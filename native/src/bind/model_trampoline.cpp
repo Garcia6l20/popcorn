@@ -5,6 +5,7 @@
 #include <nanobind/stl/vector.h>
 #include <nanobind/trampoline.h>
 
+#include <expected>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -16,7 +17,10 @@ namespace popcorn::bind
 {
 /**
  * @brief nanobind trampoline letting a Python class implement periph::model. The register file
- *        crosses as a pointer, which nanobind passes by reference without taking ownership.
+ *        crosses as a pointer, which nanobind passes by reference without taking ownership. A
+ *        bus error crosses as a return value: `on_read` returns the value or None, `on_write`
+ *        returns None or True, or False. None from `on_read` and False from `on_write` become
+ *        bus_error::denied.
  */
 class py_model : public periph::model
 {
@@ -31,7 +35,7 @@ public:
     return call<std::vector<std::string>>("claims");
   }
 
-  void reset(periph::register_file& regs, periph::reset_kind kind) override
+  void reset(periph::register_file& regs, reset_kind kind) override
   {
     call<void>("reset", &regs, kind);
   }
@@ -40,20 +44,32 @@ public:
       periph::register_file& regs,
       std::uint32_t          offset,
       std::uint8_t           size,
-      periph::access_ctx     ctx) -> std::uint32_t override
+      periph::access_ctx     ctx) -> std::expected<std::uint32_t, bus_error> override
   {
-    return call<std::uint32_t>("on_read", &regs, offset, size, ctx);
+    nb::gil_scoped_acquire gil;
+    auto const             result = call<nb::object>("on_read", &regs, offset, size, ctx);
+    if(result.is_none())
+    {
+      return std::unexpected{bus_error::denied};
+    }
+    return nb::cast<std::uint32_t>(result);
   }
 
-  void on_write(
+  auto on_write(
       periph::register_file& regs,
       std::uint32_t          offset,
       std::uint8_t           size,
       std::uint32_t          old,
       std::uint32_t          value,
-      periph::access_ctx     ctx) override
+      periph::access_ctx     ctx) -> std::expected<void, bus_error> override
   {
-    call<void>("on_write", &regs, offset, size, old, value, ctx);
+    nb::gil_scoped_acquire gil;
+    auto const result = call<nb::object>("on_write", &regs, offset, size, old, value, ctx);
+    if(not result.is_none() and not nb::cast<bool>(result))
+    {
+      return std::unexpected{bus_error::denied};
+    }
+    return {};
   }
 
   void on_event(std::uint32_t kind, std::uint64_t payload) override

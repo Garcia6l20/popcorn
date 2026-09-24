@@ -6,10 +6,9 @@
 #include <popcorn/periph/lines.hpp>
 #include <popcorn/periph/register_file.hpp>
 
-#include <reflex/enum.hpp>
-
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <functional>
 #include <memory>
 #include <span>
@@ -29,22 +28,6 @@ struct access_ctx
   icount now;
   /** @brief Bus master that made the access. */
   initiator by{initiator::cpu};
-};
-
-/**
- * @brief Cause of a reset. Backup-domain state, such as an RTC and its backup registers,
- *        survives every kind except power_on.
- */
-enum class[[= reflex::derive{reflex::Format}]] reset_kind
-{
-  power_on,
-  brown_out,
-  pin,
-  software,
-  watchdog,
-  window_watchdog,
-  low_power,
-  option_load,
 };
 
 /**
@@ -84,7 +67,8 @@ public:
    * @brief Brings the model to its reset state and pokes the reset values of its claimed
    *        registers.
    * @param regs Storage of the peripheral.
-   * @param kind Cause of the reset.
+   * @param kind Cause of the reset, as the machine received it through
+   *        `core::machine_services::request_reset` or chose it at power-up.
    */
   virtual void reset(register_file& regs, reset_kind kind) = 0;
 
@@ -94,10 +78,13 @@ public:
    * @param offset Byte offset of the access within the peripheral.
    * @param size Access size in bytes, 1, 2 or 4.
    * @param ctx Where, when and by whom the access happened.
-   * @return Value the guest reads, right-aligned to @p size.
+   * @return Value the guest reads, right-aligned to @p size, or a bus error, which the machine
+   *         turns into a guest bus fault for a CPU access or a transfer error for a DMA access.
+   *         The dispatch masks the value to @p size, bits above it are dropped. A Python model
+   *         returning neither an int nor None raises model_error in the dispatch.
    */
   virtual auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
-      -> std::uint32_t = 0;
+      -> std::expected<std::uint32_t, bus_error> = 0;
 
   /**
    * @brief Serves a guest write of a claimed register.
@@ -108,14 +95,17 @@ public:
    *        right-aligned to @p size.
    * @param value Value the guest writes, right-aligned to @p size.
    * @param ctx Where, when and by whom the access happened.
+   * @return Nothing, or a bus error, which the machine turns into a guest bus fault for a CPU
+   *         access or a transfer error for a DMA access. A Python model returning neither None
+   *         nor a bool raises model_error in the dispatch.
    */
-  virtual void on_write(
+  virtual auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) = 0;
+      access_ctx     ctx) -> std::expected<void, bus_error> = 0;
 
   /**
    * @brief Handles an event the model scheduled, when virtual time reaches it.

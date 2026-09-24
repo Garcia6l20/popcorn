@@ -10,4 +10,5 @@ TEST_CASE("core forward declarations name classes")
   CHECK(std::is_class_v<popcorn::core::scheduler>);
   CHECK(std::is_class_v<popcorn::core::event_port>);
   CHECK(std::is_class_v<popcorn::core::machine_services>);
+  CHECK(std::is_class_v<popcorn::core::trace_record>);
 }

@@ -13,8 +13,11 @@ class scheduler;
 class event_port;
 
 /**
- * @brief Machine services for models: deferred stop and guest bus access for bus-mastering
- *        models, defined by step 05 in `popcorn/core/services.hpp`.
+ * @brief Machine services for the arch module and models: deferred stop, guest bus access and
+ *        the trace ring, defined by step 05 in `popcorn/core/services.hpp`.
  */
 class machine_services;
+
+/** @brief One record of the trace ring, defined by step 06 in `popcorn/core/trace.hpp`. */
+struct trace_record;
 }

@@ -4,9 +4,11 @@
 
 #include <compare>
 #include <cstdint>
+#include <meta>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace popcorn
 {
@@ -97,6 +99,47 @@ enum class[[= reflex::derive{reflex::Format}]] initiator
   dma,
   debugger,
 };
+
+/**
+ * @brief Cause of a reset. Backup-domain state, such as an RTC and its backup registers,
+ *        survives every kind except power_on.
+ */
+enum class[[= reflex::derive{reflex::Format}]] reset_kind
+{
+  power_on,
+  brown_out,
+  pin,
+  software,
+  watchdog,
+  window_watchdog,
+  low_power,
+  option_load,
+};
+
+/** @brief Why a guest bus access failed. */
+enum class[[= reflex::derive{reflex::Format}]] bus_error
+{
+  unmapped,
+  denied,
+};
+
+/**
+ * @brief Whether a value of an enumeration equals one of its enumerators, by reflection.
+ * @param value Value to check, possibly cast from an out-of-range integer.
+ */
+template <typename E>
+  requires std::is_enum_v<E>
+constexpr auto is_enumerator(E value) noexcept -> bool
+{
+  template for(constexpr auto e : std::define_static_array(std::meta::enumerators_of(^^E)))
+  {
+    if(value == [:e:])
+    {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** @brief Program location: address plus symbol and source info when known. */
 struct location

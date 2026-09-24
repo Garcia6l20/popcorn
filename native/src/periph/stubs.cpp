@@ -1,9 +1,11 @@
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/services.hpp>
 #include <popcorn/periph/lines.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
 
 #include <string>
+#include <utility>
 
 namespace popcorn::periph
 {
@@ -58,9 +60,9 @@ void register_file::poke(std::uint32_t offset, std::uint32_t value)
   words_[offset / 4] = value;
 }
 
-void model_context::request_stop(stop_reason, std::string)
+void model_context::request_stop(stop_reason reason, std::string detail)
 {
-  throw not_implemented("model_context::request_stop");
+  services.request_stop(reason, std::move(detail));
 }
 
 void register_model(std::string_view, std::string_view, model_factory)
