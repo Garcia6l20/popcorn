@@ -296,4 +296,48 @@ auto dump_description(mcu_description const& description) -> std::string;
  * @return Compact JSON Schema (draft 2020-12) text.
  */
 auto description_json_schema() -> std::string;
+
+/**
+ * @brief Digest identifying a description: SHA-256 of dump_description() output, lower-case hex.
+ *        dump_description() is canonical, members in declaration order and compact, so equal
+ *        descriptions have equal digests. A saved snapshot records it.
+ * @param description Description to digest.
+ * @return 64 hex digits.
+ */
+auto description_digest(mcu_description const& description) -> std::string;
+
+/**
+ * @brief Position of a register in a description: index of its peripheral in
+ *        `mcu_description::peripherals`, then of the register in `peripheral_desc::registers`.
+ */
+struct register_ref
+{
+  /** @brief Peripheral index. */
+  std::uint32_t peripheral{};
+  /** @brief Register index within the peripheral. */
+  std::uint32_t reg{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(register_ref, register_ref) -> bool = default;
+};
+
+/**
+ * @brief Flat register id, the register string id of trace records: registers are numbered
+ *        from 0 in description order, every register of the first peripheral in its order, then
+ *        the next peripheral's.
+ * @param description Description the reference points into.
+ * @param ref Register position, within the description.
+ */
+auto flat_register_id(mcu_description const& description, register_ref ref) -> std::uint32_t
+    pre(ref.peripheral < description.peripherals.size())
+        pre(ref.reg < description.peripherals[ref.peripheral].registers.size());
+
+/**
+ * @brief Register of a flat register id, the inverse of flat_register_id().
+ * @param description Description the id numbers.
+ * @param id Flat register id.
+ * @return Its position, empty when the description has fewer registers.
+ */
+auto register_at(mcu_description const& description, std::uint32_t id)
+    -> std::optional<register_ref>;
 }

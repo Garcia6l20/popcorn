@@ -1,5 +1,6 @@
-#include <popcorn/core/engine.hpp>
 #include <popcorn/core/version.hpp>
+
+#include "../support/smoke.hpp"
 
 #include <doctest/doctest.h>
 #include <unicorn/unicorn.h>
@@ -14,7 +15,7 @@ TEST_CASE("version names the pinned Unicorn commit")
 
 TEST_CASE("open_m33 opens a Cortex-M33 engine")
 {
-  auto const engine = popcorn::core::open_m33();
+  auto const engine = popcorn::testing::open_m33();
   REQUIRE(engine != nullptr);
 
   int model = -1;
@@ -24,7 +25,7 @@ TEST_CASE("open_m33 opens a Cortex-M33 engine")
 
 TEST_CASE("open_m33 engine executes Thumb code")
 {
-  auto const engine = popcorn::core::open_m33();
+  auto const engine = popcorn::testing::open_m33();
 
   constexpr std::uint64_t base         = 0x0800'0000;
   constexpr std::uint8_t  movs_r0_42[] = {0x2a, 0x20};

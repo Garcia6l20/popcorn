@@ -39,3 +39,27 @@ def add_doctest(
     )
     project.Alias(f"test-{group}", program)
     return program
+
+
+def add_header_check(name: str, include_root: Path, deps: Sequence[Target] = ()) -> Target:
+    """Compile every header under @p include_root alone in its own TU, and all of them in one.
+
+    The TUs are generated into the build directory, one per header, so a new header is checked
+    without editing a list. The TU with every header carries the program's only test case.
+    """
+    headers = sorted(
+        path.relative_to(include_root).as_posix() for path in include_root.rglob("*.hpp")
+    )
+    generated = build_dir / "header-check" / name
+    sources: list[Path] = []
+    for header in headers:
+        stem = header.removesuffix(".hpp").replace("/", "_")
+        sources.append(write_file(generated / f"{stem}.cpp", f"#include <{header}>\n"))
+    together = "".join(f"#include <{header}>\n" for header in headers)
+    together += (
+        "\n#include <doctest/doctest.h>\n\n"
+        'TEST_CASE("every interface header compiles in one translation unit")\n'
+        "{\n  CHECK_FALSE(popcorn::core::version().empty());\n}\n"
+    )
+    sources.append(write_file(generated / "all.cpp", together))
+    return add_doctest(name, sources, deps)

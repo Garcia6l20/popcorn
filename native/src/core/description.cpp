@@ -3,13 +3,17 @@
 
 #include <reflex/serde/json.hpp>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <meta>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
 
@@ -219,5 +223,35 @@ auto description_json_schema() -> std::string
   json::serializer serializer{out};
   serializer.dump(root);
   return out;
+}
+
+auto description_digest(mcu_description const&) -> std::string
+{
+  throw not_implemented("description_digest");
+}
+
+auto flat_register_id(mcu_description const& description, register_ref ref) -> std::uint32_t
+{
+  auto const before =
+      description.peripherals
+      | std::views::take(ref.peripheral)
+      | std::views::transform([](peripheral_desc const& p) { return p.registers.size(); });
+  return static_cast<std::uint32_t>(std::ranges::fold_left(before, std::size_t{0}, std::plus{}))
+       + ref.reg;
+}
+
+auto register_at(mcu_description const& description, std::uint32_t id)
+    -> std::optional<register_ref>
+{
+  std::size_t remaining = id;
+  for(auto const& [index, peripheral] : std::views::enumerate(description.peripherals))
+  {
+    if(remaining < peripheral.registers.size())
+    {
+      return register_ref{static_cast<std::uint32_t>(index), static_cast<std::uint32_t>(remaining)};
+    }
+    remaining -= peripheral.registers.size();
+  }
+  return std::nullopt;
 }
 }

@@ -45,7 +45,10 @@ TEST_CASE("stop aggregates a reason, a location, counters and an optional fault"
       .time         = popcorn::vtime_from_instructions(42, 160'000'000),
       .fault =
           popcorn::fault_info{
-                 .kind = popcorn::fault_kind::bus, .fault_address = 0x2000'0000, .cfsr = 1, .hfsr = 2},
+                 .kind          = popcorn::fault_kind::bus,
+                 .fault_address = 0x2000'0000,
+                 .status        = 1,
+                 .detail        = 2},
   };
 
   CHECK(s.reason == popcorn::stop_reason::fault);

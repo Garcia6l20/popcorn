@@ -73,8 +73,8 @@ TEST_CASE("fault_error formats the fault and the symbol")
   popcorn::fault_info const fault{
       .kind          = popcorn::fault_kind::bus,
       .fault_address = 0x2000'1000,
-      .cfsr          = 0xdead,
-      .hfsr          = 0xbeef};
+      .status        = 0xdead,
+      .detail        = 0xbeef};
   popcorn::fault_error const e{where, fault};
 
   CHECK(e.where().pc == where.pc);
@@ -97,7 +97,7 @@ TEST_CASE("fault_error formats offset and file:line when present")
       .file   = "fault.c",
       .line   = 42};
   popcorn::fault_info const fault{
-      .kind = popcorn::fault_kind::usage, .fault_address = 0, .cfsr = 1, .hfsr = 2};
+      .kind = popcorn::fault_kind::usage, .fault_address = 0, .status = 1, .detail = 2};
   popcorn::fault_error const e{where, fault};
 
   CHECK(e.where().offset == 0x10);
@@ -111,7 +111,7 @@ TEST_CASE("fault_error names an out-of-range fault kind as unknown(N) instead of
 {
   auto const                bad_kind = static_cast<popcorn::fault_kind>(0xff);
   popcorn::location const   where{.pc = 0, .symbol = {}, .offset = 0, .file = {}, .line = 0};
-  popcorn::fault_info const fault{.kind = bad_kind, .fault_address = 0, .cfsr = 0, .hfsr = 0};
+  popcorn::fault_info const fault{.kind = bad_kind, .fault_address = 0, .status = 0, .detail = 0};
 
   popcorn::fault_error const e{where, fault};
   CHECK(contains(e, "unknown(255)"));
@@ -161,7 +161,7 @@ TEST_CASE("machine_running, machine_busy and not_implemented carry a plain messa
   CHECK(contains(popcorn::not_implemented{"Machine::step"}, "Machine::step"));
 }
 
-TEST_CASE("the hierarchy matches spec 02 section 8")
+TEST_CASE("the hierarchy derives every error from popcorn::error")
 {
   CHECK(std::is_base_of_v<popcorn::error, popcorn::config_error>);
   CHECK(std::is_base_of_v<popcorn::error, popcorn::image_error>);

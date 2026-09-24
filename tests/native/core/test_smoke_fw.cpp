@@ -1,5 +1,4 @@
-#include <popcorn/core/engine.hpp>
-#include <popcorn/core/smoke.hpp>
+#include "../support/smoke.hpp"
 
 #include <doctest/doctest.h>
 
@@ -25,6 +24,6 @@ TEST_CASE("smoke firmware reaches bkpt with its checksum in r0")
 {
   char const* const elf = std::getenv("POPCORN_SMOKE_ELF");
   REQUIRE(elf != nullptr);
-  auto const engine = popcorn::core::open_m33();
-  CHECK(popcorn::core::run_to_bkpt(engine, elf) == fnv1a("popcorn smoke firmware"));
+  auto const engine = popcorn::testing::open_m33();
+  CHECK(popcorn::testing::run_to_bkpt(engine, elf) == fnv1a("popcorn smoke firmware"));
 }

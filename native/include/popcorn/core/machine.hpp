@@ -1,0 +1,506 @@
+#pragma once
+
+#include <popcorn/arch/arch.hpp>
+#include <popcorn/core/clock.hpp>
+#include <popcorn/core/coverage.hpp>
+#include <popcorn/core/description.hpp>
+#include <popcorn/core/intercept.hpp>
+#include <popcorn/core/log.hpp>
+#include <popcorn/core/memory_view.hpp>
+#include <popcorn/core/register_view.hpp>
+#include <popcorn/core/scheduler.hpp>
+#include <popcorn/core/services.hpp>
+#include <popcorn/core/snapshot.hpp>
+#include <popcorn/core/trace.hpp>
+#include <popcorn/core/types.hpp>
+#include <popcorn/image/image.hpp>
+#include <popcorn/periph/model.hpp>
+#include <popcorn/periph/register_file.hpp>
+
+#include <reflex/enum.hpp>
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+struct uc_struct;
+
+namespace popcorn::core
+{
+/** @brief What a reset request from firmware, such as Arm AIRCR.SYSRESETREQ, does to a run. */
+enum class[[= reflex::derive{reflex::Format}]] reset_request_policy
+{
+  stop,
+  reset_and_continue,
+};
+
+/** @brief Construction options of a machine beyond its description. */
+struct machine_options
+{
+  /** @brief Core clock at power-on in Hz, 0 for the description's `core.reset_clock_hz`. */
+  std::uint64_t core_hz{};
+  /** @brief Core cycles per instruction. */
+  double cpi{1.0};
+  /** @brief Records kept by the always-on trace ring. */
+  std::size_t trace_capacity{4096};
+  /** @brief Model factory per peripheral name, the project file's explicit wiring. Overrides the
+   * `periph::register_model` registry for that peripheral. */
+  std::map<std::string, periph::model_factory, std::less<>> models{};
+  /** @brief Whether a processor fault stops the run, the default, or enters the firmware's
+   * handler. Passed to the arch module in `arch::arch_context::faults`. */
+  arch::fault_policy faults{arch::fault_policy::stop};
+  /** @brief Whether a firmware reset request stops the run with stop_reason::reset_request, the
+   * default, or resets the machine as reset_kind::software and continues. */
+  reset_request_policy on_reset_request{reset_request_policy::stop};
+  /** @brief Iterations of a loop that makes no progress, the same pc window and the same machine
+   * state, after which the run stops with stop_reason::spin, naming the loop and the polled
+   * register when it is MMIO. 0 turns spin detection off. */
+  std::uint32_t spin_threshold{};
+  /** @brief Whether the first access to a register of an unmodelled peripheral fails the run
+   * with model_error. Otherwise it is only logged, once per register. */
+  bool strict_peripherals{};
+};
+
+/**
+ * @brief Bounds of one native slice. The slice ends at the first block boundary at or past any
+ *        bound, except exact_instructions. Only until, budget_left, exact_instructions,
+ *        until_time and stop_when stop the run, the other bounds only end the slice so the
+ *        caller can yield.
+ */
+struct slice_request
+{
+  /** @brief Instructions after which the slice ends, the caller then yields and calls again. */
+  icount max_instructions{1'000'000};
+  /** @brief Wall time after which the slice ends, read every 256 blocks. */
+  std::chrono::nanoseconds wall_budget{std::chrono::milliseconds{1}};
+  /** @brief Stop with stop_reason::address before executing this address. */
+  std::optional<address> until{};
+  /** @brief Instructions left in the run's budget, stop with stop_reason::budget at the first
+   * block boundary at or past them. The caller subtracts `slice_result::executed` between
+   * slices. */
+  std::optional<icount> budget_left{};
+  /** @brief Stop with stop_reason::budget after exactly this many instructions, for stepping.
+   * Whole blocks run up to the last block boundary before the count, then the remaining
+   * instructions are single-stepped, which costs a per-instruction hook for those only. */
+  std::optional<icount> exact_instructions{};
+  /** @brief Stop with stop_reason::time on reaching this virtual time since reset. */
+  std::optional<vtime> until_time{};
+  /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
+   * per instruction. Stops with stop_reason::user when it returns true. */
+  std::function<bool()> stop_when{};
+};
+
+/** @brief Outcome of one native slice. */
+struct slice_result
+{
+  /** @brief Stop record when the run must stop, empty when the slice only ended a bound that
+   * lets the caller continue. */
+  std::optional<stop> stopped{};
+  /** @brief Instructions executed in the slice, read from the block hook, never assumed from the
+   * bounds: a slice overshoots by up to one block. */
+  icount executed{};
+};
+
+/** @brief Outcome of machine::call(). */
+struct call_result
+{
+  /** @brief Return value bits of the frame's `returns` kind, 0 unless the call returned. */
+  std::uint64_t value{};
+  /** @brief Why the call ended, stop_reason::returned when it reached its sentinel. */
+  stop stopped{};
+};
+
+/**
+ * @brief One emulated MCU: engine, memory map, clock, event queue, arch module, peripherals,
+ *        intercepts, watches, coverage and trace. Built from a description, never from ad-hoc
+ *        arguments. No globals, not thread-safe, one thread drives it.
+ *
+ * Ownership. The machine owns, and outlives, everything it hands out references to:
+ *
+ * - the Unicorn engine and one host buffer per RAM and flash region, mapped with
+ *   `uc_mem_map_ptr`,
+ * - the clock, its clock_driver, which it never gives away, and the scheduler,
+ * - the arch module from the factory, with an event_port of owner `arch::arch_event_owner`,
+ * - per peripheral of the description, in description order: a `periph::register_file`, the
+ *   `periph::irq_line` and `periph::dma_request` arrays, an event_port whose owner is the
+ *   peripheral index, a `periph::model_context` referencing them, the clock and the machine's
+ *   services, and the model the factory returned for that context,
+ * - the trace ring, the hook table behind every hook_handle, coverage counters, the loaded
+ *   images.
+ *
+ * Services. The machine is the machine_services implementation of its arch module and models:
+ * it derives from it privately, so only the contexts it builds reach it. Stop, reset and slice
+ * end requests set a native flag the next block hook reads, bus accesses go through memory, MMIO
+ * dispatch and watches, trace appends to the ring stamped with the current instruction count.
+ *
+ * Construction order: memory map, `arch_context{engine, description, clock, arch events, *this,
+ * options.faults}` then `arch::attach`, then one model_context and model per peripheral, then
+ * the engine hooks. Events of owner `arch::arch_event_owner` go to `arch::on_event`, other
+ * owners to the model of that peripheral index.
+ *
+ * Running. Only run_slice(), call() and the slices of a call begun by begin_call() execute guest
+ * code. While a slice runs, running() is true and a second run_slice() throws machine_busy. The
+ * mem() and regs() views and coverage() stay usable from handlers, which run while the core is
+ * paused at an instruction boundary. Every other state change, load(), reset(), calls, snapshot(),
+ * restore(), adding hooks, hook_handle::reset() and changing coverage, throws machine_running for
+ * the whole slice, handlers included. For hooks this deliberately departs from the Python API
+ * contract, which lets handlers edit a paused machine: adding or removing a hook flushes translated
+ * code of the running slice. Between the slices of a call or of a run, running() is false: the
+ * Python facade keeps its own guard for a run in progress.
+ *
+ * Neither copyable nor movable: contexts and views hold references to it.
+ */
+class machine final : private machine_services
+{
+public:
+  /**
+   * @brief Builds a machine, powered off: nothing loaded, no reset done. The call arena, scratch
+   *        memory for call arguments, and the trampoline page of linked objects are regions the
+   *        caller adds to @p description before construction, like any other region.
+   * @param description Description of the MCU, copied, description() returns the copy.
+   * @param factory Creates the arch module for `description.core`.
+   * @param options Clock, trace capacity, model wiring and run policies.
+   * @throws config_error when neither `options.core_hz` nor `description.core.reset_clock_hz`
+   *         gives a clock, when the arch module refuses the core or a model factory refuses its
+   *         peripheral.
+   * @throws emulation_error when the engine cannot be opened, or is not the pinned dev build.
+   */
+  machine(mcu_description description, arch::arch_factory factory, machine_options options)
+      pre(static_cast<bool>(factory)) pre(options.cpi > 0.0) pre(options.trace_capacity > 0)
+          pre(is_enumerator(options.faults)) pre(is_enumerator(options.on_reset_request));
+
+  /** @brief Not copyable. */
+  machine(machine const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(machine const&) -> machine& = delete;
+  /** @brief Not movable. */
+  machine(machine&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(machine&&) -> machine& = delete;
+  /** @brief Destroys the machine. Hook handles still alive become inactive. */
+  ~machine() override;
+
+  /** @brief Description the machine was built from. */
+  [[nodiscard]] auto description() const noexcept -> mcu_description const&;
+
+  /** @brief Identity of this machine, unique within the process, never 0. */
+  [[nodiscard]] auto id() const noexcept -> std::uint64_t;
+
+  /** @brief Generation, bumped by every restore(), so state from before it is recognised. */
+  [[nodiscard]] auto generation() const noexcept -> std::uint64_t;
+
+  /** @brief Whether a slice is running, true inside handlers too. */
+  [[nodiscard]] auto running() const noexcept -> bool;
+
+  /** @brief Virtual clock, for reading instruction count, time and domain rates. */
+  [[nodiscard]] auto virtual_clock() const noexcept -> core::clock const&;
+
+  /**
+   * @brief Loads one more image, such as an application after a bootloader: checks each segment
+   *        against the description's regions and copies it into flash or RAM, over earlier
+   *        content where they overlap. Its symbols follow those of earlier images in the
+   *        machine's symbol table.
+   * @param loaded Image to load, copied for symbols, lines and digest.
+   * @throws image_error naming the segment and region when a segment falls outside every
+   *         region.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void load(popcorn::image::image const& loaded);
+
+  /** @brief Images loaded so far, in load order. Their symbols concatenated in this order are the
+   * symbol table call trace records index. */
+  [[nodiscard]] auto loaded_images() const noexcept -> std::span<popcorn::image::image const>;
+
+  /**
+   * @brief Resets the machine as @p kind: every model's `reset`, the arch module's `reset` at the
+   *        description's reset vector, event queue cleared, and `trace_ring::rebase` at the new
+   *        instruction count. Also what a firmware reset request leads to at the end of its
+   *        slice under reset_request_policy::reset_and_continue.
+   * @param kind Cause of the reset, passed to every model.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void reset(reset_kind kind = reset_kind::power_on) pre(is_enumerator(kind));
+
+  /**
+   * @brief Runs one native slice, synchronously: delivers a pending interrupt, runs the engine
+   *        until a bound, a stop request or a trap, dispatches due events, and when the core
+   *        idles moves the clock to the next event. Loop-agnostic: an asyncio driver and a fuzz
+   *        driver both call it in a loop.
+   * @param request Bounds and stop conditions.
+   * @return The stop, or an empty stop when only a yield bound was reached.
+   * @throws machine_busy when a slice is already running, from a handler of it.
+   * @throws emulation_error when the machine was left invalid by a failed restore().
+   * @throws model_error on an unmodelled access under `machine_options::strict_peripherals`.
+   * @throws Any exception a handler or Python model raised during the slice, rethrown after the
+   *         engine stopped at an instruction boundary, the machine consistent and resumable,
+   *         before any fault of the same slice is reported.
+   */
+  auto run_slice(slice_request const& request) -> slice_result;
+
+  /**
+   * @brief Begins a guest function call: saves the engine registers of `arch::arch::registers()`
+   *        and the `arch::arch::save()` bytes, then `arch::arch::prepare_call()`. The slices that
+   *        follow run the call. Reaching `frame.return_sentinel` stops with
+   *        stop_reason::returned.
+   * @param frame Call to make, its entry and sentinel set.
+   * @throws machine_busy when a call is already in progress.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws config_error when the arch module refuses the frame.
+   */
+  void begin_call(arch::call_frame const& frame);
+
+  /**
+   * @brief Ends the call begun by begin_call(), after it returned or stopped: reads the return
+   *        value when it returned, then restores the saved registers and arch state, so the
+   *        interrupted context continues as if no call happened.
+   * @return Return value bits of the frame's `returns` kind, 0 when the call did not return.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  auto end_call() -> std::uint64_t pre(in_call());
+
+  /** @brief Whether a call begun by begin_call() has not been ended yet. */
+  [[nodiscard]] auto in_call() const noexcept -> bool;
+
+  /**
+   * @brief Makes a guest function call synchronously: begin_call(), slices until the call stops,
+   *        end_call(). For native callers without an event loop.
+   * @param frame Call to make, its entry and sentinel set.
+   * @param budget Instructions the call may execute before it stops with stop_reason::budget.
+   * @return Return value and stop.
+   * @throws As begin_call() and run_slice().
+   */
+  auto call(arch::call_frame const& frame, icount budget) -> call_result;
+
+  /** @brief Guest memory view, valid while the machine lives. */
+  [[nodiscard]] auto mem() noexcept -> memory_view;
+
+  /** @brief CPU register view, valid while the machine lives. */
+  [[nodiscard]] auto regs() noexcept -> register_view;
+
+  /**
+   * @brief Takes a full copy of the machine state: every RAM and flash region, the engine CPU
+   *        context and register list, the arch bytes, register storage and line levels, model
+   *        bytes, event queue, clock, intercept and return hook state. Cost is a copy of the
+   *        mapped memory, about 15 us for 784 KB.
+   * @return The snapshot, restorable any number of times.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy during a call begun by begin_call() and not ended.
+   */
+  [[nodiscard]] auto snapshot() const -> core::snapshot;
+
+  /**
+   * @brief Restores a snapshot, whatever changed since.
+   *
+   * Order, each step complete before the next starts:
+   *
+   * 1. memory: `memcpy` of each region into its host buffer, then `uc_ctl_remove_cache` over
+   *    regions that held executed code. The translated block cache is otherwise kept, which
+   *    spares retranslating the code the next slice runs.
+   * 2. CPU: `uc_context_restore` when @p saved carries this machine's engine context, otherwise
+   *    the register list through `uc_reg_write_batch`. A `uc_context` never moves between
+   *    engines: on Arm M-profile it carries pointers owned by the engine that saved it, Unicorn
+   *    issue #2195.
+   * 3. arch: `arch::arch::load` of the arch part, which also restores `pending()`.
+   * 4. peripherals and models: register storage and line levels of every peripheral, then
+   *    `periph::model::load` of every model, native and Python alike, in description order.
+   * 5. scheduler: `scheduler::restore` with the pending events and sequence counter, so seqs and
+   *    tie order replay identically.
+   * 6. clock: `clock_driver::restore`, domain handles stay valid, then `trace_ring::rebase` at
+   *    the restored instruction count.
+   *
+   * Then intercept and return hook state, and generation() bumps.
+   *
+   * Rules:
+   *
+   * - Only between slices, never from a handler, never during a call.
+   * - Any number of times on the same snapshot, which stays valid after further snapshots and
+   *   restores.
+   * - A snapshot taken by another machine is refused. A snapshot read back from bytes has no
+   *   engine context: it restores through the register list, after its description and image
+   *   digests are checked against this machine's.
+   * - A model load that throws leaves the machine invalid: run_slice() throws until a restore
+   *   succeeds.
+   * - Not restored: the intercept, return hook, watch and sink tables, which are configuration,
+   *   the trace ring and coverage counters, which are cumulative, and host bridges, which are
+   *   outside the machine.
+   *
+   * @param saved Snapshot to restore.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy during a call begun by begin_call() and not ended.
+   * @throws emulation_error when @p saved was taken by another machine.
+   * @throws config_error when a snapshot read back from bytes names another description or other
+   *         images, or has another format.
+   */
+  void restore(core::snapshot const& saved);
+
+  /**
+   * @brief Intercepts calls to a code address: a code hook on exactly that address, with the
+   *        translated block cache invalidated for it on add and on removal so the hook takes
+   *        effect at once.
+   * @param at Code address, the function entry as its symbol gives it.
+   * @param handler Called on arrival at @p at.
+   * @param mode Every arrival, or only the first.
+   * @return Handle removing the intercept.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto add_intercept(
+      address           at,
+      intercept_handler handler,
+      intercept_mode    mode = intercept_mode::every) -> intercept_handle pre(is_enumerator(mode));
+
+  /**
+   * @brief Calls a handler when a function returns: captures the arguments at entry and the
+   *        return value at the return address, counting the instructions in between.
+   * @param at Function entry.
+   * @param args Kind of each argument captured at entry.
+   * @param returns Kind of the return value.
+   * @param handler Called on every return.
+   * @return Handle removing the hook.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto add_return_hook(
+      address                       at,
+      std::vector<arch::value_kind> args,
+      arch::value_kind              returns,
+      return_handler                handler) -> intercept_handle;
+
+  /**
+   * @brief Watches guest accesses to an address range, by the CPU and by DMA.
+   * @param at First watched address.
+   * @param size Watched bytes, at least 1.
+   * @param kind Accesses reported.
+   * @param handler Called on every matching access.
+   * @return Handle removing the watch.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto
+      add_watch(address at, std::uint32_t size, watch_kind kind, watch_handler handler)
+          -> watch_handle pre(size > 0) pre(fits_address_space(at, size)) pre(is_enumerator(kind));
+
+  /** @brief Always-on trace ring. */
+  [[nodiscard]] auto trace() noexcept -> trace_ring&;
+
+  /**
+   * @brief Streams trace records of the selected kinds to a sink, the full trace a `.pctr` file
+   *        writer consumes. Kinds that cost a hook, such as block and mem, are hooked only while
+   *        a sink selects them, and only over its ranges. dt counts per sink, see trace_sink.
+   * @param kinds Kinds the sink receives.
+   * @param sink Receives batches of dt-stamped records, in order.
+   * @param ranges Code ranges whose execution is traced, empty for everywhere. A record belongs
+   *        to a range when the pc that caused it does.
+   * @return Handle removing the sink.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto
+      add_trace_sink(trace_kinds kinds, trace_sink sink, std::vector<address_range> ranges = {})
+          -> hook_handle;
+
+  /**
+   * @brief Receives the machine's log records, such as unmodelled peripheral accesses.
+   * @param sink Receives each record.
+   * @return Handle removing the sink.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto add_log_sink(log_sink sink) -> hook_handle;
+
+  /**
+   * @brief Starts collecting block and edge counters over code ranges. A native hook limited to
+   *        the ranges counts, nothing crosses to Python. Counters already held for a range are
+   *        kept, so enabling again only adds ranges.
+   * @param ranges Code ranges, empty for every executable segment of the loaded images.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void enable_coverage(std::vector<address_range> ranges);
+
+  /**
+   * @brief Stops collecting, keeping the counters.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void disable_coverage();
+
+  /** @brief Whether coverage is being collected. */
+  [[nodiscard]] auto coverage_enabled() const noexcept -> bool;
+
+  /**
+   * @brief Copy of the counters, cumulative across restores.
+   * @throws machine_running while a slice runs, outside its handlers, which read the counts so far.
+   */
+  [[nodiscard]] auto coverage() const -> coverage_data;
+
+  /**
+   * @brief Zeroes every counter, ranges kept.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void clear_coverage();
+
+  /**
+   * @brief Register storage of a peripheral.
+   * @param name Peripheral name, as the description spells it.
+   * @return The register file, valid while the machine lives.
+   * @throws config_error when the description has no such peripheral.
+   */
+  [[nodiscard]] auto peripheral(std::string_view name) -> periph::register_file&;
+
+  /**
+   * @brief Behaviour model of a peripheral, for model-specific APIs such as a UART endpoint.
+   * @param name Peripheral name, as the description spells it.
+   * @return The model, valid while the machine lives, null when no model serves the peripheral.
+   * @throws config_error when the description has no such peripheral.
+   */
+  [[nodiscard]] auto model(std::string_view name) -> periph::model*;
+
+private:
+  struct engine_closer
+  {
+    void operator()(uc_struct* engine) const noexcept;
+  };
+  struct mapped_region;
+  struct peripheral_slot;
+  struct run_state;
+
+  void require_view_access() const;
+
+  void do_request_stop(stop_reason reason, std::string detail) override;
+  void do_request_reset(reset_kind kind) override;
+  void do_end_slice() override;
+  auto do_read(address addr, std::uint8_t size, initiator by)
+      -> std::expected<std::uint32_t, bus_error> override;
+  auto do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)
+      -> std::expected<void, bus_error> override;
+  auto do_read_block(address addr, std::span<std::byte> out, initiator by)
+      -> std::expected<void, block_error> override;
+  auto do_write_block(address addr, std::span<std::byte const> in, initiator by)
+      -> std::expected<void, block_error> override;
+  void do_trace(trace_record const& record) override;
+
+  friend class memory_view;
+  friend class register_view;
+  friend class intercept_call;
+
+  std::uint64_t                                 id_;
+  mcu_description                               description_;
+  machine_options                               options_;
+  std::unique_ptr<uc_struct, engine_closer>     engine_;
+  std::vector<std::unique_ptr<mapped_region>>   memory_{};
+  core::clock                                   clock_;
+  clock_driver                                  clock_driver_;
+  scheduler                                     scheduler_;
+  event_port                                    arch_events_;
+  std::unique_ptr<arch::arch>                   arch_;
+  std::vector<std::unique_ptr<peripheral_slot>> peripherals_{};
+  std::vector<popcorn::image::image>            images_{};
+  trace_ring                                    trace_;
+  std::shared_ptr<hook_registry>                hooks_;
+  std::unique_ptr<run_state>                    run_;
+  std::uint64_t                                 generation_ = 0;
+};
+}

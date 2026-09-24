@@ -10,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 
 namespace
 {
@@ -248,4 +249,15 @@ TEST_CASE("committed JSON Schema matches the one derived from the aggregates")
   auto const committed = read_text(env_path("POPCORN_DESC_SCHEMA"));
   INFO("regenerate with: uv run pcons run schema");
   CHECK(canonical_json(committed) == canonical_json(popcorn::description_json_schema()));
+}
+
+TEST_CASE("flat register ids number registers peripheral by peripheral")
+{
+  auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  CHECK(popcorn::flat_register_id(toy, {.peripheral = 0, .reg = 1}) == 1);
+  CHECK(popcorn::flat_register_id(toy, {.peripheral = 1, .reg = 0}) == 2);
+  CHECK(popcorn::register_at(toy, 2) == popcorn::register_ref{.peripheral = 1, .reg = 0});
+  CHECK(popcorn::register_at(toy, 0) == popcorn::register_ref{.peripheral = 0, .reg = 0});
+  CHECK_FALSE(popcorn::register_at(toy, 3).has_value());
+  CHECK_THROWS_AS(std::ignore = popcorn::description_digest(toy), popcorn::not_implemented);
 }

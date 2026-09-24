@@ -1,0 +1,57 @@
+#pragma once
+
+#include <popcorn/core/types.hpp>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace popcorn::core
+{
+/**
+ * @brief Block entry counters of one code range: one counter per halfword, index
+ *        `(addr - start) >> 1`, incremented each time a translated block starting at that address
+ *        runs. Instruction and line counts are derived from these by decoding each block's byte
+ *        range, since the engine reports a block's instruction count, not its size.
+ */
+struct block_counters
+{
+  /** @brief Range the counters cover. */
+  address_range range{};
+  /** @brief Entry count per halfword of the range. */
+  std::vector<std::uint32_t> hits{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(block_counters const&, block_counters const&) -> bool = default;
+};
+
+/** @brief Count of one control-flow edge between two translated blocks, the input of branch
+ * coverage. */
+struct edge_counter
+{
+  /** @brief Start address of the block the edge leaves. */
+  address from{};
+  /** @brief Start of the block the edge enters. */
+  address to{};
+  /** @brief Times the edge was taken. */
+  std::uint64_t hits{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(edge_counter const&, edge_counter const&) -> bool = default;
+};
+
+/**
+ * @brief Raw coverage counters of a machine, plain data: what a `.pcov` file holds and what
+ *        merging sums, never lcov text.
+ */
+struct coverage_data
+{
+  /** @brief Block counters per enabled range, in enable order. */
+  std::vector<block_counters> blocks{};
+  /** @brief Edge counters with a non-zero count, ordered by from then to. */
+  std::vector<edge_counter> edges{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(coverage_data const&, coverage_data const&) -> bool = default;
+};
+}

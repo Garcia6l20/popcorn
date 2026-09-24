@@ -118,8 +118,7 @@ public:
   /**
    * @brief Ends the current slice without a stop report. Deferred. An arch-private hook, such as
    *        the Arm WFI instruction hook, calls it after entering the idle state. A slice that
-   *        ends with `arch::idle()` true and no stop request moves the clock to the next event,
-   *        spec 02 section 2.3.
+   *        ends with `arch::idle()` true and no stop request moves the clock to the next event.
    */
   void end_slice()
   {

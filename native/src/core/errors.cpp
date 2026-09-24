@@ -130,11 +130,11 @@ auto symbol_error::close_matches() const noexcept -> std::vector<std::string> co
 
 fault_error::fault_error(location where, fault_info fault)
     : emulation_error(
-          "fault {} at {}: cfsr {:#010x}, hfsr {:#010x}, fault address {:#010x}",
+          "fault {} at {}: status {:#010x}, detail {:#010x}, fault address {:#010x}",
           safe_name(fault.kind),
           describe(where.pc, where.symbol, where.offset, where.file, where.line),
-          fault.cfsr,
-          fault.hfsr,
+          fault.status,
+          fault.detail,
           fault.fault_address),
       where_(to_owned(where)), fault_(fault)
 {}

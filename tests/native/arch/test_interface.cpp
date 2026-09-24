@@ -42,6 +42,7 @@ public:
     std::uint32_t              handler{};
     std::vector<std::uint64_t> args = std::vector<std::uint64_t>(4);
     std::uint32_t              timer_fires{};
+    std::uint32_t              link{};
   };
 
   static constexpr std::uint32_t timer_kind   = 1;
@@ -177,6 +178,30 @@ public:
   {
     return frame.returns == popcorn::arch::value_kind::i32 ? current.args[0] & 0xffff'ffff
                                                            : current.args[0];
+  }
+
+  void read_args(popcorn::arch::call_frame& frame) const override
+  {
+    for(auto&& [arg, bits] : std::views::zip(frame.args, current.args))
+    {
+      arg.bits = bits;
+    }
+  }
+
+  [[nodiscard]] auto return_address() const -> popcorn::address override
+  {
+    return current.link & ~popcorn::address{1};
+  }
+
+  void return_to_caller(
+      std::optional<popcorn::arch::call_arg> const& value,
+      popcorn::arch::float_abi) override
+  {
+    if(value)
+    {
+      current.args[0] = value->bits;
+    }
+    current.pc = return_address();
   }
 
   void save(std::vector<std::byte>& out) const override
@@ -365,6 +390,33 @@ TEST_CASE("a call frame is placed and its result read back")
   open_frame.interrupts = true;
   setup.module->prepare_call(open_frame);
   CHECK(setup.module->deliverable_now());
+}
+
+TEST_CASE("arch reads an entered call's arguments and returns to the caller")
+{
+  rig setup;
+  setup.module->current.args = {7, 0x1'0000'0009, 0, 0};
+  setup.module->current.link = 0x0800'0201;
+  setup.module->current.pc   = 0x0800'1000;
+
+  popcorn::arch::call_frame entered{
+      .args = {{.kind = popcorn::arch::value_kind::i32}, {.kind = popcorn::arch::value_kind::i64}},
+  };
+  setup.module->read_args(entered);
+  CHECK(entered.args[0].bits == 7);
+  CHECK(entered.args[1].bits == 0x1'0000'0009);
+  CHECK(setup.module->return_address() == 0x0800'0200);
+
+  setup.module->return_to_caller(
+      popcorn::arch::call_arg{.kind = popcorn::arch::value_kind::i32, .bits = 42},
+      popcorn::arch::float_abi::soft);
+  CHECK(setup.module->pc() == 0x0800'0200);
+  CHECK(setup.module->current.args[0] == 42);
+
+  setup.module->current.pc = 0x0800'1000;
+  setup.module->return_to_caller(std::nullopt, popcorn::arch::float_abi::soft);
+  CHECK(setup.module->pc() == 0x0800'0200);
+  CHECK(setup.module->current.args[0] == 42);
 }
 
 TEST_CASE("arch-private hooks end the slice or request a reset through services")

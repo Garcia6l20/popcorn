@@ -1,0 +1,131 @@
+#pragma once
+
+#include <popcorn/arch/arch.hpp>
+#include <popcorn/core/types.hpp>
+
+#include <reflex/enum.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace popcorn::image
+{
+/** @brief Loadable part of an image, an ELF PT_LOAD segment or a block of a bin or HEX file. */
+struct segment
+{
+  /** @brief Name for messages: ELF segment index or section name, file name for bin or HEX. */
+  std::string name{};
+  /** @brief Guest address of the first byte, the ELF load address. */
+  address start{};
+  /** @brief Bytes to load. */
+  std::vector<std::byte> bytes{};
+  /** @brief Size in guest memory, at least the byte count, the rest zero-filled. */
+  std::uint32_t memory_size{};
+  /** @brief Whether the segment holds code. */
+  bool executable{};
+  /** @brief Whether the guest may write the segment. */
+  bool writable{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(segment const&, segment const&) -> bool = default;
+};
+
+/** @brief Kind of a symbol. */
+enum class[[= reflex::derive{reflex::Format}]] symbol_kind
+{
+  function,
+  object,
+  other,
+};
+
+/** @brief Symbol of the image. */
+struct symbol
+{
+  /** @brief Name. */
+  std::string name{};
+  /** @brief Value, the address, with the Arm Thumb bit cleared for a function. */
+  address value{};
+  /** @brief Size in bytes, 0 when unknown. */
+  std::uint32_t size{};
+  /** @brief Kind. */
+  symbol_kind kind{symbol_kind::other};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(symbol const&, symbol const&) -> bool = default;
+};
+
+/** @brief Row of a line table: the source position of the instructions from its address up to
+ * the next row's address. An end-of-sequence row has line 0: it ends the previous sequence at its
+ * address and covers no instruction itself. */
+struct line_row
+{
+  /** @brief First address the row covers. */
+  address addr{};
+  /** @brief Index of the source file in `image::files`. */
+  std::uint32_t file{};
+  /** @brief Source line, 0 for code with no line. */
+  std::uint32_t line{};
+  /** @brief Whether the row starts a statement, the DWARF is_stmt flag. Rows without it are kept
+   * too, they carry the line of inlined and scheduled code. */
+  bool is_stmt{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(line_row const&, line_row const&) -> bool = default;
+};
+
+/**
+ * @brief Firmware image: segments to load, symbols, line table, entry and calling convention.
+ *        Plain data, built by load_elf() and the other file loaders, or by the object linker. The
+ * machine checks the segments against the description's regions when loading it.
+ */
+struct image
+{
+  /** @brief Loadable segments, in address order. */
+  std::vector<segment> segments{};
+  /** @brief Symbols, in address order. */
+  std::vector<symbol> symbols{};
+  /** @brief Source file names the line table indexes, as the debug information spells them. */
+  std::vector<std::string> files{};
+  /** @brief Line table, all rows, ordered by address. Empty without debug information. */
+  std::vector<line_row> lines{};
+  /** @brief Entry point from the file header, empty when the file has none. */
+  std::optional<address> entry{};
+  /** @brief Floating-point calling convention, from the ELF header flags. */
+  arch::float_abi abi{arch::float_abi::soft};
+  /** @brief SHA-256 of the loadable content, lower-case hex, what a saved snapshot checks. */
+  std::string digest{};
+
+  /**
+   * @brief Looks a symbol up by exact name.
+   * @param name Symbol name.
+   * @return The symbol.
+   * @throws symbol_error when no symbol has that name, with the closest names.
+   */
+  [[nodiscard]] auto lookup(std::string_view name) const -> symbol const&;
+
+  /**
+   * @brief Locates an address: the function or object containing it, and the line of the row
+   *        with the greatest address not above @p addr, as addr2line does.
+   * @param addr Guest address.
+   * @return The location, symbol and file empty when unknown. Its views point into this image.
+   */
+  [[nodiscard]] auto locate(address addr) const -> location;
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(image const&, image const&) -> bool = default;
+};
+
+/**
+ * @brief Loads an ELF32 file: PT_LOAD segments, symbols, line table, entry, calling convention
+ *        and digest.
+ * @param file Path of the ELF.
+ * @return The image.
+ * @throws image_error when the file is not a loadable ELF32 for a supported machine.
+ */
+auto load_elf(std::filesystem::path const& file) -> image;
+}

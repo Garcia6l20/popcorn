@@ -58,6 +58,16 @@ enum class[[= reflex::derive{reflex::Format}]] float_abi
   hard_double,
 };
 
+/**
+ * @brief What a processor fault does: stop the run and report it, or enter the firmware's fault
+ *        handler, HardFault, MemManage, BusFault or UsageFault on Arm, the trap vector on RISC-V.
+ */
+enum class[[= reflex::derive{reflex::Format}]] fault_policy
+{
+  stop,
+  enter_handler,
+};
+
 /** @brief One call argument. */
 struct call_arg
 {
@@ -81,7 +91,7 @@ struct call_frame
   /** @brief Address of the function, as its symbol gives it. */
   address entry{};
   /** @brief Arguments in declaration order. Those past the argument registers go on the stack. */
-  std::vector<call_arg> args;
+  std::vector<call_arg> args{};
   /** @brief Type of the return value, read back by arch::call_result(). */
   value_kind returns{value_kind::i32};
   /** @brief Floating-point calling convention of the image. */
@@ -89,7 +99,7 @@ struct call_frame
   /** @brief Return address the function returns to, where the machine stops the call. */
   address return_sentinel{};
   /** @brief Initial stack pointer, the current one when empty. */
-  std::optional<address> stack;
+  std::optional<address> stack{};
   /** @brief Run privileged: Arm privileged thread mode, RISC-V machine mode. Unprivileged is
    * Arm unprivileged thread mode, RISC-V user mode. */
   bool privileged{true};
@@ -194,13 +204,16 @@ struct arch_context
   core::event_port& events;
   /** @brief Deferred stop, guest bus access, trace ring. */
   core::machine_services& services;
+  /** @brief Whether a fault stops the run, trap_result::fault(), or enters the firmware
+   * handler, trap_result::resume() after entry. */
+  fault_policy faults{fault_policy::stop};
 };
 
 /**
  * @brief Architecture module: interrupt controller, system timer, exception entry and return,
- *        calling convention and CPU state of one core. The run loop calls it at fixed points,
- *        spec 02 section 2.3. Implemented for armv8m by P3, armv6m, armv7m and RISC-V fit the
- *        same contract.
+ *        calling convention and CPU state of one core. The run loop calls it at fixed points:
+ *        before each slice, from the block hook while an interrupt is pending, and from the
+ *        engine's trap hooks. The contract fits armv6m, armv7m, armv8m and RISC-V.
  *
  * Unicorn hooks: the machine installs the interrupt, invalid-instruction and unmapped-access
  * hooks and forwards them to on_interrupt(), on_invalid_insn() and on_unmapped(). The module may
@@ -341,6 +354,28 @@ public:
    * @return Value bits of type `frame.returns`, a float as its IEEE 754 bit pattern.
    */
   [[nodiscard]] virtual auto call_result(call_frame const& frame) const -> std::uint64_t = 0;
+
+  /**
+   * @brief Reads the arguments of a function just entered, the callee side of prepare_call(),
+   *        for intercepts. The core is at the first instruction of the function.
+   * @param frame Signature in: each `args[i].kind` and `abi`. Values out: each `args[i].bits`.
+   */
+  virtual void read_args(call_frame& frame) const = 0;
+
+  /**
+   * @brief Return address of a function just entered, without instruction set state: Arm LR
+   *        with the Thumb bit cleared, RISC-V ra.
+   */
+  [[nodiscard]] virtual auto return_address() const -> address = 0;
+
+  /**
+   * @brief Returns from a function just entered without running its body, the callee side of
+   *        call_result(), for intercepts: places the return value, then moves pc to
+   *        return_address() with the instruction set state the return address carries.
+   * @param value Return value, empty for a void function.
+   * @param abi Floating-point calling convention of the image.
+   */
+  virtual void return_to_caller(std::optional<call_arg> const& value, float_abi abi) = 0;
 
   /**
    * @brief Appends the module state to a snapshot: interrupt controller, system timer, nesting,

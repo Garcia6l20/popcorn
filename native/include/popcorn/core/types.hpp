@@ -141,25 +141,39 @@ constexpr auto is_enumerator(E value) noexcept -> bool
   return false;
 }
 
-/** @brief Program location: address plus symbol and source info when known. */
+/**
+ * @brief Program location: address plus symbol and source info when known. The string views
+ *        point into the machine's loaded images and stay valid until the next image load. Use
+ *        owned_location to keep one longer.
+ */
 struct location
 {
-  address          pc;
-  std::string_view symbol;
-  std::uint32_t    offset;
-  std::string_view file;
-  std::uint32_t    line;
+  /** @brief Address of the instruction. */
+  address pc{};
+  /** @brief Name of the function or object containing pc, empty when unknown. */
+  std::string_view symbol{};
+  /** @brief Byte offset of pc from the start of symbol, 0 when symbol is empty. */
+  std::uint32_t offset{};
+  /** @brief Source file of pc from the line table, empty when unknown. */
+  std::string_view file{};
+  /** @brief Source line of pc, 0 when unknown. */
+  std::uint32_t line{};
 };
 
 /** @brief Program location that owns its symbol and file text, safe to outlive the frame it was
  * built in. */
 struct owned_location
 {
-  address       pc;
-  std::string   symbol;
-  std::uint32_t offset;
-  std::string   file;
-  std::uint32_t line;
+  /** @brief Address of the instruction. */
+  address pc{};
+  /** @brief Name of the function or object containing pc, empty when unknown. */
+  std::string symbol{};
+  /** @brief Byte offset of pc from the start of symbol, 0 when symbol is empty. */
+  std::uint32_t offset{};
+  /** @brief Source file of pc from the line table, empty when unknown. */
+  std::string file{};
+  /** @brief Source line of pc, 0 when unknown. */
+  std::uint32_t line{};
 };
 
 /** @brief Copies a location into an owned_location. */
@@ -169,22 +183,48 @@ inline auto to_owned(location const& where) -> owned_location
       where.pc, std::string(where.symbol), where.offset, std::string(where.file), where.line};
 }
 
-/** @brief Decoded processor fault. */
+/**
+ * @brief Decoded processor fault. status and detail are the architecture's raw fault registers:
+ *        Arm CFSR and HFSR, RISC-V mcause and mtval.
+ */
 struct fault_info
 {
-  fault_kind    kind;
-  address       fault_address;
-  std::uint32_t cfsr;
-  std::uint32_t hfsr;
+  /** @brief Class of the fault. */
+  fault_kind kind{};
+  /** @brief Faulting data or instruction address, 0 when the fault has none. */
+  address fault_address{};
+  /** @brief Primary fault status register: Arm CFSR, RISC-V mcause. */
+  std::uint32_t status{};
+  /** @brief Secondary fault register: Arm HFSR, RISC-V mtval. */
+  std::uint32_t detail{};
+};
+
+/** @brief Named range of guest addresses, for scoping coverage and trace collection. */
+struct address_range
+{
+  /** @brief Name for reports, such as a function or section name. */
+  std::string name{};
+  /** @brief First address. */
+  address start{};
+  /** @brief Size in bytes. */
+  std::uint32_t size{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(address_range const&, address_range const&) -> bool = default;
 };
 
 /** @brief Result of a run, step or wait. */
 struct stop
 {
-  stop_reason               reason;
-  location                  where;
-  icount                    instructions;
-  vtime                     time;
-  std::optional<fault_info> fault;
+  /** @brief Why the run stopped. */
+  stop_reason reason{};
+  /** @brief Where the core stopped, the next instruction to execute. */
+  location where{};
+  /** @brief Instructions executed since reset. */
+  icount instructions{};
+  /** @brief Virtual time since reset. */
+  vtime time{};
+  /** @brief Decoded fault, set exactly when reason is stop_reason::fault. */
+  std::optional<fault_info> fault{};
 };
 }

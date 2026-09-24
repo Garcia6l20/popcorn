@@ -5,7 +5,7 @@ from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_di
 from popcorn_build.firmware import add_firmware
 from popcorn_build.python import add_binding_check, add_extension, add_stub
 from popcorn_build.requirements import package, unicorn_commit
-from popcorn_build.testing import add_doctest
+from popcorn_build.testing import add_doctest, add_header_check
 
 WARNINGS = [
     "-Wall",
@@ -58,8 +58,10 @@ core = project.StaticLibrary(
         "native/src/core/services.cpp",
         "native/src/arch/arch.cpp",
         "native/src/periph/stubs.cpp",
-        "native/src/core/engine.cpp",
-        "native/src/core/smoke.cpp",
+        "native/src/core/trace.cpp",
+        "native/src/core/snapshot.cpp",
+        "native/src/core/machine_stub.cpp",
+        "native/src/image/image_stub.cpp",
     ],
 )
 core.public.include_dirs.append("native/include")
@@ -106,13 +108,44 @@ bench_description = project.Program(
     "bench-description", env, sources=["tests/native/core/bench_description.cpp"]
 )
 bench_description.link(core)
-add_doctest("core-engine", ["tests/native/core/test_engine.cpp"], [core])
+add_doctest(
+    "core-machine-api",
+    [
+        "tests/native/core/test_machine_api.cpp",
+        "tests/native/core/test_trace.cpp",
+        "tests/native/core/test_snapshot.cpp",
+        "tests/native/image/test_image.cpp",
+    ],
+    [core],
+    env={"POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json")},
+)
+add_doctest(
+    "consumers",
+    [
+        "tests/native/consumers/runtime.cpp",
+        "tests/native/consumers/arch_module.cpp",
+        "tests/native/consumers/image_loader.cpp",
+        "tests/native/consumers/python_facade.cpp",
+        "tests/native/consumers/peripheral_models.cpp",
+        "tests/native/consumers/observability.cpp",
+        "tests/native/consumers/object_linker.cpp",
+    ],
+    [core],
+    env={"POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json")},
+)
+add_header_check("headers", project_dir / "native" / "include", [core])
+
+smoke_support = project.StaticLibrary(
+    "popcorn-test-smoke", env, sources=["tests/native/support/smoke.cpp"]
+)
+smoke_support.link(core)
+add_doctest("core-unicorn-dev", ["tests/native/core/test_unicorn_dev.cpp"], [smoke_support, core])
 
 smoke_elf, smoke_firmware = add_firmware("smoke", "smoke", ["tests/firmware/smoke/smoke.c"])
 test_smoke_fw = add_doctest(
     "core-smoke-fw",
     ["tests/native/core/test_smoke_fw.cpp"],
-    [core],
+    [smoke_support, core],
     env={"POPCORN_SMOKE_ELF": str(smoke_elf)},
 )
 if smoke_firmware is not None:
@@ -122,6 +155,12 @@ if VARIANT != "asan":
     ext = add_extension("popcorn", "_core", ["native/src/bind/module.cpp"])
     ext.link(core)
     add_binding_check("popcorn-model-trampoline", ["native/src/bind/model_trampoline.cpp"], [core])
+    smoke_ext = add_extension(
+        "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]
+    )
+    smoke_ext.link(smoke_support)
+    smoke_ext.link(core)
+    add_stub(smoke_ext, "popcorn_testing", "_smoke")
 
     python_package = project_dir / "python" / "popcorn"
     python_sources = [*sorted(python_package.rglob("*.py")), python_package / "py.typed"]
