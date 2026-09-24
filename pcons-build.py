@@ -1,5 +1,6 @@
 from pcons import Project, get_var
 
+from popcorn_build import check
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
 from popcorn_build.firmware import add_firmware
 from popcorn_build.python import add_extension, add_stub
@@ -85,3 +86,5 @@ if VARIANT != "asan":
         project.Alias(
             "wheel", project.Install("popcorn", [ext, stub, *python_sources], name="install")
         )
+
+check.register()
