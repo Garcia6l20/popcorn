@@ -13,6 +13,7 @@ IncludeBlocks: Preserve
 
 # specific for preprocessor
 IndentPPDirectives: None
+FixNamespaceComments: false
 
 # allman style configuration
 # AllowShortFunctionsOnASingleLine: None

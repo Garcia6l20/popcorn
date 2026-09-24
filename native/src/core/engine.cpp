@@ -35,7 +35,7 @@ void require_wfi_hook(uc_engine* engine)
   }
   check(uc_hook_del(engine, hook), "uc_hook_del");
 }
-} // namespace
+}
 
 void engine_closer::operator()(uc_struct* engine) const noexcept
 {
@@ -52,4 +52,4 @@ auto open_m33() -> engine_handle
   require_wfi_hook(engine.get());
   return engine;
 }
-} // namespace popcorn::core
+}
