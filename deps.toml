@@ -14,11 +14,6 @@ CMAKE_POSITION_INDEPENDENT_CODE = "ON"
 CMAKE_C_VISIBILITY_PRESET = "hidden"
 CMAKE_C_FLAGS = "-fvisibility=hidden"
 
-[packages.reflex]
-url = "git+https://github.com/Garcia6l20/reflex.git@075e37633a2008b9286744588e408e750e9196e1"
-version = "075e376"
-build = "none"
-
 [packages.nanobind]
 url = "https://github.com/wjakob/nanobind/archive/refs/tags/v2.13.0.tar.gz"
 sha256 = "cb25a582ccade4b6067bc73c78b84ad9dbd0bbe0e537320711d18015ccafc4ef"

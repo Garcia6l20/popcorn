@@ -21,6 +21,15 @@ Prerequisites on Linux x86_64:
 uv pip install git+<repository-url>
 ```
 
+For local development, clone with submodules (third-party sources under
+`third_party/` are tracked as git submodules):
+
+```sh
+git clone --recurse-submodules <repository-url>
+# or, on an existing clone:
+git submodule update --init
+```
+
 ## License
 
 MIT, see `LICENSE`. Third-party components and their licences are listed in `NOTICE`.

@@ -16,7 +16,7 @@ variant = "release"
 [tool.ruff]
 target-version = "py314"
 line-length = 100
-extend-exclude = ["local", "build", "build-*"]
+extend-exclude = ["local", "build", "build-*", "third_party"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
@@ -24,7 +24,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 [tool.black]
 line-length = 100
 target-version = ["py314"]
-extend-exclude = "^/(local|build[^/]*)/"
+extend-exclude = "^/(local|build[^/]*|third_party)/"
 
 [tool.pyright]
 typeCheckingMode = "strict"

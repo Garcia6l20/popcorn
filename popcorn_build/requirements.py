@@ -26,7 +26,15 @@ def _fetch_missing() -> dict[str, Path]:
     }
 
 
+def _reflex_prefix() -> Path:
+    prefix = project_dir / "third_party" / "reflex"
+    if not (prefix / "core" / "include").is_dir():
+        raise SystemExit("popcorn: reflex submodule missing, run: git submodule update --init")
+    return prefix
+
+
 prefixes = _fetch_missing()
+prefixes["reflex"] = _reflex_prefix()
 unicorn_commit = (
     load_deps_file(deps_file)["packages"]["unicorn"]["url"]
     .rsplit("/", 1)[1]
@@ -63,6 +71,6 @@ def package(name: str) -> ImportedTarget:
     if name not in _imported:
         description = _describe(name)
         description.prefix = str(prefixes[name])
-        description.found_by = "pcons-fetch"
+        description.found_by = "git-submodule" if name == "reflex" else "pcons-fetch"
         _imported[name] = ImportedTarget.from_package(description)
     return _imported[name]
