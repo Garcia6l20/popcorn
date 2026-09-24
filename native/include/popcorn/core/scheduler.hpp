@@ -1,0 +1,181 @@
+#pragma once
+
+#include <popcorn/core/fwd.hpp>
+#include <popcorn/core/types.hpp>
+
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
+#include <type_traits>
+#include <vector>
+
+namespace popcorn::core
+{
+/** @brief Stable identity of a scheduled event, dispatched without any stored callable. */
+struct event_id
+{
+  /** @brief Index of the model that scheduled the event and receives it. */
+  std::uint32_t owner;
+  /** @brief Event kind, passed to the owner's `periph::model::on_event`. */
+  std::uint32_t kind;
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(event_id, event_id) -> bool = default;
+};
+
+/** @brief Event in the queue, plain data so a snapshot copies it as is. */
+struct event
+{
+  /** @brief Instruction count at which the event is due. */
+  icount at;
+  /** @brief Sequence number from schedule(), orders events due at the same count. */
+  std::uint64_t seq;
+  /** @brief Owner and kind. */
+  event_id id;
+  /** @brief Payload passed to the owner's `periph::model::on_event`. */
+  std::uint64_t payload;
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(event const&, event const&) -> bool = default;
+};
+
+static_assert(std::is_trivially_copyable_v<event_id>);
+static_assert(std::is_trivially_copyable_v<event>);
+
+/**
+ * @brief Event queue of a machine, ordered by due count then by sequence number. Holds no
+ *        callables: the run loop pops due events and dispatches each to its owner model.
+ *        Neither copyable nor movable: event ports hold references to it.
+ */
+class scheduler
+{
+public:
+  /** @brief Creates an empty queue whose first sequence number is 0. */
+  scheduler() = default;
+  /** @brief Not copyable. */
+  scheduler(scheduler const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(scheduler const&) -> scheduler& = delete;
+  /** @brief Not movable. */
+  scheduler(scheduler&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(scheduler&&) -> scheduler& = delete;
+  /** @brief Destroys the queue. */
+  ~scheduler();
+
+  /**
+   * @brief Schedules an event. An @p at already passed makes the event due at the next pop.
+   * @param at Instruction count at which the event is due.
+   * @param id Owner and kind.
+   * @param payload Passed back to the owner.
+   * @return Sequence number of the event, the handle for cancel(). Unique within one timeline:
+   *         restore() rewinds the counter, so the seqs issued after a snapshot are issued again
+   *         after restoring it, which keeps a replay deterministic.
+   */
+  auto schedule(icount at, event_id id, std::uint64_t payload) -> std::uint64_t;
+
+  /**
+   * @brief Removes a pending event. A no-op when @p seq is unknown, already fired or already
+   *        cancelled, so a caller may cancel a timer without tracking whether it fired.
+   * @param seq Sequence number from schedule().
+   */
+  void cancel(std::uint64_t seq);
+
+  /**
+   * @brief Removes a pending event if @p owner scheduled it, a no-op otherwise.
+   * @param seq Sequence number from schedule().
+   * @param owner Model index that must own the event.
+   */
+  void cancel(std::uint64_t seq, std::uint32_t owner);
+
+  /**
+   * @brief Due count of the earliest pending event, the maximum count when the queue is empty.
+   *        Cached and updated by every change to the queue, so the block hook reads it every
+   *        translated block, and an event scheduled during a slice shortens that slice.
+   */
+  [[nodiscard]] auto earliest() const noexcept -> icount
+  {
+    return earliest_;
+  }
+
+  /** @brief Due count of the earliest pending event, empty when the queue is empty. */
+  [[nodiscard]] auto next_deadline() const noexcept -> std::optional<icount>;
+
+  /**
+   * @brief Removes and returns the earliest event due at or before @p now, for the run loop.
+   * @param now Current instruction count.
+   * @return The event, empty when none is due.
+   */
+  auto pop_due(icount now) -> std::optional<event>;
+
+  /** @brief Pending events in dispatch order, for a snapshot. */
+  [[nodiscard]] auto pending() const -> std::span<event const>;
+
+  /** @brief Sequence number the next schedule() returns, for a snapshot. */
+  [[nodiscard]] auto next_seq() const noexcept -> std::uint64_t;
+
+  /**
+   * @brief Replaces the queue with a snapshot's content, tie order and sequence counter included.
+   * @param events Pending events as pending() returned them.
+   * @param next_seq Sequence number as next_seq() returned it.
+   */
+  void restore(std::span<event const> events, std::uint64_t next_seq);
+
+private:
+  void refresh_earliest() noexcept;
+
+  std::vector<event> queue_;
+  std::uint64_t      next_seq_ = 0;
+  icount             earliest_{std::numeric_limits<std::uint64_t>::max()};
+};
+
+/**
+ * @brief One model's access to the event queue. Stamps every event with the model's index, so
+ *        dispatch returns it to that model, and refuses to cancel events of other models. Built
+ *        by the machine for each model, the model never sees the scheduler itself.
+ */
+class event_port
+{
+public:
+  /**
+   * @brief Creates the port of one model.
+   * @param queue Event queue, must outlive the port.
+   * @param owner Index of the model.
+   */
+  event_port(scheduler& queue, std::uint32_t owner) noexcept : queue_{queue}, owner_{owner}
+  {}
+
+  /**
+   * @brief Schedules an event for the owning model.
+   * @param at Instruction count at which the event is due.
+   * @param kind Event kind, passed back to `periph::model::on_event`.
+   * @param payload Passed back to `periph::model::on_event`.
+   * @return Sequence number, the handle for cancel().
+   */
+  auto schedule(icount at, std::uint32_t kind, std::uint64_t payload) -> std::uint64_t
+  {
+    return queue_.schedule(at, event_id{owner_, kind}, payload);
+  }
+
+  /**
+   * @brief Cancels one of the owning model's pending events. A no-op for an unknown, fired or
+   *        cancelled seq and for a seq another model owns.
+   * @param seq Sequence number from schedule().
+   */
+  void cancel(std::uint64_t seq)
+  {
+    queue_.cancel(seq, owner_);
+  }
+
+  /** @brief Index of the owning model. */
+  [[nodiscard]] auto owner() const noexcept -> std::uint32_t
+  {
+    return owner_;
+  }
+
+private:
+  scheduler&    queue_;
+  std::uint32_t owner_;
+};
+}

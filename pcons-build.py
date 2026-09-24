@@ -54,6 +54,7 @@ core = project.StaticLibrary(
         "native/src/core/version.cpp",
         "native/src/core/errors.cpp",
         "native/src/core/description.cpp",
+        "native/src/core/time.cpp",
         "native/src/periph/stubs.cpp",
         "native/src/core/engine.cpp",
         "native/src/core/smoke.cpp",
@@ -68,6 +69,11 @@ core.link(package("reflex-serde"))
 
 add_doctest("core-types", ["tests/native/core/test_types.cpp"], [core])
 add_doctest("core-fwd", ["tests/native/core/test_fwd.cpp"], [core])
+add_doctest(
+    "core-time",
+    ["tests/native/core/test_time_types.cpp", "tests/native/core/test_clock.cpp"],
+    [core],
+)
 add_doctest("core-errors", ["tests/native/core/test_errors.cpp"], [core])
 add_doctest(
     "core-description",

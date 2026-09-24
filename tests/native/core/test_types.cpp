@@ -80,3 +80,19 @@ TEST_CASE("stop with no fault leaves the optional empty")
 
   CHECK_FALSE(s.fault.has_value());
 }
+
+TEST_CASE("icount_from_vtime rounds up and inverts vtime_from_instructions")
+{
+  CHECK(popcorn::icount_from_vtime({1'000'000'000'000ull}, 160'000'000).value == 160'000'000);
+  CHECK(popcorn::icount_from_vtime({1}, 160'000'000).value == 1);
+  CHECK(popcorn::icount_from_vtime({0}, 160'000'000).value == 0);
+  for(std::uint64_t const hz : {160'000'000ull, 110'000'000ull, 32'768ull})
+  {
+    for(std::uint64_t const n : {1ull, 3ull, 1'000'003ull, 1ull << 32})
+    {
+      CAPTURE(hz);
+      CAPTURE(n);
+      CHECK(popcorn::icount_from_vtime(popcorn::vtime_from_instructions(n, hz), hz).value == n);
+    }
+  }
+}

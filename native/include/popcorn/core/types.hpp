@@ -2,6 +2,7 @@
 
 #include <reflex/enum.hpp>
 
+#include <compare>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -16,12 +17,18 @@ using address = std::uint32_t;
 struct icount
 {
   std::uint64_t value;
+
+  /** @brief Member-wise ordering and equality. */
+  friend auto operator<=>(icount, icount) = default;
 };
 
 /** @brief Virtual time elapsed in the guest, in picoseconds. */
 struct vtime
 {
   std::uint64_t ps;
+
+  /** @brief Member-wise ordering and equality. */
+  friend auto operator<=>(vtime, vtime) = default;
 };
 
 /**
@@ -38,6 +45,22 @@ constexpr auto vtime_from_instructions(std::uint64_t instructions, std::uint64_t
   constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
   unsigned __int128 const     ps            = ps_per_second * instructions / clock_hz;
   return vtime{static_cast<std::uint64_t>(ps)};
+}
+
+/**
+ * @brief Converts virtual time into the instruction count that reaches it at a fixed clock, the
+ *        inverse of vtime_from_instructions().
+ * @param elapsed Virtual time elapsed.
+ * @param clock_hz Clock frequency in Hz, must not be 0.
+ * @return Instructions, rounded up so that the count reaches @p elapsed. The product
+ *         `elapsed * clock_hz` is formed in 128 bits and cannot overflow. The result wraps past
+ *         2^64 instructions, about 3650 years at 160 MHz.
+ */
+constexpr auto icount_from_vtime(vtime elapsed, std::uint64_t clock_hz) -> icount pre(clock_hz != 0)
+{
+  constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
+  unsigned __int128 const     scaled        = static_cast<unsigned __int128>(elapsed.ps) * clock_hz;
+  return icount{static_cast<std::uint64_t>((scaled + ps_per_second - 1) / ps_per_second)};
 }
 
 /** @brief Why a run stopped. */

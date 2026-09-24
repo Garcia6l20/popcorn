@@ -149,8 +149,8 @@ struct model_context
   std::span<irq_line> irqs;
   /** @brief DMA request lines of the peripheral, in description order. */
   std::span<dma_request> dma;
-  /** @brief Event queue of the machine. */
-  core::scheduler& sched;
+  /** @brief The model's own access to the event queue, stamped with its index. */
+  core::event_port& events;
   /** @brief Virtual clock of the machine. */
   core::clock& clock;
   /** @brief Machine services: deferred stop, guest bus access. */
