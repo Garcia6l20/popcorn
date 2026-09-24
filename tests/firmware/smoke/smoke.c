@@ -25,6 +25,6 @@ static uint32_t fnv1a(const char* data, uint32_t size)
 }
 
 __attribute__((section(".isr_vector"), used)) static const void* const vectors[] = {
-  &_estack,
-  (const void*)Reset_Handler,
+    &_estack,
+    (const void*)Reset_Handler,
 };
