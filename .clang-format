@@ -1,0 +1,93 @@
+Language: Cpp
+BasedOnStyle: llvm
+
+IndentWidth: 2
+UseTab: Never
+ColumnLimit: 100
+MaxEmptyLinesToKeep: 1
+ExperimentalAutoDetectBinPacking: false
+
+# includes - sort includes per blocks
+SortIncludes: true
+IncludeBlocks: Preserve
+
+# specific for preprocessor
+IndentPPDirectives: None
+
+# allman style configuration
+# AllowShortFunctionsOnASingleLine: None
+# KeepEmptyLinesAtTheStartOfBlocks: false
+# BreakBeforeBraces: Allman
+# AllowShortIfStatementsOnASingleLine: Never
+# AllowShortBlocksOnASingleLine: false
+
+AllowShortFunctionsOnASingleLine: None
+KeepEmptyLinesAtTheStartOfBlocks: false
+BreakBeforeBraces: Custom
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortBlocksOnASingleLine: false
+
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+
+# functions
+IndentWrappedFunctionNames: true
+# AlignAfterOpenBracket: DontAlign
+AlignAfterOpenBracket: AlwaysBreak
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: false
+BinPackArguments: true
+BinPackParameters: false
+# Cpp11BracedListStyle: true
+
+# variables
+PointerAlignment: Left
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: true
+AlignOperands: AlignAfterOperator
+BreakBeforeBinaryOperators: NonAssignment
+BreakBinaryOperations: OnePerLine
+
+# specific for switch
+IndentCaseLabels: true
+
+# defines & macros
+AlignConsecutiveMacros: true
+AlignEscapedNewlines: Left
+
+AlignArrayOfStructures: Left
+
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+  AlignCaseColons: false
+
+# space config
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: Never
+SpaceInEmptyParentheses: false
+SpacesInCStyleCastParentheses: false
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+WhitespaceSensitiveMacros:
+  - JSON
+  - JINJA

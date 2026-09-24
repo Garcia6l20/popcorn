@@ -1,0 +1,31 @@
+popcorn
+Copyright (c) 2026 Sylvain Garcia
+
+popcorn source code is released under the MIT License, see LICENSE. This
+repository contains no third-party source code. The components below are
+downloaded at build time from their upstream archives, pinned by commit or
+version and verified by sha256 where an archive is used, and compiled on the
+user's machine. The built Python extension links Unicorn statically, so an
+installed popcorn extension is a combined work subject to GPL-2.0-only.
+
+Unicorn CPU emulator, commit 938efd13aeab73155f31cf707a2094c6ccaa36dd
+  https://github.com/unicorn-engine/unicorn
+  License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
+  are under LGPL-2.0, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
+  target only and linked statically into the extension with hidden symbols.
+
+reflex C++26 reflection library
+  https://github.com/Garcia6l20/reflex
+  License: MIT. Header-only use.
+
+nanobind
+  https://github.com/wjakob/nanobind
+  License: BSD-3-Clause. Its runtime is compiled into the extension.
+
+robin-map
+  https://github.com/Tessil/robin-map
+  License: MIT. Header-only use through nanobind.
+
+doctest
+  https://github.com/doctest/doctest
+  License: MIT. Used by native test programs only, not part of the extension.

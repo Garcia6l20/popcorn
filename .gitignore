@@ -1,0 +1,9 @@
+local/
+build/
+build-*/
+.venv/
+__pycache__/
+*.egg-info/
+.ruff_cache/
+compile_commands.json
+.cache/
