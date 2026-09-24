@@ -1,10 +1,13 @@
 #include <popcorn/core/smoke.hpp>
 
+#include <popcorn/core/errors.hpp>
+
 #include <unicorn/unicorn.h>
 
 #include <elf.h>
 
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -25,7 +28,7 @@ void check(uc_err err, char const* what)
 {
   if(err != UC_ERR_OK)
   {
-    throw EngineError{std::string{what} + ": " + uc_strerror(err)};
+    throw emulation_error{std::string{what} + ": " + uc_strerror(err)};
   }
 }
 
@@ -33,7 +36,7 @@ template <typename T> auto read_at(std::vector<char> const& image, std::size_t o
 {
   if(offset + sizeof(T) > image.size())
   {
-    throw EngineError{"truncated ELF"};
+    throw image_error{"header", 0, std::format("truncated ELF at offset {:#x}", offset)};
   }
   T value;
   std::memcpy(&value, image.data() + offset, sizeof(T));
@@ -56,7 +59,7 @@ auto run_to_bkpt(engine_handle const& engine, std::filesystem::path const& elf) 
   auto const        is_arm32 = header.e_ident[EI_CLASS] == ELFCLASS32 && header.e_machine == EM_ARM;
   if(!is_elf || !is_arm32)
   {
-    throw EngineError{"not an ARM ELF32 file: " + elf.string()};
+    throw image_error{"header", 0, "not an ARM ELF32 file: " + elf.string()};
   }
 
   auto* uc = engine.get();
@@ -71,7 +74,8 @@ auto run_to_bkpt(engine_handle const& engine, std::filesystem::path const& elf) 
     }
     if(segment.p_offset + segment.p_filesz > image.size())
     {
-      throw EngineError{"truncated ELF segment"};
+      throw image_error{
+          std::to_string(i), static_cast<address>(segment.p_paddr), "truncated ELF segment"};
     }
     check(
         uc_mem_write(uc, segment.p_paddr, image.data() + segment.p_offset, segment.p_filesz),
@@ -92,7 +96,7 @@ auto run_to_bkpt(engine_handle const& engine, std::filesystem::path const& elf) 
   check(uc_hook_del(uc, hook), "unhook interrupts");
   if(interrupt != excp_bkpt)
   {
-    throw EngineError{"firmware stopped without reaching bkpt"};
+    throw emulation_error{"firmware stopped without reaching bkpt"};
   }
 
   std::uint32_t r0 = 0;

@@ -1,5 +1,7 @@
 #include <popcorn/core/engine.hpp>
 
+#include <popcorn/core/errors.hpp>
+
 #include <unicorn/unicorn.h>
 
 #include <string>
@@ -12,7 +14,7 @@ void check(uc_err err, char const* what)
 {
   if(err != UC_ERR_OK)
   {
-    throw EngineError{std::string{what} + ": " + uc_strerror(err)};
+    throw emulation_error{std::string{what} + ": " + uc_strerror(err)};
   }
 }
 
@@ -28,7 +30,7 @@ void require_wfi_hook(uc_engine* engine)
       engine, &hook, UC_HOOK_INSN, reinterpret_cast<void*>(&on_wfi), nullptr, 1, 0, UC_ARM_INS_WFI);
   if(err != UC_ERR_OK)
   {
-    throw EngineError{
+    throw emulation_error{
         std::string{"linked Unicorn has no WFI instruction hook, popcorn needs the pinned dev "
                     "build: "}
         + uc_strerror(err)};

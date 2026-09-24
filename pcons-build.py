@@ -31,6 +31,7 @@ env.cxx.flags.extend(
         "-std=gnu++26",
         "-freflection",
         "-fimplicit-constexpr",
+        "-fcontracts",
         f"-Wabi={ABI_VERSION}",
         f"-fabi-version={ABI_VERSION}",
         "-fmax-errors=5",
@@ -38,6 +39,7 @@ env.cxx.flags.extend(
         *WARNINGS,
     ]
 )
+env.link.flags.append("-fcontracts")
 
 if VARIANT == "asan":
     env.set_variant("debug")
@@ -50,6 +52,7 @@ core = project.StaticLibrary(
     env,
     sources=[
         "native/src/core/version.cpp",
+        "native/src/core/errors.cpp",
         "native/src/core/engine.cpp",
         "native/src/core/smoke.cpp",
     ],
@@ -59,7 +62,10 @@ core.private.defines.extend(
     [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit[:12]}"']
 )
 core.link(package("unicorn"))
+core.link(package("reflex"))
 
+add_doctest("core-types", ["tests/native/core/test_types.cpp"], [core])
+add_doctest("core-errors", ["tests/native/core/test_errors.cpp"], [core])
 add_doctest("core-engine", ["tests/native/core/test_engine.cpp"], [core])
 
 smoke_elf, smoke_firmware = add_firmware("smoke", "smoke", ["tests/firmware/smoke/smoke.c"])

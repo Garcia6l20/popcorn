@@ -1,4 +1,5 @@
 #include <popcorn/core/engine.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/smoke.hpp>
 #include <popcorn/core/version.hpp>
 
@@ -34,7 +35,7 @@ public:
   {
     if(!handle_)
     {
-      throw EngineError{"engine is closed"};
+      throw emulation_error{"engine is closed"};
     }
     return core::run_to_bkpt(handle_, elf);
   }
