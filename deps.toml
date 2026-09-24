@@ -1,0 +1,38 @@
+[packages.unicorn]
+url = "https://github.com/unicorn-engine/unicorn/archive/938efd13aeab73155f31cf707a2094c6ccaa36dd.tar.gz"
+sha256 = "795330791ab6e7ec4556ab7bd5f398a18dbb1c34bf8f5508311fb48b5a91311c"
+version = "2.1.4-33-g938efd13"
+build = "cmake"
+
+[packages.unicorn.cmake_options]
+UNICORN_ARCH = "arm"
+BUILD_SHARED_LIBS = "OFF"
+UNICORN_LEGACY_STATIC_ARCHIVE = "ON"
+UNICORN_BUILD_TESTS = "OFF"
+UNICORN_INSTALL = "ON"
+CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+CMAKE_C_VISIBILITY_PRESET = "hidden"
+CMAKE_C_FLAGS = "-fvisibility=hidden"
+
+[packages.reflex]
+url = "git+https://github.com/Garcia6l20/reflex.git@075e37633a2008b9286744588e408e750e9196e1"
+version = "075e376"
+build = "none"
+
+[packages.nanobind]
+url = "https://github.com/wjakob/nanobind/archive/refs/tags/v2.13.0.tar.gz"
+sha256 = "cb25a582ccade4b6067bc73c78b84ad9dbd0bbe0e537320711d18015ccafc4ef"
+version = "2.13.0"
+build = "none"
+
+[packages.robin-map]
+url = "https://github.com/Tessil/robin-map/archive/refs/tags/v1.4.0.tar.gz"
+sha256 = "7930dbf9634acfc02686d87f615c0f4f33135948130b8922331c16d90a03250c"
+version = "1.4.0"
+build = "none"
+
+[packages.doctest]
+url = "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz"
+sha256 = "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331"
+version = "2.5.3"
+build = "none"
