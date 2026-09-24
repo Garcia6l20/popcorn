@@ -1,6 +1,7 @@
-from pcons import Project
+from pcons import Project, get_var
 
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
+from popcorn_build.python import add_extension, add_stub
 from popcorn_build.requirements import package, unicorn_commit
 from popcorn_build.testing import add_doctest
 
@@ -54,3 +55,15 @@ core.private.defines.extend(
 core.link(package("unicorn"))
 
 add_doctest("core-engine", ["tests/native/core/test_engine.cpp"], [core])
+
+ext = add_extension("popcorn", "_core", ["native/src/bind/module.cpp"])
+ext.link(core)
+
+python_package = project_dir / "python" / "popcorn"
+python_sources = [*sorted(python_package.rglob("*.py")), python_package / "py.typed"]
+staged_sources = project.Install("popcorn", python_sources, name="stage-python", no_prefix=True)
+staged_sources.build_tier = "default"
+stub = add_stub(ext, "popcorn", "_core", after=[staged_sources])
+
+if get_var("PCONS_BUILD_WHEEL", False):
+    project.Alias("wheel", project.Install("popcorn", [ext, stub, *python_sources], name="install"))

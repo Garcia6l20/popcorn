@@ -1,3 +1,18 @@
+[build-system]
+requires = ["pcons==0.29.1"]
+build-backend = "pcons.pyproject"
+
+[project]
+name = "popcorn"
+version = "0.1.0.dev0"
+requires-python = ">=3.14"
+
+[dependency-groups]
+dev = ["pcons==0.29.1", "pytest", "pyright", "ruff", "black"]
+
+[tool.pcons]
+variant = "release"
+
 [tool.ruff]
 target-version = "py314"
 line-length = 100
@@ -15,3 +30,8 @@ extend-exclude = "^/(local|build[^/]*)/"
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
 include = ["python", "tests/python"]
+venvPath = "."
+venv = ".venv"
+
+[tool.uv]
+no-build-isolation-package = ["popcorn"]
