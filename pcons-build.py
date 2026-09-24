@@ -3,7 +3,7 @@ from pcons import Project, get_var
 from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
 from popcorn_build.firmware import add_firmware
-from popcorn_build.python import add_extension, add_stub
+from popcorn_build.python import add_binding_check, add_extension, add_stub
 from popcorn_build.requirements import package, unicorn_commit
 from popcorn_build.testing import add_doctest
 
@@ -54,6 +54,7 @@ core = project.StaticLibrary(
         "native/src/core/version.cpp",
         "native/src/core/errors.cpp",
         "native/src/core/description.cpp",
+        "native/src/periph/stubs.cpp",
         "native/src/core/engine.cpp",
         "native/src/core/smoke.cpp",
     ],
@@ -66,6 +67,7 @@ core.link(package("unicorn"))
 core.link(package("reflex-serde"))
 
 add_doctest("core-types", ["tests/native/core/test_types.cpp"], [core])
+add_doctest("core-fwd", ["tests/native/core/test_fwd.cpp"], [core])
 add_doctest("core-errors", ["tests/native/core/test_errors.cpp"], [core])
 add_doctest(
     "core-description",
@@ -75,6 +77,16 @@ add_doctest(
         "POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json"),
         "POPCORN_DESC_SCHEMA": str(project_dir / "data" / "schema" / "mcu_description.schema.json"),
     },
+)
+add_doctest(
+    "periph-interfaces",
+    [
+        "tests/native/periph/test_interfaces.cpp",
+        "tests/native/periph/test_lines.cpp",
+        "tests/native/periph/test_register_file.cpp",
+    ],
+    [core],
+    env={"POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json")},
 )
 describe_schema = project.Program(
     "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
@@ -99,6 +111,7 @@ if smoke_firmware is not None:
 if VARIANT != "asan":
     ext = add_extension("popcorn", "_core", ["native/src/bind/module.cpp"])
     ext.link(core)
+    add_binding_check("popcorn-model-trampoline", ["native/src/bind/model_trampoline.cpp"], [core])
 
     python_package = project_dir / "python" / "popcorn"
     python_sources = [*sorted(python_package.rglob("*.py")), python_package / "py.typed"]

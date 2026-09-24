@@ -67,6 +67,14 @@ enum class[[= reflex::derive{reflex::Format}]] fault_kind
   invalid,
 };
 
+/** @brief Bus master that initiated a memory or register access. */
+enum class[[= reflex::derive{reflex::Format}]] initiator
+{
+  cpu,
+  dma,
+  debugger,
+};
+
 /** @brief Program location: address plus symbol and source info when known. */
 struct location
 {
