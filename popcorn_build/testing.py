@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from pcons import Target, context, write_file
@@ -23,13 +23,19 @@ def _doctest_with_main() -> Target:
 
 
 def add_doctest(
-    name: str, sources: Sequence[str | Path], deps: Sequence[Target] = (), group: str = "native"
+    name: str,
+    sources: Sequence[str | Path],
+    deps: Sequence[Target] = (),
+    group: str = "native",
+    env: Mapping[str, str] | None = None,
 ) -> Target:
-    """Build a doctest program and register one test per case under @p group."""
+    """Build a doctest program and register one test per case under @p group, run with @p env."""
     project = context.current_project
     program = project.Program(f"test-{name}", project.default_environment, sources=list(sources))
     for dep in [*deps, package("doctest"), _doctest_with_main()]:
         program.link(dep)
-    project.Test(f"{group}.{name}", program, discover="doctest", labels=[group])
+    project.Test(
+        f"{group}.{name}", program, discover="doctest", labels=[group], env=dict(env or {})
+    )
     project.Alias(f"test-{group}", program)
     return program
