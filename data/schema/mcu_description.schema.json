@@ -1,0 +1,422 @@
+{
+  "$defs": {
+    "core_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "type": "string"
+        },
+        "dsp": {
+          "type": "boolean"
+        },
+        "fpu": {
+          "type": "boolean"
+        },
+        "fpu_double": {
+          "type": "boolean"
+        },
+        "mpu": {
+          "type": "boolean"
+        },
+        "mpu_regions": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mpu_regions_secure": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "num_irqs": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nvic_prio_bits": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reset_clock_hz": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "sau_regions": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trustzone": {
+          "type": "boolean"
+        },
+        "vendor_systick_config": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cpu",
+        "revision",
+        "fpu",
+        "fpu_double",
+        "mpu",
+        "mpu_regions",
+        "mpu_regions_secure",
+        "sau_regions",
+        "trustzone",
+        "dsp",
+        "nvic_prio_bits",
+        "num_irqs",
+        "vendor_systick_config",
+        "reset_clock_hz"
+      ],
+      "type": "object"
+    },
+    "cross_rule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "clear",
+            "set"
+          ],
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "reg": {
+          "type": "string"
+        },
+        "target_field": {
+          "type": "string"
+        },
+        "target_reg": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reg",
+        "field",
+        "target_reg",
+        "target_field",
+        "effect"
+      ],
+      "type": "object"
+    },
+    "field_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "acc": {
+          "enum": [
+            "read_only",
+            "write_only",
+            "read_write",
+            "write_once",
+            "read_write_once"
+          ],
+          "type": "string"
+        },
+        "lsb": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "on_read": {
+          "enum": [
+            "none",
+            "clear",
+            "set",
+            "modify",
+            "modify_external"
+          ],
+          "type": "string"
+        },
+        "on_write": {
+          "enum": [
+            "modify",
+            "one_to_clear",
+            "one_to_set",
+            "one_to_toggle",
+            "zero_to_clear",
+            "zero_to_set",
+            "zero_to_toggle",
+            "clear",
+            "set"
+          ],
+          "type": "string"
+        },
+        "width": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "lsb",
+        "width",
+        "acc",
+        "on_write",
+        "on_read"
+      ],
+      "type": "object"
+    },
+    "irq_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "number": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "number",
+        "name"
+      ],
+      "type": "object"
+    },
+    "peripheral_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "alias_of": {
+          "type": "string"
+        },
+        "base": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cross_rules": {
+          "items": {
+            "$ref": "#/$defs/cross_rule"
+          },
+          "type": "array"
+        },
+        "ip": {
+          "type": "string"
+        },
+        "ip_version": {
+          "type": "string"
+        },
+        "irqs": {
+          "items": {
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "registers": {
+          "items": {
+            "$ref": "#/$defs/register_desc"
+          },
+          "type": "array"
+        },
+        "size": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "ip",
+        "ip_version",
+        "base",
+        "size",
+        "registers",
+        "cross_rules",
+        "irqs"
+      ],
+      "type": "object"
+    },
+    "region_access": {
+      "additionalProperties": false,
+      "properties": {
+        "execute": {
+          "type": "boolean"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "write": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "read",
+        "write",
+        "execute"
+      ],
+      "type": "object"
+    },
+    "region_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "acc": {
+          "$ref": "#/$defs/region_access"
+        },
+        "kind": {
+          "enum": [
+            "rom",
+            "ram"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "physical": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secure": {
+          "type": "boolean"
+        },
+        "size": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "start",
+        "size",
+        "kind",
+        "acc",
+        "secure"
+      ],
+      "type": "object"
+    },
+    "register_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "acc": {
+          "enum": [
+            "read_only",
+            "write_only",
+            "read_write",
+            "write_once",
+            "read_write_once"
+          ],
+          "type": "string"
+        },
+        "alternate_of": {
+          "type": "string"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/field_desc"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reset": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reset_mask": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "offset",
+        "width",
+        "reset",
+        "reset_mask",
+        "acc",
+        "fields"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "core": {
+      "$ref": "#/$defs/core_desc"
+    },
+    "generator": {
+      "type": "string"
+    },
+    "irqs": {
+      "items": {
+        "$ref": "#/$defs/irq_desc"
+      },
+      "type": "array"
+    },
+    "part": {
+      "type": "string"
+    },
+    "peripherals": {
+      "items": {
+        "$ref": "#/$defs/peripheral_desc"
+      },
+      "type": "array"
+    },
+    "regions": {
+      "items": {
+        "$ref": "#/$defs/region_desc"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "sources": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "part",
+    "generator",
+    "sources",
+    "core",
+    "regions",
+    "peripherals",
+    "irqs"
+  ],
+  "title": "popcorn MCU description",
+  "type": "object"
+}

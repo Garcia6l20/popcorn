@@ -34,7 +34,7 @@ def _reflex_prefix() -> Path:
 
 
 prefixes = _fetch_missing()
-prefixes["reflex"] = _reflex_prefix()
+prefixes["reflex"] = prefixes["reflex-serde"] = _reflex_prefix()
 unicorn_commit = (
     load_deps_file(deps_file)["packages"]["unicorn"]["url"]
     .rsplit("/", 1)[1]
@@ -48,6 +48,13 @@ def _describe(name: str) -> PackageDescription:
         case "reflex":
             return PackageDescription(
                 name=name, system_include_dirs=[str(prefix / "core" / "include")]
+            )
+        case "reflex-serde":
+            return PackageDescription(
+                name=name,
+                system_include_dirs=[
+                    str(prefix / component / "include") for component in ("core", "poly", "serde")
+                ],
             )
         case "doctest":
             return PackageDescription(name=name, system_include_dirs=[str(prefix)])
@@ -71,6 +78,6 @@ def package(name: str) -> ImportedTarget:
     if name not in _imported:
         description = _describe(name)
         description.prefix = str(prefixes[name])
-        description.found_by = "git-submodule" if name == "reflex" else "pcons-fetch"
+        description.found_by = "git-submodule" if name.startswith("reflex") else "pcons-fetch"
         _imported[name] = ImportedTarget.from_package(description)
     return _imported[name]

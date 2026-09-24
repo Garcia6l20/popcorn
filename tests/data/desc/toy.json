@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "part": "TOY1",
+  "generator": "hand-written",
+  "sources": {
+    "svd": "0000000000000000000000000000000000000000000000000000000000000000",
+    "rzone": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "core": {
+    "cpu": "CM33",
+    "revision": "r0p1",
+    "fpu": true,
+    "fpu_double": false,
+    "mpu": true,
+    "mpu_regions": 8,
+    "mpu_regions_secure": 0,
+    "sau_regions": 0,
+    "trustzone": false,
+    "dsp": false,
+    "nvic_prio_bits": 3,
+    "num_irqs": 2,
+    "vendor_systick_config": false,
+    "reset_clock_hz": 4000000
+  },
+  "regions": [
+    { "name": "FLASH", "start": 134217728, "size": 65536, "kind": "rom",
+      "acc": { "read": true, "write": false, "execute": true }, "secure": false },
+    { "name": "SRAM", "start": 536870912, "size": 16384, "kind": "ram",
+      "acc": { "read": true, "write": true, "execute": true }, "secure": false }
+  ],
+  "peripherals": [
+    {
+      "name": "UART1",
+      "ip": "usart",
+      "ip_version": "v1",
+      "base": 1073745920,
+      "size": 1024,
+      "registers": [
+        {
+          "name": "ISR",
+          "offset": 0,
+          "width": 32,
+          "reset": 192,
+          "reset_mask": 4294967295,
+          "acc": "read_only",
+          "fields": [
+            { "name": "TC", "lsb": 6, "width": 1, "acc": "read_only", "on_write": "modify", "on_read": "none" },
+            { "name": "TXE", "lsb": 7, "width": 1, "acc": "read_only", "on_write": "modify", "on_read": "none" }
+          ]
+        },
+        {
+          "name": "ICR",
+          "offset": 4,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "write_only",
+          "fields": [
+            { "name": "TCCF", "lsb": 6, "width": 1, "acc": "write_only", "on_write": "one_to_clear", "on_read": "none" }
+          ]
+        }
+      ],
+      "cross_rules": [
+        { "reg": "ICR", "field": "TCCF", "target_reg": "ISR", "target_field": "TC", "effect": "clear" }
+      ],
+      "irqs": [0]
+    },
+    {
+      "name": "TIMER1",
+      "ip": "timer",
+      "ip_version": "v1",
+      "base": 1073750016,
+      "size": 1024,
+      "registers": [
+        {
+          "name": "CNT",
+          "offset": 0,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "read_write",
+          "fields": [
+            { "name": "CNT", "lsb": 0, "width": 16, "acc": "read_write", "on_write": "modify", "on_read": "none" }
+          ]
+        }
+      ],
+      "cross_rules": [],
+      "irqs": [1]
+    }
+  ],
+  "irqs": [
+    { "number": 0, "name": "UART1_IRQn" },
+    { "number": 1, "name": "TIMER1_IRQn" }
+  ]
+}

@@ -1,6 +1,6 @@
 from pcons import Project, get_var
 
-from popcorn_build import check
+from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
 from popcorn_build.firmware import add_firmware
 from popcorn_build.python import add_extension, add_stub
@@ -53,6 +53,7 @@ core = project.StaticLibrary(
     sources=[
         "native/src/core/version.cpp",
         "native/src/core/errors.cpp",
+        "native/src/core/description.cpp",
         "native/src/core/engine.cpp",
         "native/src/core/smoke.cpp",
     ],
@@ -62,10 +63,27 @@ core.private.defines.extend(
     [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit[:12]}"']
 )
 core.link(package("unicorn"))
-core.link(package("reflex"))
+core.link(package("reflex-serde"))
 
 add_doctest("core-types", ["tests/native/core/test_types.cpp"], [core])
 add_doctest("core-errors", ["tests/native/core/test_errors.cpp"], [core])
+add_doctest(
+    "core-description",
+    ["tests/native/core/test_description.cpp"],
+    [core],
+    env={
+        "POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json"),
+        "POPCORN_DESC_SCHEMA": str(project_dir / "data" / "schema" / "mcu_description.schema.json"),
+    },
+)
+describe_schema = project.Program(
+    "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
+)
+describe_schema.link(core)
+bench_description = project.Program(
+    "bench-description", env, sources=["tests/native/core/bench_description.cpp"]
+)
+bench_description.link(core)
 add_doctest("core-engine", ["tests/native/core/test_engine.cpp"], [core])
 
 smoke_elf, smoke_firmware = add_firmware("smoke", "smoke", ["tests/firmware/smoke/smoke.c"])
@@ -94,3 +112,4 @@ if VARIANT != "asan":
         )
 
 check.register()
+schema.register()
