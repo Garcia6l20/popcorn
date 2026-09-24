@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pcons import find_c_toolchain, get_variant
 
+POPCORN_VERSION = "0.1.0.dev0"
 VARIANTS = ("debug", "release", "asan")
 GCC_MINIMUM = (16, 1)
 

@@ -27,6 +27,11 @@ def _fetch_missing() -> dict[str, Path]:
 
 
 prefixes = _fetch_missing()
+unicorn_commit = (
+    load_deps_file(deps_file)["packages"]["unicorn"]["url"]
+    .rsplit("/", 1)[1]
+    .removesuffix(".tar.gz")
+)
 
 
 def _describe(name: str) -> PackageDescription:

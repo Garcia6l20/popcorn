@@ -1,7 +1,8 @@
 from pcons import Project
 
-from popcorn_build.config import VARIANT, build_dir, project_dir, toolchain
-from popcorn_build.requirements import package
+from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
+from popcorn_build.requirements import package, unicorn_commit
+from popcorn_build.testing import add_doctest
 
 WARNINGS = [
     "-Wall",
@@ -41,4 +42,15 @@ if VARIANT == "asan":
 else:
     env.set_variant(VARIANT)
 
-unicorn = package("unicorn")
+core = project.StaticLibrary(
+    "popcorn_core",
+    env,
+    sources=["native/src/core/version.cpp", "native/src/core/engine.cpp"],
+)
+core.public.include_dirs.append("native/include")
+core.private.defines.extend(
+    [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit[:12]}"']
+)
+core.link(package("unicorn"))
+
+add_doctest("core-engine", ["tests/native/core/test_engine.cpp"], [core])
