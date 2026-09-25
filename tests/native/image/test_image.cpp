@@ -31,10 +31,17 @@ TEST_CASE("image is plain data loaders and the object linker fill")
   CHECK(std::format("{}", popcorn::image::symbol_kind::object) == "object");
 }
 
-TEST_CASE("image loading and lookups are stubs")
+TEST_CASE("empty image has no symbols to find and no location to report")
 {
   popcorn::image::image const empty;
-  CHECK_THROWS_AS(std::ignore = empty.lookup("main"), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = empty.locate(0x0800'0100), popcorn::not_implemented);
-  CHECK_THROWS_AS(popcorn::image::load_elf("missing.elf"), popcorn::not_implemented);
+  CHECK_THROWS_AS(std::ignore = empty.lookup("main"), popcorn::symbol_error);
+  auto const where = empty.locate(0x0800'0100);
+  CHECK(where.symbol.empty());
+  CHECK(where.file.empty());
+  CHECK(where.line == 0);
+}
+
+TEST_CASE("load_elf on a missing file throws image_error")
+{
+  CHECK_THROWS_AS(popcorn::image::load_elf("missing.elf"), popcorn::image_error);
 }

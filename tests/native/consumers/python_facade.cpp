@@ -185,9 +185,9 @@ TEST_CASE("Python facade consumer drives every machine entry point")
   CHECK_THROWS_AS(popcorn::consumers::facade::hooks(target), popcorn::not_implemented);
   CHECK_THROWS_AS(popcorn::consumers::facade::views(target), popcorn::not_implemented);
   CHECK_THROWS_AS(popcorn::consumers::facade::snapshots(target), popcorn::not_implemented);
-  CHECK_THROWS_AS(popcorn::consumers::facade::boot(target), popcorn::not_implemented);
+  CHECK_THROWS_AS(popcorn::consumers::facade::boot(target), popcorn::image_error);
   CHECK_THROWS_AS(
       popcorn::consumers::facade::call_function(target, popcorn::image::image{}),
-      popcorn::not_implemented);
+      popcorn::symbol_error);
   CHECK_FALSE(target.running());
 }

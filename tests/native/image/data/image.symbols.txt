@@ -1,0 +1,33 @@
+
+Symbol table '.symtab' contains 33 entries:
+   Num:    Value  Size Type    Bind   Vis      Ndx Name
+     1: 08000000     0 SECTION LOCAL  DEFAULT    1 .isr_vector
+     2: 08000008     0 SECTION LOCAL  DEFAULT    2 .text
+     3: 20000000     0 SECTION LOCAL  DEFAULT    3 .data
+     4: 20000004     0 SECTION LOCAL  DEFAULT    4 .bss
+     5: 00000000     0 SECTION LOCAL  DEFAULT    5 .debug_info
+     6: 00000000     0 SECTION LOCAL  DEFAULT    6 .debug_abbrev
+     7: 00000000     0 SECTION LOCAL  DEFAULT    7 .debug_loclists
+     8: 00000000     0 SECTION LOCAL  DEFAULT    8 .debug_aranges
+     9: 00000000     0 SECTION LOCAL  DEFAULT    9 .debug_rnglists
+    10: 00000000     0 SECTION LOCAL  DEFAULT   10 .debug_line
+    11: 00000000     0 SECTION LOCAL  DEFAULT   11 .debug_str
+    12: 00000000     0 SECTION LOCAL  DEFAULT   12 .comment
+    13: 00000000     0 SECTION LOCAL  DEFAULT   13 .ARM.attributes
+    14: 00000000     0 SECTION LOCAL  DEFAULT   14 .debug_frame
+    16: 08000008     0 NOTYPE  LOCAL  DEFAULT    2 $t
+    17: 08000009     4 FUNC    LOCAL  DEFAULT    2 scale
+    18: 0800000c     0 NOTYPE  LOCAL  DEFAULT    2 $t
+    19: 08000030     0 NOTYPE  LOCAL  DEFAULT    2 $d
+    20: 08000000     0 NOTYPE  LOCAL  DEFAULT    1 $d
+    21: 08000000     8 OBJECT  LOCAL  DEFAULT    1 vectors
+    22: 20000000     0 NOTYPE  LOCAL  DEFAULT    3 $d
+    24: 08000038     0 NOTYPE  LOCAL  DEFAULT    2 $t
+    25: 08000039     4 FUNC    LOCAL  DEFAULT    2 scale
+    26: 0800003c     0 NOTYPE  LOCAL  DEFAULT    2 $t
+    27: 20000004     0 NOTYPE  LOCAL  DEFAULT    4 $d
+    28: 0800000d    44 FUNC    GLOBAL DEFAULT    2 Reset_Handler
+    29: 20000000     4 OBJECT  GLOBAL DEFAULT    3 global_counter
+    30: 20000004    64 OBJECT  GLOBAL DEFAULT    4 zero_buffer
+    31: 200c0000     0 NOTYPE  GLOBAL DEFAULT    1 _estack
+    32: 0800003d    10 FUNC    GLOBAL DEFAULT    2 shapes_perimeter

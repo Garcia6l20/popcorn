@@ -55,7 +55,9 @@ TEST_CASE("image loader consumer builds and resolves an image")
       "app.bin", 0x0800'0000, std::vector<std::byte>(16, std::byte{0xff}));
   CHECK(built.segments.front().memory_size == 16);
   CHECK(built.lines.size() == 2);
-  CHECK_THROWS_AS(
-      popcorn::consumers::image_loader::resolve(built, "Reset_Handler"), popcorn::not_implemented);
-  CHECK_THROWS_AS(popcorn::image::load_elf("app.elf"), popcorn::not_implemented);
+  auto const resolved = popcorn::consumers::image_loader::resolve(built, "Reset_Handler");
+  CHECK(resolved.symbol == "Reset_Handler");
+  CHECK(resolved.file == "startup.s");
+  CHECK(resolved.line == 12);
+  CHECK_THROWS_AS(popcorn::image::load_elf("app.elf"), popcorn::image_error);
 }
