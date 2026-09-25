@@ -20,6 +20,7 @@ for name, source in (
     ("snapshot", "snapshot.c"),
     ("branches", "branches.c"),
     ("spin", "spin.c"),
+    ("fnv", "fnv.c"),
 ):
     _, target = add_firmware("core", name, [here / source])
     if target is not None:

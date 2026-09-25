@@ -65,6 +65,7 @@ core_firmware = {
         "snapshot",
         "branches",
         "spin",
+        "fnv",
     )
 }
 m33_env = {

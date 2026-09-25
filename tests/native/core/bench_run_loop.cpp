@@ -73,6 +73,17 @@ auto symbol(std::string_view name) -> address
   return popcorn::testing::find_symbol(alu_image(), name);
 }
 
+auto fnv_image() -> popcorn::image::image const&
+{
+  static auto const loaded = popcorn::testing::read_elf(POPCORN_FW_FNV);
+  return loaded;
+}
+
+auto fnv_symbol(std::string_view name) -> address
+{
+  return popcorn::testing::find_symbol(fnv_image(), name);
+}
+
 auto alu_count(std::uint64_t loops) -> std::uint64_t
 {
   return 3 + 5 * loops + 1;
@@ -92,7 +103,8 @@ struct engine_closer
 };
 using engine_handle = std::unique_ptr<uc_engine, engine_closer>;
 
-auto raw_engine(bool host_buffers = false) -> engine_handle
+auto raw_engine(bool host_buffers = false, popcorn::image::image const& image = alu_image())
+    -> engine_handle
 {
   uc_engine* raw = nullptr;
   check(uc_open(UC_ARCH_ARM, static_cast<uc_mode>(UC_MODE_THUMB | UC_MODE_MCLASS), &raw), "open");
@@ -112,7 +124,7 @@ auto raw_engine(bool host_buffers = false) -> engine_handle
     check(uc_mem_map(raw, 0x0800'0000, 2048 * 1024, UC_PROT_READ | UC_PROT_EXEC), "map flash");
     check(uc_mem_map(raw, 0x2000'0000, 768 * 1024, UC_PROT_ALL), "map sram");
   }
-  for(auto const& seg : alu_image().segments)
+  for(auto const& seg : image.segments)
   {
     check(uc_mem_write(raw, seg.start, seg.bytes.data(), seg.bytes.size()), "load");
   }
@@ -183,15 +195,17 @@ auto raw_alu(raw_hook hook, bool exits, bool host_buffers = false) -> measured
   return {elapsed_ms(start), alu_count(alu_loops)};
 }
 
-auto make_machine(char const* description, std::uint32_t spin_threshold = 0)
-    -> std::unique_ptr<core::machine>
+auto make_machine(
+    char const*                  description,
+    std::uint32_t                spin_threshold = 0,
+    popcorn::image::image const& image          = alu_image()) -> std::unique_ptr<core::machine>
 {
   core::machine_options options;
   options.spin_threshold = spin_threshold;
   auto target            = std::make_unique<core::machine>(
       popcorn::load_description(description), popcorn::testing::test_arch_factory(),
       std::move(options));
-  target->load(alu_image());
+  target->load(image);
   target->reset();
   return target;
 }
@@ -267,6 +281,34 @@ auto machine_alu_spin() -> measured
   return run_budget(
       *target, {.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{1}},
       alu_count(alu_loops));
+}
+
+auto machine_fnv(core::slice_request request) -> measured
+{
+  auto const target = make_machine(POPCORN_M33_DESC, 0, fnv_image());
+  request.until     = fnv_symbol("fnv_done");
+  return run_budget(*target, std::move(request), std::uint64_t{1} << 40);
+}
+
+auto fnv_count() -> std::uint64_t
+{
+  static auto const count =
+      machine_fnv({.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{10}})
+          .executed;
+  return count;
+}
+
+auto raw_fnv() -> measured
+{
+  auto const    engine = raw_engine(false, fnv_image());
+  std::uint32_t stack  = 0;
+  check(uc_mem_read(engine.get(), 0x0800'0000, &stack, sizeof stack), "read the stack pointer");
+  check(uc_reg_write(engine.get(), UC_ARM_REG_SP, &stack), "sp");
+  auto const start = clock_type::now();
+  check(
+      uc_emu_start(engine.get(), fnv_symbol("fnv_entry") | 1, fnv_symbol("fnv_done"), 0, 0),
+      "raw fnv run");
+  return {elapsed_ms(start), fnv_count()};
 }
 
 auto machine_store(char const* description) -> measured
@@ -369,6 +411,14 @@ auto main(int argc, char** argv) -> int
               .wall_budget      = long_wall,
               .until            = symbol("store_done")});
        }                                                                                                 },
+      {"fnv-raw",               fnv_count(),              raw_fnv                                        },
+      {"fnv-machine-1e4",       fnv_count(),
+       [&] { return machine_fnv({.max_instructions = icount{10'000}, .wall_budget = long_wall}); }       },
+      {"fnv-machine-1e6",       fnv_count(),
+       [&] {
+         return machine_fnv({.max_instructions = icount{1'000'000}, .wall_budget = long_wall});
+       }                                                                                                 },
+      {"fnv-machine-wall",      fnv_count(),              [] { return machine_fnv({}); }                 },
       {"set-exits",             0,                        set_exits                                      },
       {"step-1",                steps,                    step_one                                       },
       {"store-plain",           store_count(store_loops), [] { return machine_store(POPCORN_M33_DESC); } },
@@ -378,7 +428,7 @@ auto main(int argc, char** argv) -> int
   if(auto const only = option(args, "--only"))
   {
     std::erase_if(scenarios, [&](scenario const& entry) {
-      return entry.name != "raw" and entry.name != *only;
+      return entry.name != "raw" and entry.name != "fnv-raw" and entry.name != *only;
     });
   }
   for(int rep = 0; rep < reps; ++rep)
@@ -395,10 +445,16 @@ auto main(int argc, char** argv) -> int
       entry.samples.push_back(result.ms);
     }
   }
-  auto const raw_median = percentile(scenarios.front().samples, 0.5);
+  auto const median_of = [&](std::string_view name) {
+    auto const found = std::ranges::find(scenarios, name, &scenario::name);
+    return found == scenarios.end() ? 0.0 : percentile(found->samples, 0.5);
+  };
+  auto const alu_raw = median_of("raw");
+  auto const fnv_raw = median_of("fnv-raw");
   for(auto const& entry : scenarios)
   {
-    auto const median = percentile(entry.samples, 0.5);
+    auto const median     = percentile(entry.samples, 0.5);
+    auto const raw_median = entry.name.starts_with("fnv-") ? fnv_raw : alu_raw;
     std::println(
         R"({{"scenario": "{}", "reps": {}, "median": {:.4f}, "p95": {:.4f}, "unit": "{}", "ratio_raw": {:.3f}, "executed": {}}})",
         entry.name, reps, median, percentile(entry.samples, 0.95),
