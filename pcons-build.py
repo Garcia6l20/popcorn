@@ -66,6 +66,9 @@ core.private.defines.extend(
 )
 core.link(package("unicorn"))
 core.link(package("reflex-serde"))
+if VARIANT != "asan":
+    core.private.compile_flags.append("-flto=auto")
+    core.public.link_flags.append("-flto=auto")
 
 describe_schema = project.Program(
     "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
