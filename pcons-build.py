@@ -70,6 +70,8 @@ if VARIANT != "asan":
     core.private.compile_flags.append("-flto=auto")
     core.public.link_flags.extend(["-flto=2", "-Werror=lto-type-mismatch", "-Werror=odr"])
 
+obs = add_subdirectory("native/src/obs")
+
 describe_schema = project.Program(
     "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
 )
@@ -101,11 +103,12 @@ if VARIANT != "asan":
         staged.build_tier = "default"
     project.Alias("stage-python", *staged_sources)
     stub = add_stub(ext, "popcorn", "_core", after=staged_sources)
+    obs_python = obs.add_python(staged_sources)
 
     if get_var("PCONS_BUILD_WHEEL", False):
         project.Alias(
             "wheel",
-            project.Install("popcorn", [ext, stub], name="install"),
+            project.Install("popcorn", [ext, stub, *obs_python], name="install"),
             *add_package_install("popcorn", python_package, name="install"),
         )
 
