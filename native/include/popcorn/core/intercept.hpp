@@ -234,7 +234,9 @@ enum class[[= reflex::derive{reflex::Format}]] watch_kind
 /** @brief One access that hit a watch. */
 struct watch_hit
 {
-  /** @brief Address of the instruction that made the access, or programmed the DMA transfer. */
+  /** @brief Address of the instruction that made the access, exact since an active watch holds
+   * the machine's exact pc hook, or, for a DMA access, the pc at which the model programming
+   * the transfer ran, with the precision of access_ctx::pc. */
   address pc{};
   /** @brief Accessed address. */
   address addr{};

@@ -21,13 +21,19 @@ namespace popcorn::periph
 /** @brief Where, when and by whom a guest register access happened. */
 struct access_ctx
 {
-  /** @brief Address of the instruction that caused the access, directly or through a DMA
-   * transfer it programmed. */
+  /** @brief Address the access is attributed to: the start of the translated block that made
+   * it, since Unicorn does not tell MMIO callbacks the accessing instruction. Exact, the
+   * instruction that caused the access, directly or through a DMA transfer it programmed,
+   * while a watch or a trace sink asking for exact pcs is active: the machine then installs a
+   * memory hook that syncs the pc, which every guest load and store pays for. */
   address pc;
   /** @brief Instructions executed when the access happened. */
   icount now;
   /** @brief Bus master that made the access. */
   initiator by{initiator::cpu};
+  /** @brief Whether the access came through a secure alias window, a peripheral description
+   * with `secure` set. */
+  bool secure{};
 };
 
 /**

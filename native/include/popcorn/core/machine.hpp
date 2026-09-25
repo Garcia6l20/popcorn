@@ -246,6 +246,7 @@ public:
    *        the slice continues.
    * @param kind Cause of the reset, passed to every model.
    * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy while a call begun by begin_call() is in progress.
    */
   void reset(reset_kind kind = reset_kind::power_on) pre(is_enumerator(kind));
 
