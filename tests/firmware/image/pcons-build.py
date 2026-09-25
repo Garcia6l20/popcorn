@@ -18,3 +18,8 @@ if image_dw5 is not None:
 _, image_dw5gcc = add_firmware("image", "image-dw5gcc", sources)
 if image_dw5gcc is not None:
     image_dw5gcc.private.compile_flags.extend(["-gdwarf-5", "-gno-as-loc-support"])
+
+types_sources = [here / "types.c", here / "main_types.c"]
+_, image_types = add_firmware("image", "image-types", types_sources)
+if image_types is not None:
+    image_types.private.compile_flags.extend(["-gdwarf-5", "-Wa,--gdwarf-5"])

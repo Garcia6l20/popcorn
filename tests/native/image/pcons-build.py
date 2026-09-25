@@ -12,7 +12,7 @@ core = context.current_project.get_target("popcorn_core")
 prebuilt_dir = project_dir / "tests" / "firmware" / "image" / "prebuilt"
 scratch = build_dir / "test-image-scratch"
 
-firmware_names = ("image", "image-dw4", "image-dw5", "image-dw5gcc")
+firmware_names = ("image", "image-dw4", "image-dw5", "image-dw5gcc", "image-types")
 firmware_deps = []
 for name in firmware_names:
     _, target = firmware("image", name)
