@@ -158,16 +158,15 @@ TEST_CASE("a model claims a register of toy.json and its state round-trips")
   CHECK(restored.current.last_read.value == 12);
 }
 
-TEST_CASE("registry and context stubs throw not_implemented")
+TEST_CASE("a model factory registers for an IP and an IP version glob")
 {
-  CHECK_THROWS_AS(
+  CHECK_NOTHROW(
       popcorn::periph::register_model(
           "usart", "*",
           [](popcorn::periph::model_context& ctx,
              popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
             return std::make_shared<isr_model>(ctx.regs);
-          }),
-      popcorn::not_implemented);
+          }));
 }
 
 TEST_CASE("the context forwards a stop request to the machine services")

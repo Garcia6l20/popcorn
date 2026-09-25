@@ -1,17 +1,20 @@
 #include <popcorn/periph/lines.hpp>
 
-#include <popcorn/core/errors.hpp>
-
 #include <doctest/doctest.h>
 
-TEST_CASE("line stubs throw not_implemented and read inactive")
+TEST_CASE("unbound lines keep their level")
 {
   popcorn::periph::irq_line irq;
   CHECK_FALSE(irq.level());
-  CHECK_THROWS_AS(irq.raise(), popcorn::not_implemented);
-  CHECK_THROWS_AS(irq.lower(), popcorn::not_implemented);
+  irq.raise();
+  CHECK(irq.level());
+  irq.raise();
+  CHECK(irq.level());
+  irq.lower();
+  CHECK_FALSE(irq.level());
   popcorn::periph::dma_request dma;
-  CHECK_THROWS_AS(dma.request(), popcorn::not_implemented);
-  CHECK_THROWS_AS(dma.release(), popcorn::not_implemented);
+  dma.request();
+  CHECK(dma.level());
+  dma.release();
   CHECK_FALSE(dma.level());
 }

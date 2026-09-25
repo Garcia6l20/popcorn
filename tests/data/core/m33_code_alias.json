@@ -493,6 +493,42 @@
               "on_read": "none"
             }
           ]
+        },
+        {
+          "name": "DATA",
+          "offset": 88,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "read_write",
+          "fields": [
+            {
+              "name": "VAL",
+              "lsb": 0,
+              "width": 32,
+              "acc": "read_write",
+              "on_write": "modify",
+              "on_read": "none"
+            }
+          ]
+        },
+        {
+          "name": "CTRL",
+          "offset": 92,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "read_write",
+          "fields": [
+            {
+              "name": "GO",
+              "lsb": 0,
+              "width": 1,
+              "acc": "read_write",
+              "on_write": "modify",
+              "on_read": "none"
+            }
+          ]
         }
       ],
       "cross_rules": [

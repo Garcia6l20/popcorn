@@ -161,7 +161,7 @@ void machine::run_state::install_hooks()
   }
 }
 
-void machine::run_state::reset_machine(reset_kind)
+void machine::run_state::reset_machine(reset_kind kind)
 {
   owner.scheduler_.restore({}, 0);
   auto fresh         = owner.clock_driver_.state();
@@ -175,6 +175,32 @@ void machine::run_state::reset_machine(reset_kind)
   trap.reset();
   remove_step_hook();
   owner.arch_->reset(reset_vector);
+  std::ranges::fill(lines.active, 0u);
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot)
+    {
+      for(auto& line : slot->irqs)
+      {
+        line.level_ = false;
+      }
+      for(auto& line : slot->dma)
+      {
+        line.level_ = false;
+      }
+    }
+  }
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot)
+    {
+      periph::layer_reset(slot->layout, slot->regs, slot->layer, slot->claimed);
+      if(slot->model)
+      {
+        slot->model->reset(slot->regs, kind);
+      }
+    }
+  }
   owner.trace_.rebase(icount{0});
   ++resets;
 }
@@ -457,8 +483,20 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
   std::uint32_t countdown = wall_check_blocks;
   while(auto const due = owner.scheduler_.pop_due(owner.clock_.now()))
   {
-    contract_assert(due->id.owner == arch::arch_event_owner);
-    arch->on_event(due->id.kind, due->payload);
+    if(due->id.owner == arch::arch_event_owner)
+    {
+      arch->on_event(due->id.kind, due->payload);
+    }
+    else
+    {
+      auto const& peripherals = owner.peripherals_;
+      contract_assert(
+          due->id.owner
+          < peripherals.size()
+          and peripherals[due->id.owner]
+          and peripherals[due->id.owner]->model);
+      peripherals[due->id.owner]->model->on_event(due->id.kind, due->payload);
+    }
     if(request.stop_when and request.stop_when())
     {
       return slice_end{make_stop(stop_reason::user, {}, std::nullopt)};

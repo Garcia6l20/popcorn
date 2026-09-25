@@ -14,6 +14,6 @@ smoke_support.link(core)
 test_support = project.StaticLibrary(
     "popcorn-test-support",
     project.default_environment,
-    sources=[here / "test_arch.cpp", here / "elf_image.cpp"],
+    sources=[here / "test_arch.cpp", here / "elf_image.cpp", here / "test_model.cpp"],
 )
 test_support.link(core)

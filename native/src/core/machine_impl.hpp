@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../periph/line_bus.hpp"
+#include "../periph/register_layer.hpp"
 #include "memory_map.hpp"
 
 #include <popcorn/arch/arch.hpp>
@@ -30,9 +32,75 @@ public:
   {}
 };
 
-/** @brief Per peripheral state of a machine. */
+/** @brief Routes IRQ line levels of every peripheral to the arch module, wired-OR per source:
+ * the source is active while any line on it is. */
+class machine_lines final : public periph::line_bus
+{
+public:
+  /** @brief Arch module receiving the levels, set before any line is built. */
+  arch::arch* arch{};
+  /** @brief Active lines per interrupt source. */
+  std::vector<std::uint32_t> active{};
+
+  void set_irq(std::uint32_t source, bool level) override
+  {
+    if(source >= active.size())
+    {
+      active.resize(source + 1);
+    }
+    auto& count = active[source];
+    if(level)
+    {
+      if(count++ == 0)
+      {
+        arch->set_irq_line(source, true);
+      }
+    }
+    else if(count > 0 and --count == 0)
+    {
+      arch->set_irq_line(source, false);
+    }
+  }
+
+  void set_dma(std::uint32_t, bool) override
+  {}
+};
+
+/** @brief Per peripheral state of a machine: storage, compiled semantics, lines, model. */
 struct machine::peripheral_slot
-{};
+{
+  /**
+   * @brief Creates the storage and layout of a peripheral.
+   * @param peripheral Description, which the machine keeps.
+   * @param queue Event queue of the machine.
+   * @param index Index of the peripheral in the description, the owner of its events.
+   */
+  peripheral_slot(peripheral_desc const& peripheral, scheduler& queue, std::uint32_t index)
+      : desc{peripheral}, regs{peripheral}, layout{peripheral}, events{queue, index},
+        claimed(layout.words(), 0)
+  {}
+
+  /** @brief Description of the peripheral. */
+  peripheral_desc const& desc;
+  /** @brief Storage. */
+  periph::register_file regs;
+  /** @brief Compiled semantics of the registers no model claims. */
+  periph::register_layout layout;
+  /** @brief Write-once locks. */
+  periph::layer_state layer{};
+  /** @brief IRQ lines, one per `irqs` entry, frozen before the context spans them. */
+  std::vector<periph::irq_line> irqs{};
+  /** @brief DMA request lines, none until the description names them. */
+  std::vector<periph::dma_request> dma{};
+  /** @brief The model's event port. */
+  event_port events;
+  /** @brief Context handed to the model factory. */
+  std::optional<periph::model_context> context{};
+  /** @brief Model serving the claimed registers, null when none. */
+  std::shared_ptr<periph::model> model{};
+  /** @brief Non-zero for each storage word the model claims. */
+  std::vector<std::uint8_t> claimed;
+};
 
 /** @brief Buffer bytes whose translated code must be removed at the next block boundary. */
 struct stale_range
@@ -160,6 +228,29 @@ struct machine::run_state
   std::vector<address> exits{};
   /** @brief Windows watched for guest stores, fixed after construction. */
   std::vector<guest_window> guest_windows{};
+  /** @brief Line bus of every peripheral's IRQ lines. */
+  machine_lines lines{};
+  /** @brief Peripheral names, aliases included, sorted, to the description index of the
+   * peripheral serving them. */
+  std::vector<std::pair<std::string_view, std::uint32_t>> peripheral_index{};
+
+  /**
+   * @brief Builds one slot per peripheral of the description, aliases excepted, its lines, its
+   *        context and its model, in description order. A cross rule whose source register the
+   *        model claims never runs in the register layer, which only sees unclaimed registers:
+   *        the model owns it, whatever its target.
+   * @throws config_error when an alias names no peripheral, when a model claims a register its
+   *         peripheral does not have, or when a cross rule from an unclaimed register would
+   *         write a register the model claims.
+   */
+  void attach_peripherals();
+
+  /**
+   * @brief Slot serving a peripheral name.
+   * @throws config_error when the description has no such peripheral.
+   */
+  [[nodiscard]] auto slot(std::string_view name) const -> peripheral_slot&;
+
   /** @brief Address the arch module's reset reads the vector table at. */
   address reset_vector{};
   /** @brief Context handed to arch::attach(), which the module may keep. */

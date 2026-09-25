@@ -30,7 +30,7 @@ public:
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
-    return {"ISR", "TDR"};
+    return {"ISR", "ICR"};
   }
 
   void reset(periph::register_file& regs, reset_kind) override
@@ -105,14 +105,15 @@ auto factory() -> periph::model_factory
 
 TEST_CASE("peripheral model consumer wires a model by registry and by explicit option")
 {
-  CHECK_THROWS_AS(
-      popcorn::periph::register_model("usart", "*", popcorn::consumers::models::factory()),
-      popcorn::not_implemented);
+  CHECK_NOTHROW(
+      popcorn::periph::register_model("usart", "*", popcorn::consumers::models::factory()));
 
   popcorn::core::machine_options options;
   options.models.emplace("UART1", popcorn::consumers::models::factory());
   popcorn::core::machine target{
       popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), options};
-  CHECK_THROWS_AS(std::ignore = target.peripheral("UART1"), popcorn::not_implemented);
+  CHECK(target.peripheral("UART1").description().name == "UART1");
+  CHECK(target.model("UART1") != nullptr);
   CHECK_NOTHROW(target.reset(popcorn::reset_kind::pin));
+  popcorn::periph::register_model("usart", "*", {});
 }

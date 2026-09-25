@@ -80,14 +80,4 @@ void machine::clear_coverage()
   require_stopped(*this);
   throw not_implemented("machine::clear_coverage");
 }
-
-auto machine::peripheral(std::string_view) -> periph::register_file&
-{
-  throw not_implemented("machine::peripheral");
-}
-
-auto machine::model(std::string_view) -> periph::model*
-{
-  throw not_implemented("machine::model");
-}
 }

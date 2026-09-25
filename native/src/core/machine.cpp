@@ -89,10 +89,12 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
     arch_->attach(run_->arch_context.emplace(
         engine_.get(), description_, clock_, arch_events_, static_cast<machine_services&>(*this),
         options_.faults));
+    run_->attach_peripherals();
     run_->install_hooks();
   }
   catch(...)
   {
+    peripherals_.clear();
     arch_.reset();
     engine_.reset();
     throw;
