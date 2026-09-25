@@ -41,8 +41,9 @@ struct edge_counter
 };
 
 /**
- * @brief Raw coverage counters of a machine, plain data: what a `.pcov` file holds and what
- *        merging sums, never lcov text.
+ * @brief Raw coverage counters of a machine, plain data: the input of `.pcov` files, lcov and
+ *        drcov exports, never lcov text. A `.pcov` file stores them per translated block with
+ *        64-bit sums, so files from runs with different block boundaries merge.
  */
 struct coverage_data
 {
