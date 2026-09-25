@@ -117,7 +117,7 @@ auto ring_dump(core::machine& target) -> std::vector<std::string>
 TEST_CASE("observability consumer reads the ring, streams a full trace and collects coverage")
 {
   popcorn::core::machine target{
-      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), {}};
+      popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), {}};
   std::vector<std::uint32_t> file;
   CHECK_THROWS_AS(
       popcorn::consumers::observability::full_trace(target, file), popcorn::not_implemented);

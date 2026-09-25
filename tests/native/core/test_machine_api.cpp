@@ -2,6 +2,8 @@
 
 #include <popcorn/core/errors.hpp>
 
+#include "../support/test_arch.hpp"
+
 #include <doctest/doctest.h>
 
 #include <chrono>
@@ -24,11 +26,6 @@ auto toy() -> popcorn::mcu_description
   REQUIRE(path != nullptr);
   return popcorn::load_description(path);
 }
-
-auto no_arch() -> popcorn::arch::arch_factory
-{
-  return [](popcorn::core_desc const&) -> std::unique_ptr<popcorn::arch::arch> { return nullptr; };
-}
 }
 
 static_assert(not std::is_copy_constructible_v<core::machine>);
@@ -43,7 +40,7 @@ TEST_CASE("machine stub keeps its description, clock and trace ring")
 {
   core::machine_options options;
   options.trace_capacity = 8;
-  core::machine first{toy(), no_arch(), options};
+  core::machine first{toy(), popcorn::testing::test_arch_factory(), options};
   CHECK(first.description().part == toy().part);
   CHECK(first.id() != 0);
   CHECK(first.generation() == 0);
@@ -56,19 +53,19 @@ TEST_CASE("machine stub keeps its description, clock and trace ring")
 
   options.core_hz = 160'000'000;
   options.cpi     = 2.0;
-  core::machine second{toy(), no_arch(), options};
+  core::machine second{toy(), popcorn::testing::test_arch_factory(), options};
   CHECK(second.id() != first.id());
   CHECK(second.virtual_clock().core_hz() == 160'000'000);
   CHECK(second.virtual_clock().instruction_hz() == 80'000'000);
 }
 
-TEST_CASE("machine stub throws not_implemented for every behaviour")
+TEST_CASE("machine stub throws not_implemented for every behaviour not yet implemented")
 {
-  core::machine                   target{toy(), no_arch(), {}};
+  core::machine                   target{toy(), popcorn::testing::test_arch_factory(), {}};
   popcorn::arch::call_frame const frame{.entry = 0x0800'0100, .return_sentinel = 0xffff'fffe};
 
-  CHECK_THROWS_AS(target.load({}), popcorn::not_implemented);
-  CHECK_THROWS_AS(target.reset(), popcorn::not_implemented);
+  CHECK_NOTHROW(target.load({}));
+  CHECK_NOTHROW(target.reset());
   CHECK_THROWS_AS(target.run_slice({}), popcorn::not_implemented);
   CHECK_THROWS_AS(target.begin_call(frame), popcorn::not_implemented);
   CHECK_THROWS_AS(target.call(frame, popcorn::icount{1000}), popcorn::not_implemented);
@@ -96,19 +93,18 @@ TEST_CASE("machine stub throws not_implemented for every behaviour")
   CHECK_THROWS_AS(target.clear_coverage(), popcorn::not_implemented);
 
   auto const memory = target.mem();
-  CHECK_THROWS_AS(std::ignore = memory.read(0x2000'0000, 4), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = memory.write(0x2000'0000, 2, 0xffff), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = memory.load<double>(0x2000'0001), popcorn::not_implemented);
-  CHECK_THROWS_AS(
-      std::ignore = memory.store<std::uint64_t>(0x2000'0001, 1), popcorn::not_implemented);
+  CHECK(memory.write(0x2000'0000, 2, 0xffff).has_value());
+  CHECK(memory.read(0x2000'0000, 4) == 0xffffu);
+  CHECK(memory.store<std::uint64_t>(0x2000'0001, 1).has_value());
+  CHECK(memory.load<double>(0x2000'0001).has_value());
 
-  auto const                        registers = target.regs();
-  popcorn::arch::cpu_register const r0{"r0", 66, 32};
-  CHECK_THROWS_AS(std::ignore = registers.list(), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = registers.find("r0"), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = registers.read(r0), popcorn::not_implemented);
-  CHECK_THROWS_AS(registers.write(r0, 0xffff'ffff), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = registers.pc(), popcorn::not_implemented);
+  auto const registers = target.regs();
+  CHECK_FALSE(registers.list().empty());
+  auto const r0 = registers.find("r0");
+  REQUIRE(r0.has_value());
+  registers.write(*r0, 0xffff'ffff);
+  CHECK(registers.read(*r0) == 0xffff'ffff);
+  CHECK_NOTHROW(std::ignore = registers.pc());
 }
 
 TEST_CASE("slice request defaults are one million instructions and one millisecond")
@@ -180,9 +176,10 @@ TEST_CASE("a machine without a core clock is a configuration error")
 {
   auto description                = toy();
   description.core.reset_clock_hz = 0;
-  CHECK_THROWS_AS(core::machine(description, no_arch(), {}), popcorn::config_error);
+  CHECK_THROWS_AS(
+      core::machine(description, popcorn::testing::test_arch_factory(), {}), popcorn::config_error);
   core::machine_options options;
   options.core_hz = 1'000'000;
-  core::machine const clocked{description, no_arch(), options};
+  core::machine const clocked{description, popcorn::testing::test_arch_factory(), options};
   CHECK(clocked.virtual_clock().core_hz() == 1'000'000);
 }

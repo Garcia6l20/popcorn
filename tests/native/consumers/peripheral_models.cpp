@@ -112,7 +112,7 @@ TEST_CASE("peripheral model consumer wires a model by registry and by explicit o
   popcorn::core::machine_options options;
   options.models.emplace("UART1", popcorn::consumers::models::factory());
   popcorn::core::machine target{
-      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), options};
+      popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), options};
   CHECK_THROWS_AS(std::ignore = target.peripheral("UART1"), popcorn::not_implemented);
-  CHECK_THROWS_AS(target.reset(popcorn::reset_kind::pin), popcorn::not_implemented);
+  CHECK_NOTHROW(target.reset(popcorn::reset_kind::pin));
 }

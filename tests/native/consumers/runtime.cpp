@@ -158,7 +158,7 @@ auto policies(core::machine_options const& options) -> bool
 TEST_CASE("runtime consumer links against the interfaces it implements")
 {
   core::machine target{
-      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), {}};
+      popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), {}};
   popcorn::consumers::runtime::services_calls(target);
   CHECK(target.trace().size() == 4);
   CHECK_FALSE(popcorn::consumers::runtime::policies({}));
@@ -177,7 +177,7 @@ TEST_CASE("runtime consumer links against the interfaces it implements")
 TEST_CASE("runtime consumer loads an image into the machine")
 {
   core::machine target{
-      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), {}};
+      popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), {}};
   popcorn::image::image built;
   built.segments.push_back(
       {.name        = "app.bin",
@@ -186,6 +186,5 @@ TEST_CASE("runtime consumer loads an image into the machine")
        .memory_size = 16,
        .executable  = true,
        .writable    = false});
-  CHECK_THROWS_AS(popcorn::consumers::runtime::load_image(target, built), popcorn::not_implemented);
-  CHECK(target.loaded_images().empty());
+  CHECK(popcorn::consumers::runtime::load_image(target, built) == 1);
 }

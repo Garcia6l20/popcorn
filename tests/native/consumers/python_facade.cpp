@@ -175,10 +175,10 @@ TEST_CASE("Python facade consumer drives every machine entry point")
   options.spin_threshold     = 1000;
   options.strict_peripherals = true;
   popcorn::core::machine configured{
-      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), options};
+      popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), options};
   CHECK_THROWS_AS(popcorn::consumers::facade::step(configured, 1), popcorn::not_implemented);
   popcorn::core::machine target{
-      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), {}};
+      popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), {}};
   CHECK_THROWS_AS(
       popcorn::consumers::facade::run_until(target, 0x0800'0100, popcorn::icount{1000}),
       popcorn::not_implemented);

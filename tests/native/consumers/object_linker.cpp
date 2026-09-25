@@ -75,7 +75,7 @@ TEST_CASE("object linker consumer adds its regions and stubs imports")
 {
   auto const description =
       popcorn::consumers::object_linker::with_linker_regions(popcorn::testing::toy_description());
-  popcorn::core::machine target{description, popcorn::testing::unused_arch_factory(), {}};
+  popcorn::core::machine target{description, popcorn::testing::test_arch_factory(), {}};
   CHECK(
       target.description().regions.size()
       == popcorn::testing::toy_description().regions.size()

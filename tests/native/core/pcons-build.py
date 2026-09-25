@@ -10,7 +10,9 @@ project = context.current_project
 here = Path(__file__).resolve().parent
 core = project.get_target("popcorn_core")
 smoke_support = project.get_target("popcorn-test-smoke")
+test_support = project.get_target("popcorn-test-support")
 toy = str(project_dir / "tests" / "data" / "desc" / "toy.json")
+core_data = project_dir / "tests" / "data" / "core"
 
 add_doctest("core-types", [here / "test_types.cpp"], [core])
 add_doctest("core-fwd", [here / "test_fwd.cpp"], [core])
@@ -34,7 +36,7 @@ alias_bare_name(bench_description)
 add_doctest(
     "core-machine-api",
     [here / "test_machine_api.cpp", here / "test_trace.cpp", here / "test_snapshot.cpp"],
-    [core],
+    [test_support, core],
     env={"POPCORN_TOY_DESC": toy},
 )
 add_doctest("core-unicorn-dev", [here / "test_unicorn_dev.cpp"], [smoke_support, core])
@@ -48,3 +50,16 @@ test_smoke_fw = add_doctest(
 )
 if smoke_firmware is not None:
     test_smoke_fw.depends(smoke_firmware)
+
+basic_elf, basic_firmware = firmware("core", "basic")
+m33_env = {
+    "POPCORN_M33_DESC": str(core_data / "m33.json"),
+    "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
+    "POPCORN_FW_BASIC": str(basic_elf),
+}
+add_doctest("core-memory-map", [here / "test_memory_map.cpp"], [test_support, core], env=m33_env)
+test_machine_load = add_doctest(
+    "core-machine-load", [here / "test_machine_load.cpp"], [test_support, core], env=m33_env
+)
+if basic_firmware is not None:
+    test_machine_load.depends(basic_firmware)

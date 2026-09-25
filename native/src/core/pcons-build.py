@@ -11,6 +11,11 @@ sources = [
         "services.cpp",
         "trace.cpp",
         "snapshot.cpp",
+        "engine.cpp",
+        "hooks.cpp",
+        "machine.cpp",
+        "memory_map.cpp",
+        "views.cpp",
         "machine_stub.cpp",
     )
 ]

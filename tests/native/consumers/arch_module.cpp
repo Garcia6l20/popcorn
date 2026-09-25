@@ -213,7 +213,7 @@ TEST_CASE("arch module consumer implements arch through its context")
   CHECK(module->on_unmapped(0x6000'0000, popcorn::arch::memory_op::read).fault_detail());
 
   popcorn::core::machine target{description, popcorn::consumers::arch_module::factory(), {}};
-  CHECK_THROWS_AS(target.reset(popcorn::reset_kind::software), popcorn::not_implemented);
+  CHECK_NOTHROW(target.reset(popcorn::reset_kind::software));
   CHECK_THROWS_AS(
       target.run_slice({.max_instructions = popcorn::icount{1000}}), popcorn::not_implemented);
   CHECK_THROWS_AS(
