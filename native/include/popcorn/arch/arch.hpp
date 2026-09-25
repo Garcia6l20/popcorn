@@ -68,6 +68,18 @@ enum class[[= reflex::derive{reflex::Format}]] fault_policy
   enter_handler,
 };
 
+/**
+ * @brief Stack pointer a call runs on. Arm: main selects MSP, process selects PSP through
+ *        CONTROL.SPSEL in thread mode. An architecture with one stack pointer accepts only
+ *        current.
+ */
+enum class[[= reflex::derive{reflex::Format}]] call_stack
+{
+  current,
+  main,
+  process,
+};
+
 /** @brief One call argument. */
 struct call_arg
 {
@@ -100,6 +112,9 @@ struct call_frame
   address return_sentinel{};
   /** @brief Initial stack pointer, the current one when empty. */
   std::optional<address> stack{};
+  /** @brief Stack pointer the call runs on and @p stack initialises. Restored with the rest of
+   * the interrupted context after the call. */
+  call_stack stack_select{call_stack::current};
   /** @brief Run privileged: Arm privileged thread mode, RISC-V machine mode. Unprivileged is
    * Arm unprivileged thread mode, RISC-V user mode. */
   bool privileged{true};
@@ -369,7 +384,8 @@ public:
    *        entry, and interrupt delivery masked unless `frame.interrupts`. The machine has saved
    *        registers() and save() bytes, and restores both afterwards.
    * @param frame Call to set up.
-   * @throws config_error when the core has no such floating-point convention or privilege.
+   * @throws config_error when the core has no such floating-point convention, privilege or stack
+   *         pointer.
    */
   virtual void prepare_call(call_frame const& frame) = 0;
 
