@@ -24,3 +24,23 @@ test_ranges = add_doctest(
 )
 if branches_firmware is not None:
     test_ranges.depends(branches_firmware)
+
+test_support = project.get_target("popcorn-test-support")
+core_data = project_dir / "tests" / "data" / "core"
+tb_firmware = {("obs", "tb"): firmware("obs", "tb")} | {
+    ("core", name): firmware("core", name) for name in ("branches", "alu", "fnv")
+}
+test_tb_ranges = add_doctest(
+    "obs-tb-ranges",
+    [here / "test_tb_ranges.cpp"],
+    [obs, test_support, core],
+    env={
+        "POPCORN_M33_DESC": str(core_data / "m33.json"),
+        "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
+        **{f"POPCORN_FW_{name.upper()}": str(elf) for (_, name), (elf, _) in tb_firmware.items()},
+    },
+)
+test_tb_ranges.private.include_dirs.append(obs_sources)
+for _, target in tb_firmware.values():
+    if target is not None:
+        test_tb_ranges.depends(target)
