@@ -315,6 +315,7 @@ public:
    * @return The snapshot, restorable any number of times.
    * @throws machine_running while a slice runs, handlers included.
    * @throws machine_busy during a call begun by begin_call() and not ended.
+   * @throws emulation_error when the machine was left invalid by a failed restore().
    */
   [[nodiscard]] auto snapshot() const -> core::snapshot;
 
@@ -331,13 +332,14 @@ public:
    *    the register list through `uc_reg_write_batch`. A `uc_context` never moves between
    *    engines: on Arm M-profile it carries pointers owned by the engine that saved it, Unicorn
    *    issue #2195.
-   * 3. arch: `arch::arch::load` of the arch part, which also restores `pending()`.
-   * 4. peripherals and models: register storage and line levels of every peripheral, then
-   *    `periph::model::load` of every model, native and Python alike, in description order.
-   * 5. scheduler: `scheduler::restore` with the pending events and sequence counter, so seqs and
+   * 3. scheduler: `scheduler::restore` with the pending events and sequence counter, so seqs and
    *    tie order replay identically.
-   * 6. clock: `clock_driver::restore`, domain handles stay valid, then `trace_ring::rebase` at
+   * 4. clock: `clock_driver::restore`, domain handles stay valid, then `trace_ring::rebase` at
    *    the restored instruction count.
+   * 5. arch: `arch::arch::load` of the arch part, which also restores `pending()` and may
+   *    schedule against the restored queue and clock.
+   * 6. peripherals and models: register storage and line levels of every peripheral, then
+   *    `periph::model::load` of every model, native and Python alike, in description order.
    *
    * Then intercept and return hook state, and generation() bumps.
    *
@@ -349,8 +351,15 @@ public:
    * - A snapshot taken by another machine is refused. A snapshot read back from bytes has no
    *   engine context: it restores through the register list, after its description and image
    *   digests are checked against this machine's.
-   * - A model load that throws leaves the machine invalid: run_slice() throws until a restore
-   *   succeeds.
+   * - The snapshot is checked whole before the machine changes. A failure after that, such as a
+   *   model load that throws, leaves the machine invalid: run_slice() and snapshot() throw until
+   *   a restore succeeds.
+   * - Calls in flight at the snapshot are not reported by return hooks after a restore, and an
+   *   intercept stop is not resumed past.
+   * - Stop, reset and slice-end requests pending at the restore are dropped. A snapshot does not
+   *   carry them.
+   * - restore() does not undo load(): images loaded since the snapshot stay listed in
+   *   loaded_images() and in the image digests of later snapshots, while their bytes revert.
    * - Not restored: the intercept, return hook, watch and sink tables, which are configuration,
    *   the trace ring and coverage counters, which are cumulative, and host bridges, which are
    *   outside the machine.
