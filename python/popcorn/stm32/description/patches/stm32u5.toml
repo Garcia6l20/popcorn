@@ -16,3 +16,180 @@ renames = { USB_OTG_FS = ["OTG_FS"], DCACHE1 = ["DCACHE"], ICACHE = ["ICache"], 
 [irqs]
 add = [{ number = 27, name = "IWDG", peripheral = "IWDG" }]
 
+[core]
+reset_clock_hz = 4_000_000
+source = "RM0456 rev 6, 11.4: MSIS at 4 MHz is SYSCLK out of reset"
+
+[[fields]]
+instances = ["ADC1", "ADC4"]
+registers = ["ADC_ISR"]
+fields = ["ADRDY", "EOSMP", "EOC", "EOS", "OVR", "AWD1", "AWD2", "AWD3"]
+on_write = "one_to_clear"
+source = "RM0456 rev 6, 33.6.1 (ADC1/ADC12) and 34.7.1 (ADC4) ADC interrupt and status register (ADC_ISR): ADRDY..AWD3 rc_w1 at the same bit positions in both chapters. instances, not ip = \"ADC\": the db-less ADC12 common block falls back to ip = group name \"ADC\" too and has no ADC_ISR register of its own"
+
+[[fields]]
+instances = ["ADC1"]
+registers = ["ADC_ISR"]
+fields = ["JEOC", "JEOS"]
+on_write = "one_to_clear"
+source = "RM0456 rev 6, 33.6.1 ADC interrupt and status register (ADC_ISR): injected-channel flags, ADC1 only, ADC4 has no injected group"
+
+[[fields]]
+instances = ["ADC4"]
+registers = ["ADC_ISR"]
+fields = ["EOCAL", "LDORDY"]
+on_write = "one_to_clear"
+source = "RM0456 rev 6, 34.7.1 ADC interrupt and status register (ADC_ISR): EOCAL and LDORDY are rc_w1 on ADC4, unlike ADC1/ADC12 (33.6.1) where LDORDY is plain r and EOCAL does not exist"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_RPR1"]
+fields = ["RPIF0", "RPIF1", "RPIF2", "RPIF3", "RPIF4", "RPIF5", "RPIF6", "RPIF7", "RPIF8", "RPIF9", "RPIF10", "RPIF11", "RPIF12", "RPIF13", "RPIF14", "RPIF15", "RPIF16", "RPIF17", "RPIF18", "RPIF19", "RPIF20", "RPIF21", "RPIF22", "RPIF23", "RPIF24", "RPIF25"]
+on_write = "one_to_clear"
+source = "RM0456 rev 6, 23.6.4 EXTI rising edge pending register (EXTI_RPR1), all bits rc_w1"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_FPR1"]
+fields = ["FPIF0", "FPIF1", "FPIF2", "FPIF3", "FPIF4", "FPIF5", "FPIF6", "FPIF7", "FPIF8", "FPIF9", "FPIF10", "FPIF11", "FPIF12", "FPIF13", "FPIF14", "FPIF15", "FPIF16", "FPIF17", "FPIF18", "FPIF19", "FPIF20", "FPIF21", "FPIF22", "FPIF23", "FPIF24", "FPIF25"]
+on_write = "one_to_clear"
+source = "RM0456 rev 6, 23.6.5 EXTI falling edge pending register (EXTI_FPR1), all bits rc_w1"
+
+[[fields]]
+instances = ["FLASH"]
+registers = ["FLASH_NSSR"]
+fields = ["EOP", "OPERR", "PROGERR", "WRPERR", "PGAERR", "SIZERR", "PGSERR", "OPTWERR"]
+on_write = "one_to_clear"
+source = "RM0456 rev 6, 7.9.7 FLASH nonsecure status register (FLASH_NSSR), all listed bits rc_w1"
+
+[[fields]]
+instances = ["FLASH"]
+registers = ["FLASH_SECSR"]
+fields = ["EOP", "OPERR", "PROGERR", "WRPERR", "PGAERR", "SIZERR", "PGSERR"]
+on_write = "one_to_clear"
+source = "RM0456 rev 6, 7.9.8 FLASH secure status register (FLASH_SECSR), all listed bits rc_w1; RDERR (SVD bit 14) is not documented in this RM revision and is left unpatched"
+
+[[fields]]
+ip = "I2C"
+registers = ["ISR"]
+fields = ["TXIS", "TXE"]
+on_write = "one_to_set"
+source = "RM0456 rev 6, 65.9.7 I2C interrupt and status register (I2C_ISR): TXIS/TXE are rs, software sets them to force a transmit event or flush TXDR, not a clear"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["TIM1_SR"]
+fields = ["UIF", "CC1IF", "CC2IF", "CC3IF", "CC4IF", "COMIF", "TIF", "BIF", "B2IF", "CC1OF", "CC2OF", "CC3OF", "CC4OF", "SBIF", "CC5IF", "CC6IF", "IDXF", "DIRF", "IERRF", "TERRF"]
+on_write = "zero_to_clear"
+source = "RM0456 rev 6, 54.6.5 TIMx status register (TIMx_SR)(x = 1, 8): every field rc_w0, all 20 SVD fields listed; the SVD names this register TIM1_SR on both TIM1 and TIM8. HAL clears a flag by writing TIMx->SR = ~flag, which writes 1 (no effect on rc_w0) to every other bit, so a field left as the default modify would be wrongly set"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["SR"]
+fields = ["UIF", "CC1IF", "CC2IF", "CC3IF", "CC4IF", "TIF", "CC1OF", "CC2OF", "CC3OF", "CC4OF", "IDXF", "DIRF", "IERRF", "TERRF"]
+on_write = "zero_to_clear"
+source = "RM0456 rev 6, 55.5.5 TIMx status register (TIMx_SR)(x = 2 to 5): every field rc_w0, all 14 SVD fields listed. Same HAL SR = ~flag concern as the TIM1/TIM8 rule above"
+
+[[fields]]
+instances = ["TIM15"]
+registers = ["SR"]
+fields = ["UIF", "CC1IF", "CC2IF", "COMIF", "TIF", "BIF", "CC1OF", "CC2OF"]
+on_write = "zero_to_clear"
+source = "RM0456 rev 6, 56.7.5 TIM15 status register (TIM15_SR): every field rc_w0, all 8 SVD fields listed. Same HAL SR = ~flag concern as the TIM1/TIM8 rule above"
+
+[[fields]]
+instances = ["TIM16", "TIM17"]
+registers = ["SR"]
+fields = ["UIF", "CC1IF", "COMIF", "BIF", "CC1OF"]
+on_write = "zero_to_clear"
+source = "RM0456 rev 6, 56.8.4 TIMx status register (TIMx_SR)(x = 16, 17): every field rc_w0, all 5 SVD fields listed. Same HAL SR = ~flag concern as the TIM1/TIM8 rule above"
+
+[[cross]]
+ip = "GPDMA"
+reg = "GPDMA_C{n}FCR"
+target_reg = "GPDMA_C{n}SR"
+each = { n = [0, 15] }
+effect = "clear"
+pairs = { TCF = "TCF", HTF = "HTF", DTEF = "DTEF", ULEF = "ULEF", USEF = "USEF", SUSPF = "SUSPF", TOF = "TOF" }
+source = "RM0456 rev 6, 17.8.7/17.8.8 GPDMA channel x flag clear register / status register, one shared layout for all 16 channels"
+
+[[cross]]
+ip = "I2C"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { ALERTCF = "ALERT", TIMOUTCF = "TIMEOUT", PECCF = "PECERR", OVRCF = "OVR", ARLOCF = "ARLO", BERRCF = "BERR", STOPCF = "STOPF", NACKCF = "NACKF", ADDRCF = "ADDR" }
+source = "RM0456 rev 6, 65.9.7/65.9.8 I2C interrupt and status register (I2C_ISR) / I2C interrupt clear register (I2C_ICR)"
+
+[[cross]]
+instances = ["RCC"]
+reg = "RCC_CICR"
+target_reg = "RCC_CIFR"
+effect = "clear"
+pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", MSISRDYC = "MSISRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", HSI48RDYC = "HSI48RDYF", PLL1RDYC = "PLL1RDYF", PLL2RDYC = "PLL2RDYF", PLL3RDYC = "PLL3RDYF", CSSC = "CSSF", MSIKRDYC = "MSIKRDYF", SHSIRDYC = "SHSIRDYF" }
+source = "RM0456 rev 6, 11.8.19/11.8.20 RCC clock interrupt flag register (RCC_CIFR) / RCC clock interrupt clear register (RCC_CICR)"
+
+[[cross]]
+instances = ["RTC"]
+reg = "SCR"
+target_reg = "SR"
+effect = "clear"
+pairs = { CALRAF = "ALRAF", CALRBF = "ALRBF", CWUTF = "WUTF", CTSF = "TSF", CTSOVF = "TSOVF", CITSF = "ITSF", CSSRUF = "SSRUF" }
+source = "RM0456 rev 6, 63.6.20/63.6.23 RTC status register (RTC_SR) / RTC status clear register (RTC_SCR)"
+
+[[cross]]
+ip = "SAI"
+reg = "ACLRFR"
+target_reg = "ASR"
+effect = "clear"
+pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
+source = "RM0456 rev 6, 69.6.8 SAI clear flag register (SAI_ACLRFR), sub-block A"
+
+[[cross]]
+ip = "SAI"
+reg = "BCLRFR"
+target_reg = "BSR"
+effect = "clear"
+pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
+source = "RM0456 rev 6, 69.6.16 SAI clear flag register (SAI_BCLRFR), sub-block B"
+
+[[cross]]
+ip = "SPI"
+reg = "SPI_IFCR"
+target_reg = "SPI_SR"
+effect = "clear"
+pairs = { SUSPC = "SUSP", MODFC = "MODF", TIFREC = "TIFRE", CRCEC = "CRCE", OVRC = "OVR", UDRC = "UDR", TXTFC = "TXTF", EOTC = "EOT" }
+source = "RM0456 rev 6, 68.8.7 SPI interrupt/status flags clear register (SPI_IFCR)"
+
+[[cross]]
+ip = "USART"
+reg = "ICR"
+target_reg = "ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE" }
+source = "RM0456 rev 6, 66.8.10/66.8.12 USART interrupt and status register (USART_ISR) / USART interrupt flag clear register (USART_ICR); ISR_enabled is the storage owner the SVD's ISR_disabled alternate view points at. UDRCF is omitted: RM 66.8.10 places UDR at bit 13 of the FIFO-enabled ISR view, but the STM32U575 SVD's ISR_enabled register (the FIFO-enabled view) does not declare a UDR field at all, an ST SVD omission"
+
+[[cross]]
+ip = "UART"
+reg = "ICR"
+target_reg = "ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE" }
+source = "RM0456 rev 6, 66.8.10/66.8.12, the same shared USART/UART chapter as the USART-keyed rule above; UART4/UART5 are a different db IP (UART, not USART) with a register-for-register identical ISR/ICR layout, confirmed against the real SVD. UDRCF omitted: RM 66.8.12 states this bit is reserved when the instance does not support SPI slave mode, which UART4/UART5 do not"
+
+[[cross]]
+ip = "LPUART"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { CMCF = "CMF", CTSCF = "CTSIF", TCCF = "TC", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE" }
+source = "RM0456 rev 6, 67.7.8 LPUART interrupt and status register (LPUART_ISR) / 67.7.10 LPUART interrupt flag clear register (LPUART_ICR): a reduced 8-field set versus USART_ICR (LPUART has a FIFO, but no LIN, smartcard, SPI-slave or receiver-timeout support); LPUART1's SVD register is a single ISR, no enabled/disabled alternate split"
+
+[[cross]]
+instances = ["UCPD1"]
+reg = "UCPD_ICR"
+target_reg = "UCPD_SR"
+effect = "clear"
+pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
+source = "RM0456 rev 6, 74.8.6/74.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR)"
+

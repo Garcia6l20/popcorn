@@ -1,13 +1,13 @@
 import copy
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from popcorn.stm32.description._cubemx import DbIp, read_part
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._model import CoreDesc, IrqDesc, PeripheralDesc
 from popcorn.stm32.description._patches import PatchTarget, apply_patches, load_patches
-from popcorn.stm32.description._svd import SvdDevice, expand_svd
+from popcorn.stm32.description._svd import expand_svd
+
+from .conftest import target_from_svd, target_peripheral
 
 SVD_DIR = Path(__file__).parents[3] / "tests" / "data" / "stm32" / "svd"
 DB_DIR = Path(__file__).parents[3] / "tests" / "data" / "stm32" / "db"
@@ -23,59 +23,9 @@ STM32U5_TOML = (
 )
 
 
-def _target(device: SvdDevice, db_ips: Mapping[str, DbIp] | None = None) -> PatchTarget:
-    db_ips = db_ips or {}
-    peripherals: list[PeripheralDesc] = []
-    irqs: dict[int, IrqDesc] = {}
-    for sp in device.peripherals:
-        matched = db_ips.get(sp.name)
-        ip = matched.name if matched is not None else (sp.group or sp.name)
-        ip_version = matched.version if matched is not None else ""
-        peripherals.append(
-            PeripheralDesc(
-                name=sp.name,
-                ip=ip,
-                ip_version=ip_version,
-                base=sp.base,
-                size=sp.size,
-                registers=sp.registers,
-                cross_rules=[],
-                irqs=[number for number, _ in sp.interrupts],
-            )
-        )
-        for number, name in sp.interrupts:
-            irqs.setdefault(number, IrqDesc(number=number, name=name))
-    core = CoreDesc(
-        cpu=device.cpu.name,
-        revision=device.cpu.revision,
-        fpu=device.cpu.fpu_present,
-        fpu_double=device.cpu.fpu_dp,
-        mpu=device.cpu.mpu_present,
-        mpu_regions=0,
-        mpu_regions_secure=0,
-        sau_regions=device.cpu.sau_num_regions,
-        trustzone=False,
-        dsp=device.cpu.dsp_present,
-        nvic_prio_bits=device.cpu.nvic_prio_bits,
-        num_irqs=len(irqs),
-        vendor_systick_config=device.cpu.vendor_systick_config,
-        reset_clock_hz=0,
-    )
-    return PatchTarget(
-        peripherals=list(peripherals), irqs=list(irqs.values()), core=core, db_ips=db_ips
-    )
-
-
 def _synthetic_target() -> PatchTarget:
     device = expand_svd((SVD_DIR / "synthetic.svd").read_bytes(), file="synthetic.svd")
-    return _target(device)
-
-
-def _peripheral(target: PatchTarget, name: str) -> PeripheralDesc:
-    for p in target.peripherals:
-        if p.name == name:
-            return p
-    raise KeyError(name)
+    return target_from_svd(device)
 
 
 def _write_patch(tmp_path: Path, text: str, name: str = "patch.toml") -> Path:
@@ -96,7 +46,7 @@ def test_load_patches_filters_by_match() -> None:
 
 def test_apply_good_patch_touches_every_rule_kind() -> None:
     device = expand_svd((SVD_DIR / "synthetic.svd").read_bytes(), file="synthetic.svd")
-    target = _target(device, {"IPX": DbIp(instance="IPX", name="TYPEX", version="v1")})
+    target = target_from_svd(device, {"IPX": DbIp(instance="IPX", name="TYPEX", version="v1")})
     patches = load_patches([PATCH_DIR / "good.toml"], part="TOY1", svd_name="synthetic.svd")
     report = apply_patches(patches, target)
 
@@ -108,18 +58,18 @@ def test_apply_good_patch_touches_every_rule_kind() -> None:
     assert report.irqs_added == 1
     assert report.core_fields_set == 1
 
-    a = _peripheral(target, "A")
+    a = target_peripheral(target, "A")
     assert a.ip == "TYPEX"
     sr = next(r for r in a.registers if r.name == "SR")
     f_field = next(f for f in sr.fields if f.name == "F")
     assert f_field.on_write.value == "zero_to_clear"
 
-    sec_d = _peripheral(target, "SEC_D")
-    d = _peripheral(target, "D")
+    sec_d = target_peripheral(target, "SEC_D")
+    d = target_peripheral(target, "D")
     assert sec_d.alias_of == "D"
     assert sec_d.ip == d.ip
 
-    b = _peripheral(target, "B")
+    b = target_peripheral(target, "B")
     for name in ("ARR0", "ARR1", "ARR2"):
         register = next(r for r in b.registers if r.name == name)
         v_field = next(f for f in register.fields if f.name == "V")
@@ -359,7 +309,7 @@ def test_alias_layout_mismatch_is_an_error(tmp_path: Path) -> None:
     """
     path = _write_patch(tmp_path, text)
     target = _synthetic_target()
-    sec_d = _peripheral(target, "SEC_D")
+    sec_d = target_peripheral(target, "SEC_D")
     sec_d.registers = [*list(sec_d.registers), sec_d.registers[0]]
 
     patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
@@ -447,7 +397,7 @@ def test_u575_alias_rule_sets_98_peripherals(st_svd_u575: Path, st_cubemx_db: Pa
         (st_cubemx_db / "mcu" / "STM32U575QGIx.xml").read_bytes(), file="STM32U575QGIx.xml"
     )
     db_ips = {ip.instance: ip for ip in part.ips}
-    target = _target(device, db_ips)
+    target = target_from_svd(device, db_ips)
 
     patches = load_patches([STM32U5_TOML], part="STM32U575QGIx", svd_name="STM32U575.svd")
     assert len(patches) == 1
@@ -458,9 +408,9 @@ def test_u575_alias_rule_sets_98_peripherals(st_svd_u575: Path, st_cubemx_db: Pa
     assert len(aliased) == 98
     for peripheral in aliased:
         assert peripheral.alias_of is not None
-        base_peripheral = _peripheral(target, peripheral.alias_of)
+        base_peripheral = target_peripheral(target, peripheral.alias_of)
         assert peripheral.base == base_peripheral.base + 0x10000000
 
-    usart1 = _peripheral(target, "USART1")
-    sec_usart1 = _peripheral(target, "SEC_USART1")
+    usart1 = target_peripheral(target, "USART1")
+    sec_usart1 = target_peripheral(target, "SEC_USART1")
     assert sec_usart1.ip == usart1.ip == "USART"
