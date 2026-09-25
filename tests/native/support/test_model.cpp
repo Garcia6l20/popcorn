@@ -81,7 +81,8 @@ auto test_model::on_write(
   }
   if(offset == ctrl_offset and (value & 1u) != 0)
   {
-    std::ignore = context_.events.schedule(icount{context_.clock.now().value + delay}, 0, 0);
+    std::ignore = context_.events.schedule(
+        icount{context_.clock.now().value + go_delay.value_or(delay)}, 0, 0);
     if(patch_on_go and not context_.services.write(*patch_on_go, 2, patch_value, initiator::dma))
     {
       throw std::runtime_error{"test_model: DMA patch refused"};
@@ -97,6 +98,10 @@ auto test_model::on_write(
 void test_model::on_event(std::uint32_t, std::uint64_t)
 {
   fired_at = context_.clock.now();
+  if(data_on_event)
+  {
+    context_.regs.poke(data_offset, 1);
+  }
   context_.irqs.front().raise();
 }
 

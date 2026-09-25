@@ -353,7 +353,8 @@ void machine::restore(core::snapshot const& saved)
   run.restore_hook_state(data.intercepts, data.return_hooks);
   run.frames.clear();
   run.coverage.has_previous = false;
-  run.return_watch          = 0;
+  run.spin.clear();
+  run.return_watch = 0;
   run.resume_past.reset();
   run.requested.reset();
   run.reset_requested.reset();

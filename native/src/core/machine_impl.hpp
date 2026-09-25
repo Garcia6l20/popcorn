@@ -230,6 +230,86 @@ struct coverage_state
   void count(address addr);
 };
 
+/** @brief Loop tracking of spin detection, active while machine_options::spin_threshold is set. */
+struct spin_state
+{
+  /** @brief Bytes after a loop head in which blocks and MMIO reads belong to the loop. */
+  static constexpr address loop_window = 256;
+  /** @brief MMIO reads kept per iteration: past them the iteration is not comparable. */
+  static constexpr std::size_t max_reads = 64;
+
+  /** @brief One MMIO read of an iteration. */
+  struct mmio_read
+  {
+    /** @brief Guest address read. */
+    address addr{};
+    /** @brief Value read. */
+    std::uint32_t value{};
+    /** @brief Flat register id, trace_id_overflow when no register lies there. */
+    std::uint16_t reg{};
+    /** @brief Description index of the peripheral, the owner of its model's events. */
+    std::uint32_t peripheral{};
+
+    /** @brief Member-wise equality. */
+    friend auto operator==(mmio_read const&, mmio_read const&) -> bool = default;
+  };
+
+  /** @brief Engine ids of the core registers compared, pc excluded. */
+  std::vector<int> register_ids{};
+  /** @brief Positions in register_ids of sp, r0-r3 and lr, compared first. */
+  std::vector<std::size_t> subset{};
+  /** @brief Engine ids of the subset. */
+  std::vector<int> subset_ids{};
+  /** @brief Head of the loop being tracked, 0 before the first backward branch. */
+  address head{};
+  /** @brief Start of the previous block, 0 after an engine restart. */
+  address previous{};
+  /** @brief Highest block start of the current iteration inside the loop window. */
+  address last{};
+  /** @brief Registers at the end of the previous iteration, valid while known. */
+  std::vector<std::uint64_t> registers{};
+  /** @brief Whether registers holds the previous iteration's values. */
+  bool known = false;
+  /** @brief Full register read of this iteration. */
+  std::vector<std::uint64_t> scratch{};
+  /** @brief Pointers into scratch for the batch read, built once. */
+  std::vector<void*> pointers{};
+  /** @brief Subset read of this iteration. */
+  std::vector<std::uint64_t> subset_scratch{};
+  /** @brief Pointers into subset_scratch, built once. */
+  std::vector<void*> subset_pointers{};
+  /** @brief MMIO reads of the previous iteration. */
+  std::vector<mmio_read> reads{};
+  /** @brief MMIO reads of the current iteration. */
+  std::vector<mmio_read> reading{};
+  /** @brief Whether the current iteration stayed within max_reads. */
+  bool comparable = true;
+  /** @brief Consecutive iterations without progress. */
+  std::uint32_t count = 0;
+  /** @brief Whether this run of iterations already raised its spin stop. */
+  bool reported = false;
+
+  /** @brief Restarts the count, the loop made progress or slept. */
+  void progress() noexcept
+  {
+    count    = 0;
+    reported = false;
+  }
+
+  /** @brief Forgets the tracked loop. */
+  void clear() noexcept
+  {
+    head       = {};
+    previous   = {};
+    last       = {};
+    known      = false;
+    comparable = true;
+    progress();
+    reads.clear();
+    reading.clear();
+  }
+};
+
 /** @brief Buffer bytes whose translated code must be removed at the next block boundary. */
 struct stale_range
 {
@@ -502,6 +582,10 @@ struct machine::run_state
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
+  /** @brief Whether spin detection runs, machine_options::spin_threshold above 0. */
+  bool spin_on = false;
+  /** @brief Spin detection state. */
+  spin_state spin{};
   /** @brief Whether coverage is collected, tested by the block hook. */
   bool coverage_on = false;
   /** @brief Coverage counters. */
@@ -700,6 +784,27 @@ struct machine::run_state
       std::uint32_t          value,
       bool                   write,
       initiator              by);
+
+  /**
+   * @brief Tracks loops at a block starting at @p addr: at a backward branch within 256 bytes,
+   *        compares the finished iteration with the previous one and requests a spin stop after
+   *        machine_options::spin_threshold iterations without progress.
+   */
+  void spin_block(address addr);
+
+  /** @brief Whether a pending event belongs to the model of a peripheral the loop polls. */
+  [[nodiscard]] auto model_due() const -> bool;
+
+  /** @brief Records a CPU MMIO read for the current loop iteration, only from blocks in the loop
+   * window, at most spin_state::max_reads per iteration. */
+  void spin_read(
+      peripheral_slot const& slot,
+      address                addr,
+      std::uint32_t          offset,
+      std::uint32_t          value);
+
+  /** @brief Text naming the loop, its function and the MMIO register it polls. */
+  [[nodiscard]] auto spin_detail() const -> std::string;
 
   /** @brief Records an intercepted call at @p at: pc, r0 and the called symbol's index. */
   void trace_call(address at);

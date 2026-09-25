@@ -153,6 +153,10 @@ auto machine::run_state::dispatch_read(
     if(value)
     {
       trace_mmio(slot, window.base + offset, offset, size, *value & size_mask(size), false, by);
+      if(spin_on and by == initiator::cpu)
+      {
+        spin_read(slot, window.base + offset, offset, *value & size_mask(size));
+      }
       note_watched(window.base + offset, size, *value, false, by);
     }
     return value.transform([size](std::uint32_t read) { return read & size_mask(size); });
@@ -169,6 +173,10 @@ auto machine::run_state::dispatch_read(
   }
   auto const read = periph::layer_read(*rules, slot.regs, offset, size);
   trace_mmio(slot, window.base + offset, offset, size, read, false, by);
+  if(spin_on and by == initiator::cpu)
+  {
+    spin_read(slot, window.base + offset, offset, read);
+  }
   note_watched(window.base + offset, size, read, false, by);
   return read;
 }

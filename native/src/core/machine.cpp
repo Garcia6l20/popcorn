@@ -75,6 +75,7 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
 {
   run_->reset_vector       = reset_vector_of(description_, options_);
   run_->description_digest = description_digest(description_);
+  run_->spin_on            = options_.spin_threshold != 0;
   hooks_->remover          = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
   arch_                    = factory(description_.core);
   if(not arch_)

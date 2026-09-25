@@ -179,6 +179,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   return_watch = 0;
   resume_past.reset();
   coverage.has_previous = false;
+  spin.clear();
   remove_step_hook();
   owner.arch_->reset(reset_vector);
   std::ranges::fill(lines.active, 0u);
@@ -289,6 +290,13 @@ void machine::run_state::on_block(
   {
     run.owner.clock_driver_.advance(icount{size});
   }
+  if(run.spin_on) [[unlikely]]
+  {
+    run.guarded([&run, addr] {
+      run.spin_block(static_cast<address>(addr));
+      return false;
+    });
+  }
   if(run.coverage_on) [[unlikely]]
   {
     run.guarded([&run, addr] {
@@ -334,6 +342,7 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
 {
   auto& run                 = *static_cast<run_state*>(user);
   run.coverage.has_previous = false;
+  run.spin.previous         = {};
   auto const stops          = run.guarded([&] {
     auto const result = run.owner.arch_->on_interrupt(intno);
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
@@ -754,7 +763,8 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, std::move(*end));
     }
-    auto const before = coverage_on ? arch->pc() : address{};
+    auto const before      = coverage_on ? arch->pc() : address{};
+    auto const spin_before = spin_on ? arch->pc() : address{};
     if(auto const entry = arch->deliver_pending(); not entry.resumes())
     {
       return finish(request, stop_from(entry));
@@ -763,8 +773,13 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       coverage.has_previous = false;
     }
+    if(spin_on and arch->pc() != spin_before)
+    {
+      spin.previous = {};
+    }
     if(arch->idle())
     {
+      spin.progress();
       if(auto end = idle_jump(request))
       {
         return finish(request, std::move(*end));
@@ -780,6 +795,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     if(not boundary_stop)
     {
       coverage.has_previous = false;
+      spin.previous         = {};
     }
     boundary_stop      = false;
     auto const started = owner.clock_.now();

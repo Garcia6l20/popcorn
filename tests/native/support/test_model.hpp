@@ -98,6 +98,11 @@ public:
   /** @brief Instruction count at which the delayed IRQ event last fired. */
   std::optional<icount> fired_at{};
 
+  /** @brief Instructions between a `CTRL.GO` write and its event, delay when empty. */
+  std::optional<std::uint64_t> go_delay{};
+  /** @brief Whether the `CTRL.GO` event also sets `DATA` to 1. */
+  bool data_on_event = false;
+
   /** @brief Whether load() throws a std::runtime_error. */
   bool throw_load = false;
 

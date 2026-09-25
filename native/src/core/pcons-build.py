@@ -23,6 +23,7 @@ sources = [
         "peripherals.cpp",
         "run_loop.cpp",
         "snapshots.cpp",
+        "spin.cpp",
         "symbols.cpp",
         "trace_feed.cpp",
         "views.cpp",

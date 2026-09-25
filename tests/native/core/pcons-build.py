@@ -64,6 +64,7 @@ core_firmware = {
         "intercepts",
         "snapshot",
         "branches",
+        "spin",
     )
 }
 m33_env = {
@@ -155,3 +156,8 @@ test_coverage = add_doctest(
 for _, target in core_firmware.values():
     if target is not None:
         test_coverage.depends(target)
+
+test_spin = add_doctest("core-spin", [here / "test_spin.cpp"], [test_support, core], env=m33_env)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_spin.depends(target)

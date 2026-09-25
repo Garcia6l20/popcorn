@@ -183,11 +183,14 @@ auto raw_alu(raw_hook hook, bool exits, bool host_buffers = false) -> measured
   return {elapsed_ms(start), alu_count(alu_loops)};
 }
 
-auto make_machine(char const* description) -> std::unique_ptr<core::machine>
+auto make_machine(char const* description, std::uint32_t spin_threshold = 0)
+    -> std::unique_ptr<core::machine>
 {
-  auto target = std::make_unique<core::machine>(
+  core::machine_options options;
+  options.spin_threshold = spin_threshold;
+  auto target            = std::make_unique<core::machine>(
       popcorn::load_description(description), popcorn::testing::test_arch_factory(),
-      core::machine_options{});
+      std::move(options));
   target->load(alu_image());
   target->reset();
   return target;
@@ -255,6 +258,15 @@ auto machine_alu_coverage() -> measured
     throw std::runtime_error{"coverage counted no edge"};
   }
   return result;
+}
+
+auto machine_alu_spin() -> measured
+{
+  auto const target = make_machine(POPCORN_M33_DESC, 1'000'000);
+  set(*target, "r0", alu_loops);
+  return run_budget(
+      *target, {.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{1}},
+      alu_count(alu_loops));
 }
 
 auto machine_store(char const* description) -> measured
@@ -349,6 +361,7 @@ auto main(int argc, char** argv) -> int
       {"machine-wall",          alu_count(alu_loops),     [] { return machine_alu({}); }                 },
       {"machine-block-sink",    alu_count(alu_loops),     machine_alu_block_sink                         },
       {"machine-coverage",      alu_count(alu_loops),     machine_alu_coverage                           },
+      {"spin-on",               alu_count(alu_loops),     machine_alu_spin                               },
       {"machine-1e4-until",     alu_count(alu_loops),
        [&] {
          return machine_alu(
