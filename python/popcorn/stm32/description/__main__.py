@@ -1,12 +1,14 @@
-"""CLI: python -m popcorn.stm32.description build|sources <part> [--core CORE] [--out FILE]."""
+"""CLI: python -m popcorn.stm32.description build|sources|golden <part> [options]."""
 
 import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from popcorn.stm32.description._builder import build_description_with_report
 from popcorn.stm32.description._cache import cached_description
 from popcorn.stm32.description._errors import DescriptionError
+from popcorn.stm32.description._golden import compute_golden, dump_tables, load_golden, write_golden
 from popcorn.stm32.description._sources import find_sources
 
 
@@ -40,6 +42,39 @@ def _cmd_sources(args: argparse.Namespace) -> int:
     return 0
 
 
+def _golden_path(part: str) -> Path:
+    return Path(__file__).parents[4] / "tests" / "data" / "stm32" / "golden" / f"{part}.json"
+
+
+def _cmd_golden(args: argparse.Namespace) -> int:
+    try:
+        sources = find_sources(args.part, core=args.core)
+        description, report = build_description_with_report(sources)
+    except DescriptionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    golden = compute_golden(description, report, svd_sha256=description.sources["svd"])
+    path = _golden_path(sources.part)
+
+    if args.dump is not None:
+        dump_tables(Path(args.dump), description)
+        print(args.dump)
+        return 0
+
+    if args.update:
+        write_golden(path, golden)
+        print(path)
+        return 0
+
+    committed = load_golden(path)
+    if golden["counts"] != committed["counts"] or golden["tables"] != committed["tables"]:
+        print(f"{path}: does not match the built description", file=sys.stderr)
+        return 1
+    print(path)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m popcorn.stm32.description")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -54,6 +89,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     sources_cmd.add_argument("part")
     sources_cmd.add_argument("--core")
     sources_cmd.set_defaults(func=_cmd_sources)
+
+    golden = subparsers.add_parser("golden")
+    golden.add_argument("part")
+    golden.add_argument("--core")
+    golden.add_argument("--update", action="store_true")
+    golden.add_argument("--dump")
+    golden.set_defaults(func=_cmd_golden)
 
     args = parser.parse_args(argv)
     result: int = args.func(args)

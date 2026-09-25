@@ -1,0 +1,15 @@
+[package]
+name = "popcorn-svd-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "popcorn-svd-oracle"
+path = "src/main.rs"
+
+[dependencies]
+svd-parser = { version = "0.14", features = ["expand"] }
+
+[profile.release]
+opt-level = 2

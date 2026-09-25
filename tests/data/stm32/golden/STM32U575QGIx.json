@@ -1,0 +1,22 @@
+{
+  "counts": {
+    "aliases": 98,
+    "cross_rules": 570,
+    "fields": 48119,
+    "irqs": 121,
+    "patched_fields": 217,
+    "peripherals": 198,
+    "regions": 10,
+    "registers": 4717
+  },
+  "part": "STM32U575QGIx",
+  "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
+  "tables": {
+    "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
+    "fields": "c511dbe23212a92cd8198970301a258238463efd038727c900a3ef9ee66e21fc",
+    "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",
+    "peripherals": "db636a6a10b6e9eb5e41648846e98aff5c45788f5ad831b7b20656505b4b21b8",
+    "regions": "79fc2a5c868e94c4d507e38a6b5d3f3c4f0f29f8b63d84dc5353aeaf0debd7a9",
+    "registers": "dfd9ec847821fac109395b1c94e26fd5d0df13b916d7d5b9541a5bbeaaab7221"
+  }
+}

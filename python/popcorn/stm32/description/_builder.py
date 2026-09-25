@@ -4,7 +4,7 @@ patch, build the IRQ table, then assemble core, regions and peripherals."""
 from popcorn.stm32.description._cubemx import instance_ips, read_part, read_rzone
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
 from popcorn.stm32.description._model import CoreDesc, IrqDesc, McuDescription, PeripheralDesc
-from popcorn.stm32.description._patches import PatchTarget, apply_patches, load_patches
+from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
 from popcorn.stm32.description._sources import Sources, compute_source_digests, generator_string
 from popcorn.stm32.description._svd import expand_svd
 
@@ -26,6 +26,13 @@ def resolve_ip(
 
 def build_description(sources: Sources) -> McuDescription:
     """McuDescription assembled from @p sources."""
+    description, _ = build_description_with_report(sources)
+    return description
+
+
+def build_description_with_report(sources: Sources) -> tuple[McuDescription, PatchReport]:
+    """@ref build_description's McuDescription, paired with the PatchReport of every rule
+    apply_patches applied while assembling it."""
     svd = expand_svd(sources.svd.read_bytes(), file=str(sources.svd))
     db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
     rzone = read_rzone(sources.rzone.read_bytes(), file=str(sources.rzone))
@@ -91,7 +98,7 @@ def build_description(sources: Sources) -> McuDescription:
         peripherals=peripherals, irqs=list(raw_irqs.values()), core=core, db_ips=db_ips
     )
     loaded_patches = load_patches(sources.patches, part=sources.part, svd_name=sources.svd.name)
-    apply_patches(loaded_patches, target)
+    report = apply_patches(loaded_patches, target)
 
     patch_irqs = [loaded.patch.irqs for loaded in loaded_patches if loaded.patch.irqs is not None]
     irq_table = build_irq_table(svd, cmsis, patch_irqs, rzone.processor.num_interrupts)
@@ -104,7 +111,7 @@ def build_description(sources: Sources) -> McuDescription:
 
     target.core.num_irqs = irq_table.num_irqs
 
-    return McuDescription(
+    description = McuDescription(
         part=sources.part,
         generator=generator_string(),
         sources=compute_source_digests(sources),
@@ -113,3 +120,4 @@ def build_description(sources: Sources) -> McuDescription:
         peripherals=target.peripherals,
         irqs=irq_table.irqs,
     )
+    return description, report
