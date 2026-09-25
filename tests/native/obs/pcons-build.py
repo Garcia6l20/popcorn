@@ -4,7 +4,7 @@ from pcons import context
 
 from popcorn_build.config import build_dir, project_dir
 from popcorn_build.firmware import firmware
-from popcorn_build.testing import add_doctest
+from popcorn_build.testing import add_doctest, alias_bare_name
 
 project = context.current_project
 here = Path(__file__).resolve().parent
@@ -101,3 +101,10 @@ test_pctr = add_doctest(
 for target in (periph_firmware, tb_firmware[("core", "alu")][1]):
     if target is not None:
         test_pctr.depends(target)
+
+obs_probe = project.Program(
+    "obs-probe", project.default_environment, sources=[here / "obs_probe.cpp"]
+)
+for dep in (obs, test_support, core):
+    obs_probe.link(dep)
+alias_bare_name(obs_probe)
