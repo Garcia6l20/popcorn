@@ -769,6 +769,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     }
     auto const before      = coverage_on ? arch->pc() : address{};
     auto const spin_before = spin_on ? arch->pc() : address{};
+    auto const spin_asleep = spin_on and arch->idle();
     if(auto const entry = arch->deliver_pending(); not entry.resumes())
     {
       return finish(request, stop_from(entry));
@@ -779,8 +780,13 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     }
     if(spin_on and arch->pc() != spin_before)
     {
-      spin.previous = {};
-      ++spin.depth;
+      auto const after = arch->pc();
+      auto const woke  = spin_asleep and after > spin_before and after - spin_before <= 4;
+      spin.previous    = {};
+      if(not woke)
+      {
+        ++spin.depth;
+      }
     }
     if(arch->idle())
     {

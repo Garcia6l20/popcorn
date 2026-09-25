@@ -7,6 +7,8 @@
 
 #include <doctest/doctest.h>
 
+#include <unicorn/unicorn.h>
+
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -220,4 +222,65 @@ TEST_CASE("reads made by a helper the loop calls belong to the iteration")
       CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
     }
   }
+}
+
+namespace
+{
+struct raw_pc_arch : popcorn::testing::test_arch
+{
+  using test_arch::test_arch;
+
+  auto deliver_pending() -> popcorn::arch::trap_result override
+  {
+    inside            = true;
+    auto const result = test_arch::deliver_pending();
+    inside            = false;
+    return result;
+  }
+
+  [[nodiscard]] auto pc() const -> address override
+  {
+    return inside ? test_arch::pc() : read(UC_ARM_REG_PC) & ~address{1};
+  }
+
+  bool inside = false;
+};
+}
+
+TEST_CASE("plain WFI wakes inside a polling loop keep its MMIO reads counting")
+{
+  core::machine_options options;
+  options.spin_threshold = 1000;
+  SUBCASE("a hung poll names its register")
+  {
+    popcorn::testing::machine_fixture<raw_pc_arch> f{m33(), "spin", options};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    f.set("pc", sym("spin", "wake_then_poll_hung"));
+    auto const stopped = f.run_to_stop(long_request());
+    CHECK(stopped.reason == stop_reason::spin);
+    CAPTURE(stopped.detail);
+    CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
+  }
+  SUBCASE("a model completing later restarts the count")
+  {
+    options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+    popcorn::testing::machine_fixture<raw_pc_arch> f{m33(), "spin", options};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    auto& model         = dynamic_cast<popcorn::testing::test_model&>(*f.target->model("TESTDEV"));
+    model.go_delay      = 100'000;
+    model.data_on_event = true;
+    f.set("pc", sym("spin", "wake_then_wait_model"));
+    CHECK(f.run_to_stop(long_request()).reason == stop_reason::user);
+  }
+}
+
+TEST_CASE("an inner poll that hangs inside an outer loop takes over as the loop")
+{
+  auto f = booted(1000);
+  start(f, "nested_poll");
+  auto const stopped = f.run_to_stop(long_request());
+  CHECK(stopped.reason == stop_reason::spin);
+  CAPTURE(stopped.detail);
+  CHECK(stopped.detail.contains("in nested_poll"));
+  CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
 }

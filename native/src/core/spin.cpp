@@ -41,9 +41,21 @@ void machine::run_state::spin_block(address addr)
   auto&      state       = spin;
   auto const jumped_back = backward_step(state.previous, addr);
   auto const inside      = state.head != 0 and addr != state.head and in_loop(state, addr);
-  auto const backward    = (jumped_back and not inside)
-                        or (state.head != 0 and addr == state.head and state.previous == 0);
-  state.previous         = addr;
+  if(addr == state.head)
+  {
+    state.candidate      = {};
+    state.candidate_hits = 0;
+  }
+  auto adopt = false;
+  if(jumped_back and inside)
+  {
+    state.candidate_hits = addr == state.candidate ? state.candidate_hits + 1 : 1;
+    state.candidate      = addr;
+    adopt                = state.candidate_hits >= 2;
+  }
+  auto const backward = (jumped_back and (not inside or adopt))
+                     or (state.head != 0 and addr == state.head and state.previous == 0);
+  state.previous      = addr;
   if(not backward)
   {
     if(in_loop(state, addr))

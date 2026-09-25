@@ -266,6 +266,11 @@ struct spin_state
   std::uint32_t depth = 0;
   /** @brief depth when the head was seen: reads count only at that depth, callees included. */
   std::uint32_t head_depth = 0;
+  /** @brief Back-edge target inside the loop window, adopted as head after two back edges to
+   * it that do not pass the head: an inner loop that took over. */
+  address candidate{};
+  /** @brief Consecutive back edges to candidate since the head was last reached. */
+  std::uint32_t candidate_hits = 0;
   /** @brief Start of the previous block, 0 after an engine restart. */
   address previous{};
   /** @brief Highest block start of the current iteration inside the loop window. */
@@ -303,13 +308,15 @@ struct spin_state
   /** @brief Forgets the tracked loop. */
   void clear() noexcept
   {
-    head       = {};
-    head_depth = 0;
-    depth      = 0;
-    previous   = {};
-    last       = {};
-    known      = false;
-    comparable = true;
+    head           = {};
+    candidate      = {};
+    candidate_hits = 0;
+    head_depth     = 0;
+    depth          = 0;
+    previous       = {};
+    last           = {};
+    known          = false;
+    comparable     = true;
     progress();
     reads.clear();
     reading.clear();

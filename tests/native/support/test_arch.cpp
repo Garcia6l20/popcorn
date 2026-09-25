@@ -165,6 +165,10 @@ auto test_arch::deliver_pending() -> popcorn::arch::trap_result
 {
   if(state_.idle and (state_.pending_lines != 0 or not sleeping()))
   {
+    if(state_.wfi_at == read(UC_ARM_REG_PC))
+    {
+      write(UC_ARM_REG_PC, pc() | 1);
+    }
     state_.idle = false;
     state_.wfi_at.reset();
   }

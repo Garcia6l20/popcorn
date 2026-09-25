@@ -130,6 +130,63 @@ __attribute__((naked)) void wait_near_helper(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void wake_then_poll_hung(void)
+{
+  __asm__ volatile("cpsid i\n"
+                   "ldr r1, =0xE000E010\n"
+                   "ldr r0, =300\n"
+                   "str r0, [r1, #4]\n"
+                   "movs r0, #1\n"
+                   "str r0, [r1]\n"
+                   "ldr r1, =0x40020000\n"
+                   "movs r2, #3\n"
+                   "0: ldr r0, [r1, #4]\n"
+                   "cmp r2, #0\n"
+                   "beq 1f\n"
+                   "subs r2, #1\n"
+                   "wfi\n"
+                   "1: tst r0, #1\n"
+                   "bne 0b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void wake_then_wait_model(void)
+{
+  __asm__ volatile("cpsid i\n"
+                   "ldr r1, =0xE000E010\n"
+                   "ldr r0, =300\n"
+                   "str r0, [r1, #4]\n"
+                   "movs r0, #1\n"
+                   "str r0, [r1]\n"
+                   "ldr r1, =0x40010000\n"
+                   "str r0, [r1, #0x5c]\n"
+                   "movs r2, #3\n"
+                   "0: ldr r0, [r1, #0x58]\n"
+                   "cmp r2, #0\n"
+                   "beq 1f\n"
+                   "subs r2, #1\n"
+                   "wfi\n"
+                   "1: cmp r0, #0\n"
+                   "beq 0b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void nested_poll(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "movs r3, #0\n"
+                   "0: adds r3, #1\n"
+                   "1: ldr r0, [r1, #4]\n"
+                   "cmp r3, #5\n"
+                   "blt 2f\n"
+                   "tst r0, #1\n"
+                   "bne 1b\n"
+                   "2: b 0b\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   __asm__ volatile("bkpt #0" ::: "memory");
@@ -138,7 +195,7 @@ __attribute__((naked)) void wait_near_helper(void)
   }
 }
 
-__attribute__((section(".isr_vector"), used)) static const void* const vectors[30] = {
+__attribute__((section(".isr_vector"), used)) static const void* const vectors[33] = {
     [0]  = &_estack,
     [1]  = (const void*)Reset_Handler,
     [16] = (const void*)tick_reads,
@@ -152,4 +209,7 @@ __attribute__((section(".isr_vector"), used)) static const void* const vectors[3
     [27] = (const void*)wait_helper,
     [28] = (const void*)wait_helper_hung,
     [29] = (const void*)wait_near_helper,
+    [30] = (const void*)wake_then_poll_hung,
+    [31] = (const void*)wake_then_wait_model,
+    [32] = (const void*)nested_poll,
 };
