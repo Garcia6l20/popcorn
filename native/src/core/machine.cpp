@@ -73,9 +73,10 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
       arch_events_{scheduler_, arch::arch_event_owner}, trace_{options_.trace_capacity},
       hooks_{std::make_shared<hook_registry>()}, run_{std::make_unique<run_state>(*this)}
 {
-  run_->reset_vector = reset_vector_of(description_, options_);
-  hooks_->remover    = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
-  arch_              = factory(description_.core);
+  run_->reset_vector       = reset_vector_of(description_, options_);
+  run_->description_digest = description_digest(description_);
+  hooks_->remover          = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
+  arch_                    = factory(description_.core);
   if(not arch_)
   {
     throw config_error(

@@ -98,6 +98,9 @@ public:
   /** @brief Instruction count at which the delayed IRQ event last fired. */
   std::optional<icount> fired_at{};
 
+  /** @brief Whether load() throws a std::runtime_error. */
+  bool throw_load = false;
+
   /** @brief Whether reset() raises the IRQ line, for the reset order test. */
   bool raise_in_reset = false;
   /** @brief Kind of the last reset, empty before the first. */

@@ -29,6 +29,30 @@ auto value_pointers(std::vector<std::uint64_t>& values) -> std::vector<void*>
 }
 }
 
+auto read_registers(uc_struct* engine, std::span<arch::cpu_register const> registers)
+    -> std::vector<std::uint64_t>
+{
+  auto                       ids = register_ids(registers);
+  std::vector<std::uint64_t> values(ids.size());
+  auto                       pointers = value_pointers(values);
+  check(
+      uc_reg_read_batch(engine, ids.data(), pointers.data(), static_cast<int>(ids.size())),
+      "reading the registers");
+  return values;
+}
+
+void write_registers(
+    uc_struct*                          engine,
+    std::span<arch::cpu_register const> registers,
+    std::vector<std::uint64_t>          values) pre(values.size() == registers.size())
+{
+  auto ids      = register_ids(registers);
+  auto pointers = value_pointers(values);
+  check(
+      uc_reg_write_batch(engine, ids.data(), pointers.data(), static_cast<int>(ids.size())),
+      "writing the registers");
+}
+
 void machine::begin_call(arch::call_frame const& frame)
 {
   require_stopped(*this);
@@ -36,12 +60,7 @@ void machine::begin_call(arch::call_frame const& frame)
   {
     throw machine_busy("a call is already in progress");
   }
-  auto       ids = register_ids(arch_->registers());
-  saved_call saved{.frame = frame, .registers = std::vector<std::uint64_t>(ids.size())};
-  auto       pointers = value_pointers(saved.registers);
-  check(
-      uc_reg_read_batch(engine_.get(), ids.data(), pointers.data(), static_cast<int>(ids.size())),
-      "saving the caller's registers");
+  saved_call saved{.frame = frame, .registers = read_registers(engine_.get(), arch_->registers())};
   arch_->save(saved.arch_state);
   arch_->prepare_call(frame);
   saved.frames      = run_->frames.size();
@@ -52,13 +71,9 @@ void machine::begin_call(arch::call_frame const& frame)
 auto machine::end_call() -> std::uint64_t
 {
   require_stopped(*this);
-  auto       saved    = *std::exchange(run_->call, std::nullopt);
-  auto const value    = saved.returned ? arch_->call_result(saved.frame) : std::uint64_t{0};
-  auto       ids      = register_ids(arch_->registers());
-  auto       pointers = value_pointers(saved.registers);
-  check(
-      uc_reg_write_batch(engine_.get(), ids.data(), pointers.data(), static_cast<int>(ids.size())),
-      "restoring the caller's registers");
+  auto       saved = *std::exchange(run_->call, std::nullopt);
+  auto const value = saved.returned ? arch_->call_result(saved.frame) : std::uint64_t{0};
+  write_registers(engine_.get(), arch_->registers(), std::move(saved.registers));
   arch_->load(saved.arch_state);
   if(run_->frames.size() > saved.frames)
   {

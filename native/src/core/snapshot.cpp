@@ -1,5 +1,8 @@
 #include <popcorn/core/snapshot.hpp>
 
+#include "engine.hpp"
+#include "engine_context.hpp"
+
 #include <popcorn/core/errors.hpp>
 
 #include <reflex/serde/bson.hpp>
@@ -10,8 +13,25 @@
 
 namespace popcorn::core
 {
-class engine_context
-{};
+engine_context::engine_context(uc_struct* engine)
+{
+  check(uc_context_alloc(engine, &context_), "allocating an engine context");
+  if(auto const err = uc_context_save(engine, context_); err != UC_ERR_OK)
+  {
+    uc_context_free(context_);
+    check(err, "saving the engine context");
+  }
+}
+
+engine_context::~engine_context()
+{
+  uc_context_free(context_);
+}
+
+auto engine_context::get() const noexcept -> uc_context*
+{
+  return context_;
+}
 
 snapshot::snapshot(snapshot_data data) : data_{std::move(data)}
 {}

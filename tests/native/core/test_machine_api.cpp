@@ -73,8 +73,8 @@ TEST_CASE("machine stub throws not_implemented for every behaviour not yet imple
   CHECK_THROWS_AS(target.call(frame, popcorn::icount{1000}), popcorn::machine_busy);
   CHECK(target.end_call() == 0);
   CHECK(target.call(frame, popcorn::icount{1000}).stopped.reason == popcorn::stop_reason::fault);
-  CHECK_THROWS_AS(std::ignore = target.snapshot(), popcorn::not_implemented);
-  CHECK_THROWS_AS(target.restore(core::snapshot{core::snapshot_data{}}), popcorn::not_implemented);
+  CHECK_NOTHROW(target.restore(target.snapshot()));
+  CHECK_THROWS_AS(target.restore(core::snapshot{core::snapshot_data{}}), popcorn::config_error);
   CHECK(target.add_intercept(0x0800'0100, {}).active());
   CHECK(target.add_return_hook(0x0800'0100, {}, popcorn::arch::value_kind::i32, {}).active());
   CHECK(target.add_watch(0x2000'0000, 4, core::watch_kind::write, {}).active());

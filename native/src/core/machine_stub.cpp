@@ -6,18 +6,6 @@
 
 namespace popcorn::core
 {
-auto machine::snapshot() const -> core::snapshot
-{
-  require_stopped(*this);
-  throw not_implemented("machine::snapshot");
-}
-
-void machine::restore(core::snapshot const&)
-{
-  require_stopped(*this);
-  throw not_implemented("machine::restore");
-}
-
 auto machine::add_trace_sink(trace_kinds, trace_sink, std::vector<address_range>) -> hook_handle
 {
   require_stopped(*this);

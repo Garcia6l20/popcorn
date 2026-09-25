@@ -407,6 +407,8 @@ struct machine::run_state
   bool wall_expired = false;
   /** @brief First exception a callback raised in the slice. */
   std::exception_ptr failure{};
+  /** @brief `description_digest()` of the machine's description, computed once. */
+  std::string description_digest{};
   /** @brief Code written while the engine ran, removed at the next block boundary. */
   std::vector<stale_range> stale_code{};
   /** @brief Whether `uc_emu_start` is on the stack. */
@@ -527,6 +529,20 @@ struct machine::run_state
    *        accesses never hit.
    */
   void note_watched(address addr, std::uint8_t size, std::uint32_t value, bool write, initiator by);
+
+  /**
+   * @brief Copies each saved region into its host buffer. Buffers mapped executable anywhere are
+   *        compared page by page, only changed pages are copied, and the translated code over
+   *        each run of changed pages is removed at every mapping of the buffer, W5g.
+   * @throws emulation_error when the engine refuses a removal.
+   */
+  void restore_memory(std::span<std::pair<mapped_region const*, memory_image const*> const> plan);
+
+  /** @brief Restores intercept and return hook counters, matched by address in add order.
+   * Hooks without a saved state start over. */
+  void restore_hook_state(
+      std::span<intercept_state const>   saved_intercepts,
+      std::span<return_hook_state const> saved_returns);
 
   /** @brief Guest ranges reaching [@p at, @p last] through every mapping of the same bytes. */
   [[nodiscard]] auto watch_spans(address at, std::uint64_t last) const
@@ -678,6 +694,23 @@ struct machine::run_state
  * @throws machine_running while a slice runs, handlers included.
  */
 void require_stopped(machine const& target);
+
+/**
+ * @brief Reads @p registers through one batch.
+ * @return Values in the order of @p registers.
+ * @throws emulation_error when the engine refuses the read.
+ */
+auto read_registers(uc_struct* engine, std::span<arch::cpu_register const> registers)
+    -> std::vector<std::uint64_t>;
+
+/**
+ * @brief Writes @p values to @p registers through one batch.
+ * @throws emulation_error when the engine refuses the write.
+ */
+void write_registers(
+    uc_struct*                          engine,
+    std::span<arch::cpu_register const> registers,
+    std::vector<std::uint64_t>          values) pre(values.size() == registers.size());
 
 /**
  * @brief Power-on core clock of a machine.

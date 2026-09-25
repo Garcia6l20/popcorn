@@ -53,7 +53,7 @@ if smoke_firmware is not None:
 
 core_firmware = {
     name: firmware("core", name)
-    for name in ("basic", "run", "alu", "idle", "calls", "periph", "mmio", "intercepts")
+    for name in ("basic", "run", "alu", "idle", "calls", "periph", "mmio", "intercepts", "snapshot")
 }
 m33_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
@@ -110,3 +110,23 @@ alias_bare_name(bench_mmio)
 for _, target in core_firmware.values():
     if target is not None:
         bench_mmio.depends(target)
+
+test_machine_snapshot = add_doctest(
+    "core-machine-snapshot",
+    [here / "test_machine_snapshot.cpp"],
+    [test_support, core],
+    env=m33_env,
+)
+bench_snapshot = project.Program(
+    "bench-snapshot", project.default_environment, sources=[here / "bench_snapshot.cpp"]
+)
+bench_snapshot.link(test_support)
+bench_snapshot.link(core)
+bench_snapshot.private.defines.extend(
+    f'{variable}="{value}"' for variable, value in m33_env.items()
+)
+alias_bare_name(bench_snapshot)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_machine_snapshot.depends(target)
+        bench_snapshot.depends(target)

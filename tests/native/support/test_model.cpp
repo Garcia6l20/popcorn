@@ -106,7 +106,12 @@ void test_model::save(std::vector<std::byte>& out) const
 }
 
 void test_model::load(std::span<std::byte const>)
-{}
+{
+  if(throw_load)
+  {
+    throw std::runtime_error{"test_model: load refused"};
+  }
+}
 
 auto test_model::context() const noexcept -> periph::model_context&
 {
