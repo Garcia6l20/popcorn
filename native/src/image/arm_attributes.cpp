@@ -12,10 +12,10 @@ namespace popcorn::image::detail
 {
 namespace
 {
-constexpr std::uint64_t tag_file           = 1;
-constexpr std::uint64_t tag_abi_hardfp_use = 27;
-constexpr std::uint64_t tag_compatibility  = 32;
-constexpr std::size_t   min_scope_len      = 5;
+constexpr std::uint64_t tag_file          = 1;
+constexpr std::uint64_t tag_abi_vfp_args  = 28;
+constexpr std::uint64_t tag_compatibility = 32;
+constexpr std::size_t   min_scope_len     = 5;
 
 auto read_u32(std::span<std::byte const> data, std::size_t pos) -> std::uint32_t
 {
@@ -47,7 +47,7 @@ auto read_uleb(std::span<std::byte const> data, std::size_t& pos) -> std::uint64
 
 struct file_tags
 {
-  std::optional<std::uint64_t> hardfp_use;
+  std::optional<std::uint64_t> vfp_args;
 };
 
 auto parse_file_scope(std::span<std::byte const> data, std::size_t pos, std::size_t scope_end)
@@ -70,9 +70,9 @@ auto parse_file_scope(std::span<std::byte const> data, std::size_t pos, std::siz
     else
     {
       auto const value = read_uleb(data, pos);
-      if(tag == tag_abi_hardfp_use)
+      if(tag == tag_abi_vfp_args)
       {
-        tags.hardfp_use = value;
+        tags.vfp_args = value;
       }
     }
     if(pos == pos_before)
@@ -137,9 +137,9 @@ auto hard_float_abi(std::span<std::byte const> attributes) -> arch::float_abi
       }
       auto const tags = parse_file_scope(attributes.first(scope_end), pos, scope_end);
 
-      if(tags.hardfp_use == 1)
+      if(tags.vfp_args == 0)
       {
-        return arch::float_abi::hard_single;
+        return arch::float_abi::soft;
       }
       return arch::float_abi::hard_double;
     }

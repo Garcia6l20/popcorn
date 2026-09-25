@@ -18,6 +18,7 @@ namespace
 constexpr std::uint8_t attr_tag_file           = 1;
 constexpr std::uint8_t attr_tag_fp_arch        = 10;
 constexpr std::uint8_t attr_tag_abi_hardfp_use = 27;
+constexpr std::uint8_t attr_tag_abi_vfp_args   = 28;
 
 auto append_cstr(std::vector<std::byte>& out, std::string_view text) -> void
 {
@@ -59,11 +60,28 @@ auto load_with_attrs(std::vector<std::byte> const& file_scope_content, std::stri
 }
 }
 
-TEST_CASE("Tag_ABI_HardFP_use == 1 gives hard_single")
+TEST_CASE("A single-precision FPU with VFP argument passing gives hard_double")
+{
+  std::vector<std::byte> const file_scope{
+      static_cast<std::byte>(attr_tag_abi_hardfp_use), std::byte{1},
+      static_cast<std::byte>(attr_tag_abi_vfp_args), std::byte{1}};
+  CHECK(load_with_attrs(file_scope, "abi-hardfp-1.elf") == popcorn::arch::float_abi::hard_double);
+}
+
+TEST_CASE("Tag_ABI_HardFP_use == 1 alone gives hard_double")
 {
   std::vector<std::byte> const file_scope{
       static_cast<std::byte>(attr_tag_abi_hardfp_use), std::byte{1}};
-  CHECK(load_with_attrs(file_scope, "abi-hardfp-1.elf") == popcorn::arch::float_abi::hard_single);
+  CHECK(
+      load_with_attrs(file_scope, "abi-hardfp-1-only.elf")
+      == popcorn::arch::float_abi::hard_double);
+}
+
+TEST_CASE("Tag_ABI_VFP_args == 0, the base AAPCS, gives soft")
+{
+  std::vector<std::byte> const file_scope{
+      static_cast<std::byte>(attr_tag_abi_vfp_args), std::byte{0}};
+  CHECK(load_with_attrs(file_scope, "abi-vfp-args-0.elf") == popcorn::arch::float_abi::soft);
 }
 
 TEST_CASE("Tag_ABI_HardFP_use absent with Tag_FP_arch == 4 gives hard_double")
@@ -90,9 +108,29 @@ TEST_CASE("An unknown odd tag above 32 is skipped as a string, not misparsed as 
   std::vector<std::byte> file_scope{static_cast<std::byte>(unknown_odd_tag)};
   append_cstr(file_scope, "unknown");
   file_scope.push_back(std::byte{0});
-  file_scope.push_back(static_cast<std::byte>(attr_tag_abi_hardfp_use));
-  file_scope.push_back(std::byte{1});
-  CHECK(
-      load_with_attrs(file_scope, "abi-unknown-odd-tag.elf")
-      == popcorn::arch::float_abi::hard_single);
+  file_scope.push_back(static_cast<std::byte>(attr_tag_abi_vfp_args));
+  file_scope.push_back(std::byte{0});
+  CHECK(load_with_attrs(file_scope, "abi-unknown-odd-tag.elf") == popcorn::arch::float_abi::soft);
+}
+
+TEST_CASE("Tag_ABI_VFP_args == 2, toolchain-specific, gives hard_double")
+{
+  std::vector<std::byte> const file_scope{
+      static_cast<std::byte>(attr_tag_abi_vfp_args), std::byte{2}};
+  CHECK(load_with_attrs(file_scope, "abi-vfp-args-2.elf") == popcorn::arch::float_abi::hard_double);
+}
+
+TEST_CASE("Tag_ABI_VFP_args == 3, no floating-point arguments, gives hard_double")
+{
+  std::vector<std::byte> const file_scope{
+      static_cast<std::byte>(attr_tag_abi_vfp_args), std::byte{3}};
+  CHECK(load_with_attrs(file_scope, "abi-vfp-args-3.elf") == popcorn::arch::float_abi::hard_double);
+}
+
+TEST_CASE("A file scope with only other tags gives hard_double")
+{
+  std::vector<std::byte> const file_scope{
+      static_cast<std::byte>(attr_tag_fp_arch), std::byte{8},
+      static_cast<std::byte>(attr_tag_abi_hardfp_use), std::byte{3}};
+  CHECK(load_with_attrs(file_scope, "abi-other-tags.elf") == popcorn::arch::float_abi::hard_double);
 }

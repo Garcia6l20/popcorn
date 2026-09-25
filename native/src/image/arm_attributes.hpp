@@ -11,11 +11,13 @@ namespace popcorn::image::detail
  * @brief Reads the floating-point calling convention from a `.ARM.attributes` section.
  * @param attributes Section bytes: format-version byte `'A'` (0x41), then subsections, each
  *        holding vendor-scoped `Tag_File`/`Tag_Section`/`Tag_Symbol` scopes.
- * @return `hard_single` when the first `Tag_File` scope of the `aeabi` vendor subsection sets
- *         `Tag_ABI_HardFP_use` to 1, `hard_double` otherwise (absent, 0 "implied by
- *         Tag_FP_arch", or any other value): `Tag_FP_arch`'s numeric encoding does not
- *         distinguish single- from double-precision FPU variants, so it cannot stand in for
- *         `Tag_ABI_HardFP_use`. `hard_double` when the section is absent or says nothing.
+ * @return `soft` when the first `Tag_File` scope of the `aeabi` vendor subsection sets
+ *         `Tag_ABI_VFP_args` to 0, the base AAPCS. `hard_double` otherwise, the section absent
+ *         or silent included: AAPCS-VFP passes doubles in d registers whatever the FPU
+ *         precision, so an FPU with single precision only, such as fpv5-sp-d16, still calls
+ *         with the double convention. `Tag_ABI_VFP_args` 2, toolchain-specific, gives
+ *         `hard_double` as a best guess, and 3, no floating-point arguments, gives `hard_double`
+ *         harmlessly.
  */
 auto hard_float_abi(std::span<std::byte const> attributes) -> arch::float_abi;
 }

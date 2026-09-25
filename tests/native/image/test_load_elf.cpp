@@ -102,7 +102,7 @@ TEST_CASE("load_elf reads the committed image firmware")
 
   REQUIRE(built.entry.has_value());
   CHECK((*built.entry & 1) != 0);
-  CHECK(built.abi == popcorn::arch::float_abi::hard_single);
+  CHECK(built.abi == popcorn::arch::float_abi::hard_double);
   CHECK(built.digest.size() == 64);
 }
 
