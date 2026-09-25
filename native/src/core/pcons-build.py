@@ -22,6 +22,8 @@ sources = [
         "peripherals.cpp",
         "run_loop.cpp",
         "snapshots.cpp",
+        "symbols.cpp",
+        "trace_feed.cpp",
         "views.cpp",
         "machine_stub.cpp",
     )

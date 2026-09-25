@@ -152,6 +152,7 @@ auto machine::run_state::dispatch_read(
     after_model(hz);
     if(value)
     {
+      trace_mmio(slot, window.base + offset, offset, size, *value & size_mask(size), false, by);
       note_watched(window.base + offset, size, *value, false, by);
     }
     return value.transform([size](std::uint32_t read) { return read & size_mask(size); });
@@ -167,6 +168,7 @@ auto machine::run_state::dispatch_read(
     note_unmodelled(window, offset, false, by);
   }
   auto const read = periph::layer_read(*rules, slot.regs, offset, size);
+  trace_mmio(slot, window.base + offset, offset, size, read, false, by);
   note_watched(window.base + offset, size, read, false, by);
   return read;
 }
@@ -199,6 +201,7 @@ auto machine::run_state::dispatch_write(
     after_model(hz);
     if(done)
     {
+      trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
       note_watched(window.base + offset, size, value, true, by);
     }
     return done;
@@ -214,6 +217,7 @@ auto machine::run_state::dispatch_write(
     note_unmodelled(window, offset, true, by);
   }
   periph::layer_write(slot.layout, *rules, slot.regs, slot.layer, offset, size, value);
+  trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
   note_watched(window.base + offset, size, value, true, by);
   return {};
 }

@@ -4,11 +4,56 @@
 
 #include <algorithm>
 #include <format>
+#include <map>
 #include <ranges>
 #include <string>
 
 namespace popcorn::core
 {
+namespace
+{
+void fill_trace_ids(auto& slot, mcu_description const& description, std::uint32_t peripheral)
+{
+  auto const&                  unit = description.peripherals[peripheral];
+  std::map<std::uint32_t, int> per_word;
+  for(auto const& desc : unit.registers)
+  {
+    if(not desc.alternate_of)
+    {
+      ++per_word[desc.offset / 4];
+    }
+  }
+  slot.trace_ids.assign(slot.layout.rule_count(), trace_id_overflow);
+  for(auto const& [index, desc] : std::views::enumerate(unit.registers))
+  {
+    if(desc.alternate_of)
+    {
+      continue;
+    }
+    auto const id   = trace_id(flat_register_id(
+        description, {.peripheral = peripheral, .reg = static_cast<std::uint32_t>(index)}));
+    auto const word = desc.offset / 4;
+    if(word >= slot.layout.words())
+    {
+      continue;
+    }
+    if(per_word[word] == 1)
+    {
+      if(auto const rule = slot.layout.rule_index(word); rule != 0)
+      {
+        slot.trace_ids[rule - 1] = id;
+      }
+      continue;
+    }
+    for(std::uint32_t byte = 0; byte < (desc.width + 7u) / 8u; ++byte)
+    {
+      slot.byte_trace_ids.emplace_back(desc.offset + byte, id);
+    }
+  }
+  std::ranges::sort(slot.byte_trace_ids);
+}
+}
+
 void machine::run_state::attach_peripherals()
 {
   lines.arch        = owner.arch_.get();
@@ -22,6 +67,7 @@ void machine::run_state::attach_peripherals()
       continue;
     }
     auto slot = std::make_unique<peripheral_slot>(unit, owner.scheduler_, at);
+    fill_trace_ids(*slot, owner.description_, at);
     slot->irqs.reserve(unit.irqs.size());
     for(auto const source : unit.irqs)
     {

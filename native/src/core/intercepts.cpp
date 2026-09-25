@@ -126,6 +126,11 @@ void machine::run_state::remove_hook(std::uint64_t id) noexcept
       }
     }
   };
+  if(sinks.contains(id))
+  {
+    remove_sink(id);
+    return;
+  }
   if(auto const found = intercepts.find(id); found != intercepts.end())
   {
     drop_from_site(found->second->at, found->second.get());
@@ -179,6 +184,25 @@ auto machine::run_state::stack_pointer() const -> std::uint64_t
   std::uint64_t value = 0;
   check(uc_reg_read(engine, sp->engine_id, &value), "reading sp");
   return sp->bits > 32 ? value : value & 0xffff'ffff;
+}
+
+void machine::run_state::trace_call(address at)
+{
+  auto const registers = arch->registers();
+  auto const r0 = std::ranges::find(registers, std::string_view{"r0"}, &arch::cpu_register::name);
+  std::uint64_t value = 0;
+  if(r0 != registers.end())
+  {
+    check(uc_reg_read(engine, r0->engine_id, &value), "reading r0");
+  }
+  auto const symbol = symbol_at(at);
+  emit(
+      {
+          .kind    = trace_kind::call,
+          .aux     = symbol ? trace_id(symbol->first) : trace_id_overflow,
+          .payload = {at, static_cast<std::uint32_t>(value), 0}
+  },
+      at, true);
 }
 
 void machine::run_state::refresh_return_watch() noexcept
@@ -259,6 +283,7 @@ void machine::run_state::on_code_site(
       {
         continue;
       }
+      run.trace_call(entry.at);
       intercept_result result = intercept_result::proceed();
       {
         handler_scope const  scope{run.in_handler};

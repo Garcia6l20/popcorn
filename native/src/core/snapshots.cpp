@@ -297,6 +297,7 @@ void machine::restore(core::snapshot const& saved)
   scheduler_.restore(data.events.pending, data.events.next_seq);
   clock_driver_.restore(data.clock);
   trace_.rebase(clock_.now());
+  run.rebase_sinks(clock_.now());
   arch_->load(data.arch.data);
   std::ranges::fill(run.lines.active, 0u);
   auto next = plan.peripherals.begin();

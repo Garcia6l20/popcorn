@@ -180,6 +180,7 @@ void machine::load(popcorn::image::image const& loaded)
     region->host_wrote(*run_, seg.start, seg.memory_size);
   }
   images_.push_back(loaded);
+  run_->build_symbol_index();
 }
 
 auto machine::loaded_images() const noexcept -> std::span<popcorn::image::image const>
@@ -214,6 +215,6 @@ auto machine::trace() noexcept -> trace_ring&
 
 void machine::do_trace(trace_record const& record)
 {
-  trace_.append(record, clock_.now());
+  run_->emit(record, arch_->pc(), true);
 }
 }

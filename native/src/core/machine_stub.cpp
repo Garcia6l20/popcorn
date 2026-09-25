@@ -6,12 +6,6 @@
 
 namespace popcorn::core
 {
-auto machine::add_trace_sink(trace_kinds, trace_sink, std::vector<address_range>) -> hook_handle
-{
-  require_stopped(*this);
-  throw not_implemented("machine::add_trace_sink");
-}
-
 void machine::enable_coverage(std::vector<address_range>)
 {
   require_stopped(*this);

@@ -224,6 +224,24 @@ auto machine_alu(core::slice_request request) -> measured
   return run_budget(*target, std::move(request), alu_count(alu_loops));
 }
 
+auto machine_alu_block_sink() -> measured
+{
+  auto const    target = make_machine(POPCORN_M33_DESC);
+  std::uint64_t blocks = 0;
+  auto const    sink   = target->add_trace_sink(
+      {core::trace_kind::block},
+      [&blocks](std::span<core::trace_record const> records) { blocks += records.size(); });
+  set(*target, "r0", alu_loops);
+  auto const result = run_budget(
+      *target, {.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{1}},
+      alu_count(alu_loops));
+  if(blocks == 0)
+  {
+    throw std::runtime_error{"the block sink received nothing"};
+  }
+  return result;
+}
+
 auto machine_store(char const* description) -> measured
 {
   auto const target = make_machine(description);
@@ -314,6 +332,7 @@ auto main(int argc, char** argv) -> int
          return machine_alu({.max_instructions = icount{1'000'000}, .wall_budget = long_wall});
        }                                                                                                 },
       {"machine-wall",          alu_count(alu_loops),     [] { return machine_alu({}); }                 },
+      {"machine-block-sink",    alu_count(alu_loops),     machine_alu_block_sink                         },
       {"machine-1e4-until",     alu_count(alu_loops),
        [&] {
          return machine_alu(

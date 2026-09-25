@@ -98,9 +98,4 @@ auto exact_pc_hook::installed() const noexcept -> bool
 {
   return not hooks_.empty();
 }
-
-auto exact_pc_hook::users() const noexcept -> std::uint32_t
-{
-  return users_;
-}
 }

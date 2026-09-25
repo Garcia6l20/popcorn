@@ -320,6 +320,11 @@ auto register_layout::find(std::uint32_t word) const noexcept -> word_rules cons
   return index == 0 ? nullptr : &rules_[index - 1];
 }
 
+auto register_layout::rule_count() const noexcept -> std::size_t
+{
+  return rules_.size();
+}
+
 auto register_layout::has_register(std::uint32_t word) const noexcept -> bool
 {
   return rule_of_word_[word] != 0;

@@ -69,7 +69,10 @@ public:
   [[nodiscard]] auto installed() const noexcept -> bool;
 
   /** @brief References held. */
-  [[nodiscard]] auto users() const noexcept -> std::uint32_t;
+  [[nodiscard]] auto users() const noexcept -> std::uint32_t
+  {
+    return users_;
+  }
 
 private:
   void release_all() noexcept;

@@ -119,8 +119,7 @@ TEST_CASE("observability consumer reads the ring, streams a full trace and colle
   popcorn::core::machine target{
       popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), {}};
   std::vector<std::uint32_t> file;
-  CHECK_THROWS_AS(
-      popcorn::consumers::observability::full_trace(target, file), popcorn::not_implemented);
+  CHECK(popcorn::consumers::observability::full_trace(target, file).active());
   CHECK(popcorn::consumers::observability::ring_dump(target).empty());
   CHECK_FALSE(target.coverage_enabled());
   CHECK_THROWS_AS(

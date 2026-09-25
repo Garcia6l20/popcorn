@@ -130,3 +130,10 @@ for _, target in core_firmware.values():
     if target is not None:
         test_machine_snapshot.depends(target)
         bench_snapshot.depends(target)
+
+test_trace_feed = add_doctest(
+    "core-trace-feed", [here / "test_trace_feed.cpp"], [test_support, core], env=m33_env
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_trace_feed.depends(target)

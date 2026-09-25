@@ -106,6 +106,16 @@ public:
   [[nodiscard]] auto find(std::uint32_t word) const noexcept
       -> word_rules const* pre(word < words());
 
+  /** @brief Rule index of a word, 1-based, 0 for a word without a register. */
+  [[nodiscard]] auto rule_index(std::uint32_t word) const noexcept -> std::uint16_t
+      pre(word < words())
+  {
+    return rule_of_word_[word];
+  }
+
+  /** @brief Number of distinct rule sets, the largest rule_index(). */
+  [[nodiscard]] auto rule_count() const noexcept -> std::size_t;
+
   /** @brief Whether a register maps to a word. */
   [[nodiscard]] auto has_register(std::uint32_t word) const noexcept -> bool pre(word < words());
 

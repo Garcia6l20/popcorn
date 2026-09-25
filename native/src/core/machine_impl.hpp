@@ -7,6 +7,7 @@
 
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/trace.hpp>
 
 #include <unicorn/unicorn.h>
 
@@ -33,6 +34,8 @@ class hook_registry
 public:
   /** @brief Whether a slice runs, so a handle refuses removal. */
   bool running = false;
+  /** @brief Trace deliveries on the stack, during which removals wait like during a slice. */
+  std::uint32_t delivering = 0;
   /** @brief Last id handed out. */
   std::uint64_t last_id = 0;
   /** @brief Log sinks by id, in registration order. */
@@ -49,7 +52,7 @@ public:
     {
       return;
     }
-    if(running)
+    if(running or delivering != 0)
     {
       pending_removal.push_back(id);
       return;
@@ -156,6 +159,27 @@ struct machine::peripheral_slot
   std::vector<std::uint8_t> logged = std::vector<std::uint8_t>(claimed.size(), 0);
   /** @brief Offsets without a register whose access was logged. */
   std::set<std::uint32_t> warned{};
+  /** @brief aux of an mmio record per rule index of the layout, less one. */
+  std::vector<std::uint16_t> trace_ids{};
+  /** @brief aux per byte offset of the words holding several registers, sorted by offset. */
+  std::vector<std::pair<std::uint32_t, std::uint16_t>> byte_trace_ids{};
+
+  /** @brief aux of an mmio record at byte @p offset, trace_id_overflow where no register lies. */
+  [[nodiscard]] auto trace_id_at(std::uint32_t offset) const noexcept -> std::uint16_t
+      pre(offset / 4 < layout.words())
+  {
+    if(not byte_trace_ids.empty()) [[unlikely]]
+    {
+      auto const found = std::ranges::lower_bound(
+          byte_trace_ids, offset, {}, &std::pair<std::uint32_t, std::uint16_t>::first);
+      if(found != byte_trace_ids.end() and found->first == offset)
+      {
+        return found->second;
+      }
+    }
+    auto const rule = layout.rule_index(offset / 4);
+    return rule == 0 ? trace_id_overflow : trace_ids[rule - 1];
+  }
 };
 
 /** @brief Buffer bytes whose translated code must be removed at the next block boundary. */
@@ -325,6 +349,48 @@ struct machine::run_state
     std::vector<std::variant<intercept_entry*, return_entry*>> entries{};
   };
 
+  /** @brief dt stamping of one sink's record stream, as trace_ring::append() stamps the ring. */
+  struct dt_stream
+  {
+    /** @brief Instruction count the next dt counts from. */
+    icount last{};
+    /** @brief Whether the time base moved, so the next record follows a time record. */
+    bool rebased = false;
+
+    /** @brief Appends @p record to @p out with its dt, after a time record when needed. */
+    void stamp(trace_record record, icount now, std::vector<trace_record>& out);
+  };
+
+  /** @brief A sink added with machine::add_trace_sink(). */
+  struct sink_entry
+  {
+    /** @brief Kinds delivered. */
+    trace_kinds kinds{};
+    /** @brief Receiver of the batches. */
+    trace_sink sink{};
+    /** @brief Code ranges whose records are delivered, empty for everywhere. */
+    std::vector<address_range> ranges{};
+    /** @brief Records not delivered yet. */
+    std::vector<trace_record> batch{};
+    /** @brief dt stamping of the sink's stream. */
+    dt_stream stream{};
+  };
+
+  /** @brief Address lookup entry of the machine's symbol table. */
+  struct symbol_entry
+  {
+    /** @brief First address. */
+    address value{};
+    /** @brief Address past the last byte covered: value plus size, or for a size-0 symbol the
+     * next entry's address, bounded by the end of the memory region holding it. */
+    std::uint64_t end{};
+    /** @brief Index in the symbol table. */
+    std::uint32_t index{};
+  };
+
+  /** @brief Records a sink collects before its batch is delivered. */
+  static constexpr std::size_t sink_batch = 4096;
+
   /** @brief A call a return hook saw enter, waiting for its return. */
   struct return_frame
   {
@@ -380,6 +446,23 @@ struct machine::run_state
   std::map<std::uint64_t, std::unique_ptr<return_entry>> return_hooks{};
   /** @brief Watches by handle id. */
   std::map<std::uint64_t, std::unique_ptr<watch_entry>> watches{};
+  /** @brief Trace sinks by handle id. */
+  std::map<std::uint64_t, std::unique_ptr<sink_entry>> sinks{};
+  /** @brief Address of the block the engine runs, the pc MMIO callbacks see without the exact
+   * pc hook, read by mmio records instead of the engine register. */
+  address block_pc{};
+  /** @brief Whether some sink selects block records, tested by the block hook. */
+  bool sinks_want_block = false;
+  /** @brief Whether the mem record hooks and their exact pc reference are held. */
+  bool sink_mem_active = false;
+  /** @brief Memory hooks feeding mem records while some sink selects them. */
+  std::vector<uc_hook> sink_mem_hooks{};
+  /** @brief Symbols of the loaded images, concatenated in load order. */
+  std::vector<popcorn::image::symbol const*> symbols{};
+  /** @brief Function and object symbols by address. */
+  std::vector<symbol_entry> symbol_index{};
+  /** @brief Largest end of symbol_index up to each position, which bounds the scan back. */
+  std::vector<std::uint64_t> symbol_max_end{};
   /** @brief Code hook sites by address. */
   std::map<address, std::unique_ptr<code_site>> sites{};
   /** @brief Calls in flight, innermost last. */
@@ -544,6 +627,61 @@ struct machine::run_state
       std::span<intercept_state const>   saved_intercepts,
       std::span<return_hook_state const> saved_returns);
 
+  /**
+   * @brief Hands a record the machine produced to the ring, when @p ring, and to every sink
+   *        selecting its kind whose ranges hold @p pc, stamped at the current count.
+   */
+  void emit(trace_record const& record, address pc, bool ring);
+
+  /**
+   * @brief Records an MMIO access: to the ring for a CPU access, to the sinks for any, with
+   *        pc 0 for DMA and debugger accesses.
+   */
+  void trace_mmio(
+      peripheral_slot const& slot,
+      address                addr,
+      std::uint32_t          offset,
+      std::uint8_t           size,
+      std::uint32_t          value,
+      bool                   write,
+      initiator              by);
+
+  /** @brief Records an intercepted call at @p at: pc, r0 and the called symbol's index. */
+  void trace_call(address at);
+
+  /** @brief Delivers a sink's batch. */
+  void flush(sink_entry& entry);
+
+  /** @brief Delivers every sink's batch. */
+  void flush_sinks();
+
+  /** @brief Moves every sink's time base to @p now, each gets a time record first. */
+  void rebase_sinks(icount now) noexcept;
+
+  /** @brief Installs or removes the hooks that feed the selected kinds, between slices. */
+  void update_sink_hooks();
+
+  /** @brief Removes a sink, delivering its batch first, its failure dropped. */
+  void remove_sink(std::uint64_t id) noexcept;
+
+  /** @brief Rebuilds the symbol table and its address index from the loaded images. */
+  void build_symbol_index();
+
+  /** @brief Symbol index and offset of the symbol holding @p pc, empty when none does. */
+  [[nodiscard]] auto symbol_at(address pc) const noexcept
+      -> std::optional<std::pair<std::uint32_t, std::uint32_t>>;
+
+  /** @brief Location of @p pc: symbol and offset, file and line empty until images locate. */
+  [[nodiscard]] auto locate(address pc) const -> location;
+
+  static void on_sink_access(
+      uc_struct*    engine,
+      uc_mem_type   type,
+      std::uint64_t addr,
+      int           size,
+      std::int64_t  value,
+      void*         user) noexcept;
+
   /** @brief Guest ranges reaching [@p at, @p last] through every mapping of the same bytes. */
   [[nodiscard]] auto watch_spans(address at, std::uint64_t last) const
       -> std::vector<std::pair<std::uint64_t, std::uint64_t>>;
@@ -686,7 +824,7 @@ struct machine::run_state
       make_stop(stop_reason reason, std::string detail, std::optional<fault_info> fault) const
       -> stop;
   [[nodiscard]] auto stop_from(arch::trap_result const& result) const -> slice_end;
-  [[nodiscard]] auto finish(slice_request const& request, slice_end end) const -> slice_result;
+  [[nodiscard]] auto finish(slice_request const& request, slice_end end) -> slice_result;
 };
 
 /**

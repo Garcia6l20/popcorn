@@ -207,6 +207,7 @@ void machine::run_state::reset_machine(reset_kind kind)
     }
   }
   owner.trace_.rebase(icount{0});
+  rebase_sinks(icount{0});
   ++resets;
 }
 
@@ -263,6 +264,7 @@ void machine::run_state::on_block(
 {
   auto&      run = *static_cast<run_state*>(user);
   auto const now = run.owner.clock_.now();
+  run.block_pc   = static_cast<address>(addr);
   if(run.stop_flag
      or now
      >= run.deadline
@@ -284,6 +286,18 @@ void machine::run_state::on_block(
   if(not run.stepping)
   {
     run.owner.clock_driver_.advance(icount{size});
+  }
+  if(run.sinks_want_block) [[unlikely]]
+  {
+    run.guarded([&run, addr, size] {
+      auto const   pc = static_cast<address>(addr);
+      trace_record record{
+          .kind = trace_kind::block, .payload = {pc, 0, 0}
+      };
+      record.aux = static_cast<std::uint16_t>(std::min<std::uint32_t>(size, 0xffff));
+      run.emit(record, pc, false);
+      return false;
+    });
   }
 }
 
@@ -668,12 +682,25 @@ auto machine::run_state::stop_from(arch::trap_result const& result) const -> sli
   return slice_end{make_stop(*result.reason(), {}, result.fault_detail())};
 }
 
-auto machine::run_state::finish(slice_request const& request, slice_end end) const -> slice_result
+auto machine::run_state::finish(slice_request const& request, slice_end end) -> slice_result
 {
   if(not end.stopped and request.stop_when and request.stop_when())
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
   }
+  if(end.stopped)
+  {
+    auto& where = end.stopped->where;
+    where       = locate(where.pc);
+    emit(
+        {
+            .kind    = trace_kind::stop,
+            .aux     = static_cast<std::uint16_t>(std::to_underlying(end.stopped->reason)),
+            .payload = {where.pc, 0, 0}
+    },
+        where.pc, true);
+  }
+  flush_sinks();
   return slice_result{.stopped = std::move(end.stopped), .executed = executed};
 }
 
