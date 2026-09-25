@@ -1,4 +1,4 @@
-"""MCU description: schema-generated types and the JSON binder."""
+"""MCU description: schema-generated types, the JSON binder, source lookup and build cache."""
 
 from popcorn.stm32.description._binder import (
     check_bounds,
@@ -7,6 +7,8 @@ from popcorn.stm32.description._binder import (
     load_json,
     to_mapping,
 )
+from popcorn.stm32.description._builder import build_description
+from popcorn.stm32.description._cache import cached_description
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
@@ -24,6 +26,7 @@ from popcorn.stm32.description._model import (
     RegisterDesc,
     WriteEffect,
 )
+from popcorn.stm32.description._sources import Sources, find_sources, resolve_part
 
 __all__ = [
     "Access",
@@ -40,10 +43,15 @@ __all__ = [
     "RegionDesc",
     "RegionKind",
     "RegisterDesc",
+    "Sources",
     "WriteEffect",
+    "build_description",
+    "cached_description",
     "check_bounds",
     "dump_json",
+    "find_sources",
     "from_mapping",
     "load_json",
+    "resolve_part",
     "to_mapping",
 ]

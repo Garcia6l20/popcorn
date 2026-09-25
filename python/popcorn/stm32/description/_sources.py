@@ -1,0 +1,276 @@
+"""Source lookup: SVD, CubeMX db, rzone, CMSIS header and patch files for a part."""
+
+import difflib
+import hashlib
+import importlib.metadata
+import os
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from popcorn.stm32.description._cubemx import read_part, rzone_file_name
+from popcorn.stm32.description._errors import DescriptionError
+from popcorn.stm32.description._patches import load_patches
+
+_PATCHES_DIR = Path(__file__).parent / "patches"
+
+_CORE_SUFFIX_RE = re.compile(r"_CM[0-9][A-Za-z0-9]*$")
+_VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)$")
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SearchPaths:
+    svd_dirs: list[Path]
+    cubemx_db: Path
+    cmsis_device_dirs: list[Path] | None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class Sources:
+    part: str
+    svd: Path
+    mcu_db: Path
+    rzone: Path
+    cmsis_header: Path | None
+    patches: list[Path]
+
+
+def _version_key(path: Path) -> tuple[int, ...]:
+    match = _VERSION_RE.search(path.name)
+    if not match:
+        return ()
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _env_paths(name: str) -> list[Path] | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    return [Path(p) for p in value.split(os.pathsep) if p]
+
+
+def default_svd_dirs(st_root: Path | None = None) -> list[Path]:
+    dirs: list[Path] = []
+    home_st = st_root if st_root is not None else Path("~/st").expanduser()
+    for clt_dir in sorted(home_st.glob("stm32cubeclt_*"), key=_version_key, reverse=True):
+        candidate = clt_dir / "STMicroelectronics_CMSIS_SVD"
+        if candidate.is_dir():
+            dirs.append(candidate)
+    for ide_dir in sorted(home_st.glob("stm32cubeide_*"), key=_version_key, reverse=True):
+        plugin_glob = "plugins/com.st.stm32cube.ide.mcu.productdb.debug_*"
+        for plugin_dir in sorted(ide_dir.glob(plugin_glob)):
+            candidate = plugin_dir / "resources" / "cmsis" / "STMicroelectronics_CMSIS_SVD"
+            if candidate.is_dir():
+                dirs.append(candidate)
+    return dirs
+
+
+def default_search_paths() -> SearchPaths:
+    """SearchPaths from POPCORN_STM32_SVD_DIRS/POPCORN_CUBEMX_DB/POPCORN_CMSIS_DEVICE_DIRS when
+    set (os.pathsep lists), else the spec 04 default locations under the user's home."""
+    svd_dirs = _env_paths("POPCORN_STM32_SVD_DIRS")
+    if svd_dirs is None:
+        svd_dirs = default_svd_dirs()
+    cubemx_db_list = _env_paths("POPCORN_CUBEMX_DB")
+    cubemx_db = cubemx_db_list[0] if cubemx_db_list else Path("~/STM32CubeMX/db").expanduser()
+    cmsis_device_dirs = _env_paths("POPCORN_CMSIS_DEVICE_DIRS")
+    return SearchPaths(svd_dirs=svd_dirs, cubemx_db=cubemx_db, cmsis_device_dirs=cmsis_device_dirs)
+
+
+def resolve_part(part: str, db_dir: Path) -> str:
+    """db RefName for @p part: exact, then @p part read as a CPN matched against every RefName's
+    'x' wildcard positions (each 'x' matches any one character of @p part), DescriptionError with
+    difflib close matches when none match, listing every candidate when several do."""
+    mcu_dir = db_dir / "mcu"
+    refnames = sorted(p.stem for p in mcu_dir.glob("*.xml"))
+    if part in refnames:
+        return part
+    candidates = [
+        ref
+        for ref in refnames
+        if len(ref) == len(part) and all(r == "x" or r == p for r, p in zip(ref, part, strict=True))
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise DescriptionError(
+            str(db_dir), 0, part, f"exactly one match expected, found {', '.join(candidates)}"
+        )
+    close = difflib.get_close_matches(part, refnames, n=5)
+    if close:
+        raise DescriptionError(
+            str(db_dir), 0, part, f"a known part, close matches: {', '.join(close)}"
+        )
+    raise DescriptionError(str(db_dir), 0, part, "a known part")
+
+
+def _wildcard_prefix_matches(pattern: str, text: str) -> bool:
+    if len(text) < len(pattern):
+        return False
+    return all(p == "x" or p == text[i] for i, p in enumerate(pattern))
+
+
+def resolve_svd_stem(
+    refname: str, svd_dirs: Sequence[Path], *, core: str | None, file: str
+) -> tuple[str, Path]:
+    stem_dirs: dict[str, Path] = {}
+    for svd_dir in svd_dirs:
+        for svd_file in sorted(svd_dir.glob("*.svd")):
+            stem_dirs.setdefault(svd_file.stem, svd_dir)
+    groups: dict[str, list[str]] = {}
+    for stem in stem_dirs:
+        base = _CORE_SUFFIX_RE.sub("", stem)
+        groups.setdefault(base, []).append(stem)
+    matches = sorted(
+        (base for base in groups if _wildcard_prefix_matches(base, refname)),
+        key=len,
+        reverse=True,
+    )
+    if not matches:
+        raise DescriptionError(file, 0, refname, "an SVD file stem matching this part")
+    variants = sorted(groups[matches[0]])
+    if len(variants) == 1:
+        stem = variants[0]
+        return stem, stem_dirs[stem]
+    if core is not None:
+        for stem in variants:
+            if core in stem:
+                return stem, stem_dirs[stem]
+        raise DescriptionError(file, 0, refname, f"a core matching one of {', '.join(variants)}")
+    raise DescriptionError(file, 0, refname, f"core=, candidates {', '.join(variants)}")
+
+
+def _patch_files() -> list[Path]:
+    if not _PATCHES_DIR.is_dir():
+        return []
+    return sorted(_PATCHES_DIR.glob("*.toml"))
+
+
+def _svd_exception(refname: str, *, search: SearchPaths) -> tuple[str, Path] | None:
+    for loaded in load_patches(_patch_files(), part=refname, svd_name=""):
+        if loaded.patch.svd is not None:
+            name = loaded.patch.svd.name
+            for svd_dir in search.svd_dirs:
+                if (svd_dir / f"{name}.svd").is_file():
+                    return name, svd_dir
+            return name, search.svd_dirs[0] if search.svd_dirs else Path()
+    return None
+
+
+def _cmsis_header_path(refname: str, search: SearchPaths) -> Path | None:
+    stem = f"{refname[:9].lower()}xx.h"
+    if search.cmsis_device_dirs is not None:
+        for device_dir in search.cmsis_device_dirs:
+            candidate = device_dir / stem
+            if candidate.is_file():
+                return candidate
+        return None
+    if len(refname) < 7:
+        return None
+    family = refname[5:7]
+    repo = Path("~/STM32Cube/Repository").expanduser()
+    for fw_dir in sorted(repo.glob(f"STM32Cube_FW_{family}_V*"), key=_version_key, reverse=True):
+        candidate = (
+            fw_dir / "Drivers" / "CMSIS" / "Device" / "ST" / f"STM32{family}xx" / "Include" / stem
+        )
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def find_sources(
+    part: str,
+    *,
+    core: str | None = None,
+    svd: Path | None = None,
+    cubemx_db: Path | None = None,
+    cmsis_header: Path | None = None,
+    search: SearchPaths | None = None,
+) -> Sources:
+    """Sources of @p part: db files by exact db lookup, SVD by family-prefix matching across
+    @p search's directories (or the spec 04 defaults, when @p search is None), CMSIS header
+    optionally, every patch file in the package whose [match] selects this part and the resolved
+    SVD file name. DescriptionError naming every path searched when a required source is
+    missing."""
+    search = search or default_search_paths()
+    db_dir = cubemx_db or search.cubemx_db
+    refname = resolve_part(part, db_dir)
+
+    mcu_db = db_dir / "mcu" / f"{refname}.xml"
+    if not mcu_db.is_file():
+        raise DescriptionError(str(db_dir), 0, refname, f"a db file at {mcu_db}")
+    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
+
+    rzone = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
+    if not rzone.is_file():
+        raise DescriptionError(str(db_dir), 0, refname, f"an rzone file at {rzone}")
+
+    if svd is not None:
+        svd_path = svd
+    else:
+        exception = _svd_exception(refname, search=search)
+        if exception is not None:
+            name, svd_dir = exception
+            svd_path = svd_dir / f"{name}.svd"
+            if not svd_path.is_file():
+                raise DescriptionError(str(svd_dir), 0, refname, f"an SVD file at {svd_path}")
+        else:
+            if not search.svd_dirs:
+                raise DescriptionError(
+                    "<search>", 0, refname, "at least one SVD directory to search"
+                )
+            stem, svd_dir = resolve_svd_stem(refname, search.svd_dirs, core=core, file=str(db_dir))
+            svd_path = svd_dir / f"{stem}.svd"
+
+    cmsis_header_path = (
+        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
+    )
+
+    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name)
+
+    return Sources(
+        part=refname,
+        svd=svd_path,
+        mcu_db=mcu_db,
+        rzone=rzone,
+        cmsis_header=cmsis_header_path,
+        patches=[loaded.path for loaded in patches],
+    )
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def compute_source_digests(sources: Sources) -> dict[str, str]:
+    """SHA-256 hex digest of each of @p sources's files, keyed svd/mcu_db/rzone/cmsis_header
+    (when present) and patch:<file name> per patch file."""
+    digests = {
+        "svd": _sha256_bytes(sources.svd.read_bytes()),
+        "mcu_db": _sha256_bytes(sources.mcu_db.read_bytes()),
+        "rzone": _sha256_bytes(sources.rzone.read_bytes()),
+    }
+    if sources.cmsis_header is not None:
+        digests["cmsis_header"] = _sha256_bytes(sources.cmsis_header.read_bytes())
+    for patch_path in sources.patches:
+        digests[f"patch:{patch_path.name}"] = _sha256_bytes(patch_path.read_bytes())
+    return digests
+
+
+def builder_digest() -> str:
+    """SHA-256 over this package's own .py files and patches/*.toml bytes, sorted path order, so
+    a builder edit invalidates the cache without a version bump."""
+    package_dir = Path(__file__).parent
+    paths = sorted({*package_dir.rglob("*.py"), *_PATCHES_DIR.glob("*.toml")})
+    hasher = hashlib.sha256()
+    for path in paths:
+        hasher.update(str(path.relative_to(package_dir)).encode())
+        hasher.update(path.read_bytes())
+    return hasher.hexdigest()
+
+
+def generator_string() -> str:
+    """'popcorn.stm32.description <popcorn version> <builder digest[:12]>'."""
+    version = importlib.metadata.version("popcorn")
+    return f"popcorn.stm32.description {version} {builder_digest()[:12]}"

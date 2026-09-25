@@ -3,61 +3,41 @@ from pathlib import Path
 
 import pytest
 from popcorn.stm32.description._cubemx import DbIp
+from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import CoreDesc, IrqDesc, PeripheralDesc
 from popcorn.stm32.description._patches import PatchTarget
+from popcorn.stm32.description._sources import Sources, find_sources
 from popcorn.stm32.description._svd import SvdDevice
 
-_CANDIDATES = [
-    Path("~/st/stm32cubeclt_1.20.0/STMicroelectronics_CMSIS_SVD/STM32U575.svd").expanduser(),
-    Path("~/st/stm32cubeide_2.0.0")
-    .expanduser()
-    .glob(
-        "plugins/com.st.stm32cube.ide.mcu.productdb.debug_*/resources/cmsis/"
-        "STMicroelectronics_CMSIS_SVD/STM32U575.svd"
-    ),
-]
+
+@pytest.fixture(scope="session")
+def u575_sources() -> Sources:
+    """Sources of STM32U575QGIx found on this machine, skips naming what find_sources
+    searched."""
+    try:
+        return find_sources("STM32U575QGIx")
+    except DescriptionError as exc:
+        pytest.skip(f"STM32U575QGIx sources not found: {exc}")
 
 
 @pytest.fixture(scope="session")
-def st_svd_u575() -> Path:
+def st_svd_u575(u575_sources: Sources) -> Path:
     """Path of the local ST STM32U575.svd install, skips naming every path searched."""
-    searched: list[str] = []
-    for candidate in _CANDIDATES:
-        if isinstance(candidate, Path):
-            searched.append(str(candidate))
-            if candidate.is_file():
-                return candidate
-        else:
-            for match in candidate:
-                searched.append(str(match))
-                if match.is_file():
-                    return match
-    pytest.skip(f"STM32U575.svd not found, searched: {', '.join(searched)}")
-
-
-_CUBEMX_DB = Path("~/STM32CubeMX/db").expanduser()
+    return u575_sources.svd
 
 
 @pytest.fixture(scope="session")
-def st_cubemx_db() -> Path:
+def st_cubemx_db(u575_sources: Sources) -> Path:
     """Path of the local CubeMX db directory, skips naming the path searched."""
-    if _CUBEMX_DB.is_dir():
-        return _CUBEMX_DB
-    pytest.skip(f"CubeMX db not found, searched: {_CUBEMX_DB}")
-
-
-_CMSIS_U575 = Path(
-    "~/STM32Cube/Repository/STM32Cube_FW_U5_V1.8.0/Drivers/CMSIS/Device/ST/STM32U5xx/"
-    "Include/stm32u575xx.h"
-).expanduser()
+    return u575_sources.mcu_db.parent.parent
 
 
 @pytest.fixture(scope="session")
-def st_cmsis_u575() -> Path:
+def st_cmsis_u575(u575_sources: Sources) -> Path:
     """Path of the local CMSIS stm32u575xx.h header, skips naming the path searched."""
-    if _CMSIS_U575.is_file():
-        return _CMSIS_U575
-    pytest.skip(f"stm32u575xx.h not found, searched: {_CMSIS_U575}")
+    if u575_sources.cmsis_header is None:
+        pytest.skip("stm32u575xx.h not found by find_sources")
+    return u575_sources.cmsis_header
 
 
 def target_from_svd(device: SvdDevice, db_ips: Mapping[str, DbIp] | None = None) -> PatchTarget:

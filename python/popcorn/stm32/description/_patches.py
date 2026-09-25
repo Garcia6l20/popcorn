@@ -50,6 +50,11 @@ class PatchIp:
 
 
 @dataclass(slots=True, kw_only=True)
+class PatchSvd:
+    name: str
+
+
+@dataclass(slots=True, kw_only=True)
 class IrqAdd:
     number: int
     name: str
@@ -103,6 +108,7 @@ class Patch:
     aliases: PatchAliases | None = None
     ip: PatchIp | None = None
     irqs: PatchIrqs | None = None
+    svd: PatchSvd | None = None
     fields: list[FieldsRule] | None = None
     cross: list[CrossRuleSpec] | None = None
 
