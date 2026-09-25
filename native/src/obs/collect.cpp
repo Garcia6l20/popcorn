@@ -1,3 +1,4 @@
+#include "refs.hpp"
 #include "tb.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -12,28 +13,6 @@
 
 namespace popcorn::obs
 {
-namespace
-{
-auto reference(image::image const& loaded, image_source const& source) -> image_ref
-{
-  image_ref ref{
-      .kind   = source.kind,
-      .path   = source.path.empty()
-                  ? std::string{}
-                  : std::filesystem::absolute(source.path).lexically_normal().string(),
-      .digest = loaded.digest};
-  auto executable = loaded.segments | std::views::filter(&image::segment::executable);
-  if(not std::ranges::empty(executable))
-  {
-    ref.base = std::ranges::min(executable | std::views::transform(&image::segment::start));
-    ref.end  = std::ranges::max(executable | std::views::transform([](image::segment const& held) {
-                                 return held.start + held.memory_size;
-                                }));
-  }
-  return ref;
-}
-}
-
 auto collect(core::machine& target, std::span<image_source const> sources) -> coverage_set
 {
   auto const images = target.loaded_images();
@@ -65,8 +44,12 @@ auto collect(core::machine& target, std::span<image_source const> sources) -> co
   auto       sized = size_blocks(data, code);
 
   coverage_group group{
-      .images =
-          std::views::zip_transform(reference, images, sources) | std::ranges::to<std::vector>(),
+      .images  = std::views::zip_transform(
+                     [](image::image const& loaded, image_source const& source) {
+                      return reference_of(loaded, source.kind, source.path);
+                     },
+                     images, sources)
+               | std::ranges::to<std::vector>(),
       .ranges  = data.blocks
                | std::views::transform(&core::block_counters::range)
                | std::ranges::to<std::vector>(),

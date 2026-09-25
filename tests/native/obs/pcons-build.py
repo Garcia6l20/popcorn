@@ -60,3 +60,16 @@ test_lcov = add_doctest(
 test_lcov.private.include_dirs.append(obs_sources)
 if lines_firmware is not None:
     test_lcov.depends(lines_firmware)
+
+test_pcov = add_doctest(
+    "obs-pcov",
+    [here / "test_pcov.cpp"],
+    [obs, test_support, core],
+    env={
+        "POPCORN_M33_DESC": str(core_data / "m33.json"),
+        "POPCORN_FW_BRANCHES": str(branches_elf),
+        "POPCORN_OBS_SCRATCH": str(build_dir / "test-obs-scratch"),
+    },
+)
+if branches_firmware is not None:
+    test_pcov.depends(branches_firmware)

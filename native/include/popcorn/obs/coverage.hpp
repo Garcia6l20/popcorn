@@ -5,9 +5,12 @@
 
 #include <reflex/enum.hpp>
 
+#include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace popcorn::obs
@@ -157,4 +160,75 @@ auto lcov(
     coverage_set const&                        set,
     std::span<std::vector<image::image> const> images,
     lcov_options const& options) -> std::string pre(images.size() == set.groups.size());
+
+/**
+ * @brief Encodes a coverage set as a `.pcov` version 1 file, little endian, fields 4-byte aligned,
+ *        strings padded with zeros: `PCOV`, u16 version 1, u16 flags 0, u32 group count, then per
+ *        group u64 split, u64 dropped, the images `{u32 kind, u32 base, u32 end, u32 length, path,
+ *        u32 length, digest}`, the ranges `{u32 start, u32 size, u32 length, name}`, the blocks
+ *        `{u32 start, u32 size, u64 hits}` and the edges `{u32 from, u32 to, u64 hits}`, each list
+ *        after its u32 count. The set is made canonical first, as merge() does.
+ * @param set Coverage.
+ * @return The file bytes.
+ */
+auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>;
+
+/**
+ * @brief Decodes a `.pcov` file.
+ * @param bytes File bytes.
+ * @param file Name for errors.
+ * @return The set, canonical.
+ * @throws format_error when the bytes are not a canonical `.pcov` version 1 file: bad magic or
+ *         version, a count past the end, an unsorted or repeated key, a zero hit, a block size
+ *         outside 1 to 1024, an unknown image kind or a raw image with a path.
+ */
+auto decode_pcov(std::span<std::byte const> bytes, std::string_view file = {}) -> coverage_set;
+
+/**
+ * @brief Writes a `.pcov` file, through a temporary file `<path>.tmp.<pid>` in the same directory
+ *        renamed over @p path, so that a reader never sees half a file.
+ * @param path Destination.
+ * @param set Coverage.
+ * @throws format_error when the file cannot be written.
+ */
+void save_pcov(std::filesystem::path const& path, coverage_set const& set);
+
+/**
+ * @brief Reads a `.pcov` file.
+ * @param path File.
+ * @return The set.
+ * @throws format_error when the file cannot be read or is not a `.pcov` file.
+ */
+auto load_pcov(std::filesystem::path const& path) -> coverage_set;
+
+/**
+ * @brief Sums coverage sets, canonical: groups with the same image digests add their block,
+ *        edge, split and dropped counts, saturating, and take the union of their ranges, the
+ *        smallest name for one start and size. Each image keeps the smallest of its paths, so
+ *        the result does not depend on the order of @p sets. Other groups are kept.
+ * @param sets Sets to sum, possibly none.
+ * @return The sum, groups sorted by their digest lists.
+ */
+auto merge(std::span<coverage_set const> sets) -> coverage_set;
+
+/**
+ * @brief Adds a coverage set to a `.pcov` file, creating it when missing: what the machines of
+ *        one worker do with the worker's file. One writer per file: two processes adding to the
+ *        same file at once can lose one's coverage.
+ * @param path File.
+ * @param set Coverage to add.
+ * @return The merged set now in the file.
+ * @throws format_error when the existing file is not a `.pcov` file or cannot be written.
+ */
+auto merge_into(std::filesystem::path const& path, coverage_set const& set) -> coverage_set;
+
+/**
+ * @brief Loads the images of every group, for lcov().
+ * @param set Coverage.
+ * @return Per group, its images: an ELF loaded from its path, a raw image as an empty image.
+ * @throws format_error when an ELF is missing or its digest differs from the one recorded, the
+ *         ELF changed since collect.
+ * @throws image_error when an ELF cannot be loaded.
+ */
+auto load_images(coverage_set const& set) -> std::vector<std::vector<image::image>>;
 }
