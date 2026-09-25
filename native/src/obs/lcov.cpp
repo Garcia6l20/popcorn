@@ -395,16 +395,21 @@ void add_lines(group_view const& view, image::image const& source, file_records&
 
 auto function_row(image::image const& source, address at) -> image::line_row const*
 {
+  auto const* entry = row_at(source, at);
+  if(entry == nullptr)
+  {
+    return nullptr;
+  }
   auto const same = std::ranges::equal_range(source.lines, at, {}, &image::line_row::addr);
-  image::line_row const* best = nullptr;
+  image::line_row const* best = entry;
   for(auto const& row : same)
   {
-    if(row.line != 0 and (best == nullptr or row.line < best->line))
+    if(row.file == entry->file and row.line != 0 and row.line < best->line)
     {
       best = &row;
     }
   }
-  return best != nullptr ? best : row_at(source, at);
+  return best;
 }
 
 void add_functions(group_view const& view, image::image const& source, file_records& out)

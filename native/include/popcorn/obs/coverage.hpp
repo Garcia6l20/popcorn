@@ -142,6 +142,8 @@ struct lcov_options
  * Each file record starts with its own TN record.
  *
  * Rules and limits:
+ * - A function is filed under the file of the row that holds its entry, the one addr2line
+ *   reports, at the smallest non-zero line among the rows at its entry in that file.
  * - Rows of zero length, followed by a row at the same address, cover no instruction: their line
  *   gets no DA record from them, as addr2line resolves the address to the last row.
  * - Branch discovery starts from each function's entry, row starts and block starts. A start other

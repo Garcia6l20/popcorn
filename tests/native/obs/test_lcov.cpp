@@ -574,3 +574,23 @@ TEST_CASE("every file record starts with its TN record")
     }
   }
 }
+
+TEST_CASE("a function is filed under the file of its entry row, not under an inlined header")
+{
+  auto made  = synthetic(nops(8), {}, 8);
+  made.files = {"c.c", "h.h"};
+  made.lines = {
+      {.addr = 0x100, .file = 0, .line = 747, .is_stmt = true},
+      {.addr = 0x100, .file = 1, .line = 76,  .is_stmt = true},
+      {.addr = 0x100, .file = 0, .line = 737, .is_stmt = true},
+      {.addr = 0x100, .file = 0, .line = 747, .is_stmt = true},
+      {.addr = 0x108, .file = 0, .line = 0,   .is_stmt = true},
+  };
+  auto const text = lcov_of(
+      made, {
+                group_of({{.start = 0x100, .size = 8, .hits = 1}}
+                )
+  });
+  CHECK(starting(text, "FN:") == std::vector<std::string>{"FN:737,f"});
+  CHECK(starting(text, "SF:") == std::vector<std::string>{"SF:c.c"});
+}
