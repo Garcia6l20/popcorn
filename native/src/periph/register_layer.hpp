@@ -102,6 +102,13 @@ public:
    */
   [[nodiscard]] auto word_of(std::string_view name) const -> std::optional<std::uint32_t>;
 
+  /** @brief Rules of a word, null for a word without a register: one lookup for the dispatch. */
+  [[nodiscard]] auto find(std::uint32_t word) const noexcept
+      -> word_rules const* pre(word < words());
+
+  /** @brief Whether a register maps to a word. */
+  [[nodiscard]] auto has_register(std::uint32_t word) const noexcept -> bool pre(word < words());
+
   /** @brief Whether any word has write-once bits. */
   [[nodiscard]] auto has_write_once() const noexcept -> bool;
 
@@ -143,6 +150,41 @@ auto layer_read(
     std::uint32_t          offset,
     std::uint8_t           size) -> std::uint32_t pre(size == 1 or size == 2 or size == 4)
     pre(offset % size == 0) pre(offset / 4 < layout.words());
+
+/**
+ * @brief Reads a register the description serves, its rules already looked up.
+ * @param rules Rules of the accessed word, from register_layout::find().
+ * @param regs Storage.
+ * @param offset Byte offset of the access, aligned to @p size.
+ * @param size Access size in bytes, 1, 2 or 4.
+ * @return Value right-aligned to @p size.
+ */
+auto layer_read(
+    word_rules const& rules,
+    register_file&    regs,
+    std::uint32_t     offset,
+    std::uint8_t      size) -> std::uint32_t pre(size == 1 or size == 2 or size == 4)
+    pre(offset % size == 0);
+
+/**
+ * @brief Writes a register the description serves, its rules already looked up.
+ * @param layout Compiled semantics, for the cross rules.
+ * @param rules Rules of the accessed word, from register_layout::find().
+ * @param regs Storage.
+ * @param state Write-once locks.
+ * @param offset Byte offset of the access, aligned to @p size.
+ * @param size Access size in bytes, 1, 2 or 4.
+ * @param value Value right-aligned to @p size.
+ */
+void layer_write(
+    register_layout const& layout,
+    word_rules const&      rules,
+    register_file&         regs,
+    layer_state&           state,
+    std::uint32_t          offset,
+    std::uint8_t           size,
+    std::uint32_t          value) pre(size == 1 or size == 2 or size == 4) pre(offset % size == 0)
+    pre(offset / 4 < layout.words());
 
 /**
  * @brief Writes a register the description serves: access, write effects, write-once lock,

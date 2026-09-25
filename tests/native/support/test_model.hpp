@@ -16,7 +16,9 @@ namespace popcorn::testing
 /**
  * @brief Native model of the core test description's `TESTDEV`. Claims `DATA` and `CTRL`,
  *        stores writes as they come, and on a write of 1 to `CTRL.GO` raises its IRQ line after
- *        delay instructions through its event port. A read of `DATA` lowers the line.
+ *        delay instructions through its event port. A read of `DATA` lowers the line. Records
+ *        every access, and on request fails or throws on reads, requests a stop on writes, and
+ *        on a `CTRL.GO` write patches a halfword through DMA or halves the core clock.
  *        Test-only.
  */
 class test_model final : public periph::model
@@ -56,6 +58,45 @@ public:
 
   /** @brief Context the model was created with. */
   [[nodiscard]] auto context() const noexcept -> periph::model_context&;
+
+  /** @brief One access the model served. */
+  struct access
+  {
+    /** @brief Byte offset in the peripheral. */
+    std::uint32_t offset{};
+    /** @brief Access size in bytes. */
+    std::uint8_t size{};
+    /** @brief Whether it was a write. */
+    bool write{};
+    /** @brief Stored bytes before a write. */
+    std::uint32_t old{};
+    /** @brief Value written, 0 for a read. */
+    std::uint32_t value{};
+    /** @brief Context of the access. */
+    periph::access_ctx ctx{};
+  };
+
+  /** @brief Whether accesses are recorded, off for benchmarks. */
+  bool record = true;
+  /** @brief Accesses served, in order. */
+  std::vector<access> accesses{};
+  /** @brief Whether reads return bus_error::denied. */
+  bool fail_reads = false;
+  /** @brief Whether writes return bus_error::denied. */
+  bool fail_writes = false;
+  /** @brief Whether reads throw a std::runtime_error naming their rank. */
+  bool throw_reads = false;
+  /** @brief Whether writes request a stop with detail "model stop". */
+  bool stop_on_write = false;
+  /** @brief Address a `CTRL.GO` write patches through DMA with patch_value. */
+  std::optional<address> patch_on_go{};
+  /** @brief Halfword the patch writes. */
+  std::uint16_t patch_value{};
+  /** @brief Whether a `CTRL.GO` write halves the core clock. */
+  bool halve_rate_on_go = false;
+
+  /** @brief Instruction count at which the delayed IRQ event last fired. */
+  std::optional<icount> fired_at{};
 
   /** @brief Whether reset() raises the IRQ line, for the reset order test. */
   bool raise_in_reset = false;

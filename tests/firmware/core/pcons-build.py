@@ -15,9 +15,11 @@ for name, source in (
     ("run", "run.c"),
     ("idle", "idle.c"),
     ("calls", "calls.c"),
+    ("periph", "periph.c"),
 ):
     _, target = add_firmware("core", name, [here / source])
     if target is not None:
         target.private.link_flags.append(SECTION_BOUNDS)
 
 add_firmware("core", "alu", [here / "alu.S"])
+add_firmware("core", "mmio", [here / "mmio.S"])

@@ -46,12 +46,6 @@ auto machine::add_trace_sink(trace_kinds, trace_sink, std::vector<address_range>
   throw not_implemented("machine::add_trace_sink");
 }
 
-auto machine::add_log_sink(log_sink) -> hook_handle
-{
-  require_stopped(*this);
-  throw not_implemented("machine::add_log_sink");
-}
-
 void machine::enable_coverage(std::vector<address_range>)
 {
   require_stopped(*this);

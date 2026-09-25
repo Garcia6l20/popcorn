@@ -2,6 +2,7 @@
 
 #include "../periph/line_bus.hpp"
 #include "../periph/register_layer.hpp"
+#include "engine.hpp"
 #include "memory_map.hpp"
 
 #include <popcorn/arch/arch.hpp>
@@ -13,7 +14,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <expected>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,10 +30,27 @@ class hook_registry
 public:
   /** @brief Whether a slice runs, so a handle refuses removal. */
   bool running = false;
+  /** @brief Last id handed out. */
+  std::uint64_t last_id = 0;
+  /** @brief Log sinks by id, in registration order. */
+  std::map<std::uint64_t, log_sink> log_sinks{};
 
   /** @brief Removes a hook by id. */
-  void remove(std::uint64_t) noexcept
-  {}
+  void remove(std::uint64_t id) noexcept
+  {
+    log_sinks.erase(id);
+  }
+
+  /** @brief Hands a record to every log sink, in registration order. The sinks are copied
+   * first, so a sink may add or remove sinks. */
+  void log(log_record const& record) const
+  {
+    auto const sinks = log_sinks;
+    for(auto const& [id, sink] : sinks)
+    {
+      sink(record);
+    }
+  }
 };
 
 /** @brief Routes IRQ line levels of every peripheral to the arch module, wired-OR per source:
@@ -100,6 +121,10 @@ struct machine::peripheral_slot
   std::shared_ptr<periph::model> model{};
   /** @brief Non-zero for each storage word the model claims. */
   std::vector<std::uint8_t> claimed;
+  /** @brief Non-zero for each word whose unmodelled access was logged, once per machine life. */
+  std::vector<std::uint8_t> logged = std::vector<std::uint8_t>(claimed.size(), 0);
+  /** @brief Offsets without a register whose access was logged. */
+  std::set<std::uint32_t> warned{};
 };
 
 /** @brief Buffer bytes whose translated code must be removed at the next block boundary. */
@@ -170,6 +195,24 @@ struct machine::run_state
     buffer_window window{};
   };
 
+  /** @brief One engine MMIO mapping of a peripheral window, its own or an alias's. */
+  struct mmio_window
+  {
+    /** @brief Run state serving the accesses. */
+    run_state* run{};
+    /** @brief Slot of the peripheral the window reaches. */
+    peripheral_slot* slot{};
+    /** @brief Peripheral named by the window, the alias for an alias window. */
+    peripheral_desc const* unit{};
+    /** @brief Guest address of the window. */
+    address base{};
+    /** @brief Bytes mapped, the peripheral size rounded up to the engine page. */
+    std::uint32_t size{};
+    /** @brief Whether accesses through the window are secure: an alias window, a `SEC_`
+     * instance of the peripheral it aliases. */
+    bool secure{};
+  };
+
   /** @brief Creates the run state of @p machine. */
   explicit run_state(machine& machine) noexcept : owner{machine}
   {}
@@ -202,6 +245,12 @@ struct machine::run_state
   std::optional<arch::trap_result> trap{};
   /** @brief Access the engine refused, handled between engine runs. */
   std::optional<unmapped_access> unmapped{};
+  /** @brief First bus error a model returned on a CPU access in the engine run, W5f. */
+  std::optional<unmapped_access> bus_fault{};
+  /** @brief Engine MMIO windows, sorted by base. */
+  std::vector<std::unique_ptr<mmio_window>> windows{};
+  /** @brief Memory hook making MMIO pc exact while a consumer needs it. */
+  exact_pc_hook exact_pc{};
   /** @brief Clock value at which the block hook stops the engine. */
   icount deadline{};
   /** @brief Instructions executed in the slice. */
@@ -244,6 +293,85 @@ struct machine::run_state
    *         write a register the model claims.
    */
   void attach_peripherals();
+
+  /**
+   * @brief Maps every peripheral window, aliases included, as engine MMIO, one map per window.
+   * @throws config_error when two windows share an engine page.
+   */
+  void map_peripherals();
+
+  /** @brief Window holding [@p addr, @p addr + @p size), null when none. */
+  [[nodiscard]] auto window_at(address addr, std::uint8_t size) const noexcept -> mmio_window*;
+
+  /**
+   * @brief Serves a read of a peripheral window: the model for a claimed register, the register
+   *        layer otherwise.
+   * @param window Window accessed.
+   * @param offset Byte offset in the window, aligned to @p size.
+   * @param size Access size in bytes, 1, 2 or 4.
+   * @param by Bus master.
+   * @return Value right-aligned to @p size, or the model's bus error for a DMA or debugger
+   *         access. A CPU access records the error and reads 0.
+   * @throws model_error on a first unmodelled access under strict_peripherals.
+   */
+  auto dispatch_read(
+      mmio_window const& window,
+      std::uint32_t      offset,
+      std::uint8_t       size,
+      initiator          by) -> std::expected<std::uint32_t, bus_error>;
+
+  /**
+   * @brief Serves a write of a peripheral window, as dispatch_read().
+   * @throws model_error on a first unmodelled access under strict_peripherals.
+   */
+  auto dispatch_write(
+      mmio_window const& window,
+      std::uint32_t      offset,
+      std::uint8_t       size,
+      std::uint32_t      value,
+      initiator          by) -> std::expected<void, bus_error>;
+
+  /** @brief Lowers the engine deadline to the earliest event after a model call, and ends the
+   * engine run when the call changed the instruction rate. */
+  void after_model(std::uint64_t instruction_hz);
+
+  /** @brief Records the first model bus error of a CPU access in the engine run. */
+  void record_bus_fault(address addr, arch::memory_op op) noexcept;
+
+  /**
+   * @brief Logs the first access to a register of a peripheral without model. A debugger
+   *        access under strict_peripherals is neither logged nor refused.
+   * @throws model_error under strict_peripherals, on that first CPU or DMA access.
+   */
+  void note_unmodelled(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
+
+  /** @brief Logs the first access to an offset without register. */
+  void warn_unregistered(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
+
+  static auto
+      on_mmio_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
+      -> std::uint64_t;
+  static void on_mmio_write(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      std::uint64_t value,
+      void*         user) noexcept;
+
+  /**
+   * @brief Takes a reference on the exact pc hook, between slices only.
+   * @throws emulation_error when the engine refuses the hook.
+   */
+  void acquire_exact_pc() pre(not in_engine)
+  {
+    exact_pc.acquire();
+  }
+
+  /** @brief Drops a reference on the exact pc hook, between slices only. */
+  void release_exact_pc() noexcept pre(not in_engine)
+  {
+    exact_pc.release();
+  }
 
   /**
    * @brief Slot serving a peripheral name.

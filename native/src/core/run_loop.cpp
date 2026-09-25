@@ -173,6 +173,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   owner.clock_driver_.restore(fresh);
   unmapped.reset();
   trap.reset();
+  bus_fault.reset();
   remove_step_hook();
   owner.arch_->reset(reset_vector);
   std::ranges::fill(lines.active, 0u);
@@ -221,7 +222,7 @@ void machine::run_state::code_changed(
 
 auto machine::run_state::payload_pending() const noexcept -> bool
 {
-  return requested or reset_requested or end_requested or failure or unmapped or trap;
+  return requested or reset_requested or end_requested or failure or unmapped or trap or bus_fault;
 }
 
 void machine::run_state::drain_stale_code()
@@ -379,6 +380,7 @@ void machine::run_state::clear_slice() noexcept
   end_requested = false;
   trap.reset();
   unmapped.reset();
+  bus_fault.reset();
   failure      = nullptr;
   stop_flag    = false;
   wall_expired = false;
@@ -581,6 +583,18 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
 
 auto machine::run_state::trap_after(uc_err err) -> std::optional<slice_end>
 {
+  if(bus_fault)
+  {
+    auto const access = *std::exchange(bus_fault, std::nullopt);
+    unmapped.reset();
+    trap.reset();
+    auto const result = arch->on_unmapped(access.addr, access.op);
+    if(result.resumes())
+    {
+      return std::nullopt;
+    }
+    return stop_from(result);
+  }
   if(trap)
   {
     auto const result = *std::exchange(trap, std::nullopt);

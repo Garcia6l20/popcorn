@@ -41,4 +41,66 @@ auto open_engine(arch::engine_spec const& spec) -> engine_handle
   }
   return engine;
 }
+
+namespace
+{
+void on_access(uc_struct*, uc_mem_type, std::uint64_t, int, std::int64_t, void*) noexcept
+{}
+}
+
+void exact_pc_hook::configure(
+    uc_struct*                                           engine,
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges)
+{
+  engine_ = engine;
+  ranges_ = std::move(ranges);
+}
+
+void exact_pc_hook::acquire()
+{
+  if(users_ == 0)
+  {
+    for(auto const& [first, last] : ranges_)
+    {
+      uc_hook    hook = 0;
+      auto const err  = uc_hook_add(
+          engine_, &hook, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, reinterpret_cast<void*>(&on_access),
+          nullptr, first, last);
+      if(err != UC_ERR_OK)
+      {
+        release_all();
+        check(err, "adding the exact pc memory hook");
+      }
+      hooks_.push_back(hook);
+    }
+  }
+  ++users_;
+}
+
+void exact_pc_hook::release() noexcept
+{
+  if(users_ > 0 and --users_ == 0)
+  {
+    release_all();
+  }
+}
+
+void exact_pc_hook::release_all() noexcept
+{
+  for(auto const hook : hooks_)
+  {
+    uc_hook_del(engine_, hook);
+  }
+  hooks_.clear();
+}
+
+auto exact_pc_hook::installed() const noexcept -> bool
+{
+  return not hooks_.empty();
+}
+
+auto exact_pc_hook::users() const noexcept -> std::uint32_t
+{
+  return users_;
+}
 }

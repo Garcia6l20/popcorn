@@ -291,6 +291,10 @@ auto register_layout::rules(std::uint32_t word) const noexcept -> word_rules con
 
 auto register_layout::crosses(std::uint32_t word) const -> std::span<cross_target const>
 {
+  if(crosses_.empty())
+  {
+    return {};
+  }
   auto const range = std::ranges::equal_range(crosses_, word, {}, &cross_target::source_word);
   return {range.begin(), range.end()};
 }
@@ -308,6 +312,17 @@ auto register_layout::word_of(std::string_view name) const -> std::optional<std:
     return word_of(*reg->alternate_of);
   }
   return reg->offset / 4;
+}
+
+auto register_layout::find(std::uint32_t word) const noexcept -> word_rules const*
+{
+  auto const index = rule_of_word_[word];
+  return index == 0 ? nullptr : &rules_[index - 1];
+}
+
+auto register_layout::has_register(std::uint32_t word) const noexcept -> bool
+{
+  return rule_of_word_[word] != 0;
 }
 
 auto register_layout::has_write_once() const noexcept -> bool
@@ -331,15 +346,28 @@ auto layer_read(
     std::uint32_t          offset,
     std::uint8_t           size) -> std::uint32_t
 {
-  auto const  word  = offset / 4;
-  auto const& rules = layout.rules(word);
-  auto const  lane  = lane_mask(offset, size);
-  auto const  old   = regs.peek(word * 4);
-  auto const  value = (old & rules.readable & lane) >> (8 * (offset % 4));
-  auto const  after = (old & ~(rules.read_clear & lane)) | (rules.read_set & lane);
-  if(after != old)
+  return layer_read(layout.rules(offset / 4), regs, offset, size);
+}
+
+auto layer_read(
+    word_rules const& rules,
+    register_file&    regs,
+    std::uint32_t     offset,
+    std::uint8_t      size) -> std::uint32_t
+{
+  auto const word  = offset / 4;
+  auto const lane  = lane_mask(offset, size);
+  auto const old   = regs.peek(word * 4);
+  auto const value = (old & rules.readable & lane) >> (8 * (offset % 4));
+  auto const drop  = rules.read_clear & lane;
+  auto const raise = rules.read_set & lane;
+  if((drop | raise) != 0)
   {
-    regs.poke(word * 4, after);
+    auto const after = (old & ~drop) | raise;
+    if(after != old)
+    {
+      regs.poke(word * 4, after);
+    }
   }
   return value;
 }
@@ -352,18 +380,40 @@ void layer_write(
     std::uint8_t           size,
     std::uint32_t          value)
 {
-  auto const  word     = offset / 4;
-  auto const& rules    = layout.rules(word);
-  auto const  lane     = lane_mask(offset, size);
-  auto const  written  = (value << (8 * (offset % 4))) & lane;
-  auto const  open     = rules.writable & ~(locked(state, word) ? rules.write_once : 0u) & lane;
-  auto        stored   = regs.peek(word * 4);
-  std::size_t position = 0;
-  template for(constexpr auto e :
-               std::define_static_array(std::meta::enumerators_of(^^write_effect)))
+  layer_write(layout, layout.rules(offset / 4), regs, state, offset, size, value);
+}
+
+void layer_write(
+    register_layout const& layout,
+    word_rules const&      rules,
+    register_file&         regs,
+    layer_state&           state,
+    std::uint32_t          offset,
+    std::uint8_t           size,
+    std::uint32_t          value)
+{
+  constexpr auto modify  = effect_index(write_effect::modify);
+  auto const     word    = offset / 4;
+  auto const     lane    = lane_mask(offset, size);
+  auto const     written = (value << (8 * (offset % 4))) & lane;
+  auto const     open    = rules.writable & ~(locked(state, word) ? rules.write_once : 0u) & lane;
+  auto           stored  = regs.peek(word * 4);
+  if((open & ~rules.on_write[modify]) == 0)
   {
-    stored = apply([:e:], stored, written, rules.on_write[position] & open);
-    ++position;
+    stored = (stored & ~open) | (written & open);
+  }
+  else
+  {
+    std::size_t position = 0;
+    template for(constexpr auto e :
+                 std::define_static_array(std::meta::enumerators_of(^^write_effect)))
+    {
+      if(auto const mask = rules.on_write[position] & open; mask != 0)
+      {
+        stored = apply([:e:], stored, written, mask);
+      }
+      ++position;
+    }
   }
   regs.poke(word * 4, stored);
   if((rules.write_once & lane) != 0)

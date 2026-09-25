@@ -126,7 +126,7 @@ TEST_CASE("m33 description loads with its regions and test peripherals")
   CHECK(m33_code_alias().regions.back().physical == address{0x2000'0000});
 }
 
-TEST_CASE("machine maps every region and the arch system page with their protections")
+TEST_CASE("machine maps every region, peripheral window and the arch system page")
 {
   recorded      made;
   core::machine target{m33(), made.factory(), {}};
@@ -139,12 +139,16 @@ TEST_CASE("machine maps every region and the arch system page with their protect
   CHECK(page == 1024);
 
   auto const found = mappings(engine);
-  REQUIRE(found.size() == 4);
+  REQUIRE(found.size() == 7);
   CHECK(found[0] == mapping{0x0000'0000, 0x001f'ffff, rx});
   CHECK(found[1] == mapping{0x0800'0000, 0x081f'ffff, rx});
   CHECK(found[2] == mapping{0x2000'0000, 0x200b'ffff, rwx});
-  CHECK(found[3].begin == popcorn::testing::test_arch::system_base);
-  CHECK(found[3].end == popcorn::testing::test_arch::system_base + 0xfff);
+  CHECK(found[3].begin == 0x4001'0000);
+  CHECK(found[3].end == 0x4001'03ff);
+  CHECK(found[4].begin == 0x4002'0000);
+  CHECK(found[5].begin == 0x5001'0000);
+  CHECK(found[6].begin == popcorn::testing::test_arch::system_base);
+  CHECK(found[6].end == popcorn::testing::test_arch::system_base + 0xfff);
 }
 
 TEST_CASE("machine construction refuses what it cannot map")
@@ -223,7 +227,7 @@ TEST_CASE("an rx alias over rw SRAM shares the buffer and keeps each protection"
   recorded      made;
   core::machine target{desc, made.factory(), {}};
   auto const    found = mappings(made.module->attached_engine());
-  REQUIRE(found.size() == 5);
+  REQUIRE(found.size() == 8);
   CHECK(found[2] == mapping{0x0a00'0000, 0x0a0b'ffff, rx});
   CHECK(found[3] == mapping{0x2000'0000, 0x200b'ffff, rw});
 

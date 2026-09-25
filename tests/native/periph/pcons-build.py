@@ -31,3 +31,16 @@ test_registry = add_doctest(
 )
 if calls_firmware is not None:
     test_registry.depends(calls_firmware)
+
+periph_elf, periph_firmware = firmware("core", "periph")
+test_mmio = add_doctest(
+    "periph-mmio",
+    [here / "test_mmio_dispatch.cpp"],
+    [test_support, core],
+    env={
+        "POPCORN_M33_DESC": str(project_dir / "tests" / "data" / "core" / "m33.json"),
+        "POPCORN_FW_PERIPH": str(periph_elf),
+    },
+)
+if periph_firmware is not None:
+    test_mmio.depends(periph_firmware)

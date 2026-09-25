@@ -86,7 +86,7 @@ TEST_CASE("machine stub throws not_implemented for every behaviour not yet imple
       std::ignore = target.add_trace_sink(core::trace_kinds::all(), {}), popcorn::not_implemented);
   CHECK(target.peripheral("UART1").description().name == "UART1");
   CHECK(target.model("UART1") == nullptr);
-  CHECK_THROWS_AS(std::ignore = target.add_log_sink({}), popcorn::not_implemented);
+  CHECK(target.add_log_sink({}).active());
   CHECK_THROWS_AS(
       std::ignore = target.add_intercept(0x0800'0100, {}, core::intercept_mode::once),
       popcorn::not_implemented);

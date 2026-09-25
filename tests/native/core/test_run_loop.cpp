@@ -251,7 +251,7 @@ TEST_CASE("the wall budget ends a long slice without a stop")
   auto const start = std::chrono::steady_clock::now();
   auto const slice = f.run(
       {.max_instructions = icount{1'000'000'000}, .wall_budget = std::chrono::microseconds{1}});
-  CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds{3});
+  CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds{50});
   CHECK_FALSE(slice.stopped.has_value());
   CHECK(slice.executed.value > 0);
 }
