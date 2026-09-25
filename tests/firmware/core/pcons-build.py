@@ -10,7 +10,12 @@ SECTION_BOUNDS = (
     "--defsym=_ebss=ADDR(.bss)+SIZEOF(.bss)"
 )
 
-for name, source in (("basic", "basic.c"), ("run", "run.c")):
+for name, source in (
+    ("basic", "basic.c"),
+    ("run", "run.c"),
+    ("idle", "idle.c"),
+    ("calls", "calls.c"),
+):
     _, target = add_firmware("core", name, [here / source])
     if target is not None:
         target.private.link_flags.append(SECTION_BOUNDS)

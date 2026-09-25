@@ -4,6 +4,8 @@
 
 #include <popcorn/core/errors.hpp>
 
+#include <reflex/enum.hpp>
+
 #include <algorithm>
 #include <format>
 #include <limits>
@@ -157,6 +159,24 @@ void machine::run_state::install_hooks()
             watched.window.start, watched.window.start + watched.window.size - 1),
         std::format("adding the guest store hook at {:#010x}", watched.window.start));
   }
+}
+
+void machine::run_state::reset_machine(reset_kind)
+{
+  owner.scheduler_.restore({}, 0);
+  auto fresh         = owner.clock_driver_.state();
+  fresh.now          = {};
+  fresh.epoch_icount = {};
+  fresh.epoch_time   = {};
+  fresh.core_hz      = core_clock_hz(owner.description_, owner.options_);
+  fresh.cpi          = owner.options_.cpi;
+  owner.clock_driver_.restore(fresh);
+  unmapped.reset();
+  trap.reset();
+  remove_step_hook();
+  owner.arch_->reset(reset_vector);
+  owner.trace_.rebase(icount{0});
+  ++resets;
 }
 
 void machine::run_state::code_changed(
@@ -413,20 +433,91 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
   }
   if(reset_requested)
   {
-    reset_requested.reset();
-    return slice_end{make_stop(stop_reason::reset_request, {}, std::nullopt)};
+    auto const kind = *std::exchange(reset_requested, std::nullopt);
+    if(call or owner.options_.on_reset_request == reset_request_policy::stop)
+    {
+      return slice_end{make_stop(
+          stop_reason::reset_request, std::string{reflex::enum_value_name(kind)}, std::nullopt)};
+    }
+    reset_machine(kind);
   }
   if(end_requested)
   {
     end_requested = false;
-    return slice_end{};
+    if(not arch->idle())
+    {
+      return slice_end{};
+    }
   }
   return std::nullopt;
 }
 
-auto machine::run_state::bound_reached(slice_request const& request) const
-    -> std::optional<slice_end>
+auto machine::run_state::dispatch_due(slice_request const& request) -> std::optional<slice_end>
 {
+  std::uint32_t countdown = wall_check_blocks;
+  while(auto const due = owner.scheduler_.pop_due(owner.clock_.now()))
+  {
+    contract_assert(due->id.owner == arch::arch_event_owner);
+    arch->on_event(due->id.kind, due->payload);
+    if(request.stop_when and request.stop_when())
+    {
+      return slice_end{make_stop(stop_reason::user, {}, std::nullopt)};
+    }
+    if(--countdown == 0)
+    {
+      countdown = wall_check_blocks;
+      if(wall_expired_now())
+      {
+        return slice_end{};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+auto machine::run_state::idle_jump(slice_request const& request) -> std::optional<slice_end>
+{
+  auto const next = owner.scheduler_.next_deadline();
+  if(not next)
+  {
+    return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
+  }
+  auto const now    = owner.clock_.now();
+  auto       target = std::min(
+      *next, add_sat(now, left(request.max_instructions, icount{executed.value + jumped.value})));
+  if(request.until_time)
+  {
+    target = std::min(target, owner.clock_.to_icount(*request.until_time));
+  }
+  if(target > now)
+  {
+    jumped.value += target.value - now.value;
+    owner.clock_driver_.jump_to(target);
+  }
+  return std::nullopt;
+}
+
+auto machine::run_state::exit_list(slice_request const& request) const -> std::vector<address>
+{
+  std::vector<address> list;
+  if(request.until)
+  {
+    list.push_back(*request.until);
+  }
+  if(call)
+  {
+    list.push_back(call->frame.return_sentinel);
+  }
+  return list;
+}
+
+auto machine::run_state::bound_reached(slice_request const& request) -> std::optional<slice_end>
+{
+  if(call and arch->pc() == call->frame.return_sentinel)
+  {
+    call->returned = true;
+    return slice_end{make_stop(stop_reason::returned, {}, std::nullopt)};
+  }
   if(request.budget_left and executed >= *request.budget_left)
   {
     return slice_end{make_stop(stop_reason::budget, {}, std::nullopt)};
@@ -535,10 +626,18 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   wall_countdown = wall_check_blocks;
   wall_expired   = false;
   wall_deadline  = std::chrono::steady_clock::now() + request.wall_budget;
-  set_exits(request.until ? std::vector<address>{*request.until} : std::vector<address>{});
+  set_exits(exit_list(request));
   for(;;)
   {
     drain_stale_code();
+    if(auto end = handle_requests())
+    {
+      return finish(request, std::move(*end));
+    }
+    if(auto end = dispatch_due(request))
+    {
+      return finish(request, std::move(*end));
+    }
     if(auto end = handle_requests())
     {
       return finish(request, std::move(*end));
@@ -547,9 +646,17 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, std::move(*end));
     }
-    if(auto const entry = owner.arch_->deliver_pending(); not entry.resumes())
+    if(auto const entry = arch->deliver_pending(); not entry.resumes())
     {
       return finish(request, stop_from(entry));
+    }
+    if(arch->idle())
+    {
+      if(auto end = idle_jump(request))
+      {
+        return finish(request, std::move(*end));
+      }
+      continue;
     }
     update_stepping(request);
     deadline           = std::min(next_deadline(request), owner.scheduler_.earliest());
@@ -562,11 +669,16 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       std::ignore = wall_expired_now();
     }
     rethrow_failure();
+    auto const resets_before = resets;
     if(auto end = handle_requests())
     {
       trap.reset();
       unmapped.reset();
       return finish(request, std::move(*end));
+    }
+    if(resets != resets_before)
+    {
+      continue;
     }
     if(auto end = trap_after(err))
     {

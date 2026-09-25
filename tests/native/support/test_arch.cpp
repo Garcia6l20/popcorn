@@ -2,7 +2,9 @@
 
 #include "upper_case.hpp"
 
+#include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/services.hpp>
 
 #include <reflex/enum.hpp>
@@ -18,6 +20,8 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <utility>
 
 namespace popcorn::testing
 {
@@ -48,6 +52,9 @@ constexpr std::uint32_t excp_exception_exit   = 8;
 constexpr std::uint32_t exception_base        = 16;
 constexpr std::uint32_t exc_return_thread_msp = 0xffff'fff9;
 constexpr std::uint32_t reset_lr              = 0xffff'ffff;
+constexpr std::uint32_t wfi_encoding          = 0xbf30;
+constexpr std::uint32_t wfi_wide_first        = 0xf3af;
+constexpr std::uint32_t wfi_wide_second       = 0x8003;
 
 auto cpu_model_of(core_desc const& core) -> int
 {
@@ -66,18 +73,36 @@ auto cpu_model_of(core_desc const& core) -> int
 
 auto on_wfi(uc_engine*, void* user) noexcept -> int
 {
-  static_cast<test_arch::state*>(user)->idle = true;
+  static_cast<test_arch*>(user)->wait_for_interrupt();
   return 0;
 }
 
-auto system_read(uc_engine*, std::uint64_t, unsigned size, void*) noexcept -> std::uint64_t
+auto system_read(uc_engine*, std::uint64_t offset, unsigned size, void* user) noexcept
+    -> std::uint64_t
 {
-  return size >= 4 ? test_arch::system_pattern
-                   : test_arch::system_pattern & ((1u << (size * 8)) - 1);
+  auto const word =
+      static_cast<test_arch const*>(user)->read_system(static_cast<std::uint32_t>(offset));
+  return size >= 4 ? word : word & ((1u << (size * 8)) - 1);
 }
 
-void system_write(uc_engine*, std::uint64_t, unsigned, std::uint64_t, void*) noexcept
-{}
+void system_write(
+    uc_engine*,
+    std::uint64_t offset,
+    unsigned,
+    std::uint64_t value,
+    void*         user) noexcept
+{
+  static_cast<test_arch*>(user)->write_system(
+      static_cast<std::uint32_t>(offset), static_cast<std::uint32_t>(value));
+}
+
+constexpr std::size_t argument_registers = 4;
+constexpr std::array  argument_ids{UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3};
+
+auto wide(popcorn::arch::value_kind kind) noexcept -> bool
+{
+  return kind == popcorn::arch::value_kind::i64 or kind == popcorn::arch::value_kind::f64;
+}
 
 void require(uc_err err, std::string_view what)
 {
@@ -106,7 +131,7 @@ void test_arch::attach(popcorn::arch::arch_context const& ctx)
   uc_hook wfi = 0;
   require(
       uc_hook_add(
-          ctx.engine, &wfi, UC_HOOK_INSN, reinterpret_cast<void*>(&on_wfi), &state_, 1, 0,
+          ctx.engine, &wfi, UC_HOOK_INSN, reinterpret_cast<void*>(&on_wfi), this, 1, 0,
           UC_ARM_INS_WFI),
       "adding the WFI hook, popcorn needs the pinned dev Unicorn");
   require(
@@ -138,6 +163,15 @@ void test_arch::reset(address reset_vector)
 
 auto test_arch::deliver_pending() -> popcorn::arch::trap_result
 {
+  if(state_.idle and (state_.pending_lines != 0 or not sleeping()))
+  {
+    state_.idle = false;
+    state_.wfi_at.reset();
+  }
+  if(state_.wfi_at == read(UC_ARM_REG_PC))
+  {
+    write(UC_ARM_REG_PC, pc() | 1);
+  }
   if(deliverable_now())
   {
     auto const source = static_cast<std::uint32_t>(std::countr_zero(state_.pending_lines));
@@ -188,17 +222,122 @@ auto test_arch::on_unmapped(address addr, popcorn::arch::memory_op op) -> popcor
   return popcorn::arch::trap_result::fault({.kind = fault_kind::unmapped, .fault_address = addr});
 }
 
-void test_arch::on_event(std::uint32_t, std::uint64_t)
-{}
+void test_arch::on_event(std::uint32_t kind, std::uint64_t payload)
+{
+  auto& events = context_->events;
+  if(kind == timer_event)
+  {
+    if(state_.timer_enabled and payload == timer_generation_)
+    {
+      ++timer_expiries;
+      set_irq_line(0, true);
+      arm_timer();
+    }
+    return;
+  }
+  event_log.push_back({.kind = kind, .payload = payload, .at = context_->clock.now()});
+  if(kind == chain_event)
+  {
+    std::ignore = events.schedule(context_->clock.now(), 1, payload + 1);
+  }
+}
+
+void test_arch::wait_for_interrupt()
+{
+  auto const at = read(UC_ARM_REG_PC);
+  if(is_exit(at))
+  {
+    return;
+  }
+  if(wfi_size(at) != 0)
+  {
+    state_.wfi_at = at;
+  }
+  else if(at >= 2 and wfi_size(at - 2) == 2)
+  {
+    state_.wfi_at = at - 2;
+  }
+  else if(at >= 4 and wfi_size(at - 4) == 4)
+  {
+    state_.wfi_at = at - 4;
+  }
+  else
+  {
+    return;
+  }
+  state_.idle = true;
+  context_->services.end_slice();
+}
+
+void test_arch::write_system(std::uint32_t offset, std::uint32_t value)
+{
+  switch(offset)
+  {
+    case reset_offset:
+      if(value == reset_key)
+      {
+        context_->services.request_reset(reset_kind::software);
+      }
+      break;
+    case timer_period_offset:
+      state_.timer_period = value;
+      break;
+    case timer_control_offset:
+      if((value & 1u) != 0 and not state_.timer_enabled and state_.timer_period != 0)
+      {
+        state_.timer_enabled = true;
+        state_.timer_start   = context_->clock.now().value;
+        ++timer_generation_;
+        std::ignore = context_->events.schedule(
+            icount{state_.timer_start + state_.timer_period}, timer_event, timer_generation_);
+      }
+      else if((value & 1u) == 0 and state_.timer_enabled)
+      {
+        state_.timer_enabled = false;
+        ++timer_generation_;
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+auto test_arch::read_system(std::uint32_t offset) const -> std::uint32_t
+{
+  switch(offset)
+  {
+    case timer_period_offset:
+      return state_.timer_period;
+    case timer_control_offset:
+      return state_.timer_enabled ? 1u : 0u;
+    default:
+      return system_pattern;
+  }
+}
 
 auto test_arch::idle() const -> bool
 {
-  return state_.idle;
+  return state_.idle and sleeping();
+}
+
+auto test_arch::sleeping() const -> bool
+{
+  auto const at = read(UC_ARM_REG_PC);
+  return state_.wfi_at
+     and (at == *state_.wfi_at or at == *state_.wfi_at + wfi_size(*state_.wfi_at));
+}
+
+void test_arch::arm_timer()
+{
+  auto const elapsed = context_->clock.now().value - state_.timer_start;
+  auto const next = state_.timer_start + state_.timer_period * (elapsed / state_.timer_period + 1);
+  std::ignore     = context_->events.schedule(icount{next}, timer_event, timer_generation_);
 }
 
 auto test_arch::pc() const -> address
 {
-  return read(UC_ARM_REG_PC);
+  auto const at = read(UC_ARM_REG_PC);
+  return state_.wfi_at == at ? at + wfi_size(at) : at;
 }
 
 auto test_arch::resume_address() const -> address
@@ -211,19 +350,78 @@ auto test_arch::registers() const -> std::span<popcorn::arch::cpu_register const
   return core_registers;
 }
 
-void test_arch::prepare_call(popcorn::arch::call_frame const&)
+auto test_arch::arg_registers(popcorn::arch::call_frame const& frame) const
+    -> std::vector<std::pair<std::size_t, bool>>
 {
-  throw not_implemented("test_arch::prepare_call");
+  if(frame.abi != popcorn::arch::float_abi::soft)
+  {
+    throw config_error("image", 0, "abi", "soft, the test arch has no FPU convention");
+  }
+  std::vector<std::pair<std::size_t, bool>> placed;
+  std::size_t                               next = 0;
+  for(auto const& arg : frame.args)
+  {
+    auto const is_wide = wide(arg.kind);
+    if(is_wide)
+    {
+      next += next % 2;
+    }
+    if(next + (is_wide ? 2 : 1) > argument_registers)
+    {
+      throw config_error("call", 0, "args", "arguments that fit r0-r3 on the test arch");
+    }
+    placed.emplace_back(next, is_wide);
+    next += is_wide ? 2 : 1;
+  }
+  return placed;
 }
 
-auto test_arch::call_result(popcorn::arch::call_frame const&) const -> std::uint64_t
+void test_arch::place_args(popcorn::arch::call_frame const& frame)
 {
-  throw not_implemented("test_arch::call_result");
+  for(auto const [slot, arg] : std::views::zip(arg_registers(frame), frame.args))
+  {
+    write(argument_ids[slot.first], static_cast<std::uint32_t>(arg.bits));
+    if(slot.second)
+    {
+      write(argument_ids[slot.first + 1], static_cast<std::uint32_t>(arg.bits >> 32));
+    }
+  }
 }
 
-void test_arch::read_args(popcorn::arch::call_frame&) const
+void test_arch::prepare_call(popcorn::arch::call_frame const& frame)
 {
-  throw not_implemented("test_arch::read_args");
+  state_.idle = false;
+  state_.wfi_at.reset();
+  if(not frame.privileged)
+  {
+    throw config_error("call", 0, "privileged", "privileged calls on the test arch");
+  }
+  place_args(frame);
+  if(frame.stack)
+  {
+    write(UC_ARM_REG_SP, *frame.stack);
+  }
+  write(UC_ARM_REG_PRIMASK, frame.interrupts ? 0u : 1u);
+  write(UC_ARM_REG_LR, frame.return_sentinel | 1);
+  write(UC_ARM_REG_PC, frame.entry | 1);
+}
+
+auto test_arch::call_result(popcorn::arch::call_frame const& frame) const -> std::uint64_t
+{
+  auto const low = std::uint64_t{read(UC_ARM_REG_R0)};
+  return wide(frame.returns) ? low | std::uint64_t{read(UC_ARM_REG_R1)} << 32 : low;
+}
+
+void test_arch::read_args(popcorn::arch::call_frame& frame) const
+{
+  for(auto&& [slot, arg] : std::views::zip(arg_registers(frame), frame.args))
+  {
+    arg.bits = read(argument_ids[slot.first]);
+    if(slot.second)
+    {
+      arg.bits |= std::uint64_t{read(argument_ids[slot.first + 1])} << 32;
+    }
+  }
 }
 
 auto test_arch::return_address() const -> address
@@ -232,10 +430,22 @@ auto test_arch::return_address() const -> address
 }
 
 void test_arch::return_to_caller(
-    std::optional<popcorn::arch::call_arg> const&,
-    popcorn::arch::float_abi)
+    std::optional<popcorn::arch::call_arg> const& value,
+    popcorn::arch::float_abi                      abi)
 {
-  throw not_implemented("test_arch::return_to_caller");
+  if(abi != popcorn::arch::float_abi::soft)
+  {
+    throw config_error("image", 0, "abi", "soft, the test arch has no FPU convention");
+  }
+  if(value)
+  {
+    write(UC_ARM_REG_R0, static_cast<std::uint32_t>(value->bits));
+    if(wide(value->kind))
+    {
+      write(UC_ARM_REG_R1, static_cast<std::uint32_t>(value->bits >> 32));
+    }
+  }
+  write(UC_ARM_REG_PC, read(UC_ARM_REG_LR) | 1);
 }
 
 void test_arch::save(std::vector<std::byte>& out) const
@@ -248,12 +458,22 @@ void test_arch::save(std::vector<std::byte>& out) const
 void test_arch::load(std::span<std::byte const> in)
 {
   state_ = reflex::serde::bson::deserializer{in}.load<state>();
-  set_pending(false);
+  set_pending(state_.pending_lines != 0);
+  ++timer_generation_;
+  if(state_.timer_enabled)
+  {
+    arm_timer();
+  }
 }
 
 auto test_arch::attached_engine() const noexcept -> uc_struct*
 {
   return context_ ? context_->engine : nullptr;
+}
+
+auto test_arch::attached_clock() const noexcept -> core::clock&
+{
+  return context_->clock;
 }
 
 auto test_arch::attached_events() const noexcept -> core::event_port&
@@ -264,6 +484,35 @@ auto test_arch::attached_events() const noexcept -> core::event_port&
 auto test_arch::attached_services() const noexcept -> core::machine_services&
 {
   return context_->services;
+}
+
+auto test_arch::wfi_size(address at) const -> std::uint32_t
+{
+  auto const first = context_->services.read(at, 2, initiator::debugger);
+  if(first == wfi_encoding)
+  {
+    return 2;
+  }
+  if(first
+     == wfi_wide_first
+     and context_->services.read(at + 2, 2, initiator::debugger)
+     == wfi_wide_second)
+  {
+    return 4;
+  }
+  return 0;
+}
+
+auto test_arch::is_exit(address at) const -> bool
+{
+  std::size_t count = 0;
+  require(uc_ctl_get_exits_cnt(context_->engine, &count), "reading the exit count");
+  std::vector<std::uint64_t> exits(count);
+  if(count != 0)
+  {
+    require(uc_ctl_get_exits(context_->engine, exits.data(), count), "reading the exits");
+  }
+  return std::ranges::contains(exits, std::uint64_t{at});
 }
 
 auto test_arch::last_refused() const noexcept -> std::optional<popcorn::arch::memory_op>

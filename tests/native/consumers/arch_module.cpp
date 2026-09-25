@@ -217,7 +217,8 @@ TEST_CASE("arch module consumer implements arch through its context")
   auto const slice = target.run_slice({.max_instructions = popcorn::icount{1000}});
   REQUIRE(slice.stopped.has_value());
   CHECK(slice.stopped->reason == popcorn::stop_reason::fault);
-  CHECK_THROWS_AS(
-      target.call({.entry = 0x0800'0100, .return_sentinel = 0xffff'fffe}, popcorn::icount{100}),
-      popcorn::not_implemented);
+  auto const called =
+      target.call({.entry = 0x0800'0100, .return_sentinel = 0xffff'fffe}, popcorn::icount{100});
+  CHECK(called.stopped.reason == popcorn::stop_reason::fault);
+  CHECK_FALSE(target.in_call());
 }

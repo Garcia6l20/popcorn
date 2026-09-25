@@ -51,7 +51,7 @@ test_smoke_fw = add_doctest(
 if smoke_firmware is not None:
     test_smoke_fw.depends(smoke_firmware)
 
-core_firmware = {name: firmware("core", name) for name in ("basic", "run", "alu")}
+core_firmware = {name: firmware("core", name) for name in ("basic", "run", "alu", "idle", "calls")}
 m33_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
     "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
@@ -68,6 +68,10 @@ if basic_firmware is not None:
 test_run_loop = add_doctest(
     "core-run-loop", [here / "test_run_loop.cpp"], [test_support, core], env=m33_env
 )
+test_events = add_doctest(
+    "core-events", [here / "test_events_idle.cpp"], [test_support, core], env=m33_env
+)
+test_calls = add_doctest("core-calls", [here / "test_calls.cpp"], [test_support, core], env=m33_env)
 bench_run_loop = project.Program(
     "bench-run-loop", project.default_environment, sources=[here / "bench_run_loop.cpp"]
 )
@@ -80,4 +84,6 @@ alias_bare_name(bench_run_loop)
 for _, target in core_firmware.values():
     if target is not None:
         test_run_loop.depends(target)
+        test_events.depends(target)
+        test_calls.depends(target)
         bench_run_loop.depends(target)

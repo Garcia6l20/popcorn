@@ -6,33 +6,6 @@
 
 namespace popcorn::core
 {
-void machine::begin_call(arch::call_frame const&)
-{
-  require_stopped(*this);
-  if(in_call())
-  {
-    throw machine_busy("a call is already in progress");
-  }
-  throw not_implemented("machine::begin_call");
-}
-
-auto machine::end_call() -> std::uint64_t
-{
-  require_stopped(*this);
-  throw not_implemented("machine::end_call");
-}
-
-auto machine::in_call() const noexcept -> bool
-{
-  return run_->in_call;
-}
-
-auto machine::call(arch::call_frame const& frame, icount) -> call_result
-{
-  begin_call(frame);
-  throw not_implemented("machine::call");
-}
-
 auto machine::snapshot() const -> core::snapshot
 {
   require_stopped(*this);

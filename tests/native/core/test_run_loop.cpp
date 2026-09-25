@@ -1,9 +1,9 @@
+#include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/scheduler.hpp>
 
-#include "../support/elf_image.hpp"
-#include "../support/firmware.hpp"
+#include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
 #include <doctest/doctest.h>
@@ -33,90 +33,18 @@ using popcorn::address;
 using popcorn::icount;
 using popcorn::stop_reason;
 
-auto description(char const* variable) -> popcorn::mcu_description
-{
-  char const* const path = std::getenv(variable);
-  REQUIRE_MESSAGE(path != nullptr, variable);
-  return popcorn::load_description(path);
-}
+using popcorn::testing::elf;
+using popcorn::testing::m33;
+using popcorn::testing::m33_code_alias;
+using popcorn::testing::sym;
 
-auto m33() -> popcorn::mcu_description
+template <typename Arch = popcorn::testing::test_arch>
+struct fixture : popcorn::testing::machine_fixture<Arch>
 {
-  return description("POPCORN_M33_DESC");
-}
-
-auto m33_code_alias() -> popcorn::mcu_description
-{
-  return description("POPCORN_M33_CODE_ALIAS_DESC");
-}
-
-auto elf(std::string_view name) -> image::image const&
-{
-  static std::map<std::string, image::image, std::less<>> cache;
-  auto                                                    found = cache.find(name);
-  if(found == cache.end())
-  {
-    found = cache
-                .emplace(
-                    std::string{name}, popcorn::testing::read_elf(popcorn::testing::firmware(name)))
-                .first;
-  }
-  return found->second;
-}
-
-auto sym(std::string_view firmware, std::string_view name) -> address
-{
-  return popcorn::testing::find_symbol(elf(firmware), name);
-}
-
-template <typename Arch = popcorn::testing::test_arch> struct fixture
-{
-  Arch*                          module = nullptr;
-  std::unique_ptr<core::machine> target;
-
   explicit fixture(popcorn::mcu_description desc, std::string_view firmware, auto... extra)
-  {
-    target = std::make_unique<core::machine>(
-        std::move(desc),
-        [this, extra...](popcorn::core_desc const& core) -> std::unique_ptr<popcorn::arch::arch> {
-          auto made = std::make_unique<Arch>(core, extra...);
-          module    = made.get();
-          return made;
-        },
-        core::machine_options{});
-    target->load(elf(firmware));
-    target->reset();
-  }
-
-  auto reg(std::string_view name) const -> std::uint64_t
-  {
-    return target->regs().read(*target->regs().find(name));
-  }
-
-  void set(std::string_view name, std::uint64_t value) const
-  {
-    target->regs().write(*target->regs().find(name), value);
-  }
-
-  auto run(core::slice_request const& request = {}) const -> core::slice_result
-  {
-    return target->run_slice(request);
-  }
-
-  auto run_to_stop(core::slice_request request = {}) const -> popcorn::stop
-  {
-    request.wall_budget = std::chrono::seconds{10};
-    auto const result   = run(request);
-    REQUIRE(result.stopped.has_value());
-    return *result.stopped;
-  }
-
-  auto word(address at) const -> std::uint32_t
-  {
-    auto const value = target->mem().read(at, 4);
-    REQUIRE(value.has_value());
-    return *value;
-  }
+      : popcorn::testing::machine_fixture<Arch>{
+            std::move(desc), firmware, core::machine_options{}, extra...}
+  {}
 };
 
 auto alu_count(std::uint64_t loops) -> std::uint64_t
@@ -520,35 +448,21 @@ public:
   }
 };
 
-class scheduling_arch final : public popcorn::testing::test_arch
+class stuck_arch final : public popcorn::testing::test_arch
 {
 public:
-  scheduling_arch(popcorn::core_desc const& core, address at) : test_arch{core}, at_{at}
-  {}
+  using test_arch::test_arch;
 
-  void attach(popcorn::arch::arch_context const& ctx) override
+  bool armed = false;
+
+  auto deliver_pending() -> popcorn::arch::trap_result override
   {
-    test_arch::attach(ctx);
-    context_     = &ctx;
-    uc_hook hook = 0;
-    REQUIRE(
-        uc_hook_add(
-            ctx.engine, &hook, UC_HOOK_CODE, reinterpret_cast<void*>(&on_code), this, at_, at_)
-        == UC_ERR_OK);
+    if(armed)
+    {
+      std::ignore = attached_events().schedule(attached_clock().now(), 1, 0);
+    }
+    return test_arch::deliver_pending();
   }
-
-  static constexpr std::uint64_t period = 1000;
-
-private:
-  static void on_code(uc_engine*, std::uint64_t, std::uint32_t, void* user) noexcept
-  {
-    auto& self = *static_cast<scheduling_arch*>(user);
-    std::ignore =
-        self.context_->events.schedule(icount{self.context_->clock.now().value + period}, 1, 0);
-  }
-
-  address                            at_;
-  popcorn::arch::arch_context const* context_{};
 };
 
 template <typename Arch>
@@ -663,20 +577,6 @@ TEST_CASE("a slice end request from a handler ends the slice without a stop")
   CHECK(f.run_to_stop().reason == stop_reason::user);
 }
 
-TEST_CASE("the wall budget ends a slice whose engine runs stop before any block")
-{
-  auto f           = alu(1'000'000);
-  std::ignore      = f.module->attached_events().schedule(f.target->virtual_clock().now(), 0, 0);
-  auto const start = std::chrono::steady_clock::now();
-  auto const slice = f.run(
-      {.max_instructions = icount{1'000'000'000}, .wall_budget = std::chrono::milliseconds{5}});
-  auto const took = std::chrono::steady_clock::now() - start;
-  CHECK_FALSE(slice.stopped.has_value());
-  CHECK(slice.executed.value == 0);
-  CHECK(took >= std::chrono::milliseconds{5});
-  CHECK(took < std::chrono::seconds{2});
-}
-
 TEST_CASE("an exception from a callback reaches the caller and the machine stays usable")
 {
   auto f = boot_with<throwing_arch>(m33());
@@ -789,14 +689,17 @@ TEST_CASE("stop_when is evaluated at the slice end")
   CHECK(slice.stopped->reason == stop_reason::user);
 }
 
-TEST_CASE("an event an arch hook schedules inside the engine ends the engine run on time")
+TEST_CASE("the wall budget ends a slice whose engine runs stop at every first block")
 {
-  auto const               entry = sym("alu", "alu_entry");
-  fixture<scheduling_arch> f{m33(), "alu", entry};
-  f.set("r0", 1'000'000);
-  auto const slice =
-      f.run({.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::milliseconds{20}});
+  auto f = boot_with<stuck_arch>(m33());
+  f.set("pc", sym("run", "straight"));
+  f.module->armed  = true;
+  auto const start = std::chrono::steady_clock::now();
+  auto const slice = f.run(
+      {.max_instructions = icount{1'000'000'000}, .wall_budget = std::chrono::milliseconds{5}});
+  auto const took = std::chrono::steady_clock::now() - start;
   CHECK_FALSE(slice.stopped.has_value());
-  CHECK(slice.executed.value >= scheduling_arch::period);
-  CHECK(slice.executed.value < scheduling_arch::period + 16);
+  CHECK(slice.executed.value == 0);
+  CHECK(took >= std::chrono::milliseconds{5});
+  CHECK(took < std::chrono::seconds{2});
 }

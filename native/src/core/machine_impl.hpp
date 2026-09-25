@@ -63,6 +63,19 @@ struct unmapped_access
   arch::memory_op op{};
 };
 
+/** @brief Caller context saved by machine::begin_call(). */
+struct saved_call
+{
+  /** @brief Frame of the call. */
+  arch::call_frame frame{};
+  /** @brief Values of `arch::registers()`, in its order. */
+  std::vector<std::uint64_t> registers{};
+  /** @brief Bytes of `arch::save()`. */
+  std::vector<std::byte> arch_state{};
+  /** @brief Whether a slice of the call reached the return sentinel. */
+  bool returned{};
+};
+
 /** @brief How a slice ends: with a stop, or empty when only a yield bound was reached. */
 struct slice_end
 {
@@ -103,8 +116,10 @@ struct machine::run_state
   bool running = false;
   /** @brief Whether a handler of the running slice is on the stack. */
   bool in_handler = false;
-  /** @brief Whether a call begun by begin_call() is not ended. */
-  bool in_call = false;
+  /** @brief Caller context of the call in progress. */
+  std::optional<saved_call> call{};
+  /** @brief Resets done so far, which tells the loop a reset superseded an engine result. */
+  std::uint64_t resets{};
   /** @brief Whether a failed restore left the machine unusable. */
   bool invalid = false;
   /** @brief The one flag the block hook tests: a request, a failure or stale code is pending. */
@@ -170,6 +185,12 @@ struct machine::run_state
    */
   void code_changed(host_buffer const& buffer, std::size_t first, std::size_t last);
 
+  /**
+   * @brief Resets the machine as @p kind in the W5a order, and drops the per-run state of the
+   *        execution the reset discards: refused access, trap, stepping.
+   */
+  void reset_machine(reset_kind kind);
+
   /** @brief Removes the translated code of every stale range, then clears the flag when nothing
    * else is pending. */
   void drain_stale_code();
@@ -232,7 +253,10 @@ struct machine::run_state
   void               remove_step_hook() noexcept;
   [[nodiscard]] auto next_deadline(slice_request const& request) const -> icount;
   [[nodiscard]] auto handle_requests() -> std::optional<slice_end>;
-  [[nodiscard]] auto bound_reached(slice_request const& request) const -> std::optional<slice_end>;
+  [[nodiscard]] auto dispatch_due(slice_request const& request) -> std::optional<slice_end>;
+  [[nodiscard]] auto idle_jump(slice_request const& request) -> std::optional<slice_end>;
+  [[nodiscard]] auto exit_list(slice_request const& request) const -> std::vector<address>;
+  [[nodiscard]] auto bound_reached(slice_request const& request) -> std::optional<slice_end>;
   [[nodiscard]] auto trap_after(uc_err err) -> std::optional<slice_end>;
   [[nodiscard]] auto engine_run() -> uc_err;
   void               rethrow_failure();

@@ -181,19 +181,14 @@ auto machine::loaded_images() const noexcept -> std::span<popcorn::image::image 
   return images_;
 }
 
-void machine::reset(reset_kind)
+void machine::reset(reset_kind kind)
 {
   require_stopped(*this);
-  scheduler_.restore({}, 0);
-  auto fresh         = clock_driver_.state();
-  fresh.now          = {};
-  fresh.epoch_icount = {};
-  fresh.epoch_time   = {};
-  fresh.core_hz      = core_clock_hz(description_, options_);
-  fresh.cpi          = options_.cpi;
-  clock_driver_.restore(fresh);
-  arch_->reset(run_->reset_vector);
-  trace_.rebase(icount{0});
+  if(in_call())
+  {
+    throw machine_busy("a reset would lose the frame of the call in progress");
+  }
+  run_->reset_machine(kind);
 }
 
 auto machine::mem() noexcept -> memory_view

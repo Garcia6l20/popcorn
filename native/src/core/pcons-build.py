@@ -11,6 +11,7 @@ sources = [
         "services.cpp",
         "trace.cpp",
         "snapshot.cpp",
+        "calls.cpp",
         "engine.cpp",
         "hooks.cpp",
         "machine.cpp",
