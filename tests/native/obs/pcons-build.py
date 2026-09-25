@@ -85,3 +85,19 @@ test_drcov = add_doctest(
 )
 if lines_firmware is not None:
     test_drcov.depends(lines_firmware)
+
+periph_elf, periph_firmware = firmware("core", "periph")
+test_pctr = add_doctest(
+    "obs-pctr",
+    [here / "test_pctr.cpp"],
+    [obs, test_support, core],
+    env={
+        "POPCORN_M33_DESC": str(core_data / "m33.json"),
+        "POPCORN_FW_PERIPH": str(periph_elf),
+        "POPCORN_FW_ALU": str(tb_firmware[("core", "alu")][0]),
+        "POPCORN_OBS_SCRATCH": str(build_dir / "test-obs-scratch"),
+    },
+)
+for target in (periph_firmware, tb_firmware[("core", "alu")][1]):
+    if target is not None:
+        test_pctr.depends(target)

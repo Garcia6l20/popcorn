@@ -3,6 +3,9 @@
 #include <popcorn/image/image.hpp>
 #include <popcorn/obs/coverage.hpp>
 #include <popcorn/obs/errors.hpp>
+#include <popcorn/obs/pctr.hpp>
+
+#include <reflex/enum.hpp>
 
 #include <reflex/py.hpp>
 
@@ -14,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <meta>
 #include <ranges>
 #include <span>
 #include <string>
@@ -75,6 +79,42 @@ auto rows(coverage_set const& set) -> std::vector<group_row>
            };
          })
        | std::ranges::to<std::vector>();
+}
+
+using record_row = std::tuple<
+    std::uint8_t,
+    std::uint8_t,
+    std::uint16_t,
+    std::uint32_t,
+    std::uint32_t,
+    std::uint32_t,
+    std::uint32_t>;
+
+auto record_of(record_row const& row) -> core::trace_record
+{
+  auto const& [kind, flags, aux, dt, first, second, third] = row;
+  auto const valid                                         = [kind] {
+    template for(constexpr auto e :
+                 std::define_static_array(std::meta::enumerators_of(^^core::trace_kind)))
+    {
+      if(kind == std::to_underlying([:e:]) and [:e:] != core::trace_kind::str)
+      {
+        return true;
+      }
+    }
+    return false;
+  }();
+  if(not valid)
+  {
+    throw format_error("", 0, "a trace record kind other than str");
+  }
+  return {
+      .kind    = static_cast<core::trace_kind>(kind),
+      .flags   = flags,
+      .aux     = aux,
+      .dt      = dt,
+      .payload = {first, second, third},
+  };
 }
 
 auto set_of(std::vector<group_row> const& groups) -> coverage_set
@@ -181,6 +221,42 @@ auto set_of(std::vector<group_row> const& groups) -> coverage_set
     file = drcov(decode_pcov(copy));
   }
   return {detail::to_bytes(file.bytes), file.dropped};
+}
+
+[[= py::doc{"Write trace records (kind, flags, aux, dt, p0, p1, p2), dt already stamped, to a "
+            ".pctr file with register and symbol names by id. Returns the file size. For tests "
+            "and synthetic traces."}]] auto
+    write_pctr(
+        std::string const&                     path,
+        std::uint64_t                          origin,
+        std::vector<detail::record_row> const& records,
+        std::vector<std::string> const&        register_names,
+        std::vector<std::string> const&        symbol_names) -> std::uint64_t
+{
+  auto const converted =
+      records | std::views::transform(detail::record_of) | std::ranges::to<std::vector>();
+  nb::gil_scoped_release released;
+  pctr_writer            writer{
+      path, icount{origin},
+       {.registers = register_names, .symbols = symbol_names}
+  };
+  writer.write(converted);
+  writer.close();
+  return writer.bytes();
+}
+
+[[= py::doc{"Trace record kinds of a .pctr file: (name, value, payload words)."}]] auto pctr_kinds()
+    -> std::vector<std::tuple<std::string, std::uint8_t, std::uint8_t>>
+{
+  std::vector<std::tuple<std::string, std::uint8_t, std::uint8_t>> kinds;
+  template for(constexpr auto e :
+               std::define_static_array(std::meta::enumerators_of(^^core::trace_kind)))
+  {
+    kinds.emplace_back(
+        std::string{reflex::enum_value_name([:e:])}, std::to_underlying([:e:]),
+        static_cast<std::uint8_t>(core::pctr_payload_words([:e:])));
+  }
+  return kinds;
 }
 
 [[= py::doc{"Image reference of an ELF: (kind, absolute path, digest, base, end)."}]] auto
