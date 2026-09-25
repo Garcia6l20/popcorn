@@ -84,11 +84,38 @@ TEST_CASE("snapshot data is plain comparable data")
   CHECK(copy != data);
 }
 
-TEST_CASE("the saved form is a stub")
+TEST_CASE("the saved form round-trips to an equal value")
 {
-  CHECK_THROWS_AS(std::ignore = popcorn::core::encode_snapshot(filled()), popcorn::not_implemented);
-  std::vector<std::byte> const bytes{std::byte{5}, std::byte{0}, std::byte{0}, std::byte{0}};
-  CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::not_implemented);
+  auto const data  = filled();
+  auto const bytes = core::encode_snapshot(data);
+  auto const back  = core::decode_snapshot(bytes);
+  CHECK(back == data);
+  CHECK(back.memory == data.memory);
+  CHECK(back.registers == data.registers);
+  CHECK(back.arch == data.arch);
+  CHECK(back.peripherals == data.peripherals);
+  CHECK(back.models == data.models);
+  CHECK(back.clock == data.clock);
+  CHECK(back.events == data.events);
+}
+
+TEST_CASE("a corrupted saved form is a config_error")
+{
+  std::vector<std::byte> const truncated{std::byte{5}, std::byte{0}, std::byte{0}, std::byte{0}};
+  CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(truncated), popcorn::config_error);
+
+  auto bytes = core::encode_snapshot(filled());
+  CHECK(bytes.size() > 4);
+  bytes[bytes.size() - 1] = std::byte{0xff};
+  CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::config_error);
+}
+
+TEST_CASE("a saved form with a future format is a config_error")
+{
+  auto data        = filled();
+  data.format      = core::snapshot_format_version + 1;
+  auto const bytes = core::encode_snapshot(data);
+  CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::config_error);
 }
 
 TEST_CASE("a snapshot read back from bytes has no engine context")

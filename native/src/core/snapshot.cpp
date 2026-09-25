@@ -2,6 +2,10 @@
 
 #include <popcorn/core/errors.hpp>
 
+#include <reflex/serde/bson.hpp>
+
+#include <format>
+#include <stdexcept>
 #include <utility>
 
 namespace popcorn::core
@@ -34,13 +38,39 @@ auto snapshot::machine_id() const noexcept -> std::uint64_t
   return machine_id_;
 }
 
-auto encode_snapshot(snapshot_data const&) -> std::vector<std::byte>
+auto encode_snapshot(snapshot_data const& data) -> std::vector<std::byte>
 {
-  throw not_implemented("encode_snapshot");
+  std::vector<std::byte> out;
+  reflex::serde::bson::serializer{out}.dump(data);
+  return out;
 }
 
-auto decode_snapshot(std::span<std::byte const>) -> snapshot_data
+auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data
 {
-  throw not_implemented("decode_snapshot");
+  snapshot_data data;
+  try
+  {
+    data = reflex::serde::bson::deserializer{bytes}.load<snapshot_data>();
+  }
+  catch(std::runtime_error const& failure)
+  {
+    throw config_error(
+        "snapshot", 0, "bytes",
+        std::format("a snapshot matching snapshot_data: {}", failure.what()));
+  }
+  catch(std::out_of_range const& failure)
+  {
+    throw config_error(
+        "snapshot", 0, "bytes",
+        std::format("a snapshot matching snapshot_data: {}", failure.what()));
+  }
+  if(data.format != snapshot_format_version)
+  {
+    throw config_error(
+        "snapshot", 0, "format",
+        std::format(
+            "snapshot_format_version {}, bytes have {}", snapshot_format_version, data.format));
+  }
+  return data;
 }
 }

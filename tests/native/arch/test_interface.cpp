@@ -33,16 +33,16 @@ class toy_arch final : public popcorn::arch::arch
 public:
   struct state
   {
-    std::uint32_t              pending{};
-    std::uint32_t              enabled{};
-    std::uint32_t              active{};
-    bool                       masked{};
-    bool                       sleeping{};
-    std::uint32_t              pc{};
-    std::uint32_t              handler{};
-    std::vector<std::uint64_t> args = std::vector<std::uint64_t>(4);
-    std::uint32_t              timer_fires{};
-    std::uint32_t              link{};
+    std::uint32_t                pending{};
+    std::uint32_t                enabled{};
+    std::uint32_t                active{};
+    bool                         masked{};
+    bool                         sleeping{};
+    std::uint32_t                pc{};
+    std::uint32_t                handler{};
+    std::array<std::uint64_t, 4> args{};
+    std::uint32_t                timer_fires{};
+    std::uint32_t                link{};
   };
 
   static constexpr std::uint32_t timer_kind   = 1;
