@@ -73,3 +73,15 @@ test_pcov = add_doctest(
 )
 if branches_firmware is not None:
     test_pcov.depends(branches_firmware)
+
+test_drcov = add_doctest(
+    "obs-drcov",
+    [here / "test_drcov.cpp"],
+    [obs, test_support, core],
+    env={
+        "POPCORN_M33_DESC": str(core_data / "m33.json"),
+        "POPCORN_FW_LINES": str(lines_elf),
+    },
+)
+if lines_firmware is not None:
+    test_drcov.depends(lines_firmware)

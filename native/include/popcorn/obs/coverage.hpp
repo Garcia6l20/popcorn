@@ -5,6 +5,7 @@
 
 #include <reflex/enum.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -231,4 +232,39 @@ auto merge_into(std::filesystem::path const& path, coverage_set const& set) -> c
  * @throws image_error when an ELF cannot be loaded.
  */
 auto load_images(coverage_set const& set) -> std::vector<std::vector<image::image>>;
+
+/** @brief A drcov file and what it left out. */
+struct drcov_file
+{
+  /** @brief The file bytes. */
+  std::vector<std::byte> bytes{};
+  /** @brief Blocks with hits outside every module's executable extent, not in the file. */
+  std::uint64_t dropped{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(drcov_file const&, drcov_file const&) -> bool = default;
+};
+
+/**
+ * @brief drcov version 2 file of a coverage set, for Lighthouse and other drcov readers.
+ *
+ * One module per image of every group, in group order then load order, ids from 0, its extent
+ * the image's executable segments: the base is the lowest executable segment's start, not the
+ * start of the whole mapping, so offsets count from the first executable byte. The path column is
+ * the ELF path, `raw-` and the first 12 hex digits of the digest for a raw image. Entry, checksum
+ * and timestamp are 0. A block goes to the last image of its group whose extent holds its start,
+ * and one BB entry `{u32 offset from the module base, u16 size, u16 module id}` is written per
+ * module, start and size, sorted, whatever its hits: drcov has no counts. A block in no module,
+ * such as code run from RAM, is left out and counted.
+ *
+ * @param set Coverage, canonical: every block sized 1 to 1024 bytes with hits.
+ * @return The file and the count of blocks left out.
+ * @throws format_error when there are more than 65536 modules.
+ */
+auto drcov(coverage_set const& set) -> drcov_file
+    pre(std::ranges::all_of(set.groups, [](coverage_group const& group) {
+      return std::ranges::all_of(group.blocks, [](block_hit const& block) {
+        return block.size > 0 and block.size <= 1024 and block.hits > 0;
+      });
+    }));
 }

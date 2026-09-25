@@ -171,6 +171,18 @@ auto set_of(std::vector<group_row> const& groups) -> coverage_set
   return text;
 }
 
+[[= py::doc{"drcov version 2 bytes of a .pcov file, and the count of blocks left out."}]] auto
+    drcov_bytes(nb::bytes const& pcov) -> std::tuple<nb::bytes, std::uint64_t>
+{
+  auto const copy = detail::copy(pcov);
+  drcov_file file;
+  {
+    nb::gil_scoped_release released;
+    file = drcov(decode_pcov(copy));
+  }
+  return {detail::to_bytes(file.bytes), file.dropped};
+}
+
 [[= py::doc{"Image reference of an ELF: (kind, absolute path, digest, base, end)."}]] auto
     image_ref_of(std::string const& path) -> detail::image_row
 {

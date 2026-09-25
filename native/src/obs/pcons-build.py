@@ -16,6 +16,7 @@ sources = [
     here / "lcov.cpp",
     here / "pcov.cpp",
     here / "refs.cpp",
+    here / "drcov.cpp",
 ]
 popcorn_obs = project.StaticLibrary("popcorn_obs", project.default_environment, sources=sources)
 popcorn_obs.link(core)

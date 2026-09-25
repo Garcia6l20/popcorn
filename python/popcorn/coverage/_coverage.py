@@ -198,6 +198,19 @@ class Coverage:
         """
         Path(path).write_text(_call(_obs.lcov_text, self._data, branches, test_name))
 
+    def export_drcov(self, path: PathLike) -> int:
+        """Writes a drcov version 2 file for Lighthouse and other drcov readers.
+
+        One module per image. drcov has no counts: every block that ran is listed once per
+        module.
+
+        Returns:
+            How many blocks were left out, outside every image's executable extent.
+        """
+        data, dropped = _call(_obs.drcov_bytes, self._data)
+        Path(path).write_bytes(data)
+        return dropped
+
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Coverage) and self._data == other._data
 

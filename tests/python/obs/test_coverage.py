@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import random
+import struct
 from pathlib import Path
 
 import pytest
+from popcorn import _obs
 from popcorn.coverage import (
     BlockHit,
     CodeRange,
@@ -192,3 +194,50 @@ def test_merge_session_ignores_saves_in_progress(tmp_path: Path) -> None:
     coverage.save(worker_path(tmp_path, "gw0"))
     (tmp_path / "gw1.pcov.tmp.1234").write_bytes(b"half")
     assert merge_session(tmp_path, tmp_path / "session.info") == coverage
+
+
+def read_drcov(path: Path) -> tuple[list[str], list[tuple[int, int, int]]]:
+    data = path.read_bytes()
+    lines: list[str] = []
+    at = 0
+    while not lines or not lines[-1].startswith("BB Table:"):
+        end = data.index(b"\n", at)
+        lines.append(data[at:end].decode())
+        at = end + 1
+    rest = data[at:]
+    assert len(rest) % 8 == 0
+    return lines, [struct.unpack_from("<IHH", rest, offset) for offset in range(0, len(rest), 8)]
+
+
+def test_drcov_of_the_lines_firmware(tmp_path: Path) -> None:
+    image = ImageRef.from_elf(LINES_ELF)
+    coverage = Coverage.from_parts(
+        [
+            CoverageGroup(
+                images=(image,),
+                ranges=(CodeRange("clamp", 0x0800_0008, 0x10),),
+                blocks=(
+                    BlockHit(0x0800_0008, 4, 2),
+                    BlockHit(0x0800_0014, 4, 1),
+                    BlockHit(0x2000_0000, 2, 1),
+                ),
+                edges=(),
+            )
+        ]
+    )
+    out = tmp_path / "cov.drcov"
+    assert coverage.export_drcov(out) == 1
+    header, entries = read_drcov(out)
+    assert header[:4] == [
+        "DRCOV VERSION: 2",
+        "DRCOV FLAVOR: drcov",
+        "Module Table: version 2, count 1",
+        "Columns: id, base, end, entry, checksum, timestamp, path",
+    ]
+    assert header[4] == (
+        f" 0, 0x{image.base:016x}, 0x{image.end:016x}, 0x0000000000000000, 0x00000000,"
+        f" 0x00000000, {image.path}"
+    )
+    assert header[5] == "BB Table: 2 bbs"
+    assert entries == [(0x0800_0008 - image.base, 4, 0), (0x0800_0014 - image.base, 4, 0)]
+    assert out.read_bytes() == _obs.drcov_bytes(coverage.to_bytes())[0]
