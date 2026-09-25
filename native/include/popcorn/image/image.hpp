@@ -100,8 +100,8 @@ struct image
   /** @brief Entry point from the file header, empty when the file has none. */
   std::optional<address> entry{};
   /** @brief Floating-point calling convention: soft unless the ELF header flags set
-   * EF_ARM_ABI_FLOAT_HARD, then single or double from the `.ARM.attributes` section,
-   * double when it does not say. */
+   * EF_ARM_ABI_FLOAT_HARD, then hard_double for AAPCS-VFP whatever the FPU precision, or soft
+   * when `.ARM.attributes` sets Tag_ABI_VFP_args to the base AAPCS. */
   arch::float_abi abi{arch::float_abi::soft};
   /** @brief SHA-256 of the loadable content, lower-case hex, what a saved snapshot checks. */
   std::string digest{};
