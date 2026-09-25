@@ -210,10 +210,13 @@ void machine::run_state::on_block(
     std::uint32_t size,
     void*         user) noexcept
 {
-  auto& run = *static_cast<run_state*>(user);
+  auto&      run = *static_cast<run_state*>(user);
+  auto const now = run.owner.clock_.now();
   if(run.stop_flag
-     or run.owner.clock_.now()
+     or now
      >= run.deadline
+     or now
+     >= run.owner.scheduler_.earliest()
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {

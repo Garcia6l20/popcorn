@@ -520,6 +520,37 @@ public:
   }
 };
 
+class scheduling_arch final : public popcorn::testing::test_arch
+{
+public:
+  scheduling_arch(popcorn::core_desc const& core, address at) : test_arch{core}, at_{at}
+  {}
+
+  void attach(popcorn::arch::arch_context const& ctx) override
+  {
+    test_arch::attach(ctx);
+    context_     = &ctx;
+    uc_hook hook = 0;
+    REQUIRE(
+        uc_hook_add(
+            ctx.engine, &hook, UC_HOOK_CODE, reinterpret_cast<void*>(&on_code), this, at_, at_)
+        == UC_ERR_OK);
+  }
+
+  static constexpr std::uint64_t period = 1000;
+
+private:
+  static void on_code(uc_engine*, std::uint64_t, std::uint32_t, void* user) noexcept
+  {
+    auto& self = *static_cast<scheduling_arch*>(user);
+    std::ignore =
+        self.context_->events.schedule(icount{self.context_->clock.now().value + period}, 1, 0);
+  }
+
+  address                            at_;
+  popcorn::arch::arch_context const* context_{};
+};
+
 template <typename Arch>
 auto boot_with(popcorn::mcu_description desc, auto... extra) -> fixture<Arch>
 {
@@ -756,4 +787,16 @@ TEST_CASE("stop_when is evaluated at the slice end")
   CHECK(asked);
   REQUIRE(slice.stopped.has_value());
   CHECK(slice.stopped->reason == stop_reason::user);
+}
+
+TEST_CASE("an event an arch hook schedules inside the engine ends the engine run on time")
+{
+  auto const               entry = sym("alu", "alu_entry");
+  fixture<scheduling_arch> f{m33(), "alu", entry};
+  f.set("r0", 1'000'000);
+  auto const slice =
+      f.run({.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::milliseconds{20}});
+  CHECK_FALSE(slice.stopped.has_value());
+  CHECK(slice.executed.value >= scheduling_arch::period);
+  CHECK(slice.executed.value < scheduling_arch::period + 16);
 }

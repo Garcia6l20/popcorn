@@ -7,9 +7,9 @@ extern uint32_t _edata[];
 extern uint32_t _sbss[];
 extern uint32_t _ebss[];
 
-volatile uint32_t order_log[8];
-volatile uint32_t order_count;
-volatile uint32_t ram_results[2];
+volatile uint32_t                             order_log[8];
+volatile uint32_t                             order_count;
+volatile uint32_t                             ram_results[2];
 __attribute__((aligned(4))) volatile uint16_t ram_fn[2];
 
 static void log_order(uint32_t value)
