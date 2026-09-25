@@ -25,8 +25,9 @@ class hook_registry;
  *        no-op. Removing a hook changes the translated code of a running slice, so reset()
  *        refuses it while a slice runs, handlers included. Destruction and move assignment
  *        cannot refuse: during a slice, from a handler or a garbage collector, their removal
- *        takes effect at the end of the slice. A restore keeps hooks: the hook table is
- *        configuration, not machine state.
+ *        takes effect at the end of the slice: until then its handler may still be called in
+ *        that slice, so whatever the handler captures must outlive the slice. A restore keeps
+ *        hooks: the hook table is configuration, not machine state.
  */
 class hook_handle
 {

@@ -396,13 +396,18 @@ public:
       return_handler                handler) -> intercept_handle;
 
   /**
-   * @brief Watches guest accesses to an address range, by the CPU and by DMA.
+   * @brief Watches guest accesses to an address range, by the CPU and by DMA. A watch covers
+   *        every address that maps the watched bytes: the memory region and its aliases, the
+   *        peripheral window and its alias windows. An access that overlaps the range hits it,
+   *        whichever address it starts at. watch_hit::addr is the address accessed. While any
+   *        watch exists, every guest load and store pays for a memory hook.
    * @param at First watched address.
    * @param size Watched bytes, at least 1.
    * @param kind Accesses reported.
    * @param handler Called on every matching access.
    * @return Handle removing the watch.
    * @throws machine_running while a slice runs, handlers included.
+   * @throws config_error when the range reaches no memory and no peripheral window.
    */
   [[nodiscard]] auto
       add_watch(address at, std::uint32_t size, watch_kind kind, watch_handler handler)
