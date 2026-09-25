@@ -4,13 +4,13 @@
 #include <doctest/doctest.h>
 #include <reflex/serde/json.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <tuple>
 
 namespace
 {
@@ -259,5 +259,36 @@ TEST_CASE("flat register ids number registers peripheral by peripheral")
   CHECK(popcorn::register_at(toy, 2) == popcorn::register_ref{.peripheral = 1, .reg = 0});
   CHECK(popcorn::register_at(toy, 0) == popcorn::register_ref{.peripheral = 0, .reg = 0});
   CHECK_FALSE(popcorn::register_at(toy, 3).has_value());
-  CHECK_THROWS_AS(std::ignore = popcorn::description_digest(toy), popcorn::not_implemented);
+}
+
+TEST_CASE("toy description digest matches the value computed independently from its dump")
+{
+  auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  CHECK(
+      popcorn::description_digest(toy)
+      == "b811faf7a695fa3e258a09d9bfbd353d3d8cf0e574b883684e85cdb4d1c974e3");
+}
+
+TEST_CASE("digest is 64 lower-case hex characters")
+{
+  auto const toy    = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  auto const digest = popcorn::description_digest(toy);
+  CHECK(digest.size() == 64);
+  CHECK(std::ranges::all_of(digest, [](char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+  }));
+}
+
+TEST_CASE("digest is stable across repeated calls")
+{
+  auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  CHECK(popcorn::description_digest(toy) == popcorn::description_digest(toy));
+}
+
+TEST_CASE("descriptions differing in one register reset value have different digests")
+{
+  auto changed = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  changed.peripherals[0].registers[0].reset += 1;
+  auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  CHECK(popcorn::description_digest(toy) != popcorn::description_digest(changed));
 }

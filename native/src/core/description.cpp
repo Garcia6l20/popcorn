@@ -1,6 +1,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
 
+#include <reflex/hash/sha256.hpp>
 #include <reflex/serde/json.hpp>
 
 #include <algorithm>
@@ -225,9 +226,11 @@ auto description_json_schema() -> std::string
   return out;
 }
 
-auto description_digest(mcu_description const&) -> std::string
+auto description_digest(mcu_description const& description) -> std::string
 {
-  throw not_implemented("description_digest");
+  auto const digest = reflex::sha256_of(dump_description(description));
+  auto const hex    = reflex::to_hex(digest);
+  return std::string{hex.begin(), hex.end()};
 }
 
 auto flat_register_id(mcu_description const& description, register_ref ref) -> std::uint32_t
