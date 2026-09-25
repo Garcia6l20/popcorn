@@ -10,6 +10,7 @@
 #include "common.hpp"
 
 #include <doctest/doctest.h>
+#include <unicorn/unicorn.h>
 
 #include <array>
 #include <cstddef>
@@ -25,6 +26,15 @@ namespace popcorn::consumers::arch_module
 class armv8m_shape final : public popcorn::arch::arch
 {
 public:
+  [[nodiscard]] auto engine() const -> popcorn::arch::engine_spec override
+  {
+    return {
+        .arch      = UC_ARCH_ARM,
+        .mode      = UC_MODE_THUMB | UC_MODE_MCLASS,
+        .cpu_model = UC_CPU_ARM_CORTEX_M33,
+    };
+  }
+
   void attach(popcorn::arch::arch_context const& ctx) override
   {
     if(not ctx.description.core.fpu and ctx.description.core.nvic_prio_bits > 8)
@@ -188,6 +198,12 @@ TEST_CASE("arch module consumer implements arch through its context")
   popcorn::core::event_port       events{queue, popcorn::arch::arch_event_owner};
   popcorn::testing::fake_services services;
   auto const module = popcorn::consumers::arch_module::factory()(description.core);
+  CHECK(
+      module->engine()
+      == popcorn::arch::engine_spec{
+          .arch      = UC_ARCH_ARM,
+          .mode      = UC_MODE_THUMB | UC_MODE_MCLASS,
+          .cpu_model = UC_CPU_ARM_CORTEX_M33});
   module->attach(
       {nullptr, description, clock, events, services, popcorn::arch::fault_policy::enter_handler});
   CHECK(module->on_invalid_insn().resumes());

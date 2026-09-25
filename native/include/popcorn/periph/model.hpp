@@ -148,7 +148,7 @@ struct model_context
 
   /**
    * @brief Asks the run loop to stop, forwarding to services. Deferred: it only records the
-   *        request, the run loop stops at the next instruction boundary, and nothing calls
+   *        request, the run loop stops at the next block boundary, and nothing calls
    *        `uc_emu_stop` from the model's callback.
    * @param reason Reason the run reports.
    * @param detail Human-readable detail for the stop record.

@@ -54,6 +54,9 @@ struct symbol
   std::uint32_t size{};
   /** @brief Kind. */
   symbol_kind kind{symbol_kind::other};
+  /** @brief Whether the symbol has global binding. lookup() prefers the global one of several
+   * symbols sharing a name. */
+  bool global{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(symbol const&, symbol const&) -> bool = default;
@@ -89,13 +92,16 @@ struct image
   std::vector<segment> segments{};
   /** @brief Symbols, in address order. */
   std::vector<symbol> symbols{};
-  /** @brief Source file names the line table indexes, as the debug information spells them. */
+  /** @brief Source file paths the line table indexes: the name, prefixed while relative by its
+   * directory then by the compilation directory, lexically normalized with `/` separators. */
   std::vector<std::string> files{};
   /** @brief Line table, all rows, ordered by address. Empty without debug information. */
   std::vector<line_row> lines{};
   /** @brief Entry point from the file header, empty when the file has none. */
   std::optional<address> entry{};
-  /** @brief Floating-point calling convention, from the ELF header flags. */
+  /** @brief Floating-point calling convention: soft unless the ELF header flags set
+   * EF_ARM_ABI_FLOAT_HARD, then single or double from the `.ARM.attributes` section,
+   * double when it does not say. */
   arch::float_abi abi{arch::float_abi::soft};
   /** @brief SHA-256 of the loadable content, lower-case hex, what a saved snapshot checks. */
   std::string digest{};

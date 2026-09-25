@@ -45,9 +45,15 @@ public:
     std::uint32_t                link{};
   };
 
-  static constexpr std::uint32_t timer_kind   = 1;
-  static constexpr std::uint32_t timer_source = 7;
-  static constexpr std::uint32_t svc_intno    = 2;
+  static constexpr std::uint32_t              timer_kind   = 1;
+  static constexpr std::uint32_t              timer_source = 7;
+  static constexpr std::uint32_t              svc_intno    = 2;
+  static constexpr popcorn::arch::engine_spec toy_engine{.arch = 1, .mode = 2};
+
+  [[nodiscard]] auto engine() const -> popcorn::arch::engine_spec override
+  {
+    return toy_engine;
+  }
 
   void attach(popcorn::arch::arch_context const& ctx) override
   {
@@ -279,6 +285,8 @@ TEST_CASE("a dummy arch links and is created through a factory")
   auto const module = factory(described("toy").core);
   REQUIRE(module != nullptr);
   CHECK_FALSE(module->pending());
+  CHECK(module->engine() == toy_arch::toy_engine);
+  CHECK_FALSE(module->engine().cpu_model.has_value());
 
   popcorn::mcu_description        other = described("cortex-m33");
   popcorn::core::clock            clock{1'000'000};

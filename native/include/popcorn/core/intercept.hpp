@@ -256,8 +256,9 @@ enum class[[= reflex::derive{reflex::Format}]] watch_action
 };
 
 /**
- * @brief Handles a watch hit. A stop is deferred to the next instruction boundary, the run then
- *        reports stop_reason::watchpoint. An exception is stored and rethrown as for
+ * @brief Handles a watch hit. A stop is deferred to the next block boundary: the rest of the
+ *        accessing block runs, and the stop's pc is that boundary. The run then reports
+ *        stop_reason::watchpoint. An exception is stored and rethrown as for
  *        intercept_handler.
  */
 using watch_handler = std::function<watch_action(watch_hit const& hit)>;

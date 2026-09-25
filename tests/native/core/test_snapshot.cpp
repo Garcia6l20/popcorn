@@ -35,10 +35,11 @@ auto filled() -> core::snapshot_data
       {.owner = "UART1", .data = {std::byte{0x10}, std::byte{0x20}}}
   };
   data.peripherals = {
-      {.peripheral = "UART1",
-       .words      = {0, 0xc0, 0xffff'ffff},
-       .irq_levels = {1},
-       .dma_levels = {0, 1}}
+      {.peripheral   = "UART1",
+       .words        = {0, 0xc0, 0xffff'ffff},
+       .irq_levels   = {1},
+       .dma_levels   = {0, 1},
+       .write_locked = {0x5, 0x8000'0000}}
   };
   data.events = {
       .pending =
@@ -94,6 +95,7 @@ TEST_CASE("the saved form round-trips to an equal value")
   CHECK(back.registers == data.registers);
   CHECK(back.arch == data.arch);
   CHECK(back.peripherals == data.peripherals);
+  CHECK(back.peripherals.front().write_locked == std::vector<std::uint32_t>{0x5, 0x8000'0000});
   CHECK(back.models == data.models);
   CHECK(back.clock == data.clock);
   CHECK(back.events == data.events);

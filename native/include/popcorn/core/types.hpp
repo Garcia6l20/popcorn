@@ -226,5 +226,8 @@ struct stop
   vtime time{};
   /** @brief Decoded fault, set exactly when reason is stop_reason::fault. */
   std::optional<fault_info> fault{};
+  /** @brief What caused the stop, beyond the reason: the text of a stop request, the loop and
+   * polled register of a spin, the access of a watch hit. Empty when the reason says it all. */
+  std::string detail{};
 };
 }

@@ -75,7 +75,10 @@ public:
 
   /**
    * @brief Instructions executed since reset, exact to the translated block: the block hook
-   *        advances the clock once per block, so the clock is the instruction counter.
+   *        advances the clock once per block, so the clock is the instruction counter. A block
+   *        the engine leaves before its end, for any reason, an intercept that returns or stops,
+   *        a code hook stop, an exception or a fault, counts its full length: deterministic, not
+   *        exact. Instructions single-stepped for exact_instructions count one by one.
    */
   [[nodiscard]] auto now() const noexcept -> icount
   {

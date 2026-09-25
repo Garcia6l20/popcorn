@@ -188,6 +188,21 @@ struct cpu_register
   friend auto operator==(cpu_register, cpu_register) -> bool = default;
 };
 
+/** @brief Unicorn engine parameters of a core, as the Unicorn constants' integer values. */
+struct engine_spec
+{
+  /** @brief `uc_arch` value passed to `uc_open`. */
+  int arch{};
+  /** @brief `uc_mode` bit set passed to `uc_open`. */
+  int mode{};
+  /** @brief CPU model set with `UC_CTL_CPU_MODEL` before any other engine call, empty for the
+   * engine default. */
+  std::optional<int> cpu_model{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(engine_spec const&, engine_spec const&) -> bool = default;
+};
+
 /**
  * @brief What the machine hands the arch module on attach. The context and everything it
  *        references outlive the arch module, so the module may keep the references.
@@ -238,6 +253,13 @@ public:
   auto operator=(arch&&) -> arch& = delete;
   /** @brief Destroys the module. */
   virtual ~arch();
+
+  /**
+   * @brief Engine the machine opens for this core. Called once, after the factory and before
+   *        attach().
+   * @return Architecture, mode and CPU model.
+   */
+  [[nodiscard]] virtual auto engine() const -> engine_spec = 0;
 
   /**
    * @brief Binds the module to its engine and machine, once, before any other call. Maps the
@@ -304,8 +326,11 @@ public:
   virtual auto on_invalid_insn() -> trap_result = 0;
 
   /**
-   * @brief Handles a slice that ended on an unmapped access, pc at the faulting instruction.
-   *        Called between slices, never from the hook.
+   * @brief Handles a slice that ended on an unmapped or protected access, pc at the faulting
+   *        instruction. Also called for a bus error a peripheral model returned on a CPU access:
+   *        that access completed, the call comes at the next block boundary with the pc there, an
+   *        imprecise bus fault, and @p addr lies in a described peripheral. Called between
+   *        slices, never from the hook.
    * @param addr Address of the access.
    * @param op Kind of the access.
    * @return Resume after fault entry, or a stop.

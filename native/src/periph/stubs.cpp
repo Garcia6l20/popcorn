@@ -4,11 +4,15 @@
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
 
+#include <cstdint>
 #include <string>
 #include <utility>
 
 namespace popcorn::periph
 {
+irq_line::irq_line(line_bus& bus, std::uint32_t source) noexcept : bus_{&bus}, source_{source}
+{}
+
 void irq_line::raise()
 {
   throw not_implemented("irq_line::raise");
@@ -21,8 +25,11 @@ void irq_line::lower()
 
 auto irq_line::level() const -> bool
 {
-  return false;
+  return level_;
 }
+
+dma_request::dma_request(line_bus& bus, std::uint32_t source) noexcept : bus_{&bus}, source_{source}
+{}
 
 void dma_request::request()
 {
@@ -36,7 +43,7 @@ void dma_request::release()
 
 auto dma_request::level() const -> bool
 {
-  return false;
+  return level_;
 }
 
 register_file::register_file(peripheral_desc const& desc)

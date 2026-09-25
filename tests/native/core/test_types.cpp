@@ -84,6 +84,11 @@ TEST_CASE("stop with no fault leaves the optional empty")
   CHECK_FALSE(s.fault.has_value());
 }
 
+TEST_CASE("a default stop has an empty detail")
+{
+  CHECK(popcorn::stop{}.detail.empty());
+}
+
 TEST_CASE("icount_from_vtime rounds up and inverts vtime_from_instructions")
 {
   CHECK(popcorn::icount_from_vtime({1'000'000'000'000ull}, 160'000'000).value == 160'000'000);

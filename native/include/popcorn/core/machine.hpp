@@ -59,7 +59,10 @@ struct machine_options
    * handler. Passed to the arch module in `arch::arch_context::faults`. */
   arch::fault_policy faults{arch::fault_policy::stop};
   /** @brief Whether a firmware reset request stops the run with stop_reason::reset_request, the
-   * default, or resets the machine as reset_kind::software and continues. */
+   * default, or resets the machine as reset_kind::software and continues. A reset request during
+   * a call begun by begin_call() always stops with stop_reason::reset_request, whatever the
+   * policy: a reset would lose the call frame and its return sentinel. end_call() then restores
+   * the caller's context. */
   reset_request_policy on_reset_request{reset_request_policy::stop};
   /** @brief Iterations of a loop that makes no progress, the same pc window and the same machine
    * state, after which the run stops with stop_reason::spin, naming the loop and the polled
@@ -68,6 +71,10 @@ struct machine_options
   /** @brief Whether the first access to a register of an unmodelled peripheral fails the run
    * with model_error. Otherwise it is only logged, once per register. */
   bool strict_peripherals{};
+  /** @brief Address of the vector table the arch module's reset reads. Empty: the start of the
+   * region containing address 0, otherwise of the first region in description order with execute
+   * access. */
+  std::optional<address> vector_table{};
 };
 
 /**
@@ -82,7 +89,8 @@ struct slice_request
   icount max_instructions{1'000'000};
   /** @brief Wall time after which the slice ends, read every 256 blocks. */
   std::chrono::nanoseconds wall_budget{std::chrono::milliseconds{1}};
-  /** @brief Stop with stop_reason::address before executing this address. */
+  /** @brief Stop with stop_reason::address before executing this address. A slice that starts at
+   * this address stops at once, 0 instructions executed. */
   std::optional<address> until{};
   /** @brief Instructions left in the run's budget, stop with stop_reason::budget at the first
    * block boundary at or past them. The caller subtracts `slice_result::executed` between
@@ -106,7 +114,10 @@ struct slice_result
    * lets the caller continue. */
   std::optional<stop> stopped{};
   /** @brief Instructions executed in the slice, read from the block hook, never assumed from the
-   * bounds: a slice overshoots by up to one block. */
+   * bounds: a slice overshoots by up to one block. A block the engine leaves before its end, for
+   * any reason, an intercept that returns or stops, a code hook stop, an exception or a fault,
+   * counts its full length: deterministic, not exact. Instructions single-stepped for
+   * exact_instructions count one by one. */
   icount executed{};
 };
 
@@ -142,7 +153,8 @@ struct call_result
  * end requests set a native flag the next block hook reads, bus accesses go through memory, MMIO
  * dispatch and watches, trace appends to the ring stamped with the current instruction count.
  *
- * Construction order: memory map, `arch_context{engine, description, clock, arch events, *this,
+ * Construction order: the arch module from the factory, the engine it asks for with
+ * `arch::engine()`, memory map, `arch_context{engine, description, clock, arch events, *this,
  * options.faults}` then `arch::attach`, then one model_context and model per peripheral, then
  * the engine hooks. Events of owner `arch::arch_event_owner` go to `arch::on_event`, other
  * owners to the model of that peripheral index.
@@ -172,6 +184,8 @@ public:
    * @throws config_error when neither `options.core_hz` nor `description.core.reset_clock_hz`
    *         gives a clock, when the arch module refuses the core or a model factory refuses its
    *         peripheral.
+   * @throws config_error when options.vector_table is empty and the description has no region
+   *         with execute access.
    * @throws emulation_error when the engine cannot be opened, or is not the pinned dev build.
    */
   machine(mcu_description description, arch::arch_factory factory, machine_options options)
@@ -221,10 +235,15 @@ public:
   [[nodiscard]] auto loaded_images() const noexcept -> std::span<popcorn::image::image const>;
 
   /**
-   * @brief Resets the machine as @p kind: every model's `reset`, the arch module's `reset` at the
-   *        description's reset vector, event queue cleared, and `trace_ring::rebase` at the new
-   *        instruction count. Also what a firmware reset request leads to at the end of its
-   *        slice under reset_request_policy::reset_and_continue.
+   * @brief Resets the machine as @p kind, in this order: event queue cleared, clock restarted at
+   *        instruction 0 and time 0 at the power-on core clock, for every kind, the arch module's
+   *        `reset` at the reset vector, see machine_options::vector_table, then per peripheral in
+   *        description order its register storage to reset values and the model's `reset`, then
+   *        `trace_ring::rebase` at instruction 0. The arch resets first so that a line a model
+   *        raises in its own reset reaches it. Memory is not touched. Also what a firmware reset
+   *        request leads to under reset_request_policy::reset_and_continue: the request takes
+   *        effect at the next block boundary, the reset runs there, the trace rebases at 0, and
+   *        the slice continues.
    * @param kind Cause of the reset, passed to every model.
    * @throws machine_running while a slice runs, handlers included.
    */
@@ -242,7 +261,8 @@ public:
    * @throws model_error on an unmodelled access under `machine_options::strict_peripherals`.
    * @throws Any exception a handler or Python model raised during the slice, rethrown after the
    *         engine stopped at an instruction boundary, the machine consistent and resumable,
-   *         before any fault of the same slice is reported.
+   *         before any fault of the same slice is reported. Only the first exception of a slice
+   *         is rethrown, later ones of the same slice are dropped.
    */
   auto run_slice(slice_request const& request) -> slice_result;
 
@@ -303,7 +323,8 @@ public:
    * Order, each step complete before the next starts:
    *
    * 1. memory: `memcpy` of each region into its host buffer, then `uc_ctl_remove_cache` over
-   *    regions that held executed code. The translated block cache is otherwise kept, which
+   *    every page of every host buffer mapped executable whose bytes the copy changed, at every
+   *    address the buffer is mapped. The translated block cache is otherwise kept, which
    *    spares retranslating the code the next slice runs.
    * 2. CPU: `uc_context_restore` when @p saved carries this machine's engine context, otherwise
    *    the register list through `uc_reg_write_batch`. A `uc_context` never moves between

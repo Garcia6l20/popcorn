@@ -71,6 +71,9 @@ struct peripheral_image
   std::vector<std::uint8_t> irq_levels{};
   /** @brief Level of each `periph::dma_request`, in description order, 1 when active. */
   std::vector<std::uint8_t> dma_levels{};
+  /** @brief Write-once lock bit of each word, bit `i % 32` of element `i / 32` for word `i`, set
+   * after the first write since reset. Empty for a peripheral without write-once registers. */
+  std::vector<std::uint32_t> write_locked{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_image const&, peripheral_image const&) -> bool = default;
