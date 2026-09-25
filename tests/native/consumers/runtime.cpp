@@ -6,6 +6,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/core/trace.hpp>
 #include <popcorn/core/version.hpp>
+#include <popcorn/image/image.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
 
@@ -136,6 +137,12 @@ void services_calls(core::machine& target)
       popcorn::icount{4});
 }
 
+auto load_image(core::machine& target, popcorn::image::image const& built) -> std::size_t
+{
+  target.load(built);
+  return target.loaded_images().size();
+}
+
 auto policies(core::machine_options const& options) -> bool
 {
   return options.on_reset_request
@@ -165,4 +172,20 @@ TEST_CASE("runtime consumer links against the interfaces it implements")
   auto const due = queue.pop_due(clock.now());
   REQUIRE(due.has_value());
   CHECK(due->id.owner == popcorn::arch::arch_event_owner);
+}
+
+TEST_CASE("runtime consumer loads an image into the machine")
+{
+  core::machine target{
+      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), {}};
+  popcorn::image::image built;
+  built.segments.push_back(
+      {.name        = "app.bin",
+       .start       = 0x0800'0000,
+       .bytes       = std::vector<std::byte>(16, std::byte{0xff}),
+       .memory_size = 16,
+       .executable  = true,
+       .writable    = false});
+  CHECK_THROWS_AS(popcorn::consumers::runtime::load_image(target, built), popcorn::not_implemented);
+  CHECK(target.loaded_images().empty());
 }

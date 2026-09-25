@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pcons import Target, context, write_file
 
-from popcorn_build.config import build_dir
+from popcorn_build.config import build_dir, project_dir
 from popcorn_build.requirements import package
 
 _doctest_main: Target | None = None
@@ -22,6 +22,16 @@ def _doctest_with_main() -> Target:
     return _doctest_main
 
 
+def alias_bare_name(target: Target) -> None:
+    """Make `pcons build <name>` reach @p target when a subdirectory script declared it.
+
+    Ninja knows a target declared under a subdirectory only by its path-qualified output, such as
+    tests/native/core/test-core-types. Root targets already answer to their bare name.
+    """
+    if target.source_dir != project_dir:
+        context.current_project.Alias(target.name, target)
+
+
 def add_doctest(
     name: str,
     sources: Sequence[str | Path],
@@ -38,6 +48,7 @@ def add_doctest(
         f"{group}.{name}", program, discover="doctest", labels=[group], env=dict(env or {})
     )
     project.Alias(f"test-{group}", program)
+    alias_bare_name(program)
     return program
 
 

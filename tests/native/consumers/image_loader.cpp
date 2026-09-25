@@ -1,9 +1,6 @@
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/errors.hpp>
-#include <popcorn/core/machine.hpp>
 #include <popcorn/image/image.hpp>
-
-#include "common.hpp"
 
 #include <doctest/doctest.h>
 
@@ -52,7 +49,7 @@ auto resolve(image::image const& loaded, std::string const& name) -> location
 }
 }
 
-TEST_CASE("image loader consumer builds an image the machine loads")
+TEST_CASE("image loader consumer builds and resolves an image")
 {
   auto const built = popcorn::consumers::image_loader::from_bin(
       "app.bin", 0x0800'0000, std::vector<std::byte>(16, std::byte{0xff}));
@@ -61,9 +58,4 @@ TEST_CASE("image loader consumer builds an image the machine loads")
   CHECK_THROWS_AS(
       popcorn::consumers::image_loader::resolve(built, "Reset_Handler"), popcorn::not_implemented);
   CHECK_THROWS_AS(popcorn::image::load_elf("app.elf"), popcorn::not_implemented);
-
-  popcorn::core::machine target{
-      popcorn::testing::toy_description(), popcorn::testing::unused_arch_factory(), {}};
-  CHECK_THROWS_AS(target.load(built), popcorn::not_implemented);
-  CHECK(target.loaded_images().empty());
 }

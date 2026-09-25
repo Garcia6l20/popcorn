@@ -251,6 +251,33 @@ TEST_CASE("committed JSON Schema matches the one derived from the aggregates")
   CHECK(canonical_json(committed) == canonical_json(popcorn::description_json_schema()));
 }
 
+TEST_CASE("JSON Schema defines each enum once under its C++ name and refers to it")
+{
+  namespace json = reflex::serde::json;
+  auto document  = json::deserializer{popcorn::description_json_schema()}.load<json::value>();
+  auto defs      = std::move(document.as_object()["$defs"]);
+  document.as_object().erase("$defs");
+
+  auto dumped = [](json::value const& value) {
+    std::string      out;
+    json::serializer serializer{out};
+    serializer.dump(value);
+    return out;
+  };
+  CHECK_FALSE(dumped(document).contains("\"enum\""));
+  CHECK(
+      canonical_json(dumped(defs.as_object()["region_kind"]))
+      == canonical_json(R"({"type": "string", "enum": ["rom", "ram"]})"));
+  auto& field = defs.as_object()["field_desc"].as_object()["properties"].as_object();
+  CHECK(canonical_json(dumped(field["acc"])) == canonical_json(R"({"$ref": "#/$defs/access"})"));
+  CHECK(
+      canonical_json(dumped(field["on_write"]))
+      == canonical_json(R"({"$ref": "#/$defs/write_effect"})"));
+  auto& properties = defs.as_object()["register_desc"].as_object()["properties"].as_object();
+  CHECK(
+      canonical_json(dumped(properties["acc"])) == canonical_json(R"({"$ref": "#/$defs/access"})"));
+}
+
 TEST_CASE("flat register ids number registers peripheral by peripheral")
 {
   auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));

@@ -1,6 +1,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
 
+#include <reflex/enum.hpp>
 #include <reflex/hash/sha256.hpp>
 #include <reflex/serde/json.hpp>
 
@@ -17,6 +18,7 @@
 #include <ranges>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace popcorn
 {
@@ -67,6 +69,95 @@ void refuse_other_version(std::string_view text, std::string_view source)
   }
 }
 
+template <typename T> consteval void collect_named(std::vector<std::meta::info>& named)
+{
+  if constexpr(std::same_as<T, std::string>)
+  {
+    return;
+  }
+  else if constexpr(reflex::enum_c<T> or reflex::aggregate_c<T>)
+  {
+    if(std::ranges::contains(named, ^^T))
+    {
+      return;
+    }
+    named.push_back(^^T);
+    if constexpr(reflex::aggregate_c<T>)
+    {
+      template for(constexpr auto member : std::define_static_array(
+                       std::meta::nonstatic_data_members_of(
+                           ^^T, std::meta::access_context::current())))
+      {
+        collect_named<typename[:std::meta::type_of(member):]>(named);
+      }
+    }
+  }
+  else if constexpr(reflex::optional_c<T> or reflex::seq_c<T>)
+  {
+    collect_named<typename T::value_type>(named);
+  }
+  else if constexpr(reflex::map_c<T>)
+  {
+    collect_named<typename T::mapped_type>(named);
+  }
+}
+
+template <typename T> consteval auto definition_names_are_unique() -> bool
+{
+  std::vector<std::meta::info> named;
+  collect_named<T>(named);
+  for(auto const& type : named)
+  {
+    if(std::ranges::count_if(
+           named,
+           [&](std::meta::info other) {
+             return std::meta::identifier_of(other) == std::meta::identifier_of(type);
+           })
+       != 1)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename T> auto schema_of(json::object& defs) -> json::value;
+
+template <reflex::enum_c T> auto definition_of(json::object&) -> json::value
+{
+  json::array names;
+  template for(constexpr auto e : std::define_static_array(std::meta::enumerators_of(^^T)))
+  {
+    names.emplace_back(std::string(reflex::enum_value_name([:e:])));
+  }
+  return {
+      {"type", "string"        },
+      {"enum", std::move(names)}
+  };
+}
+
+template <reflex::aggregate_c T> auto definition_of(json::object& defs) -> json::value
+{
+  json::object properties;
+  json::array  required;
+  template for(constexpr auto member : std::define_static_array(
+                   std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current())))
+  {
+    std::string const key(std::string_view(reflex::serde::serialized_name(member)));
+    properties.emplace(key, schema_of<typename[:std::meta::type_of(member):]>(defs));
+    if constexpr(not reflex::serde::omits_when_empty(member))
+    {
+      required.emplace_back(key);
+    }
+  }
+  return {
+      {"type",                 "object"             },
+      {"additionalProperties", false                },
+      {"properties",           std::move(properties)},
+      {"required",             std::move(required)  }
+  };
+}
+
 template <typename T> auto schema_of(json::object& defs) -> json::value
 {
   if constexpr(std::same_as<T, bool>)
@@ -99,18 +190,6 @@ template <typename T> auto schema_of(json::object& defs) -> json::value
         {"type", "string"}
     };
   }
-  else if constexpr(reflex::enum_c<T>)
-  {
-    json::array names;
-    template for(constexpr auto e : std::define_static_array(std::meta::enumerators_of(^^T)))
-    {
-      names.emplace_back(std::string(std::meta::identifier_of(e)));
-    }
-    return {
-        {"type", "string"        },
-        {"enum", std::move(names)}
-    };
-  }
   else if constexpr(reflex::optional_c<T>)
   {
     return schema_of<typename T::value_type>(defs);
@@ -132,29 +211,13 @@ template <typename T> auto schema_of(json::object& defs) -> json::value
   }
   else
   {
-    static_assert(reflex::aggregate_c<T>, "no JSON Schema mapping for this description member");
+    static_assert(
+        reflex::enum_c<T> or reflex::aggregate_c<T>,
+        "no JSON Schema mapping for this description member");
     constexpr std::string_view name = std::meta::identifier_of(^^T);
     if(not defs.contains(std::string(name)))
     {
-      json::object properties;
-      json::array  required;
-      template for(constexpr auto member : std::define_static_array(
-                       std::meta::nonstatic_data_members_of(
-                           ^^T, std::meta::access_context::current())))
-      {
-        std::string const key(std::string_view(reflex::serde::serialized_name(member)));
-        properties.emplace(key, schema_of<typename[:std::meta::type_of(member):]>(defs));
-        if constexpr(not reflex::serde::omits_when_empty(member))
-        {
-          required.emplace_back(key);
-        }
-      }
-      defs[std::string(name)] = json::value{
-          {"type",                 "object"             },
-          {"additionalProperties", false                },
-          {"properties",           std::move(properties)},
-          {"required",             std::move(required)  }
-      };
+      defs[std::string(name)] = definition_of<T>(defs);
     }
     return {
         {"$ref", std::format("#/$defs/{}", name)}
@@ -209,6 +272,9 @@ auto dump_description(mcu_description const& description) -> std::string
 
 auto description_json_schema() -> std::string
 {
+  static_assert(
+      definition_names_are_unique<mcu_description>(),
+      "two description types share a name, their $defs entries would collide");
   json::object defs;
   schema_of<mcu_description>(defs);
   auto root =

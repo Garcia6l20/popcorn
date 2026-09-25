@@ -91,3 +91,33 @@ def add_stub(extension: Target, package: str, name: str, after: Sequence[Target]
     )
     stub.depends(extension, *after)
     return stub
+
+
+def package_files(package_dir: Path) -> list[Path]:
+    """Python sources and package data under @p package_dir, recursively, sorted."""
+    return sorted(
+        path for pattern in ("*.py", "*.toml", "py.typed") for path in package_dir.rglob(pattern)
+    )
+
+
+def add_package_install(
+    package: str, package_dir: Path, name: str, no_prefix: bool = False
+) -> list[Target]:
+    """One InstallAs per file of package_files(@p package_dir), each at @p package/<relative path>.
+
+    pcons Install puts every source at its basename in one directory, which would flatten
+    subpackages onto each other. Each target is named @p name-<relative path with dashes>.
+    """
+    project = context.current_project
+    installed: list[Target] = []
+    for path in package_files(package_dir):
+        relative = path.relative_to(package_dir).as_posix()
+        installed.append(
+            project.InstallAs(
+                f"{package}/{relative}",
+                path,
+                name=f"{name}-{relative.replace('/', '-')}",
+                no_prefix=no_prefix,
+            )
+        )
+    return installed

@@ -1,11 +1,15 @@
-from pcons import Project, get_var
+from pcons import Project, add_subdirectory, get_var
 
 from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
-from popcorn_build.firmware import add_firmware
-from popcorn_build.python import add_binding_check, add_extension, add_stub
+from popcorn_build.python import (
+    add_binding_check,
+    add_extension,
+    add_package_install,
+    add_stub,
+)
 from popcorn_build.requirements import package, unicorn_commit
-from popcorn_build.testing import add_doctest, add_header_check
+from popcorn_build.testing import add_header_check
 
 WARNINGS = [
     "-Wall",
@@ -47,21 +51,13 @@ if VARIANT == "asan":
 else:
     env.set_variant(VARIANT)
 
+CORE_AREAS = ("core", "arch", "periph", "image")
+
 core = project.StaticLibrary(
     "popcorn_core",
     env,
     sources=[
-        "native/src/core/version.cpp",
-        "native/src/core/errors.cpp",
-        "native/src/core/description.cpp",
-        "native/src/core/time.cpp",
-        "native/src/core/services.cpp",
-        "native/src/arch/arch.cpp",
-        "native/src/periph/stubs.cpp",
-        "native/src/core/trace.cpp",
-        "native/src/core/snapshot.cpp",
-        "native/src/core/machine_stub.cpp",
-        "native/src/image/image_stub.cpp",
+        source for area in CORE_AREAS for source in add_subdirectory(f"native/src/{area}").sources
     ],
 )
 core.public.include_dirs.append("native/include")
@@ -71,85 +67,17 @@ core.private.defines.extend(
 core.link(package("unicorn"))
 core.link(package("reflex-serde"))
 
-add_doctest("core-types", ["tests/native/core/test_types.cpp"], [core])
-add_doctest("core-fwd", ["tests/native/core/test_fwd.cpp"], [core])
-add_doctest(
-    "core-time",
-    ["tests/native/core/test_time_types.cpp", "tests/native/core/test_clock.cpp"],
-    [core],
-)
-add_doctest("core-services", ["tests/native/core/test_services.cpp"], [core])
-add_doctest("arch-interface", ["tests/native/arch/test_interface.cpp"], [core])
-add_doctest("core-errors", ["tests/native/core/test_errors.cpp"], [core])
-add_doctest(
-    "core-description",
-    ["tests/native/core/test_description.cpp"],
-    [core],
-    env={
-        "POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json"),
-        "POPCORN_DESC_SCHEMA": str(project_dir / "data" / "schema" / "mcu_description.schema.json"),
-    },
-)
-add_doctest(
-    "periph-interfaces",
-    [
-        "tests/native/periph/test_interfaces.cpp",
-        "tests/native/periph/test_lines.cpp",
-        "tests/native/periph/test_register_file.cpp",
-    ],
-    [core],
-    env={"POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json")},
-)
 describe_schema = project.Program(
     "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
 )
 describe_schema.link(core)
-bench_description = project.Program(
-    "bench-description", env, sources=["tests/native/core/bench_description.cpp"]
-)
-bench_description.link(core)
-add_doctest(
-    "core-machine-api",
-    [
-        "tests/native/core/test_machine_api.cpp",
-        "tests/native/core/test_trace.cpp",
-        "tests/native/core/test_snapshot.cpp",
-        "tests/native/image/test_image.cpp",
-    ],
-    [core],
-    env={"POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json")},
-)
-add_doctest(
-    "consumers",
-    [
-        "tests/native/consumers/runtime.cpp",
-        "tests/native/consumers/arch_module.cpp",
-        "tests/native/consumers/image_loader.cpp",
-        "tests/native/consumers/python_facade.cpp",
-        "tests/native/consumers/peripheral_models.cpp",
-        "tests/native/consumers/observability.cpp",
-        "tests/native/consumers/object_linker.cpp",
-    ],
-    [core],
-    env={"POPCORN_TOY_DESC": str(project_dir / "tests" / "data" / "desc" / "toy.json")},
-)
 add_header_check("headers", project_dir / "native" / "include", [core])
 
-smoke_support = project.StaticLibrary(
-    "popcorn-test-smoke", env, sources=["tests/native/support/smoke.cpp"]
-)
-smoke_support.link(core)
-add_doctest("core-unicorn-dev", ["tests/native/core/test_unicorn_dev.cpp"], [smoke_support, core])
-
-smoke_elf, smoke_firmware = add_firmware("smoke", "smoke", ["tests/firmware/smoke/smoke.c"])
-test_smoke_fw = add_doctest(
-    "core-smoke-fw",
-    ["tests/native/core/test_smoke_fw.cpp"],
-    [smoke_support, core],
-    env={"POPCORN_SMOKE_ELF": str(smoke_elf)},
-)
-if smoke_firmware is not None:
-    test_smoke_fw.depends(smoke_firmware)
+smoke_support = add_subdirectory("tests/native/support").smoke_support
+for tree in ("tests/firmware", "tests/native"):
+    for script in sorted((project_dir / tree).glob("*/pcons-build.py")):
+        if script.parent.name != "support":
+            add_subdirectory(script.parent.relative_to(project_dir))
 
 if VARIANT != "asan":
     ext = add_extension("popcorn", "_core", ["native/src/bind/module.cpp"])
@@ -163,14 +91,19 @@ if VARIANT != "asan":
     add_stub(smoke_ext, "popcorn_testing", "_smoke")
 
     python_package = project_dir / "python" / "popcorn"
-    python_sources = [*sorted(python_package.rglob("*.py")), python_package / "py.typed"]
-    staged_sources = project.Install("popcorn", python_sources, name="stage-python", no_prefix=True)
-    staged_sources.build_tier = "default"
-    stub = add_stub(ext, "popcorn", "_core", after=[staged_sources])
+    staged_sources = add_package_install(
+        "popcorn", python_package, name="stage-python", no_prefix=True
+    )
+    for staged in staged_sources:
+        staged.build_tier = "default"
+    project.Alias("stage-python", *staged_sources)
+    stub = add_stub(ext, "popcorn", "_core", after=staged_sources)
 
     if get_var("PCONS_BUILD_WHEEL", False):
         project.Alias(
-            "wheel", project.Install("popcorn", [ext, stub, *python_sources], name="install")
+            "wheel",
+            project.Install("popcorn", [ext, stub], name="install"),
+            *add_package_install("popcorn", python_package, name="install"),
         )
 
 check.register()

@@ -7,10 +7,11 @@ from pcons import PathToken, Target, context
 from pcons.core.environment import Environment
 from pcons.toolchains.presets import CrossPreset
 
-from popcorn_build.config import build_dir, project_dir
+from popcorn_build.config import project_dir
 
 CPU_FLAGS = ("-mcpu=cortex-m33", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-sp-d16")
 LINKER_SCRIPT = "tests/firmware/common/m33.ld"
+FIRMWARE_PREFIX = "firmware"
 
 cortex_m33 = CrossPreset(
     name="cortex-m33-none-eabi",
@@ -31,6 +32,7 @@ toolchain_found = all(
 )
 
 _env: Environment | None = None
+_declared: dict[tuple[str, str], tuple[Path, Target | None]] = {}
 
 
 def firmware_env() -> Environment | None:
@@ -40,7 +42,7 @@ def firmware_env() -> Environment | None:
         project = context.current_project
         _env = project.Environment(toolchain="gcc", name="firmware")
         _env.apply_cross_preset(cortex_m33)
-        _env.build_prefix = "firmware"
+        _env.build_prefix = FIRMWARE_PREFIX
         _env.cc.flags.extend(["-std=c23", "-Os", "-g", "-Wall", "-Wextra", "-Werror"])
         _env.cc.flags.append(
             PathToken(
@@ -50,7 +52,7 @@ def firmware_env() -> Environment | None:
     return _env
 
 
-def add_firmware(area: str, name: str, sources: Sequence[str]) -> tuple[Path, Target | None]:
+def add_firmware(area: str, name: str, sources: Sequence[str | Path]) -> tuple[Path, Target | None]:
     """Build tests/firmware/@p area/@p name.elf, or fall back to its committed prebuilt copy.
 
     @return The ELF path tests load and the target building it, None when the prebuilt copy is used.
@@ -62,17 +64,19 @@ def add_firmware(area: str, name: str, sources: Sequence[str]) -> tuple[Path, Ta
     if env is None:
         if not prebuilt.is_file():
             raise SystemExit(f"popcorn: no arm-none-eabi-gcc and no prebuilt firmware {prebuilt}")
+        _declared[area, name] = (prebuilt, None)
         return prebuilt, None
 
     project = context.current_project
     elf = project.Program(f"firmware-{area}-{name}", env, sources=list(sources))
-    elf.output_name = f"{area}/{name}"
+    elf.output_name = name
     elf.output_suffix = ".elf"
     elf.private.link_flags.append(PathToken(prefix="-T", path=LINKER_SCRIPT, path_type="project"))
-    elf.depends(LINKER_SCRIPT)
-    elf_path = build_dir / "firmware" / area / f"{name}.elf"
+    elf.depends(project_dir / LINKER_SCRIPT)
+    elf_dir = elf.build_dir if elf.build_dir.is_absolute() else project.top.root_dir / elf.build_dir
+    elf_path = elf_dir / f"{name}.elf"
 
-    stamp = build_dir / "firmware" / area / f"{name}.check"
+    stamp = elf_dir / f"{name}.check"
     check = env.Command(
         target=stamp,
         source=[elf, prebuilt],
@@ -86,4 +90,17 @@ def add_firmware(area: str, name: str, sources: Sequence[str]) -> tuple[Path, Ta
         ],
     )
     project.Alias("firmware-check", check)
+    _declared[area, name] = (elf_path, elf)
     return elf_path, elf
+
+
+def firmware(area: str, name: str) -> tuple[Path, Target | None]:
+    """The ELF path and target add_firmware returned for @p area/@p name.
+
+    Build scripts under tests/firmware run before those under tests/native, so a native test
+    reaches firmware declared in another directory through this lookup.
+    """
+    declared = _declared.get((area, name))
+    if declared is None:
+        raise SystemExit(f"popcorn: firmware {area}/{name} is not declared, see tests/firmware")
+    return declared

@@ -1,5 +1,15 @@
 {
   "$defs": {
+    "access": {
+      "enum": [
+        "read_only",
+        "write_only",
+        "read_write",
+        "write_once",
+        "read_write_once"
+      ],
+      "type": "string"
+    },
     "core_desc": {
       "additionalProperties": false,
       "properties": {
@@ -75,15 +85,18 @@
       ],
       "type": "object"
     },
+    "cross_effect": {
+      "enum": [
+        "clear",
+        "set"
+      ],
+      "type": "string"
+    },
     "cross_rule": {
       "additionalProperties": false,
       "properties": {
         "effect": {
-          "enum": [
-            "clear",
-            "set"
-          ],
-          "type": "string"
+          "$ref": "#/$defs/cross_effect"
         },
         "field": {
           "type": "string"
@@ -111,14 +124,7 @@
       "additionalProperties": false,
       "properties": {
         "acc": {
-          "enum": [
-            "read_only",
-            "write_only",
-            "read_write",
-            "write_once",
-            "read_write_once"
-          ],
-          "type": "string"
+          "$ref": "#/$defs/access"
         },
         "lsb": {
           "maximum": 255,
@@ -129,28 +135,10 @@
           "type": "string"
         },
         "on_read": {
-          "enum": [
-            "none",
-            "clear",
-            "set",
-            "modify",
-            "modify_external"
-          ],
-          "type": "string"
+          "$ref": "#/$defs/read_effect"
         },
         "on_write": {
-          "enum": [
-            "modify",
-            "one_to_clear",
-            "one_to_set",
-            "one_to_toggle",
-            "zero_to_clear",
-            "zero_to_set",
-            "zero_to_toggle",
-            "clear",
-            "set"
-          ],
-          "type": "string"
+          "$ref": "#/$defs/write_effect"
         },
         "width": {
           "maximum": 255,
@@ -244,6 +232,16 @@
       ],
       "type": "object"
     },
+    "read_effect": {
+      "enum": [
+        "none",
+        "clear",
+        "set",
+        "modify",
+        "modify_external"
+      ],
+      "type": "string"
+    },
     "region_access": {
       "additionalProperties": false,
       "properties": {
@@ -271,11 +269,7 @@
           "$ref": "#/$defs/region_access"
         },
         "kind": {
-          "enum": [
-            "rom",
-            "ram"
-          ],
-          "type": "string"
+          "$ref": "#/$defs/region_kind"
         },
         "name": {
           "type": "string"
@@ -309,18 +303,18 @@
       ],
       "type": "object"
     },
+    "region_kind": {
+      "enum": [
+        "rom",
+        "ram"
+      ],
+      "type": "string"
+    },
     "register_desc": {
       "additionalProperties": false,
       "properties": {
         "acc": {
-          "enum": [
-            "read_only",
-            "write_only",
-            "read_write",
-            "write_once",
-            "read_write_once"
-          ],
-          "type": "string"
+          "$ref": "#/$defs/access"
         },
         "alternate_of": {
           "type": "string"
@@ -365,6 +359,20 @@
         "fields"
       ],
       "type": "object"
+    },
+    "write_effect": {
+      "enum": [
+        "modify",
+        "one_to_clear",
+        "one_to_set",
+        "one_to_toggle",
+        "zero_to_clear",
+        "zero_to_set",
+        "zero_to_toggle",
+        "clear",
+        "set"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

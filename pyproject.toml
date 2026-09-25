@@ -6,9 +6,19 @@ build-backend = "pcons.pyproject"
 name = "popcorn"
 version = "0.1.0.dev0"
 requires-python = ">=3.14"
+dependencies = [
+    "pyelftools",
+]
 
 [dependency-groups]
-dev = ["pcons==0.29.1", "pytest", "pyright", "ruff", "black"]
+dev = [
+    "pcons==0.29.1",
+    "pytest",
+    "pyright",
+    "ruff",
+    "black",
+    "jsonschema",
+]
 
 [tool.pcons]
 variant = "release"

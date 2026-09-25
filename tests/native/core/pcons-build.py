@@ -1,0 +1,50 @@
+from pathlib import Path
+
+from pcons import context
+
+from popcorn_build.config import project_dir
+from popcorn_build.firmware import firmware
+from popcorn_build.testing import add_doctest, alias_bare_name
+
+project = context.current_project
+here = Path(__file__).resolve().parent
+core = project.get_target("popcorn_core")
+smoke_support = project.get_target("popcorn-test-smoke")
+toy = str(project_dir / "tests" / "data" / "desc" / "toy.json")
+
+add_doctest("core-types", [here / "test_types.cpp"], [core])
+add_doctest("core-fwd", [here / "test_fwd.cpp"], [core])
+add_doctest("core-time", [here / "test_time_types.cpp", here / "test_clock.cpp"], [core])
+add_doctest("core-services", [here / "test_services.cpp"], [core])
+add_doctest("core-errors", [here / "test_errors.cpp"], [core])
+add_doctest(
+    "core-description",
+    [here / "test_description.cpp"],
+    [core],
+    env={
+        "POPCORN_TOY_DESC": toy,
+        "POPCORN_DESC_SCHEMA": str(project_dir / "data" / "schema" / "mcu_description.schema.json"),
+    },
+)
+bench_description = project.Program(
+    "bench-description", project.default_environment, sources=[here / "bench_description.cpp"]
+)
+bench_description.link(core)
+alias_bare_name(bench_description)
+add_doctest(
+    "core-machine-api",
+    [here / "test_machine_api.cpp", here / "test_trace.cpp", here / "test_snapshot.cpp"],
+    [core],
+    env={"POPCORN_TOY_DESC": toy},
+)
+add_doctest("core-unicorn-dev", [here / "test_unicorn_dev.cpp"], [smoke_support, core])
+
+smoke_elf, smoke_firmware = firmware("smoke", "smoke")
+test_smoke_fw = add_doctest(
+    "core-smoke-fw",
+    [here / "test_smoke_fw.cpp"],
+    [smoke_support, core],
+    env={"POPCORN_SMOKE_ELF": str(smoke_elf)},
+)
+if smoke_firmware is not None:
+    test_smoke_fw.depends(smoke_firmware)
