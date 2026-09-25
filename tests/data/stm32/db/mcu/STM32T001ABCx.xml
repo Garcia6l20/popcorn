@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<Mcu Family="STM32T0" Line="STM32T001" RefName="STM32T001ABCx" xmlns="http://mcd.rou.st.com/modules.php?name=mcu">
+    <Core>ARM Cortex-M0</Core>
+    <Ram>16</Ram>
+    <Ram>4</Ram>
+    <Die>DIE000</Die>
+    <Flash>64</Flash>
+    <IP ConfigFile="USART-synth" InstanceName="USART1" Name="USART" Version="v1_synth"/>
+    <IP ConfigFile="USB_OTG-synth" InstanceName="USB_OTG_FS" Name="USB_OTG" Version="v1_synth"/>
+    <IP ConfigFile="GPIO-synth" InstanceName="GPIOA" Name="GPIO" Version="v1_synth"/>
+</Mcu>

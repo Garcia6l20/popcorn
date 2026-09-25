@@ -28,3 +28,14 @@ def st_svd_u575() -> Path:
                 if match.is_file():
                     return match
     pytest.skip(f"STM32U575.svd not found, searched: {', '.join(searched)}")
+
+
+_CUBEMX_DB = Path("~/STM32CubeMX/db").expanduser()
+
+
+@pytest.fixture(scope="session")
+def st_cubemx_db() -> Path:
+    """Path of the local CubeMX db directory, skips naming the path searched."""
+    if _CUBEMX_DB.is_dir():
+        return _CUBEMX_DB
+    pytest.skip(f"CubeMX db not found, searched: {_CUBEMX_DB}")

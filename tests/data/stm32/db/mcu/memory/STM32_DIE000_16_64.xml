@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<rzone schemaVersion="0.2.0">
+
+  <device Dname="STM32T0-64K" info="synthetic probe part">
+    <processor Dclock="80000000" Dcore="ARM Cortex-M0" DcoreVersion="r0p0" Dmpu="MPU"
+               DnumInterrupts="32" DnumMpuRegions="8"/>
+  </device>
+
+  <resources>
+    <memories>
+      <memory access="rx" info="Flash memory" name="Flash_NS" security="n" size="0x00010000" start="0x08000000" type="ROM"/>
+      <memory access="rwx" info="SRAM alias" name="SRAM_ALIAS" physical="0x20000000" security="n" size="0x00004000" start="0x30000000" type="RAM"/>
+      <memory access="rwx" info="Secure SRAM" name="SRAM_S" security="c" size="0x00004000" start="0x38000000" type="RAM"/>
+      <memory access="rw" info="Backup SRAM" name="BKPSRAM_NS" security="n" size="0x00000200" start="0x40036400" type="RAM"/>
+    </memories>
+  </resources>
+
+</rzone>

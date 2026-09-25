@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<rzone schemaVersion="0.2.0">
+
+  <device Dname="STM32T0-bad" info="error case: an unsupported memory type">
+    <processor Dclock="80000000" Dcore="ARM Cortex-M0" DcoreVersion="r0p0" DnumInterrupts="32" DnumMpuRegions="8"/>
+  </device>
+
+  <resources>
+    <memories>
+      <memory access="rw" info="One-time programmable" name="OTP_AREA" security="n" size="0x00000400" start="0x1FFF7800" type="OTP"/>
+    </memories>
+  </resources>
+
+</rzone>
