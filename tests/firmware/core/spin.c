@@ -89,6 +89,47 @@ __attribute__((naked)) void long_poll(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void wait_helper(void)
+{
+  __asm__ volatile("cpsid i\n"
+                   "ldr r1, =0x40010000\n"
+                   "movs r0, #1\n"
+                   "str r0, [r1, #0x5c]\n"
+                   "1: bl 9f\n"
+                   "cmp r0, #0\n"
+                   "beq 1b\n"
+                   "bkpt #0\n"
+                   ".space 300\n"
+                   "9: ldr r0, [r1, #0x58]\n"
+                   "bx lr\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void wait_helper_hung(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "1: bl 9f\n"
+                   "tst r0, #1\n"
+                   "bne 1b\n"
+                   "bkpt #0\n"
+                   ".space 300\n"
+                   "9: ldr r0, [r1, #4]\n"
+                   "bx lr\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void wait_near_helper(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "1: bl 9f\n"
+                   "tst r0, #1\n"
+                   "bne 1b\n"
+                   "bkpt #0\n"
+                   "9: ldr r0, [r1, #4]\n"
+                   "bx lr\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   __asm__ volatile("bkpt #0" ::: "memory");
@@ -97,7 +138,7 @@ __attribute__((naked)) void long_poll(void)
   }
 }
 
-__attribute__((section(".isr_vector"), used)) static const void* const vectors[27] = {
+__attribute__((section(".isr_vector"), used)) static const void* const vectors[30] = {
     [0]  = &_estack,
     [1]  = (const void*)Reset_Handler,
     [16] = (const void*)tick_reads,
@@ -108,4 +149,7 @@ __attribute__((section(".isr_vector"), used)) static const void* const vectors[2
     [24] = (const void*)wait_ready_ticking,
     [25] = (const void*)wait_model,
     [26] = (const void*)long_poll,
+    [27] = (const void*)wait_helper,
+    [28] = (const void*)wait_helper_hung,
+    [29] = (const void*)wait_near_helper,
 };

@@ -190,3 +190,34 @@ TEST_CASE("a hung poll still spins while an interrupt handler reads MMIO")
   CAPTURE(stopped.detail);
   CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
 }
+
+TEST_CASE("reads made by a helper the loop calls belong to the iteration")
+{
+  SUBCASE("the helper's model completes later: no spin")
+  {
+    core::machine_options options;
+    options.spin_threshold = 1000;
+    options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+    fixture f{m33(), "spin", options};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    auto& model         = dynamic_cast<popcorn::testing::test_model&>(*f.target->model("TESTDEV"));
+    model.go_delay      = 100'000;
+    model.data_on_event = true;
+    start(f, "wait_helper");
+    CHECK(f.run_to_stop(long_request()).reason == stop_reason::user);
+  }
+  SUBCASE("a hung helper poll names the register")
+  {
+    for(auto const* const entry : {"wait_helper_hung", "wait_near_helper"})
+    {
+      CAPTURE(entry);
+      auto f = booted(1000);
+      start(f, entry);
+      auto const stopped = f.run_to_stop(long_request());
+      CHECK(stopped.reason == stop_reason::spin);
+      CAPTURE(stopped.detail);
+      CHECK(stopped.detail.contains(std::string{"in "} + entry));
+      CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
+    }
+  }
+}

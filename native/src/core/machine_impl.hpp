@@ -262,6 +262,10 @@ struct spin_state
   std::vector<int> subset_ids{};
   /** @brief Head of the loop being tracked, 0 before the first backward branch. */
   address head{};
+  /** @brief Exceptions entered and not returned from since tracking began. */
+  std::uint32_t depth = 0;
+  /** @brief depth when the head was seen: reads count only at that depth, callees included. */
+  std::uint32_t head_depth = 0;
   /** @brief Start of the previous block, 0 after an engine restart. */
   address previous{};
   /** @brief Highest block start of the current iteration inside the loop window. */
@@ -300,6 +304,8 @@ struct spin_state
   void clear() noexcept
   {
     head       = {};
+    head_depth = 0;
+    depth      = 0;
     previous   = {};
     last       = {};
     known      = false;
@@ -795,8 +801,8 @@ struct machine::run_state
   /** @brief Whether a pending event belongs to the model of a peripheral the loop polls. */
   [[nodiscard]] auto model_due() const -> bool;
 
-  /** @brief Records a CPU MMIO read for the current loop iteration, only from blocks in the loop
-   * window, at most spin_state::max_reads per iteration. */
+  /** @brief Records a CPU MMIO read for the current loop iteration, only at the exception depth
+   * of the loop head, callees included, at most spin_state::max_reads per iteration. */
   void spin_read(
       peripheral_slot const& slot,
       address                addr,

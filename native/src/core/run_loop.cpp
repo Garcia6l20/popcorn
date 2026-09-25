@@ -348,6 +348,10 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
     {
+      if(run.spin.depth != 0)
+      {
+        --run.spin.depth;
+      }
       return false;
     }
     run.trap      = result;
@@ -776,6 +780,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     if(spin_on and arch->pc() != spin_before)
     {
       spin.previous = {};
+      ++spin.depth;
     }
     if(arch->idle())
     {

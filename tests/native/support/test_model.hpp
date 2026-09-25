@@ -18,7 +18,8 @@ namespace popcorn::testing
  *        stores writes as they come, and on a write of 1 to `CTRL.GO` raises its IRQ line after
  *        delay instructions through its event port. A read of `DATA` lowers the line. Records
  *        every access, and on request fails or throws on reads, requests a stop on writes, and
- *        on a `CTRL.GO` write patches a halfword through DMA or halves the core clock.
+ *        on a `CTRL.GO` write patches a halfword through DMA or halves the core clock. go_delay
+ *        replaces the delay, and data_on_event sets `DATA` to 1 when the event fires.
  *        Test-only.
  */
 class test_model final : public periph::model

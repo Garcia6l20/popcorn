@@ -25,6 +25,11 @@ auto pointers_into(std::vector<std::uint64_t>& values) -> std::vector<void*>
        | std::ranges::to<std::vector>();
 }
 
+auto backward_step(address previous, address addr) noexcept -> bool
+{
+  return previous != 0 and addr <= previous and previous - addr < spin_state::loop_window;
+}
+
 auto in_loop(spin_state const& state, address addr) noexcept -> bool
 {
   return state.head != 0 and state.head <= addr and addr - state.head < spin_state::loop_window;
@@ -34,15 +39,11 @@ auto in_loop(spin_state const& state, address addr) noexcept -> bool
 void machine::run_state::spin_block(address addr)
 {
   auto&      state       = spin;
-  auto const jumped_back = state.previous
-                        != 0
-                       and addr
-                        <= state.previous
-                       and state.previous
-                         - addr
-                         < spin_state::loop_window;
-  auto const backward = jumped_back or (state.head != 0 and addr == state.head);
-  state.previous      = addr;
+  auto const jumped_back = backward_step(state.previous, addr);
+  auto const inside      = state.head != 0 and addr != state.head and in_loop(state, addr);
+  auto const backward    = (jumped_back and not inside)
+                        or (state.head != 0 and addr == state.head and state.previous == 0);
+  state.previous         = addr;
   if(not backward)
   {
     if(in_loop(state, addr))
@@ -84,8 +85,9 @@ void machine::run_state::spin_block(address addr)
     state.known = false;
     if(addr != state.head)
     {
-      state.head = addr;
-      state.last = addr;
+      state.head       = addr;
+      state.head_depth = state.depth;
+      state.last       = addr;
     }
   }
   else if(not state.known)
@@ -155,7 +157,7 @@ void machine::run_state::spin_read(
     std::uint32_t          value)
 {
   auto& state = spin;
-  if(not in_loop(state, block_pc) or not state.comparable)
+  if(state.head == 0 or state.depth != state.head_depth or not state.comparable)
   {
     return;
   }
