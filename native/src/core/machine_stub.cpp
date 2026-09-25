@@ -6,15 +6,6 @@
 
 namespace popcorn::core
 {
-auto machine::run_slice(slice_request const&) -> slice_result
-{
-  if(running())
-  {
-    throw machine_busy("a slice is already running");
-  }
-  throw not_implemented("machine::run_slice");
-}
-
 void machine::begin_call(arch::call_frame const&)
 {
   require_stopped(*this);
@@ -125,20 +116,5 @@ auto machine::peripheral(std::string_view) -> periph::register_file&
 auto machine::model(std::string_view) -> periph::model*
 {
   throw not_implemented("machine::model");
-}
-
-void machine::do_request_stop(stop_reason, std::string)
-{
-  throw not_implemented("machine::request_stop");
-}
-
-void machine::do_request_reset(reset_kind)
-{
-  throw not_implemented("machine::request_reset");
-}
-
-void machine::do_end_slice()
-{
-  throw not_implemented("machine::end_slice");
 }
 }

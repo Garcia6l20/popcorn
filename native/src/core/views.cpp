@@ -61,7 +61,7 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, ini
     byte = static_cast<std::byte>(value & 0xff);
     value >>= 8;
   }
-  region->host_wrote(engine_.get(), addr, size);
+  region->host_wrote(*run_, addr, size);
   return {};
 }
 
@@ -102,7 +102,7 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, initia
     }
     auto const run = std::min(in.size() - done, region->remaining(at));
     std::memcpy(region->host(at), in.data() + done, run);
-    region->host_wrote(engine_.get(), at, run);
+    region->host_wrote(*run_, at, run);
     done += run;
   }
   return {};

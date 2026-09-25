@@ -4,10 +4,15 @@ from popcorn_build.firmware import add_firmware
 
 here = Path(__file__).resolve().parent
 
-_, basic = add_firmware("core", "basic", [here / "basic.c"])
-if basic is not None:
-    basic.private.link_flags.append(
-        "-Wl,--defsym=_sidata=LOADADDR(.data),--defsym=_sdata=ADDR(.data),"
-        "--defsym=_edata=ADDR(.data)+SIZEOF(.data),--defsym=_sbss=ADDR(.bss),"
-        "--defsym=_ebss=ADDR(.bss)+SIZEOF(.bss)"
-    )
+SECTION_BOUNDS = (
+    "-Wl,--defsym=_sidata=LOADADDR(.data),--defsym=_sdata=ADDR(.data),"
+    "--defsym=_edata=ADDR(.data)+SIZEOF(.data),--defsym=_sbss=ADDR(.bss),"
+    "--defsym=_ebss=ADDR(.bss)+SIZEOF(.bss)"
+)
+
+for name, source in (("basic", "basic.c"), ("run", "run.c")):
+    _, target = add_firmware("core", name, [here / source])
+    if target is not None:
+        target.private.link_flags.append(SECTION_BOUNDS)
+
+add_firmware("core", "alu", [here / "alu.S"])

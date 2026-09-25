@@ -51,15 +51,33 @@ test_smoke_fw = add_doctest(
 if smoke_firmware is not None:
     test_smoke_fw.depends(smoke_firmware)
 
-basic_elf, basic_firmware = firmware("core", "basic")
+core_firmware = {name: firmware("core", name) for name in ("basic", "run", "alu")}
 m33_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
     "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
-    "POPCORN_FW_BASIC": str(basic_elf),
+    **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in core_firmware.items()},
 }
+basic_firmware = core_firmware["basic"][1]
 add_doctest("core-memory-map", [here / "test_memory_map.cpp"], [test_support, core], env=m33_env)
 test_machine_load = add_doctest(
     "core-machine-load", [here / "test_machine_load.cpp"], [test_support, core], env=m33_env
 )
 if basic_firmware is not None:
     test_machine_load.depends(basic_firmware)
+
+test_run_loop = add_doctest(
+    "core-run-loop", [here / "test_run_loop.cpp"], [test_support, core], env=m33_env
+)
+bench_run_loop = project.Program(
+    "bench-run-loop", project.default_environment, sources=[here / "bench_run_loop.cpp"]
+)
+bench_run_loop.link(test_support)
+bench_run_loop.link(core)
+bench_run_loop.private.defines.extend(
+    f'{variable}="{value}"' for variable, value in m33_env.items()
+)
+alias_bare_name(bench_run_loop)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_run_loop.depends(target)
+        bench_run_loop.depends(target)

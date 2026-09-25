@@ -176,12 +176,12 @@ TEST_CASE("Python facade consumer drives every machine entry point")
   options.strict_peripherals = true;
   popcorn::core::machine configured{
       popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), options};
-  CHECK_THROWS_AS(popcorn::consumers::facade::step(configured, 1), popcorn::not_implemented);
+  CHECK(popcorn::consumers::facade::step(configured, 1)->reason == popcorn::stop_reason::fault);
   popcorn::core::machine target{
       popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), {}};
-  CHECK_THROWS_AS(
-      popcorn::consumers::facade::run_until(target, 0x0800'0100, popcorn::icount{1000}),
-      popcorn::not_implemented);
+  CHECK(
+      popcorn::consumers::facade::run_until(target, 0x0800'0100, popcorn::icount{1000})->reason
+      == popcorn::stop_reason::fault);
   CHECK_THROWS_AS(popcorn::consumers::facade::hooks(target), popcorn::not_implemented);
   CHECK_THROWS_AS(popcorn::consumers::facade::views(target), popcorn::not_implemented);
   CHECK_THROWS_AS(popcorn::consumers::facade::snapshots(target), popcorn::not_implemented);

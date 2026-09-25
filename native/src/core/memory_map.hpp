@@ -28,6 +28,8 @@ struct buffer_window
   std::size_t offset{};
   /** @brief Bytes in the window. */
   std::size_t size{};
+  /** @brief Whether guest stores may go through the window. */
+  bool writable{};
 };
 
 /** @brief Host memory behind one region and every alias of it, mapped with `uc_mem_map_ptr`. */
@@ -88,13 +90,24 @@ struct machine::mapped_region
 
   /**
    * @brief Removes translated code over bytes the host wrote, at every address the buffer is
-   *        mapped, when the buffer is executable. Unicorn only sees guest stores.
-   * @param engine Engine holding the translated code.
+   *        mapped, when the buffer is executable: at once between engine runs, at the next block
+   *        boundary from inside one. Unicorn only sees guest stores.
+   * @param run Run state of the machine owning the region.
    * @param addr First written guest address.
    * @param size Bytes written.
-   * @throws emulation_error when the engine refuses the removal.
+   * @throws emulation_error when the engine refuses an immediate removal.
    */
-  void host_wrote(uc_struct* engine, address addr, std::size_t size) const
-      pre(contains(addr, size));
+  void host_wrote(run_state& run, address addr, std::size_t size) const pre(contains(addr, size));
 };
+
+/**
+ * @brief Removes translated code over buffer bytes [@p first, @p last) at every window mapping
+ *        them.
+ * @throws emulation_error when the engine refuses the removal.
+ */
+void remove_translated(
+    uc_struct*         engine,
+    host_buffer const& buffer,
+    std::size_t        first,
+    std::size_t        last);
 }

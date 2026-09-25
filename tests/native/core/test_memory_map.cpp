@@ -6,7 +6,9 @@
 #include <doctest/doctest.h>
 #include <unicorn/unicorn.h>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -90,35 +92,21 @@ auto config_key(auto&& build) -> std::string
 class bkpt_runner
 {
 public:
-  explicit bkpt_runner(uc_engine* engine) : engine_{engine}
-  {
-    REQUIRE(
-        uc_hook_add(engine_, &hook_, UC_HOOK_INTR, reinterpret_cast<void*>(&stop), nullptr, 1, 0)
-        == UC_ERR_OK);
-  }
-  bkpt_runner(bkpt_runner const&)                    = delete;
-  auto operator=(bkpt_runner const&) -> bkpt_runner& = delete;
-  ~bkpt_runner()
-  {
-    uc_hook_del(engine_, hook_);
-  }
+  explicit bkpt_runner(core::machine& target) : target_{target}
+  {}
 
-  auto run(address at) -> std::uint32_t
+  auto run(address at) -> std::uint64_t
   {
-    REQUIRE(uc_emu_start(engine_, at | 1, at + 0x100, 0, 0) == UC_ERR_OK);
-    std::uint32_t r0 = 0;
-    REQUIRE(uc_reg_read(engine_, UC_ARM_REG_R0, &r0) == UC_ERR_OK);
-    return r0;
+    auto const registers = target_.regs();
+    registers.write(*registers.find("pc"), at);
+    auto const slice = target_.run_slice({.wall_budget = std::chrono::seconds{10}});
+    REQUIRE(slice.stopped.has_value());
+    REQUIRE(slice.stopped->reason == popcorn::stop_reason::user);
+    return registers.read(*registers.find("r0"));
   }
 
 private:
-  static void stop(uc_engine* engine, std::uint32_t, void*) noexcept
-  {
-    uc_emu_stop(engine);
-  }
-
-  uc_engine* engine_;
-  uc_hook    hook_{};
+  core::machine& target_;
 };
 
 constexpr std::uint32_t rx  = UC_PROT_READ | UC_PROT_EXEC;
@@ -224,8 +212,16 @@ TEST_CASE("a debugger write through an alias reads back through its target and t
 
 TEST_CASE("an rx alias over rw SRAM shares the buffer and keeps each protection")
 {
+  auto desc = m33_code_alias();
+  SUBCASE("alias listed after its target")
+  {}
+  SUBCASE("alias listed before its target")
+  {
+    std::ranges::rotate(desc.regions.begin() + 2, desc.regions.begin() + 3, desc.regions.end());
+    REQUIRE(desc.regions[2].name == "SRAM_CODE");
+  }
   recorded      made;
-  core::machine target{m33_code_alias(), made.factory(), {}};
+  core::machine target{desc, made.factory(), {}};
   auto const    found = mappings(made.module->attached_engine());
   REQUIRE(found.size() == 5);
   CHECK(found[2] == mapping{0x0a00'0000, 0x0a0b'ffff, rx});
@@ -246,7 +242,7 @@ TEST_CASE("debugger writes into executable memory replace translated code at eve
   {
     recorded      made;
     core::machine target{m33(), made.factory(), {}};
-    bkpt_runner   runner{made.module->attached_engine()};
+    bkpt_runner   runner{target};
     auto const    memory = target.mem();
     REQUIRE(memory.write_block(0x0800'0400, movs_r0_1_bkpt));
     CHECK(runner.run(0x0800'0400) == 1);
@@ -262,7 +258,7 @@ TEST_CASE("debugger writes into executable memory replace translated code at eve
   {
     recorded      made;
     core::machine target{m33_code_alias(), made.factory(), {}};
-    bkpt_runner   runner{made.module->attached_engine()};
+    bkpt_runner   runner{target};
     auto const    memory = target.mem();
     REQUIRE(memory.write_block(0x2000'0400, movs_r0_1_bkpt));
     CHECK(runner.run(0x0a00'0400) == 1);

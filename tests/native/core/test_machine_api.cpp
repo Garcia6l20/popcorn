@@ -66,7 +66,9 @@ TEST_CASE("machine stub throws not_implemented for every behaviour not yet imple
 
   CHECK_NOTHROW(target.load({}));
   CHECK_NOTHROW(target.reset());
-  CHECK_THROWS_AS(target.run_slice({}), popcorn::not_implemented);
+  auto const slice = target.run_slice({});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(slice.stopped->reason == popcorn::stop_reason::fault);
   CHECK_THROWS_AS(target.begin_call(frame), popcorn::not_implemented);
   CHECK_THROWS_AS(target.call(frame, popcorn::icount{1000}), popcorn::not_implemented);
   CHECK_THROWS_AS(std::ignore = target.snapshot(), popcorn::not_implemented);

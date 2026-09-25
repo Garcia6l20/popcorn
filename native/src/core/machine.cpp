@@ -71,7 +71,7 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
     : id_{next_machine_id()}, description_{std::move(description)}, options_{std::move(options)},
       clock_{core_clock_hz(description_, options_), options_.cpi}, clock_driver_{clock_},
       arch_events_{scheduler_, arch::arch_event_owner}, trace_{options_.trace_capacity},
-      hooks_{std::make_shared<hook_registry>()}, run_{std::make_unique<run_state>()}
+      hooks_{std::make_shared<hook_registry>()}, run_{std::make_unique<run_state>(*this)}
 {
   run_->reset_vector = reset_vector_of(description_, options_);
   arch_              = factory(description_.core);
@@ -82,12 +82,14 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
         std::format("a core the arch factory implements, not {}", description_.core.cpu));
   }
   engine_.reset(open_engine(arch_->engine()).release());
-  memory_ = mapped_region::build(engine_.get(), description_);
+  run_->engine = engine_.get();
+  memory_      = mapped_region::build(engine_.get(), description_);
   try
   {
     arch_->attach(run_->arch_context.emplace(
         engine_.get(), description_, clock_, arch_events_, static_cast<machine_services&>(*this),
         options_.faults));
+    run_->install_hooks();
   }
   catch(...)
   {
@@ -169,7 +171,7 @@ void machine::load(popcorn::image::image const& loaded)
     }
     auto* const out = std::ranges::copy(seg.bytes, region->host(seg.start)).out;
     std::ranges::fill_n(out, seg.memory_size - seg.bytes.size(), std::byte{0});
-    region->host_wrote(engine_.get(), seg.start, seg.memory_size);
+    region->host_wrote(*run_, seg.start, seg.memory_size);
   }
   images_.push_back(loaded);
 }

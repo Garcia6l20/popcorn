@@ -1,6 +1,7 @@
 #include "memory_map.hpp"
 
 #include "engine.hpp"
+#include "machine_impl.hpp"
 
 #include <popcorn/core/errors.hpp>
 
@@ -87,7 +88,10 @@ auto machine::mapped_region::build(uc_struct* engine, mcu_description const& des
     auto const& region = *mapped->desc;
     if(not region.physical)
     {
-      mapped->buffer = allocate(region);
+      if(not mapped->buffer)
+      {
+        mapped->buffer = allocate(region);
+      }
       continue;
     }
     auto const target = std::ranges::find_if(memory, [&](auto const& candidate) {
@@ -129,7 +133,10 @@ auto machine::mapped_region::build(uc_struct* engine, mcu_description const& des
       ++mapped_count;
       mapped->buffer->executable = mapped->buffer->executable or region.acc.execute;
       mapped->buffer->mappings.push_back(
-          {.start = region.start, .offset = mapped->offset, .size = region.size});
+          {.start    = region.start,
+           .offset   = mapped->offset,
+           .size     = region.size,
+           .writable = (protection(region) & UC_PROT_WRITE) != 0});
     }
   }
   catch(...)
@@ -168,15 +175,13 @@ auto machine::mapped_region::host(address addr) const noexcept -> std::byte*
   return buffer->bytes.get() + offset + (addr - desc->start);
 }
 
-void machine::mapped_region::host_wrote(uc_struct* engine, address addr, std::size_t size) const
+void remove_translated(
+    uc_struct*         engine,
+    host_buffer const& buffer,
+    std::size_t        first,
+    std::size_t        last)
 {
-  if(not buffer->executable or size == 0)
-  {
-    return;
-  }
-  auto const first = offset + (addr - desc->start);
-  auto const last  = first + size;
-  for(auto const& window : buffer->mappings)
+  for(auto const& window : buffer.mappings)
   {
     auto const from = std::max(first, window.offset);
     auto const to   = std::min(last, window.offset + window.size);
@@ -188,5 +193,15 @@ void machine::mapped_region::host_wrote(uc_struct* engine, address addr, std::si
           std::format("removing translated code at {:#010x}", guest + from));
     }
   }
+}
+
+void machine::mapped_region::host_wrote(run_state& run, address addr, std::size_t size) const
+{
+  if(not buffer->executable or size == 0)
+  {
+    return;
+  }
+  auto const first = offset + (addr - desc->start);
+  run.code_changed(*buffer, first, first + size);
 }
 }

@@ -15,9 +15,12 @@ namespace popcorn::testing
 /**
  * @brief Minimal M-profile arch module over the real engine, for core tests before the armv8m
  *        module exists. Maps a 4 KB system page at 0xE000E000 whose reads return a fixed
- *        pattern, resets from a vector table, exposes the core registers. Test-only.
+ *        pattern, resets from a vector table, exposes the core registers. Latches IRQ lines,
+ *        enters one handler at a time with a basic frame while PRIMASK is clear, returns through
+ *        EXC_RETURN, stops on BKPT past the instruction, faults on invalid instructions and
+ *        refused accesses. Test-only, tests derive from it to change one behaviour.
  */
-class test_arch final : public popcorn::arch::arch
+class test_arch : public popcorn::arch::arch
 {
 public:
   /** @brief Base of the system page attach() maps. */
@@ -66,20 +69,40 @@ public:
   [[nodiscard]] auto attached_services() const noexcept
       -> core::machine_services& pre(context_.has_value());
 
+  /** @brief Event port of the module, which attach() must have bound. */
+  [[nodiscard]] auto attached_events() const noexcept
+      -> core::event_port& pre(context_.has_value());
+
+  /** @brief Kind of the last access on_unmapped() handled, empty before any. */
+  [[nodiscard]] auto last_refused() const noexcept -> std::optional<popcorn::arch::memory_op>;
+
   /** @brief State save() writes and load() reads. */
   struct state
   {
     /** @brief Whether the core sleeps after WFI. */
     bool idle{};
+    /** @brief Latched IRQ lines, bit per source. */
+    std::uint32_t pending_lines{};
+    /** @brief Vector table the last reset read. */
+    address vector_table{};
   };
 
-private:
+protected:
+  /** @brief Reads a 32-bit engine register. */
   [[nodiscard]] auto read(int engine_id) const -> std::uint32_t;
-  void               write(int engine_id, std::uint32_t value) const;
+  /** @brief Writes a 32-bit engine register. */
+  void write(int engine_id, std::uint32_t value) const;
+  /** @brief Immediate of the BKPT instruction at pc(). */
+  [[nodiscard]] auto bkpt_immediate() const -> std::uint8_t;
+
+private:
+  void enter(std::uint32_t source);
+  void exception_return();
 
   int                                        cpu_model_;
   std::optional<popcorn::arch::arch_context> context_{};
   state                                      state_{};
+  std::optional<popcorn::arch::memory_op>    last_refused_{};
 };
 
 /** @brief Factory creating a test_arch for any core Unicorn models. */

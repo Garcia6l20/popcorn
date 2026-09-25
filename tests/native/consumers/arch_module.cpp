@@ -214,8 +214,9 @@ TEST_CASE("arch module consumer implements arch through its context")
 
   popcorn::core::machine target{description, popcorn::consumers::arch_module::factory(), {}};
   CHECK_NOTHROW(target.reset(popcorn::reset_kind::software));
-  CHECK_THROWS_AS(
-      target.run_slice({.max_instructions = popcorn::icount{1000}}), popcorn::not_implemented);
+  auto const slice = target.run_slice({.max_instructions = popcorn::icount{1000}});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(slice.stopped->reason == popcorn::stop_reason::fault);
   CHECK_THROWS_AS(
       target.call({.entry = 0x0800'0100, .return_sentinel = 0xffff'fffe}, popcorn::icount{100}),
       popcorn::not_implemented);

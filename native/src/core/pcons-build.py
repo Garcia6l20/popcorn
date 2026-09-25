@@ -15,6 +15,7 @@ sources = [
         "hooks.cpp",
         "machine.cpp",
         "memory_map.cpp",
+        "run_loop.cpp",
         "views.cpp",
         "machine_stub.cpp",
     )
