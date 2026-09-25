@@ -6,7 +6,7 @@
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/trace.hpp>
-#include <popcorn/obs/coverage.hpp>
+#include <popcorn/obs/collect.hpp>
 
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"

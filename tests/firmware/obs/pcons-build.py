@@ -5,3 +5,4 @@ from popcorn_build.firmware import add_firmware
 here = Path(__file__).resolve().parent
 
 add_firmware("obs", "tb", [here / "tb.S"])
+add_firmware("obs", "lines", [here / "lines.c"])

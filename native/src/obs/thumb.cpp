@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <utility>
 
 namespace popcorn::obs::thumb
@@ -308,5 +309,32 @@ auto classify(insn const& i) noexcept -> flow
 auto is_it(insn const& i) noexcept -> bool
 {
   return i.size == 2 and (i.bits & 0xff00) == 0xbf00 and (i.bits & 0x000f) != 0;
+}
+
+auto conditional_branch(insn const& i) noexcept -> std::optional<cond_branch>
+{
+  auto const control = classify(i);
+  if(control.kind != ending::direct or not control.conditional)
+  {
+    return std::nullopt;
+  }
+  return cond_branch{
+      .at          = i.at,
+      .size        = i.size,
+      .taken       = *control.target,
+      .fallthrough = i.at + i.size,
+  };
+}
+
+auto is_call(insn const& i) noexcept -> bool
+{
+  auto const bl  = i.size == 4 and (i.bits & 0xf800'd000) == 0xf000'd000;
+  auto const blx = i.size == 2 and (i.bits & 0xff80) == 0x4780;
+  return bl or blx;
+}
+
+auto it_length(insn const& i) noexcept -> std::uint8_t
+{
+  return static_cast<std::uint8_t>(4 - std::countr_zero(i.bits & 0xf));
 }
 }

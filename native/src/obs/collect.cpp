@@ -2,7 +2,7 @@
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
-#include <popcorn/obs/coverage.hpp>
+#include <popcorn/obs/collect.hpp>
 
 #include <algorithm>
 #include <filesystem>

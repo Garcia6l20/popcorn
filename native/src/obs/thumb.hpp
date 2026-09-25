@@ -120,4 +120,42 @@ auto classify(insn const& i) noexcept -> flow;
  * @param i Instruction.
  */
 auto is_it(insn const& i) noexcept -> bool;
+
+/** @brief A conditional branch by encoding: B T1, B T3, CBZ or CBNZ. */
+struct cond_branch
+{
+  /** @brief Address of the branch. */
+  address at{};
+  /** @brief Its size in bytes. */
+  std::uint8_t size{};
+  /** @brief Target when taken. */
+  address taken{};
+  /** @brief Next instruction, reached when not taken. */
+  address fallthrough{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(cond_branch const&, cond_branch const&) -> bool = default;
+};
+
+/**
+ * @brief The conditional branch an instruction is by its encoding. IT-predicated instructions
+ *        are not, the caller tracks IT state.
+ * @param i Instruction.
+ * @return The branch, empty for any other instruction.
+ */
+auto conditional_branch(insn const& i) noexcept -> std::optional<cond_branch>;
+
+/**
+ * @brief Whether an instruction is a call, BL or BLX register, after which execution resumes at
+ *        the next instruction.
+ * @param i Instruction.
+ */
+auto is_call(insn const& i) noexcept -> bool;
+
+/**
+ * @brief Instructions an IT instruction makes conditional, from its mask.
+ * @param i An IT instruction, see is_it().
+ * @return 1 to 4.
+ */
+auto it_length(insn const& i) noexcept -> std::uint8_t;
 }

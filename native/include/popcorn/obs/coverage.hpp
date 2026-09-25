@@ -1,6 +1,5 @@
 #pragma once
 
-#include <popcorn/core/machine.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/image/image.hpp>
 
@@ -18,18 +17,6 @@ enum class[[= reflex::derive{reflex::Format}]] image_kind : std::uint32_t
 {
   elf = 0,
   raw = 1,
-};
-
-/** @brief Where a loaded image came from, supplied by the caller of collect(). */
-struct image_source
-{
-  /** @brief ELF file, or a raw image from a bin or HEX file or the object linker. */
-  image_kind kind{image_kind::elf};
-  /** @brief Absolute path of the ELF, empty for a raw image. */
-  std::string path{};
-
-  /** @brief Member-wise equality. */
-  friend auto operator==(image_source const&, image_source const&) -> bool = default;
 };
 
 /** @brief Image a coverage group was collected against. */
@@ -109,30 +96,6 @@ struct coverage_set
 };
 
 /**
- * @brief Collects a machine's coverage counters as byte-ranged blocks. Each counted block start
- *        is decoded to the end of its translated block, from the loaded images' bytes or, for
- *        code outside them, from memory as it is now. An edge from a block into its own decoded
- *        range, other than to its branch target, proves the engine ended the block there: the
- *        block's hits are split over the sizes the edges show.
- *
- * Known limits: while stepping every stepped instruction counts as a block start and decodes to
- * a full block, so stepped code over-counts. A block that ended early without a recorded edge,
- * at a stop or an exception entry, counts at full size. The hits of a block start whose first
- * instruction cannot be read are counted in coverage_group::dropped. Exceptions that depend on
- * CPU state end blocks the decoder cannot predict. Once a u32 counter saturates, a start's hits
- * over its sizes are the sum of its edges into the block's middle when that is larger.
- *
- * @param target Machine, stopped or inside one of its handlers.
- * @param sources One source per loaded image, in load order. An ELF source's path is stored
- *        made absolute.
- * @return One group.
- * @throws config_error for an ELF source with an empty path or a raw source with a path.
- * @throws machine_running while a slice runs, outside its handlers.
- */
-auto collect(core::machine& target, std::span<image_source const> sources) -> coverage_set
-    pre(sources.size() == target.loaded_images().size());
-
-/**
  * @brief Code ranges of functions by name, for scoping coverage and trace sinks.
  * @param images Images to search, in load order. The first image holding a name wins.
  * @param names Function names.
@@ -147,4 +110,51 @@ auto collect(core::machine& target, std::span<image_source const> sources) -> co
  */
 auto function_ranges(std::span<image::image const> images, std::span<std::string const> names)
     -> std::vector<address_range>;
+
+/** @brief What lcov() writes beyond line counts. */
+struct lcov_options
+{
+  /** @brief Whether to write BRDA, BRF and BRH records. */
+  bool branches = true;
+  /** @brief Test name of the TN record, empty allowed. */
+  std::string test_name{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(lcov_options const&, lcov_options const&) -> bool = default;
+};
+
+/**
+ * @brief lcov tracefile text of a coverage set, the records TN, SF, FN, FNDA, FNF, FNH, BRDA, BRF,
+ *        BRH, DA, LF, LH, end_of_record, files sorted by path.
+ *
+ * Inside a group an instruction's count is the sum of the hits of the blocks holding it, and a
+ * line's count is the largest count among its instructions, over the group's ranges, row starts
+ * and block starts. Across groups, which are different images, the counts of one file and line
+ * are summed: the only place a line count is a sum. Branches are Thumb B<cond>, CBZ and CBNZ
+ * outside IT blocks, found by following control flow through each function in range, and counted
+ * from the edges out of the blocks that end with them. A branch whose block never ran is `-`.
+ * Edges the machine did not record, at an exception entry or a stop right after a branch, are
+ * missing from the counts. BRDA block numbers are the branch's index among its line's branches.
+ * Each file record starts with its own TN record.
+ *
+ * Rules and limits:
+ * - Rows of zero length, followed by a row at the same address, cover no instruction: their line
+ *   gets no DA record from them, as addr2line resolves the address to the last row.
+ * - Branch discovery starts from each function's entry, row starts and block starts. A start other
+ *   than the entry, with an IT instruction among the 8 halfwords before it, may sit inside an IT
+ *   block: its first 4 instructions are not reported as branches.
+ * - A call that never returns, followed by a literal pool, lets discovery decode the pool's words
+ *   as instructions: a word that encodes B<cond>, CBZ or CBNZ is reported as a branch. The images
+ *   carry no mapping symbols to tell code from data.
+ *
+ * @param set Coverage, as collect() or a `.pcov` load gives it.
+ * @param images Per group, its images in the order of coverage_group::images. A raw image
+ *        contributes nothing.
+ * @param options Branch records and test name.
+ * @return The tracefile text.
+ */
+auto lcov(
+    coverage_set const&                        set,
+    std::span<std::vector<image::image> const> images,
+    lcov_options const& options) -> std::string pre(images.size() == set.groups.size());
 }

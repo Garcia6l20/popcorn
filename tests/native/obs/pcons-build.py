@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pcons import context
 
-from popcorn_build.config import project_dir
+from popcorn_build.config import build_dir, project_dir
 from popcorn_build.firmware import firmware
 from popcorn_build.testing import add_doctest
 
@@ -44,3 +44,19 @@ test_tb_ranges.private.include_dirs.append(obs_sources)
 for _, target in tb_firmware.values():
     if target is not None:
         test_tb_ranges.depends(target)
+
+lines_elf, lines_firmware = firmware("obs", "lines")
+test_lcov = add_doctest(
+    "obs-lcov",
+    [here / "test_lcov.cpp"],
+    [obs, test_support, core],
+    env={
+        "POPCORN_M33_DESC": str(core_data / "m33.json"),
+        "POPCORN_FW_LINES": str(lines_elf),
+        "POPCORN_PROJECT_DIR": str(project_dir),
+        "POPCORN_OBS_SCRATCH": str(build_dir / "test-obs-scratch"),
+    },
+)
+test_lcov.private.include_dirs.append(obs_sources)
+if lines_firmware is not None:
+    test_lcov.depends(lines_firmware)
