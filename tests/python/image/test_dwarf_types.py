@@ -11,9 +11,14 @@ from __future__ import annotations
 import posixpath
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
+from elftools.dwarf.compileunit import CompileUnit
+from elftools.dwarf.die import DIE
+from elftools.dwarf.ranges import BaseAddressEntry, RangeEntry
 from popcorn.image import (
     ArrayType,
     BaseType,
@@ -28,6 +33,7 @@ from popcorn.image import (
     Typedef,
     load_debug_info,
 )
+from popcorn.image.dwarf import address_from_ranges
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ELF_PATH = REPO_ROOT / "tests" / "firmware" / "image" / "prebuilt" / "image-types.elf"
@@ -304,3 +310,81 @@ def test_encoding_keeps_signedness_on_char(info: DebugInfo) -> None:
     unsigned_char = info.type("unsigned char")
     assert isinstance(unsigned_char, BaseType)
     assert unsigned_char.encoding == Encoding.UNSIGNED
+
+
+class _FakeAttr:
+    def __init__(self, form: str, value: object) -> None:
+        self.form = form
+        self.value = value
+
+
+class _FakeDIE:
+    def __init__(self, attributes: dict[str, _FakeAttr]) -> None:
+        self.attributes = attributes
+
+
+class _FakeRangeLists:
+    def __init__(self, entries: Sequence[object]) -> None:
+        self._entries = entries
+
+    def get_range_list_at_offset(self, offset: int, cu: object = None) -> Sequence[object]:
+        return self._entries
+
+
+class _FakeDwarfInfo:
+    def __init__(self, entries: Sequence[object]) -> None:
+        self._range_lists = _FakeRangeLists(entries)
+
+    def range_lists(self) -> _FakeRangeLists:
+        return self._range_lists
+
+
+class _FakeCU:
+    def __init__(self, entries: Sequence[object], low_pc: int | None = None) -> None:
+        self.dwarfinfo = _FakeDwarfInfo(entries)
+        top_attrs: dict[str, _FakeAttr] = {}
+        if low_pc is not None:
+            top_attrs["DW_AT_low_pc"] = _FakeAttr("DW_FORM_addr", low_pc)
+        self._top = _FakeDIE(top_attrs)
+
+    def get_top_DIE(self) -> _FakeDIE:
+        return self._top
+
+
+def _ranges_die() -> _FakeDIE:
+    return _FakeDIE({"DW_AT_ranges": _FakeAttr("DW_FORM_sec_offset", 0)})
+
+
+def _call(cu: _FakeCU, die: _FakeDIE) -> int | None:
+    return address_from_ranges(cast(CompileUnit, cu), cast(DIE, die))
+
+
+def test_address_from_ranges_no_attribute_is_none() -> None:
+    cu = _FakeCU([])
+    assert _call(cu, _FakeDIE({})) is None
+
+
+def test_address_from_ranges_absolute_entries() -> None:
+    entries = [
+        RangeEntry(0, 0, 0x2000, 0x2010, True),
+        RangeEntry(0, 0, 0x1000, 0x1010, True),
+    ]
+    cu = _FakeCU(entries)
+    assert _call(cu, _ranges_die()) == 0x1000
+
+
+def test_address_from_ranges_base_relative_entries() -> None:
+    entries = [
+        BaseAddressEntry(0, 0x8000),
+        RangeEntry(0, 0, 0x20, 0x30, False),
+        BaseAddressEntry(0, 0x100),
+        RangeEntry(0, 0, 0x5, 0x9, False),
+    ]
+    cu = _FakeCU(entries)
+    assert _call(cu, _ranges_die()) == 0x105
+
+
+def test_address_from_ranges_uses_cu_low_pc_as_initial_base() -> None:
+    entries = [RangeEntry(0, 0, 0x10, 0x20, False)]
+    cu = _FakeCU(entries, low_pc=0x5000)
+    assert _call(cu, _ranges_die()) == 0x5010

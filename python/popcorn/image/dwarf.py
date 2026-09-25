@@ -615,7 +615,7 @@ def _merge_function(functions: dict[str, Function], name: str, function: Functio
         functions[name] = function
 
 
-def _address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
+def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
     attr = die.attributes.get("DW_AT_ranges")
     if attr is None or attr.form in _REF_FORMS:
         return None
@@ -659,7 +659,7 @@ def _build_function(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Func
 
     address = _attr_int(die, "DW_AT_low_pc")
     if address is None:
-        address = _address_from_ranges(cu, die)
+        address = address_from_ranges(cu, die)
 
     function = Function(
         name=name,
@@ -708,6 +708,7 @@ def _walk_cu(
 
 
 def _fill_addresses_from_symtab(elf: ELFFile, functions: dict[str, Function]) -> None:
+    """Ignores symbol binding; an ambiguous name match leaves the function's address None."""
     missing = {name for name, fn in functions.items() if fn.address is None}
     if not missing:
         return
