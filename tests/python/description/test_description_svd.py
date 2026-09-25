@@ -1,3 +1,4 @@
+import os
 import statistics
 import time
 import xml.etree.ElementTree as ET
@@ -256,6 +257,10 @@ def test_u575_spot_checks(u575_device: SvdDevice) -> None:
     assert idcode.reset == 0x30076482
 
 
+@pytest.mark.skipif(
+    os.environ.get("POPCORN_PERF") != "1",
+    reason="set POPCORN_PERF=1 to run the expand_svd timing benchmark",
+)
 def test_u575_expand_time(st_svd_u575: Path) -> None:
     data = st_svd_u575.read_bytes()
     durations: list[float] = []

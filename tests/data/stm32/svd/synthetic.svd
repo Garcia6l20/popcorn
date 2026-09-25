@@ -87,5 +87,21 @@
         </register>
       </registers>
     </peripheral>
+    <peripheral>
+      <name>D</name>
+      <baseAddress>0x40003000</baseAddress>
+      <addressBlock><offset>0</offset><size>0x400</size><usage>registers</usage></addressBlock>
+      <registers>
+        <register>
+          <name>CR</name>
+          <addressOffset>0x0</addressOffset>
+          <fields><field><name>EN</name><bitOffset>0</bitOffset><bitWidth>1</bitWidth></field></fields>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral derivedFrom="D">
+      <name>SEC_D</name>
+      <baseAddress>0x50003000</baseAddress>
+    </peripheral>
   </peripherals>
 </device>

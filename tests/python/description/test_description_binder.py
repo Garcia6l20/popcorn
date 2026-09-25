@@ -204,8 +204,8 @@ def test_list_of_dataclasses_binds() -> None:
 
 @dataclass(slots=True, kw_only=True)
 class _Selector:
-    ip: str | None = None
-    instances: list[str] | None = None
+    ip: str | None = field(default=None, metadata={"selector_group": "target"})
+    instances: list[str] | None = field(default=None, metadata={"selector_group": "target"})
 
 
 def test_selector_with_exactly_one_field_set() -> None:
@@ -222,3 +222,15 @@ def test_selector_with_both_fields_set_is_refused() -> None:
 def test_selector_with_neither_field_set_is_refused() -> None:
     with pytest.raises(DescriptionError):
         from_mapping(_Selector, {}, file="test")
+
+
+@dataclass(slots=True, kw_only=True)
+class _AllOptionalNotASelector:
+    a: str | None = None
+    b: str | None = None
+
+
+def test_all_optional_dataclass_without_metadata_is_not_a_selector() -> None:
+    result = from_mapping(_AllOptionalNotASelector, {}, file="test")
+    assert result.a is None
+    assert result.b is None

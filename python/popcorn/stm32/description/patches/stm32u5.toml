@@ -1,0 +1,14 @@
+format = 1
+source = "I05 section 5: SVD peripheral naming vs CubeMX db IP instances, STM32U575QGIx"
+
+[match]
+parts = ["STM32U5*"]
+svd = ["STM32U5*.svd"]
+
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+source = "I05 section 1: SEC_ prefix at NS base + 0x1000_0000, true on U5"
+
+[ip]
+renames = { USB_OTG_FS = ["OTG_FS"], DCACHE1 = ["DCACHE"], ICACHE = ["ICache"], COMP1 = ["COMP"], COMP2 = ["COMP"], OPAMP1 = ["OPAMP"], OPAMP2 = ["OPAMP"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI", "LPGPIO1"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"], GTZC_S = ["GTZC2_TZSC", "GTZC2_TZIC", "GTZC2_MPCBB4"], SYS = ["SYSCFG"] }

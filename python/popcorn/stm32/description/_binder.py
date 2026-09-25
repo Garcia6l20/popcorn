@@ -94,16 +94,17 @@ def _bind_value(type_hint: object, raw: object, *, file: str, key: str) -> objec
 
 
 def _check_selector(cls: type, instance: object, *, file: str, key: str) -> None:
-    flds = dataclasses.fields(cls)
-    if not flds:
-        return
-    hints = get_type_hints(cls)
-    if not all(_is_optional(hints[f.name]) for f in flds):
-        return
-    set_names = [f.name for f in flds if getattr(instance, f.name) is not None]
-    if len(set_names) != 1:
-        names = ", ".join(f.name for f in flds)
-        raise DescriptionError(file, 0, key or cls.__name__, f"exactly one of {names}")
+    groups: dict[str, list[str]] = {}
+    for f in dataclasses.fields(cls):
+        group = f.metadata.get("selector_group")
+        if group is not None:
+            groups.setdefault(group, []).append(f.name)
+    for names in groups.values():
+        set_names = [name for name in names if getattr(instance, name) is not None]
+        if len(set_names) != 1:
+            raise DescriptionError(
+                file, 0, key or cls.__name__, f"exactly one of {', '.join(names)}"
+            )
 
 
 def _bind_object[T: "DataclassInstance"](cls: type[T], data: object, *, file: str, key: str) -> T:

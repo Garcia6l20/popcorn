@@ -1,0 +1,44 @@
+format = 1
+source = "synthetic probe for the patch engine"
+
+[match]
+parts = ["TOY*"]
+svd = ["synthetic.svd"]
+
+[core]
+source = "synthetic probe"
+reset_clock_hz = 8000000
+
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+
+[ip]
+renames = { IPX = ["A"] }
+
+[[fields]]
+ip = "TYPEX"
+registers = ["SR"]
+fields = ["F"]
+on_write = "zero_to_clear"
+source = "synthetic probe"
+
+[[fields]]
+instances = ["B"]
+registers = ["ARR{n}"]
+fields = ["V"]
+on_read = "set"
+each = { n = [0, 2] }
+source = "synthetic probe"
+
+[[cross]]
+ip = "TYPEX"
+reg = "SR2"
+target_reg = "SR"
+effect = "clear"
+pairs = { R = "F" }
+source = "synthetic probe"
+
+[irqs]
+drop = ["A_IRQ"]
+add = [{ number = 5, name = "NEW_IRQ", peripheral = "B" }]
