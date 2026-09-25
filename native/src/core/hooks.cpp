@@ -79,11 +79,6 @@ auto intercept_call::occurrence() const noexcept -> std::uint64_t
   return occurrence_;
 }
 
-auto intercept_call::args(std::span<arch::value_kind const>) const -> std::vector<std::uint64_t>
-{
-  throw not_implemented("intercept_call::args");
-}
-
 auto intercept_call::target() const noexcept -> machine&
 {
   return *machine_;

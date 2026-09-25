@@ -84,6 +84,7 @@ public:
     run_.clear_slice();
     hooks_.running = false;
     run_.running   = false;
+    hooks_.drain();
   }
 
 private:
@@ -174,6 +175,9 @@ void machine::run_state::reset_machine(reset_kind kind)
   unmapped.reset();
   trap.reset();
   bus_fault.reset();
+  frames.clear();
+  return_watch = 0;
+  resume_past.reset();
   remove_step_hook();
   owner.arch_->reset(reset_vector);
   std::ranges::fill(lines.active, 0u);
@@ -252,8 +256,8 @@ auto machine::run_state::deliverable() noexcept -> bool
 }
 
 void machine::run_state::on_block(
-    uc_struct* engine,
-    std::uint64_t,
+    uc_struct*    engine,
+    std::uint64_t addr,
     std::uint32_t size,
     void*         user) noexcept
 {
@@ -269,6 +273,13 @@ void machine::run_state::on_block(
   {
     uc_emu_stop(engine);
     return;
+  }
+  if(run.return_watch != 0 and addr == run.return_watch) [[unlikely]]
+  {
+    run.guarded([&run, addr] {
+      run.on_return_block(static_cast<address>(addr));
+      return false;
+    });
   }
   if(not run.stepping)
   {
@@ -553,6 +564,10 @@ auto machine::run_state::exit_list(slice_request const& request) const -> std::v
 
 auto machine::run_state::bound_reached(slice_request const& request) -> std::optional<slice_end>
 {
+  if(return_watch != 0 and arch->pc() == return_watch)
+  {
+    on_return_block(return_watch);
+  }
   if(call and arch->pc() == call->frame.return_sentinel)
   {
     call->returned = true;
@@ -709,6 +724,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
         return finish(request, std::move(*end));
       }
       continue;
+    }
+    if(resume_past and arch->pc() != resume_past->first)
+    {
+      resume_past.reset();
     }
     update_stepping(request);
     deadline           = std::min(next_deadline(request), owner.scheduler_.earliest());

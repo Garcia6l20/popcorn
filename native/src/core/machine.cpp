@@ -74,6 +74,7 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
       hooks_{std::make_shared<hook_registry>()}, run_{std::make_unique<run_state>(*this)}
 {
   run_->reset_vector = reset_vector_of(description_, options_);
+  hooks_->remover    = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
   arch_              = factory(description_.core);
   if(not arch_)
   {
@@ -104,6 +105,7 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
 
 machine::~machine()
 {
+  hooks_->remover = nullptr;
   peripherals_.clear();
   arch_.reset();
   engine_.reset();

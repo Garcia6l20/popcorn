@@ -75,21 +75,15 @@ TEST_CASE("machine stub throws not_implemented for every behaviour not yet imple
   CHECK(target.call(frame, popcorn::icount{1000}).stopped.reason == popcorn::stop_reason::fault);
   CHECK_THROWS_AS(std::ignore = target.snapshot(), popcorn::not_implemented);
   CHECK_THROWS_AS(target.restore(core::snapshot{core::snapshot_data{}}), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = target.add_intercept(0x0800'0100, {}), popcorn::not_implemented);
-  CHECK_THROWS_AS(
-      std::ignore = target.add_return_hook(0x0800'0100, {}, popcorn::arch::value_kind::i32, {}),
-      popcorn::not_implemented);
-  CHECK_THROWS_AS(
-      std::ignore = target.add_watch(0x2000'0000, 4, core::watch_kind::write, {}),
-      popcorn::not_implemented);
+  CHECK(target.add_intercept(0x0800'0100, {}).active());
+  CHECK(target.add_return_hook(0x0800'0100, {}, popcorn::arch::value_kind::i32, {}).active());
+  CHECK(target.add_watch(0x2000'0000, 4, core::watch_kind::write, {}).active());
   CHECK_THROWS_AS(
       std::ignore = target.add_trace_sink(core::trace_kinds::all(), {}), popcorn::not_implemented);
   CHECK(target.peripheral("UART1").description().name == "UART1");
   CHECK(target.model("UART1") == nullptr);
   CHECK(target.add_log_sink({}).active());
-  CHECK_THROWS_AS(
-      std::ignore = target.add_intercept(0x0800'0100, {}, core::intercept_mode::once),
-      popcorn::not_implemented);
+  CHECK(target.add_intercept(0x0800'0100, {}, core::intercept_mode::once).active());
   CHECK_FALSE(target.coverage_enabled());
   CHECK_THROWS_AS(target.enable_coverage({}), popcorn::not_implemented);
   CHECK_THROWS_AS(target.disable_coverage(), popcorn::not_implemented);

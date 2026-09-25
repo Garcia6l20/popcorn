@@ -53,7 +53,7 @@ if smoke_firmware is not None:
 
 core_firmware = {
     name: firmware("core", name)
-    for name in ("basic", "run", "alu", "idle", "calls", "periph", "mmio")
+    for name in ("basic", "run", "alu", "idle", "calls", "periph", "mmio", "intercepts")
 }
 m33_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
@@ -76,6 +76,12 @@ test_events = add_doctest(
 )
 test_calls = add_doctest("core-calls", [here / "test_calls.cpp"], [test_support, core], env=m33_env)
 add_doctest("core-bus", [here / "test_bus.cpp"], [core])
+test_intercepts = add_doctest(
+    "core-intercepts", [here / "test_intercepts.cpp"], [test_support, core], env=m33_env
+)
+test_watches = add_doctest(
+    "core-watches", [here / "test_watches.cpp"], [test_support, core], env=m33_env
+)
 bench_run_loop = project.Program(
     "bench-run-loop", project.default_environment, sources=[here / "bench_run_loop.cpp"]
 )
@@ -90,6 +96,8 @@ for _, target in core_firmware.values():
         test_run_loop.depends(target)
         test_events.depends(target)
         test_calls.depends(target)
+        test_intercepts.depends(target)
+        test_watches.depends(target)
         bench_run_loop.depends(target)
 
 bench_mmio = project.Program(

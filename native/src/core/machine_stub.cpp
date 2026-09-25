@@ -18,28 +18,6 @@ void machine::restore(core::snapshot const&)
   throw not_implemented("machine::restore");
 }
 
-auto machine::add_intercept(address, intercept_handler, intercept_mode) -> intercept_handle
-{
-  require_stopped(*this);
-  throw not_implemented("machine::add_intercept");
-}
-
-auto machine::add_return_hook(
-    address,
-    std::vector<arch::value_kind>,
-    arch::value_kind,
-    return_handler) -> intercept_handle
-{
-  require_stopped(*this);
-  throw not_implemented("machine::add_return_hook");
-}
-
-auto machine::add_watch(address, std::uint32_t, watch_kind, watch_handler) -> watch_handle
-{
-  require_stopped(*this);
-  throw not_implemented("machine::add_watch");
-}
-
 auto machine::add_trace_sink(trace_kinds, trace_sink, std::vector<address_range>) -> hook_handle
 {
   require_stopped(*this);

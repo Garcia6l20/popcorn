@@ -82,5 +82,5 @@ TEST_CASE("object linker consumer adds its regions and stubs imports")
       + 2);
   CHECK_THROWS_AS(
       popcorn::consumers::object_linker::run_linked(target, popcorn::image::image{}),
-      popcorn::not_implemented);
+      popcorn::symbol_error);
 }

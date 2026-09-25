@@ -44,7 +44,9 @@ void machine::begin_call(arch::call_frame const& frame)
       "saving the caller's registers");
   arch_->save(saved.arch_state);
   arch_->prepare_call(frame);
-  run_->call = std::move(saved);
+  saved.frames      = run_->frames.size();
+  saved.resume_past = std::exchange(run_->resume_past, std::nullopt);
+  run_->call        = std::move(saved);
 }
 
 auto machine::end_call() -> std::uint64_t
@@ -58,6 +60,12 @@ auto machine::end_call() -> std::uint64_t
       uc_reg_write_batch(engine_.get(), ids.data(), pointers.data(), static_cast<int>(ids.size())),
       "restoring the caller's registers");
   arch_->load(saved.arch_state);
+  if(run_->frames.size() > saved.frames)
+  {
+    run_->frames.resize(saved.frames);
+  }
+  run_->refresh_return_watch();
+  run_->resume_past = saved.resume_past;
   return value;
 }
 

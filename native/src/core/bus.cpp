@@ -33,7 +33,9 @@ auto machine::do_read(address addr, std::uint8_t size, initiator by)
 {
   if(auto const* const region = mapped_region::find(memory_, addr, size))
   {
-    return read_host(region->host(addr), size);
+    auto const value = read_host(region->host(addr), size);
+    run_->note_watched(addr, size, value, false, by);
+    return value;
   }
   if(auto const* const window = run_->window_at(addr, size))
   {
@@ -56,12 +58,14 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, ini
     {
       return std::unexpected(bus_error::denied);
     }
+    auto bits = value;
     for(auto& byte : std::span{region->host(addr), size})
     {
-      byte = static_cast<std::byte>(value & 0xff);
-      value >>= 8;
+      byte = static_cast<std::byte>(bits & 0xff);
+      bits >>= 8;
     }
     region->host_wrote(*run_, addr, size);
+    run_->note_watched(addr, size, value, true, by);
     return {};
   }
   if(auto const* const window = run_->window_at(addr, size))
@@ -81,8 +85,9 @@ auto machine::do_read_block(address addr, std::span<std::byte> out, initiator by
   std::size_t done = 0;
   while(done < out.size())
   {
-    auto const at = static_cast<address>(addr + done);
-    if(auto const* const region = mapped_region::find(memory_, at, 1))
+    auto const        at     = static_cast<address>(addr + done);
+    auto const* const region = mapped_region::find(memory_, at, 1);
+    if(region != nullptr and (run_->watches.empty() or by == initiator::debugger))
     {
       auto const run = std::min(out.size() - done, region->remaining(at));
       std::memcpy(out.data() + done, region->host(at), run);
@@ -110,8 +115,9 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, initia
   std::size_t done = 0;
   while(done < in.size())
   {
-    auto const at = static_cast<address>(addr + done);
-    if(auto const* const region = mapped_region::find(memory_, at, 1))
+    auto const        at     = static_cast<address>(addr + done);
+    auto const* const region = mapped_region::find(memory_, at, 1);
+    if(region != nullptr and (run_->watches.empty() or by == initiator::debugger))
     {
       if(not writable_by(*region->desc, by))
       {

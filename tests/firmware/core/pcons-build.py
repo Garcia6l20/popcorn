@@ -16,6 +16,7 @@ for name, source in (
     ("idle", "idle.c"),
     ("calls", "calls.c"),
     ("periph", "periph.c"),
+    ("intercepts", "intercepts.c"),
 ):
     _, target = add_firmware("core", name, [here / source])
     if target is not None:

@@ -150,6 +150,10 @@ auto machine::run_state::dispatch_read(
           {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = window.secure});
     }
     after_model(hz);
+    if(value)
+    {
+      note_watched(window.base + offset, size, *value, false, by);
+    }
     return value.transform([size](std::uint32_t read) { return read & size_mask(size); });
   }
   auto const* const rules = slot.layout.find(word);
@@ -162,7 +166,9 @@ auto machine::run_state::dispatch_read(
   {
     note_unmodelled(window, offset, false, by);
   }
-  return periph::layer_read(*rules, slot.regs, offset, size);
+  auto const read = periph::layer_read(*rules, slot.regs, offset, size);
+  note_watched(window.base + offset, size, read, false, by);
+  return read;
 }
 
 auto machine::run_state::dispatch_write(
@@ -191,6 +197,10 @@ auto machine::run_state::dispatch_write(
           {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = window.secure});
     }
     after_model(hz);
+    if(done)
+    {
+      note_watched(window.base + offset, size, value, true, by);
+    }
     return done;
   }
   auto const* const rules = slot.layout.find(word);
@@ -204,6 +214,7 @@ auto machine::run_state::dispatch_write(
     note_unmodelled(window, offset, true, by);
   }
   periph::layer_write(slot.layout, *rules, slot.regs, slot.layer, offset, size, value);
+  note_watched(window.base + offset, size, value, true, by);
   return {};
 }
 

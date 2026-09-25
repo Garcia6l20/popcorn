@@ -15,6 +15,7 @@ sources = [
         "calls.cpp",
         "engine.cpp",
         "hooks.cpp",
+        "intercepts.cpp",
         "machine.cpp",
         "memory_map.cpp",
         "mmio.cpp",

@@ -10,16 +10,19 @@
 
 #include <unicorn/unicorn.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <expected>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace popcorn::core
@@ -34,11 +37,39 @@ public:
   std::uint64_t last_id = 0;
   /** @brief Log sinks by id, in registration order. */
   std::map<std::uint64_t, log_sink> log_sinks{};
+  /** @brief Ids whose removal waits for the end of the running slice. */
+  std::vector<std::uint64_t> pending_removal{};
+  /** @brief Removes the engine side of a hook, set by the machine. */
+  std::function<void(std::uint64_t)> remover{};
 
-  /** @brief Removes a hook by id. */
+  /** @brief Removes a hook by id, at the end of the slice when one runs. */
   void remove(std::uint64_t id) noexcept
   {
-    log_sinks.erase(id);
+    if(log_sinks.erase(id) != 0)
+    {
+      return;
+    }
+    if(running)
+    {
+      pending_removal.push_back(id);
+      return;
+    }
+    if(remover)
+    {
+      remover(id);
+    }
+  }
+
+  /** @brief Removes the hooks whose removal waited for the slice end. */
+  void drain() noexcept
+  {
+    for(auto const id : std::exchange(pending_removal, {}))
+    {
+      if(remover)
+      {
+        remover(id);
+      }
+    }
   }
 
   /** @brief Hands a record to every log sink, in registration order. The sinks are copied
@@ -167,6 +198,10 @@ struct saved_call
   std::vector<std::byte> arch_state{};
   /** @brief Whether a slice of the call reached the return sentinel. */
   bool returned{};
+  /** @brief Return frames in flight when the call began, those of the caller. */
+  std::size_t frames{};
+  /** @brief Caller's pending intercept resume point. */
+  std::optional<std::pair<address, std::size_t>> resume_past{};
 };
 
 /** @brief How a slice ends: with a stop, or empty when only a yield bound was reached. */
@@ -213,6 +248,98 @@ struct machine::run_state
     bool secure{};
   };
 
+  /** @brief An intercept added with machine::add_intercept(). */
+  struct intercept_entry
+  {
+    /** @brief Handle id. */
+    std::uint64_t id{};
+    /** @brief Intercepted address. */
+    address at{};
+    /** @brief Handler. */
+    intercept_handler handler{};
+    /** @brief Every call or the first only. */
+    intercept_mode mode{};
+    /** @brief Whether a once intercept already fired. */
+    bool spent{};
+    /** @brief Calls handled so far. */
+    std::uint64_t calls{};
+  };
+
+  /** @brief A return hook added with machine::add_return_hook(). */
+  struct return_entry
+  {
+    /** @brief Handle id. */
+    std::uint64_t id{};
+    /** @brief Function entry. */
+    address at{};
+    /** @brief Argument kinds captured at entry. */
+    std::vector<arch::value_kind> args{};
+    /** @brief Return value kind. */
+    arch::value_kind returns{};
+    /** @brief Handler. */
+    return_handler handler{};
+    /** @brief Returns handled so far. */
+    std::uint64_t calls{};
+  };
+
+  /** @brief A watch added with machine::add_watch(). */
+  struct watch_entry
+  {
+    /** @brief Handle id. */
+    std::uint64_t id{};
+    /** @brief Run state serving the hits. */
+    run_state* run{};
+    /** @brief First watched address. */
+    address at{};
+    /** @brief Watched bytes. */
+    std::uint32_t size{};
+    /** @brief Accesses reported. */
+    watch_kind kind{};
+    /** @brief Handler. */
+    watch_handler handler{};
+    /** @brief Inclusive guest ranges reaching the watched bytes, every alias mapping included. */
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> spans{};
+    /** @brief Memory hooks over the RAM and flash spans, each starting 3 bytes lower, since
+     * Unicorn matches a hook on the access start address only. */
+    std::vector<uc_hook> hooks{};
+
+    /** @brief Whether [@p addr, @p addr + @p size) overlaps a span. */
+    [[nodiscard]] auto covers(address addr, std::uint8_t size) const noexcept -> bool
+    {
+      auto const last = std::uint64_t{addr} + size - 1;
+      return std::ranges::any_of(
+          spans, [&](auto const& span) { return addr <= span.second and span.first <= last; });
+    }
+  };
+
+  /** @brief One engine code hook serving every intercept and return hook of an address. */
+  struct code_site
+  {
+    /** @brief Run state serving the calls. */
+    run_state* run{};
+    /** @brief Hooked address. */
+    address at{};
+    /** @brief Engine hook. */
+    uc_hook hook{};
+    /** @brief Intercepts and return hooks of the address, in add order. */
+    std::vector<std::variant<intercept_entry*, return_entry*>> entries{};
+  };
+
+  /** @brief A call a return hook saw enter, waiting for its return. */
+  struct return_frame
+  {
+    /** @brief Hook that saw the entry. */
+    return_entry* entry{};
+    /** @brief Address the call returns to. */
+    address ret{};
+    /** @brief Stack pointer at entry, the same at the return under AAPCS. */
+    std::uint64_t sp{};
+    /** @brief Argument bits captured at entry. */
+    std::vector<std::uint64_t> args{};
+    /** @brief Clock at entry. */
+    icount entered{};
+  };
+
   /** @brief Creates the run state of @p machine. */
   explicit run_state(machine& machine) noexcept : owner{machine}
   {}
@@ -247,6 +374,21 @@ struct machine::run_state
   std::optional<unmapped_access> unmapped{};
   /** @brief First bus error a model returned on a CPU access in the engine run, W5f. */
   std::optional<unmapped_access> bus_fault{};
+  /** @brief Intercepts by handle id. */
+  std::map<std::uint64_t, std::unique_ptr<intercept_entry>> intercepts{};
+  /** @brief Return hooks by handle id. */
+  std::map<std::uint64_t, std::unique_ptr<return_entry>> return_hooks{};
+  /** @brief Watches by handle id. */
+  std::map<std::uint64_t, std::unique_ptr<watch_entry>> watches{};
+  /** @brief Code hook sites by address. */
+  std::map<address, std::unique_ptr<code_site>> sites{};
+  /** @brief Calls in flight, innermost last. */
+  std::vector<return_frame> frames{};
+  /** @brief Return address of the innermost frame, what the block hook compares. */
+  address return_watch{};
+  /** @brief Site address a stop left pc on and index of the entry after the stopping one: the
+   * site resumes there once when the run restarts at that address. */
+  std::optional<std::pair<address, std::size_t>> resume_past{};
   /** @brief Engine MMIO windows, sorted by base. */
   std::vector<std::unique_ptr<mmio_window>> windows{};
   /** @brief Memory hook making MMIO pc exact while a consumer needs it. */
@@ -356,6 +498,51 @@ struct machine::run_state
       std::uint64_t offset,
       unsigned      size,
       std::uint64_t value,
+      void*         user) noexcept;
+
+  /**
+   * @brief Adds an intercept or return hook to the code site of its address, creating the site
+   *        and its engine hook, and removing the translated code there, on first use.
+   * @throws emulation_error when the engine refuses the hook.
+   */
+  void add_to_site(address at, std::variant<intercept_entry*, return_entry*> entry);
+
+  /** @brief Removes the engine side and the entry of a hook by handle id, between slices. */
+  void remove_hook(std::uint64_t id) noexcept;
+
+  /** @brief Floating-point convention of the loaded image holding @p at, soft when none. */
+  [[nodiscard]] auto abi_at(address at) const -> arch::float_abi;
+
+  /** @brief Stack pointer, the arch register named `sp`. */
+  [[nodiscard]] auto stack_pointer() const -> std::uint64_t;
+
+  /** @brief Reports every innermost return frame a block about to run at @p addr completes. */
+  void on_return_block(address addr);
+
+  /** @brief Pops frames the stack has unwound past and recomputes return_watch. */
+  void refresh_return_watch() noexcept;
+
+  /**
+   * @brief Reports an access to every watch it hits, as the bus and MMIO dispatch see it. Debugger
+   *        accesses never hit.
+   */
+  void note_watched(address addr, std::uint8_t size, std::uint32_t value, bool write, initiator by);
+
+  /** @brief Guest ranges reaching [@p at, @p last] through every mapping of the same bytes. */
+  [[nodiscard]] auto watch_spans(address at, std::uint64_t last) const
+      -> std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+
+  /** @brief Calls a watch handler and records a deferred watchpoint stop when it asks. */
+  void hit_watch(watch_entry& watch, watch_hit const& hit);
+
+  static void
+      on_code_site(uc_struct* engine, std::uint64_t addr, std::uint32_t size, void* user) noexcept;
+  static void on_watch_access(
+      uc_struct*    engine,
+      uc_mem_type   type,
+      std::uint64_t addr,
+      int           size,
+      std::int64_t  value,
       void*         user) noexcept;
 
   /**
