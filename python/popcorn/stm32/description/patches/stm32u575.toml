@@ -1,0 +1,9 @@
+format = 1
+source = "RM0456 rev 6, 22.3 Table 187 STM32U5 series vector table; CMSIS stm32u575xx.h IRQn_Type has no PKA, OTFDEC1, OTFDEC2 or GPU2D entry, unlike stm32u585xx.h (PKA/OTFDEC1/OTFDEC2 present) and stm32u5g7xx.h (GPU2D present): these are per-part, not per-family"
+
+[match]
+parts = ["STM32U575*"]
+svd = ["STM32U575*.svd"]
+
+[irqs]
+drop = ["PKA", "OTFDEC1", "OTFDEC2", "GPU2D_IRQ", "GPU2D_IRQSYS"]

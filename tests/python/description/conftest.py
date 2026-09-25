@@ -39,3 +39,17 @@ def st_cubemx_db() -> Path:
     if _CUBEMX_DB.is_dir():
         return _CUBEMX_DB
     pytest.skip(f"CubeMX db not found, searched: {_CUBEMX_DB}")
+
+
+_CMSIS_U575 = Path(
+    "~/STM32Cube/Repository/STM32Cube_FW_U5_V1.8.0/Drivers/CMSIS/Device/ST/STM32U5xx/"
+    "Include/stm32u575xx.h"
+).expanduser()
+
+
+@pytest.fixture(scope="session")
+def st_cmsis_u575() -> Path:
+    """Path of the local CMSIS stm32u575xx.h header, skips naming the path searched."""
+    if _CMSIS_U575.is_file():
+        return _CMSIS_U575
+    pytest.skip(f"stm32u575xx.h not found, searched: {_CMSIS_U575}")
