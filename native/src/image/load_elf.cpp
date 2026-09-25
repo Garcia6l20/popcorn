@@ -1,5 +1,7 @@
 #include "arm_attributes.hpp"
 #include "digest.hpp"
+#include "dwarf_lines.hpp"
+#include "dwarf_units.hpp"
 #include "elf_file.hpp"
 
 #include <popcorn/image/image.hpp>
@@ -227,6 +229,44 @@ auto load_abi(elf_file const& elf) -> arch::float_abi
   }
   return detail::hard_float_abi(*attributes);
 }
+
+auto debug_section_bytes(elf_file const& elf, std::string_view name) -> std::span<std::byte const>
+{
+  auto const* sh = elf.section_header(name);
+  if(sh == nullptr)
+  {
+    return {};
+  }
+  if((sh->sh_flags & SHF_COMPRESSED) != 0)
+  {
+    throw image_error{std::string{name}, 0, "compressed debug sections are not supported"};
+  }
+  return elf.section_bytes(*sh);
+}
+
+void load_lines(elf_file const& elf, image& img)
+{
+  auto const info = debug_section_bytes(elf, ".debug_info");
+  auto const line = debug_section_bytes(elf, ".debug_line");
+  if(info.empty() || line.empty())
+  {
+    return;
+  }
+
+  detail::debug_sections const sections{
+      .info        = info,
+      .abbrev      = debug_section_bytes(elf, ".debug_abbrev"),
+      .line        = line,
+      .str         = debug_section_bytes(elf, ".debug_str"),
+      .line_str    = debug_section_bytes(elf, ".debug_line_str"),
+      .str_offsets = debug_section_bytes(elf, ".debug_str_offsets"),
+  };
+
+  auto const units = detail::compile_units(sections);
+  auto       table = detail::decode_lines(sections, units);
+  img.files        = std::move(table.files);
+  img.lines        = std::move(table.rows);
+}
 }
 
 auto load_elf(std::filesystem::path const& file) -> image
@@ -238,7 +278,8 @@ auto load_elf(std::filesystem::path const& file) -> image
   img.symbols  = load_symbols(elf);
   img.entry    = elf.header().e_entry == 0 ? std::optional<address>{} : elf.header().e_entry;
   img.abi      = load_abi(elf);
-  img.digest   = detail::digest_of(img.segments);
+  load_lines(elf, img);
+  img.digest = detail::digest_of(img.segments);
   return img;
 }
 }

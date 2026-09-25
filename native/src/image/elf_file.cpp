@@ -137,16 +137,26 @@ auto elf_file::section_bytes(Elf32_Shdr const& section) const -> std::span<std::
   return checked_span(bytes_, section.sh_offset, section.sh_size, "section");
 }
 
-auto elf_file::section(std::string_view name) const -> std::optional<std::span<std::byte const>>
+auto elf_file::section_header(std::string_view name) const -> Elf32_Shdr const*
 {
   for(auto const& sh : sections_)
   {
     if(section_name(sh) == name)
     {
-      return section_bytes(sh);
+      return &sh;
     }
   }
-  return std::nullopt;
+  return nullptr;
+}
+
+auto elf_file::section(std::string_view name) const -> std::optional<std::span<std::byte const>>
+{
+  auto const* sh = section_header(name);
+  if(sh == nullptr)
+  {
+    return std::nullopt;
+  }
+  return section_bytes(*sh);
 }
 
 auto elf_file::bytes() const -> std::span<std::byte const>

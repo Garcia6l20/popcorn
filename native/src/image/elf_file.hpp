@@ -60,6 +60,10 @@ auto read_file(std::filesystem::path const& file) -> std::vector<std::byte>;
  */
 inline auto read_ntbs(std::span<std::byte const> data, std::size_t& pos) -> std::string_view
 {
+  if(pos > data.size())
+  {
+    throw image_error{"header", 0, "read past end of section"};
+  }
   std::string_view const rest{reinterpret_cast<char const*>(data.data() + pos), data.size() - pos};
   auto const             nul = rest.find('\0');
   if(nul == std::string_view::npos)
@@ -91,6 +95,8 @@ public:
   [[nodiscard]] auto sections() const -> std::span<Elf32_Shdr const>;
   /** @brief Name of a section from the section header string table. */
   [[nodiscard]] auto section_name(Elf32_Shdr const& section) const -> std::string_view;
+  /** @brief Header of a section by name, null when not present. */
+  [[nodiscard]] auto section_header(std::string_view name) const -> Elf32_Shdr const*;
   /** @brief Bytes of @p section, empty when it has no file content (SHT_NOBITS or size 0). */
   [[nodiscard]] auto section_bytes(Elf32_Shdr const& section) const -> std::span<std::byte const>;
   /** @brief Bytes of a section by name, empty when the section is not present or has no bytes. */

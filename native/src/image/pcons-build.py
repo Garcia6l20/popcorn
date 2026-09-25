@@ -4,6 +4,9 @@ here = Path(__file__).resolve().parent
 sources = [
     here / "arm_attributes.cpp",
     here / "digest.cpp",
+    here / "dwarf_lines.cpp",
+    here / "dwarf_reader.cpp",
+    here / "dwarf_units.cpp",
     here / "elf_file.cpp",
     here / "image.cpp",
     here / "load_elf.cpp",
