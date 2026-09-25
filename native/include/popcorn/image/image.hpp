@@ -110,7 +110,8 @@ struct image
    * @brief Looks a symbol up by exact name.
    * @param name Symbol name.
    * @return The symbol.
-   * @throws symbol_error when no symbol has that name, with the closest names.
+   * @throws symbol_error when no symbol has that name, with the closest names, or when
+   * several symbols have it and none is the single global one, with every match.
    */
   [[nodiscard]] auto lookup(std::string_view name) const -> symbol const&;
 
