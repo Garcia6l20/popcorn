@@ -16,6 +16,7 @@ scratch = build_dir / "test-image-scratch"
 env = {
     "POPCORN_IMAGE_ELF": str(image_prebuilt_elf),
     "POPCORN_IMAGE_BIN": str(here / "data" / "image.bin"),
+    "POPCORN_IMAGE_HEX": str(here / "data" / "image.hex"),
     "POPCORN_IMAGE_SCRATCH": str(scratch),
 }
 
@@ -25,6 +26,7 @@ test_image = add_doctest(
         here / "test_arm_attributes.cpp",
         here / "test_image.cpp",
         here / "test_load_elf.cpp",
+        here / "test_load_raw.cpp",
         here / "test_lookup.cpp",
         here / "test_robustness.cpp",
     ],

@@ -48,6 +48,12 @@ auto read(std::span<std::byte const> bytes, std::size_t offset, std::string_view
 }
 
 /**
+ * @brief Reads a whole file into memory.
+ * @throws image_error when the file cannot be opened, sized or read.
+ */
+auto read_file(std::filesystem::path const& file) -> std::vector<std::byte>;
+
+/**
  * @brief Bounded null-terminated byte string starting at @p pos in @p data.
  * @param pos Advanced past the terminating NUL.
  * @throws image_error when no NUL terminator is found before the end of @p data.

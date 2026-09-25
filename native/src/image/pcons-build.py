@@ -7,5 +7,5 @@ sources = [
     here / "elf_file.cpp",
     here / "image.cpp",
     here / "load_elf.cpp",
-    here / "raw_stub.cpp",
+    here / "load_raw.cpp",
 ]

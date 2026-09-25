@@ -7,19 +7,17 @@
 
 namespace popcorn::image::detail
 {
-namespace
-{
 auto read_file(std::filesystem::path const& file) -> std::vector<std::byte>
 {
   std::ifstream stream{file, std::ios::binary | std::ios::ate};
   if(!stream)
   {
-    throw image_error{"file", 0, "cannot open " + file.string()};
+    throw image_error{file.filename().string(), 0, "cannot open " + file.string()};
   }
   auto const size = stream.tellg();
   if(size < 0)
   {
-    throw image_error{"file", 0, "cannot size " + file.string()};
+    throw image_error{file.filename().string(), 0, "cannot size " + file.string()};
   }
   std::vector<std::byte> out(static_cast<std::size_t>(size));
   stream.seekg(0);
@@ -29,10 +27,9 @@ auto read_file(std::filesystem::path const& file) -> std::vector<std::byte>
   }
   if(!stream)
   {
-    throw image_error{"file", 0, "failed reading " + file.string()};
+    throw image_error{file.filename().string(), 0, "failed reading " + file.string()};
   }
   return out;
-}
 }
 
 elf_file::elf_file(std::filesystem::path const& file) : bytes_{read_file(file)}
