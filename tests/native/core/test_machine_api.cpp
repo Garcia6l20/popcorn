@@ -59,7 +59,7 @@ TEST_CASE("machine stub keeps its description, clock and trace ring")
   CHECK(second.virtual_clock().instruction_hz() == 80'000'000);
 }
 
-TEST_CASE("machine stub throws not_implemented for every behaviour not yet implemented")
+TEST_CASE("every machine entry point answers on a toy description")
 {
   core::machine                   target{toy(), popcorn::testing::test_arch_factory(), {}};
   popcorn::arch::call_frame const frame{.entry = 0x0800'0100, .return_sentinel = 0xffff'fffe};
@@ -84,10 +84,11 @@ TEST_CASE("machine stub throws not_implemented for every behaviour not yet imple
   CHECK(target.add_log_sink({}).active());
   CHECK(target.add_intercept(0x0800'0100, {}, core::intercept_mode::once).active());
   CHECK_FALSE(target.coverage_enabled());
-  CHECK_THROWS_AS(target.enable_coverage({}), popcorn::not_implemented);
-  CHECK_THROWS_AS(target.disable_coverage(), popcorn::not_implemented);
-  CHECK_THROWS_AS(std::ignore = target.coverage(), popcorn::not_implemented);
-  CHECK_THROWS_AS(target.clear_coverage(), popcorn::not_implemented);
+  CHECK_NOTHROW(target.enable_coverage({}));
+  CHECK(target.coverage_enabled());
+  CHECK_NOTHROW(target.disable_coverage());
+  CHECK_NOTHROW(std::ignore = target.coverage());
+  CHECK_NOTHROW(target.clear_coverage());
 
   auto const memory = target.mem();
   CHECK(memory.write(0x2000'0000, 2, 0xffff).has_value());

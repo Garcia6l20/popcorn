@@ -182,6 +182,54 @@ struct machine::peripheral_slot
   }
 };
 
+/** @brief Edge counters by `(from, to)`, open addressing over a power-of-two table. */
+class flat_edge_table
+{
+public:
+  /** @brief Adds one to the count of the edge from @p from to @p to. */
+  void count(address from, address to);
+
+  /** @brief Edges with a non-zero count, ordered by from then to. */
+  [[nodiscard]] auto edges() const -> std::vector<edge_counter>;
+
+  /** @brief Drops every edge. */
+  void clear() noexcept;
+
+private:
+  struct slot
+  {
+    address       from{};
+    address       to{};
+    std::uint64_t hits{};
+  };
+
+  void grow();
+
+  std::vector<slot> slots_{};
+  std::size_t       used_ = 0;
+};
+
+/** @brief Coverage counters of a machine, cumulative across restores. */
+struct coverage_state
+{
+  /** @brief Block counters per range, in enable order. */
+  std::vector<block_counters> blocks{};
+  /** @brief Whether some ranges overlap, so a block may count in several. */
+  bool overlapping = false;
+  /** @brief Range the previous block fell in, searched first. */
+  std::size_t last_range = 0;
+  /** @brief Edge counters. */
+  flat_edge_table edges{};
+  /** @brief Start of the previous counted block. */
+  address previous{};
+  /** @brief Whether previous starts an edge: false after a block outside every range or a
+   * control transfer that is no branch. */
+  bool has_previous = false;
+
+  /** @brief Counts a block starting at @p addr and the edge that reached it. */
+  void count(address addr);
+};
+
 /** @brief Buffer bytes whose translated code must be removed at the next block boundary. */
 struct stale_range
 {
@@ -451,6 +499,13 @@ struct machine::run_state
   /** @brief Address of the block the engine runs, the pc MMIO callbacks see without the exact
    * pc hook, read by mmio records instead of the engine register. */
   address block_pc{};
+  /** @brief Whether the last engine run ended at a block boundary through the block hook, so
+   * the next run resumes the block the edge chain expects. */
+  bool boundary_stop = false;
+  /** @brief Whether coverage is collected, tested by the block hook. */
+  bool coverage_on = false;
+  /** @brief Coverage counters. */
+  coverage_state coverage{};
   /** @brief Whether some sink selects block records, tested by the block hook. */
   bool sinks_want_block = false;
   /** @brief Whether the mem record hooks and their exact pc reference are held. */

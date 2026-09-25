@@ -13,6 +13,7 @@ sources = [
         "snapshot.cpp",
         "bus.cpp",
         "calls.cpp",
+        "coverage.cpp",
         "engine.cpp",
         "hooks.cpp",
         "intercepts.cpp",
@@ -25,6 +26,5 @@ sources = [
         "symbols.cpp",
         "trace_feed.cpp",
         "views.cpp",
-        "machine_stub.cpp",
     )
 ]

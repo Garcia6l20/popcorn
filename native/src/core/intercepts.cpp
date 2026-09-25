@@ -298,6 +298,7 @@ void machine::run_state::on_code_site(
           continue;
         case intercept_action::returns:
           run.arch->return_to_caller(result.value(), run.abi_at(entry.at));
+          run.coverage.has_previous = false;
           return false;
         case intercept_action::stop:
           run.trap        = arch::trap_result::stop(*result.reason());

@@ -63,9 +63,10 @@ void machine::begin_call(arch::call_frame const& frame)
   saved_call saved{.frame = frame, .registers = read_registers(engine_.get(), arch_->registers())};
   arch_->save(saved.arch_state);
   arch_->prepare_call(frame);
-  saved.frames      = run_->frames.size();
-  saved.resume_past = std::exchange(run_->resume_past, std::nullopt);
-  run_->call        = std::move(saved);
+  run_->coverage.has_previous = false;
+  saved.frames                = run_->frames.size();
+  saved.resume_past           = std::exchange(run_->resume_past, std::nullopt);
+  run_->call                  = std::move(saved);
 }
 
 auto machine::end_call() -> std::uint64_t
@@ -80,7 +81,8 @@ auto machine::end_call() -> std::uint64_t
     run_->frames.resize(saved.frames);
   }
   run_->refresh_return_watch();
-  run_->resume_past = saved.resume_past;
+  run_->resume_past           = saved.resume_past;
+  run_->coverage.has_previous = false;
   return value;
 }
 

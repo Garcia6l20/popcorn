@@ -122,8 +122,8 @@ TEST_CASE("observability consumer reads the ring, streams a full trace and colle
   CHECK(popcorn::consumers::observability::full_trace(target, file).active());
   CHECK(popcorn::consumers::observability::ring_dump(target).empty());
   CHECK_FALSE(target.coverage_enabled());
-  CHECK_THROWS_AS(
-      popcorn::consumers::observability::collect_coverage(target), popcorn::not_implemented);
+  CHECK(popcorn::consumers::observability::collect_coverage(target) == 0);
+  CHECK_FALSE(target.coverage_enabled());
 
   target.trace().append(
       {.kind = popcorn::core::trace_kind::mmio, .flags = 4 | popcorn::core::trace_write_flag},

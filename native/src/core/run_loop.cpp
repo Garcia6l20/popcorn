@@ -178,6 +178,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   frames.clear();
   return_watch = 0;
   resume_past.reset();
+  coverage.has_previous = false;
   remove_step_hook();
   owner.arch_->reset(reset_vector);
   std::ranges::fill(lines.active, 0u);
@@ -273,6 +274,7 @@ void machine::run_state::on_block(
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {
+    run.boundary_stop = true;
     uc_emu_stop(engine);
     return;
   }
@@ -286,6 +288,17 @@ void machine::run_state::on_block(
   if(not run.stepping)
   {
     run.owner.clock_driver_.advance(icount{size});
+  }
+  if(run.coverage_on) [[unlikely]]
+  {
+    run.guarded([&run, addr] {
+      run.coverage.count(static_cast<address>(addr));
+      return false;
+    });
+    if(run.stepping)
+    {
+      run.coverage.has_previous = false;
+    }
   }
   if(run.sinks_want_block) [[unlikely]]
   {
@@ -319,8 +332,9 @@ void machine::run_state::on_step(
 
 void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, void* user) noexcept
 {
-  auto&      run   = *static_cast<run_state*>(user);
-  auto const stops = run.guarded([&] {
+  auto& run                 = *static_cast<run_state*>(user);
+  run.coverage.has_previous = false;
+  auto const stops          = run.guarded([&] {
     auto const result = run.owner.arch_->on_interrupt(intno);
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
@@ -740,9 +754,14 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, std::move(*end));
     }
+    auto const before = coverage_on ? arch->pc() : address{};
     if(auto const entry = arch->deliver_pending(); not entry.resumes())
     {
       return finish(request, stop_from(entry));
+    }
+    if(coverage_on and arch->pc() != before)
+    {
+      coverage.has_previous = false;
     }
     if(arch->idle())
     {
@@ -757,7 +776,12 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       resume_past.reset();
     }
     update_stepping(request);
-    deadline           = std::min(next_deadline(request), owner.scheduler_.earliest());
+    deadline = std::min(next_deadline(request), owner.scheduler_.earliest());
+    if(not boundary_stop)
+    {
+      coverage.has_previous = false;
+    }
+    boundary_stop      = false;
     auto const started = owner.clock_.now();
     auto const err     = engine_run();
     auto const ran     = owner.clock_.now().value - started.value;

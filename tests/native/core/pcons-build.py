@@ -53,7 +53,18 @@ if smoke_firmware is not None:
 
 core_firmware = {
     name: firmware("core", name)
-    for name in ("basic", "run", "alu", "idle", "calls", "periph", "mmio", "intercepts", "snapshot")
+    for name in (
+        "basic",
+        "run",
+        "alu",
+        "idle",
+        "calls",
+        "periph",
+        "mmio",
+        "intercepts",
+        "snapshot",
+        "branches",
+    )
 }
 m33_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
@@ -137,3 +148,10 @@ test_trace_feed = add_doctest(
 for _, target in core_firmware.values():
     if target is not None:
         test_trace_feed.depends(target)
+
+test_coverage = add_doctest(
+    "core-coverage", [here / "test_coverage.cpp"], [test_support, core], env=m33_env
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_coverage.depends(target)
