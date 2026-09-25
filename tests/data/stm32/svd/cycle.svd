@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device schemaVersion="1.3">
+  <name>CYCLE</name>
+  <version>1.0</version>
+  <peripherals>
+    <peripheral derivedFrom="Y">
+      <name>X</name>
+      <baseAddress>0x40000000</baseAddress>
+    </peripheral>
+    <peripheral derivedFrom="X">
+      <name>Y</name>
+      <baseAddress>0x40001000</baseAddress>
+    </peripheral>
+  </peripherals>
+</device>
