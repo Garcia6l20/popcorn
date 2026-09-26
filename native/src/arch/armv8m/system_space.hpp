@@ -54,6 +54,7 @@ private:
   void write_word(window which, std::uint32_t offset, std::uint32_t value, std::uint32_t mask);
   void write_scs(std::uint32_t offset, std::uint32_t value, std::uint32_t mask);
   void write_scs_byte(std::uint32_t offset, std::uint8_t value);
+  void write_pmsav7(std::uint32_t offset, std::uint32_t value, std::uint32_t mask);
   [[nodiscard]] auto priority_byte(std::uint32_t offset) const -> std::uint8_t;
 
   cortex_m& core_;

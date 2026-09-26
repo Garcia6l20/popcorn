@@ -6,7 +6,8 @@
 namespace popcorn::arch::armv8m
 {
 /**
- * @brief Whether the Cortex-M module implements a core: `cpu` CM33 in this release.
+ * @brief Whether the Cortex-M module implements a core: `cpu` CM33, CM4, CM7 or CM3 in this
+ *        release. CM0 and CM0PLUS are refused.
  * @param core Core of an MCU description.
  */
 [[nodiscard]] auto implements(core_desc const& core) -> bool;
@@ -28,6 +29,13 @@ namespace popcorn::arch::armv8m
  * paused registers and module state. SysTick keeps its live phase unless the call reprogrammed
  * it, ticks missed during a masked call are taken as one SysTick, and an IRQ line raised during
  * the call is taken after it.
+ *
+ * CM33 runs as ARMv8-M Mainline, in the Secure state, with MSPLIM and PSPLIM carried in
+ * snapshots and calls. CM4, CM7 and CM3 run as ARMv7-M: EXC_RETURN takes only its six defined
+ * values, CCR.STKALIGN resets set and decides the frame alignment, the MPU is PMSAv7 with RBAR
+ * and RASR and their aliases, SHCSR has no HARDFAULTACT or NMIACT, and no SFPA is stacked. CM4
+ * has FPv4-SP, CM7 FPv5 single or double precision by `core.fpu_double`, CM3 no FPU: no
+ * floating-point registers, FPCCR, FPCAR and FPDSCR read 0.
  *
  * Current limitations:
  *
@@ -51,6 +59,12 @@ namespace popcorn::arch::armv8m
  * - MSPLIM and PSPLIM have no engine register id: a reset clears them, an in-memory snapshot
  *   restores them, a serialized snapshot does not. Exception entry stacking below MSPLIM is not
  *   detected, where hardware raises STKOF.
+ * - CM7: CCR.IC, CCR.DC and CCR.BP are storage. The cache maintenance registers, CCSIDR and
+ *   CSSELR read 0 and ignore writes. The DWT lock access register is ignored and CYCCNT is always
+ *   writable.
+ * - ARMv7-M: a return to Thread mode with other exceptions active and CCR.NONBASETHRDENA clear
+ *   is not refused with INVPC. `msr` to MSPLIM or PSPLIM is ignored, not an undefined
+ *   instruction.
  * - A debugger `mem()` write to STIR is judged by the privilege of the paused core: while it is
  *   in unprivileged Thread mode with CCR.USERSETMPEND clear, the write pends nothing.
  * - A debugger `mem()` access to the system space that fails outside a slice returns 0, and the

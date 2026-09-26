@@ -1,6 +1,4 @@
     .syntax unified
-    .cpu cortex-m33
-    .fpu fpv5-sp-d16
     .thumb
 
     .equ SYST_CSR, 0xE000E010

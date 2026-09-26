@@ -104,19 +104,24 @@ auto run_scs() -> std::pair<std::vector<std::uint32_t>, std::vector<std::uint64_
 }
 }
 
-TEST_CASE("the factory implements CM33 only and opens an M33 engine")
+TEST_CASE("the factory implements CM33, CM4, CM7 and CM3, refuses CM0, and opens an M33 engine")
 {
   auto core = m33().core;
   CHECK(armv8m::implements(core));
-  core.cpu = "CM4";
+  for(auto const* const accepted : {"CM4", "CM7", "CM3"})
+  {
+    core.cpu = accepted;
+    CHECK(armv8m::implements(core));
+  }
+  core.cpu = "CM0";
   CHECK_FALSE(armv8m::implements(core));
   core.cpu = "XYZ";
   CHECK_FALSE(armv8m::implements(core));
-  core.cpu = "CM4";
+  core.cpu = "CM0";
   try
   {
     std::ignore = armv8m::factory()(core);
-    FAIL("CM4 accepted");
+    FAIL("CM0 accepted");
   }
   catch(popcorn::config_error const& refused)
   {

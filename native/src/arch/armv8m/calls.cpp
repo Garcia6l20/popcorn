@@ -67,7 +67,7 @@ void cortex_m::prepare_call(call_frame const& frame)
   auto* const engine  = engine_handle();
   auto&       bus     = context_->services;
   auto const  layout  = aapcs::allocate(frame.args, frame.abi == float_abi::hard_double);
-  auto        special = read_special(engine);
+  auto        special = read_special(engine, stack_limits());
   auto const  thread  = special.ipsr == 0;
   auto const  process = [&] {
     switch(frame.stack_select)
@@ -157,7 +157,7 @@ void cortex_m::prepare_call(call_frame const& frame)
       | (frame.privileged ? 0u : control_npriv)
       | (process ? control_spsel : 0u);
   (process ? target.psp : target.msp) = sp;
-  set_context(engine, target);
+  set_context(engine, target, stack_limits());
   write(UC_ARM_REG_EPSR, xpsr_thumb);
   in_call_ = true;
 }

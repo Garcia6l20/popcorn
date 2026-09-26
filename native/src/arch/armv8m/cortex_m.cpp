@@ -194,7 +194,7 @@ auto cortex_m::reset_state(address vector_table) const -> state
       .level    = bit_words(count),
   };
   fresh.scs.vtor     = vector_table;
-  fresh.scs.ccr      = ccr_reset;
+  fresh.scs.ccr      = v7() ? ccr_stkalign : ccr_reset;
   fresh.scs.fpccr    = core_.fpu ? fpccr_reset : 0;
   fresh.scs.mpu_rbar = std::vector<std::uint32_t>(core_.mpu_regions, 0);
   fresh.scs.mpu_rlar = std::vector<std::uint32_t>(core_.mpu_regions, 0);
@@ -226,7 +226,7 @@ void cortex_m::reset(address reset_vector)
   write(UC_ARM_REG_XPSR_NZCVQG, (*entry & 1u) != 0 ? xpsr_thumb : 0u);
   write(UC_ARM_REG_PC, *entry);
   state_.special = {.msp = *sp & ~3u};
-  set_context(engine, state_.special);
+  set_context(engine, state_.special, stack_limits());
   set_pending(false);
 }
 
@@ -356,7 +356,7 @@ auto cortex_m::registers() const -> std::span<cpu_register const>
 void cortex_m::save(std::vector<std::byte>& out) const
 {
   auto saved                     = state_;
-  saved.special                  = read_special(engine_handle());
+  saved.special                  = read_special(engine_handle(), stack_limits());
   saved.systick.generation_floor = generation_;
   std::vector<std::byte> bytes;
   reflex::serde::bson::serializer{bytes}.dump(saved);
@@ -367,7 +367,7 @@ void cortex_m::load(std::span<std::byte const> in)
 {
   auto const live = state_;
   state_          = reflex::serde::bson::deserializer{in}.load<state>();
-  set_context(engine_handle(), state_.special);
+  set_context(engine_handle(), state_.special, stack_limits());
   generation_ = std::max(generation_, state_.systick.generation_floor) + 1;
   if(in_call_)
   {
@@ -391,6 +391,16 @@ void cortex_m::load(std::span<std::byte const> in)
   }
   arm_systick();
   refresh_pending();
+}
+
+auto cortex_m::stack_limits() const noexcept -> bool
+{
+  return profile_.arch == architecture::v8m_main;
+}
+
+auto cortex_m::v7() const noexcept -> bool
+{
+  return profile_.arch == architecture::v7m;
 }
 
 auto cortex_m::cpuid() const noexcept -> std::uint32_t

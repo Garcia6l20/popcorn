@@ -18,7 +18,10 @@ constexpr std::uint32_t aircr_key         = 0x05fa;
 constexpr std::uint32_t aircr_key_stat    = 0xfa05;
 constexpr std::uint32_t aircr_sysresetreq = 1u << 2;
 constexpr std::uint32_t ccr_read_one      = 0x0000'0201;
-constexpr std::uint32_t ccr_writable   = (1u << 1) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 10);
+constexpr std::uint32_t ccr_writable = (1u << 1) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 10);
+constexpr std::uint32_t ccr_v7_writable =
+    (1u << 0) | (1u << 1) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 9);
+constexpr std::uint32_t rbar_valid     = 1u << 4;
 constexpr std::uint32_t scr_writable   = (1u << 1) | (1u << 2) | (1u << 4);
 constexpr std::uint32_t vtor_writable  = 0xffff'ff80;
 constexpr std::uint32_t syst_calib     = 0x4000'0000;
@@ -55,13 +58,12 @@ constexpr std::array shcsr_pended{
     shcsr_bit{15, exc_svcall    }
 };
 
-constexpr std::array<std::uint32_t, 16> m33_id_registers{
-    0x0000'0030, 0x0000'0210, 0x0020'0000, 0x0000'0000, 0x0010'1f40, 0x0000'0000,
-    0x0100'0000, 0x0000'0000, 0x0110'1110, 0x0221'2000, 0x2023'2232, 0x0111'1131,
-    0x0131'0132, 0x0000'0000, 0x0000'0000, 0x8000'c000};
-
+constexpr std::array<std::uint32_t, 3> fpv4_media_features{0x1011'0021, 0x1100'0011, 0x0000'0000};
 constexpr std::array<std::uint32_t, 3> fpv5_sp_media_features{
     0x1011'0021, 0x1100'0011, 0x0000'0040};
+constexpr std::array<std::uint32_t, 3> fpv5_dp_media_features{
+    0x1011'0221, 0x1200'0011, 0x0000'0040};
+constexpr std::uint32_t ccr_caches = (1u << 16) | (1u << 17) | (1u << 18);
 
 constexpr auto merge(std::uint32_t old, std::uint32_t value, std::uint32_t mask) noexcept
     -> std::uint32_t
@@ -216,11 +218,27 @@ auto system_space::read_scs(std::uint32_t offset) const -> std::uint32_t
   }
   if(in(offset, 0xd40, 0xd7c))
   {
-    return m33_id_registers[(offset - 0xd40) / 4];
+    return core_.profile_.ids[(offset - 0xd40) / 4];
   }
   if(in(offset, 0xf40, 0xf48))
   {
-    return core_.core_.fpu ? fpv5_sp_media_features[(offset - 0xf40) / 4] : 0;
+    if(not core_.core_.fpu)
+    {
+      return 0;
+    }
+    auto const& table = not core_.profile_.fpv5 ? fpv4_media_features
+                      : core_.core_.fpu_double  ? fpv5_dp_media_features
+                                                : fpv5_sp_media_features;
+    return table[(offset - 0xf40) / 4];
+  }
+  if(core_.v7() and (in(offset, 0xd9c, 0xdb8) or offset == 0xdc0 or offset == 0xdc4))
+  {
+    if(offset >= 0xdc0 or scs.mpu_rnr >= scs.mpu_rbar.size())
+    {
+      return 0;
+    }
+    return (offset - 0xd9c) % 8 == 0 ? scs.mpu_rbar[scs.mpu_rnr] | scs.mpu_rnr
+                                     : scs.mpu_rlar[scs.mpu_rnr];
   }
   if(in(offset, 0xda4, 0xdbc))
   {
@@ -274,12 +292,17 @@ auto system_space::read_scs(std::uint32_t offset) const -> std::uint32_t
     case 0xd10:
       return scs.scr;
     case 0xd14:
-      return scs.ccr | ccr_read_one;
+      return core_.v7() ? scs.ccr : scs.ccr | ccr_read_one;
     case 0xd24:
     {
       std::uint32_t shcsr = scs.shcsr_enables;
       for(auto const& entry : shcsr_active)
       {
+        auto const secure_only = entry.exception == exc_hardfault or entry.exception == exc_nmi;
+        if(core_.v7() and secure_only)
+        {
+          continue;
+        }
         shcsr |= core_.is_active(entry.exception) ? 1u << entry.bit : 0u;
       }
       for(auto const& entry : shcsr_pended)
@@ -301,7 +324,7 @@ auto system_space::read_scs(std::uint32_t offset) const -> std::uint32_t
     case 0xd3c:
       return scs.afsr;
     case 0xd88:
-      return scs.cpacr;
+      return core_.core_.fpu ? scs.cpacr : 0;
     case 0xd90:
       return std::uint32_t{core_.core_.mpu_regions} << 8;
     case 0xd94:
@@ -321,11 +344,11 @@ auto system_space::read_scs(std::uint32_t offset) const -> std::uint32_t
     case 0xdfc:
       return scs.demcr;
     case 0xf34:
-      return scs.fpccr;
+      return core_.core_.fpu ? scs.fpccr : 0;
     case 0xf38:
-      return scs.fpcar;
+      return core_.core_.fpu ? scs.fpcar : 0;
     case 0xf3c:
-      return scs.fpdscr;
+      return core_.core_.fpu ? scs.fpdscr : 0;
     default:
       return 0;
   }
@@ -423,6 +446,11 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
     });
     return;
   }
+  if(core_.v7() and (in(offset, 0xd9c, 0xdb8) or offset == 0xdc0 or offset == 0xdc4))
+  {
+    write_pmsav7(offset, value, mask);
+    return;
+  }
   if(in(offset, 0xda4, 0xdbc))
   {
     auto const region = scs.mpu_rnr + 1 + (offset - 0xda4) / 8;
@@ -489,7 +517,11 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
       scs.scr = merge(scs.scr, value, mask & scr_writable);
       return;
     case 0xd14:
-      scs.ccr = merge(scs.ccr, value, mask & ccr_writable);
+      scs.ccr = merge(
+          scs.ccr, value,
+          mask
+              & ((core_.v7() ? ccr_v7_writable : ccr_writable)
+                 | (core_.profile_.caches ? ccr_caches : 0u)));
       return;
     case 0xd24:
       scs.shcsr_enables = merge(scs.shcsr_enables, value, mask & shcsr_enables);
@@ -517,7 +549,7 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
       scs.afsr = merge(scs.afsr, value, mask);
       return;
     case 0xd88:
-      scs.cpacr = merge(scs.cpacr, value, mask & cpacr_writable);
+      scs.cpacr = merge(scs.cpacr, value, mask & (core_.core_.fpu ? cpacr_writable : 0u));
       return;
     case 0xd94:
       scs.mpu_ctrl = merge(scs.mpu_ctrl, value, mask & 0x7u);
@@ -605,5 +637,31 @@ void system_space::write_scs_byte(std::uint32_t offset, std::uint8_t value)
   }
   auto& cfsr = core_.state_.scs.cfsr;
   cfsr &= ~(std::uint32_t{value} << (8 * (offset - 0xd28)));
+}
+
+void system_space::write_pmsav7(std::uint32_t offset, std::uint32_t value, std::uint32_t mask)
+{
+  auto& scs = core_.state_.scs;
+  if(offset >= 0xdc0)
+  {
+    return;
+  }
+  if((offset - 0xd9c) % 8 != 0)
+  {
+    if(scs.mpu_rnr < scs.mpu_rlar.size())
+    {
+      scs.mpu_rlar[scs.mpu_rnr] = merge(scs.mpu_rlar[scs.mpu_rnr], value, mask);
+    }
+    return;
+  }
+  auto const written = value & mask;
+  if((written & rbar_valid) != 0 and (written & 0xfu) < scs.mpu_rbar.size())
+  {
+    scs.mpu_rnr = written & 0xfu;
+  }
+  if(scs.mpu_rnr < scs.mpu_rbar.size())
+  {
+    scs.mpu_rbar[scs.mpu_rnr] = merge(scs.mpu_rbar[scs.mpu_rnr], value, mask) & ~0x1fu;
+  }
 }
 }

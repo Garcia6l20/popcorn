@@ -128,6 +128,7 @@ ENTRIES = {
         "faultmask_udf",
         "return_to_reset_lr",
         "bad_exc_return",
+        "bad_exc_return_v8",
         "stack_overflow_entry",
         "bad_vector",
         "invstate",
@@ -157,3 +158,34 @@ for name, entries in ENTRIES.items():
     if target is not None:
         target.private.link_flags.append(SECTION_BOUNDS)
         target.private.link_flags.extend(f"-Wl,--undefined={entry}" for entry in entries)
+
+VARIANT_FLAGS = {
+    "m4": ("-mcpu=cortex-m4", "-mfpu=fpv4-sp-d16"),
+    "m7": ("-mcpu=cortex-m7", "-mfpu=fpv5-d16"),
+    "m3": (
+        "-mcpu=cortex-m3",
+        "-mfloat-abi=soft",
+        "-mfpu=auto",
+        "-DPOPCORN_NO_FPU",
+        "-DPOPCORN_NO_DSP",
+    ),
+}
+VARIANTS = {
+    "exceptions": ("m4", "m7", "m3"),
+    "svc": ("m4",),
+    "timers": ("m4",),
+    "faults": ("m4",),
+}
+
+for name, cores in VARIANTS.items():
+    for core_name in cores:
+        _, target = add_firmware(
+            "arch",
+            f"{name}_{core_name}",
+            [here / "startup.c", *(here / source for source in SOURCES[name])],
+        )
+        if target is not None:
+            target.private.compile_flags.extend(VARIANT_FLAGS[core_name])
+            target.private.link_flags.extend(VARIANT_FLAGS[core_name])
+            target.private.link_flags.append(SECTION_BOUNDS)
+            target.private.link_flags.extend(f"-Wl,--undefined={entry}" for entry in ENTRIES[name])

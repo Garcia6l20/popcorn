@@ -178,3 +178,19 @@ TEST_CASE("a call end keeps the live fired count unless the call reprogrammed Sy
   live.rvr = 49;
   CHECK(systick::fired_after_call(live, saved, 450) == 4u);
 }
+
+TEST_CASE("valid_v7_exc_return accepts the six ARMv7-M values only")
+{
+  for(std::uint32_t const value :
+      {0xFFFF'FFE1u, 0xFFFF'FFE9u, 0xFFFF'FFEDu, 0xFFFF'FFF1u, 0xFFFF'FFF9u, 0xFFFF'FFFDu})
+  {
+    CAPTURE(value);
+    CHECK(armv8m::valid_v7_exc_return(value));
+  }
+  for(std::uint32_t const value : {0xFFFF'FFBCu, 0xFFFF'FFE5u, 0xFFFF'FFF5u})
+  {
+    CAPTURE(value);
+    CHECK_FALSE(armv8m::valid_v7_exc_return(value));
+  }
+  CHECK(armv8m::valid_exc_return(0xFFFF'FFBC));
+}

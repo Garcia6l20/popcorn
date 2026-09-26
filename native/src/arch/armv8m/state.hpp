@@ -28,6 +28,10 @@ struct special_registers
   std::uint32_t ipsr{};
   /** @brief APSR.GE, in xPSR bits 19:16. */
   std::uint32_t ge{};
+  /** @brief MSPLIM, ARMv8-M only. */
+  std::uint32_t msplim{};
+  /** @brief PSPLIM, ARMv8-M only. */
+  std::uint32_t psplim{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(special_registers const&, special_registers const&) -> bool = default;

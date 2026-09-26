@@ -1,6 +1,4 @@
     .syntax unified
-    .cpu cortex-m33
-    .fpu fpv5-sp-d16
     .thumb
 
     .text
@@ -42,6 +40,12 @@ usage_skip:
     .type bad_return_irq, %function
 bad_return_irq:
     ldr r0, =0xFFFFFFF5
+    bx r0
+
+    .global bad_return_v8_irq
+    .type bad_return_v8_irq, %function
+bad_return_v8_irq:
+    ldr r0, =0xFFFFFFBC
     bx r0
 
     .pool

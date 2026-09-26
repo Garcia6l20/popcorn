@@ -37,6 +37,9 @@ inline constexpr std::uint32_t scr_sleeponexit = 1u << 1;
 /** @brief SCR.SEVONPEND. */
 inline constexpr std::uint32_t scr_sevonpend = 1u << 4;
 
+/** @brief CCR.STKALIGN, 8-byte aligned exception frames. */
+inline constexpr std::uint32_t ccr_stkalign = 1u << 9;
+
 /** @brief HFSR.VECTTBL, a vector read failed on exception entry. */
 inline constexpr std::uint32_t hfsr_vecttbl = 1u << 1;
 
@@ -164,15 +167,18 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
  *        pointers and the masks, target IPSR, target CONTROL with nPRIV last, then GE.
  * @param engine Engine to write.
  * @param target Values to apply.
+ * @param stack_limits Whether the core has MSPLIM and PSPLIM, written last.
  * @throws emulation_error when the engine refuses a write.
  */
-void set_context(uc_struct* engine, special_registers const& target);
+void set_context(uc_struct* engine, special_registers const& target, bool stack_limits);
 
 /**
  * @brief Reads the special registers from the engine, also in unprivileged Thread mode, where
  *        the engine reads the stack pointers and masks as zero: the read goes through Handler
  *        mode for its duration.
+ * @param engine Engine to read.
+ * @param stack_limits Whether the core has MSPLIM and PSPLIM to read, else they read 0.
  * @throws emulation_error when the engine refuses a read or write.
  */
-[[nodiscard]] auto read_special(uc_struct* engine) -> special_registers;
+[[nodiscard]] auto read_special(uc_struct* engine, bool stack_limits) -> special_registers;
 }

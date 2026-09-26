@@ -102,11 +102,15 @@ void setup_vectors(void)
   set_vec(16 + 5, irq5_handler);
   set_vec(16 + 6, irq6_handler);
   set_vec(16 + 7, irq7_handler);
+#ifndef POPCORN_NO_FPU
   set_vec(16 + 8, fpu_check_irq);
+#endif
   set_vec(16 + 9, psp_irq);
   set_vec(16 + 10, it_irq);
   REG32(SCB_VTOR) = (uint32_t)ram_vector;
+#ifndef POPCORN_NO_FPU
   REG32(SCB_CPACR) |= 0xFu << 20;
+#endif
   REG32(SCB_SHCSR) |= (1u << 16) | (1u << 17) | (1u << 18);
   __asm__ volatile("dsb\nisb" ::: "memory");
 }
@@ -158,7 +162,9 @@ __attribute__((noipa)) void exceptions_run(void)
   __asm__ volatile("cpsie i" ::: "memory");
   LOG(0x601);
 
+#ifndef POPCORN_NO_FPU
   LOG(0x700 | fpu_check());
+#endif
 
   psp_section();
   LOG(0x9FF);
@@ -198,7 +204,9 @@ __attribute__((noipa)) void probe_setup(void)
   setup_vectors();
   set_vec(16 + 11, clobber_irq);
   set_vec(16 + 12, nested_body);
+#ifndef POPCORN_NO_FPU
   set_vec(16 + 13, nested_fp_body);
+#endif
   set_vec(16 + 14, tail_a);
   set_vec(16 + 15, tail_b);
   set_vec(16 + 16, faultmask_irq);

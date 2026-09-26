@@ -168,7 +168,7 @@ auto best_pending(exception_state const& exceptions, bool synchronous_only) noex
   return best;
 }
 
-void set_context(uc_struct* engine, special_registers const& target)
+void set_context(uc_struct* engine, special_registers const& target, bool stack_limits)
 {
   write(engine, UC_ARM_REG_IPSR, 1, "IPSR");
   write(
@@ -184,9 +184,14 @@ void set_context(uc_struct* engine, special_registers const& target)
   write(engine, UC_ARM_REG_IPSR, target.ipsr, "IPSR");
   write(engine, UC_ARM_REG_CONTROL, target.control, "CONTROL");
   write(engine, UC_ARM_REG_APSR_G, target.ge, "APSR.GE");
+  if(stack_limits)
+  {
+    write(engine, UC_ARM_REG_MSPLIM, target.msplim, "MSPLIM");
+    write(engine, UC_ARM_REG_PSPLIM, target.psplim, "PSPLIM");
+  }
 }
 
-auto read_special(uc_struct* engine) -> special_registers
+auto read_special(uc_struct* engine, bool stack_limits) -> special_registers
 {
   auto const control      = read(engine, UC_ARM_REG_CONTROL, "CONTROL");
   auto const ipsr         = read(engine, UC_ARM_REG_IPSR, "IPSR");
@@ -204,6 +209,8 @@ auto read_special(uc_struct* engine) -> special_registers
       .psp       = read(engine, UC_ARM_REG_PSP, "PSP"),
       .ipsr      = ipsr,
       .ge        = read(engine, UC_ARM_REG_XPSR, "xPSR") & xpsr_ge,
+      .msplim    = stack_limits ? read(engine, UC_ARM_REG_MSPLIM, "MSPLIM") : 0u,
+      .psplim    = stack_limits ? read(engine, UC_ARM_REG_PSPLIM, "PSPLIM") : 0u,
   };
   if(unprivileged)
   {
@@ -216,17 +223,19 @@ auto cortex_m::enter(std::uint32_t number) -> trap_result
 {
   auto* const                engine   = engine_handle();
   auto&                      services = context_->services;
-  auto const                 special  = read_special(engine);
+  auto const                 special  = read_special(engine, stack_limits());
   auto const                 thread   = special.ipsr == 0;
   auto const                 use_psp  = thread and (special.control & control_spsel) != 0;
   auto const                 fp       = core_.fpu and (special.control & control_fpca) != 0;
   auto const                 size     = fp ? extended_frame_size : basic_frame_size;
   auto const                 sp       = use_psp ? special.psp : special.msp;
-  auto const                 frame_at = (sp - size) & ~4u;
+  auto const                 align    = not v7() or (state_.scs.ccr & ccr_stkalign) != 0;
+  auto const                 frame_at = align ? (sp - size) & ~4u : sp - size;
   std::vector<std::uint32_t> words(size / 4, 0);
   read_batch(engine, frame_ids, std::span{words}.first(frame_ids.size()));
   words[6] = pc() & ~1u;
-  words[7] = (words[7] & ~(stacked_align_bit | stacked_sfpa_bit)) | ((sp >> 2) & 1u) << 9;
+  words[7] = (words[7] & ~(stacked_align_bit | stacked_sfpa_bit))
+           | (align and frame_at != sp - size ? stacked_align_bit : 0u);
   if(profile_.secure_engine and (special.control & control_sfpa) != 0)
   {
     words[7] |= stacked_sfpa_bit;
@@ -258,7 +267,7 @@ auto cortex_m::enter(std::uint32_t number) -> trap_result
   target.ipsr    = number;
   target.control = special.control & ~(control_spsel | control_fpca | control_sfpa);
   (use_psp ? target.psp : target.msp) = frame_at;
-  set_context(engine, target);
+  set_context(engine, target, stack_limits());
   write(UC_ARM_REG_EPSR, (*vector & 1u) << 24);
   write(
       UC_ARM_REG_LR,
@@ -278,7 +287,7 @@ auto cortex_m::exception_return() -> trap_result
   auto* const engine   = engine_handle();
   auto&       services = context_->services;
   auto const  value    = read(UC_ARM_REG_PC) | 1u;
-  auto        special  = read_special(engine);
+  auto        special  = read_special(engine, stack_limits());
   auto const  number   = special.ipsr;
   auto const  invalid  = [&] {
     state_.scs.cfsr |= cfsr::invpc;
@@ -298,7 +307,7 @@ auto cortex_m::exception_return() -> trap_result
          .cfsr_bits = cfsr::iaccviol,
          .reported  = target}));
   }
-  if(not valid_exc_return(value))
+  if(not(v7() ? valid_v7_exc_return(value) : valid_exc_return(value)))
   {
     return invalid();
   }
@@ -343,7 +352,7 @@ auto cortex_m::exception_return() -> trap_result
                  | sfpa;
   (returning.process_stack ? target.psp : target.msp) = popped;
   target.ge                                           = words[7] & xpsr_ge;
-  set_context(engine, target);
+  set_context(engine, target, stack_limits());
   if(number >= exc_irq0 and test_bit(state_.exceptions.level, number))
   {
     note_pending(number);

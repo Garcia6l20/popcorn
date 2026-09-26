@@ -18,6 +18,16 @@ arch_firmware = {
     name: firmware("arch", name) for name in ("scs", "exceptions", "svc", "timers", "faults")
 }
 arch_firmware["abi"] = firmware("abi", "abi")
+for variant in (
+    "exceptions_m4",
+    "exceptions_m7",
+    "exceptions_m3",
+    "svc_m4",
+    "timers_m4",
+    "faults_m4",
+):
+    arch_firmware[variant] = firmware("arch", variant)
+arch_firmware["abi_m4"] = firmware("abi", "abi_m4")
 arch_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in arch_firmware.items()},
@@ -34,6 +44,7 @@ arch_tests = [
         ("arch-timers", "test_timers.cpp"),
         ("arch-faults", "test_faults.cpp"),
         ("arch-calls", "test_calls.cpp"),
+        ("arch-variants", "test_variants.cpp"),
     )
 ]
 for test in arch_tests:

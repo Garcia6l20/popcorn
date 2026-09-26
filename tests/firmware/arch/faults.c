@@ -24,6 +24,7 @@ void usagefault_entry(void);
 void hardfault_udf(void);
 void usage_skip(void);
 void bad_return_irq(void);
+void bad_return_v8_irq(void);
 
 __attribute__((aligned(512))) uint32_t ram_vector[VECTORS];
 uint32_t                               unpriv_read;
@@ -77,9 +78,11 @@ __attribute__((noipa)) void faults_setup(void)
   ram_vector[5]     = (uint32_t)busfault_entry;
   ram_vector[6]     = (uint32_t)usagefault_entry;
   ram_vector[16]    = (uint32_t)bad_return_irq;
+  ram_vector[17]    = (uint32_t)bad_return_v8_irq;
   REG32(SCB_VTOR)   = (uint32_t)ram_vector;
   REG8(NVIC_IPR(0)) = 0x80;
-  REG32(NVIC_ISER0) = 1u;
+  REG8(NVIC_IPR(1)) = 0x80;
+  REG32(NVIC_ISER0) = 3u;
   __asm__ volatile("dsb\nisb\nbkpt #1" ::: "memory");
 }
 
@@ -223,4 +226,11 @@ __attribute__((noipa)) void spin_udf(void)
     __asm__ volatile("udf #2" ::: "memory");
   }
   __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void bad_exc_return_v8(void)
+{
+  enable_faults(1);
+  pend(1);
+  __asm__ volatile("b ." ::: "memory");
 }

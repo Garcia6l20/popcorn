@@ -115,6 +115,8 @@ private:
   [[nodiscard]] auto cyccnt_counting() const noexcept -> bool;
   [[nodiscard]] auto read_cyccnt() const -> std::uint32_t;
   void               rebase_cyccnt(std::uint32_t value);
+  [[nodiscard]] auto stack_limits() const noexcept -> bool;
+  [[nodiscard]] auto v7() const noexcept -> bool;
   [[nodiscard]] auto current_priority(bool ignore_primask = false) const -> int;
   static auto        wfi_hook(uc_struct* engine, void* user) noexcept -> int;
   void               wait_for_interrupt();

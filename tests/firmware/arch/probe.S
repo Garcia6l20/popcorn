@@ -1,15 +1,19 @@
     .syntax unified
-    .cpu cortex-m33
-    .fpu fpv5-sp-d16
     .thumb
 
     .equ NVIC_ISPR0, 0xE000E200
+
+#ifdef POPCORN_NO_DSP
+#define APSR_FLAGS APSR_nzcvq
+#else
+#define APSR_FLAGS APSR_nzcvqg
+#endif
 
     .text
 
     .macro PATTERN
     ldr r0, =0xF80A0000
-    msr APSR_nzcvqg, r0
+    msr APSR_FLAGS, r0
     ldr r0, =0xA0A00000
     ldr r1, =0xA1A10001
     ldr r2, =0xA2A20002
@@ -66,21 +70,25 @@
     PATTERN
     PROBE
 
+#ifndef POPCORN_NO_FPU
     ENTRY regs_thread_msp_fp
     FP_PATTERN
     PATTERN
     PROBE
+#endif
 
     ENTRY regs_thread_psp
     TO_PSP 2
     PATTERN
     PROBE
 
+#ifndef POPCORN_NO_FPU
     ENTRY regs_thread_psp_fp
     TO_PSP 2
     FP_PATTERN
     PATTERN
     PROBE
+#endif
 
     ENTRY regs_thread_psp_unpriv
     TO_PSP 2
@@ -102,29 +110,35 @@
     PEND 12
     b .
 
+#ifndef POPCORN_NO_FPU
     ENTRY regs_nested_fp
     PEND 13
     b .
+#endif
 
     ENTRY nested_body
     PATTERN
     PROBE
 
+#ifndef POPCORN_NO_FPU
     ENTRY nested_fp_body
     FP_PATTERN
     PATTERN
     PROBE
+#endif
 
     ENTRY clobber_irq
     bkpt #4
     ldr r0, =0x00000000
-    msr APSR_nzcvqg, r0
+    msr APSR_FLAGS, r0
+#ifndef POPCORN_NO_FPU
     .irp i,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
     ldr r0, =(0xC0000000 + \i)
     vmov s\i, r0
     .endr
     movs r0, #0
     vmsr fpscr, r0
+#endif
     ldr r0, =0xDEAD0000
     ldr r1, =0xDEAD0001
     ldr r2, =0xDEAD0002

@@ -54,6 +54,26 @@ constexpr auto valid_exc_return(std::uint32_t value) noexcept -> bool
 }
 
 /**
+ * @brief Whether an EXC_RETURN value is one of the six ARMv7-M defines: Handler MSP, Thread MSP,
+ *        Thread PSP, each with a basic or an extended frame.
+ */
+constexpr auto valid_v7_exc_return(std::uint32_t value) noexcept -> bool
+{
+  switch(value)
+  {
+    case 0xFFFF'FFE1:
+    case 0xFFFF'FFE9:
+    case 0xFFFF'FFED:
+    case 0xFFFF'FFF1:
+    case 0xFFFF'FFF9:
+    case 0xFFFF'FFFD:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
  * @brief What an EXC_RETURN value selects. S, DCRS and ES are ignored: the M33 engine runs
  *        Secure, so firmware built for Non-secure values returns.
  */

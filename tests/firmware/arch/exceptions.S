@@ -1,6 +1,4 @@
     .syntax unified
-    .cpu cortex-m33
-    .fpu fpv5-sp-d16
     .thumb
 
     .equ NVIC_ISPR0, 0xE000E200
@@ -17,6 +15,7 @@
     str r3, [r2]
     .endm
 
+#ifndef POPCORN_NO_FPU
     .global fpu_check
     .type fpu_check, %function
 fpu_check:
@@ -60,6 +59,8 @@ fpu_check_irq:
     ldr r12, =0x710
     LOGV r12
     bx lr
+
+#endif
 
     .global psp_section
     .type psp_section, %function
