@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
@@ -340,10 +341,17 @@ TEST_CASE("timer domains run at twice their APB clock when the APB prescaler div
 
 TEST_CASE("the oscillator driving the system clock cannot be switched off")
 {
-  auto f = idle_fixture();
+  auto                          f = idle_fixture();
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
   write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "MSISON"));
   CHECK(f.field("RCC", "RCC_CR", "MSISON") == 1);
   CHECK(f.field("RCC", "RCC_CR", "MSISRDY") == 1);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged.front().message.contains("MSISON = 0"));
+  write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "MSISON"));
+  CHECK(logged.size() == 1);
   write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "MSIKON"));
   CHECK(f.field("RCC", "RCC_CR", "MSIKON") == 0);
   CHECK(f.field("RCC", "RCC_CR", "MSIKRDY") == 0);
@@ -354,6 +362,9 @@ TEST_CASE("PLL1 driving the system clock keeps its configuration against a sourc
 {
   stm32_fixture f{u575(), "rcc_ll", with_listener()};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
   write(f, "RCC_PLL1CFGR", peek(f, "RCC_PLL1CFGR") & ~(bit_of("RCC_PLL1CFGR", "PLL1SRC") * 3u));
   CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1SRC") == 1);
   write(f, "RCC_PLL1DIVR", 0);
@@ -362,6 +373,11 @@ TEST_CASE("PLL1 driving the system clock keeps its configuration against a sourc
   CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1REN") == 1);
   CHECK(probe(f).hz("sysclk") == 160 * mhz);
   CHECK(f.target->virtual_clock().core_hz() == 160 * mhz);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged.front().kind == core::log_kind::model_warning);
+  CHECK(logged.front().peripheral == "RCC");
+  CHECK(logged.front().reg == "RCC_PLL1CFGR");
+  CHECK(logged.front().message.contains("stop the core clock"));
   f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
   idle_until(f, std::chrono::microseconds{10});
 }

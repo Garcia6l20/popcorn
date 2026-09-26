@@ -106,7 +106,7 @@ TEST_CASE("both caches invalidate after reset, BUSYF then BSYENDF after the main
     CHECK(flag(f, unit, reg, "BUSYF"));
     CHECK_FALSE(flag(f, unit, reg, "BSYENDF"));
   }
-  idle_for(f, std::chrono::microseconds{2});
+  idle_for(f, std::chrono::microseconds{20});
   CHECK_FALSE(flag(f, "ICache", "ICACHE_SR", "BUSYF"));
   CHECK(flag(f, "ICache", "ICACHE_SR", "BSYENDF"));
   CHECK_FALSE(flag(f, "DCACHE", "DCACHE_SR", "BUSYF"));
@@ -116,7 +116,7 @@ TEST_CASE("both caches invalidate after reset, BUSYF then BSYENDF after the main
 TEST_CASE("ICACHE invalidate raises its interrupt when enabled and FCR clears the flag")
 {
   auto f = idle();
-  idle_for(f, std::chrono::microseconds{2});
+  idle_for(f, std::chrono::microseconds{20});
   write(f, "ICache", "ICACHE_FCR", bit_of("ICache", "ICACHE_FCR", "CBSYENDF"));
   CHECK_FALSE(flag(f, "ICache", "ICACHE_SR", "BSYENDF"));
   CHECK(f.target->peripheral("ICache").peek(offset_of("ICache", "ICACHE_FCR")) == 0);
@@ -125,7 +125,7 @@ TEST_CASE("ICACHE invalidate raises its interrupt when enabled and FCR clears th
   CHECK(flag(f, "ICache", "ICACHE_SR", "BUSYF"));
   CHECK_FALSE(flag(f, "ICache", "ICACHE_CR", "CACHEINV"));
   CHECK_FALSE(pending(f, 107));
-  idle_for(f, std::chrono::microseconds{2});
+  idle_for(f, std::chrono::microseconds{20});
   CHECK(flag(f, "ICache", "ICACHE_SR", "BSYENDF"));
   CHECK(pending(f, 107));
 }
@@ -134,7 +134,7 @@ TEST_CASE("disabling ICACHE starts an invalidate")
 {
   auto f = idle();
   write(f, "ICache", "ICACHE_CR", bit_of("ICache", "ICACHE_CR", "EN"));
-  idle_for(f, std::chrono::microseconds{2});
+  idle_for(f, std::chrono::microseconds{20});
   write(f, "ICache", "ICACHE_FCR", bit_of("ICache", "ICACHE_FCR", "CBSYENDF"));
   write(f, "ICache", "ICACHE_CR", 0);
   CHECK(flag(f, "ICache", "ICACHE_SR", "BUSYF"));
@@ -145,7 +145,7 @@ TEST_CASE("a DCACHE range command runs only on an enabled idle cache and ends wi
   auto       f       = idle();
   auto const start   = bit_of("DCACHE", "DCACHE_CR", "STARTCMD");
   auto const command = 2u * bit_of("DCACHE", "DCACHE_CR", "CACHECMD");
-  idle_for(f, std::chrono::microseconds{2});
+  idle_for(f, std::chrono::microseconds{20});
   write(f, "DCACHE", "DCACHE_CR", command | start);
   CHECK_FALSE(flag(f, "DCACHE", "DCACHE_SR", "BUSYCMDF"));
   auto const enable = bit_of("DCACHE", "DCACHE_CR", "EN");
@@ -153,7 +153,7 @@ TEST_CASE("a DCACHE range command runs only on an enabled idle cache and ends wi
   write(f, "DCACHE", "DCACHE_CR", enable | command | start);
   CHECK(flag(f, "DCACHE", "DCACHE_SR", "BUSYCMDF"));
   CHECK_FALSE(flag(f, "DCACHE", "DCACHE_CR", "STARTCMD"));
-  idle_for(f, std::chrono::microseconds{2});
+  idle_for(f, std::chrono::microseconds{20});
   CHECK_FALSE(flag(f, "DCACHE", "DCACHE_SR", "BUSYCMDF"));
   CHECK(flag(f, "DCACHE", "DCACHE_SR", "CMDENDF"));
   CHECK(pending(f, 111));
@@ -168,7 +168,7 @@ TEST_CASE("a snapshot taken while the reset invalidate is pending ends it at the
   auto const ended = [&] {
     auto const stopped = f.run_to_stop(
         {.max_instructions = icount{1'000'000},
-         .until_time       = vtime{f.target->virtual_clock().time().ps + 10'000'000},
+         .until_time       = vtime{f.target->virtual_clock().time().ps + 100'000'000},
          .stop_when        = [&] { return flag(f, "ICache", "ICACHE_SR", "BSYENDF"); }});
     CHECK(stopped.reason == stop_reason::user);
     return f.target->virtual_clock().now();

@@ -1,0 +1,210 @@
+#include "stm32_fixture.hpp"
+
+#include <popcorn/core/log.hpp>
+#include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
+
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace
+{
+namespace core = popcorn::core;
+using popcorn::fault_kind;
+using popcorn::icount;
+using popcorn::stop_reason;
+using popcorn::testing::stm32_fixture;
+using popcorn::testing::u575;
+
+constexpr std::uint32_t imprecise_bus_error = 1u << 10;
+constexpr std::uint32_t handler_mark        = 0xfa17;
+
+auto run_log(
+    std::string_view      firmware,
+    core::machine_options options = popcorn::testing::stm32_options()) -> std::vector<std::uint32_t>
+{
+  stm32_fixture f{u575(), firmware, std::move(options)};
+  auto const    stopped = f.run_to_stop();
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  return f.log();
+}
+
+auto field(stm32_fixture const& f, std::string_view reg, std::string_view name) -> std::uint32_t
+{
+  return f.field("PWR", reg, name);
+}
+}
+
+TEST_CASE("voltage scale 1 and the EPOD booster become ready after the PWR delay")
+{
+  auto const log = run_log("pwr_ll");
+  REQUIRE(log.size() == 4);
+  CHECK(log[0] > 0);
+  CHECK(log[0] <= 200);
+  CHECK(log[1] > 0);
+  CHECK(log[1] <= 200);
+  CHECK(log[2] == 3u << 16);
+  CHECK(log[3] == 3);
+  CHECK(run_log("pwr_ll") == log);
+}
+
+TEST_CASE("a snapshot taken while VOSRDY is pending restores to the same run")
+{
+  stm32_fixture f{u575(), "pwr_ll", popcorn::testing::stm32_options()};
+  while(field(f, "PWR_VOSR", "VOS") == 0)
+  {
+    REQUIRE_FALSE(f.run({.max_instructions = icount{4}}).stopped.has_value());
+  }
+  REQUIRE(field(f, "PWR_VOSR", "VOSRDY") == 0);
+  auto const saved = f.target->snapshot();
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  auto const expected = f.log();
+  f.target->restore(saved);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.log() == expected);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 3);
+}
+
+TEST_CASE("FLASH keeps its latency and unlocks with the key pair, LOCK relocks")
+{
+  auto const log = run_log("flash_ll");
+  CHECK(log == std::vector<std::uint32_t>{4, 1, 0, 1});
+  CHECK(run_log("flash_ll") == log);
+}
+
+TEST_CASE("a wrong FLASH key is an imprecise bus fault")
+{
+  stm32_fixture f{u575(), "flash_ll"};
+  f.set("pc", popcorn::testing::sym("flash_ll", "wrong_key"));
+  auto const stopped = f.run_to_stop();
+  REQUIRE(stopped.reason == stop_reason::fault);
+  REQUIRE(stopped.fault.has_value());
+  CHECK(stopped.fault->kind == fault_kind::bus);
+  CHECK((stopped.fault->status & imprecise_bus_error) != 0);
+  CHECK(f.field("FLASH", "FLASH_NSCR", "LOCK") == 1);
+}
+
+TEST_CASE("after a wrong key FLASH_NSCR stays locked until reset")
+{
+  auto options   = popcorn::testing::stm32_options();
+  options.faults = popcorn::arch::fault_policy::enter_handler;
+  stm32_fixture f{u575(), "flash_ll", options};
+  f.set("pc", popcorn::testing::sym("flash_ll", "wrong_key"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.log() == std::vector<std::uint32_t>{handler_mark, 1});
+  f.target->reset();
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.log() == std::vector<std::uint32_t>{4, 1, 0, 1});
+}
+
+TEST_CASE("LL cache maintenance and the ICACHE interrupt on a U575, IDCODE from DBGMCU")
+{
+  auto const log = run_log("cache_ll");
+  REQUIRE(log.size() == 7);
+  CHECK(log[0] == 0);
+  CHECK(log[1] == 1);
+  CHECK(log[2] > 0);
+  CHECK(log[3] == 1);
+  CHECK(log[5] > 0);
+  CHECK(log[6] == 0x3007'6482);
+  CHECK(run_log("cache_ll") == log);
+}
+
+TEST_CASE("FLASH_NSCR ignores writes while locked and clears STRT once unlocked")
+{
+  stm32_fixture f{u575(), "flash_ll"};
+  auto&         regs = f.target->peripheral("FLASH");
+  auto const    nscr = std::ranges::find(
+      regs.description().registers, std::string_view{"FLASH_NSCR"}, &popcorn::register_desc::name);
+  auto const nskeyr = std::ranges::find(
+      regs.description().registers, std::string_view{"FLASH_NSKEYR"},
+      &popcorn::register_desc::name);
+  auto* const model = f.target->model("FLASH");
+  auto const  write = [&](std::uint32_t offset, std::uint32_t value) {
+    return model->on_write(regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}});
+  };
+  REQUIRE(write(nscr->offset, 1u).has_value());
+  CHECK(f.field("FLASH", "FLASH_NSCR", "PG") == 0);
+  CHECK(f.field("FLASH", "FLASH_NSCR", "LOCK") == 1);
+  REQUIRE(write(nskeyr->offset, 0x4567'0123u).has_value());
+  REQUIRE(write(nskeyr->offset, 0xcdef'89abu).has_value());
+  CHECK(regs.peek(nskeyr->offset) == 0);
+  REQUIRE(write(nscr->offset, 1u | (1u << 16)).has_value());
+  CHECK(f.field("FLASH", "FLASH_NSCR", "PG") == 1);
+  CHECK(f.field("FLASH", "FLASH_NSCR", "STRT") == 0);
+  CHECK(f.field("FLASH", "FLASH_NSCR", "OPTLOCK") == 1);
+  CHECK_FALSE(write(nskeyr->offset, 0x4567'0123u).has_value());
+}
+
+TEST_CASE("PWR and FLASH log what v1 does not model, once each")
+{
+  stm32_fixture                 f{u575(), "flash_ll"};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const write = [&](std::string_view peripheral, std::string_view reg, std::uint32_t value) {
+    auto&      regs = f.target->peripheral(peripheral);
+    auto const found =
+        std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
+    REQUIRE(found != regs.description().registers.end());
+    REQUIRE(f.target->model(peripheral)
+                ->on_write(
+                    regs, found->offset, 4, regs.peek(found->offset), value,
+                    {.pc = 0, .now = icount{0}})
+                .has_value());
+  };
+  write("PWR", "PWR_CR1", 2);
+  write("PWR", "PWR_CR1", 4);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].kind == core::log_kind::model_warning);
+  CHECK(logged[0].peripheral == "PWR");
+  CHECK(logged[0].reg == "PWR_CR1");
+  CHECK(logged[0].message.contains("stop2"));
+  write("FLASH", "FLASH_NSKEYR", 0x4567'0123u);
+  write("FLASH", "FLASH_NSKEYR", 0xcdef'89abu);
+  write("FLASH", "FLASH_NSCR", 1);
+  write("FLASH", "FLASH_NSCR", 1u << 16);
+  REQUIRE(logged.size() == 2);
+  CHECK(logged[1].peripheral == "FLASH");
+  CHECK(logged[1].message.contains("PG requested"));
+}
+
+TEST_CASE("a snapshot between the two FLASH keys restores the half-done sequence")
+{
+  stm32_fixture f{u575(), "flash_ll"};
+  auto&         regs   = f.target->peripheral("FLASH");
+  auto const    nskeyr = std::ranges::find(
+      regs.description().registers, std::string_view{"FLASH_NSKEYR"},
+      &popcorn::register_desc::name);
+  auto* const model = f.target->model("FLASH");
+  auto const  key   = [&](std::uint32_t value) {
+    return model->on_write(regs, nskeyr->offset, 4, 0, value, {.pc = 0, .now = icount{0}});
+  };
+  REQUIRE(key(0x4567'0123u).has_value());
+  auto const saved = f.target->snapshot();
+  REQUIRE(key(0x1111'1111u).has_value() == false);
+  f.target->restore(saved);
+  REQUIRE(key(0xcdef'89abu).has_value());
+  CHECK(f.field("FLASH", "FLASH_NSCR", "LOCK") == 0);
+}
+
+TEST_CASE("the first PWR_CR1 write logs its LPMS mode, Stop 0 included")
+{
+  stm32_fixture                 f{u575(), "flash_ll"};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto&      regs = f.target->peripheral("PWR");
+  auto const cr1  = std::ranges::find(
+      regs.description().registers, std::string_view{"PWR_CR1"}, &popcorn::register_desc::name);
+  REQUIRE(
+      f.target->model("PWR")->on_write(regs, cr1->offset, 4, 0, 0, {.pc = 0, .now = icount{0}}));
+  REQUIRE(logged.size() == 1);
+  CHECK(logged.front().message.contains("stop0"));
+}

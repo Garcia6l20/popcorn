@@ -1,13 +1,18 @@
 #pragma once
 
+#include <popcorn/core/clock.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/log.hpp>
+#include <popcorn/core/scheduler.hpp>
+#include <popcorn/core/services.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
 
 #include <reflex/serde/bson.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -15,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -186,6 +192,34 @@ protected:
       missing(name);
     }
     return *found;
+  }
+
+  /**
+   * @brief Logs a model warning through the machine services. The model records no pc: the
+   *        services fill in the current one.
+   * @param reg Register the warning is about, as the description spells it.
+   * @param message Human-readable text.
+   */
+  void warn(std::string_view reg, std::string message) const
+  {
+    ctx_.services.log(
+        {.kind       = core::log_kind::model_warning,
+         .peripheral = desc_.name,
+         .reg        = std::string{reg},
+         .message    = std::move(message)});
+  }
+
+  /**
+   * @brief Schedules an event of the model a virtual time from now, at the current instruction
+   *        rate.
+   * @param delay Virtual time until the event.
+   * @param kind Event kind, passed back to on_event().
+   * @param payload Payload passed back to on_event(), usually a generation.
+   */
+  void schedule_in(std::chrono::nanoseconds delay, std::uint32_t kind, std::uint64_t payload)
+  {
+    auto const ps = static_cast<std::uint64_t>(delay.count()) * 1000u;
+    ctx_.events.schedule(ctx_.clock.to_icount(vtime{ctx_.clock.time().ps + ps}), kind, payload);
   }
 
   /**

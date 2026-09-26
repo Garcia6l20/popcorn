@@ -15,10 +15,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-/** @brief Virtual time of a full invalidate or a maintenance command. RM0456 sections 8.4.11
- * and 9.4.8 give none: short, and nonzero so that software sees the busy flag. */
-constexpr std::chrono::nanoseconds maintenance_time = std::chrono::microseconds{1};
-
 constexpr std::uint32_t invalidate_done = 0;
 constexpr std::uint32_t command_done    = 1;
 
@@ -28,12 +24,6 @@ struct cache_state
 
   friend auto operator==(cache_state const&, cache_state const&) -> bool = default;
 };
-
-void after_maintenance(model_context& ctx, std::uint32_t kind, std::uint32_t generation)
-{
-  auto const delay = static_cast<std::uint64_t>(maintenance_time.count()) * 1000u;
-  ctx.events.schedule(ctx.clock.to_icount(vtime{ctx.clock.time().ps + delay}), kind, generation);
-}
 
 void drive(irq_line& line, bool level)
 {
@@ -50,7 +40,7 @@ void drive(irq_line& line, bool level)
 class icache final : public dispatch_model<icache, cache_state>
 {
 public:
-  icache(model_context& ctx, peripheral_desc const& desc);
+  icache(model_context& ctx, peripheral_desc const& desc, cache_options const& options);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -63,18 +53,19 @@ private:
   void invalidate();
   void interrupt();
 
-  register_file& regs_;
-  field_ref      enable_;
-  field_ref      invalidate_;
-  field_ref      busy_;
-  field_ref      busy_end_;
-  field_ref      error_;
-  field_ref      busy_end_irq_;
-  field_ref      error_irq_;
-  field_ref      clear_busy_end_;
-  field_ref      clear_error_;
-  reg_ref        fcr_;
-  irq_line&      line_;
+  cache_options const& options_;
+  register_file&       regs_;
+  field_ref            enable_;
+  field_ref            invalidate_;
+  field_ref            busy_;
+  field_ref            busy_end_;
+  field_ref            error_;
+  field_ref            busy_end_irq_;
+  field_ref            error_irq_;
+  field_ref            clear_busy_end_;
+  field_ref            clear_error_;
+  reg_ref              fcr_;
+  irq_line&            line_;
 };
 
 constexpr std::array<write_entry<icache>, 3> icache_writes{
@@ -85,8 +76,8 @@ constexpr std::array<write_entry<icache>, 3> icache_writes{
      }
 };
 
-icache::icache(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "ICACHE", icache_writes}, regs_{ctx.regs},
+icache::icache(model_context& ctx, peripheral_desc const& desc, cache_options const& options)
+    : dispatch_model{ctx, desc, "ICACHE", icache_writes}, options_{options}, regs_{ctx.regs},
       enable_{field("ICACHE_CR", "EN")}, invalidate_{field("ICACHE_CR", "CACHEINV")},
       busy_{field("ICACHE_SR", "BUSYF")}, busy_end_{field("ICACHE_SR", "BSYENDF")},
       error_{field("ICACHE_SR", "ERRF")}, busy_end_irq_{field("ICACHE_IER", "BSYENDIE")},
@@ -106,7 +97,7 @@ void icache::reset(register_file& regs, reset_kind)
 void icache::invalidate()
 {
   update(regs_, busy_, 1);
-  after_maintenance(ctx_, invalidate_done, ++state_.generation[invalidate_done]);
+  schedule_in(options_.busy_delay, invalidate_done, ++state_.generation[invalidate_done]);
 }
 
 void icache::interrupt()
@@ -160,7 +151,7 @@ void icache::fcr_written(std::uint32_t, std::uint32_t now)
 class dcache final : public dispatch_model<dcache, cache_state>
 {
 public:
-  dcache(model_context& ctx, peripheral_desc const& desc);
+  dcache(model_context& ctx, peripheral_desc const& desc, cache_options const& options);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -173,24 +164,25 @@ private:
   void invalidate();
   void interrupt();
 
-  register_file& regs_;
-  field_ref      enable_;
-  field_ref      invalidate_;
-  field_ref      command_;
-  field_ref      start_;
-  field_ref      busy_;
-  field_ref      busy_end_;
-  field_ref      error_;
-  field_ref      command_busy_;
-  field_ref      command_end_;
-  field_ref      busy_end_irq_;
-  field_ref      error_irq_;
-  field_ref      command_end_irq_;
-  field_ref      clear_busy_end_;
-  field_ref      clear_error_;
-  field_ref      clear_command_end_;
-  reg_ref        fcr_;
-  irq_line&      line_;
+  cache_options const& options_;
+  register_file&       regs_;
+  field_ref            enable_;
+  field_ref            invalidate_;
+  field_ref            command_;
+  field_ref            start_;
+  field_ref            busy_;
+  field_ref            busy_end_;
+  field_ref            error_;
+  field_ref            command_busy_;
+  field_ref            command_end_;
+  field_ref            busy_end_irq_;
+  field_ref            error_irq_;
+  field_ref            command_end_irq_;
+  field_ref            clear_busy_end_;
+  field_ref            clear_error_;
+  field_ref            clear_command_end_;
+  reg_ref              fcr_;
+  irq_line&            line_;
 };
 
 constexpr std::array<write_entry<dcache>, 3> dcache_writes{
@@ -201,8 +193,8 @@ constexpr std::array<write_entry<dcache>, 3> dcache_writes{
      }
 };
 
-dcache::dcache(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "DCACHE", dcache_writes}, regs_{ctx.regs},
+dcache::dcache(model_context& ctx, peripheral_desc const& desc, cache_options const& options)
+    : dispatch_model{ctx, desc, "DCACHE", dcache_writes}, options_{options}, regs_{ctx.regs},
       enable_{field("DCACHE_CR", "EN")}, invalidate_{field("DCACHE_CR", "CACHEINV")},
       command_{field("DCACHE_CR", "CACHECMD")}, start_{field("DCACHE_CR", "STARTCMD")},
       busy_{field("DCACHE_SR", "BUSYF")}, busy_end_{field("DCACHE_SR", "BSYENDF")},
@@ -226,7 +218,7 @@ void dcache::reset(register_file& regs, reset_kind)
 void dcache::invalidate()
 {
   update(regs_, busy_, 1);
-  after_maintenance(ctx_, invalidate_done, ++state_.generation[invalidate_done]);
+  schedule_in(options_.busy_delay, invalidate_done, ++state_.generation[invalidate_done]);
 }
 
 void dcache::interrupt()
@@ -274,7 +266,7 @@ void dcache::cr_written(std::uint32_t old, std::uint32_t now)
     if(enable_.of(now) != 0 and idle and command >= 1 and command <= 3)
     {
       update(regs_, command_busy_, 1);
-      after_maintenance(ctx_, command_done, ++state_.generation[command_done]);
+      schedule_in(options_.busy_delay, command_done, ++state_.generation[command_done]);
     }
   }
 }
@@ -303,17 +295,17 @@ void dcache::fcr_written(std::uint32_t, std::uint32_t now)
 }
 }
 
-auto icache_factory() -> model_factory
+auto icache_factory(cache_options const& options) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<icache>(ctx, desc);
+  return [&options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<icache>(ctx, desc, options);
   };
 }
 
-auto dcache_factory() -> model_factory
+auto dcache_factory(cache_options const& options) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<dcache>(ctx, desc);
+  return [&options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<dcache>(ctx, desc, options);
   };
 }
 }

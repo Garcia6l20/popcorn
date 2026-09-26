@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <ranges>
 #include <string>
@@ -297,7 +298,9 @@ struct timer
  * @brief RCC of the STM32U5, RM0456 section 11. Ready flags follow their enables after the
  *        board's ready delay. RCC writes RCC_CIFR storage directly when the matching RCC_CIER bit
  *        is set and raises no ready interrupt: firmware waiting on the RCC IRQ hangs, and the
- *        spin stop names its loop.
+ *        spin stop names its loop. A write that would stop the core clock, switching off the
+ *        oscillator that drives it or changing PLL1 while it drives it, is refused and logs one
+ *        warning per machine life.
  */
 class rcc final : public dispatch_model<rcc, rcc_state>
 {
@@ -336,7 +339,9 @@ private:
   void cancel(std::uint32_t kind);
   void settle(bool notify);
   void publish(bool notify);
+  void refuse_core_stop(std::string_view reg, std::string_view what);
 
+  bool                                               core_stop_logged_{};
   rcc_options const&                                 options_;
   register_file&                                     regs_;
   std::array<oscillator, source_count>               osc_{};
@@ -569,6 +574,10 @@ void rcc::oscillators_written(
     now             = osc.ready.with(now, osc.ready.of(old));
     if((used >> static_cast<std::uint32_t>(index) & 1u) != 0)
     {
+      if(osc.on.of(now) == 0)
+      {
+        refuse_core_stop(reg, std::format("{} = 0", names.on));
+      }
       now = osc.on.with(now, 1);
     }
   }
@@ -612,7 +621,8 @@ void rcc::tree_written(std::uint32_t, std::uint32_t)
 
 template <std::size_t Pll> void rcc::pll_config_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const& fields = pll_[Pll];
+  auto const& fields    = pll_[Pll];
+  auto const  attempted = now;
   if(locked(Pll))
   {
     for(auto const& kept : {fields.src, fields.range, fields.m})
@@ -620,9 +630,14 @@ template <std::size_t Pll> void rcc::pll_config_written(std::uint32_t old, std::
       now = kept.with(now, kept.of(old));
     }
   }
-  if((in_use() >> std::to_underlying(source::pll1) & 1u) != 0 and Pll == 0)
+  auto const drives_core = Pll == 0 and (in_use() >> std::to_underlying(source::pll1) & 1u) != 0;
+  if(drives_core)
   {
     now = fields.output_enable[2].with(now, 1);
+    if(now != attempted)
+    {
+      refuse_core_stop("RCC_PLL1CFGR", "a PLL1 configuration change");
+    }
   }
   regs_.poke(fields.src.offset, now);
   settle(true);
@@ -630,7 +645,8 @@ template <std::size_t Pll> void rcc::pll_config_written(std::uint32_t old, std::
 
 template <std::size_t Pll> void rcc::pll_dividers_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const& fields = pll_[Pll];
+  auto const& fields    = pll_[Pll];
+  auto const  attempted = now;
   if(locked(Pll))
   {
     for(auto const& kept : {fields.n, fields.divider[0], fields.divider[1], fields.divider[2]})
@@ -638,8 +654,25 @@ template <std::size_t Pll> void rcc::pll_dividers_written(std::uint32_t old, std
       now = kept.with(now, kept.of(old));
     }
   }
+  if(Pll == 0 and now != attempted and (in_use() >> std::to_underlying(source::pll1) & 1u) != 0)
+  {
+    refuse_core_stop("RCC_PLL1DIVR", "a PLL1 divider change");
+  }
   regs_.poke(fields.n.offset, now);
   settle(true);
+}
+
+void rcc::refuse_core_stop(std::string_view reg, std::string_view what)
+{
+  if(std::exchange(core_stop_logged_, true))
+  {
+    return;
+  }
+  warn(
+      reg,
+      std::format(
+          "firmware tried to stop the core clock with {}, refused: the core clock stays at {} Hz",
+          what, ctx_.clock.core_hz()));
 }
 
 auto rcc::locked(std::size_t pll) const -> bool
@@ -813,7 +846,11 @@ void rcc::publish(bool notify)
     set(entry.domain, get(regs_, entry.enable) != 0 ? bus * x2 : 0);
   }
   auto const core = hz[std::to_underlying(hclk)];
-  if(not options_.fixed_core_clock and core != 0 and core != clock.core_hz())
+  if(not options_.fixed_core_clock and core == 0)
+  {
+    refuse_core_stop("RCC_CFGR1", "a stopped system clock");
+  }
+  else if(not options_.fixed_core_clock and core != clock.core_hz())
   {
     clock.set_core_hz(core);
   }

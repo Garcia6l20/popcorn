@@ -2,6 +2,8 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/caches.hpp>
+#include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
 
 #include <functional>
@@ -19,6 +21,10 @@ struct board
 {
   /** @brief Clock sources and timing of the RCC model. */
   rcc_options rcc{};
+  /** @brief Timing of the PWR model. */
+  pwr_options pwr{};
+  /** @brief Timing of the ICACHE and DCACHE models. */
+  cache_options caches{};
 };
 
 /**
