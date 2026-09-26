@@ -20,7 +20,7 @@ from popcorn._errors import (
     SymbolError,
 )
 from popcorn._image import Image
-from popcorn._machine import Machine
+from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, Machine
 from popcorn._stop import Stop
 
 type TomlValue = int | float | bool | str | list[TomlValue] | dict[str, TomlValue]
@@ -185,6 +185,8 @@ class Project:
             strict_peripherals=file.models.strict,
             vector_table=file.boot.vtor,
             config_digest=self.digest,
+            arena_base=_arena_base(file.boot.arena_base),
+            arena_size=file.boot.arena_size or DEFAULT_ARENA_SIZE,
         )
         for index, init in enumerate(file.boot.memory_init):
             key = f"boot.memory_init[{index}]"
@@ -279,3 +281,12 @@ def _toml(value: object) -> TomlValue:
     if isinstance(value, dict):
         return {str(k): _toml(v) for k, v in cast(dict[object, object], value).items()}
     raise TypeError(f"not a TOML value: {value!r}")
+
+
+def _arena_base(value: object) -> int | None:
+    if value is None:
+        return DEFAULT_ARENA_BASE
+    if isinstance(value, bool):
+        return None
+    assert isinstance(value, int)
+    return value

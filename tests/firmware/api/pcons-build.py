@@ -19,3 +19,31 @@ _, views = add_firmware("api", "views", [here / "views.c"])
 if views is not None:
     kept = ("table", "matrix", "banner", "extras")
     views.private.link_flags.extend([SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in kept)])
+
+CALLED = (
+    "add",
+    "negate",
+    "ones",
+    "twice64",
+    "mulf",
+    "half",
+    "sum6",
+    "fill",
+    "mixed",
+    "by_value",
+    "low_byte",
+    "neg16",
+    "soft_mixed",
+    "stack_now",
+    "control_now",
+    "bump",
+    "forever",
+    "fault",
+    "wait_flag",
+)
+_, callee = add_firmware("api", "callee", [here / "callee.c"])
+if callee is not None:
+    callee.private.link_flags.extend(
+        [SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in CALLED)]
+    )
+    callee.private.link_libs.append("gcc")

@@ -88,6 +88,10 @@ struct boot_section
   std::optional<std::uint64_t> budget{};
   /** @brief Memory written after the images load. */
   std::vector<memory_init_entry> memory_init{};
+  /** @brief First address of the call arena, `false` for none, empty for the default. */
+  std::optional<reflex::serde::toml::value> arena_base{};
+  /** @brief Size of the call arena in bytes, empty for the default. */
+  std::optional<std::uint32_t> arena_size{};
 };
 
 /** @brief `[clock]`. */

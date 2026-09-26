@@ -27,11 +27,17 @@ class Snapshot:
     loads into another machine built from the same description, images and configuration.
     """
 
-    __slots__ = ("_native",)
+    __slots__ = ("_arena_offset", "_native")
 
-    def __init__(self, native: _core.SnapshotHandle) -> None:
+    def __init__(self, native: _core.SnapshotHandle, arena_offset: int = 0) -> None:
         """Wrap a native snapshot. Use Machine.snapshot or Snapshot.load instead."""
         self._native = native
+        self._arena_offset = arena_offset
+
+    @property
+    def arena_offset(self) -> int:
+        """Call arena bytes allocated when it was taken, 0 for one read back from a file."""
+        return self._arena_offset
 
     @property
     def native(self) -> _core.SnapshotHandle:

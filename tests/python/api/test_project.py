@@ -231,3 +231,18 @@ def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.MachineDesc
     assert "32-bit address space" in caught.value.expected
     with pytest.raises(popcorn.EmulationError, match="0x30000000"):
         handle.write_memory(0x3000_0000, b"\x00")
+
+
+def test_boot_arena_keys_set_or_disable_the_arena(tmp_path: Path) -> None:
+    moved = popcorn.Project.load(
+        write(tmp_path, minimal(arena_base="0x6E00_0000", arena_size="0x2000"))
+    ).machine()
+    assert (moved.arena.base, moved.arena.size) == (0x6E00_0000, 0x2000)
+    none = popcorn.Project.load(write(tmp_path, minimal(arena_base="false"))).machine()
+    with pytest.raises(popcorn.ConfigError, match="no arena"):
+        _ = none.arena
+    default = popcorn.Project.load(write(tmp_path, minimal())).machine()
+    assert default.arena.base == 0x6F00_0000
+    with pytest.raises(popcorn.ConfigError) as caught:
+        popcorn.Project.load(write(tmp_path, minimal(arena_base="true")))
+    assert (caught.value.key, caught.value.line) == ("boot.arena_base", 8)

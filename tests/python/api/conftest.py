@@ -12,6 +12,7 @@ ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
 CORE_FIRMWARE = ROOT / "tests" / "firmware" / "core" / "prebuilt"
 DRIVER_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "driver.elf"
+CALLEE_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "callee.elf"
 VIEWS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "views.elf"
 
 
@@ -87,4 +88,12 @@ def views(m33: popcorn.MachineDescription) -> popcorn.Machine:
     m.reset()
     stop = asyncio.run(m.run(budget=100_000))
     assert stop.reason is popcorn.StopReason.USER
+    return m
+
+
+@pytest.fixture
+def callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    """A machine over the callee firmware, reset, not booted."""
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF))
+    m.reset()
     return m

@@ -577,6 +577,19 @@ void check_values(project_file const& file, context const& ctx)
   {
     ctx.fail("clock.cpi", "a finite number of cycles per instruction above 0");
   }
+  if(auto const& base = file.boot.arena_base; base)
+  {
+    auto const address = base->is<toml::integer>()
+                     and base->as<toml::integer>()
+                      >= 0
+                     and base->as<toml::integer>()
+                      <= 0xffff'ffff;
+    auto const disabled = base->is<toml::boolean>() and not base->as<toml::boolean>();
+    if(not address and not disabled)
+    {
+      ctx.fail("boot.arena_base", "an address from 0 to 0xffffffff, or false for no arena");
+    }
+  }
   if(file.clock.core_hz == 0u)
   {
     ctx.fail("clock.core_hz", "a core clock above 0 Hz");

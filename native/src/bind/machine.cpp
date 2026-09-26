@@ -64,6 +64,11 @@ auto options_of(mcu_description const& description, machine_config const& config
   options.strict_peripherals = config.strict_peripherals;
   options.vector_table       = config.vector_table;
   options.config_digest      = config.config_digest;
+  if(config.arena_start)
+  {
+    options.scratch =
+        address_range{.name = "arena", .start = *config.arena_start, .size = config.arena_size};
+  }
   return options;
 }
 }
@@ -130,6 +135,25 @@ void machine_handle::restore(snapshot_handle const& saved)
 {
   reflex::py::nb::gil_scoped_release unlocked;
   machine_->restore(saved.native());
+}
+
+void machine_handle::begin_call(arch::call_frame const& frame)
+{
+  machine_->begin_call(frame);
+}
+
+auto machine_handle::end_call() -> std::uint64_t
+{
+  if(not machine_->in_call())
+  {
+    throw config_error("call", 0, "end_call", "a call begun by begin_call");
+  }
+  return machine_->end_call();
+}
+
+auto machine_handle::in_call() const noexcept -> bool
+{
+  return machine_->in_call();
 }
 
 auto machine_handle::id() const noexcept -> std::uint64_t

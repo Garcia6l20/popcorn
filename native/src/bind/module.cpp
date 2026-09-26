@@ -44,6 +44,10 @@ REFLEX_PY_MODULE(_core, m)
   m.bind_enum<popcorn::fault_kind>("FaultKind");
   m.bind_enum<popcorn::reset_kind>("ResetKind");
   m.bind_enum<popcorn::arch::float_abi>("FloatAbi");
+  m.bind_enum<popcorn::arch::value_kind>("ValueKind");
+  m.bind_enum<popcorn::arch::call_stack>("CallStack");
+  m.bind<popcorn::arch::call_arg>("CallArg");
+  m.bind<popcorn::arch::call_frame>("CallFrame");
   m.bind_enum<popcorn::access>("Access");
   m.bind_enum<popcorn::write_effect>("WriteEffect");
   m.bind_enum<popcorn::read_effect>("ReadEffect");

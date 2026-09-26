@@ -72,6 +72,16 @@ class Var:
         return self._name
 
     @property
+    def info(self) -> DebugInfo:
+        """The DWARF the type comes from."""
+        return self._info
+
+    @property
+    def type_id(self) -> TypeId:
+        """The type, as an id into `info`."""
+        return self._type_id
+
+    @property
     def type(self) -> DebugType:
         """The type, typedefs and qualifiers stripped."""
         return self._info.strip(self._type_id)

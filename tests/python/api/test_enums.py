@@ -13,6 +13,7 @@ PAIRS: list[tuple[type[enum.Enum], type[enum.Enum]]] = [
     (popcorn.FaultKind, _core.FaultKind),
     (popcorn.ResetKind, _core.ResetKind),
     (popcorn.FloatAbi, _core.FloatAbi),
+    (popcorn.ValueKind, _core.ValueKind),
 ]
 
 

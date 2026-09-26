@@ -37,6 +37,11 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   std::optional<address> vector_table{};
   /** @brief Digest of the configuration, recorded in snapshots. */
   std::string config_digest{};
+  /** @brief First address of the call arena, a RAM region outside the description, empty for
+   * none. */
+  std::optional<address> arena_start{};
+  /** @brief Size of the call arena in bytes, a multiple of the page size. */
+  std::uint32_t arena_size{};
 };
 
 /** @brief Bounds of one slice, core::slice_request without the predicate. */
@@ -233,6 +238,27 @@ public:
    */
   [[= py::doc{"Restore a snapshot this machine took, or one read back from bytes."}]] void
       restore(snapshot_handle const& saved);
+
+  /**
+   * @brief Begins a guest function call, saving the interrupted context.
+   * @param frame The call.
+   * @throws machine_busy when a call is already in progress.
+   * @throws config_error when the arch module refuses the frame.
+   */
+  [[= py::doc{"Begin a guest function call, saving the interrupted context."}]] void
+      begin_call(arch::call_frame const& frame);
+
+  /**
+   * @brief Ends the call, restoring the interrupted context.
+   * @return Return value bits, 0 when the call did not return.
+   * @throws config_error when no call is in progress.
+   */
+  [[= py::doc{"End the call, restore the interrupted context, return the value bits."}]] auto
+      end_call() -> std::uint64_t;
+
+  /** @brief Whether a call is in progress. */
+  [[= py::doc{"Whether a call begun by begin_call has not been ended."}]] [[nodiscard]] auto
+      in_call() const noexcept -> bool;
 
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept

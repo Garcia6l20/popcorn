@@ -51,3 +51,12 @@ class FloatAbi(enum.Enum):
     SOFT = 0
     HARD_SINGLE = 1
     HARD_DOUBLE = 2
+
+
+class ValueKind(enum.Enum):
+    """Kind of a call argument or result: its width and whether it is a float."""
+
+    I32 = 0
+    I64 = 1
+    F32 = 2
+    F64 = 3

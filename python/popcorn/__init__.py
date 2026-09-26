@@ -1,6 +1,8 @@
 """popcorn: MCU emulation for firmware tests, driven from asyncio."""
 
 from popcorn import arm, coverage, trace, units
+from popcorn._arena import Arena, ArenaBlock
+from popcorn._call import F32, I64, CallResult, Stack, f32, i64
 from popcorn._core import version
 from popcorn._description import (
     MachineDescription,
@@ -9,7 +11,7 @@ from popcorn._description import (
     parse_description,
 )
 from popcorn._dwarf_views import Var
-from popcorn._enums import FaultKind, FloatAbi, ResetKind, StopReason
+from popcorn._enums import FaultKind, FloatAbi, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
     BudgetExceeded,
     ConfigError,
@@ -37,8 +39,13 @@ from popcorn._views import (
 )
 
 __all__ = [
+    "F32",
+    "I64",
+    "Arena",
+    "ArenaBlock",
     "BoardEntry",
     "BudgetExceeded",
+    "CallResult",
     "ConfigError",
     "Device",
     "EmulationError",
@@ -67,15 +74,19 @@ __all__ = [
     "ScalarView",
     "Segment",
     "Snapshot",
+    "Stack",
     "Stop",
     "StopReason",
     "Symbol",
     "SymbolError",
     "TomlValue",
+    "ValueKind",
     "Var",
     "arm",
     "coverage",
     "description_digest",
+    "f32",
+    "i64",
     "load_description",
     "parse_description",
     "trace",

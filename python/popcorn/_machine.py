@@ -12,9 +12,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from popcorn import _core
+from popcorn._arena import Arena
+from popcorn._call import (
+    I32_SLOT,
+    CallResult,
+    Signature,
+    Stack,
+    argument,
+    decode,
+    signature_of,
+    slot_for,
+)
 from popcorn._description import MachineDescription, load_description
 from popcorn._dwarf_views import Var
-from popcorn._enums import ResetKind, StopReason
+from popcorn._enums import FloatAbi, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
     BudgetExceeded,
     ConfigError,
@@ -33,6 +44,11 @@ from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
     from popcorn.image.dwarf import DebugInfo, DebugType
+
+DEFAULT_ARENA_BASE = 0x6F00_0000
+"""Default first address of the call arena, an FMC address STM32 parts leave unmapped."""
+DEFAULT_ARENA_SIZE = 1 << 20
+"""Default size of the call arena."""
 
 _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
@@ -120,8 +136,10 @@ class Machine:
     """
 
     __slots__ = (
+        "_arena",
         "_background",
         "_busy",
+        "_call_baseline",
         "_config_digest",
         "_description",
         "_handle",
@@ -129,6 +147,7 @@ class Machine:
         "_memory",
         "_peripherals",
         "_registers",
+        "_sentinel",
         "_slice_instructions",
         "_slice_wall_ns",
         "_waiters",
@@ -148,6 +167,8 @@ class Machine:
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
         config_digest: str = "",
+        arena_base: int | None = DEFAULT_ARENA_BASE,
+        arena_size: int = DEFAULT_ARENA_SIZE,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -164,6 +185,9 @@ class Machine:
             slice_wall_budget: Wall seconds after which a slice yields to the event loop.
             config_digest: Digest of the configuration, such as a project file's, that snapshots
                 record.
+            arena_base: First address of the call arena, a RAM region outside the description,
+                None for no arena. It must not overlap a region or a peripheral.
+            arena_size: Size of the call arena, a multiple of 4 KiB.
 
         Raises:
             ConfigError: No arch module implements the core, or an option is out of range.
@@ -181,6 +205,8 @@ class Machine:
         config.strict_peripherals = strict_peripherals
         config.vector_table = vector_table
         config.config_digest = config_digest
+        config.arena_start = arena_base
+        config.arena_size = arena_size if arena_base is not None else 0
         self._description = description
         self._config_digest = config_digest
         self._handle = _core.MachineHandle(description, config)
@@ -194,6 +220,15 @@ class Machine:
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
         self._peripherals = Peripherals(access, description)
+        self._arena = (
+            None
+            if arena_base is None
+            else Arena(self._memory, arena_base, arena_size, self._type_view)
+        )
+        self._call_baseline: Snapshot | None = None
+        self._sentinel = (
+            self._arena.sentinel if self._arena is not None else _free_sentinel(description)
+        )
         for one in (image,) if isinstance(image, Image) else image:
             self.load(one)
 
@@ -332,6 +367,140 @@ class Machine:
                     continue
         return infos
 
+    @property
+    def arena(self) -> Arena:
+        """The call arena, scratch memory for call arguments, reset by `restore`.
+
+        Raises:
+            ConfigError: The machine was built with no arena.
+        """
+        if self._arena is None:
+            raise ConfigError(
+                "no arena configured", file="machine", key="arena", expected="an arena_base"
+            )
+        return self._arena
+
+    def set_call_baseline(self, snapshot: Snapshot | None) -> None:
+        """The snapshot `call(reset=True)` restores, None to take one at the next such call."""
+        self._call_baseline = snapshot
+
+    async def call(
+        self,
+        fn: int | str | Symbol,
+        *args: object,
+        returns: ValueKind | None = None,
+        budget: int | None = None,
+        privileged: bool = True,
+        stack: Stack = Stack.CURRENT,
+        stack_top: int | None = None,
+        interrupts: bool = False,
+        reset: bool | Snapshot = False,
+        abi: FloatAbi | None = None,
+    ) -> CallResult:
+        """Call a guest function and return what it returned, the interrupted context restored.
+
+        The signature comes from DWARF when the image has the function: the argument count is
+        checked before anything runs, and each argument takes its parameter's kind, range and
+        signedness. Without DWARF an int is a 32-bit integer unless `popcorn.i64(v)`, a float a
+        double unless `popcorn.f32(v)`, and `returns` names the result kind, I32 by default. An
+        arena block or a variable passes its address. A struct by value is refused.
+
+        Args:
+            fn: Function address, symbol or name.
+            args: Arguments in declaration order.
+            returns: Result kind of a function without DWARF.
+            budget: Stop the call with BUDGET past this many instructions.
+            privileged: Run in privileged thread mode.
+            stack: The stack pointer the call runs on.
+            stack_top: Initial value of that stack pointer, the current one when None.
+            interrupts: Whether interrupts stay enabled during the call.
+            reset: True restores the call baseline before the call. The first such call takes
+                the baseline from the machine as it is and restores nothing;
+                `set_call_baseline(m.snapshot())` chooses one explicitly. A Snapshot restores
+                that snapshot before the call.
+            abi: Float calling convention, the one of the image holding the function when None.
+
+        Returns:
+            The value and the stop, RETURNED when the call returned. A fault or an exhausted
+            budget is a stop, not an exception.
+
+        Raises:
+            TypeError: The argument count differs from DWARF's, or an argument has no kind.
+            ValueError: An argument is outside its parameter's C type.
+            SymbolError: `fn` names no symbol.
+            NotImplementedError: A parameter is a struct passed by value.
+            MachineBusy: A run, step, wait or call is active.
+        """
+        entry = self.address_of(fn)
+        signature = self._signature(fn, entry)
+        where = signature.name
+        if signature.params is not None and len(signature.params) != len(args):
+            raise TypeError(f"{where} takes {len(signature.params)} arguments, {len(args)} given")
+        frame = _core.CallFrame()
+        frame.entry = entry
+        frame.args = [
+            argument(
+                value,
+                None if signature.params is None else signature.params[index],
+                f"argument {index} of {where}",
+            )
+            for index, value in enumerate(args)
+        ]
+        result_slot = signature.returns if returns is None else slot_for(returns)
+        frame.returns = result_slot.kind
+        frame.abi = _core.FloatAbi((abi or self._abi_at(entry)).value)
+        frame.return_sentinel = self._sentinel
+        frame.stack = stack_top
+        frame.stack_select = _core.CallStack[stack.value]
+        frame.privileged = privileged
+        frame.interrupts = interrupts
+        if isinstance(reset, Snapshot):
+            self.restore(reset)
+        elif reset:
+            if self._call_baseline is None:
+                self._call_baseline = self.snapshot()
+            else:
+                self.restore(self._call_baseline)
+        with self._exclusive():
+            self._handle.begin_call(frame)
+            try:
+                stop = await self._drive(
+                    until=None, budget=budget, for_=None, stop_when=None, exact=None
+                )
+            finally:
+                bits = self._handle.end_call()
+        value = decode(result_slot, bits) if stop.reason is StopReason.RETURNED else 0
+        return CallResult(value, bits, stop)
+
+    def _signature(self, fn: int | str | Symbol, entry: int) -> Signature:
+        name = fn if isinstance(fn, str) else fn.name if isinstance(fn, Symbol) else f"{fn:#x}"
+        for info in reversed(self._debug_infos()):
+            function = info.functions.get(name) if isinstance(fn, str | Symbol) else None
+            if function is None:
+                function = next((f for f in info.functions.values() if f.address == entry), None)
+            if function is not None and function.address == entry:
+                return signature_of(info, function)
+        return Signature(name, None, I32_SLOT)
+
+    def _abi_at(self, address: int) -> FloatAbi:
+        for image in reversed(self._images):
+            if any(s.start <= address < s.start + s.memory_size for s in image.segments):
+                return image.abi
+        return FloatAbi.SOFT
+
+    def _type_view(self, debug_type: DebugType | str, address: int) -> Var | None:
+        for info in reversed(self._debug_infos()):
+            if isinstance(debug_type, str):
+                type_id = info.types.get(debug_type)
+                if type_id is not None:
+                    return Var(self._memory, info, type_id, address, debug_type)
+                continue
+            for type_id, candidate in info.by_id.items():
+                if candidate is debug_type:
+                    name = next((n for n, t in info.types.items() if t == type_id), "block")
+                    return Var(self._memory, info, type_id, address, name)
+        return None
+
     def snapshot(self) -> Snapshot:
         """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.
 
@@ -339,7 +508,8 @@ class Machine:
             MachineRunning: A run is active, handlers of it included.
         """
         self._require_idle()
-        return Snapshot(self._handle.snapshot())
+        offset = 0 if self._arena is None else self._arena.used
+        return Snapshot(self._handle.snapshot(), offset)
 
     def restore(self, snapshot: Snapshot) -> None:
         """Restore a snapshot this machine took, or one read back from a file. The call arena
@@ -362,6 +532,8 @@ class Machine:
                 expected="restore into the machine that took it, or load its saved form",
             )
         self._handle.restore(snapshot.native)
+        if self._arena is not None:
+            self._arena.reset(snapshot.arena_offset)
 
     def load_snapshot(self, path: str | os.PathLike[str]) -> Snapshot:
         """Read a saved snapshot and restore it.
@@ -628,3 +800,24 @@ class Machine:
 
     def __repr__(self) -> str:
         return f"Machine({self._description.part}, images={len(self._images)})"
+
+
+def _free_sentinel(description: MachineDescription) -> int:
+    """First 16-byte-aligned address from the default arena base, else from 0x1000, below the
+    Arm system region, that no region or peripheral covers: the return address of a call without
+    an arena."""
+    spans = [(r.start, r.start + r.size) for r in description.regions]
+    spans += [(p.base, p.base + p.size) for p in description.peripherals]
+    for start in (DEFAULT_ARENA_BASE, 0x1000):
+        address = start
+        while address < 0xE000_0000:
+            covering = next((end for low, end in spans if low <= address < end), None)
+            if covering is None:
+                return address
+            address = (covering + 15) & ~15
+    raise ConfigError(
+        "no free address below 0xE0000000 for a call return",
+        file="machine",
+        key="arena",
+        expected="an arena or an unmapped address for call returns",
+    )
