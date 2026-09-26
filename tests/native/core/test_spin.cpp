@@ -1,6 +1,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
@@ -283,4 +284,84 @@ TEST_CASE("an inner poll that hangs inside an outer loop takes over as the loop"
   CAPTURE(stopped.detail);
   CHECK(stopped.detail.contains("in nested_poll"));
   CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
+}
+
+namespace
+{
+auto install_tick(fixture const& f, std::string_view handler) -> void
+{
+  REQUIRE(f.target->mem().write(0x0800'0000 + 4 * 16, 4, sym("spin", handler) | 1));
+}
+}
+
+TEST_CASE("a loop in the tick handler does not restart the interrupted poll")
+{
+  auto f = booted(1000);
+  install_tick(f, "tick_walk");
+  start(f, "wait_ready_ticking");
+  auto const stopped = f.run_to_stop(long_request());
+  REQUIRE(stopped.reason == stop_reason::spin);
+  CAPTURE(stopped.detail);
+  CHECK(stopped.detail.contains("in wait_ready_ticking"));
+  CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
+}
+
+TEST_CASE("a handler that hangs after an interrupted loop is a spin in the handler")
+{
+  auto f = booted(1000);
+  install_tick(f, "tick_hang");
+  start(f, "wait_ready_ticking");
+  auto const stopped = f.run_to_stop(long_request());
+  REQUIRE(stopped.reason == stop_reason::spin);
+  CAPTURE(stopped.detail);
+  CHECK(stopped.detail.contains("in tick_hang"));
+  CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
+}
+
+TEST_CASE("calls stopped inside a handler leave the spin depth of their caller")
+{
+  auto f = booted(1000);
+  install_tick(f, "tick_hang");
+  popcorn::arch::call_frame const frame{
+      .entry           = sym("spin", "wait_ready_ticking"),
+      .return_sentinel = 0x3000'0000,
+      .interrupts      = true,
+  };
+  auto const hang = sym("spin", "tick_hang") & ~address{1};
+  for(std::uint32_t call = 0; call < popcorn::core::spin_state::max_levels + 1; ++call)
+  {
+    CAPTURE(call);
+    auto const called = f.target->call(frame, icount{2000});
+    REQUIRE(called.stopped.reason == stop_reason::budget);
+    REQUIRE(called.stopped.where.pc >= hang);
+    REQUIRE(called.stopped.where.pc < hang + 16);
+  }
+  install_tick(f, "tick_walk");
+  start(f, "wait_ready_ticking");
+  auto const stopped = f.run_to_stop(long_request());
+  REQUIRE(stopped.reason == stop_reason::spin);
+  CHECK(stopped.detail.contains("polling UNMODELLED.STAT"));
+}
+
+TEST_CASE("a masked call running another loop does not restart the paused poll")
+{
+  auto const uninterrupted = [] {
+    auto f = booted(1000);
+    start(f, "wait_ready");
+    auto const slice = f.run(long_request());
+    REQUIRE(slice.stopped.has_value());
+    REQUIRE(slice.stopped->reason == stop_reason::spin);
+    return slice.executed.value;
+  }();
+  auto f = booted(1000);
+  start(f, "wait_ready");
+  auto const first = f.run({.max_instructions = icount{1500}});
+  REQUIRE_FALSE(first.stopped.has_value());
+  popcorn::arch::call_frame const frame{
+      .entry = sym("spin", "delay"), .return_sentinel = 0x3000'0000};
+  REQUIRE(f.target->call(frame, icount{5000}).stopped.reason == stop_reason::budget);
+  auto const rest = f.run(long_request());
+  REQUIRE(rest.stopped.has_value());
+  CHECK(rest.stopped->reason == stop_reason::spin);
+  CHECK(first.executed.value + rest.executed.value == uninterrupted);
 }

@@ -305,15 +305,17 @@ TEST_CASE("a task hung on a register after PendSV switches is a spin between two
   CHECK(log_of(m) == expected_log(5));
 }
 
-TEST_CASE("recorded: a loop in the tick handler restarts spin tracking of the hung task")
+TEST_CASE("a task hung on a register spins across ticks whose handler walks a list")
 {
   core::machine_options options;
   options.spin_threshold = 3000;
   auto       m           = started("rtos_hung", std::move(options));
   auto const result =
       m.f->run({.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{10}});
-  CHECK_FALSE(result.stopped.has_value());
-  CHECK(m.f->word(fn("tick")) > 200);
+  REQUIRE(result.stopped.has_value());
+  CHECK(result.stopped->reason == stop_reason::spin);
+  CHECK(result.stopped->detail.find("UNMODELLED.STAT") != std::string::npos);
+  CHECK(m.f->word(fn("tick")) > 5);
 }
 
 TEST_CASE("the plain RTOS runs one virtual second without a spin stop")

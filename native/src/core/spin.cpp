@@ -30,37 +30,38 @@ auto backward_step(address previous, address addr) noexcept -> bool
   return previous != 0 and addr <= previous and previous - addr < spin_state::loop_window;
 }
 
-auto in_loop(spin_state const& state, address addr) noexcept -> bool
+auto in_loop(spin_state::loop_state const& loop, address addr) noexcept -> bool
 {
-  return state.head != 0 and state.head <= addr and addr - state.head < spin_state::loop_window;
+  return loop.head != 0 and loop.head <= addr and addr - loop.head < spin_state::loop_window;
 }
 }
 
 void machine::run_state::spin_block(address addr)
 {
   auto&      state       = spin;
+  auto&      loop        = state.loop();
   auto const jumped_back = backward_step(state.previous, addr);
-  auto const inside      = state.head != 0 and addr != state.head and in_loop(state, addr);
-  if(addr == state.head)
+  auto const inside      = loop.head != 0 and addr != loop.head and in_loop(loop, addr);
+  if(addr == loop.head)
   {
-    state.candidate      = {};
-    state.candidate_hits = 0;
+    loop.candidate      = {};
+    loop.candidate_hits = 0;
   }
   auto adopt = false;
   if(jumped_back and inside)
   {
-    state.candidate_hits = addr == state.candidate ? state.candidate_hits + 1 : 1;
-    state.candidate      = addr;
-    adopt                = state.candidate_hits >= 2;
+    loop.candidate_hits = addr == loop.candidate ? loop.candidate_hits + 1 : 1;
+    loop.candidate      = addr;
+    adopt               = loop.candidate_hits >= 2;
   }
   auto const backward = (jumped_back and (not inside or adopt))
-                     or (state.head != 0 and addr == state.head and state.previous == 0);
+                     or (loop.head != 0 and addr == loop.head and state.previous == 0);
   state.previous      = addr;
   if(not backward)
   {
-    if(in_loop(state, addr))
+    if(in_loop(loop, addr))
     {
-      state.last = std::max(state.last, addr);
+      loop.last = std::max(loop.last, addr);
     }
     return;
   }
@@ -91,23 +92,22 @@ void machine::run_state::spin_block(address addr)
             static_cast<int>(state.register_ids.size())),
         "reading the registers of a loop");
   };
-  if(addr != state.head or not state.comparable or state.reading != state.reads)
+  if(addr != loop.head or not loop.comparable or loop.reading != loop.reads)
   {
-    state.progress();
-    state.known = false;
-    if(addr != state.head)
+    loop.progress();
+    loop.known = false;
+    if(addr != loop.head)
     {
-      state.head       = addr;
-      state.head_depth = state.depth;
-      state.last       = addr;
+      loop.head = addr;
+      loop.last = addr;
     }
   }
-  else if(not state.known)
+  else if(not loop.known)
   {
     read_all();
-    state.registers = state.scratch;
-    state.known     = true;
-    state.progress();
+    loop.registers = state.scratch;
+    loop.known     = true;
+    loop.progress();
   }
   else
   {
@@ -118,37 +118,37 @@ void machine::run_state::spin_block(address addr)
         "reading the registers of a loop");
     auto const subset_same = std::ranges::equal(
         state.subset_scratch,
-        state.subset | std::views::transform([&](std::size_t at) { return state.registers[at]; }));
+        state.subset | std::views::transform([&](std::size_t at) { return loop.registers[at]; }));
     if(not subset_same)
     {
-      state.progress();
-      state.known = false;
+      loop.progress();
+      loop.known = false;
     }
     else
     {
       read_all();
-      if(state.scratch == state.registers)
+      if(state.scratch == loop.registers)
       {
-        ++state.count;
+        ++loop.count;
       }
       else
       {
-        state.progress();
-        state.registers = state.scratch;
+        loop.progress();
+        loop.registers = state.scratch;
       }
     }
   }
-  std::swap(state.reads, state.reading);
-  state.reading.clear();
-  state.comparable = true;
-  if(state.count >= owner.options_.spin_threshold and not state.reported)
+  std::swap(loop.reads, loop.reading);
+  loop.reading.clear();
+  loop.comparable = true;
+  if(loop.count >= owner.options_.spin_threshold and not loop.reported)
   {
     if(model_due())
     {
-      state.progress();
+      loop.progress();
       return;
     }
-    state.reported = true;
+    loop.reported = true;
     owner.do_request_stop(stop_reason::spin, spin_detail());
   }
 }
@@ -156,7 +156,7 @@ void machine::run_state::spin_block(address addr)
 auto machine::run_state::model_due() const -> bool
 {
   auto const pending = owner.scheduler_.pending();
-  return std::ranges::any_of(spin.reads, [&](spin_state::mmio_read const& read) {
+  return std::ranges::any_of(spin.loop().reads, [&](spin_state::mmio_read const& read) {
     return std::ranges::any_of(
         pending, [&](event const& due) { return due.id.owner == read.peripheral; });
   });
@@ -168,18 +168,18 @@ void machine::run_state::spin_read(
     std::uint32_t          offset,
     std::uint32_t          value)
 {
-  auto& state = spin;
-  if(state.head == 0 or state.depth != state.head_depth or not state.comparable)
+  auto& loop = spin.loop();
+  if(loop.head == 0 or not loop.comparable)
   {
     return;
   }
-  if(state.reading.size() == spin_state::max_reads)
+  if(loop.reading.size() == spin_state::max_reads)
   {
-    state.reading.clear();
-    state.comparable = false;
+    loop.reading.clear();
+    loop.comparable = false;
     return;
   }
-  state.reading.push_back(
+  loop.reading.push_back(
       {.addr  = addr,
        .value = value,
        .reg   = slot.trace_id_at(offset),
@@ -189,16 +189,17 @@ void machine::run_state::spin_read(
 
 auto machine::run_state::spin_detail() const -> std::string
 {
-  auto text = std::format("loop {:#010x}-{:#010x}", spin.head, spin.last);
-  if(auto const found = symbol_at(spin.head))
+  auto const& loop = spin.loop();
+  auto        text = std::format("loop {:#010x}-{:#010x}", loop.head, loop.last);
+  if(auto const found = symbol_at(loop.head))
   {
     text += std::format(" in {}", symbols[found->first]->name);
   }
-  if(spin.reads.empty())
+  if(loop.reads.empty())
   {
     return text;
   }
-  auto const& read = spin.reads.back();
+  auto const& read = loop.reads.back();
   auto const  ref  = register_at(owner.description_, read.reg);
   if(read.reg == trace_id_overflow or not ref)
   {

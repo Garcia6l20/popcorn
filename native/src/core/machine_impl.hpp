@@ -230,13 +230,17 @@ struct coverage_state
   void count(address addr);
 };
 
-/** @brief Loop tracking of spin detection, active while machine_options::spin_threshold is set. */
+/** @brief Loop tracking of spin detection, active while machine_options::spin_threshold is set.
+ * One loop is tracked per exception depth, so a handler's loops never restart the tracking of
+ * the loop it interrupted. */
 struct spin_state
 {
   /** @brief Bytes after a loop head in which blocks and MMIO reads belong to the loop. */
   static constexpr address loop_window = 256;
   /** @brief MMIO reads kept per iteration: past them the iteration is not comparable. */
   static constexpr std::size_t max_reads = 64;
+  /** @brief Depths tracked apart, deeper nesting shares the last level. */
+  static constexpr std::uint32_t max_levels = 32;
 
   /** @brief One MMIO read of an iteration. */
   struct mmio_read
@@ -254,31 +258,65 @@ struct spin_state
     friend auto operator==(mmio_read const&, mmio_read const&) -> bool = default;
   };
 
+  /** @brief The loop tracked at one exception depth. */
+  struct loop_state
+  {
+    /** @brief Head of the loop being tracked, 0 before the first backward branch. */
+    address head{};
+    /** @brief Back-edge target inside the loop window, adopted as head after two back edges to
+     * it that do not pass the head: an inner loop that took over. */
+    address candidate{};
+    /** @brief Consecutive back edges to candidate since the head was last reached. */
+    std::uint32_t candidate_hits = 0;
+    /** @brief Highest block start of the current iteration inside the loop window. */
+    address last{};
+    /** @brief Registers at the end of the previous iteration, valid while known. */
+    std::vector<std::uint64_t> registers{};
+    /** @brief Whether registers holds the previous iteration's values. */
+    bool known = false;
+    /** @brief MMIO reads of the previous iteration, callees included. */
+    std::vector<mmio_read> reads{};
+    /** @brief MMIO reads of the current iteration. */
+    std::vector<mmio_read> reading{};
+    /** @brief Whether the current iteration stayed within max_reads. */
+    bool comparable = true;
+    /** @brief Consecutive iterations without progress. */
+    std::uint32_t count = 0;
+    /** @brief Whether this run of iterations already raised its spin stop. */
+    bool reported = false;
+
+    /** @brief Restarts the count, the loop made progress or slept. */
+    void progress() noexcept
+    {
+      count    = 0;
+      reported = false;
+    }
+
+    /** @brief Forgets the loop, keeping the capacity of its buffers. */
+    void clear() noexcept
+    {
+      head           = {};
+      candidate      = {};
+      candidate_hits = 0;
+      last           = {};
+      known          = false;
+      comparable     = true;
+      progress();
+      reads.clear();
+      reading.clear();
+    }
+  };
+
   /** @brief Engine ids of the core registers compared, pc excluded. */
   std::vector<int> register_ids{};
   /** @brief Positions in register_ids of sp, r0-r3 and lr, compared first. */
   std::vector<std::size_t> subset{};
   /** @brief Engine ids of the subset. */
   std::vector<int> subset_ids{};
-  /** @brief Head of the loop being tracked, 0 before the first backward branch. */
-  address head{};
   /** @brief Exceptions entered and not returned from since tracking began. */
   std::uint32_t depth = 0;
-  /** @brief depth when the head was seen: reads count only at that depth, callees included. */
-  std::uint32_t head_depth = 0;
-  /** @brief Back-edge target inside the loop window, adopted as head after two back edges to
-   * it that do not pass the head: an inner loop that took over. */
-  address candidate{};
-  /** @brief Consecutive back edges to candidate since the head was last reached. */
-  std::uint32_t candidate_hits = 0;
-  /** @brief Start of the previous block, 0 after an engine restart. */
+  /** @brief Start of the previous block, 0 after an engine restart or an exception. */
   address previous{};
-  /** @brief Highest block start of the current iteration inside the loop window. */
-  address last{};
-  /** @brief Registers at the end of the previous iteration, valid while known. */
-  std::vector<std::uint64_t> registers{};
-  /** @brief Whether registers holds the previous iteration's values. */
-  bool known = false;
   /** @brief Full register read of this iteration. */
   std::vector<std::uint64_t> scratch{};
   /** @brief Pointers into scratch for the batch read, built once. */
@@ -287,39 +325,57 @@ struct spin_state
   std::vector<std::uint64_t> subset_scratch{};
   /** @brief Pointers into subset_scratch, built once. */
   std::vector<void*> subset_pointers{};
-  /** @brief MMIO reads of the previous iteration. */
-  std::vector<mmio_read> reads{};
-  /** @brief MMIO reads of the current iteration. */
-  std::vector<mmio_read> reading{};
-  /** @brief Whether the current iteration stayed within max_reads. */
-  bool comparable = true;
-  /** @brief Consecutive iterations without progress. */
-  std::uint32_t count = 0;
-  /** @brief Whether this run of iterations already raised its spin stop. */
-  bool reported = false;
+  /** @brief Tracked loop per depth, grown on first use, never shrunk. */
+  std::vector<loop_state> levels = std::vector<loop_state>(1);
 
-  /** @brief Restarts the count, the loop made progress or slept. */
-  void progress() noexcept
+  /** @brief The loop tracked at the current depth. */
+  [[nodiscard]] auto loop() noexcept -> loop_state&
   {
-    count    = 0;
-    reported = false;
+    return levels[std::min(depth, max_levels - 1)];
   }
 
-  /** @brief Forgets the tracked loop. */
+  /** @brief The loop tracked at the current depth. */
+  [[nodiscard]] auto loop() const noexcept -> loop_state const&
+  {
+    return levels[std::min(depth, max_levels - 1)];
+  }
+
+  /** @brief An exception was entered: one level deeper, starting with no loop. */
+  void enter()
+  {
+    ++depth;
+    auto const level = std::min(depth, max_levels - 1);
+    if(levels.size() <= level)
+    {
+      levels.resize(level + 1);
+    }
+    levels[level].clear();
+  }
+
+  /** @brief An exception returned: back to the interrupted loop, clamped at depth 0. */
+  void leave() noexcept
+  {
+    if(depth != 0)
+    {
+      --depth;
+    }
+  }
+
+  /** @brief Restarts the count of the loop at the current depth. */
+  void progress() noexcept
+  {
+    loop().progress();
+  }
+
+  /** @brief Forgets every tracked loop. */
   void clear() noexcept
   {
-    head           = {};
-    candidate      = {};
-    candidate_hits = 0;
-    head_depth     = 0;
-    depth          = 0;
-    previous       = {};
-    last           = {};
-    known          = false;
-    comparable     = true;
-    progress();
-    reads.clear();
-    reading.clear();
+    depth    = 0;
+    previous = {};
+    for(auto& level : levels)
+    {
+      level.clear();
+    }
   }
 };
 
@@ -367,6 +423,11 @@ struct saved_call
   std::size_t frames{};
   /** @brief Caller's pending intercept resume point. */
   std::optional<std::pair<address, std::size_t>> resume_past{};
+  /** @brief Caller's spin exception depth: a call stopped inside a handler must not leave the
+   * depth one too high. */
+  std::uint32_t spin_depth{};
+  /** @brief Caller's loop at spin_depth, so a call does not restart the caller's spin count. */
+  spin_state::loop_state paused_loop{};
 };
 
 /** @brief How a slice ends: with a stop, or empty when only a yield bound was reached. */
@@ -808,8 +869,8 @@ struct machine::run_state
   /** @brief Whether a pending event belongs to the model of a peripheral the loop polls. */
   [[nodiscard]] auto model_due() const -> bool;
 
-  /** @brief Records a CPU MMIO read for the current loop iteration, only at the exception depth
-   * of the loop head, callees included, at most spin_state::max_reads per iteration. */
+  /** @brief Records a CPU MMIO read into the iteration of the loop tracked at the current
+   * exception depth, callees included, at most spin_state::max_reads per iteration. */
   void spin_read(
       peripheral_slot const& slot,
       address                addr,

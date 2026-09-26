@@ -65,9 +65,12 @@ namespace popcorn::arch::armv8m
  * - The floating-point context is stacked at exception entry, never lazily: FPCCR and FPCAR are
  *   storage. FPDSCR is storage too, the engine builds new floating-point contexts from its own
  *   defaults.
- * - Spin detection counts one exception level too few after an SVC, or a fault the engine raises
- *   as an exception, taken while already in Handler mode, until the level returns to Thread mode.
- *   The count errs low: a spin may go undetected, never falsely reported.
+ * - Spin detection tracks one loop per exception level. It counts one level too few after an SVC,
+ *   or a fault the engine raises as an exception, taken while already in Handler mode, until the
+ *   level returns to Thread mode. After such an SVC returns, the handler's loop is tracked on the
+ *   level of the loop it interrupted, whose tracking restarts once per such SVC. A hung handler
+ *   loop that issues SVCs is still reported. The count errs low: a spin may go undetected, never
+ *   falsely reported.
  * - CM7: CCR.IC, CCR.DC and CCR.BP are storage. The cache maintenance registers, CCSIDR and
  *   CSSELR read 0 and ignore writes. The DWT lock access register is ignored and CYCCNT is always
  *   writable.

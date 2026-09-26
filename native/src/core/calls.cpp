@@ -66,6 +66,8 @@ void machine::begin_call(arch::call_frame const& frame)
   run_->coverage.has_previous = false;
   saved.frames                = run_->frames.size();
   saved.resume_past           = std::exchange(run_->resume_past, std::nullopt);
+  saved.spin_depth            = run_->spin.depth;
+  saved.paused_loop           = run_->spin.loop();
   run_->call                  = std::move(saved);
 }
 
@@ -82,6 +84,9 @@ auto machine::end_call() -> std::uint64_t
   }
   run_->refresh_return_watch();
   run_->resume_past           = saved.resume_past;
+  run_->spin.depth            = saved.spin_depth;
+  run_->spin.loop()           = std::move(saved.paused_loop);
+  run_->spin.previous         = {};
   run_->coverage.has_previous = false;
   return value;
 }

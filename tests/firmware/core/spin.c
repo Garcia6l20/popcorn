@@ -187,6 +187,27 @@ __attribute__((naked)) void nested_poll(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void tick_walk(void)
+{
+  __asm__ volatile("ldr r1, =0x40010008\n"
+                   "ldr r0, [r1]\n"
+                   "movs r2, #3\n"
+                   "1: subs r2, #1\n"
+                   "bne 1b\n"
+                   "bx lr\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void tick_hang(void)
+{
+  __asm__ volatile("ldr r1, =0x40020000\n"
+                   "1: ldr r0, [r1, #4]\n"
+                   "tst r0, #1\n"
+                   "bne 1b\n"
+                   "bx lr\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   __asm__ volatile("bkpt #0" ::: "memory");
