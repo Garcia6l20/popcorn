@@ -17,6 +17,7 @@ from popcorn._dwarf_views import Var
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import (
     BudgetExceeded,
+    ConfigError,
     EmulationError,
     FaultError,
     MachineBusy,
@@ -24,6 +25,7 @@ from popcorn._errors import (
     SymbolError,
 )
 from popcorn._image import Image, Location, Symbol, location_of
+from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
@@ -330,6 +332,49 @@ class Machine:
                     continue
         return infos
 
+    def snapshot(self) -> Snapshot:
+        """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.
+
+        Raises:
+            MachineRunning: A run is active, handlers of it included.
+        """
+        self._require_idle()
+        return Snapshot(self._handle.snapshot())
+
+    def restore(self, snapshot: Snapshot) -> None:
+        """Restore a snapshot this machine took, or one read back from a file. The call arena
+        and every model restore with it.
+
+        Raises:
+            ConfigError: The snapshot was taken by another machine, or a snapshot read back from
+                a file names another description, images or configuration, keyed by the digest
+                that differs.
+            MachineRunning: A run is active, handlers of it included.
+        """
+        self._require_idle()
+        machine_id = snapshot.machine_id
+        if machine_id not in (0, self._handle.id()):
+            raise ConfigError(
+                "the snapshot was taken by another machine: restore into the machine that took"
+                " it, or load its saved form",
+                file="snapshot",
+                key="machine",
+                expected="restore into the machine that took it, or load its saved form",
+            )
+        self._handle.restore(snapshot.native)
+
+    def load_snapshot(self, path: str | os.PathLike[str]) -> Snapshot:
+        """Read a saved snapshot and restore it.
+
+        Raises:
+            ConfigError: The file is malformed, or names another description, images or
+                configuration than this machine's, keyed by the digest that differs.
+            MachineRunning: A run is active.
+        """
+        snapshot = Snapshot.load(path)
+        self.restore(snapshot)
+        return snapshot
+
     def locate(self, address: int) -> Location:
         """Symbol, offset, file and line of an address, the rule stops use."""
         return location_of(self._handle.locate(address))
@@ -462,6 +507,12 @@ class Machine:
             yield
         finally:
             self._busy = False
+
+    def _require_idle(self) -> None:
+        if self._busy:
+            raise MachineRunning(
+                "the machine is running, handlers included, stop or await it first"
+            )
 
     def _require_stopped(self) -> None:
         if self._busy and _HANDLER_OF.get() is not self:

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "image.hpp"
+#include "snapshot.hpp"
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/machine.hpp>
@@ -215,6 +216,27 @@ public:
       std::uint32_t      offset,
       std::uint8_t       width,
       std::uint32_t      value);
+
+  /**
+   * @brief Takes a snapshot.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy during a call.
+   */
+  [[= py::doc{"Take a snapshot of the whole machine state."}]] [[nodiscard]] auto snapshot() const
+      -> snapshot_handle;
+
+  /**
+   * @brief Restores a snapshot of this machine, or one read back from bytes.
+   * @param saved The snapshot.
+   * @throws config_error when a read-back snapshot names another description, images or config.
+   * @throws emulation_error when @p saved was taken by another machine.
+   */
+  [[= py::doc{"Restore a snapshot this machine took, or one read back from bytes."}]] void
+      restore(snapshot_handle const& saved);
+
+  /** @brief Identity of the machine, never 0. */
+  [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept
+      -> std::uint64_t;
 
   /** @brief Instructions executed since reset. */
   [[= py::doc{"Instructions executed since reset."}]] [[nodiscard]] auto instructions() const

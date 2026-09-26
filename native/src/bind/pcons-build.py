@@ -7,6 +7,7 @@ sources = [
     here / "machine.cpp",
     here / "run.cpp",
     here / "views.cpp",
+    here / "snapshot.cpp",
     here / "description.cpp",
     here / "image.cpp",
     here / "errors.cpp",

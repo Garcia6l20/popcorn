@@ -25,6 +25,7 @@ from popcorn._errors import (
 from popcorn._image import Image, Location, Segment, Symbol
 from popcorn._machine import Event, Machine, Reached
 from popcorn._project import BoardEntry, Device, Project, TomlValue
+from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
 from popcorn._views import (
     Memory,
@@ -65,6 +66,7 @@ __all__ = [
     "ResetKind",
     "ScalarView",
     "Segment",
+    "Snapshot",
     "Stop",
     "StopReason",
     "Symbol",

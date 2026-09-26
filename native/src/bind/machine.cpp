@@ -121,6 +121,22 @@ void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes
   }
 }
 
+auto machine_handle::snapshot() const -> snapshot_handle
+{
+  return snapshot_handle{machine_->snapshot()};
+}
+
+void machine_handle::restore(snapshot_handle const& saved)
+{
+  reflex::py::nb::gil_scoped_release unlocked;
+  machine_->restore(saved.native());
+}
+
+auto machine_handle::id() const noexcept -> std::uint64_t
+{
+  return machine_->id();
+}
+
 auto machine_handle::native() const noexcept -> core::machine&
 {
   return *machine_;
