@@ -86,8 +86,9 @@ for tree in ("tests/firmware", "tests/native"):
             add_subdirectory(script.parent.relative_to(project_dir))
 
 if VARIANT != "asan":
-    ext = add_extension("popcorn", "_core", ["native/src/bind/module.cpp"])
+    ext = add_extension("popcorn", "_core", add_subdirectory("native/src/bind").sources)
     ext.link(core)
+    ext.link(obs.popcorn_obs)
     add_binding_check("popcorn-model-trampoline", ["native/src/bind/model_trampoline.cpp"], [core])
     smoke_ext = add_extension(
         "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]

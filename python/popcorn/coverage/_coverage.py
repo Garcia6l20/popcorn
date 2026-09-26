@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
@@ -165,6 +164,8 @@ class Coverage:
     def save(self, path: PathLike) -> None:
         """Writes a .pcov file, through a unique temporary file in the same directory renamed over
         the destination, so that a reader never sees half a file."""
+        import tempfile
+
         destination = Path(path)
         handle, name = tempfile.mkstemp(dir=destination.parent, prefix=f"{destination.name}.tmp.")
         temporary = Path(name)
