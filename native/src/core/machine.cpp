@@ -223,4 +223,13 @@ void machine::do_trace(trace_record const& record)
 {
   run_->emit(record, arch_->pc(), true);
 }
+
+void machine::do_log(log_record record)
+{
+  if(record.pc == 0)
+  {
+    record.pc = arch_->pc();
+  }
+  hooks_->log(record);
+}
 }

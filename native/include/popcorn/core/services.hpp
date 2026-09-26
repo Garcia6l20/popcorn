@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/fwd.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/types.hpp>
 
 #include <cstddef>
@@ -201,6 +202,17 @@ public:
     do_trace(record);
   }
 
+  /**
+   * @brief Sends a record to the machine's log sinks, those of machine::add_log_sink, as the
+   *        core's own records. A model fills `peripheral` with its peripheral's name and usually
+   *        `kind` log_kind::model_warning. Logging once per condition is the caller's choice.
+   * @param record Record to log. A `pc` of 0 is replaced by the current pc.
+   */
+  void log(log_record record)
+  {
+    do_log(std::move(record));
+  }
+
 private:
   virtual void do_request_stop(stop_reason reason, std::string detail) = 0;
   virtual void do_request_reset(reset_kind kind)                       = 0;
@@ -214,5 +226,6 @@ private:
   virtual auto do_write_block(address addr, std::span<std::byte const> in, initiator by)
       -> std::expected<void, block_error>           = 0;
   virtual void do_trace(trace_record const& record) = 0;
+  virtual void do_log(log_record record)            = 0;
 };
 }

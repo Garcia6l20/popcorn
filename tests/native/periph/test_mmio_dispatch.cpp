@@ -354,3 +354,31 @@ TEST_CASE("under strict_peripherals the debugger reads unmodelled registers free
   CHECK_THROWS_AS(std::ignore = f.run(), popcorn::model_error);
   CHECK(records.size() == 1);
 }
+
+TEST_CASE("a model logs through its services to the machine's log sinks")
+{
+  auto                          f = booted();
+  auto&                         m = model(f);
+  std::vector<core::log_record> records;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& r) { records.push_back(r); });
+  m.log_messages  = true;
+  m.data_on_event = true;
+  m.accesses.clear();
+  enter(f, "go_and_wait");
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  auto const write_pc = std::ranges::find_if(m.accesses, [](auto const& a) { return a.write; });
+  REQUIRE(write_pc != m.accesses.end());
+  REQUIRE(records.size() == 2);
+  CHECK(records[0].kind == core::log_kind::model_warning);
+  CHECK(records[0].peripheral == "TESTDEV");
+  CHECK(records[0].message == "write 0x5c");
+  CHECK(records[0].pc == write_pc->ctx.pc);
+  CHECK(records[1].message == "event");
+  CHECK(records[1].peripheral == "TESTDEV");
+  CHECK(records[1].pc == test_model::event_pc);
+  f.target->reset();
+  REQUIRE(records.size() == 3);
+  CHECK(records[2].message == "reset");
+  CHECK(records[2].pc == f.reg("pc"));
+}

@@ -542,6 +542,7 @@ private:
   auto do_write_block(address addr, std::span<std::byte const> in, initiator by)
       -> std::expected<void, block_error> override;
   void do_trace(trace_record const& record) override;
+  void do_log(log_record record) override;
 
   friend class memory_view;
   friend class register_view;

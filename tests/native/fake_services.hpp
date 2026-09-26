@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace popcorn::testing
 {
@@ -32,6 +33,8 @@ public:
   std::uint32_t slice_ends{};
   /** @brief Bus master of the last access. */
   std::optional<initiator> last_by;
+  /** @brief Records passed to log(), in order. */
+  std::vector<core::log_record> logged;
 
   /**
    * @brief Stores a little-endian word, bypassing the bus.
@@ -143,5 +146,10 @@ private:
 
   void do_trace(core::trace_record const&) override
   {}
+
+  void do_log(core::log_record record) override
+  {
+    logged.push_back(std::move(record));
+  }
 };
 }

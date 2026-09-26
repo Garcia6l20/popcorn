@@ -111,8 +111,15 @@ public:
   bool raise_in_reset = false;
   /** @brief Kind of the last reset, empty before the first. */
   std::optional<reset_kind> last_reset{};
+  /** @brief Whether on_write, on_event and reset log a model_warning through the services: pc
+   * left 0 for the machine to fill, except event_pc from on_event. */
+  bool log_messages = false;
+  /** @brief pc the on_event record carries. */
+  static constexpr address event_pc = 0x0800'1234;
 
 private:
+  void note(std::string message, address pc = 0) const;
+
   periph::model_context& context_;
 };
 

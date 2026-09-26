@@ -180,6 +180,19 @@ __attribute__((naked)) void gap_read(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void go_and_wait(void)
+{
+  __asm__ volatile("cpsid i\n"
+                   "ldr r1, =0x40010000\n"
+                   "movs r0, #1\n"
+                   "str r0, [r1, #0x5c]\n"
+                   "1: ldr r0, [r1, #0x58]\n"
+                   "cmp r0, #0\n"
+                   "beq 1b\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   for(uint32_t *from = _sidata, *to = _sdata; to < _edata;)

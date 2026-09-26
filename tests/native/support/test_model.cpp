@@ -20,6 +20,7 @@ void test_model::reset(periph::register_file& regs, reset_kind kind)
   regs.poke(data_offset, 0);
   regs.poke(ctrl_offset, 0);
   last_reset = kind;
+  note("reset");
   if(raise_in_reset)
   {
     context_.irqs.front().raise();
@@ -71,6 +72,7 @@ auto test_model::on_write(
   {
     return std::unexpected(bus_error::denied);
   }
+  note(std::format("write {:#x}", offset));
   if(size == 4)
   {
     regs.poke(offset, value);
@@ -98,6 +100,7 @@ auto test_model::on_write(
 void test_model::on_event(std::uint32_t, std::uint64_t)
 {
   fired_at = context_.clock.now();
+  note("event", event_pc);
   if(data_on_event)
   {
     context_.regs.poke(data_offset, 1);
@@ -115,6 +118,18 @@ void test_model::load(std::span<std::byte const>)
   if(throw_load)
   {
     throw std::runtime_error{"test_model: load refused"};
+  }
+}
+
+void test_model::note(std::string message, address pc) const
+{
+  if(log_messages)
+  {
+    context_.services.log(
+        {.kind       = popcorn::core::log_kind::model_warning,
+         .pc         = pc,
+         .peripheral = "TESTDEV",
+         .message    = std::move(message)});
   }
 }
 

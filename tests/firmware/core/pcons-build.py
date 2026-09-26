@@ -13,7 +13,7 @@ SECTION_BOUNDS = (
 UNREFERENCED = {
     "run": ("count_irq",),
     "spin": ("tick_walk", "tick_hang"),
-    "periph": ("shared_accesses", "gap_read"),
+    "periph": ("shared_accesses", "gap_read", "go_and_wait"),
 }
 
 for name, source in (

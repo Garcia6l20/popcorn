@@ -102,3 +102,17 @@ TEST_CASE("enumerator checks come from reflection")
   static_assert(not popcorn::is_enumerator(static_cast<popcorn::reset_kind>(200)));
   CHECK(std::format("{}", popcorn::reset_kind::window_watchdog) == "window_watchdog");
 }
+
+TEST_CASE("services forward log records unchanged")
+{
+  popcorn::testing::fake_services services;
+  services.log(
+      {.kind       = popcorn::core::log_kind::model_warning,
+       .pc         = 0x0800'0100,
+       .peripheral = "RCC",
+       .message    = "core clock stopped"});
+  REQUIRE(services.logged.size() == 1);
+  CHECK(services.logged[0].peripheral == "RCC");
+  CHECK(services.logged[0].pc == 0x0800'0100);
+  CHECK(services.logged[0].message == "core clock stopped");
+}
