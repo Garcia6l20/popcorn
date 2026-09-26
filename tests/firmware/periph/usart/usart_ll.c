@@ -1,5 +1,6 @@
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
+#include "stm32u5xx_ll_dma.h"
 #include "stm32u5xx_ll_lpuart.h"
 #include "stm32u5xx_ll_pwr.h"
 #include "stm32u5xx_ll_rcc.h"
@@ -22,6 +23,8 @@ void uart4_poll(void);
 void lpuart_poll(void);
 void idle(void);
 void tx_fifo_irq(void);
+void tx_dma(void);
+void GPDMA1_Channel0_IRQHandler(void);
 
 void idle(void)
 {
@@ -255,6 +258,49 @@ void tx_fifo_irq(void)
   {
   }
   LOG(tx_refills);
+  DONE();
+}
+
+static char const banner[65] = "popcorn usart dma banner, sixty-four bytes long, sent by gpdma!\n";
+static volatile uint32_t dma_done;
+
+void GPDMA1_Channel0_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_0))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_0);
+    ++dma_done;
+  }
+}
+
+void tx_dma(void)
+{
+  start_usart1();
+  enable(USART1);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  LL_DMA_ConfigTransfer(
+      GPDMA1, LL_DMA_CHANNEL_0,
+      LL_DMA_SRC_INCREMENT
+          | LL_DMA_DEST_FIXED
+          | LL_DMA_SRC_DATAWIDTH_BYTE
+          | LL_DMA_DEST_DATAWIDTH_BYTE);
+  LL_DMA_SetDataTransferDirection(GPDMA1, LL_DMA_CHANNEL_0, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+  LL_DMA_SetPeriphRequest(GPDMA1, LL_DMA_CHANNEL_0, LL_GPDMA1_REQUEST_USART1_TX);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_0, 64);
+  LL_DMA_SetSrcAddress(GPDMA1, LL_DMA_CHANNEL_0, (uint32_t)banner);
+  LL_DMA_SetDestAddress(GPDMA1, LL_DMA_CHANNEL_0, (uint32_t)&USART1->TDR);
+  LL_DMA_EnableIT_TC(GPDMA1, LL_DMA_CHANNEL_0);
+  NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_0);
+  LL_USART_ClearFlag_TC(USART1);
+  LL_USART_EnableDMAReq_TX(USART1);
+  while(dma_done == 0)
+  {
+  }
+  while(!LL_USART_IsActiveFlag_TC(USART1))
+  {
+  }
+  LOG(dma_done);
   DONE();
 }
 

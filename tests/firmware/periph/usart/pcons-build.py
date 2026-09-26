@@ -17,5 +17,6 @@ add_ll_firmware(
         "lpuart_poll",
         "idle",
         "tx_fifo_irq",
+        "tx_dma",
     ],
 )

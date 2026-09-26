@@ -1,3 +1,4 @@
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 
@@ -53,7 +54,9 @@ struct usart_state
  *        give, read when each frame starts. FIFO mode, 8 frames each way, or single registers.
  *        TX frames reach the port's endpoint when their stop bit ends. RX frames the board queues
  *        arrive one frame time apart, an overrun drops the frame and sets ORE, IDLE follows one
- *        idle frame. Not modelled, logged once when configured: synchronous mode, smartcard,
+ *        idle frame. With CR3.DMAT the `<instance>_tx_dma` request follows TXE, with CR3.DMAR the
+ *        `<instance>_rx_dma` request follows RXNE, through the GPDMA peer, levels announced again
+ *        in reset. Not modelled, logged once when configured: synchronous mode, smartcard,
  *        IrDA, LIN, the RS485 driver enable, auto baud rate, receiver timeout, wake-up from Stop.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_port
@@ -132,6 +135,10 @@ private:
   field_ref                                    parity_ie_;
   field_ref                                    error_ie_;
   field_ref                                    tx_threshold_;
+  field_ref                                    dma_transmit_;
+  field_ref                                    dma_receive_;
+  dma_signal                                   tx_dma_;
+  dma_signal                                   rx_dma_;
   field_ref                                    rx_threshold_;
   field_ref                                    tx_threshold_ie_;
   field_ref                                    rx_threshold_ie_;
@@ -211,7 +218,9 @@ usart::usart(
       complete_ie_{field(cr1_, "TCIE")}, rx_not_empty_ie_{field(cr1_, "RXFNEIE")},
       rx_full_ie_{field(cr1_, "RXFFIE")}, idle_ie_{field(cr1_, "IDLEIE")},
       parity_ie_{field(cr1_, "PEIE")}, error_ie_{field("CR3", "EIE")},
-      tx_threshold_{field("CR3", "TXFTCFG")}, rx_threshold_{field("CR3", "RXFTCFG")},
+      tx_threshold_{field("CR3", "TXFTCFG")}, dma_transmit_{field("CR3", "DMAT")},
+      dma_receive_{field("CR3", "DMAR")}, tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
+      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}, rx_threshold_{field("CR3", "RXFTCFG")},
       tx_threshold_ie_{field("CR3", "TXFTIE")}, rx_threshold_ie_{field("CR3", "RXFTIE")},
       tx_threshold_flag_{field(isr_, "TXFT")}, rx_threshold_flag_{field(isr_, "RXFT")},
       flush_rx_{field("RQR", "RXFRQ")}, flush_tx_{field("RQR", "TXFRQ")},
@@ -267,6 +276,8 @@ void usart::reset(register_file& regs, reset_kind)
   state_.shifting     = false;
   state_.receiving    = false;
   state_.idle_pending = false;
+  tx_dma_.resolve();
+  rx_dma_.resolve();
   flags();
 }
 
@@ -383,6 +394,11 @@ void usart::flags()
   update(regs_, rx_ack_, enabled() and get(regs_, receive_) != 0 ? 1 : 0);
   regs_.poke(rdr_.offset, state_.rx_fifo.empty() ? 0 : state_.rx_fifo.front());
   interrupts();
+  auto const up        = enabled();
+  auto const tx_wanted = get(regs_, dma_transmit_) != 0 and get(regs_, transmit_) != 0;
+  auto const rx_wanted = get(regs_, dma_receive_) != 0 and get(regs_, receive_) != 0;
+  tx_dma_.set(up and tx_wanted and get(regs_, tx_not_full_) != 0);
+  rx_dma_.set(up and rx_wanted and get(regs_, rx_not_empty_) != 0);
 }
 
 void usart::interrupts()

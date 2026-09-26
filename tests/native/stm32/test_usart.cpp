@@ -331,3 +331,39 @@ TEST_CASE("RXFT rises at the RX FIFO threshold and queued() counts host frames n
   CHECK(r.port("USART1").queued() == 1);
   CHECK(r.f->field("USART1", "ISR_enabled", "RXFNE") == 1);
 }
+
+TEST_CASE("a GPDMA channel feeds USART1 through its TX request, one frame at a time")
+{
+  constexpr std::string_view banner =
+      "popcorn usart dma banner, sixty-four bytes long, sent by gpdma!\n";
+  rig        r{"tx_dma"};
+  auto const log = r.finish();
+  CHECK(log == std::vector<std::uint32_t>{1});
+  CHECK(text(*r.usart1) == banner);
+  spaced(*r.usart1, frame_of(*r.f, "USART1", 4'000'000, false));
+
+  rig again{"tx_dma"};
+  again.finish();
+  CHECK(again.usart1->frames == r.usart1->frames);
+}
+
+TEST_CASE("a snapshot mid-DMA transmission restores to the same remaining frames")
+{
+  rig r{"tx_dma"};
+  while(r.usart1->frames.size() < 10)
+  {
+    REQUIRE_FALSE(r.f->run({.max_instructions = icount{64}}).stopped.has_value());
+  }
+  auto const saved = r.f->target->snapshot();
+  auto const mark  = r.usart1->frames.size();
+  r.finish();
+  std::vector<stm32::captured_frame> const rest{
+      r.usart1->frames.begin() + static_cast<long>(mark), r.usart1->frames.end()};
+  r.usart1->frames.resize(mark);
+  r.f->target->restore(saved);
+  r.finish();
+  CHECK(
+      std::vector<stm32::captured_frame>{
+          r.usart1->frames.begin() + static_cast<long>(mark), r.usart1->frames.end()}
+      == rest);
+}
