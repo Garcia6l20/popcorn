@@ -54,6 +54,7 @@ def add_ll_firmware(
     )
     target.private.defines.extend(DEFINES)
     target.private.link_flags.append(SECTION_BOUNDS)
+    target.private.link_libs.append("gcc")
     target.private.link_flags.extend(
         f"-Wl,--undefined={entry}" for entry in ("log_buf", "log_len", *entries)
     )

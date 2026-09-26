@@ -16,7 +16,16 @@ periph_data = project_dir / "tests" / "data" / "periph"
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
 firmwares = {
     name: firmware("periph", name)
-    for name in ("boot_ll", "rcc_ll", "pwr_ll", "flash_ll", "cache_ll", "gpio_ll", "gpdma_ll")
+    for name in (
+        "boot_ll",
+        "rcc_ll",
+        "pwr_ll",
+        "flash_ll",
+        "cache_ll",
+        "gpio_ll",
+        "gpdma_ll",
+        "usart_ll",
+    )
 }
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
@@ -41,6 +50,7 @@ u575_programs = [
         ("stm32-gpio", "test_gpio.cpp"),
         ("stm32-gpdma", "test_gpdma.cpp"),
         ("stm32-dma-routing", "test_dma_routing.cpp"),
+        ("stm32-usart", "test_usart.cpp"),
     )
 ]
 for program in u575_programs:

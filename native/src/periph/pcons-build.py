@@ -15,5 +15,6 @@ sources += [
         "gpio.cpp",
         "exti.cpp",
         "gpdma.cpp",
+        "usart.cpp",
     )
 ]

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/caches.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
@@ -42,4 +43,10 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
+
+/**
+ * @brief Factory of the USART, UART and LPUART model, RM0456 sections 66 and 67.
+ * @param b Board whose `uarts` give each instance its far end, kept by reference.
+ */
+[[nodiscard]] auto usart_factory(board const& b) -> model_factory;
 }

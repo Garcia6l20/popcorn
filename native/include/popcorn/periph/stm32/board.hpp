@@ -5,9 +5,11 @@
 #include <popcorn/periph/stm32/caches.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
+#include <popcorn/periph/stm32/uart.hpp>
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 
 namespace popcorn::periph::stm32
@@ -25,6 +27,9 @@ struct board
   pwr_options pwr{};
   /** @brief Timing of the ICACHE and DCACHE models. */
   cache_options caches{};
+  /** @brief Far end of each UART by instance name, such as `USART1`. A UART without one drops
+   * what it transmits. */
+  std::map<std::string, std::shared_ptr<uart_endpoint>, std::less<>> uarts{};
 };
 
 /**

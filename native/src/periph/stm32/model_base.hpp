@@ -180,6 +180,15 @@ protected:
   }
 
   /**
+   * @brief Whether the peripheral has a register of that name.
+   * @param name Register name as the description spells it.
+   */
+  [[nodiscard]] auto has_register(std::string_view name) const -> bool
+  {
+    return std::ranges::contains(desc_.registers, name, &register_desc::name);
+  }
+
+  /**
    * @brief Description of a register of the peripheral by name.
    * @param name Register name as the description spells it.
    * @throws config_error as reg() does.
