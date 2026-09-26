@@ -79,3 +79,14 @@ def test_fault_and_budget_errors_are_emulation_errors() -> None:
     assert isinstance(fault, popcorn.EmulationError)
     assert fault.reason is popcorn.StopReason.FAULT
     assert budget.reason is popcorn.StopReason.BUDGET
+
+
+def test_reset_with_no_vector_table_is_an_emulation_error(
+    m33: popcorn.MachineDescription, basic: popcorn.Image
+) -> None:
+    m = popcorn.Machine(m33, image=basic, vector_table=0x3000_0000)
+    with pytest.raises(popcorn.EmulationError) as caught:
+        m.reset()
+    assert "no vector table" in str(caught.value)
+    assert caught.value.reason is None
+    assert isinstance(caught.value, popcorn.PopcornError)

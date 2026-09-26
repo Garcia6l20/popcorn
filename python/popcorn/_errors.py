@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from popcorn._enums import FaultKind, StopReason
+
+if TYPE_CHECKING:
+    from popcorn._stop import Stop
 
 
 class PopcornError(Exception):
@@ -70,6 +74,7 @@ class EmulationError(PopcornError):
         reason: Stop reason that ended it, None when not a stop.
         pc: Address of the instruction, None when unknown.
         symbol: Function containing pc, empty when unknown.
+        stop: The stop, when the error reports one, such as an unexpected stop of `running()`.
     """
 
     def __init__(
@@ -79,11 +84,13 @@ class EmulationError(PopcornError):
         reason: StopReason | None = None,
         pc: int | None = None,
         symbol: str = "",
+        stop: Stop | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
         self.pc = pc
         self.symbol = symbol
+        self.stop = stop
 
 
 class FaultError(EmulationError):
@@ -106,8 +113,9 @@ class FaultError(EmulationError):
         hfsr: int = 0,
         pc: int | None = None,
         symbol: str = "",
+        stop: Stop | None = None,
     ) -> None:
-        super().__init__(message, reason=StopReason.FAULT, pc=pc, symbol=symbol)
+        super().__init__(message, reason=StopReason.FAULT, pc=pc, symbol=symbol, stop=stop)
         self.kind = kind
         self.address = address
         self.cfsr = cfsr
@@ -122,9 +130,15 @@ class BudgetExceeded(EmulationError):
     """
 
     def __init__(
-        self, message: str, *, budget: int = 0, pc: int | None = None, symbol: str = ""
+        self,
+        message: str,
+        *,
+        budget: int = 0,
+        pc: int | None = None,
+        symbol: str = "",
+        stop: Stop | None = None,
     ) -> None:
-        super().__init__(message, reason=StopReason.BUDGET, pc=pc, symbol=symbol)
+        super().__init__(message, reason=StopReason.BUDGET, pc=pc, symbol=symbol, stop=stop)
         self.budget = budget
 
 

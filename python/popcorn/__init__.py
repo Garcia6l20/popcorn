@@ -1,6 +1,6 @@
 """popcorn: MCU emulation for firmware tests, driven from asyncio."""
 
-from popcorn import coverage, trace
+from popcorn import coverage, trace, units
 from popcorn._core import version
 from popcorn._description import (
     MachineDescription,
@@ -22,12 +22,15 @@ from popcorn._errors import (
     SymbolError,
 )
 from popcorn._image import Image, Location, Segment, Symbol
-from popcorn._machine import Machine
+from popcorn._machine import Event, Machine, Reached
+from popcorn._stop import Fault, Stop
 
 __all__ = [
     "BudgetExceeded",
     "ConfigError",
     "EmulationError",
+    "Event",
+    "Fault",
     "FaultError",
     "FaultKind",
     "FloatAbi",
@@ -40,8 +43,10 @@ __all__ = [
     "MachineRunning",
     "ModelError",
     "PopcornError",
+    "Reached",
     "ResetKind",
     "Segment",
+    "Stop",
     "StopReason",
     "Symbol",
     "SymbolError",
@@ -50,5 +55,6 @@ __all__ = [
     "load_description",
     "parse_description",
     "trace",
+    "units",
     "version",
 ]
