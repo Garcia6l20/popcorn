@@ -14,15 +14,17 @@ Prerequisites on Linux x86_64:
 - Python >= 3.14 with its development headers, and uv
 - g++ >= 16.1 as `g++`
 - cmake and ninja
-- git and network access, third-party sources are fetched at build time
+- git and network access: Unicorn and reflex are git submodules, the other third-party sources
+  are fetched at build time
 - optional: arm-none-eabi-gcc, to rebuild the test firmware
 
 ```sh
 uv pip install git+<repository-url>
 ```
 
-For local development, clone with submodules (third-party sources under
-`third_party/` are tracked as git submodules):
+For local development, clone with `--recurse-submodules`: Unicorn and reflex under `third_party/`
+are git submodules, and the build reads the Unicorn commit from git. A copy of the tree without its
+git metadata is not supported.
 
 ```sh
 git clone --recurse-submodules <repository-url>

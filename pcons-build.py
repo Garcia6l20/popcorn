@@ -62,7 +62,7 @@ core = project.StaticLibrary(
 )
 core.public.include_dirs.append("native/include")
 core.private.defines.extend(
-    [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit[:12]}"']
+    [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit}"']
 )
 core.link(package("unicorn"))
 core.link(package("reflex-serde"))

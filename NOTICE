@@ -2,19 +2,24 @@ popcorn
 Copyright (c) 2026 Sylvain Garcia
 
 popcorn source code is released under the MIT License, see LICENSE. This
-repository contains no third-party source code. The components below are
-downloaded at build time from their upstream archives, pinned by commit or
-version and verified by sha256 where an archive is used, and compiled on the
-user's machine. The built Python extension links Unicorn statically, so an
-installed popcorn extension is a combined work subject to GPL-2.0-only.
+repository contains no third-party source code. Unicorn and reflex are git
+submodules under third_party/, pinned by commit. The other components below
+are downloaded at build time from their upstream archives, pinned by version
+and verified by sha256. Everything is compiled on the user's machine. The built
+Python extension links Unicorn statically, so an installed popcorn extension is
+a combined work subject to GPL-2.0-only.
 
-Unicorn CPU emulator, commit 938efd13aeab73155f31cf707a2094c6ccaa36dd
-  https://github.com/unicorn-engine/unicorn
+Unicorn CPU emulator, popcorn fork at commit
+722da2448374ab194fd0cafeeffceff368ce47ba, submodule third_party/unicorn
+  https://github.com/Garcia6l20/unicorn, branch popcorn/v7m-special-reg-access
+  Upstream: https://github.com/unicorn-engine/unicorn, commit 938efd13aeab
+  plus one patch giving host access to M-profile special registers in any mode.
+  The fork lists its changes, files and dates in POPCORN_CHANGES.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.0, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.
 
-reflex C++26 reflection library
+reflex C++26 reflection library, submodule third_party/reflex
   https://github.com/Garcia6l20/reflex
   License: MIT. Header-only use.
 

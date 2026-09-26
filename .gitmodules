@@ -1,3 +1,7 @@
 [submodule "third_party/reflex"]
 	path = third_party/reflex
 	url = https://github.com/Garcia6l20/reflex.git
+[submodule "third_party/unicorn"]
+	path = third_party/unicorn
+	url = https://github.com/Garcia6l20/unicorn.git
+	branch = popcorn/v7m-special-reg-access
