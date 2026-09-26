@@ -31,6 +31,15 @@ namespace popcorn::arch::armv8m
  *   entry and return, and by an exception becoming pending while SCR.SEVONPEND is set. WFE also
  *   wakes on the WFI condition with PRIMASK, BASEPRI and FAULTMASK respected, where WFI ignores
  *   PRIMASK. YIELD runs as a NOP.
+ * - A fault the engine raises as an exception, such as a fetch from the system region or a
+ *   stack-limit violation, stops the engine run when it is pended, and the handler is entered at
+ *   once in the same slice. An unprivileged access to the system space is served, never a
+ *   BusFault.
+ * - A bus error from a peripheral model, on a read or a write, is reported as IMPRECISERR with no
+ *   BFAR, where hardware reports a failed read as a precise error.
+ * - MSPLIM and PSPLIM have no engine register id: a reset clears them, an in-memory snapshot
+ *   restores them, a serialized snapshot does not. Exception entry stacking below MSPLIM is not
+ *   detected, where hardware raises STKOF.
  * - A debugger `mem()` write to STIR is judged by the privilege of the paused core: while it is
  *   in unprivileged Thread mode with CCR.USERSETMPEND clear, the write pends nothing.
  * - A debugger `mem()` access to the system space that fails outside a slice returns 0, and the

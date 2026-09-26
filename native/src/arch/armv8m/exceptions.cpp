@@ -234,17 +234,22 @@ auto cortex_m::enter(std::uint32_t number) -> trap_result
   }
   if(not services.write_block(frame_at, std::as_bytes(std::span{words}), initiator::cpu))
   {
+    state_.scs.cfsr |= cfsr::stkerr;
     return trap_result::fault(
-        {.kind = fault_kind::bus, .fault_address = frame_at, .status = 1u << 12, .detail = number});
+        {.kind          = fault_kind::bus,
+         .fault_address = frame_at,
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
   }
   auto const vector = services.read(state_.scs.vtor + 4 * number, 4, initiator::cpu);
   if(not vector)
   {
+    state_.scs.hfsr |= hfsr_vecttbl;
     return trap_result::fault(
         {.kind          = fault_kind::hard,
          .fault_address = state_.scs.vtor + 4 * number,
-         .status        = 1u << 1,
-         .detail        = number});
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
   }
   auto target    = special;
   target.ipsr    = number;
@@ -273,10 +278,24 @@ auto cortex_m::exception_return() -> trap_result
   auto        special  = read_special(engine);
   auto const  number   = special.ipsr;
   auto const  invalid  = [&] {
+    state_.scs.cfsr |= cfsr::invpc;
     return trap_result::fault(
-        {.kind = fault_kind::usage, .fault_address = value, .status = 1u << 18, .detail = number});
+        {.kind          = fault_kind::usage,
+         .fault_address = value,
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
   };
-  if(number == 0 or not valid_exc_return(value))
+  if(number == 0)
+  {
+    auto const target = value & ~1u;
+    write(UC_ARM_REG_PC, value);
+    return stop_engine_on_pend(raise_fault(
+        {.kind      = fault_kind::mem_manage,
+         .target    = exc_memmanage,
+         .cfsr_bits = cfsr::iaccviol,
+         .reported  = target}));
+  }
+  if(not valid_exc_return(value))
   {
     return invalid();
   }
@@ -286,8 +305,12 @@ auto cortex_m::exception_return() -> trap_result
   std::vector<std::uint32_t> words(size / 4, 0);
   if(not services.read_block(frame_at, std::as_writable_bytes(std::span{words}), initiator::cpu))
   {
+    state_.scs.cfsr |= cfsr::unstkerr;
     return trap_result::fault(
-        {.kind = fault_kind::bus, .fault_address = frame_at, .status = 1u << 11, .detail = number});
+        {.kind          = fault_kind::bus,
+         .fault_address = frame_at,
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
   }
   auto const stacked_ipsr = words[7] & ipsr_mask;
   if(returning.thread != (stacked_ipsr == 0))

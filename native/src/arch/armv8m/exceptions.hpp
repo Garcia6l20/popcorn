@@ -2,6 +2,8 @@
 
 #include "state.hpp"
 
+#include <popcorn/core/types.hpp>
+
 #include <cstdint>
 #include <optional>
 
@@ -34,6 +36,61 @@ inline constexpr std::uint32_t exc_irq0 = 16;
 inline constexpr std::uint32_t scr_sleeponexit = 1u << 1;
 /** @brief SCR.SEVONPEND. */
 inline constexpr std::uint32_t scr_sevonpend = 1u << 4;
+
+/** @brief HFSR.VECTTBL, a vector read failed on exception entry. */
+inline constexpr std::uint32_t hfsr_vecttbl = 1u << 1;
+
+/** @brief CFSR bits of the configurable faults. */
+namespace cfsr
+{
+/** @brief MMFSR.IACCVIOL. */
+inline constexpr std::uint32_t iaccviol = 1u << 0;
+/** @brief MMFSR.MMARVALID. */
+inline constexpr std::uint32_t mmarvalid = 1u << 7;
+/** @brief BFSR.IBUSERR. */
+inline constexpr std::uint32_t ibuserr = 1u << 8;
+/** @brief BFSR.PRECISERR. */
+inline constexpr std::uint32_t preciserr = 1u << 9;
+/** @brief BFSR.IMPRECISERR. */
+inline constexpr std::uint32_t impreciserr = 1u << 10;
+/** @brief BFSR.UNSTKERR. */
+inline constexpr std::uint32_t unstkerr = 1u << 11;
+/** @brief BFSR.STKERR. */
+inline constexpr std::uint32_t stkerr = 1u << 12;
+/** @brief BFSR.BFARVALID. */
+inline constexpr std::uint32_t bfarvalid = 1u << 15;
+/** @brief UFSR.UNDEFINSTR. */
+inline constexpr std::uint32_t undefinstr = 1u << 16;
+/** @brief UFSR.INVSTATE. */
+inline constexpr std::uint32_t invstate = 1u << 17;
+/** @brief UFSR.INVPC. */
+inline constexpr std::uint32_t invpc = 1u << 18;
+/** @brief UFSR.NOCP. */
+inline constexpr std::uint32_t nocp = 1u << 19;
+/** @brief UFSR.STKOF. */
+inline constexpr std::uint32_t stkof = 1u << 20;
+/** @brief UFSR.UNALIGNED. */
+inline constexpr std::uint32_t unaligned = 1u << 24;
+/** @brief UFSR.DIVBYZERO. */
+inline constexpr std::uint32_t divbyzero = 1u << 25;
+}
+
+/** @brief A configurable fault to raise: its class, target handler and status. */
+struct fault_cause
+{
+  /** @brief Class reported when the fault stops the run. */
+  fault_kind kind{};
+  /** @brief MemManage, BusFault or UsageFault. */
+  std::uint32_t target{};
+  /** @brief CFSR bits the fault sets. */
+  std::uint32_t cfsr_bits{};
+  /** @brief Address reported when the fault stops the run. */
+  address reported{};
+  /** @brief Faulting data address, recorded in BFAR or MMFAR by target. */
+  std::optional<address> data_address{};
+  /** @brief Whether the fault is synchronous: it escalates when it cannot preempt. */
+  bool synchronous{true};
+};
 
 /** @brief HFSR.FORCED, a configurable fault or SVC escalated to HardFault. */
 inline constexpr std::uint32_t hfsr_forced = 1u << 30;

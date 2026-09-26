@@ -10,6 +10,7 @@ sources = [
             "system_space.cpp",
             "exceptions.cpp",
             "timers.cpp",
+            "faults.cpp",
             "sleep.cpp",
             "factory.cpp",
         )

@@ -325,21 +325,7 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
     write(UC_ARM_REG_PC, (pc() + 2) | 1u);
     return trap_result::stop(stop_reason::user);
   }
-  return trap_result::fault({.kind = fault_kind::invalid, .fault_address = pc(), .detail = intno});
-}
-
-auto cortex_m::on_invalid_insn() -> trap_result
-{
-  if(hint())
-  {
-    return trap_result::resume();
-  }
-  return trap_result::fault({.kind = fault_kind::usage, .fault_address = pc()});
-}
-
-auto cortex_m::on_unmapped(address addr, memory_op) -> trap_result
-{
-  return trap_result::fault({.kind = fault_kind::unmapped, .fault_address = addr});
+  return engine_fault(intno);
 }
 
 auto cortex_m::idle() const -> bool
