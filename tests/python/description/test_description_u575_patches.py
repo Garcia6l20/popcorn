@@ -202,3 +202,23 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
     assert report.core_fields_set == 1
+
+
+_ARCH_WINDOWS = (0xE000_0000, 0xE000_1000, 0xE000_2000, 0xE000_E000)
+
+
+def test_no_peripheral_overlaps_an_arch_module_window(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, report = u575_target_and_report
+    names = {p.name for p in target.peripherals}
+    assert "DCB" not in names
+    assert "DBGMCU" in names
+    assert report.peripherals_dropped == 1
+    overlapping = [
+        p.name
+        for p in target.peripherals
+        for window in _ARCH_WINDOWS
+        if p.base < window + 0x1000 and window < p.base + p.size
+    ]
+    assert overlapping == []

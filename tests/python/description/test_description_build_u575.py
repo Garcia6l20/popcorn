@@ -19,7 +19,7 @@ def _schema() -> dict[str, object]:
 def test_build_u575_matches_expected_shape(u575_sources: Sources) -> None:
     description = build_description(u575_sources)
 
-    assert len(description.peripherals) == 198
+    assert len(description.peripherals) == 197
     assert sum(1 for p in description.peripherals if p.alias_of is not None) == 98
     assert len(description.regions) == 10
     assert len(description.irqs) == 121

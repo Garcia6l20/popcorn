@@ -1,6 +1,6 @@
-"""Patch file format, loader and application: fields, cross rules, aliases, IP renames, IRQ
-add/drop, core overrides. popcorn's own TOML format, so these dataclasses are the format
-definition, not a mirror of any C++ or schema type."""
+"""Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
+IP renames, IRQ add/drop, core overrides. popcorn's own TOML format, so these dataclasses are the
+format definition, not a mirror of any C++ or schema type."""
 
 import copy
 import fnmatch
@@ -52,6 +52,12 @@ class PatchIp:
 @dataclass(slots=True, kw_only=True)
 class PatchSvd:
     name: str
+
+
+@dataclass(slots=True, kw_only=True)
+class PatchPeripherals:
+    drop: list[str]
+    source: str
 
 
 @dataclass(slots=True, kw_only=True)
@@ -107,6 +113,7 @@ class Patch:
     core: PatchCore | None = None
     aliases: PatchAliases | None = None
     ip: PatchIp | None = None
+    peripherals: PatchPeripherals | None = None
     irqs: PatchIrqs | None = None
     svd: PatchSvd | None = None
     fields: list[FieldsRule] | None = None
@@ -123,6 +130,7 @@ class PatchTarget:
 
 @dataclass(slots=True, kw_only=True)
 class PatchReport:
+    peripherals_dropped: int = 0
     ip_renamed: int = 0
     aliased: int = 0
     fields_touched: int = 0
@@ -380,6 +388,24 @@ def _apply_irqs(
         report.irqs_added += 1
 
 
+def _apply_drops(
+    rules: Sequence[tuple[PatchPeripherals, str]],
+    peripherals: list[PeripheralDesc],
+    report: PatchReport,
+) -> None:
+    known = {p.name for p in peripherals}
+    dropped: set[str] = set()
+    for rule, file in rules:
+        for name in rule.drop:
+            if name in dropped:
+                raise DescriptionError(file, 0, "peripherals.drop", "each name once")
+            if name not in known:
+                raise DescriptionError(file, 0, f"peripherals.drop.{name}", "a known peripheral")
+            dropped.add(name)
+    peripherals[:] = [p for p in peripherals if p.name not in dropped]
+    report.peripherals_dropped += len(dropped)
+
+
 def _apply_core(
     rule: PatchCore, core: CoreDesc, touched: set[str], report: PatchReport, *, file: str
 ) -> None:
@@ -392,14 +418,26 @@ def _apply_core(
 
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
-    """Applies @p patches to @p target in the fixed order: IP renames, aliases, fields, cross
-    rules, IRQ drops and adds, core. Validates every rule before mutating @p target: an error
-    leaves it exactly as it was."""
+    """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
+    fields, cross rules, IRQ drops and adds, core. Drops come first, so a later rule naming a
+    dropped peripheral fails as naming an unknown one. Validates every rule before mutating
+    @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
     core = copy.deepcopy(target.core)
-    by_name = {p.name: p for p in peripherals}
     report = PatchReport()
+
+    _apply_drops(
+        [
+            (loaded.patch.peripherals, str(loaded.path))
+            for loaded in patches
+            if loaded.patch.peripherals is not None
+        ],
+        peripherals,
+        report,
+    )
+
+    by_name = {p.name: p for p in peripherals}
 
     for loaded in patches:
         if loaded.patch.ip is not None:

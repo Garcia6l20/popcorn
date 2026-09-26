@@ -5,6 +5,10 @@ source = "I05 section 5: SVD peripheral naming vs CubeMX db IP instances, STM32U
 parts = ["STM32U5*"]
 svd = ["STM32U5*.svd"]
 
+[peripherals]
+drop = ["DCB"]
+source = "Armv8-M Architecture Reference Manual (DDI 0553), D1.2: the System Control Space, 0xE000E000 to 0xE000EFFF, holds the core-private DCB (DSCSR at 0xE000EE08) and is modelled by the Cortex-M arch module, not as a peripheral. DBGMCU at 0xE0044000 is outside the SCS and stays"
+
 [aliases]
 prefix = "SEC_"
 offset = 0x10000000

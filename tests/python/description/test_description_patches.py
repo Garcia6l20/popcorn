@@ -391,6 +391,102 @@ def test_no_partial_application_on_error(tmp_path: Path) -> None:
     assert target == before
 
 
+def test_drop_removes_peripherals_before_every_other_rule(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    drop = ["C", "B"]
+    source = "probe"
+    """
+    path = _write_patch(tmp_path, text)
+    target = _synthetic_target()
+    names = {p.name for p in target.peripherals}
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    report = apply_patches(patches, target)
+    assert report.peripherals_dropped == 2
+    assert {p.name for p in target.peripherals} == names - {"B", "C"}
+
+
+def test_unknown_peripheral_in_drop_is_an_error(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    drop = ["NOPE"]
+    source = "probe"
+    """
+    path = _write_patch(tmp_path, text)
+    target = _synthetic_target()
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.key == "peripherals.drop.NOPE"
+
+
+def test_a_name_dropped_twice_is_an_error(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    drop = ["A"]
+    source = "probe"
+    """
+    first = _write_patch(tmp_path, text, "family.toml")
+    second = _write_patch(tmp_path, text, "part.toml")
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    patches = load_patches([first, second], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(second)
+    assert excinfo.value.key == "peripherals.drop"
+    assert excinfo.value.expected == "each name once"
+    assert target == before
+
+
+def test_a_rule_naming_a_dropped_peripheral_is_an_error(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    drop = ["A"]
+    source = "probe"
+    [[fields]]
+    instances = ["A"]
+    registers = ["SR"]
+    fields = ["F"]
+    on_write = "modify"
+    source = "probe"
+    """
+    path = _write_patch(tmp_path, text)
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "fields[0].instances"
+    assert target == before
+
+
+def test_drop_without_source_is_an_error(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    drop = ["A"]
+    """
+    path = _write_patch(tmp_path, text)
+    with pytest.raises(DescriptionError):
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+
+
 def test_u575_alias_rule_sets_98_peripherals(st_svd_u575: Path, st_cubemx_db: Path) -> None:
     device = expand_svd(st_svd_u575.read_bytes(), file=str(st_svd_u575))
     part = read_part(
