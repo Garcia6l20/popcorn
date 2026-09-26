@@ -169,6 +169,12 @@ void cortex_m::attach(arch_context const& ctx)
         uc_mmio_map(ctx.engine, base, window_size, &mmio_read, &user, &mmio_write, &user),
         std::format("mapping the system space at {:#010x}", base));
   }
+  uc_hook wfi = 0;
+  require(
+      uc_hook_add(
+          ctx.engine, &wfi, UC_HOOK_INSN, reinterpret_cast<void*>(&wfi_hook), this, 1, 0,
+          UC_ARM_INS_WFI),
+      "adding the WFI hook, popcorn needs the pinned Unicorn fork");
   uc_context* saved = nullptr;
   require(uc_context_alloc(ctx.engine, &saved), "allocating the pristine context");
   pristine_.reset(saved);
@@ -207,6 +213,7 @@ void cortex_m::reset(address reset_vector)
     throw emulation_error(std::format("cortex_m reset: no vector table at {:#010x}", reset_vector));
   }
   state_ = reset_state(reset_vector);
+  ++generation_;
   for(auto const& reg : registers())
   {
     if(reg.name.starts_with('r') or reg.name.starts_with('s') or reg.name == "fpscr")
@@ -225,6 +232,7 @@ void cortex_m::reset(address reset_vector)
 auto cortex_m::deliver_pending() -> trap_result
 {
   rethrow_failure();
+  wake_if_due();
   auto const best = best_pending(state_.exceptions);
   if(not best or not preempts(*best))
   {
@@ -239,7 +247,7 @@ auto cortex_m::deliverable_now() const -> bool
   return best and preempts(*best);
 }
 
-auto cortex_m::current_priority() const -> int
+auto cortex_m::current_priority(bool ignore_primask) const -> int
 {
   std::array<int, 3>           ids{UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI, UC_ARM_REG_FAULTMASK};
   std::array<std::uint32_t, 3> held{};
@@ -249,7 +257,7 @@ auto cortex_m::current_priority() const -> int
       "reading the priority masks");
   return execution_priority(
       state_.exceptions, state_.scs.prigroup,
-      {.primask   = (held[0] & 1u) != 0,
+      {.primask   = not ignore_primask and (held[0] & 1u) != 0,
        .basepri   = static_cast<std::uint8_t>(held[1]),
        .faultmask = (held[2] & 1u) != 0});
 }
@@ -329,18 +337,18 @@ auto cortex_m::on_unmapped(address addr, memory_op) -> trap_result
   return trap_result::fault({.kind = fault_kind::unmapped, .fault_address = addr});
 }
 
-void cortex_m::on_event(std::uint32_t, std::uint64_t)
-{}
-
 auto cortex_m::idle() const -> bool
 {
   rethrow_failure();
-  return false;
+  return sleeping();
 }
 
 auto cortex_m::pc() const -> address
 {
-  return read(UC_ARM_REG_PC);
+  auto const at = raw_pc();
+  return state_.sleep and state_.sleep->size != 0 and at == state_.sleep->at
+           ? at + state_.sleep->size
+           : at;
 }
 
 auto cortex_m::resume_address() const -> address
@@ -380,8 +388,9 @@ void cortex_m::return_to_caller(std::optional<call_arg> const&, float_abi)
 
 void cortex_m::save(std::vector<std::byte>& out) const
 {
-  auto saved    = state_;
-  saved.special = read_special(engine_handle());
+  auto saved                     = state_;
+  saved.special                  = read_special(engine_handle());
+  saved.systick.generation_floor = generation_;
   std::vector<std::byte> bytes;
   reflex::serde::bson::serializer{bytes}.dump(saved);
   out.insert(out.end(), bytes.begin(), bytes.end());
@@ -391,6 +400,8 @@ void cortex_m::load(std::span<std::byte const> in)
 {
   state_ = reflex::serde::bson::deserializer{in}.load<state>();
   set_context(engine_handle(), state_.special);
+  generation_ = std::max(generation_, state_.systick.generation_floor) + 1;
+  arm_systick();
   refresh_pending();
 }
 

@@ -1,6 +1,7 @@
 #include "arch_fixture.hpp"
 
 #include "cortex_m.hpp"
+#include "state.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/errors.hpp>
@@ -389,7 +390,11 @@ TEST_CASE("the module state round trips through its saved bytes")
   f.module->load(first);
   std::vector<std::byte> second;
   f.module->save(second);
-  CHECK(first == second);
+  auto const before = reflex::serde::bson::deserializer{first}.load<armv8m::state>();
+  auto       after  = reflex::serde::bson::deserializer{second}.load<armv8m::state>();
+  CHECK(after.systick.generation_floor == before.systick.generation_floor + 1);
+  after.systick.generation_floor = before.systick.generation_floor;
+  CHECK(after == before);
   CHECK(f.target->mem().read(0xE000'1020, 4) == 0x2000'1234u);
   CHECK(f.target->mem().read(0xE000'1038, 4) == 0x0000'0005u);
   CHECK(

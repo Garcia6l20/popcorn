@@ -5,6 +5,13 @@ sources = [
     here / "arch.cpp",
     *(
         here / "armv8m" / name
-        for name in ("cortex_m.cpp", "system_space.cpp", "exceptions.cpp", "factory.cpp")
+        for name in (
+            "cortex_m.cpp",
+            "system_space.cpp",
+            "exceptions.cpp",
+            "timers.cpp",
+            "sleep.cpp",
+            "factory.cpp",
+        )
     ),
 ]

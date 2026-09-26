@@ -107,7 +107,22 @@ private:
       std::uint64_t value,
       void*         user) noexcept;
 
-  [[nodiscard]] auto current_priority() const -> int;
+  [[nodiscard]] auto systick_ticks() const -> std::uint64_t;
+  auto               read_systick(std::uint32_t offset) -> std::uint32_t;
+  void               write_systick(std::uint32_t offset, std::uint32_t value, std::uint32_t mask);
+  void               arm_systick();
+  [[nodiscard]] auto cyccnt_counting() const noexcept -> bool;
+  [[nodiscard]] auto read_cyccnt() const -> std::uint32_t;
+  void               rebase_cyccnt(std::uint32_t value);
+  [[nodiscard]] auto current_priority(bool ignore_primask = false) const -> int;
+  static auto        wfi_hook(uc_struct* engine, void* user) noexcept -> int;
+  void               wait_for_interrupt();
+  [[nodiscard]] auto raw_pc() const -> address;
+  [[nodiscard]] auto in_exit_list(address at) const -> bool;
+  [[nodiscard]] auto wfi_size(address at) const -> std::uint32_t;
+  [[nodiscard]] auto sleeping() const -> bool;
+  [[nodiscard]] auto wake_event() const -> bool;
+  void               wake_if_due();
   [[nodiscard]] auto privileged() const -> bool;
   [[nodiscard]] auto preempts(std::uint32_t number) const -> bool;
   auto               raise(std::uint32_t number, address at) -> trap_result;
@@ -129,6 +144,8 @@ private:
   std::unique_ptr<uc_context, context_free> pristine_{};
   std::array<window_user, 4>                windows_{};
   mutable std::exception_ptr                failure_{};
+  std::uint64_t                             generation_{};
+  mutable std::vector<std::uint64_t>        exits_{};
   system_space                              space_{*this};
 };
 }

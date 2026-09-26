@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace popcorn::arch::armv8m
@@ -89,16 +90,8 @@ struct scs_state
   std::uint32_t dcrdr{};
   /** @brief DEMCR. */
   std::uint32_t demcr{};
-  /** @brief SYST_CSR. */
-  std::uint32_t syst_csr{};
-  /** @brief SYST_RVR. */
-  std::uint32_t syst_rvr{};
-  /** @brief SYST_CVR. */
-  std::uint32_t syst_cvr{};
   /** @brief DWT_CTRL. */
   std::uint32_t dwt_ctrl{};
-  /** @brief DWT_CYCCNT. */
-  std::uint32_t dwt_cyccnt{};
   /** @brief DWT_COMPn and DWT_FUNCTIONn, alternating. */
   std::array<std::uint32_t, 8> dwt_comparators{};
   /** @brief MPU_CTRL. */
@@ -124,6 +117,62 @@ struct scs_state
   friend auto operator==(scs_state const&, scs_state const&) -> bool = default;
 };
 
+/** @brief SysTick, counting from an anchor on the instruction count. */
+struct systick_state
+{
+  /** @brief SYST_CSR ENABLE, TICKINT and CLKSOURCE, bits 0-2. */
+  std::uint32_t csr{};
+  /** @brief SYST_RVR, 24 bits. */
+  std::uint32_t rvr{};
+  /** @brief Instruction count of the anchor. */
+  std::uint64_t anchor{};
+  /** @brief Counter value at the anchor, and the frozen value while disabled. */
+  std::uint32_t anchor_value{};
+  /** @brief Tick count since the anchor of the last COUNTFLAG clear. */
+  std::uint64_t flag_since{};
+  /** @brief COUNTFLAG carried over from before the anchor. */
+  bool flag{};
+  /** @brief Crossings of the current anchor already dispatched, 0 for none. */
+  std::uint64_t fired{};
+  /** @brief Live event generation when saved, a floor for the generation after a restore. */
+  std::uint64_t generation_floor{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(systick_state const&, systick_state const&) -> bool = default;
+};
+
+/** @brief DWT CYCCNT, counting from an anchor on the instruction count. */
+struct cyccnt_state
+{
+  /** @brief Counter value at the anchor. */
+  std::uint32_t base{};
+  /** @brief Instruction count of the anchor. */
+  std::uint64_t anchor{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(cyccnt_state const&, cyccnt_state const&) -> bool = default;
+};
+
+/** @brief Why the core sleeps. */
+enum class sleep_kind : std::uint8_t
+{
+  wfi,
+};
+
+/** @brief A sleeping core: the instruction it sleeps on. */
+struct sleep_state
+{
+  /** @brief Address of the WFI. */
+  address at{};
+  /** @brief Size of the WFI. */
+  std::uint32_t size{};
+  /** @brief Why the core sleeps. */
+  sleep_kind kind{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(sleep_state const&, sleep_state const&) -> bool = default;
+};
+
 /** @brief Saved state of the module. */
 struct state
 {
@@ -133,6 +182,12 @@ struct state
   scs_state scs{};
   /** @brief Special registers, read from the engine by save() and re-applied by load(). */
   special_registers special{};
+  /** @brief SysTick. */
+  systick_state systick{};
+  /** @brief DWT CYCCNT. */
+  cyccnt_state cyccnt{};
+  /** @brief Set while the core sleeps. */
+  std::optional<sleep_state> sleep{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(state const&, state const&) -> bool = default;

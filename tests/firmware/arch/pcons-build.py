@@ -76,11 +76,36 @@ ENTRIES = {
         "log_buf",
         "log_len",
     ),
+    "timers": (
+        "timers_setup",
+        "tick_1khz",
+        "tick_phase",
+        "countflag",
+        "wake_masked",
+        "moved_here",
+        "spin_tick",
+        "cvr_pair",
+        "cyc_pair",
+        "cyc_same_block",
+        "cyc_frozen",
+        "cyc_restart",
+        "rvr_race",
+        "wfi_empty",
+        "wfi_wide",
+        "wfi_spot",
+        "return_only",
+        "wfi_tick",
+        "wfi_tick_at",
+        "ticks",
+        "log_buf",
+        "log_len",
+    ),
 }
 
 SOURCES = {
     "exceptions": ("exceptions.c", "exceptions.S", "probe.S"),
     "svc": ("svc.c", "svc.S", "switch.S"),
+    "timers": ("timers.c", "sleep.S"),
 }
 
 for name, entries in ENTRIES.items():

@@ -18,15 +18,13 @@ constexpr std::uint32_t aircr_key         = 0x05fa;
 constexpr std::uint32_t aircr_key_stat    = 0xfa05;
 constexpr std::uint32_t aircr_sysresetreq = 1u << 2;
 constexpr std::uint32_t ccr_read_one      = 0x0000'0201;
-constexpr std::uint32_t ccr_writable  = (1u << 1) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 10);
-constexpr std::uint32_t scr_writable  = (1u << 1) | (1u << 2) | (1u << 4);
-constexpr std::uint32_t vtor_writable = 0xffff'ff80;
-constexpr std::uint32_t syst_csr_writable = 0x7;
-constexpr std::uint32_t syst_rvr_writable = 0x00ff'ffff;
-constexpr std::uint32_t syst_calib        = 0x4000'0000;
-constexpr std::uint32_t cpacr_writable    = 0x00f0'0000;
-constexpr std::uint32_t dwt_numcomp       = 4u << 28;
-constexpr std::uint32_t shcsr_enables     = 0x0007'0000;
+constexpr std::uint32_t ccr_writable   = (1u << 1) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 10);
+constexpr std::uint32_t scr_writable   = (1u << 1) | (1u << 2) | (1u << 4);
+constexpr std::uint32_t vtor_writable  = 0xffff'ff80;
+constexpr std::uint32_t syst_calib     = 0x4000'0000;
+constexpr std::uint32_t cpacr_writable = 0x00f0'0000;
+constexpr std::uint32_t dwt_numcomp    = 4u << 28;
+constexpr std::uint32_t shcsr_enables  = 0x0007'0000;
 
 constexpr std::array<bool, 16> system_priority_implemented{false, false, false, false, true,  true,
                                                            true,  false, false, false, false, true,
@@ -139,7 +137,7 @@ auto system_space::read_word(window which, std::uint32_t offset) const -> std::u
       }
       if(offset == 0x004)
       {
-        return scs.dwt_cyccnt;
+        return core_.read_cyccnt();
       }
       if(in(offset, 0x020, 0x05c) and (offset & 0x4) == 0)
       {
@@ -240,11 +238,9 @@ auto system_space::read_scs(std::uint32_t offset) const -> std::uint32_t
     case 0x008:
       return scs.actlr;
     case 0x010:
-      return scs.syst_csr;
     case 0x014:
-      return scs.syst_rvr;
     case 0x018:
-      return scs.syst_cvr;
+      return core_.read_systick(offset);
     case 0x01c:
       return syst_calib;
     case 0xd00:
@@ -361,11 +357,13 @@ void system_space::write_word(
     case window::dwt:
       if(offset == 0x000)
       {
-        scs.dwt_ctrl = merge(scs.dwt_ctrl, value, mask & 1u);
+        auto const cycles = core_.read_cyccnt();
+        scs.dwt_ctrl      = merge(scs.dwt_ctrl, value, mask & 1u);
+        core_.rebase_cyccnt(cycles);
       }
       else if(offset == 0x004)
       {
-        scs.dwt_cyccnt = merge(scs.dwt_cyccnt, value, mask);
+        core_.rebase_cyccnt(merge(core_.read_cyccnt(), value, mask));
       }
       else if(in(offset, 0x020, 0x05c) and (offset & 0x4) == 0)
       {
@@ -441,13 +439,9 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
       scs.actlr = merge(scs.actlr, value, mask);
       return;
     case 0x010:
-      scs.syst_csr = merge(scs.syst_csr, value, mask & syst_csr_writable);
-      return;
     case 0x014:
-      scs.syst_rvr = merge(scs.syst_rvr, value, mask & syst_rvr_writable);
-      return;
     case 0x018:
-      scs.syst_cvr = merge(scs.syst_cvr, value, mask);
+      core_.write_systick(offset, value, mask);
       return;
     case 0xd04:
     {
@@ -557,8 +551,12 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
       scs.dcrdr = merge(scs.dcrdr, value, mask);
       return;
     case 0xdfc:
-      scs.demcr = merge(scs.demcr, value, mask);
+    {
+      auto const cycles = core_.read_cyccnt();
+      scs.demcr         = merge(scs.demcr, value, mask);
+      core_.rebase_cyccnt(cycles);
       return;
+    }
     case 0xf00:
     {
       auto const number = exc_irq0 + ((value & mask) & 0x1ffu);

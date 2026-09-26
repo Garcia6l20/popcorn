@@ -1,5 +1,6 @@
 #include "exceptions.hpp"
 #include "frame.hpp"
+#include "systick.hpp"
 
 #include <doctest/doctest.h>
 
@@ -90,4 +91,90 @@ TEST_CASE("EXC_RETURN encodes the six entry cases and decodes Non-secure values"
       == armv8m::exc_return{.thread = true, .process_stack = true, .basic_frame = true});
   CHECK(armv8m::valid_exc_return(0xFFFFFFBC));
   CHECK_FALSE(armv8m::valid_exc_return(0xFFFFFFF5));
+}
+
+TEST_CASE("SysTick crossings, values and expiries follow the reload and anchor value")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state s{
+      .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 3999};
+  CHECK(systick::crossing(s, 1) == 4000u);
+  CHECK(systick::crossing(s, 2) == 8000u);
+  CHECK(systick::crossing(s, 3) == 12000u);
+  CHECK(systick::value_at(s, 4001) == 3999u);
+  CHECK(systick::value_at(s, 4000) == 0u);
+  CHECK(systick::value_at(s, 1) == 3999u);
+  s.anchor_value = 10;
+  CHECK(systick::crossing(s, 1) == 10u);
+  CHECK(systick::crossing(s, 2) == 4010u);
+  CHECK(systick::crossing(s, 3) == 8010u);
+  CHECK(systick::value_at(s, 4) == 6u);
+  s.csr          = systick::enable | systick::clksource;
+  s.anchor_value = 25;
+  CHECK(systick::value_at(s, 0) == 25u);
+  s.csr = 0;
+  CHECK(systick::value_at(s, 9999) == 25u);
+}
+
+TEST_CASE("SysTick with RVR 0 stops at 0 after its first crossing")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state s{
+      .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 0, .anchor_value = 5};
+  CHECK(systick::crossing(s, 1) == 5u);
+  CHECK_FALSE(systick::crossing(s, 2).has_value());
+  CHECK(systick::value_at(s, 5) == 0u);
+  CHECK(systick::value_at(s, 500) == 0u);
+  CHECK(systick::crossings_through(s, 500) == 1u);
+  s.anchor_value = 0;
+  CHECK_FALSE(systick::crossing(s, 1).has_value());
+}
+
+TEST_CASE("SysTick ticks and expiries at a cpi of 1, 2 and 1.5 and the external divisor")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state s{
+      .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 3999, .anchor = 100};
+  CHECK(systick::expiry(s, 4000, 1.0) == 4100u);
+  CHECK(systick::expiry(s, 4000, 2.0) == 2100u);
+  CHECK(systick::ticks(s, 2100, 2.0) == 4000u);
+  for(std::uint64_t k = 1; k <= 1000; ++k)
+  {
+    auto const z = *systick::crossing(s, k);
+    auto const n = systick::expiry(s, z, 1.5);
+    CAPTURE(k);
+    CHECK(systick::ticks(s, n, 1.5) >= z);
+    CHECK(systick::ticks(s, n - 1, 1.5) < z);
+  }
+  s.csr = systick::enable | systick::tickint;
+  CHECK(systick::expiry(s, 4000, 1.0) == 100u + 32000u);
+  CHECK(systick::ticks(s, 100 + 32007, 1.0) == 4000u);
+}
+
+TEST_CASE("SysTick COUNTFLAG and missed crossings coalesce")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state s{
+      .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 99, .fired = 3};
+  CHECK(systick::crossings_through(s, 950) == 9u);
+  CHECK(*systick::crossing(s, 10) == 1000u);
+  CHECK_FALSE(systick::countflag(s, 99));
+  CHECK(systick::countflag(s, 100));
+  s.flag_since = 150;
+  CHECK_FALSE(systick::countflag(s, 199));
+  CHECK(systick::countflag(s, 200));
+  s.flag = true;
+  CHECK(systick::countflag(s, 150));
+}
+
+TEST_CASE("a call end keeps the live fired count unless the call reprogrammed SysTick")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state const saved{
+      .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 99, .fired = 2};
+  auto live  = saved;
+  live.fired = 7;
+  CHECK(systick::fired_after_call(live, saved, 450) == 7u);
+  live.rvr = 49;
+  CHECK(systick::fired_after_call(live, saved, 450) == 4u);
 }
