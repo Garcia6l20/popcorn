@@ -7,6 +7,8 @@
 #include <map>
 #include <ranges>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace popcorn::core
 {
@@ -81,6 +83,8 @@ void machine::run_state::attach_peripherals()
             .events   = slot->events,
             .clock    = owner.clock_,
             .services = static_cast<machine_services&>(owner),
+            .peers    = peers,
+            .part     = owner.description_,
         });
     auto const configured = owner.options_.models.find(unit.name);
     auto const factory =
@@ -138,6 +142,44 @@ void machine::run_state::attach_peripherals()
     peripheral_index.emplace_back(unit.name, serving);
   }
   std::ranges::sort(peripheral_index);
+
+  std::vector<std::pair<std::string_view, periph::model*>> by_name;
+  for(auto const& [name, serving] : peripheral_index)
+  {
+    if(auto* const found = owner.peripherals_[serving]->model.get())
+    {
+      by_name.emplace_back(name, found);
+    }
+  }
+  std::vector<periph::model*> models;
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot and slot->model)
+    {
+      models.push_back(slot->model.get());
+    }
+  }
+  peers.fill(std::move(by_name), std::move(models));
+}
+
+void machine_peers::fill(
+    std::vector<std::pair<std::string_view, periph::model*>> by_name,
+    std::vector<periph::model*>                              models) noexcept
+{
+  by_name_ = std::move(by_name);
+  models_  = std::move(models);
+}
+
+auto machine_peers::find(std::string_view peripheral) const noexcept -> periph::model*
+{
+  auto const found = std::ranges::lower_bound(
+      by_name_, peripheral, {}, &std::pair<std::string_view, periph::model*>::first);
+  return found == by_name_.end() or found->first != peripheral ? nullptr : found->second;
+}
+
+auto machine_peers::all() const noexcept -> std::span<periph::model* const>
+{
+  return models_;
 }
 
 auto machine::run_state::slot(std::string_view name) const -> peripheral_slot&

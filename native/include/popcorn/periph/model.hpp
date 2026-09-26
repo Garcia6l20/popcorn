@@ -134,6 +134,45 @@ public:
 };
 
 /**
+ * @brief Models of one machine, by peripheral instance name. Empty while the machine builds its
+ *        models, factories and model::claims() included, filled once every model is attached.
+ *        Never used from a model destructor.
+ */
+class peer_directory
+{
+public:
+  /** @brief Creates the directory. */
+  peer_directory() = default;
+  /** @brief Not copyable, contexts hold its address. */
+  peer_directory(peer_directory const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(peer_directory const&) -> peer_directory& = delete;
+  /** @brief Not movable. */
+  peer_directory(peer_directory&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(peer_directory&&) -> peer_directory& = delete;
+
+  /**
+   * @brief Model of a peripheral of the same machine.
+   * @param peripheral Instance name as the description spells it, an alias names the model of
+   *        the peripheral it aliases.
+   * @return The model, or null when the peripheral has none, is not in the description, or the
+   *         machine is still building its models.
+   */
+  [[nodiscard]] virtual auto find(std::string_view peripheral) const noexcept -> model* = 0;
+
+  /**
+   * @brief Every model of the machine, in description order, empty while the machine is still
+   *        building its models.
+   */
+  [[nodiscard]] virtual auto all() const noexcept -> std::span<model* const> = 0;
+
+protected:
+  /** @brief Destroys the directory, only through its implementation. */
+  ~peer_directory() = default;
+};
+
+/**
  * @brief What a model factory hands a new model. The context and everything it references
  *        outlive the model, so the model may keep the reference.
  */
@@ -151,6 +190,10 @@ struct model_context
   core::clock& clock;
   /** @brief Machine services: deferred stop, guest bus access. */
   core::machine_services& services;
+  /** @brief Models of the same machine, see peer_directory for when it is filled. */
+  peer_directory& peers;
+  /** @brief Description of the machine, valid for the model's life. */
+  mcu_description const& part;
 
   /**
    * @brief Asks the run loop to stop, forwarding to services. Deferred: it only records the

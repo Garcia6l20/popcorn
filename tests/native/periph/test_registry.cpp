@@ -302,3 +302,73 @@ TEST_CASE("two peripherals on one interrupt source drive it wired-OR")
           {3, true}
   });
 }
+
+namespace
+{
+class peer_probe final : public periph::model
+{
+public:
+  explicit peer_probe(periph::model_context& ctx)
+      : context{ctx}, in_factory{ctx.peers.find("TESTDEV")}
+  {}
+
+  periph::model_context& context;
+  periph::model*         in_factory;
+  mutable periph::model* in_claims{};
+  periph::model*         in_reset{};
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    in_claims = context.peers.find("TESTDEV");
+    return {};
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {
+    in_reset = context.peers.find("TESTDEV");
+  }
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+}
+
+TEST_CASE("peers are empty while models are built and name every model after")
+{
+  core::machine_options options = with_test_model();
+  options.models.emplace(
+      "UNMODELLED",
+      [](periph::model_context& ctx, popcorn::peripheral_desc const&)
+          -> std::shared_ptr<periph::model> { return std::make_shared<peer_probe>(ctx); });
+  core::machine target{m33(), popcorn::testing::test_arch_factory(), options};
+  auto&         probe = dynamic_cast<peer_probe&>(*target.model("UNMODELLED"));
+  CHECK(probe.in_factory == nullptr);
+  CHECK(probe.in_claims == nullptr);
+  target.reset();
+  CHECK(probe.in_reset == target.model("TESTDEV"));
+  CHECK(probe.context.peers.find("SEC_TESTDEV") == target.model("TESTDEV"));
+  CHECK(probe.context.peers.find("UNMODELLED") == &probe);
+  CHECK(probe.context.peers.find("NOPE") == nullptr);
+  CHECK(&probe.context.part == &target.description());
+  auto const all = probe.context.peers.all();
+  REQUIRE(all.size() == 2);
+  CHECK(all[0] == target.model("TESTDEV"));
+  CHECK(all[1] == &probe);
+}

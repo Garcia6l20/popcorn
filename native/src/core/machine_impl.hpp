@@ -21,7 +21,9 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -119,6 +121,27 @@ public:
 
   void set_dma(std::uint32_t, bool) override
   {}
+};
+
+/** @brief Peer directory of a machine, filled by attach_peripherals once every model exists. */
+class machine_peers final : public periph::peer_directory
+{
+public:
+  /**
+   * @brief Fills the directory.
+   * @param by_name Model per peripheral name, aliases included, sorted by name.
+   * @param models Every model, in description order.
+   */
+  void fill(
+      std::vector<std::pair<std::string_view, periph::model*>> by_name,
+      std::vector<periph::model*>                              models) noexcept;
+
+  [[nodiscard]] auto find(std::string_view peripheral) const noexcept -> periph::model* override;
+  [[nodiscard]] auto all() const noexcept -> std::span<periph::model* const> override;
+
+private:
+  std::vector<std::pair<std::string_view, periph::model*>> by_name_{};
+  std::vector<periph::model*>                              models_{};
 };
 
 /** @brief Per peripheral state of a machine: storage, compiled semantics, lines, model. */
@@ -724,6 +747,8 @@ struct machine::run_state
   /** @brief Peripheral names, aliases included, sorted, to the description index of the
    * peripheral serving them. */
   std::vector<std::pair<std::string_view, std::uint32_t>> peripheral_index{};
+  /** @brief Models of the machine for model contexts, empty until attach_peripherals ends. */
+  machine_peers peers{};
 
   /**
    * @brief Builds one slot per peripheral of the description, aliases excepted, its lines, its

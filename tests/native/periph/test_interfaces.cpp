@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -106,6 +107,19 @@ public:
   popcorn::periph::register_file& storage;
 };
 
+class no_peers final : public popcorn::periph::peer_directory
+{
+public:
+  [[nodiscard]] auto find(std::string_view) const noexcept -> popcorn::periph::model* override
+  {
+    return nullptr;
+  }
+  [[nodiscard]] auto all() const noexcept -> std::span<popcorn::periph::model* const> override
+  {
+    return {};
+  }
+};
+
 auto uart_of_toy() -> popcorn::peripheral_desc
 {
   char const* const path = std::getenv("POPCORN_TOY_DESC");
@@ -177,8 +191,19 @@ TEST_CASE("the context forwards a stop request to the machine services")
   popcorn::core::scheduler        queue;
   popcorn::core::event_port       events{queue, 0};
   popcorn::testing::fake_services services;
+  no_peers                        peers;
+  popcorn::mcu_description const  part{};
   popcorn::periph::model_context  ctx{
-      .regs = regs, .irqs = {}, .dma = {}, .events = events, .clock = clock, .services = services};
+      .regs     = regs,
+      .irqs     = {},
+      .dma      = {},
+      .events   = events,
+      .clock    = clock,
+      .services = services,
+      .peers    = peers,
+      .part     = part};
+  CHECK(ctx.peers.find("UART1") == nullptr);
+  CHECK(ctx.peers.all().empty());
   ctx.request_stop(popcorn::stop_reason::user, "tx done");
   REQUIRE(services.stop.has_value());
   CHECK(services.stop->first == popcorn::stop_reason::user);
