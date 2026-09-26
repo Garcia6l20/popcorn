@@ -154,6 +154,7 @@ private:
   mutable std::exception_ptr                failure_{};
   std::uint64_t                             generation_{};
   mutable std::vector<std::uint64_t>        exits_{};
+  bool                                      in_call_{};
   system_space                              space_{*this};
 };
 }

@@ -2,6 +2,7 @@
 
 #include "exceptions.hpp"
 #include "registers.hpp"
+#include "systick.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/services.hpp>
@@ -233,7 +234,7 @@ auto cortex_m::deliver_pending() -> trap_result
 {
   rethrow_failure();
   wake_if_due();
-  auto const best = best_pending(state_.exceptions);
+  auto const best = best_pending(state_.exceptions, state_.call_masked);
   if(not best or not preempts(*best))
   {
     return trap_result::resume();
@@ -243,7 +244,7 @@ auto cortex_m::deliver_pending() -> trap_result
 
 auto cortex_m::deliverable_now() const -> bool
 {
-  auto const best = best_pending(state_.exceptions);
+  auto const best = best_pending(state_.exceptions, state_.call_masked);
   return best and preempts(*best);
 }
 
@@ -352,31 +353,6 @@ auto cortex_m::registers() const -> std::span<cpu_register const>
   return core_.fpu ? std::span<cpu_register const>{fpu_registers} : integer_registers;
 }
 
-void cortex_m::prepare_call(call_frame const&)
-{
-  throw not_implemented("cortex_m::prepare_call");
-}
-
-auto cortex_m::call_result(call_frame const&) const -> std::uint64_t
-{
-  throw not_implemented("cortex_m::call_result");
-}
-
-void cortex_m::read_args(call_frame&) const
-{
-  throw not_implemented("cortex_m::read_args");
-}
-
-auto cortex_m::return_address() const -> address
-{
-  return read(UC_ARM_REG_LR) & ~address{1};
-}
-
-void cortex_m::return_to_caller(std::optional<call_arg> const&, float_abi)
-{
-  throw not_implemented("cortex_m::return_to_caller");
-}
-
 void cortex_m::save(std::vector<std::byte>& out) const
 {
   auto saved                     = state_;
@@ -389,9 +365,30 @@ void cortex_m::save(std::vector<std::byte>& out) const
 
 void cortex_m::load(std::span<std::byte const> in)
 {
-  state_ = reflex::serde::bson::deserializer{in}.load<state>();
+  auto const live = state_;
+  state_          = reflex::serde::bson::deserializer{in}.load<state>();
   set_context(engine_handle(), state_.special);
   generation_ = std::max(generation_, state_.systick.generation_floor) + 1;
+  if(in_call_)
+  {
+    in_call_             = false;
+    state_.systick.fired = systick::fired_after_call(live.systick, state_.systick, systick_ticks());
+    for(std::uint32_t number = exc_nmi; number < exception_count(); ++number)
+    {
+      if(not synchronous(number))
+      {
+        put_bit(state_.exceptions.pending, number, test_bit(live.exceptions.pending, number));
+      }
+    }
+    state_.exceptions.level = live.exceptions.level;
+    for(auto number = exc_irq0; number < exception_count(); ++number)
+    {
+      if(test_bit(state_.exceptions.level, number))
+      {
+        put_bit(state_.exceptions.pending, number, true);
+      }
+    }
+  }
   arm_systick();
   refresh_pending();
 }
@@ -471,7 +468,9 @@ void cortex_m::refresh_pending() noexcept
   auto any = false;
   for(std::uint32_t number = 2; number < exception_count() and not any; ++number)
   {
-    any = is_pending(number) and is_enabled(number);
+    any = is_pending(number)
+      and is_enabled(number)
+      and (not state_.call_masked or synchronous(number));
   }
   set_pending(any);
 }

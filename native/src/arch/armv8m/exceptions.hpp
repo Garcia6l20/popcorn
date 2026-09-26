@@ -141,11 +141,21 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
     std::uint32_t          prigroup,
     masks                  held) noexcept -> int;
 
+/** @brief Whether exception @p number is synchronous: HardFault, the configurable faults, SVCall.
+ */
+[[nodiscard]] constexpr auto synchronous(std::uint32_t number) noexcept -> bool
+{
+  return (number >= exc_hardfault and number <= exc_usagefault) or number == exc_svcall;
+}
+
 /**
  * @brief Pending and enabled exception taken first: lowest priority value, subpriority
  *        included, then lowest number. System exceptions 2-15 are always enabled, IRQs by ISER.
+ * @param exceptions Exception state.
+ * @param synchronous_only Whether asynchronous exceptions are left out, as in a masked call.
  */
-[[nodiscard]] auto best_pending(exception_state const& exceptions) noexcept
+[[nodiscard]] auto
+    best_pending(exception_state const& exceptions, bool synchronous_only = false) noexcept
     -> std::optional<std::uint32_t>;
 
 /**

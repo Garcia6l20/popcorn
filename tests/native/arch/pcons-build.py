@@ -17,6 +17,7 @@ add_doctest("arch-interface", [here / "test_interface.cpp"], [core])
 arch_firmware = {
     name: firmware("arch", name) for name in ("scs", "exceptions", "svc", "timers", "faults")
 }
+arch_firmware["abi"] = firmware("abi", "abi")
 arch_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in arch_firmware.items()},
@@ -32,6 +33,7 @@ arch_tests = [
         ("arch-svc", "test_svc.cpp"),
         ("arch-timers", "test_timers.cpp"),
         ("arch-faults", "test_faults.cpp"),
+        ("arch-calls", "test_calls.cpp"),
     )
 ]
 for test in arch_tests:

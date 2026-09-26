@@ -192,6 +192,8 @@ struct state
   std::optional<sleep_state> sleep{};
   /** @brief Event register of WFE. */
   bool event_register{};
+  /** @brief Set while a call masks asynchronous exceptions. */
+  bool call_masked{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(state const&, state const&) -> bool = default;

@@ -18,6 +18,17 @@ namespace popcorn::arch::armv8m
  * 0xE0002000 and the SCS at 0xE000E000, 4 KB each, and refuses a description with a peripheral
  * inside them. Unicorn reports WFE and YIELD with pc past the instruction, not at it.
  *
+ * Calls follow AAPCS32: `float_abi::soft` passes floating-point values in core registers,
+ * `float_abi::hard_double` in s0-s15 and d0-d7 with back-filling, the AAPCS-VFP variant.
+ * `float_abi::hard_single` is a RISC-V convention and refused. `call_stack::main` runs the call
+ * on MSP, `call_stack::process` on PSP, `call_stack::current` on the stack Thread mode had
+ * selected, MSP when paused in a handler. The return sentinel must lie below 0xE0000000, the
+ * execute-never system region. A call never changes PRIMASK: a masked call holds back
+ * asynchronous exceptions only, SVC and faults stay live. After the call the machine restores the
+ * paused registers and module state. SysTick keeps its live phase unless the call reprogrammed
+ * it, ticks missed during a masked call are taken as one SysTick, and an IRQ line raised during
+ * the call is taken after it.
+ *
  * Current limitations:
  *
  * - SysTick and DWT CYCCNT count processor cycles derived from executed instructions and the

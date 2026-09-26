@@ -147,13 +147,16 @@ auto execution_priority(
   return priority;
 }
 
-auto best_pending(exception_state const& exceptions) noexcept -> std::optional<std::uint32_t>
+auto best_pending(exception_state const& exceptions, bool synchronous_only) noexcept
+    -> std::optional<std::uint32_t>
 {
   std::optional<std::uint32_t> best;
   for(std::uint32_t number = exc_nmi; number < exceptions.priority.size(); ++number)
   {
     auto const enabled = number < exc_irq0 or test_bit(exceptions.enabled, number);
-    if(not enabled or not test_bit(exceptions.pending, number))
+    if(not enabled
+       or not test_bit(exceptions.pending, number)
+       or (synchronous_only and not synchronous(number)))
     {
       continue;
     }
