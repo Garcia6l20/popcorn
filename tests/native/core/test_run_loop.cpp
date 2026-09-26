@@ -2,6 +2,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/scheduler.hpp>
+#include <popcorn/core/trace.hpp>
 
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
@@ -32,6 +33,7 @@ namespace image = popcorn::image;
 using popcorn::address;
 using popcorn::icount;
 using popcorn::stop_reason;
+using popcorn::core::trace_kind;
 
 using popcorn::testing::elf;
 using popcorn::testing::m33;
@@ -746,4 +748,44 @@ TEST_CASE("a resumed trap that pends an interrupt enters its handler in the same
   REQUIRE(f.module->aborts > 1);
   auto const entries = f.word(sym("run", "irq_count"));
   CHECK((entries == f.module->aborts or entries + 1 == f.module->aborts));
+}
+
+TEST_CASE("stop_when at the slice end runs as a handler: views work, state changes throw")
+{
+  auto       f      = alu(1'000'000);
+  auto const entry  = f.target->regs().read(*f.target->regs().find("pc"));
+  bool       asked  = false;
+  auto const result = f.run(
+      {.max_instructions = icount{1}, .wall_budget = std::chrono::seconds{60}, .stop_when = [&] {
+         asked = true;
+         CHECK(f.target->regs().read(*f.target->regs().find("pc")) != 0);
+         CHECK(f.target->mem().read(static_cast<address>(entry), 2).has_value());
+         CHECK_THROWS_AS(f.target->reset(), popcorn::machine_running);
+         CHECK_THROWS_AS(std::ignore = f.target->run_slice({}), popcorn::machine_busy);
+         return true;
+       }});
+  CHECK(asked);
+  REQUIRE(result.stopped.has_value());
+  CHECK(result.stopped->reason == stop_reason::user);
+}
+
+TEST_CASE("a throwing stop_when leaves the slice's trace records delivered")
+{
+  auto                    f = boot_run(m33());
+  std::vector<trace_kind> seen;
+  auto const              sink = f.target->add_trace_sink(
+      {trace_kind::block}, [&seen](std::span<popcorn::core::trace_record const> records) {
+        for(auto const& record : records)
+        {
+          seen.push_back(record.kind);
+        }
+      });
+  CHECK_THROWS_AS(
+      std::ignore = f.run(
+          {.max_instructions = icount{100},
+           .wall_budget      = std::chrono::seconds{60},
+           .stop_when        = []() -> bool { throw test_failure{"stop_when"}; }}),
+      test_failure);
+  CHECK_FALSE(seen.empty());
+  CHECK_FALSE(f.target->running());
 }

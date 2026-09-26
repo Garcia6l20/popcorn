@@ -290,6 +290,23 @@ TEST_CASE("stop_when is asked after every dispatched event")
   CHECK(ticks(f) == 2);
 }
 
+TEST_CASE("stop_when after a dispatched event runs as a handler")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_entry"));
+  auto       calls = 0;
+  auto const stop  = f.run_to_stop({.stop_when = [&] {
+    ++calls;
+    CHECK(f.target->regs().read(*f.target->regs().find("sp")) != 0);
+    CHECK(f.target->mem().read(sym("idle", "ticks"), 4).has_value());
+    CHECK_THROWS_AS(f.target->reset(), popcorn::machine_running);
+    CHECK_THROWS_AS(std::ignore = f.target->run_slice({}), popcorn::machine_busy);
+    return f.module->timer_expiries == 1;
+  }});
+  CHECK(stop.reason == stop_reason::user);
+  CHECK(calls >= 1);
+}
+
 TEST_CASE("a reset request stops under the stop policy and names the kind")
 {
   auto f = booted("calls");

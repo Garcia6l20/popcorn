@@ -1,6 +1,7 @@
 #include "machine_impl.hpp"
 
 #include "engine.hpp"
+#include "handler_scope.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
@@ -28,23 +29,6 @@ auto register_name(peripheral_desc const& unit, std::uint32_t word) -> std::stri
   return found == unit.registers.end() ? std::string{} : found->name;
 }
 
-class handler_scope
-{
-public:
-  explicit handler_scope(bool& in_handler) noexcept
-      : in_handler_{in_handler}, outer_{std::exchange(in_handler, true)}
-  {}
-  handler_scope(handler_scope const&)                    = delete;
-  auto operator=(handler_scope const&) -> handler_scope& = delete;
-  ~handler_scope()
-  {
-    in_handler_ = outer_;
-  }
-
-private:
-  bool& in_handler_;
-  bool  outer_;
-};
 }
 
 void machine::run_state::map_peripherals()

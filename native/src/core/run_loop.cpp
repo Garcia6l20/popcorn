@@ -1,6 +1,7 @@
 #include "machine_impl.hpp"
 
 #include "engine.hpp"
+#include "handler_scope.hpp"
 
 #include <popcorn/core/errors.hpp>
 
@@ -563,7 +564,7 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
           and peripherals[due->id.owner]->model);
       peripherals[due->id.owner]->model->on_event(due->id.kind, due->payload);
     }
-    if(request.stop_when and request.stop_when())
+    if(request.stop_when and asks_stop(request))
     {
       return slice_end{make_stop(stop_reason::user, {}, std::nullopt)};
     }
@@ -577,6 +578,12 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
     }
   }
   return std::nullopt;
+}
+
+auto machine::run_state::asks_stop(slice_request const& request) -> bool
+{
+  handler_scope const scope{in_handler};
+  return request.stop_when();
 }
 
 auto machine::run_state::idle_jump(slice_request const& request) -> std::optional<slice_end>
@@ -726,7 +733,8 @@ auto machine::run_state::stop_from(arch::trap_result const& result) const -> sli
 
 auto machine::run_state::finish(slice_request const& request, slice_end end) -> slice_result
 {
-  if(not end.stopped and request.stop_when and request.stop_when())
+  flush_sinks();
+  if(not end.stopped and request.stop_when and asks_stop(request))
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
   }

@@ -1,6 +1,7 @@
 #include "machine_impl.hpp"
 
 #include "engine.hpp"
+#include "handler_scope.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
@@ -14,24 +15,6 @@ namespace popcorn::core
 {
 namespace
 {
-class handler_scope
-{
-public:
-  explicit handler_scope(bool& in_handler) noexcept
-      : in_handler_{in_handler}, outer_{std::exchange(in_handler, true)}
-  {}
-  handler_scope(handler_scope const&)                    = delete;
-  auto operator=(handler_scope const&) -> handler_scope& = delete;
-  ~handler_scope()
-  {
-    in_handler_ = outer_;
-  }
-
-private:
-  bool& in_handler_;
-  bool  outer_;
-};
-
 constexpr auto hook_types(watch_kind kind) noexcept -> int
 {
   switch(kind)

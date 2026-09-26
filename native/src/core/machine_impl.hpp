@@ -1111,6 +1111,9 @@ struct machine::run_state
   [[nodiscard]] auto next_deadline(slice_request const& request) const -> icount;
   [[nodiscard]] auto handle_requests() -> std::optional<slice_end>;
   [[nodiscard]] auto dispatch_due(slice_request const& request) -> std::optional<slice_end>;
+  /** @brief Evaluates the request's stop_when as a handler: views work, state changes throw
+   * machine_running. */
+  [[nodiscard]] auto asks_stop(slice_request const& request) -> bool;
   [[nodiscard]] auto idle_jump(slice_request const& request) -> std::optional<slice_end>;
   [[nodiscard]] auto exit_list(slice_request const& request) const -> std::vector<address>;
   [[nodiscard]] auto bound_reached(slice_request const& request) -> std::optional<slice_end>;
