@@ -112,7 +112,8 @@ struct slice_request
    * Whole blocks run up to the last block boundary before the count, then the remaining
    * instructions are single-stepped, which costs a per-instruction hook for those only. */
   std::optional<icount> exact_instructions{};
-  /** @brief Stop with stop_reason::time on reaching this virtual time since reset. */
+  /** @brief Stop with stop_reason::time on reaching this virtual time since reset, also while
+   * the core sleeps with no event pending: the clock jumps there. */
   std::optional<vtime> until_time{};
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */
@@ -275,8 +276,9 @@ public:
   /**
    * @brief Runs one native slice, synchronously: delivers a pending interrupt, runs the engine
    *        until a bound, a stop request or a trap, dispatches due events, and when the core
-   *        idles moves the clock to the next event. Loop-agnostic: an asyncio driver and a fuzz
-   *        driver both call it in a loop.
+   *        idles moves the clock to the next event or to until_time, whichever comes first, and
+   *        stops with stop_reason::idle only when neither exists. Loop-agnostic: an asyncio
+   *        driver and a fuzz driver both call it in a loop.
    * @param request Bounds and stop conditions.
    * @return The stop, or an empty stop when only a yield bound was reached.
    * @throws machine_busy when a slice is already running, from a handler of it.

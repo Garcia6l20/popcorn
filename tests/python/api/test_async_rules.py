@@ -151,11 +151,6 @@ def test_a_fault_inside_running_raises_on_exit(machines: Machines) -> None:
     assert caught.value.address == 0x6000_0000
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TimeoutError,
-    reason="run_state::idle_jump stops IDLE without jumping to until_time when no event is due",
-)
 def test_a_deadline_inside_running_advances_an_idle_machine(machines: Machines) -> None:
     m = machines("idle")
     start = m.time

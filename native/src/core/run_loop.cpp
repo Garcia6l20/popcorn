@@ -582,13 +582,16 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
 auto machine::run_state::idle_jump(slice_request const& request) -> std::optional<slice_end>
 {
   auto const next = owner.scheduler_.next_deadline();
-  if(not next)
+  if(not next and not request.until_time)
   {
     return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
   }
-  auto const now    = owner.clock_.now();
-  auto       target = std::min(
-      *next, add_sat(now, left(request.max_instructions, icount{executed.value + jumped.value})));
+  auto const now = owner.clock_.now();
+  auto target = add_sat(now, left(request.max_instructions, icount{executed.value + jumped.value}));
+  if(next)
+  {
+    target = std::min(target, *next);
+  }
   if(request.until_time)
   {
     target = std::min(target, owner.clock_.to_icount(*request.until_time));

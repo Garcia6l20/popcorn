@@ -219,6 +219,67 @@ TEST_CASE("idle with no event pending stops as idle after the wfi")
   CHECK(stop.where.pc == sym("idle", "idle_forever") + 2);
 }
 
+TEST_CASE("idle with no event pending reaches until_time and the next slice continues there")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const start = f.target->virtual_clock().time();
+  auto const first = vtime{start.ps + ps_per_second / 1000};
+  auto const stop  = f.run_to_stop({.until_time = first});
+  CHECK(stop.reason == stop_reason::time);
+  CHECK(stop.time == first);
+  CHECK(stop.instructions == f.target->virtual_clock().to_icount(first));
+  CHECK(stop.where.pc == sym("idle", "idle_forever") + 2);
+  auto const second = vtime{first.ps + ps_per_second / 1000};
+  auto const again  = f.run(
+      {.max_instructions = icount{1'000'000'000}, .wall_budget = long_wall, .until_time = second});
+  REQUIRE(again.stopped.has_value());
+  CHECK(again.stopped->reason == stop_reason::time);
+  CHECK(again.stopped->time == second);
+  CHECK(again.executed == icount{0});
+  CHECK(f.run_to_stop().reason == stop_reason::idle);
+  CHECK(f.target->virtual_clock().time() == second);
+}
+
+TEST_CASE("an event due exactly at until_time while asleep is dispatched before the time stop")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock  = f.target->virtual_clock();
+  auto const  target = vtime{clock.time().ps + ps_per_second / 1000};
+  auto const  at     = clock.to_icount(target);
+  std::ignore        = f.module->attached_events().schedule(at, 1, 7);
+  f.module->event_log.clear();
+  auto const stop = f.run_to_stop({.until_time = target});
+  CHECK(stop.reason == stop_reason::time);
+  CHECK(stop.time == target);
+  CHECK(
+      f.module->event_log
+      == std::vector<logged>{
+          {.kind = 1, .payload = 7, .at = at}
+  });
+}
+
+TEST_CASE("an idle jump toward until_time stops at the slice bound first and resumes")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const clock  = &f.target->virtual_clock();
+  auto const start  = clock->now();
+  auto const target = vtime{clock->time().ps + ps_per_second};
+  auto const capped =
+      f.run({.max_instructions = icount{1000}, .wall_budget = long_wall, .until_time = target});
+  CHECK_FALSE(capped.stopped.has_value());
+  CHECK(clock->now() == icount{start.value + 1000});
+  auto const rest =
+      f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = target});
+  CHECK(rest.reason == stop_reason::time);
+  CHECK(clock->time() == target);
+}
+
 TEST_CASE("stop_when is asked after every dispatched event")
 {
   auto f = booted("idle");

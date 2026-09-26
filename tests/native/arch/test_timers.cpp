@@ -305,6 +305,46 @@ TEST_CASE("an engine exit right after a wfi reached by a return is not taken for
   CHECK(f.target->virtual_clock().now().value - before == 1);
 }
 
+TEST_CASE("wfi with nothing queued sleeps to until_time, the same again after a restore")
+{
+  auto f = booted();
+  REQUIRE(start(f, "wfi_empty").reason == stop_reason::idle);
+  auto const saved  = f.target->snapshot();
+  auto const target = popcorn::vtime{f.target->virtual_clock().time().ps + 1'000'000'000};
+  auto const sleep  = [&f, target] {
+    auto const stopped = f.run_to_stop({.until_time = target});
+    CHECK(stopped.reason == stop_reason::time);
+    CHECK(stopped.time == target);
+    CHECK(stopped.where.pc == code("wfi_empty") + 2);
+    CHECK(f.module->idle());
+    return stopped.instructions;
+  };
+  auto const first = sleep();
+  f.target->restore(saved);
+  CHECK(sleep() == first);
+}
+
+TEST_CASE("sleep-on-exit sleeps to an until_time between two ticks")
+{
+  auto f = booted();
+  f.set("pc", fn("sleep_on_exit"));
+  auto const begin = f.target->virtual_clock().now().value;
+  run_to_instruction(f, begin + 5 * period);
+  auto const before  = ticks(f);
+  auto const clock   = &f.target->virtual_clock();
+  auto const current = f.target->mem().read(0xE000'E018, 4);
+  REQUIRE(current.has_value());
+  auto const ahead = std::uint64_t{*current} + period / 2;
+  auto const target =
+      popcorn::vtime{clock->time().ps + ahead * 1'000'000'000'000 / clock->instruction_hz()};
+  auto const stopped = f.run_to_stop({.until_time = target});
+  CHECK(stopped.reason == stop_reason::time);
+  CHECK(stopped.time == target);
+  CHECK(ticks(f) == before + 1);
+  CHECK(f.module->idle());
+  CHECK(f.word(fn("thread_counter")) == 0);
+}
+
 TEST_CASE("a pc write while asleep runs from the new pc and never completes the old wfi")
 {
   auto f = booted();
