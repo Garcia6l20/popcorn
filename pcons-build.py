@@ -111,7 +111,7 @@ if VARIANT != "asan":
         staged.build_tier = "default"
     project.Alias("stage-python", *staged_sources)
     stub = add_stub(ext, "popcorn", "_core", after=staged_sources)
-    obs_python = obs.add_python(staged_sources)
+    obs_python = obs.add_python([*staged_sources, ext])
 
     if get_var("PCONS_BUILD_WHEEL", False):
         project.Alias(
