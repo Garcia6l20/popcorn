@@ -2,7 +2,9 @@ popcorn
 Copyright (c) 2026 Sylvain Garcia
 
 popcorn source code is released under the MIT License, see LICENSE. This
-repository contains no third-party source code. Unicorn and reflex are git
+repository contains no third-party source code. The prebuilt test firmware
+under tests/firmware/periph/prebuilt contains object code compiled from the
+firmware-only packages listed last. Unicorn and reflex are git
 submodules under third_party/, pinned by commit. The other components below
 are downloaded at build time from their upstream archives, pinned by version
 and verified by sha256. Everything is compiled on the user's machine. The built
@@ -47,3 +49,22 @@ robin-map
 doctest
   https://github.com/doctest/doctest
   License: MIT. Used by native test programs only, not part of the extension.
+
+Firmware-only packages. Fetched only when arm-none-eabi-gcc is found, compiled
+into the STM32 test firmware only, never linked into popcorn, its extension or
+its native test programs.
+
+STM32U5 HAL and LL drivers, v1.6.2, Copyright 2021 STMicroelectronics
+  https://github.com/STMicroelectronics/stm32u5xx-hal-driver
+  License: BSD-3-Clause, see LICENSES/stm32u5xx-hal-driver-LICENSE.md. The LL
+  drivers are used.
+
+CMSIS device STM32U5, v1.4.2, Copyright STMicroelectronics
+  https://github.com/STMicroelectronics/cmsis-device-u5
+  License: Apache-2.0, see LICENSES/Apache-2.0.txt. The device headers, the
+  STM32U575 startup file and the system file are used.
+
+CMSIS 5, v5.9.0, Copyright Arm Limited
+  https://github.com/ARM-software/CMSIS_5
+  License: Apache-2.0, see LICENSES/Apache-2.0.txt. Only the core headers
+  under CMSIS/Core/Include are used.

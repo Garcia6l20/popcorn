@@ -17,6 +17,8 @@ from pcons.packages.fetch.cli import (
 )
 
 from popcorn_build.config import build_dir, project_dir
+from popcorn_build.firmware import toolchain_found
+from popcorn_build.manifest import is_firmware_only, packages_to_fetch
 
 deps_file = project_dir / "deps.toml"
 deps_dir = build_dir / "deps"
@@ -39,9 +41,12 @@ def _log_fetches() -> None:
     logging.basicConfig(level=logging.INFO, format="pcons-fetch: %(message)s")
 
 
+manifest: dict[str, dict[str, Any]] = load_deps_file(deps_file)["packages"]
+
+
 def _fetch_missing() -> dict[str, Path]:
-    manifest: dict[str, dict[str, Any]] = load_deps_file(deps_file)["packages"]
-    missing = [name for name in manifest if not (pkg_dir / f"{name}.pcons-pkg.toml").exists()]
+    wanted = packages_to_fetch(manifest, with_firmware=toolchain_found)
+    missing = [name for name in wanted if not (pkg_dir / f"{name}.pcons-pkg.toml").exists()]
     if missing:
         _log_fetches()
         for name in missing:
@@ -49,7 +54,7 @@ def _fetch_missing() -> dict[str, Path]:
                 raise SystemExit(f"popcorn: fetching {name} from deps.toml failed")
     return {
         name: Path(PackageDescription.from_toml(pkg_dir / f"{name}.pcons-pkg.toml").prefix)
-        for name in manifest
+        for name in wanted
     }
 
 
@@ -155,3 +160,12 @@ def package(name: str) -> ImportedTarget:
         )
         _imported[name] = ImportedTarget.from_package(description)
     return _imported[name]
+
+
+def firmware_source(name: str) -> Path:
+    """Source tree of the firmware-only package @p name, fetched only with arm-none-eabi-gcc."""
+    if name not in manifest or not is_firmware_only(manifest[name]):
+        raise SystemExit(f"popcorn: {name} is not a firmware-only package of deps.toml")
+    if name not in prefixes:
+        raise SystemExit(f"popcorn: firmware package {name} needs arm-none-eabi-gcc on PATH")
+    return prefixes[name]

@@ -38,15 +38,21 @@ def add_doctest(
     deps: Sequence[Target] = (),
     group: str = "native",
     env: Mapping[str, str] | None = None,
+    register: bool = True,
 ) -> Target:
-    """Build a doctest program and register one test per case under @p group, run with @p env."""
+    """Build a doctest program and register one test per case under @p group, run with @p env.
+
+    With @p register false the program is built but no test is registered, for tests whose
+    inputs this machine lacks.
+    """
     project = context.current_project
     program = project.Program(f"test-{name}", project.default_environment, sources=list(sources))
     for dep in [*deps, package("doctest"), _doctest_with_main()]:
         program.link(dep)
-    project.Test(
-        f"{group}.{name}", program, discover="doctest", labels=[group], env=dict(env or {})
-    )
+    if register:
+        project.Test(
+            f"{group}.{name}", program, discover="doctest", labels=[group], env=dict(env or {})
+        )
     project.Alias(f"test-{group}", program)
     alias_bare_name(program)
     return program

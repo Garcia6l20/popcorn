@@ -15,3 +15,24 @@ url = "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz"
 sha256 = "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331"
 version = "2.5.3"
 build = "none"
+
+[packages.stm32u5-hal-driver]
+url = "https://github.com/STMicroelectronics/stm32u5xx-hal-driver/archive/refs/tags/v1.6.2.tar.gz"
+sha256 = "6c8dff59e51279f8b466cafd7e6eda59cdc85de4918274d7976519f892d79d47"
+version = "1.6.2"
+build = "none"
+firmware = true
+
+[packages.cmsis-device-u5]
+url = "https://github.com/STMicroelectronics/cmsis-device-u5/archive/refs/tags/v1.4.2.tar.gz"
+sha256 = "43e84096f4938727cd66745da8a532f96c315227f48ddef9544166c52b7cce2b"
+version = "1.4.2"
+build = "none"
+firmware = true
+
+[packages.cmsis-core]
+url = "https://github.com/ARM-software/CMSIS_5/archive/refs/tags/5.9.0.tar.gz"
+sha256 = "9ce693dd15c41f02506adda79323c077912b3211303ca0d9b28b8ebe735a7031"
+version = "5.9.0"
+build = "none"
+firmware = true

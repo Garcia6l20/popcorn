@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "part": "STM32BASE",
+  "generator": "hand-written",
+  "sources": {
+    "svd": "0000000000000000000000000000000000000000000000000000000000000000",
+    "rzone": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "core": {
+    "cpu": "CM33",
+    "revision": "r0p1",
+    "fpu": true,
+    "fpu_double": false,
+    "mpu": true,
+    "mpu_regions": 8,
+    "mpu_regions_secure": 0,
+    "sau_regions": 0,
+    "trustzone": false,
+    "dsp": false,
+    "nvic_prio_bits": 3,
+    "num_irqs": 1,
+    "vendor_systick_config": false,
+    "reset_clock_hz": 4000000
+  },
+  "regions": [
+    {
+      "name": "FLASH",
+      "start": 134217728,
+      "size": 65536,
+      "kind": "rom",
+      "acc": {
+        "read": true,
+        "write": false,
+        "execute": true
+      },
+      "secure": false
+    },
+    {
+      "name": "SRAM",
+      "start": 536870912,
+      "size": 16384,
+      "kind": "ram",
+      "acc": {
+        "read": true,
+        "write": true,
+        "execute": true
+      },
+      "secure": false
+    }
+  ],
+  "peripherals": [
+    {
+      "name": "RCC",
+      "ip": "RCC",
+      "ip_version": "STM32U5_rcc_v1_0",
+      "base": 1174539264,
+      "size": 1024,
+      "registers": [
+        {
+          "name": "RCC_CR",
+          "offset": 0,
+          "width": 32,
+          "reset": 53,
+          "reset_mask": 4294967295,
+          "acc": "read_write",
+          "fields": [
+            {
+              "name": "MSISON",
+              "lsb": 0,
+              "width": 1,
+              "acc": "read_write",
+              "on_write": "modify",
+              "on_read": "none"
+            },
+            {
+              "name": "MSISRDY",
+              "lsb": 2,
+              "width": 1,
+              "acc": "read_only",
+              "on_write": "modify",
+              "on_read": "none"
+            },
+            {
+              "name": "HSION",
+              "lsb": 8,
+              "width": 1,
+              "acc": "read_write",
+              "on_write": "modify",
+              "on_read": "none"
+            },
+            {
+              "name": "HSIRDY",
+              "lsb": 10,
+              "width": 1,
+              "acc": "read_only",
+              "on_write": "modify",
+              "on_read": "none"
+            }
+          ]
+        },
+        {
+          "name": "RCC_CFGR1",
+          "offset": 28,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "read_write",
+          "fields": [
+            {
+              "name": "SW",
+              "lsb": 0,
+              "width": 2,
+              "acc": "read_write",
+              "on_write": "modify",
+              "on_read": "none"
+            },
+            {
+              "name": "SWS",
+              "lsb": 2,
+              "width": 2,
+              "acc": "read_only",
+              "on_write": "modify",
+              "on_read": "none"
+            }
+          ]
+        },
+        {
+          "name": "RCC_HALF",
+          "offset": 34,
+          "width": 16,
+          "reset": 0,
+          "reset_mask": 65535,
+          "acc": "read_write",
+          "fields": [
+            {
+              "name": "LOW",
+              "lsb": 0,
+              "width": 4,
+              "acc": "read_write",
+              "on_write": "modify",
+              "on_read": "none"
+            }
+          ]
+        }
+      ],
+      "cross_rules": [],
+      "irqs": [
+        0
+      ]
+    }
+  ],
+  "irqs": [
+    {
+      "number": 0,
+      "name": "RCC_IRQn"
+    }
+  ]
+}
