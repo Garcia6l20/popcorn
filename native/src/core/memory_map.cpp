@@ -45,6 +45,12 @@ auto protection(region_desc const& region) noexcept -> std::uint32_t
   return prot;
 }
 
+auto overlaps(std::uint64_t start, std::uint64_t end, address other, std::uint64_t size) noexcept
+    -> bool
+{
+  return start < other + size and other < end;
+}
+
 auto allocate(region_desc const& region) -> std::shared_ptr<host_buffer>
 {
   auto buffer   = std::make_shared<host_buffer>();
@@ -58,19 +64,68 @@ auto allocate(region_desc const& region) -> std::shared_ptr<host_buffer>
 }
 }
 
+auto machine::mapped_region::scratch_region(
+    mcu_description const& description,
+    address_range const&   scratch,
+    std::uint32_t          page) -> std::unique_ptr<mapped_region>
+{
+  auto const refuse = [&](std::string expected) {
+    throw config_error("machine_options", 0, "scratch", std::move(expected));
+  };
+  auto const start = std::uint64_t{scratch.start};
+  auto const end   = start + scratch.size;
+  auto const name  = scratch.name.empty() ? std::string{"scratch"} : scratch.name;
+  if(scratch.size == 0 or start % page != 0 or scratch.size % page != 0)
+  {
+    refuse(std::format("a non-empty range, start and size multiples of {} bytes", page));
+  }
+  for(auto const& region : description.regions)
+  {
+    if(overlaps(start, end, region.start, region.size))
+    {
+      refuse(std::format("a range outside region {}", region.name));
+    }
+    if(region.name == name)
+    {
+      refuse(std::format("a name other than region {}", region.name));
+    }
+  }
+  for(auto const& peripheral : description.peripherals)
+  {
+    if(overlaps(start, end, peripheral.base, peripheral.size))
+    {
+      refuse(std::format("a range outside peripheral {}", peripheral.name));
+    }
+  }
+  auto              owned = std::make_unique<region_desc const>(region_desc{
+      .name     = name,
+      .start    = scratch.start,
+      .size     = scratch.size,
+      .kind     = region_kind::ram,
+      .acc      = {.read = true, .write = true, .execute = false},
+      .secure   = false,
+      .physical = std::nullopt,
+  });
+  auto const* const desc  = owned.get();
+  return std::make_unique<mapped_region>(
+      mapped_region{.desc = desc, .buffer = {}, .offset = 0, .owned = std::move(owned)});
+}
+
 void aligned_free::operator()(std::byte* bytes) const noexcept
 {
   ::operator delete[](bytes, host_alignment);
 }
 
-auto machine::mapped_region::build(uc_struct* engine, mcu_description const& description)
-    -> std::vector<std::unique_ptr<mapped_region>>
+auto machine::mapped_region::build(
+    uc_struct*                          engine,
+    mcu_description const&              description,
+    std::optional<address_range> const& scratch) -> std::vector<std::unique_ptr<mapped_region>>
 {
   std::uint32_t page = 0;
   check(uc_ctl_get_page_size(engine, &page), "reading the engine page size");
 
   std::vector<std::unique_ptr<mapped_region>> memory;
-  memory.reserve(description.regions.size());
+  memory.reserve(description.regions.size() + 1);
   for(auto const& region : description.regions)
   {
     if(region.start % page != 0 or region.size % page != 0)
@@ -81,6 +136,10 @@ auto machine::mapped_region::build(uc_struct* engine, mcu_description const& des
     }
     memory.push_back(
         std::make_unique<mapped_region>(mapped_region{.desc = &region, .buffer = {}, .offset = 0}));
+  }
+  if(scratch)
+  {
+    memory.push_back(scratch_region(description, *scratch, page));
   }
 
   for(auto& mapped : memory)
@@ -96,7 +155,8 @@ auto machine::mapped_region::build(uc_struct* engine, mcu_description const& des
     }
     auto const target = std::ranges::find_if(memory, [&](auto const& candidate) {
       auto const& other = *candidate->desc;
-      return not other.physical
+      return not candidate->owned
+         and not other.physical
          and other.start
           <= *region.physical
          and *region.physical

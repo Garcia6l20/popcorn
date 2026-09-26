@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -54,19 +55,38 @@ struct machine::mapped_region
   std::shared_ptr<host_buffer> buffer;
   /** @brief Offset of the region's first byte within the buffer. */
   std::size_t offset{};
+  /** @brief Region desc outside the description, the scratch region's, which desc points to. */
+  std::unique_ptr<region_desc const> owned{};
 
   /**
    * @brief Allocates a host buffer per region without `physical`, maps every region in the
-   *        engine, aliases onto their target's buffer.
+   *        engine, aliases onto their target's buffer, then the scratch region as RAM,
+   *        read-write, not executable.
    * @param engine Engine to map into.
    * @param description Description whose regions are mapped, which must outlive the result.
-   * @return One entry per region, in description order.
+   * @param scratch `machine_options::scratch`.
+   * @return One entry per region, in description order, then the scratch region.
    * @throws config_error naming a region that is not page aligned, or whose `physical` does not
-   *         fall inside another region.
+   *         fall inside another region, or key `scratch` when the scratch region is empty, not
+   *         page aligned, overlaps a region or a peripheral, or shares a region's name.
    * @throws emulation_error when the engine refuses a mapping.
    */
-  static auto build(uc_struct* engine, mcu_description const& description)
-      -> std::vector<std::unique_ptr<mapped_region>>;
+  static auto build(
+      uc_struct*                          engine,
+      mcu_description const&              description,
+      std::optional<address_range> const& scratch) -> std::vector<std::unique_ptr<mapped_region>>;
+
+  /**
+   * @brief Unmapped entry for the scratch region, its desc owned.
+   * @param description Description the region must stay clear of.
+   * @param scratch `machine_options::scratch`.
+   * @param page Engine page size in bytes.
+   * @throws config_error with key `scratch`, as build() documents.
+   */
+  static auto scratch_region(
+      mcu_description const& description,
+      address_range const&   scratch,
+      std::uint32_t          page) -> std::unique_ptr<mapped_region>;
 
   /**
    * @brief Region holding every byte of an access.

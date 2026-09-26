@@ -78,6 +78,15 @@ struct machine_options
    * region containing address 0, otherwise of the first region in description order with execute
    * access. */
   std::optional<address> vector_table{};
+  /** @brief RAM region mapped read-write and not executable outside the description, such as a
+   * call argument arena. Part of snapshot memory, so a restore resets it. Named by its `name`,
+   * `scratch` when empty. Must stay clear of the description's regions and peripherals, which
+   * the machine refuses with config_error, and of the arch module's system space, which the arch
+   * module's attach refuses. A description alias never targets it. */
+  std::optional<address_range> scratch{};
+  /** @brief Digest of the configuration the machine was built from, such as a project file,
+   * stored in every snapshot as `snapshot_data::config_digest`. Opaque to the core. */
+  std::string config_digest{};
 };
 
 /**
@@ -238,6 +247,16 @@ public:
   [[nodiscard]] auto loaded_images() const noexcept -> std::span<popcorn::image::image const>;
 
   /**
+   * @brief Locates an address the way a stop's `where` does: the function or object containing
+   *        it across every loaded image, then the file and line from the last loaded image whose
+   *        segments cover it.
+   * @param pc Guest address.
+   * @return The location, symbol and file empty when unknown. Its views stay valid until the
+   *         next load().
+   */
+  [[nodiscard]] auto locate(address pc) const -> location;
+
+  /**
    * @brief Resets the machine as @p kind, in this order: event queue cleared, clock restarted at
    *        instruction 0 and time 0 at the power-on core clock, for every kind, the arch module's
    *        `reset` at the reset vector, see machine_options::vector_table, then per peripheral in
@@ -371,8 +390,9 @@ public:
    * @throws machine_running while a slice runs, handlers included.
    * @throws machine_busy during a call begun by begin_call() and not ended.
    * @throws emulation_error when @p saved was taken by another machine.
-   * @throws config_error when a snapshot read back from bytes names another description or other
-   *         images, or has another format.
+   * @throws config_error when a snapshot read back from bytes names another description, other
+   *         images or another `machine_options::config_digest`, or has another format, or when its
+   * memory regions, the scratch region included, are not this machine's.
    */
   void restore(core::snapshot const& saved);
 

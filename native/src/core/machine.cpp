@@ -86,7 +86,7 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
   }
   engine_.reset(open_engine(arch_->engine()).release());
   run_->engine = engine_.get();
-  memory_      = mapped_region::build(engine_.get(), description_);
+  memory_      = mapped_region::build(engine_.get(), description_, options_.scratch);
   try
   {
     arch_->attach(run_->arch_context.emplace(
@@ -187,6 +187,11 @@ void machine::load(popcorn::image::image const& loaded)
 auto machine::loaded_images() const noexcept -> std::span<popcorn::image::image const>
 {
   return images_;
+}
+
+auto machine::locate(address pc) const -> location
+{
+  return run_->locate(pc);
 }
 
 void machine::reset(reset_kind kind)

@@ -14,7 +14,7 @@
 namespace popcorn::core
 {
 /** @brief Version of the snapshot_data layout, stamped by the machine and checked on restore. */
-inline constexpr std::uint32_t snapshot_format_version = 1;
+inline constexpr std::uint32_t snapshot_format_version = 2;
 
 /** @brief Opaque state saved by one owner: the arch module or one peripheral model. */
 struct snapshot_part
@@ -152,9 +152,12 @@ struct snapshot_data
   std::string description_digest{};
   /** @brief Digest of each loaded image, in load order. */
   std::vector<std::string> image_digests{};
+  /** @brief `machine_options::config_digest` of the machine that took the snapshot. */
+  std::string config_digest{};
   /** @brief Machine generation when the snapshot was taken. */
   std::uint64_t generation{};
-  /** @brief Every mapped RAM and flash region, in description order. MMIO is not memory. */
+  /** @brief Every mapped RAM and flash region, in description order, then the scratch region of
+   * `machine_options::scratch`. MMIO is not memory. */
   std::vector<memory_image> memory{};
   /** @brief Every register of `arch::arch::registers()`, in its order. */
   std::vector<register_value> registers{};

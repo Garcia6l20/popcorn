@@ -68,6 +68,7 @@ auto machine::snapshot() const -> core::snapshot
       .unicorn_commit     = POPCORN_UNICORN_COMMIT,
       .description_digest = run.description_digest,
       .image_digests      = digests(images_),
+      .config_digest      = options_.config_digest,
       .generation         = generation_,
   };
   for(auto const& region : memory_)
@@ -180,6 +181,12 @@ void machine::restore(core::snapshot const& saved)
     {
       refuse("image_digests", std::format("the digests of the loaded images, {}", loaded));
     }
+    if(data.config_digest != options_.config_digest)
+    {
+      refuse(
+          "config_digest",
+          std::format("the config digest of this machine, {}", options_.config_digest));
+    }
   }
 
   auto const holds = [](memory_image const* image, region_desc const& region) {
@@ -242,6 +249,17 @@ void machine::restore(core::snapshot const& saved)
           std::format("{} bytes at {:#010x}", region->desc->size, region->desc->start));
     }
     plan.memory.emplace_back(region.get(), image);
+  }
+  for(auto const& image : data.memory)
+  {
+    auto const mapped = std::ranges::any_of(memory_, [&](auto const& region) {
+      return not region->desc->physical and region->desc->name == image.region;
+    });
+    if(not mapped)
+    {
+      refuse(
+          std::format("memory.{}", image.region), "a RAM, flash or scratch region of this machine");
+    }
   }
   if(not own or not saved.has_engine_context())
   {

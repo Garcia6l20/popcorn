@@ -297,7 +297,7 @@ void machine::run_state::on_code_site(
         case intercept_action::proceed:
           continue;
         case intercept_action::returns:
-          run.arch->return_to_caller(result.value(), run.abi_at(entry.at));
+          run.arch->return_to_caller(result.value(), result.abi().value_or(run.abi_at(entry.at)));
           run.coverage.has_previous = false;
           return false;
         case intercept_action::stop:
@@ -549,11 +549,12 @@ auto machine::add_watch(address at, std::uint32_t size, watch_kind kind, watch_h
   return hook_handle{hooks_, id};
 }
 
-auto intercept_call::args(std::span<arch::value_kind const> kinds) const
-    -> std::vector<std::uint64_t>
+auto intercept_call::args(
+    std::span<arch::value_kind const> kinds,
+    std::optional<arch::float_abi>    abi) const -> std::vector<std::uint64_t>
 {
   auto&            run = *machine_->run_;
-  arch::call_frame frame{.entry = function_, .abi = run.abi_at(function_)};
+  arch::call_frame frame{.entry = function_, .abi = abi.value_or(run.abi_at(function_))};
   for(auto const kind : kinds)
   {
     frame.args.push_back({.kind = kind, .bits = 0});

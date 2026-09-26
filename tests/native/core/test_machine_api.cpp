@@ -143,6 +143,13 @@ TEST_CASE("intercept results carry exactly their action's data")
   static_assert(returned.action() == core::intercept_action::returns);
   static_assert(returned.value()->bits == 0x1'0000'0000);
   static_assert(not returned.reason().has_value());
+  static_assert(not returned.abi().has_value());
+
+  constexpr auto soft_return = core::intercept_result::returns(
+      popcorn::arch::call_arg{.kind = popcorn::arch::value_kind::f64, .bits = 0},
+      popcorn::arch::float_abi::soft);
+  static_assert(soft_return.abi() == popcorn::arch::float_abi::soft);
+  static_assert(not proceed.abi().has_value());
 
   constexpr auto void_return = core::intercept_result::returns(std::nullopt);
   static_assert(not void_return.value().has_value());
@@ -167,6 +174,8 @@ TEST_CASE("machine options default to stopping on faults and reset requests")
   CHECK(options.on_reset_request == core::reset_request_policy::stop);
   CHECK(options.spin_threshold == 0);
   CHECK_FALSE(options.strict_peripherals);
+  CHECK_FALSE(options.scratch.has_value());
+  CHECK(options.config_digest.empty());
   CHECK(std::format("{}", core::reset_request_policy::reset_and_continue) == "reset_and_continue");
 }
 

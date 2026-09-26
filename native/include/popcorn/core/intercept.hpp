@@ -91,18 +91,20 @@ public:
   /** @brief Run the intercepted function as if no intercept were there. */
   [[nodiscard]] static constexpr auto proceed() noexcept -> intercept_result
   {
-    return intercept_result{intercept_action::proceed, std::nullopt, std::nullopt};
+    return intercept_result{intercept_action::proceed, std::nullopt, std::nullopt, std::nullopt};
   }
 
   /**
    * @brief Skip the function body and return to the caller.
-   * @param value Return value placed under the image's calling convention, none for a void
-   *        function.
+   * @param value Return value, none for a void function.
+   * @param abi Calling convention the value is placed under, empty for the image's. For a
+   *        function whose `pcs` attribute differs from the image, which DWARF does not record.
    */
-  [[nodiscard]] static constexpr auto returns(std::optional<arch::call_arg> value) noexcept
+  [[nodiscard]] static constexpr auto
+      returns(std::optional<arch::call_arg> value, std::optional<arch::float_abi> abi = {}) noexcept
       -> intercept_result
   {
-    return intercept_result{intercept_action::returns, value, std::nullopt};
+    return intercept_result{intercept_action::returns, value, std::nullopt, abi};
   }
 
   /**
@@ -112,7 +114,7 @@ public:
   [[nodiscard]] static constexpr auto stop(stop_reason reason) noexcept -> intercept_result
       pre(is_enumerator(reason)) pre(reason != stop_reason::fault)
   {
-    return intercept_result{intercept_action::stop, std::nullopt, reason};
+    return intercept_result{intercept_action::stop, std::nullopt, reason, std::nullopt};
   }
 
   /** @brief What the run loop does. */
@@ -133,17 +135,25 @@ public:
     return reason_;
   }
 
+  /** @brief Calling convention of a returns() result, empty for the image's and other actions. */
+  [[nodiscard]] constexpr auto abi() const noexcept -> std::optional<arch::float_abi>
+  {
+    return abi_;
+  }
+
 private:
   constexpr intercept_result(
-      intercept_action              action,
-      std::optional<arch::call_arg> value,
-      std::optional<stop_reason>    reason) noexcept
-      : action_{action}, value_{value}, reason_{reason}
+      intercept_action               action,
+      std::optional<arch::call_arg>  value,
+      std::optional<stop_reason>     reason,
+      std::optional<arch::float_abi> abi) noexcept
+      : action_{action}, value_{value}, reason_{reason}, abi_{abi}
   {}
 
-  intercept_action              action_;
-  std::optional<arch::call_arg> value_{};
-  std::optional<stop_reason>    reason_;
+  intercept_action               action_;
+  std::optional<arch::call_arg>  value_{};
+  std::optional<stop_reason>     reason_;
+  std::optional<arch::float_abi> abi_;
 };
 
 /**
@@ -165,11 +175,14 @@ public:
   [[nodiscard]] auto occurrence() const noexcept -> std::uint64_t;
 
   /**
-   * @brief Reads the arguments under the image's calling convention, `arch::arch::read_args()`.
+   * @brief Reads the arguments, `arch::arch::read_args()`.
    * @param kinds Type of each argument in declaration order, the function's signature.
+   * @param abi Calling convention to read them under, empty for the image's. For a function
+   *        whose `pcs` attribute differs from the image, which DWARF does not record.
    * @return Value bits of each argument, a float as its IEEE 754 bit pattern.
    */
-  [[nodiscard]] auto args(std::span<arch::value_kind const> kinds) const
+  [[nodiscard]] auto
+      args(std::span<arch::value_kind const> kinds, std::optional<arch::float_abi> abi = {}) const
       -> std::vector<std::uint64_t>;
 
   /** @brief Machine the call runs on, stopped at an instruction boundary for the handler. */
