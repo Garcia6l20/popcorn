@@ -465,6 +465,33 @@ public:
   }
 };
 
+class abort_pend_arch final : public popcorn::testing::test_arch
+{
+public:
+  using test_arch::test_arch;
+
+  static constexpr std::uint32_t prefetch_abort = 3;
+  static constexpr std::uint32_t exception_exit = 8;
+
+  std::uint32_t aborts = 0;
+  std::uint32_t other  = 0;
+
+  auto on_interrupt(std::uint32_t intno) -> popcorn::arch::trap_result override
+  {
+    if(intno == prefetch_abort)
+    {
+      ++aborts;
+      set_irq_line(0, true);
+      return popcorn::arch::trap_result::resume();
+    }
+    if(intno != exception_exit)
+    {
+      other = intno;
+    }
+    return test_arch::on_interrupt(intno);
+  }
+};
+
 template <typename Arch>
 auto boot_with(popcorn::mcu_description desc, auto... extra) -> fixture<Arch>
 {
@@ -702,4 +729,21 @@ TEST_CASE("the wall budget ends a slice whose engine runs stop at every first bl
   CHECK(slice.executed.value == 0);
   CHECK(took >= std::chrono::milliseconds{5});
   CHECK(took < std::chrono::seconds{2});
+}
+
+TEST_CASE("a resumed trap that pends an interrupt enters its handler in the same slice")
+{
+  auto       f       = boot_with<abort_pend_arch>(m33());
+  auto const handler = sym("run", "count_irq");
+  REQUIRE(f.target->mem().write(0x0800'0000 + 4 * 16, 4, handler | 1));
+  enter(f, "jump_xn");
+  f.module->other = 0;
+  auto const slice =
+      f.run({.max_instructions = icount{10'000}, .wall_budget = std::chrono::seconds{10}});
+  CHECK(f.module->other == 0);
+  CHECK_FALSE(slice.stopped.has_value());
+  CHECK(slice.executed.value >= 10'000);
+  REQUIRE(f.module->aborts > 1);
+  auto const entries = f.word(sym("run", "irq_count"));
+  CHECK((entries == f.module->aborts or entries + 1 == f.module->aborts));
 }

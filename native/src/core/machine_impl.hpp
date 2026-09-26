@@ -959,6 +959,12 @@ struct machine::run_state
    * block hook's hot path. */
   [[gnu::noinline]] auto deliverable() noexcept -> bool;
 
+  /** @brief After a trap hook resumed: whether it left a deliverable exception pending, then
+   * marked as a block-boundary stop so the loop enters the handler. A fetch abort forms no
+   * block, so no block hook would ever see the pending exception.
+   * @return Whether the caller must stop the engine. */
+  auto stop_on_pending() -> bool;
+
   static void
       on_block(uc_struct* engine, std::uint64_t addr, std::uint32_t size, void* user) noexcept;
   static void

@@ -10,6 +10,8 @@ SECTION_BOUNDS = (
     "--defsym=_ebss=ADDR(.bss)+SIZEOF(.bss)"
 )
 
+UNREFERENCED = {"run": ("count_irq",)}
+
 for name, source in (
     ("basic", "basic.c"),
     ("run", "run.c"),
@@ -25,6 +27,9 @@ for name, source in (
     _, target = add_firmware("core", name, [here / source])
     if target is not None:
         target.private.link_flags.append(SECTION_BOUNDS)
+        target.private.link_flags.extend(
+            f"-Wl,--undefined={entry}" for entry in UNREFERENCED.get(name, ())
+        )
 
 add_firmware("core", "alu", [here / "alu.S"])
 add_firmware("core", "mmio", [here / "mmio.S"])

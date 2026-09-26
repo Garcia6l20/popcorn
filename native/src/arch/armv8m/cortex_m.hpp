@@ -134,8 +134,6 @@ private:
   auto               raise(std::uint32_t number, address at) -> trap_result;
   auto               raise_fault(fault_cause const& cause) -> trap_result;
   auto               engine_fault(std::uint32_t intno) -> trap_result;
-  auto               engine_fault_cause(std::uint32_t intno) -> trap_result;
-  auto               stop_engine_on_pend(trap_result result) -> trap_result;
   auto               enter(std::uint32_t number) -> trap_result;
   auto               exception_return() -> trap_result;
 

@@ -352,7 +352,7 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
       {
         --run.spin.depth;
       }
-      return false;
+      return run.stop_on_pending();
     }
     run.trap      = result;
     run.stop_flag = true;
@@ -364,11 +364,11 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
   }
 }
 
-auto machine::run_state::on_invalid_insn(uc_struct*, void* user) noexcept -> bool
+auto machine::run_state::on_invalid_insn(uc_struct* engine, void* user) noexcept -> bool
 {
-  auto& run     = *static_cast<run_state*>(user);
-  bool  resumes = false;
-  run.guarded([&] {
+  auto&      run     = *static_cast<run_state*>(user);
+  bool       resumes = false;
+  auto const stops   = run.guarded([&] {
     auto const result = run.owner.arch_->on_invalid_insn();
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
     resumes           = result.resumes();
@@ -376,10 +376,25 @@ auto machine::run_state::on_invalid_insn(uc_struct*, void* user) noexcept -> boo
     {
       run.trap      = result;
       run.stop_flag = true;
+      return false;
     }
-    return not resumes;
+    return run.stop_on_pending();
   });
+  if(resumes and stops)
+  {
+    uc_emu_stop(engine);
+  }
   return resumes;
+}
+
+auto machine::run_state::stop_on_pending() -> bool
+{
+  if(not(arch->pending() and arch->deliverable_now()))
+  {
+    return false;
+  }
+  boundary_stop = true;
+  return true;
 }
 
 auto machine::run_state::on_bad_access(

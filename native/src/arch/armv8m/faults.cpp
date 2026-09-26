@@ -127,20 +127,6 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
 
 auto cortex_m::engine_fault(std::uint32_t intno) -> trap_result
 {
-  return stop_engine_on_pend(engine_fault_cause(intno));
-}
-
-auto cortex_m::stop_engine_on_pend(trap_result result) -> trap_result
-{
-  if(result.resumes())
-  {
-    uc_emu_stop(engine_handle());
-  }
-  return result;
-}
-
-auto cortex_m::engine_fault_cause(std::uint32_t intno) -> trap_result
-{
   auto const at = pc();
   switch(intno)
   {

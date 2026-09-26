@@ -97,6 +97,20 @@ __attribute__((naked)) void guest_patch(void)
                    ".ltorg\n");
 }
 
+volatile uint32_t irq_count;
+
+void count_irq(void)
+{
+  ++irq_count;
+}
+
+__attribute__((naked)) void jump_xn(void)
+{
+  __asm__ volatile("ldr r0, =0x40020001\n"
+                   "bx r0\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   for(uint32_t *from = _sidata, *to = _sdata; to < _edata;)
@@ -115,7 +129,7 @@ __attribute__((naked)) void guest_patch(void)
   }
 }
 
-__attribute__((section(".isr_vector"), used)) static const void* const vectors[24] = {
+__attribute__((section(".isr_vector"), used)) static const void* const vectors[25] = {
     [0]  = &_estack,
     [1]  = (const void*)Reset_Handler,
     [16] = (const void*)irq0_handler,
@@ -126,4 +140,5 @@ __attribute__((section(".isr_vector"), used)) static const void* const vectors[2
     [21] = (const void*)straight,
     [22] = (const void*)ram_calls,
     [23] = (const void*)guest_patch,
+    [24] = (const void*)jump_xn,
 };

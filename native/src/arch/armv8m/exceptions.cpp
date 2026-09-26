@@ -310,11 +310,11 @@ auto cortex_m::exception_return() -> trap_result
   {
     auto const target = value & ~1u;
     write(UC_ARM_REG_PC, value);
-    return stop_engine_on_pend(raise_fault(
+    return raise_fault(
         {.kind      = fault_kind::mem_manage,
          .target    = exc_memmanage,
          .cfsr_bits = cfsr::iaccviol,
-         .reported  = target}));
+         .reported  = target});
   }
   if(not(v7() ? valid_v7_exc_return(value) : valid_exc_return(value)))
   {
