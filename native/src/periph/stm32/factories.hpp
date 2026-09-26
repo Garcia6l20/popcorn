@@ -39,4 +39,7 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the EXTI model, RM0456 section 23. */
 [[nodiscard]] auto exti_factory() -> model_factory;
+
+/** @brief Factory of the GPDMA1 model, RM0456 section 17. */
+[[nodiscard]] auto gpdma_factory() -> model_factory;
 }

@@ -14,5 +14,6 @@ sources += [
         "flash.cpp",
         "gpio.cpp",
         "exti.cpp",
+        "gpdma.cpp",
     )
 ]
