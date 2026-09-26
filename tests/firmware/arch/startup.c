@@ -51,7 +51,7 @@ void IRQ5_Handler(void) __attribute__((weak, alias("Default_Handler")));
 void IRQ6_Handler(void) __attribute__((weak, alias("Default_Handler")));
 void IRQ7_Handler(void) __attribute__((weak, alias("Default_Handler")));
 
-__attribute__((section(".isr_vector"), used)) static const void* const vectors[24] = {
+__attribute__((section(".isr_vector"), used)) const void* const vectors[24] = {
     &_estack,
     Reset_Handler,
     NMI_Handler,

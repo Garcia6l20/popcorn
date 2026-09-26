@@ -1,6 +1,7 @@
 #include "system_space.hpp"
 
 #include "cortex_m.hpp"
+#include "exceptions.hpp"
 
 #include <popcorn/core/services.hpp>
 
@@ -27,8 +28,6 @@ constexpr std::uint32_t cpacr_writable    = 0x00f0'0000;
 constexpr std::uint32_t dwt_numcomp       = 4u << 28;
 constexpr std::uint32_t shcsr_enables     = 0x0007'0000;
 
-constexpr std::uint32_t exc_nmi        = 2;
-constexpr std::uint32_t exc_hardfault  = 3;
 constexpr std::uint32_t exc_memmanage  = 4;
 constexpr std::uint32_t exc_busfault   = 5;
 constexpr std::uint32_t exc_usagefault = 6;
@@ -36,7 +35,6 @@ constexpr std::uint32_t exc_svcall     = 11;
 constexpr std::uint32_t exc_debugmon   = 12;
 constexpr std::uint32_t exc_pendsv     = 14;
 constexpr std::uint32_t exc_systick    = 15;
-constexpr std::uint32_t exc_irq0       = 16;
 
 constexpr std::array<bool, 16> system_priority_implemented{false, false, false, false, true,  true,
                                                            true,  false, false, false, false, true,
@@ -265,6 +263,20 @@ auto system_space::read_scs(std::uint32_t offset) const -> std::uint32_t
       icsr |= core_.is_pending(exc_nmi) ? 1u << 31 : 0u;
       icsr |= core_.is_pending(exc_pendsv) ? 1u << 28 : 0u;
       icsr |= core_.is_pending(exc_systick) ? 1u << 26 : 0u;
+      auto const& exceptions = core_.state_.exceptions;
+      if(auto const best = best_pending(exceptions))
+      {
+        icsr |= (*best & 0x1ffu) << 12;
+      }
+      auto irq_pending = false;
+      auto active      = 0u;
+      for(std::uint32_t number = 1; number < core_.exception_count(); ++number)
+      {
+        irq_pending = irq_pending or (number >= exc_irq0 and core_.is_pending(number));
+        active += core_.is_active(number) ? 1u : 0u;
+      }
+      icsr |= irq_pending ? 1u << 22 : 0u;
+      icsr |= active <= 1 ? 1u << 11 : 0u;
       return icsr;
     }
     case 0xd08:
@@ -413,7 +425,12 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
   }
   if(in(offset, 0x280, 0x2bc))
   {
-    each_irq(0x280, [&](std::uint32_t number) { core_.set_exception_pending(number, false); });
+    each_irq(0x280, [&](std::uint32_t number) {
+      if(not test_bit(core_.state_.exceptions.level, number))
+      {
+        core_.set_exception_pending(number, false);
+      }
+    });
     return;
   }
   if(in(offset, 0xda4, 0xdbc))

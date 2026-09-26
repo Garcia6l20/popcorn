@@ -107,6 +107,10 @@ private:
       std::uint64_t value,
       void*         user) noexcept;
 
+  [[nodiscard]] auto preempts(std::uint32_t number) const -> bool;
+  auto               enter(std::uint32_t number) -> trap_result;
+  auto               exception_return() -> trap_result;
+
   [[nodiscard]] auto engine_handle() const -> uc_struct*;
   [[nodiscard]] auto read(int engine_id) const -> std::uint32_t;
   void               write(int engine_id, std::uint32_t value) const;

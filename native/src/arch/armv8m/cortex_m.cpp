@@ -22,11 +22,12 @@ namespace popcorn::arch::armv8m
 {
 namespace
 {
-constexpr std::uint32_t excp_bkpt   = 7;
-constexpr std::uint32_t reset_lr    = 0xffff'ffff;
-constexpr std::uint32_t xpsr_thumb  = 0x0100'0000;
-constexpr std::uint32_t ccr_reset   = 0x0000'0201;
-constexpr std::uint32_t fpccr_reset = 0xc000'0000;
+constexpr std::uint32_t excp_bkpt           = 7;
+constexpr std::uint32_t excp_exception_exit = 8;
+constexpr std::uint32_t reset_lr            = 0xffff'ffff;
+constexpr std::uint32_t xpsr_thumb          = 0x0100'0000;
+constexpr std::uint32_t ccr_reset           = 0x0000'0201;
+constexpr std::uint32_t fpccr_reset         = 0xc000'0000;
 
 auto profile_of(core_desc const& core) -> profile
 {
@@ -83,20 +84,6 @@ auto bit_words(std::uint32_t count) -> std::vector<std::uint32_t>
   return std::vector<std::uint32_t>((count + 31) / 32, 0);
 }
 
-auto test_bit(std::vector<std::uint32_t> const& bits, std::uint32_t number) noexcept -> bool
-{
-  return number / 32 < bits.size() and ((bits[number / 32] >> (number % 32)) & 1u) != 0;
-}
-
-void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value) noexcept
-{
-  if(number / 32 >= bits.size())
-  {
-    return;
-  }
-  auto const mask   = 1u << (number % 32);
-  bits[number / 32] = value ? bits[number / 32] | mask : bits[number / 32] & ~mask;
-}
 }
 
 auto cortex_m::mmio_read(uc_struct*, std::uint64_t offset, unsigned size, void* user) noexcept
@@ -237,35 +224,62 @@ void cortex_m::reset(address reset_vector)
 auto cortex_m::deliver_pending() -> trap_result
 {
   rethrow_failure();
-  return trap_result::resume();
+  auto const best = best_pending(state_.exceptions);
+  if(not best or not preempts(*best))
+  {
+    return trap_result::resume();
+  }
+  return enter(*best);
 }
 
 auto cortex_m::deliverable_now() const -> bool
 {
-  return false;
+  auto const best = best_pending(state_.exceptions);
+  return best and preempts(*best);
+}
+
+auto cortex_m::preempts(std::uint32_t number) const -> bool
+{
+  std::array<int, 3>           ids{UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI, UC_ARM_REG_FAULTMASK};
+  std::array<std::uint32_t, 3> held{};
+  std::array<void*, 3>         out{&held[0], &held[1], &held[2]};
+  require(
+      uc_reg_read_batch(engine_handle(), ids.data(), out.data(), static_cast<int>(ids.size())),
+      "reading the priority masks");
+  auto const current = execution_priority(
+      state_.exceptions, state_.scs.prigroup,
+      {.primask   = (held[0] & 1u) != 0,
+       .basepri   = static_cast<std::uint8_t>(held[1]),
+       .faultmask = (held[2] & 1u) != 0});
+  return group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup) < current;
 }
 
 void cortex_m::set_irq_line(std::uint32_t source, bool active)
 {
   auto const number = 16 + source;
   contract_assert(number < exception_count());
-  auto& exceptions = state_.exceptions;
-  if(active and not test_bit(exceptions.level, number))
+  auto&      exceptions = state_.exceptions;
+  auto const was        = test_bit(exceptions.level, number);
+  put_bit(exceptions.level, number, active);
+  if(active and not was)
   {
     put_bit(exceptions.pending, number, true);
   }
-  put_bit(exceptions.level, number, active);
   refresh_pending();
 }
 
 auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
 {
+  if(intno == excp_exception_exit)
+  {
+    return exception_return();
+  }
   if(intno == excp_bkpt)
   {
     write(UC_ARM_REG_PC, (pc() + 2) | 1u);
     return trap_result::stop(stop_reason::user);
   }
-  return trap_result::fault({.kind = fault_kind::usage, .fault_address = pc(), .detail = intno});
+  return trap_result::fault({.kind = fault_kind::invalid, .fault_address = pc(), .detail = intno});
 }
 
 auto cortex_m::on_invalid_insn() -> trap_result

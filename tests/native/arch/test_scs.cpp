@@ -409,3 +409,33 @@ TEST_CASE("the system space run is deterministic")
 {
   CHECK(run_scs() == run_scs());
 }
+
+TEST_CASE("the register view reads and writes special registers while unprivileged")
+{
+  auto f = booted();
+  f.set("pc", fn("unpriv_psp"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(f.reg("control") == 3);
+  CHECK(f.reg("basepri") == 0x40);
+  CHECK(f.reg("psp") == 0x2007'0000);
+  CHECK(f.reg("msp") == estack);
+  CHECK(f.reg("sp") == 0x2007'0000);
+  f.set("primask", 1);
+  f.set("basepri", 0x60);
+  f.set("faultmask", 1);
+  f.set("msp", 0x2000'1000);
+  f.set("psp", 0x2000'2000);
+  CHECK(f.reg("primask") == 1);
+  CHECK(f.reg("basepri") == 0x60);
+  CHECK(f.reg("faultmask") == 1);
+  CHECK(f.reg("msp") == 0x2000'1000);
+  CHECK(f.reg("psp") == 0x2000'2000);
+  CHECK(f.reg("sp") == 0x2000'2000);
+  f.set("control", 0);
+  CHECK(f.reg("control") == 0);
+  CHECK(f.reg("sp") == 0x2000'1000);
+  f.set("control", 3);
+  CHECK(f.reg("control") == 3);
+  CHECK(f.reg("sp") == 0x2000'2000);
+  CHECK(f.reg("basepri") == 0x60);
+}
