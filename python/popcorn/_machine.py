@@ -113,6 +113,7 @@ class Machine:
     __slots__ = (
         "_background",
         "_busy",
+        "_config_digest",
         "_description",
         "_handle",
         "_images",
@@ -134,6 +135,7 @@ class Machine:
         vector_table: int | None = None,
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
+        config_digest: str = "",
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -148,6 +150,8 @@ class Machine:
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice yields to the event loop.
             slice_wall_budget: Wall seconds after which a slice yields to the event loop.
+            config_digest: Digest of the configuration, such as a project file's, that snapshots
+                record.
 
         Raises:
             ConfigError: No arch module implements the core, or an option is out of range.
@@ -164,7 +168,9 @@ class Machine:
         config.spin_threshold = spin_threshold
         config.strict_peripherals = strict_peripherals
         config.vector_table = vector_table
+        config.config_digest = config_digest
         self._description = description
+        self._config_digest = config_digest
         self._handle = _core.MachineHandle(description, config)
         self._images: list[Image] = []
         self._slice_instructions = slice_instructions
@@ -179,6 +185,11 @@ class Machine:
     def description(self) -> MachineDescription:
         """Description the machine was built from."""
         return self._description
+
+    @property
+    def config_digest(self) -> str:
+        """Digest of the configuration the machine was built from, empty when none."""
+        return self._config_digest
 
     @property
     def images(self) -> tuple[Image, ...]:
@@ -230,6 +241,18 @@ class Machine:
         self._require_stopped()
         self._handle.reset(_core.ResetKind(kind.value))
 
+    def _write_memory(self, address: int, data: bytes) -> None:
+        """Write bytes into guest memory as the debugger, flash included, for `Project.machine`
+        until `Machine.mem` exists.
+
+        Raises:
+            ConfigError: A byte is not in writable memory or the range leaves the 32-bit address
+                space, keyed by the address.
+            MachineRunning: A run is active.
+        """
+        self._require_stopped()
+        self._handle.write_memory(address, data)
+
     def locate(self, address: int) -> Location:
         """Symbol, offset, file and line of an address, the rule stops use."""
         return location_of(self._handle.locate(address))
@@ -267,7 +290,8 @@ class Machine:
         Args:
             until: Stop with ADDRESS before executing this address or symbol.
             budget: Stop with BUDGET at the first block boundary past this many instructions.
-            for_: Stop with TIME after this much virtual time.
+            for_: Stop with TIME after this much virtual time. An idle core, WFI with nothing
+                due, sleeps to the deadline and stops with TIME, not IDLE.
             stop_when: Sync predicate evaluated at event boundaries and slice ends, never per
                 instruction. Stops with USER when it returns True. An exception it raises
                 reaches the caller with its traceback.

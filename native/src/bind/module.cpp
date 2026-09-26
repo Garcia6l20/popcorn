@@ -1,7 +1,9 @@
+#include "config.hpp"
 #include "description.hpp"
 #include "errors.hpp"
 #include "image.hpp"
 #include "machine.hpp"
+#include "toml_caster.hpp"
 
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/description.hpp>
@@ -56,5 +58,16 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::irq_desc>("IrqDesc");
   m.bind<popcorn::core_desc>("CoreDesc");
   m.bind<popcorn::mcu_description>("McuDescription");
+  m.bind<popcorn::config::project_section>("ProjectSection");
+  m.bind<popcorn::config::mcu_section>("McuSection");
+  m.bind<popcorn::config::image_entry>("ImageEntry");
+  m.bind<popcorn::config::memory_init_entry>("MemoryInit");
+  m.bind<popcorn::config::boot_section>("BootSection");
+  m.bind<popcorn::config::clock_section>("ClockSection");
+  m.bind<popcorn::config::device_entry>("DeviceEntry");
+  m.bind<popcorn::config::board_entry>("BoardEntry");
+  m.bind<popcorn::config::models_section>("ModelsSection");
+  m.bind<popcorn::config::project_file>("ProjectFile");
+  m.bind<popcorn::config::loaded_project>("LoadedProject");
   m.bind<^^popcorn::bind>();
 }

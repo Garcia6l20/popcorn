@@ -23,11 +23,14 @@ from popcorn._errors import (
 )
 from popcorn._image import Image, Location, Segment, Symbol
 from popcorn._machine import Event, Machine, Reached
+from popcorn._project import BoardEntry, Device, Project, TomlValue
 from popcorn._stop import Fault, Stop
 
 __all__ = [
+    "BoardEntry",
     "BudgetExceeded",
     "ConfigError",
+    "Device",
     "EmulationError",
     "Event",
     "Fault",
@@ -43,6 +46,7 @@ __all__ = [
     "MachineRunning",
     "ModelError",
     "PopcornError",
+    "Project",
     "Reached",
     "ResetKind",
     "Segment",
@@ -50,6 +54,7 @@ __all__ = [
     "StopReason",
     "Symbol",
     "SymbolError",
+    "TomlValue",
     "coverage",
     "description_digest",
     "load_description",

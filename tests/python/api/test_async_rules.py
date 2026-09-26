@@ -55,7 +55,7 @@ def test_a_handler_reads_the_machine_but_the_core_refuses_a_reset(machines: Mach
     seen: list[int] = []
 
     def predicate(machine: popcorn.Machine) -> bool:
-        seen.append(machine.instructions)
+        seen.append(machine.pc)
         machine.reset()
         return False
 

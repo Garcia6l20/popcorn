@@ -8,6 +8,7 @@
 #include <cmath>
 #include <format>
 #include <ranges>
+#include <span>
 
 namespace popcorn::bind
 {
@@ -61,6 +62,7 @@ auto options_of(mcu_description const& description, machine_config const& config
   options.spin_threshold     = config.spin_threshold;
   options.strict_peripherals = config.strict_peripherals;
   options.vector_table       = config.vector_table;
+  options.config_digest      = config.config_digest;
   return options;
 }
 }
@@ -96,6 +98,24 @@ auto machine_handle::image_digests() const -> std::vector<std::string>
 auto machine_handle::locate(address pc) const -> location_info
 {
   return owned(machine_->locate(pc));
+}
+
+void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes)
+{
+  if(std::uint64_t{at} + bytes.size() > std::uint64_t{1} << 32)
+  {
+    throw config_error(
+        "memory", 0, std::format("{:#010x}", at),
+        std::format("{} bytes within the 32-bit address space", bytes.size()));
+  }
+  auto const written = machine_->mem().write_block(
+      at, std::span{static_cast<std::byte const*>(bytes.data()), bytes.size()});
+  if(not written)
+  {
+    throw config_error(
+        "memory", 0, std::format("{:#010x}", at),
+        std::format("{} bytes of writable memory", bytes.size()));
+  }
 }
 
 auto machine_handle::native() const noexcept -> core::machine&

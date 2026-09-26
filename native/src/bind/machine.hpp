@@ -34,6 +34,8 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   bool strict_peripherals{};
   /** @brief Address of the vector table reset reads, empty for the description's default. */
   std::optional<address> vector_table{};
+  /** @brief Digest of the configuration, recorded in snapshots. */
+  std::string config_digest{};
 };
 
 /** @brief Bounds of one slice, core::slice_request without the predicate. */
@@ -142,6 +144,17 @@ public:
   [[= py::doc{"Run one slice, the GIL released. stop_when runs at event boundaries."}]] auto
       run_slice(slice_args const& args, std::optional<std::function<bool()>> const& stop_when)
           -> slice_outcome;
+
+  /**
+   * @brief Writes bytes into guest memory, as the debugger.
+   * @param at First guest address.
+   * @param bytes Bytes to write.
+   * @throws config_error naming the address when a byte is not writable memory or the range
+   *         leaves the 32-bit address space.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{"Write bytes into guest memory as the debugger."}]] void
+      write_memory(address at, reflex::py::nb::bytes const& bytes);
 
   /** @brief Instructions executed since reset. */
   [[= py::doc{"Instructions executed since reset."}]] [[nodiscard]] auto instructions() const

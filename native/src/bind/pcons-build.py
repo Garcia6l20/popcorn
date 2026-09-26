@@ -9,4 +9,5 @@ sources = [
     here / "description.cpp",
     here / "image.cpp",
     here / "errors.cpp",
+    here / "config.cpp",
 ]
