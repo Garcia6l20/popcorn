@@ -20,9 +20,11 @@ struct builtin
   auto (*make)(board const& b) -> model_factory;
 };
 
-constexpr std::array<builtin, 1> builtins{
+constexpr std::array<builtin, 3> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
+     {"ICACHE", "Icache_v1_0_0*", [](board const&) { return icache_factory(); }},
+     {"DCACHE", "STM32U5xx1_v0_0", [](board const&) { return dcache_factory(); }},
      }
 };
 

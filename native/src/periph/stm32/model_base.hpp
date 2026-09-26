@@ -189,6 +189,28 @@ protected:
   }
 
   /**
+   * @brief IRQ line of the peripheral by the description's IRQ name.
+   * @param name IRQ name as the description spells it, such as `ICACHE_IRQn`.
+   * @throws config_error naming the part, the IRQ and the model when the part has no such IRQ or
+   *         the peripheral does not raise it.
+   */
+  [[nodiscard]] auto irq(std::string_view name) const -> irq_line&
+  {
+    auto const named = std::ranges::find(ctx_.part.irqs, name, &irq_desc::name);
+    if(named != ctx_.part.irqs.end())
+    {
+      auto const at = std::ranges::find(desc_.irqs, named->number);
+      if(at != desc_.irqs.end())
+      {
+        return ctx_.irqs[static_cast<std::size_t>(at - desc_.irqs.begin())];
+      }
+    }
+    throw config_error(
+        ctx_.part.part, 0, std::format("peripherals.{}.irqs.{}", desc_.name, name),
+        std::format("an IRQ the {} model raises", model_name_));
+  }
+
+  /**
    * @brief Throws the configuration error of a register or field the model needs.
    * @param path Register, or register and field joined by a dot.
    */

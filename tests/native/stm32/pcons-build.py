@@ -33,6 +33,7 @@ u575_programs = [
     for name, source in (
         ("stm32-attach-u575", "test_attach_u575.cpp"),
         ("stm32-rcc", "test_rcc.cpp"),
+        ("stm32-caches", "test_caches.cpp"),
     )
 ]
 for program in u575_programs:

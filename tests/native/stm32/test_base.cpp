@@ -53,6 +53,11 @@ public:
   stm32::reg_ref   word;
   stm32::field_ref bits;
 
+  auto line(std::string_view name) const -> periph::irq_line&
+  {
+    return irq(name);
+  }
+
   auto state() -> probe_state&
   {
     return state_;
@@ -297,5 +302,24 @@ TEST_CASE("a claimed register without fields is writable in full unless it is re
   catch(popcorn::config_error const& e)
   {
     CHECK(e.key() == "peripherals.RCC.registers.RCC_RO.fields");
+  }
+}
+
+TEST_CASE("an IRQ resolves by its description name, a missing one is a config error")
+{
+  bench                           b;
+  probe_model                     model{b.ctx, b.rcc, "RCC_CR", "HSION"};
+  std::array<periph::irq_line, 1> lines{};
+  b.ctx.irqs = lines;
+  CHECK(&model.line("RCC_IRQn") == &lines[0]);
+  try
+  {
+    std::ignore = model.line("NOPE_IRQn");
+    FAIL("no config_error");
+  }
+  catch(popcorn::config_error const& e)
+  {
+    CHECK(e.key() == "peripherals.RCC.irqs.NOPE_IRQn");
+    CHECK(e.expected() == "an IRQ the probe model raises");
   }
 }
