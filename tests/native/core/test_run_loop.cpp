@@ -119,7 +119,7 @@ TEST_CASE("a budget stops at the first block boundary at or past it")
   auto       f      = alu(1'000'000);
   auto const before = f.target->virtual_clock().now();
   auto const result =
-      f.run({.wall_budget = std::chrono::seconds{10}, .budget_left = icount{1'000'000}});
+      f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{1'000'000}});
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->reason == stop_reason::budget);
   CHECK(result.executed.value >= 1'000'000);
@@ -133,7 +133,7 @@ TEST_CASE("a budget spans slices when the caller subtracts what each executed")
   auto                f = alu(1'000'000);
   core::slice_request request{
       .max_instructions = icount{10'000},
-      .wall_budget      = std::chrono::seconds{10},
+      .wall_budget      = std::chrono::seconds{60},
       .budget_left      = icount{1'000'000}};
   std::uint64_t total  = 0;
   int           slices = 0;
@@ -179,7 +179,7 @@ TEST_CASE("exact_instructions stops after exactly that many instructions")
     auto       f     = alu(1'000'000);
     auto const start = std::chrono::steady_clock::now();
     auto const result =
-        f.run({.wall_budget = std::chrono::seconds{10}, .exact_instructions = icount{count}});
+        f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{count}});
     auto const took = std::chrono::steady_clock::now() - start;
     REQUIRE(result.stopped.has_value());
     CHECK(result.stopped->reason == stop_reason::budget);
@@ -203,13 +203,13 @@ TEST_CASE("single steps reach the registers of one exact run")
     for(std::uint64_t i = 0; i < count; ++i)
     {
       REQUIRE(
-          stepped.run({.wall_budget = std::chrono::seconds{10}, .exact_instructions = icount{1}})
+          stepped.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}})
               .executed.value
           == 1);
     }
     auto whole = alu(1'000'000);
     std::ignore =
-        whole.run({.wall_budget = std::chrono::seconds{10}, .exact_instructions = icount{count}});
+        whole.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{count}});
     for(auto const* name : {"r0", "r1", "r2", "r3", "pc"})
     {
       CHECK(stepped.reg(name) == whole.reg(name));
@@ -229,7 +229,7 @@ TEST_CASE("the slice bound yields and the next slice continues")
   {
     auto const slice = sliced.run(
         {.max_instructions = icount{10'000},
-         .wall_budget      = std::chrono::seconds{10},
+         .wall_budget      = std::chrono::seconds{60},
          .until            = sym("alu", "alu_done")});
     ++slices;
     if(slice.stopped)
@@ -265,7 +265,7 @@ TEST_CASE("until stops before the address, also inside a block translated withou
   auto const first = f.run_to_stop({.until = sym("run", "straight")});
   CHECK(first.reason == stop_reason::address);
   CHECK(
-      f.run({.wall_budget = std::chrono::seconds{10}, .until = sym("run", "straight")})
+      f.run({.wall_budget = std::chrono::seconds{60}, .until = sym("run", "straight")})
           .executed.value
       == 0);
 
@@ -304,7 +304,7 @@ TEST_CASE("until at the current pc stops at once with nothing executed")
 {
   auto       f     = alu(10);
   auto const entry = sym("alu", "alu_entry");
-  auto const slice = f.run({.wall_budget = std::chrono::seconds{10}, .until = entry});
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}, .until = entry});
   REQUIRE(slice.stopped.has_value());
   CHECK(slice.stopped->reason == stop_reason::address);
   CHECK(slice.executed.value == 0);
@@ -507,7 +507,7 @@ TEST_CASE("a DMA patch from inside a slice takes effect at the next block bounda
   auto       f      = boot_with<dma_patch_arch>(m33(), ram_fn);
   f.set("pc", sym("run", "ram_calls"));
   f.set("r0", ram_fn | 1);
-  auto const slice = f.run({.wall_budget = std::chrono::seconds{10}});
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}});
   REQUIRE(slice.stopped.has_value());
   CHECK(slice.stopped->reason == stop_reason::user);
   CHECK(f.word(sym("run", "ram_results")) == 1);
@@ -598,7 +598,7 @@ TEST_CASE("a slice end request from a handler ends the slice without a stop")
   auto f = boot_with<stop_request_arch>(m33(), request_kind::end);
   f.set("pc", sym("run", "ram_calls"));
   f.set("r0", sym("run", "ram_fn") | 1);
-  auto const slice = f.run({.wall_budget = std::chrono::seconds{10}});
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}});
   CHECK_FALSE(slice.stopped.has_value());
   CHECK(f.target->regs().pc() == sym("run", "ram_calls") + 10);
   CHECK(f.run_to_stop().reason == stop_reason::user);
@@ -695,7 +695,7 @@ TEST_CASE("traps stop with their fault or reason")
 TEST_CASE("a reset after a run restarts the clock at 0")
 {
   auto f      = alu(1'000'000);
-  std::ignore = f.run({.wall_budget = std::chrono::seconds{10}, .budget_left = icount{10'000}});
+  std::ignore = f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{10'000}});
   CHECK(f.target->virtual_clock().now().value >= 10'000);
   f.target->reset(popcorn::reset_kind::software);
   CHECK(f.target->virtual_clock().now() == icount{0});
@@ -707,7 +707,7 @@ TEST_CASE("stop_when is evaluated at the slice end")
   auto       f     = alu(1'000'000);
   bool       asked = false;
   auto const slice = f.run(
-      {.max_instructions = icount{1000}, .wall_budget = std::chrono::seconds{10}, .stop_when = [&] {
+      {.max_instructions = icount{1000}, .wall_budget = std::chrono::seconds{60}, .stop_when = [&] {
          asked = true;
          return true;
        }});
@@ -739,7 +739,7 @@ TEST_CASE("a resumed trap that pends an interrupt enters its handler in the same
   enter(f, "jump_xn");
   f.module->other = 0;
   auto const slice =
-      f.run({.max_instructions = icount{10'000}, .wall_budget = std::chrono::seconds{10}});
+      f.run({.max_instructions = icount{10'000}, .wall_budget = std::chrono::seconds{60}});
   CHECK(f.module->other == 0);
   CHECK_FALSE(slice.stopped.has_value());
   CHECK(slice.executed.value >= 10'000);

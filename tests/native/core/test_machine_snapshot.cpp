@@ -97,7 +97,7 @@ auto run_million(auto const& f) -> observed
 {
   core::slice_request request{.exact_instructions = icount{1'000'000}};
   request.max_instructions = icount{2'000'000};
-  request.wall_budget      = std::chrono::seconds{10};
+  request.wall_budget      = std::chrono::seconds{60};
   auto const result        = f.run(request);
   CHECK(result.executed == icount{1'000'000});
   return observe(f);

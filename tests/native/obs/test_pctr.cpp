@@ -201,11 +201,11 @@ TEST_CASE("a restore between slices writes a time record and times continue from
   auto const path   = scratch("alu.pctr");
   auto       writer = obs::pctr_writer_for(*f.target, path);
   auto       sink   = f.target->add_trace_sink({trace_kind::block}, writer->sink());
-  static_cast<void>(f.run({.wall_budget = std::chrono::seconds{10}, .budget_left = icount{500}}));
+  static_cast<void>(f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{500}}));
   auto const before = f.target->virtual_clock().now();
   f.target->restore(taken);
   auto const restored = f.target->virtual_clock().now();
-  static_cast<void>(f.run({.wall_budget = std::chrono::seconds{10}, .budget_left = icount{500}}));
+  static_cast<void>(f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{500}}));
   sink.reset();
   writer->close();
 

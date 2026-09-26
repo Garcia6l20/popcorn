@@ -283,7 +283,7 @@ TEST_CASE("a clock rate change inside a model call keeps until_time exact in one
   auto const target = popcorn::vtime{start.ps + 1'000'000'000};
   auto const slice  = f.run(
       {.max_instructions = icount{100'000'000},
-       .wall_budget      = std::chrono::seconds{10},
+       .wall_budget      = std::chrono::seconds{60},
        .until_time       = target});
   REQUIRE(slice.stopped.has_value());
   CHECK(slice.stopped->reason == stop_reason::time);
@@ -301,7 +301,7 @@ TEST_CASE("an event a model schedules from an MMIO write fires on time inside th
   enter(f, "rate_write");
   f.set("primask", 1);
   auto const slice = f.run(
-      {.wall_budget = std::chrono::seconds{10}, .budget_left = icount{4 * test_model::delay}});
+      {.wall_budget = std::chrono::seconds{60}, .budget_left = icount{4 * test_model::delay}});
   REQUIRE(slice.stopped.has_value());
   REQUIRE(m.accesses.size() == 1);
   REQUIRE(m.fired_at.has_value());

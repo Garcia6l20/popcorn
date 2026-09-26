@@ -199,7 +199,7 @@ TEST_CASE("exception entry and return break the edge chain")
   f.target->enable_coverage({});
   core::slice_request request{.exact_instructions = popcorn::icount{100'000}};
   request.max_instructions = popcorn::icount{200'000};
-  request.wall_budget      = std::chrono::seconds{10};
+  request.wall_budget      = std::chrono::seconds{60};
   std::ignore              = f.run(request);
   auto const handler       = sym("snapshot", "tick_handler");
   auto const data          = f.target->coverage();

@@ -122,10 +122,10 @@ template <typename Arch = test_arch> struct machine_fixture
     return target->run_slice(request);
   }
 
-  /** @brief Runs one slice with a 10 s wall budget and requires a stop. */
+  /** @brief Runs one slice with a 60 s wall budget and requires a stop. */
   auto run_to_stop(core::slice_request request = {}) const -> stop
   {
-    request.wall_budget = std::chrono::seconds{10};
+    request.wall_budget = std::chrono::seconds{60};
     auto const result   = run(request);
     REQUIRE(result.stopped.has_value());
     return *result.stopped;

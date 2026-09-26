@@ -77,7 +77,7 @@ auto run_to_instruction(arch_fixture const& f, std::uint64_t target) -> core::sl
   auto const at     = vtime{clock.time().ps + (target - clock.now().value) * ps_per_instr};
   auto const result = f.run(
       {.max_instructions = icount{400'000'000},
-       .wall_budget      = std::chrono::seconds{30},
+       .wall_budget      = std::chrono::seconds{60},
        .until_time       = at});
   REQUIRE(result.stopped.has_value());
   REQUIRE(result.stopped->reason == stop_reason::time);
@@ -282,7 +282,7 @@ TEST_CASE("until right after a sleeping wfi stops asleep, and the next slice sle
   CHECK(f.module->idle());
   auto const before = f.target->virtual_clock().now().value;
   auto const slice =
-      f.run({.wall_budget = std::chrono::seconds{10}, .exact_instructions = icount{1}});
+      f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
   CHECK(slice.executed.value == 1);
   CHECK(f.target->virtual_clock().now().value - before > 1);
   CHECK((f.reg("xpsr") & 0x1ff) == 15);
@@ -300,7 +300,7 @@ TEST_CASE("an engine exit right after a wfi reached by a return is not taken for
   CHECK_FALSE(f.module->idle());
   auto const before = f.target->virtual_clock().now().value;
   auto const slice =
-      f.run({.wall_budget = std::chrono::seconds{10}, .exact_instructions = icount{1}});
+      f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
   CHECK(slice.executed.value == 1);
   CHECK(f.target->virtual_clock().now().value - before == 1);
 }

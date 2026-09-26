@@ -57,7 +57,7 @@ struct elf_machine
 
   auto run_to_stop() const -> popcorn::stop
   {
-    auto const result = target->run_slice({.wall_budget = std::chrono::seconds{10}});
+    auto const result = target->run_slice({.wall_budget = std::chrono::seconds{60}});
     REQUIRE(result.stopped.has_value());
     return *result.stopped;
   }

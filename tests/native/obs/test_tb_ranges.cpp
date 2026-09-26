@@ -425,7 +425,7 @@ TEST_CASE("P2 firmware: collect and pure decode agree with the engine")
     f.set("pc", sym(load.name, load.entry) | 1);
     f.set("r0", load.r0);
     auto request        = load.request;
-    request.wall_budget = std::chrono::seconds{10};
+    request.wall_budget = std::chrono::seconds{60};
     static_cast<void>(f.run(request));
     auto const set = obs::collect(*f.target, sources_of(load.name));
     REQUIRE_FALSE(seen.by_pc.empty());

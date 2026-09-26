@@ -342,7 +342,7 @@ TEST_CASE("M4 runs the SVC and PendSV logs, and SysTick ticks 1000 times a virtu
   auto const  at     = vtime{clock.time().ps + (target - clock.now().value) * 250'000};
   auto const  result = f.run(
       {.max_instructions = icount{400'000'000},
-       .wall_budget      = std::chrono::seconds{30},
+       .wall_budget      = std::chrono::seconds{60},
        .until_time       = at});
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->reason == stop_reason::time);

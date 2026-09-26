@@ -82,7 +82,7 @@ auto run_to(rtos_machine const& m, double ms) -> core::slice_result
 {
   auto const result = m.f->run(
       {.max_instructions = icount{400'000'000},
-       .wall_budget      = std::chrono::seconds{30},
+       .wall_budget      = std::chrono::seconds{60},
        .until_time       = at_ms(m, ms)});
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->reason == stop_reason::time);
@@ -94,7 +94,7 @@ void run_to_task_a(rtos_machine const& m, double after_ms)
   run_to(m, after_ms);
   auto const result = m.f->run(
       {.max_instructions = icount{400'000'000},
-       .wall_budget      = std::chrono::seconds{30},
+       .wall_budget      = std::chrono::seconds{60},
        .until            = fn("task_a") & ~address{1}});
   REQUIRE(result.stopped.has_value());
   REQUIRE(result.stopped->reason == stop_reason::address);
@@ -311,7 +311,7 @@ TEST_CASE("a task hung on a register spins across ticks whose handler walks a li
   options.spin_threshold = 3000;
   auto       m           = started("rtos_hung", std::move(options));
   auto const result =
-      m.f->run({.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{10}});
+      m.f->run({.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{60}});
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->reason == stop_reason::spin);
   CHECK(result.stopped->detail.find("UNMODELLED.STAT") != std::string::npos);

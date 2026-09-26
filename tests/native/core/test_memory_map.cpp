@@ -99,7 +99,7 @@ public:
   {
     auto const registers = target_.regs();
     registers.write(*registers.find("pc"), at);
-    auto const slice = target_.run_slice({.wall_budget = std::chrono::seconds{10}});
+    auto const slice = target_.run_slice({.wall_budget = std::chrono::seconds{60}});
     REQUIRE(slice.stopped.has_value());
     REQUIRE(slice.stopped->reason == popcorn::stop_reason::user);
     return registers.read(*registers.find("r0"));

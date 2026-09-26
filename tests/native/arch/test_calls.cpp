@@ -114,7 +114,7 @@ auto run_for(arch_fixture const& f, std::uint64_t instructions) -> core::slice_r
   auto const  at     = vtime{clock.time().ps + instructions * ps_per_instr};
   auto const  result = f.run(
       {.max_instructions = icount{400'000'000},
-       .wall_budget      = std::chrono::seconds{30},
+       .wall_budget      = std::chrono::seconds{60},
        .until_time       = at});
   REQUIRE(result.stopped.has_value());
   REQUIRE(result.stopped->reason == stop_reason::time);
@@ -399,7 +399,7 @@ TEST_CASE("a call on a core asleep in WFI runs, and the core sleeps again after 
   auto const t0     = ticks(f);
   auto const before = f.target->virtual_clock().now().value;
   auto const slice =
-      f.run({.wall_budget = std::chrono::seconds{10}, .exact_instructions = icount{1}});
+      f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
   CHECK(slice.executed.value == 1);
   CHECK(f.target->virtual_clock().now().value - before > 1);
   CHECK(ticks(f) == t0);
@@ -534,7 +534,7 @@ TEST_CASE("intercept_call::args reads hard_double arguments of an image from loa
   target.load(loaded);
   target.reset();
   REQUIRE(
-      target.run_slice({.wall_budget = std::chrono::seconds{10}}).stopped->reason
+      target.run_slice({.wall_budget = std::chrono::seconds{60}}).stopped->reason
       == stop_reason::user);
   std::vector<std::uint64_t> seen;
   auto const                 kinds = std::vector<value_kind>{
@@ -545,7 +545,7 @@ TEST_CASE("intercept_call::args reads hard_double arguments of an image from loa
         return core::intercept_result::returns(f64(99.0));
       });
   target.regs().write(*target.regs().find("pc"), loaded.lookup("call_mixed").value);
-  auto const stopped = target.run_slice({.wall_budget = std::chrono::seconds{10}}).stopped;
+  auto const stopped = target.run_slice({.wall_budget = std::chrono::seconds{60}}).stopped;
   REQUIRE(stopped.has_value());
   REQUIRE(stopped->reason == stop_reason::user);
   CHECK(

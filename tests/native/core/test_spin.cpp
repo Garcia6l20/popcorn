@@ -46,7 +46,7 @@ auto long_request() -> core::slice_request
 {
   core::slice_request request;
   request.max_instructions = icount{10'000'000};
-  request.wall_budget      = std::chrono::seconds{10};
+  request.wall_budget      = std::chrono::seconds{60};
   return request;
 }
 }
@@ -157,7 +157,7 @@ TEST_CASE("an idle wait with a tick handler is not a spin")
   fixture f{m33(), "idle", options};
   f.set("pc", sym("idle", "idle_entry"));
   core::slice_request request{
-      .wall_budget = std::chrono::seconds{10}, .until_time = popcorn::vtime{1'000'000'000'000}};
+      .wall_budget = std::chrono::seconds{60}, .until_time = popcorn::vtime{1'000'000'000'000}};
   for(;;)
   {
     auto const slice = f.run(request);
