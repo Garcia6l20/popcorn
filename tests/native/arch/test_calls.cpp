@@ -570,3 +570,26 @@ TEST_CASE("an IRQ pended before an unmasked call runs once, during the call")
   run_for(f, 10 * period);
   CHECK(f.word(fn("irq3_count")) == 1);
 }
+
+TEST_CASE("a call stack may span two adjacent writable regions")
+{
+  auto split = m33_with([](popcorn::mcu_description& d) {
+    auto  second = d.regions.back();
+    auto& first  = d.regions.back();
+    first.size   = 0x6'0000;
+    second.name  = "SRAM2";
+    second.start = first.start + 0x6'0000;
+    second.size  = 0x6'0000;
+    d.regions.push_back(second);
+  });
+  REQUIRE(split.regions.size() == 4);
+  auto f = booted({}, std::move(split));
+  auto c = frame(
+      "sum10", {i32(1), i32(2), i32(3), i32(4), i32(5), i32(6), i32(7), i32(8), i32(9), i32(10)});
+  c.stack      = 0x2006'0008;
+  auto const r = call(f, c);
+  REQUIRE(r.stopped.reason == stop_reason::returned);
+  CHECK(r.value == 385);
+  c.stack = 0x200C'0008;
+  CHECK_THROWS_AS(f.target->begin_call(c), popcorn::config_error);
+}

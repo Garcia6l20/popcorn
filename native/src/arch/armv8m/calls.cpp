@@ -95,11 +95,24 @@ void cortex_m::prepare_call(call_frame const& frame)
       }
     }
   }
-  auto const below = std::max<address>(layout.stack_bytes, 8);
-  auto const from  = layout.stack_bytes == 0 ? sp - 8 : sp;
-  auto const fits  = std::ranges::any_of(context_->description.regions, [&](region_desc const& r) {
-    return r.acc.write and from >= r.start and from - r.start + below <= r.size;
-  });
+  auto const below   = std::max<address>(layout.stack_bytes, 8);
+  auto const from    = layout.stack_bytes == 0 ? sp - 8 : sp;
+  auto       covered = std::uint64_t{from};
+  auto const end     = std::uint64_t{from} + below;
+  for(auto grew = true; covered < end and grew;)
+  {
+    grew = false;
+    for(auto const& r : context_->description.regions)
+    {
+      auto const last = std::uint64_t{r.start} + r.size;
+      if(r.acc.write and covered >= r.start and covered < last)
+      {
+        covered = last;
+        grew    = true;
+      }
+    }
+  }
+  auto const fits = covered >= end;
   if(not fits)
   {
     throw config_error(
