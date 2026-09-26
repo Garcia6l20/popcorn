@@ -24,8 +24,19 @@ from popcorn._errors import (
     PopcornError,
     SymbolError,
 )
+from popcorn._hooks import (
+    Initiator,
+    Intercept,
+    LogEntry,
+    Return,
+    Returned,
+    Watch,
+    WatchAction,
+    WatchHit,
+    WatchKind,
+)
 from popcorn._image import Image, Location, Segment, Symbol
-from popcorn._machine import Event, Machine, Reached
+from popcorn._machine import Call, Event, Machine, Reached
 from popcorn._project import BoardEntry, Device, Project, TomlValue
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
@@ -45,6 +56,7 @@ __all__ = [
     "ArenaBlock",
     "BoardEntry",
     "BudgetExceeded",
+    "Call",
     "CallResult",
     "ConfigError",
     "Device",
@@ -56,7 +68,10 @@ __all__ = [
     "FloatAbi",
     "Image",
     "ImageError",
+    "Initiator",
+    "Intercept",
     "Location",
+    "LogEntry",
     "Machine",
     "MachineBusy",
     "MachineDescription",
@@ -71,6 +86,8 @@ __all__ = [
     "RegisterBank",
     "RegisterView",
     "ResetKind",
+    "Return",
+    "Returned",
     "ScalarView",
     "Segment",
     "Snapshot",
@@ -82,6 +99,10 @@ __all__ = [
     "TomlValue",
     "ValueKind",
     "Var",
+    "Watch",
+    "WatchAction",
+    "WatchHit",
+    "WatchKind",
     "arm",
     "coverage",
     "description_digest",

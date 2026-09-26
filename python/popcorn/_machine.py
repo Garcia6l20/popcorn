@@ -7,19 +7,23 @@ import contextlib
 import contextvars
 import difflib
 import os
-from collections.abc import AsyncGenerator, Callable, Generator, Iterable
+from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, overload, runtime_checkable
 
 from popcorn import _core
 from popcorn._arena import Arena
 from popcorn._call import (
+    F32,
     I32_SLOT,
+    I64,
     CallResult,
     Signature,
+    Slot,
     Stack,
     argument,
     decode,
+    encode,
     signature_of,
     slot_for,
 )
@@ -35,6 +39,19 @@ from popcorn._errors import (
     MachineRunning,
     SymbolError,
 )
+from popcorn._hooks import (
+    CallbackTable,
+    Initiator,
+    Intercept,
+    LogEntry,
+    Relay,
+    Return,
+    Returned,
+    Watch,
+    WatchAction,
+    WatchHit,
+    WatchKind,
+)
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
@@ -44,6 +61,129 @@ from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
     from popcorn.image.dwarf import DebugInfo, DebugType
+
+
+class Call:
+    """A call arriving at an intercepted function, stopped at its first instruction.
+
+    Valid only while the handler runs.
+    """
+
+    __slots__ = ("_signature", "_view", "machine")
+
+    def __init__(self, machine: Machine, view: _core.InterceptCall, signature: Signature) -> None:
+        """Wrap a native call. Handlers receive it built."""
+        self.machine = machine
+        self._view = view
+        self._signature = signature
+
+    @property
+    def function(self) -> int:
+        """Address of the intercepted function."""
+        return self._view.function()
+
+    @property
+    def occurrence(self) -> int:
+        """Calls of this intercept before this one, 0 for the first."""
+        return self._view.occurrence()
+
+    @property
+    def lr(self) -> int:
+        """Address the function returns to."""
+        return self._view.return_address()
+
+    @property
+    def sp(self) -> int:
+        """Stack pointer at entry."""
+        return self.machine.reg.sp
+
+    def args(
+        self, kinds: Sequence[ValueKind], abi: FloatAbi | None = None
+    ) -> tuple[int | float, ...]:
+        """Arguments of the given kinds, integers signed, floats decoded, under the image's
+        calling convention or `abi`."""
+        native = [_core.ValueKind(k.value) for k in kinds]
+        bits = self._view.args(native, None if abi is None else _core.FloatAbi(abi.value))
+        return tuple(decode(slot_for(k), b) for k, b in zip(kinds, bits, strict=True))
+
+    def args_typed(self, abi: FloatAbi | None = None) -> tuple[int | float, ...]:
+        """Arguments read with the function's DWARF signature, each at its C type.
+
+        Raises:
+            TypeError: The function has no DWARF signature.
+        """
+        params = self._signature.params
+        if params is None:
+            reason = self._signature.unsupported or f"{self._signature.name} has no DWARF signature"
+            raise TypeError(f"{reason}, use args(kinds)")
+        native = [p.kind for p in params]
+        bits = self._view.args(native, None if abi is None else _core.FloatAbi(abi.value))
+        return tuple(decode(p, b) for p, b in zip(params, bits, strict=True))
+
+    def arg(self, index: int) -> int:
+        """Argument `index` as an integer: from DWARF when known, else the index-th 32-bit
+        integer argument."""
+        if self._signature.params is not None:
+            value = self.args_typed()[index]
+            if not isinstance(value, int):
+                raise TypeError(f"argument {index} of {self._signature.name} is a float")
+            return value
+        value = self.args([ValueKind.I32] * (index + 1))[index]
+        assert isinstance(value, int)
+        return value
+
+    def arg_f(self, index: int) -> float:
+        """Argument `index` as a float, from the DWARF signature."""
+        value = self.args_typed()[index]
+        if not isinstance(value, float):
+            raise TypeError(f"argument {index} of {self._signature.name} is an integer")
+        return value
+
+    def proceed(self) -> Return:
+        """Run the function as if no intercept were there."""
+        return Return(_core.InterceptResult.proceed())
+
+    def returns(
+        self, value: int | float | I64 | F32 | None = None, abi: FloatAbi | None = None
+    ) -> Return:
+        """Skip the function and return `value` to the caller, of the DWARF return type when
+        known, under the image's calling convention or `abi`. None for a void function."""
+        if value is None:
+            return Return(_core.InterceptResult.returns(None))
+        slot = self._result_slot(value)
+        number = value.value if isinstance(value, I64 | F32) else value
+        arg = _core.CallArg()
+        arg.kind = slot.kind
+        arg.bits = encode(slot.kind, number, f"the return value of {self._signature.name}")
+        native_abi = None if abi is None else _core.FloatAbi(abi.value)
+        return Return(_core.InterceptResult.returns(arg, native_abi), number)
+
+    def stop(self, reason: StopReason = StopReason.USER) -> Return:
+        """Stop the run at the function, before its body.
+
+        Raises:
+            ValueError: `reason` is FAULT, which only the core raises.
+        """
+        if reason is StopReason.FAULT:
+            raise ValueError("an intercept cannot stop with FAULT")
+        return Return(_core.InterceptResult.stop(_core.StopReason(reason.value)))
+
+    def _result_slot(self, value: int | float | I64 | F32) -> Slot:
+        if isinstance(value, I64):
+            return slot_for(ValueKind.I64)
+        if isinstance(value, F32):
+            return slot_for(ValueKind.F32)
+        if self._signature.params is not None:
+            return self._signature.returns
+        return slot_for(ValueKind.F64 if isinstance(value, float) else ValueKind.I32)
+
+
+type InterceptHandler = Callable[[Call], Return]
+"""An intercept handler: the call in, what to do out."""
+type ReturnHandler = Callable[[Returned], None]
+"""An on_return handler."""
+type WatchHandler = Callable[[WatchHit], WatchAction | None]
+"""A watch handler: STOP, RESUME, or None for RESUME."""
 
 DEFAULT_ARENA_BASE = 0x6F00_0000
 """Default first address of the call arena, an FMC address STM32 parts leave unmapped."""
@@ -140,10 +280,13 @@ class Machine:
         "_background",
         "_busy",
         "_call_baseline",
+        "_callback_table",
         "_config_digest",
         "_description",
         "_handle",
         "_images",
+        "_installed",
+        "_logs",
         "_memory",
         "_peripherals",
         "_registers",
@@ -226,6 +369,9 @@ class Machine:
             else Arena(self._memory, arena_base, arena_size, self._type_view)
         )
         self._call_baseline: Snapshot | None = None
+        self._logs: dict[int, list[LogEntry]] = {}
+        self._callback_table = CallbackTable()
+        self._installed: list[Intercept | Watch] = []
         self._sentinel = (
             self._arena.sentinel if self._arena is not None else _free_sentinel(description)
         )
@@ -434,6 +580,8 @@ class Machine:
         entry = self.address_of(fn)
         signature = self._signature(fn, entry)
         where = signature.name
+        if signature.unsupported is not None:
+            raise NotImplementedError(signature.unsupported)
         if signature.params is not None and len(signature.params) != len(args):
             raise TypeError(f"{where} takes {len(signature.params)} arguments, {len(args)} given")
         frame = _core.CallFrame()
@@ -500,6 +648,256 @@ class Machine:
                     name = next((n for n, t in info.types.items() if t == type_id), "block")
                     return Var(self._memory, info, type_id, address, name)
         return None
+
+    @overload
+    def intercept(
+        self, fn: int | str | Symbol, handler: None = None, *, once: bool = False
+    ) -> Callable[[InterceptHandler], Intercept]: ...
+    @overload
+    def intercept(
+        self, fn: int | str | Symbol, handler: InterceptHandler, *, once: bool = False
+    ) -> Intercept: ...
+    def intercept(
+        self, fn: int | str | Symbol, handler: InterceptHandler | None = None, *, once: bool = False
+    ) -> Intercept | Callable[[InterceptHandler], Intercept]:
+        """Intercept calls to a function: `handler(call)` returns `call.proceed()`,
+        `call.returns(value)` or `call.stop()`. A decorator when `handler` is omitted.
+
+        The intercept takes effect at once, translated code included, and every call it sees
+        goes to `intercept_log(fn)`. The handler runs sync at the function's first instruction
+        and may read the machine; an exception it raises reaches the run with its traceback.
+
+        Raises:
+            SymbolError: `fn` names no symbol.
+            MachineRunning: A run is active, outside its handlers.
+        """
+        if handler is None:
+            return lambda given: self._install_intercept(fn, given, once)
+        return self._install_intercept(fn, handler, once)
+
+    @contextlib.contextmanager
+    def intercepted(
+        self, fn: int | str | Symbol, handler: InterceptHandler
+    ) -> Generator[Intercept]:
+        """Intercept `fn` for the body of the `with` block only."""
+        installed = self._install_intercept(fn, handler, False)
+        try:
+            yield installed
+        finally:
+            installed.remove()
+
+    def script(self, fn: int | str | Symbol, replies: Sequence[int | float | None]) -> Intercept:
+        """Answer the first calls of `fn` with `replies` in order, then run the original.
+
+        A None reply returns from a void function.
+        """
+        answers = tuple(replies)
+
+        def answer(call: Call) -> Return:
+            if call.occurrence < len(answers):
+                return call.returns(answers[call.occurrence])
+            return call.proceed()
+
+        return self._install_intercept(fn, answer, False)
+
+    def intercept_log(self, fn: int | str | Symbol) -> list[LogEntry]:
+        """Every call the intercepts of `fn` saw, oldest first: arguments from DWARF, and the
+        value the intercept returned or, for a call that ran the original, the value it
+        returned. The log accumulates across intercepts of `fn` for the life of the machine;
+        clear the returned list to start over."""
+        return self._logs.setdefault(self.address_of(fn), [])
+
+    @overload
+    def on_return(
+        self, fn: int | str | Symbol, handler: None = None
+    ) -> Callable[[ReturnHandler], Intercept]: ...
+    @overload
+    def on_return(self, fn: int | str | Symbol, handler: ReturnHandler) -> Intercept: ...
+    def on_return(
+        self, fn: int | str | Symbol, handler: ReturnHandler | None = None
+    ) -> Intercept | Callable[[ReturnHandler], Intercept]:
+        """Call `handler(returned)` each time `fn` returns, with its entry arguments, its
+        return value and the instructions it took, types from DWARF. A decorator when `handler`
+        is omitted.
+
+        Raises:
+            TypeError: `fn` has no DWARF signature.
+        """
+        if handler is None:
+            return lambda given: self._install_return_hook(fn, given)
+        return self._install_return_hook(fn, handler)
+
+    def watch(
+        self,
+        target: int | str | Symbol,
+        size: int = 4,
+        kind: WatchKind = WatchKind.WRITE,
+        handler: WatchHandler | None = None,
+    ) -> Watch:
+        """Watch accesses to `size` bytes at an address or symbol, by the CPU and by DMA.
+
+        Without a handler every hit stops the run with WATCHPOINT. A handler returns
+        `WatchAction.STOP` or `RESUME`, None meaning RESUME. Every hit goes to `Watch.hits`.
+        An address inside a peripheral window that no register covers is not watched yet.
+
+        Raises:
+            ConfigError: The range is empty or reaches no memory and no peripheral.
+        """
+        self._require_stopped()
+        address = self.address_of(target)
+        watch: Watch
+
+        def native(hit: _core.WatchHit) -> _core.WatchAction:
+            seen = WatchHit(
+                hit.pc, hit.addr, hit.size, hit.value, hit.write, Initiator(hit.by.value)
+            )
+            watch.hits.append(seen)
+            if handler is None:
+                return _core.WatchAction.stop
+            with self._as_handler():
+                action = handler(seen)
+            return _core.WatchAction((WatchAction.RESUME if action is None else action).value)
+
+        keys: list[int] = []
+        relay = self._relay(native, keys)
+        hook = self._handle.add_watch(address, size, _core.WatchKind(kind.value), relay)
+        watch = self._keep(Watch(hook, self._callback_table, keys[0]))
+        return watch
+
+    def stub_libc(self) -> list[Intercept]:
+        """Replace memcpy, memmove, memset, strlen and the `__aeabi_mem*` helpers the images
+        define with Python doing the work through `m.mem`, for fast calls and object mode."""
+        stubs: dict[str, InterceptHandler] = {
+            "memcpy": self._copy_stub(returns_dest=True),
+            "memmove": self._copy_stub(returns_dest=True),
+            "memset": self._set_stub(order="dcn", returns_dest=True),
+            "strlen": self._strlen_stub,
+        }
+        for suffix in ("", "4", "8"):
+            stubs[f"__aeabi_memcpy{suffix}"] = self._copy_stub(returns_dest=False)
+            stubs[f"__aeabi_memmove{suffix}"] = self._copy_stub(returns_dest=False)
+            stubs[f"__aeabi_memset{suffix}"] = self._set_stub(order="dnc", returns_dest=False)
+            stubs[f"__aeabi_memclr{suffix}"] = self._set_stub(order="dn", returns_dest=False)
+        known = self.symbols
+        return [
+            self._install_intercept(name, stub, False)
+            for name, stub in stubs.items()
+            if name in known
+        ]
+
+    def _words(self, call: Call, count: int) -> list[int]:
+        return [int(v) & 0xFFFF_FFFF for v in call.args([ValueKind.I32] * count)]
+
+    def _copy_stub(self, *, returns_dest: bool) -> InterceptHandler:
+        def copy(call: Call) -> Return:
+            dest, src, n = self._words(call, 3)
+            if n:
+                self.mem.write(dest, self.mem.read(src, n))
+            return call.returns(dest if returns_dest else None)
+
+        return copy
+
+    def _set_stub(self, *, order: str, returns_dest: bool) -> InterceptHandler:
+        def fill(call: Call) -> Return:
+            words = dict(zip(order, self._words(call, len(order)), strict=True))
+            if words["n"]:
+                self.mem.write(words["d"], bytes([words.get("c", 0) & 0xFF]) * words["n"])
+            return call.returns(words["d"] if returns_dest else None)
+
+        return fill
+
+    def _strlen_stub(self, call: Call) -> Return:
+        (text,) = self._words(call, 1)
+        length = 0
+        while True:
+            block = self.mem.read(text + length, 64 - (text + length) % 64)
+            end = block.find(b"\0")
+            if end >= 0:
+                return call.returns(length + end)
+            length += len(block)
+
+    def _relay(self, handler: Callable[..., object], keys: list[int]) -> Relay:
+        """The native side's callable for `handler`, its key appended to `keys`."""
+        key = self._callback_table.add(handler)
+        keys.append(key)
+        return Relay(self._callback_table, key)
+
+    def _keep[H: (Intercept, Watch)](self, hook: H) -> H:
+        self._installed = [h for h in self._installed if h.active]
+        self._installed.append(hook)
+        return hook
+
+    @contextlib.contextmanager
+    def _as_handler(self) -> Generator[None]:
+        token = _HANDLER_OF.set(self)
+        try:
+            yield
+        finally:
+            _HANDLER_OF.reset(token)
+
+    def _install_intercept(
+        self, fn: int | str | Symbol, handler: InterceptHandler, once: bool
+    ) -> Intercept:
+        self._require_stopped()
+        entry = self.address_of(fn)
+        signature = self._signature(fn, entry)
+        log = self._logs.setdefault(entry, [])
+
+        def native(view: _core.InterceptCall) -> _core.InterceptResult:
+            call = Call(self, view, signature)
+            with self._as_handler():
+                args = call.args_typed() if signature.params is not None else ()
+                reply = handler(call)
+            record = LogEntry(call.occurrence, args)
+            if reply.action == "returns":
+                record.value, record.returned = reply.value, True
+            log.append(record)
+            return reply.native
+
+        keys: list[int] = []
+        hooks = [self._handle.add_intercept(entry, self._relay(native, keys), once)]
+        if signature.params is not None:
+            kinds = [p.kind for p in signature.params]
+
+            def returned(done: _core.ReturnedCall) -> None:
+                pending = next((r for r in reversed(log) if not r.returned), None)
+                if pending is not None:
+                    pending.value = (
+                        None if signature.void else decode(signature.returns, done.value)
+                    )
+                    pending.returned = True
+
+            hooks.append(
+                self._handle.add_return_hook(
+                    entry, kinds, signature.returns.kind, self._relay(returned, keys)
+                )
+            )
+        return self._keep(Intercept(hooks, entry, log, self._callback_table, keys))
+
+    def _install_return_hook(self, fn: int | str | Symbol, handler: ReturnHandler) -> Intercept:
+        self._require_stopped()
+        entry = self.address_of(fn)
+        signature = self._signature(fn, entry)
+        if signature.params is None and signature.unsupported is None:
+            raise TypeError(f"{signature.name} has no DWARF signature for on_return")
+        params = signature.params or ()
+
+        def native(done: _core.ReturnedCall) -> None:
+            returned = Returned(
+                done.function,
+                done.occurrence,
+                tuple(decode(p, b) for p, b in zip(params, done.args, strict=True)),
+                None if signature.void else decode(signature.returns, done.value),
+                done.instructions,
+            )
+            with self._as_handler():
+                handler(returned)
+
+        keys: list[int] = []
+        hook = self._handle.add_return_hook(
+            entry, [p.kind for p in params], signature.returns.kind, self._relay(native, keys)
+        )
+        return self._keep(Intercept([hook], entry, [], self._callback_table, keys))
 
     def snapshot(self) -> Snapshot:
         """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.

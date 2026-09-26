@@ -14,6 +14,9 @@ PAIRS: list[tuple[type[enum.Enum], type[enum.Enum]]] = [
     (popcorn.ResetKind, _core.ResetKind),
     (popcorn.FloatAbi, _core.FloatAbi),
     (popcorn.ValueKind, _core.ValueKind),
+    (popcorn.WatchKind, _core.WatchKind),
+    (popcorn.WatchAction, _core.WatchAction),
+    (popcorn.Initiator, _core.Initiator),
 ]
 
 

@@ -114,15 +114,25 @@ class Signature:
     name: str
     params: tuple[Slot, ...] | None
     returns: Slot
+    void: bool = False
+    unsupported: str | None = None
 
 
 def signature_of(info: DebugInfo, function: Function) -> Signature:
-    """The signature DWARF gives a function."""
-    params = tuple(
-        slot_of(info, p.type, f"parameter {p.name or index} of {function.name}")
-        for index, p in enumerate(function.params)
-    )
-    return Signature(function.name, params, slot_of(info, function.returns, function.name))
+    """The signature DWARF gives a function. A parameter popcorn cannot pass leaves the
+    parameters unknown, the reason kept in `unsupported`."""
+    try:
+        returns = slot_of(info, function.returns, function.name)
+    except NotImplementedError as error:
+        return Signature(function.name, None, I32_SLOT, False, str(error))
+    try:
+        params = tuple(
+            slot_of(info, p.type, f"parameter {p.name or index} of {function.name}")
+            for index, p in enumerate(function.params)
+        )
+    except NotImplementedError as error:
+        return Signature(function.name, None, returns, function.returns is None, str(error))
+    return Signature(function.name, params, returns, function.returns is None)
 
 
 def argument(value: object, slot: Slot | None, where: str) -> _core.CallArg:

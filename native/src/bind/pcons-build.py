@@ -8,6 +8,7 @@ sources = [
     here / "run.cpp",
     here / "views.cpp",
     here / "snapshot.cpp",
+    here / "hooks.cpp",
     here / "description.cpp",
     here / "image.cpp",
     here / "errors.cpp",

@@ -48,6 +48,12 @@ REFLEX_PY_MODULE(_core, m)
   m.bind_enum<popcorn::arch::call_stack>("CallStack");
   m.bind<popcorn::arch::call_arg>("CallArg");
   m.bind<popcorn::arch::call_frame>("CallFrame");
+  m.bind_enum<popcorn::initiator>("Initiator");
+  m.bind_enum<popcorn::core::intercept_action>("InterceptAction");
+  m.bind_enum<popcorn::core::watch_kind>("WatchKind");
+  m.bind_enum<popcorn::core::watch_action>("WatchAction");
+  m.bind<popcorn::core::intercept_result>("InterceptResult");
+  m.bind<popcorn::core::watch_hit>("WatchHit");
   m.bind_enum<popcorn::access>("Access");
   m.bind_enum<popcorn::write_effect>("WriteEffect");
   m.bind_enum<popcorn::read_effect>("ReadEffect");

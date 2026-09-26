@@ -1,5 +1,6 @@
 #pragma once
 
+#include "hooks.hpp"
 #include "image.hpp"
 #include "snapshot.hpp"
 
@@ -259,6 +260,46 @@ public:
   /** @brief Whether a call is in progress. */
   [[= py::doc{"Whether a call begun by begin_call has not been ended."}]] [[nodiscard]] auto
       in_call() const noexcept -> bool;
+
+  /**
+   * @brief Intercepts calls to an address.
+   * @param at Function entry.
+   * @param handler Called with an InterceptCall, returns an InterceptResult.
+   * @param once Only the first arrival.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Intercept calls to an address, handler(InterceptCall) -> InterceptResult."}]] auto
+      add_intercept(address at, reflex::py::nb::object handler, bool once) -> hook;
+
+  /**
+   * @brief Calls a handler when a function returns.
+   * @param at Function entry.
+   * @param args Kind of each argument captured at entry.
+   * @param returns Kind of the return value.
+   * @param handler Called with a ReturnedCall.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Call handler(ReturnedCall) when the function at an address returns."}]] auto
+      add_return_hook(
+          address                              at,
+          std::vector<arch::value_kind> const& args,
+          arch::value_kind                     returns,
+          reflex::py::nb::object               handler) -> hook;
+
+  /**
+   * @brief Watches accesses to an address range.
+   * @param at First address.
+   * @param size Bytes, at least 1.
+   * @param kind Accesses reported.
+   * @param handler Called with a WatchHit, returns a WatchAction.
+   * @throws config_error when the range is empty, leaves the address space or reaches nothing.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Watch an address range, handler(WatchHit) -> WatchAction."}]] auto add_watch(
+      address                at,
+      std::uint32_t          size,
+      core::watch_kind       kind,
+      reflex::py::nb::object handler) -> hook;
 
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept

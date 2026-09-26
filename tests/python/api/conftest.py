@@ -12,6 +12,8 @@ ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
 CORE_FIRMWARE = ROOT / "tests" / "firmware" / "core" / "prebuilt"
 DRIVER_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "driver.elf"
+HOOKS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "hooks.elf"
+ABI_ELF = ROOT / "tests" / "firmware" / "abi" / "prebuilt" / "abi.elf"
 CALLEE_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "callee.elf"
 VIEWS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "views.elf"
 
@@ -96,4 +98,13 @@ def callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
     """A machine over the callee firmware, reset, not booted."""
     m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF))
     m.reset()
+    return m
+
+
+@pytest.fixture
+def hooked(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    """A machine over the hooks firmware, stopped at its bkpt after copying .data."""
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(HOOKS_ELF))
+    m.reset()
+    assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
     return m

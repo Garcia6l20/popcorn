@@ -47,3 +47,20 @@ if callee is not None:
         [SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in CALLED)]
     )
     callee.private.link_libs.append("gcc")
+
+HOOKED = (
+    "use_delay",
+    "run_script",
+    "use_triple",
+    "write_three",
+    "use_libc",
+    "note_then_fault",
+    "use_fact",
+    "use_pair",
+    "use_strlen_ff",
+)
+_, hooks = add_firmware("api", "hooks", [here / "hooks.c"])
+if hooks is not None:
+    hooks.private.link_flags.extend(
+        [SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in HOOKED)]
+    )
