@@ -1,7 +1,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/image/image.hpp>
 
-#include "../support/elf_image.hpp"
 #include "../support/test_arch.hpp"
 
 #include <unicorn/unicorn.h>
@@ -64,24 +64,24 @@ auto elapsed_ms(clock_type::time_point start) -> double
 
 auto alu_image() -> popcorn::image::image const&
 {
-  static auto const loaded = popcorn::testing::read_elf(POPCORN_FW_ALU);
+  static auto const loaded = popcorn::image::load_elf(POPCORN_FW_ALU);
   return loaded;
 }
 
 auto symbol(std::string_view name) -> address
 {
-  return popcorn::testing::find_symbol(alu_image(), name);
+  return alu_image().lookup(name).value;
 }
 
 auto fnv_image() -> popcorn::image::image const&
 {
-  static auto const loaded = popcorn::testing::read_elf(POPCORN_FW_FNV);
+  static auto const loaded = popcorn::image::load_elf(POPCORN_FW_FNV);
   return loaded;
 }
 
 auto fnv_symbol(std::string_view name) -> address
 {
-  return popcorn::testing::find_symbol(fnv_image(), name);
+  return fnv_image().lookup(name).value;
 }
 
 auto alu_count(std::uint64_t loops) -> std::uint64_t

@@ -1,9 +1,9 @@
-#include "../support/elf_image.hpp"
 #include "cortex_m.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/image/image.hpp>
 
 #include <algorithm>
 #include <charconv>
@@ -49,13 +49,13 @@ struct scenario
 
 auto rtos_image() -> popcorn::image::image const&
 {
-  static auto const loaded = popcorn::testing::read_elf(POPCORN_FW_RTOS);
+  static auto const loaded = popcorn::image::load_elf(POPCORN_FW_RTOS);
   return loaded;
 }
 
 auto symbol(std::string_view name) -> address
 {
-  return popcorn::testing::find_symbol(rtos_image(), name);
+  return rtos_image().lookup(name).value;
 }
 
 auto booted() -> std::unique_ptr<core::machine>

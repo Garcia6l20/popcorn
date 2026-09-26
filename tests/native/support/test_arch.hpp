@@ -25,9 +25,10 @@ namespace popcorn::testing
  *        and events carry a generation that is never saved, so load() re-arms the timer and
  *        orphans the events of the state it replaces. A write of reset_key at system_base + 0x0C
  *        requests a software reset. WFI idles the core until a line is pending or pc leaves the
- *        WFI and its successor. Calls follow the soft-float AAPCS in r0-r3. Events of other kinds
- *        are logged, kind 2 also schedules a kind 1 event due at once. Test-only, tests derive
- *        from it to change one behaviour.
+ *        WFI and its successor. Calls follow the AAPCS in r0-r3, integer values under any float
+ *        ABI, floating-point values under the soft one only. Events of other kinds are logged.
+ *        A kind 2 event also schedules a kind 1 event due at once. Test-only, tests derive from
+ *        it to change one behaviour.
  */
 class test_arch : public popcorn::arch::arch
 {

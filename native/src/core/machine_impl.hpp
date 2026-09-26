@@ -905,7 +905,8 @@ struct machine::run_state
   [[nodiscard]] auto symbol_at(address pc) const noexcept
       -> std::optional<std::pair<std::uint32_t, std::uint32_t>>;
 
-  /** @brief Location of @p pc: symbol and offset, file and line empty until images locate. */
+  /** @brief Location of @p pc: symbol and offset from the symbol index, file and line from the
+   * last loaded image whose segments cover @p pc. */
   [[nodiscard]] auto locate(address pc) const -> location;
 
   static void on_sink_access(

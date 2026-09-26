@@ -491,19 +491,20 @@ TEST_CASE("an intercept reads arguments and returns a value to the firmware call
         value_kind::i32, value_kind::f64, value_kind::i32, value_kind::f32, value_kind::i64};
     auto const hook = f.target->add_intercept(
         fn(soft ? "soft_mixed" : "mixed"), [&](core::intercept_call const& c) {
-          if(soft)
+          if(not soft)
           {
             seen = c.args(kinds);
             return core::intercept_result::returns(f64(99.0));
           }
-          auto signature =
-              frame("mixed", {i32(0), f64(0), i32(0), f32(0), i64(0)}, value_kind::f64);
+          auto signature = frame(
+              "soft_mixed", {i32(0), f64(0), i32(0), f32(0), i64(0)}, value_kind::f64,
+              float_abi::soft);
           f.module->read_args(signature);
           for(auto const& arg : signature.args)
           {
             seen.push_back(arg.bits);
           }
-          f.module->return_to_caller(f64(99.0), float_abi::hard_double);
+          f.module->return_to_caller(f64(99.0), float_abi::soft);
           return core::intercept_result::proceed();
         });
     f.set("pc", fn(soft ? "call_soft_mixed" : "call_mixed"));

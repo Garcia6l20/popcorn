@@ -104,6 +104,20 @@ auto wide(popcorn::arch::value_kind kind) noexcept -> bool
   return kind == popcorn::arch::value_kind::i64 or kind == popcorn::arch::value_kind::f64;
 }
 
+auto floating(popcorn::arch::value_kind kind) noexcept -> bool
+{
+  return kind == popcorn::arch::value_kind::f32 or kind == popcorn::arch::value_kind::f64;
+}
+
+void require_soft_floats(popcorn::arch::float_abi abi, bool has_floating)
+{
+  if(abi != popcorn::arch::float_abi::soft and has_floating)
+  {
+    throw config_error(
+        "image", 0, "abi", "soft for floating-point values, the test arch has no FPU convention");
+  }
+}
+
 void require(uc_err err, std::string_view what)
 {
   if(err != UC_ERR_OK)
@@ -357,10 +371,9 @@ auto test_arch::registers() const -> std::span<popcorn::arch::cpu_register const
 auto test_arch::arg_registers(popcorn::arch::call_frame const& frame) const
     -> std::vector<std::pair<std::size_t, bool>>
 {
-  if(frame.abi != popcorn::arch::float_abi::soft)
-  {
-    throw config_error("image", 0, "abi", "soft, the test arch has no FPU convention");
-  }
+  require_soft_floats(
+      frame.abi, floating(frame.returns)
+                     or std::ranges::any_of(frame.args, floating, &popcorn::arch::call_arg::kind));
   std::vector<std::pair<std::size_t, bool>> placed;
   std::size_t                               next = 0;
   for(auto const& arg : frame.args)
@@ -412,6 +425,7 @@ void test_arch::prepare_call(popcorn::arch::call_frame const& frame)
 
 auto test_arch::call_result(popcorn::arch::call_frame const& frame) const -> std::uint64_t
 {
+  require_soft_floats(frame.abi, floating(frame.returns));
   auto const low = std::uint64_t{read(UC_ARM_REG_R0)};
   return wide(frame.returns) ? low | std::uint64_t{read(UC_ARM_REG_R1)} << 32 : low;
 }
@@ -437,10 +451,7 @@ void test_arch::return_to_caller(
     std::optional<popcorn::arch::call_arg> const& value,
     popcorn::arch::float_abi                      abi)
 {
-  if(abi != popcorn::arch::float_abi::soft)
-  {
-    throw config_error("image", 0, "abi", "soft, the test arch has no FPU convention");
-  }
+  require_soft_floats(abi, value and floating(value->kind));
   if(value)
   {
     write(UC_ARM_REG_R0, static_cast<std::uint32_t>(value->bits));

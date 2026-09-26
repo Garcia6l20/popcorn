@@ -1,8 +1,8 @@
 #pragma once
 
 #include <popcorn/core/machine.hpp>
+#include <popcorn/image/image.hpp>
 
-#include "elf_image.hpp"
 #include "firmware.hpp"
 #include "test_arch.hpp"
 
@@ -53,7 +53,7 @@ inline auto elf(std::string_view name) -> image::image const&
   auto                                                    found = cache.find(name);
   if(found == cache.end())
   {
-    found = cache.emplace(std::string{name}, read_elf(firmware(name))).first;
+    found = cache.emplace(std::string{name}, image::load_elf(firmware(name))).first;
   }
   return found->second;
 }
@@ -65,7 +65,7 @@ inline auto elf(std::string_view name) -> image::image const&
  */
 inline auto sym(std::string_view firmware_name, std::string_view name) -> address
 {
-  return find_symbol(elf(firmware_name), name);
+  return elf(firmware_name).lookup(name).value;
 }
 
 /**

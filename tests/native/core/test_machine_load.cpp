@@ -1,7 +1,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/image/image.hpp>
 
-#include "../support/elf_image.hpp"
 #include "../support/firmware.hpp"
 #include "../support/test_arch.hpp"
 
@@ -15,6 +15,7 @@
 #include <meta>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -34,7 +35,7 @@ auto m33() -> popcorn::mcu_description
 
 auto basic() -> image::image
 {
-  return popcorn::testing::read_elf(popcorn::testing::firmware("basic"));
+  return popcorn::image::load_elf(popcorn::testing::firmware("basic"));
 }
 
 auto filled(address start, std::size_t size, std::byte value, std::uint32_t memory_size = 0)
@@ -71,17 +72,17 @@ auto sp_of(core::machine& target) -> std::uint64_t
 }
 }
 
-TEST_CASE("the test ELF reader finds segments, symbols and the digest of basic")
+TEST_CASE("load_elf finds segments, symbols and the digest of basic")
 {
   auto const loaded = basic();
   REQUIRE_FALSE(loaded.segments.empty());
   CHECK(loaded.segments.front().start == 0x0800'0000);
   CHECK(loaded.segments.front().executable);
-  CHECK(popcorn::testing::find_symbol(loaded, "Reset_Handler") % 2 == 0);
-  CHECK(popcorn::testing::find_symbol(loaded, "patched_ret") > 0x0800'0000);
-  CHECK(popcorn::testing::find_symbol(loaded, "pattern") >= 0x2000'0000);
+  CHECK(loaded.lookup("Reset_Handler").value % 2 == 0);
+  CHECK(loaded.lookup("patched_ret").value > 0x0800'0000);
+  CHECK(loaded.lookup("pattern").value >= 0x2000'0000);
   CHECK(loaded.digest.size() == 64);
-  CHECK_THROWS_AS(popcorn::testing::find_symbol(loaded, "missing"), popcorn::symbol_error);
+  CHECK_THROWS_AS(std::ignore = loaded.lookup("missing"), popcorn::symbol_error);
 }
 
 TEST_CASE("load then reset starts basic at Reset_Handler with the stack at _estack")
@@ -90,15 +91,14 @@ TEST_CASE("load then reset starts basic at Reset_Handler with the stack at _esta
   core::machine target{m33(), popcorn::testing::test_arch_factory(), {}};
   target.load(loaded);
   target.reset();
-  CHECK(target.regs().pc() == popcorn::testing::find_symbol(loaded, "Reset_Handler"));
+  CHECK(target.regs().pc() == loaded.lookup("Reset_Handler").value);
   CHECK(sp_of(target) == estack);
 
   auto const memory = target.mem();
   CHECK(memory.read(0x0800'0000, 4) == estack);
   CHECK(memory.read(0x0000'0000, 4) == estack);
   CHECK(memory.read(0x0800'0004, 4) == memory.read(0x0000'0004, 4));
-  CHECK(
-      memory.read(0x0800'0004, 4) == (popcorn::testing::find_symbol(loaded, "Reset_Handler") | 1u));
+  CHECK(memory.read(0x0800'0004, 4) == (loaded.lookup("Reset_Handler").value | 1u));
   REQUIRE(target.loaded_images().size() == 1);
   CHECK(target.loaded_images().front() == loaded);
 }
@@ -110,7 +110,7 @@ TEST_CASE("reset reads the vector table machine_options::vector_table names")
   options.vector_table = 0x0801'0000;
   core::machine target{m33(), popcorn::testing::test_arch_factory(), options};
   target.load(loaded);
-  auto const entry = popcorn::testing::find_symbol(loaded, "patched");
+  auto const entry = loaded.lookup("patched").value;
   REQUIRE(target.mem().write(0x0801'0000, 4, 0x2008'0000));
   REQUIRE(target.mem().write(0x0801'0004, 4, entry | 1));
   target.reset();

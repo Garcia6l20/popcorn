@@ -70,6 +70,18 @@ auto machine::run_state::locate(address pc) const -> location
     where.symbol = symbols[found->first]->name;
     where.offset = found->second;
   }
+  auto const holds = [pc](image::image const& loaded) {
+    return std::ranges::any_of(loaded.segments, [pc](image::segment const& seg) {
+      return seg.start <= pc and pc < std::uint64_t{seg.start} + seg.memory_size;
+    });
+  };
+  auto const images = owner.images_ | std::views::reverse;
+  if(auto const holder = std::ranges::find_if(images, holds); holder != images.end())
+  {
+    auto const source = holder->locate(pc);
+    where.file        = source.file;
+    where.line        = source.line;
+  }
   return where;
 }
 }

@@ -2,8 +2,8 @@
 #include <popcorn/core/snapshot.hpp>
 
 #include <popcorn/core/description.hpp>
+#include <popcorn/image/image.hpp>
 
-#include "../support/elf_image.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
 
@@ -38,7 +38,7 @@ auto options() -> core::machine_options
 
 auto image() -> popcorn::image::image const&
 {
-  static auto const loaded = popcorn::testing::read_elf(POPCORN_FW_SNAPSHOT);
+  static auto const loaded = popcorn::image::load_elf(POPCORN_FW_SNAPSHOT);
   return loaded;
 }
 

@@ -1,9 +1,9 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/services.hpp>
+#include <popcorn/image/image.hpp>
 
 #include "../../../native/src/core/engine.hpp"
-#include "../support/elf_image.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
 
@@ -54,13 +54,13 @@ struct scenario
 
 auto image() -> popcorn::image::image const&
 {
-  static auto const loaded = popcorn::testing::read_elf(POPCORN_FW_MMIO);
+  static auto const loaded = popcorn::image::load_elf(POPCORN_FW_MMIO);
   return loaded;
 }
 
 auto symbol(std::string_view name) -> address
 {
-  return popcorn::testing::find_symbol(image(), name);
+  return image().lookup(name).value;
 }
 
 auto per_access(clock_type::time_point start, std::uint64_t count) -> measured

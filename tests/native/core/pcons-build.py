@@ -162,3 +162,10 @@ test_spin = add_doctest("core-spin", [here / "test_spin.cpp"], [test_support, co
 for _, target in core_firmware.values():
     if target is not None:
         test_spin.depends(target)
+
+test_facade_support = add_doctest(
+    "core-facade-support", [here / "test_facade_support.cpp"], [test_support, core], env=m33_env
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_facade_support.depends(target)
