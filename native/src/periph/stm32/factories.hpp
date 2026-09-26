@@ -33,4 +33,10 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the FLASH register model, RM0456 section 7. */
 [[nodiscard]] auto flash_factory() -> model_factory;
+
+/** @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1. */
+[[nodiscard]] auto gpio_factory() -> model_factory;
+
+/** @brief Factory of the EXTI model, RM0456 section 23. */
+[[nodiscard]] auto exti_factory() -> model_factory;
 }

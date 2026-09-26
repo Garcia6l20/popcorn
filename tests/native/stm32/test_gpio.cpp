@@ -1,0 +1,280 @@
+#include "stm32_fixture.hpp"
+
+#include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
+
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace
+{
+namespace stm32 = popcorn::periph::stm32;
+using popcorn::icount;
+using popcorn::stop_reason;
+using popcorn::testing::stm32_fixture;
+using popcorn::testing::u575;
+
+constexpr std::uint32_t exti13_mark = 0xe013;
+constexpr std::uint32_t exti0_mark  = 0xe000;
+constexpr std::uint32_t resumed     = 0xb3;
+
+auto port(stm32_fixture const& f, std::string_view name) -> stm32::gpio_port&
+{
+  auto* const found = f.model_of<stm32::gpio_port>(name);
+  REQUIRE(found != nullptr);
+  return *found;
+}
+
+auto at_breakpoint() -> stm32_fixture
+{
+  stm32_fixture f{u575(), "gpio_ll"};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(f.log() == std::vector<std::uint32_t>{1, 0, 1, 1, 1});
+  return f;
+}
+
+auto finished(stm32_fixture const& f) -> std::vector<std::uint32_t>
+{
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  return f.log();
+}
+
+void write(stm32_fixture const& f, std::string_view reg, std::uint32_t value)
+{
+  auto&      regs = f.target->peripheral("GPIOA");
+  auto const found =
+      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != regs.description().registers.end());
+  REQUIRE(
+      f.target->model("GPIOA")
+          ->on_write(
+              regs, found->offset, 4, regs.peek(found->offset), value, {.pc = 0, .now = icount{0}})
+          .has_value());
+}
+
+auto count(std::vector<std::uint32_t> const& log, std::uint32_t mark) -> long
+{
+  return std::ranges::count(log, mark);
+}
+}
+
+TEST_CASE(
+    "LL drives PA5, a BSRR set wins over a reset, PC13 pulls up, a falling edge enters EXTI13")
+{
+  auto f = at_breakpoint();
+  CHECK(port(f, "GPIOA").level(5));
+  CHECK(port(f, "GPIOA").mode(5) == stm32::pin_mode::output);
+  CHECK(port(f, "GPIOC").mode(13) == stm32::pin_mode::input);
+  port(f, "GPIOA").drive(13, true);
+  port(f, "GPIOA").drive(13, false);
+  CHECK(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 0);
+  port(f, "GPIOC").drive(13, false);
+  CHECK(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 1);
+  auto const log = finished(f);
+  CHECK(
+      log
+      == std::vector<std::uint32_t>{1, 0, 1, 1, 1, exti13_mark, resumed, 1, 1, exti0_mark, 0x5e1});
+  CHECK(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 0);
+  port(f, "GPIOC").drive(13, {});
+  CHECK(port(f, "GPIOC").level(13));
+  CHECK(f.field("EXTI", "EXTI_RPR1", "RPIF13") == 0);
+  CHECK(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 0);
+
+  auto again = at_breakpoint();
+  port(again, "GPIOC").drive(13, false);
+  CHECK(finished(again) == log);
+}
+
+TEST_CASE("a pulse between two slices is one falling edge and one EXTI13 entry")
+{
+  auto f = at_breakpoint();
+  port(f, "GPIOC").drive(13, false);
+  port(f, "GPIOC").drive(13, true);
+  CHECK(count(finished(f), exti13_mark) == 1);
+}
+
+TEST_CASE("an external drive does not override a push-pull output, it does an open-drain one")
+{
+  auto  f  = at_breakpoint();
+  auto& pa = port(f, "GPIOA");
+  CHECK(pa.level(5));
+  pa.drive(5, false);
+  CHECK(pa.level(5));
+  write(f, "GPIO_MODER", (f.target->peripheral("GPIOA").peek(0) & ~(3u << 12)) | (1u << 12));
+  write(f, "GPIO_OTYPER", 1u << 6);
+  write(f, "GPIO_ODR", (1u << 5) | (1u << 6));
+  CHECK_FALSE(pa.level(6));
+  pa.drive(6, true);
+  CHECK(pa.level(6));
+  pa.drive(6, false);
+  CHECK_FALSE(pa.level(6));
+  write(f, "GPIO_ODR", 1u << 5);
+  pa.drive(6, true);
+  CHECK_FALSE(pa.level(6));
+}
+
+TEST_CASE("listeners hear each level change once, and a destroyed handle stops its listener")
+{
+  auto                                       f  = at_breakpoint();
+  auto&                                      pc = port(f, "GPIOC");
+  std::vector<std::pair<std::uint8_t, bool>> first;
+  std::vector<std::pair<std::uint8_t, bool>> second;
+  auto one = pc.on_change([&](std::uint8_t pin, bool level) { first.emplace_back(pin, level); });
+  {
+    auto two = pc.on_change([&](std::uint8_t pin, bool level) { second.emplace_back(pin, level); });
+    pc.drive(13, false);
+    pc.drive(13, false);
+  }
+  pc.drive(13, true);
+  CHECK(
+      first
+      == std::vector<std::pair<std::uint8_t, bool>>{
+          {13, false},
+          {13, true }
+  });
+  CHECK(
+      second
+      == std::vector<std::pair<std::uint8_t, bool>>{
+          {13, false}
+  });
+  one.reset();
+  pc.drive(13, false);
+  CHECK(first.size() == 2);
+}
+
+TEST_CASE("the LCKR key sequence freezes the pin mode until reset")
+{
+  auto f = at_breakpoint();
+  port(f, "GPIOC").drive(13, false);
+  auto const log = finished(f);
+  CHECK(log[7] == 1);
+  CHECK(log[8] == 1);
+  CHECK(f.field("GPIOA", "GPIO_LCKR", "LCKK") == 1);
+  f.target->reset();
+  CHECK(f.field("GPIOA", "GPIO_LCKR", "LCKK") == 0);
+}
+
+TEST_CASE("a snapshot with a pending FPR restores to one handler entry, drives and listeners kept")
+{
+  auto  f     = at_breakpoint();
+  auto& pc    = port(f, "GPIOC");
+  int   heard = 0;
+  auto  sub   = pc.on_change([&](std::uint8_t, bool) { ++heard; });
+  pc.drive(13, false);
+  REQUIRE(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 1);
+  auto const saved    = f.target->snapshot();
+  auto const expected = finished(f);
+  CHECK(count(expected, exti13_mark) == 1);
+  pc.drive(13, true);
+  f.target->restore(saved);
+  CHECK_FALSE(pc.level(13));
+  CHECK(finished(f) == expected);
+  auto const before = heard;
+  pc.drive(13, true);
+  CHECK(heard == before + 1);
+}
+
+TEST_CASE("EXTI keeps a masked line off the NVIC and ignores edges it does not select")
+{
+  auto       f      = at_breakpoint();
+  auto&      exti   = f.target->peripheral("EXTI");
+  auto const offset = [&](std::string_view reg) {
+    return std::ranges::find(exti.description().registers, reg, &popcorn::register_desc::name)
+        ->offset;
+  };
+  auto const pending = [&] {
+    auto const word = f.target->mem().read(0xe000'e200u, 4);
+    REQUIRE(word.has_value());
+    return (*word >> 24 & 1u) != 0;
+  };
+  auto const write_exti = [&](std::string_view reg, std::uint32_t value) {
+    REQUIRE(
+        f.target->model("EXTI")
+            ->on_write(
+                exti, offset(reg), 4, exti.peek(offset(reg)), value, {.pc = 0, .now = icount{0}})
+            .has_value());
+  };
+  write_exti("EXTI_IMR1", 0);
+  port(f, "GPIOC").drive(13, false);
+  CHECK(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 1);
+  CHECK_FALSE(pending());
+  write_exti("EXTI_IMR1", 1u << 13);
+  CHECK(pending());
+  write_exti("EXTI_FPR1", 1u << 13);
+  exti.poke(offset("EXTI_FTSR1"), 0);
+  port(f, "GPIOC").drive(13, true);
+  port(f, "GPIOC").drive(13, false);
+  CHECK(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 0);
+  CHECK(f.field("EXTI", "EXTI_RPR1", "RPIF13") == 0);
+}
+
+namespace
+{
+void write_port(
+    stm32_fixture const& f,
+    std::string_view     name,
+    std::string_view     reg,
+    std::uint32_t        value)
+{
+  auto&      regs = f.target->peripheral(name);
+  auto const found =
+      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != regs.description().registers.end());
+  REQUIRE(
+      f.target->model(name)
+          ->on_write(
+              regs, found->offset, 4, regs.peek(found->offset), value, {.pc = 0, .now = icount{0}})
+          .has_value());
+}
+}
+
+TEST_CASE("a listener removed or added during a notification is not called for that change")
+{
+  auto                f        = at_breakpoint();
+  auto&               pc       = port(f, "GPIOC");
+  bool                b_called = false;
+  bool                c_called = false;
+  stm32::subscription b;
+  stm32::subscription c;
+  auto                a = pc.on_change([&](std::uint8_t, bool) {
+    b.reset();
+    c = pc.on_change([&](std::uint8_t, bool) { c_called = true; });
+  });
+  b                     = pc.on_change([&](std::uint8_t, bool) { b_called = true; });
+  pc.drive(13, false);
+  CHECK_FALSE(b_called);
+  CHECK_FALSE(c_called);
+}
+
+TEST_CASE("a listener that drives a pin the same change moved reports each final level once")
+{
+  auto       f     = at_breakpoint();
+  auto&      pc    = port(f, "GPIOC");
+  auto const moder = f.target->peripheral("GPIOC").peek(0);
+  write_port(f, "GPIOC", "GPIO_MODER", moder & ~(3u << 28));
+  write_port(f, "GPIOC", "GPIO_PUPDR", (1u << 26) | (1u << 28));
+  REQUIRE(pc.level(13));
+  REQUIRE(pc.level(14));
+  std::vector<std::pair<std::uint8_t, bool>> heard;
+  auto                                       sub = pc.on_change([&](std::uint8_t pin, bool level) {
+    heard.emplace_back(pin, level);
+    if(pin == 13)
+    {
+      pc.drive(14, true);
+    }
+  });
+  write_port(f, "GPIOC", "GPIO_PUPDR", (2u << 26) | (2u << 28));
+  CHECK_FALSE(pc.level(13));
+  CHECK(pc.level(14));
+  CHECK(
+      heard
+      == std::vector<std::pair<std::uint8_t, bool>>{
+          {13, false}
+  });
+}

@@ -6,5 +6,13 @@ sources = [
 ]
 sources += [
     here / "stm32" / name
-    for name in ("models.cpp", "rcc.cpp", "caches.cpp", "pwr.cpp", "flash.cpp")
+    for name in (
+        "models.cpp",
+        "rcc.cpp",
+        "caches.cpp",
+        "pwr.cpp",
+        "flash.cpp",
+        "gpio.cpp",
+        "exti.cpp",
+    )
 ]
