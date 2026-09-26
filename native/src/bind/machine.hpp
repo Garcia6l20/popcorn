@@ -149,12 +149,72 @@ public:
    * @brief Writes bytes into guest memory, as the debugger.
    * @param at First guest address.
    * @param bytes Bytes to write.
-   * @throws config_error naming the address when a byte is not writable memory or the range
-   *         leaves the 32-bit address space.
+   * @throws config_error naming the address when the range leaves the 32-bit address space.
+   * @throws emulation_error naming the failing address on a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Write bytes into guest memory as the debugger."}]] void
       write_memory(address at, reflex::py::nb::bytes const& bytes);
+
+  /**
+   * @brief Reads bytes of guest memory, as the debugger.
+   * @param at First guest address.
+   * @param size Byte count.
+   * @throws config_error naming the address when the range leaves the 32-bit address space.
+   * @throws emulation_error naming the failing address on a bus error.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{"Read bytes of guest memory as the debugger."}]] [[nodiscard]] auto
+      read_memory(address at, std::uint32_t size) const -> reflex::py::nb::bytes;
+
+  /** @brief Names of the core registers, in the arch module's order. */
+  [[= py::doc{"Names of the core registers, in the arch module's order."}]] [[nodiscard]] auto
+      register_names() const -> std::vector<std::string>;
+
+  /**
+   * @brief Reads a core register by its index in register_names().
+   * @param index Register index.
+   * @throws config_error when the index is out of range.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{"Read a core register by its index in register_names()."}]] [[nodiscard]] auto
+      read_register(std::uint32_t index) const -> std::uint64_t;
+
+  /**
+   * @brief Writes a core register by its index in register_names().
+   * @param index Register index.
+   * @param value Value, at most the register's width.
+   * @throws config_error when the index is out of range or the value is too wide.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{"Write a core register by its index in register_names()."}]] void
+      write_register(std::uint32_t index, std::uint64_t value);
+
+  /**
+   * @brief Stored value of a peripheral register, without read effects.
+   * @param peripheral Peripheral name.
+   * @param offset Byte offset of the register.
+   * @param width Register width in bits, 8, 16 or 32.
+   * @throws config_error when the peripheral is unknown or the register falls outside it.
+   */
+  [[= py::doc{"Stored value of a peripheral register, without read effects."}]] [[nodiscard]] auto
+      peek(std::string const& peripheral, std::uint32_t offset, std::uint8_t width)
+          -> std::uint32_t;
+
+  /**
+   * @brief Stores a peripheral register value, without write effects.
+   * @param peripheral Peripheral name.
+   * @param offset Byte offset of the register.
+   * @param width Register width in bits, 8, 16 or 32.
+   * @param value Value, at most @p width bits.
+   * @throws config_error when the peripheral is unknown, the register falls outside it or the
+   *         value is too wide.
+   */
+  [[= py::doc{"Store a peripheral register value, without write effects."}]] void poke(
+      std::string const& peripheral,
+      std::uint32_t      offset,
+      std::uint8_t       width,
+      std::uint32_t      value);
 
   /** @brief Instructions executed since reset. */
   [[= py::doc{"Instructions executed since reset."}]] [[nodiscard]] auto instructions() const

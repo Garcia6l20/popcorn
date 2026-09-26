@@ -193,10 +193,9 @@ class Project:
             except SymbolError as error:
                 raise self._error(f"{key}.symbol", "a symbol of the loaded images") from error
             try:
-                data = bytes.fromhex(init.bytes)
-                m._write_memory(address, data)  # pyright: ignore[reportPrivateUsage]
-            except ConfigError as error:
-                raise self._error(f"{key}.bytes", error.expected) from error
+                m.mem.write(address, bytes.fromhex(init.bytes))
+            except (ConfigError, EmulationError) as error:
+                raise self._error(f"{key}.bytes", f"bytes the memory accepts: {error}") from error
         return m
 
     async def boot(self, machine: Machine) -> Stop:

@@ -149,11 +149,11 @@ def test_zstd_is_imported_only_for_zstd_files(tmp_path: Path) -> None:
     packed = compress(path)
     raw = run_python(
         "import sys\n"
+        "sys.modules['compression.zstd'] = None\n"
         "from popcorn.trace import read\n"
-        f"list(read({str(path)!r}))\n"
-        "print('compression.zstd' in sys.modules)\n"
+        f"print(len(list(read({str(path)!r}))))\n"
     )
-    assert raw.stdout.strip() == "False", raw.stderr
+    assert raw.stdout.strip() == str(len(rows)), raw.stderr
     blocked = run_python(
         "import sys\n"
         "sys.modules['compression.zstd'] = None\n"

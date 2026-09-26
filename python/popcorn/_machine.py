@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import difflib
 import os
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from popcorn import _core
 from popcorn._description import MachineDescription, load_description
+from popcorn._dwarf_views import Var
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import (
     BudgetExceeded,
@@ -23,7 +25,12 @@ from popcorn._errors import (
 )
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._stop import Stop, stop_of
+from popcorn._views import Memory, Peripherals, ViewAccess
+from popcorn.arm import Registers
 from popcorn.units import VirtualDuration, VirtualTime
+
+if TYPE_CHECKING:
+    from popcorn.image.dwarf import DebugInfo, DebugType
 
 _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
@@ -117,6 +124,9 @@ class Machine:
         "_description",
         "_handle",
         "_images",
+        "_memory",
+        "_peripherals",
+        "_registers",
         "_slice_instructions",
         "_slice_wall_ns",
         "_waiters",
@@ -178,6 +188,10 @@ class Machine:
         self._busy = False
         self._background = False
         self._waiters: list[_Waiter] = []
+        access = ViewAccess(self._handle, self._require_stopped)
+        self._memory = Memory(access)
+        self._registers = Registers(access, self._handle.register_names())
+        self._peripherals = Peripherals(access, description)
         for one in (image,) if isinstance(image, Image) else image:
             self.load(one)
 
@@ -241,17 +255,80 @@ class Machine:
         self._require_stopped()
         self._handle.reset(_core.ResetKind(kind.value))
 
-    def _write_memory(self, address: int, data: bytes) -> None:
-        """Write bytes into guest memory as the debugger, flash included, for `Project.machine`
-        until `Machine.mem` exists.
+    @property
+    def mem(self) -> Memory:
+        """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`."""
+        return self._memory
+
+    @property
+    def reg(self) -> Registers:
+        """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`."""
+        return self._registers
+
+    @property
+    def periph(self) -> Peripherals:
+        """Peripheral registers by name, `m.periph.USART1.CR1.UE`.
+
+        Reads and writes register storage without model effects; use m.mem or
+        RegisterView.read/write for bus accesses a model reacts to.
+        """
+        return self._peripherals
+
+    def sym(self, name: str) -> int:
+        """Address of a symbol of the loaded images, the last loaded first.
 
         Raises:
-            ConfigError: A byte is not in writable memory or the range leaves the 32-bit address
-                space, keyed by the address.
-            MachineRunning: A run is active.
+            SymbolError: No loaded image has the name, with close matches.
         """
-        self._require_stopped()
-        self._handle.write_memory(address, data)
+        return self.address_of(name)
+
+    @property
+    def symbols(self) -> dict[str, Symbol]:
+        """Every symbol of the loaded images by name, a later image winning a clash."""
+        merged: dict[str, Symbol] = {}
+        for image in self._images:
+            merged.update((s.name, s) for s in image.symbols)
+        return merged
+
+    def var(self, name: str) -> Var:
+        """A module-scope variable of the loaded ELF images, typed from their DWARF.
+
+        Raises:
+            SymbolError: No loaded image declares the variable, with close matches.
+        """
+        known: list[str] = []
+        for info in reversed(self._debug_infos()):
+            variable = info.variables.get(name)
+            if variable is not None:
+                return Var(self._memory, info, variable.type, variable.address, name)
+            known.extend(info.variables)
+        close = difflib.get_close_matches(name, known, n=5)
+        raise SymbolError(
+            f"no variable {name} in the loaded images, close matches: {', '.join(close)}",
+            name=name,
+            close_matches=close,
+        )
+
+    @property
+    def types(self) -> dict[str, DebugType]:
+        """Named types of the loaded ELF images' DWARF, typedefs included, a later image winning
+        a clash."""
+        merged: dict[str, DebugType] = {}
+        for info in self._debug_infos():
+            merged.update((name, info.resolve(type_id)) for name, type_id in info.types.items())
+        return merged
+
+    def _debug_infos(self) -> list[DebugInfo]:
+        from popcorn.image.dwarf import DebugInfoError, load_debug_info
+
+        infos: list[DebugInfo] = []
+        for image in self._images:
+            if image.path is not None and image.path.suffix != ".hex" and image.segments:
+                try:
+                    infos.append(load_debug_info(image.path))
+                except DebugInfoError:
+                    continue
+        return infos
 
     def locate(self, address: int) -> Location:
         """Symbol, offset, file and line of an address, the rule stops use."""

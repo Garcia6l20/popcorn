@@ -1,4 +1,5 @@
 #include "machine.hpp"
+#include "errors.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/errors.hpp>
@@ -112,9 +113,11 @@ void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes
       at, std::span{static_cast<std::byte const*>(bytes.data()), bytes.size()});
   if(not written)
   {
-    throw config_error(
-        "memory", 0, std::format("{:#010x}", at),
-        std::format("{} bytes of writable memory", bytes.size()));
+    throw detail::bus_access_error(
+        std::format(
+            "bus error at {:#010x}: {}", written.error().at,
+            written.error().error == bus_error::unmapped ? "unmapped" : "denied"),
+        written.error().at);
   }
 }
 

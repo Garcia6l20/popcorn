@@ -75,6 +75,7 @@ class EmulationError(PopcornError):
         pc: Address of the instruction, None when unknown.
         symbol: Function containing pc, empty when unknown.
         stop: The stop, when the error reports one, such as an unexpected stop of `running()`.
+        address: The guest address a refused memory access started at, None otherwise.
     """
 
     def __init__(
@@ -85,12 +86,14 @@ class EmulationError(PopcornError):
         pc: int | None = None,
         symbol: str = "",
         stop: Stop | None = None,
+        address: int | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
         self.pc = pc
         self.symbol = symbol
         self.stop = stop
+        self.address = address
 
 
 class FaultError(EmulationError):

@@ -111,6 +111,10 @@ void translate(std::exception_ptr const& thrown)
         "BudgetExceeded", e, nb::arg("budget") = e.budget().value, nb::arg("pc") = e.where().pc,
         nb::arg("symbol") = e.where().symbol);
   }
+  catch(bus_access_error const& e)
+  {
+    raise("EmulationError", e, nb::arg("address") = e.at());
+  }
   catch(emulation_error const& e)
   {
     raise("EmulationError", e);

@@ -229,5 +229,5 @@ def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.MachineDesc
         handle.write_memory(0xFFFF_FFFF, b"\x00\x00")
     assert caught.value.key == "0xffffffff"
     assert "32-bit address space" in caught.value.expected
-    with pytest.raises(popcorn.ConfigError, match="writable memory"):
+    with pytest.raises(popcorn.EmulationError, match="0x30000000"):
         handle.write_memory(0x3000_0000, b"\x00")

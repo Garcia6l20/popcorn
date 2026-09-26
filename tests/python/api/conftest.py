@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import popcorn
@@ -11,6 +12,7 @@ ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
 CORE_FIRMWARE = ROOT / "tests" / "firmware" / "core" / "prebuilt"
 DRIVER_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "driver.elf"
+VIEWS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "views.elf"
 
 
 @pytest.fixture
@@ -76,3 +78,13 @@ class Machines:
 def machines(m33: popcorn.MachineDescription, driver: popcorn.Image) -> Machines:
     """Factory of reset machines over the driver firmware."""
     return Machines(m33, driver)
+
+
+@pytest.fixture
+def views(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    """A machine over the views firmware, stopped at its bkpt after copying .data."""
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(VIEWS_ELF))
+    m.reset()
+    stop = asyncio.run(m.run(budget=100_000))
+    assert stop.reason is popcorn.StopReason.USER
+    return m

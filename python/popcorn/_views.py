@@ -1,0 +1,316 @@
+"""Views of a stopped machine: memory, core registers, peripheral registers."""
+
+from __future__ import annotations
+
+import enum
+import struct
+from collections.abc import Callable, Iterator, Sequence
+from typing import TYPE_CHECKING
+
+from popcorn import _core
+from popcorn._errors import ConfigError, EmulationError
+
+if TYPE_CHECKING:
+    from popcorn._description import MachineDescription
+
+
+class ViewAccess:
+    """What a view needs from its machine: the native handle, and the running check."""
+
+    __slots__ = ("check", "handle")
+
+    def __init__(self, handle: _core.MachineHandle, check: Callable[[], None]) -> None:
+        self.handle = handle
+        self.check = check
+
+
+class ScalarView[T: (int, float)]:
+    """Little-endian scalars of one type, indexed by guest address: `m.mem.u32[addr] = 5`."""
+
+    __slots__ = ("_access", "_format", "_size")
+
+    def __init__(self, access: ViewAccess, fmt: str) -> None:
+        self._access = access
+        self._format = "<" + fmt
+        self._size = struct.calcsize(self._format)
+
+    def __getitem__(self, address: int) -> T:
+        self._access.check()
+        value: T = struct.unpack(
+            self._format, self._access.handle.read_memory(address, self._size)
+        )[0]
+        return value
+
+    def __setitem__(self, address: int, value: T) -> None:
+        self._access.check()
+        try:
+            data = struct.pack(self._format, value)
+        except struct.error as error:
+            raise ValueError(f"{value!r} does not fit {self._format[1:]}: {error}") from error
+        self._access.handle.write_memory(address, data)
+
+
+class Memory:
+    """Guest memory as the debugger sees it: flash writable, MMIO through the models.
+
+    A bus error raises EmulationError naming the failing address.
+    """
+
+    __slots__ = ("_access", "f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
+
+    def __init__(self, access: ViewAccess) -> None:
+        self._access = access
+        self.u8 = ScalarView[int](access, "B")
+        self.u16 = ScalarView[int](access, "H")
+        self.u32 = ScalarView[int](access, "I")
+        self.u64 = ScalarView[int](access, "Q")
+        self.i8 = ScalarView[int](access, "b")
+        self.i16 = ScalarView[int](access, "h")
+        self.i32 = ScalarView[int](access, "i")
+        self.i64 = ScalarView[int](access, "q")
+        self.f32 = ScalarView[float](access, "f")
+        self.f64 = ScalarView[float](access, "d")
+
+    def read(self, address: int, size: int) -> bytes:
+        """`size` bytes from `address`."""
+        self._access.check()
+        return self._access.handle.read_memory(address, size)
+
+    def write(self, address: int, data: bytes) -> None:
+        """Write `data` at `address`."""
+        self._access.check()
+        self._access.handle.write_memory(address, data)
+
+    def cstring(self, address: int, limit: int = 256) -> str:
+        """The NUL-terminated string at `address`, at most `limit` bytes, UTF-8 with
+        replacement characters.
+
+        Reads up to the end of each 64-byte block at once, byte by byte where a block read
+        meets a bus error, so a string ending just before unmapped memory still reads.
+        """
+        self._access.check()
+        data = bytearray()
+        while len(data) < limit:
+            at = address + len(data)
+            size = min(64 - at % 64, limit - len(data))
+            try:
+                chunk = self._access.handle.read_memory(at, size)
+            except EmulationError:
+                chunk = self._bytes_until_nul(at, size)
+            end = chunk.find(b"\0")
+            if end >= 0:
+                data += chunk[:end]
+                break
+            data += chunk
+        return data.decode("utf-8", errors="replace")
+
+    def _bytes_until_nul(self, address: int, size: int) -> bytes:
+        data = bytearray()
+        for at in range(address, address + size):
+            byte = self._access.handle.read_memory(at, 1)
+            data += byte
+            if byte == b"\0":
+                break
+        return bytes(data)
+
+
+class RegisterBank[R: enum.Enum]:
+    """Core registers by typed enum, `bank[Reg.PSP]`. The generated `Registers` adds one typed
+    attribute per register."""
+
+    __slots__ = ("_access", "_index")
+
+    def __init__(self, access: ViewAccess, names: Sequence[str]) -> None:
+        self._access = access
+        self._index = {name: index for index, name in enumerate(names)}
+
+    def _slot(self, register: R) -> int:
+        name = str(register.value)
+        index = self._index.get(name)
+        if index is None:
+            raise ConfigError(
+                f"this core has no register {name}",
+                file="registers",
+                key=name,
+                expected="a register of this core",
+            )
+        return index
+
+    def __getitem__(self, register: R) -> int:
+        self._access.check()
+        return self._access.handle.read_register(self._slot(register))
+
+    def __setitem__(self, register: R, value: int) -> None:
+        self._access.check()
+        if value < 0 or value >> 64:
+            raise ValueError(f"{value} does not fit a register")
+        self._access.handle.write_register(self._slot(register), value)
+
+    def names(self) -> tuple[str, ...]:
+        """Register names of this core, in the arch module's order."""
+        return tuple(self._index)
+
+
+class FieldBits:
+    """Position of a register field."""
+
+    __slots__ = ("lsb", "mask", "width")
+
+    def __init__(self, lsb: int, width: int) -> None:
+        self.lsb = lsb
+        self.width = width
+        self.mask = ((1 << width) - 1) << lsb
+
+
+class RegisterView:
+    """One peripheral register: `.value` for the whole word, a field by name as a bit slice.
+
+    `value` and fields read and write the register storage without the model's access effects.
+    `read()` and `write()` go over the bus, as `m.mem` does, so a model reacts.
+    """
+
+    __slots__ = ("_access", "_base", "_fields", "_name", "_offset", "_peripheral", "_width")
+
+    _access: ViewAccess
+    _base: int
+    _fields: dict[str, FieldBits]
+    _name: str
+    _offset: int
+    _peripheral: str
+    _width: int
+
+    def __init__(
+        self, access: ViewAccess, peripheral: str, base: int, register: _core.RegisterDesc
+    ) -> None:
+        object.__setattr__(self, "_access", access)
+        object.__setattr__(self, "_base", base)
+        object.__setattr__(self, "_peripheral", peripheral)
+        object.__setattr__(self, "_name", register.name)
+        object.__setattr__(self, "_offset", register.offset)
+        object.__setattr__(self, "_width", register.width)
+        object.__setattr__(
+            self, "_fields", {f.name: FieldBits(f.lsb, f.width) for f in register.fields}
+        )
+
+    @property
+    def name(self) -> str:
+        """Register name."""
+        return self._name
+
+    @property
+    def offset(self) -> int:
+        """Offset in the peripheral."""
+        return self._offset
+
+    @property
+    def fields(self) -> tuple[str, ...]:
+        """Field names."""
+        return tuple(self._fields)
+
+    def read(self) -> int:
+        """Read the register over the bus as the debugger, so a model reacts."""
+        return self._bus().__getitem__(self._base + self._offset)
+
+    def write(self, value: int) -> None:
+        """Write the register over the bus as the debugger, so a model reacts."""
+        self._bus()[self._base + self._offset] = value
+
+    def _bus(self) -> ScalarView[int]:
+        memory = Memory(self._access)
+        return {8: memory.u8, 16: memory.u16, 32: memory.u32}[self._width]
+
+    @property
+    def value(self) -> int:
+        """Stored value of the whole register."""
+        self._access.check()
+        return self._access.handle.peek(self._peripheral, self._offset, self._width)
+
+    @value.setter
+    def value(self, value: int) -> None:
+        self._access.check()
+        if value < 0 or value >> self._width:
+            raise ValueError(f"{value} does not fit the {self._width}-bit register {self._name}")
+        self._access.handle.poke(self._peripheral, self._offset, self._width, value)
+
+    def _field(self, name: str) -> FieldBits:
+        field = self._fields.get(name)
+        if field is None:
+            raise AttributeError(
+                f"{self._peripheral}.{self._name} has no field {name},"
+                f" fields: {', '.join(self._fields)}"
+            )
+        return field
+
+    def __getattr__(self, name: str) -> int:
+        field = self._field(name)
+        return (self.value & field.mask) >> field.lsb
+
+    def __setattr__(self, name: str, value: int) -> None:
+        if name == "value":
+            object.__setattr__(self, name, value)
+            return
+        field = self._field(name)
+        if value < 0 or value >> field.width:
+            raise ValueError(f"{value} does not fit the {field.width}-bit field {name}")
+        self.value = (self.value & ~field.mask) | (value << field.lsb)
+
+    def __repr__(self) -> str:
+        return f"<{self._peripheral}.{self._name} @ {self._offset:#x}>"
+
+
+class PeripheralView:
+    """One peripheral: its registers by name."""
+
+    __slots__ = ("_access", "_base", "_name", "_registers")
+
+    def __init__(self, access: ViewAccess, peripheral: _core.PeripheralDesc) -> None:
+        self._access = access
+        self._name = peripheral.name
+        self._base = peripheral.base
+        self._registers = {r.name: r for r in peripheral.registers}
+
+    @property
+    def registers(self) -> tuple[str, ...]:
+        """Register names."""
+        return tuple(self._registers)
+
+    def __getattr__(self, name: str) -> RegisterView:
+        register = self._registers.get(name)
+        if register is None:
+            raise AttributeError(f"{self._name} has no register {name}")
+        return RegisterView(self._access, self._name, self._base, register)
+
+    def __getitem__(self, name: str) -> RegisterView:
+        return self.__getattr__(name)
+
+    def __dir__(self) -> list[str]:
+        return [*self._registers]
+
+
+class Peripherals:
+    """The peripherals of the description, by name: `m.periph.USART1.CR1.UE`."""
+
+    __slots__ = ("_access", "_peripherals")
+
+    def __init__(self, access: ViewAccess, description: MachineDescription) -> None:
+        self._access = access
+        self._peripherals = {p.name: p for p in description.peripherals}
+
+    def names(self) -> tuple[str, ...]:
+        """Peripheral names, in description order."""
+        return tuple(self._peripherals)
+
+    def __getattr__(self, name: str) -> PeripheralView:
+        peripheral = self._peripherals.get(name)
+        if peripheral is None:
+            raise AttributeError(f"the description has no peripheral {name}")
+        return PeripheralView(self._access, peripheral)
+
+    def __getitem__(self, name: str) -> PeripheralView:
+        return self.__getattr__(name)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._peripherals)
+
+    def __dir__(self) -> list[str]:
+        return [*self._peripherals]
