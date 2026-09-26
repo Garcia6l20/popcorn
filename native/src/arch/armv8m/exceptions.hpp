@@ -30,6 +30,11 @@ inline constexpr std::uint32_t exc_systick = 15;
 /** @brief Exception number of IRQ 0. */
 inline constexpr std::uint32_t exc_irq0 = 16;
 
+/** @brief SCR.SLEEPONEXIT. */
+inline constexpr std::uint32_t scr_sleeponexit = 1u << 1;
+/** @brief SCR.SEVONPEND. */
+inline constexpr std::uint32_t scr_sevonpend = 1u << 4;
+
 /** @brief HFSR.FORCED, a configurable fault or SVC escalated to HardFault. */
 inline constexpr std::uint32_t hfsr_forced = 1u << 30;
 

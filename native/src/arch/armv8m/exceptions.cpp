@@ -259,6 +259,7 @@ auto cortex_m::enter(std::uint32_t number) -> trap_result
   put_bit(state_.exceptions.pending, number, false);
   put_bit(state_.exceptions.active, number, true);
   refresh_pending();
+  state_.event_register = true;
   services.trace(
       {.kind = core::trace_kind::irq, .flags = 1, .aux = static_cast<std::uint16_t>(number)});
   return trap_result::resume();
@@ -319,7 +320,18 @@ auto cortex_m::exception_return() -> trap_result
   set_context(engine, target);
   if(number >= exc_irq0 and test_bit(state_.exceptions.level, number))
   {
+    note_pending(number);
     put_bit(state_.exceptions.pending, number, true);
+  }
+  state_.event_register = true;
+  auto const idle_thread =
+      stacked_ipsr == 0 and std::ranges::all_of(state_.exceptions.active, [](std::uint32_t word) {
+        return word == 0;
+      });
+  if(idle_thread and (state_.scs.scr & scr_sleeponexit) != 0)
+  {
+    state_.sleep = sleep_state{.at = words[6] & ~1u, .size = 0, .kind = sleep_kind::sleep_on_exit};
+    services.end_slice();
   }
   refresh_pending();
   services.trace(

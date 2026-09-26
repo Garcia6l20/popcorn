@@ -346,3 +346,85 @@ TEST_CASE("a CVR write restarts the period and orphans the queued tick event")
   run_to_instruction(f, written + 10 * period + period / 4);
   CHECK(ticks(f) == 15);
 }
+
+TEST_CASE("wfe sleeps to the next tick, passes after an sev, and sleeps once after sev wfe wfe")
+{
+  for(int round = 0; round < 2; ++round)
+  {
+    CAPTURE(round);
+    {
+      auto f = booted();
+      REQUIRE(start(f, "wfe_basic").reason == stop_reason::user);
+      CHECK(log_of(f) == std::vector<std::uint32_t>{0, 1});
+    }
+    {
+      auto       f     = booted();
+      auto const begin = f.target->virtual_clock().now().value;
+      auto const done  = start(f, "wfe_sev");
+      REQUIRE(done.reason == stop_reason::user);
+      CHECK(log_of(f) == std::vector<std::uint32_t>{0});
+      CHECK(done.instructions.value - begin < period);
+    }
+    {
+      auto f = booted();
+      REQUIRE(start(f, "wfe_sev_twice").reason == stop_reason::user);
+      CHECK(log_of(f) == std::vector<std::uint32_t>{1});
+    }
+  }
+}
+
+TEST_CASE("yield runs as a nop")
+{
+  auto f = booted();
+  REQUIRE(start(f, "yield_loop").reason == stop_reason::user);
+  auto const log = log_of(f);
+  REQUIRE(log.size() == 100);
+  for(std::uint32_t index = 0; index < 100; ++index)
+  {
+    CHECK(log[index] == index);
+  }
+}
+
+TEST_CASE("with SEVONPEND a disabled IRQ pended by the host wakes wfe without a handler")
+{
+  auto f = booted();
+  REQUIRE(start(f, "wfe_sevonpend").reason == stop_reason::user);
+  REQUIRE(f.target->mem().write(0xE000'E200, 4, 1u << 6));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(log_of(f) == std::vector<std::uint32_t>{0x5E});
+  CHECK((f.target->mem().read(0xE000'E200, 4).value_or(0) & (1u << 6)) != 0);
+}
+
+TEST_CASE("sleep-on-exit keeps Thread from running and costs the handler only per tick")
+{
+  auto f = booted();
+  f.set("pc", fn("sleep_on_exit"));
+  auto const begin = f.target->virtual_clock().now().value;
+  run_to_instruction(f, begin + 5 * period);
+  auto const first = ticks(f);
+  auto const b     = run_to_instruction(f, begin + 10 * period);
+  CHECK(ticks(f) == first + 5);
+  auto const c = run_to_instruction(f, begin + 15 * period);
+  CHECK(ticks(f) == first + 10);
+  CHECK(b.executed.value == c.executed.value);
+  CHECK(f.word(fn("thread_counter")) == 0);
+  CHECK(f.module->idle());
+}
+
+TEST_CASE("wfe respects PRIMASK: a masked IRQ leaves it asleep unless SEVONPEND sets the event")
+{
+  {
+    auto f = booted();
+    REQUIRE(start(f, "wfe_primask").reason == stop_reason::user);
+    REQUIRE(f.target->mem().write(0xE000'E200, 4, 1u << 7));
+    CHECK(f.run_to_stop().reason == stop_reason::idle);
+    CHECK(log_of(f).empty());
+  }
+  {
+    auto f = booted();
+    REQUIRE(start(f, "wfe_primask_sevonpend").reason == stop_reason::user);
+    REQUIRE(f.target->mem().write(0xE000'E200, 4, 1u << 7));
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    CHECK(log_of(f) == std::vector<std::uint32_t>{0x7E});
+  }
+}

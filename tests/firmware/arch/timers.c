@@ -2,7 +2,10 @@
 
 #define SCB_ICSR        0xE000ED04u
 #define SCB_VTOR        0xE000ED08u
+#define SCB_SCR         0xE000ED10u
 #define SCB_SHPR(n)     (0xE000ED18u + (n) - 4u)
+#define NVIC_ISER0      0xE000E100u
+#define NVIC_ICER0      0xE000E180u
 #define SYST_CSR        0xE000E010u
 #define SYST_RVR        0xE000E014u
 #define SYST_CVR        0xE000E018u
@@ -103,4 +106,88 @@ __attribute__((noipa)) void spin_tick(void)
   {
   }
   __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+uint32_t thread_counter;
+
+__attribute__((noipa)) void wfe_basic(void)
+{
+  start_systick(3999, 7);
+  LOG(ticks);
+  __asm__ volatile("wfe" ::: "memory");
+  LOG(ticks);
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void wfe_sev(void)
+{
+  start_systick(3999, 7);
+  __asm__ volatile("sev\nwfe" ::: "memory");
+  LOG(ticks);
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void wfe_sev_twice(void)
+{
+  start_systick(3999, 7);
+  __asm__ volatile("sev\nwfe\nwfe" ::: "memory");
+  LOG(ticks);
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void yield_loop(void)
+{
+  for(uint32_t round = 0; round < 100; ++round)
+  {
+    __asm__ volatile("yield" ::: "memory");
+    LOG(round);
+  }
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void wfe_sevonpend(void)
+{
+  REG32(NVIC_ICER0) = 1u << 6;
+  REG32(SCB_SCR) |= 1u << 4;
+  __asm__ volatile("dsb\nisb\nbkpt #2\nwfe" ::: "memory");
+  LOG(0x5E);
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void sleep_on_exit(void)
+{
+  REG32(SCB_SCR) |= 1u << 1;
+  start_systick(3999, 7);
+  __asm__ volatile("dsb\nisb\nwfi" ::: "memory");
+  for(;;)
+  {
+    thread_counter = thread_counter + 1u;
+  }
+}
+
+static void wfe_masked(uint32_t sevonpend)
+{
+  __asm__ volatile("cpsid i" ::: "memory");
+  if(sevonpend != 0)
+  {
+    REG32(SCB_SCR) |= 1u << 4;
+  }
+  else
+  {
+    REG32(SCB_SCR) &= ~(1u << 4);
+  }
+  REG32(NVIC_ISER0) = 1u << 7;
+  __asm__ volatile("dsb\nisb\nbkpt #2\nwfe" ::: "memory");
+  LOG(0x7E);
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void wfe_primask(void)
+{
+  wfe_masked(0);
+}
+
+__attribute__((noipa)) void wfe_primask_sevonpend(void)
+{
+  wfe_masked(1);
 }

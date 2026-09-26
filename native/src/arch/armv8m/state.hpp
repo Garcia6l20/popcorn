@@ -157,14 +157,16 @@ struct cyccnt_state
 enum class sleep_kind : std::uint8_t
 {
   wfi,
+  wfe,
+  sleep_on_exit,
 };
 
 /** @brief A sleeping core: the instruction it sleeps on. */
 struct sleep_state
 {
-  /** @brief Address of the WFI. */
+  /** @brief Address of the WFI or WFE, the return address for sleep-on-exit. */
   address at{};
-  /** @brief Size of the WFI. */
+  /** @brief Size of the instruction, 0 for sleep-on-exit. */
   std::uint32_t size{};
   /** @brief Why the core sleeps. */
   sleep_kind kind{};
@@ -188,6 +190,8 @@ struct state
   cyccnt_state cyccnt{};
   /** @brief Set while the core sleeps. */
   std::optional<sleep_state> sleep{};
+  /** @brief Event register of WFE. */
+  bool event_register{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(state const&, state const&) -> bool = default;

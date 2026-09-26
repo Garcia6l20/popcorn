@@ -123,6 +123,9 @@ private:
   [[nodiscard]] auto sleeping() const -> bool;
   [[nodiscard]] auto wake_event() const -> bool;
   void               wake_if_due();
+  void               note_pending(std::uint32_t number) noexcept;
+  auto               hint() -> bool;
+  [[nodiscard]] auto halfword(address at) const -> std::uint32_t;
   [[nodiscard]] auto privileged() const -> bool;
   [[nodiscard]] auto preempts(std::uint32_t number) const -> bool;
   auto               raise(std::uint32_t number, address at) -> trap_result;

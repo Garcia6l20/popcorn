@@ -20,6 +20,13 @@ namespace
 constexpr std::uint32_t wfi_narrow      = 0xbf30;
 constexpr std::uint32_t wfi_wide_first  = 0xf3af;
 constexpr std::uint32_t wfi_wide_second = 0x8003;
+constexpr std::uint32_t hint_wide_first = 0xf3af;
+constexpr std::uint32_t wfe_narrow      = 0xbf20;
+constexpr std::uint32_t yield_narrow    = 0xbf10;
+constexpr std::uint32_t sev_narrow      = 0xbf40;
+constexpr std::uint32_t wfe_wide_second = 0x8002;
+constexpr std::uint32_t yield_wide      = 0x8001;
+constexpr std::uint32_t sev_wide_second = 0x8004;
 
 void require(uc_err err, std::string_view what)
 {
@@ -112,10 +119,85 @@ auto cortex_m::sleeping() const -> bool
 
 auto cortex_m::wake_event() const -> bool
 {
+  auto const wfe = state_.sleep and state_.sleep->kind == sleep_kind::wfe;
+  if(wfe and state_.event_register)
+  {
+    return true;
+  }
   auto const best = best_pending(state_.exceptions);
   return best
      and group_priority(priority_of(state_.exceptions, *best), state_.scs.prigroup)
-       < current_priority(true);
+       < current_priority(not wfe);
+}
+
+void cortex_m::note_pending(std::uint32_t number) noexcept
+{
+  if((state_.scs.scr & scr_sevonpend) != 0 and not test_bit(state_.exceptions.pending, number))
+  {
+    state_.event_register = true;
+  }
+}
+
+auto cortex_m::halfword(address at) const -> std::uint32_t
+{
+  return context_->services.read(at, 2, initiator::debugger).value_or(0);
+}
+
+auto cortex_m::hint() -> bool
+{
+  auto const at   = raw_pc();
+  auto const here = halfword(at);
+  if((here & 0xff00u)
+     == 0xde00u
+     or ((here & 0xfff0u) == 0xf7f0u and (halfword(at + 2) & 0xf000u) == 0xa000u))
+  {
+    return false;
+  }
+  address       insn = 0;
+  std::uint32_t size = 0;
+  bool          wfe  = false;
+  if(auto const before = at >= 2 ? halfword(at - 2) : 0;
+     before == wfe_narrow or before == yield_narrow)
+  {
+    insn = at - 2;
+    size = 2;
+    wfe  = before == wfe_narrow;
+  }
+  else if(
+      auto const second = at >= 4 ? halfword(at - 2) : 0;
+      at
+      >= 4
+      and halfword(at - 4)
+      == hint_wide_first
+      and (second == wfe_wide_second or second == yield_wide))
+  {
+    insn = at - 4;
+    size = 4;
+    wfe  = second == wfe_wide_second;
+  }
+  else
+  {
+    return false;
+  }
+  if(not wfe)
+  {
+    return true;
+  }
+  auto const sev = (insn >= 2 and halfword(insn - 2) == sev_narrow)
+                or (insn
+                    >= 4
+                    and halfword(insn - 4)
+                    == hint_wide_first
+                    and halfword(insn - 2)
+                    == sev_wide_second);
+  if(sev or state_.event_register)
+  {
+    state_.event_register = false;
+    return true;
+  }
+  state_.sleep = sleep_state{.at = insn, .size = size, .kind = sleep_kind::wfe};
+  context_->services.end_slice();
+  return true;
 }
 
 void cortex_m::wake_if_due()
@@ -134,6 +216,10 @@ void cortex_m::wake_if_due()
     return;
   }
   auto const& sleep = *state_.sleep;
+  if(sleep.kind == sleep_kind::wfe and state_.event_register)
+  {
+    state_.event_register = false;
+  }
   if(sleep.size != 0 and raw_pc() == sleep.at)
   {
     write(UC_ARM_REG_PC, (sleep.at + sleep.size) | 1u);

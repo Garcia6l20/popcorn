@@ -304,6 +304,7 @@ void cortex_m::set_irq_line(std::uint32_t source, bool active)
   put_bit(exceptions.level, number, active);
   if(active and not was)
   {
+    note_pending(number);
     put_bit(exceptions.pending, number, true);
   }
   refresh_pending();
@@ -329,6 +330,10 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
 
 auto cortex_m::on_invalid_insn() -> trap_result
 {
+  if(hint())
+  {
+    return trap_result::resume();
+  }
   return trap_result::fault({.kind = fault_kind::usage, .fault_address = pc()});
 }
 
@@ -432,6 +437,10 @@ auto cortex_m::is_enabled(std::uint32_t number) const noexcept -> bool
 
 void cortex_m::set_exception_pending(std::uint32_t number, bool value)
 {
+  if(value)
+  {
+    note_pending(number);
+  }
   put_bit(state_.exceptions.pending, number, value);
   refresh_pending();
 }

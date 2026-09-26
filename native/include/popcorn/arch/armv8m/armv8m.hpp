@@ -22,10 +22,15 @@ namespace popcorn::arch::armv8m
  *
  * - SysTick and DWT CYCCNT count processor cycles derived from executed instructions and the
  *   machine's cycles per instruction. SYST_CSR.CLKSOURCE 0 divides by 8, the STM32 HCLK/8
- *   convention. CYCCNT keeps counting through WFI sleep, where a real core gates it.
+ *   convention. CYCCNT keeps counting through WFI and WFE sleep, where a real core gates it.
  * - A guest read of SYST_CVR, SYST_CSR.COUNTFLAG or CYCCNT resolves to the end of the translated
  *   block holding the read, which also ends at a 1 KB page boundary.
  * - A debugger `mem()` read of SYST_CSR clears COUNTFLAG, as a guest read does.
+ * - WFE sleeps unless the event register is set or an SEV sits right before it: Unicorn runs SEV
+ *   as a NOP, so an SEV elsewhere never wakes a WFE. The event register is set by exception
+ *   entry and return, and by an exception becoming pending while SCR.SEVONPEND is set. WFE also
+ *   wakes on the WFI condition with PRIMASK, BASEPRI and FAULTMASK respected, where WFI ignores
+ *   PRIMASK. YIELD runs as a NOP.
  * - A debugger `mem()` write to STIR is judged by the privilege of the paused core: while it is
  *   in unprivileged Thread mode with CCR.USERSETMPEND clear, the write pends nothing.
  * - A debugger `mem()` access to the system space that fails outside a slice returns 0, and the
