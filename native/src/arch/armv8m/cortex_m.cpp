@@ -22,6 +22,7 @@ namespace popcorn::arch::armv8m
 {
 namespace
 {
+constexpr std::uint32_t excp_swi            = 2;
 constexpr std::uint32_t excp_bkpt           = 7;
 constexpr std::uint32_t excp_exception_exit = 8;
 constexpr std::uint32_t reset_lr            = 0xffff'ffff;
@@ -238,7 +239,7 @@ auto cortex_m::deliverable_now() const -> bool
   return best and preempts(*best);
 }
 
-auto cortex_m::preempts(std::uint32_t number) const -> bool
+auto cortex_m::current_priority() const -> int
 {
   std::array<int, 3>           ids{UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI, UC_ARM_REG_FAULTMASK};
   std::array<std::uint32_t, 3> held{};
@@ -246,12 +247,44 @@ auto cortex_m::preempts(std::uint32_t number) const -> bool
   require(
       uc_reg_read_batch(engine_handle(), ids.data(), out.data(), static_cast<int>(ids.size())),
       "reading the priority masks");
-  auto const current = execution_priority(
+  return execution_priority(
       state_.exceptions, state_.scs.prigroup,
       {.primask   = (held[0] & 1u) != 0,
        .basepri   = static_cast<std::uint8_t>(held[1]),
        .faultmask = (held[2] & 1u) != 0});
-  return group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup) < current;
+}
+
+auto cortex_m::privileged() const -> bool
+{
+  return (read(UC_ARM_REG_IPSR) & 0x1ffu) != 0 or (read(UC_ARM_REG_CONTROL) & 1u) == 0;
+}
+
+auto cortex_m::preempts(std::uint32_t number) const -> bool
+{
+  return group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup)
+       < current_priority();
+}
+
+auto cortex_m::raise(std::uint32_t number, address at) -> trap_result
+{
+  auto const current = current_priority();
+  if(group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup) < current)
+  {
+    set_exception_pending(number, true);
+    return trap_result::resume();
+  }
+  if(group_priority(priority_of(state_.exceptions, exc_hardfault), state_.scs.prigroup) < current)
+  {
+    state_.scs.hfsr |= hfsr_forced;
+    set_exception_pending(exc_hardfault, true);
+    return trap_result::resume();
+  }
+  write(UC_ARM_REG_PC, at | 1u);
+  return trap_result::fault(
+      {.kind          = fault_kind::hard,
+       .fault_address = at,
+       .status        = state_.scs.cfsr,
+       .detail        = state_.scs.hfsr});
 }
 
 void cortex_m::set_irq_line(std::uint32_t source, bool active)
@@ -273,6 +306,10 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
   if(intno == excp_exception_exit)
   {
     return exception_return();
+  }
+  if(intno == excp_swi)
+  {
+    return raise(exc_svcall, pc() - 2);
   }
   if(intno == excp_bkpt)
   {

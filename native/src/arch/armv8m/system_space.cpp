@@ -28,14 +28,6 @@ constexpr std::uint32_t cpacr_writable    = 0x00f0'0000;
 constexpr std::uint32_t dwt_numcomp       = 4u << 28;
 constexpr std::uint32_t shcsr_enables     = 0x0007'0000;
 
-constexpr std::uint32_t exc_memmanage  = 4;
-constexpr std::uint32_t exc_busfault   = 5;
-constexpr std::uint32_t exc_usagefault = 6;
-constexpr std::uint32_t exc_svcall     = 11;
-constexpr std::uint32_t exc_debugmon   = 12;
-constexpr std::uint32_t exc_pendsv     = 14;
-constexpr std::uint32_t exc_systick    = 15;
-
 constexpr std::array<bool, 16> system_priority_implemented{false, false, false, false, true,  true,
                                                            true,  false, false, false, false, true,
                                                            true,  false, true,  true};
@@ -567,6 +559,15 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
     case 0xdfc:
       scs.demcr = merge(scs.demcr, value, mask);
       return;
+    case 0xf00:
+    {
+      auto const number = exc_irq0 + ((value & mask) & 0x1ffu);
+      if(number < core_.exception_count() and (bit(scs.ccr, 1) or core_.privileged()))
+      {
+        core_.set_exception_pending(number, true);
+      }
+      return;
+    }
     case 0xf34:
       scs.fpccr = merge(scs.fpccr, value, mask);
       return;

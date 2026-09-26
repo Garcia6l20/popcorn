@@ -107,7 +107,10 @@ private:
       std::uint64_t value,
       void*         user) noexcept;
 
+  [[nodiscard]] auto current_priority() const -> int;
+  [[nodiscard]] auto privileged() const -> bool;
   [[nodiscard]] auto preempts(std::uint32_t number) const -> bool;
+  auto               raise(std::uint32_t number, address at) -> trap_result;
   auto               enter(std::uint32_t number) -> trap_result;
   auto               exception_return() -> trap_result;
 

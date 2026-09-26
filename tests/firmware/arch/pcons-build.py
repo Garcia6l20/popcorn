@@ -43,9 +43,45 @@ ENTRIES = {
         "log_buf",
         "log_len",
     ),
+    "svc": (
+        "svc_setup",
+        "svc_basic",
+        "svc_regs",
+        "svc_regs_at",
+        "svc_psp",
+        "svc_psp_top",
+        "svc_handler_mode",
+        "svc_escalate",
+        "svc_escalate_at",
+        "svc_unpriv",
+        "faultmask_svc",
+        "faultmask_svc_after",
+        "svc_until",
+        "svc_until_after",
+        "svc_entry",
+        "pendsv_basic",
+        "pendsv_tail",
+        "pendsv_clear",
+        "nmi_run",
+        "stir_run",
+        "stir_unpriv",
+        "stir_allowed",
+        "spin_svc",
+        "spin_svc_handler",
+        "switch_run",
+        "task_sp",
+        "task_sp_first",
+        "control_seen",
+        "b_fp_seen",
+        "log_buf",
+        "log_len",
+    ),
 }
 
-SOURCES = {"exceptions": ("exceptions.c", "exceptions.S", "probe.S")}
+SOURCES = {
+    "exceptions": ("exceptions.c", "exceptions.S", "probe.S"),
+    "svc": ("svc.c", "svc.S", "switch.S"),
+}
 
 for name, entries in ENTRIES.items():
     sources = SOURCES.get(name, (f"{name}.c",))

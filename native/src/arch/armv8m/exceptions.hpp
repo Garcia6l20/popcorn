@@ -13,8 +13,25 @@ namespace popcorn::arch::armv8m
 inline constexpr std::uint32_t exc_nmi = 2;
 /** @brief Exception number of HardFault. */
 inline constexpr std::uint32_t exc_hardfault = 3;
+/** @brief Exception number of MemManage. */
+inline constexpr std::uint32_t exc_memmanage = 4;
+/** @brief Exception number of BusFault. */
+inline constexpr std::uint32_t exc_busfault = 5;
+/** @brief Exception number of UsageFault. */
+inline constexpr std::uint32_t exc_usagefault = 6;
+/** @brief Exception number of SVCall. */
+inline constexpr std::uint32_t exc_svcall = 11;
+/** @brief Exception number of DebugMonitor. */
+inline constexpr std::uint32_t exc_debugmon = 12;
+/** @brief Exception number of PendSV. */
+inline constexpr std::uint32_t exc_pendsv = 14;
+/** @brief Exception number of SysTick. */
+inline constexpr std::uint32_t exc_systick = 15;
 /** @brief Exception number of IRQ 0. */
 inline constexpr std::uint32_t exc_irq0 = 16;
+
+/** @brief HFSR.FORCED, a configurable fault or SVC escalated to HardFault. */
+inline constexpr std::uint32_t hfsr_forced = 1u << 30;
 
 /** @brief Mask of the group priority bits for an AIRCR.PRIGROUP value. */
 constexpr auto group_mask(std::uint32_t prigroup) noexcept -> std::uint32_t

@@ -14,7 +14,7 @@ core_data = project_dir / "tests" / "data" / "core"
 
 add_doctest("arch-interface", [here / "test_interface.cpp"], [core])
 
-arch_firmware = {name: firmware("arch", name) for name in ("scs", "exceptions")}
+arch_firmware = {name: firmware("arch", name) for name in ("scs", "exceptions", "svc")}
 arch_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in arch_firmware.items()},
@@ -27,6 +27,7 @@ arch_tests = [
         ("arch-scs", "test_scs.cpp"),
         ("arch-exceptions", "test_exceptions.cpp"),
         ("arch-units", "test_units.cpp"),
+        ("arch-svc", "test_svc.cpp"),
     )
 ]
 for test in arch_tests:

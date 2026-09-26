@@ -20,10 +20,8 @@ namespace popcorn::arch::armv8m
  *
  * Current limitations:
  *
- * - While the core is in unprivileged Thread mode, the register view and the machine's register
- *   list read MSP, PSP, PRIMASK, BASEPRI and FAULTMASK as 0, and drop writes to them and to
- *   CONTROL: the engine gates them by privilege. Snapshots and calls restore them correctly
- *   through the module's own state.
+ * - A debugger `mem()` write to STIR is judged by the privilege of the paused core: while it is
+ *   in unprivileged Thread mode with CCR.USERSETMPEND clear, the write pends nothing.
  * - A debugger `mem()` access to the system space that fails outside a slice returns 0, and the
  *   next `run_slice` rethrows the failure.
  *
