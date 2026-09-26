@@ -56,9 +56,18 @@ namespace popcorn::arch::armv8m
  *   BusFault.
  * - A bus error from a peripheral model, on a read or a write, is reported as IMPRECISERR with no
  *   BFAR, where hardware reports a failed read as a precise error.
- * - MSPLIM and PSPLIM have no engine register id: a reset clears them, an in-memory snapshot
- *   restores them, a serialized snapshot does not. Exception entry stacking below MSPLIM is not
- *   detected, where hardware raises STKOF.
+ * - MSPLIM and PSPLIM survive a register-list restore and a call, only `reset()` clears them.
+ *   Exception entry stacking below the limit of the stack it pushes to, MSPLIM in Handler mode or
+ *   Thread mode on MSP, PSPLIM in Thread mode on PSP, stops with a UsageFault STKOF and leaves
+ *   the exception pending, where hardware stacks down to the limit and takes the UsageFault.
+ * - Lockup, and the INVPC, UNSTKERR, STKERR, STKOF on entry, VECTTBL and INVSTATE faults, stop
+ *   the run under every fault policy.
+ * - The floating-point context is stacked at exception entry, never lazily: FPCCR and FPCAR are
+ *   storage. FPDSCR is storage too, the engine builds new floating-point contexts from its own
+ *   defaults.
+ * - Spin detection counts one exception level too few after an SVC, or a fault the engine raises
+ *   as an exception, taken while already in Handler mode, until the level returns to Thread mode.
+ *   The count errs low: a spin may go undetected, never falsely reported.
  * - CM7: CCR.IC, CCR.DC and CCR.BP are storage. The cache maintenance registers, CCSIDR and
  *   CSSELR read 0 and ignore writes. The DWT lock access register is ignored and CYCCNT is always
  *   writable.

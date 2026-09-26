@@ -8,6 +8,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/image/image.hpp>
 
 #include <doctest/doctest.h>
 
@@ -518,6 +519,43 @@ TEST_CASE("an intercept reads arguments and returns a value to the firmware call
         f.target->mem().read(fn("mixed_seen") + 4, 4)
         == static_cast<std::uint32_t>(std::bit_cast<std::uint64_t>(99.0) >> 32));
   }
+}
+
+TEST_CASE("intercept_call::args reads hard_double arguments of an image from load_elf")
+{
+  auto const loaded = popcorn::image::load_elf(popcorn::testing::firmware("abi"));
+  REQUIRE(loaded.abi == float_abi::hard_double);
+  core::machine target{
+      m33(),
+      [](popcorn::core_desc const& core) -> std::unique_ptr<arch::arch> {
+        return std::make_unique<arch::armv8m::cortex_m>(core);
+      },
+      {}};
+  target.load(loaded);
+  target.reset();
+  REQUIRE(
+      target.run_slice({.wall_budget = std::chrono::seconds{10}}).stopped->reason
+      == stop_reason::user);
+  std::vector<std::uint64_t> seen;
+  auto const                 kinds = std::vector<value_kind>{
+      value_kind::i32, value_kind::f64, value_kind::i32, value_kind::f32, value_kind::i64};
+  auto const hook =
+      target.add_intercept(loaded.lookup("mixed").value, [&](core::intercept_call const& c) {
+        seen = c.args(kinds);
+        return core::intercept_result::returns(f64(99.0));
+      });
+  target.regs().write(*target.regs().find("pc"), loaded.lookup("call_mixed").value);
+  auto const stopped = target.run_slice({.wall_budget = std::chrono::seconds{10}}).stopped;
+  REQUIRE(stopped.has_value());
+  REQUIRE(stopped->reason == stop_reason::user);
+  CHECK(
+      seen
+      == std::vector<std::uint64_t>{
+          1, std::bit_cast<std::uint64_t>(2.0), 3, std::bit_cast<std::uint32_t>(4.0f), 5});
+  CHECK(target.mem().read(loaded.lookup("mixed_seen").value, 4) == 0u);
+  CHECK(
+      target.mem().read(loaded.lookup("mixed_seen").value + 4, 4)
+      == static_cast<std::uint32_t>(std::bit_cast<std::uint64_t>(99.0) >> 32));
 }
 
 TEST_CASE("an IRQ line raised during a masked call is taken after end_call")

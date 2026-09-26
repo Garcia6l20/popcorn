@@ -234,7 +234,7 @@ TEST_CASE("a UDF polled in a loop with a UsageFault handler reading a register i
   CHECK(stopped.detail.find("TESTDEV") == std::string::npos);
 }
 
-TEST_CASE("recorded: MSPLIM raises STKOF, and a reset clears MSPLIM")
+TEST_CASE("MSPLIM raises STKOF, the UsageFault entry below it stops, a reset clears MSPLIM")
 {
   {
     auto       m       = booted(fault_policy::stop);
@@ -247,8 +247,9 @@ TEST_CASE("recorded: MSPLIM raises STKOF, and a reset clears MSPLIM")
     auto       m       = booted(fault_policy::enter_handler);
     auto const stopped = run_entry(m, "stack_limit");
     REQUIRE(stopped.reason == stop_reason::fault);
-    CHECK(stopped.fault->kind == popcorn::fault_kind::hard);
-    CHECK((stopped.fault->status & 0x00100000) != 0);
+    CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+    CHECK(stopped.fault->status == 0x00100000);
+    CHECK(m.f->module->is_pending(6));
     m.f->target->reset();
     REQUIRE(m.f->run_to_stop().reason == stop_reason::user);
     m.f->set("pc", fn("deep_stack_run"));
@@ -262,4 +263,51 @@ TEST_CASE("recorded: an unprivileged read of CPUID is answered, no BusFault")
   REQUIRE(run_entry(m, "unpriv_scs").reason == stop_reason::user);
   CHECK(m.f->word(fn("unpriv_read")) == m.f->module->cpuid());
   CHECK(log_of(*m.f).empty());
+}
+
+TEST_CASE("exception entry stacking below the pushed stack's limit stops with STKOF")
+{
+  struct stkof_case
+  {
+    std::string_view entry;
+    bool             overflows;
+    bool             process;
+    std::uint32_t    size;
+    std::uint32_t    pending;
+  };
+  std::vector<stkof_case> const cases{
+      {"stkof_main_fits",      false, false, 0x20, 14},
+      {"stkof_main_basic",     true,  false, 0x20, 14},
+      {"stkof_main_fp_fits",   false, false, 0x68, 14},
+      {"stkof_main_fp",        true,  false, 0x68, 14},
+      {"stkof_process_basic",  true,  true,  0x20, 14},
+      {"stkof_process_msplim", false, true,  0x20, 14},
+      {"stkof_handler",        true,  false, 0x20, 2 },
+  };
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    for(auto const& one : cases)
+    {
+      CAPTURE(policy);
+      CAPTURE(one.entry);
+      auto       m       = booted(policy);
+      auto const stopped = run_entry(m, one.entry);
+      if(not one.overflows)
+      {
+        CHECK(stopped.reason == stop_reason::user);
+        CHECK(m.f->reg("xpsr") % 0x200 == one.pending);
+        CHECK_FALSE(m.f->module->is_pending(one.pending));
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::fault);
+      REQUIRE(stopped.fault.has_value());
+      auto const sp = static_cast<address>(m.f->reg(one.process ? "psp" : "msp"));
+      CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+      CHECK(stopped.fault->fault_address == ((sp - one.size) & ~address{7}));
+      CHECK(stopped.fault->status == 0x00100000);
+      CHECK(stopped.fault->detail == 0);
+      CHECK(m.f->module->is_pending(one.pending));
+      CHECK_FALSE(m.f->module->is_active(one.pending));
+    }
+  }
 }

@@ -4,7 +4,7 @@ from pcons import context
 
 from popcorn_build.config import project_dir
 from popcorn_build.firmware import firmware
-from popcorn_build.testing import add_doctest
+from popcorn_build.testing import add_doctest, alias_bare_name
 
 here = Path(__file__).resolve().parent
 project = context.current_project
@@ -15,7 +15,8 @@ core_data = project_dir / "tests" / "data" / "core"
 add_doctest("arch-interface", [here / "test_interface.cpp"], [core])
 
 arch_firmware = {
-    name: firmware("arch", name) for name in ("scs", "exceptions", "svc", "timers", "faults")
+    name: firmware("arch", name)
+    for name in ("scs", "exceptions", "svc", "timers", "faults", "rtos")
 }
 arch_firmware["abi"] = firmware("abi", "abi")
 for variant in (
@@ -45,6 +46,7 @@ arch_tests = [
         ("arch-faults", "test_faults.cpp"),
         ("arch-calls", "test_calls.cpp"),
         ("arch-variants", "test_variants.cpp"),
+        ("arch-rtos", "test_rtos.cpp"),
     )
 ]
 for test in arch_tests:
@@ -52,3 +54,19 @@ for test in arch_tests:
     for _, target in arch_firmware.values():
         if target is not None:
             test.depends(target)
+
+bench_arch = project.Program(
+    "bench-arch", project.default_environment, sources=[here / "bench_arch.cpp"]
+)
+bench_arch.link(test_support)
+bench_arch.link(core)
+bench_arch.private.include_dirs.append(private_dir)
+bench_arch.private.defines.extend(
+    f'{variable}="{value}"'
+    for variable, value in arch_env.items()
+    if variable in ("POPCORN_M33_DESC", "POPCORN_FW_RTOS")
+)
+alias_bare_name(bench_arch)
+_, rtos_target = arch_firmware["rtos"]
+if rtos_target is not None:
+    bench_arch.depends(rtos_target)

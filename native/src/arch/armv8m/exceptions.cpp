@@ -221,16 +221,25 @@ auto read_special(uc_struct* engine, bool stack_limits) -> special_registers
 
 auto cortex_m::enter(std::uint32_t number) -> trap_result
 {
-  auto* const                engine   = engine_handle();
-  auto&                      services = context_->services;
-  auto const                 special  = read_special(engine, stack_limits());
-  auto const                 thread   = special.ipsr == 0;
-  auto const                 use_psp  = thread and (special.control & control_spsel) != 0;
-  auto const                 fp       = core_.fpu and (special.control & control_fpca) != 0;
-  auto const                 size     = fp ? extended_frame_size : basic_frame_size;
-  auto const                 sp       = use_psp ? special.psp : special.msp;
-  auto const                 align    = not v7() or (state_.scs.ccr & ccr_stkalign) != 0;
-  auto const                 frame_at = align ? (sp - size) & ~4u : sp - size;
+  auto* const engine   = engine_handle();
+  auto&       services = context_->services;
+  auto const  special  = read_special(engine, stack_limits());
+  auto const  thread   = special.ipsr == 0;
+  auto const  use_psp  = thread and (special.control & control_spsel) != 0;
+  auto const  fp       = core_.fpu and (special.control & control_fpca) != 0;
+  auto const  size     = fp ? extended_frame_size : basic_frame_size;
+  auto const  sp       = use_psp ? special.psp : special.msp;
+  auto const  align    = not v7() or (state_.scs.ccr & ccr_stkalign) != 0;
+  auto const  frame_at = align ? (sp - size) & ~4u : sp - size;
+  if(frame_at < (use_psp ? special.psplim : special.msplim))
+  {
+    state_.scs.cfsr |= cfsr::stkof;
+    return trap_result::fault(
+        {.kind          = fault_kind::usage,
+         .fault_address = frame_at,
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
+  }
   std::vector<std::uint32_t> words(size / 4, 0);
   read_batch(engine, frame_ids, std::span{words}.first(frame_ids.size()));
   words[6] = pc() & ~1u;

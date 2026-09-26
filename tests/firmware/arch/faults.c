@@ -234,3 +234,74 @@ __attribute__((noipa)) void bad_exc_return_v8(void)
   pend(1);
   __asm__ volatile("b ." ::: "memory");
 }
+
+__attribute__((aligned(8))) uint32_t stkof_main[64];
+__attribute__((aligned(8))) uint32_t stkof_process[64];
+
+[[noreturn]] static void stkof_on_main(uint32_t room, uint32_t fp)
+{
+  __asm__ volatile(
+      "cbz %1, 1f\nvmov s0, %1\n1:\n"
+      "msr msplim, %0\nadd r0, %0, %2\nmsr msp, r0\nisb\n"
+      "ldr r1, =0xE000ED04\nmov r2, #0x10000000\nstr r2, [r1]\ndsb\nisb\nb .\n.ltorg" ::"r"(
+          &stkof_main[32]),
+      "l"(fp), "r"(room)
+      : "r0", "r1", "r2", "memory");
+  __builtin_unreachable();
+}
+
+[[noreturn]] static void stkof_on_process(uint32_t room, uint32_t msplim_above)
+{
+  __asm__ volatile(
+      "msr psplim, %0\nadd r0, %0, %1\nmsr psp, r0\nmovs r0, #2\nmsr control, r0\nisb\n"
+      "cbz %2, 1f\nmrs r0, msp\nadd r0, r0, #0x100\nmsr msplim, r0\nisb\n1:\n"
+      "ldr r1, =0xE000ED04\nmov r2, #0x10000000\nstr r2, [r1]\ndsb\nisb\nb .\n.ltorg" ::"r"(
+          &stkof_process[32]),
+      "r"(room), "l"(msplim_above)
+      : "r0", "r1", "r2", "memory");
+  __builtin_unreachable();
+}
+
+__attribute__((naked)) void stkof_svc(void)
+{
+  __asm__ volatile("mrs r0, msp\nsub r0, r0, #0x18\nmsr msplim, r0\nisb\n"
+                   "ldr r1, =0xE000ED04\nmov r2, #0x80000000\nstr r2, [r1]\ndsb\nisb\nb .\n.ltorg");
+}
+
+__attribute__((noipa)) void stkof_main_fits(void)
+{
+  stkof_on_main(0x20, 0);
+}
+
+__attribute__((noipa)) void stkof_main_basic(void)
+{
+  stkof_on_main(0x18, 0);
+}
+
+__attribute__((noipa)) void stkof_main_fp_fits(void)
+{
+  stkof_on_main(0x68, 1);
+}
+
+__attribute__((noipa)) void stkof_main_fp(void)
+{
+  stkof_on_main(0x40, 1);
+}
+
+__attribute__((noipa)) void stkof_process_basic(void)
+{
+  stkof_on_process(0x18, 0);
+}
+
+__attribute__((noipa)) void stkof_process_msplim(void)
+{
+  stkof_on_process(0x20, 1);
+}
+
+__attribute__((noipa)) void stkof_handler(void)
+{
+  ram_vector[11] = (uint32_t)stkof_svc;
+  __asm__ volatile("dsb\nisb\nmsr psp, %0\nmovs r0, #2\nmsr control, r0\nisb\nsvc #0\nb ." ::"r"(
+                       &stkof_process[64])
+                   : "r0", "memory");
+}
