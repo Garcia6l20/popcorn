@@ -44,3 +44,17 @@ test_mmio = add_doctest(
 )
 if periph_firmware is not None:
     test_mmio.depends(periph_firmware)
+
+test_shared_page = add_doctest(
+    "periph-shared-page",
+    [here / "test_shared_page.cpp"],
+    [test_support, core],
+    env={
+        "POPCORN_M33_SHARED_DESC": str(
+            project_dir / "tests" / "data" / "core" / "m33_shared_page.json"
+        ),
+        "POPCORN_FW_PERIPH": str(periph_elf),
+    },
+)
+if periph_firmware is not None:
+    test_shared_page.depends(periph_firmware)

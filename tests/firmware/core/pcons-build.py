@@ -10,7 +10,11 @@ SECTION_BOUNDS = (
     "--defsym=_ebss=ADDR(.bss)+SIZEOF(.bss)"
 )
 
-UNREFERENCED = {"run": ("count_irq",), "spin": ("tick_walk", "tick_hang")}
+UNREFERENCED = {
+    "run": ("count_irq",),
+    "spin": ("tick_walk", "tick_hang"),
+    "periph": ("shared_accesses", "gap_read"),
+}
 
 for name, source in (
     ("basic", "basic.c"),

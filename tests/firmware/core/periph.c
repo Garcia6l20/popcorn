@@ -132,6 +132,54 @@ __attribute__((naked)) void unaligned(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void shared_accesses(void)
+{
+  __asm__ volatile("ldr r2, =results\n"
+                   "ldr r1, =0x40030000\n"
+                   "movs r0, #0xa1\n"
+                   "str r0, [r1]\n"
+                   "movs r0, #0xb2\n"
+                   "str r0, [r1, #0x100]\n"
+                   "movs r0, #0xc3\n"
+                   "str r0, [r1, #0x308]\n"
+                   "ldr r4, =0x40040000\n"
+                   "ldr r5, =0x40040600\n"
+                   "movs r0, #0xd4\n"
+                   "str r0, [r5]\n"
+                   "ldr r6, =0x400404fc\n"
+                   "movs r0, #0xe5\n"
+                   "str r0, [r6]\n"
+                   "ldr r3, [r1]\n"
+                   "str r3, [r2, #0]\n"
+                   "ldr r3, [r1, #0x100]\n"
+                   "str r3, [r2, #4]\n"
+                   "ldr r3, [r1, #0x308]\n"
+                   "str r3, [r2, #8]\n"
+                   "ldr r7, =0x50030308\n"
+                   "ldr r3, [r7]\n"
+                   "str r3, [r2, #12]\n"
+                   "ldr r3, [r1, #0x200]\n"
+                   "str r3, [r2, #16]\n"
+                   "ldr r3, [r5]\n"
+                   "str r3, [r2, #20]\n"
+                   "ldr r3, [r6]\n"
+                   "str r3, [r2, #24]\n"
+                   "ldr r3, [r4]\n"
+                   "str r3, [r2, #28]\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void gap_read(void)
+{
+  __asm__ volatile("ldr r1, =0x40030200\n"
+                   "ldr r2, =results\n"
+                   "ldr r3, [r1]\n"
+                   "str r3, [r2]\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
 [[noreturn]] void Reset_Handler(void)
 {
   for(uint32_t *from = _sidata, *to = _sdata; to < _edata;)

@@ -467,7 +467,9 @@ struct machine::run_state
     peripheral_desc const* unit{};
     /** @brief Guest address of the window. */
     address base{};
-    /** @brief Bytes mapped, the peripheral size rounded up to the engine page. */
+    /** @brief Bytes the window serves from base: the peripheral size rounded up to the engine
+     * page, or in a page shared with other windows, up to the next window's base or the end of
+     * the shared pages. */
     std::uint32_t size{};
     /** @brief Whether accesses through the window are secure: an alias window, a `SEC_`
      * instance of the peripheral it aliases. */
@@ -735,8 +737,10 @@ struct machine::run_state
   void attach_peripherals();
 
   /**
-   * @brief Maps every peripheral window, aliases included, as engine MMIO, one map per window.
-   * @throws config_error when two windows share an engine page.
+   * @brief Maps every peripheral window, aliases included, as engine MMIO: one map per window
+   *        alone in its engine pages, one map per run of pages windows share.
+   * @throws config_error when two peripherals overlap, when the first window of its pages does
+   *         not start on an engine page, or when a window sharing a page is not word-aligned.
    */
   void map_peripherals();
 
@@ -792,6 +796,33 @@ struct machine::run_state
       on_mmio_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
       -> std::uint64_t;
   static void on_mmio_write(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      std::uint64_t value,
+      void*         user) noexcept;
+
+  /** @brief Engine pages several windows share, mapped once and dispatched by address. */
+  struct mmio_page
+  {
+    /** @brief Run state serving the accesses. */
+    run_state* run{};
+    /** @brief Guest address of the first shared page. */
+    address base{};
+    /** @brief Windows in the pages, by base. */
+    std::vector<mmio_window*> members{};
+
+    /** @brief The window serving @p addr: the last one whose base is at or below it. */
+    [[nodiscard]] auto member_at(address addr) const noexcept -> mmio_window&;
+  };
+
+  /** @brief Shared pages, each mapped once. */
+  std::vector<std::unique_ptr<mmio_page>> shared_pages{};
+
+  static auto
+      on_shared_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
+      -> std::uint64_t;
+  static void on_shared_write(
       uc_struct*    engine,
       std::uint64_t offset,
       unsigned      size,

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <format>
 #include <ranges>
+#include <span>
 #include <string>
 
 namespace popcorn::core
@@ -59,38 +60,91 @@ void machine::run_state::map_peripherals()
       serving = static_cast<std::size_t>(
           std::ranges::find(units, *unit.alias_of, &peripheral_desc::name) - units.begin());
     }
-    auto const size = (unit.size + page - 1) / page * page;
     windows.push_back(
         std::make_unique<mmio_window>(mmio_window{
             .run    = this,
             .slot   = owner.peripherals_[serving].get(),
             .unit   = &unit,
             .base   = unit.base,
-            .size   = size,
             .secure = unit.alias_of.has_value(),
         }));
   }
   std::ranges::sort(windows, {}, [](auto const& window) { return window->base; });
+  auto const refuse = [&](mmio_window const& window, std::string expected) {
+    throw config_error(
+        owner.description_.part, 0, std::format("peripherals.{}", window.unit->name),
+        std::move(expected));
+  };
+  auto const end_of = [page](mmio_window const& window) {
+    auto const end = std::uint64_t{window.base} + window.unit->size;
+    return (end + page - 1) / page * page;
+  };
   for(auto const [before, after] : windows | std::views::pairwise)
   {
-    if(std::uint64_t{before->base} + before->size > after->base)
+    if(std::uint64_t{before->base} + before->unit->size > after->base)
     {
-      throw config_error(
-          owner.description_.part, 0, std::format("peripherals.{}", after->unit->name),
-          std::format(
-              "a window on its own engine pages of {} bytes, it shares one with {}", page,
-              before->unit->name));
+      refuse(*after, std::format("a window that does not overlap {}", before->unit->name));
     }
   }
   std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
-  for(auto const& window : windows)
+  for(std::size_t first = 0; first < windows.size();)
   {
-    check(
-        uc_mmio_map(
-            engine, window->base, window->size, &on_mmio_read, window.get(), &on_mmio_write,
-            window.get()),
-        std::format("mapping peripheral {}", window->unit->name));
-    ranges.emplace_back(window->base, std::uint64_t{window->base} + window->size - 1);
+    auto end  = end_of(*windows[first]);
+    auto last = first + 1;
+    for(; last < windows.size() and windows[last]->base / page * page < end; ++last)
+    {
+      end = std::max(end, end_of(*windows[last]));
+    }
+    auto const group = std::span{windows}.subspan(first, last - first);
+    auto&      lead  = *group.front();
+    if(lead.base % page != 0)
+    {
+      refuse(lead, std::format("a window starting on an engine page of {} bytes", page));
+    }
+    for(auto const [index, window] : std::views::enumerate(group))
+    {
+      auto const next = static_cast<std::size_t>(index) + 1;
+      auto const stop = next < group.size() ? std::uint64_t{group[next]->base} : end;
+      window->size    = static_cast<std::uint32_t>(stop - window->base);
+    }
+    if(group.size() == 1)
+    {
+      check(
+          uc_mmio_map(engine, lead.base, lead.size, &on_mmio_read, &lead, &on_mmio_write, &lead),
+          std::format("mapping peripheral {}", lead.unit->name));
+    }
+    else
+    {
+      for(auto const& window : group)
+      {
+        if(window->base % 4 != 0)
+        {
+          refuse(
+              *window,
+              std::format(
+                  "a word-aligned window, it shares an engine page with {}", lead.unit->name));
+        }
+      }
+      auto shared = std::make_unique<mmio_page>(mmio_page{
+          .run     = this,
+          .base    = lead.base,
+          .members = group
+                   | std::views::transform([](auto const& window) { return window.get(); })
+                   | std::ranges::to<std::vector>(),
+      });
+      check(
+          uc_mmio_map(
+              engine, lead.base, end - lead.base, &on_shared_read, shared.get(), &on_shared_write,
+              shared.get()),
+          std::format("mapping peripherals {} to {}", lead.unit->name, group.back()->unit->name));
+      shared_pages.push_back(std::move(shared));
+    }
+    ranges.emplace_back(lead.base, end - 1);
+    first = last;
+  }
+  for(auto const [before, after] : windows | std::views::pairwise)
+  {
+    contract_assert(std::uint64_t{before->base} + before->size <= after->base);
   }
   if(not ranges.empty())
   {
@@ -345,6 +399,63 @@ void machine::run_state::on_mmio_write(
     if(not done)
     {
       run.record_bus_fault(window.base + static_cast<address>(offset), arch::memory_op::write);
+    }
+    return false;
+  });
+}
+
+auto machine::run_state::mmio_page::member_at(address addr) const noexcept -> mmio_window&
+{
+  auto const after = std::ranges::upper_bound(
+      members, addr, {}, [](mmio_window const* window) { return window->base; });
+  return **std::prev(after);
+}
+
+auto machine::run_state::on_shared_read(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned      size,
+    void*         user) noexcept -> std::uint64_t
+{
+  auto const&   shared = *static_cast<mmio_page const*>(user);
+  auto&         run    = *shared.run;
+  auto const    addr   = static_cast<address>(shared.base + offset);
+  auto const&   window = shared.member_at(addr);
+  std::uint32_t value  = 0;
+  run.guarded([&] {
+    auto const read = run.dispatch_read(
+        window, addr - window.base, static_cast<std::uint8_t>(size), initiator::cpu);
+    if(read)
+    {
+      value = *read;
+    }
+    else
+    {
+      run.record_bus_fault(addr, arch::memory_op::read);
+    }
+    return false;
+  });
+  return value;
+}
+
+void machine::run_state::on_shared_write(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned      size,
+    std::uint64_t value,
+    void*         user) noexcept
+{
+  auto const& shared = *static_cast<mmio_page const*>(user);
+  auto&       run    = *shared.run;
+  auto const  addr   = static_cast<address>(shared.base + offset);
+  auto const& window = shared.member_at(addr);
+  run.guarded([&] {
+    auto const done = run.dispatch_write(
+        window, addr - window.base, static_cast<std::uint8_t>(size),
+        static_cast<std::uint32_t>(value), initiator::cpu);
+    if(not done)
+    {
+      run.record_bus_fault(addr, arch::memory_op::write);
     }
     return false;
   });
