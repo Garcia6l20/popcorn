@@ -8,6 +8,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -60,6 +61,37 @@ struct stm32_fixture
         std::move(desc), arch::armv8m::factory(), std::move(options));
     target->load(elf(firmware_name));
     target->reset();
+  }
+
+  /** @brief Writes a core register by name. */
+  void set(std::string_view name, std::uint64_t value) const
+  {
+    target->regs().write(*target->regs().find(name), value);
+  }
+
+  /**
+   * @brief Value of a register field, resolved by name from the description.
+   * @param peripheral Instance name.
+   * @param reg Register name.
+   * @param field Field name.
+   */
+  [[nodiscard]] auto
+      field(std::string_view peripheral, std::string_view reg, std::string_view field) const
+      -> std::uint32_t
+  {
+    auto const& regs  = target->peripheral(peripheral);
+    auto const  found = std::ranges::find(regs.description().registers, reg, &register_desc::name);
+    REQUIRE(found != regs.description().registers.end());
+    auto const bits = std::ranges::find(found->fields, field, &field_desc::name);
+    REQUIRE(bits != found->fields.end());
+    auto const mask = bits->width >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << bits->width) - 1u;
+    return (regs.peek(found->offset & ~3u) >> (8 * (found->offset % 4) + bits->lsb)) & mask;
+  }
+
+  /** @brief Runs one slice. */
+  auto run(core::slice_request const& request) const -> core::slice_result
+  {
+    return target->run_slice(request);
   }
 
   /** @brief Runs one slice with a 60 s wall budget and requires a stop. */

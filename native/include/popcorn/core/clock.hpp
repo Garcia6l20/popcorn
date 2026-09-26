@@ -159,8 +159,9 @@ public:
   /**
    * @brief Current frequency of a clock domain.
    * @param domain Handle from domain().
-   * @return Frequency in Hz. 0 for a domain nothing has set yet, which the caller must treat as
-   *         a stopped clock.
+   * @return Frequency in Hz. 0 for a stopped clock: a domain nothing has set yet, a gated
+   *         peripheral clock or a source that is off. A caller that divides by it checks for 0
+   *         first. The core clock is not a domain, see core_hz(), and is never 0.
    */
   [[nodiscard]] auto hz(clock_domain domain) const -> std::uint64_t
       pre(domain.index < state_.domain_hz.size())
@@ -172,10 +173,10 @@ public:
    * @brief Sets the frequency of a clock domain, as the RCC model does when firmware reprograms
    *        the clock tree.
    * @param domain Handle from domain().
-   * @param hz Frequency in Hz.
+   * @param hz Frequency in Hz, 0 for a stopped clock: a gated peripheral clock or a source that
+   *        is off. The core clock is set through set_core_hz(), which keeps it above 0.
    */
-  void set_hz(clock_domain domain, std::uint64_t hz) pre(domain.index < state_.domain_hz.size())
-      pre(hz > 0);
+  void set_hz(clock_domain domain, std::uint64_t hz) pre(domain.index < state_.domain_hz.size());
 
 private:
   friend class clock_driver;

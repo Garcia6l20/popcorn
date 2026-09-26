@@ -18,13 +18,18 @@ SUPPORT_DIR = project_dir / "tests" / "firmware" / AREA
 
 
 def add_ll_firmware(
-    name: str, sources: Sequence[Path], ll_modules: Sequence[str] = ()
+    name: str,
+    sources: Sequence[Path],
+    ll_modules: Sequence[str] = (),
+    entries: Sequence[str] = (),
 ) -> tuple[Path, Target | None]:
     """Build tests/firmware/periph/prebuilt/@p name.elf for STM32U575 on ST's LL drivers.
 
     The firmware links the CMSIS device startup and system files, stm32u5xx_ll_<module>.c for
-    each of @p ll_modules, and periph_test.c. Without arm-none-eabi-gcc, the ST and ARM packages
-    are not fetched and the committed prebuilt ELF is used.
+    each of @p ll_modules, and periph_test.c. @p entries are symbols tests reach that nothing in
+    the firmware references, kept through the section garbage collection. Without
+    arm-none-eabi-gcc, the ST and ARM packages are not fetched and the committed prebuilt ELF is
+    used.
     """
     if firmware_env() is None:
         return add_firmware(AREA, name, sources)
@@ -49,5 +54,7 @@ def add_ll_firmware(
     )
     target.private.defines.extend(DEFINES)
     target.private.link_flags.append(SECTION_BOUNDS)
-    target.private.link_flags.extend(["-Wl,--undefined=log_buf", "-Wl,--undefined=log_len"])
+    target.private.link_flags.extend(
+        f"-Wl,--undefined={entry}" for entry in ("log_buf", "log_len", *entries)
+    )
     return elf, target

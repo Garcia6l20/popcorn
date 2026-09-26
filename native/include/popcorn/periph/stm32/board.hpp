@@ -2,6 +2,7 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/rcc.hpp>
 
 #include <functional>
 #include <map>
@@ -15,7 +16,10 @@ namespace popcorn::periph::stm32
  *        factories() over it.
  */
 struct board
-{};
+{
+  /** @brief Clock sources and timing of the RCC model. */
+  rcc_options rcc{};
+};
 
 /**
  * @brief Factory per peripheral instance of @p part that a built-in model serves, for

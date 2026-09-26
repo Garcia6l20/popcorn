@@ -23,6 +23,8 @@ TEST_CASE("every built-in model attaches to the full description, cross rules in
   stm32::register_builtin_models();
   core::machine target{u575(), popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()};
   stm32::board const board{};
+  CHECK(stm32::factories(board, u575()).contains("RCC"));
+  CHECK(target.model("RCC") != nullptr);
   for(auto const& [name, factory] : stm32::factories(board, u575()))
   {
     CAPTURE(name);

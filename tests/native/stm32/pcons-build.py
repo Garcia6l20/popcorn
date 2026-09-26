@@ -14,7 +14,7 @@ private_dir = project_dir / "native" / "src" / "periph" / "stm32"
 periph_data = project_dir / "tests" / "data" / "periph"
 
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
-firmwares = {name: firmware("periph", name) for name in ("boot_ll",)}
+firmwares = {name: firmware("periph", name) for name in ("boot_ll", "rcc_ll")}
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in firmwares.items()},
@@ -28,14 +28,15 @@ base = add_doctest(
 )
 base.private.include_dirs.append(private_dir)
 
-attach = add_doctest(
-    "stm32-attach-u575",
-    [here / "test_attach_u575.cpp"],
-    [core],
-    env=u575_env,
-    register=u575 is not None,
-)
-attach.private.include_dirs.append(private_dir)
-for _, target in firmwares.values():
-    if target is not None:
-        attach.depends(target)
+u575_programs = [
+    add_doctest(name, [here / source], [core], env=u575_env, register=u575 is not None)
+    for name, source in (
+        ("stm32-attach-u575", "test_attach_u575.cpp"),
+        ("stm32-rcc", "test_rcc.cpp"),
+    )
+]
+for program in u575_programs:
+    program.private.include_dirs.append(private_dir)
+    for _, target in firmwares.values():
+        if target is not None:
+            program.depends(target)

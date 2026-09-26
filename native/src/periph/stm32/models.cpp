@@ -1,4 +1,5 @@
 #include "../register_layer.hpp"
+#include "factories.hpp"
 
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
@@ -19,7 +20,11 @@ struct builtin
   auto (*make)(board const& b) -> model_factory;
 };
 
-constexpr std::array<builtin, 0> builtins{};
+constexpr std::array<builtin, 1> builtins{
+    {
+     {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
+     }
+};
 
 auto default_board() -> board const&
 {

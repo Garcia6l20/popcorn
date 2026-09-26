@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <format>
 #include <span>
 #include <string>
@@ -146,7 +147,7 @@ protected:
    */
   [[nodiscard]] auto reg(std::string_view name) const -> reg_ref
   {
-    auto const& found = find_register(name);
+    auto const& found = describe(name);
     return {.offset = word_of(found), .lsb = lane_of(found), .width = found.width};
   }
 
@@ -160,7 +161,7 @@ protected:
    */
   [[nodiscard]] auto field(std::string_view reg, std::string_view field) const -> field_ref
   {
-    auto const& found  = find_register(reg);
+    auto const& found  = describe(reg);
     auto const  within = std::ranges::find(found.fields, field, &field_desc::name);
     if(within == found.fields.end())
     {
@@ -172,6 +173,31 @@ protected:
         .width  = within->width};
   }
 
+  /**
+   * @brief Description of a register of the peripheral by name.
+   * @param name Register name as the description spells it.
+   * @throws config_error as reg() does.
+   */
+  [[nodiscard]] auto describe(std::string_view name) const -> register_desc const&
+  {
+    auto const found = std::ranges::find(desc_.registers, name, &register_desc::name);
+    if(found == desc_.registers.end())
+    {
+      missing(name);
+    }
+    return *found;
+  }
+
+  /**
+   * @brief Throws the configuration error of a register or field the model needs.
+   * @param path Register, or register and field joined by a dot.
+   */
+  [[noreturn]] void missing(std::string_view path) const
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("peripherals.{}.registers.{}", desc_.name, path),
+        std::format("a register the {} model needs", model_name_));
+  }
   /** @brief Context of the model. */
   model_context& ctx_;
   /** @brief Description of the peripheral. */
@@ -190,23 +216,173 @@ private:
     return static_cast<std::uint8_t>(8 * (found.offset % 4));
   }
 
-  [[nodiscard]] auto find_register(std::string_view name) const -> register_desc const&
-  {
-    auto const found = std::ranges::find(desc_.registers, name, &register_desc::name);
-    if(found == desc_.registers.end())
-    {
-      missing(name);
-    }
-    return *found;
-  }
-
-  [[noreturn]] void missing(std::string_view path) const
-  {
-    throw config_error(
-        ctx_.part.part, 0, std::format("peripherals.{}.registers.{}", desc_.name, path),
-        std::format("a register the {} model needs", model_name_));
-  }
-
   std::string model_name_;
+};
+
+/**
+ * @brief Word a guest write leaves in storage before register semantics apply.
+ * @param old Stored word.
+ * @param offset Byte offset of the access in the peripheral.
+ * @param size Access size in bytes, 1, 2 or 4.
+ * @param value Written value, right-aligned to @p size.
+ */
+[[nodiscard]] constexpr auto merge_write(
+    std::uint32_t old,
+    std::uint32_t offset,
+    std::uint8_t  size,
+    std::uint32_t value) noexcept -> std::uint32_t
+{
+  auto const shift = 8u * (offset % 4u);
+  auto const lanes = size >= 4 ? ~std::uint32_t{} : ((std::uint32_t{1} << (8u * size)) - 1u);
+  return (old & ~(lanes << shift)) | ((value & lanes) << shift);
+}
+
+/**
+ * @brief Bytes of a stored word a guest read returns, right-aligned.
+ * @param word Stored word.
+ * @param offset Byte offset of the access in the peripheral.
+ * @param size Access size in bytes, 1, 2 or 4.
+ */
+[[nodiscard]] constexpr auto
+    read_lanes(std::uint32_t word, std::uint32_t offset, std::uint8_t size) noexcept
+    -> std::uint32_t
+{
+  auto const lanes = size >= 4 ? ~std::uint32_t{} : ((std::uint32_t{1} << (8u * size)) - 1u);
+  return (word >> (8u * (offset % 4u))) & lanes;
+}
+
+/**
+ * @brief Register a model serves through a write handler.
+ * @tparam Derived Model class.
+ */
+template <typename Derived> struct write_entry
+{
+  /** @brief Register name as the description spells it. */
+  std::string_view reg;
+  /** @brief Called after a guest write stored the register's writable bits, with the word
+   * before and after. */
+  void (Derived::*on_write)(std::uint32_t old, std::uint32_t now);
+};
+
+/**
+ * @brief Model serving its claimed registers through one write handler each. Reads return the
+ *        stored word. A write merges the access into the stored word, keeps the bits the
+ *        description marks read-only, stores the result, then calls the register's handler.
+ * @tparam Derived Model class.
+ * @tparam State Serializable state, as for stm32_model.
+ */
+template <typename Derived, typename State> class dispatch_model : public stm32_model<State>
+{
+public:
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    std::vector<std::string> names;
+    for(auto const& entry : bound_)
+    {
+      names.emplace_back(entry.name);
+    }
+    return names;
+  }
+
+  auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx)
+      -> std::expected<std::uint32_t, bus_error> override
+  {
+    auto const word  = offset & ~3u;
+    auto const found = std::ranges::find(bound_, word, &bound::offset);
+    auto const mask  = found != bound_.end() ? found->readable : ~std::uint32_t{};
+    return read_lanes(regs.peek(word) & mask, offset, size);
+  }
+
+  auto on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t,
+      std::uint32_t value,
+      access_ctx) -> std::expected<void, bus_error> override
+  {
+    auto const word  = offset & ~3u;
+    auto const found = std::ranges::find(bound_, word, &bound::offset);
+    if(found != bound_.end())
+    {
+      auto const old    = regs.peek(word);
+      auto const merged = merge_write(old, offset, size, value);
+      auto const now    = (merged & found->writable) | (old & ~found->writable);
+      regs.poke(word, now);
+      (static_cast<Derived&>(*this).*found->handler)(old, now);
+    }
+    return {};
+  }
+
+protected:
+  /**
+   * @brief Resolves every entry's register by name.
+   * @param ctx Context of the model.
+   * @param desc Description of the peripheral.
+   * @param model_name Model name for configuration errors.
+   * @param table Registers and their write handlers.
+   * @throws config_error when the description lacks a register of @p table.
+   */
+  dispatch_model(
+      model_context&                        ctx,
+      peripheral_desc const&                desc,
+      std::string_view                      model_name,
+      std::span<write_entry<Derived> const> table)
+      : stm32_model<State>{ctx, desc, model_name}
+  {
+    for(auto const& entry : table)
+    {
+      auto const&   described = this->describe(entry.reg);
+      auto const    at        = this->reg(entry.reg);
+      std::uint32_t writable  = 0;
+      std::uint32_t readable  = 0;
+      auto const    whole = field_ref{.offset = at.offset, .lsb = at.lsb, .width = at.width}.mask();
+      if(described.fields.empty())
+      {
+        if(described.acc == access::read_only)
+        {
+          this->missing(std::format("{}.fields", entry.reg));
+        }
+        writable = whole;
+        readable =
+            described.acc == access::write_only or described.acc == access::write_once ? 0 : whole;
+      }
+      for(auto const& field : described.fields)
+      {
+        auto const bits =
+            field_ref{
+                .offset = at.offset,
+                .lsb    = static_cast<std::uint8_t>(at.lsb + field.lsb),
+                .width  = field.width}
+                .mask();
+        if(field.acc != access::read_only)
+        {
+          writable |= bits;
+        }
+        if(field.acc != access::write_only and field.acc != access::write_once)
+        {
+          readable |= bits;
+        }
+      }
+      bound_.push_back(
+          {.name     = described.name,
+           .offset   = at.offset,
+           .writable = writable,
+           .readable = readable,
+           .handler  = entry.on_write});
+    }
+  }
+
+private:
+  struct bound
+  {
+    std::string_view name;
+    std::uint32_t    offset{};
+    std::uint32_t    writable{};
+    std::uint32_t    readable{};
+    void (Derived::*handler)(std::uint32_t old, std::uint32_t now);
+  };
+
+  std::vector<bound> bound_;
 };
 }

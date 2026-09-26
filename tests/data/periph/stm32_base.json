@@ -141,6 +141,50 @@
               "on_read": "none"
             }
           ]
+        },
+        {
+          "name": "RCC_RAW",
+          "offset": 64,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "read_write",
+          "fields": []
+        },
+        {
+          "name": "RCC_RO",
+          "offset": 68,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "read_only",
+          "fields": []
+        },
+        {
+          "name": "RCC_WO",
+          "offset": 72,
+          "width": 32,
+          "reset": 0,
+          "reset_mask": 4294967295,
+          "acc": "read_write",
+          "fields": [
+            {
+              "name": "CMD",
+              "lsb": 0,
+              "width": 1,
+              "acc": "write_only",
+              "on_write": "modify",
+              "on_read": "none"
+            },
+            {
+              "name": "VAL",
+              "lsb": 8,
+              "width": 8,
+              "acc": "read_write",
+              "on_write": "modify",
+              "on_read": "none"
+            }
+          ]
         }
       ],
       "cross_rules": [],

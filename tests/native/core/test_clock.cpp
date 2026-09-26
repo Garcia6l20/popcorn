@@ -55,6 +55,18 @@ TEST_CASE("clock domains start unset and keep their handles")
   CHECK(clock.hz(apb1) == 40'000'000);
 }
 
+TEST_CASE("a stopped clock domain stores 0 and leaves the core clock running")
+{
+  popcorn::core::clock clock{160'000'000};
+  auto const           apb1 = clock.domain("apb1");
+  clock.set_hz(apb1, 40'000'000);
+  clock.set_hz(apb1, 0);
+  CHECK(clock.hz(apb1) == 0);
+  CHECK(clock.core_hz() == 160'000'000);
+  clock.set_hz(apb1, 20'000'000);
+  CHECK(clock.hz(apb1) == 20'000'000);
+}
+
 TEST_CASE("clock_driver advances, jumps, saves and restores the clock")
 {
   popcorn::core::clock        clock{160'000'000};

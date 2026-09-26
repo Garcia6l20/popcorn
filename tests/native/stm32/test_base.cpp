@@ -14,6 +14,7 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -234,11 +235,67 @@ TEST_CASE("built-in registration runs once and factories cover only served perip
   auto const         part = popcorn::testing::description_from("POPCORN_STM32_BASE_DESC");
   stm32::board const board{};
   auto const         made = stm32::factories(board, part);
+  CHECK(made.contains("RCC"));
   for(auto const& [name, factory] : made)
   {
     CHECK(factory);
     CHECK(
         std::ranges::find(part.peripherals, name, &popcorn::peripheral_desc::name)
         != part.peripherals.end());
+  }
+}
+
+namespace
+{
+class table_probe final : public stm32::dispatch_model<table_probe, probe_state>
+{
+public:
+  table_probe(
+      periph::model_context&                           ctx,
+      popcorn::peripheral_desc const&                  desc,
+      std::span<stm32::write_entry<table_probe> const> table)
+      : dispatch_model{ctx, desc, "table", table}
+  {}
+
+  std::uint32_t last{};
+
+  void written(std::uint32_t, std::uint32_t now)
+  {
+    last = now;
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+};
+}
+
+TEST_CASE("a claimed register without fields is writable in full unless it is read-only")
+{
+  bench                                                b;
+  std::array<stm32::write_entry<table_probe>, 2> const table{
+      {
+       {"RCC_RAW", &table_probe::written},
+       {"RCC_WO", &table_probe::written},
+       }
+  };
+  table_probe model{b.ctx, b.rcc, table};
+  CHECK(model.claims() == std::vector<std::string>{"RCC_RAW", "RCC_WO"});
+  REQUIRE(model.on_write(b.regs, 0x40, 4, 0, 0xdead'beefu, {.pc = 0, .now = icount{0}}));
+  CHECK(model.last == 0xdead'beefu);
+  CHECK(model.on_read(b.regs, 0x40, 4, {.pc = 0, .now = icount{0}}) == 0xdead'beefu);
+  REQUIRE(model.on_write(b.regs, 0x48, 4, 0, 0x1ffu, {.pc = 0, .now = icount{0}}));
+  CHECK(b.regs.peek(0x48) == 0x101u);
+  CHECK(model.on_read(b.regs, 0x48, 4, {.pc = 0, .now = icount{0}}) == 0x100u);
+  std::array<stm32::write_entry<table_probe>, 1> const read_only{
+      {{"RCC_RO", &table_probe::written}}};
+  try
+  {
+    table_probe const refused{b.ctx, b.rcc, read_only};
+    FAIL("no config_error");
+  }
+  catch(popcorn::config_error const& e)
+  {
+    CHECK(e.key() == "peripherals.RCC.registers.RCC_RO.fields");
   }
 }
