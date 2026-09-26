@@ -1,7 +1,7 @@
 from pcons import Project, add_subdirectory, get_var
 
 from popcorn_build import check, schema
-from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, project_dir, toolchain
+from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, gcc_ar, project_dir, toolchain
 from popcorn_build.python import (
     add_binding_check,
     add_extension,
@@ -50,6 +50,7 @@ if VARIANT == "asan":
     env.apply_preset("sanitize")
 else:
     env.set_variant(VARIANT)
+    env.ar.cmd = gcc_ar
 
 CORE_AREAS = ("core", "arch", "periph", "image")
 
