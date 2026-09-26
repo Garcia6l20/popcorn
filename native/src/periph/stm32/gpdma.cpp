@@ -1,10 +1,12 @@
 #include "dma.hpp"
 #include "factories.hpp"
+#include "gpdma_requests.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/services.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -14,6 +16,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -133,9 +136,11 @@ class gpdma final : public dispatch_model<gpdma, gpdma_state>, public dma_contro
 public:
   gpdma(model_context& ctx, peripheral_desc const& desc);
 
-  void reset(register_file& regs, reset_kind kind) override;
-  void on_event(std::uint32_t kind, std::uint64_t payload) override;
-  void on_request(std::uint32_t request, bool level) override;
+  void               reset(register_file& regs, reset_kind kind) override;
+  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void               on_request(std::uint32_t request, bool level) override;
+  [[nodiscard]] auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> override;
 
   template <std::size_t Ch> void control_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Ch> void clear_written(std::uint32_t old, std::uint32_t now);
@@ -630,6 +635,16 @@ template <std::size_t Ch> void gpdma::clear_written(std::uint32_t, std::uint32_t
   }
   regs_.poke(c.fcr.offset, 0);
   interrupts(Ch);
+}
+
+auto gpdma::request_of(std::string_view signal) const -> std::optional<std::uint32_t>
+{
+  auto const found = std::ranges::find(gpdma_requests, signal, &gpdma_request::signal);
+  if(found == gpdma_requests.end())
+  {
+    return std::nullopt;
+  }
+  return found->request;
 }
 
 void gpdma::on_request(std::uint32_t request, bool level)

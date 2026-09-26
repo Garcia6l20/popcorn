@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 namespace popcorn::periph::stm32
 {
@@ -26,6 +28,14 @@ public:
    * @param level New level.
    */
   virtual void on_request(std::uint32_t request, bool level) = 0;
+
+  /**
+   * @brief Request number of a signal on this controller.
+   * @param signal Signal name as the reference manual spells it, such as `usart1_tx_dma`.
+   * @return The number, empty when the controller serves no such signal.
+   */
+  [[nodiscard]] virtual auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */
