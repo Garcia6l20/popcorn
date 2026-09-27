@@ -685,6 +685,13 @@ struct machine::run_state
   bool spin_on = false;
   /** @brief Spin detection state. */
   spin_state spin{};
+  /** @brief Events dispatched at one instruction count, beyond which the run stops: a handler
+   * that reschedules itself at the same count would otherwise never let time pass. */
+  static constexpr std::uint32_t max_events_per_instant = 65536;
+  /** @brief Instruction count the events of instant_events were dispatched at. */
+  icount instant{};
+  /** @brief Events dispatched at instant, across slices. */
+  std::uint32_t instant_events = 0;
   /** @brief Whether coverage is collected, tested by the block hook. */
   bool coverage_on = false;
   /** @brief Coverage counters. */
@@ -1111,6 +1118,9 @@ struct machine::run_state
   [[nodiscard]] auto next_deadline(slice_request const& request) const -> icount;
   [[nodiscard]] auto handle_requests() -> std::optional<slice_end>;
   [[nodiscard]] auto dispatch_due(slice_request const& request) -> std::optional<slice_end>;
+  /** @brief Counts an event dispatched now, a spin stop naming its owner once the count at this
+   * instant reaches max_events_per_instant. */
+  [[nodiscard]] auto count_instant(event const& due) -> std::optional<slice_end>;
   /** @brief Evaluates the request's stop_when as a handler: views work, state changes throw
    * machine_running. */
   [[nodiscard]] auto asks_stop(slice_request const& request) -> bool;

@@ -114,6 +114,8 @@ public:
   /** @brief Whether on_write, on_event and reset log a model_warning through the services: pc
    * left 0 for the machine to fill, except event_pc from on_event. */
   bool log_messages = false;
+  /** @brief Whether on_event reschedules the event it received at the current count, forever. */
+  bool reschedule_now = false;
   /** @brief pc the on_event record carries. */
   static constexpr address event_pc = 0x0800'1234;
 

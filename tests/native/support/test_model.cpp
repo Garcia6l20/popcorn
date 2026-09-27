@@ -97,8 +97,13 @@ auto test_model::on_write(
   return {};
 }
 
-void test_model::on_event(std::uint32_t, std::uint64_t)
+void test_model::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(reschedule_now)
+  {
+    std::ignore = context_.events.schedule(context_.clock.now(), kind, payload);
+    return;
+  }
   fired_at = context_.clock.now();
   note("event", event_pc);
   if(data_on_event)

@@ -69,7 +69,10 @@ struct machine_options
    * register when it is MMIO. 0 turns spin detection off. A loop waiting on RAM that an
    * interrupt handler updates, such as a tick counter, repeats identically between two
    * interrupts, so the threshold should stay well above the iterations between interrupts,
-   * 1e5 to 1e6: a stuck loop repeats forever, so a large threshold only delays the stop. */
+   * 1e5 to 1e6: a stuck loop repeats forever, so a large threshold only delays the stop.
+   * Independently of spin_threshold, the run also stops with stop_reason::spin when 65536 events
+   * are dispatched at one instruction count, detail 'events repeat without time passing: <owner>
+   * kind <n>'. */
   std::uint32_t spin_threshold{};
   /** @brief Whether the first access to a register of an unmodelled peripheral fails the run
    * with model_error. Otherwise it is only logged, once per register. */

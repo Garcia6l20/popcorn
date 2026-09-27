@@ -4,6 +4,7 @@
 
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
+#include "../support/test_model.hpp"
 
 #include <doctest/doctest.h>
 
@@ -71,12 +72,28 @@ public:
 
   std::vector<std::uint64_t> stamps;
   bool                       reschedule_now = false;
+  std::uint64_t              next_left      = 0;
+  std::uint64_t              now_left       = 0;
+  std::uint64_t              handled        = 0;
 
   void on_event(std::uint32_t kind, std::uint64_t payload) override
   {
+    ++handled;
     if(reschedule_now)
     {
       std::ignore = attached_events().schedule(attached_clock().now(), 3, 0);
+      return;
+    }
+    if(now_left != 0)
+    {
+      --now_left;
+      std::ignore = attached_events().schedule(attached_clock().now(), 5, 0);
+      return;
+    }
+    if(next_left != 0)
+    {
+      --next_left;
+      std::ignore = attached_events().schedule(icount{attached_clock().now().value + 1}, 4, 0);
       return;
     }
     auto const before = timer_expiries;
@@ -497,17 +514,147 @@ TEST_CASE("until right after an executed wfi stops with the core asleep")
   CHECK(f.target->virtual_clock().now().value - before.value > 1);
 }
 
-TEST_CASE("events rescheduled at now forever end the slice at the wall budget")
+TEST_CASE("events rescheduled at now forever stop as a spin naming their owner")
 {
   auto f = booted_stamping();
   f.set("pc", sym("idle", "idle_forever"));
   f.module->reschedule_now = true;
-  std::ignore      = f.module->attached_events().schedule(f.target->virtual_clock().now(), 3, 0);
-  auto const start = std::chrono::steady_clock::now();
-  auto const slice = f.run({.wall_budget = std::chrono::milliseconds{5}});
-  auto const took  = std::chrono::steady_clock::now() - start;
-  CHECK_FALSE(slice.stopped.has_value());
-  CHECK(took < std::chrono::seconds{2});
+  std::ignore = f.module->attached_events().schedule(f.target->virtual_clock().now(), 3, 0);
+  auto const                   start = f.target->virtual_clock().now();
+  std::optional<popcorn::stop> stopped;
+  auto                         slices = 0;
+  for(; not stopped and slices < 100'000; ++slices)
+  {
+    stopped = f.run({.wall_budget = std::chrono::microseconds{50}}).stopped;
+  }
+  REQUIRE(stopped.has_value());
+  CHECK(stopped->reason == stop_reason::spin);
+  CHECK(stopped->detail == "events repeat without time passing: arch kind 3");
+  CHECK(f.target->virtual_clock().now() == start);
+  CHECK(slices > 1);
+}
+
+TEST_CASE("a peripheral model's events repeating at now stop as a spin naming the peripheral")
+{
+  core::machine_options options;
+  options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+  auto f = booted("idle", std::move(options));
+  f.set("pc", sym("idle", "idle_forever"));
+  auto& m          = dynamic_cast<popcorn::testing::test_model&>(*f.target->model("TESTDEV"));
+  m.reschedule_now = true;
+  std::ignore      = m.context().events.schedule(f.target->virtual_clock().now(), 1, 0);
+  auto const stop  = f.run_to_stop();
+  CHECK(stop.reason == stop_reason::spin);
+  CHECK(stop.detail == "events repeat without time passing: TESTDEV kind 1");
+}
+
+namespace
+{
+constexpr std::uint64_t cap = 65536;
+
+auto storm(stamping const& f) -> void
+{
+  f.set("pc", sym("idle", "idle_forever"));
+  f.module->reschedule_now = true;
+  std::ignore = f.module->attached_events().schedule(f.target->virtual_clock().now(), 3, 0);
+}
+
+auto partial(stamping const& f) -> std::uint64_t
+{
+  auto const before = f.module->handled;
+  auto const slice  = f.run({.wall_budget = std::chrono::microseconds{50}});
+  REQUIRE_FALSE(slice.stopped.has_value());
+  auto const done = f.module->handled - before;
+  REQUIRE(done > 0);
+  REQUIRE(done < cap);
+  return done;
+}
+
+auto to_spin(stamping const& f) -> std::uint64_t
+{
+  auto const before = f.module->handled;
+  auto const stop   = f.run_to_stop();
+  CHECK(stop.reason == stop_reason::spin);
+  return f.module->handled - before;
+}
+}
+
+TEST_CASE("the cap lets 65535 events at one instant run and stops at the 65536th")
+{
+  {
+    auto f = booted_stamping();
+    f.set("pc", sym("idle", "idle_forever"));
+    f.module->now_left = cap - 2;
+    std::ignore = f.module->attached_events().schedule(f.target->virtual_clock().now(), 5, 0);
+    CHECK(f.run_to_stop().reason == stop_reason::idle);
+    CHECK(f.module->handled == cap - 1);
+  }
+  {
+    auto f = booted_stamping();
+    f.set("pc", sym("idle", "idle_forever"));
+    f.module->now_left = cap - 1;
+    std::ignore = f.module->attached_events().schedule(f.target->virtual_clock().now(), 5, 0);
+    CHECK(f.run_to_stop().reason == stop_reason::spin);
+    CHECK(f.module->handled == cap);
+  }
+}
+
+TEST_CASE("resuming after an event spin stop runs 65536 more events before the next")
+{
+  auto f = booted_stamping();
+  storm(f);
+  CHECK(to_spin(f) == cap);
+  CHECK(to_spin(f) == cap);
+}
+
+TEST_CASE("a restore in the middle of an event storm restarts the count")
+{
+  auto f = booted_stamping();
+  storm(f);
+  auto const saved = f.target->snapshot();
+  std::ignore      = partial(f);
+  f.target->restore(saved);
+  CHECK(to_spin(f) == cap);
+}
+
+TEST_CASE("a reset in the middle of an event storm restarts the count")
+{
+  auto f = booted_stamping();
+  f.target->reset(popcorn::reset_kind::software);
+  storm(f);
+  std::ignore = partial(f);
+  f.target->reset(popcorn::reset_kind::software);
+  REQUIRE(f.target->virtual_clock().now() == icount{0});
+  storm(f);
+  CHECK(to_spin(f) == cap);
+}
+
+TEST_CASE("events one instruction apart never count toward the per-instant cap")
+{
+  auto f = booted_stamping();
+  f.set("pc", sym("idle", "idle_forever"));
+  f.module->next_left = 100'000;
+  auto const start    = f.target->virtual_clock().now();
+  std::ignore         = f.module->attached_events().schedule(start, 4, 0);
+  auto const stop     = f.run_to_stop({.max_instructions = icount{1'000'000}});
+  CHECK(stop.reason == stop_reason::idle);
+  CHECK(f.module->next_left == 0);
+  CHECK(f.target->virtual_clock().now().value == start.value + 100'000);
+}
+
+TEST_CASE("a chain of events at one instant runs to its end")
+{
+  auto       f      = booted("calls");
+  auto&      events = f.module->attached_events();
+  auto const now    = f.target->virtual_clock().now();
+  f.module->event_log.clear();
+  for(std::uint64_t link = 0; link < 10; ++link)
+  {
+    std::ignore = events.schedule(now, popcorn::testing::test_arch::chain_event, link);
+  }
+  auto const stop = f.run_to_stop({.budget_left = icount{100}});
+  CHECK(stop.reason == stop_reason::budget);
+  CHECK(f.module->event_log.size() == 20);
 }
 
 namespace

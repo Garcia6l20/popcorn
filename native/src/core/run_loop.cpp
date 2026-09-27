@@ -182,6 +182,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   resume_past.reset();
   coverage.has_previous = false;
   spin.clear();
+  instant_events = 0;
   remove_step_hook();
   owner.arch_->reset(reset_vector);
   std::ranges::fill(lines.active, 0u);
@@ -565,6 +566,10 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
           and peripherals[due->id.owner]->model);
       peripherals[due->id.owner]->model->on_event(due->id.kind, due->payload);
     }
+    if(auto end = count_instant(*due))
+    {
+      return end;
+    }
     if(request.stop_when and asks_stop(request))
     {
       return slice_end{make_stop(stop_reason::user, {}, std::nullopt)};
@@ -579,6 +584,28 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
     }
   }
   return std::nullopt;
+}
+
+auto machine::run_state::count_instant(event const& due) -> std::optional<slice_end>
+{
+  auto const now = owner.clock_.now();
+  if(now != instant)
+  {
+    instant        = now;
+    instant_events = 0;
+  }
+  if(++instant_events < max_events_per_instant)
+  {
+    return std::nullopt;
+  }
+  instant_events  = 0;
+  auto const name = due.id.owner == arch::arch_event_owner
+                      ? std::string{"arch"}
+                      : owner.peripherals_[due.id.owner]->desc.name;
+  return slice_end{make_stop(
+      stop_reason::spin,
+      std::format("events repeat without time passing: {} kind {}", name, due.id.kind),
+      std::nullopt)};
 }
 
 auto machine::run_state::asks_stop(slice_request const& request) -> bool

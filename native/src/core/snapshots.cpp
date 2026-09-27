@@ -372,7 +372,8 @@ void machine::restore(core::snapshot const& saved)
   run.frames.clear();
   run.coverage.has_previous = false;
   run.spin.clear();
-  run.return_watch = 0;
+  run.instant_events = 0;
+  run.return_watch   = 0;
   run.resume_past.reset();
   run.requested.reset();
   run.reset_requested.reset();
