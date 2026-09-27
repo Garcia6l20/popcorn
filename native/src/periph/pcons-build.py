@@ -16,5 +16,6 @@ sources += [
         "exti.cpp",
         "gpdma.cpp",
         "usart.cpp",
+        "tim.cpp",
     )
 ]

@@ -49,4 +49,7 @@ namespace popcorn::periph::stm32
  * @param b Board whose `uarts` give each instance its far end, kept by reference.
  */
 [[nodiscard]] auto usart_factory(board const& b) -> model_factory;
+
+/** @brief Factory of the TIM model, RM0456 sections 54 to 57. */
+[[nodiscard]] auto tim_factory() -> model_factory;
 }
