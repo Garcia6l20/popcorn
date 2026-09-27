@@ -6,8 +6,9 @@ import asyncio
 import contextlib
 import contextvars
 import difflib
+import functools
 import os
-from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Sequence
+from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, overload, runtime_checkable
 
@@ -53,10 +54,12 @@ from popcorn._hooks import (
     WatchKind,
 )
 from popcorn._image import Image, Location, Symbol, location_of
+from popcorn._model_build import build_model
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
+from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
@@ -312,6 +315,7 @@ class Machine:
         config_digest: str = "",
         arena_base: int | None = DEFAULT_ARENA_BASE,
         arena_size: int = DEFAULT_ARENA_SIZE,
+        models: Mapping[str, Callable[[], Model]] | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -331,9 +335,13 @@ class Machine:
             arena_base: First address of the call arena, a RAM region outside the description,
                 None for no arena. It must not overlap a region or a peripheral.
             arena_size: Size of the call arena, a multiple of 4 KiB.
+            models: Python model per peripheral name, a `popcorn.model.Model` subclass or a
+                callable building one, such as `functools.partial(Timer, period=5)`. It
+                replaces the registered model of that peripheral.
 
         Raises:
-            ConfigError: No arch module implements the core, or an option is out of range.
+            ConfigError: No arch module implements the core, an option is out of range, a
+                models key names no peripheral, or a model is refused.
             ImageError: An image does not fit the memory map.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
@@ -350,6 +358,7 @@ class Machine:
         config.config_digest = config_digest
         config.arena_start = arena_base
         config.arena_size = arena_size if arena_base is not None else 0
+        config.python_models = _model_makers(description, models or {})
         self._description = description
         self._config_digest = config_digest
         self._handle = _core.MachineHandle(description, config)
@@ -426,6 +435,15 @@ class Machine:
         self._require_stopped()
         self._handle.load(image.native)
         self._images.append(image)
+
+    def model(self, peripheral: str) -> Model | None:
+        """The Python model serving a peripheral, None when it has none or a native one.
+
+        Raises:
+            ConfigError: The description has no such peripheral.
+        """
+        found: object = self._handle.model(peripheral)
+        return found if isinstance(found, Model) else None
 
     def reset(self, kind: ResetKind = ResetKind.POWER_ON) -> None:
         """Reset: clock to 0, core from its vector table, peripherals to reset values.
@@ -1198,6 +1216,23 @@ class Machine:
 
     def __repr__(self) -> str:
         return f"Machine({self._description.part}, images={len(self._images)})"
+
+
+def _model_makers(
+    description: MachineDescription, models: Mapping[str, Callable[[], Model]]
+) -> dict[str, object]:
+    served = {p.name for p in description.peripherals if p.alias_of is None}
+    for name in models:
+        if name not in served:
+            close = difflib.get_close_matches(name, sorted(served))
+            raise ConfigError(
+                f"models: {description.part} has no peripheral {name}"
+                + (f", close matches: {', '.join(close)}" if close else ""),
+                file=description.part,
+                key=f"models.{name}",
+                expected="a peripheral of the description",
+            )
+    return {name: functools.partial(build_model, maker) for name, maker in models.items()}
 
 
 def _free_sentinel(description: MachineDescription) -> int:

@@ -3,6 +3,7 @@
 #include "errors.hpp"
 #include "image.hpp"
 #include "machine.hpp"
+#include "models.hpp"
 #include "toml_caster.hpp"
 
 #include <popcorn/arch/arch.hpp>
@@ -79,5 +80,6 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::config::models_section>("ModelsSection");
   m.bind<popcorn::config::project_file>("ProjectFile");
   m.bind<popcorn::config::loaded_project>("LoadedProject");
+  popcorn::bind::detail::bind_model_base(m.handle);
   m.bind<^^popcorn::bind>();
 }

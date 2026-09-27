@@ -3,7 +3,6 @@ from pcons import Project, add_subdirectory, get_var
 from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, gcc_ar, project_dir, toolchain
 from popcorn_build.python import (
-    add_binding_check,
     add_extension,
     add_package_install,
     add_stub,
@@ -97,7 +96,6 @@ if VARIANT != "asan":
     ext.link(core)
     ext.link(obs.popcorn_obs)
     ext.link(popcorn_config)
-    add_binding_check("popcorn-model-trampoline", ["native/src/bind/model_trampoline.cpp"], [core])
     smoke_ext = add_extension(
         "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]
     )

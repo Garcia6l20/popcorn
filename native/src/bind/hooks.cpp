@@ -1,6 +1,7 @@
 #include "hooks.hpp"
 
 #include "machine.hpp"
+#include "python_callable.hpp"
 
 #include <popcorn/core/errors.hpp>
 
@@ -16,21 +17,7 @@ namespace popcorn::bind
 namespace
 {
 namespace nb = reflex::py::nb;
-
-struct python_callable
-{
-  explicit python_callable(nb::object fn) : fn{std::move(fn)}
-  {}
-  python_callable(python_callable const&)                    = delete;
-  auto operator=(python_callable const&) -> python_callable& = delete;
-  ~python_callable()
-  {
-    nb::gil_scoped_acquire held;
-    fn.reset();
-  }
-
-  nb::object fn;
-};
+using detail::held;
 
 struct view_scope
 {
@@ -44,11 +31,6 @@ struct view_scope
 
   std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 };
-
-auto held(nb::object fn) -> std::shared_ptr<python_callable>
-{
-  return std::make_shared<python_callable>(std::move(fn));
-}
 }
 
 hook::hook(core::hook_handle handle) noexcept : handle_{std::move(handle)}

@@ -13,4 +13,6 @@ sources = [
     here / "image.cpp",
     here / "errors.cpp",
     here / "config.cpp",
+    here / "model_context.cpp",
+    here / "model_trampoline.cpp",
 ]

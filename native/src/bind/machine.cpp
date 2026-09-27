@@ -1,5 +1,6 @@
 #include "machine.hpp"
 #include "errors.hpp"
+#include "models.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/errors.hpp>
@@ -64,6 +65,10 @@ auto options_of(mcu_description const& description, machine_config const& config
   options.strict_peripherals = config.strict_peripherals;
   options.vector_table       = config.vector_table;
   options.config_digest      = config.config_digest;
+  for(auto const& [name, maker] : config.python_models)
+  {
+    options.models.emplace(name, detail::python_model_factory(maker));
+  }
   if(config.arena_start)
   {
     options.scratch =
@@ -74,11 +79,17 @@ auto options_of(mcu_description const& description, machine_config const& config
 }
 
 machine_handle::machine_handle(mcu_description const& description, machine_config const& config)
-    : machine_{std::make_unique<core::machine>(
-          description,
-          factory_for(description),
-          options_of(description, config))}
-{}
+    : alive_{std::make_shared<bool>(true)}
+{
+  detail::building_scope const building{alive_};
+  machine_ = std::make_unique<core::machine>(
+      description, factory_for(description), options_of(description, config));
+}
+
+machine_handle::~machine_handle()
+{
+  *alive_ = false;
+}
 
 void machine_handle::load(image const& loaded)
 {
@@ -154,6 +165,11 @@ auto machine_handle::end_call() -> std::uint64_t
 auto machine_handle::in_call() const noexcept -> bool
 {
   return machine_->in_call();
+}
+
+auto machine_handle::model(std::string const& peripheral) const -> reflex::py::nb::object
+{
+  return detail::python_object(machine_->model(peripheral));
 }
 
 auto machine_handle::id() const noexcept -> std::uint64_t

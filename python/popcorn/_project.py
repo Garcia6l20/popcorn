@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
+import inspect
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -22,6 +25,7 @@ from popcorn._errors import (
 from popcorn._image import Image
 from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, Machine
 from popcorn._stop import Stop
+from popcorn.model import Model
 
 type TomlValue = int | float | bool | str | list[TomlValue] | dict[str, TomlValue]
 """A TOML value as tomllib gives it."""
@@ -139,7 +143,9 @@ class Project:
         process: a later import anywhere in the process sees their modules too.
 
         Raises:
-            ConfigError: A module or class is missing, or a reference is not a class.
+            ConfigError: A module or class is missing, a reference is not a class, a model is
+                not a `popcorn.model.Model`, or a parameter is unknown to its class or missing,
+                named as `board.<periph>.<param>`.
         """
         if self._board is None:
             for directory in self._loaded.file.models.python:
@@ -148,16 +154,22 @@ class Project:
             board: dict[str, BoardEntry] = {}
             for name, entry in self._loaded.file.board.items():
                 key = f"board.{name}"
-                devices = tuple(
-                    Device(
-                        device.address,
-                        self._resolve(device.model, f"{key}.devices[{index}].model"),
-                        _params(device.params),
-                    )
-                    for index, device in enumerate(entry.devices)
-                )
+                devices: list[Device] = []
+                for index, device in enumerate(entry.devices):
+                    at = f"{key}.devices[{index}]"
+                    cls = self._resolve(device.model, f"{at}.model")
+                    params = _params(device.params)
+                    self._check_params(cls, (device.address,), params, at)
+                    devices.append(Device(device.address, cls, params))
                 model = None if entry.model is None else self._resolve(entry.model, f"{key}.model")
-                board[name] = BoardEntry(entry.connect, model, devices, _params(entry.params))
+                params = _params(entry.params)
+                if model is not None:
+                    if not issubclass(model, Model):
+                        raise self._error(
+                            f"{key}.model", f"a popcorn.model.Model subclass, not {entry.model}"
+                        )
+                    self._check_params(model, (), params, key)
+                board[name] = BoardEntry(entry.connect, model, tuple(devices), params)
             self._board = board
         return dict(self._board)
 
@@ -176,9 +188,17 @@ class Project:
         if config is not None and config != self.config:
             return Project.load(self.path, config).machine()
         file = self._loaded.file
-        self.board()
+        description = self.description()
+        served = {p.name for p in description.peripherals if p.alias_of is None}
+        models: dict[str, Callable[[], Model]] = {}
+        for name, entry in self.board().items():
+            if entry.model is None:
+                continue
+            if name not in served:
+                raise self._error(f"board.{name}", f"a peripheral of {description.part}")
+            models[name] = functools.partial(entry.model, **entry.params)
         m = Machine(
-            self.description(),
+            description,
             image=self.images(),
             core_hz=file.clock.core_hz or 0,
             cpi=file.clock.cpi,
@@ -187,6 +207,7 @@ class Project:
             config_digest=self.digest,
             arena_base=_arena_base(file.boot.arena_base),
             arena_size=file.boot.arena_size or DEFAULT_ARENA_SIZE,
+            models=models,
         )
         for index, init in enumerate(file.boot.memory_init):
             key = f"boot.memory_init[{index}]"
@@ -249,6 +270,38 @@ class Project:
             key=key,
             expected=expected,
         )
+
+    def _check_params(
+        self, cls: type, args: tuple[object, ...], params: dict[str, TomlValue], key: str
+    ) -> None:
+        try:
+            signature = inspect.signature(cls)
+        except TypeError, ValueError:
+            return
+        try:
+            signature.bind(*args, **params)
+        except TypeError as error:
+            accepted = list(signature.parameters.values())
+            named = [
+                p.name for p in accepted if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+            ]
+            if not any(p.kind is p.VAR_KEYWORD for p in accepted):
+                for param in params:
+                    if param not in named:
+                        raise self._error(
+                            f"{key}.{param}",
+                            f"a parameter of {cls.__qualname__}: {', '.join(named) or 'none'}",
+                        ) from error
+            for param in accepted[len(args) :]:
+                if (
+                    param.default is param.empty
+                    and param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
+                    and param.name not in params
+                ):
+                    raise self._error(
+                        f"{key}.{param.name}", f"a value for {cls.__qualname__}({param.name})"
+                    ) from error
+            raise self._error(key, f"arguments {cls.__qualname__} accepts: {error}") from error
 
     def _resolve(self, reference: str, key: str) -> type:
         module_name, colon, class_name = reference.partition(":")

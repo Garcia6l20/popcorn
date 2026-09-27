@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -43,6 +44,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   std::optional<address> arena_start{};
   /** @brief Size of the call arena in bytes, a multiple of the page size. */
   std::uint32_t arena_size{};
+  /** @brief Python model maker per peripheral name, called with the ModelContext, returning a
+   * popcorn.model.Model. Overrides the registered models of that peripheral. */
+  std::map<std::string, reflex::py::nb::object> python_models{};
 };
 
 /** @brief Bounds of one slice, core::slice_request without the predicate. */
@@ -113,6 +117,13 @@ public:
    *         `cpi` or `trace_capacity` when not above 0, or as core::machine's constructor.
    */
   machine_handle(mcu_description const& description, machine_config const& config);
+
+  /** @brief Not copyable, models hold its lifetime flag. */
+  machine_handle(machine_handle const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(machine_handle const&) -> machine_handle& = delete;
+  /** @brief Marks the machine gone for its Python models, then destroys it. */
+  ~machine_handle();
 
   /**
    * @brief Loads one more image.
@@ -301,6 +312,15 @@ public:
       core::watch_kind       kind,
       reflex::py::nb::object handler) -> hook;
 
+  /**
+   * @brief Python model of a peripheral.
+   * @param peripheral Peripheral name.
+   * @return The model object, None when the peripheral has no model or a native one.
+   * @throws config_error when the description has no such peripheral.
+   */
+  [[= py::doc{"Python model of a peripheral, None when it has none."}]] [[nodiscard]] auto
+      model(std::string const& peripheral) const -> reflex::py::nb::object;
+
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept
       -> std::uint64_t;
@@ -323,6 +343,7 @@ public:
   [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
 
 private:
+  std::shared_ptr<bool>          alive_;
   std::unique_ptr<core::machine> machine_;
 };
 }

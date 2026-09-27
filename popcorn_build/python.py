@@ -59,16 +59,6 @@ def add_extension(package: str, name: str, sources: Sequence[str | Path]) -> Tar
     return ext
 
 
-def add_binding_check(name: str, sources: Sequence[str | Path], deps: Sequence[Target]) -> Target:
-    """Compile @p sources against nanobind as a static library, a build-only check of bindings."""
-    project = context.current_project
-    check = project.StaticLibrary(name, project.default_environment, sources=sources)
-    check.private.compile_flags.append("-fvisibility=hidden")
-    for dep in [_nanobind(), *deps]:
-        check.link(dep)
-    return check
-
-
 def add_stub(extension: Target, package: str, name: str, after: Sequence[Target] = ()) -> Target:
     """Generate build/@p package/@p name.pyi with nanobind's stubgen from the built extension."""
     project = context.current_project

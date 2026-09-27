@@ -1,6 +1,6 @@
 """popcorn: MCU emulation for firmware tests, driven from asyncio."""
 
-from popcorn import arm, coverage, trace, units
+from popcorn import arm, coverage, model, trace, units
 from popcorn._arena import Arena, ArenaBlock
 from popcorn._call import F32, I64, CallResult, Stack, f32, i64
 from popcorn._core import version
@@ -109,6 +109,7 @@ __all__ = [
     "f32",
     "i64",
     "load_description",
+    "model",
     "parse_description",
     "trace",
     "units",

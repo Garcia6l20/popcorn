@@ -64,3 +64,20 @@ if hooks is not None:
     hooks.private.link_flags.extend(
         [SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in HOOKED)]
     )
+
+MODELLED = (
+    "start_timer",
+    "stop_timer",
+    "wait_timer_irqs",
+    "eeprom_roundtrip",
+    "read_timer_count",
+    "write_timer_cr",
+    "touch_unmodelled",
+    "write_then_fault",
+    "ready",
+)
+_, model = add_firmware("api", "model", [here / "model.c"])
+if model is not None:
+    model.private.link_flags.extend(
+        [SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in MODELLED)]
+    )
