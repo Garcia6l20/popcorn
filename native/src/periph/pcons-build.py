@@ -17,5 +17,6 @@ sources += [
         "gpdma.cpp",
         "usart.cpp",
         "tim.cpp",
+        "iwdg.cpp",
     )
 ]

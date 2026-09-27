@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "lsi_source.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -254,6 +255,7 @@ struct rcc_state
 {
   std::array<std::uint32_t, source_count + 1> generation{};
   std::uint32_t                               pending{};
+  std::uint8_t                                lsi_forced{};
 
   friend auto operator==(rcc_state const&, rcc_state const&) -> bool = default;
 };
@@ -300,15 +302,17 @@ struct timer
  *        is set and raises no ready interrupt: firmware waiting on the RCC IRQ hangs, and the
  *        spin stop names its loop. A write that would stop the core clock, switching off the
  *        oscillator that drives it or changing PLL1 while it drives it, is refused and logs one
- *        warning per machine life.
+ *        warning per machine life. A started IWDG keeps the LSI on until the next reset, RM0456
+ *        section 11.4.16.
  */
-class rcc final : public dispatch_model<rcc, rcc_state>
+class rcc final : public dispatch_model<rcc, rcc_state>, public lsi_source
 {
 public:
   rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void force_lsi() override;
 
   void                            cr_written(std::uint32_t old, std::uint32_t now);
   void                            icscr1_written(std::uint32_t old, std::uint32_t now);
@@ -500,7 +504,9 @@ auto rcc::is_ready(source which) const -> bool
 
 auto rcc::is_on(source which) const -> bool
 {
-  return get(regs_, osc_[std::to_underlying(which)].on) != 0;
+  return get(regs_, osc_[std::to_underlying(which)].on)
+      != 0
+      or (which == source::lsi and state_.lsi_forced != 0);
 }
 
 auto rcc::pll_input(std::size_t pll) const -> source
@@ -594,7 +600,7 @@ void rcc::oscillators_written(
     {
       start(static_cast<source>(index));
     }
-    else if(was and not is)
+    else if(was and not is and not is_on(static_cast<source>(index)))
     {
       stop(static_cast<source>(index));
     }
@@ -726,7 +732,7 @@ void rcc::on_event(std::uint32_t kind, std::uint64_t payload)
       update(regs_, sws_, target);
     }
   }
-  else if(get(regs_, osc_[kind].on) != 0)
+  else if(is_on(static_cast<source>(kind)))
   {
     update(regs_, osc_[kind].ready, 1);
     if(get(regs_, osc_[kind].enable) != 0)
@@ -900,8 +906,24 @@ void rcc::reset(register_file& regs, reset_kind kind)
   {
     ++generation;
   }
-  state_.pending = 0;
+  state_.pending    = 0;
+  state_.lsi_forced = 0;
+  if(not is_on(source::lsi))
+  {
+    update(regs_, osc_[std::to_underlying(source::lsi)].ready, 0);
+  }
   publish(false);
+}
+
+void rcc::force_lsi()
+{
+  auto const lsi    = source::lsi;
+  auto const was    = is_on(lsi);
+  state_.lsi_forced = 1;
+  if(not was and not is_ready(lsi))
+  {
+    start(lsi);
+  }
 }
 }
 

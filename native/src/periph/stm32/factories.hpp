@@ -52,4 +52,7 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the TIM model, RM0456 sections 54 to 57. */
 [[nodiscard]] auto tim_factory() -> model_factory;
+
+/** @brief Factory of the IWDG model, RM0456 section 61. */
+[[nodiscard]] auto iwdg_factory() -> model_factory;
 }

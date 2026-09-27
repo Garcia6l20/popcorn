@@ -26,6 +26,7 @@ firmwares = {
         "gpdma_ll",
         "usart_ll",
         "tim_ll",
+        "iwdg_ll",
     )
 }
 u575_env = {
@@ -53,6 +54,7 @@ u575_programs = [
         ("stm32-dma-routing", "test_dma_routing.cpp"),
         ("stm32-usart", "test_usart.cpp"),
         ("stm32-tim", "test_tim.cpp"),
+        ("stm32-iwdg", "test_iwdg.cpp"),
     )
 ]
 for program in u575_programs:
