@@ -16,4 +16,5 @@ sources = [
     here / "board.cpp",
     here / "model_context.cpp",
     here / "model_trampoline.cpp",
+    here / "observability.cpp",
 ]

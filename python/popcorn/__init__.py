@@ -37,6 +37,7 @@ from popcorn._hooks import (
 )
 from popcorn._image import Image, Location, Segment, Symbol
 from popcorn._machine import Call, Event, Machine, Reached
+from popcorn._observe import MachineCoverage, Ring, TraceRecording
 from popcorn._project import BoardEntry, Device, Project, TomlValue
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
@@ -74,6 +75,7 @@ __all__ = [
     "LogEntry",
     "Machine",
     "MachineBusy",
+    "MachineCoverage",
     "MachineDescription",
     "MachineRunning",
     "Memory",
@@ -88,6 +90,7 @@ __all__ = [
     "ResetKind",
     "Return",
     "Returned",
+    "Ring",
     "ScalarView",
     "Segment",
     "Snapshot",
@@ -97,6 +100,7 @@ __all__ = [
     "Symbol",
     "SymbolError",
     "TomlValue",
+    "TraceRecording",
     "ValueKind",
     "Var",
     "Watch",

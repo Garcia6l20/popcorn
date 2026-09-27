@@ -3,6 +3,7 @@
 #include "board.hpp"
 #include "hooks.hpp"
 #include "image.hpp"
+#include "observability.hpp"
 #include "snapshot.hpp"
 
 #include <popcorn/core/description.hpp>
@@ -371,6 +372,79 @@ public:
    */
   [[= py::doc{"Alternate function number of a GPIO pin."}]] [[nodiscard]] auto
       gpio_alternate(std::string const& peripheral, std::uint8_t pin) const -> std::uint8_t;
+
+  /**
+   * @brief Code ranges of functions, for coverage and traces.
+   * @param names Function names.
+   * @throws symbol_error when no loaded image has a name.
+   */
+  [[= py::doc{"Code range (name, start, size) of each function, in order."}]] [[nodiscard]] auto
+      function_ranges(std::vector<std::string> const& names) const
+      -> std::vector<detail::range_row>;
+
+  /**
+   * @brief Starts collecting coverage counters, adding ranges to those already counted.
+   * @param ranges Code ranges, empty for every executable segment of the loaded images.
+   * @throws config_error when a range is empty or leaves the 32-bit address space.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Start collecting coverage over ranges, all code when empty."}]] void
+      enable_coverage(std::vector<detail::range_row> const& ranges);
+
+  /**
+   * @brief Stops collecting, keeping the counters.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Stop collecting coverage, keeping the counters."}]] void disable_coverage();
+
+  /** @brief Whether coverage is being collected. */
+  [[= py::doc{"Whether coverage is being collected."}]] [[nodiscard]] auto
+      coverage_enabled() const noexcept -> bool;
+
+  /**
+   * @brief Zeroes every counter.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Zero every coverage counter, ranges kept."}]] void clear_coverage();
+
+  /**
+   * @brief The coverage collected so far as `.pcov` bytes, with the GIL released.
+   * @param elf_paths Absolute ELF path of each loaded image in load order, empty for a raw one.
+   * @throws config_error when the count differs from the loaded images.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{"Coverage so far as .pcov bytes, one ELF path or '' per loaded image."}]] auto
+      coverage_pcov(std::vector<std::string> const& elf_paths) -> reflex::py::nb::bytes;
+
+  /**
+   * @brief Streams trace records of some kinds into a `.pctr` file until the handle closes.
+   * @param path File.
+   * @param kinds Trace kind values, neither str nor time.
+   * @param ranges Code ranges traced, empty for everywhere.
+   * @throws config_error for an unknown kind or an invalid range.
+   * @throws format_error when the file cannot be created.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Stream trace records of kinds into a .pctr file until closed."}]] auto open_trace(
+      std::string const&                    path,
+      std::vector<std::uint8_t> const&      kinds,
+      std::vector<detail::range_row> const& ranges) -> trace_handle;
+
+  /**
+   * @brief Writes the always-on trace ring to a `.pctr` file, oldest record first.
+   * @param path File.
+   * @throws format_error when the file cannot be written.
+   */
+  [[= py::doc{"Write the trace ring to a .pctr file."}]] void
+      write_ring(std::string const& path) const;
+
+  /**
+   * @brief Calls a Python callable with each machine log record, the GIL taken.
+   * @param sink Called with a LogRecord.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Call sink(LogRecord) for each machine log record."}]] auto
+      add_log_sink(reflex::py::nb::object sink) -> hook;
 
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept

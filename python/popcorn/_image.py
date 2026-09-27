@@ -65,12 +65,13 @@ def symbol_of(native: _core.SymbolInfo) -> Symbol:
 class Image:
     """A firmware image, immutable, loadable into any number of machines."""
 
-    __slots__ = ("_native", "_path")
+    __slots__ = ("_elf", "_native", "_path")
 
-    def __init__(self, native: _core.Image, path: Path | None = None) -> None:
+    def __init__(self, native: _core.Image, path: Path | None = None, *, elf: bool = False) -> None:
         """Wrap a native image. Use Image.elf, Image.bin or Image.hex instead."""
         self._native = native
         self._path = path
+        self._elf = elf
 
     @property
     def native(self) -> _core.Image:
@@ -80,7 +81,7 @@ class Image:
     @classmethod
     def elf(cls, path: str | os.PathLike[str]) -> Image:
         """Load an ELF32 file: segments, symbols, line table, entry and float ABI."""
-        return cls(_core.load_elf(os.fspath(path)), Path(path))
+        return cls(_core.load_elf(os.fspath(path)), Path(path), elf=True)
 
     @classmethod
     def bin(cls, path: str | os.PathLike[str], at: int) -> Image:
@@ -96,6 +97,11 @@ class Image:
     def path(self) -> Path | None:
         """File the image was loaded from."""
         return self._path
+
+    @property
+    def is_elf(self) -> bool:
+        """Whether the image was read from an ELF file, rather than a bin or HEX file."""
+        return self._elf
 
     @property
     def digest(self) -> str:

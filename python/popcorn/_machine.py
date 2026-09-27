@@ -57,12 +57,14 @@ from popcorn._hooks import (
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
+from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, UartPorts
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
 from popcorn.model import Model
+from popcorn.trace import TraceKind
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
@@ -298,17 +300,20 @@ class Machine:
         "_call_baseline",
         "_callback_table",
         "_config_digest",
+        "_coverage",
         "_description",
         "_handle",
         "_images",
         "_installed",
         "_irqs",
+        "_log_hook",
         "_logs",
         "_memory",
         "_nvic",
         "_peripherals",
         "_ports",
         "_registers",
+        "_ring",
         "_sentinel",
         "_slice_instructions",
         "_slice_wall_ns",
@@ -395,6 +400,9 @@ class Machine:
         self._registers = Registers(access, self._handle.register_names())
         self._peripherals = Peripherals(access, description)
         self._nvic = Nvic(self._memory, description.core.num_irqs)
+        self._coverage = MachineCoverage(self._handle, lambda: self._images, self._require_stopped)
+        self._ring = Ring(self._handle, self.locate, self._require_stopped)
+        self._log_hook = self._handle.add_log_sink(functools.partial(forward_log, description.part))
         self._irqs = Irqs(description)
         self._arena = (
             None
@@ -489,6 +497,50 @@ class Machine:
     def reg(self) -> Registers:
         """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`."""
         return self._registers
+
+    @property
+    def coverage(self) -> MachineCoverage:
+        """Block and edge coverage, `m.coverage.enable()` then `m.coverage.save(path)`."""
+        return self._coverage
+
+    @property
+    def ring(self) -> Ring:
+        """The always-on trace ring, `m.ring.dump()` after a failure."""
+        return self._ring
+
+    @contextlib.contextmanager
+    def trace(
+        self,
+        kinds: Iterable[TraceKind],
+        path: str | os.PathLike[str],
+        *,
+        ranges: Ranges | None = None,
+        functions: Iterable[str] | None = None,
+    ) -> Generator[TraceRecording]:
+        """Write a full `.pctr` trace of `kinds` while the block runs, `popcorn.trace.ALL` for
+        every kind.
+
+        `ranges` and `functions` limit the trace to records caused by that code, everywhere
+        when both are None. Block and memory records cost a native hook while traced, nothing
+        crosses to Python per record. Leaving the block removes the sink, then closes the file.
+
+        Raises:
+            ConfigError: A kind is not selectable, or a range is invalid.
+            SymbolError: No loaded image has a function name.
+            FormatError: The file cannot be created, written or closed, from `popcorn._obs`.
+            MachineRunning: A run is active.
+        """
+        self._require_stopped()
+        recording = open_trace(self._handle, kinds, path, ranges, functions)
+        try:
+            yield recording
+        except BaseException as error:
+            try:
+                recording.close()
+            except Exception as close_error:
+                error.add_note(f"closing the trace {recording.path} also failed: {close_error}")
+            raise
+        recording.close()
 
     @property
     def board(self) -> Board:

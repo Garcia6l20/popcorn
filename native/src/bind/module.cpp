@@ -17,6 +17,7 @@
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
 #if __has_include(<popcorn/periph/stm32/builtin.hpp>)
@@ -56,6 +57,8 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::core::intercept_result>("InterceptResult");
   m.bind<popcorn::core::watch_hit>("WatchHit");
   m.bind_enum<popcorn::periph::stm32::pin_mode>("PinMode");
+  m.bind_enum<popcorn::core::log_kind>("LogKind");
+  m.bind<popcorn::core::log_record>("LogRecord");
   m.bind_enum<popcorn::access>("Access");
   m.bind_enum<popcorn::write_effect>("WriteEffect");
   m.bind_enum<popcorn::read_effect>("ReadEffect");
