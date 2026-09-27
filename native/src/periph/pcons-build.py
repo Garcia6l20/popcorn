@@ -18,5 +18,6 @@ sources += [
         "usart.cpp",
         "tim.cpp",
         "iwdg.cpp",
+        "rtc.cpp",
     )
 ]

@@ -6,6 +6,9 @@
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
 
+#include <chrono>
+#include <optional>
+
 namespace popcorn::periph::stm32
 {
 /**
@@ -55,4 +58,13 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the IWDG model, RM0456 section 61. */
 [[nodiscard]] auto iwdg_factory() -> model_factory;
+
+/**
+ * @brief Factory of the RTC model, RM0456 section 63.
+ * @param initial Calendar at power-on, the board's `rtc_initial`, copied.
+ */
+[[nodiscard]] auto rtc_factory(std::optional<std::chrono::sys_seconds> initial) -> model_factory;
+
+/** @brief Factory of the TAMP backup register model, RM0456 section 64. */
+[[nodiscard]] auto tamp_factory() -> model_factory;
 }

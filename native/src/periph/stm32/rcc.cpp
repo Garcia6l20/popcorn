@@ -1,3 +1,4 @@
+#include "backup_domain.hpp"
 #include "factories.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
@@ -362,6 +363,7 @@ private:
   std::array<field_ref, 3>                           ppre_{};
   field_ref                                          iclk_select_;
   field_ref                                          rtc_select_;
+  field_ref                                          rtc_enable_;
   field_ref                                          lsi_prediv_;
   field_ref                                          backup_reset_;
   field_ref                                          remove_flags_;
@@ -414,8 +416,9 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
       sws_{field("RCC_CFGR1", "SWS")}, hpre_{field("RCC_CFGR2", "HPRE")},
       ppre_{field("RCC_CFGR2", "PPRE1"), field("RCC_CFGR2", "PPRE2"), field("RCC_CFGR3", "PPRE3")},
       iclk_select_{field("RCC_CCIPR1", "ICLKSEL")}, rtc_select_{field("RCC_BDCR", "RTCSEL")},
-      lsi_prediv_{field("RCC_BDCR", "LSIPREDIV")}, backup_reset_{field("RCC_BDCR", "BDRST")},
-      remove_flags_{field("RCC_CSR", "RMVF")}, bdcr_{reg("RCC_BDCR")}, csr_{reg("RCC_CSR")}
+      rtc_enable_{field("RCC_BDCR", "RTCEN")}, lsi_prediv_{field("RCC_BDCR", "LSIPREDIV")},
+      backup_reset_{field("RCC_BDCR", "BDRST")}, remove_flags_{field("RCC_CSR", "RMVF")},
+      bdcr_{reg("RCC_BDCR")}, csr_{reg("RCC_CSR")}
 {
   for(auto const& [index, names] : std::views::enumerate(oscillators))
   {
@@ -698,6 +701,16 @@ void rcc::bdcr_written(std::uint32_t old, std::uint32_t now)
     now = rtc_select_.with(now, rtc_select_.of(old));
   }
   oscillators_written("RCC_BDCR", bdcr_.offset, old, now);
+  if(backup_reset_.of(old) == 0 and backup_reset_.of(now) != 0)
+  {
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto* const domain = dynamic_cast<backup_domain*>(peer))
+      {
+        domain->backup_reset();
+      }
+    }
+  }
 }
 
 void rcc::csr_written(std::uint32_t old, std::uint32_t now)
@@ -819,7 +832,7 @@ auto rcc::rates() const -> std::array<std::uint64_t, signal_count>
   constexpr std::array<signal, 4> iclk_sources{hsi48, pll2_q, pll1_q, msik};
   at(iclk) = at(iclk_sources[get(regs_, iclk_select_)]);
   std::array<std::uint64_t, 4> const rtc_hz{0, at(lse), at(lsi), at(hse) / 32};
-  at(rtc) = rtc_hz[get(regs_, rtc_select_)];
+  at(rtc) = get(regs_, rtc_enable_) != 0 ? rtc_hz[get(regs_, rtc_select_)] : 0;
   return hz;
 }
 

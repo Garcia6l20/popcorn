@@ -7,9 +7,11 @@
 #include <popcorn/periph/stm32/rcc.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace popcorn::periph::stm32
@@ -30,6 +32,12 @@ struct board
   /** @brief Far end of each UART by instance name, such as `USART1`. A UART without one drops
    * what it transmits. */
   std::map<std::string, std::shared_ptr<uart_endpoint>, std::less<>> uarts{};
+  /**
+   * @brief Calendar of the RTC model at power-on, as if a backup battery had kept it, weekday
+   *        derived from the date, years 2000 to 2099. Empty for the RTC_TR and RTC_DR reset
+   *        values, 2000-01-01 00:00:00, Monday, with INITS clear.
+   */
+  std::optional<std::chrono::sys_seconds> rtc_initial{};
 };
 
 /**
