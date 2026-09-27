@@ -1,5 +1,6 @@
 #pragma once
 
+#include "board.hpp"
 #include "hooks.hpp"
 #include "image.hpp"
 #include "snapshot.hpp"
@@ -321,6 +322,56 @@ public:
   [[= py::doc{"Python model of a peripheral, None when it has none."}]] [[nodiscard]] auto
       model(std::string const& peripheral) const -> reflex::py::nb::object;
 
+  /**
+   * @brief Connects a UART of the machine to Python, replacing its far end.
+   * @param peripheral UART instance name.
+   * @throws config_error when the description has no such peripheral.
+   * @throws model_error when the peripheral's model is not a UART.
+   */
+  [[= py::doc{"Connect a UART to Python, replacing its far end."}]] [[nodiscard]] auto
+      attach_uart(std::string const& peripheral) -> uart_link;
+
+  /**
+   * @brief Drives a GPIO pin from outside the MCU, or releases it.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, 0 to 15.
+   * @param level Level driven, empty to release the pin.
+   * @throws config_error when the port is unknown or the pin out of range.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   */
+  [[= py::doc{"Drive a GPIO pin from outside, None to release it."}]] void
+      gpio_drive(std::string const& peripheral, std::uint8_t pin, std::optional<bool> level);
+
+  /**
+   * @brief Level of a GPIO pin as its input data register reads it.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, 0 to 15.
+   * @throws config_error when the port is unknown or the pin out of range.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   */
+  [[= py::doc{"Level of a GPIO pin as the input data register reads it."}]] [[nodiscard]] auto
+      gpio_level(std::string const& peripheral, std::uint8_t pin) const -> bool;
+
+  /**
+   * @brief Mode of a GPIO pin.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, 0 to 15.
+   * @throws config_error when the port is unknown or the pin out of range.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   */
+  [[= py::doc{"Mode of a GPIO pin."}]] [[nodiscard]] auto
+      gpio_mode(std::string const& peripheral, std::uint8_t pin) const -> periph::stm32::pin_mode;
+
+  /**
+   * @brief Alternate function number of a GPIO pin.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, 0 to 15.
+   * @throws config_error when the port is unknown or the pin out of range.
+   * @throws model_error when the peripheral's model is not a GPIO port.
+   */
+  [[= py::doc{"Alternate function number of a GPIO pin."}]] [[nodiscard]] auto
+      gpio_alternate(std::string const& peripheral, std::uint8_t pin) const -> std::uint8_t;
+
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept
       -> std::uint64_t;
@@ -343,6 +394,9 @@ public:
   [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
 
 private:
+  [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
+      -> periph::stm32::gpio_port&;
+
   std::shared_ptr<bool>          alive_;
   std::unique_ptr<core::machine> machine_;
 };

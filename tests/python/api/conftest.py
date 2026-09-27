@@ -108,3 +108,28 @@ def hooked(m33: popcorn.MachineDescription) -> popcorn.Machine:
     m.reset()
     assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
     return m
+
+
+BOARD_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "board.elf"
+
+
+@pytest.fixture(scope="session")
+def u575() -> popcorn.MachineDescription:
+    """The STM32U575 description built from ST's files, the test skipped without them."""
+    from popcorn.stm32 import mcu
+    from popcorn.stm32.description import DescriptionError
+
+    try:
+        return mcu("STM32U575QGIx")
+    except DescriptionError as error:
+        pytest.skip(f"no STM32U575 description: {error}")
+
+
+@pytest.fixture
+def board(u575: popcorn.MachineDescription) -> popcorn.Machine:
+    """A U575 machine over the board firmware, at `ready`: USART1 echoes, PA5 follows PA0."""
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    stop = asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS
+    return m

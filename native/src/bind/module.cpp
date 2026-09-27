@@ -55,6 +55,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind_enum<popcorn::core::watch_action>("WatchAction");
   m.bind<popcorn::core::intercept_result>("InterceptResult");
   m.bind<popcorn::core::watch_hit>("WatchHit");
+  m.bind_enum<popcorn::periph::stm32::pin_mode>("PinMode");
   m.bind_enum<popcorn::access>("Access");
   m.bind_enum<popcorn::write_effect>("WriteEffect");
   m.bind_enum<popcorn::read_effect>("ReadEffect");

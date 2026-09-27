@@ -8,6 +8,7 @@ import contextvars
 import difflib
 import functools
 import os
+import threading
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, overload, runtime_checkable
@@ -55,8 +56,10 @@ from popcorn._hooks import (
 )
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._model_build import build_model
+from popcorn._nvic import Irqs, Nvic
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
+from popcorn._streams import Board, UartPorts
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
 from popcorn.model import Model
@@ -203,8 +206,8 @@ def _check_duration(for_: VirtualDuration | None) -> None:
         raise ValueError(f"for_ must not be negative, got {for_}")
 
 
-def _stop_error(stopped: Stop) -> EmulationError:
-    message = f"the background run stopped: {stopped}"
+def _stop_error(stopped: Stop, during: str = "the background run") -> EmulationError:
+    message = f"{during} stopped with {stopped.reason.name}: {stopped}"
     if stopped.reason is StopReason.FAULT and stopped.fault is not None:
         fault = stopped.fault
         return FaultError(
@@ -262,6 +265,14 @@ class Reached:
         return machine.pc == machine.address_of(self.target)
 
 
+@dataclass(frozen=True, slots=True)
+class _Ready:
+    predicate: Callable[[], bool]
+
+    def ready(self, machine: Machine) -> bool:
+        return self.predicate()
+
+
 @dataclass(slots=True)
 class _Waiter:
     event: Event
@@ -279,8 +290,10 @@ class Machine:
     """
 
     __slots__ = (
+        "__weakref__",
         "_arena",
         "_background",
+        "_board",
         "_busy",
         "_call_baseline",
         "_callback_table",
@@ -289,13 +302,17 @@ class Machine:
         "_handle",
         "_images",
         "_installed",
+        "_irqs",
         "_logs",
         "_memory",
+        "_nvic",
         "_peripherals",
+        "_ports",
         "_registers",
         "_sentinel",
         "_slice_instructions",
         "_slice_wall_ns",
+        "_thread",
         "_waiters",
     )
 
@@ -368,10 +385,17 @@ class Machine:
         self._busy = False
         self._background = False
         self._waiters: list[_Waiter] = []
-        access = ViewAccess(self._handle, self._require_stopped)
+        self._thread = threading.get_ident()
+        self._ports = UartPorts(self._handle.attach_uart, self._wait_until, self._require_owner)
+        self._board = Board(self._ports)
+        access = ViewAccess(
+            self._handle, self._require_stopped, self._ports.stream, self._require_owner
+        )
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
         self._peripherals = Peripherals(access, description)
+        self._nvic = Nvic(self._memory, description.core.num_irqs)
+        self._irqs = Irqs(description)
         self._arena = (
             None
             if arena_base is None
@@ -465,6 +489,21 @@ class Machine:
     def reg(self) -> Registers:
         """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`."""
         return self._registers
+
+    @property
+    def board(self) -> Board:
+        """UART streams and host ptys wired to the MCU."""
+        return self._board
+
+    @property
+    def nvic(self) -> Nvic:
+        """The interrupt controller from the debugger's side."""
+        return self._nvic
+
+    @property
+    def irq(self) -> Irqs:
+        """Interrupt numbers of the description by name, `m.irq.USART2_IRQn`."""
+        return self._irqs
 
     @property
     def periph(self) -> Peripherals:
@@ -936,6 +975,10 @@ class Machine:
                 a file names another description, images or configuration, keyed by the digest
                 that differs.
             MachineRunning: A run is active, handlers of it included.
+
+        UART frames the firmware transmitted and Python did not read yet are dropped, as are
+        bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
+        restore. Bytes already in the UART's receiver return to the snapshot's state.
         """
         self._require_idle()
         machine_id = snapshot.machine_id
@@ -948,6 +991,7 @@ class Machine:
                 expected="restore into the machine that took it, or load its saved form",
             )
         self._handle.restore(snapshot.native)
+        self._ports.discard()
         if self._arena is not None:
             self._arena.reset(snapshot.arena_offset)
 
@@ -1031,6 +1075,11 @@ class Machine:
         with self._exclusive():
             return await self._drive(until=None, budget=None, for_=None, stop_when=None, exact=n)
 
+    async def _wait_until(self, ready: Callable[[], bool], for_: VirtualDuration | None) -> None:
+        stop = await self.wait_for(_Ready(ready), for_=for_)
+        if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
+            raise _stop_error(stop, "the run waiting for UART data")
+
     async def wait_for(self, event: Event, *, for_: VirtualDuration | None = None) -> Stop:
         """Run until `event` is ready, a USER stop, or until `for_` elapses, a TIME stop.
 
@@ -1102,6 +1151,13 @@ class Machine:
                 "the machine is running, handlers included, stop or await it first"
             )
 
+    def _require_owner(self) -> None:
+        if self._busy and threading.get_ident() != self._thread:
+            raise RuntimeError(
+                "a board stimulus from another thread while the machine runs: call it from "
+                "the machine's thread"
+            )
+
     def _require_stopped(self) -> None:
         if self._busy and _HANDLER_OF.get() is not self:
             raise MachineRunning("the machine is running, stop or await it first")
@@ -1143,7 +1199,9 @@ class Machine:
                 args.budget_left = remaining
             if left is not None:
                 args.exact_instructions = left
+            self._ports.pump()
             outcome = self._handle.run_slice(args, predicate)
+            self._ports.pump()
             if outcome.stopped is not None:
                 return stop_of(outcome.stopped)
             if remaining is not None:
@@ -1161,7 +1219,9 @@ class Machine:
                 if w.deadline_ps is not None and not w.future.done()
             ]
             args.until_time_ps = min(deadlines, default=None)
+            self._ports.pump()
             outcome = self._handle.run_slice(args, None)
+            self._ports.pump()
             stopped = None if outcome.stopped is None else stop_of(outcome.stopped)
             self._check_waiters()
             if stopped is None or stopped.reason is StopReason.TIME:

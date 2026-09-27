@@ -1,0 +1,160 @@
+"""UART streams: bytes in and out of the firmware in virtual time."""
+
+from __future__ import annotations
+
+import asyncio
+import gc
+import itertools
+import os
+import weakref
+
+import popcorn
+import pytest
+from popcorn import _core
+from popcorn.board import Frame
+from popcorn.units import VirtualTime, ms, us
+
+FRAME_PS = 87_500_000
+
+
+async def echo(m: popcorn.Machine, data: bytes) -> tuple[VirtualTime, list[Frame]]:
+    uart = m.periph.USART1.port
+    start = m.time
+    await uart.write(data)
+    return start, await uart.read_frames(len(data), for_=ms(10))
+
+
+def test_the_firmware_echoes_at_the_configured_baud(board: popcorn.Machine) -> None:
+    start, frames = asyncio.run(echo(board, b"hello"))
+    assert bytes(f.data for f in frames) == b"hello"
+    assert frames[-1].at.ps - start.ps >= 5 * FRAME_PS
+    gaps = [b.at.ps - a.at.ps for a, b in itertools.pairwise(frames)]
+    assert all(gap >= FRAME_PS for gap in gaps)
+
+
+def test_the_same_exchange_gives_the_same_times(u575: popcorn.MachineDescription) -> None:
+    from .conftest import BOARD_ELF
+
+    def once() -> list[tuple[int, int]]:
+        m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+        m.reset()
+        asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+        start, frames = asyncio.run(echo(m, b"popcorn"))
+        return [(f.data, f.at.ps - start.ps) for f in frames]
+
+    assert once() == once()
+
+
+def test_read_inside_running_awaits_the_background_run(board: popcorn.Machine) -> None:
+    async def body() -> bytes:
+        uart = board.periph.USART1.port
+        async with board.running():
+            await uart.write(b"hello")
+            return await uart.read(5, for_=ms(10))
+
+    assert asyncio.run(body()) == b"hello"
+
+
+def test_a_read_that_times_out_returns_what_arrived(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[bytes, bytes]:
+        await uart.write(b"ab")
+        short = await uart.read(5, for_=us(300))
+        rest = await uart.read(5, for_=us(100))
+        return short, rest
+
+    assert asyncio.run(body()) == (b"ab", b"")
+    assert uart.available == 0 and uart.queued == 0
+
+
+def test_queued_counts_bytes_not_yet_delivered(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    asyncio.run(uart.write(b"xyz"))
+    assert uart.queued == 3
+    assert asyncio.run(uart.read(3, for_=ms(1))) == b"xyz"
+    assert uart.queued == 0
+
+
+def test_the_port_is_one_stream_per_uart(board: popcorn.Machine) -> None:
+    assert board.periph.USART1.port is board.periph.USART1.port
+
+
+def test_a_peripheral_without_a_uart_model_has_no_port(board: popcorn.Machine) -> None:
+    with pytest.raises(popcorn.ModelError) as caught:
+        _ = board.periph.GPIOA.port
+    assert caught.value.peripheral == "GPIOA"
+
+
+def test_a_fault_while_reading_raises(board: popcorn.Machine) -> None:
+    board.reg.pc = 0x6000_0000
+
+    with pytest.raises(popcorn.EmulationError):
+        asyncio.run(board.periph.USART1.port.read(1, for_=ms(1)))
+
+
+def test_reads_take_frames_in_order_in_parts(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[bytes, int, bytes]:
+        await uart.write(b"hello")
+        await board.run(for_=ms(1))
+        head = await uart.read(2)
+        left = uart.available
+        return head, left, await uart.read(3)
+
+    assert asyncio.run(body()) == (b"he", 3, b"llo")
+
+
+def test_a_stream_keeps_its_machine_and_both_are_freed_together(
+    u575: popcorn.MachineDescription,
+) -> None:
+    from .conftest import BOARD_ELF
+
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+    uart = m.periph.USART1.port
+    path = m.board.pty("USART1")
+    machine = weakref.ref(m)
+    del m
+    gc.collect()
+    assert machine() is not None and uart.queued == 0
+    del uart
+    gc.collect()
+    assert machine() is None
+    assert not os.path.exists(path)
+
+
+def test_a_restore_drops_frames_not_read_yet(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    saved = board.snapshot()
+
+    async def body() -> None:
+        await uart.write(b"hello")
+        await board.run(for_=ms(1))
+
+    asyncio.run(body())
+    assert uart.available == 5
+    board.restore(saved)
+    assert uart.available == 0 and uart.queued == 0
+
+
+def test_a_link_kept_past_its_handle_refuses_access(u575: popcorn.MachineDescription) -> None:
+    handle = _core.MachineHandle(u575, _core.MachineConfig())
+    link = handle.attach_uart("USART1")
+    del handle
+    gc.collect()
+    with pytest.raises(popcorn.ConfigError, match="machine still exists"):
+        link.send(b"x")
+    with pytest.raises(popcorn.ConfigError, match="machine still exists"):
+        link.queued()
+
+
+def test_a_write_from_another_thread_during_a_run_is_refused(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> None:
+        async with board.running():
+            await asyncio.to_thread(asyncio.run, uart.write(b"x"))
+
+    with pytest.raises(RuntimeError, match="another thread"):
+        asyncio.run(body())

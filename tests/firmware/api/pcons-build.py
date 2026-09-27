@@ -81,3 +81,7 @@ if model is not None:
     model.private.link_flags.extend(
         [SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in MODELLED)]
     )
+
+_, board = add_firmware("api", "board", [here / "board.c"])
+if board is not None:
+    board.private.link_flags.extend([SECTION_BOUNDS, "-Wl,--undefined=ready"])

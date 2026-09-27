@@ -175,7 +175,7 @@ class Project:
 
     def machine(self, config: str | None = None) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
-        board references checked, `[boot] memory_init` written. Not reset.
+        board models, `connect = "pty"` bridges, `[boot] memory_init` written. Not reset.
 
         Args:
             config: A config to apply instead of this project's, reloading the file.
@@ -184,6 +184,9 @@ class Project:
             ConfigError: As `load`, `description` and `board`, or a memory_init symbol or range
                 is invalid.
             ImageError: An image cannot be read or does not fit the memory map.
+            ModelError: A `connect` peripheral is not a UART.
+            NotImplementedError: A `[board]` entry lists devices, which no bus model attaches
+                yet.
         """
         if config is not None and config != self.config:
             return Project.load(self.path, config).machine()
@@ -209,6 +212,16 @@ class Project:
             arena_size=file.boot.arena_size or DEFAULT_ARENA_SIZE,
             models=models,
         )
+        for name, entry in self.board().items():
+            if entry.devices:
+                raise NotImplementedError(
+                    f"board.{name}.devices: no bus model attaches Python devices yet"
+                )
+            if entry.connect is None:
+                continue
+            if entry.connect != "pty":
+                raise self._error(f"board.{name}.connect", f'"pty", not "{entry.connect}"')
+            m.board.pty(name)
         for index, init in enumerate(file.boot.memory_init):
             key = f"boot.memory_init[{index}]"
             try:

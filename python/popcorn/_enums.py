@@ -60,3 +60,12 @@ class ValueKind(enum.Enum):
     I64 = 1
     F32 = 2
     F64 = 3
+
+
+class PinMode(enum.Enum):
+    """Mode of a GPIO pin."""
+
+    INPUT = 0
+    OUTPUT = 1
+    ALTERNATE = 2
+    ANALOG = 3

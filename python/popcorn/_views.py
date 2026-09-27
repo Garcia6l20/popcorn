@@ -8,20 +8,31 @@ from collections.abc import Callable, Iterator, Sequence
 from typing import TYPE_CHECKING
 
 from popcorn import _core
+from popcorn._enums import PinMode
 from popcorn._errors import ConfigError, EmulationError
 
 if TYPE_CHECKING:
     from popcorn._description import MachineDescription
+    from popcorn._streams import UartStream
 
 
 class ViewAccess:
-    """What a view needs from its machine: the native handle, and the running check."""
+    """What a view needs from its machine: the native handle, the running check, the check
+    that a board stimulus comes from the machine's thread, and its UART streams."""
 
-    __slots__ = ("check", "handle")
+    __slots__ = ("check", "handle", "ports", "stimulus")
 
-    def __init__(self, handle: _core.MachineHandle, check: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        handle: _core.MachineHandle,
+        check: Callable[[], None],
+        ports: Callable[[str], UartStream] | None = None,
+        stimulus: Callable[[], None] = lambda: None,
+    ) -> None:
         self.handle = handle
         self.check = check
+        self.ports = ports
+        self.stimulus = stimulus
 
 
 class ScalarView[T: (int, float)]:
@@ -274,6 +285,29 @@ class PeripheralView:
         """Register names."""
         return tuple(self._registers)
 
+    @property
+    def port(self) -> UartStream:
+        """The host end of this UART, connected on first use, replacing its board endpoint.
+
+        Raises:
+            ModelError: The peripheral's model is not a UART.
+        """
+        if self._access.ports is None:
+            raise AttributeError(f"{self._name} has no port in this machine")
+        return self._access.ports(self._name)
+
+    def pin(self, number: int) -> Pin:
+        """Pin `number` of this GPIO port.
+
+        Raises:
+            ConfigError: `number` is not 0 to 15.
+        """
+        if not 0 <= number <= 15:
+            raise ConfigError(
+                f"{self._name}: no pin {number}", key="pin", expected="a pin from 0 to 15"
+            )
+        return Pin(self._access, self._name, number)
+
     def __getattr__(self, name: str) -> RegisterView:
         register = self._registers.get(name)
         if register is None:
@@ -285,6 +319,62 @@ class PeripheralView:
 
     def __dir__(self) -> list[str]:
         return [*self._registers]
+
+
+class Pin:
+    """One GPIO pin, `m.periph.GPIOB.pin(5)`, through the GPIO model.
+
+    Setting `level` drives the pin from outside the MCU: an input reads it, an output keeps its
+    own level. The drive is board state, kept across an MCU reset and restored by snapshots.
+    Driving works inside `running()` too, like a signal from the board: the firmware sees the
+    new level at the next slice boundary. Reads raise MachineRunning there. A drive from
+    another thread while a run is active raises RuntimeError: the GPIO model runs on the
+    machine's thread. Every access raises
+    ModelError when the port's model is not a GPIO port.
+    """
+
+    __slots__ = ("_access", "number", "port")
+
+    def __init__(self, access: ViewAccess, port: str, number: int) -> None:
+        """View a pin. Use `m.periph.<GPIOx>.pin(n)` instead."""
+        self._access = access
+        self.port = port
+        self.number = number
+
+    @property
+    def level(self) -> bool:
+        """Level as the input data register reads it."""
+        self._access.check()
+        return self._access.handle.gpio_level(self.port, self.number)
+
+    @level.setter
+    def level(self, value: bool | int) -> None:
+        self._access.stimulus()
+        self._access.handle.gpio_drive(self.port, self.number, bool(value))
+
+    def release(self) -> None:
+        """Stop driving the pin, leaving it to its pull.
+
+        Raises:
+            RuntimeError: Called from another thread while a run is active.
+        """
+        self._access.stimulus()
+        self._access.handle.gpio_drive(self.port, self.number, None)
+
+    @property
+    def mode(self) -> PinMode:
+        """Mode the firmware configured."""
+        self._access.check()
+        return PinMode(self._access.handle.gpio_mode(self.port, self.number).value)
+
+    @property
+    def alternate(self) -> int:
+        """Alternate function number."""
+        self._access.check()
+        return self._access.handle.gpio_alternate(self.port, self.number)
+
+    def __repr__(self) -> str:
+        return f"Pin({self.port}, {self.number})"
 
 
 class Peripherals:
