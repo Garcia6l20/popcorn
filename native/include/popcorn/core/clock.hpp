@@ -32,6 +32,9 @@ struct clock_state
   icount epoch_icount{};
   /** @brief Virtual time of the last rate change. */
   vtime epoch_time{};
+  /** @brief Virtual time in picoseconds run before the last reset, summed over every reset since
+   * the last power-on reset. */
+  std::uint64_t before_reset_ps{};
   /** @brief Core clock frequency in Hz. */
   std::uint64_t core_hz{};
   /** @brief Core cycles per instruction. */
@@ -117,6 +120,16 @@ public:
         state_.epoch_time.ps
         + vtime_from_instructions(state_.now.value - state_.epoch_icount.value, instruction_hz())
               .ps};
+  }
+
+  /**
+   * @brief Virtual time since the last power-on reset: time() plus the time run before every
+   *        other kind of reset since. What a backup-domain device such as an RTC keeps counting
+   *        through a system reset.
+   */
+  [[nodiscard]] auto since_power_on() const -> vtime
+  {
+    return vtime{state_.before_reset_ps + time().ps};
   }
 
   /**

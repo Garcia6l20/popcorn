@@ -166,12 +166,13 @@ void machine::run_state::install_hooks()
 void machine::run_state::reset_machine(reset_kind kind)
 {
   owner.scheduler_.restore({}, 0);
-  auto fresh         = owner.clock_driver_.state();
-  fresh.now          = {};
-  fresh.epoch_icount = {};
-  fresh.epoch_time   = {};
-  fresh.core_hz      = core_clock_hz(owner.description_, owner.options_);
-  fresh.cpi          = owner.options_.cpi;
+  auto fresh            = owner.clock_driver_.state();
+  fresh.before_reset_ps = kind == reset_kind::power_on ? 0 : owner.clock_.since_power_on().ps;
+  fresh.now             = {};
+  fresh.epoch_icount    = {};
+  fresh.epoch_time      = {};
+  fresh.core_hz         = core_clock_hz(owner.description_, owner.options_);
+  fresh.cpi             = owner.options_.cpi;
   owner.clock_driver_.restore(fresh);
   unmapped.reset();
   trap.reset();

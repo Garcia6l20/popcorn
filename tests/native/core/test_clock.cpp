@@ -103,3 +103,16 @@ TEST_CASE("clock_driver advances, jumps, saves and restores the clock")
   CHECK(fresh_driver.state() == saved);
   CHECK(fresh.domain("apb1") == apb1);
 }
+
+TEST_CASE("time since power-on adds the time run before resets to the current time")
+{
+  popcorn::core::clock        clock{4'000'000};
+  popcorn::core::clock_driver driver{clock};
+  CHECK(clock.since_power_on() == popcorn::vtime{0});
+  auto state            = driver.state();
+  state.before_reset_ps = 3'000'000;
+  driver.restore(state);
+  driver.advance({4});
+  CHECK(clock.time() == popcorn::vtime{1'000'000});
+  CHECK(clock.since_power_on() == popcorn::vtime{4'000'000});
+}

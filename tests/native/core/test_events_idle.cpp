@@ -280,6 +280,40 @@ TEST_CASE("an idle jump toward until_time stops at the slice bound first and res
   CHECK(clock->time() == target);
 }
 
+TEST_CASE("time since power-on runs on across every reset but a power-on reset")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  auto const& clock    = f.target->virtual_clock();
+  auto const  sleep_to = [&f, &clock](std::uint64_t ms) {
+    auto const target = vtime{clock.time().ps + ms * (ps_per_second / 1000)};
+    REQUIRE(f.run_to_stop({.until_time = target}).reason == stop_reason::time);
+    return target;
+  };
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const first = sleep_to(2);
+  CHECK(clock.since_power_on() == first);
+  f.target->reset(popcorn::reset_kind::software);
+  CHECK(clock.time() == vtime{0});
+  CHECK(clock.since_power_on() == first);
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const second = sleep_to(3);
+  CHECK(clock.since_power_on() == vtime{first.ps + second.ps});
+  auto const saved = f.target->snapshot();
+  f.target->reset(popcorn::reset_kind::watchdog);
+  CHECK(clock.since_power_on() == vtime{first.ps + second.ps});
+  f.target->reset(popcorn::reset_kind::brown_out);
+  CHECK(clock.since_power_on() == vtime{first.ps + second.ps});
+  f.target->restore(saved);
+  CHECK(clock.time() == second);
+  CHECK(clock.since_power_on() == vtime{first.ps + second.ps});
+  f.target->reset(popcorn::reset_kind::power_on);
+  CHECK(clock.since_power_on() == vtime{0});
+  f.target->restore(saved);
+  CHECK(clock.since_power_on() == vtime{first.ps + second.ps});
+}
+
 TEST_CASE("stop_when is asked after every dispatched event")
 {
   auto f = booted("idle");
@@ -323,12 +357,19 @@ TEST_CASE("a reset request under reset_and_continue reboots and the slice contin
   options.on_reset_request = core::reset_request_policy::reset_and_continue;
   auto f                   = booted("calls", options);
   f.set("pc", sym("calls", "reset_now"));
-  auto const slice = f.run({.wall_budget = long_wall, .budget_left = icount{10'000}});
+  auto const& clock = f.target->virtual_clock();
+  auto const  start = clock.since_power_on();
+  auto const  slice = f.run({.wall_budget = long_wall, .budget_left = icount{10'000}});
   REQUIRE(slice.stopped.has_value());
   CHECK(slice.stopped->reason == stop_reason::budget);
   CHECK(f.word(boots) == 2);
-  CHECK(f.target->virtual_clock().now().value < slice.executed.value);
+  CHECK(clock.now().value < slice.executed.value);
   CHECK(f.word(sym("calls", "counter")) > 0);
+  CHECK(
+      clock.since_power_on()
+      == vtime{
+          start.ps
+          + popcorn::vtime_from_instructions(slice.executed.value, clock.instruction_hz()).ps});
 }
 
 TEST_CASE("a reset request in the block of a refused access wins over the fault")

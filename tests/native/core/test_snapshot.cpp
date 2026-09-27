@@ -50,14 +50,15 @@ auto filled() -> core::snapshot_data
             .payload = 0}},
       .next_seq = 6,
   };
-  data.clock.now          = popcorn::icount{150};
-  data.clock.epoch_icount = popcorn::icount{50};
-  data.clock.epoch_time   = popcorn::vtime{12'500'000};
-  data.clock.core_hz      = 4'000'000;
-  data.clock.cpi          = 1.5;
-  data.clock.domain_names = {"apb1", "apb2"};
-  data.clock.domain_hz    = {4'000'000, 0};
-  data.intercepts         = {
+  data.clock.now             = popcorn::icount{150};
+  data.clock.epoch_icount    = popcorn::icount{50};
+  data.clock.epoch_time      = popcorn::vtime{12'500'000};
+  data.clock.before_reset_ps = 7'000'000'000;
+  data.clock.core_hz         = 4'000'000;
+  data.clock.cpi             = 1.5;
+  data.clock.domain_names    = {"apb1", "apb2"};
+  data.clock.domain_hz       = {4'000'000, 0};
+  data.intercepts            = {
       {.at = 0x0800'0100, .calls = 12, .spent = true}
   };
   data.return_hooks = {
