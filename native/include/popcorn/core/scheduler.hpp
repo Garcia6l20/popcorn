@@ -3,6 +3,8 @@
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
 
+#include <reflex/enum.hpp>
+
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -24,6 +26,16 @@ struct event_id
   friend auto operator==(event_id, event_id) -> bool = default;
 };
 
+/** @brief What an event's deadline counts. */
+enum class[[= reflex::derive{reflex::Format}]] deadline
+{
+  /** @brief Executed instructions: the event keeps its instruction count across rate
+   * changes, as a core-cycle counter such as SysTick does. */
+  instructions,
+  /** @brief Virtual time: the instruction count follows every core rate change. */
+  time,
+};
+
 /** @brief Event in the queue, plain data so a snapshot copies it as is. */
 struct event
 {
@@ -35,6 +47,11 @@ struct event
   event_id id;
   /** @brief Payload passed to the owner's `periph::model::on_event`. */
   std::uint64_t payload;
+  /** @brief Virtual due time in picoseconds since reset, for a deadline::time event, 0 for an
+   * instruction one. */
+  std::uint64_t due_ps{};
+  /** @brief What the deadline counts. at is derived from due_ps for deadline::time. */
+  deadline kind{deadline::instructions};
 
   /** @brief Member-wise equality. */
   friend auto operator==(event const&, event const&) -> bool = default;
@@ -74,6 +91,26 @@ public:
    *         after restoring it, which keeps a replay deterministic.
    */
   auto schedule(icount at, event_id id, std::uint64_t payload) -> std::uint64_t;
+
+  /**
+   * @brief Schedules an event at a virtual time. Its instruction count follows every later core
+   *        rate change, see rekey(). A time already passed makes it due at the next pop.
+   * @param due Virtual time since reset.
+   * @param id Owner and kind.
+   * @param payload Passed back to the owner.
+   * @param time Clock converting @p due at its current rate.
+   * @return Sequence number, as schedule().
+   */
+  auto schedule_at(vtime due, event_id id, std::uint64_t payload, clock const& time)
+      -> std::uint64_t;
+
+  /**
+   * @brief Recomputes the instruction count of every deadline::time event at @p time's current
+   *        rate, never before its current instruction, and keeps the tie order. Called by the
+   *        machine on every core rate change.
+   * @param time Clock after the change.
+   */
+  void rekey(clock const& time);
 
   /**
    * @brief Removes a pending event. A no-op when @p seq is unknown, already fired or already
@@ -156,6 +193,21 @@ public:
   auto schedule(icount at, std::uint32_t kind, std::uint64_t payload) -> std::uint64_t
   {
     return queue_.schedule(at, event_id{owner_, kind}, payload);
+  }
+
+  /**
+   * @brief Schedules an event for the owning model at a virtual time, kept across core rate
+   *        changes. The way to schedule a delay in time, rather than clock.to_icount().
+   * @param due Virtual time since reset.
+   * @param kind Event kind, passed back to `periph::model::on_event`.
+   * @param payload Passed back to `periph::model::on_event`.
+   * @param time The machine's clock, `model_context::clock`.
+   * @return Sequence number, the handle for cancel().
+   */
+  auto schedule_at(vtime due, std::uint32_t kind, std::uint64_t payload, clock const& time)
+      -> std::uint64_t
+  {
+    return queue_.schedule_at(due, event_id{owner_, kind}, payload, time);
   }
 
   /**

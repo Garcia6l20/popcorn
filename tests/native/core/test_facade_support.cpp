@@ -277,7 +277,7 @@ TEST_CASE("a snapshot carries the machine's config digest through its saved form
   options.config_digest = "project-digest";
   auto const f          = booted(std::move(options));
   auto const saved      = f.target->snapshot();
-  CHECK(saved.data().format == 2);
+  CHECK(saved.data().format == core::snapshot_format_version);
   CHECK(saved.data().config_digest == "project-digest");
   auto const back = core::decode_snapshot(core::encode_snapshot(saved.data()));
   CHECK(back.config_digest == "project-digest");

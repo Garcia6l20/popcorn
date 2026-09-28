@@ -95,6 +95,8 @@ public:
   std::uint16_t patch_value{};
   /** @brief Whether a `CTRL.GO` write halves the core clock. */
   bool halve_rate_on_go = false;
+  /** @brief Whether a `CTRL.GO` write doubles the core clock, after scheduling its event. */
+  bool double_rate_on_go = false;
 
   /** @brief Instruction count at which the delayed IRQ event last fired. */
   std::optional<icount> fired_at{};
@@ -114,6 +116,13 @@ public:
   /** @brief Whether on_write, on_event and reset log a model_warning through the services: pc
    * left 0 for the machine to fill, except event_pc from on_event. */
   bool log_messages = false;
+  /** @brief Virtual delay in picoseconds of the `CTRL.GO` event, scheduled with schedule_at,
+   * replacing the instruction delay when set. */
+  std::optional<std::uint64_t> time_delay_ps{};
+  /** @brief Virtual time of the last `CTRL.GO` write. */
+  std::optional<vtime> go_time{};
+  /** @brief Virtual time at which the delayed IRQ event last fired. */
+  std::optional<vtime> fired_time{};
   /** @brief Whether on_event reschedules the event it received at the current count, forever. */
   bool reschedule_now = false;
   /** @brief pc the on_event record carries. */

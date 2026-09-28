@@ -83,8 +83,17 @@ auto test_model::on_write(
   }
   if(offset == ctrl_offset and (value & 1u) != 0)
   {
-    std::ignore = context_.events.schedule(
-        icount{context_.clock.now().value + go_delay.value_or(delay)}, 0, 0);
+    go_time = context_.clock.time();
+    if(time_delay_ps)
+    {
+      std::ignore =
+          context_.events.schedule_at(vtime{go_time->ps + *time_delay_ps}, 0, 0, context_.clock);
+    }
+    else
+    {
+      std::ignore = context_.events.schedule(
+          icount{context_.clock.now().value + go_delay.value_or(delay)}, 0, 0);
+    }
     if(patch_on_go and not context_.services.write(*patch_on_go, 2, patch_value, initiator::dma))
     {
       throw std::runtime_error{"test_model: DMA patch refused"};
@@ -92,6 +101,10 @@ auto test_model::on_write(
     if(halve_rate_on_go)
     {
       context_.clock.set_core_hz(context_.clock.core_hz() / 2);
+    }
+    if(double_rate_on_go)
+    {
+      context_.clock.set_core_hz(context_.clock.core_hz() * 2);
     }
   }
   return {};
@@ -104,7 +117,8 @@ void test_model::on_event(std::uint32_t kind, std::uint64_t payload)
     std::ignore = context_.events.schedule(context_.clock.now(), kind, payload);
     return;
   }
-  fired_at = context_.clock.now();
+  fired_at   = context_.clock.now();
+  fired_time = context_.clock.time();
   note("event", event_pc);
   if(data_on_event)
   {

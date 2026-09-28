@@ -382,3 +382,118 @@ TEST_CASE("a model logs through its services to the machine's log sinks")
   CHECK(records[2].message == "reset");
   CHECK(records[2].pc == f.reg("pc"));
 }
+
+TEST_CASE("a time-keyed event follows a core rate change made in the same MMIO write")
+{
+  auto  f            = booted();
+  auto& m            = model(f);
+  m.halve_rate_on_go = true;
+  m.time_delay_ps    = 25'000'000;
+  enter(f, "rate_write");
+  f.set("primask", 1);
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{1000}});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(f.target->virtual_clock().core_hz() == 2'000'000);
+  REQUIRE(m.go_time.has_value());
+  REQUIRE(m.fired_time.has_value());
+  auto const due = m.go_time->ps + *m.time_delay_ps;
+  CHECK(m.fired_time->ps >= due);
+  CHECK(m.fired_time->ps <= due + 2 * 500'000);
+}
+
+TEST_CASE("a time-keyed event follows a core speed-up made in the same MMIO write")
+{
+  auto  f             = booted();
+  auto& m             = model(f);
+  m.double_rate_on_go = true;
+  m.time_delay_ps     = 25'000'000;
+  enter(f, "rate_write");
+  f.set("primask", 1);
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{1000}});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(f.target->virtual_clock().core_hz() == 8'000'000);
+  REQUIRE(m.go_time.has_value());
+  REQUIRE(m.fired_time.has_value());
+  auto const due = m.go_time->ps + *m.time_delay_ps;
+  CHECK(m.fired_time->ps >= due);
+  CHECK(m.fired_time->ps <= due + 2 * 125'000);
+}
+
+TEST_CASE("a core slow-down in an MMIO write ends the engine run so until_time stays exact")
+{
+  auto  f            = booted();
+  auto& m            = model(f);
+  m.halve_rate_on_go = true;
+  m.time_delay_ps    = 1'000'000'000'000;
+  enter(f, "rate_write");
+  f.set("primask", 1);
+  auto const start  = f.target->virtual_clock().time();
+  auto const target = popcorn::vtime{start.ps + 1'000'000'000};
+  auto const slice  = f.run(
+      {.max_instructions = icount{100'000'000},
+       .wall_budget      = std::chrono::seconds{60},
+       .until_time       = target});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(slice.stopped->reason == stop_reason::time);
+  CHECK_FALSE(m.fired_time.has_value());
+  CHECK(slice.stopped->time.ps >= target.ps);
+  CHECK(slice.stopped->time.ps < target.ps + 2 * 500'000);
+}
+
+TEST_CASE("an instruction-keyed event keeps its count across a core rate change")
+{
+  auto  f            = booted();
+  auto& m            = model(f);
+  m.halve_rate_on_go = true;
+  m.accesses.clear();
+  enter(f, "rate_write");
+  f.set("primask", 1);
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{1000}});
+  REQUIRE(slice.stopped.has_value());
+  REQUIRE(m.fired_at.has_value());
+  auto const due = m.accesses.front().ctx.now.value + test_model::delay;
+  CHECK(m.fired_at->value >= due);
+  CHECK(m.fired_at->value <= due + 2);
+}
+
+TEST_CASE("a time-keyed event follows a core rate change the host makes between slices")
+{
+  auto  f         = booted();
+  auto& m         = model(f);
+  m.time_delay_ps = 250'000'000;
+  enter(f, "rate_write");
+  f.set("primask", 1);
+  auto const first = f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{10}});
+  REQUIRE(first.stopped.has_value());
+  REQUIRE(m.go_time.has_value());
+  REQUIRE_FALSE(m.fired_time.has_value());
+  m.context().clock.set_core_hz(16'000'000);
+  auto const rest = f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{10'000}});
+  REQUIRE(rest.stopped.has_value());
+  REQUIRE(m.fired_time.has_value());
+  auto const due = m.go_time->ps + *m.time_delay_ps;
+  CHECK(m.fired_time->ps >= due);
+  CHECK(m.fired_time->ps <= due + 2 * 62'500);
+}
+
+TEST_CASE("a restore replays a time-keyed event across a rate change at the same count")
+{
+  auto  f            = booted();
+  auto& m            = model(f);
+  m.halve_rate_on_go = true;
+  m.time_delay_ps    = 25'000'000;
+  enter(f, "rate_write");
+  f.set("primask", 1);
+  auto const saved = f.target->snapshot();
+  auto const fire  = [&] {
+    m.fired_at.reset();
+    auto const slice =
+        f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{1000}});
+    REQUIRE(slice.stopped.has_value());
+    REQUIRE(m.fired_at.has_value());
+    return *m.fired_at;
+  };
+  auto const first = fire();
+  f.target->restore(saved);
+  CHECK(fire() == first);
+}

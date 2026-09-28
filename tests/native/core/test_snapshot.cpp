@@ -6,6 +6,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <tuple>
 #include <vector>
 
@@ -119,6 +122,33 @@ TEST_CASE("a saved form with a future format is a config_error")
   data.format      = core::snapshot_format_version + 1;
   auto const bytes = core::encode_snapshot(data);
   CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::config_error);
+}
+
+TEST_CASE("the format 2 form encode_snapshot(filled()) wrote at 55a536c reads back as format 3")
+{
+  char const* const path = std::getenv("POPCORN_SNAPSHOT_V2");
+  REQUIRE(path != nullptr);
+  std::ifstream           file{path, std::ios::binary};
+  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
+  REQUIRE_FALSE(raw.empty());
+  auto const back = core::decode_snapshot(std::as_bytes(std::span{raw}));
+  auto       data = filled();
+  CHECK(back.format == core::snapshot_format_version);
+  REQUIRE(back.events.pending.size() == data.events.pending.size());
+  for(auto const& pending : back.events.pending)
+  {
+    CHECK(pending.kind == core::deadline::instructions);
+    CHECK(pending.due_ps == 0);
+  }
+  CHECK(back == data);
+}
+
+TEST_CASE("time-keyed events survive the saved form")
+{
+  auto data                          = filled();
+  data.events.pending.front().kind   = core::deadline::time;
+  data.events.pending.front().due_ps = 123'456'789;
+  CHECK(core::decode_snapshot(core::encode_snapshot(data)) == data);
 }
 
 TEST_CASE("a snapshot read back from bytes has no engine context")

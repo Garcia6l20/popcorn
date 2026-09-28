@@ -17,6 +17,15 @@ auto dispatch_key(event const& e) noexcept
 {
   return std::tuple{e.at.value, e.seq};
 }
+
+auto instruction_of(std::uint64_t due_ps, clock const& time) -> icount
+{
+  if(due_ps <= time.time().ps)
+  {
+    return time.now();
+  }
+  return std::max(time.now(), time.to_icount(vtime{due_ps}));
+}
 }
 
 clock::clock(std::uint64_t core_hz, double cpi)
@@ -37,12 +46,20 @@ void clock::set_core_hz(std::uint64_t hz)
 {
   start_epoch();
   state_.core_hz = hz;
+  if(on_epoch_)
+  {
+    on_epoch_();
+  }
 }
 
 void clock::set_cpi(double cpi)
 {
   start_epoch();
   state_.cpi = cpi;
+  if(on_epoch_)
+  {
+    on_epoch_();
+  }
 }
 
 auto clock::domain(std::string_view name) -> clock_domain
@@ -81,6 +98,11 @@ void clock_driver::restore(clock_state const& saved)
   current = std::move(next);
 }
 
+void clock_driver::on_rate_change(std::function<void()> hook)
+{
+  clock_.on_epoch_ = std::move(hook);
+}
+
 scheduler::~scheduler() = default;
 
 void scheduler::refresh_earliest() noexcept
@@ -91,10 +113,44 @@ void scheduler::refresh_earliest() noexcept
 
 auto scheduler::schedule(icount at, event_id id, std::uint64_t payload) -> std::uint64_t
 {
-  event const added{.at = at, .seq = next_seq_++, .id = id, .payload = payload};
+  event const added{
+      .at      = at,
+      .seq     = next_seq_++,
+      .id      = id,
+      .payload = payload,
+      .due_ps  = 0,
+      .kind    = deadline::instructions};
   queue_.insert(std::ranges::upper_bound(queue_, dispatch_key(added), {}, dispatch_key), added);
   refresh_earliest();
   return added.seq;
+}
+
+auto scheduler::schedule_at(vtime due, event_id id, std::uint64_t payload, clock const& time)
+    -> std::uint64_t
+{
+  event const added{
+      .at      = instruction_of(due.ps, time),
+      .seq     = next_seq_++,
+      .id      = id,
+      .payload = payload,
+      .due_ps  = due.ps,
+      .kind    = deadline::time};
+  queue_.insert(std::ranges::upper_bound(queue_, dispatch_key(added), {}, dispatch_key), added);
+  refresh_earliest();
+  return added.seq;
+}
+
+void scheduler::rekey(clock const& time)
+{
+  for(auto& pending : queue_)
+  {
+    if(pending.kind == deadline::time)
+    {
+      pending.at = instruction_of(pending.due_ps, time);
+    }
+  }
+  std::ranges::sort(queue_, {}, dispatch_key);
+  refresh_earliest();
 }
 
 void scheduler::cancel(std::uint64_t seq)

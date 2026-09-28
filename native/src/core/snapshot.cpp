@@ -84,6 +84,10 @@ auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data
         "snapshot", 0, "bytes",
         std::format("a snapshot matching snapshot_data: {}", failure.what()));
   }
+  if(data.format == 2)
+  {
+    data.format = snapshot_format_version;
+  }
   if(data.format != snapshot_format_version)
   {
     throw config_error(

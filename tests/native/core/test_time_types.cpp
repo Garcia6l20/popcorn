@@ -1,3 +1,4 @@
+#include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
 
 #include <doctest/doctest.h>
@@ -94,4 +95,85 @@ TEST_CASE("restore rewinds the queue and the seq counter for a deterministic rep
   CHECK(std::ranges::equal(queue.pending(), saved));
   CHECK(queue.earliest().value == 100);
   CHECK(queue.schedule({10}, {5, 5}, 0) == after);
+}
+
+namespace
+{
+struct keyed_queue
+{
+  popcorn::core::clock        clock{4'000'000};
+  popcorn::core::clock_driver driver{clock};
+  popcorn::core::scheduler    queue;
+
+  keyed_queue()
+  {
+    driver.on_rate_change([this] { queue.rekey(clock); });
+  }
+};
+
+constexpr popcorn::core::event_id owner{.owner = 1, .kind = 0};
+}
+
+TEST_CASE("a time-keyed event moves with the core rate, an instruction-keyed one stays")
+{
+  keyed_queue q;
+  q.driver.advance({100});
+  auto const timed = q.queue.schedule_at(popcorn::vtime{100'000'000}, owner, 1, q.clock);
+  auto const fixed = q.queue.schedule(popcorn::icount{400}, owner, 2);
+  CHECK(q.queue.pending()[0].seq == timed);
+  CHECK(q.queue.pending()[0].at.value == 400);
+  CHECK(q.queue.pending()[0].kind == popcorn::core::deadline::time);
+  CHECK(q.queue.pending()[1].seq == fixed);
+  q.clock.set_core_hz(8'000'000);
+  CHECK(q.queue.pending()[0].seq == fixed);
+  CHECK(q.queue.pending()[0].at.value == 400);
+  CHECK(q.queue.pending()[1].seq == timed);
+  CHECK(q.queue.pending()[1].at.value == 100 + 600);
+  CHECK(q.queue.earliest().value == 400);
+  q.clock.set_cpi(2.0);
+  CHECK(q.queue.pending()[0].seq == timed);
+  CHECK(q.queue.pending()[0].at.value == 400);
+  CHECK(q.queue.pending()[1].seq == fixed);
+}
+
+TEST_CASE("a time-keyed and an instruction-keyed event on one count keep scheduling order")
+{
+  keyed_queue q;
+  auto const  timed = q.queue.schedule_at(popcorn::vtime{25'000'000}, owner, 1, q.clock);
+  auto const  fixed = q.queue.schedule(popcorn::icount{100}, owner, 2);
+  CHECK(q.queue.pending()[0].seq == timed);
+  q.clock.set_cpi(1.0);
+  CHECK(q.queue.pending()[0].seq == timed);
+  CHECK(q.queue.pending()[1].seq == fixed);
+  CHECK(q.queue.pending()[0].at == q.queue.pending()[1].at);
+}
+
+TEST_CASE("a time-keyed event already due, or due after a slow-down, never moves before now")
+{
+  keyed_queue q;
+  q.driver.advance({1000});
+  auto const past = q.queue.schedule_at(popcorn::vtime{1'000}, owner, 1, q.clock);
+  CHECK(q.queue.pending()[0].seq == past);
+  CHECK(q.queue.pending()[0].at.value == 1000);
+  q.clock.set_core_hz(1'000'000);
+  CHECK(q.queue.pending()[0].at.value == 1000);
+  CHECK(q.queue.pop_due(popcorn::icount{1000}).has_value());
+}
+
+TEST_CASE("the rate-change hook runs once per change, after the new epoch starts")
+{
+  popcorn::core::clock        clock{4'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({4});
+  std::vector<std::uint64_t> seen;
+  driver.on_rate_change([&] {
+    seen.push_back(clock.core_hz());
+    CHECK(clock.time() == popcorn::vtime{1'000'000});
+  });
+  clock.set_core_hz(8'000'000);
+  clock.set_cpi(2.0);
+  CHECK(seen == std::vector<std::uint64_t>{8'000'000, 8'000'000});
+  driver.on_rate_change({});
+  clock.set_core_hz(4'000'000);
+  CHECK(seen.size() == 2);
 }

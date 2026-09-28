@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -135,6 +136,8 @@ public:
   /**
    * @brief Instruction count at which a virtual time is reached at the current rate, rounded up
    *        through icount_from_vtime(), so an event scheduled for @p at never fires before it.
+   *        A deadline that must hold across rate changes is scheduled with
+   *        event_port::schedule_at, not converted here.
    * @param at Virtual time since reset, not before the current epoch's start.
    */
   [[nodiscard]] auto to_icount(vtime at) const -> icount pre(at.ps >= state_.epoch_time.ps)
@@ -148,16 +151,16 @@ public:
    * @brief Changes the core clock frequency from now on, starting a new epoch at now(), exact to
    *        the block in which firmware made the change.
    *
-   * Pending events keep their instruction-count deadlines, nothing is rescaled and nobody is
-   * notified. A model that scheduled for a virtual time reschedules on a rate change, driven by
-   * the model that changes the rate, such as RCC.
+   * Pending deadline::time events move to the instruction count of their virtual time at the
+   * new rate, deadline::instructions events keep theirs.
    * @param hz Frequency in Hz, at least one instruction per second must result.
    */
   void set_core_hz(std::uint64_t hz) pre(hz > 0) pre(static_cast<double>(hz) / cpi() >= 1.0);
 
   /**
    * @brief Changes the cycles per instruction from now on, starting a new epoch at now().
-   *        Pending events keep their instruction-count deadlines, as for set_core_hz().
+   *        Pending deadline::time events move to the instruction count of their virtual time
+   *        at the new rate, deadline::instructions events keep theirs.
    * @param cpi Core cycles per instruction, at least one instruction per second must result.
    */
   void set_cpi(double cpi) pre(cpi > 0.0) pre(static_cast<double>(core_hz()) / cpi >= 1.0);
@@ -196,7 +199,8 @@ private:
 
   void start_epoch();
 
-  clock_state state_;
+  clock_state           state_;
+  std::function<void()> on_epoch_;
 };
 
 /**
@@ -246,6 +250,13 @@ public:
    * @param saved State from state().
    */
   void restore(clock_state const& saved) pre(saved.domain_names.size() == saved.domain_hz.size());
+
+  /**
+   * @brief Installs the function the clock calls after every rate change, once the new epoch
+   *        has started. The machine re-keys its time-keyed events there.
+   * @param hook Called with no argument, empty to remove.
+   */
+  void on_rate_change(std::function<void()> hook);
 
 private:
   clock& clock_;
