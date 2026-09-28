@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "description.hpp"
 #include "errors.hpp"
+#include "fault_bits.hpp"
 #include "image.hpp"
 #include "machine.hpp"
 #include "models.hpp"
