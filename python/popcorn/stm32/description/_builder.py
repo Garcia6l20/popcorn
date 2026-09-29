@@ -95,7 +95,11 @@ def build_description_with_report(sources: Sources) -> tuple[McuDescription, Pat
             raw_irqs.setdefault(number, IrqDesc(number=number, name=name))
 
     target = PatchTarget(
-        peripherals=peripherals, irqs=list(raw_irqs.values()), core=core, db_ips=db_ips
+        peripherals=peripherals,
+        irqs=list(raw_irqs.values()),
+        core=core,
+        db_ips=db_ips,
+        regions=rzone.regions,
     )
     loaded_patches = load_patches(sources.patches, part=sources.part, svd_name=sources.svd.name)
     report = apply_patches(loaded_patches, target)
@@ -116,7 +120,7 @@ def build_description_with_report(sources: Sources) -> tuple[McuDescription, Pat
         generator=generator_string(),
         sources=compute_source_digests(sources),
         core=target.core,
-        regions=rzone.regions,
+        regions=target.regions,
         peripherals=target.peripherals,
         irqs=irq_table.irqs,
     )

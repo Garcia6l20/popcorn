@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from popcorn.stm32.description._cubemx import DbIp, read_part
 from popcorn.stm32.description._errors import DescriptionError
+from popcorn.stm32.description._model import RegionAccess, RegionDesc, RegionKind
 from popcorn.stm32.description._patches import PatchTarget, apply_patches, load_patches
 from popcorn.stm32.description._svd import expand_svd
 
@@ -510,3 +511,137 @@ def test_u575_alias_rule_sets_98_peripherals(st_svd_u575: Path, st_cubemx_db: Pa
     usart1 = target_peripheral(target, "USART1")
     sec_usart1 = target_peripheral(target, "SEC_USART1")
     assert sec_usart1.ip == usart1.ip == "USART"
+
+
+_RAM = RegionDesc(
+    name="SRAM",
+    start=0x2000_0000,
+    size=0x1000,
+    kind=RegionKind.RAM,
+    acc=RegionAccess(read=True, write=True, execute=True),
+    secure=False,
+)
+
+
+def _memory_patch(tmp_path: Path, *entries: str) -> Path:
+    lines = ",\n".join(f"  {entry}" for entry in entries)
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[memory]
+source = "probe"
+add = [
+{lines}
+]
+"""
+    return _write_patch(tmp_path, text)
+
+
+_OTP = (
+    '{ name = "OTP", start = 0x0BFA0000, size = 0x400, kind = "rom", '
+    "acc = { read = true, write = false, execute = false }, secure = false }"
+)
+_OTP_ALIAS = (
+    '{ name = "OTP_S", start = 0x0FFA0000, size = 0x400, kind = "rom", '
+    "acc = { read = true, write = false, execute = false }, secure = true, physical = 0x0BFA0000 }"
+)
+
+
+def test_memory_add_appends_regions_after_the_existing_ones(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    patches = load_patches(
+        [_memory_patch(tmp_path, _OTP, _OTP_ALIAS)], part="TOY1", svd_name="synthetic.svd"
+    )
+    report = apply_patches(patches, target)
+    assert report.regions_added == 2
+    assert [r.name for r in target.regions] == ["SRAM", "OTP", "OTP_S"]
+    otp, alias = target.regions[1], target.regions[2]
+    assert (otp.start, otp.size, otp.kind, otp.secure, otp.physical) == (
+        0x0BFA_0000,
+        0x400,
+        RegionKind.ROM,
+        False,
+        None,
+    )
+    assert otp.acc == RegionAccess(read=True, write=False, execute=False)
+    assert (alias.secure, alias.physical) == (True, 0x0BFA_0000)
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        (
+            '{ name = "SRAM", start = 0x10000000, size = 0x400, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = false }",
+            "a region name not already used",
+        ),
+        (
+            '{ name = "LOW", start = 0x1FFFFC00, size = 0x800, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = false }",
+            "a range clear of region SRAM",
+        ),
+        (
+            '{ name = "HIGH", start = 0x20000C00, size = 0x800, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = false }",
+            "a range clear of region SRAM",
+        ),
+        (
+            '{ name = "EMPTY", start = 0x30000000, size = 0, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = false }",
+            "a non-empty range inside the 32-bit space",
+        ),
+        (
+            '{ name = "WRAP", start = 0xFFFFFC00, size = 0x800, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = false }",
+            "a non-empty range inside the 32-bit space",
+        ),
+        (
+            '{ name = "HALF", start = 0x30000000, size = 0x200, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = false }",
+            "a start and size in whole 1 KB pages",
+        ),
+        (
+            '{ name = "SKEW", start = 0x30000200, size = 0x400, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = false }",
+            "a start and size in whole 1 KB pages",
+        ),
+        (
+            '{ name = "NOWHERE", start = 0x30000000, size = 0x400, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = true, "
+            "physical = 0x40000000 }",
+            "a physical range inside an existing region",
+        ),
+        (
+            '{ name = "PAST", start = 0x30000000, size = 0x800, kind = "ram", '
+            "acc = { read = true, write = true, execute = false }, secure = true, "
+            "physical = 0x20000C00 }",
+            "a physical range inside an existing region",
+        ),
+    ],
+)
+def test_memory_add_refuses_a_clash_an_overlap_or_a_bad_range(
+    tmp_path: Path, entry: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    path = _memory_patch(tmp_path, _OTP, entry)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    name = entry.split('"')[1]
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.key == f"memory.add.{name}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
+def test_memory_add_refuses_two_added_regions_that_overlap(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    path = _memory_patch(tmp_path, _OTP, _OTP.replace('"OTP"', '"OTP2"'))
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "memory.add.OTP2"

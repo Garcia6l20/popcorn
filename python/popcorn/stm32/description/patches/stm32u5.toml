@@ -197,3 +197,10 @@ effect = "clear"
 pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
 source = "RM0456 rev 6, 74.8.6/74.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR)"
 
+
+[memory]
+source = "RM0456 rev 6, 7.3.1 Tables 51 to 53: the 512-byte OTP area at 0x0BFA0000 in the nonsecure information block, its alias at 0x0FFA0000 in the secure information block. 7.2: OTP data cannot be erased and is written once, through the flash interface, so a CPU store is refused. Each region is 1 KB, the emulator's page granularity: the 512 bytes past the OTP area read as erased instead of faulting"
+add = [
+  { name = "OTP_NS", start = 0x0BFA0000, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+  { name = "OTP_S", start = 0x0FFA0000, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = true, physical = 0x0BFA0000 },
+]

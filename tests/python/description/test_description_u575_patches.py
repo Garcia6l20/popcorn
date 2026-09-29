@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 from popcorn.stm32.description._cubemx import read_part
-from popcorn.stm32.description._model import ReadEffect, WriteEffect
+from popcorn.stm32.description._model import (
+    ReadEffect,
+    RegionAccess,
+    RegionKind,
+    WriteEffect,
+)
 from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
 from popcorn.stm32.description._svd import expand_svd
 
@@ -222,3 +227,22 @@ def test_no_peripheral_overlaps_an_arch_module_window(
         if p.base < window + 0x1000 and window < p.base + p.size
     ]
     assert overlapping == []
+
+
+def test_otp_is_a_read_only_region_with_a_secure_alias(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, report = u575_target_and_report
+    assert report.regions_added == 2
+    regions = {r.name: r for r in target.regions}
+    otp, alias = regions["OTP_NS"], regions["OTP_S"]
+    assert (otp.start, otp.size, otp.secure, otp.physical) == (0x0BFA_0000, 0x400, False, None)
+    assert (alias.start, alias.size, alias.secure, alias.physical) == (
+        0x0FFA_0000,
+        0x400,
+        True,
+        0x0BFA_0000,
+    )
+    for region in (otp, alias):
+        assert region.kind is RegionKind.ROM
+        assert region.acc == RegionAccess(read=True, write=False, execute=False)

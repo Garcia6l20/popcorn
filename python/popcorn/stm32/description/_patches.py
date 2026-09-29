@@ -1,6 +1,6 @@
 """Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
-IP renames, IRQ add/drop, core overrides. popcorn's own TOML format, so these dataclasses are the
-format definition, not a mirror of any C++ or schema type."""
+IP renames, IRQ add/drop, core overrides, added memory regions. popcorn's own TOML format, so
+these dataclasses are the format definition, not a mirror of any C++ or schema type."""
 
 import copy
 import fnmatch
@@ -20,6 +20,7 @@ from popcorn.stm32.description._model import (
     IrqDesc,
     PeripheralDesc,
     ReadEffect,
+    RegionDesc,
     RegisterDesc,
     WriteEffect,
 )
@@ -57,6 +58,12 @@ class PatchSvd:
 @dataclass(slots=True, kw_only=True)
 class PatchPeripherals:
     drop: list[str]
+    source: str
+
+
+@dataclass(slots=True, kw_only=True)
+class PatchMemory:
+    add: list[RegionDesc]
     source: str
 
 
@@ -118,6 +125,7 @@ class Patch:
     svd: PatchSvd | None = None
     fields: list[FieldsRule] | None = None
     cross: list[CrossRuleSpec] | None = None
+    memory: PatchMemory | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -126,6 +134,7 @@ class PatchTarget:
     irqs: list[IrqDesc]
     core: CoreDesc
     db_ips: Mapping[str, DbIp] = field(default_factory=dict[str, DbIp])
+    regions: list[RegionDesc] = field(default_factory=list[RegionDesc])
 
 
 @dataclass(slots=True, kw_only=True)
@@ -138,6 +147,7 @@ class PatchReport:
     irqs_dropped: int = 0
     irqs_added: int = 0
     core_fields_set: int = 0
+    regions_added: int = 0
 
 
 def _matches(match: PatchMatch, part: str, svd_name: str) -> bool:
@@ -417,14 +427,43 @@ def _apply_core(
         report.core_fields_set += 1
 
 
+_ENGINE_PAGE = 0x400
+"""Granularity of a memory region, the emulator's page size: the core refuses anything finer."""
+
+
+def _apply_memory(
+    rule: PatchMemory, regions: list[RegionDesc], report: PatchReport, *, file: str
+) -> None:
+    for added in rule.add:
+        key = f"memory.add.{added.name}"
+        if added.size == 0 or added.start + added.size > 1 << 32:
+            raise DescriptionError(file, 0, key, "a non-empty range inside the 32-bit space")
+        if added.start % _ENGINE_PAGE != 0 or added.size % _ENGINE_PAGE != 0:
+            raise DescriptionError(file, 0, key, "a start and size in whole 1 KB pages")
+        if added.physical is not None and not any(
+            region.start <= added.physical
+            and added.physical + added.size <= region.start + region.size
+            for region in regions
+        ):
+            raise DescriptionError(file, 0, key, "a physical range inside an existing region")
+        for region in regions:
+            if region.name == added.name:
+                raise DescriptionError(file, 0, key, "a region name not already used")
+            if added.start < region.start + region.size and region.start < added.start + added.size:
+                raise DescriptionError(file, 0, key, f"a range clear of region {region.name}")
+        regions.append(copy.deepcopy(added))
+        report.regions_added += 1
+
+
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
     """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
-    fields, cross rules, IRQ drops and adds, core. Drops come first, so a later rule naming a
-    dropped peripheral fails as naming an unknown one. Validates every rule before mutating
-    @p target: an error leaves it exactly as it was."""
+    fields, cross rules, IRQ drops and adds, core, memory regions. Drops come first, so a later
+    rule naming a dropped peripheral fails as naming an unknown one. Validates every rule before
+    mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
     core = copy.deepcopy(target.core)
+    regions = copy.deepcopy(target.regions)
     report = PatchReport()
 
     _apply_drops(
@@ -482,7 +521,12 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
         if loaded.patch.core is not None:
             _apply_core(loaded.patch.core, core, core_touched, report, file=str(loaded.path))
 
+    for loaded in patches:
+        if loaded.patch.memory is not None:
+            _apply_memory(loaded.patch.memory, regions, report, file=str(loaded.path))
+
     target.peripherals = peripherals
     target.irqs = irqs
     target.core = core
+    target.regions = regions
     return report
