@@ -22,3 +22,4 @@ sources += [
         "spi.cpp",
     )
 ]
+sources += [here / "devices" / name for name in ("at25sf.cpp",)]

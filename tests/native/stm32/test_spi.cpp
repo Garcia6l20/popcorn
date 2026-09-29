@@ -2,6 +2,7 @@
 
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/devices/at25sf.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 
@@ -811,4 +812,110 @@ TEST_CASE("24-bit frames take 3 FIFO bytes, 5 frames fill the 16-byte FIFO")
   b.run_until(b.now() + 20 * frame_ps);
   CHECK(sent(*r.device) == std::vector<std::uint32_t>{1, 2, 3, 4, 5});
   CHECK(r.device->sizes == std::vector<std::uint8_t>(5, 24));
+}
+
+namespace
+{
+struct flash_rig
+{
+  std::shared_ptr<popcorn::periph::devices::at25sf> flash =
+      std::make_shared<popcorn::periph::devices::at25sf>();
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+
+  explicit flash_rig(std::string_view entry)
+  {
+    board.spi["SPI1"].push_back({.device = flash, .cs_port = "GPIOA", .cs_pin = 4});
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, u575());
+    f              = std::make_unique<stm32_fixture>(u575(), "spi_ll", std::move(options));
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("spi_ll", "main")})
+            .reason
+        == stop_reason::address);
+    enter(entry);
+  }
+
+  void enter(std::string_view entry) const
+  {
+    f->set("pc", sym("spi_ll", entry));
+  }
+
+  auto finish() const -> std::vector<std::uint32_t>
+  {
+    auto const stopped = f->run_to_stop();
+    CAPTURE(stopped.detail);
+    REQUIRE(stopped.reason == stop_reason::user);
+    return f->log();
+  }
+
+  auto at(std::uint32_t address) const -> std::uint32_t
+  {
+    return std::to_integer<std::uint32_t>(flash->contents()[address]);
+  }
+};
+}
+
+TEST_CASE("the AT25SF on SPI1 answers the JEDEC ID read")
+{
+  flash_rig r{"poll"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0xFF, 0x1F, 0x32, 0x17});
+}
+
+TEST_CASE("a page program through SPI1 polls BUSY for tPP, then reads back, twice the same")
+{
+  std::vector<std::uint32_t> first;
+  for(int run = 0; run < 2; ++run)
+  {
+    flash_rig  r{"write_read"};
+    auto const log = r.finish();
+    REQUIRE(log.size() == 2);
+    CHECK(log[0] >= 2);
+    CHECK(log[0] <= 600 / 8 + 1);
+    CHECK(log[1] == 16);
+    for(std::uint32_t index = 0; index < 16; ++index)
+    {
+      CHECK(r.at(0x1000 + index) == 0xA0 + index);
+    }
+    CHECK(r.at(0x1010) == 0xFF);
+    if(run == 0)
+    {
+      first = log;
+    }
+    else
+    {
+      CHECK(log == first);
+    }
+  }
+}
+
+TEST_CASE("a sector erase through SPI1 polls BUSY for tSE and reads 0xFF")
+{
+  flash_rig r{"write_read"};
+  REQUIRE(r.finish().size() == 2);
+  r.enter("erase");
+  auto const log = r.finish();
+  REQUIRE(log.size() == 4);
+  CHECK(log[2] >= 2);
+  CHECK(log[2] <= 60'000 / 8 + 1);
+  CHECK(log[3] == 16);
+  CHECK(r.at(0x1000) == 0xFF);
+  CHECK(log[2] * 10 >= log[0] * 900);
+  CHECK(log[2] * 10 <= log[0] * 1'100);
+}
+
+TEST_CASE("a snapshot after a page program restores the programmed page into a fresh device")
+{
+  flash_rig r{"write_read"};
+  REQUIRE(r.finish().size() == 2);
+  auto const saved = r.f->target->snapshot();
+  flash_rig  other{"idle"};
+  REQUIRE(other.at(0x1000) == 0xFF);
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(std::ranges::equal(other.flash->contents(), r.flash->contents()));
+  other.enter("erase");
+  auto const log = other.finish();
+  REQUIRE(log.size() == 4);
+  CHECK(log[3] == 16);
 }

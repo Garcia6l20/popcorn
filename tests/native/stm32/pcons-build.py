@@ -44,6 +44,8 @@ base = add_doctest(
 )
 base.private.include_dirs.append(private_dir)
 
+add_doctest("stm32-at25sf", [here / "test_at25sf.cpp"], [core])
+
 u575_programs = [
     add_doctest(name, [here / source], [core], env=u575_env, register=u575 is not None)
     for name, source in (

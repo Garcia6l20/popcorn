@@ -14,6 +14,8 @@ void poll(void);
 void irq_eot(void);
 void no_cs(void);
 void hw_ss(void);
+void write_read(void);
+void erase(void);
 
 void idle(void)
 {
@@ -158,6 +160,95 @@ void irq_eot(void)
   chip_select(0);
   log_answer();
   LOG(received);
+  DONE();
+}
+
+static void transfer(uint8_t const* out, uint8_t* in, uint32_t count)
+{
+  LL_SPI_SetTransferSize(SPI1, count);
+  LL_SPI_Enable(SPI1);
+  LL_SPI_StartMasterTransfer(SPI1);
+  for(uint32_t index = 0; index < count; ++index)
+  {
+    while(!LL_SPI_IsActiveFlag_TXP(SPI1))
+    {
+    }
+    LL_SPI_TransmitData8(SPI1, out != 0 ? out[index] : 0);
+    while(!LL_SPI_IsActiveFlag_RXP(SPI1))
+    {
+    }
+    uint8_t const value = LL_SPI_ReceiveData8(SPI1);
+    if(in != 0)
+    {
+      in[index] = value;
+    }
+  }
+  finish();
+}
+
+static void flash_command(uint8_t const* out, uint8_t* in, uint32_t count)
+{
+  chip_select(1);
+  transfer(out, in, count);
+  chip_select(0);
+}
+
+static uint32_t wait_ready(void)
+{
+  static uint8_t const read_status[2] = {0x05, 0};
+  uint8_t              status[2];
+  uint32_t             polls = 0;
+  do
+  {
+    flash_command(read_status, status, sizeof status);
+    ++polls;
+  } while((status[1] & 1u) != 0);
+  return polls;
+}
+
+static void write_enable(void)
+{
+  static uint8_t const enable[1] = {0x06};
+  flash_command(enable, 0, sizeof enable);
+}
+
+static uint32_t read_back(uint8_t expected_base, uint32_t erased)
+{
+  static uint8_t const out[20] = {0x03, 0x00, 0x10, 0x00};
+  static uint8_t       in[20];
+  flash_command(out, in, sizeof in);
+  uint32_t equal = 0;
+  for(uint32_t index = 0; index < 16; ++index)
+  {
+    uint8_t const want = erased ? 0xFF : (uint8_t)(expected_base + index);
+    equal += in[4 + index] == want ? 1u : 0u;
+  }
+  return equal;
+}
+
+void write_read(void)
+{
+  configure(LL_SPI_NSS_SOFT);
+  static uint8_t out[20] = {0x02, 0x00, 0x10, 0x00};
+  for(uint32_t index = 0; index < 16; ++index)
+  {
+    out[4 + index] = (uint8_t)(0xA0 + index);
+  }
+  write_enable();
+  flash_command(out, 0, sizeof out);
+  LOG(wait_ready());
+  LOG(read_back(0xA0, 0));
+  DONE();
+}
+
+void erase(void)
+{
+  static uint8_t const sector[4] = {0x20, 0x00, 0x10, 0x00};
+  configure(LL_SPI_NSS_SOFT);
+  write_enable();
+  flash_command(sector, 0, sizeof sector);
+  LOG(wait_ready());
+  LOG(read_back(0, 1));
   DONE();
 }
 
