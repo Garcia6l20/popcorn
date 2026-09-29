@@ -5,6 +5,7 @@
 #include <popcorn/periph/stm32/caches.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
+#include <popcorn/periph/stm32/spi.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -38,6 +40,9 @@ struct board
    *        values, 2000-01-01 00:00:00, Monday, with INITS clear.
    */
   std::optional<std::chrono::sys_seconds> rtc_initial{};
+  /** @brief Devices on each SPI instance by instance name, such as `SPI1`. The SPI model copies the
+   * list when the machine is built and saves and loads each device with its own state. */
+  std::map<std::string, std::vector<spi_attachment>, std::less<>> spi{};
 };
 
 /**

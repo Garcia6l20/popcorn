@@ -28,6 +28,7 @@ firmwares = {
         "tim_ll",
         "iwdg_ll",
         "rtc_ll",
+        "spi_ll",
     )
 }
 u575_env = {
@@ -57,6 +58,7 @@ u575_programs = [
         ("stm32-tim", "test_tim.cpp"),
         ("stm32-iwdg", "test_iwdg.cpp"),
         ("stm32-rtc", "test_rtc.cpp"),
+        ("stm32-spi", "test_spi.cpp"),
     )
 ]
 for program in u575_programs:

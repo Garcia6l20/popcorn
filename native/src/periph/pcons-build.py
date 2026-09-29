@@ -19,5 +19,6 @@ sources += [
         "tim.cpp",
         "iwdg.cpp",
         "rtc.cpp",
+        "spi.cpp",
     )
 ]

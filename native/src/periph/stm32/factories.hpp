@@ -67,4 +67,10 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the TAMP backup register model, RM0456 section 64. */
 [[nodiscard]] auto tamp_factory() -> model_factory;
+
+/**
+ * @brief Factory of the SPI model, RM0456 section 68.
+ * @param b Board whose `spi` lists each instance's devices, copied when a model is made.
+ */
+[[nodiscard]] auto spi_factory(board const& b) -> model_factory;
 }
