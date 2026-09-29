@@ -1,5 +1,6 @@
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
+#include "stm32u5xx_ll_dma.h"
 #include "stm32u5xx_ll_gpio.h"
 #include "stm32u5xx_ll_spi.h"
 
@@ -16,6 +17,9 @@ void no_cs(void);
 void hw_ss(void);
 void write_read(void);
 void erase(void);
+void dma(void);
+void GPDMA1_Channel2_IRQHandler(void);
+void GPDMA1_Channel3_IRQHandler(void);
 
 void idle(void)
 {
@@ -249,6 +253,94 @@ void erase(void)
   flash_command(sector, 0, sizeof sector);
   LOG(wait_ready());
   LOG(read_back(0, 1));
+  DONE();
+}
+
+static uint8_t           dma_out[68] = {0x03, 0x00, 0x10, 0x00};
+static uint8_t           dma_in[68];
+static volatile uint32_t tx_done;
+static volatile uint32_t rx_done;
+
+void GPDMA1_Channel2_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_2))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_2);
+    ++tx_done;
+  }
+}
+
+void GPDMA1_Channel3_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_3))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_3);
+    ++rx_done;
+  }
+}
+
+static void dma_channel(
+    uint32_t channel,
+    uint32_t request,
+    uint32_t direction,
+    uint32_t increment,
+    uint32_t source,
+    uint32_t destination)
+{
+  LL_DMA_ConfigTransfer(
+      GPDMA1, channel, increment | LL_DMA_SRC_DATAWIDTH_BYTE | LL_DMA_DEST_DATAWIDTH_BYTE);
+  LL_DMA_SetDataTransferDirection(GPDMA1, channel, direction);
+  LL_DMA_SetPeriphRequest(GPDMA1, channel, request);
+  LL_DMA_SetBlkDataLength(GPDMA1, channel, sizeof dma_out);
+  LL_DMA_SetSrcAddress(GPDMA1, channel, source);
+  LL_DMA_SetDestAddress(GPDMA1, channel, destination);
+  LL_DMA_EnableIT_TC(GPDMA1, channel);
+}
+
+void dma(void)
+{
+  configure(LL_SPI_NSS_SOFT);
+  static uint8_t program[68] = {0x02, 0x00, 0x10, 0x00};
+  for(uint32_t index = 0; index < 64; ++index)
+  {
+    program[4 + index] = (uint8_t)(3 * index + 1);
+  }
+  write_enable();
+  flash_command(program, 0, sizeof program);
+  wait_ready();
+
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  dma_channel(
+      LL_DMA_CHANNEL_2, LL_GPDMA1_REQUEST_SPI1_TX, LL_DMA_DIRECTION_MEMORY_TO_PERIPH,
+      LL_DMA_SRC_INCREMENT | LL_DMA_DEST_FIXED, (uint32_t)dma_out, (uint32_t)&SPI1->TXDR);
+  dma_channel(
+      LL_DMA_CHANNEL_3, LL_GPDMA1_REQUEST_SPI1_RX, LL_DMA_DIRECTION_PERIPH_TO_MEMORY,
+      LL_DMA_SRC_FIXED | LL_DMA_DEST_INCREMENT, (uint32_t)&SPI1->RXDR, (uint32_t)dma_in);
+  NVIC_EnableIRQ(GPDMA1_Channel2_IRQn);
+  NVIC_EnableIRQ(GPDMA1_Channel3_IRQn);
+  LL_SPI_SetTransferSize(SPI1, sizeof dma_out);
+  LL_SPI_EnableDMAReq_RX(SPI1);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_3);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_2);
+  LL_SPI_EnableDMAReq_TX(SPI1);
+  chip_select(1);
+  LL_SPI_Enable(SPI1);
+  LL_SPI_StartMasterTransfer(SPI1);
+  while(tx_done == 0 || rx_done == 0)
+  {
+  }
+  finish();
+  chip_select(0);
+  LL_SPI_DisableDMAReq_TX(SPI1);
+  LL_SPI_DisableDMAReq_RX(SPI1);
+  uint32_t equal = 0;
+  for(uint32_t index = 0; index < 64; ++index)
+  {
+    equal += dma_in[4 + index] == (uint8_t)(3 * index + 1) ? 1u : 0u;
+  }
+  LOG(equal);
+  LOG(tx_done);
+  LOG(rx_done);
   DONE();
 }
 

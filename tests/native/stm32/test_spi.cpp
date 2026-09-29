@@ -1,3 +1,4 @@
+#include "dma.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/machine.hpp>
@@ -11,8 +12,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <map>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -816,16 +821,49 @@ TEST_CASE("24-bit frames take 3 FIFO bytes, 5 frames fill the 16-byte FIFO")
 
 namespace
 {
+class recorded_flash final : public stm32::spi_target
+{
+public:
+  explicit recorded_flash(std::shared_ptr<popcorn::periph::devices::at25sf> device)
+      : flash{std::move(device)}
+  {}
+
+  std::shared_ptr<popcorn::periph::devices::at25sf> flash;
+  std::vector<vtime>                                frames;
+
+  void select(bool selected, vtime at) override
+  {
+    flash->select(selected, at);
+  }
+
+  auto exchange(std::uint32_t out, std::uint8_t bits, vtime at) -> std::uint32_t override
+  {
+    frames.push_back(at);
+    return flash->exchange(out, bits, at);
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    flash->save(out);
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    flash->load(in);
+  }
+};
+
 struct flash_rig
 {
   std::shared_ptr<popcorn::periph::devices::at25sf> flash =
       std::make_shared<popcorn::periph::devices::at25sf>();
-  stm32::board                   board{};
-  std::unique_ptr<stm32_fixture> f;
+  std::shared_ptr<recorded_flash> device = std::make_shared<recorded_flash>(flash);
+  stm32::board                    board{};
+  std::unique_ptr<stm32_fixture>  f;
 
   explicit flash_rig(std::string_view entry)
   {
-    board.spi["SPI1"].push_back({.device = flash, .cs_port = "GPIOA", .cs_pin = 4});
+    board.spi["SPI1"].push_back({.device = device, .cs_port = "GPIOA", .cs_pin = 4});
     auto options   = popcorn::testing::stm32_options();
     options.models = stm32::factories(board, u575());
     f              = std::make_unique<stm32_fixture>(u575(), "spi_ll", std::move(options));
@@ -918,4 +956,194 @@ TEST_CASE("a snapshot after a page program restores the programmed page into a f
   auto const log = other.finish();
   REQUIRE(log.size() == 4);
   CHECK(log[3] == 16);
+}
+
+TEST_CASE("GPDMA channels 2 and 3 read 64 bytes from the AT25SF through the SPI1 requests")
+{
+  std::vector<vtime>     first;
+  std::vector<std::byte> first_state;
+  for(int run = 0; run < 2; ++run)
+  {
+    flash_rig r{"dma"};
+    CHECK(r.finish() == std::vector<std::uint32_t>{64, 1, 1});
+    auto const  state  = core::encode_snapshot(r.f->target->snapshot().data());
+    auto const& frames = r.device->frames;
+    REQUIRE(frames.size() >= 68);
+    auto const dma_frames = std::vector(frames.end() - 68, frames.end());
+    for(std::size_t index = 1; index < dma_frames.size(); ++index)
+    {
+      CAPTURE(index);
+      CHECK(dma_frames[index].ps - dma_frames[index - 1].ps == frame_ps);
+    }
+    if(run == 0)
+    {
+      first       = frames;
+      first_state = state;
+    }
+    else
+    {
+      CHECK(frames == first);
+      CHECK(state == first_state);
+    }
+  }
+}
+
+TEST_CASE("a snapshot mid-DMA read restores to the same bytes and the same frame times")
+{
+  flash_rig r{"dma"};
+  REQUIRE(
+      r.f->run_to_stop({.max_instructions = icount{100'000'000},
+                        .stop_when =
+                            [&] {
+                              auto const left   = r.f->field("GPDMA1", "GPDMA_C3BR1", "BNDT");
+                              auto const armed  = r.f->field("SPI1", "SPI_CFG1", "RXDMAEN") != 0;
+                              auto const moving = left > 0 and left < 30;
+                              return armed and moving;
+                            }})
+          .reason
+      == stop_reason::user);
+  auto const saved  = r.f->target->snapshot();
+  auto const mark   = r.device->frames.size();
+  auto const log    = r.finish();
+  auto const frames = r.device->frames;
+  CHECK(log == std::vector<std::uint32_t>{64, 1, 1});
+
+  flash_rig other{"idle"};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.finish() == log);
+  CHECK(
+      other.device->frames == std::vector(frames.begin() + static_cast<long>(mark), frames.end()));
+}
+
+namespace
+{
+class request_probe final : public popcorn::periph::model, public stm32::dma_controller
+{
+public:
+  std::map<std::uint32_t, bool> levels;
+
+  void on_request(std::uint32_t request, bool level) override
+  {
+    levels[request] = level;
+  }
+
+  [[nodiscard]] auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> override
+  {
+    if(signal == "spi1_rx_dma")
+    {
+      return 6;
+    }
+    if(signal == "spi1_tx_dma")
+    {
+      return 7;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
+struct probe_rig
+{
+  std::shared_ptr<script_target> device = std::make_shared<script_target>();
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+
+  probe_rig()
+  {
+    board.spi["SPI1"].push_back({.device = device, .cs_port = "GPIOA"});
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, u575());
+    options.models.insert_or_assign(
+        "GPDMA1",
+        [](popcorn::periph::model_context&,
+           popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+          return std::make_shared<request_probe>();
+        });
+    f = std::make_unique<stm32_fixture>(u575(), "spi_ll", std::move(options));
+    f->set("pc", sym("spi_ll", "idle"));
+  }
+
+  [[nodiscard]] auto level(std::uint32_t request) const -> bool
+  {
+    auto* const probe = f->model_of<request_probe>("GPDMA1");
+    REQUIRE(probe != nullptr);
+    auto const found = probe->levels.find(request);
+    return found != probe->levels.end() and found->second;
+  }
+};
+
+constexpr std::uint32_t rx_request = 6;
+constexpr std::uint32_t tx_request = 7;
+}
+
+TEST_CASE("the SPI1 DMA requests follow TXP, RXP and a partial last packet after EOT")
+{
+  probe_rig r;
+  bus       b{*r.f};
+  b.controller(7, 5, 3);
+  CHECK(b.get("SPI_SR", "TXP") == 1);
+  CHECK_FALSE(r.level(tx_request));
+  b.set("SPI_CFG1", "TXDMAEN", 1);
+  CHECK(r.level(tx_request));
+  CHECK_FALSE(r.level(rx_request));
+  for(std::uint32_t index = 0; index < 5; ++index)
+  {
+    b.send(index);
+  }
+  CHECK_FALSE(r.level(tx_request));
+  b.set("SPI_CR1", "CSTART", 1);
+  auto const start = b.now();
+  b.run_until(start + 3 * frame_ps + frame_ps / 2);
+  CHECK_FALSE(r.level(rx_request));
+  b.run_until(start + 4 * frame_ps + frame_ps / 2);
+  CHECK(b.get("SPI_SR", "RXP") == 1);
+  CHECK_FALSE(r.level(rx_request));
+  b.set("SPI_CFG1", "RXDMAEN", 1);
+  CHECK(r.level(rx_request));
+  CHECK(b.receive(2) == 0x1FFF);
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  CHECK_FALSE(r.level(rx_request));
+  CHECK(b.receive(2) == 0x1732);
+  CHECK_FALSE(r.level(rx_request));
+  b.run_until(start + 5 * frame_ps + frame_ps / 2);
+  REQUIRE(b.get("SPI_SR", "EOT") == 1);
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  CHECK(r.level(rx_request));
+  CHECK(b.receive() == 0xFF);
+  CHECK_FALSE(r.level(rx_request));
+  b.set("SPI_CR1", "SPE", 0);
+  CHECK_FALSE(r.level(tx_request));
+  CHECK_FALSE(r.level(rx_request));
 }

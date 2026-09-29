@@ -1,3 +1,4 @@
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 
@@ -77,9 +78,12 @@ auto lower(std::string_view name) -> std::string
  *        IER, EOTIE covering EOT, SUSP and TXC. A device is selected by its GPIO chip select pin,
  *        active low, or by the hardware SS output from CSTART to the end of the transfer while
  *        CFG2.SSOE is set. With no device selected MISO reads all ones, a pulled-up line. The
- *        devices are saved and loaded with the model. Not modelled, logged once: target mode,
- *        half duplex, CRC, TI mode, the autonomous trigger, the SS pulse and timing options and
- *        DMA requests.
+ *        devices are saved and loaded with the model. With CFG1.TXDMAEN the `<instance>_tx_dma`
+ *        request follows TXP, with CFG1.RXDMAEN the `<instance>_rx_dma` request follows RXP, or
+ *        a partial last packet left in the RX FIFO once EOT is set, RM0456 section 68.4.14,
+ *        through the GPDMA peer, both low while SPE is clear. Not modelled, logged once: target
+ *        mode, half duplex, CRC, TI mode, the autonomous trigger, the SS pulse and timing
+ *        options.
  */
 class spi final : public dispatch_model<spi, spi_state>
 {
@@ -166,14 +170,19 @@ private:
   std::vector<field_ref>                       cleared_on_enable_;
   core::clock_domain                           kernel_;
   irq_line&                                    line_;
+  field_ref                                    tx_dma_enable_;
+  field_ref                                    rx_dma_enable_;
+  dma_signal                                   tx_dma_;
+  dma_signal                                   rx_dma_;
   bool                                         unsupported_logged_{};
   bool                                         no_clock_logged_{};
 };
 
-constexpr std::array<write_entry<spi>, 7> spi_writes{
+constexpr std::array<write_entry<spi>, 8> spi_writes{
     {
      {"SPI_CR1", &spi::control_written},
      {"SPI_CR2", &spi::plain_written},
+     {"SPI_CFG1", &spi::plain_written},
      {"SPI_IER", &spi::plain_written},
      {"SPI_SR", &spi::status_written},
      {"SPI_IFCR", &spi::clear_written},
@@ -199,7 +208,10 @@ spi::spi(model_context& ctx, peripheral_desc const& desc, std::vector<spi_attach
       tx_complete_{field("SPI_SR", "TXC")}, rx_level_{field("SPI_SR", "RXPLVL")},
       rx_word_{field("SPI_SR", "RXWNE")}, tx_packet_ie_{field("SPI_IER", "TXPIE")},
       duplex_packet_ie_{field("SPI_IER", "DXPIE")}, remaining_{field("SPI_SR", "CTSIZE")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")}
+      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
+      tx_dma_enable_{field("SPI_CFG1", "TXDMAEN")}, rx_dma_enable_{field("SPI_CFG1", "RXDMAEN")},
+      tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
+      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}
 {
   auto const& flags = describe("SPI_SR").fields;
   for(auto const& bits : describe("SPI_IFCR").fields)
@@ -227,11 +239,9 @@ spi::spi(model_context& ctx, peripheral_desc const& desc, std::vector<spi_attach
   {
     cleared_on_enable_.push_back(field("SPI_SR", name));
   }
-  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 7>{
+  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 5>{
           {
            {"SPI_CFG1", "CRCEN"},
-           {"SPI_CFG1", "TXDMAEN"},
-           {"SPI_CFG1", "RXDMAEN"},
            {"SPI_CFG2", "SP"},
            {"SPI_CFG2", "MIDI"},
            {"SPI_CFG2", "MSSI"},
@@ -380,6 +390,8 @@ void spi::reset(register_file& regs, reset_kind)
     }
   }
   subscribe();
+  tx_dma_.resolve();
+  rx_dma_.resolve();
   flags();
 }
 
@@ -519,6 +531,10 @@ void spi::flags()
   {
     line_.lower();
   }
+  auto const up        = get(regs_, enable_) != 0;
+  auto const remainder = get(regs_, end_) != 0 and not state_.rx_fifo.empty();
+  tx_dma_.set(up and get(regs_, tx_dma_enable_) != 0 and tx_room);
+  rx_dma_.set(up and get(regs_, rx_dma_enable_) != 0 and (rx_full or remainder));
 }
 
 void spi::warn_unsupported()
@@ -533,8 +549,8 @@ void spi::warn_unsupported()
   {
     warn(
         "SPI_CFG2",
-        "target mode, half duplex, CRC, TI mode, the autonomous trigger, SS timing or DMA "
-        "requests are configured: not modelled, the SPI runs as a plain controller");
+        "target mode, half duplex, CRC, TI mode, the autonomous trigger or SS timing is "
+        "configured: not modelled, the SPI runs as a plain controller");
   }
 }
 
