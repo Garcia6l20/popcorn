@@ -219,8 +219,8 @@ protected:
   }
 
   /**
-   * @brief Schedules an event of the model a virtual time from now, at the current instruction
-   *        rate.
+   * @brief Schedules an event of the model a virtual time from now, kept at that virtual time
+   *        across core clock changes.
    * @param delay Virtual time until the event.
    * @param kind Event kind, passed back to on_event().
    * @param payload Payload passed back to on_event(), usually a generation.
@@ -228,7 +228,7 @@ protected:
   void schedule_in(std::chrono::nanoseconds delay, std::uint32_t kind, std::uint64_t payload)
   {
     auto const ps = static_cast<std::uint64_t>(delay.count()) * 1000u;
-    ctx_.events.schedule(ctx_.clock.to_icount(vtime{ctx_.clock.time().ps + ps}), kind, payload);
+    ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + ps}, kind, payload, ctx_.clock);
   }
 
   /**

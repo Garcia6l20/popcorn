@@ -179,3 +179,24 @@ TEST_CASE("a snapshot taken while the reset invalidate is pending ends it at the
   REQUIRE_FALSE(flag(f, "ICache", "ICACHE_SR", "BSYENDF"));
   CHECK(ended() == first);
 }
+
+TEST_CASE("an invalidate pending across a core clock change ends at its virtual time")
+{
+  auto f = idle();
+  write(f, "ICache", "ICACHE_CR", bit_of("ICache", "ICACHE_CR", "CACHEINV"));
+  REQUIRE(flag(f, "ICache", "ICACHE_SR", "BUSYF"));
+  auto const start = f.target->virtual_clock().time().ps;
+  idle_for(f, std::chrono::microseconds{1});
+  auto const icscr1 = f.target->peripheral("RCC").peek(offset_of("RCC", "RCC_ICSCR1"));
+  write(
+      f, "RCC", "RCC_ICSCR1",
+      (icscr1 & ~(0xFu << 28)) | (1u << 28) | bit_of("RCC", "RCC_ICSCR1", "MSIRGSEL"));
+  REQUIRE(f.target->virtual_clock().core_hz() == 24'000'000);
+  auto const stopped = f.run_to_stop({.max_instructions = icount{100'000'000}, .stop_when = [&] {
+                                        return flag(f, "ICache", "ICACHE_SR", "BSYENDF");
+                                      }});
+  REQUIRE(stopped.reason == stop_reason::user);
+  auto const took = f.target->virtual_clock().time().ps - start;
+  CHECK(took >= 10'000'000);
+  CHECK(took < 10'000'000 + 1'000'000 / 24);
+}

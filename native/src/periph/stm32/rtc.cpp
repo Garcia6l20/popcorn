@@ -156,7 +156,7 @@ auto date_of(std::uint64_t days) -> std::chrono::year_month_day
  *        read until DR is read, RSF one RTCCLK cycle after a clear, ADD1H and SUB1H. The wake-up
  *        timer on RTCCLK / 16 to / 2 or on ck_spre, 16 or 17 bits, with WUTWF. Alarms A and B on
  *        seconds, minutes, hours and date or weekday with their masks. Every deadline is kept in
- *        RTCCLK cycles and converted again when a clock changes, the core clock included. A reset
+ *        RTCCLK cycles, scheduled in virtual time, re-derived when RTCCLK changes rate. A reset
  *        other than power-on keeps the calendar, the configuration, the wake-up timer and the
  *        alarms, and resets the shadow registers. A backup domain reset, RCC_BDCR.BDRST, brings
  *        everything to its reset values. A ck_spre wake-up period restarts when INIT clears. A
@@ -659,7 +659,7 @@ void rtc::schedule(event_kind kind)
   auto const now    = now_ps();
   auto const offset = now - ctx_.clock.time().ps;
   auto const due    = std::max(time_of(state_.due[kind]), now) - offset;
-  ctx_.events.schedule(ctx_.clock.to_icount(vtime{due}), kind, generation);
+  ctx_.events.schedule_at(vtime{due}, kind, generation, ctx_.clock);
 }
 
 void rtc::schedule_all()
@@ -872,12 +872,7 @@ void rtc::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     return;
   }
-  auto const cycle = cycle_at(now_ps());
-  if(cycle < state_.due[kind])
-  {
-    schedule(static_cast<event_kind>(kind));
-    return;
-  }
+  auto const cycle   = cycle_at(now_ps());
   state_.armed[kind] = 0;
   switch(static_cast<event_kind>(kind))
   {
@@ -914,11 +909,13 @@ void rtc::on_event(std::uint32_t kind, std::uint64_t payload)
 
 void rtc::on_clock_change()
 {
-  auto const ps = now_ps();
-  if(auto const hz = ctx_.clock.hz(domain_); hz != state_.hz)
+  auto const hz = ctx_.clock.hz(domain_);
+  if(hz == state_.hz)
   {
-    rebase(ps, hz);
+    return;
   }
+  auto const ps = now_ps();
+  rebase(ps, hz);
   schedule_all();
   settle(cycle_at(ps));
 }

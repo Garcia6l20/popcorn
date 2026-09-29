@@ -401,9 +401,9 @@ void gpdma::schedule(std::size_t ch)
   constexpr std::uint64_t latency_cycles = 4;
   auto const              ps             = latency_cycles * ps_per_second / hz;
   s.scheduled                            = true;
-  ctx_.events.schedule(
-      ctx_.clock.to_icount(vtime{ctx_.clock.time().ps + ps}), burst_done,
-      (static_cast<std::uint64_t>(ch) << 32) | s.generation);
+  ctx_.events.schedule_at(
+      vtime{ctx_.clock.time().ps + ps}, burst_done,
+      (static_cast<std::uint64_t>(ch) << 32) | s.generation, ctx_.clock);
 }
 
 void gpdma::on_event(std::uint32_t kind, std::uint64_t payload)

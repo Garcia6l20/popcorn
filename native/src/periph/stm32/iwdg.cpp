@@ -63,7 +63,7 @@ struct iwdg_state
  *        reaching 0, or a reload while it is above WIN, requests a watchdog reset. EWIF and the
  *        IWDG IRQ follow the counter reaching EWIT - 1 while EWIE is set, RM0456 section 61.7.6.
  *        The kernel clock is RCC's `lsi` domain, after LSIPREDIV. Every deadline is kept in
- *        virtual time and converted again when a clock changes, the core clock included. An LSI
+ *        virtual time, re-derived when the LSI rate changes. An LSI
  *        rate change keeps the partial division sequence, a stopped LSI drops it. Deviations: the
  *        new prescaler restarts the division sequence when PVU falls, an error under one period
  *        of the old prescaled clock, a refresh reloads at the key write instead of one period
@@ -182,7 +182,7 @@ void iwdg::schedule_at_tick(std::uint32_t kind, std::uint64_t ticks)
 {
   auto const at  = anchor() + wide{ticks} * tick_unit();
   auto const due = std::max(static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz), now_ps());
-  ctx_.events.schedule(ctx_.clock.to_icount(vtime{due}), kind, ++state_.generation[kind]);
+  ctx_.events.schedule_at(vtime{due}, kind, ++state_.generation[kind], ctx_.clock);
 }
 
 void iwdg::reschedule()
@@ -222,16 +222,16 @@ void iwdg::schedule_update(std::size_t which)
     }
     due = now_ps() + (update_cycles * ps_per_second + hz - 1) / hz;
   }
-  ctx_.events.schedule(
-      ctx_.clock.to_icount(vtime{std::max(due, now_ps())}),
-      first_update + static_cast<std::uint32_t>(which), ++state_.generation[first_update + which]);
+  ctx_.events.schedule_at(
+      vtime{std::max(due, now_ps())}, first_update + static_cast<std::uint32_t>(which),
+      ++state_.generation[first_update + which], ctx_.clock);
 }
 
 void iwdg::schedule_updates()
 {
   for(std::size_t which = 0; which < updates; ++which)
   {
-    if((state_.waiting >> which & 1u) != 0)
+    if((state_.waiting >> which & 1u) != 0 and state_.update_due[which] == 0)
     {
       schedule_update(which);
     }
@@ -408,26 +408,13 @@ void iwdg::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     return;
   }
-  auto const count = count_at(now_ps());
   if(kind == early_wakeup)
   {
-    if(count >= get(regs_, early_time_))
-    {
-      reschedule();
-      return;
-    }
     update(regs_, early_flag_, 1);
     interrupt();
     return;
   }
-  if(count == 0)
-  {
-    bite();
-  }
-  else
-  {
-    reschedule();
-  }
+  bite();
 }
 
 void iwdg::on_clock_change()
@@ -440,8 +427,8 @@ void iwdg::on_clock_change()
   if(auto const hz = ctx_.clock.hz(lsi_); hz != state_.hz)
   {
     rebase(now_ps(), hz);
+    reschedule();
   }
-  reschedule();
 }
 }
 

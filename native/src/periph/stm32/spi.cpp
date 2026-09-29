@@ -81,7 +81,7 @@ auto lower(std::string_view name) -> std::string
  *        half duplex, CRC, TI mode, the autonomous trigger, the SS pulse and timing options and
  *        DMA requests.
  */
-class spi final : public dispatch_model<spi, spi_state>, public clock_listener
+class spi final : public dispatch_model<spi, spi_state>
 {
 public:
   spi(model_context& ctx, peripheral_desc const& desc, std::vector<spi_attachment> attachments);
@@ -99,7 +99,6 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
-  void on_clock_change() override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
@@ -120,7 +119,6 @@ private:
 
   void subscribe();
   void start_frame(std::uint64_t from_ps);
-  void schedule_frame();
   void finish_frame();
   void stop(bool completed);
   void hardware_select(bool selected);
@@ -424,14 +422,7 @@ void spi::start_frame(std::uint64_t from_ps)
   }
   state_.busy         = 1;
   state_.frame_end_ps = std::max(from_ps + ps, ctx_.clock.time().ps);
-  ++state_.generation;
-  schedule_frame();
-}
-
-void spi::schedule_frame()
-{
-  auto const due = std::max(state_.frame_end_ps, ctx_.clock.time().ps);
-  ctx_.events.schedule(ctx_.clock.to_icount(vtime{due}), frame_done, state_.generation);
+  ctx_.events.schedule_at(vtime{state_.frame_end_ps}, frame_done, ++state_.generation, ctx_.clock);
 }
 
 void spi::finish_frame()
@@ -687,11 +678,6 @@ void spi::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     return;
   }
-  if(ctx_.clock.time().ps < state_.frame_end_ps)
-  {
-    schedule_frame();
-    return;
-  }
   finish_frame();
   flags();
 }
@@ -717,16 +703,6 @@ void spi::load(std::span<std::byte const> in)
   state_.devices.clear();
   state_.selected.resize(attachments_.size());
   subscribe();
-}
-
-void spi::on_clock_change()
-{
-  if(state_.busy == 0)
-  {
-    return;
-  }
-  ++state_.generation;
-  schedule_frame();
 }
 }
 

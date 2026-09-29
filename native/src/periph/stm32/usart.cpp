@@ -330,7 +330,7 @@ auto usart::frame_ps() -> std::uint64_t
 auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t
 {
   auto const due = std::max(from_ps + ps, ctx_.clock.time().ps);
-  ctx_.events.schedule(ctx_.clock.to_icount(vtime{due}), kind, state_.generation[kind]);
+  ctx_.events.schedule_at(vtime{due}, kind, state_.generation[kind], ctx_.clock);
   return due;
 }
 

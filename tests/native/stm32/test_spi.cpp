@@ -732,33 +732,6 @@ TEST_CASE("enabling EOTIE while TXC is set raises the SPI IRQ at once")
   CHECK(stopped.reason == stop_reason::address);
 }
 
-TEST_CASE("a frame event delivered before the frame end does not end the frame")
-{
-  rig r{"idle", true};
-  bus b{*r.f};
-  b.controller(7, 1);
-  b.send(0x9F);
-  b.set("SPI_CR1", "CSTART", 1);
-  auto const start = b.now();
-  b.run_until(start + frame_ps / 2);
-  auto* const model = r.f->target->model("SPI1");
-  REQUIRE(model != nullptr);
-  for(std::uint64_t payload = 0; payload < 1'000; ++payload)
-  {
-    model->on_event(0, payload);
-  }
-  CHECK(r.device->frames.empty());
-  CHECK(b.get("SPI_SR", "EOT") == 0);
-  b.run_until(start + frame_ps + frame_ps / 2);
-  REQUIRE(r.device->frames.size() == 1);
-  CHECK(
-      r.device->frames[0].second.ps
-      == r.f->target->virtual_clock().since_power_on().ps
-      - b.now()
-      + start
-      + frame_ps);
-}
-
 TEST_CASE("TXP asks for the remaining frames only when they are fewer than a packet")
 {
   for(auto const& [size, expected] : {

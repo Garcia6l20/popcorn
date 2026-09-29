@@ -410,3 +410,23 @@ TEST_CASE("RTCSEL locks once set and BDRST clears the backup domain until releas
   write(f, "RCC_BDCR", 2u * lse);
   CHECK(f.field("RCC", "RCC_BDCR", "RTCSEL") == 2);
 }
+
+TEST_CASE("a ready delay pending across a core clock change ends at its virtual time")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "HSION"));
+  auto const start = f.target->virtual_clock().time().ps;
+  idle_until(f, std::chrono::microseconds{10});
+  write(
+      f, "RCC_ICSCR1",
+      (peek(f, "RCC_ICSCR1") & ~(0xFu << 28)) | (1u << 28) | bit_of("RCC_ICSCR1", "MSIRGSEL"));
+  REQUIRE(f.target->virtual_clock().core_hz() == 24 * mhz);
+  auto const stopped =
+      f.run_to_stop({.max_instructions = icount{100'000'000}, .stop_when = [&] {
+                       return (peek(f, "RCC_CR") & bit_of("RCC_CR", "HSIRDY")) != 0;
+                     }});
+  REQUIRE(stopped.reason == stop_reason::user);
+  auto const took = f.target->virtual_clock().time().ps - start;
+  CHECK(took >= 100 * mhz);
+  CHECK(took < 100 * mhz + 1'000'000 / 24);
+}

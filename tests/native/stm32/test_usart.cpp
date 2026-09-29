@@ -156,6 +156,41 @@ TEST_CASE("the first queued frame arrives one frame time after it is queued")
   CHECK(took <= frame + instruction_ps);
 }
 
+TEST_CASE("a frame in flight across a core clock change arrives at its virtual time")
+{
+  rig r{"overrun"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  auto const                       start = r.f->target->virtual_clock().time();
+  auto const                       frame = frame_of(*r.f, "USART1", 4'000'000, false);
+  std::vector<std::uint16_t> const one{'x'};
+  r.port("USART1").receive(one);
+  REQUIRE(
+      r.f->run_to_stop(
+             {.max_instructions = icount{10'000'000}, .until_time = vtime{start.ps + frame / 4}})
+          .reason
+      == stop_reason::time);
+  auto&      rcc    = r.f->target->peripheral("RCC");
+  auto const icscr1 = std::ranges::find(
+      rcc.description().registers, std::string_view{"RCC_ICSCR1"}, &popcorn::register_desc::name);
+  REQUIRE(icscr1 != rcc.description().registers.end());
+  auto const at  = rcc.description().base + icscr1->offset;
+  auto const old = r.f->target->mem().read(at, 4);
+  REQUIRE(old.has_value());
+  REQUIRE(
+      r.f->target->mem()
+          .write(
+              at, 4, (static_cast<std::uint32_t>(*old) & ~(0xFu << 28)) | (1u << 28) | (1u << 23))
+          .has_value());
+  REQUIRE(r.f->target->virtual_clock().core_hz() == 24'000'000);
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{100'000'000}, .stop_when = [&] {
+                                           return r.f->field("USART1", "ISR_enabled", "RXFNE") != 0;
+                                         }});
+  REQUIRE(stopped.reason == stop_reason::user);
+  auto const took = r.f->target->virtual_clock().time().ps - start.ps;
+  CHECK(took >= frame);
+  CHECK(took <= frame + instruction_ps);
+}
+
 TEST_CASE("a FIFO loopback returns 16 frames unchanged")
 {
   rig r{"loop_fifo"};

@@ -929,7 +929,7 @@ void tim::reschedule()
   }
   state_.scheduled = 1;
   state_.due_ps    = due;
-  ctx_.events.schedule(ctx_.clock.to_icount(vtime{due}), tick_due, ++state_.generation);
+  ctx_.events.schedule_at(vtime{due}, tick_due, ++state_.generation, ctx_.clock);
 }
 
 void tim::warn_unsupported()
@@ -1031,12 +1031,14 @@ void tim::on_event(std::uint32_t kind, std::uint64_t payload)
 
 void tim::on_clock_change()
 {
+  auto const hz = ctx_.clock.hz(domain_);
+  if(hz == state_.hz)
+  {
+    return;
+  }
   auto const ps = now_ps();
   catch_up(ps);
-  if(auto const hz = ctx_.clock.hz(domain_); hz != state_.hz)
-  {
-    rebase(ps, hz);
-  }
+  rebase(ps, hz);
   state_.scheduled = 0;
   settle();
 }

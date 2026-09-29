@@ -540,7 +540,7 @@ void rcc::schedule(std::uint32_t kind)
   auto const generation = ++state_.generation[kind];
   state_.pending |= std::uint32_t{1} << kind;
   auto const delay = static_cast<std::uint64_t>(options_.ready_delay.count()) * 1000u;
-  ctx_.events.schedule(ctx_.clock.to_icount(vtime{ctx_.clock.time().ps + delay}), kind, generation);
+  ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + delay}, kind, generation, ctx_.clock);
 }
 
 void rcc::cancel(std::uint32_t kind)
