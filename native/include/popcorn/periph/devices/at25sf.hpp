@@ -102,6 +102,13 @@ public:
   [[nodiscard]] auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
       -> std::uint32_t override;
   /**
+   * @brief On power_on and brown_out: status registers reloaded from their non-volatile
+   *        copies with WEL clear, BUSY, the tRST and tRES1 waits and deep power down ended,
+   *        the instruction in progress dropped. The array keeps its contents. Other kinds do
+   *        nothing.
+   */
+  void reset(reset_kind kind) override;
+  /**
    * @brief Appends the state: status, timings, the instruction in progress and the pages that
    *        differ from the initial image.
    */

@@ -494,7 +494,7 @@ void i2c::abort()
   regs_.poke(status_.offset, (regs_.peek(status_.offset) & ~status_reset_mask_) | tx_empty_.mask());
 }
 
-void i2c::reset(register_file& regs, reset_kind)
+void i2c::reset(register_file& regs, reset_kind kind)
 {
   for(auto const& name : claims())
   {
@@ -506,6 +506,10 @@ void i2c::reset(register_file& regs, reset_kind)
   tx_dma_.resolve();
   rx_dma_.resolve();
   event_dma_.resolve();
+  for(auto const& target : targets_)
+  {
+    target->reset(kind);
+  }
   flags();
 }
 

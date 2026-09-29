@@ -220,6 +220,15 @@ void eeprom_24xx::stop(vtime at)
   self.enter(phase::idle);
 }
 
+void eeprom_24xx::reset(reset_kind kind)
+{
+  if(kind != reset_kind::power_on and kind != reset_kind::brown_out)
+  {
+    return;
+  }
+  impl_->state = {};
+}
+
 void eeprom_24xx::save(std::vector<std::byte>& out) const
 {
   auto copy         = impl_->state;

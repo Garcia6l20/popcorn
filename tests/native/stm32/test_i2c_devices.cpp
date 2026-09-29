@@ -15,6 +15,7 @@
 namespace
 {
 namespace devices = popcorn::periph::devices;
+using popcorn::reset_kind;
 using popcorn::vtime;
 
 constexpr std::uint64_t us = 1'000'000;
@@ -295,4 +296,53 @@ TEST_CASE("a repeated START ends a table write, the next one starts with its own
   REQUIRE(table.writes().size() == 2);
   CHECK(table.writes()[0] == devices::table_write{.reg = 0x10, .bytes = {0xAA}});
   CHECK(table.writes()[1] == devices::table_write{.reg = 0x11, .bytes = {0xBB}});
+}
+
+TEST_CASE("a power-on reset during tWR lets the EEPROM answer at once in the new timeline")
+{
+  for(auto const kind : {reset_kind::power_on, reset_kind::brown_out})
+  {
+    CAPTURE(kind);
+    devices::eeprom_24xx eeprom{small_eeprom()};
+    host                 h{eeprom, 50 * ms};
+    REQUIRE(h.write({0x00, 0x11}) == std::vector<bool>(3, true));
+    h.now += 5 * ms;
+    REQUIRE(h.write({0x20, 0xAA, 0xBB}) == std::vector<bool>(4, true));
+    CHECK_FALSE(eeprom.start(false, vtime{h.now += us}));
+    eeprom.stop(vtime{h.now += us});
+    eeprom.reset(kind);
+    h.now = us;
+    CHECK(h.read(1) == std::vector<std::uint8_t>{0x11});
+    CHECK(byte_at(eeprom, 0x20) == 0xAA);
+    CHECK(byte_at(eeprom, 0x21) == 0xBB);
+  }
+}
+
+TEST_CASE("a reset of another kind leaves the EEPROM in its write cycle")
+{
+  devices::eeprom_24xx eeprom{small_eeprom()};
+  host                 h{eeprom};
+  REQUIRE(h.write({0x20, 0xAA}) == std::vector<bool>(3, true));
+  eeprom.reset(reset_kind::software);
+  CHECK_FALSE(eeprom.start(false, vtime{h.now += us}));
+  eeprom.stop(vtime{h.now += us});
+}
+
+TEST_CASE("a power-on reset drops the table write in progress and keeps the recorded ones")
+{
+  for(auto const kind : {reset_kind::power_on, reset_kind::software})
+  {
+    CAPTURE(kind);
+    devices::table_target table{{.address = 0x38}};
+    host                  h{table};
+    REQUIRE(h.write({0x01, 0x99}) == std::vector<bool>(3, true));
+    REQUIRE(table.start(false, vtime{h.now += us}));
+    REQUIRE(table.write(0x02, vtime{h.now += us}));
+    REQUIRE(table.write(0x77, vtime{h.now += us}));
+    table.reset(kind);
+    table.stop(vtime{h.now += us});
+    auto const kept = kind == reset_kind::power_on ? 1u : 2u;
+    REQUIRE(table.writes().size() == kept);
+    CHECK(table.writes()[0] == devices::table_write{.reg = 0x01, .bytes = {0x99}});
+  }
 }

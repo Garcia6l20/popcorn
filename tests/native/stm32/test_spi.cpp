@@ -41,6 +41,7 @@ public:
   std::vector<std::pair<bool, vtime>>           selects;
   std::vector<std::pair<std::uint32_t, vtime>>  frames;
   std::vector<std::uint8_t>                     sizes;
+  std::vector<popcorn::reset_kind>              resets;
   std::uint32_t                                 position{};
   static constexpr std::array<std::uint32_t, 4> replies{0xFF, 0x1F, 0x32, 0x17};
 
@@ -67,6 +68,11 @@ public:
   void load(std::span<std::byte const> in) override
   {
     position = in.empty() ? 0 : static_cast<std::uint32_t>(in.front());
+  }
+
+  void reset(popcorn::reset_kind kind) override
+  {
+    resets.push_back(kind);
   }
 };
 
@@ -327,6 +333,22 @@ TEST_CASE("after two extra resets one chip select edge still gives one select ca
   rig r{"poll", false, 2};
   CHECK(r.finish() == std::vector<std::uint32_t>{0xFF, 0x1F, 0x32, 0x17});
   CHECK(r.device->selects.size() == 2);
+}
+
+TEST_CASE("every machine reset reaches the device once with its kind")
+{
+  using popcorn::reset_kind;
+  rig r{"poll", false, 2};
+  CHECK(
+      r.device->resets
+      == std::vector{reset_kind::power_on, reset_kind::power_on, reset_kind::power_on});
+  r.f->target->reset(reset_kind::software);
+  r.f->target->reset(reset_kind::brown_out);
+  CHECK(
+      r.device->resets
+      == std::vector{
+          reset_kind::power_on, reset_kind::power_on, reset_kind::power_on, reset_kind::software,
+          reset_kind::brown_out});
 }
 
 TEST_CASE("a snapshot mid-transfer restores the device and the remaining frames")
@@ -851,6 +873,11 @@ public:
   {
     flash->load(in);
   }
+
+  void reset(popcorn::reset_kind kind) override
+  {
+    flash->reset(kind);
+  }
 };
 
 struct flash_rig
@@ -1146,4 +1173,79 @@ TEST_CASE("the SPI1 DMA requests follow TXP, RXP and a partial last packet after
   b.set("SPI_CR1", "SPE", 0);
   CHECK_FALSE(r.level(tx_request));
   CHECK_FALSE(r.level(rx_request));
+}
+
+namespace
+{
+class page_program_injector final : public stm32::spi_target
+{
+public:
+  std::shared_ptr<popcorn::periph::devices::at25sf> flash =
+      std::make_shared<popcorn::periph::devices::at25sf>();
+  std::uint32_t frames{};
+
+  void select(bool selected, vtime at) override
+  {
+    flash->select(selected, at);
+  }
+
+  auto exchange(std::uint32_t out, std::uint8_t bits, vtime at) -> std::uint32_t override
+  {
+    if(frames++ == 0)
+    {
+      for(std::uint32_t const byte : {0x02u, 0x00u, 0x10u, 0x00u, 0x55u})
+      {
+        static_cast<void>(flash->exchange(byte, 8, at));
+      }
+      return 0xFF;
+    }
+    return flash->exchange(out, bits, at);
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    flash->save(out);
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    flash->load(in);
+  }
+
+  void reset(popcorn::reset_kind kind) override
+  {
+    flash->reset(kind);
+  }
+};
+}
+
+TEST_CASE("a supply reset drops the instruction of a hardware-SS device, other resets end it")
+{
+  for(auto const kind : {popcorn::reset_kind::power_on, popcorn::reset_kind::software})
+  {
+    CAPTURE(kind);
+    auto         device = std::make_shared<page_program_injector>();
+    stm32::board board{};
+    board.spi["SPI1"].push_back({.device = device});
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, u575());
+    stm32_fixture f{u575(), "spi_ll", std::move(options)};
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("spi_ll", "main")})
+            .reason
+        == stop_reason::address);
+    auto const now = f.target->virtual_clock().time();
+    device->flash->select(true, now);
+    static_cast<void>(device->flash->exchange(0x06, 8, now));
+    device->flash->select(false, now);
+    f.set("pc", sym("spi_ll", "hw_ss"));
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{100'000'000},
+                       .stop_when        = [&] { return device->frames > 0; }})
+            .reason
+        == stop_reason::user);
+    f.target->reset(kind);
+    auto const programmed = device->flash->contents()[0x1000] == std::byte{0x55};
+    CHECK(programmed == (kind == popcorn::reset_kind::software));
+  }
 }

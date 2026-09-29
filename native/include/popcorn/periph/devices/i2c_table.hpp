@@ -67,6 +67,11 @@ public:
   [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> bool override;
   [[nodiscard]] auto read(vtime at) -> std::uint8_t override;
   void               stop(vtime at) override;
+  /**
+   * @brief On power_on and brown_out: the transfer in progress dropped, unrecorded. writes()
+   *        keeps what it recorded. Other kinds do nothing.
+   */
+  void reset(reset_kind kind) override;
   /** @brief Appends the state: the transfer in progress and the recorded writes. */
   void save(std::vector<std::byte>& out) const override;
   /** @brief Restores bytes save() wrote. */

@@ -369,7 +369,7 @@ void spi::hardware_select(bool selected)
   }
 }
 
-void spi::reset(register_file& regs, reset_kind)
+void spi::reset(register_file& regs, reset_kind kind)
 {
   for(auto const& name : claims())
   {
@@ -381,6 +381,10 @@ void spi::reset(register_file& regs, reset_kind)
   state_.generation     = generation;
   selected.resize(attachments_.size());
   state_.selected = selected;
+  for(auto const& attached : attachments_)
+  {
+    attached.device->reset(kind);
+  }
   for(std::size_t index = 0; index < attachments_.size(); ++index)
   {
     if(not attachments_[index].cs_pin and state_.selected[index] != 0)

@@ -63,6 +63,11 @@ public:
   [[nodiscard]] auto read(vtime at) -> std::uint8_t override;
   void               stop(vtime at) override;
   /**
+   * @brief On power_on and brown_out: the write cycle ended, the page already written, the
+   *        address pointer at 0, the transfer in progress dropped. Other kinds do nothing.
+   */
+  void reset(reset_kind kind) override;
+  /**
    * @brief Appends the state: the transfer in progress, the write cycle and the pages that
    *        differ from the initial image.
    */

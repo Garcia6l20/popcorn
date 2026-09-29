@@ -42,11 +42,15 @@ struct board
    */
   std::optional<std::chrono::sys_seconds> rtc_initial{};
   /** @brief Devices on each SPI instance by instance name, such as `SPI1`. The SPI model copies the
-   * list when the machine is built and saves and loads each device with its own state. */
+   * list when the machine is built, saves and loads each device with its own state, and resets it
+   * with the machine. A device object is shared by every machine built from these factories:
+   * give each machine its own board and devices. */
   std::map<std::string, std::vector<spi_attachment>, std::less<>> spi{};
   /** @brief Targets on each I2C instance by instance name, such as `I2C1`. The I2C model copies
-   * the list when the machine is built, addresses the first target answering an address, and
-   * saves and loads each target with its own state. */
+   * the list when the machine is built, addresses the first target answering an address, saves
+   * and loads each target with its own state, and resets it with the machine. A target object is
+   * shared by every machine built from these factories: give each machine its own board and
+   * targets. */
   std::map<std::string, std::vector<std::shared_ptr<i2c_target>>, std::less<>> i2c{};
 };
 

@@ -59,8 +59,9 @@ public:
   explicit recorded_target(std::shared_ptr<stm32::i2c_target> target) : inner{std::move(target)}
   {}
 
-  std::shared_ptr<stm32::i2c_target> inner;
-  std::vector<bus_event>             events;
+  std::shared_ptr<stm32::i2c_target>                                                     inner;
+  std::vector<bus_event>                                                                 events;
+  std::shared_ptr<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>> resets;
 
   [[nodiscard]] auto address() const -> std::uint8_t override
   {
@@ -102,6 +103,15 @@ public:
   void load(std::span<std::byte const> in) override
   {
     inner->load(in);
+  }
+
+  void reset(popcorn::reset_kind kind) override
+  {
+    inner->reset(kind);
+    if(resets)
+    {
+      resets->emplace_back(this, kind);
+    }
   }
 };
 
@@ -238,11 +248,16 @@ struct rig
   std::shared_ptr<recorded_target> table  = std::make_shared<recorded_target>(script);
   std::shared_ptr<recorded_target> picky =
       std::make_shared<recorded_target>(std::make_shared<picky_target>());
+  std::shared_ptr<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>> resets =
+      std::make_shared<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>>();
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
   explicit rig(std::string_view entry, bool probe = false)
   {
+    memory->resets    = resets;
+    table->resets     = resets;
+    picky->resets     = resets;
     board.i2c["I2C1"] = {memory, table, picky};
     auto options      = popcorn::testing::stm32_options();
     options.models    = stm32::factories(board, u575());
@@ -325,6 +340,41 @@ TEST_CASE("two page writes with acknowledge polling, then a random read of 20 by
       CHECK(state == first_state);
     }
   }
+}
+
+TEST_CASE("every machine reset reaches each target once, in attachment order, with its kind")
+{
+  using popcorn::reset_kind;
+  rig        r{"eeprom_rw"};
+  auto const expect = [&](reset_kind kind) {
+    return std::vector<std::pair<stm32::i2c_target const*, reset_kind>>{
+        {r.memory.get(), kind},
+        {r.table.get(),  kind},
+        {r.picky.get(),  kind}
+    };
+  };
+  CHECK(*r.resets == expect(reset_kind::power_on));
+  r.resets->clear();
+  r.f->target->reset(reset_kind::watchdog);
+  CHECK(*r.resets == expect(reset_kind::watchdog));
+}
+
+TEST_CASE("a power-on reset during tWR lets the EEPROM answer at once in the new timeline")
+{
+  auto const  fresh = rig{"eeprom_rw"}.finish();
+  rig         r{"eeprom_rw"};
+  auto const& events = r.memory->events;
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{100'000'000}, .stop_when = [&] {
+                                           return not of_kind(events, 'N').empty();
+                                         }});
+  REQUIRE(stopped.reason == stop_reason::user);
+  r.f->target->reset(popcorn::reset_kind::power_on);
+  REQUIRE(
+      r.f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("i2c_ll", "main")})
+          .reason
+      == stop_reason::address);
+  r.f->set("pc", sym("i2c_ll", "eeprom_rw"));
+  CHECK(r.finish() == fresh);
 }
 
 TEST_CASE("the EEPROM NACKs its address during tWR and ACKs the first poll after it")

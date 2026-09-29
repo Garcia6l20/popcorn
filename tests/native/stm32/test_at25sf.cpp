@@ -14,6 +14,7 @@
 namespace
 {
 namespace devices = popcorn::periph::devices;
+using popcorn::reset_kind;
 using popcorn::vtime;
 
 constexpr std::uint64_t us = 1'000'000;
@@ -433,4 +434,103 @@ TEST_CASE("a 4 KB erase at an unaligned address erases exactly its sector")
   CHECK(h.at(0x002000) == 0x00);
   auto const sector = h.flash.contents().subspan(0x1000, 0x1000);
   CHECK(std::ranges::all_of(sector, [](std::byte value) { return value == std::byte{0xFF}; }));
+}
+
+TEST_CASE("a power-on reset ends BUSY and clears WEL, the new timeline starting at 0")
+{
+  host h;
+  h.now = 50 * ms;
+  h.command({0x06});
+  h.program(0x2000, {0x00});
+  CHECK(h.status() == 0x01);
+  h.command({0x06});
+  CHECK(h.status() == 0x01);
+  h.flash.reset(reset_kind::power_on);
+  h.now = us;
+  CHECK(h.status() == 0x00);
+  CHECK(h.at(0x2000) == 0x00);
+  h.command({0x06});
+  CHECK(h.status() == 0x02);
+  h.flash.reset(reset_kind::brown_out);
+  CHECK(h.status() == 0x00);
+}
+
+TEST_CASE("a reset of another kind leaves the device as it was")
+{
+  for(auto const kind : {reset_kind::pin, reset_kind::software, reset_kind::watchdog})
+  {
+    CAPTURE(kind);
+    host h;
+    h.command({0x06});
+    h.flash.reset(kind);
+    CHECK(h.status() == 0x02);
+    h.program(0x2000, {0x00});
+    h.flash.reset(kind);
+    CHECK(h.status() == 0x01);
+    h.command({0xB9});
+    h.wait(3 * us);
+    h.flash.reset(kind);
+    CHECK(h.command({0x9F}, 3) == std::vector<std::uint32_t>{0xFF, 0xFF, 0xFF});
+  }
+}
+
+TEST_CASE("a power-on reset ends the tRST wait of a 66h 99h reset")
+{
+  host h;
+  h.now = 50 * ms;
+  h.command({0x66});
+  h.command({0x99});
+  CHECK(h.command({0x05}, 1) == std::vector<std::uint32_t>{0xFF});
+  h.flash.reset(reset_kind::power_on);
+  h.now = us;
+  CHECK(h.status() == 0x00);
+}
+
+TEST_CASE("a power-on reset leaves deep power down, entered or still entering")
+{
+  host asleep;
+  asleep.now = 50 * ms;
+  asleep.command({0xB9});
+  asleep.wait(3 * us);
+  CHECK(asleep.command({0x9F}, 3) == std::vector<std::uint32_t>{0xFF, 0xFF, 0xFF});
+  asleep.flash.reset(reset_kind::power_on);
+  asleep.now = us;
+  CHECK(asleep.command({0x9F}, 3) == std::vector<std::uint32_t>{0x1F, 0x32, 0x17});
+
+  host entering;
+  entering.now = 50 * ms;
+  entering.command({0xB9});
+  entering.flash.reset(reset_kind::power_on);
+  entering.now = us;
+  entering.wait(10 * us);
+  CHECK(entering.command({0x9F}, 3) == std::vector<std::uint32_t>{0x1F, 0x32, 0x17});
+  entering.now = 60 * ms;
+  CHECK(entering.command({0x9F}, 3) == std::vector<std::uint32_t>{0x1F, 0x32, 0x17});
+}
+
+TEST_CASE("a power-on reset reloads the stored status and drops the instruction in progress")
+{
+  host h;
+  h.command({0x06});
+  h.command({0x01, 0x1C, 0x02});
+  h.wait(5 * ms);
+  h.command({0x50});
+  h.command({0x01, 0x00, 0x00});
+  CHECK(h.status() == 0x00);
+  h.flash.select(true, vtime{h.now += us});
+  (void)h.flash.exchange(0x9F, 8, vtime{h.now += us});
+  h.flash.reset(reset_kind::power_on);
+  h.now = us;
+  CHECK(h.flash.exchange(0, 8, vtime{h.now += us}) == 0xFF);
+  h.flash.select(false, vtime{h.now += us});
+  CHECK(h.status() == 0x1C);
+  CHECK(h.command({0x35}, 1) == std::vector<std::uint32_t>{0x02});
+  h.command({0x01, 0x00, 0x00});
+  CHECK(h.status() == 0x1C);
+  h.command({0x50});
+  h.command({0x01, 0x00, 0x00});
+  h.command({0x66});
+  h.command({0x99});
+  h.wait(30 * us);
+  CHECK(h.status() == 0x1C);
 }

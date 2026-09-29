@@ -150,7 +150,7 @@ struct at25sf::impl
     {
       return code == release;
     }
-    if(code == reset)
+    if(code == opcode::reset)
     {
       return state.reset_enabled != 0;
     }
@@ -278,7 +278,7 @@ struct at25sf::impl
       case volatile_enable:
         state.volatile_write = 1;
         break;
-      case reset:
+      case opcode::reset:
         state.status1        = state.stored1;
         state.status2        = state.stored2;
         state.volatile_write = 0;
@@ -427,6 +427,27 @@ auto at25sf::exchange(std::uint32_t out, std::uint8_t bits, vtime at) -> std::ui
     in |= std::uint32_t{impl_->byte(byte, at.ps)} << shift;
   }
   return in;
+}
+
+void at25sf::reset(reset_kind kind)
+{
+  if(kind != reset_kind::power_on and kind != reset_kind::brown_out)
+  {
+    return;
+  }
+  auto&      state   = impl_->state;
+  auto const stored1 = state.stored1;
+  auto const stored2 = state.stored2;
+  auto const size    = state.size;
+  auto const digest  = state.image_digest;
+  state              = {};
+  state.stored1      = stored1;
+  state.stored2      = stored2;
+  state.status1      = static_cast<std::uint8_t>(stored1 & ~wel_bit);
+  state.status2      = stored2;
+  state.size         = size;
+  state.image_digest = digest;
+  state.buffer.assign(page_size, std::byte{0xFF});
 }
 
 void at25sf::save(std::vector<std::byte>& out) const

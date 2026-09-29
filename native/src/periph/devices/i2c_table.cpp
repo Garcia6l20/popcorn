@@ -133,6 +133,17 @@ void table_target::stop(vtime)
   impl_->end_write();
 }
 
+void table_target::reset(reset_kind kind)
+{
+  if(kind != reset_kind::power_on and kind != reset_kind::brown_out)
+  {
+    return;
+  }
+  auto writes         = std::move(impl_->state.writes);
+  impl_->state        = {};
+  impl_->state.writes = std::move(writes);
+}
+
 void table_target::save(std::vector<std::byte>& out) const
 {
   reflex::serde::bson::serializer{out}.dump(impl_->state);

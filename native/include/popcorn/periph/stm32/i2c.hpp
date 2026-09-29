@@ -63,6 +63,17 @@ public:
   virtual void stop(vtime at) = 0;
 
   /**
+   * @brief The machine was reset. The I2C model calls it for every attached target, in
+   *        attachment order, after its own reset. The default does nothing.
+   * @param kind Cause of the reset. A target on the board takes power_on and brown_out as its
+   *        own supply events and any other kind as an MCU reset it does not see. After power_on
+   *        the times passed to later calls restart from 0, so on power_on and brown_out a device
+   *        clears every time it keeps along with its volatile state.
+   */
+  virtual void reset([[maybe_unused]] reset_kind kind)
+  {}
+
+  /**
    * @brief Appends the target state to a snapshot.
    * @param out Snapshot bytes, appended to.
    */
