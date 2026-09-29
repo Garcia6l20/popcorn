@@ -589,3 +589,40 @@ def board(entry: str) -> str:
         f'[models]\npython = ["{MODELS_DIR}"]\n'
         f"[board.TIMER]\n{entry}"
     )
+
+
+class Stamp(Model):
+    """Records the virtual time its event fires."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fired: list[VirtualTime] = []
+
+    def fire(self) -> None:
+        self.fired.append(self.now)
+
+
+MSIRGSEL = 1 << 23
+MSIKRANGE_4MHZ = 4 << 24
+MSISRANGE_48MHZ = 0 << 28
+MSIS_48_MHZ = MSIRGSEL | MSIKRANGE_4MHZ | MSISRANGE_48MHZ
+
+
+def test_an_event_keeps_its_virtual_time_across_a_core_clock_change(
+    u575: popcorn.MachineDescription,
+) -> None:
+    from .conftest import BOARD_ELF
+
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF), models={"CRC": Stamp})
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    stamp = m.model("CRC")
+    assert isinstance(stamp, Stamp)
+    start, counted = m.time, m.instructions
+    stamp.schedule(us(100), stamp.fire)
+    m.periph.RCC.RCC_ICSCR1.write(MSIS_48_MHZ)
+    asyncio.run(m.run(for_=us(200)))
+    assert len(stamp.fired) == 1
+    late = stamp.fired[0].ps - start.ps - 100_000_000
+    assert 0 <= late < 1_000_000
+    assert m.instructions - counted > 48 * 200 * 9 // 10

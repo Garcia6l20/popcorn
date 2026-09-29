@@ -387,6 +387,9 @@ class Model(_core.ModelBase):
     def schedule(self, delay: VirtualDuration, callback: Callable[[], object]) -> int:
         """Call a method of this model `delay` from now in virtual time.
 
+        The deadline is a virtual time: a core clock change before it fires, such as the
+        firmware reprogramming its clock tree, does not move it.
+
         Events are saved in snapshots by method name, so `callback` must be a method of this
         model, bound to it.
 

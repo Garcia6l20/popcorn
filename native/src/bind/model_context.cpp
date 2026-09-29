@@ -108,7 +108,7 @@ auto model_context_view::schedule(std::uint64_t delay_ps, std::uint32_t kind, st
     throw config_error(
         ctx.regs.description().name, 0, "delay", "a due time within 2^64 picoseconds");
   }
-  return ctx.events.schedule(ctx.clock.to_icount(vtime{now.ps + delay_ps}), kind, payload);
+  return ctx.events.schedule_at(vtime{now.ps + delay_ps}, kind, payload, ctx.clock);
 }
 
 void model_context_view::cancel(std::uint64_t handle)

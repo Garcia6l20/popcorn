@@ -78,7 +78,8 @@ public:
       irq_level(std::uint32_t index) const -> bool;
 
   /**
-   * @brief Schedules an event of the model.
+   * @brief Schedules an event of the model at a virtual time, kept when the core clock changes
+   *        before it fires.
    * @param delay_ps Virtual time from now, in picoseconds.
    * @param kind Kind passed back to the model.
    * @param payload Payload passed back to the model.
