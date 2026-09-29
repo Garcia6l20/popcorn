@@ -71,6 +71,7 @@ MODELLED = (
     "wait_timer_irqs",
     "eeprom_roundtrip",
     "read_timer_count",
+    "read_timer_count_n",
     "write_timer_cr",
     "touch_unmodelled",
     "write_then_fault",

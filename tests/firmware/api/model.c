@@ -84,6 +84,16 @@ __attribute__((noipa)) uint32_t read_timer_count(void)
   return TIMER_CNT;
 }
 
+__attribute__((noipa)) uint32_t read_timer_count_n(uint32_t count)
+{
+  uint32_t sum = 0;
+  for(uint32_t index = 0; index < count; ++index)
+  {
+    sum += TIMER_CNT;
+  }
+  return sum;
+}
+
 __attribute__((noipa)) void write_timer_cr(uint32_t value)
 {
   TIMER_CR = value;
