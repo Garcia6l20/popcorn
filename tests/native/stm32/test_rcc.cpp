@@ -209,6 +209,31 @@ TEST_CASE("a fixed core clock keeps the instruction rate while the domains follo
   CHECK(probe(f).hz("sysclk") == 160 * mhz);
 }
 
+TEST_CASE("the RCC factory copies its options: a board changed afterwards does not reach it")
+{
+  stm32::board board{.rcc = {.fixed_core_clock = true}};
+  auto         options       = popcorn::testing::stm32_options();
+  options.models             = stm32::factories(board, u575());
+  board.rcc.fixed_core_clock = false;
+  stm32_fixture f{u575(), "rcc_ll", with_listener(std::move(options))};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.target->virtual_clock().instruction_hz() == 4 * mhz);
+  CHECK(probe(f).hz("sysclk") == 160 * mhz);
+}
+
+TEST_CASE("machines built from factories outlive the board they were made from")
+{
+  auto options = popcorn::testing::stm32_options();
+  {
+    stm32::board const board{.rcc = {.fixed_core_clock = true}};
+    options.models = stm32::factories(board, u575());
+  }
+  stm32_fixture f{u575(), "rcc_ll", with_listener(std::move(options))};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.target->virtual_clock().instruction_hz() == 4 * mhz);
+  CHECK(probe(f).hz("sysclk") == 160 * mhz);
+}
+
 TEST_CASE("every reset kind leaves its own flag in RCC_CSR, RMVF clears them")
 {
   template for(constexpr auto kind :

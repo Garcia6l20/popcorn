@@ -1,6 +1,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/machine.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
 
@@ -110,6 +111,24 @@ TEST_CASE("both caches invalidate after reset, BUSYF then BSYENDF after the main
   CHECK_FALSE(flag(f, "ICache", "ICACHE_SR", "BUSYF"));
   CHECK(flag(f, "ICache", "ICACHE_SR", "BSYENDF"));
   CHECK_FALSE(flag(f, "DCACHE", "DCACHE_SR", "BUSYF"));
+  CHECK(flag(f, "DCACHE", "DCACHE_SR", "BSYENDF"));
+}
+
+TEST_CASE(
+    "the cache factories copy their busy delay: a board changed afterwards does not reach them")
+{
+  stm32::board board{};
+  board.caches.busy_delay = std::chrono::microseconds{50};
+  auto options            = popcorn::testing::stm32_options();
+  options.models          = stm32::factories(board, u575());
+  board.caches.busy_delay = std::chrono::microseconds{1};
+  stm32_fixture f{u575(), "rcc_ll", std::move(options)};
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  idle_for(f, std::chrono::microseconds{20});
+  CHECK(flag(f, "ICache", "ICACHE_SR", "BUSYF"));
+  CHECK(flag(f, "DCACHE", "DCACHE_SR", "BUSYF"));
+  idle_for(f, std::chrono::microseconds{40});
+  CHECK(flag(f, "ICache", "ICACHE_SR", "BSYENDF"));
   CHECK(flag(f, "DCACHE", "DCACHE_SR", "BSYENDF"));
 }
 

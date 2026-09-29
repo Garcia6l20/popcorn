@@ -612,9 +612,10 @@ void usart::attach(std::shared_ptr<uart_endpoint> far_end)
 
 auto usart_factory(board const& b) -> model_factory
 {
-  return [&b](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    auto const found = b.uarts.find(desc.name);
-    return std::make_shared<usart>(ctx, desc, found != b.uarts.end() ? found->second : nullptr);
-  };
+  return
+      [uarts = b.uarts](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+        auto const found = uarts.find(desc.name);
+        return std::make_shared<usart>(ctx, desc, found != uarts.end() ? found->second : nullptr);
+      };
 }
 }

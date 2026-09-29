@@ -107,6 +107,23 @@ auto frame_of(
 }
 }
 
+TEST_CASE("the USART factory copies the board's endpoints when it is made")
+{
+  auto         first  = std::make_shared<stm32::capture_endpoint>();
+  auto         second = std::make_shared<stm32::capture_endpoint>();
+  stm32::board board{};
+  board.uarts.emplace("USART1", first);
+  auto options             = popcorn::testing::stm32_options();
+  options.models           = stm32::factories(board, u575());
+  board.uarts.at("USART1") = second;
+  stm32_fixture f{u575(), "usart_ll", std::move(options)};
+  auto const    stopped = f.run_to_stop();
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  CHECK(text(*first) == hello);
+  CHECK(second->frames.empty());
+}
+
 TEST_CASE("polled USART1 transmission leaves one frame time apart at 115200 8N1")
 {
   rig r{"main"};

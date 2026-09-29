@@ -13,27 +13,27 @@ namespace popcorn::periph::stm32
 {
 /**
  * @brief Factory of the RCC model, RM0456 section 11.
- * @param options Board configuration, kept by reference: it must outlive every model made.
+ * @param options Board configuration, copied into every model made.
  */
-[[nodiscard]] auto rcc_factory(rcc_options const& options) -> model_factory;
+[[nodiscard]] auto rcc_factory(rcc_options options) -> model_factory;
 
 /**
  * @brief Factory of the ICACHE model, RM0456 section 8.
- * @param options Board configuration, kept by reference: it must outlive every model made.
+ * @param options Board configuration, copied into every model made.
  */
-[[nodiscard]] auto icache_factory(cache_options const& options) -> model_factory;
+[[nodiscard]] auto icache_factory(cache_options options) -> model_factory;
 
 /**
  * @brief Factory of the DCACHE model, RM0456 section 9.
- * @param options Board configuration, kept by reference: it must outlive every model made.
+ * @param options Board configuration, copied into every model made.
  */
-[[nodiscard]] auto dcache_factory(cache_options const& options) -> model_factory;
+[[nodiscard]] auto dcache_factory(cache_options options) -> model_factory;
 
 /**
  * @brief Factory of the PWR model, RM0456 section 10.
- * @param options Board configuration, kept by reference: it must outlive every model made.
+ * @param options Board configuration, copied into every model made.
  */
-[[nodiscard]] auto pwr_factory(pwr_options const& options) -> model_factory;
+[[nodiscard]] auto pwr_factory(pwr_options options) -> model_factory;
 
 /** @brief Factory of the FLASH register model, RM0456 section 7. */
 [[nodiscard]] auto flash_factory() -> model_factory;
@@ -49,7 +49,8 @@ namespace popcorn::periph::stm32
 
 /**
  * @brief Factory of the USART, UART and LPUART model, RM0456 sections 66 and 67.
- * @param b Board whose `uarts` give each instance its far end, kept by reference.
+ * @param b Board whose `uarts` give each instance its far end, copied: the endpoints stay
+ *        shared.
  */
 [[nodiscard]] auto usart_factory(board const& b) -> model_factory;
 

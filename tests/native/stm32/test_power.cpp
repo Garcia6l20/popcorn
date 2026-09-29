@@ -3,10 +3,12 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -14,7 +16,8 @@
 
 namespace
 {
-namespace core = popcorn::core;
+namespace core  = popcorn::core;
+namespace stm32 = popcorn::periph::stm32;
 using popcorn::fault_kind;
 using popcorn::icount;
 using popcorn::stop_reason;
@@ -52,6 +55,19 @@ TEST_CASE("voltage scale 1 and the EPOD booster become ready after the PWR delay
   CHECK(log[2] == 3u << 16);
   CHECK(log[3] == 3);
   CHECK(run_log("pwr_ll") == log);
+}
+
+TEST_CASE("the PWR factory copies its ready delay: a board changed afterwards does not reach it")
+{
+  stm32::board board{};
+  board.pwr.ready_delay = std::chrono::milliseconds{1};
+  auto options          = popcorn::testing::stm32_options();
+  options.models        = stm32::factories(board, u575());
+  board.pwr.ready_delay = std::chrono::microseconds{50};
+  auto const log        = run_log("pwr_ll", std::move(options));
+  REQUIRE(log.size() == 4);
+  CHECK(log[0] > 200);
+  CHECK(log[1] > 200);
 }
 
 TEST_CASE("a snapshot taken while VOSRDY is pending restores to the same run")

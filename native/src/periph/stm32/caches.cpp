@@ -53,19 +53,19 @@ private:
   void invalidate();
   void interrupt();
 
-  cache_options const& options_;
-  register_file&       regs_;
-  field_ref            enable_;
-  field_ref            invalidate_;
-  field_ref            busy_;
-  field_ref            busy_end_;
-  field_ref            error_;
-  field_ref            busy_end_irq_;
-  field_ref            error_irq_;
-  field_ref            clear_busy_end_;
-  field_ref            clear_error_;
-  reg_ref              fcr_;
-  irq_line&            line_;
+  cache_options  options_;
+  register_file& regs_;
+  field_ref      enable_;
+  field_ref      invalidate_;
+  field_ref      busy_;
+  field_ref      busy_end_;
+  field_ref      error_;
+  field_ref      busy_end_irq_;
+  field_ref      error_irq_;
+  field_ref      clear_busy_end_;
+  field_ref      clear_error_;
+  reg_ref        fcr_;
+  irq_line&      line_;
 };
 
 constexpr std::array<write_entry<icache>, 3> icache_writes{
@@ -164,25 +164,25 @@ private:
   void invalidate();
   void interrupt();
 
-  cache_options const& options_;
-  register_file&       regs_;
-  field_ref            enable_;
-  field_ref            invalidate_;
-  field_ref            command_;
-  field_ref            start_;
-  field_ref            busy_;
-  field_ref            busy_end_;
-  field_ref            error_;
-  field_ref            command_busy_;
-  field_ref            command_end_;
-  field_ref            busy_end_irq_;
-  field_ref            error_irq_;
-  field_ref            command_end_irq_;
-  field_ref            clear_busy_end_;
-  field_ref            clear_error_;
-  field_ref            clear_command_end_;
-  reg_ref              fcr_;
-  irq_line&            line_;
+  cache_options  options_;
+  register_file& regs_;
+  field_ref      enable_;
+  field_ref      invalidate_;
+  field_ref      command_;
+  field_ref      start_;
+  field_ref      busy_;
+  field_ref      busy_end_;
+  field_ref      error_;
+  field_ref      command_busy_;
+  field_ref      command_end_;
+  field_ref      busy_end_irq_;
+  field_ref      error_irq_;
+  field_ref      command_end_irq_;
+  field_ref      clear_busy_end_;
+  field_ref      clear_error_;
+  field_ref      clear_command_end_;
+  reg_ref        fcr_;
+  irq_line&      line_;
 };
 
 constexpr std::array<write_entry<dcache>, 3> dcache_writes{
@@ -295,16 +295,16 @@ void dcache::fcr_written(std::uint32_t, std::uint32_t now)
 }
 }
 
-auto icache_factory(cache_options const& options) -> model_factory
+auto icache_factory(cache_options options) -> model_factory
 {
-  return [&options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<icache>(ctx, desc, options);
   };
 }
 
-auto dcache_factory(cache_options const& options) -> model_factory
+auto dcache_factory(cache_options options) -> model_factory
 {
-  return [&options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<dcache>(ctx, desc, options);
   };
 }

@@ -347,7 +347,7 @@ private:
   void refuse_core_stop(std::string_view reg, std::string_view what);
 
   bool                                               core_stop_logged_{};
-  rcc_options const&                                 options_;
+  rcc_options                                        options_;
   register_file&                                     regs_;
   std::array<oscillator, source_count>               osc_{};
   std::array<pll_fields, 3>                          pll_{};
@@ -940,9 +940,9 @@ void rcc::force_lsi()
 }
 }
 
-auto rcc_factory(rcc_options const& options) -> model_factory
+auto rcc_factory(rcc_options options) -> model_factory
 {
-  return [&options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<rcc>(ctx, desc, options);
   };
 }

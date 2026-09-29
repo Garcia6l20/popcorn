@@ -57,16 +57,16 @@ public:
   void cr1_written(std::uint32_t old, std::uint32_t now);
 
 private:
-  pwr_options const& options_;
-  register_file&     regs_;
-  field_ref          range_;
-  field_ref          range_ready_;
-  field_ref          booster_;
-  field_ref          booster_ready_;
-  field_ref          active_range_;
-  field_ref          active_range_ready_;
-  field_ref          low_power_;
-  bool               low_power_logged_{};
+  pwr_options    options_;
+  register_file& regs_;
+  field_ref      range_;
+  field_ref      range_ready_;
+  field_ref      booster_;
+  field_ref      booster_ready_;
+  field_ref      active_range_;
+  field_ref      active_range_ready_;
+  field_ref      low_power_;
+  bool           low_power_logged_{};
 };
 
 constexpr std::array<write_entry<pwr>, 2> pwr_writes{
@@ -142,9 +142,9 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
 }
 }
 
-auto pwr_factory(pwr_options const& options) -> model_factory
+auto pwr_factory(pwr_options options) -> model_factory
 {
-  return [&options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<pwr>(ctx, desc, options);
   };
 }

@@ -21,8 +21,8 @@ namespace popcorn::periph::stm32
 {
 /**
  * @brief Board configuration of the built-in STM32 models: clock sources, and the devices and
- *        endpoints wired to the MCU. Owned by the caller, it outlives every machine built from
- *        factories() over it.
+ *        endpoints wired to the MCU. factories() copies what it needs, so the board may change or
+ *        go away once the factories are made.
  */
 struct board
 {
@@ -53,7 +53,8 @@ struct board
 /**
  * @brief Factory per peripheral instance of @p part that a built-in model serves, for
  *        core::machine_options::models.
- * @param b Board the models read their configuration from, kept by reference.
+ * @param b Board the models read their configuration from, copied into the factories. UART
+ *        endpoints, SPI devices and I2C targets are held by `shared_ptr` and stay shared.
  * @param part Description the machine is built from.
  * @return Factories keyed by instance name, aliases excluded.
  */
