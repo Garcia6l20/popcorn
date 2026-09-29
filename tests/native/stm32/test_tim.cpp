@@ -383,8 +383,10 @@ TEST_CASE("the TIM6 update DMA request moves one word per update")
 
 TEST_CASE("polling UIF with no interrupt enabled waits on a timer event, not a spin")
 {
-  auto       f       = entered("tim6_poll");
-  auto const stopped = f.run_to_stop();
+  auto options           = popcorn::testing::stm32_options();
+  options.spin_threshold = 10'000;
+  auto       f           = entered("tim6_poll", std::move(options));
+  auto const stopped     = f.run_to_stop();
   CAPTURE(stopped.detail);
   REQUIRE(stopped.reason == stop_reason::user);
   CHECK(f.log() == std::vector<std::uint32_t>{2});

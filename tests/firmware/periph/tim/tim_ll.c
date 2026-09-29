@@ -247,7 +247,7 @@ void tim6_dma(void)
 void tim6_poll(void)
 {
   LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM6);
-  time_base(TIM6, 3999, 1999);
+  time_base(TIM6, 3999, 49);
   LL_TIM_EnableCounter(TIM6);
   for(uint32_t seen = 0; seen < 2; ++seen)
   {
