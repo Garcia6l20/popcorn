@@ -96,9 +96,10 @@ auto resolve_strx(
 }
 }
 
-auto compile_units(debug_sections const& sections) -> std::vector<compile_unit_ref>
+auto scan_compile_units(debug_sections const& sections) -> compile_unit_scan
 {
-  std::vector<compile_unit_ref>     units;
+  compile_unit_scan                 scan;
+  auto&                             units = scan.units;
   std::unordered_set<std::uint64_t> seen_line_offsets;
   std::unordered_map<std::uint64_t, std::unordered_map<std::uint64_t, abbrev_decl>> abbrev_cache;
 
@@ -137,6 +138,7 @@ auto compile_units(debug_sections const& sections) -> std::vector<compile_unit_r
     if(inserted)
     {
       cache_it->second = parse_abbrev_table(sections.abbrev, abbrev_offset);
+      ++scan.abbrev_tables_parsed;
     }
     auto const& table = cache_it->second;
     auto const  code  = cursor.uleb();
@@ -197,6 +199,11 @@ auto compile_units(debug_sections const& sections) -> std::vector<compile_unit_r
     }
     cursor.seek(next_cu);
   }
-  return units;
+  return scan;
+}
+
+auto compile_units(debug_sections const& sections) -> std::vector<compile_unit_ref>
+{
+  return scan_compile_units(sections).units;
 }
 }

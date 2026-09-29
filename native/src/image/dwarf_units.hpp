@@ -21,6 +21,21 @@ struct compile_unit_ref
   std::string   comp_dir{};
 };
 
+/** @brief Compile units found by scan_compile_units(), and how many abbrev tables it parsed. */
+struct compile_unit_scan
+{
+  std::vector<compile_unit_ref> units;
+  std::size_t                   abbrev_tables_parsed{};
+};
+
+/**
+ * @brief Scans every compile unit's first DIE for DW_AT_stmt_list and DW_AT_comp_dir, parsing
+ *        each distinct abbrev table once.
+ * @return The units compile_units() returns, and the number of abbrev tables parsed.
+ * @throws image_error on a truncated or malformed .debug_info/.debug_abbrev.
+ */
+[[nodiscard]] auto scan_compile_units(debug_sections const& sections) -> compile_unit_scan;
+
 /**
  * @brief Scans every compile unit's first DIE for DW_AT_stmt_list and DW_AT_comp_dir.
  * @return One entry per compile unit that has a DW_AT_stmt_list; units without one are skipped.

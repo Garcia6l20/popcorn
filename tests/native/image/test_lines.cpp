@@ -6,7 +6,6 @@
 
 #include <doctest/doctest.h>
 
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -22,6 +21,7 @@ using popcorn::image::detail::compile_unit_ref;
 using popcorn::image::detail::compile_units;
 using popcorn::image::detail::debug_sections;
 using popcorn::image::detail::decode_lines;
+using popcorn::image::detail::scan_compile_units;
 
 namespace
 {
@@ -638,13 +638,13 @@ TEST_CASE("decode_lines rejects maximum_operations_per_instruction == 0 (D1)")
 
 namespace
 {
-auto wrap_cu_v5(byte_writer const& die) -> std::vector<std::byte>
+auto wrap_cu_v5(byte_writer const& die, std::uint32_t abbrev_offset = 0) -> std::vector<std::byte>
 {
   byte_writer cu_body;
   cu_body.u16(5);
   cu_body.u8(1);
   cu_body.u8(4);
-  cu_body.u32(0);
+  cu_body.u32(abbrev_offset);
   cu_body.bytes.insert(cu_body.bytes.end(), die.bytes.begin(), die.bytes.end());
 
   byte_writer info;
@@ -790,7 +790,9 @@ TEST_CASE("compile_units dedupes compile units that share a line_offset, not jus
   CHECK(units.size() == 1);
 }
 
-TEST_CASE("compile_units caches the abbrev table across many units sharing one abbrev_offset (A1)")
+namespace
+{
+auto stmt_list_abbrev_table() -> byte_writer
 {
   constexpr std::uint64_t dw_at_stmt_list    = 0x10;
   constexpr std::uint64_t dw_form_sec_offset = 0x17;
@@ -804,17 +806,28 @@ TEST_CASE("compile_units caches the abbrev table across many units sharing one a
   abbrev.uleb(0);
   abbrev.uleb(0);
   abbrev.uleb(0);
+  return abbrev;
+}
 
-  constexpr int          unit_count = 20000;
+auto units_over(std::vector<std::uint32_t> const& abbrev_offsets) -> std::vector<std::byte>
+{
   std::vector<std::byte> info;
-  for(int i = 0; i < unit_count; ++i)
+  for(std::uint32_t index = 0; index < abbrev_offsets.size(); ++index)
   {
     byte_writer die;
     die.uleb(1);
-    die.u32(static_cast<std::uint32_t>(i));
-    auto const cu = wrap_cu_v5(die);
+    die.u32(index);
+    auto const cu = wrap_cu_v5(die, abbrev_offsets[index]);
     info.insert(info.end(), cu.begin(), cu.end());
   }
+  return info;
+}
+}
+
+TEST_CASE("compile_units caches the abbrev table across many units sharing one abbrev_offset (A1)")
+{
+  auto const abbrev = stmt_list_abbrev_table();
+  auto const info   = units_over(std::vector<std::uint32_t>(64, 0));
 
   debug_sections const sections{
       .info        = info,
@@ -824,12 +837,35 @@ TEST_CASE("compile_units caches the abbrev table across many units sharing one a
       .line_str    = {},
       .str_offsets = {}};
 
-  auto const start = std::chrono::steady_clock::now();
-  auto const units = compile_units(sections);
-  auto const elapsed =
-      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  auto const scan = scan_compile_units(sections);
+  REQUIRE(scan.units.size() == 64);
+  CHECK(scan.abbrev_tables_parsed == 1);
+  CHECK(compile_units(sections).size() == 64);
+}
 
-  REQUIRE(units.size() == unit_count);
-  MESSAGE("compile_units: ", unit_count, " units sharing one abbrev table in ", elapsed, " ms");
-  CHECK(elapsed < 1000.0);
+TEST_CASE("compile_units parses each distinct abbrev table once, units alternating between two")
+{
+  auto       abbrev = stmt_list_abbrev_table();
+  auto const second = static_cast<std::uint32_t>(abbrev.size());
+  auto const table  = stmt_list_abbrev_table();
+  abbrev.bytes.insert(abbrev.bytes.end(), table.bytes.begin(), table.bytes.end());
+
+  std::vector<std::uint32_t> offsets;
+  for(int index = 0; index < 16; ++index)
+  {
+    offsets.push_back(index % 2 == 0 ? 0 : second);
+  }
+  auto const info = units_over(offsets);
+
+  debug_sections const sections{
+      .info        = info,
+      .abbrev      = abbrev.bytes,
+      .line        = {},
+      .str         = {},
+      .line_str    = {},
+      .str_offsets = {}};
+
+  auto const scan = scan_compile_units(sections);
+  REQUIRE(scan.units.size() == 16);
+  CHECK(scan.abbrev_tables_parsed == 2);
 }
