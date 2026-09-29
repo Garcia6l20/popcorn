@@ -296,8 +296,17 @@ TEST_CASE("a window change reloads the counter from RL when WVU clears")
   CHECK(now < expected + lsi_cycle);
 }
 
-TEST_CASE("a snapshot with PVU and WVU set restores the update deadlines exactly")
+TEST_CASE("a snapshot with PVU, WVU and EWU set restores the update deadlines exactly")
 {
+  constexpr std::uint32_t updating = 0b1101;
+  auto const              early_at = [](stm32_fixture const& f, bus const& b) {
+    auto const stopped =
+        f.run_to_stop({.max_instructions = icount{1'000'000'000}, .stop_when = [&] {
+                         return (b.read("IWDG", "SR") & (1u << 14)) != 0;
+                       }});
+    REQUIRE(stopped.reason == stop_reason::user);
+    return f.target->virtual_clock().time();
+  };
   auto f = entered("idle");
   bus  b{f};
   b.write("IWDG", "KR", 0xCCCC);
@@ -305,24 +314,31 @@ TEST_CASE("a snapshot with PVU and WVU set restores the update deadlines exactly
   b.write("IWDG", "KR", 0x5555);
   b.write("IWDG", "PR", 1);
   b.write("IWDG", "WINR", 0x800);
-  REQUIRE(b.read("IWDG", "SR") == 0b101);
+  b.write("IWDG", "EWCR", (1u << 15) | 0xFF0);
+  REQUIRE(b.read("IWDG", "SR") == updating);
   auto const saved = f.target->snapshot();
   REQUIRE(run_for(f, 3 * lsi_cycle).reason == stop_reason::time);
-  CHECK(b.read("IWDG", "SR") == 0b101);
+  CHECK(b.read("IWDG", "SR") == updating);
   REQUIRE(run_for(f, 4 * lsi_cycle).reason == stop_reason::time);
   CHECK(b.read("IWDG", "SR") == 0);
+  auto const cleared = f.target->virtual_clock().time().ps;
+  auto const early   = early_at(f, b);
+  CHECK(early.ps - cleared > 3 * ms);
+  CHECK(early.ps - cleared < 5 * ms);
   REQUIRE(run_for(f, 2'000 * ms).reason == stop_reason::reset_request);
   auto const at = f.target->virtual_clock().time();
 
   f.target->restore(saved);
-  CHECK(b.read("IWDG", "SR") == 0b101);
+  CHECK(b.read("IWDG", "SR") == updating);
+  CHECK(early_at(f, b) == early);
   REQUIRE(run_for(f, 2'000 * ms).reason == stop_reason::reset_request);
   CHECK(f.target->virtual_clock().time() == at);
 
   auto other = entered("idle");
   bus  ob{other};
   other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
-  CHECK(ob.read("IWDG", "SR") == 0b101);
+  CHECK(ob.read("IWDG", "SR") == updating);
+  CHECK(early_at(other, ob) == early);
   REQUIRE(run_for(other, 2'000 * ms).reason == stop_reason::reset_request);
   CHECK(other.target->virtual_clock().time() == at);
 }
@@ -362,4 +378,92 @@ TEST_CASE("an LSI rate change keeps the partial division sequence")
   auto const now = f.target->virtual_clock().time().ps;
   CHECK(now >= expected);
   CHECK(now < expected + slow);
+}
+
+namespace
+{
+constexpr std::uint32_t ewu  = 1u << 3;
+constexpr std::uint32_t ewif = 1u << 14;
+constexpr std::uint32_t ewie = 1u << 15;
+
+struct early_rig
+{
+  stm32_fixture f = entered("idle");
+  bus           b{f};
+
+  early_rig()
+  {
+    b.write("IWDG", "KR", 0xCCCC);
+    b.write("IWDG", "KR", 0x5555);
+  }
+
+  [[nodiscard]] auto status() const -> std::uint32_t
+  {
+    return b.read("IWDG", "SR");
+  }
+
+  [[nodiscard]] auto irq_pending() const -> bool
+  {
+    auto const word = f.target->mem().read(0xe000'e200u, 4);
+    REQUIRE(word.has_value());
+    return (*word >> 27 & 1u) != 0;
+  }
+
+  void clear_irq() const
+  {
+    REQUIRE(f.target->mem().write(0xe000'e280u, 4, 1u << 27).has_value());
+  }
+
+  template <typename Busy> void write_early(std::uint32_t value, Busy const& while_busy) const
+  {
+    b.write("IWDG", "EWCR", value);
+    REQUIRE((status() & ewu) != 0);
+    auto steps = 0;
+    while((status() & ewu) != 0)
+    {
+      REQUIRE(steps < 100);
+      while_busy();
+      REQUIRE(run_for(f, 5 * us).reason == stop_reason::time);
+      ++steps;
+    }
+    CHECK(steps * 5 * us >= 6 * lsi_cycle);
+    REQUIRE(run_for(f, us).reason == stop_reason::time);
+  }
+
+  void write_early(std::uint32_t value) const
+  {
+    write_early(value, [] {});
+  }
+};
+}
+
+TEST_CASE("a new EWIE applies when EWU clears, not at the write")
+{
+  early_rig r;
+  r.write_early(0xFFF);
+  CHECK((r.status() & ewif) == 0);
+  r.write_early(ewie | 0xFFF, [&] { REQUIRE((r.status() & ewif) == 0); });
+  CHECK((r.status() & ewif) != 0);
+  CHECK(r.irq_pending());
+}
+
+TEST_CASE("a new EWIT applies when EWU clears, not at the write")
+{
+  early_rig r;
+  r.write_early(ewie | 2);
+  CHECK((r.status() & ewif) == 0);
+  r.write_early(ewie | 0xFFF, [&] { REQUIRE((r.status() & ewif) == 0); });
+  CHECK((r.status() & ewif) != 0);
+}
+
+TEST_CASE("with EWIF set, the IWDG IRQ follows EWIE once EWU clears")
+{
+  early_rig r;
+  r.write_early(ewie | 0xFFF);
+  REQUIRE((r.status() & ewif) != 0);
+  r.write_early(0xFFF);
+  r.clear_irq();
+  REQUIRE_FALSE(r.irq_pending());
+  r.write_early(ewie | 0xFFF, [&] { REQUIRE_FALSE(r.irq_pending()); });
+  CHECK(r.irq_pending());
 }

@@ -45,6 +45,7 @@ struct iwdg_state
   std::array<std::uint64_t, updates>                update_due{};
   std::uint32_t                                     start{};
   std::uint32_t                                     divider{4};
+  std::uint32_t                                     early{};
   std::uint8_t                                      running{};
   std::uint8_t                                      unlocked{};
   std::uint8_t                                      bitten{};
@@ -59,9 +60,10 @@ struct iwdg_state
  *        time of its last reload, never ticked. `KR` 0xCCCC starts it from 0xFFF and forces the
  *        LSI on through the RCC peer, 0xAAAA reloads it from RL, 0x5555 unlocks PR, RLR, WINR
  *        and EWCR until another key. PVU, RVU, WVU and EWU stay set for six LSI cycles after a
- *        write, the new prescaler applies then, a new window reloads the counter then. The counter
- *        reaching 0, or a reload while it is above WIN, requests a watchdog reset. EWIF and the
- *        IWDG IRQ follow the counter reaching EWIT - 1 while EWIE is set, RM0456 section 61.7.6.
+ *        write, the new prescaler applies then, a new window reloads the counter then, a new EWIT
+ *        and EWIE apply then, RM0456 section 61.7.6. The counter reaching 0, or a reload while it
+ *        is above WIN, requests a watchdog reset. EWIF and the IWDG IRQ follow the counter
+ *        reaching EWIT - 1 while EWIE is set.
  *        The kernel clock is RCC's `lsi` domain, after LSIPREDIV. Every deadline is kept in
  *        virtual time, re-derived when the LSI rate changes. An LSI
  *        rate change keeps the partial division sequence, a stopped LSI drops it. Deviations: the
@@ -194,8 +196,8 @@ void iwdg::reschedule()
     return;
   }
   schedule_at_tick(expiry, state_.start);
-  auto const threshold = get(regs_, early_time_);
-  auto const armed     = get(regs_, early_enable_) != 0 and get(regs_, early_flag_) == 0;
+  auto const threshold = early_time_.of(state_.early);
+  auto const armed     = early_enable_.of(state_.early) != 0 and get(regs_, early_flag_) == 0;
   if(armed and threshold != 0 and state_.start >= threshold)
   {
     schedule_at_tick(early_wakeup, state_.start - threshold + 1);
@@ -266,6 +268,11 @@ void iwdg::finish_update(update_index which)
   state_.waiting &= static_cast<std::uint8_t>(~(1u << which));
   state_.update_due[which] = 0;
   update(regs_, busy_[which], 0);
+  if(which == early_update)
+  {
+    state_.early = early_clear_.with(regs_.peek(early_register_.offset), 0);
+    interrupt();
+  }
   if(state_.running == 0)
   {
     return;
@@ -299,7 +306,7 @@ void iwdg::bite()
 
 void iwdg::interrupt()
 {
-  if(get(regs_, early_flag_) != 0 and get(regs_, early_enable_) != 0)
+  if(get(regs_, early_flag_) != 0 and early_enable_.of(state_.early) != 0)
   {
     line_.raise();
   }
