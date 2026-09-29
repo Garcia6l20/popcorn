@@ -1,3 +1,5 @@
+#include "image_file.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/devices/at25sf.hpp>
 
@@ -10,8 +12,6 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
-#include <fstream>
-#include <iterator>
 #include <span>
 #include <utility>
 #include <vector>
@@ -97,18 +97,7 @@ auto ps_of(std::chrono::nanoseconds span) -> std::uint64_t
   return static_cast<std::uint64_t>(span.count()) * 1000u;
 }
 
-auto digest_of(std::span<std::byte const> bytes) -> std::uint64_t
-{
-  constexpr std::uint64_t prime = 0x0000'0100'0000'01B3;
-  auto                    hash  = std::uint64_t{0xCBF2'9CE4'8422'2325};
-  for(auto const value : bytes)
-  {
-    hash = (hash ^ std::to_integer<std::uint64_t>(value)) * prime;
-  }
-  return hash;
-}
-
-auto read_image(at25sf_options const& options) -> std::vector<std::byte>
+auto read_array(at25sf_options const& options) -> std::vector<std::byte>
 {
   constexpr std::uint32_t block = 64u << 10;
   if(options.part.size == 0 or options.part.size % block != 0)
@@ -117,25 +106,7 @@ auto read_image(at25sf_options const& options) -> std::vector<std::byte>
         "at25sf", 0, "part.size",
         std::format("a non-zero multiple of 64 KB, not {} bytes", options.part.size));
   }
-  std::vector<std::byte> array(options.part.size, std::byte{0xFF});
-  if(options.image.empty())
-  {
-    return array;
-  }
-  std::ifstream file{options.image, std::ios::binary};
-  if(not file)
-  {
-    throw config_error(options.image.string(), 0, "image", "a readable AT25SF image file");
-  }
-  std::vector<char> const bytes{std::istreambuf_iterator<char>{file}, {}};
-  if(bytes.size() > array.size())
-  {
-    throw config_error(
-        options.image.string(), 0, "image",
-        std::format("an AT25SF image of at most {} bytes, not {}", array.size(), bytes.size()));
-  }
-  std::memcpy(array.data(), bytes.data(), bytes.size());
-  return array;
+  return read_image(options.image, options.part.size, "AT25SF");
 }
 }
 
@@ -148,7 +119,7 @@ struct at25sf::impl
   at25sf_state           state{};
 
   explicit impl(at25sf_options opts)
-      : options{std::move(opts)}, initial{read_image(options)}, array{initial},
+      : options{std::move(opts)}, initial{read_array(options)}, array{initial},
         digest{digest_of(initial)}
   {
     state.buffer.assign(page_size, std::byte{0xFF});

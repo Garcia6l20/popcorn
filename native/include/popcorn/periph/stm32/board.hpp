@@ -3,6 +3,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/caches.hpp>
+#include <popcorn/periph/stm32/i2c.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
@@ -43,6 +44,10 @@ struct board
   /** @brief Devices on each SPI instance by instance name, such as `SPI1`. The SPI model copies the
    * list when the machine is built and saves and loads each device with its own state. */
   std::map<std::string, std::vector<spi_attachment>, std::less<>> spi{};
+  /** @brief Targets on each I2C instance by instance name, such as `I2C1`. The I2C model copies
+   * the list when the machine is built, addresses the first target answering an address, and
+   * saves and loads each target with its own state. */
+  std::map<std::string, std::vector<std::shared_ptr<i2c_target>>, std::less<>> i2c{};
 };
 
 /**

@@ -73,4 +73,10 @@ namespace popcorn::periph::stm32
  * @param b Board whose `spi` lists each instance's devices, copied when a model is made.
  */
 [[nodiscard]] auto spi_factory(board const& b) -> model_factory;
+
+/**
+ * @brief Factory of the I2C model, RM0456 section 65.
+ * @param b Board whose `i2c` lists each instance's targets, copied when a model is made.
+ */
+[[nodiscard]] auto i2c_factory(board const& b) -> model_factory;
 }

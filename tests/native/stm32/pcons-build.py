@@ -29,6 +29,7 @@ firmwares = {
         "iwdg_ll",
         "rtc_ll",
         "spi_ll",
+        "i2c_ll",
     )
 }
 u575_env = {
@@ -45,6 +46,7 @@ base = add_doctest(
 base.private.include_dirs.append(private_dir)
 
 add_doctest("stm32-at25sf", [here / "test_at25sf.cpp"], [core])
+add_doctest("stm32-i2c-devices", [here / "test_i2c_devices.cpp"], [core])
 
 u575_programs = [
     add_doctest(name, [here / source], [core], env=u575_env, register=u575 is not None)
@@ -61,6 +63,7 @@ u575_programs = [
         ("stm32-iwdg", "test_iwdg.cpp"),
         ("stm32-rtc", "test_rtc.cpp"),
         ("stm32-spi", "test_spi.cpp"),
+        ("stm32-i2c", "test_i2c.cpp"),
     )
 ]
 for program in u575_programs:
