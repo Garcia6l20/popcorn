@@ -1,3 +1,4 @@
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 
@@ -85,9 +86,12 @@ auto lower(std::string_view name) -> std::string
  *        clears its flags, PE = 0 resets the transfer, CR2's START, STOP, NACK and PECBYTE and
  *        the ISR flags. The event IRQ follows TXIS, RXNE, ADDR, NACKF, STOPF, TC and TCR with
  *        their enables, the error IRQ BERR, ARLO, OVR, PECERR, TIMEOUT and ALERT with ERRIE,
- *        which this model never sets. The targets are saved and loaded with the model. Not
- *        modelled, logged once: target mode, 10-bit addressing, SMBus and PEC, the autonomous
- *        trigger and DMA requests.
+ *        which this model never sets. DMA requests, RM0456 section 65.7, through the GPDMA peer,
+ *        low while PE is clear since PE = 0 clears their flags: `<instance>_tx_dma` follows
+ *        TXIS with CR1.TXDMAEN, `<instance>_rx_dma` RXNE with CR1.RXDMAEN, `<instance>_evc_dma`
+ *        TC with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets are saved and loaded
+ *        with the model. Not modelled, logged once: target mode, 10-bit addressing, SMBus and
+ *        PEC, the autonomous trigger.
  */
 class i2c final : public dispatch_model<i2c, i2c_state>
 {
@@ -115,6 +119,7 @@ public:
   void status_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
   void plain_written(std::uint32_t old, std::uint32_t now);
+  void trigger_written(std::uint32_t old, std::uint32_t now);
 
 private:
   [[nodiscard]] auto step() const -> phase;
@@ -174,11 +179,18 @@ private:
   core::clock_domain                           kernel_;
   irq_line&                                    event_line_;
   irq_line&                                    error_line_;
+  field_ref                                    tx_dma_enable_;
+  field_ref                                    rx_dma_enable_;
+  field_ref                                    complete_dma_enable_;
+  field_ref                                    reload_dma_enable_;
+  dma_signal                                   tx_dma_;
+  dma_signal                                   rx_dma_;
+  dma_signal                                   event_dma_;
   bool                                         unsupported_logged_{};
   bool                                         no_clock_logged_{};
 };
 
-constexpr std::array<write_entry<i2c>, 10> i2c_writes{
+constexpr std::array<write_entry<i2c>, 11> i2c_writes{
     {
      {"CR1", &i2c::enable_written},
      {"CR2", &i2c::command_written},
@@ -190,6 +202,7 @@ constexpr std::array<write_entry<i2c>, 10> i2c_writes{
      {"ICR", &i2c::clear_written},
      {"RXDR", &i2c::plain_written},
      {"TXDR", &i2c::plain_written},
+     {"I2C_AUTOCR", &i2c::trigger_written},
      }
 };
 
@@ -210,7 +223,12 @@ i2c::i2c(
       stop_detected_{field("ISR", "STOPF")}, nack_received_{field("ISR", "NACKF")},
       busy_{field("ISR", "BUSY")}, error_enable_{field("CR1", "ERRIE")},
       kernel_{ctx.clock.domain(lower(desc.name))}, event_line_{irq(desc.name + "_EV_IRQn")},
-      error_line_{irq(desc.name + "_ER_IRQn")}
+      error_line_{irq(desc.name + "_ER_IRQn")}, tx_dma_enable_{field("CR1", "TXDMAEN")},
+      rx_dma_enable_{field("CR1", "RXDMAEN")}, complete_dma_enable_{field("I2C_AUTOCR", "TCDMAEN")},
+      reload_dma_enable_{field("I2C_AUTOCR", "TCRDMAEN")},
+      tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
+      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"},
+      event_dma_{ctx.peers, lower(desc.name) + "_evc_dma"}
 {
   for(auto const name : {"START", "STOP", "NACK", "PECBYTE"})
   {
@@ -247,10 +265,8 @@ i2c::i2c(
   {
     errors_.push_back(field("ISR", name));
   }
-  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 12>{
+  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 10>{
           {
-           {"CR1", "TXDMAEN"},
-           {"CR1", "RXDMAEN"},
            {"CR1", "SBC"},
            {"CR1", "NOSTRETCH"},
            {"CR1", "GCEN"},
@@ -487,6 +503,9 @@ void i2c::reset(register_file& regs, reset_kind)
   auto const generation = state_.generation + 1;
   state_                = {};
   state_.generation     = generation;
+  tx_dma_.resolve();
+  rx_dma_.resolve();
+  event_dma_.resolve();
   flags();
 }
 
@@ -522,6 +541,12 @@ void i2c::flags()
   {
     error_line_.lower();
   }
+  auto const complete =
+      get(regs_, complete_dma_enable_) != 0 and get(regs_, transfer_complete_) != 0;
+  auto const reload = get(regs_, reload_dma_enable_) != 0 and get(regs_, reload_complete_) != 0;
+  tx_dma_.set(get(regs_, tx_dma_enable_) != 0 and get(regs_, tx_interrupt_) != 0);
+  rx_dma_.set(get(regs_, rx_dma_enable_) != 0 and get(regs_, rx_full_) != 0);
+  event_dma_.set(complete or reload);
 }
 
 void i2c::warn_unsupported()
@@ -534,8 +559,8 @@ void i2c::warn_unsupported()
   {
     warn(
         "CR1",
-        "target mode, 10-bit addressing, SMBus, PEC, the autonomous trigger or DMA requests are "
-        "configured: not modelled, the I2C runs as a plain 7-bit controller");
+        "target mode, 10-bit addressing, SMBus, PEC or the autonomous trigger is configured: not "
+        "modelled, the I2C runs as a plain 7-bit controller");
   }
 }
 
@@ -628,6 +653,11 @@ void i2c::clear_written(std::uint32_t, std::uint32_t now)
 
 void i2c::plain_written(std::uint32_t, std::uint32_t)
 {}
+
+void i2c::trigger_written(std::uint32_t, std::uint32_t)
+{
+  warn_unsupported();
+}
 
 auto i2c::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
     -> std::expected<std::uint32_t, bus_error>

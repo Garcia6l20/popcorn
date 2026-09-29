@@ -1,5 +1,7 @@
+#include "dma.hpp"
 #include "stm32_fixture.hpp"
 
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/devices/i2c_eeprom.hpp>
@@ -12,11 +14,15 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -159,6 +165,66 @@ auto eeprom_options() -> devices::eeprom_24xx_options
       .address = 0x50, .size = 4096, .address_bytes = 2, .page_size = 16, .image = eeprom_image()};
 }
 
+class request_probe final : public popcorn::periph::model, public stm32::dma_controller
+{
+public:
+  std::map<std::uint32_t, bool> levels;
+
+  void on_request(std::uint32_t request, bool level) override
+  {
+    levels[request] = level;
+  }
+
+  [[nodiscard]] auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> override
+  {
+    if(signal == "i2c1_rx_dma")
+    {
+      return 12;
+    }
+    if(signal == "i2c1_tx_dma")
+    {
+      return 13;
+    }
+    if(signal == "i2c1_evc_dma")
+    {
+      return 14;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
 struct rig
 {
   std::shared_ptr<devices::eeprom_24xx> eeprom =
@@ -175,17 +241,34 @@ struct rig
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
-  explicit rig(std::string_view entry)
+  explicit rig(std::string_view entry, bool probe = false)
   {
     board.i2c["I2C1"] = {memory, table, picky};
     auto options      = popcorn::testing::stm32_options();
     options.models    = stm32::factories(board, u575());
-    f                 = std::make_unique<stm32_fixture>(u575(), "i2c_ll", std::move(options));
+    if(probe)
+    {
+      options.models.insert_or_assign(
+          "GPDMA1",
+          [](popcorn::periph::model_context&,
+             popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+            return std::make_shared<request_probe>();
+          });
+    }
+    f = std::make_unique<stm32_fixture>(u575(), "i2c_ll", std::move(options));
     REQUIRE(
         f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("i2c_ll", "main")})
             .reason
         == stop_reason::address);
     f->set("pc", sym("i2c_ll", entry));
+  }
+
+  [[nodiscard]] auto level(std::uint32_t request) const -> bool
+  {
+    auto* const probe = f->model_of<request_probe>("GPDMA1");
+    REQUIRE(probe != nullptr);
+    auto const found = probe->levels.find(request);
+    return found != probe->levels.end() and found->second;
   }
 
   auto finish() const -> std::vector<std::uint32_t>
@@ -842,4 +925,141 @@ TEST_CASE("TXIS stays low during TCR and comes back once NBYTES is written again
   CHECK(b.get("ISR", "TC") == 1);
   REQUIRE(r.table->events.size() == 3);
   CHECK(r.table->events[2] == bus_event{'w', 0x42, r.table->events[2].at});
+}
+
+TEST_CASE("GPDMA reads 32 EEPROM bytes through the I2C1 RX request, twice the same")
+{
+  std::vector<bus_event> first;
+  std::vector<std::byte> first_state;
+  for(int run = 0; run < 2; ++run)
+  {
+    rig r{"dma"};
+    CHECK(r.finish() == std::vector<std::uint32_t>{32, 1});
+    auto const reads = of_kind(r.memory->events, 'r');
+    REQUIRE(reads.size() == 32);
+    for(std::size_t index = 1; index < reads.size(); ++index)
+    {
+      CAPTURE(index);
+      CHECK(reads[index].at - reads[index - 1].at == byte_ps);
+    }
+    auto const state = core::encode_snapshot(r.f->target->snapshot().data());
+    if(run == 0)
+    {
+      first       = r.memory->events;
+      first_state = state;
+    }
+    else
+    {
+      CHECK(r.memory->events == first);
+      CHECK(state == first_state);
+    }
+  }
+}
+
+TEST_CASE("a snapshot mid-DMA read restores to the same bytes and the same bus times")
+{
+  rig r{"dma"};
+  REQUIRE(
+      r.f->run_to_stop({.max_instructions = icount{100'000'000},
+                        .stop_when =
+                            [&] {
+                              auto const reads = of_kind(r.memory->events, 'r').size();
+                              return reads > 4 and reads < 28;
+                            }})
+          .reason
+      == stop_reason::user);
+  auto const saved = r.f->target->snapshot();
+  auto const mark  = r.memory->events.size();
+  auto const log   = r.finish();
+  CHECK(log == std::vector<std::uint32_t>{32, 1});
+  auto const tail = std::vector(
+      r.memory->events.begin() + static_cast<std::ptrdiff_t>(mark), r.memory->events.end());
+
+  rig other{"idle"};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.finish() == log);
+  CHECK(other.memory->events == tail);
+}
+
+TEST_CASE("the I2C1 DMA requests follow TXIS, RXNE, TC and TCR with their enables and PE")
+{
+  constexpr std::uint32_t rx_request  = 12;
+  constexpr std::uint32_t tx_request  = 13;
+  constexpr std::uint32_t evc_request = 14;
+  rig                     r{"idle", true};
+  bus                     b{*r.f};
+  b.controller();
+  b.command(0x38, 2, false, false);
+  b.run_until(b.now() + address_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "TXIS") == 1);
+  CHECK_FALSE(r.level(tx_request));
+  b.set("CR1", "TXDMAEN", 1);
+  CHECK(r.level(tx_request));
+  b.send(0x40);
+  CHECK(r.level(tx_request));
+  b.send(0x02);
+  CHECK_FALSE(r.level(tx_request));
+  b.run_until(b.now() + 2 * byte_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "TC") == 1);
+  REQUIRE(b.get("ISR", "TXE") == 1);
+  CHECK_FALSE(r.level(tx_request));
+  CHECK_FALSE(r.level(evc_request));
+  b.set("I2C_AUTOCR", "TCDMAEN", 1);
+  CHECK(r.level(evc_request));
+  b.command(0x38, 1, true, false, true);
+  CHECK_FALSE(r.level(evc_request));
+  b.run_until(b.now() + address_ps + byte_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "RXNE") == 1);
+  REQUIRE(b.get("ISR", "TCR") == 1);
+  CHECK_FALSE(r.level(rx_request));
+  CHECK_FALSE(r.level(evc_request));
+  b.set("I2C_AUTOCR", "TCRDMAEN", 1);
+  CHECK(r.level(evc_request));
+  b.set("CR1", "RXDMAEN", 1);
+  CHECK(r.level(rx_request));
+  b.set("CR1", "PE", 0);
+  CHECK_FALSE(r.level(evc_request));
+  CHECK_FALSE(r.level(rx_request));
+}
+
+TEST_CASE("clearing PE drops the TX request, reading RXDR drops the RX request")
+{
+  constexpr std::uint32_t rx_request = 12;
+  constexpr std::uint32_t tx_request = 13;
+  rig                     r{"idle", true};
+  bus                     b{*r.f};
+  b.controller();
+  b.set("CR1", "TXDMAEN", 1);
+  b.set("CR1", "RXDMAEN", 1);
+  b.command(0x38, 1, false, true);
+  b.run_until(b.now() + address_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "TXIS") == 1);
+  CHECK(r.level(tx_request));
+  b.set("CR1", "PE", 0);
+  CHECK_FALSE(r.level(tx_request));
+  b.set("CR1", "PE", 1);
+  b.command(0x38, 1, true, true);
+  b.run_until(b.now() + address_ps + byte_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "RXNE") == 1);
+  CHECK(r.level(rx_request));
+  CHECK(b.receive() == 0xFF);
+  CHECK_FALSE(r.level(rx_request));
+}
+
+TEST_CASE("setting AUTOCR.TRIGEN logs the unmodelled trigger once, at the write")
+{
+  rig                           r{"idle"};
+  bus                           b{*r.f};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  b.controller();
+  b.set("I2C_AUTOCR", "TRIGEN", 1);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].kind == core::log_kind::model_warning);
+  CHECK(logged[0].peripheral == "I2C1");
+  CHECK(logged[0].message.contains("trigger"));
+  b.set("I2C_AUTOCR", "TRIGPOL", 1);
+  CHECK(logged.size() == 1);
 }

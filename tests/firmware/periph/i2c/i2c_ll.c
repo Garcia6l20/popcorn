@@ -1,5 +1,6 @@
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
+#include "stm32u5xx_ll_dma.h"
 #include "stm32u5xx_ll_i2c.h"
 
 #define EEPROM_ADDRESS    (0x50u << 1)
@@ -11,6 +12,7 @@ static uint8_t           buffer[300];
 static volatile uint32_t nack_entries;
 static volatile uint32_t stop_entries;
 static volatile uint32_t event_entries;
+static volatile uint32_t dma_done;
 
 void I2C1_EV_IRQHandler(void);
 void idle(void);
@@ -18,6 +20,8 @@ void eeprom_rw(void);
 void nack(void);
 void table(void);
 void reload(void);
+void dma(void);
+void GPDMA1_Channel4_IRQHandler(void);
 
 void idle(void)
 {
@@ -224,6 +228,54 @@ void reload(void)
   }
   LOG(equal);
   LOG(reloads);
+  DONE();
+}
+
+void GPDMA1_Channel4_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_4))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_4);
+    ++dma_done;
+  }
+}
+
+void dma(void)
+{
+  configure();
+  static uint8_t const address[2] = {0x00, 0x40};
+  send(EEPROM_ADDRESS, address, sizeof address, LL_I2C_MODE_SOFTEND);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  LL_DMA_ConfigTransfer(
+      GPDMA1, LL_DMA_CHANNEL_4,
+      LL_DMA_SRC_FIXED
+          | LL_DMA_DEST_INCREMENT
+          | LL_DMA_SRC_DATAWIDTH_BYTE
+          | LL_DMA_DEST_DATAWIDTH_BYTE);
+  LL_DMA_SetDataTransferDirection(GPDMA1, LL_DMA_CHANNEL_4, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+  LL_DMA_SetPeriphRequest(GPDMA1, LL_DMA_CHANNEL_4, LL_GPDMA1_REQUEST_I2C1_RX);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_4, 32);
+  LL_DMA_SetSrcAddress(GPDMA1, LL_DMA_CHANNEL_4, (uint32_t)&I2C1->RXDR);
+  LL_DMA_SetDestAddress(GPDMA1, LL_DMA_CHANNEL_4, (uint32_t)buffer);
+  LL_DMA_EnableIT_TC(GPDMA1, LL_DMA_CHANNEL_4);
+  NVIC_EnableIRQ(GPDMA1_Channel4_IRQn);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_4);
+  LL_I2C_EnableDMAReq_RX(I2C1);
+  LL_I2C_HandleTransfer(
+      I2C1, EEPROM_ADDRESS, LL_I2C_ADDRSLAVE_7BIT, 32, LL_I2C_MODE_AUTOEND,
+      LL_I2C_GENERATE_START_READ);
+  wait_stop();
+  while(dma_done == 0)
+  {
+  }
+  LL_I2C_DisableDMAReq_RX(I2C1);
+  uint32_t equal = 0;
+  for(uint32_t index = 0; index < 32; ++index)
+  {
+    equal += buffer[index] == (uint8_t)(0x40 + index) ? 1u : 0u;
+  }
+  LOG(equal);
+  LOG(dma_done);
   DONE();
 }
 
