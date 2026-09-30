@@ -84,7 +84,6 @@ private:
   std::array<field_ref, pins>     brr_{};
   std::array<field_ref, pins>     lock_{};
   field_ref                       lock_key_;
-  exti_input*                     exti_{};
   std::uint32_t                   reported_{};
   std::uint32_t                   notifying_{};
   std::shared_ptr<listener_table> listeners_ = std::make_shared<listener_table>();
@@ -136,7 +135,6 @@ void gpio::reset(register_file& regs, reset_kind)
   }
   state_.lock_step  = 0;
   state_.lock_value = 0;
-  exti_             = dynamic_cast<exti_input*>(ctx_.peers.find("EXTI"));
   settle(false);
 }
 
@@ -214,6 +212,7 @@ void gpio::settle(bool notify)
     reported_ = before;
   }
   ++notifying_;
+  auto* const                exti = dynamic_cast<exti_input*>(ctx_.peers.find("EXTI"));
   std::vector<std::uint64_t> ids;
   for(auto const& [id, listener] : listeners_->entries)
   {
@@ -236,9 +235,9 @@ void gpio::settle(bool notify)
         listener(pin, high);
       }
     }
-    if(exti_ != nullptr)
+    if(exti != nullptr)
     {
-      exti_->pin_changed(port_, pin, high);
+      exti->pin_changed(port_, pin, high);
     }
   }
   --notifying_;

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -277,4 +278,20 @@ TEST_CASE("a listener that drives a pin the same change moved reports each final
       == std::vector<std::pair<std::uint8_t, bool>>{
           {13, false}
   });
+}
+
+TEST_CASE("a machine restored from saved bytes without a reset forwards a pin edge to EXTI")
+{
+  auto       f     = at_breakpoint();
+  auto const bytes = popcorn::core::encode_snapshot(f.target->snapshot().data());
+  auto       fresh = popcorn::testing::stm32_fixture{u575(), "gpio_ll"};
+  auto       other = std::make_unique<popcorn::core::machine>(
+      u575(), popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options());
+  other->load(popcorn::testing::elf("gpio_ll"));
+  other->restore(popcorn::core::snapshot{popcorn::core::decode_snapshot(bytes)});
+  fresh.target = std::move(other);
+
+  port(fresh, "GPIOC").drive(13, false);
+  CHECK(fresh.field("EXTI", "EXTI_FPR1", "FPIF13") == 1);
+  CHECK(count(finished(fresh), exti13_mark) == 1);
 }

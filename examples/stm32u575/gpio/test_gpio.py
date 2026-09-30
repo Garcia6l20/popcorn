@@ -84,11 +84,6 @@ async def test_a_press_runs_the_exti13_handler_once(machine: Machine) -> None:
     assert entries.count(EXTI13) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="known issue restore-into-unreset-machine: a machine restored from the boot snapshot"
-    " without a reset never forwards GPIO edges to EXTI",
-)
 async def test_a_second_machine_from_the_boot_snapshot_takes_presses(
     machine_factory: MachineFactory,
 ) -> None:
