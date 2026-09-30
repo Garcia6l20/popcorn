@@ -1,0 +1,12 @@
+[project]
+name = "gpio-button"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/gpio_button.elf"
+
+[boot]
+until = "main"
+budget = 1_000_000
