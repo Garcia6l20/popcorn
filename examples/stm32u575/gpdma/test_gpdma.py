@@ -13,8 +13,8 @@ The whole run executes about 1200 translated blocks, the WFI wait sleeping betwe
 USART interrupts. Busy-polling the USART for the 31.75 ms the 352 frames take would run tens of
 thousands of blocks at 4 MHz, so the block count bounds show the CPU asleep.
 
-The USART port records what the firmware sends from the moment the test first takes it, so
-each test takes `machine.periph.USART1.port` before it runs the firmware.
+The USART port holds everything the firmware sent since the boot point the test starts from,
+so the tests read it after the run.
 """
 
 import itertools
@@ -40,18 +40,16 @@ async def run_transfers(machine: Machine) -> None:
 
 
 async def test_both_transfers_arrive_in_order(machine: Machine) -> None:
-    port = machine.periph.USART1.port
     await run_transfers(machine)
     assert machine.var("transfers_done").value == 2
 
-    frames = await port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
+    frames = await machine.periph.USART1.port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
     assert bytes(frame.data for frame in frames) == BLOCK + HEAD + TAIL
 
 
 async def test_the_dma_keeps_the_usart_busy_back_to_back(machine: Machine) -> None:
-    port = machine.periph.USART1.port
     await run_transfers(machine)
-    frames = await port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
+    frames = await machine.periph.USART1.port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
 
     frame_ps = 10 * machine.periph.USART1.BRR.value * 10**12 // PCLK2_HZ
     first, second = frames[: len(BLOCK)], frames[len(BLOCK) :]

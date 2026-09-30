@@ -333,6 +333,12 @@ public:
       model(std::string const& peripheral) const -> reflex::py::nb::object;
 
   /**
+   * @brief Names of the peripherals whose model is a built-in UART, in description order.
+   */
+  [[= py::doc{"Names of the peripherals whose model is a built-in UART."}]] [[nodiscard]] auto
+      uart_names() const -> std::vector<std::string>;
+
+  /**
    * @brief Connects a UART of the machine to Python, replacing its far end.
    * @param peripheral UART instance name.
    * @throws config_error when the description has no such peripheral.

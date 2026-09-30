@@ -10,11 +10,17 @@ import weakref
 
 import popcorn
 import pytest
-from popcorn import _core
+from popcorn import ModelError, _core
 from popcorn.board import Frame
+from popcorn.model import Model
 from popcorn.units import VirtualTime, ms, us
 
 FRAME_PS = 87_500_000
+USART1_TDR = 0x4001_3828
+
+
+class Silent(Model):
+    """A Python model with no register behaviour, standing in for a UART."""
 
 
 async def echo(m: popcorn.Machine, data: bytes) -> tuple[VirtualTime, list[Frame]]:
@@ -122,6 +128,42 @@ def test_a_stream_keeps_its_machine_and_both_are_freed_together(
     gc.collect()
     assert machine() is None
     assert not os.path.exists(path)
+
+
+def test_frames_sent_before_the_port_is_taken_wait_for_it(board: popcorn.Machine) -> None:
+    board.mem.u32[USART1_TDR] = ord("A")
+    saved = board.snapshot()
+    asyncio.run(board.run(for_=ms(1)))
+    uart = board.periph.USART1.port
+    assert uart.available == 1
+    assert asyncio.run(uart.read(1)) == b"A"
+
+    board.restore(saved)
+    assert uart.available == 0
+    asyncio.run(board.run(for_=ms(1)))
+    assert asyncio.run(uart.read(1)) == b"A"
+
+
+def test_a_secure_alias_shares_the_port_of_the_uart_it_aliases(board: popcorn.Machine) -> None:
+    board.mem.u32[USART1_TDR] = ord("A")
+    asyncio.run(board.run(for_=ms(1)))
+    assert board.periph.SEC_USART1.port is board.periph.USART1.port
+    assert asyncio.run(board.periph.SEC_USART1.port.read(1)) == b"A"
+
+    async def echo() -> bytes:
+        await board.periph.SEC_USART1.port.write(b"hi")
+        return await board.periph.USART1.port.read(2, for_=ms(10))
+
+    assert asyncio.run(echo()) == b"hi"
+
+
+def test_a_python_model_in_a_uart_slot_is_not_connected(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(u575, models={"USART2": Silent})
+    with pytest.raises(ModelError):
+        _ = m.periph.USART2.port
+    assert m.periph.USART1.port.available == 0
 
 
 def test_a_restore_drops_frames_not_read_yet(board: popcorn.Machine) -> None:

@@ -25,8 +25,8 @@ uv run pytest -q examples/stm32u575/gpdma
 - `test_gpdma.py`:
   - The USART port collects the 352 bytes, with frames back to back at the BRR rate.
   - A block trace shows the CPU mostly asleep while the DMA works.
-  - The port records only once taken, so each test takes `machine.periph.USART1.port` before
-    it runs the firmware.
+  - The port holds what the firmware sent since the boot point the test starts from, so the
+    tests read it after the run.
 - `firmware/main.c`: the two channel setups, the linked-list nodes and the WFI wait.
 
 ## Rebuild the firmware

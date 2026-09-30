@@ -9,7 +9,7 @@ import os
 import time
 import tty
 import weakref
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -47,6 +47,12 @@ class UartStream:
     configured. Bytes the firmware transmits are queued with the time their stop bit ended, no
     Python call per byte. Deterministic: the same writes at the same virtual times give the same
     frames at the same times.
+
+    Capture starts at power-on or at the last `Machine.restore`: every built-in UART is
+    connected when the machine is built, so frames sent before the test first takes `port` wait
+    in the queue. An alias, such as a secure address window of the same USART, shares the
+    stream of the peripheral serving it. The queue grows by one frame per transmitted character
+    until read, about 16 bytes each.
 
     `Machine.restore` empties the queue of transmitted frames not read yet, since they came
     from a run the restore undoes. Bytes written and not yet delivered are part of the UART
@@ -245,25 +251,36 @@ class PtyBridge:
 class UartPorts:
     """The Python ends of a machine's UARTs, one link and one stream per UART."""
 
-    __slots__ = ("_connect", "_links", "_stimulus", "_streams", "_wait", "bridges")
+    __slots__ = ("_aliases", "_connect", "_links", "_stimulus", "_streams", "_wait", "bridges")
 
     def __init__(
         self,
         connect: Callable[[str], _core.UartLink],
+        uarts: Iterable[str],
+        aliases: Mapping[str, str],
         wait: Waiter,
         stimulus: Callable[[], None],
     ) -> None:
-        """Wire UARTs through `connect`, reads running the machine through `wait`, writes
-        checked by `stimulus`."""
+        """Connect every UART named in `uarts` through `connect` at once, so each one queues
+        what the firmware transmits from power-on. `aliases` maps an alias, such as a secure
+        address window, to the peripheral serving it, which shares its link. Reads run the
+        machine through `wait`, writes are checked by `stimulus`."""
+        self._aliases = dict(aliases)
         self._connect = connect
         self._wait = wait
         self._stimulus = stimulus
-        self._links: dict[str, _core.UartLink] = {}
+        self._links: dict[str, _core.UartLink] = {name: connect(name) for name in uarts}
         self._streams: dict[str, UartStream] = {}
         self.bridges: dict[str, PtyBridge] = {}
 
+    def serving(self, name: str) -> str:
+        """The peripheral that serves `name`, `name` itself unless it is an alias."""
+        return self._aliases.get(name, name)
+
     def link(self, name: str) -> _core.UartLink:
-        """The native link of UART `name`, connected on first use."""
+        """The native link of UART `name` or of the UART its alias names, connected at machine
+        build for a built-in UART."""
+        name = self.serving(name)
         link = self._links.get(name)
         if link is None:
             link = self._links[name] = self._connect(name)
@@ -276,6 +293,7 @@ class UartPorts:
             ModelError: The peripheral's model is not a UART.
             ConfigError: The description has no such peripheral.
         """
+        name = self.serving(name)
         stream = self._streams.get(name)
         if stream is None:
             stream = UartStream(name, self.link(name), self._wait, self.bridges, self._stimulus)
@@ -297,7 +315,11 @@ class UartPorts:
 
 class Board:
     """What is wired to the MCU: host ptys bridged to its UARTs and the Python devices on its
-    buses, `m.board`."""
+    buses, `m.board`.
+
+    Every built-in UART is connected to Python from power-on: its `port` holds what the
+    firmware sent since power-on or the last `Machine.restore`, unless a pty bridge takes it.
+    """
 
     __slots__ = ("_devices", "_ports")
 
@@ -334,6 +356,7 @@ class Board:
             ConfigError: The description has no such peripheral.
         """
         bridges = self._ports.bridges
+        name = self._ports.serving(name)
         bridge = bridges.get(name)
         if bridge is None:
             bridge = PtyBridge(name, self._ports.link(name), deadlock_warning)

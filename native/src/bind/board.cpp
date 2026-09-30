@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <format>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace popcorn::bind
@@ -49,6 +50,21 @@ auto uart_link::drain(std::uint64_t count) -> std::vector<uart_frame>
   std::vector<uart_frame> out(endpoint_->frames.begin(), endpoint_->frames.begin() + taken);
   endpoint_->frames.erase(endpoint_->frames.begin(), endpoint_->frames.begin() + taken);
   return out;
+}
+
+auto machine_handle::uart_names() const -> std::vector<std::string>
+{
+  std::vector<std::string> names;
+  for(auto const& unit : machine_->description().peripherals)
+  {
+    if(not unit.alias_of
+       and dynamic_cast<periph::stm32::uart_port*>(machine_->model(unit.name))
+       != nullptr)
+    {
+      names.push_back(unit.name);
+    }
+  }
+  return names;
 }
 
 auto machine_handle::attach_uart(std::string const& peripheral) -> uart_link

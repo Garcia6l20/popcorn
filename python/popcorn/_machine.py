@@ -422,7 +422,13 @@ class Machine:
         self._background = False
         self._waiters: list[_Waiter] = []
         self._thread = threading.get_ident()
-        self._ports = UartPorts(self._handle.attach_uart, self._wait_until, self._require_owner)
+        self._ports = UartPorts(
+            self._handle.attach_uart,
+            self._handle.uart_names(),
+            {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None},
+            self._wait_until,
+            self._require_owner,
+        )
         self._devices = attached
         for targets in attached.values():
             for target in targets:

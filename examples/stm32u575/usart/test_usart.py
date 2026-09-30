@@ -48,10 +48,6 @@ async def test_each_line_is_echoed_in_turn(machine: Machine) -> None:
         assert await port.read(len(expected), for_=ms(10)) == expected
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the UART link connects on the first port access, so frames sent earlier are lost",
-)
 async def test_the_banner_is_kept_for_a_port_taken_after_the_run(
     machine_factory: MachineFactory,
 ) -> None:
