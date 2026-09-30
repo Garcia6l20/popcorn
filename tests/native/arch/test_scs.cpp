@@ -449,3 +449,45 @@ TEST_CASE("the register view reads and writes special registers while unprivileg
   CHECK(f.reg("sp") == 0x2000'2000);
   CHECK(f.reg("basepri") == 0x60);
 }
+
+TEST_CASE("VTOR reads bits 6:0 clear and a write drops the unaligned reset table's low bits")
+{
+  constexpr address                       table_a  = 0x2001'0008;
+  constexpr address                       table_b  = 0x2001'1000;
+  constexpr address                       code     = 0x2001'2000;
+  constexpr address                       vtor     = 0xE000'ED08;
+  constexpr address                       pendsv   = 4 * 14;
+  constexpr address                       handler  = code + 0x3a;
+  constexpr address                       handler2 = code + 0x3e;
+  constexpr address                       decoy    = code + 0x42;
+  constexpr std::array<std::uint16_t, 35> thumb{
+      0xf64e, 0x5004, 0xf2ce, 0x0000, 0xf04f, 0x5180, 0x6001, 0xf3bf, 0x8f6f,
+      0xf64e, 0x5008, 0xf2ce, 0x0000, 0xf241, 0x0100, 0xf2c2, 0x0101, 0x6001,
+      0x6802, 0xf64e, 0x5004, 0xf2ce, 0x0000, 0xf04f, 0x5180, 0x6001, 0xf3bf,
+      0x8f6f, 0xe7fe, 0x240a, 0x4770, 0x250b, 0xbe01, 0x260d, 0xbe01};
+
+  arch_fixture f{m33(), "scs", {.vector_table = table_a}};
+  auto         mem = f.target->mem();
+  for(auto const [index, half] : std::views::enumerate(thumb))
+  {
+    REQUIRE(mem.write(code + 2 * static_cast<address>(index), 2, half));
+  }
+  REQUIRE(mem.write(table_a, 4, 0x2002'0000));
+  REQUIRE(mem.write(table_a + 4, 4, code | 1u));
+  REQUIRE(mem.write(table_a + pendsv, 4, handler | 1u));
+  REQUIRE(mem.write((table_a & ~0x7fu) + pendsv, 4, decoy | 1u));
+  REQUIRE(mem.write(table_b + pendsv, 4, handler2 | 1u));
+  REQUIRE(mem.write((table_b | (table_a & 0x7fu)) + pendsv, 4, decoy | 1u));
+  f.target->reset();
+  CHECK(f.reg("pc") == code);
+  CHECK(f.reg("msp") == 0x2002'0000);
+  CHECK(f.word(vtor) == (table_a & ~0x7fu));
+
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.reg("r4") == 0xa);
+  CHECK(f.reg("r2") == table_b);
+  CHECK(f.reg("r5") == 0xb);
+  CHECK(f.reg("r6") == 0);
+  CHECK(f.reg("pc") == handler2 + 4);
+  CHECK(f.word(vtor) == table_b);
+}

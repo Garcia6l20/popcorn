@@ -286,7 +286,7 @@ auto system_space::read_scs(std::uint32_t offset) const -> std::uint32_t
       return icsr;
     }
     case 0xd08:
-      return scs.vtor;
+      return scs.vtor & vtor_writable;
     case 0xd0c:
       return aircr_key_stat << 16 | scs.prigroup << 8;
     case 0xd10:
@@ -501,7 +501,7 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
       return;
     }
     case 0xd08:
-      scs.vtor = merge(scs.vtor, value, mask & vtor_writable);
+      scs.vtor = merge(scs.vtor & vtor_writable, value, mask & vtor_writable);
       return;
     case 0xd0c:
       if(mask == ~0u and value >> 16 == aircr_key)
