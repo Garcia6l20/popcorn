@@ -30,6 +30,7 @@ firmwares = {
         "rtc_ll",
         "spi_ll",
         "i2c_ll",
+        "sai_ll",
     )
 }
 u575_env = {
@@ -64,6 +65,7 @@ u575_programs = [
         ("stm32-rtc", "test_rtc.cpp"),
         ("stm32-spi", "test_spi.cpp"),
         ("stm32-i2c", "test_i2c.cpp"),
+        ("stm32-sai", "test_sai.cpp"),
     )
 ]
 for program in u575_programs:

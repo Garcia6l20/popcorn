@@ -21,6 +21,7 @@ sources += [
         "rtc.cpp",
         "spi.cpp",
         "i2c.cpp",
+        "sai.cpp",
     )
 ]
 sources += [here / "devices" / name for name in ("at25sf.cpp", "i2c_eeprom.cpp", "i2c_table.cpp")]

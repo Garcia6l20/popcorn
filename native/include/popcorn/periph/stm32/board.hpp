@@ -2,6 +2,7 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/stm32/caches.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
@@ -52,13 +53,18 @@ struct board
    * shared by every machine built from these factories: give each machine its own board and
    * targets. */
   std::map<std::string, std::vector<std::shared_ptr<i2c_target>>, std::less<>> i2c{};
+  /** @brief What each SAI audio block is wired to, keyed by instance and block, such as
+   * `SAI1_A`. The SAI model copies the attachments when the machine is built: the endpoints stay
+   * shared. */
+  std::map<std::string, audio_attachment, std::less<>> audio{};
 };
 
 /**
  * @brief Factory per peripheral instance of @p part that a built-in model serves, for
  *        core::machine_options::models.
  * @param b Board the models read their configuration from, copied into the factories. UART
- *        endpoints, SPI devices and I2C targets are held by `shared_ptr` and stay shared.
+ *        endpoints, SPI devices, I2C targets and audio endpoints are held by `shared_ptr` and stay
+ *        shared.
  * @param part Description the machine is built from.
  * @return Factories keyed by instance name, aliases excluded.
  */

@@ -80,4 +80,10 @@ namespace popcorn::periph::stm32
  * @param b Board whose `i2c` lists each instance's targets, copied when a model is made.
  */
 [[nodiscard]] auto i2c_factory(board const& b) -> model_factory;
+
+/**
+ * @brief Factory of the SAI model, RM0456 section 69.
+ * @param b Board whose `audio` wires each audio block, copied: the endpoints stay shared.
+ */
+[[nodiscard]] auto sai_factory(board const& b) -> model_factory;
 }
