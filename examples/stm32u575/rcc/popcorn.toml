@@ -1,0 +1,15 @@
+[project]
+name = "rcc-clock"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/rcc_clock.elf"
+
+[boot]
+until = "main"
+budget = 1_000_000
+
+[models]
+strict = true

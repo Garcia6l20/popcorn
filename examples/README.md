@@ -5,6 +5,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 
 | example | firmware style | shows |
 | --- | --- | --- |
+| [stm32u575/rcc](stm32u575/rcc) | LL | HSE bypass to a 160 MHz PLL1, voltage range, flash latency, SysTick period in virtual time |
 | [stm32u575/spi](stm32u575/spi) | FreeRTOS, HAL init, LL driver | AT25SF NOR flash on the hardware SS output, an interrupt-driven transfer from a task, an application linked behind a bootloader offset |
 
 Every example has the same layout:
