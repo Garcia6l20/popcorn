@@ -24,6 +24,7 @@ dev = [
 
 [tool.pcons]
 variant = "release"
+variables = { POPCORN_BUILD_TESTS = "OFF", POPCORN_BUILD_EXAMPLES = "OFF" }
 
 [tool.ruff]
 target-version = "py314"

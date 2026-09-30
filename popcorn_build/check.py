@@ -48,15 +48,21 @@ def _examples() -> list[Stage]:
     ]
 
 
+GATE_VARIABLES = ("POPCORN_BUILD_TESTS=ON", "POPCORN_BUILD_EXAMPLES=ON")
+
+
 def stages(asan: bool) -> list[Stage]:
-    """The gate, in order. With @p asan, the native suite in build-asan only."""
+    """The gate, in order. With @p asan, the native suite in build-asan only.
+
+    The build stages set the test and example switches ON: a package build persists them OFF in
+    the same build directory."""
     if asan:
         return [
-            ("build", _pcons("-B", "build-asan", "--variant=asan")),
+            ("build", _pcons("-B", "build-asan", "--variant=asan", *GATE_VARIABLES)),
             ("test", _pcons("-B", "build-asan", "test")),
         ]
     return [
-        ("build", _pcons("-B", "build")),
+        ("build", _pcons("-B", "build", *GATE_VARIABLES)),
         ("test", _pcons("-B", "build", "test")),
         ("pytest", _python_tool("pytest", "-q", "tests/python")),
         *_examples(),

@@ -2,6 +2,7 @@ from pcons import Project, add_subdirectory, get_var
 
 from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, gcc_ar, project_dir, toolchain
+from popcorn_build.options import build_examples, build_tests
 from popcorn_build.python import (
     add_extension,
     add_package_install,
@@ -83,27 +84,30 @@ describe_schema = project.Program(
 describe_schema.link(core)
 regs_gen = project.Program("popcorn-regs-gen", env, sources=["native/src/tools/regs_gen.cpp"])
 regs_gen.link(core)
-add_header_check("headers", project_dir / "native" / "include", [core])
 
-smoke_support = add_subdirectory("tests/native/support").smoke_support
-for tree in ("tests/firmware", "tests/native"):
-    for script in sorted((project_dir / tree).glob("*/pcons-build.py")):
-        if script.parent.name != "support":
-            add_subdirectory(script.parent.relative_to(project_dir))
-for script in sorted((project_dir / "examples").glob("*/*/pcons-build.py")):
-    add_subdirectory(script.parent.relative_to(project_dir))
+if build_tests:
+    add_header_check("headers", project_dir / "native" / "include", [core])
+    smoke_support = add_subdirectory("tests/native/support").smoke_support
+    for tree in ("tests/firmware", "tests/native"):
+        for script in sorted((project_dir / tree).glob("*/pcons-build.py")):
+            if script.parent.name != "support":
+                add_subdirectory(script.parent.relative_to(project_dir))
+if build_examples:
+    for script in sorted((project_dir / "examples").glob("*/*/pcons-build.py")):
+        add_subdirectory(script.parent.relative_to(project_dir))
 
 if VARIANT != "asan":
     ext = add_extension("popcorn", "_core", add_subdirectory("native/src/bind").sources)
     ext.link(core)
     ext.link(obs.popcorn_obs)
     ext.link(popcorn_config)
-    smoke_ext = add_extension(
-        "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]
-    )
-    smoke_ext.link(smoke_support)
-    smoke_ext.link(core)
-    add_stub(smoke_ext, "popcorn_testing", "_smoke")
+    if build_tests:
+        smoke_ext = add_extension(
+            "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]
+        )
+        smoke_ext.link(smoke_support)
+        smoke_ext.link(core)
+        add_stub(smoke_ext, "popcorn_testing", "_smoke")
 
     python_package = project_dir / "python" / "popcorn"
     staged_sources = add_package_install(

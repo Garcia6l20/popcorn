@@ -19,6 +19,7 @@ from pcons.packages.fetch.cli import (
 from popcorn_build.config import build_dir, project_dir
 from popcorn_build.firmware import toolchain_found
 from popcorn_build.manifest import is_firmware_only, packages_to_fetch
+from popcorn_build.options import build_examples, build_tests
 
 deps_file = project_dir / "deps.toml"
 deps_dir = build_dir / "deps"
@@ -45,7 +46,9 @@ manifest: dict[str, dict[str, Any]] = load_deps_file(deps_file)["packages"]
 
 
 def _fetch_missing() -> dict[str, Path]:
-    wanted = packages_to_fetch(manifest, with_firmware=toolchain_found)
+    wanted = packages_to_fetch(
+        manifest, with_firmware=toolchain_found and (build_tests or build_examples)
+    )
     missing = [name for name in wanted if not (pkg_dir / f"{name}.pcons-pkg.toml").exists()]
     if missing:
         _log_fetches()
