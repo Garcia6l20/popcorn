@@ -302,11 +302,18 @@ def test_no_project_file(pytester: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(["*no project file*pass --popcorn-project or add popcorn.toml*"])
 
 
-def test_the_project_file_of_an_ini_rootdir(pytester: pytest.Pytester) -> None:
+@pytest.mark.parametrize(
+    ("inifile", "content"),
+    [
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-p no:asyncio"\n'),
+        ("pytest.ini", "[pytest]\naddopts = -p no:asyncio\n"),
+    ],
+)
+def test_the_project_file_of_an_ini_rootdir(
+    pytester: pytest.Pytester, inifile: str, content: str
+) -> None:
     example = pytester.mkdir("example")
-    (example / "pyproject.toml").write_text(
-        '[tool.pytest.ini_options]\naddopts = "-p no:asyncio"\n'
-    )
+    (example / inifile).write_text(content)
     (example / "conftest.py").write_text('pytest_plugins = ["popcorn.pytest"]\n')
     write_project(pytester, directory=example)
     (example / "test_example.py").write_text(
