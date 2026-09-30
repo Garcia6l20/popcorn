@@ -90,6 +90,8 @@ for tree in ("tests/firmware", "tests/native"):
     for script in sorted((project_dir / tree).glob("*/pcons-build.py")):
         if script.parent.name != "support":
             add_subdirectory(script.parent.relative_to(project_dir))
+for script in sorted((project_dir / "examples").glob("*/*/pcons-build.py")):
+    add_subdirectory(script.parent.relative_to(project_dir))
 
 if VARIANT != "asan":
     ext = add_extension("popcorn", "_core", add_subdirectory("native/src/bind").sources)

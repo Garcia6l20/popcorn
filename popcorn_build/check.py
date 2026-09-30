@@ -37,6 +37,17 @@ def _clang_format() -> list[str]:
     return [clang_format, "--dry-run", "-Werror", *_native_sources()]
 
 
+def _examples() -> list[Stage]:
+    examples = sorted(ini.parent for ini in (project_dir / "examples").glob("*/*/pytest.ini"))
+    return [
+        (
+            f"{example.parent.name}/{example.name}",
+            _python_tool("pytest", "-q", str(example.relative_to(project_dir))),
+        )
+        for example in examples
+    ]
+
+
 def stages(asan: bool) -> list[Stage]:
     """The gate, in order. With @p asan, the native suite in build-asan only."""
     if asan:
@@ -48,6 +59,7 @@ def stages(asan: bool) -> list[Stage]:
         ("build", _pcons("-B", "build")),
         ("test", _pcons("-B", "build", "test")),
         ("pytest", _python_tool("pytest", "-q", "tests/python")),
+        *_examples(),
         ("pyright", _python_tool("pyright")),
         ("ruff", _python_tool("ruff", "check", ".")),
         ("black", _python_tool("black", "--check", "-q", ".")),

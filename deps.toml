@@ -36,3 +36,10 @@ sha256 = "9ce693dd15c41f02506adda79323c077912b3211303ca0d9b28b8ebe735a7031"
 version = "5.9.0"
 build = "none"
 firmware = true
+
+[packages.freertos-kernel]
+url = "https://github.com/FreeRTOS/FreeRTOS-Kernel/archive/refs/tags/V11.3.1.tar.gz"
+sha256 = "da9c9567368db9b2f1d053a344e7892587af6ee50398f0f14fba53405cc7c041"
+version = "11.3.1"
+build = "none"
+firmware = true

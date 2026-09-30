@@ -43,36 +43,48 @@ def firmware_env() -> Environment | None:
         _env = project.Environment(toolchain="gcc", name="firmware")
         _env.apply_cross_preset(cortex_m33)
         _env.build_prefix = FIRMWARE_PREFIX
-        _env.cc.flags.extend(["-std=c23", "-Os", "-g", "-Wall", "-Wextra", "-Werror"])
-        _env.cc.flags.append(
-            PathToken(
-                prefix="-ffile-prefix-map=", path=project_dir, path_type="absolute", suffix="=."
-            )
-        )
+        add_c_flags(_env)
     return _env
 
 
-def add_firmware(area: str, name: str, sources: Sequence[str | Path]) -> tuple[Path, Target | None]:
-    """Build tests/firmware/@p area/@p name.elf, or fall back to its committed prebuilt copy.
+def add_c_flags(env: Environment) -> None:
+    """C23, size-optimized with debug info, warnings as errors, project paths made relative."""
+    env.cc.flags.extend(["-std=c23", "-Os", "-g", "-Wall", "-Wextra", "-Werror"])
+    env.cc.flags.append(
+        PathToken(prefix="-ffile-prefix-map=", path=project_dir, path_type="absolute", suffix="=.")
+    )
 
-    @return The ELF path tests load and the target building it, None when the prebuilt copy is used.
-    With the toolchain, a firmware-check-@p name target fails when the loadable content of the
-    rebuilt ELF differs from the prebuilt one.
+
+def prebuilt_only(prebuilt: Path) -> Path:
+    """@p prebuilt, the committed ELF used without the cross toolchain.
+
+    @throws SystemExit The prebuilt ELF does not exist.
     """
-    prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt" / f"{name}.elf"
-    env = firmware_env()
-    if env is None:
-        if not prebuilt.is_file():
-            raise SystemExit(f"popcorn: no arm-none-eabi-gcc and no prebuilt firmware {prebuilt}")
-        _declared[area, name] = (prebuilt, None)
-        return prebuilt, None
+    if not prebuilt.is_file():
+        raise SystemExit(f"popcorn: no arm-none-eabi-gcc and no prebuilt firmware {prebuilt}")
+    return prebuilt
 
+
+def checked_program(
+    target_name: str,
+    name: str,
+    env: Environment,
+    sources: Sequence[str | Path],
+    linker_script: PathToken,
+    linker_file: Path,
+    prebuilt: Path,
+) -> tuple[Path, Target]:
+    """Link @p name.elf from @p sources with @p linker_script, checked against @p prebuilt.
+
+    @return The ELF path and its target. A firmware-check-@p name target fails when the loadable
+    content of the ELF differs from @p prebuilt.
+    """
     project = context.current_project
-    elf = project.Program(f"firmware-{area}-{name}", env, sources=list(sources))
+    elf = project.Program(target_name, env, sources=list(sources))
     elf.output_name = name
     elf.output_suffix = ".elf"
-    elf.private.link_flags.append(PathToken(prefix="-T", path=LINKER_SCRIPT, path_type="project"))
-    elf.depends(project_dir / LINKER_SCRIPT)
+    elf.private.link_flags.append(linker_script)
+    elf.depends(linker_file)
     elf_dir = elf.build_dir if elf.build_dir.is_absolute() else project.top.root_dir / elf.build_dir
     elf_path = elf_dir / f"{name}.elf"
 
@@ -90,6 +102,31 @@ def add_firmware(area: str, name: str, sources: Sequence[str | Path]) -> tuple[P
         ],
     )
     project.Alias("firmware-check", check)
+    return elf_path, elf
+
+
+def add_firmware(area: str, name: str, sources: Sequence[str | Path]) -> tuple[Path, Target | None]:
+    """Build tests/firmware/@p area/@p name.elf, or fall back to its committed prebuilt copy.
+
+    @return The ELF path tests load and the target building it, None when the prebuilt copy is used.
+    With the toolchain, a firmware-check-@p name target fails when the loadable content of the
+    rebuilt ELF differs from the prebuilt one.
+    """
+    prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt" / f"{name}.elf"
+    env = firmware_env()
+    if env is None:
+        _declared[area, name] = (prebuilt_only(prebuilt), None)
+        return prebuilt, None
+
+    elf_path, elf = checked_program(
+        f"firmware-{area}-{name}",
+        name,
+        env,
+        sources,
+        PathToken(prefix="-T", path=LINKER_SCRIPT, path_type="project"),
+        project_dir / LINKER_SCRIPT,
+        prebuilt,
+    )
     _declared[area, name] = (elf_path, elf)
     return elf_path, elf
 

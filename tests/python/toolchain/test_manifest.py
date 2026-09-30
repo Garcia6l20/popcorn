@@ -25,8 +25,8 @@ def test_only_a_true_firmware_key_marks_a_package() -> None:
     assert not is_firmware_only({"firmware": "yes"})
 
 
-def test_the_repository_manifest_marks_the_st_and_arm_packages_firmware_only() -> None:
+def test_the_repository_manifest_marks_the_st_arm_and_freertos_packages_firmware_only() -> None:
     manifest = tomllib.loads((Path(__file__).parents[3] / "deps.toml").read_text())["packages"]
     firmware = {name for name, entry in manifest.items() if is_firmware_only(entry)}
-    assert firmware == {"stm32u5-hal-driver", "cmsis-device-u5", "cmsis-core"}
+    assert firmware == {"stm32u5-hal-driver", "cmsis-device-u5", "cmsis-core", "freertos-kernel"}
     assert set(packages_to_fetch(manifest, with_firmware=False)).isdisjoint(firmware)
