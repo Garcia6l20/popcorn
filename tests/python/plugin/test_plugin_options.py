@@ -22,14 +22,14 @@ OPTIONS = (
 
 def test_help_lists_the_six_options(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    result = pytester.runpytest("--help")
+    result = pytester.runpytest("-p", "no:asyncio", "--help")
     assert result.ret == 0
     result.stdout.fnmatch_lines(["popcorn firmware emulation:", *(f"*{o}*" for o in OPTIONS)])
 
 
 def test_markers_lists_popcorn(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    result = pytester.runpytest("--markers")
+    result = pytester.runpytest("-p", "no:asyncio", "--markers")
     result.stdout.fnmatch_lines(["@pytest.mark.popcorn(config=None, budget=None, strict=None):*"])
 
 
@@ -51,7 +51,7 @@ def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
                 budget=None,
             )
         """)
-    pytester.runpytest().assert_outcomes(passed=1)
+    pytester.runpytest("-p", "no:asyncio").assert_outcomes(passed=1)
 
 
 def test_values_parse_relative_to_the_invocation_directory(
@@ -79,6 +79,8 @@ def test_values_parse_relative_to_the_invocation_directory(
         """))
     monkeypatch.chdir(here)
     result = pytester.runpytest(
+        "-p",
+        "no:asyncio",
         "--popcorn-project=sub/p.toml",
         "--popcorn-config=variant",
         "--popcorn-cov=out/cov.info",
@@ -105,7 +107,7 @@ def test_the_default_project_is_at_the_rootdir(
             assert project == Path({str(pytester.path)!r}) / "popcorn.toml"
         """))
     monkeypatch.chdir(here)
-    pytester.runpytest().assert_outcomes(passed=1)
+    pytester.runpytest("-p", "no:asyncio").assert_outcomes(passed=1)
 
 
 def test_bare_trace_on_fail_takes_the_default_directory(pytester: pytest.Pytester) -> None:
@@ -118,4 +120,4 @@ def test_bare_trace_on_fail_takes_the_default_directory(pytester: pytest.Pyteste
             assert settings.trace_on_fail
             assert settings.trace_dir is None
         """)
-    pytester.runpytest("--popcorn-trace-on-fail").assert_outcomes(passed=1)
+    pytester.runpytest("-p", "no:asyncio", "--popcorn-trace-on-fail").assert_outcomes(passed=1)

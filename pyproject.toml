@@ -18,6 +18,8 @@ dev = [
     "ruff",
     "black",
     "jsonschema",
+    "pytest-asyncio==1.4.0",
+    "pytest-xdist==3.8.0",
 ]
 
 [tool.pcons]

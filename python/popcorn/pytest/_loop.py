@@ -1,15 +1,17 @@
-"""The plugin's own event loop: async tests nobody else runs."""
+"""The plugin's own event loop: async tests and async fixtures nobody else runs."""
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import warnings
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Mapping
 from dataclasses import dataclass
 from typing import cast
 
 import pytest
+from _pytest.fixtures import FixtureDef, SubRequest, resolve_fixture_function
 
 type AsyncTest = Callable[..., Coroutine[object, object, object]]
 
@@ -24,6 +26,16 @@ class OwnedLoop:
     def __init__(self) -> None:
         self._runner: asyncio.Runner | None = None
 
+    @property
+    def started(self) -> bool:
+        """Whether the runner was created."""
+        return self._runner is not None
+
+    def run[T](self, coroutine: Coroutine[object, object, T], context: contextvars.Context) -> T:
+        """Run `coroutine` to completion on the loop in `context`, leaving the tasks it started
+        running."""
+        return self._get().run(coroutine, context=context)
+
     def run_test(self, function: AsyncTest, arguments: Mapping[str, object]) -> None:
         """Run the async test `function` with `arguments` to completion.
 
@@ -32,7 +44,7 @@ class OwnedLoop:
         next test. A task still running `CANCEL_WAIT` seconds after its cancellation is named in
         the warning and left on the loop: it never blocks the session.
         """
-        self._get().run(_guarded(function(**arguments)))
+        self._get().run(_guarded(function(**arguments)), context=contextvars.copy_context())
 
     def close(self) -> None:
         """Close the runner, cancelling what is left on the loop within `CANCEL_WAIT` seconds."""
@@ -145,6 +157,107 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
         return None
     owned_loop(pyfuncitem.config).run_test(function, call_arguments(pyfuncitem))
     return True
+
+
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_fixture_setup(
+    fixturedef: FixtureDef[object], request: SubRequest
+) -> Generator[None, object, object]:
+    """Run a coroutine or async generator fixture on the owned loop.
+
+    `trylast` puts this wrapper inside pytest-asyncio's and anyio's, which replace the fixtures
+    they run by sync functions first: what is still async here is nobody else's.
+    """
+    function: object = fixturedef.func
+    if not (inspect.iscoroutinefunction(function) or inspect.isasyncgenfunction(function)):
+        return (yield)
+    resolved: object = resolve_fixture_function(fixturedef, request)
+    loop = owned_loop(request.config)
+    sync = (
+        _async_generator_fixture(resolved, loop, request, fixturedef.argname)
+        if inspect.isasyncgenfunction(resolved)
+        else _coroutine_fixture(
+            cast(Callable[..., Coroutine[object, object, object]], resolved), loop, request
+        )
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fixturedef, "func", sync)
+        return (yield)
+
+
+def _coroutine_fixture(
+    function: Callable[..., Coroutine[object, object, object]],
+    loop: OwnedLoop,
+    request: SubRequest,
+) -> Callable[..., object]:
+    def setup(*args: object, **kwargs: object) -> object:
+        context = contextvars.copy_context()
+        value = loop.run(function(*args, **kwargs), context)
+        reset = _apply_changes(context)
+        if reset is not None:
+            request.addfinalizer(reset)
+        return value
+
+    return setup
+
+
+def _async_generator_fixture(
+    function: Callable[..., AsyncGenerator[object]],
+    loop: OwnedLoop,
+    request: SubRequest,
+    name: str,
+) -> Callable[..., object]:
+    def setup(*args: object, **kwargs: object) -> object:
+        generator = function(*args, **kwargs)
+        context = contextvars.copy_context()
+        value = loop.run(_first(generator), context)
+        reset = _apply_changes(context)
+
+        def teardown() -> None:
+            try:
+                loop.run(_finish(generator, name), context)
+            finally:
+                if reset is not None:
+                    reset()
+
+        request.addfinalizer(teardown)
+        return value
+
+    return setup
+
+
+def _apply_changes(context: contextvars.Context) -> Callable[[], None] | None:
+    """Set in the current context the variables `context` changed, and return what resets
+    them, None when it changed none."""
+    tokens: list[contextvars.Token[object]] = []
+    for variable, value in context.items():
+        try:
+            if variable.get() is value:
+                continue
+        except LookupError:
+            pass
+        tokens.append(variable.set(value))
+    if not tokens:
+        return None
+
+    def reset() -> None:
+        for token in tokens:
+            token.var.reset(token)
+
+    return reset
+
+
+async def _first(generator: AsyncGenerator[object]) -> object:
+    return await anext(generator)
+
+
+async def _finish(generator: AsyncGenerator[object], name: str) -> None:
+    try:
+        await anext(generator)
+    except StopAsyncIteration:
+        return
+    await generator.aclose()
+    raise ValueError(f"the async generator fixture {name} yielded twice")
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
