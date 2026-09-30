@@ -11,7 +11,8 @@ first, which adds 546 ps per frame.
 import itertools
 
 import pytest
-from popcorn import Machine
+from popcorn import Machine, StopReason
+from popcorn.pytest import MachineFactory
 from popcorn.units import ms, ns
 
 pytestmark = pytest.mark.popcorn(budget=2_000_000)
@@ -45,3 +46,16 @@ async def test_each_line_is_echoed_in_turn(machine: Machine) -> None:
         await port.write(word + b"\r\n")
         expected = b"echo: " + word + b"\r\n"
         assert await port.read(len(expected), for_=ms(10)) == expected
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the UART link connects on the first port access, so frames sent earlier are lost",
+)
+async def test_the_banner_is_kept_for_a_port_taken_after_the_run(
+    machine_factory: MachineFactory,
+) -> None:
+    fresh = await machine_factory.booted()
+    stop = await fresh.run(for_=ms(10))
+    assert stop.reason is StopReason.TIME, stop
+    assert await fresh.periph.USART1.port.read(len(BANNER), for_=ms(1)) == BANNER
