@@ -1,0 +1,12 @@
+[project]
+name = "gpdma-uart"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/gpdma_uart.elf"
+
+[boot]
+until = "main"
+budget = 1_000_000
