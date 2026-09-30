@@ -14,6 +14,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/tim](stm32u575/tim) | LL | TIM2 1 kHz update interrupt toggling PA5, TIM16 one-pulse after 50 ms, update period in virtual time |
 | [stm32u575/usart](stm32u575/usart) | HAL IT | a printf banner and a receive-to-idle line echo, frame timing at the BRR rate |
 | [stm32u575/spi](stm32u575/spi) | FreeRTOS, HAL init, LL driver | AT25SF NOR flash on the hardware SS output, an interrupt-driven transfer from a task, an application linked behind a bootloader offset |
+| [stm32u575/spi_mock](stm32u575/spi_mock) | HAL | a two-channel ADC written in Python as a `SpiTarget` on a software chip select: samples from a function of virtual time, chip select framing, `Machine(devices=)` next to the project file |
 
 Every example has the same layout:
 
