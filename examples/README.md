@@ -8,6 +8,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/gpio](stm32u575/gpio) | HAL | a host-driven button on an EXTI falling edge toggling an LED, WFI between presses |
 | [stm32u575/gpdma](stm32u575/gpdma) | HAL DMA | USART1 TX over GPDMA1, a normal block then a two-node linked list, frames back to back while the CPU sleeps in WFI |
 | [stm32u575/i2c](stm32u575/i2c) | LL | a 24xx EEPROM page write with acknowledge polling, configs swapping the device, a scripted TableTarget |
+| [stm32u575/i2c_mock](stm32u575/i2c_mock) | LL | a temperature sensor written in Python as an `I2CTarget`: scripted readings, the configuration word the firmware wrote, NACK injection and recovery |
 | [stm32u575/iwdg](stm32u575/iwdg) | HAL | IWDG refresh, a watchdog reset request 500 ms after the last refresh, IWDGRSTF after the reset |
 | [stm32u575/rcc](stm32u575/rcc) | LL | HSE bypass to a 160 MHz PLL1, voltage range, flash latency, SysTick period in virtual time |
 | [stm32u575/tim](stm32u575/tim) | LL | TIM2 1 kHz update interrupt toggling PA5, TIM16 one-pulse after 50 ms, update period in virtual time |

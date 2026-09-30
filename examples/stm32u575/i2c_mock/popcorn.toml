@@ -1,0 +1,21 @@
+[project]
+name = "i2c-mock"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/i2c_sensor.elf"
+
+[boot]
+until = "main"
+budget = 1_000_000
+
+[models]
+python = ["."]
+
+[board.I2C1]
+devices = [{ address = 0x48, model = "tempsensor:TempSensor", readings = [21.0, 21.5, 22.25, 23.0, 22.5, 22.0] }]
+
+[configs.hot]
+board.I2C1.devices = [{ address = 0x48, model = "tempsensor:TempSensor", readings = [34.0, 35.5, 36.0] }]
