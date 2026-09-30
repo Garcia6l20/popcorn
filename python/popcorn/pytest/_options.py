@@ -89,7 +89,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         metavar="DIR",
         help="keep a .pctr trace of each failing test using the machine fixture, "
-        "in .pytest_cache/d/popcorn/traces, or in DIR given as --popcorn-trace-on-fail=DIR",
+        "in .pytest_cache/d/popcorn/traces, or in DIR given as --popcorn-trace-on-fail=DIR: "
+        "a bare flag before a path takes the path as DIR",
     )
     group.addoption(
         "--popcorn-strict",

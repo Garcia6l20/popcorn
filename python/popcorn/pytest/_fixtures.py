@@ -9,7 +9,7 @@ import pytest
 
 from popcorn import Machine, PopcornError, Project
 from popcorn.pytest._options import UNSET, marker_options
-from popcorn.pytest._report import track
+from popcorn.pytest._report import TraceOnFail, trace_directory, track
 from popcorn.pytest._session import Booted, Key, PopcornSession, popcorn_session
 
 
@@ -158,12 +158,24 @@ def machine(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) ->
     track(item, "machine", booted.machine, test.key)
     m = booted.machine
     m.default_budget = test.budget
+    settings = _popcorn_session.settings
+    trace = None
+    if settings.trace_on_fail:
+        trace = TraceOnFail(item, trace_directory(request.config, settings.trace_dir))
+        if not trace.start(m):
+            trace = None
     yield m
-    if _spoiled(m, booted):
-        _popcorn_session.rebuild(test.key)
-        return
-    m.remove_hooks()
-    m.set_call_baseline(None)
+    closed = trace is None
+    try:
+        if trace is not None:
+            trace.finish()
+            closed = True
+    finally:
+        if not closed or _spoiled(m, booted):
+            _popcorn_session.rebuild(test.key)
+        else:
+            m.remove_hooks()
+            m.set_call_baseline(None)
 
 
 @pytest.fixture

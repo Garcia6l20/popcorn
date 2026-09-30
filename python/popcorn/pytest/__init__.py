@@ -25,6 +25,13 @@ machine: the stop of the failing exception or of the machine's last run, the fau
 decoded, the call stack and the trace ring. A machine without a stop since the test started shows
 its registers and ring. The report of a setup error from a failed boot shows the boot's stop.
 
+With `--popcorn-trace-on-fail=DIR`, the `machine` fixture traces every test with
+`popcorn.trace.ALL` and keeps `DIR/<node id>.pctr` for a test whose call failed, named in its
+report. The bare flag keeps them in `.pytest_cache/d/popcorn/traces`, or `.popcorn-traces` in the
+rootdir without the cache plugin. Write it as `--popcorn-trace-on-fail=DIR` or last on the command
+line: a bare flag before a path takes the path as its DIR. `machine_factory` machines are not
+traced. Kept traces are never pruned: `--cache-clear` removes those in the pytest cache.
+
 Limits:
 
 - Host input queued on a UART and not delivered yet stays queued across the restore.

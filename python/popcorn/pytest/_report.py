@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import re
+import warnings
 from collections.abc import Generator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 import pytest
 
 from popcorn import EmulationError, Machine, Stop
+from popcorn._obs import FormatError
+from popcorn.pytest._options import SETTINGS
 from popcorn.report import stop_report
+from popcorn.trace import ALL
 
 _REGISTERS = (
     *(f"r{number}" for number in range(13)),
@@ -36,6 +44,93 @@ class Tracked:
 
 
 MACHINES = pytest.StashKey[list[Tracked]]()
+NAME_LENGTH = 150
+CALL_FAILED = pytest.StashKey[bool]()
+KEPT_TRACE = pytest.StashKey[Path]()
+
+
+class TraceOnFail:
+    """A full trace of one test's machine, kept only when the test's call fails."""
+
+    def __init__(self, item: pytest.Item, directory: Path) -> None:
+        """Prepare the trace of the test `item` in `directory`."""
+        name = file_name(item)
+        self.path = directory / f"{name}.pctr"
+        self._directory = directory
+        self._part = directory / f"{name}.pctr.part"
+        self._item = item
+        self._stack = contextlib.ExitStack()
+
+    def start(self, machine: Machine) -> bool:
+        """Start tracing `machine`. A trace that cannot start is one PytestWarning, and the test
+        runs untraced.
+
+        Returns:
+            Whether the trace started.
+        """
+        try:
+            self._directory.mkdir(parents=True, exist_ok=True)
+            self._stack.enter_context(machine.trace(ALL, self._part))
+        except (OSError, FormatError) as error:
+            warnings.warn(
+                pytest.PytestWarning(f"popcorn could not trace {self._item.nodeid}: {error}"),
+                stacklevel=1,
+            )
+            return False
+        self._item.stash[KEPT_TRACE] = self.path
+        return True
+
+    def finish(self) -> None:
+        """Close the trace, then keep it when the test's call failed, else delete it.
+
+        Raises:
+            RuntimeError: The trace could not be closed, naming its file.
+        """
+        kept = False
+        try:
+            try:
+                self._stack.close()
+            except Exception as error:
+                raise RuntimeError(f"closing the popcorn trace {self._part} failed") from error
+            if self._item.stash.get(CALL_FAILED, False):
+                self._part.replace(self.path)
+                kept = True
+        finally:
+            if not kept:
+                self._part.unlink(missing_ok=True)
+
+
+def sweep(directory: Path) -> None:
+    """Delete the part files an interrupted session left in `directory`."""
+    if directory.is_dir():
+        for part in directory.glob("*.pctr.part"):
+            part.unlink(missing_ok=True)
+
+
+def trace_directory(config: pytest.Config, chosen: Path | None) -> Path:
+    """Where kept traces go: `chosen`, else the pytest cache, else `<rootdir>/.popcorn-traces`."""
+    if chosen is not None:
+        return chosen
+    cache: object = getattr(config, "cache", None)
+    if isinstance(cache, pytest.Cache):
+        return cache.mkdir("popcorn") / "traces"
+    return config.rootpath / ".popcorn-traces"
+
+
+def file_name(item: pytest.Item) -> str:
+    """A file name for the test `item`: its node id with other characters than letters, digits,
+    `_`, `.` and `-` replaced, cut to `NAME_LENGTH`, then a hash of the node id when that changed
+    it, and the xdist worker id first."""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", item.nodeid)
+    if name != item.nodeid or len(name) > NAME_LENGTH:
+        digest = hashlib.sha256(item.nodeid.encode()).hexdigest()[:8]
+        name = f"{name[:NAME_LENGTH]}-{digest}"
+    workerinput: object = getattr(item.config, "workerinput", None)
+    if isinstance(workerinput, dict):
+        worker = cast(dict[str, object], workerinput).get("workerid")
+        if isinstance(worker, str):
+            name = f"{worker}-{name}"
+    return name
 
 
 def track(item: pytest.Item, label: str, machine: Machine, key: object) -> None:
@@ -101,6 +196,14 @@ def _indent(text: str) -> str:
     return "\n".join(f"  {line}" for line in text.splitlines())
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Sweep stale trace part files, from the xdist controller or a run without xdist."""
+    settings = session.config.stash[SETTINGS]
+    if settings.trace_on_fail and getattr(session.config, "workerinput", None) is None:
+        sweep(trace_directory(session.config, settings.trace_dir))
+
+
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]
@@ -112,12 +215,17 @@ def pytest_runtest_makereport(
     """
     report = yield
     tracked = item.stash.get(MACHINES, list[Tracked]())
+    if call.when == "call" and report.failed:
+        item.stash[CALL_FAILED] = True
     if report.failed and tracked:
         error = None if call.excinfo is None else call.excinfo.value
         try:
             text = section_text(tracked, error)
         except Exception as broken:
             text = f"popcorn report failed: {type(broken).__name__}: {broken}"
+        kept = item.stash.get(KEPT_TRACE, None)
+        if call.when == "call" and kept is not None:
+            text += f"\ntrace: {kept}"
         report.sections.append(("popcorn", text))
     if call.when == "teardown" and MACHINES in item.stash:
         del item.stash[MACHINES]
