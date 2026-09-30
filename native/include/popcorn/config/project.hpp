@@ -129,6 +129,10 @@ struct board_entry
   std::optional<std::string> model{};
   /** @brief Devices on the bus. */
   std::vector<device_entry> devices{};
+  /** @brief HSE frequency in Hz the board gives the RCC model, `[board.RCC]` only. */
+  std::optional<std::uint64_t> hse_hz{};
+  /** @brief LSE frequency in Hz the board gives the RCC model, `[board.RCC]` only. */
+  std::optional<std::uint64_t> lse_hz{};
   /** @brief Every other key, the model's constructor keyword arguments. */
   [[= extra_keys]] std::map<std::string, reflex::serde::toml::value> params{};
 };

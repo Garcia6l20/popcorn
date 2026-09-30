@@ -49,6 +49,12 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief Python model maker per peripheral name, called with the ModelContext, returning a
    * popcorn.model.Model. Overrides the registered models of that peripheral. */
   std::map<std::string, reflex::py::nb::object> python_models{};
+  /** @brief HSE frequency in Hz the board gives the RCC model, from 4 to 50 MHz, empty for the
+   * model's default. */
+  std::optional<std::uint64_t> rcc_hse_hz{};
+  /** @brief LSE frequency in Hz the board gives the RCC model, above 0 and at most 1 MHz, empty for
+   * the model's default. */
+  std::optional<std::uint64_t> rcc_lse_hz{};
   /** @brief Python bus targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
    * instances in attachment order, served by the built-in bus model of that peripheral. */
   std::map<std::string, std::vector<reflex::py::nb::object>> python_devices{};

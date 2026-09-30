@@ -13,11 +13,6 @@ from popcorn.units import VirtualTime, ms, us
 
 pytestmark = pytest.mark.popcorn(budget=2_000_000)
 
-needs_board_hse = pytest.mark.xfail(
-    strict=True,
-    reason="no API sets the board HSE rate: the RCC model runs a 16 MHz HSE, the board 32 MHz",
-)
-
 SYSCLK_HZ = 160_000_000
 SWS_PLL1 = 3
 
@@ -59,7 +54,6 @@ async def test_hse_is_ready_before_pll1_locks(machine: Machine) -> None:
     assert ready == {"hse_ready": (1, 0), "pll_ready": (1, 1)}
 
 
-@needs_board_hse
 async def test_systick_ticks_every_millisecond_at_160_mhz(machine: Machine) -> None:
     await configure_clock(machine)
     ticks = timestamps(machine, "SysTick_Handler")

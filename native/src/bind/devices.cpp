@@ -221,10 +221,15 @@ void bind_device_bases(nb::module_ scope)
 
 auto device_factories(
     mcu_description const&                                description,
-    std::map<std::string, std::vector<nb::object>> const& devices)
+    std::map<std::string, std::vector<nb::object>> const& devices,
+    std::optional<stm32::rcc_options> const&              rcc)
     -> std::map<std::string, periph::model_factory, std::less<>>
 {
   stm32::board board;
+  if(rcc)
+  {
+    board.rcc = *rcc;
+  }
   for(auto const& [peripheral, objects] : devices)
   {
     auto const unit = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
@@ -268,6 +273,18 @@ auto device_factories(
       throw refused(peripheral, "a peripheral a built-in I2C or SPI model serves");
     }
     out.emplace(peripheral, std::move(found->second));
+  }
+  if(rcc)
+  {
+    auto const unit  = std::ranges::find_if(description.peripherals, [](peripheral_desc const& p) {
+      return p.ip == "RCC" and not p.alias_of;
+    });
+    auto       found = unit == description.peripherals.end() ? all.end() : all.find(unit->name);
+    if(found == all.end())
+    {
+      throw config_error("rcc", 0, "rcc", "an MCU whose RCC a built-in model serves");
+    }
+    out.emplace(found->first, std::move(found->second));
   }
   return out;
 }

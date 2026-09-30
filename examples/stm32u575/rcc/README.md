@@ -19,19 +19,14 @@ uv run pytest -q examples/stm32u575/rcc
 
 ## Read first
 
-- `popcorn.toml`: the chip, the image, a boot to `main`, strict models.
+- `popcorn.toml`: the chip, the image, a boot to `main`, `[board.RCC] hse_hz` giving the RCC
+  model the board's 32 MHz HSE, and strict models.
 - `test_rcc.py`: `SystemCoreClock` and `RCC_CFGR1.SWS` read through the symbol and peripheral
   views, the ready flags captured by intercepts, and the SysTick period in virtual time.
   `SystemCoreClock` is what the firmware computes from the PLL1 registers and `HSE_VALUE`. The
   SysTick period checks the real frequency: the core clock follows HCLK, so the period depends
   on the HSE rate the board gives the RCC model.
 - `firmware/main.c`: the clock sequence.
-
-## Known limitation
-
-popcorn has no way yet to set the board's HSE rate. The RCC model runs a 16 MHz HSE, so PLL1
-gives 80 MHz and SysTick ticks every 2 ms. The SysTick test is marked `xfail(strict=True)` until
-that API exists.
 
 ## Rebuild the firmware
 

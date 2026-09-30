@@ -25,6 +25,7 @@ from popcorn._errors import (
 )
 from popcorn._image import Image
 from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, AttachedDevice, Machine
+from popcorn._rcc import RccOptions
 from popcorn._stop import Stop
 from popcorn.model import Model
 
@@ -206,7 +207,8 @@ class Project:
         self, config: str | None = None, *, strict_peripherals: bool | None = None
     ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
-        board models, bus devices, `connect = "pty"` bridges, `[boot] memory_init` written. Not
+        board models, bus devices, `[board.RCC]` clock sources, `connect = "pty"` bridges,
+        `[boot] memory_init` written. Not
         reset. Each call builds new device instances, so two machines never share one.
 
         Args:
@@ -239,6 +241,14 @@ class Project:
             for name, entry in self.board().items()
             if entry.devices
         }
+        clocks = file.board.get("RCC")
+        rcc = None
+        if clocks is not None and (clocks.hse_hz is not None or clocks.lse_hz is not None):
+            defaults = RccOptions()
+            rcc = RccOptions(
+                hse_hz=defaults.hse_hz if clocks.hse_hz is None else clocks.hse_hz,
+                lse_hz=defaults.lse_hz if clocks.lse_hz is None else clocks.lse_hz,
+            )
         m = Machine(
             description,
             image=self.images(),
@@ -253,6 +263,7 @@ class Project:
             arena_size=file.boot.arena_size or DEFAULT_ARENA_SIZE,
             models=models,
             devices=devices,
+            rcc=rcc,
         )
         for name, entry in self.board().items():
             if entry.connect is None:

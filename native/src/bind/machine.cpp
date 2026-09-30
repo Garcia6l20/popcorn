@@ -10,8 +10,10 @@
 #include <array>
 #include <cmath>
 #include <format>
+#include <optional>
 #include <ranges>
 #include <span>
+#include <string>
 
 namespace popcorn::bind
 {
@@ -38,6 +40,41 @@ auto factory_for(mcu_description const& description) -> arch::arch_factory
         std::format("a core an arch module implements, not {}", description.core.cpu));
   }
   return found->factory();
+}
+
+constexpr std::uint64_t hse_min_hz = 4'000'000;
+constexpr std::uint64_t hse_max_hz = 50'000'000;
+constexpr std::uint64_t lse_max_hz = 1'000'000;
+
+auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32::rcc_options>
+{
+  if(not config.rcc_hse_hz and not config.rcc_lse_hz)
+  {
+    return std::nullopt;
+  }
+  periph::stm32::rcc_options options;
+  if(config.rcc_hse_hz)
+  {
+    if(*config.rcc_hse_hz < hse_min_hz or *config.rcc_hse_hz > hse_max_hz)
+    {
+      throw config_error(
+          "rcc", 0, "rcc.hse_hz",
+          std::format("an HSE frequency from 4 to 50 MHz, not {} Hz", *config.rcc_hse_hz));
+    }
+    options.hse_hz = *config.rcc_hse_hz;
+  }
+  if(config.rcc_lse_hz)
+  {
+    if(*config.rcc_lse_hz == 0 or *config.rcc_lse_hz > lse_max_hz)
+    {
+      throw config_error(
+          "rcc", 0, "rcc.lse_hz",
+          std::format(
+              "an LSE frequency above 0 Hz and at most 1 MHz, not {} Hz", *config.rcc_lse_hz));
+    }
+    options.lse_hz = *config.rcc_lse_hz;
+  }
+  return options;
 }
 
 auto options_of(mcu_description const& description, machine_config const& config)
@@ -70,12 +107,17 @@ auto options_of(mcu_description const& description, machine_config const& config
   {
     options.models.emplace(name, detail::python_model_factory(maker));
   }
-  if(not config.python_devices.empty())
+  auto const rcc = rcc_options_of(config);
+  if(not config.python_devices.empty() or rcc)
   {
-    for(auto& [name, factory] : detail::device_factories(description, config.python_devices))
+    for(auto& [name, factory] : detail::device_factories(description, config.python_devices, rcc))
     {
       if(not options.models.emplace(name, std::move(factory)).second)
       {
+        if(not config.python_devices.contains(name))
+        {
+          throw config_error("rcc", 0, "rcc", "an RCC without a Python model");
+        }
         throw config_error(
             "devices", 0, std::format("devices.{}", name), "a peripheral without a Python model");
       }

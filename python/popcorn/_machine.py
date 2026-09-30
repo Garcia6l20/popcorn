@@ -66,6 +66,7 @@ from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
+from popcorn._rcc import RccOptions
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, UartPorts
@@ -353,6 +354,7 @@ class Machine:
         devices: (
             Mapping[str, Sequence[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget]] | None
         ) = None,
+        rcc: RccOptions | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -378,13 +380,16 @@ class Machine:
             devices: Bus devices per I2C or SPI peripheral name, `popcorn.board` targets or
                 `popcorn.devices` devices of one bus kind, in attachment order. The built-in bus
                 model of the peripheral serves them. A device serves one live machine at a time.
+            rcc: Clock sources the board gives the built-in RCC model, None for its defaults,
+                a 16 MHz HSE and a 32.768 kHz LSE.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
                 models key names no peripheral, a model is refused, or devices are refused:
                 a peripheral that is not a built-in bus of their kind or has a Python model,
                 a chip select pin the description lacks, a device already serving a live
-                machine or listed twice.
+                machine or listed twice. With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz
+                or above 1 MHz, an RCC with a Python model or one no built-in model serves.
             ImageError: An image does not fit the memory map.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
@@ -404,6 +409,9 @@ class Machine:
         config.python_models = _model_makers(description, models or {})
         attached = _checked_devices(description, devices or {}, models or {})
         config.python_devices = {name: list(targets) for name, targets in attached.items()}
+        if rcc is not None:
+            config.rcc_hse_hz = rcc.hse_hz
+            config.rcc_lse_hz = rcc.lse_hz
         self._description = description
         self._config_digest = config_digest
         self._handle = _core.MachineHandle(description, config)

@@ -632,12 +632,37 @@ void check_values(project_file const& file, context const& ctx)
             std::format("a pin name such as PA4, pin 0 to 15, not {}", *device.cs));
       }
     }
+    for(auto const& [key, hz] : {
+            std::pair{"hse_hz", entry.hse_hz},
+            std::pair{"lse_hz", entry.lse_hz}
+    })
+    {
+      if(hz and (name != "RCC" or entry.model))
+      {
+        ctx.fail(
+            std::format("board.{}.{}", name, key),
+            "a key of board.RCC with the built-in RCC model only");
+      }
+    }
+    if(entry.hse_hz and (*entry.hse_hz < 4'000'000 or *entry.hse_hz > 50'000'000))
+    {
+      ctx.fail(
+          std::format("board.{}.hse_hz", name),
+          std::format("an HSE frequency from 4 to 50 MHz, not {} Hz", *entry.hse_hz));
+    }
+    if(entry.lse_hz and (*entry.lse_hz == 0 or *entry.lse_hz > 1'000'000))
+    {
+      ctx.fail(
+          std::format("board.{}.lse_hz", name),
+          std::format("an LSE frequency above 0 Hz and at most 1 MHz, not {} Hz", *entry.lse_hz));
+    }
     if(not entry.model and not entry.params.empty())
     {
       ctx.fail(
           std::format("board.{}.{}", name, entry.params.begin()->first),
           std::format(
-              "a key of board.{}: connect, model, devices, or a model parameter with model set",
+              "a key of board.{}: connect, model, devices, hse_hz, lse_hz, or a model parameter "
+              "with model set",
               name));
     }
   }

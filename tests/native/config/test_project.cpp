@@ -274,7 +274,38 @@ TEST_CASE("a board key without a model is an error")
   CHECK(error.line() == 4);
   CHECK(
       error.expected()
-      == "a key of board.UART4: connect, model, devices, or a model parameter with model set");
+      == "a key of board.UART4: connect, model, devices, hse_hz, lse_hz, or a model parameter "
+         "with model set");
+}
+
+TEST_CASE("board.RCC takes the HSE and LSE frequencies of the board")
+{
+  scratch_file const file{
+      std::string{minimal} + "[board.RCC]\nhse_hz = 32_000_000\nlse_hz = 32_000\n"};
+  auto const loaded = config::load_project(file.path());
+  CHECK(loaded.file.board.at("RCC").hse_hz == 32'000'000u);
+  CHECK(loaded.file.board.at("RCC").lse_hz == 32'000u);
+}
+
+TEST_CASE("an HSE outside 4 to 50 MHz, a 0 Hz LSE or a clock key off board.RCC is an error")
+{
+  auto error = failure_of(std::string{minimal} + "[board.RCC]\nhse_hz = 3_999_999\n");
+  CHECK(error.key() == "board.RCC.hse_hz");
+  CHECK(error.line() == 4);
+  CHECK(error.expected() == "an HSE frequency from 4 to 50 MHz, not 3999999 Hz");
+  error = failure_of(std::string{minimal} + "[board.RCC]\nhse_hz = 50_000_001\n");
+  CHECK(error.key() == "board.RCC.hse_hz");
+  error = failure_of(std::string{minimal} + "[board.RCC]\nlse_hz = 0\n");
+  CHECK(error.key() == "board.RCC.lse_hz");
+  CHECK(error.expected() == "an LSE frequency above 0 Hz and at most 1 MHz, not 0 Hz");
+  error = failure_of(std::string{minimal} + "[board.RCC]\nlse_hz = 32_768_000\n");
+  CHECK(error.key() == "board.RCC.lse_hz");
+  CHECK(error.expected() == "an LSE frequency above 0 Hz and at most 1 MHz, not 32768000 Hz");
+  error = failure_of(std::string{minimal} + "[board.PWR]\nhse_hz = 8_000_000\n");
+  CHECK(error.key() == "board.PWR.hse_hz");
+  CHECK(error.expected() == "a key of board.RCC with the built-in RCC model only");
+  error = failure_of(std::string{minimal} + "[board.RCC]\nmodel = \"m:Rcc\"\nhse_hz = 8_000_000\n");
+  CHECK(error.key() == "board.RCC.hse_hz");
 }
 
 TEST_CASE("the clock refuses a cpi that is not finite and above 0, and a 0 Hz core")
