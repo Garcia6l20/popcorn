@@ -3,11 +3,13 @@
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_dma.h"
 
-#define FRAMES       64u
-#define DUPLEX_WORDS 64u
-#define RING_WORDS   64u
-#define RING_BLOCKS  32u
-#define LINK_UPDATE  (LL_DMA_UPDATE_CBR1 | LL_DMA_UPDATE_CSAR | LL_DMA_UPDATE_CLLR)
+#define FRAMES               64u
+#define DUPLEX_WORDS         64u
+#define RING_WORDS           64u
+#define RING_BLOCKS          32u
+#define SAMPLES              16u
+#define SAI_CR1_TX_MASTER_32 ((7u << SAI_xCR1_DS_Pos) | (4u << SAI_xCR1_MCKDIV_Pos))
+#define LINK_UPDATE          (LL_DMA_UPDATE_CBR1 | LL_DMA_UPDATE_CSAR | LL_DMA_UPDATE_CLLR)
 
 #define SAI_CR1_TX_MASTER_16 ((4u << SAI_xCR1_DS_Pos) | (4u << SAI_xCR1_MCKDIV_Pos))
 #define SAI_CR1_RX_SYNC_16   (SAI_xCR1_MODE | (4u << SAI_xCR1_DS_Pos) | SAI_xCR1_SYNCEN_0)
@@ -27,6 +29,9 @@ static volatile uint32_t received_blocks;
 
 uint32_t ring[RING_WORDS];
 
+int16_t const samples[SAMPLES] = {-3,  2,    -1,     0x7fff,  -32768, 0,  1, -2,
+                                  100, -100, 0x1234, -0x1234, 7,      -7, 8, -8};
+
 struct ring_node
 {
   uint32_t br1;
@@ -42,6 +47,8 @@ void duplex_irq(void);
 void underrun(void);
 void SAI1_IRQHandler(void);
 void dma(void);
+void dma16_zero(void);
+void dma16_sign(void);
 void GPDMA1_Channel0_IRQHandler(void);
 void GPDMA1_Channel1_IRQHandler(void);
 int  main(void);
@@ -271,6 +278,50 @@ void dma(void)
   LOG(received_blocks);
   LOG(SAI1_Block_A->SR & SAI_xSR_OVRUDR);
   DONE();
+}
+
+static void dma16(uint32_t alignment)
+{
+  clocks();
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  configure(SAI1_Block_A, SAI_CR1_TX_MASTER_32 | SAI_xCR1_DMAEN, 0);
+  LL_DMA_ConfigTransfer(
+      GPDMA1, LL_DMA_CHANNEL_0,
+      LL_DMA_SRC_INCREMENT
+          | LL_DMA_DEST_FIXED
+          | LL_DMA_SRC_DATAWIDTH_HALFWORD
+          | LL_DMA_DEST_DATAWIDTH_WORD
+          | alignment);
+  LL_DMA_SetDataTransferDirection(GPDMA1, LL_DMA_CHANNEL_0, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+  LL_DMA_SetPeriphRequest(GPDMA1, LL_DMA_CHANNEL_0, LL_GPDMA1_REQUEST_SAI1_A);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_0, SAMPLES * 2u);
+  LL_DMA_SetSrcAddress(GPDMA1, LL_DMA_CHANNEL_0, (uint32_t)samples);
+  LL_DMA_SetDestAddress(GPDMA1, LL_DMA_CHANNEL_0, (uint32_t)&SAI1_Block_A->DR);
+  LL_DMA_EnableIT_TC(GPDMA1, LL_DMA_CHANNEL_0);
+  NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_0);
+  SAI1_Block_A->CR1 |= SAI_xCR1_SAIEN;
+  while(ring_blocks == 0)
+  {
+    __WFI();
+  }
+  while((SAI1_Block_A->SR & SAI_xSR_FLVL) != 0)
+  {
+  }
+  disable(SAI1_Block_A);
+  LOG(ring_blocks);
+  LOG(SAI1_Block_A->SR & SAI_xSR_OVRUDR);
+  DONE();
+}
+
+void dma16_zero(void)
+{
+  dma16(LL_DMA_DATA_ALIGN_ZEROPADD);
+}
+
+void dma16_sign(void)
+{
+  dma16(LL_DMA_DATA_ALIGN_SIGNEXTPADD);
 }
 
 int main(void)

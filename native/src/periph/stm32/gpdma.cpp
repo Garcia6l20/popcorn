@@ -1,4 +1,5 @@
 #include "dma.hpp"
+#include "dma_data.hpp"
 #include "factories.hpp"
 #include "gpdma_requests.hpp"
 #include "model_base.hpp"
@@ -34,6 +35,8 @@ struct channel_state
 {
   std::uint32_t generation{};
   std::uint32_t block_bytes{};
+  std::uint32_t packed{};
+  std::uint8_t  packed_bytes{};
   bool          half_reported{};
   bool          scheduled{};
 
@@ -87,6 +90,9 @@ struct channel_fields
   std::array<field_ref, 7> clear;
   std::array<field_ref, 7> interrupt_enable;
   field_ref                packing;
+  field_ref                source_exchange;
+  field_ref                byte_exchange;
+  field_ref                half_exchange;
   std::optional<reg_ref>   tr3;
   std::optional<reg_ref>   br2;
   std::optional<field_ref> update_tr3;
@@ -113,7 +119,6 @@ enum class unsupported : std::uint8_t
 {
   two_d,
   link_step,
-  packing,
 };
 
 class gpdma;
@@ -124,12 +129,16 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  * @brief GPDMA1 of the STM32U5, RM0456 section 17: 16 channels, software or hardware requested,
  *        1D transfers in bursts, block and linked-list transfers, half and complete transfer,
  *        error, suspend and reset. Each burst is an event a transfer latency after its request,
- *        never performed inside a register or request callback. Not modelled: 2D addressing on
- *        channels 12 to 15, whose TR3 and BR2 linked-list words are still consumed in RM order,
- *        the FIFO packing modes of PAM, link step mode, each logging once and running as plain 1D
- *        run-to-completion, triggers, and the half transfer event under TCEM 2 and 3, which is
- *        only raised per block under TCEM 0 and 1. A request level held by a requester across a
- *        machine reset is cleared: the requester announces it again on its next change.
+ *        never performed inside a register or request callback. Data handling, RM0456 17.4.10
+ *        and Table 141: SBX, then the width conversion of PAM, 0-padding or sign extension to a
+ *        wider destination, right or left truncation to a narrower one, packing and unpacking
+ *        LSB first, then DBX and DHX. BNDT counts source bytes. A packing channel needs BNDT to
+ *        be a multiple of the destination width. Not modelled: 2D addressing on channels 12 to
+ *        15, whose TR3 and BR2 linked-list words are still consumed in RM order, link step mode,
+ *        each logging once and running as plain 1D run-to-completion, triggers, and the half
+ *        transfer event under TCEM 2 and 3, which is only raised per block under TCEM 0 and 1.
+ *        A request level held by a requester across a machine reset is cleared: the requester
+ *        announces it again on its next change.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>, public dma_controller
 {
@@ -153,6 +162,8 @@ private:
   void               start(std::size_t ch);
   void               schedule(std::size_t ch);
   void               burst(std::size_t ch);
+  auto               convert(std::size_t ch, std::uint32_t value) -> bool;
+  auto               deliver(std::size_t ch, std::uint32_t value) -> bool;
   void               block_done(std::size_t ch);
   auto               link(std::size_t ch) -> bool;
   void               finish(std::size_t ch, flag_index flag);
@@ -165,7 +176,7 @@ private:
   reg_ref                              misr_;
   std::array<field_ref, channels>      masked_{};
   core::clock_domain                   hclk_;
-  std::array<bool, 3>                  unsupported_logged_{};
+  std::array<bool, 2>                  unsupported_logged_{};
   bool                                 stopped_clock_logged_{};
 };
 
@@ -253,6 +264,9 @@ gpdma::gpdma(model_context& ctx, peripheral_desc const& desc)
     c.update_tr2            = field(p + "LLR", "UT2");
     c.update_tr1            = field(p + "LLR", "UT1");
     c.packing               = field(p + "TR1", "PAM");
+    c.source_exchange       = field(p + "TR1", "SBX");
+    c.byte_exchange         = field(p + "TR1", "DBX");
+    c.half_exchange         = field(p + "TR1", "DHX");
     for(std::size_t f = 0; f < flag_names.size(); ++f)
     {
       c.flag[f]             = field(p + "SR", flag_names[f]);
@@ -284,6 +298,8 @@ void gpdma::reset(register_file& regs, reset_kind)
     c.scheduled     = false;
     c.half_reported = false;
     c.block_bytes   = 0;
+    c.packed        = 0;
+    c.packed_bytes  = 0;
   }
   for(std::size_t ch = 0; ch < channels; ++ch)
   {
@@ -320,26 +336,18 @@ auto gpdma::valid(std::size_t ch) const -> bool
   {
     return false;
   }
-  return get(regs_, c.source_width)
-       < 3
-     and get(regs_, c.destination_width)
-       < 3
-     and bytes
-       % sw
-      == 0
-     and regs_.peek(c.sar.offset)
-       % sw
-      == 0
-     and regs_.peek(c.dar.offset)
-       % dw
-      == 0;
+  auto const widths  = get(regs_, c.source_width) < 3 and get(regs_, c.destination_width) < 3;
+  auto const packing = sw != dw and (get(regs_, c.packing) & 2u) != 0;
+  auto const whole   = bytes % sw == 0 and (not packing or bytes % dw == 0);
+  auto const source  = regs_.peek(c.sar.offset) % sw == 0;
+  auto const target  = regs_.peek(c.dar.offset) % dw == 0;
+  return widths and whole and source and target;
 }
 
 void gpdma::warn_once(std::size_t ch, unsupported feature)
 {
-  constexpr std::array<std::string_view, 3> names{
-      "2D addressing", "link step mode", "data packing"};
-  auto const what = names[std::to_underlying(feature)];
+  constexpr std::array<std::string_view, 2> names{"2D addressing", "link step mode"};
+  auto const                                what = names[std::to_underlying(feature)];
   if(not std::exchange(unsupported_logged_[std::to_underlying(feature)], true))
   {
     warn(
@@ -365,13 +373,6 @@ void gpdma::start(std::size_t ch)
   {
     warn_once(ch, unsupported::two_d);
   }
-  if(get(regs_, c.source_width)
-     != get(regs_, c.destination_width)
-     and (get(regs_, c.packing) & 2u)
-     != 0)
-  {
-    warn_once(ch, unsupported::packing);
-  }
   update(regs_, c.idle, 0);
   if(get(regs_, c.bytes) == 0 and not link(ch))
   {
@@ -379,6 +380,8 @@ void gpdma::start(std::size_t ch)
   }
   s.block_bytes   = get(regs_, c.bytes);
   s.half_reported = false;
+  s.packed        = 0;
+  s.packed_bytes  = 0;
   schedule(ch);
 }
 
@@ -425,26 +428,70 @@ void gpdma::on_event(std::uint32_t kind, std::uint64_t payload)
   }
 }
 
+auto gpdma::deliver(std::size_t ch, std::uint32_t value) -> bool
+{
+  auto&      c           = ch_[ch];
+  auto const dw          = static_cast<std::uint8_t>(1u << get(regs_, c.destination_width));
+  auto const destination = regs_.peek(c.dar.offset);
+  auto const bytes       = get(regs_, c.byte_exchange) != 0;
+  auto const halves      = get(regs_, c.half_exchange) != 0;
+  auto const data        = exchange_destination(value, dw, bytes, halves);
+  if(not ctx_.services.write(destination, dw, data, initiator::dma))
+  {
+    return false;
+  }
+  if(get(regs_, c.destination_increment) != 0)
+  {
+    regs_.poke(c.dar.offset, destination + dw);
+  }
+  return true;
+}
+
+auto gpdma::convert(std::size_t ch, std::uint32_t value) -> bool
+{
+  auto&      c      = ch_[ch];
+  auto&      s      = state_.channel[ch];
+  auto const sw     = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
+  auto const dw     = static_cast<std::uint8_t>(1u << get(regs_, c.destination_width));
+  auto const pam    = get(regs_, c.packing);
+  auto const source = exchange_source(value, sw, get(regs_, c.source_exchange) != 0);
+  if(sw == dw or (pam & 2u) == 0)
+  {
+    return deliver(ch, resize(source, sw, dw, pam));
+  }
+  if(dw < sw)
+  {
+    for(std::uint32_t at = 0; at < sw; at += dw)
+    {
+      if(not deliver(ch, (source >> (8u * at)) & data_mask(dw)))
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+  s.packed |= (source & data_mask(sw)) << (8u * s.packed_bytes);
+  s.packed_bytes = static_cast<std::uint8_t>(s.packed_bytes + sw);
+  if(s.packed_bytes < dw)
+  {
+    return true;
+  }
+  auto const packed = std::exchange(s.packed, 0);
+  s.packed_bytes    = 0;
+  return deliver(ch, packed);
+}
+
 void gpdma::burst(std::size_t ch)
 {
   auto&      c     = ch_[ch];
   auto&      s     = state_.channel[ch];
   auto const sw    = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
-  auto const dw    = static_cast<std::uint8_t>(1u << get(regs_, c.destination_width));
   auto const beats = get(regs_, c.source_burst) + 1;
   for(std::uint32_t beat = 0; beat < beats and get(regs_, c.bytes) != 0; ++beat)
   {
-    auto const source      = regs_.peek(c.sar.offset);
-    auto const destination = regs_.peek(c.dar.offset);
-    auto const value       = ctx_.services.read(source, sw, initiator::dma);
-    if(not value)
-    {
-      finish(ch, data_error);
-      return;
-    }
-    auto const mask   = dw >= 4 ? ~std::uint32_t{} : (std::uint32_t{1} << (8u * dw)) - 1u;
-    auto const stored = ctx_.services.write(destination, dw, *value & mask, initiator::dma);
-    if(not stored)
+    auto const source = regs_.peek(c.sar.offset);
+    auto const value  = ctx_.services.read(source, sw, initiator::dma);
+    if(not value or not convert(ch, *value))
     {
       finish(ch, data_error);
       return;
@@ -452,10 +499,6 @@ void gpdma::burst(std::size_t ch)
     if(get(regs_, c.source_increment) != 0)
     {
       regs_.poke(c.sar.offset, source + sw);
-    }
-    if(get(regs_, c.destination_increment) != 0)
-    {
-      regs_.poke(c.dar.offset, destination + dw);
     }
     update(regs_, c.bytes, get(regs_, c.bytes) - sw);
   }

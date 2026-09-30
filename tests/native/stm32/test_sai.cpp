@@ -10,6 +10,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -1157,4 +1158,27 @@ TEST_CASE("the DMA requests follow DMAEN and FREQ, also while the block is off")
   r.f->target->reset();
   CHECK_FALSE(r.level(b_request));
   CHECK_FALSE(r.level(a_request));
+}
+
+TEST_CASE("GPDMA widens 16-bit samples to the 32-bit data register, 0-padded or sign-extended")
+{
+  constexpr std::array<std::int16_t, 16> samples{-3,  2,    -1,     0x7fff,  -32768, 0,  1, -2,
+                                                 100, -100, 0x1234, -0x1234, 7,      -7, 8, -8};
+  for(bool const sign : {false, true})
+  {
+    CAPTURE(sign);
+    rig        r{sign ? "dma16_sign" : "dma16_zero"};
+    auto const log = r.finish();
+    CHECK(log == std::vector<std::uint32_t>{1, 0});
+    REQUIRE(r.a->frames.size() == 8);
+    for(std::size_t index = 0; index < samples.size(); ++index)
+    {
+      CAPTURE(index);
+      auto const half = static_cast<std::uint16_t>(samples[index]);
+      auto const expected =
+          sign ? static_cast<std::uint32_t>(std::int32_t{samples[index]}) : std::uint32_t{half};
+      CHECK(r.a->frames[index / 2].slots[index % 2] == expected);
+      CHECK(r.a->frames[index / 2].format.data_bits == 32);
+    }
+  }
 }

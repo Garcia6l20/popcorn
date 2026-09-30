@@ -1,4 +1,5 @@
 #include "dma.hpp"
+#include "dma_data.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/machine.hpp>
@@ -262,4 +263,226 @@ TEST_CASE("a request held high across a machine reset starts nothing afterwards"
   controller->on_request(25, true);
   idle_for(f, std::chrono::microseconds{50});
   CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 0);
+}
+
+TEST_CASE("the data handling functions follow RM0456 Table 141 for one item")
+{
+  using namespace popcorn::periph::stm32;
+  constexpr std::uint32_t word = 0x0483'0281;
+  CHECK(resize(0x81, 1, 2, 0) == 0x0081);
+  CHECK(exchange_destination(resize(0x81, 1, 2, 0), 2, true, false) == 0x8100);
+  CHECK(resize(0x81, 1, 2, 1) == 0xFF81);
+  CHECK(resize(0x81, 1, 4, 0) == 0x0000'0081);
+  CHECK(exchange_destination(0x0000'0081, 4, true, false) == 0x0000'8100);
+  CHECK(exchange_destination(0x0000'0081, 4, false, true) == 0x0081'0000);
+  CHECK(exchange_destination(0x0000'0081, 4, true, true) == 0x8100'0000);
+  CHECK(resize(0x81, 1, 4, 1) == 0xFFFF'FF81);
+  CHECK(exchange_destination(0xFFFF'FF81, 4, true, false) == 0xFFFF'81FF);
+  CHECK(exchange_destination(0xFFFF'FF81, 4, false, true) == 0xFF81'FFFF);
+  CHECK(exchange_destination(0xFFFF'FF81, 4, true, true) == 0x81FF'FFFF);
+  CHECK(resize(0x0281, 2, 1, 0) == 0x81);
+  CHECK(resize(0x0281, 2, 1, 1) == 0x02);
+  CHECK(resize(0x0281, 2, 4, 0) == 0x0000'0281);
+  CHECK(exchange_destination(0x0000'0281, 4, true, false) == 0x0000'8102);
+  CHECK(exchange_destination(0x0000'0281, 4, false, true) == 0x0281'0000);
+  CHECK(exchange_destination(0x0000'0281, 4, true, true) == 0x8102'0000);
+  CHECK(resize(0x8302, 2, 4, 1) == 0xFFFF'8302);
+  CHECK(resize(0x0302, 2, 4, 1) == 0x0000'0302);
+  CHECK(resize(word, 4, 1, 0) == 0x81);
+  CHECK(resize(word, 4, 1, 1) == 0x04);
+  CHECK(resize(word, 4, 2, 0) == 0x0281);
+  CHECK(exchange_destination(0x0281, 2, true, false) == 0x8102);
+  CHECK(exchange_destination(0x0281, 2, false, true) == 0x0281);
+  CHECK(resize(word, 4, 2, 1) == 0x0483);
+  CHECK(resize(word, 4, 4, 1) == word);
+  CHECK(resize(0x81, 1, 1, 1) == 0x81);
+  CHECK(exchange_source(word, 4, true) == 0x0402'8381);
+  CHECK(exchange_source(word, 4, false) == word);
+  CHECK(exchange_source(0x0281, 2, true) == 0x0281);
+  CHECK(exchange_destination(word, 4, true, false) == 0x8304'8102);
+  CHECK(exchange_destination(word, 4, false, true) == 0x0281'0483);
+  CHECK(exchange_destination(0x81, 1, true, true) == 0x81);
+}
+
+namespace
+{
+constexpr std::array<std::uint8_t, 8> handled_bytes{0x81, 0x02, 0x83, 0x04, 0x85, 0x06, 0x87, 0x08};
+
+void load_source(stm32_fixture const& f)
+{
+  for(auto const [index, byte] : std::views::enumerate(handled_bytes))
+  {
+    REQUIRE(f.target->mem().write(copy_from + static_cast<std::uint32_t>(index), 1, byte));
+  }
+}
+
+auto copy_with(std::uint32_t tr1, std::uint32_t bytes) -> stm32_fixture
+{
+  auto f = idle_machine();
+  load_source(f);
+  write(f, "GPDMA_C0TR1", tr1 | bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", bit("GPDMA_C0TR2", "SWREQ"));
+  write(f, "GPDMA_C0BR1", bytes);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  idle_for(f, std::chrono::microseconds{50});
+  return f;
+}
+
+auto copied_bytes(stm32_fixture const& f, std::uint32_t length) -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> out;
+  for(std::uint32_t index = 0; index < length; ++index)
+  {
+    auto const byte = f.target->mem().read(copy_to + index, 1);
+    REQUIRE(byte.has_value());
+    out.push_back(static_cast<std::uint8_t>(*byte));
+  }
+  return out;
+}
+
+auto tr1(std::uint32_t source, std::uint32_t destination, std::uint32_t pam) -> std::uint32_t
+{
+  return source
+       * bit("GPDMA_C0TR1", "SDW_LOG2")
+       | destination
+       * bit("GPDMA_C0TR1", "DDW_LOG2")
+       | pam
+       * bit("GPDMA_C0TR1", "PAM");
+}
+}
+
+TEST_CASE("bytes packed into words keep their order, DHX exchanges the half-words")
+{
+  auto const plain = copy_with(tr1(0, 2, 2), 8);
+  CHECK(
+      copied_bytes(plain, 8)
+      == std::vector<std::uint8_t>(handled_bytes.begin(), handled_bytes.end()));
+  CHECK(plain.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+  auto const halves = copy_with(tr1(0, 2, 2) | bit("GPDMA_C0TR1", "DHX"), 8);
+  CHECK(
+      copied_bytes(halves, 8)
+      == std::vector<std::uint8_t>{0x83, 0x04, 0x81, 0x02, 0x87, 0x08, 0x85, 0x06});
+}
+
+TEST_CASE("words unpacked into bytes go LSB first, after SBX")
+{
+  auto const plain = copy_with(tr1(2, 0, 2), 8);
+  CHECK(
+      copied_bytes(plain, 8)
+      == std::vector<std::uint8_t>(handled_bytes.begin(), handled_bytes.end()));
+  auto const exchanged = copy_with(tr1(2, 0, 2) | bit("GPDMA_C0TR1", "SBX"), 8);
+  CHECK(
+      copied_bytes(exchanged, 8)
+      == std::vector<std::uint8_t>{0x81, 0x83, 0x02, 0x04, 0x85, 0x87, 0x06, 0x08});
+}
+
+TEST_CASE("half-words widened to words are 0-padded or sign-extended, narrowed keep low or high")
+{
+  CHECK(
+      copied_bytes(copy_with(tr1(1, 2, 0), 4), 8)
+      == std::vector<std::uint8_t>{0x81, 0x02, 0x00, 0x00, 0x83, 0x04, 0x00, 0x00});
+  CHECK(
+      copied_bytes(copy_with(tr1(1, 2, 1), 4), 8)
+      == std::vector<std::uint8_t>{0x81, 0x02, 0x00, 0x00, 0x83, 0x04, 0x00, 0x00});
+  CHECK(
+      copied_bytes(copy_with(tr1(0, 2, 1), 2), 8)
+      == std::vector<std::uint8_t>{0x81, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0x00, 0x00});
+  CHECK(copied_bytes(copy_with(tr1(1, 0, 0), 4), 2) == std::vector<std::uint8_t>{0x81, 0x83});
+  CHECK(copied_bytes(copy_with(tr1(1, 0, 1), 4), 2) == std::vector<std::uint8_t>{0x02, 0x04});
+}
+
+TEST_CASE("packing a block that is not a whole number of destination items is a user error")
+{
+  auto const f = copy_with(tr1(0, 2, 2), 6);
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "USEF") == 1);
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 6);
+}
+
+TEST_CASE("a packing channel stopped by a data error starts its next block with nothing queued")
+{
+  constexpr popcorn::address sram_end = 0x200C'0000;
+  auto                       f        = idle_machine();
+  load_source(f);
+  REQUIRE(f.target->mem().write(sram_end - 2, 2, 0x5A5A));
+  write(f, "GPDMA_C0TR1", tr1(0, 2, 2) | bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", bit("GPDMA_C0TR2", "SWREQ"));
+  write(f, "GPDMA_C0BR1", 4);
+  write(f, "GPDMA_C0SAR", sram_end - 2);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  idle_for(f, std::chrono::microseconds{50});
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0SR", "DTEF") == 1);
+  write(f, "GPDMA_C0FCR", bit("GPDMA_C0FCR", "DTEF"));
+  write(f, "GPDMA_C0BR1", 4);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  idle_for(f, std::chrono::microseconds{50});
+  CHECK(copied_bytes(f, 4) == std::vector<std::uint8_t>{0x81, 0x02, 0x83, 0x04});
+}
+
+namespace
+{
+constexpr std::uint32_t paced_request = 25;
+
+auto paced_pack() -> stm32_fixture
+{
+  auto f = idle_machine();
+  load_source(f);
+  write(f, "GPDMA_C0TR1", tr1(0, 2, 2) | bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", paced_request * bit("GPDMA_C0TR2", "REQSEL"));
+  write(f, "GPDMA_C0BR1", 8);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  return f;
+}
+
+void pace(stm32_fixture const& f, bool level)
+{
+  auto* const controller =
+      dynamic_cast<popcorn::periph::stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  controller->on_request(paced_request, level);
+}
+
+auto finish_paced(stm32_fixture const& f) -> std::vector<std::uint64_t>
+{
+  pace(f, true);
+  std::vector<std::uint64_t> seen;
+  for(int step = 0; step < 200 and f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 0; ++step)
+  {
+    auto const before = f.field("GPDMA1", "GPDMA_C0BR1", "BNDT");
+    idle_for(f, std::chrono::nanoseconds{250});
+    if(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") != before)
+    {
+      seen.push_back(f.target->virtual_clock().time().ps);
+    }
+  }
+  return seen;
+}
+}
+
+TEST_CASE("a snapshot with packed bytes queued restores into a fresh machine to the same words")
+{
+  auto f = paced_pack();
+  pace(f, true);
+  for(int step = 0; step < 200 and f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 6; ++step)
+  {
+    idle_for(f, std::chrono::nanoseconds{250});
+  }
+  pace(f, false);
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 6);
+  CHECK(copied_bytes(f, 4) == std::vector<std::uint8_t>{0, 0, 0, 0});
+  auto const saved = f.target->snapshot();
+  auto const times = finish_paced(f);
+  CHECK(times.size() == 6);
+  auto const words = copied_bytes(f, 8);
+  CHECK(words == std::vector<std::uint8_t>(handled_bytes.begin(), handled_bytes.end()));
+  auto other = idle_machine();
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(finish_paced(other) == times);
+  CHECK(copied_bytes(other, 8) == words);
 }
