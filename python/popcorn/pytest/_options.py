@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn, cast
 
 import pytest
 
@@ -103,6 +105,87 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register the `popcorn` marker and parse the options."""
+    """Register the `popcorn` marker and parse the options.
+
+    Raises:
+        pytest.UsageError: `--popcorn-budget` is not above 0.
+    """
     config.addinivalue_line("markers", MARKER)
-    config.stash[SETTINGS] = Settings.from_config(config)
+    settings = Settings.from_config(config)
+    if settings.budget is not None and settings.budget <= 0:
+        raise pytest.UsageError(f"--popcorn-budget must be above 0, not {settings.budget}")
+    config.stash[SETTINGS] = settings
+
+
+class Unset(enum.Enum):
+    """A marker keyword that was not given."""
+
+    UNSET = 0
+
+
+UNSET = Unset.UNSET
+
+_KEYWORDS = ("config", "budget", "strict")
+
+
+@dataclass(frozen=True, slots=True)
+class MarkerOptions:
+    """The keywords of the closest `popcorn` marker of a test, `UNSET` where absent.
+
+    Attributes:
+        config: The config to apply, None for the base file.
+        budget: The default instruction budget, None for unbounded runs.
+        strict: None or absent, the command line then the project file; True or False
+            overrides.
+    """
+
+    config: str | Unset | None = UNSET
+    budget: int | Unset | None = UNSET
+    strict: bool | None = None
+
+
+def marker_options(item: pytest.Item) -> MarkerOptions:
+    """The checked keywords of the closest `popcorn` marker of `item`: the function's, else its
+    class's, else its module's. Keywords do not merge across levels.
+
+    Raises:
+        pytest.fail.Exception: A positional argument, an unknown keyword or a value of the wrong
+            type or range.
+    """
+    marker = item.get_closest_marker("popcorn")
+    if marker is None:
+        return MarkerOptions()
+    if marker.args:
+        _refuse(f"takes keywords only, not the positional {marker.args!r}")
+    unknown = sorted(set(marker.kwargs) - set(_KEYWORDS))
+    if unknown:
+        _refuse(f"has no keyword {', '.join(unknown)}: use {', '.join(_KEYWORDS)}")
+    config: object = marker.kwargs.get("config", UNSET)
+    budget: object = marker.kwargs.get("budget", UNSET)
+    strict: object = marker.kwargs.get("strict")
+    if not (config is UNSET or config is None or isinstance(config, str)):
+        _refuse(f"config is a str or None, not {config!r}")
+    if not (
+        budget is UNSET
+        or budget is None
+        or (isinstance(budget, int) and not isinstance(budget, bool) and budget > 0)
+    ):
+        _refuse(f"budget is an int above 0 or None, not {budget!r}")
+    if not (strict is None or isinstance(strict, bool)):
+        _refuse(f"strict is a bool or None, not {strict!r}")
+    return MarkerOptions(
+        config=cast(str | Unset | None, config),
+        budget=cast(int | Unset | None, budget),
+        strict=strict,
+    )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Check the `popcorn` marker of every marked test, whatever fixtures it uses."""
+    if item.get_closest_marker("popcorn") is not None:
+        marker_options(item)
+
+
+def _refuse(message: str) -> NoReturn:
+    pytest.fail(f"@pytest.mark.popcorn {message}", pytrace=False)

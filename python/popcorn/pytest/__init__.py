@@ -57,7 +57,23 @@ Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture,
 
 Options, registered for `pytest --help`: `--popcorn-project`, `--popcorn-config`,
 `--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`.
-Marker: `@pytest.mark.popcorn(config=None, budget=None, strict=None)`.
+
+    @pytest.mark.popcorn(config="variant", budget=1_000_000, strict=True)
+    async def test_variant(machine: popcorn.Machine) -> None: ...
+
+Each setting of a test comes from its `popcorn` marker, else the command line, else the
+project file:
+
+- `config`: `--popcorn-config`, else the base file. `config=None` in a marker is the base file
+  even with `--popcorn-config`. It also selects the config of `popcorn_project`.
+- `strict`: None or absent, the command line then the project file; True or False overrides.
+  `--popcorn-strict` turns strictness on, else `[models] strict` applies.
+- `budget`: `--popcorn-budget`, the `default_budget` of the test's booted machines, per `run`,
+  `wait_for` and `call`, never a wall-clock timeout. `budget=None` in a marker is unbounded.
+
+The closest marker wins whole, the function's over its class's over its module's: its keywords
+do not merge with those of a farther marker. Every marked test has its marker checked at setup,
+whether it uses a popcorn fixture or not.
 """
 
 from popcorn.pytest._fixtures import MachineFactory

@@ -21,6 +21,8 @@ DRIVER_ELF = PREBUILT / "driver.elf"
 CALLEE_ELF = PREBUILT / "callee.elf"
 FAULT_ELF = PREBUILT / "fault.elf"
 BOARD_ELF = PREBUILT / "board.elf"
+MODEL_ELF = PREBUILT / "model.elf"
+MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 
 CONFTEST = 'pytest_plugins = ["popcorn.pytest"]\n'
 
@@ -99,4 +101,17 @@ def write_project(
     )
     path = (directory or pytester.path) / "popcorn.toml"
     path.write_text(text)
+    return path
+
+
+def write_model_project(pytester: pytest.Pytester, extra: str = "") -> Path:
+    """A `popcorn.toml` over the model test description and `model.elf`, booted to `ready`, lax
+    about unmodelled peripherals."""
+    path = pytester.path / "popcorn.toml"
+    path.write_text(
+        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{MODEL_JSON}"\n'
+        f'[image.app]\nelf = "{MODEL_ELF}"\n'
+        '[boot]\nuntil = "ready"\nbudget = 10_000\n'
+        f"[models]\nstrict = false\n{textwrap.dedent(extra)}"
+    )
     return path

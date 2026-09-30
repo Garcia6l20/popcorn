@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 import pytest
 
 from popcorn import Machine, PopcornError, Project
+from popcorn.pytest._options import UNSET, marker_options
 from popcorn.pytest._session import Booted, Key, PopcornSession, popcorn_session
 
 
@@ -18,12 +20,16 @@ class MachineFactory:
     key not booted yet: the sync form cannot boot while the event loop runs.
     `factory(booted=False)` gives a new machine as `Project.machine` builds it, powered off and
     not reset, for a test that boots it itself.
+
+    Booted machines get the test's default instruction budget, the `budget` of its marker or
+    `--popcorn-budget`. Machines not booted get none: it would bound their boot too.
     """
 
-    def __init__(self, session: PopcornSession, default: Key) -> None:
-        """Make machines for one test whose own key is `default`."""
+    def __init__(self, session: PopcornSession, test: ItemSettings) -> None:
+        """Make machines for one test with `test` settings."""
         self._session = session
-        self._default = default
+        self._default = test.key
+        self._budget = test.budget
         self._machines: list[Machine] = []
 
     def __call__(
@@ -60,6 +66,7 @@ class MachineFactory:
     def _restored(self, key: Key, booted: Booted) -> Machine:
         machine = self._keep(self._session.build(key))
         machine.restore(booted.decoded())
+        machine.default_budget = self._budget
         return machine
 
     def _keep(self, machine: Machine) -> Machine:
@@ -67,9 +74,39 @@ class MachineFactory:
         return machine
 
 
-def key_of(request: pytest.FixtureRequest, session: PopcornSession) -> Key:
-    """The key of the test `request` belongs to."""
-    return session.key(None, None)
+_NODE = "node"
+
+
+@dataclass(frozen=True, slots=True)
+class ItemSettings:
+    """The machine settings of one test.
+
+    Attributes:
+        key: The config and strictness of its machines.
+        budget: The default instruction budget of its booted machines, None for unbounded.
+    """
+
+    key: Key
+    budget: int | None
+
+
+def settings_of(item: pytest.Item, session: PopcornSession) -> ItemSettings:
+    """The settings of `item`: marker over command line over project file, per setting.
+
+    `--popcorn-strict` can only turn strictness on, `strict=False` in a marker turns it off.
+
+    Raises:
+        pytest.fail.Exception: The marker is malformed.
+        ConfigError: The config does not exist.
+    """
+    options = marker_options(item)
+    settings = session.settings
+    config = settings.config if options.config is UNSET else options.config
+    strict = options.strict
+    if strict is None and settings.strict:
+        strict = True
+    budget = settings.budget if options.budget is UNSET else options.budget
+    return ItemSettings(session.key(config, strict), budget)
 
 
 @pytest.fixture(scope="session")
@@ -79,8 +116,9 @@ def _popcorn_session(request: pytest.FixtureRequest) -> PopcornSession:
 
 @pytest.fixture(scope="session")
 def popcorn_project(_popcorn_session: PopcornSession) -> Project:
-    """The project file, `--popcorn-project` or `<rootdir>/popcorn.toml`."""
-    return _popcorn_session.project()
+    """The project file, `--popcorn-project` or `<rootdir>/popcorn.toml`, with `--popcorn-config`
+    applied."""
+    return _popcorn_session.project(_popcorn_session.settings.config)
 
 
 @pytest.fixture
@@ -89,14 +127,16 @@ def machine(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) ->
 
     Every test of one key gets the same machine object. Hooks, intercept logs, the call baseline
     and the trace ring are reset for each test. Host input queued on a UART and not delivered
-    yet is not.
+    yet is not. Its `default_budget` is the test's, from the `popcorn` marker or
+    `--popcorn-budget`.
     """
-    key = key_of(request, _popcorn_session)
-    booted = _restored(_popcorn_session, key)
+    test = settings_of(_item(request), _popcorn_session)
+    booted = _restored(_popcorn_session, test.key)
     m = booted.machine
+    m.default_budget = test.budget
     yield m
     if _spoiled(m, booted):
-        _popcorn_session.rebuild(key)
+        _popcorn_session.rebuild(test.key)
         return
     m.remove_hooks()
     m.set_call_baseline(None)
@@ -107,9 +147,15 @@ def machine_factory(
     request: pytest.FixtureRequest, _popcorn_session: PopcornSession
 ) -> Iterator[MachineFactory]:
     """A `MachineFactory` for this test, its machines closed after it."""
-    factory = MachineFactory(_popcorn_session, key_of(request, _popcorn_session))
+    factory = MachineFactory(_popcorn_session, settings_of(_item(request), _popcorn_session))
     yield factory
     factory.close()
+
+
+def _item(request: pytest.FixtureRequest) -> pytest.Item:
+    item: object = getattr(request, _NODE)
+    assert isinstance(item, pytest.Item)
+    return item
 
 
 def _restored(session: PopcornSession, key: Key) -> Booted:
