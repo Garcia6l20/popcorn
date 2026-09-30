@@ -1,5 +1,6 @@
 #include "config.hpp"
 #include "description.hpp"
+#include "devices.hpp"
 #include "errors.hpp"
 #include "fault_bits.hpp"
 #include "image.hpp"
@@ -86,5 +87,6 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::config::project_file>("ProjectFile");
   m.bind<popcorn::config::loaded_project>("LoadedProject");
   popcorn::bind::detail::bind_model_base(m.handle);
+  popcorn::bind::detail::bind_device_bases(m.handle);
   m.bind<^^popcorn::bind>();
 }

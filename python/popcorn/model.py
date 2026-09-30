@@ -25,7 +25,6 @@ Handlers are sync and run with the core paused at an instruction boundary.
 from __future__ import annotations
 
 import functools
-import struct
 import types
 import typing
 import weakref
@@ -39,11 +38,11 @@ from popcorn._description import MachineDescription
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, ModelError
 from popcorn._model_build import build_model, building
+from popcorn._state import StateReader, declared_fields, encode
 from popcorn.units import VirtualDuration, VirtualTime
 
 _READS = "_popcorn_reads"
 _WRITES = "_popcorn_writes"
-_STATE_TYPES: tuple[type, ...] = (bool, int, float, bytes, bytearray, str)
 
 
 def on_read[F: Callable[..., object]](register: str) -> Callable[[F], F]:
@@ -230,26 +229,8 @@ def _spec_of(cls: type[Model]) -> _Spec:
 
 
 def _make_spec(cls: type[Model]) -> _Spec:
-    try:
-        hints = typing.get_type_hints(cls)
-    except NameError as error:
-        raise TypeError(f"{cls.__qualname__}: annotations must resolve: {error}") from error
-    base = typing.get_type_hints(Model)
     custom = cls.snapshot is not Model.snapshot and cls.restore is not Model.restore
-    state: list[tuple[str, type]] = []
-    irqs: list[str] = []
-    for name, hint in hints.items():
-        if name in base or typing.get_origin(hint) is ClassVar:
-            continue
-        if hint is IrqLine:
-            irqs.append(name)
-        elif hint in _STATE_TYPES:
-            state.append((name, typing.cast(type, hint)))
-        elif not custom:
-            raise TypeError(
-                f"{cls.__qualname__}.{name}: state of type {hint} is not snapshotted by "
-                "default, override snapshot() and restore()"
-            )
+    state, irqs = declared_fields(cls, Model, custom=custom, other=(IrqLine,))
     events: dict[int, str] = {}
     methods: dict[types.FunctionType, str] = {}
     for klass in cls.__mro__:
@@ -257,7 +238,7 @@ def _make_spec(cls: type[Model]) -> _Spec:
             if isinstance(value, types.FunctionType) and value not in methods:
                 methods[value] = name
                 events.setdefault(zlib.crc32(name.encode()), name)
-    return _Spec(tuple(state), tuple(irqs), events, methods)
+    return _Spec(state, irqs, events, methods)
 
 
 class Model(_core.ModelBase):
@@ -435,7 +416,7 @@ class Model(_core.ModelBase):
                     f"not a {kind.__name__}",
                     peripheral=self.peripheral,
                 )
-            _encode(out, value)
+            encode(out, value)
         return bytes(out)
 
     def restore(self, data: bytes) -> None:
@@ -444,7 +425,7 @@ class Model(_core.ModelBase):
         An override that raises during `Machine.restore` leaves the machine unusable: runs,
         calls and snapshots raise EmulationError until a restore succeeds.
         """
-        reader = _Reader(data)
+        reader = StateReader(data)
         values = [(name, reader.read(kind)) for name, kind in _spec_of(type(self)).state]
         if not reader.done():
             raise ModelError(
@@ -538,56 +519,6 @@ class Model(_core.ModelBase):
 
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} of {self.peripheral}>"
-
-
-def _encode(out: bytearray, value: object) -> None:
-    if isinstance(value, bool):
-        out += struct.pack("<?", value)
-    elif isinstance(value, int):
-        raw = value.to_bytes((value.bit_length() + 8) // 8, "little", signed=True)
-        out += struct.pack("<H", len(raw)) + raw
-    elif isinstance(value, float):
-        out += struct.pack("<d", value)
-    else:
-        raw = value.encode() if isinstance(value, str) else bytes(typing.cast(bytes, value))
-        out += struct.pack("<I", len(raw)) + raw
-
-
-class _Reader:
-    __slots__ = ("_at", "_data")
-
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-        self._at = 0
-
-    def done(self) -> bool:
-        return self._at == len(self._data)
-
-    def read(self, kind: type) -> object:
-        if kind is bool:
-            return self._unpack("<?")
-        if kind is float:
-            return self._unpack("<d")
-        if kind is int:
-            return int.from_bytes(self._take(self._length("<H")), "little", signed=True)
-        raw = self._take(self._length("<I"))
-        if kind is str:
-            return raw.decode()
-        return bytearray(raw) if kind is bytearray else raw
-
-    def _unpack(self, layout: str) -> object:
-        value: object = struct.unpack(layout, self._take(struct.calcsize(layout)))[0]
-        return value
-
-    def _length(self, layout: str) -> int:
-        return typing.cast(int, self._unpack(layout))
-
-    def _take(self, count: int) -> bytes:
-        if self._at + count > len(self._data):
-            raise ModelError(f"model state ends after {len(self._data)} bytes")
-        chunk = self._data[self._at : self._at + count]
-        self._at += count
-        return chunk
 
 
 _REGISTERED: dict[tuple[str, str], Callable[[_core.ModelContext], object]] = {}

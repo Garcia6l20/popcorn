@@ -49,6 +49,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief Python model maker per peripheral name, called with the ModelContext, returning a
    * popcorn.model.Model. Overrides the registered models of that peripheral. */
   std::map<std::string, reflex::py::nb::object> python_models{};
+  /** @brief Python bus targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
+   * instances in attachment order, served by the built-in bus model of that peripheral. */
+  std::map<std::string, std::vector<reflex::py::nb::object>> python_devices{};
 };
 
 /** @brief Bounds of one slice, core::slice_request without the predicate. */

@@ -1,4 +1,5 @@
 #include "machine.hpp"
+#include "devices.hpp"
 #include "errors.hpp"
 #include "models.hpp"
 
@@ -68,6 +69,17 @@ auto options_of(mcu_description const& description, machine_config const& config
   for(auto const& [name, maker] : config.python_models)
   {
     options.models.emplace(name, detail::python_model_factory(maker));
+  }
+  if(not config.python_devices.empty())
+  {
+    for(auto& [name, factory] : detail::device_factories(description, config.python_devices))
+    {
+      if(not options.models.emplace(name, std::move(factory)).second)
+      {
+        throw config_error(
+            "devices", 0, std::format("devices.{}", name), "a peripheral without a Python model");
+      }
+    }
   }
   if(config.arena_start)
   {

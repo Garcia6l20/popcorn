@@ -11,7 +11,7 @@ import os
 import threading
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, overload, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast, overload, runtime_checkable
 
 from popcorn import _core
 from popcorn._arena import Arena
@@ -30,6 +30,7 @@ from popcorn._call import (
     slot_for,
 )
 from popcorn._description import MachineDescription, load_description
+from popcorn._devices import I2CTarget, SpiTarget, attach, serving
 from popcorn._dwarf_views import Var
 from popcorn._enums import FloatAbi, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
@@ -302,6 +303,7 @@ class Machine:
         "_config_digest",
         "_coverage",
         "_description",
+        "_devices",
         "_handle",
         "_images",
         "_installed",
@@ -338,6 +340,7 @@ class Machine:
         arena_base: int | None = DEFAULT_ARENA_BASE,
         arena_size: int = DEFAULT_ARENA_SIZE,
         models: Mapping[str, Callable[[], Model]] | None = None,
+        devices: Mapping[str, Sequence[I2CTarget | SpiTarget]] | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -360,10 +363,16 @@ class Machine:
             models: Python model per peripheral name, a `popcorn.model.Model` subclass or a
                 callable building one, such as `functools.partial(Timer, period=5)`. It
                 replaces the registered model of that peripheral.
+            devices: Python bus devices per I2C or SPI peripheral name, `I2CTarget` or
+                `SpiTarget` instances of one kind, in attachment order. The built-in bus model of
+                the peripheral serves them. A device serves one live machine at a time.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
-                models key names no peripheral, or a model is refused.
+                models key names no peripheral, a model is refused, or devices are refused:
+                a peripheral that is not a built-in bus of their kind or has a Python model,
+                a chip select pin the description lacks, a device already serving a live
+                machine or listed twice.
             ImageError: An image does not fit the memory map.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
@@ -381,6 +390,8 @@ class Machine:
         config.arena_start = arena_base
         config.arena_size = arena_size if arena_base is not None else 0
         config.python_models = _model_makers(description, models or {})
+        attached = _checked_devices(description, devices or {}, models or {})
+        config.python_devices = {name: list(targets) for name, targets in attached.items()}
         self._description = description
         self._config_digest = config_digest
         self._handle = _core.MachineHandle(description, config)
@@ -392,7 +403,11 @@ class Machine:
         self._waiters: list[_Waiter] = []
         self._thread = threading.get_ident()
         self._ports = UartPorts(self._handle.attach_uart, self._wait_until, self._require_owner)
-        self._board = Board(self._ports)
+        self._devices = attached
+        for targets in attached.values():
+            for target in targets:
+                attach(target, self)
+        self._board = Board(self._ports, attached)
         access = ViewAccess(
             self._handle, self._require_stopped, self._ports.stream, self._require_owner
         )
@@ -1345,6 +1360,57 @@ def _model_makers(
                 expected="a peripheral of the description",
             )
     return {name: functools.partial(build_model, maker) for name, maker in models.items()}
+
+
+_BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI"}
+
+
+def _checked_devices(
+    description: MachineDescription,
+    devices: Mapping[str, Sequence[I2CTarget | SpiTarget]],
+    models: Mapping[str, object],
+) -> dict[str, tuple[I2CTarget | SpiTarget, ...]]:
+    peripherals = {p.name: p for p in description.peripherals if p.alias_of is None}
+    seen: set[int] = set()
+    out: dict[str, tuple[I2CTarget | SpiTarget, ...]] = {}
+
+    def refuse(name: str, expected: str) -> ConfigError:
+        return ConfigError(
+            f"devices.{name}: {expected}",
+            file=description.part,
+            key=f"devices.{name}",
+            expected=expected,
+        )
+
+    for name, targets in devices.items():
+        peripheral = peripherals.get(name)
+        if peripheral is None:
+            raise refuse(name, f"a peripheral of {description.part}")
+        if peripheral.ip not in _BUS_IPS.values():
+            raise refuse(name, "an I2C or SPI peripheral")
+        if name in models:
+            raise refuse(name, "a peripheral without a Python model")
+        listed: list[I2CTarget | SpiTarget] = []
+        for candidate in cast(Sequence[object], targets):
+            if not isinstance(candidate, I2CTarget | SpiTarget):
+                raise refuse(name, "popcorn.board.I2CTarget or SpiTarget instances")
+            target = candidate
+            kind = I2CTarget if isinstance(target, I2CTarget) else SpiTarget
+            listed.append(target)
+            if peripheral.ip != _BUS_IPS[kind]:
+                raise refuse(name, f"an {_BUS_IPS[kind]} peripheral for an {kind.__name__}")
+            if id(target) in seen:
+                raise refuse(name, f"{target!r} listed once")
+            seen.add(id(target))
+            if serving(target) is not None:
+                raise refuse(name, f"{target!r} not serving another live machine")
+            if isinstance(target, SpiTarget) and target.cs is not None:
+                port = f"GPIO{target.cs[1]}"
+                if port not in peripherals:
+                    raise refuse(name, f"a chip select on a GPIO port of {description.part}")
+        if listed:
+            out[name] = tuple(listed)
+    return out
 
 
 def _free_sentinel(description: MachineDescription) -> int:
