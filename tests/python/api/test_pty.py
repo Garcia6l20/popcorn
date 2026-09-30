@@ -198,5 +198,6 @@ def test_other_connections_and_devices_are_refused(
     path.write_text(
         head + '[board.I2C1]\ndevices = [{ address = 0x50, model = "fractions:Fraction" }]\n'
     )
-    with pytest.raises(NotImplementedError, match=r"board\.I2C1\.devices"):
+    with pytest.raises(popcorn.ConfigError) as refused:
         popcorn.Project.load(path).machine()
+    assert refused.value.key == "board.I2C1.devices[0].model"

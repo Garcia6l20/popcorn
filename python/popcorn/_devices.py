@@ -72,6 +72,16 @@ def _word(device: object, method: str, value: object, bits: int) -> int:
     return value
 
 
+def check_address(address: int) -> None:
+    """Refuse `address` unless it is a 7-bit I2C target address, 0x08 to 0x77.
+
+    Raises:
+        ValueError: It is not.
+    """
+    if isinstance(address, bool) or not 0x08 <= address <= 0x77:
+        raise ValueError(f"an I2C target address is 0x08 to 0x77, not {address!r}")
+
+
 class I2CTarget(_core.I2CTargetBase):
     """A target on an I2C bus, answering one 7-bit address, written in Python.
 
@@ -101,8 +111,7 @@ class I2CTarget(_core.I2CTargetBase):
         Raises:
             ValueError: `address` is not a 7-bit target address, 0x08 to 0x77.
         """
-        if isinstance(address, bool) or not 0x08 <= address <= 0x77:
-            raise ValueError(f"an I2C target address is 0x08 to 0x77, not {address!r}")
+        check_address(address)
         super().__init__()
         self._bus_address = address
 

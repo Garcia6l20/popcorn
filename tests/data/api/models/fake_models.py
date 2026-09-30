@@ -1,13 +1,14 @@
 """Stand-in model classes the project file tests reference."""
 
+from popcorn.board import I2CTarget
 from popcorn.model import Model
 
 
-class Eeprom:
-    """A bus device model."""
+class Eeprom(I2CTarget):
+    """A bus device."""
 
     def __init__(self, address: int, size: int) -> None:
-        self.address = address
+        super().__init__(address)
         self.size = size
 
 

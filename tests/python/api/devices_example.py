@@ -18,6 +18,8 @@ class Eeprom24(I2CTarget):
     pending: bytearray
 
     def __init__(self, address: int, size: int, page: int = 16) -> None:
+        if size <= 0 or size % page:
+            raise ValueError("an EEPROM size is a positive multiple of its page")
         super().__init__(address)
         self.size = size
         self.page = page

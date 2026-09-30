@@ -14,6 +14,7 @@ from typing import cast
 
 from popcorn import _core
 from popcorn._description import MachineDescription, load_description
+from popcorn._devices import I2CTarget, SpiTarget, check_address
 from popcorn._enums import StopReason
 from popcorn._errors import (
     BudgetExceeded,
@@ -144,8 +145,9 @@ class Project:
 
         Raises:
             ConfigError: A module or class is missing, a reference is not a class, a model is
-                not a `popcorn.model.Model`, or a parameter is unknown to its class or missing,
-                named as `board.<periph>.<param>`.
+                not a `popcorn.model.Model`, a device is not a `popcorn.board.I2CTarget` or
+                `SpiTarget`, an entry has both a model and devices, or a parameter is unknown
+                to its class or missing, named as `board.<periph>.<param>`.
         """
         if self._board is None:
             for directory in self._loaded.file.models.python:
@@ -158,9 +160,18 @@ class Project:
                 for index, device in enumerate(entry.devices):
                     at = f"{key}.devices[{index}]"
                     cls = self._resolve(device.model, f"{at}.model")
+                    if not issubclass(cls, I2CTarget | SpiTarget):
+                        raise self._error(
+                            f"{at}.model",
+                            f"a popcorn.board.I2CTarget or SpiTarget subclass, not {device.model}",
+                        )
                     params = _params(device.params)
                     self._check_params(cls, (device.address,), params, at)
                     devices.append(Device(device.address, cls, params))
+                if entry.model is not None and entry.devices:
+                    raise self._error(
+                        f"{key}.devices", "no devices on a peripheral that has a Python model"
+                    )
                 model = None if entry.model is None else self._resolve(entry.model, f"{key}.model")
                 params = _params(entry.params)
                 if model is not None:
@@ -175,18 +186,18 @@ class Project:
 
     def machine(self, config: str | None = None) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
-        board models, `connect = "pty"` bridges, `[boot] memory_init` written. Not reset.
+        board models, bus devices, `connect = "pty"` bridges, `[boot] memory_init` written. Not
+        reset. Each call builds new device instances, so two machines never share one.
 
         Args:
             config: A config to apply instead of this project's, reloading the file.
 
         Raises:
-            ConfigError: As `load`, `description` and `board`, or a memory_init symbol or range
-                is invalid.
+            ConfigError: As `load`, `description` and `board`, a memory_init symbol or range is
+                invalid, a device sits on a peripheral that is not an I2C bus, a device class
+                refuses its address, or `Machine(devices=)` refuses the devices.
             ImageError: An image cannot be read or does not fit the memory map.
             ModelError: A `connect` peripheral is not a UART.
-            NotImplementedError: A `[board]` entry lists devices, which no bus model attaches
-                yet.
         """
         if config is not None and config != self.config:
             return Project.load(self.path, config).machine()
@@ -200,6 +211,11 @@ class Project:
             if name not in served:
                 raise self._error(f"board.{name}", f"a peripheral of {description.part}")
             models[name] = functools.partial(entry.model, **entry.params)
+        devices = {
+            name: self._devices(name, entry, description)
+            for name, entry in self.board().items()
+            if entry.devices
+        }
         m = Machine(
             description,
             image=self.images(),
@@ -211,12 +227,9 @@ class Project:
             arena_base=_arena_base(file.boot.arena_base),
             arena_size=file.boot.arena_size or DEFAULT_ARENA_SIZE,
             models=models,
+            devices=devices,
         )
         for name, entry in self.board().items():
-            if entry.devices:
-                raise NotImplementedError(
-                    f"board.{name}.devices: no bus model attaches Python devices yet"
-                )
             if entry.connect is None:
                 continue
             if entry.connect != "pty":
@@ -273,6 +286,31 @@ class Project:
         if stop.reason is StopReason.BUDGET:
             raise BudgetExceeded(message, budget=boot.budget or 0, pc=pc, symbol=symbol, stop=stop)
         raise EmulationError(message, reason=stop.reason, pc=pc, symbol=symbol, stop=stop)
+
+    def _devices(
+        self, name: str, entry: BoardEntry, description: MachineDescription
+    ) -> list[I2CTarget | SpiTarget]:
+        peripheral = next(
+            (p for p in description.peripherals if p.name == name and p.alias_of is None), None
+        )
+        built: list[I2CTarget | SpiTarget] = []
+        for index, device in enumerate(entry.devices):
+            at = f"board.{name}.devices[{index}]"
+            if peripheral is None or peripheral.ip != "I2C":
+                raise self._error(f"{at}.address", f"an I2C bus of {description.part}")
+            if not issubclass(device.model, I2CTarget):
+                raise self._error(f"{at}.model", "a popcorn.board.I2CTarget subclass on I2C")
+            try:
+                check_address(device.address)
+            except ValueError as error:
+                raise self._error(f"{at}.address", str(error)) from error
+            try:
+                built.append(device.model(device.address, **device.params))
+            except (ValueError, TypeError) as error:
+                raise self._error(
+                    at, f"arguments {device.model.__qualname__} accepts: {error}"
+                ) from error
+        return built
 
     def _error(self, key: str, expected: str) -> ConfigError:
         line = self._loaded.line_of(key)

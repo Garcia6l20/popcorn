@@ -246,3 +246,47 @@ def test_boot_arena_keys_set_or_disable_the_arena(tmp_path: Path) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Project.load(write(tmp_path, minimal(arena_base="true")))
     assert (caught.value.key, caught.value.line) == ("boot.arena_base", 8)
+
+
+def _with_devices(tmp_path: Path, peripheral: str, device: str) -> Path:
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    (models / "bus_devices.py").write_text(
+        "from popcorn.board import I2CTarget, SpiTarget\n\n\n"
+        "class Target(I2CTarget):\n"
+        "    def __init__(self, address: int, size: int = 16) -> None:\n"
+        "        super().__init__(address)\n"
+        "        self.size = size\n\n\n"
+        "class Flash(SpiTarget):\n"
+        "    def __init__(self, address: int) -> None:\n"
+        "        super().__init__()\n\n\n"
+        "class NotADevice:\n"
+        "    def __init__(self, address: int) -> None:\n"
+        "        self.address = address\n"
+    )
+    return write(
+        tmp_path,
+        minimal()
+        + f"[board.{peripheral}]\ndevices = [\n  {device},\n]\n"
+        + f'[models]\npython = ["{models}"]\n',
+    )
+
+
+def test_a_device_class_must_be_a_bus_target(tmp_path: Path) -> None:
+    path = _with_devices(
+        tmp_path, "TESTDEV", '{ address = 0x50, model = "bus_devices:NotADevice" }'
+    )
+    with pytest.raises(popcorn.ConfigError) as caught:
+        popcorn.Project.load(path).board()
+    assert caught.value.key == "board.TESTDEV.devices[0].model"
+    assert "I2CTarget or SpiTarget" in caught.value.expected
+    assert caught.value.line == 9
+
+
+def test_devices_need_an_i2c_bus(tmp_path: Path) -> None:
+    path = _with_devices(tmp_path, "TESTDEV", '{ address = 0x50, model = "bus_devices:Target" }')
+    with pytest.raises(popcorn.ConfigError) as caught:
+        popcorn.Project.load(path).machine()
+    assert caught.value.key == "board.TESTDEV.devices[0].address"
+    assert caught.value.expected == "an I2C bus of POPCORN-M33-TEST"
+    assert caught.value.line == 9

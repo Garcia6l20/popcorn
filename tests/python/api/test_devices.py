@@ -458,3 +458,83 @@ def test_the_native_layer_refuses_devices_on_its_own(
     with pytest.raises(ConfigError, match=reason) as refused:
         _core.MachineHandle(u575, config)
     assert refused.value.key == f"devices.{peripheral}"
+
+
+DATA = Path(__file__).parents[2] / "data" / "api"
+
+
+def test_fr_per_5_a_project_file_wires_an_eeprom_the_firmware_uses(
+    u575: popcorn.MachineDescription,
+) -> None:
+    project = popcorn.Project.load(DATA / "devices.toml")
+    m = project.machine()
+    stop = asyncio.run(project.boot(m))
+    assert stop.reason is StopReason.ADDRESS
+    m.reg.pc = m.sym("eeprom_rw")
+    result = finish(m)
+    assert result[0] == 20
+    (eeprom,) = m.board.devices("I2C1")
+    assert isinstance(eeprom, Eeprom24)
+    assert eeprom.address == 0x50
+    assert bytes(eeprom.array[0x10:0x24]) == bytes(pattern(i) for i in range(20))
+    other = project.machine()
+    (second,) = other.board.devices("I2C1")
+    assert isinstance(second, Eeprom24)
+    assert second is not eeprom
+    assert second.array == bytearray(b"\xff" * 4096)
+
+
+def _project(tmp_path: Path, devices: str) -> Path:
+    text = (DATA / "devices.toml").read_text()
+    text = text.replace('"../../firmware/', f'"{DATA.parent.parent}/firmware/')
+    text = text.replace('"../../python"', f'"{Path(__file__).parents[1]}"')
+    start = text.index("[board.I2C1]")
+    end = text.index("[models]")
+    path = tmp_path / "popcorn.toml"
+    path.write_text(text[:start] + devices + text[end:])
+    return path
+
+
+@pytest.mark.parametrize(
+    ("devices", "key", "expected"),
+    [
+        (
+            '[board.SPI1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
+            "size = 16 }]\n",
+            "board.SPI1.devices[0].address",
+            "an I2C bus of STM32U575QGIx",
+        ),
+        (
+            '[board.I2C1]\ndevices = [{ address = 0x07, model = "api.devices_example:Eeprom24", '
+            "size = 16 }]\n",
+            "board.I2C1.devices[0].address",
+            "an I2C target address is 0x08 to 0x77, not 7",
+        ),
+        (
+            '[board.I2C1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
+            "size = 0 }]\n",
+            "board.I2C1.devices[0]",
+            "arguments Eeprom24 accepts: an EEPROM size is a positive multiple of its page",
+        ),
+        (
+            '[board.I2C1]\nmodel = "api.models_example:Timer"\n'
+            'devices = [{ address = 0x50, model = "api.devices_example:Eeprom24", size = 16 }]\n',
+            "board.I2C1.devices",
+            "no devices on a peripheral that has a Python model",
+        ),
+        (
+            '[board.I2C1]\ndevices = [{ address = 0x50, model = "api.devices_example:JedecDevice", '
+            "jedec = [1, 2, 3] }]\n",
+            "board.I2C1.devices[0].model",
+            "a popcorn.board.I2CTarget subclass on I2C",
+        ),
+    ],
+)
+def test_project_devices_are_refused_with_their_key(
+    u575: popcorn.MachineDescription, tmp_path: Path, devices: str, key: str, expected: str
+) -> None:
+    with pytest.raises(ConfigError) as caught:
+        popcorn.Project.load(_project(tmp_path, devices)).machine()
+    assert caught.value.key == key
+    assert caught.value.expected == expected
+    assert caught.value.line > 0
