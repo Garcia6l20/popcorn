@@ -62,8 +62,9 @@ class MachineFactory:
             raise
 
     def close(self) -> None:
-        """Close the pty bridges of every machine made."""
+        """Collect the coverage of every machine made and close its pty bridges."""
         for machine in self._machines:
+            self._session.collect(machine)
             machine.board.close()
         self._machines.clear()
 

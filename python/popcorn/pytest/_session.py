@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import copy
+import hashlib
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from popcorn import Machine, Project, Snapshot, Stop
+from popcorn.coverage import worker_path
 from popcorn.pytest._loop import OwnedLoop, owned_loop
 from popcorn.pytest._options import SETTINGS, Settings
 
@@ -58,12 +62,37 @@ class Booted:
         return self._decoded
 
 
+@dataclass(frozen=True, slots=True)
+class CoverageRun:
+    """Where this process saves firmware coverage for `--popcorn-cov`.
+
+    Attributes:
+        directory: The session directory of `.pcov` files, shared by xdist workers.
+        worker: This process's xdist worker id, `main` without xdist.
+        owner: Whether this process made the directory, merges it and removes it.
+    """
+
+    directory: Path
+    worker: str
+    owner: bool
+
+    @property
+    def path(self) -> Path:
+        """This process's `.pcov` file."""
+        return worker_path(self.directory, self.worker)
+
+
+COVERAGE = pytest.StashKey[CoverageRun]()
+
+
 @dataclass(slots=True)
 class PopcornSession:
     """The plugin's state in one process, one per xdist worker."""
 
     settings: Settings
     loop: OwnedLoop
+    coverage: CoverageRun | None = None
+    coverage_failures: list[str] = field(default_factory=list[str])
     boots: int = 0
     rebuilds: int = 0
     _projects: dict[str | None, Project] = field(default_factory=dict[str | None, Project])
@@ -102,8 +131,21 @@ class PopcornSession:
         return Key(config, strict)
 
     def build(self, key: Key) -> Machine:
-        """A new machine of `key`, not reset."""
-        return self.project(key.config).machine(strict_peripherals=key.strict)
+        """A new machine of `key`, not reset, counting coverage under `--popcorn-cov`."""
+        machine = self.project(key.config).machine(strict_peripherals=key.strict)
+        if self.coverage is not None:
+            machine.coverage.enable()
+        return machine
+
+    def collect(self, machine: Machine) -> None:
+        """Add the coverage `machine` counted to this process's `.pcov` file. A file that cannot
+        be written is a coverage failure, reported at session end, not an error of the test."""
+        if self.coverage is None:
+            return
+        try:
+            machine.coverage.merge_into(self.coverage.path)
+        except OSError as error:
+            self.coverage_failures.append(f"coverage not saved to {self.coverage.path}: {error}")
 
     def booted(self, key: Key) -> Booted:
         """The booted state of `key`, booting it on the owned loop the first time.
@@ -144,6 +186,7 @@ class PopcornSession:
     def rebuild(self, key: Key) -> Booted:
         """Replace the reused machine of `key` by a new one restored from the saved form."""
         old = self._booted[key]
+        self.collect(old.machine)
         old.machine.board.close()
         machine = self.build(key)
         machine.restore(old.decoded())
@@ -159,6 +202,10 @@ class PopcornSession:
         self.rebuilds += 1
         return booted
 
+    def booted_machines(self) -> list[Machine]:
+        """The reused machine of every key booted in this process."""
+        return [booted.machine for booted in self._booted.values()]
+
     def failed_machine(self, key: Key) -> Machine | None:
         """The machine whose boot of `key` failed, as the failure left it, None when the build
         itself failed or the boot did not."""
@@ -170,6 +217,16 @@ class PopcornSession:
             booted.machine.board.close()
         for machine in self._failed_machines.values():
             machine.board.close()
+
+    def _save_boot_coverage(self, key: Key, machine: Machine, snapshot: Snapshot) -> None:
+        assert self.coverage is not None
+        boot = machine.coverage.collect()
+        machine.coverage.clear()
+        path = boot_coverage_path(self.coverage.directory, key, snapshot)
+        try:
+            boot.save(path)
+        except OSError as error:
+            self.coverage_failures.append(f"boot coverage of {key} not saved: {error}")
 
     def _lookup(self, key: Key) -> Booted | None:
         failed = self._failed.get(key)
@@ -191,6 +248,8 @@ class PopcornSession:
             else:
                 stop = await project.boot(machine)
             snapshot = machine.snapshot()
+            if self.coverage is not None:
+                self._save_boot_coverage(key, machine, snapshot)
         except Exception as error:
             self._failed[key] = error
             if machine is not None:
@@ -206,6 +265,15 @@ class PopcornSession:
         )
         self._booted[key] = booted
         return booted
+
+
+def boot_coverage_path(directory: Path, key: Key, snapshot: Snapshot) -> Path:
+    """The file of the boot coverage of `key`: the same name in every process booting it, from
+    the key and the digests of its boot snapshot."""
+    identity = "\n".join(
+        (str(key), snapshot.description_digest, *snapshot.image_digests, snapshot.config_digest)
+    )
+    return directory / f"boot-{hashlib.sha256(identity.encode()).hexdigest()[:16]}.pcov"
 
 
 def fresh_copy(error: BaseException) -> BaseException:
@@ -227,13 +295,20 @@ def popcorn_session(config: pytest.Config) -> PopcornSession:
     """The plugin state of `config`, created on first use."""
     session = config.stash.get(SESSION, None)
     if session is None:
-        session = config.stash[SESSION] = PopcornSession(config.stash[SETTINGS], owned_loop(config))
+        session = config.stash[SESSION] = PopcornSession(
+            config.stash[SETTINGS], owned_loop(config), config.stash.get(COVERAGE, None)
+        )
     return session
 
 
 def summary(session: PopcornSession) -> dict[str, object]:
     """The counters of `session`, as a worker hands them to the xdist controller."""
-    return {"keys": [str(key) for key in session.keys], "boots": session.boots, "cache_hits": 0}
+    return {
+        "keys": [str(key) for key in session.keys],
+        "boots": session.boots,
+        "cache_hits": 0,
+        "coverage_failures": list(session.coverage_failures),
+    }
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
@@ -241,17 +316,37 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     state = session.config.stash.get(SESSION, None)
     if state is None:
         return
+    for booted in state.booted_machines():
+        state.collect(booted)
     state.close()
     workeroutput: object = getattr(session.config, "workeroutput", None)
     if isinstance(workeroutput, dict):
         workeroutput["popcorn"] = summary(state)
 
 
+WORKER_SUMMARIES = pytest.StashKey[list[dict[str, object]]]()
+
+
+def summary_line(summaries: list[dict[str, object]]) -> str | None:
+    """The one terminal line of the summed counters of `summaries`, None when nothing booted."""
+    keys: set[str] = set()
+    boots = hits = 0
+    for one in summaries:
+        keys.update(str(key) for key in cast(list[object], one.get("keys", [])))
+        boots += cast(int, one.get("boots", 0))
+        hits += cast(int, one.get("cache_hits", 0))
+    if not keys:
+        return None
+    return f"popcorn: {len(keys)} key(s), {boots} boot(s), {hits} from cache"
+
+
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
-    """One line of boot counters when a machine was booted."""
-    state = terminalreporter.config.stash.get(SESSION, None)
-    if state is None or not state.keys:
-        return
-    terminalreporter.write_line(
-        f"popcorn: {len(state.keys)} key(s), {state.boots} boot(s), 0 from cache"
-    )
+    """One line of boot counters, summed over xdist workers on the controller."""
+    config = terminalreporter.config
+    summaries = list(config.stash.get(WORKER_SUMMARIES, list[dict[str, object]]()))
+    state = config.stash.get(SESSION, None)
+    if state is not None:
+        summaries.append(summary(state))
+    line = summary_line(summaries)
+    if line is not None:
+        terminalreporter.write_line(line)

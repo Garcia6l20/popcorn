@@ -32,6 +32,13 @@ rootdir without the cache plugin. Write it as `--popcorn-trace-on-fail=DIR` or l
 line: a bare flag before a path takes the path as its DIR. `machine_factory` machines are not
 traced. Kept traces are never pruned: `--cache-clear` removes those in the pytest cache.
 
+With `--popcorn-cov=LCOV`, every machine the plugin builds counts coverage. Each process adds
+its machines' counts to one `.pcov` file of a temporary `popcorn-cov-*` directory, the boot of
+each configuration counted once, and the controller merges them into `LCOV` at session end. An
+interrupted session keeps the directory and writes no lcov. A crash or SIGKILL leaves the
+directory behind. xdist workers on other hosts, `--tx ssh=...`, are not supported: they share
+the directory by path.
+
 Limits:
 
 - Host input queued on a UART and not delivered yet stays queued across the restore.
@@ -97,6 +104,7 @@ pytest_plugins = [
     "popcorn.pytest._session",
     "popcorn.pytest._fixtures",
     "popcorn.pytest._report",
+    "popcorn.pytest._coverage",
 ]
 
 __all__ = ["MachineFactory", "Settings"]
