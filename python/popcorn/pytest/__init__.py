@@ -4,6 +4,28 @@ Load it from the root `conftest.py` of a test suite:
 
     pytest_plugins = ["popcorn.pytest"]
 
+Fixtures:
+
+    async def test_boot_state(machine: popcorn.Machine) -> None:
+        await machine.call("check")
+
+- `popcorn_project`, session scope: the `popcorn.Project` of `--popcorn-project`, by default
+  `popcorn.toml` in the pytest rootdir.
+- `machine`: the project's machine, built and booted once per session and process, then
+  restored from its boot snapshot before each test. Every test gets the same object. The plugin
+  removes the hooks a test installed, empties the intercept logs, the call baseline and the
+  trace ring. A test that loads another image, opens a pty or leaves the machine running spoils
+  it: the next test gets a new machine restored from the saved boot. A project without
+  `[boot] until` boots to the reset state. A failed boot errors every test using the machine,
+  booted once.
+- `machine_factory`: a `MachineFactory`, new machines separate from `machine`.
+
+Limits:
+
+- Host input queued on a UART and not delivered yet stays queued across the restore.
+- A trace opened with `machine.trace(...)` and never closed keeps its sink on the reused machine.
+- The `[models] python` directories stay on `sys.path` for the session.
+
 Async tests:
 
     async def test_ticks() -> None:
@@ -38,8 +60,14 @@ Options, registered for `pytest --help`: `--popcorn-project`, `--popcorn-config`
 Marker: `@pytest.mark.popcorn(config=None, budget=None, strict=None)`.
 """
 
+from popcorn.pytest._fixtures import MachineFactory
 from popcorn.pytest._options import Settings
 
-pytest_plugins = ["popcorn.pytest._options", "popcorn.pytest._loop"]
+pytest_plugins = [
+    "popcorn.pytest._options",
+    "popcorn.pytest._loop",
+    "popcorn.pytest._session",
+    "popcorn.pytest._fixtures",
+]
 
-__all__ = ["Settings"]
+__all__ = ["MachineFactory", "Settings"]

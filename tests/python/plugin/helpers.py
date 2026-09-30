@@ -20,6 +20,7 @@ PREBUILT = ROOT / "tests" / "firmware" / "api" / "prebuilt"
 DRIVER_ELF = PREBUILT / "driver.elf"
 CALLEE_ELF = PREBUILT / "callee.elf"
 FAULT_ELF = PREBUILT / "fault.elf"
+BOARD_ELF = PREBUILT / "board.elf"
 
 CONFTEST = 'pytest_plugins = ["popcorn.pytest"]\n'
 
@@ -79,15 +80,23 @@ def read_loops(pytester: pytest.Pytester) -> Loops:
 
 
 def write_project(
-    pytester: pytest.Pytester, until: str | None = "alu_mark", extra: str = ""
+    pytester: pytest.Pytester,
+    until: str | None = "alu_mark",
+    extra: str = "",
+    *,
+    vtor: str | None = None,
+    directory: Path | None = None,
 ) -> Path:
-    """An inner `popcorn.toml` over the M33 test description and `driver.elf`."""
-    boot = f'[boot]\nuntil = "{until}"\n' if until is not None else ""
+    """A `popcorn.toml` over the M33 test description and `driver.elf`, in `directory` or the
+    pytester directory. `vtor` names a `vt_*` table of the driver the boot starts from."""
+    boot = "" if until is None else f'until = "{until}"\n'
+    if vtor is not None:
+        boot += f"vtor = {popcorn.Image.elf(DRIVER_ELF).lookup(vtor).value:#x}\n"
     text = (
         f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
         f'[image.app]\nelf = "{DRIVER_ELF}"\n'
-        f"{boot}{textwrap.dedent(extra)}"
+        f"{'[boot]' + chr(10) + boot if boot else ''}{textwrap.dedent(extra)}"
     )
-    path = pytester.path / "popcorn.toml"
+    path = (directory or pytester.path) / "popcorn.toml"
     path.write_text(text)
     return path
