@@ -70,6 +70,7 @@ class PopcornSession:
     _booted: dict[Key, Booted] = field(default_factory=dict[Key, Booted])
     _failed: dict[Key, BaseException] = field(default_factory=dict[Key, BaseException])
     _locks: dict[Key, asyncio.Lock] = field(default_factory=dict[Key, asyncio.Lock])
+    _failed_machines: dict[Key, Machine] = field(default_factory=dict[Key, Machine])
 
     @property
     def keys(self) -> list[Key]:
@@ -158,10 +159,17 @@ class PopcornSession:
         self.rebuilds += 1
         return booted
 
+    def failed_machine(self, key: Key) -> Machine | None:
+        """The machine whose boot of `key` failed, as the failure left it, None when the build
+        itself failed or the boot did not."""
+        return self._failed_machines.get(key)
+
     def close(self) -> None:
-        """Close the pty bridges of the reused machines."""
+        """Close the pty bridges of the reused machines and of those whose boot failed."""
         for booted in self._booted.values():
             booted.machine.board.close()
+        for machine in self._failed_machines.values():
+            machine.board.close()
 
     def _lookup(self, key: Key) -> Booted | None:
         failed = self._failed.get(key)
@@ -172,6 +180,7 @@ class PopcornSession:
     async def _boot(self, key: Key) -> Booted:
         project = self.project(key.config)
         self.boots += 1
+        machine: Machine | None = None
         try:
             machine = self.build(key)
             image_count = len(machine.images)
@@ -184,6 +193,8 @@ class PopcornSession:
             snapshot = machine.snapshot()
         except Exception as error:
             self._failed[key] = error
+            if machine is not None:
+                self._failed_machines[key] = machine
             raise
         booted = Booted(
             machine=machine,

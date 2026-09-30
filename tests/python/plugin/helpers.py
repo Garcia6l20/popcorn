@@ -88,15 +88,17 @@ def write_project(
     *,
     vtor: str | None = None,
     directory: Path | None = None,
+    elf: Path = DRIVER_ELF,
 ) -> Path:
-    """A `popcorn.toml` over the M33 test description and `driver.elf`, in `directory` or the
-    pytester directory. `vtor` names a `vt_*` table of the driver the boot starts from."""
+    """A `popcorn.toml` over the M33 test description and `elf`, `driver.elf` by default, in
+    `directory` or the pytester directory. `vtor` names a `vt_*` table of `elf` the boot starts
+    from."""
     boot = "" if until is None else f'until = "{until}"\n'
     if vtor is not None:
-        boot += f"vtor = {popcorn.Image.elf(DRIVER_ELF).lookup(vtor).value:#x}\n"
+        boot += f"vtor = {popcorn.Image.elf(elf).lookup(vtor).value:#x}\n"
     text = (
         f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-        f'[image.app]\nelf = "{DRIVER_ELF}"\n'
+        f'[image.app]\nelf = "{elf}"\n'
         f"{'[boot]' + chr(10) + boot if boot else ''}{textwrap.dedent(extra)}"
     )
     path = (directory or pytester.path) / "popcorn.toml"

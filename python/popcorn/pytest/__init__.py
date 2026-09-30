@@ -20,6 +20,11 @@ Fixtures:
   booted once.
 - `machine_factory`: a `MachineFactory`, new machines separate from `machine`.
 
+A failing test that used a popcorn machine gets a "popcorn" section in its report, one block per
+machine: the stop of the failing exception or of the machine's last run, the fault registers
+decoded, the call stack and the trace ring. A machine without a stop since the test started shows
+its registers and ring. The report of a setup error from a failed boot shows the boot's stop.
+
 Limits:
 
 - Host input queued on a UART and not delivered yet stays queued across the restore.
@@ -84,6 +89,7 @@ pytest_plugins = [
     "popcorn.pytest._loop",
     "popcorn.pytest._session",
     "popcorn.pytest._fixtures",
+    "popcorn.pytest._report",
 ]
 
 __all__ = ["MachineFactory", "Settings"]

@@ -9,6 +9,7 @@ import pytest
 
 from popcorn import Machine, PopcornError, Project
 from popcorn.pytest._options import UNSET, marker_options
+from popcorn.pytest._report import track
 from popcorn.pytest._session import Booted, Key, PopcornSession, popcorn_session
 
 
@@ -25,9 +26,10 @@ class MachineFactory:
     `--popcorn-budget`. Machines not booted get none: it would bound their boot too.
     """
 
-    def __init__(self, session: PopcornSession, test: ItemSettings) -> None:
-        """Make machines for one test with `test` settings."""
+    def __init__(self, session: PopcornSession, test: ItemSettings, item: pytest.Item) -> None:
+        """Make machines for the test `item` with `test` settings."""
         self._session = session
+        self._item = item
         self._default = test.key
         self._budget = test.budget
         self._machines: list[Machine] = []
@@ -43,13 +45,21 @@ class MachineFactory:
         """
         key = self._key(config, strict)
         if not booted:
-            return self._keep(self._session.build(key))
-        return self._restored(key, self._session.booted(key))
+            return self._keep(self._session.build(key), key)
+        try:
+            return self._restored(key, self._session.booted(key))
+        except PopcornError:
+            self._track_failed(key)
+            raise
 
     async def booted(self, config: str | None = None, *, strict: bool | None = None) -> Machine:
         """A new booted machine as `factory()` gives, booting the key on the running loop."""
         key = self._key(config, strict)
-        return self._restored(key, await self._session.booted_async(key))
+        try:
+            return self._restored(key, await self._session.booted_async(key))
+        except PopcornError:
+            self._track_failed(key)
+            raise
 
     def close(self) -> None:
         """Close the pty bridges of every machine made."""
@@ -64,13 +74,19 @@ class MachineFactory:
         return self._session.key(config, strict)
 
     def _restored(self, key: Key, booted: Booted) -> Machine:
-        machine = self._keep(self._session.build(key))
+        machine = self._keep(self._session.build(key), key)
         machine.restore(booted.decoded())
         machine.default_budget = self._budget
         return machine
 
-    def _keep(self, machine: Machine) -> Machine:
+    def _track_failed(self, key: Key) -> None:
+        failed = self._session.failed_machine(key)
+        if failed is not None:
+            track(self._item, f"machine_factory boot of {key}", failed, key)
+
+    def _keep(self, machine: Machine, key: Key) -> Machine:
         self._machines.append(machine)
+        track(self._item, f"machine_factory #{len(self._machines)}", machine, key)
         return machine
 
 
@@ -130,8 +146,16 @@ def machine(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) ->
     yet is not. Its `default_budget` is the test's, from the `popcorn` marker or
     `--popcorn-budget`.
     """
-    test = settings_of(_item(request), _popcorn_session)
-    booted = _restored(_popcorn_session, test.key)
+    item = _item(request)
+    test = settings_of(item, _popcorn_session)
+    try:
+        booted = _restored(_popcorn_session, test.key)
+    except PopcornError:
+        failed = _popcorn_session.failed_machine(test.key)
+        if failed is not None:
+            track(item, "machine", failed, test.key)
+        raise
+    track(item, "machine", booted.machine, test.key)
     m = booted.machine
     m.default_budget = test.budget
     yield m
@@ -147,7 +171,8 @@ def machine_factory(
     request: pytest.FixtureRequest, _popcorn_session: PopcornSession
 ) -> Iterator[MachineFactory]:
     """A `MachineFactory` for this test, its machines closed after it."""
-    factory = MachineFactory(_popcorn_session, settings_of(_item(request), _popcorn_session))
+    item = _item(request)
+    factory = MachineFactory(_popcorn_session, settings_of(item, _popcorn_session), item)
     yield factory
     factory.close()
 
