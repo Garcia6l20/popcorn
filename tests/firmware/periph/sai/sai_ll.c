@@ -1,8 +1,13 @@
 #include "periph_test.h"
 #include "stm32u5xx.h"
+#include "stm32u5xx_ll_bus.h"
+#include "stm32u5xx_ll_dma.h"
 
 #define FRAMES       64u
 #define DUPLEX_WORDS 64u
+#define RING_WORDS   64u
+#define RING_BLOCKS  32u
+#define LINK_UPDATE  (LL_DMA_UPDATE_CBR1 | LL_DMA_UPDATE_CSAR | LL_DMA_UPDATE_CLLR)
 
 #define SAI_CR1_TX_MASTER_16 ((4u << SAI_xCR1_DS_Pos) | (4u << SAI_xCR1_MCKDIV_Pos))
 #define SAI_CR1_RX_SYNC_16   (SAI_xCR1_MODE | (4u << SAI_xCR1_DS_Pos) | SAI_xCR1_SYNCEN_0)
@@ -16,12 +21,29 @@ volatile uint32_t received_count;
 static volatile uint32_t sent_count;
 static volatile uint32_t underruns;
 static volatile uint32_t status_seen;
+static volatile uint32_t ring_blocks;
+static volatile uint32_t ring_halves;
+static volatile uint32_t received_blocks;
+
+uint32_t ring[RING_WORDS];
+
+struct ring_node
+{
+  uint32_t br1;
+  uint32_t sar;
+  uint32_t llr;
+};
+
+static struct ring_node node;
 
 void idle(void);
 void tx_poll(void);
 void duplex_irq(void);
 void underrun(void);
 void SAI1_IRQHandler(void);
+void dma(void);
+void GPDMA1_Channel0_IRQHandler(void);
+void GPDMA1_Channel1_IRQHandler(void);
 int  main(void);
 
 void idle(void)
@@ -157,6 +179,97 @@ void underrun(void)
   disable(SAI1_Block_A);
   NVIC_DisableIRQ(SAI1_IRQn);
   LOG(underruns);
+  DONE();
+}
+
+void GPDMA1_Channel0_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_HT(GPDMA1, LL_DMA_CHANNEL_0))
+  {
+    LL_DMA_ClearFlag_HT(GPDMA1, LL_DMA_CHANNEL_0);
+    ++ring_halves;
+  }
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_0))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_0);
+    ++ring_blocks;
+  }
+}
+
+void GPDMA1_Channel1_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_1))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_1);
+    ++received_blocks;
+  }
+}
+
+static void ring_channel(void)
+{
+  node = (struct ring_node){
+      RING_WORDS * 4u, (uint32_t)ring, LINK_UPDATE | ((uint32_t)&node & 0xfffcu)};
+  LL_DMA_ConfigTransfer(
+      GPDMA1, LL_DMA_CHANNEL_0,
+      LL_DMA_SRC_INCREMENT
+          | LL_DMA_DEST_FIXED
+          | LL_DMA_SRC_DATAWIDTH_WORD
+          | LL_DMA_DEST_DATAWIDTH_WORD);
+  LL_DMA_SetDataTransferDirection(GPDMA1, LL_DMA_CHANNEL_0, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+  LL_DMA_SetPeriphRequest(GPDMA1, LL_DMA_CHANNEL_0, LL_GPDMA1_REQUEST_SAI1_A);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_0, RING_WORDS * 4u);
+  LL_DMA_SetSrcAddress(GPDMA1, LL_DMA_CHANNEL_0, (uint32_t)ring);
+  LL_DMA_SetDestAddress(GPDMA1, LL_DMA_CHANNEL_0, (uint32_t)&SAI1_Block_A->DR);
+  LL_DMA_SetLinkedListBaseAddr(GPDMA1, LL_DMA_CHANNEL_0, (uint32_t)&node & 0xffff0000u);
+  LL_DMA_ConfigLinkUpdate(GPDMA1, LL_DMA_CHANNEL_0, LINK_UPDATE, (uint32_t)&node);
+  LL_DMA_EnableIT_HT(GPDMA1, LL_DMA_CHANNEL_0);
+  LL_DMA_EnableIT_TC(GPDMA1, LL_DMA_CHANNEL_0);
+  NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+}
+
+static void receive_channel(void)
+{
+  LL_DMA_ConfigTransfer(
+      GPDMA1, LL_DMA_CHANNEL_1,
+      LL_DMA_SRC_FIXED
+          | LL_DMA_DEST_INCREMENT
+          | LL_DMA_SRC_DATAWIDTH_WORD
+          | LL_DMA_DEST_DATAWIDTH_WORD);
+  LL_DMA_SetDataTransferDirection(GPDMA1, LL_DMA_CHANNEL_1, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+  LL_DMA_SetPeriphRequest(GPDMA1, LL_DMA_CHANNEL_1, LL_GPDMA1_REQUEST_SAI1_B);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_1, DUPLEX_WORDS * 4u);
+  LL_DMA_SetSrcAddress(GPDMA1, LL_DMA_CHANNEL_1, (uint32_t)&SAI1_Block_B->DR);
+  LL_DMA_SetDestAddress(GPDMA1, LL_DMA_CHANNEL_1, (uint32_t)received);
+  LL_DMA_EnableIT_TC(GPDMA1, LL_DMA_CHANNEL_1);
+  NVIC_EnableIRQ(GPDMA1_Channel1_IRQn);
+}
+
+void dma(void)
+{
+  for(uint32_t index = 0; index < RING_WORDS; ++index)
+  {
+    ring[index] = ramp(index);
+  }
+  clocks();
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  configure(SAI1_Block_B, SAI_CR1_RX_SYNC_16 | SAI_xCR1_DMAEN, 0);
+  configure(SAI1_Block_A, SAI_CR1_TX_MASTER_16 | SAI_xCR1_DMAEN, 0);
+  ring_channel();
+  receive_channel();
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_1);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_0);
+  SAI1_Block_B->CR1 |= SAI_xCR1_SAIEN;
+  SAI1_Block_A->CR1 |= SAI_xCR1_SAIEN;
+  while(ring_blocks < RING_BLOCKS)
+  {
+    __WFI();
+  }
+  disable(SAI1_Block_A);
+  disable(SAI1_Block_B);
+  LOG(ring_blocks);
+  LOG(ring_halves);
+  LOG(received_blocks);
+  LOG(SAI1_Block_A->SR & SAI_xSR_OVRUDR);
   DONE();
 }
 

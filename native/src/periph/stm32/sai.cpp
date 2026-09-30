@@ -1,3 +1,4 @@
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 
@@ -68,6 +69,7 @@ struct block_fields
   field_ref                                    size;
   field_ref                                    sync;
   field_ref                                    mono;
+  field_ref                                    dma;
   field_ref                                    enable;
   field_ref                                    no_divider;
   field_ref                                    divider;
@@ -106,6 +108,16 @@ auto lower(std::string_view name) -> std::string
   return out;
 }
 
+auto requests_of(peer_directory const& peers, std::string_view instance)
+    -> std::array<dma_signal, blocks>
+{
+  auto const prefix = lower(instance);
+  return {
+      dma_signal{peers, prefix + "_a_dma"},
+      dma_signal{peers, prefix + "_b_dma"}
+  };
+}
+
 class sai;
 
 auto sai_writes() -> std::span<write_entry<sai> const>;
@@ -126,15 +138,18 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
  *        receiver takes the frame from its endpoint when its first active slot ends, and stores
  *        each active slot's word when the slot ends, slot 0 only in mono mode. Endpoints get the
  *        frame's start time. A frame shorter than 8 bits never runs, logged once, section 69.4.6.
- * Underrun and overrun set OVRUDR and keep the slot position, section 69.4.14: a transmitter sends
- * 0 and a receiver drops words until the FIFO serves the slot where it happened. FLVL and FREQ
- * follow the FIFO level against FTH for the block's direction, section 69.4.9, also while SAIEN is
- * clear. Clearing SAIEN takes effect at the end of the frame in progress, section 69.4.15. A master
- * with NODIV = 0 and FRL + 1 not a power of 2 from 8 sets WCKCFG and stays disabled. FRCR.FSDEF is
- * writable, as RM0456 69.6.4 describes it and ST's HAL writes it, although the register map marks
- * it read-only. The IRQ follows the status flags of both blocks with their enables. Not modelled,
- * logged once: SPDIF, AC'97, PDM, companding, mute, synchronization with another SAI. The frame and
- * slot timing ignore FSOFF and FBOFF.
+ *        Underrun and overrun set OVRUDR and keep the slot position, section 69.4.14: a
+ *        transmitter sends 0 and a receiver drops words until the FIFO serves the slot where it
+ *        happened. FLVL and FREQ follow the FIFO level against FTH for the block's direction,
+ *        section 69.4.9, also while SAIEN is clear. Clearing SAIEN takes effect at the end of the
+ *        frame in progress, section 69.4.15. A master with NODIV = 0 and FRL + 1 not a power of 2
+ *        from 8 sets WCKCFG and stays disabled. FRCR.FSDEF is writable, as RM0456 69.6.4
+ *        describes it and ST's HAL writes it, although the register map marks it read-only. The
+ *        IRQ follows the status flags of both blocks with their enables. With CR1.DMAEN, the
+ *        block's DMA request `<instance>_a_dma` or `<instance>_b_dma` follows FREQ, section
+ *        69.4.16, through the GPDMA peer, also while SAIEN is clear, levels announced again in
+ *        reset. Not modelled, logged once: SPDIF, AC'97, PDM, companding, mute, synchronization
+ *        with another SAI. The frame and slot timing ignore FSOFF and FBOFF.
  */
 class sai final : public dispatch_model<sai, sai_state>, public audio_port, public clock_listener
 {
@@ -203,6 +218,7 @@ private:
   field_ref                            pdm_enable_;
   core::clock_domain                   kernel_;
   irq_line&                            line_;
+  std::array<dma_signal, blocks>       requests_;
   bool                                 unsupported_logged_{};
   bool                                 no_clock_logged_{};
   bool                                 decimation_logged_{};
@@ -234,7 +250,8 @@ sai::sai(
     std::array<audio_attachment, blocks> wired)
     : dispatch_model{ctx, desc, "SAI", sai_writes()}, regs_{ctx.regs}, wired_{std::move(wired)},
       block_{fields_of('A'), fields_of('B')}, pdm_enable_{field("PDMCR", "PDMEN")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")}
+      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
+      requests_{requests_of(ctx.peers, desc.name)}
 {}
 
 auto sai::fields_of(char prefix) const -> block_fields
@@ -251,6 +268,7 @@ auto sai::fields_of(char prefix) const -> block_fields
       .size          = field(cr1, "DS"),
       .sync          = field(cr1, "SYNCEN"),
       .mono          = field(cr1, "MONO"),
+      .dma           = field(cr1, "DMAEN"),
       .enable        = field(cr1, "SAIAEN"),
       .no_divider    = field(cr1, "NODIV"),
       .divider       = field(cr1, "MCKDIV"),
@@ -399,6 +417,10 @@ void sai::reset(register_file& regs, reset_kind)
     auto const generation = block.generation + 1;
     block                 = {};
     block.generation      = generation;
+  }
+  for(auto& request : requests_)
+  {
+    request.resolve();
   }
   flags();
 }
@@ -908,6 +930,10 @@ void sai::flags()
   else
   {
     line_.lower();
+  }
+  for(std::size_t b = 0; b < blocks; ++b)
+  {
+    requests_[b].set(on(block_[b].dma) and on(block_[b].request));
   }
 }
 }

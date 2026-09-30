@@ -1,3 +1,4 @@
+#include "dma.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/log.hpp>
@@ -11,7 +12,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -88,6 +92,65 @@ auto source_words(std::size_t count) -> std::vector<std::uint32_t>
   return out;
 }
 
+constexpr std::uint32_t a_request = 36;
+constexpr std::uint32_t b_request = 37;
+
+class request_probe final : public popcorn::periph::model, public stm32::dma_controller
+{
+public:
+  std::map<std::uint32_t, bool> levels;
+
+  void on_request(std::uint32_t request, bool level) override
+  {
+    levels[request] = level;
+  }
+
+  [[nodiscard]] auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> override
+  {
+    if(signal == "sai1_a_dma")
+    {
+      return a_request;
+    }
+    if(signal == "sai1_b_dma")
+    {
+      return b_request;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
 struct rig
 {
   std::shared_ptr<recorder>      a = std::make_shared<recorder>();
@@ -98,7 +161,8 @@ struct rig
   explicit rig(
       std::string_view           entry,
       std::vector<std::uint32_t> words    = source_words(256),
-      stm32::audio_attachment    a_wiring = {})
+      stm32::audio_attachment    a_wiring = {},
+      bool                       probe    = false)
       : b{std::make_shared<recorder>(std::move(words))}
   {
     a_wiring.endpoint     = a;
@@ -106,12 +170,29 @@ struct rig
     board.audio["SAI1_B"] = {.endpoint = b};
     auto options          = popcorn::testing::stm32_options();
     options.models        = stm32::factories(board, u575());
-    f                     = std::make_unique<stm32_fixture>(u575(), "sai_ll", std::move(options));
+    if(probe)
+    {
+      options.models.insert_or_assign(
+          "GPDMA1",
+          [](popcorn::periph::model_context&,
+             popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+            return std::make_shared<request_probe>();
+          });
+    }
+    f = std::make_unique<stm32_fixture>(u575(), "sai_ll", std::move(options));
     REQUIRE(
         f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
             .reason
         == stop_reason::address);
     f->set("pc", sym("sai_ll", entry));
+  }
+
+  [[nodiscard]] auto level(std::uint32_t request) const -> bool
+  {
+    auto* const found = f->model_of<request_probe>("GPDMA1");
+    REQUIRE(found != nullptr);
+    auto const at = found->levels.find(request);
+    return at != found->levels.end() and at->second;
   }
 
   auto finish() const -> std::vector<std::uint32_t>
@@ -897,7 +978,7 @@ TEST_CASE("a write to a full FIFO is dropped, a mono receiver keeps slot 0 only"
 
 TEST_CASE("the IRQ-driven firmware runs give the same frames, log and state twice")
 {
-  for(std::string_view const entry : {"duplex_irq", "underrun"})
+  for(std::string_view const entry : {"duplex_irq", "underrun", "dma"})
   {
     CAPTURE(entry);
     std::vector<stm32::captured_audio_frame> frames;
@@ -981,4 +1062,99 @@ TEST_CASE("an attachment set through the port changes the decimation from the ne
     at.push_back(call.at - start);
   }
   CHECK(at == std::vector<std::uint64_t>{0, 10 * us, 20 * us, 40 * us});
+}
+
+TEST_CASE(
+    "GPDMA feeds block A from a circular ring for 1024 frames, block B fills one buffer then "
+    "overruns")
+{
+  auto const words = source_words(64);
+  rig        r{"dma", words};
+  auto const log = r.finish();
+  CHECK(log == std::vector<std::uint32_t>{32, 32, 1, 0});
+  auto const& frames = r.a->frames;
+  REQUIRE(frames.size() >= 1024);
+  for(std::uint32_t index = 0; index < 1024; ++index)
+  {
+    CAPTURE(index);
+    auto const first = (2 * index) % 64;
+    CHECK(frames[index].slots == std::vector<std::uint32_t>{ramp(first), ramp(first + 1)});
+    if(index > 0)
+    {
+      CHECK(frames[index].at.ps - frames[index - 1].at.ps == frame_ps);
+    }
+  }
+  for(std::uint32_t index = 0; index < 64; ++index)
+  {
+    CAPTURE(index);
+    CHECK(r.word("received", index) == (words[index] & 0xFFFFu));
+  }
+}
+
+TEST_CASE("a snapshot mid-DMA restored into a fresh machine sends the same rest")
+{
+  rig first{"dma"};
+  bus b{*first.f};
+  b.run_until(b.now() + 300 * frame_ps + 20 * us);
+  auto const                               done  = first.a->frames.size();
+  auto const                               saved = first.f->target->snapshot();
+  auto const                               log   = first.finish();
+  std::vector<stm32::captured_audio_frame> rest{
+      first.a->frames.begin() + static_cast<std::ptrdiff_t>(done), first.a->frames.end()};
+  REQUIRE(rest.size() > 500);
+  rig other{"idle"};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.finish() == log);
+  CHECK(other.a->frames == rest);
+}
+
+TEST_CASE("the DMA requests follow DMAEN and FREQ, also while the block is off")
+{
+  rig r{"idle", source_words(64), {}, true};
+  bus b{*r.f};
+  CHECK_FALSE(r.level(a_request));
+  b.set("ACR1", "DMAEN", 1);
+  CHECK(r.level(a_request));
+  b.push('A', 1);
+  CHECK_FALSE(r.level(a_request));
+  b.put(
+      "ACR2", {
+                  {"FTH", 1}
+  });
+  CHECK(r.level(a_request));
+  b.push('A', 2);
+  b.push('A', 3);
+  CHECK_FALSE(r.level(a_request));
+  b.set("ACR1", "DMAEN", 0);
+  b.put(
+      "ACR2", {
+                  {"FFLUSH", 1}
+  });
+  CHECK_FALSE(r.level(a_request));
+  b.clocks();
+  b.stereo16("B", 32, false);
+  b.put(
+      "BCR1", {
+                  {"MODE",   1},
+                  {"DS",     4},
+                  {"MCKDIV", 4},
+                  {"DMAEN",  1},
+                  {"SAIAEN", 1}
+  });
+  auto const start = b.now();
+  CHECK_FALSE(r.level(b_request));
+  b.run_until(start + 33 * us);
+  CHECK(r.level(b_request));
+  CHECK(b.pop('B') == (source_words(1)[0] & 0xFFFFu));
+  CHECK_FALSE(r.level(b_request));
+  b.run_until(start + frame_ps + 1);
+  CHECK(r.level(b_request));
+  b.set("BCR1", "DMAEN", 0);
+  CHECK_FALSE(r.level(b_request));
+  b.set("BCR1", "DMAEN", 1);
+  CHECK(r.level(b_request));
+  r.f->target->reset();
+  CHECK_FALSE(r.level(b_request));
+  CHECK_FALSE(r.level(a_request));
 }
