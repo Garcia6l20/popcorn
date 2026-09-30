@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from popcorn import Machine, StopReason
+from popcorn.pytest import MachineFactory
 from popcorn.trace import Block, Irq, TraceKind, read
 from popcorn.units import ms
 
@@ -81,3 +82,18 @@ async def test_a_press_runs_the_exti13_handler_once(machine: Machine) -> None:
     await press(machine)
     entries = [r.number for r in machine.ring.records() if isinstance(r, Irq) and r.enter]
     assert entries.count(EXTI13) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="known issue restore-into-unreset-machine: a machine restored from the boot snapshot"
+    " without a reset never forwards GPIO edges to EXTI",
+)
+async def test_a_second_machine_from_the_boot_snapshot_takes_presses(
+    machine_factory: MachineFactory,
+) -> None:
+    second = await machine_factory.booted()
+    await settle(second)
+    await press(second)
+    assert second.var("presses").value == 1
+    assert second.periph.GPIOA.pin(5).level
