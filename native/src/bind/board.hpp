@@ -25,15 +25,30 @@ struct[[= py::rename{"UartFrame"}]] uart_frame
 
 namespace detail
 {
-/** @brief Far end of a UART that queues every transmitted frame for Python to drain. */
+/** @brief Transmitted frames a UART link keeps before dropping the oldest, about 16 MiB. */
+inline constexpr std::uint64_t uart_frame_limit = std::uint64_t{1} << 20;
+
+/**
+ * @brief Far end of a UART that queues transmitted frames for Python to drain, at most `limit`
+ *        of them: a full queue drops its oldest frame and counts it.
+ */
 class queue_endpoint final : public periph::stm32::uart_endpoint
 {
 public:
   /** @brief Frames not drained yet, oldest first. */
   std::deque<uart_frame> frames;
+  /** @brief Frames kept at most. */
+  std::uint64_t limit = uart_frame_limit;
+  /** @brief Frames dropped because the queue was full. */
+  std::uint64_t dropped{};
 
   void transmitted(std::uint16_t data, vtime at) override
   {
+    while(frames.size() >= limit)
+    {
+      frames.pop_front();
+      ++dropped;
+    }
     frames.push_back({.data = data, .at_ps = at.ps});
   }
 };
@@ -75,6 +90,18 @@ public:
    */
   [[= py::doc{"Take at most count of the oldest transmitted frames."}]] auto
       drain(std::uint64_t count) -> std::vector<uart_frame>;
+
+  /** @brief Transmitted frames dropped because the queue held its limit. */
+  [[= py::doc{"Transmitted frames dropped because the queue was full."}]] [[nodiscard]] auto
+      dropped() const noexcept -> std::uint64_t;
+
+  /**
+   * @brief Sets the most transmitted frames the queue keeps, uart_frame_limit by default.
+   * @param limit Frames, at least 1.
+   * @throws config_error when @p limit is 0.
+   */
+  [[= py::doc{"Set the most transmitted frames the queue keeps, for tests."}]] void
+      set_frame_limit(std::uint64_t limit);
 
 private:
   [[nodiscard]] auto port() const -> periph::stm32::uart_port&;

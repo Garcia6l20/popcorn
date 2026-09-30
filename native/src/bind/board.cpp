@@ -52,6 +52,25 @@ auto uart_link::drain(std::uint64_t count) -> std::vector<uart_frame>
   return out;
 }
 
+auto uart_link::dropped() const noexcept -> std::uint64_t
+{
+  return endpoint_->dropped;
+}
+
+void uart_link::set_frame_limit(std::uint64_t limit)
+{
+  if(limit == 0)
+  {
+    throw config_error("uart", 0, "limit", "a frame limit of at least 1");
+  }
+  endpoint_->limit = limit;
+  while(endpoint_->frames.size() > limit)
+  {
+    endpoint_->frames.pop_front();
+    ++endpoint_->dropped;
+  }
+}
+
 auto machine_handle::uart_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;

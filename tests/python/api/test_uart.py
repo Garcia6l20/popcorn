@@ -166,6 +166,26 @@ def test_a_python_model_in_a_uart_slot_is_not_connected(
     assert m.periph.USART1.port.available == 0
 
 
+def test_a_full_queue_drops_its_oldest_frames_and_counts_them(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    link = board._ports.link("USART1")  # pyright: ignore[reportPrivateUsage]
+
+    link.set_frame_limit(3)
+
+    async def body() -> bytes:
+        await uart.write(b"hello")
+        await board.run(for_=ms(2))
+        return await uart.read(uart.available)
+
+    saved = board.snapshot()
+    assert asyncio.run(body()) == b"llo"
+    assert uart.dropped == 2
+    board.restore(saved)
+    assert uart.dropped == 0
+    with pytest.raises(popcorn.ConfigError):
+        link.set_frame_limit(0)
+
+
 def test_a_restore_drops_frames_not_read_yet(board: popcorn.Machine) -> None:
     uart = board.periph.USART1.port
     saved = board.snapshot()

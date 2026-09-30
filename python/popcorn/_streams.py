@@ -52,14 +52,15 @@ class UartStream:
     connected when the machine is built, so frames sent before the test first takes `port` wait
     in the queue. An alias, such as a secure address window of the same USART, shares the
     stream of the peripheral serving it. The queue grows by one frame per transmitted character
-    until read, about 16 bytes each.
+    until read, about 16 bytes each, up to 1 Mi frames, about 16 MiB. A full queue drops its
+    oldest frame and counts it in `dropped`.
 
     `Machine.restore` empties the queue of transmitted frames not read yet, since they came
     from a run the restore undoes. Bytes written and not yet delivered are part of the UART
     model's state and return to what the snapshot holds.
     """
 
-    __slots__ = ("__weakref__", "_bridges", "_link", "_stimulus", "_wait", "name")
+    __slots__ = ("__weakref__", "_bridges", "_dropped", "_link", "_stimulus", "_wait", "name")
 
     def __init__(
         self,
@@ -68,9 +69,11 @@ class UartStream:
         wait: Waiter,
         bridges: dict[str, PtyBridge],
         stimulus: Callable[[], None],
+        dropped: Callable[[], int],
     ) -> None:
         """Wrap a native link. Use `m.periph.<NAME>.port` instead."""
         self.name = name
+        self._dropped = dropped
         self._link = link
         self._wait = wait
         self._bridges = bridges
@@ -80,6 +83,12 @@ class UartStream:
     def available(self) -> int:
         """Frames the firmware transmitted, not read yet."""
         return self._link.available()
+
+    @property
+    def dropped(self) -> int:
+        """Transmitted frames dropped because the queue held its limit, since power-on or the
+        last `Machine.restore`."""
+        return self._dropped()
 
     @property
     def queued(self) -> int:
@@ -251,7 +260,16 @@ class PtyBridge:
 class UartPorts:
     """The Python ends of a machine's UARTs, one link and one stream per UART."""
 
-    __slots__ = ("_aliases", "_connect", "_links", "_stimulus", "_streams", "_wait", "bridges")
+    __slots__ = (
+        "_aliases",
+        "_connect",
+        "_dropped_base",
+        "_links",
+        "_stimulus",
+        "_streams",
+        "_wait",
+        "bridges",
+    )
 
     def __init__(
         self,
@@ -266,6 +284,7 @@ class UartPorts:
         address window, to the peripheral serving it, which shares its link. Reads run the
         machine through `wait`, writes are checked by `stimulus`."""
         self._aliases = dict(aliases)
+        self._dropped_base: dict[str, int] = {}
         self._connect = connect
         self._wait = wait
         self._stimulus = stimulus
@@ -296,7 +315,15 @@ class UartPorts:
         name = self.serving(name)
         stream = self._streams.get(name)
         if stream is None:
-            stream = UartStream(name, self.link(name), self._wait, self.bridges, self._stimulus)
+            link = self.link(name)
+            stream = UartStream(
+                name,
+                link,
+                self._wait,
+                self.bridges,
+                self._stimulus,
+                lambda: link.dropped() - self._dropped_base.get(name, 0),
+            )
             self._streams[name] = stream
         return stream
 
@@ -307,8 +334,9 @@ class UartPorts:
 
     def discard(self) -> None:
         """Drop transmitted frames not read yet and bytes waiting for ptys, at a restore."""
-        for link in self._links.values():
+        for name, link in self._links.items():
             link.drain(link.available())
+            self._dropped_base[name] = link.dropped()
         for bridge in self.bridges.values():
             bridge.discard()
 
