@@ -106,7 +106,23 @@ auto read_array(at25sf_options const& options) -> std::vector<std::byte>
         "at25sf", 0, "part.size",
         std::format("a non-zero multiple of 64 KB, not {} bytes", options.part.size));
   }
-  return read_image(options.image, options.part.size, "AT25SF");
+  if(options.initial.empty())
+  {
+    return read_image(options.image, options.part.size, "AT25SF");
+  }
+  if(not options.image.empty())
+  {
+    throw config_error("at25sf", 0, "initial", "initial bytes or an image file, not both");
+  }
+  if(options.initial.size() > options.part.size)
+  {
+    throw config_error(
+        "at25sf", 0, "initial",
+        std::format("at most {} initial bytes, not {}", options.part.size, options.initial.size()));
+  }
+  auto array = read_image({}, options.part.size, "AT25SF");
+  std::ranges::copy(options.initial, array.begin());
+  return array;
 }
 }
 

@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <string>
 #include <vector>
 
 namespace
@@ -347,6 +348,73 @@ TEST_CASE("an image file gives the initial contents, and load restores relative 
   CHECK_THROWS_AS(
       devices::at25sf{{.image = std::filesystem::current_path() / "missing.bin"}},
       popcorn::config_error);
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("initial bytes give the initial contents, the rest erased")
+{
+  host h{{.initial = {std::byte{0x12}, std::byte{0x34}}}};
+  CHECK(h.at(0) == 0x12);
+  CHECK(h.at(1) == 0x34);
+  CHECK(h.at(2) == 0xFF);
+  CHECK(h.flash.contents().size() == 8u << 20);
+
+  devices::at25sf_options full;
+  full.part.size = 64u << 10;
+  full.initial.assign(64u << 10, std::byte{0x5A});
+  devices::at25sf const exact{full};
+  CHECK(std::ranges::all_of(exact.contents(), [](std::byte b) { return b == std::byte{0x5A}; }));
+}
+
+TEST_CASE("initial bytes are refused with an image or when larger than the part")
+{
+  auto const refused_key = [](devices::at25sf_options const& options) {
+    try
+    {
+      devices::at25sf const flash{options};
+    }
+    catch(popcorn::config_error const& error)
+    {
+      return std::string{error.key()};
+    }
+    return std::string{};
+  };
+  auto const path = std::filesystem::current_path() / "test_at25sf_initial.bin";
+  {
+    std::ofstream file{path, std::ios::binary};
+    file.put(0x12);
+  }
+  CHECK(refused_key({.image = path, .initial = {std::byte{0x12}}}) == "initial");
+  std::filesystem::remove(path);
+
+  devices::at25sf_options longer;
+  longer.part.size = 64u << 10;
+  longer.initial.assign((64u << 10) + 1, std::byte{0x00});
+  CHECK(refused_key(longer) == "initial");
+  longer.initial.pop_back();
+  CHECK(refused_key(longer).empty());
+}
+
+TEST_CASE("load checks the initial array, whichever of image or initial bytes gave it")
+{
+  host                   h{{.initial = {std::byte{0x12}, std::byte{0x34}}}};
+  std::vector<std::byte> saved;
+  h.flash.save(saved);
+
+  devices::at25sf same{{.initial = {std::byte{0x12}, std::byte{0x34}}}};
+  CHECK_NOTHROW(same.load(saved));
+  devices::at25sf other{{.initial = {std::byte{0x12}, std::byte{0x35}}}};
+  CHECK_THROWS_AS(other.load(saved), popcorn::config_error);
+  devices::at25sf erased;
+  CHECK_THROWS_AS(erased.load(saved), popcorn::config_error);
+
+  auto const path = std::filesystem::current_path() / "test_at25sf_same.bin";
+  {
+    std::ofstream file{path, std::ios::binary};
+    file.put(0x12).put(0x34);
+  }
+  devices::at25sf from_file{{.image = path}};
+  CHECK_NOTHROW(from_file.load(saved));
   std::filesystem::remove(path);
 }
 

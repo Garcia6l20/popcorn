@@ -51,6 +51,9 @@ struct at25sf_options
   /** @brief Initial array contents, read at construction. Empty for an erased array, all 0xFF. A
    * shorter file leaves the rest erased. */
   std::filesystem::path image{};
+  /** @brief Initial array contents when @p image is empty, at most `part.size` bytes, the rest
+   * erased. Empty for an erased array. */
+  std::vector<std::byte> initial{};
   /** @brief Page program time, tPP. */
   std::chrono::nanoseconds page_program{std::chrono::microseconds{600}};
   /** @brief 4 KB block erase time, tSE. */
@@ -89,10 +92,12 @@ class at25sf final : public stm32::spi_target
 {
 public:
   /**
-   * @brief Creates the device, its array erased or read from @p options.image.
+   * @brief Creates the device, its array erased, read from @p options.image or copied from
+   *        @p options.initial.
    * @param options Part, image and times.
-   * @throws config_error when the part size is 0 or not a multiple of 64 KB, or the image cannot
-   *         be read or is larger than the part.
+   * @throws config_error when the part size is 0 or not a multiple of 64 KB, the image cannot
+   *         be read or is larger than the part, or @p options.initial is set together with an
+   *         image or is larger than the part.
    */
   explicit at25sf(at25sf_options options = {});
   /** @brief Destroys the device. */
