@@ -41,7 +41,7 @@ extend-exclude = "^/(local|build[^/]*|third_party)/"
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
-include = ["python", "tests/python"]
+include = ["python", "tests/python", "examples"]
 venvPath = "."
 venv = ".venv"
 

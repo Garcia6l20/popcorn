@@ -1,0 +1,16 @@
+[project]
+name = "spi-flash"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/spi_flash.elf"
+
+[boot]
+vtor = 0x0800C008
+until = "main"
+budget = 1_000_000
+
+[board.SPI1]
+devices = [{ model = "popcorn.devices:At25sf", page_program = "800 us" }]

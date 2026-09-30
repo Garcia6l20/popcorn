@@ -1,0 +1,27 @@
+# popcorn examples
+
+Each directory is a firmware project for one chip with the pytest suite that runs it on popcorn.
+Copy one, build it, run its tests, then read its `test_*.py` to see how a test drives the machine.
+
+| example | firmware style | shows |
+| --- | --- | --- |
+| [stm32u575/spi](stm32u575/spi) | FreeRTOS, HAL init, LL driver | AT25SF NOR flash on the hardware SS output, an interrupt-driven transfer from a task, an application linked behind a bootloader offset |
+
+Every example has the same layout:
+
+- `firmware/` the C sources, as a CubeMX project would have them
+- `prebuilt/<name>.elf` the committed firmware, used as is without arm-none-eabi-gcc
+- `popcorn.toml` the project file: chip, image, boot, board devices
+- `test_*.py` the tests, and `conftest.py` loading the `popcorn.pytest` plugin
+- `pytest.ini` makes the example directory the pytest rootdir, so its `popcorn.toml` is the
+  project
+
+Run one example from the repository root:
+
+```sh
+uv run pytest -q examples/stm32u575/spi
+```
+
+With arm-none-eabi-gcc on PATH, `uv run pcons -B build -j4` rebuilds every example's firmware.
+`uv run pcons -B build -j4 firmware-check` then compares each rebuilt ELF with its prebuilt copy,
+loadable content only.
