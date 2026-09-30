@@ -176,6 +176,41 @@ TEST_CASE("an unmodelled register is logged once, and fails the run under strict
   }
 }
 
+TEST_CASE("under strict every unmodelled access raises, and the log stays once per register")
+{
+  for(auto const strict : {false, true})
+  {
+    for(auto const restore : {false, true})
+    {
+      CAPTURE(strict);
+      CAPTURE(restore);
+      auto                          f = booted(strict);
+      std::vector<core::log_record> records;
+      auto const                    sink =
+          f.target->add_log_sink([&](core::log_record const& r) { records.push_back(r); });
+      auto const saved = f.target->snapshot();
+      for(auto round = 0; round < 3; ++round)
+      {
+        CAPTURE(round);
+        if(restore)
+        {
+          f.target->restore(saved);
+        }
+        enter(f, "unmodelled_reads");
+        if(strict)
+        {
+          CHECK_THROWS_AS(std::ignore = f.run(), popcorn::model_error);
+        }
+        else
+        {
+          CHECK(f.run_to_stop().reason == stop_reason::user);
+        }
+      }
+      CHECK(records.size() == 1);
+    }
+  }
+}
+
 TEST_CASE("an access to an offset without register reads 0 and warns once")
 {
   auto                          f = booted();

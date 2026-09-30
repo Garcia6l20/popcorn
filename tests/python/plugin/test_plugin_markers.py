@@ -100,11 +100,9 @@ def test_strict_from_marker_and_option(pytester: pytest.Pytester) -> None:
     write_model_project(pytester)
     pytester.makepyfile(STRICT)
     run(pytester).assert_outcomes(passed=5)
-    result = run(pytester, "--popcorn-strict", "-k", "unmarked or lax or strict_none")
-    result.assert_outcomes(passed=3)
+    run(pytester, "--popcorn-strict").assert_outcomes(passed=5)
 
 
-@pytest.mark.xfail(strict=True, reason="known issue strict-unmodelled-raises-once")
 def test_every_strict_test_on_a_reused_machine_raises(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_model_project(pytester)

@@ -788,7 +788,7 @@ struct machine::run_state
    * @param by Bus master.
    * @return Value right-aligned to @p size, or the model's bus error for a DMA or debugger
    *         access. A CPU access records the error and reads 0.
-   * @throws model_error on a first unmodelled access under strict_peripherals.
+   * @throws model_error on every unmodelled access under strict_peripherals.
    */
   auto dispatch_read(
       mmio_window const& window,
@@ -798,7 +798,7 @@ struct machine::run_state
 
   /**
    * @brief Serves a write of a peripheral window, as dispatch_read().
-   * @throws model_error on a first unmodelled access under strict_peripherals.
+   * @throws model_error on every unmodelled access under strict_peripherals.
    */
   auto dispatch_write(
       mmio_window const& window,
@@ -815,9 +815,10 @@ struct machine::run_state
   void record_bus_fault(address addr, arch::memory_op op) noexcept;
 
   /**
-   * @brief Logs the first access to a register of a peripheral without model. A debugger
-   *        access under strict_peripherals is neither logged nor refused.
-   * @throws model_error under strict_peripherals, on that first CPU or DMA access.
+   * @brief Logs the first access to a register of a peripheral without model, once per machine
+   *        life, restore included. A debugger access under strict_peripherals is neither logged
+   *        nor refused.
+   * @throws model_error under strict_peripherals, on every CPU or DMA access.
    */
   void note_unmodelled(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 

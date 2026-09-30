@@ -74,8 +74,8 @@ struct machine_options
    * are dispatched at one instruction count, detail 'events repeat without time passing: <owner>
    * kind <n>'. */
   std::uint32_t spin_threshold{};
-  /** @brief Whether the first access to a register of an unmodelled peripheral fails the run
-   * with model_error. Otherwise it is only logged, once per register. */
+  /** @brief Whether every access to a register of an unmodelled peripheral fails the run. The
+   * log keeps one record per register. */
   bool strict_peripherals{};
   /** @brief Address of the vector table the arch module's reset reads. Empty: the start of the
    * region containing address 0, otherwise of the first region in description order with execute

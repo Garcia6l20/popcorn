@@ -205,7 +205,7 @@ auto machine::run_state::dispatch_read(
     warn_unregistered(window, offset, false, by);
     return 0u;
   }
-  if(not slot.model and slot.logged[word] == 0)
+  if(not slot.model and (slot.logged[word] == 0 or owner.options_.strict_peripherals))
   {
     note_unmodelled(window, offset, false, by);
   }
@@ -258,7 +258,7 @@ auto machine::run_state::dispatch_write(
     warn_unregistered(window, offset, true, by);
     return {};
   }
-  if(not slot.model and slot.logged[word] == 0)
+  if(not slot.model and (slot.logged[word] == 0 or owner.options_.strict_peripherals))
   {
     note_unmodelled(window, offset, true, by);
   }
@@ -296,23 +296,23 @@ void machine::run_state::note_unmodelled(
   {
     return;
   }
-  auto& logged = window.slot->logged[offset / 4];
-  if(logged != 0)
+  auto&      logged = window.slot->logged[offset / 4];
+  auto const reg    = register_name(window.slot->desc, offset / 4);
+  auto const name   = window.unit->name;
+  if(logged == 0)
   {
-    return;
+    logged = 1;
+    owner.hooks_->log(
+        {.kind       = log_kind::unmodelled_access,
+         .pc         = arch->pc(),
+         .peripheral = name,
+         .reg        = reg,
+         .offset     = offset,
+         .write      = write,
+         .message    = std::format(
+             "{} of {}.{} at offset {:#x}, no model", write ? "write" : "read", name, reg,
+             offset)});
   }
-  logged          = 1;
-  auto const reg  = register_name(window.slot->desc, offset / 4);
-  auto const name = window.unit->name;
-  owner.hooks_->log(
-      {.kind       = log_kind::unmodelled_access,
-       .pc         = arch->pc(),
-       .peripheral = name,
-       .reg        = reg,
-       .offset     = offset,
-       .write      = write,
-       .message    = std::format(
-           "{} of {}.{} at offset {:#x}, no model", write ? "write" : "read", name, reg, offset)});
   if(owner.options_.strict_peripherals)
   {
     throw model_error(name, reg, offset);
