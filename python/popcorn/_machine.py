@@ -310,12 +310,14 @@ class Machine:
         "_callback_table",
         "_config_digest",
         "_coverage",
+        "_default_budget",
         "_description",
         "_devices",
         "_handle",
         "_images",
         "_installed",
         "_irqs",
+        "_last_stop",
         "_log_hook",
         "_logs",
         "_memory",
@@ -426,7 +428,7 @@ class Machine:
         self._peripherals = Peripherals(access, description)
         self._nvic = Nvic(self._memory, description.core.num_irqs)
         self._coverage = MachineCoverage(self._handle, lambda: self._images, self._require_stopped)
-        self._ring = Ring(self._handle, self.locate, self._require_stopped)
+        self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
         self._log_hook = self._handle.add_log_sink(functools.partial(forward_log, description.part))
         self._irqs = Irqs(description)
         self._arena = (
@@ -435,6 +437,8 @@ class Machine:
             else Arena(self._memory, arena_base, arena_size, self._type_view)
         )
         self._call_baseline: Snapshot | None = None
+        self._last_stop: Stop | None = None
+        self._default_budget: int | None = None
         self._logs: dict[int, list[LogEntry]] = {}
         self._callback_table = CallbackTable()
         self._installed: list[Intercept | Watch] = []
@@ -512,6 +516,7 @@ class Machine:
         """
         self._require_stopped()
         self._handle.reset(_core.ResetKind(kind.value))
+        self._last_stop = None
 
     @property
     def mem(self) -> Memory:
@@ -527,6 +532,50 @@ class Machine:
     def coverage(self) -> MachineCoverage:
         """Block and edge coverage, `m.coverage.enable()` then `m.coverage.save(path)`."""
         return self._coverage
+
+    @property
+    def last_stop(self) -> Stop | None:
+        """The stop that ended the most recent run, step, wait, call or `running()` background
+        run. None after construction, `reset()`, `restore()`, and a run that ended without a
+        stop: cancelled, or ended by an exception of a handler or predicate.
+
+        Raises:
+            MachineRunning: A run is active.
+        """
+        self._require_stopped()
+        return self._last_stop
+
+    @property
+    def default_budget(self) -> int | None:
+        """The instruction budget of `run`, `wait_for` and `call` when they are given none.
+
+        None, the default, leaves them unbounded. `step` counts its own instructions, and the
+        background run of `running()` stays unbounded whatever this is. A host setting, not part
+        of snapshots.
+        """
+        return self._default_budget
+
+    @default_budget.setter
+    def default_budget(self, budget: int | None) -> None:
+        self._default_budget = _checked_budget(budget)
+
+    def remove_hooks(self) -> int:
+        """Remove every intercept, return hook and watch of this machine, as `remove()` on each.
+        Also empties every intercept log.
+
+        Returns:
+            How many were still installed.
+
+        Raises:
+            MachineRunning: A run is active, handlers of it included.
+        """
+        self._require_idle()
+        live = [hook for hook in self._installed if hook.active]
+        for hook in live:
+            hook.remove()
+        self._installed.clear()
+        self._logs.clear()
+        return len(live)
 
     @property
     def ring(self) -> Ring:
@@ -689,7 +738,8 @@ class Machine:
             fn: Function address, symbol or name.
             args: Arguments in declaration order.
             returns: Result kind of a function without DWARF.
-            budget: Stop the call with BUDGET past this many instructions.
+            budget: Stop the call with BUDGET past this many instructions, `default_budget`
+                when None.
             privileged: Run in privileged thread mode.
             stack: The stack pointer the call runs on.
             stack_top: Initial value of that stack pointer, the current one when None.
@@ -747,7 +797,11 @@ class Machine:
             self._handle.begin_call(frame)
             try:
                 stop = await self._drive(
-                    until=None, budget=budget, for_=None, stop_when=None, exact=None
+                    until=None,
+                    budget=self._default_budget if budget is None else budget,
+                    for_=None,
+                    stop_when=None,
+                    exact=None,
                 )
             finally:
                 bits = self._handle.end_call()
@@ -837,7 +891,7 @@ class Machine:
     def intercept_log(self, fn: int | str | Symbol) -> list[LogEntry]:
         """Every call the intercepts of `fn` saw, oldest first: arguments from DWARF, and the
         value the intercept returned or, for a call that ran the original, the value it
-        returned. The log accumulates across intercepts of `fn` for the life of the machine;
+        returned. The log accumulates across intercepts of `fn` until `remove_hooks()`;
         clear the returned list to start over."""
         return self._logs.setdefault(self.address_of(fn), [])
 
@@ -1068,6 +1122,7 @@ class Machine:
                 expected="restore into the machine that took it, or load its saved form",
             )
         self._handle.restore(snapshot.native)
+        self._last_stop = None
         self._ports.discard()
         if self._arena is not None:
             self._arena.reset(snapshot.arena_offset)
@@ -1120,7 +1175,8 @@ class Machine:
 
         Args:
             until: Stop with ADDRESS before executing this address or symbol.
-            budget: Stop with BUDGET at the first block boundary past this many instructions.
+            budget: Stop with BUDGET at the first block boundary past this many instructions,
+                `default_budget` when None.
             for_: Stop with TIME after this much virtual time. An idle core, WFI with nothing
                 due, sleeps to the deadline and stops with TIME, not IDLE.
             stop_when: Sync predicate evaluated at event boundaries and slice ends, never per
@@ -1135,7 +1191,7 @@ class Machine:
         with self._exclusive():
             return await self._drive(
                 until=target,
-                budget=budget,
+                budget=self._default_budget if budget is None else budget,
                 for_=for_,
                 stop_when=stop_when,
                 exact=None,
@@ -1264,6 +1320,7 @@ class Machine:
         stop_when: Callable[[Machine], bool] | None,
         exact: int | None,
     ) -> Stop:
+        self._last_stop = None
         args = self._slice_args()
         args.until = until
         if for_ is not None:
@@ -1280,7 +1337,8 @@ class Machine:
             outcome = self._handle.run_slice(args, predicate)
             self._ports.pump()
             if outcome.stopped is not None:
-                return stop_of(outcome.stopped)
+                self._last_stop = stop_of(outcome.stopped)
+                return self._last_stop
             if remaining is not None:
                 remaining = max(remaining - outcome.executed, 0)
             if left is not None:
@@ -1288,6 +1346,7 @@ class Machine:
             await asyncio.sleep(0)
 
     async def _drive_background(self) -> Stop | None:
+        self._last_stop = None
         args = self._slice_args()
         while True:
             deadlines = [
@@ -1306,6 +1365,7 @@ class Machine:
             elif stopped.reason is StopReason.IDLE:
                 await asyncio.sleep(self._slice_wall_ns / 1e9)
             else:
+                self._last_stop = stopped
                 self._release_waiters(stopped)
                 return stopped
 
@@ -1427,6 +1487,16 @@ def _checked_devices(
         if listed:
             out[name] = tuple(listed)
     return out
+
+
+def _checked_budget(budget: object) -> int | None:
+    if budget is None:
+        return None
+    if isinstance(budget, bool) or not isinstance(budget, int):
+        raise TypeError(f"the default budget is an int or None, not {type(budget).__name__}")
+    if budget <= 0:
+        raise ValueError(f"the default budget must be above 0, not {budget}")
+    return budget
 
 
 def _free_sentinel(description: MachineDescription) -> int:

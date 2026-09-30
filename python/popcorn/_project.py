@@ -202,13 +202,17 @@ class Project:
             self._board = board
         return dict(self._board)
 
-    def machine(self, config: str | None = None) -> Machine:
+    def machine(
+        self, config: str | None = None, *, strict_peripherals: bool | None = None
+    ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
         board models, bus devices, `connect = "pty"` bridges, `[boot] memory_init` written. Not
         reset. Each call builds new device instances, so two machines never share one.
 
         Args:
             config: A config to apply instead of this project's, reloading the file.
+            strict_peripherals: Whether unmodelled peripheral accesses raise ModelError,
+                `[models] strict` when None. Not part of `digest`.
 
         Raises:
             ConfigError: As `load`, `description` and `board`, a memory_init symbol or range is
@@ -219,7 +223,7 @@ class Project:
             ModelError: A `connect` peripheral is not a UART.
         """
         if config is not None and config != self.config:
-            return Project.load(self.path, config).machine()
+            return Project.load(self.path, config).machine(strict_peripherals=strict_peripherals)
         file = self._loaded.file
         description = self.description()
         served = {p.name for p in description.peripherals if p.alias_of is None}
@@ -240,7 +244,9 @@ class Project:
             image=self.images(),
             core_hz=file.clock.core_hz or 0,
             cpi=file.clock.cpi,
-            strict_peripherals=file.models.strict,
+            strict_peripherals=(
+                file.models.strict if strict_peripherals is None else strict_peripherals
+            ),
             vector_table=file.boot.vtor,
             config_digest=self.digest,
             arena_base=_arena_base(file.boot.arena_base),

@@ -441,6 +441,9 @@ public:
   [[= py::doc{"Write the trace ring to a .pctr file."}]] void
       write_ring(std::string const& path) const;
 
+  /** @brief Drops every record of the trace ring, the next ones counting from now. */
+  [[= py::doc{"Drop every record of the trace ring."}]] void clear_ring();
+
   /**
    * @brief Calls a Python callable with each machine log record, the GIL taken.
    * @param sink Called with a LogRecord.

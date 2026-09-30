@@ -146,18 +146,29 @@ def open_trace(
 class Ring:
     """The always-on trace ring of a machine, `m.ring`: its most recent records."""
 
-    __slots__ = ("_check", "_handle", "_locate")
+    __slots__ = ("_check", "_handle", "_idle", "_locate")
 
     def __init__(
         self,
         handle: _core.MachineHandle,
         locate: Callable[[int], Location],
         check: Callable[[], None],
+        idle: Callable[[], None],
     ) -> None:
         """Wrap a machine. `Machine.ring` builds it."""
         self._handle = handle
         self._locate = locate
         self._check = check
+        self._idle = idle
+
+    def clear(self) -> None:
+        """Drop every kept record. The next records count their time from now.
+
+        Raises:
+            MachineRunning: A run is active, handlers of it included.
+        """
+        self._idle()
+        self._handle.clear_ring()
 
     def records(self) -> list[Record]:
         """The kept records, oldest first, registers and symbols named."""

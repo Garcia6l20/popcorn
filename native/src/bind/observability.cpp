@@ -185,6 +185,11 @@ void machine_handle::write_ring(std::string const& path) const
   writer->close();
 }
 
+void machine_handle::clear_ring()
+{
+  machine_->trace().clear(machine_->virtual_clock().now());
+}
+
 auto machine_handle::add_log_sink(nb::object sink) -> hook
 {
   auto callable = detail::held(std::move(sink));
