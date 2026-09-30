@@ -54,7 +54,7 @@ def test_config_from_marker_and_option(pytester: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(["popcorn: 2 key(s), 2 boot(s), 0 from cache"])
     result = run(pytester, "--popcorn-config=variant")
     result.assert_outcomes(passed=4)
-    result.stdout.fnmatch_lines(["popcorn: 2 key(s), 2 boot(s), 0 from cache"])
+    result.stdout.fnmatch_lines(["popcorn: 2 key(s), 0 boot(s), 2 from cache"])
 
 
 STRICT = """

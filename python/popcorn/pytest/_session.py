@@ -13,7 +13,8 @@ from typing import cast
 import pytest
 
 from popcorn import Machine, Project, Snapshot, Stop
-from popcorn.coverage import worker_path
+from popcorn.coverage import Coverage, worker_path
+from popcorn.pytest._cache import Entry, cache_directory, cache_key, locked
 from popcorn.pytest._loop import OwnedLoop, owned_loop
 from popcorn.pytest._options import SETTINGS, Settings
 
@@ -42,7 +43,8 @@ class Booted:
         machine: The machine the `machine` fixture restores for every test of the key.
         snapshot: The boot snapshot, taken on `machine`.
         saved: `snapshot` in its saved form, restorable into any machine of the key.
-        boot_stop: The stop of the boot, None for a project without `[boot] until`.
+        boot_stop: The stop of the boot, None for a project without `[boot] until`. Read back
+            from the cache entry on a cache hit, located in this machine.
         image_count: How many images the machine had after the build.
         ptys: The pty bridges the machine had after the build.
     """
@@ -92,8 +94,11 @@ class PopcornSession:
     settings: Settings
     loop: OwnedLoop
     coverage: CoverageRun | None = None
+    cache: Path | None = None
     coverage_failures: list[str] = field(default_factory=list[str])
     boots: int = 0
+    cache_hits: int = 0
+    cache_dropped: int = 0
     rebuilds: int = 0
     _projects: dict[str | None, Project] = field(default_factory=dict[str | None, Project])
     _booted: dict[Key, Booted] = field(default_factory=dict[Key, Booted])
@@ -236,6 +241,65 @@ class PopcornSession:
 
     async def _boot(self, key: Key) -> Booted:
         project = self.project(key.config)
+        try:
+            booted = await self._cached_boot(key, project)
+        except Exception as error:
+            self._failed[key] = error
+            raise
+        self._booted[key] = booted
+        return booted
+
+    async def _cached_boot(self, key: Key, project: Project) -> Booted:
+        if self.cache is None:
+            return await self._fresh_boot(key, project)
+        self.cache.mkdir(parents=True, exist_ok=True)
+        entry = Entry.of(self.cache, cache_key(project, key.strict))
+        async with locked(entry):
+            if entry.exists(self.coverage is not None):
+                restored = self._restored_from(key, entry)
+                if restored is not None:
+                    return restored
+            booted = await self._fresh_boot(key, project)
+            entry.save(booted.snapshot, booted.boot_stop, self._boot_coverage_bytes(key, booted))
+            return booted
+
+    def _restored_from(self, key: Key, entry: Entry) -> Booted | None:
+        """The boot of `key` restored from `entry`, None when the entry cannot be used: it is
+        dropped and the key boots. Any error falls back to the boot, a Python model's `restore`
+        raising its own exception type included."""
+        machine: Machine | None = None
+        try:
+            machine = self.build(key)
+            ptys = machine.board.ptys
+            machine.restore(Snapshot.load(entry.snapshot))
+            snapshot = machine.snapshot()
+            stop = entry.stop(machine)
+            if self.coverage is not None:
+                path = boot_coverage_path(self.coverage.directory, key, snapshot)
+                Coverage.load(entry.coverage).save(path)
+        except Exception:
+            if machine is not None:
+                machine.board.close()
+            entry.drop()
+            self.cache_dropped += 1
+            return None
+        self.cache_hits += 1
+        return Booted(
+            machine=machine,
+            snapshot=snapshot,
+            saved=snapshot.to_bytes(),
+            boot_stop=stop,
+            image_count=len(machine.images),
+            ptys=ptys,
+        )
+
+    def _boot_coverage_bytes(self, key: Key, booted: Booted) -> bytes | None:
+        if self.coverage is None:
+            return None
+        path = boot_coverage_path(self.coverage.directory, key, booted.snapshot)
+        return path.read_bytes() if path.is_file() else None
+
+    async def _fresh_boot(self, key: Key, project: Project) -> Booted:
         self.boots += 1
         machine: Machine | None = None
         try:
@@ -250,12 +314,11 @@ class PopcornSession:
             snapshot = machine.snapshot()
             if self.coverage is not None:
                 self._save_boot_coverage(key, machine, snapshot)
-        except Exception as error:
-            self._failed[key] = error
+        except Exception:
             if machine is not None:
                 self._failed_machines[key] = machine
             raise
-        booted = Booted(
+        return Booted(
             machine=machine,
             snapshot=snapshot,
             saved=snapshot.to_bytes(),
@@ -263,8 +326,6 @@ class PopcornSession:
             image_count=image_count,
             ptys=ptys,
         )
-        self._booted[key] = booted
-        return booted
 
 
 def boot_coverage_path(directory: Path, key: Key, snapshot: Snapshot) -> Path:
@@ -296,7 +357,10 @@ def popcorn_session(config: pytest.Config) -> PopcornSession:
     session = config.stash.get(SESSION, None)
     if session is None:
         session = config.stash[SESSION] = PopcornSession(
-            config.stash[SETTINGS], owned_loop(config), config.stash.get(COVERAGE, None)
+            config.stash[SETTINGS],
+            owned_loop(config),
+            config.stash.get(COVERAGE, None),
+            cache_directory(config),
         )
     return session
 
@@ -306,7 +370,8 @@ def summary(session: PopcornSession) -> dict[str, object]:
     return {
         "keys": [str(key) for key in session.keys],
         "boots": session.boots,
-        "cache_hits": 0,
+        "cache_hits": session.cache_hits,
+        "cache_dropped": session.cache_dropped,
         "coverage_failures": list(session.coverage_failures),
     }
 
@@ -350,3 +415,9 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     line = summary_line(summaries)
     if line is not None:
         terminalreporter.write_line(line)
+    dropped = sum(cast(int, one.get("cache_dropped", 0)) for one in summaries)
+    if dropped:
+        terminalreporter.write_line(
+            f"popcorn: {dropped} unreadable boot cache entr{'y' if dropped == 1 else 'ies'} "
+            "dropped and booted again"
+        )

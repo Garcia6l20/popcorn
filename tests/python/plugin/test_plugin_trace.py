@@ -96,7 +96,7 @@ def test_without_the_option_nothing_is_traced(pytester: pytest.Pytester) -> None
     pytester.makepyfile(TESTS)
     result = run(pytester)
     result.assert_outcomes(passed=1, failed=1)
-    assert not (pytester.path / ".pytest_cache" / "d" / "popcorn").exists()
+    assert not (pytester.path / ".pytest_cache" / "d" / "popcorn" / "traces").exists()
     result.stdout.no_fnmatch_line("trace: *")
 
 

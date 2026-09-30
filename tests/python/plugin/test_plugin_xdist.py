@@ -73,7 +73,7 @@ def test_each_worker_boots_and_saves_its_own_file(pytester: pytest.Pytester) -> 
         *BASE, "-n", "2", "--dist", "each", "--popcorn-cov=a.info"
     )
     result.assert_outcomes(passed=60)
-    result.stdout.fnmatch_lines(["popcorn: 2 key(s), 4 boot(s), 0 from cache"])
+    result.stdout.fnmatch_lines(["popcorn: 2 key(s), 2 boot(s), 2 from cache"])
     *names, directory = (pytester.path / "files.txt").read_text().splitlines()
     assert names[-2:] == ["gw0.pcov", "gw1.pcov"]
     assert len(names) == 4 and all(name.startswith("boot-") for name in names[:2])

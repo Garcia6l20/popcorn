@@ -39,6 +39,14 @@ interrupted session keeps the directory and writes no lcov. A crash or SIGKILL l
 directory behind. xdist workers on other hosts, `--tx ssh=...`, are not supported: they share
 the directory by path.
 
+Boot snapshots are cached in `.pytest_cache/d/popcorn/boot`: a later session, or another xdist
+worker, restores a configuration's boot instead of running it, one boot per configuration across
+workers. The cache key covers the popcorn build, the description, the images, the project file
+with its config, the strictness, the `[models] python` directories and the source of every board
+model and device class. A module outside those directories that a model imports is not covered,
+and entries are never pruned: `--cache-clear` drops them all. `-p no:cacheprovider` turns the
+cache off.
+
 Limits:
 
 - Host input queued on a UART and not delivered yet stays queued across the restore.
