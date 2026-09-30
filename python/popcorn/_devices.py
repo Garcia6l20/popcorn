@@ -195,6 +195,9 @@ class SpiTarget(_core.SpiTargetBase):
     pin from the machine's first reset or snapshot load on. None selects the device by the SPI
     hardware SS output, from the start to the end of each transfer.
 
+    Project files: a class used from `[board.X] devices` with a `cs` key takes `cs` as a keyword
+    argument and passes it to `super().__init__`.
+
     Time, state, reset and lifetime: as `I2CTarget`.
     """
 

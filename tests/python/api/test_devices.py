@@ -501,7 +501,7 @@ def _project(tmp_path: Path, devices: str) -> Path:
         (
             '[board.SPI1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
             "size = 16 }]\n",
-            "board.SPI1.devices[0].address",
+            "board.SPI1.devices[0].model",
             "an I2C bus of STM32U575QGIx",
         ),
         (
@@ -523,10 +523,39 @@ def _project(tmp_path: Path, devices: str) -> Path:
             "no devices on a peripheral that has a Python model",
         ),
         (
-            '[board.I2C1]\ndevices = [{ address = 0x50, model = "api.devices_example:JedecDevice", '
+            '[board.I2C1]\ndevices = [{ cs = "PA4", model = "api.devices_example:JedecDevice", '
             "jedec = [1, 2, 3] }]\n",
             "board.I2C1.devices[0].model",
-            "a popcorn.board.I2CTarget subclass on I2C",
+            "an SPI bus of STM32U575QGIx",
+        ),
+        (
+            '[board.SPI1]\ndevices = [{ address = 0x50, model = "api.devices_example:JedecDevice", '
+            "jedec = [1, 2, 3] }]\n",
+            "board.SPI1.devices[0].address",
+            "no address for an SPI device, it has a cs",
+        ),
+        (
+            '[board.I2C1]\ndevices = [{ model = "api.devices_example:Eeprom24", size = 16 }]\n',
+            "board.I2C1.devices[0].address",
+            "the address of an I2C target",
+        ),
+        (
+            '[board.I2C1]\ndevices = [{ address = 0x50, cs = "PA4", '
+            'model = "api.devices_example:Eeprom24", size = 16 }]\n',
+            "board.I2C1.devices[0].cs",
+            "an address for an I2C target or a cs for an SPI device, not both",
+        ),
+        (
+            '[board.I2C1]\ndevices = [{ cs = "PA4", model = "api.devices_example:Eeprom24", '
+            "size = 16 }]\n",
+            "board.I2C1.devices[0].cs",
+            "no cs for an I2C target",
+        ),
+        (
+            '[board.SPI1]\ndevices = [{ cs = "PZ4", model = "api.devices_example:JedecDevice", '
+            "jedec = [1, 2, 3] }]\n",
+            "board.SPI1.devices[0].cs",
+            "a chip select on a GPIO port of STM32U575QGIx",
         ),
     ],
 )
@@ -538,3 +567,30 @@ def test_project_devices_are_refused_with_their_key(
     assert caught.value.key == key
     assert caught.value.expected == expected
     assert caught.value.line > 0
+
+
+def test_a_project_file_wires_spi_devices_by_chip_select(
+    u575: popcorn.MachineDescription, tmp_path: Path
+) -> None:
+    for cs, entry in (("PA4", "poll"), (None, "hw_ss")):
+        chip = "" if cs is None else f'cs = "{cs}", '
+        text = (
+            '[mcu]\npart = "STM32U575QGIx"\n'
+            f'[image.app]\nelf = "{SPI_ELF}"\n'
+            '[boot]\nuntil = "main"\nbudget = 100_000_000\n'
+            "[board.SPI1]\n"
+            f'devices = [{{ {chip}model = "api.devices_example:JedecDevice", '
+            "jedec = [0x1F, 0x87, 0x01] }]\n"
+            f'[models]\npython = ["{Path(__file__).parents[1]}"]\n'
+        )
+        path = tmp_path / f"spi-{entry}.toml"
+        path.write_text(text)
+        project = popcorn.Project.load(path)
+        assert project.board()["SPI1"].devices[0].cs == cs
+        m = project.machine()
+        asyncio.run(project.boot(m))
+        m.reg.pc = m.sym(entry)
+        assert finish(m) == [0xFF, 0x1F, 0x87, 0x01]
+        (device,) = m.board.devices("SPI1")
+        assert isinstance(device, JedecDevice)
+        assert device.cs == cs

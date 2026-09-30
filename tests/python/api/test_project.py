@@ -260,6 +260,12 @@ def _with_devices(tmp_path: Path, peripheral: str, device: str) -> Path:
         "class Flash(SpiTarget):\n"
         "    def __init__(self, address: int) -> None:\n"
         "        super().__init__()\n\n\n"
+        "class NoCs(SpiTarget):\n"
+        "    def __init__(self, size: int) -> None:\n"
+        "        super().__init__()\n\n\n"
+        "class Loose(SpiTarget):\n"
+        "    def __init__(self, **options: object) -> None:\n"
+        '        super().__init__(options.get("cs"))\n\n\n'
         "class NotADevice:\n"
         "    def __init__(self, address: int) -> None:\n"
         "        self.address = address\n"
@@ -287,6 +293,25 @@ def test_devices_need_an_i2c_bus(tmp_path: Path) -> None:
     path = _with_devices(tmp_path, "TESTDEV", '{ address = 0x50, model = "bus_devices:Target" }')
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Project.load(path).machine()
-    assert caught.value.key == "board.TESTDEV.devices[0].address"
+    assert caught.value.key == "board.TESTDEV.devices[0].model"
     assert caught.value.expected == "an I2C bus of POPCORN-M33-TEST"
     assert caught.value.line == 9
+
+
+def test_an_spi_class_used_with_cs_must_take_a_cs_keyword(tmp_path: Path) -> None:
+    path = _with_devices(
+        tmp_path, "TESTDEV", '{ cs = "PA4", model = "bus_devices:NoCs", size = 1 }'
+    )
+    with pytest.raises(popcorn.ConfigError) as caught:
+        popcorn.Project.load(path).board()
+    assert caught.value.key == "board.TESTDEV.devices[0].cs"
+    assert caught.value.expected == "a cs keyword accepted by NoCs"
+    assert caught.value.line == 9
+
+
+def test_an_spi_class_taking_any_keyword_takes_cs(tmp_path: Path) -> None:
+    path = _with_devices(
+        tmp_path, "TESTDEV", '{ cs = "PA4", model = "bus_devices:Loose", size = 1 }'
+    )
+    device = popcorn.Project.load(path).board()["TESTDEV"].devices[0]
+    assert (device.cs, device.params) == ("PA4", {"size": 1})

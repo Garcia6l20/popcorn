@@ -103,11 +103,17 @@ struct clock_section
   double cpi{1.0};
 };
 
-/** @brief One device on a bus of `[board.<periph>] devices`. */
+/**
+ * @brief One device on a bus of `[board.<periph>] devices`: an I2C target by its address, or an
+ *        SPI device by its chip select, never both.
+ */
 struct device_entry
 {
-  /** @brief Bus address. */
-  [[= required]] popcorn::address address{};
+  /** @brief 7-bit address of an I2C target, empty for an SPI device. */
+  std::optional<popcorn::address> address{};
+  /** @brief Chip select pin of an SPI device, such as `PA4`, active low. Empty for an I2C target,
+   * or for an SPI device on the hardware SS output. */
+  std::optional<std::string> cs{};
   /** @brief Model class, `module:Class`. */
   [[= required]] std::string model{};
   /** @brief Every other key, the model's constructor keyword arguments. */

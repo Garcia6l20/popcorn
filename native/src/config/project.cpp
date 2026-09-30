@@ -571,6 +571,26 @@ void resolve(std::string& path, std::filesystem::path const& base)
   }
 }
 
+auto is_pin(std::string_view name) -> bool
+{
+  if(name.size() < 3 or name.size() > 4 or name[0] != 'P' or name[1] < 'A' or name[1] > 'Z')
+  {
+    return false;
+  }
+  auto const digits = name.substr(2);
+  if(not std::ranges::all_of(digits, [](char c) { return c >= '0' and c <= '9'; })
+     or (digits.size() == 2 and digits[0] == '0'))
+  {
+    return false;
+  }
+  auto pin = 0;
+  for(auto const c : digits)
+  {
+    pin = pin * 10 + (c - '0');
+  }
+  return pin <= 15;
+}
+
 void check_values(project_file const& file, context const& ctx)
 {
   if(not std::isfinite(file.clock.cpi) or not(file.clock.cpi > 0.0))
@@ -596,6 +616,22 @@ void check_values(project_file const& file, context const& ctx)
   }
   for(auto const& [name, entry] : file.board)
   {
+    for(std::size_t index = 0; index < entry.devices.size(); ++index)
+    {
+      auto const& device = entry.devices[index];
+      auto const  key    = std::format("board.{}.devices[{}]", name, index);
+      if(device.address and device.cs)
+      {
+        ctx.fail(
+            join(key, "cs"), "an address for an I2C target or a cs for an SPI device, not both");
+      }
+      if(device.cs and not is_pin(*device.cs))
+      {
+        ctx.fail(
+            join(key, "cs"),
+            std::format("a pin name such as PA4, pin 0 to 15, not {}", *device.cs));
+      }
+    }
     if(not entry.model and not entry.params.empty())
     {
       ctx.fail(

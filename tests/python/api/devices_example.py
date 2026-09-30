@@ -79,7 +79,9 @@ class JedecDevice(SpiTarget):
     position: int
     command: int
 
-    def __init__(self, cs: str | None, jedec: tuple[int, int, int]) -> None:
+    def __init__(
+        self, cs: str | None = None, jedec: tuple[int, int, int] = (0x1F, 0x32, 0x17)
+    ) -> None:
         super().__init__(cs)
         self.jedec = jedec
         self.position = 0

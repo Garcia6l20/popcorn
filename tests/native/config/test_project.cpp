@@ -286,3 +286,47 @@ TEST_CASE("the clock refuses a cpi that is not finite and above 0, and a 0 Hz co
   CHECK(zero.key() == "clock.core_hz");
   CHECK(zero.line() == 4);
 }
+
+TEST_CASE("an SPI device names its chip select, an I2C target its address, never both")
+{
+  scratch_file const file{
+      std::string{minimal}
+      + "[board.SPI1]\ndevices = [\n  { cs = \"PA4\", model = \"m:Flash\", size = 4 },\n"
+        "  { model = \"m:Ss\" },\n]\n"};
+  auto const  loaded  = config::load_project(file.path(), {});
+  auto const& devices = loaded.file.board.at("SPI1").devices;
+  REQUIRE(devices.size() == 2);
+  CHECK(devices[0].cs == "PA4");
+  CHECK_FALSE(devices[0].address.has_value());
+  CHECK(devices[0].params.size() == 1);
+  CHECK_FALSE(devices[1].cs.has_value());
+  CHECK_FALSE(devices[1].address.has_value());
+
+  auto const both = failure_of(
+      std::string{minimal}
+      + "[board.SPI1]\ndevices = [\n  { address = 0x50, cs = \"PA4\", model = \"m:C\" },\n]\n");
+  CHECK(both.key() == "board.SPI1.devices[0].cs");
+  CHECK(both.line() == 4);
+  CHECK(both.expected() == "an address for an I2C target or a cs for an SPI device, not both");
+}
+
+TEST_CASE("a chip select is a pin name from P?0 to P?15")
+{
+  for(auto const pin : {"PA4", "PZ0", "PB15", "PC10"})
+  {
+    CAPTURE(pin);
+    scratch_file const file{
+        std::string{minimal}
+        + std::format("[board.SPI1]\ndevices = [{{ cs = \"{}\", model = \"m:C\" }}]\n", pin)};
+    CHECK(config::load_project(file.path(), {}).file.board.at("SPI1").devices[0].cs == pin);
+  }
+  for(auto const pin : {"PA16", "A4", "pa4", "Pa4", "PA", "PA04", "PA123", "P44", ""})
+  {
+    CAPTURE(pin);
+    auto const error = failure_of(
+        std::string{minimal}
+        + std::format("[board.SPI1]\ndevices = [{{ cs = \"{}\", model = \"m:C\" }}]\n", pin));
+    CHECK(error.key() == "board.SPI1.devices[0].cs");
+    CHECK(error.expected() == std::format("a pin name such as PA4, pin 0 to 15, not {}", pin));
+  }
+}

@@ -34,11 +34,13 @@ type TomlValue = int | float | bool | str | list[TomlValue] | dict[str, TomlValu
 
 @dataclass(frozen=True, slots=True)
 class Device:
-    """A device on a bus of `[board.<periph>] devices`."""
+    """A device on a bus of `[board.<periph>] devices`: an I2C target by its `address`, or an
+    SPI device by its chip select `cs`, None for the hardware SS output."""
 
-    address: int
+    address: int | None
     model: type
     params: dict[str, TomlValue]
+    cs: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,8 +168,24 @@ class Project:
                             f"a popcorn.board.I2CTarget or SpiTarget subclass, not {device.model}",
                         )
                     params = _params(device.params)
-                    self._check_params(cls, (device.address,), params, at)
-                    devices.append(Device(device.address, cls, params))
+                    if issubclass(cls, I2CTarget):
+                        if device.address is None and device.cs is not None:
+                            raise self._error(f"{at}.cs", "no cs for an I2C target")
+                        if device.address is None:
+                            raise self._error(f"{at}.address", "the address of an I2C target")
+                        self._check_params(cls, (device.address,), params, at)
+                    else:
+                        if device.address is not None:
+                            raise self._error(
+                                f"{at}.address", "no address for an SPI device, it has a cs"
+                            )
+                        if device.cs is not None and not _takes_cs(cls):
+                            raise self._error(
+                                f"{at}.cs", f"a cs keyword accepted by {cls.__qualname__}"
+                            )
+                        chip = {} if device.cs is None else {"cs": device.cs}
+                        self._check_params(cls, (), {**chip, **params}, at)
+                    devices.append(Device(device.address, cls, params, device.cs))
                 if entry.model is not None and entry.devices:
                     raise self._error(
                         f"{key}.devices", "no devices on a peripheral that has a Python model"
@@ -194,8 +212,9 @@ class Project:
 
         Raises:
             ConfigError: As `load`, `description` and `board`, a memory_init symbol or range is
-                invalid, a device sits on a peripheral that is not an I2C bus, a device class
-                refuses its address, or `Machine(devices=)` refuses the devices.
+                invalid, an I2C target sits on a peripheral that is not an I2C bus or an SPI
+                device on one that is not an SPI bus, an address is outside 0x08 to 0x77, a
+                device class refuses its parameters, or `Machine(devices=)` refuses them.
             ImageError: An image cannot be read or does not fit the memory map.
             ModelError: A `connect` peripheral is not a UART.
         """
@@ -293,23 +312,34 @@ class Project:
         peripheral = next(
             (p for p in description.peripherals if p.name == name and p.alias_of is None), None
         )
+        ip = None if peripheral is None else peripheral.ip
+        served = {p.name for p in description.peripherals if p.alias_of is None}
         built: list[I2CTarget | SpiTarget] = []
         for index, device in enumerate(entry.devices):
             at = f"board.{name}.devices[{index}]"
-            if peripheral is None or peripheral.ip != "I2C":
-                raise self._error(f"{at}.address", f"an I2C bus of {description.part}")
-            if not issubclass(device.model, I2CTarget):
-                raise self._error(f"{at}.model", "a popcorn.board.I2CTarget subclass on I2C")
+            cls = device.model
             try:
-                check_address(device.address)
-            except ValueError as error:
-                raise self._error(f"{at}.address", str(error)) from error
-            try:
-                built.append(device.model(device.address, **device.params))
+                if issubclass(cls, I2CTarget):
+                    if ip != "I2C":
+                        raise self._error(f"{at}.model", f"an I2C bus of {description.part}")
+                    address = cast(int, device.address)
+                    try:
+                        check_address(address)
+                    except ValueError as error:
+                        raise self._error(f"{at}.address", str(error)) from error
+                    built.append(cls(address, **device.params))
+                elif issubclass(cls, SpiTarget):
+                    if ip != "SPI":
+                        raise self._error(f"{at}.model", f"an SPI bus of {description.part}")
+                    if device.cs is not None and f"GPIO{device.cs[1]}" not in served:
+                        raise self._error(
+                            f"{at}.cs", f"a chip select on a GPIO port of {description.part}"
+                        )
+                    chip = {} if device.cs is None else {"cs": device.cs}
+                    make = cast(Callable[..., SpiTarget], cls)
+                    built.append(make(**chip, **device.params))
             except (ValueError, TypeError) as error:
-                raise self._error(
-                    at, f"arguments {device.model.__qualname__} accepts: {error}"
-                ) from error
+                raise self._error(at, f"arguments {cls.__qualname__} accepts: {error}") from error
         return built
 
     def _error(self, key: str, expected: str) -> ConfigError:
@@ -394,3 +424,15 @@ def _arena_base(value: object) -> int | None:
         return None
     assert isinstance(value, int)
     return value
+
+
+def _takes_cs(cls: type) -> bool:
+    try:
+        parameters = inspect.signature(cls).parameters.values()
+    except TypeError, ValueError:
+        return True
+    return any(
+        p.kind is p.VAR_KEYWORD
+        or (p.name == "cs" and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY))
+        for p in parameters
+    )
