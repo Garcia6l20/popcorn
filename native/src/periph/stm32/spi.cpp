@@ -75,7 +75,8 @@ auto lower(std::string_view name) -> std::string
  *        SPI3. A full RX FIFO sets OVR and drops the frame, or with CR1.MASRX suspends the clock
  *        and sets SUSP until IFCR.SUSPC. CSUSP stops after the current frame and sets SUSP. IFCR
  *        clears its flags, re-enabling clears EOT, OVR, UDR and CRCE, the SPI IRQ follows SR and
- *        IER, EOTIE covering EOT, SUSP and TXC. A device is selected by its GPIO chip select pin,
+ *        IER while SPE is set, EOTIE covering EOT, SUSP and TXC, and only MODF with MODFIE while
+ *        SPE is clear, RM0456 section 68.7. A device is selected by its GPIO chip select pin,
  *        active low, or by the hardware SS output from CSTART to the end of the transfer while
  *        CFG2.SSOE is set. With no device selected MISO reads all ones, a pulled-up line. The
  *        devices are saved and loaded with the model. With CFG1.TXDMAEN the `<instance>_tx_dma`
@@ -166,6 +167,7 @@ private:
   field_ref                                    remaining_;
   std::vector<std::pair<field_ref, field_ref>> clears_;
   std::vector<std::pair<field_ref, field_ref>> interrupts_;
+  std::vector<std::pair<field_ref, field_ref>> mode_fault_;
   std::vector<field_ref>                       unsupported_;
   std::vector<field_ref>                       cleared_on_enable_;
   core::clock_domain                           kernel_;
@@ -227,7 +229,15 @@ spi::spi(model_context& ctx, peripheral_desc const& desc, std::vector<spi_attach
   {
     std::string_view const name{bits.name};
     auto const             target = name.substr(0, name.size() - 2);
-    if(name.ends_with("IE") and std::ranges::contains(flags, target, &field_desc::name))
+    if(not name.ends_with("IE") or not std::ranges::contains(flags, target, &field_desc::name))
+    {
+      continue;
+    }
+    if(target == "MODF")
+    {
+      mode_fault_.emplace_back(field("SPI_IER", name), field("SPI_SR", target));
+    }
+    else
     {
       interrupts_.emplace_back(field("SPI_IER", name), field("SPI_SR", target));
     }
@@ -522,10 +532,15 @@ void spi::flags()
       frame_bits() <= 16 ? static_cast<std::uint32_t>(bytes % 4 / frame_occupancy()) : 0);
   update(regs_, remaining_, not limited_ and size > state_.done ? size - state_.done : 0);
   regs_.poke(receive_.offset, state_.rx_fifo.empty() ? 0 : state_.rx_fifo.front());
-  auto level = false;
-  for(auto const& [enable, flag] : interrupts_)
+  auto const up    = get(regs_, enable_) != 0;
+  auto       level = false;
+  for(auto const& [enable, flag] : mode_fault_)
   {
     level = level or (get(regs_, enable) != 0 and get(regs_, flag) != 0);
+  }
+  for(auto const& [enable, flag] : interrupts_)
+  {
+    level = level or (up and get(regs_, enable) != 0 and get(regs_, flag) != 0);
   }
   if(level)
   {
@@ -535,7 +550,6 @@ void spi::flags()
   {
     line_.lower();
   }
-  auto const up        = get(regs_, enable_) != 0;
   auto const remainder = get(regs_, end_) != 0 and not state_.rx_fifo.empty();
   tx_dma_.set(up and get(regs_, tx_dma_enable_) != 0 and tx_room);
   rx_dma_.set(up and get(regs_, rx_dma_enable_) != 0 and (rx_full or remainder));

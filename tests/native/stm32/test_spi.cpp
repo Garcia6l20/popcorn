@@ -749,6 +749,7 @@ TEST_CASE("enabling EOTIE while TXC is set raises the SPI IRQ at once")
   rig r{"idle", true};
   bus b{*r.f};
   b.set("RCC", "RCC_APB2ENR", "SPI1EN", 1);
+  b.set("SPI_CR1", "SPE", 1);
   REQUIRE(b.get("SPI_SR", "TXC") == 1);
   b.write(0xe000'e104u, 1u << (spi1_irq % 32));
   CHECK_FALSE(pending(*r.f, spi1_irq));
@@ -1248,4 +1249,31 @@ TEST_CASE("a supply reset drops the instruction of a hardware-SS device, other r
     auto const programmed = device->flash->contents()[0x1000] == std::byte{0x55};
     CHECK(programmed == (kind == popcorn::reset_kind::software));
   }
+}
+
+TEST_CASE("the SPI IRQ stays low while SPE is clear, except for MODF")
+{
+  rig                        r{"idle", true};
+  bus                        b{*r.f};
+  constexpr popcorn::address icpr1 = 0xe000'e284u;
+  b.set("RCC", "RCC_APB2ENR", "SPI1EN", 1);
+  b.set("SPI_CFG2", "SSM", 1);
+  b.set("SPI_CFG2", "MASTER", 1);
+  b.set("SPI_CR1", "SSI", 1);
+  b.set("SPI_CR2", "TSIZE", 4);
+  REQUIRE(b.get("SPI_SR", "TXP") == 1);
+  b.set("SPI_IER", "TXPIE", 1);
+  b.set("SPI_IER", "EOTIE", 1);
+  CHECK_FALSE(pending(*r.f, spi1_irq));
+  b.set("SPI_CR1", "SPE", 1);
+  CHECK(pending(*r.f, spi1_irq));
+  b.set("SPI_CR1", "SPE", 0);
+  b.write(icpr1, 1u << (spi1_irq % 32));
+  CHECK_FALSE(pending(*r.f, spi1_irq));
+  auto&      regs   = r.f->target->peripheral("SPI1");
+  auto const status = b.reg("SPI1", "SPI_SR").offset;
+  regs.poke(status, regs.peek(status) | 1u << b.bits("SPI1", "SPI_SR", "MODF").lsb);
+  CHECK_FALSE(pending(*r.f, spi1_irq));
+  b.set("SPI_IER", "MODFIE", 1);
+  CHECK(pending(*r.f, spi1_irq));
 }
