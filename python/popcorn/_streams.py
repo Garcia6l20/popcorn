@@ -11,9 +11,11 @@ import tty
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from popcorn import _core
-from popcorn._devices import I2CTarget, SpiTarget
+from popcorn._devices import BusDevice, I2CTarget, SpiTarget
+from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.units import VirtualDuration, VirtualTime
 
 _LOG = logging.getLogger("popcorn")
@@ -302,15 +304,20 @@ class Board:
     def __init__(
         self,
         ports: UartPorts,
-        devices: Mapping[str, tuple[I2CTarget | SpiTarget, ...]],
+        devices: Mapping[str, tuple[BusDevice, ...]],
     ) -> None:
         """Bridge the UARTs of `ports`, list `devices`. `Machine.board` builds it."""
         self._ports = ports
         self._devices = dict(devices)
 
-    def devices(self, peripheral: str) -> tuple[I2CTarget | SpiTarget, ...]:
-        """The Python devices on bus `peripheral`, in attachment order, empty for none."""
-        return self._devices.get(peripheral, ())
+    def devices(
+        self, peripheral: str
+    ) -> tuple[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget, ...]:
+        """The devices on bus `peripheral`, in attachment order, empty for none."""
+        return cast(
+            "tuple[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget, ...]",
+            self._devices.get(peripheral, ()),
+        )
 
     def pty(self, name: str, *, deadlock_warning: float = 2.0) -> str:
         """Bridge UART `name` to a new host pty and return its path, the same one on later calls.

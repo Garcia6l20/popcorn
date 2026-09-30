@@ -30,7 +30,14 @@ from popcorn._call import (
     slot_for,
 )
 from popcorn._description import MachineDescription, load_description
-from popcorn._devices import I2CTarget, SpiTarget, attach, serving
+from popcorn._devices import (
+    BusDevice,
+    I2CTarget,
+    SpiTarget,
+    attach,
+    cs_of,
+    serving,
+)
 from popcorn._dwarf_views import Var
 from popcorn._enums import FloatAbi, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
@@ -64,6 +71,7 @@ from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, UartPorts
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
+from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.model import Model
 from popcorn.trace import TraceKind
 from popcorn.units import VirtualDuration, VirtualTime
@@ -340,7 +348,9 @@ class Machine:
         arena_base: int | None = DEFAULT_ARENA_BASE,
         arena_size: int = DEFAULT_ARENA_SIZE,
         models: Mapping[str, Callable[[], Model]] | None = None,
-        devices: Mapping[str, Sequence[I2CTarget | SpiTarget]] | None = None,
+        devices: (
+            Mapping[str, Sequence[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget]] | None
+        ) = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -363,9 +373,9 @@ class Machine:
             models: Python model per peripheral name, a `popcorn.model.Model` subclass or a
                 callable building one, such as `functools.partial(Timer, period=5)`. It
                 replaces the registered model of that peripheral.
-            devices: Python bus devices per I2C or SPI peripheral name, `I2CTarget` or
-                `SpiTarget` instances of one kind, in attachment order. The built-in bus model of
-                the peripheral serves them. A device serves one live machine at a time.
+            devices: Bus devices per I2C or SPI peripheral name, `popcorn.board` targets or
+                `popcorn.devices` devices of one bus kind, in attachment order. The built-in bus
+                model of the peripheral serves them. A device serves one live machine at a time.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
@@ -1362,17 +1372,20 @@ def _model_makers(
     return {name: functools.partial(build_model, maker) for name, maker in models.items()}
 
 
+type AttachedDevice = I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget
+"""A device `Machine(devices=)` takes, of `popcorn.board` or `popcorn.devices`."""
+
 _BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI"}
 
 
 def _checked_devices(
     description: MachineDescription,
-    devices: Mapping[str, Sequence[I2CTarget | SpiTarget]],
+    devices: Mapping[str, Sequence[BusDevice]],
     models: Mapping[str, object],
-) -> dict[str, tuple[I2CTarget | SpiTarget, ...]]:
+) -> dict[str, tuple[BusDevice, ...]]:
     peripherals = {p.name: p for p in description.peripherals if p.alias_of is None}
     seen: set[int] = set()
-    out: dict[str, tuple[I2CTarget | SpiTarget, ...]] = {}
+    out: dict[str, tuple[BusDevice, ...]] = {}
 
     def refuse(name: str, expected: str) -> ConfigError:
         return ConfigError(
@@ -1390,12 +1403,14 @@ def _checked_devices(
             raise refuse(name, "an I2C or SPI peripheral")
         if name in models:
             raise refuse(name, "a peripheral without a Python model")
-        listed: list[I2CTarget | SpiTarget] = []
+        listed: list[BusDevice] = []
         for candidate in cast(Sequence[object], targets):
-            if not isinstance(candidate, I2CTarget | SpiTarget):
-                raise refuse(name, "popcorn.board.I2CTarget or SpiTarget instances")
+            if not isinstance(candidate, _core.I2CTargetBase | _core.SpiTargetBase):
+                raise refuse(
+                    name, "popcorn.board.I2CTarget or SpiTarget or popcorn.devices instances"
+                )
             target = candidate
-            kind = I2CTarget if isinstance(target, I2CTarget) else SpiTarget
+            kind = I2CTarget if isinstance(target, _core.I2CTargetBase) else SpiTarget
             listed.append(target)
             if peripheral.ip != _BUS_IPS[kind]:
                 raise refuse(name, f"an {_BUS_IPS[kind]} peripheral for an {kind.__name__}")
@@ -1404,8 +1419,9 @@ def _checked_devices(
             seen.add(id(target))
             if serving(target) is not None:
                 raise refuse(name, f"{target!r} not serving another live machine")
-            if isinstance(target, SpiTarget) and target.cs is not None:
-                port = f"GPIO{target.cs[1]}"
+            cs = cs_of(target) if isinstance(target, _core.SpiTargetBase) else None
+            if cs is not None:
+                port = f"GPIO{cs[1]}"
                 if port not in peripherals:
                     raise refuse(name, f"a chip select on a GPIO port of {description.part}")
         if listed:

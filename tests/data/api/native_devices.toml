@@ -1,0 +1,17 @@
+[project]
+name = "native-devices"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "../../firmware/periph/prebuilt/spi_ll.elf"
+
+[boot]
+until = "main"
+budget = 100_000_000
+
+[board.SPI1]
+devices = [
+  { model = "popcorn.devices:At25sf", jedec = [0x1F, 0x87, 0x01], size = 4194304, page_program = "600 us" },
+]

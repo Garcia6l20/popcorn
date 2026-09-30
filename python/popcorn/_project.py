@@ -14,7 +14,7 @@ from typing import cast
 
 from popcorn import _core
 from popcorn._description import MachineDescription, load_description
-from popcorn._devices import I2CTarget, SpiTarget, check_address
+from popcorn._devices import ParamError, check_address, project_params
 from popcorn._enums import StopReason
 from popcorn._errors import (
     BudgetExceeded,
@@ -24,7 +24,7 @@ from popcorn._errors import (
     SymbolError,
 )
 from popcorn._image import Image
-from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, Machine
+from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, AttachedDevice, Machine
 from popcorn._stop import Stop
 from popcorn.model import Model
 
@@ -162,13 +162,13 @@ class Project:
                 for index, device in enumerate(entry.devices):
                     at = f"{key}.devices[{index}]"
                     cls = self._resolve(device.model, f"{at}.model")
-                    if not issubclass(cls, I2CTarget | SpiTarget):
+                    if not issubclass(cls, _core.I2CTargetBase | _core.SpiTargetBase):
                         raise self._error(
                             f"{at}.model",
                             f"a popcorn.board.I2CTarget or SpiTarget subclass, not {device.model}",
                         )
                     params = _params(device.params)
-                    if issubclass(cls, I2CTarget):
+                    if issubclass(cls, _core.I2CTargetBase):
                         if device.address is None and device.cs is not None:
                             raise self._error(f"{at}.cs", "no cs for an I2C target")
                         if device.address is None:
@@ -308,18 +308,23 @@ class Project:
 
     def _devices(
         self, name: str, entry: BoardEntry, description: MachineDescription
-    ) -> list[I2CTarget | SpiTarget]:
+    ) -> list[AttachedDevice]:
         peripheral = next(
             (p for p in description.peripherals if p.name == name and p.alias_of is None), None
         )
         ip = None if peripheral is None else peripheral.ip
         served = {p.name for p in description.peripherals if p.alias_of is None}
-        built: list[I2CTarget | SpiTarget] = []
+        built: list[AttachedDevice] = []
         for index, device in enumerate(entry.devices):
             at = f"board.{name}.devices[{index}]"
             cls = device.model
             try:
-                if issubclass(cls, I2CTarget):
+                params = project_params(cls, device.params, self.path.parent)
+            except ParamError as error:
+                raise self._error(f"{at}.{error.name}", error.expected) from error
+            make = cast(Callable[..., AttachedDevice], cls)
+            try:
+                if issubclass(cls, _core.I2CTargetBase):
                     if ip != "I2C":
                         raise self._error(f"{at}.model", f"an I2C bus of {description.part}")
                     address = cast(int, device.address)
@@ -327,8 +332,8 @@ class Project:
                         check_address(address)
                     except ValueError as error:
                         raise self._error(f"{at}.address", str(error)) from error
-                    built.append(cls(address, **device.params))
-                elif issubclass(cls, SpiTarget):
+                    built.append(make(address, **params))
+                elif issubclass(cls, _core.SpiTargetBase):
                     if ip != "SPI":
                         raise self._error(f"{at}.model", f"an SPI bus of {description.part}")
                     if device.cs is not None and f"GPIO{device.cs[1]}" not in served:
@@ -336,8 +341,7 @@ class Project:
                             f"{at}.cs", f"a chip select on a GPIO port of {description.part}"
                         )
                     chip = {} if device.cs is None else {"cs": device.cs}
-                    make = cast(Callable[..., SpiTarget], cls)
-                    built.append(make(**chip, **device.params))
+                    built.append(make(**chip, **params))
             except (ValueError, TypeError) as error:
                 raise self._error(at, f"arguments {cls.__qualname__} accepts: {error}") from error
         return built
