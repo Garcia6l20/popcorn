@@ -372,3 +372,24 @@ TEST_CASE("peers are empty while models are built and name every model after")
   CHECK(all[0] == target.model("TESTDEV"));
   CHECK(all[1] == &probe);
 }
+
+TEST_CASE("the model context carries strict_peripherals, unchanged by a restore without reset")
+{
+  for(bool const strict : {false, true})
+  {
+    CAPTURE(strict);
+    core::machine_options options = with_test_model();
+    options.strict_peripherals    = strict;
+    options.models.emplace(
+        "UNMODELLED",
+        [](periph::model_context& ctx, popcorn::peripheral_desc const&)
+            -> std::shared_ptr<periph::model> { return std::make_shared<peer_probe>(ctx); });
+    core::machine target{m33(), popcorn::testing::test_arch_factory(), options};
+    auto&         probe = dynamic_cast<peer_probe&>(*target.model("UNMODELLED"));
+    CHECK(probe.context.strict_peripherals == strict);
+    auto const saved = target.snapshot();
+    target.restore(saved);
+    CHECK(target.model("UNMODELLED") == &probe);
+    CHECK(probe.context.strict_peripherals == strict);
+  }
+}

@@ -222,6 +222,10 @@ struct model_context
   peer_directory& peers;
   /** @brief Description of the machine, valid for the model's life. */
   mcu_description const& part;
+  /** @brief Whether the machine runs with `core::machine_options::strict_peripherals`, fixed for
+   * the machine's life, so a model may cache it: a model may raise model_error where it would
+   * only warn. */
+  bool strict_peripherals{};
 
   /**
    * @brief Asks the run loop to stop, forwarding to services. Deferred: it only records the

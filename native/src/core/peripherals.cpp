@@ -77,14 +77,15 @@ void machine::run_state::attach_peripherals()
     }
     slot->context.emplace(
         periph::model_context{
-            .regs     = slot->regs,
-            .irqs     = slot->irqs,
-            .dma      = slot->dma,
-            .events   = slot->events,
-            .clock    = owner.clock_,
-            .services = static_cast<machine_services&>(owner),
-            .peers    = peers,
-            .part     = owner.description_,
+            .regs               = slot->regs,
+            .irqs               = slot->irqs,
+            .dma                = slot->dma,
+            .events             = slot->events,
+            .clock              = owner.clock_,
+            .services           = static_cast<machine_services&>(owner),
+            .peers              = peers,
+            .part               = owner.description_,
+            .strict_peripherals = owner.options_.strict_peripherals,
         });
     auto const configured = owner.options_.models.find(unit.name);
     auto const factory =
