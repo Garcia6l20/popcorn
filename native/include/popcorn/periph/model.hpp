@@ -114,6 +114,34 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> = 0;
 
   /**
+   * @brief Serves a CPU or DMA store to a read-only memory region whose description names this
+   *        model's peripheral as its controller, such as a word stored into flash while
+   *        programming. The region's bytes stay unchanged unless the model writes them, through
+   *        core::machine_services with initiator::debugger. Debugger writes bypass it. The
+   *        dispatch splits a 64-bit CPU store, VSTR.64 or VSTM of a D register, into two 4-byte
+   *        calls, low address first, and skips the second when the first returns a bus error.
+   *        The model is called with the engine running and the GIL released.
+   * @param region The region the store hit.
+   * @param addr Address of the store.
+   * @param size Store size in bytes, 1, 2 or 4.
+   * @param value Value stored, right-aligned to @p size.
+   * @param ctx Where, when and by whom the store happened.
+   * @return Nothing when the model took the store, or a bus error, which the machine turns into
+   *         an imprecise BusFault, at the end of the current translated block, for a CPU store,
+   *         or a transfer error for a DMA store. The default refuses every store with
+   *         bus_error::denied.
+   */
+  virtual auto on_memory_write(
+      [[maybe_unused]] region_desc const& region,
+      [[maybe_unused]] address            addr,
+      [[maybe_unused]] std::uint8_t       size,
+      [[maybe_unused]] std::uint32_t      value,
+      [[maybe_unused]] access_ctx         ctx) -> std::expected<void, bus_error>
+  {
+    return std::unexpected{bus_error::denied};
+  }
+
+  /**
    * @brief Handles an event the model scheduled, when virtual time reaches it.
    * @param kind Event kind the model chose when scheduling, the `kind` of the event id.
    * @param payload Payload the model passed when scheduling.

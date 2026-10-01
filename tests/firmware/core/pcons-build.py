@@ -37,3 +37,4 @@ for name, source in (
 
 add_firmware("core", "alu", [here / "alu.S"])
 add_firmware("core", "mmio", [here / "mmio.S"])
+add_firmware("core", "rom_store", [here / "rom_store.S"])

@@ -19,6 +19,7 @@ arch_firmware = {
     for name in ("scs", "exceptions", "svc", "timers", "faults", "rtos")
 }
 arch_firmware["abi"] = firmware("abi", "abi")
+arch_firmware["rom_store"] = firmware("core", "rom_store")
 for variant in (
     "exceptions_m4",
     "exceptions_m7",
@@ -47,6 +48,7 @@ arch_tests = [
         ("arch-calls", "test_calls.cpp"),
         ("arch-variants", "test_variants.cpp"),
         ("arch-rtos", "test_rtos.cpp"),
+        ("arch-store-controller", "test_store_controller.cpp"),
     )
 ]
 for test in arch_tests:

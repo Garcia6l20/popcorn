@@ -807,6 +807,25 @@ struct machine::run_state
       std::uint32_t      value,
       initiator          by) -> std::expected<void, bus_error>;
 
+  /**
+   * @brief Hands a store into a read-only region to the model of its controller, a 64-bit store
+   *        as two 4-byte stores, low address first, the second skipped after a bus error. A
+   *        store another master made and the model took is reported to the watches: CPU stores
+   *        reach them through the engine's write hook.
+   * @param region Region holding every byte of the store, its controller set.
+   * @param addr Address of the store.
+   * @param size Store size in bytes, 1, 2, 4 or 8.
+   * @param value Value stored, right-aligned to @p size.
+   * @param by Bus master of the store, never the debugger.
+   */
+  auto dispatch_controller_write(
+      mapped_region const& region,
+      address              addr,
+      std::uint8_t         size,
+      std::uint64_t        value,
+      initiator            by) -> std::expected<void, bus_error> pre(region.controller != nullptr)
+      pre(by != initiator::debugger) pre(size == 1 or size == 2 or size == 4 or size == 8);
+
   /** @brief Lowers the engine deadline to the earliest event after a model call, and ends the
    * engine run when the call changed the instruction rate. */
   void after_model(std::uint64_t instruction_hz);

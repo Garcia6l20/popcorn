@@ -268,6 +268,34 @@ auto machine::run_state::dispatch_write(
   return {};
 }
 
+auto machine::run_state::dispatch_controller_write(
+    mapped_region const& region,
+    address              addr,
+    std::uint8_t         size,
+    std::uint64_t        value,
+    initiator            by) -> std::expected<void, bus_error>
+{
+  auto const hz   = owner.clock_.instruction_hz();
+  auto const word = [&](address at, std::uint8_t bytes, std::uint32_t data) {
+    handler_scope const scope{in_handler};
+    return region.controller->on_memory_write(
+        *region.desc, at, bytes, data,
+        {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = region.desc->secure});
+  };
+  auto done = size == 8 ? word(addr, 4, static_cast<std::uint32_t>(value))
+                        : word(addr, size, static_cast<std::uint32_t>(value) & size_mask(size));
+  if(done and size == 8)
+  {
+    done = word(addr + 4, 4, static_cast<std::uint32_t>(value >> 32));
+  }
+  after_model(hz);
+  if(done and by != initiator::cpu)
+  {
+    note_watched(addr, size, static_cast<std::uint32_t>(value), true, by);
+  }
+  return done;
+}
+
 void machine::run_state::after_model(std::uint64_t instruction_hz)
 {
   deadline = std::min(deadline, owner.scheduler_.earliest());

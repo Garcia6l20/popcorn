@@ -56,6 +56,10 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, ini
   {
     if(not writable_by(*region->desc, by))
     {
+      if(region->controller != nullptr)
+      {
+        return run_->dispatch_controller_write(*region, addr, size, value, by);
+      }
       return std::unexpected(bus_error::denied);
     }
     auto bits = value;
@@ -117,6 +121,10 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, initia
   {
     auto const        at     = static_cast<address>(addr + done);
     auto const* const region = mapped_region::find(memory_, at, 1);
+    if(region != nullptr and region->controller != nullptr and by != initiator::debugger)
+    {
+      return std::unexpected(block_error{.error = bus_error::denied, .at = at});
+    }
     if(region != nullptr and (run_->watches.empty() or by == initiator::debugger))
     {
       if(not writable_by(*region->desc, by))

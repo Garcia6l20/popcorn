@@ -401,11 +401,31 @@ auto machine::run_state::on_bad_access(
     uc_struct*,
     uc_mem_type   type,
     std::uint64_t addr,
-    int,
-    std::int64_t,
-    void* user) noexcept -> bool
+    int           size,
+    std::int64_t  value,
+    void*         user) noexcept -> bool
 {
-  auto& run     = *static_cast<run_state*>(user);
+  auto& run = *static_cast<run_state*>(user);
+  if(type == UC_MEM_WRITE_PROT)
+  {
+    auto const* const region = mapped_region::find(
+        run.owner.memory_, static_cast<address>(addr), static_cast<std::size_t>(size));
+    if(region != nullptr and region->controller != nullptr)
+    {
+      run.guarded([&] {
+        auto const done = run.dispatch_controller_write(
+            *region, static_cast<address>(addr), static_cast<std::uint8_t>(size),
+            static_cast<std::uint64_t>(value), initiator::cpu);
+        if(not done)
+        {
+          run.record_bus_fault(static_cast<address>(addr), arch::memory_op::write);
+        }
+        return false;
+      });
+      uc_ctl_drop_store(run.engine);
+      return true;
+    }
+  }
   run.unmapped  = unmapped_access{.addr = static_cast<address>(addr), .op = memory_op_of(type)};
   run.stop_flag = true;
   return false;

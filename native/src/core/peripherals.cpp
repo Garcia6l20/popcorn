@@ -160,6 +160,13 @@ void machine::run_state::attach_peripherals()
     }
   }
   peers.fill(std::move(by_name), std::move(models));
+  for(auto const& region : owner.memory_)
+  {
+    if(region->desc->controller)
+    {
+      region->controller = peers.find(*region->desc->controller);
+    }
+  }
 }
 
 void machine_peers::fill(

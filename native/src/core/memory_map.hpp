@@ -11,6 +11,11 @@
 
 struct uc_struct;
 
+namespace popcorn::periph
+{
+class model;
+}
+
 namespace popcorn::core
 {
 /** @brief Frees a page-aligned host allocation. */
@@ -57,6 +62,9 @@ struct machine::mapped_region
   std::size_t offset{};
   /** @brief Region desc outside the description, the scratch region's, which desc points to. */
   std::unique_ptr<region_desc const> owned{};
+  /** @brief Model of the peripheral the description names as the region's controller, null
+   * without one or when that peripheral has no model. Set once every model is attached. */
+  periph::model* controller{};
 
   /**
    * @brief Allocates a host buffer per region without `physical`, maps every region in the
