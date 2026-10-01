@@ -133,17 +133,25 @@ struct lcov_options
  *
  * Inside a group an instruction's count is the sum of the hits of the blocks holding it, and a
  * line's count is the largest count among its instructions, over the group's ranges, row starts
- * and block starts. Across groups, which are different images, the counts of one file and line
- * are summed: the only place a line count is a sum. Branches are Thumb B<cond>, CBZ and CBNZ
- * outside IT blocks, found by following control flow through each function in range, and counted
- * from the edges out of the blocks that end with them. A branch whose block never ran is `-`.
- * Edges the machine did not record, at an exception entry or a stop right after a branch, are
- * missing from the counts. BRDA block numbers are the branch's index among its line's branches.
- * Each file record starts with its own TN record.
+ * and block starts. A block left before its end, by a stop, a fault or an intercept, holds only
+ * the instructions that ran, and none when it was left at its start. Across groups, which are
+ * different images, the counts of one file and line are summed: the only place a line count is a
+ * sum. Branches are Thumb B<cond>, CBZ and CBNZ outside IT blocks, found by following control
+ * flow through each function in range, and counted from the edges out of the blocks that end with
+ * them. A branch whose block never ran to it is `-`. Edges the machine did not record, at an
+ * exception entry or a stop right after a branch, are missing from the counts. BRDA block numbers
+ * are the branch's index among its line's branches. Each file record starts with its own TN
+ * record.
+ *
+ * A function is `FN:<start>,<end>,<name>`. With a debug function at its address, image::image
+ * functions, it is filed under the declaring file at the declaration line. Without one, it is
+ * filed under the file of the row that holds its entry, the one addr2line reports, at the
+ * smallest non-zero line among the rows at its entry in that file. Its end is the largest line of
+ * that file among the rows of its code, at least its start and before the start of the next
+ * function of the file. The start line has a DA record of at least the function's entry count, so
+ * that genhtml finds it a line.
  *
  * Rules and limits:
- * - A function is filed under the file of the row that holds its entry, the one addr2line
- *   reports, at the smallest non-zero line among the rows at its entry in that file.
  * - Rows of zero length, followed by a row at the same address, cover no instruction: their line
  *   gets no DA record from them, as addr2line resolves the address to the last row.
  * - Branch discovery starts from each function's entry, row starts and block starts. A start other
@@ -152,6 +160,10 @@ struct lcov_options
  * - A call that never returns, followed by a literal pool, lets discovery decode the pool's words
  *   as instructions: a word that encodes B<cond>, CBZ or CBNZ is reported as a branch. The images
  *   carry no mapping symbols to tell code from data.
+ * - A line can be hit while its branch never ran: another path ran an instruction the line table
+ *   gives that line, such as a shared exit, or a run stopped or faulted after the line's first
+ *   instruction and before its branch. genhtml 2 with branch coverage reports it as `line is hit
+ *   but no branches on line have been evaluated`.
  *
  * @param set Coverage, as collect() or a `.pcov` load gives it.
  * @param images Per group, its images in the order of coverage_group::images. A raw image

@@ -96,11 +96,13 @@ struct sized_blocks
 
 /**
  * @brief Turns raw counters into sized blocks: each start decoded, its hits split where edges
- *        prove the engine ended the block early. A start counted in several overlapping ranges
- *        keeps its largest count. Each edge into the block's middle gives a block of that size
- *        with the edge's hits, and the full size keeps what is left of the count. The hits over
- *        all sizes of a start therefore sum to the larger of its count and its early edges: once
- *        a u32 counter saturates, the edges, which are u64, win.
+ *        prove the engine ended the block early or cuts show it was left early. A start counted
+ *        in several overlapping ranges keeps its largest count. Each edge into the block's middle
+ *        and each cut there gives a block of that size with their hits, a cut at the start
+ *        removes its hits, since none of the block's instructions ran, and the full size keeps
+ *        what is left of the count. The hits over all sizes of a start therefore sum to the
+ *        larger of its count less its cuts at the start and its early edges and cuts: once a u32
+ *        counter saturates, the edges and cuts, which are u64, win.
  * @param data Raw counters.
  * @param code Code source.
  */

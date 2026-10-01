@@ -15,6 +15,8 @@ namespace
 {
 constexpr std::size_t first_edge_slots = 1024;
 
+constexpr address max_insn_bytes = 4;
+
 auto edge_hash(address from, address to) noexcept -> std::uint64_t
 {
   return (std::uint64_t{from} << 32 | to) * 0x9e37'79b9'7f4a'7c15;
@@ -100,7 +102,7 @@ void flat_edge_table::clear() noexcept
   used_ = 0;
 }
 
-void coverage_state::count(address addr)
+void coverage_state::count(address addr, std::uint32_t insns)
 {
   auto inside = false;
   if(last_range < blocks.size() and holds(blocks[last_range].range, addr) and not overlapping)
@@ -127,6 +129,7 @@ void coverage_state::count(address addr)
   if(not inside)
   {
     has_previous = false;
+    open_insns   = 0;
     return;
   }
   if(has_previous)
@@ -135,6 +138,22 @@ void coverage_state::count(address addr)
   }
   previous     = addr;
   has_previous = true;
+  open_insns   = insns;
+}
+
+void coverage_state::leave(arch::arch const& core, address pc)
+{
+  auto const insns = std::exchange(open_insns, 0u);
+  if(pc - previous > max_insn_bytes * insns)
+  {
+    return;
+  }
+  auto const ran = core.instructions_between(previous, pc);
+  if(not ran or *ran >= insns)
+  {
+    return;
+  }
+  ++cuts[{previous, pc}];
 }
 
 void machine::enable_coverage(std::vector<address_range> ranges)
@@ -199,7 +218,17 @@ auto machine::coverage_enabled() const noexcept -> bool
 auto machine::coverage() const -> coverage_data
 {
   require_view_access();
-  return {.blocks = run_->coverage.blocks, .edges = run_->coverage.edges.edges()};
+  auto const& state = run_->coverage;
+  return {
+      .blocks = state.blocks,
+      .edges  = state.edges.edges(),
+      .cuts   = state.cuts
+              | std::views::transform([](auto const& held) {
+                return cut_counter{
+                    .start = held.first.first, .at = held.first.second, .hits = held.second};
+                })
+              | std::ranges::to<std::vector>(),
+  };
 }
 
 void machine::clear_coverage()
@@ -211,6 +240,7 @@ void machine::clear_coverage()
     std::ranges::fill(counters.hits, 0u);
   }
   state.edges.clear();
+  state.cuts.clear();
   state.has_previous = false;
 }
 }

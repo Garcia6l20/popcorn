@@ -81,6 +81,23 @@ struct line_row
   friend auto operator==(line_row const&, line_row const&) -> bool = default;
 };
 
+/** @brief Function of the debug information with contiguous code, and where its source declares
+ * it. */
+struct debug_function
+{
+  /** @brief First address of its code, DW_AT_low_pc with the Arm Thumb bit cleared. */
+  address low{};
+  /** @brief Address past its code, DW_AT_high_pc with the Arm Thumb bit cleared. */
+  address high{};
+  /** @brief Index of the declaring source file in `image::files`, DW_AT_decl_file. */
+  std::uint32_t file{};
+  /** @brief Declaration line, DW_AT_decl_line, never 0. */
+  std::uint32_t line{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(debug_function const&, debug_function const&) -> bool = default;
+};
+
 /**
  * @brief Firmware image: segments to load, symbols, line table, entry and calling convention.
  *        Plain data, built by load_elf() and the other file loaders, or by the object linker. The
@@ -97,6 +114,11 @@ struct image
   std::vector<std::string> files{};
   /** @brief Line table, all rows, ordered by address. Empty without debug information. */
   std::vector<line_row> lines{};
+  /** @brief Functions of the debug information, a DW_TAG_subprogram with DW_AT_low_pc,
+   * DW_AT_high_pc and a declaration each, sorted by low, high, file then line. Empty without
+   * debug information or when its DIEs cannot be read. A declaration file no row uses comes after
+   * the rows' files in `files`. */
+  std::vector<debug_function> functions{};
   /** @brief Entry point from the file header, empty when the file has none. */
   std::optional<address> entry{};
   /** @brief Floating-point calling convention: soft unless the ELF header flags set

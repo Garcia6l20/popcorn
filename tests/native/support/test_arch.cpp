@@ -17,11 +17,14 @@
 #include <bit>
 #include <format>
 #include <memory>
+#include <optional>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace popcorn::testing
 {
@@ -356,6 +359,32 @@ auto test_arch::pc() const -> address
 {
   auto const at = read(UC_ARM_REG_PC);
   return state_.wfi_at == at ? at + wfi_size(at) : at;
+}
+
+auto test_arch::instructions_between(address from, address to) const -> std::optional<std::uint32_t>
+{
+  if(to < from or (to - from) % 2 != 0)
+  {
+    return std::nullopt;
+  }
+  std::vector<std::uint16_t> code((to - from) / 2);
+  if(not code.empty()
+     and not context_->services.read_block(
+         from, std::as_writable_bytes(std::span{code}), initiator::debugger))
+  {
+    return std::nullopt;
+  }
+  std::uint32_t count = 0;
+  std::size_t   at    = 0;
+  for(; at < code.size(); ++count)
+  {
+    at += (code[at] >> 11) >= 0b11101u ? 2 : 1;
+  }
+  if(at != code.size())
+  {
+    return std::nullopt;
+  }
+  return count;
 }
 
 auto test_arch::resume_address() const -> address

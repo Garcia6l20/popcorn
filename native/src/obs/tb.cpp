@@ -127,26 +127,41 @@ auto size_blocks(core::coverage_data const& data, code_bytes& code) -> sized_blo
       result.dropped += hits;
       continue;
     }
-    auto const end   = std::uint64_t{start} + block.size;
-    auto const from  = std::ranges::equal_range(data.edges, start, {}, &core::edge_counter::from);
-    auto       inner = from | std::views::filter([&](core::edge_counter const& edge) {
-                   return edge.to > start and edge.to < end and edge.to != block.last.target;
-                       });
-    if(std::ranges::empty(inner))
+    auto const                       end   = std::uint64_t{start} + block.size;
+    std::uint64_t                    unrun = 0;
+    std::map<address, std::uint64_t> early;
+    for(auto const& edge :
+        std::ranges::equal_range(data.edges, start, {}, &core::edge_counter::from))
     {
-      result.blocks.push_back({.start = start, .size = block.size, .hits = hits});
-      continue;
+      if(edge.to > start and edge.to < end and edge.to != block.last.target)
+      {
+        early[edge.to] += edge.hits;
+      }
     }
-    ++result.split;
-    std::uint64_t early = 0;
-    for(auto const& edge : inner)
+    for(auto const& cut : std::ranges::equal_range(data.cuts, start, {}, &core::cut_counter::start))
     {
-      result.blocks.push_back({.start = start, .size = edge.to - start, .hits = edge.hits});
-      early += edge.hits;
+      if(cut.at == start)
+      {
+        unrun += cut.hits;
+      }
+      else if(cut.at < end)
+      {
+        early[cut.at] += cut.hits;
+      }
     }
-    if(hits > early)
+    std::uint64_t ended = unrun;
+    if(not early.empty())
     {
-      result.blocks.push_back({.start = start, .size = block.size, .hits = hits - early});
+      ++result.split;
+    }
+    for(auto const& [at, count] : early)
+    {
+      result.blocks.push_back({.start = start, .size = at - start, .hits = count});
+      ended += count;
+    }
+    if(hits > ended)
+    {
+      result.blocks.push_back({.start = start, .size = block.size, .hits = hits - ended});
     }
   }
   std::ranges::sort(

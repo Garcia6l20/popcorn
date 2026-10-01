@@ -41,6 +41,24 @@ struct edge_counter
 };
 
 /**
+ * @brief Count of one way a translated block was left before its last instruction ran: a stop, a
+ *        fault, an intercept that returned or stopped, or an exit address inside the block.
+ */
+struct cut_counter
+{
+  /** @brief Start address of the block. */
+  address start{};
+  /** @brief Address of the first instruction of the block that did not run, @p start when none
+   * ran. */
+  address at{};
+  /** @brief Times the block was left there. */
+  std::uint64_t hits{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(cut_counter const&, cut_counter const&) -> bool = default;
+};
+
+/**
  * @brief Raw coverage counters of a machine, plain data: the input of `.pcov` files, lcov and
  *        drcov exports, never lcov text. A `.pcov` file stores them per translated block with
  *        64-bit sums, so files from runs with different block boundaries merge.
@@ -51,6 +69,9 @@ struct coverage_data
   std::vector<block_counters> blocks{};
   /** @brief Edge counters with a non-zero count, ordered by from then to. */
   std::vector<edge_counter> edges{};
+  /** @brief Blocks entered but left before their end, ordered by start then at. Their entries
+   * are in blocks too. */
+  std::vector<cut_counter> cuts{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(coverage_data const&, coverage_data const&) -> bool = default;

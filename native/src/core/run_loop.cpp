@@ -278,7 +278,8 @@ void machine::run_state::on_block(
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {
-    run.boundary_stop = true;
+    run.boundary_stop       = true;
+    run.coverage.open_insns = 0;
     uc_emu_stop(engine);
     return;
   }
@@ -303,8 +304,8 @@ void machine::run_state::on_block(
   }
   if(run.coverage_on) [[unlikely]]
   {
-    run.guarded([&run, addr] {
-      run.coverage.count(static_cast<address>(addr));
+    run.guarded([&run, addr, size] {
+      run.coverage.count(static_cast<address>(addr), size);
       return false;
     });
     if(run.stepping)
@@ -902,6 +903,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     auto const started = owner.clock_.now();
     auto const err     = engine_run();
     auto const ran     = owner.clock_.now().value - started.value;
+    if(coverage_on)
+    {
+      coverage.leave(*arch, arch->pc());
+    }
     executed.value += ran;
     if(leaving)
     {

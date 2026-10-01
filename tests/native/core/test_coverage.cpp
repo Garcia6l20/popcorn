@@ -241,6 +241,11 @@ TEST_CASE("an intercept that returns or stops and resumes leaves no false edge")
     auto const data = f.target->coverage();
     CHECK(hits_at(data, seven) == 1);
     CHECK(from_seven(data).empty());
+    CHECK(
+        data.cuts
+        == std::vector<core::cut_counter>{
+            {.start = seven, .at = seven, .hits = 1}
+    });
   }
   SUBCASE("stop then resume")
   {
@@ -250,6 +255,11 @@ TEST_CASE("an intercept that returns or stops and resumes leaves no false edge")
     CHECK(call() == 107);
     auto const data = f.target->coverage();
     CHECK(hits_at(data, seven) == 2);
+    CHECK(
+        data.cuts
+        == std::vector<core::cut_counter>{
+            {.start = seven, .at = seven, .hits = 1}
+    });
     auto const edges = from_seven(data);
     REQUIRE(edges.size() == 1);
     CHECK(edges.front().to != seven);

@@ -113,6 +113,8 @@ public:
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto idle() const -> bool override;
   [[nodiscard]] auto pc() const -> address override;
+  [[nodiscard]] auto instructions_between(address from, address to) const
+      -> std::optional<std::uint32_t> override;
   [[nodiscard]] auto resume_address() const -> address override;
   [[nodiscard]] auto registers() const -> std::span<popcorn::arch::cpu_register const> override;
   void               prepare_call(popcorn::arch::call_frame const& frame) override;

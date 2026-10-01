@@ -1,19 +1,26 @@
 #include "dwarf_lines.hpp"
 #include "dwarf_units.hpp"
+#include "synthetic_elf.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/image/image.hpp>
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <map>
+#include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 using popcorn::image::load_elf;
@@ -21,7 +28,9 @@ using popcorn::image::detail::compile_unit_ref;
 using popcorn::image::detail::compile_units;
 using popcorn::image::detail::debug_sections;
 using popcorn::image::detail::decode_lines;
+using popcorn::image::detail::file_ref;
 using popcorn::image::detail::scan_compile_units;
+using popcorn::image::detail::scan_functions;
 
 namespace
 {
@@ -868,4 +877,447 @@ TEST_CASE("compile_units parses each distinct abbrev table once, units alternati
   auto const scan = scan_compile_units(sections);
   REQUIRE(scan.units.size() == 16);
   CHECK(scan.abbrev_tables_parsed == 2);
+}
+
+TEST_CASE("decode_lines resolves wanted file table entries, a file no row uses after the others")
+{
+  v4_line_program_builder used;
+  used.set_address(0x0800'0000);
+  used.copy();
+  used.advance_pc(2);
+  used.end_sequence();
+  auto       line   = used.build();
+  auto const second = line.size();
+  auto const unused = v4_line_program_builder{}.build();
+  line.insert(line.end(), unused.begin(), unused.end());
+
+  std::vector<compile_unit_ref> const units{
+      {.line_offset = 0,      .comp_dir = ""      },
+      {.line_offset = second, .comp_dir = "/other"},
+  };
+  std::vector<file_ref> const wanted{
+      {.line_offset = second, .index = 1},
+      {.line_offset = 0,      .index = 1},
+      {.line_offset = 0,      .index = 0},
+      {.line_offset = 0,      .index = 7},
+      {.line_offset = 12345,  .index = 1},
+  };
+  debug_sections const sections{
+      .info = {}, .abbrev = {}, .line = line, .str = {}, .line_str = {}, .str_offsets = {}};
+  auto const table = decode_lines(sections, units, wanted);
+  CHECK(table.files == std::vector<std::string>{"a.c", "/other/a.c"});
+  CHECK(
+      table.wanted
+      == std::vector<std::optional<std::uint32_t>>{1, 0, std::nullopt, std::nullopt, std::nullopt});
+}
+
+namespace
+{
+constexpr std::uint64_t dw_tag_subprogram_test = 0x2e;
+constexpr std::uint64_t dw_tag_variable_test   = 0x34;
+
+void attribute(byte_writer& abbrev, std::uint64_t attr, std::uint64_t form)
+{
+  abbrev.uleb(attr);
+  abbrev.uleb(form);
+}
+
+void abbreviation(
+    byte_writer&                                                   abbrev,
+    std::uint64_t                                                  code,
+    std::uint64_t                                                  tag,
+    bool                                                           children,
+    std::initializer_list<std::pair<std::uint64_t, std::uint64_t>> attrs)
+{
+  abbrev.uleb(code);
+  abbrev.uleb(tag);
+  abbrev.u8(children ? 1 : 0);
+  for(auto const& [attr, form] : attrs)
+  {
+    attribute(abbrev, attr, form);
+  }
+  abbrev.uleb(0);
+  abbrev.uleb(0);
+}
+}
+
+TEST_CASE("scan_functions takes declarations through abstract origins and specifications")
+{
+  constexpr std::uint64_t stmt_list = 0x10, addr_base = 0x73, low_pc = 0x11, high_pc = 0x12,
+                          origin = 0x31, decl_file = 0x3a, decl_line = 0x3b, specification = 0x47;
+  constexpr std::uint64_t sec_offset = 0x17, data1 = 0x0b, data2 = 0x05, data4 = 0x06, addr = 0x01,
+                          addrx = 0x1b, ref4 = 0x13, ref_addr = 0x10, implicit_const = 0x21;
+
+  byte_writer abbrev;
+  abbreviation(
+      abbrev, 1, 0x11, true,
+      {
+          {stmt_list, sec_offset},
+          {addr_base, sec_offset}
+  });
+  abbreviation(
+      abbrev, 2, dw_tag_subprogram_test, false,
+      {
+          {decl_file, data1},
+          {decl_line, data1}
+  });
+  abbreviation(
+      abbrev, 3, dw_tag_subprogram_test, false,
+      {
+          {origin,  ref4 },
+          {low_pc,  addrx},
+          {high_pc, data4}
+  });
+  abbreviation(
+      abbrev, 4, dw_tag_subprogram_test, false,
+      {
+          {specification, ref_addr},
+          {decl_line,     data2   },
+          {low_pc,        addr    },
+          {high_pc,       addr    }
+  });
+  abbreviation(
+      abbrev, 5, dw_tag_subprogram_test, false,
+      {
+          {low_pc,  addr },
+          {high_pc, data4}
+  });
+  abbrev.uleb(6);
+  abbrev.uleb(dw_tag_subprogram_test);
+  abbrev.u8(0);
+  attribute(abbrev, decl_file, implicit_const);
+  abbrev.sleb(3);
+  attribute(abbrev, decl_line, data1);
+  attribute(abbrev, low_pc, addr);
+  attribute(abbrev, high_pc, data4);
+  abbrev.uleb(0);
+  abbrev.uleb(0);
+  abbreviation(
+      abbrev, 7, dw_tag_subprogram_test, false,
+      {
+          {origin,  ref4 },
+          {low_pc,  addr },
+          {high_pc, data4}
+  });
+  for(auto const& [code, tag] : {
+          std::pair{8, dw_tag_variable_test  },
+          {9, dw_tag_subprogram_test}
+  })
+  {
+    abbreviation(
+        abbrev, static_cast<std::uint64_t>(code), tag, false,
+        {
+            {decl_file, data1},
+            {decl_line, data1},
+            {low_pc,    addr },
+            {high_pc,   data4}
+    });
+  }
+  abbreviation(
+      abbrev, 10, dw_tag_subprogram_test, false,
+      {
+          {decl_file, data1},
+          {decl_line, data1},
+          {low_pc,    addr },
+          {high_pc,   addrx}
+  });
+  abbreviation(
+      abbrev, 11, dw_tag_subprogram_test, false,
+      {
+          {decl_file, data1},
+          {decl_line, data1},
+          {low_pc,    addrx},
+          {high_pc,   data4}
+  });
+  abbreviation(
+      abbrev, 12, dw_tag_subprogram_test, false,
+      {
+          {origin,    ref4 },
+          {decl_file, data1},
+          {low_pc,    addr },
+          {high_pc,   data4}
+  });
+  abbrev.uleb(0);
+
+  byte_writer die;
+  die.uleb(1);
+  die.u32(0);
+  die.u32(8);
+  auto const declared = 12 + die.size();
+  die.uleb(2);
+  die.u8(1);
+  die.u8(30);
+  die.uleb(3);
+  die.u32(static_cast<std::uint32_t>(declared));
+  die.uleb(1);
+  die.u32(0x10);
+  auto const specified = 12 + die.size();
+  die.uleb(2);
+  die.u8(2);
+  die.u8(40);
+  die.uleb(4);
+  die.u32(static_cast<std::uint32_t>(specified));
+  die.u16(44);
+  die.u32(0x2000);
+  die.u32(0x2020);
+  die.uleb(5);
+  die.u32(0x3000);
+  die.u32(0x10);
+  for(int copy = 0; copy < 2; ++copy)
+  {
+    die.uleb(6);
+    die.u8(50);
+    die.u32(0x4000);
+    die.u32(8);
+  }
+  auto const looping = 12 + die.size();
+  die.uleb(7);
+  die.u32(static_cast<std::uint32_t>(looping));
+  die.u32(0x5000);
+  die.u32(4);
+  die.uleb(8);
+  die.u8(1);
+  die.u8(70);
+  die.u32(0x6000);
+  die.u32(4);
+  die.uleb(9);
+  die.u8(1);
+  die.u8(80);
+  die.u32(0x7000);
+  die.u32(0);
+  die.uleb(9);
+  die.u8(1);
+  die.u8(0);
+  die.u32(0x7800);
+  die.u32(4);
+  die.uleb(10);
+  die.u8(5);
+  die.u8(90);
+  die.u32(0x8000);
+  die.uleb(2);
+  die.uleb(11);
+  die.u8(1);
+  die.u8(95);
+  die.uleb(0x4000'0000'0000'0001);
+  die.u32(4);
+  die.uleb(11);
+  die.u8(1);
+  die.u8(96);
+  die.uleb(3);
+  die.u32(4);
+  die.uleb(12);
+  die.u32(static_cast<std::uint32_t>(declared));
+  die.u8(6);
+  die.u32(0xa000);
+  die.u32(4);
+  die.u8(0);
+
+  byte_writer addresses;
+  addresses.u32(16);
+  addresses.u16(5);
+  addresses.u8(4);
+  addresses.u8(0);
+  addresses.u32(0x1111'0000);
+  addresses.u32(0x1000);
+  addresses.u32(0x8010);
+
+  auto const           info = wrap_cu_v5(die);
+  debug_sections const sections{
+      .info        = info,
+      .abbrev      = abbrev.bytes,
+      .line        = {},
+      .str         = {},
+      .line_str    = {},
+      .str_offsets = {},
+      .addr        = addresses.bytes};
+  using row = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t>;
+  auto const found = scan_functions(sections)
+                   | std::views::transform([](auto const& held) {
+                       return row{held.low, held.high, held.line_offset, held.file, held.line};
+                     })
+                   | std::ranges::to<std::vector>();
+  CHECK(
+      found
+      == std::vector<row>{
+          {0x1000, 0x1010, 0, 1, 30},
+          {0x2000, 0x2020, 0, 2, 44},
+          {0x4000, 0x4008, 0, 3, 50},
+          {0x8000, 0x8010, 0, 5, 90},
+          {0xa000, 0xa004, 0, 6, 30},
+  });
+}
+
+TEST_CASE("scan_functions rejects a DIE with an unknown abbreviation code")
+{
+  byte_writer abbrev;
+  abbreviation(abbrev, 1, 0x11, true, {});
+  abbrev.uleb(0);
+  byte_writer die;
+  die.uleb(1);
+  die.uleb(2);
+  auto const           info = wrap_cu_v5(die);
+  debug_sections const sections{
+      .info        = info,
+      .abbrev      = abbrev.bytes,
+      .line        = {},
+      .str         = {},
+      .line_str    = {},
+      .str_offsets = {}};
+  CHECK_THROWS_AS(std::ignore = scan_functions(sections), popcorn::image_error);
+}
+
+TEST_CASE("load_elf: debug functions carry the declaring file and line in every DWARF version")
+{
+  for(auto const* variable :
+      {"POPCORN_IMAGE_ELF", "POPCORN_IMAGE_DW4_ELF", "POPCORN_IMAGE_DW5_ELF",
+       "POPCORN_IMAGE_DW5GCC_ELF"})
+  {
+    CAPTURE(variable);
+    auto const loaded = load_elf(env_path(variable));
+    std::vector<std::tuple<std::string, std::string, std::uint32_t, bool>> seen;
+    for(auto const& function : loaded.functions)
+    {
+      auto const symbol = std::ranges::find_if(loaded.symbols, [&](auto const& held) {
+        return held.value == function.low and held.kind == popcorn::image::symbol_kind::function;
+      });
+      REQUIRE(symbol != loaded.symbols.end());
+      auto const file = loaded.files.at(function.file);
+      seen.emplace_back(
+          symbol->name, file.substr(file.rfind('/') + 1), function.line,
+          function.high == symbol->value + symbol->size);
+    }
+    CHECK(
+        seen
+        == std::vector<std::tuple<std::string, std::string, std::uint32_t, bool>>{
+            {"scale",            "main.c",   12, true},
+            {"Reset_Handler",    "main.c",   17, true},
+            {"scale",            "shapes.c", 5,  true},
+            {"shapes_perimeter", "shapes.c", 12, true},
+    });
+  }
+}
+
+TEST_CASE("load_elf keeps the line table and no debug function when a DIE cannot be read")
+{
+  v4_line_program_builder program;
+  program.set_address(0x0800'0000);
+  program.copy();
+  program.advance_pc(2);
+  program.end_sequence();
+  byte_writer abbrev;
+  abbreviation(
+      abbrev, 1, 0x11, true,
+      {
+          {0x10, 0x17}
+  });
+  abbrev.uleb(0);
+  byte_writer die;
+  die.uleb(1);
+  die.u32(0);
+  die.uleb(9);
+  popcorn::testing::synthetic_elf builder;
+  builder.add_section(".debug_info", SHT_PROGBITS, 0, wrap_cu_v5(die));
+  builder.add_section(".debug_abbrev", SHT_PROGBITS, 0, abbrev.bytes);
+  builder.add_section(".debug_line", SHT_PROGBITS, 0, program.build());
+  auto const path =
+      popcorn::testing::synthetic_elf::write(builder.build(), "debug-function-unreadable.elf");
+  auto const loaded = load_elf(path);
+  CHECK_FALSE(loaded.lines.empty());
+  CHECK(loaded.functions.empty());
+}
+
+TEST_CASE("scan_functions leaves out an indexed address without DW_AT_addr_base")
+{
+  byte_writer abbrev;
+  abbreviation(
+      abbrev, 1, 0x11, true,
+      {
+          {0x10, 0x17}
+  });
+  abbreviation(
+      abbrev, 2, dw_tag_subprogram_test, false,
+      {
+          {0x3a, 0x0b},
+          {0x3b, 0x0b},
+          {0x11, 0x1b},
+          {0x12, 0x06}
+  });
+  abbrev.uleb(0);
+  byte_writer die;
+  die.uleb(1);
+  die.u32(0);
+  die.uleb(2);
+  die.u8(1);
+  die.u8(7);
+  die.uleb(1);
+  die.u32(4);
+  die.u8(0);
+  byte_writer addresses;
+  addresses.u32(12);
+  addresses.u16(5);
+  addresses.u8(4);
+  addresses.u8(0);
+  addresses.u32(0x1111'0000);
+  addresses.u32(0x1000);
+  auto const           info = wrap_cu_v5(die);
+  debug_sections const sections{
+      .info        = info,
+      .abbrev      = abbrev.bytes,
+      .line        = {},
+      .str         = {},
+      .line_str    = {},
+      .str_offsets = {},
+      .addr        = addresses.bytes};
+  CHECK(scan_functions(sections).empty());
+}
+
+TEST_CASE("load_elf clears the Thumb bit of debug functions and drops one past the address space")
+{
+  v4_line_program_builder program;
+  program.set_address(0x0800'0000);
+  program.copy();
+  program.advance_pc(8);
+  program.end_sequence();
+  byte_writer abbrev;
+  abbreviation(
+      abbrev, 1, 0x11, true,
+      {
+          {0x10, 0x17}
+  });
+  abbreviation(
+      abbrev, 2, dw_tag_subprogram_test, false,
+      {
+          {0x3a, 0x0b},
+          {0x3b, 0x0b},
+          {0x11, 0x01},
+          {0x12, 0x06}
+  });
+  abbrev.uleb(0);
+  byte_writer die;
+  die.uleb(1);
+  die.u32(0);
+  die.uleb(2);
+  die.u8(1);
+  die.u8(3);
+  die.u32(0x0800'0001);
+  die.u32(8);
+  die.uleb(2);
+  die.u8(1);
+  die.u8(4);
+  die.u32(0xffff'fff0);
+  die.u32(0x20);
+  die.u8(0);
+  popcorn::testing::synthetic_elf builder;
+  builder.add_section(".debug_info", SHT_PROGBITS, 0, wrap_cu_v5(die));
+  builder.add_section(".debug_abbrev", SHT_PROGBITS, 0, abbrev.bytes);
+  builder.add_section(".debug_line", SHT_PROGBITS, 0, program.build());
+  auto const path =
+      popcorn::testing::synthetic_elf::write(builder.build(), "debug-function-thumb.elf");
+  auto const loaded = load_elf(path);
+  REQUIRE(loaded.files == std::vector<std::string>{"a.c"});
+  CHECK(
+      loaded.functions
+      == std::vector<popcorn::image::debug_function>{
+          {.low = 0x0800'0000, .high = 0x0800'0008, .file = 0, .line = 3}
+  });
 }

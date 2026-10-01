@@ -1,5 +1,7 @@
 #include "thumb.hpp"
 
+#include <popcorn/arch/armv8m/armv8m.hpp>
+#include <popcorn/core/intercept.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/image/image.hpp>
 #include <popcorn/obs/collect.hpp>
@@ -10,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -20,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -121,6 +125,83 @@ auto starting(std::string const& text, std::string_view prefix) -> std::vector<s
        | std::ranges::to<std::vector>();
 }
 
+void check_genhtml(std::string const& text, std::string_view name)
+{
+  char const* const genhtml = std::getenv("POPCORN_GENHTML");
+  if(genhtml == nullptr)
+  {
+    MESSAGE("genhtml check skipped, set POPCORN_GENHTML to run it");
+    return;
+  }
+  char const* const project = std::getenv("POPCORN_PROJECT_DIR");
+  char const* const scratch = std::getenv("POPCORN_OBS_SCRATCH");
+  REQUIRE(project != nullptr);
+  REQUIRE(scratch != nullptr);
+  auto const out = std::filesystem::path{scratch} / "genhtml" / name;
+  std::filesystem::create_directories(out);
+  auto const info = out / std::format("{}.info", name);
+  std::ofstream{info} << text;
+  auto const log     = out / "genhtml.log";
+  auto const command = std::format(
+      "cd '{}' && '{}' --branch-coverage --function-coverage -o '{}' '{}' > '{}' 2>&1", project,
+      genhtml, (out / "html").string(), info.string(), log.string());
+  CHECK(std::system(command.c_str()) == 0);
+  std::ifstream      logged{log};
+  std::ostringstream content;
+  content << logged.rdbuf();
+  CHECK(content.str().find("WARNING") == std::string::npos);
+  MESSAGE(content.str());
+}
+
+auto cut_line(std::string_view text) -> std::uint32_t
+{
+  char const* const project = std::getenv("POPCORN_PROJECT_DIR");
+  REQUIRE(project != nullptr);
+  std::ifstream source{std::filesystem::path{project} / "tests" / "firmware" / "obs" / "cut.c"};
+  REQUIRE(source.is_open());
+  std::uint32_t number = 0;
+  for(std::string line; std::getline(source, line);)
+  {
+    ++number;
+    if(line.find(text) != std::string::npos)
+    {
+      return number;
+    }
+  }
+  FAIL("no line of cut.c holds ", text);
+  return 0;
+}
+
+auto first_address(image::image const& loaded, std::uint32_t line) -> address
+{
+  auto const found = std::ranges::find(loaded.lines, line, &image::line_row::line);
+  REQUIRE(found != loaded.lines.end());
+  return found->addr;
+}
+
+auto cut_lcov(core::machine& target) -> std::string
+{
+  std::array const sources{
+      obs::image_source{.kind = obs::image_kind::elf, .path = firmware("cut").string()}
+  };
+  std::vector<std::vector<image::image>> const images{{image::load_elf(firmware("cut"))}};
+  return obs::lcov(obs::collect(target, sources), images, {});
+}
+
+auto call_to_stop(fixture const& f, std::string_view function, std::uint32_t argument)
+    -> stop_reason
+{
+  f.target->begin_call(
+      {.entry           = popcorn::testing::sym("cut", function),
+       .args            = {{.kind = popcorn::arch::value_kind::i32, .bits = argument}},
+       .returns         = popcorn::arch::value_kind::i32,
+       .abi             = popcorn::arch::float_abi::soft,
+       .return_sentinel = 0x3000'0000});
+  auto const reason = f.run_to_stop().reason;
+  std::ignore       = f.target->end_call();
+  return reason;
+}
+
 auto nops(std::size_t count) -> std::vector<std::byte>
 {
   std::vector<std::byte> bytes;
@@ -197,7 +278,7 @@ TEST_CASE("a line counts the most executed instruction, not the sum of its block
   })
       == "TN:\n"
          "SF:a.c\n"
-         "FN:7,f\n"
+         "FN:7,7,f\n"
          "FNDA:1,f\n"
          "FNF:1\n"
          "FNH:1\n"
@@ -426,9 +507,9 @@ TEST_CASE("lines.elf: every record equals the hand-derived table")
          "SF:"
       + *path
       + "\n"
-        "FN:8,clamp\n"
-        "FN:21,count_bits\n"
-        "FN:32,classify\n"
+        "FN:7,18,clamp\n"
+        "FN:20,29,count_bits\n"
+        "FN:31,47,classify\n"
         "FNDA:2,clamp\n"
         "FNDA:1,count_bits\n"
         "FNDA:2,classify\n"
@@ -442,47 +523,27 @@ TEST_CASE("lines.elf: every record equals the hand-derived table")
         "BRDA:34,0,1,1\n"
         "BRF:6\n"
         "BRH:6\n"
+        "DA:7,2\n"
         "DA:9,2\n"
         "DA:13,1\n"
         "DA:18,2\n"
+        "DA:20,1\n"
         "DA:21,1\n"
         "DA:22,1\n"
         "DA:23,5\n"
         "DA:25,4\n"
         "DA:26,4\n"
         "DA:29,1\n"
+        "DA:31,2\n"
         "DA:34,2\n"
         "DA:40,1\n"
         "DA:44,1\n"
         "DA:47,1\n"
-        "LF:13\n"
-        "LH:13\n"
+        "LF:16\n"
+        "LH:16\n"
         "end_of_record\n");
 
-  char const* const genhtml = std::getenv("POPCORN_GENHTML");
-  if(genhtml == nullptr)
-  {
-    MESSAGE("genhtml check skipped, set POPCORN_GENHTML to run it");
-    return;
-  }
-  char const* const project = std::getenv("POPCORN_PROJECT_DIR");
-  char const* const scratch = std::getenv("POPCORN_OBS_SCRATCH");
-  REQUIRE(project != nullptr);
-  REQUIRE(scratch != nullptr);
-  auto const out = std::filesystem::path{scratch} / "genhtml";
-  std::filesystem::create_directories(out);
-  auto const info = out / "lines.info";
-  std::ofstream{info} << text;
-  auto const log     = out / "genhtml.log";
-  auto const command = std::format(
-      "cd '{}' && '{}' --branch-coverage --function-coverage -o '{}' '{}' > '{}' 2>&1", project,
-      genhtml, (out / "html").string(), info.string(), log.string());
-  CHECK(std::system(command.c_str()) == 0);
-  std::ifstream      logged{log};
-  std::ostringstream content;
-  content << logged.rdbuf();
-  CHECK(content.str().find("WARNING") == std::string::npos);
-  MESSAGE(content.str());
+  check_genhtml(text, "lines");
 }
 
 TEST_CASE("a switch case reached only through TBB reports its branch once no IT precedes it")
@@ -509,7 +570,7 @@ TEST_CASE("a pool word after a call that never returns is decoded, a known limit
       == std::vector<std::string>{"BRDA:3,0,0,-", "BRDA:3,0,1,-"});
 }
 
-TEST_CASE("FN takes the smallest line among the rows at the function's address")
+TEST_CASE("without a debug function, FN takes the smallest line among the rows at its address")
 {
   auto const made = synthetic(
       nops(4),
@@ -520,7 +581,7 @@ TEST_CASE("FN takes the smallest line among the rows at the function's address")
           {0x108, 0}
   },
       8);
-  CHECK(starting(lcov_of(made, {group_of({})}), "FN:") == std::vector<std::string>{"FN:4,f"});
+  CHECK(starting(lcov_of(made, {group_of({})}), "FN:") == std::vector<std::string>{"FN:4,9,f"});
 }
 
 TEST_CASE("functions of one name in one file add their entries")
@@ -575,7 +636,7 @@ TEST_CASE("every file record starts with its TN record")
   }
 }
 
-TEST_CASE("a function is filed under the file of its entry row, not under an inlined header")
+TEST_CASE("without a debug function, FN takes the file of its entry row, not an inlined header")
 {
   auto made  = synthetic(nops(8), {}, 8);
   made.files = {"c.c", "h.h"};
@@ -591,6 +652,202 @@ TEST_CASE("a function is filed under the file of its entry row, not under an inl
                 group_of({{.start = 0x100, .size = 8, .hits = 1}}
                 )
   });
-  CHECK(starting(text, "FN:") == std::vector<std::string>{"FN:737,f"});
+  CHECK(starting(text, "FN:") == std::vector<std::string>{"FN:737,747,f"});
   CHECK(starting(text, "SF:") == std::vector<std::string>{"SF:c.c"});
+}
+
+TEST_CASE("FN takes its debug function's declaration, its end the last line of that file in it")
+{
+  auto made  = synthetic(nops(8), {}, 8);
+  made.files = {"c.c", "h.h"};
+  made.lines = {
+      {.addr = 0x100, .file = 1, .line = 976, .is_stmt = true},
+      {.addr = 0x104, .file = 0, .line = 745, .is_stmt = true},
+      {.addr = 0x106, .file = 0, .line = 740, .is_stmt = true},
+      {.addr = 0x108, .file = 0, .line = 990, .is_stmt = true},
+      {.addr = 0x10a, .file = 0, .line = 0,   .is_stmt = true},
+  };
+  made.functions = {
+      {.low = 0x100, .high = 0x108, .file = 0, .line = 737}
+  };
+  auto const text = lcov_of(
+      made, {
+                group_of({{.start = 0x100, .size = 8, .hits = 3}}
+                )
+  });
+  CHECK(starting(text, "FN:") == std::vector<std::string>{"FN:737,745,f"});
+  CHECK(has(text, "DA:737,3"));
+  CHECK(starting(text, "SF:") == std::vector<std::string>{"SF:c.c", "SF:h.h"});
+}
+
+TEST_CASE("FN ends before the next function of its file starts, never before its own start")
+{
+  auto made = synthetic(
+      nops(8),
+      {
+          {0x100, 10},
+          {0x104, 30},
+          {0x108, 4 },
+          {0x10c, 0 }
+  },
+      8);
+  made.symbols.push_back(
+      {.name = "g", .value = 0x108, .size = 4, .kind = image::symbol_kind::function});
+  made.functions = {
+      {.low = 0x108, .high = 0x10c, .file = 0, .line = 20},
+  };
+  CHECK(
+      starting(lcov_of(made, {group_of({})}), "FN:")
+      == std::vector<std::string>{"FN:10,19,f", "FN:20,20,g"});
+}
+
+TEST_CASE("FN of one name keeps the largest end over its functions and groups")
+{
+  auto first = synthetic(
+      nops(8),
+      {
+          {0x100, 12},
+          {0x108, 0 }
+  },
+      8);
+  first.functions = {
+      {.low = 0x100, .high = 0x108, .file = 0, .line = 10}
+  };
+  auto second  = first;
+  second.lines = {
+      {.addr = 0x100, .file = 0, .line = 15, .is_stmt = true},
+      {.addr = 0x108, .file = 0, .line = 0,  .is_stmt = true}
+  };
+  second.digest = "e";
+  auto twice    = first;
+  twice.symbols.push_back(
+      {.name = "f", .value = 0x108, .size = 4, .kind = image::symbol_kind::function});
+  twice.lines = {
+      {.addr = 0x100, .file = 0, .line = 12, .is_stmt = true},
+      {.addr = 0x108, .file = 0, .line = 14, .is_stmt = true},
+      {.addr = 0x10c, .file = 0, .line = 0,  .is_stmt = true}
+  };
+  twice.functions.push_back({.low = 0x108, .high = 0x10c, .file = 0, .line = 10});
+  CHECK(starting(lcov_of(twice, {group_of({})}), "FN:") == std::vector<std::string>{"FN:10,14,f"});
+  obs::coverage_set const set{
+      .groups = {group_of({}), group_of({}, {}, 0x10, "e")}
+  };
+  std::vector<std::vector<image::image>> const images{{first}, {second}};
+  CHECK(starting(obs::lcov(set, images, {}), "FN:") == std::vector<std::string>{"FN:10,15,f"});
+}
+
+TEST_CASE("cut.elf: an exit, an intercept and a fault inside a block count only what ran")
+{
+  using popcorn::testing::sym;
+  fixture f{m33(), "cut", {}};
+  f.target->enable_coverage({});
+  REQUIRE(f.run_to_stop({.until = sym("cut", "cut_mid")}).reason == stop_reason::address);
+  auto const hook = f.target->add_intercept(sym("cut", "pick"), [](core::intercept_call const&) {
+    return core::intercept_result::returns(
+        popcorn::arch::call_arg{.kind = popcorn::arch::value_kind::i32, .bits = 7});
+  });
+  CHECK(call_to_stop(f, "use_pick", 5) == stop_reason::returned);
+  CHECK(call_to_stop(f, "probe", 0x6000'0000) == stop_reason::fault);
+
+  auto const loaded = image::load_elf(firmware("cut"));
+  auto const probed = cut_line("if(*(volatile uint32_t const*)at == 5u)");
+  CHECK(
+      f.target->coverage().cuts
+      == std::vector<core::cut_counter>{
+          {.start = sym("cut", "pick"),     .at = sym("cut",            "pick"),    .hits = 1},
+          {.start = sym("cut", "straight"), .at = sym("cut",            "cut_mid"), .hits = 1},
+          {.start = sym("cut", "probe"),    .at = first_address(loaded, probed),    .hits = 1},
+  });
+
+  auto const text = cut_lcov(*f.target);
+  for(auto const line : {cut_line("if(v > 3u)"), cut_line("if(sink > 9u)"), probed})
+  {
+    CAPTURE(line);
+    CHECK(has(text, std::format("DA:{},0", line)));
+    CHECK(has(text, std::format("BRDA:{},0,0,-", line)));
+    CHECK(has(text, std::format("BRDA:{},0,1,-", line)));
+  }
+  CHECK(has(text, std::format("DA:{},1", cut_line("sink = v;"))));
+  CHECK(has(text, std::format("DA:{},1", cut_line("sink = 1u;"))));
+  CHECK(has(text, "FNDA:0,pick"));
+  CHECK(has(text, "FNDA:1,probe"));
+  check_genhtml(text, "cut");
+
+  f.target->clear_coverage();
+  CHECK(f.target->coverage().cuts.empty());
+}
+
+TEST_CASE("cut.elf: a fault that enters its handler leaves the faulting line not run")
+{
+  using popcorn::testing::sym;
+  core::machine target{
+      m33(),
+      popcorn::arch::armv8m::factory(),
+      {.faults = popcorn::arch::fault_policy::enter_handler}};
+  target.load(popcorn::testing::elf("cut"));
+  target.reset();
+  target.enable_coverage({});
+  auto const write = [&](std::string_view name, std::uint64_t value) {
+    target.regs().write(*target.regs().find(name), value);
+  };
+  write("r0", 0x6000'0000);
+  write("lr", sym("cut", "Reset_Handler") | 1u);
+  write("pc", sym("cut", "probe"));
+  core::slice_request request{.until = sym("cut", "HardFault_Handler")};
+  request.wall_budget = std::chrono::seconds{60};
+  auto const ran      = target.run_slice(request);
+  REQUIRE(ran.stopped.has_value());
+  CHECK(ran.stopped->reason == stop_reason::address);
+
+  auto const loaded = image::load_elf(firmware("cut"));
+  auto const probed = cut_line("if(*(volatile uint32_t const*)at == 5u)");
+  CHECK(
+      target.coverage().cuts
+      == std::vector<core::cut_counter>{
+          {.start = sym("cut", "probe"), .at = first_address(loaded, probed), .hits = 1}
+  });
+  auto const text = cut_lcov(target);
+  CHECK(has(text, std::format("DA:{},0", probed)));
+  CHECK(has(text, std::format("DA:{},1", cut_line("sink = 1u;"))));
+}
+
+TEST_CASE("cut.elf: a stop at the entry of a block that loops on itself records no cut")
+{
+  fixture f{m33(), "cut", {}};
+  f.target->enable_coverage({});
+  REQUIRE(f.run_to_stop({.budget_left = popcorn::icount{40}}).reason == stop_reason::budget);
+  CHECK(f.target->coverage().cuts.empty());
+}
+
+TEST_CASE("cut.elf: an exit where a block ended records no cut")
+{
+  fixture    f{m33(), "cut", {}};
+  auto const loaded = image::load_elf(firmware("cut"));
+  f.target->enable_coverage({});
+  auto const after_branch = first_address(loaded, cut_line("note(0u);"));
+  REQUIRE(f.run_to_stop({.until = after_branch}).reason == stop_reason::address);
+  CHECK(f.target->coverage().cuts.empty());
+}
+
+TEST_CASE("cut.elf: a block outside every range closes the block counted before it")
+{
+  using popcorn::testing::sym;
+  fixture    f{m33(), "cut", {}};
+  auto const loaded = image::load_elf(firmware("cut"));
+  auto const head   = sym("cut", "cut_mid");
+  f.target->enable_coverage({
+      {.name  = "head",
+       .start = head,
+       .size  = first_address(loaded, cut_line("note(0u);")) - head}
+  });
+  REQUIRE(f.run_to_stop({.until = head}).reason == stop_reason::address);
+  f.set("lr", sym("cut", "straight") | 1u);
+  auto       visits = 0;
+  auto const hook   = f.target->add_intercept(head + 2, [&visits](core::intercept_call const&) {
+    return ++visits == 1 ? core::intercept_result::proceed()
+                         : core::intercept_result::stop(stop_reason::user);
+  });
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(visits == 2);
+  CHECK(f.target->coverage().cuts.empty());
 }

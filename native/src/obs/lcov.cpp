@@ -14,6 +14,7 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -70,6 +71,7 @@ struct branch_count
 struct function_count
 {
   std::uint32_t line{};
+  std::uint32_t end{};
   count         hits{};
 };
 
@@ -412,27 +414,85 @@ auto function_row(image::image const& source, address at) -> image::line_row con
   return best;
 }
 
+struct function_place
+{
+  std::uint32_t file{};
+  std::uint32_t line{};
+  std::uint32_t end{};
+};
+
+auto end_line(
+    image::image const& source,
+    std::uint32_t       file,
+    address             low,
+    address             high,
+    std::uint32_t       start) -> std::uint32_t
+{
+  auto const first = std::ranges::lower_bound(source.lines, low, {}, &image::line_row::addr);
+  auto const last  = std::ranges::lower_bound(source.lines, high, {}, &image::line_row::addr);
+  auto       end   = start;
+  for(auto const& row : std::ranges::subrange(first, last))
+  {
+    if(row.file == file)
+    {
+      end = std::max(end, row.line);
+    }
+  }
+  return end;
+}
+
+auto place_of(image::image const& source, image::symbol const& function, image::segment const& code)
+    -> std::optional<function_place>
+{
+  auto const declared =
+      std::ranges::lower_bound(source.functions, function.value, {}, &image::debug_function::low);
+  if(declared != source.functions.end() and declared->low == function.value)
+  {
+    return function_place{
+        .file = declared->file,
+        .line = declared->line,
+        .end  = end_line(source, declared->file, declared->low, declared->high, declared->line),
+    };
+  }
+  auto const* row = function_row(source, function.value);
+  if(row == nullptr)
+  {
+    return std::nullopt;
+  }
+  return function_place{
+      .file = row->file,
+      .line = row->line,
+      .end  = end_line(
+          source, row->file, function.value, function_end(source, function, code), row->line),
+  };
+}
+
 void add_functions(group_view const& view, image::image const& source, file_records& out)
 {
   for(auto const& function : source.symbols)
   {
-    if(function.kind
-       != image::symbol_kind::function
-       or not view.in_scope(function.value)
-       or executable_segment(source, function.value)
-       == nullptr)
+    if(function.kind != image::symbol_kind::function or not view.in_scope(function.value))
     {
       continue;
     }
-    if(auto const* row = function_row(source, function.value))
+    auto const* code = executable_segment(source, function.value);
+    if(code == nullptr)
+    {
+      continue;
+    }
+    if(auto const place = place_of(source, function, *code))
     {
       auto const hits          = view.entries(function.value);
-      auto const [held, fresh] = out[source.files.at(row->file)].functions.try_emplace(
-          function.name, function_count{.line = row->line, .hits = hits});
+      auto&      record        = out[source.files.at(place->file)];
+      auto const [held, fresh] = record.functions.try_emplace(
+          function.name, function_count{.line = place->line, .end = place->end, .hits = hits});
       if(not fresh)
       {
         held->second.hits = add(held->second.hits, hits);
+        held->second.end  = std::max(held->second.end, place->end);
       }
+      auto& entered = record.lines[place->line];
+      entered       = std::max(entered, hits);
     }
   }
 }
@@ -509,6 +569,7 @@ void merge_group(file_records const& group, file_records& total)
       if(not fresh)
       {
         held->second.hits = add(held->second.hits, function.hits);
+        held->second.end  = std::max(held->second.end, function.end);
       }
     }
     for(auto const& [line, by_address] : record.branches)
@@ -546,7 +607,14 @@ void write_file(
   std::ranges::sort(order);
   for(auto const& [line, name] : order)
   {
-    std::format_to(std::back_inserter(out), "FN:{},{}\n", line, name);
+    auto const next = std::ranges::upper_bound(
+        order, line, {}, &std::pair<std::uint32_t, std::string_view>::first);
+    auto end = record.functions.at(std::string{name}).end;
+    if(next != order.end())
+    {
+      end = std::min(end, next->first - 1);
+    }
+    std::format_to(std::back_inserter(out), "FN:{},{},{}\n", line, end, name);
   }
   for(auto const& [line, name] : order)
   {

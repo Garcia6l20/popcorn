@@ -514,6 +514,63 @@ TEST_CASE("hit split, split: an edge into the block's middle splits its hits")
   CHECK(sized.split == 1);
 }
 
+TEST_CASE("cuts: a cut at the start removes its hits, one inside sizes a block to what ran")
+{
+  std::array const images{synthetic(thumb_bytes({0x3001, 0x3001, 0x3001, 0x3001, 0x3001, 0xe019}))};
+  obs::code_bytes  code{images, {}};
+  core::coverage_data const data{
+      .blocks = {counters_at(0x1000, 10)},
+      .edges  = {{.from = 0x1000, .to = 0x1008, .hits = 2}},
+      .cuts =
+          {{.start = 0x1000, .at = 0x1000, .hits = 3},
+                 {.start = 0x1000, .at = 0x1008, .hits = 1},
+                 {.start = 0x1000, .at = 0x100a, .hits = 1}},
+  };
+  auto const sized = obs::size_blocks(data, code);
+  CHECK(
+      sized.blocks
+      == std::vector<obs::block_hit>{
+          {.start = 0x1000, .size = 8,  .hits = 3},
+          {.start = 0x1000, .size = 10, .hits = 1},
+          {.start = 0x1000, .size = 12, .hits = 3},
+  });
+  CHECK(sized.split == 1);
+}
+
+TEST_CASE("cuts: a block every entry of which was cut at its start is left out, not split")
+{
+  std::array const          images{synthetic(thumb_bytes({0x3001, 0x4770}))};
+  obs::code_bytes           code{images, {}};
+  core::coverage_data const data{
+      .blocks = {counters_at(0x1000, 2)},
+      .cuts   = {{.start = 0x1000, .at = 0x1000, .hits = 2}},
+  };
+  auto const sized = obs::size_blocks(data, code);
+  CHECK(sized.blocks.empty());
+  CHECK(sized.split == 0);
+  CHECK(sized.dropped == 0);
+}
+
+TEST_CASE("cuts: a cut past the decoded block or at another start changes nothing")
+{
+  std::array const          images{synthetic(thumb_bytes({0x3001, 0x4770, 0x3001, 0x4770}))};
+  obs::code_bytes           code{images, {}};
+  core::coverage_data const data{
+      .blocks = {counters_at(0x1000, 4)},
+      .cuts =
+          {{.start = 0x0ffe, .at = 0x1000, .hits = 1},
+                 {.start = 0x1000, .at = 0x1004, .hits = 1},
+                 {.start = 0x1002, .at = 0x1002, .hits = 1}},
+  };
+  auto const sized = obs::size_blocks(data, code);
+  CHECK(
+      sized.blocks
+      == std::vector<obs::block_hit>{
+          {.start = 0x1000, .size = 4, .hits = 4}
+  });
+  CHECK(sized.split == 0);
+}
+
 TEST_CASE("overlapping counters of one start keep the largest, not the sum")
 {
   std::array const          images{synthetic(thumb_bytes({0x3001, 0x4770}))};

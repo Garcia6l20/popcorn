@@ -248,9 +248,27 @@ struct coverage_state
   /** @brief Whether previous starts an edge: false after a block outside every range or a
    * control transfer that is no branch. */
   bool has_previous = false;
+  /** @brief Instructions of the block at previous while it may still be left before its end, 0
+   * once the engine entered another block or the block fell outside every range. */
+  std::uint32_t open_insns = 0;
+  /** @brief Blocks left before their end, by block start then first instruction not run. */
+  std::map<std::pair<address, address>, std::uint64_t> cuts{};
 
-  /** @brief Counts a block starting at @p addr and the edge that reached it. */
-  void count(address addr);
+  /**
+   * @brief Counts a block starting at @p addr and the edge that reached it.
+   * @param addr Block start.
+   * @param insns Instructions of the block, as the engine translated it.
+   */
+  void count(address addr, std::uint32_t insns);
+
+  /**
+   * @brief Closes the block counted last as execution leaves it: a cut at @p pc when @p pc is one
+   *        of its instructions, which therefore did not run. Called after each engine run, which
+   *        ends with the block it entered last, and where an intercept returns.
+   * @param core Arch decoding the block's instructions.
+   * @param pc Next instruction to run.
+   */
+  void leave(arch::arch const& core, address pc);
 };
 
 /** @brief Loop tracking of spin detection, active while machine_options::spin_threshold is set.

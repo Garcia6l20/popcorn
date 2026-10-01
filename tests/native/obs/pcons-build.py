@@ -46,6 +46,7 @@ for _, target in tb_firmware.values():
         test_tb_ranges.depends(target)
 
 lines_elf, lines_firmware = firmware("obs", "lines")
+cut_elf, cut_firmware = firmware("obs", "cut")
 test_lcov = add_doctest(
     "obs-lcov",
     [here / "test_lcov.cpp"],
@@ -53,13 +54,15 @@ test_lcov = add_doctest(
     env={
         "POPCORN_M33_DESC": str(core_data / "m33.json"),
         "POPCORN_FW_LINES": str(lines_elf),
+        "POPCORN_FW_CUT": str(cut_elf),
         "POPCORN_PROJECT_DIR": str(project_dir),
         "POPCORN_OBS_SCRATCH": str(build_dir / "test-obs-scratch"),
     },
 )
 test_lcov.private.include_dirs.append(obs_sources)
-if lines_firmware is not None:
-    test_lcov.depends(lines_firmware)
+for target in (lines_firmware, cut_firmware):
+    if target is not None:
+        test_lcov.depends(target)
 
 test_pcov = add_doctest(
     "obs-pcov",

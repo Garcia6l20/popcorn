@@ -40,6 +40,14 @@ interrupted session keeps the directory and writes no lcov. A crash or SIGKILL l
 directory behind. xdist workers on other hosts, `--tx ssh=...`, are not supported: they share
 the directory by path.
 
+The lcov file uses the lcov 2 function records, `FN:<start>,<end>,<name>`. `genhtml
+--branch-coverage` reads it with no ignored error but one, which the data can legitimately
+produce: `line is hit but no branches on line have been evaluated`. It names a line whose branch
+never ran while another of its instructions did: a shared exit the line table gives the branch's
+line, or a run that stopped or faulted after the line's first instruction and before its branch.
+`--ignore-errors inconsistent` renders it, and turns genhtml's other consistency errors into
+warnings too.
+
 Boot snapshots are cached in `.pytest_cache/d/popcorn/boot`: a later session, or another xdist
 worker, restores a configuration's boot instead of running it, one boot per configuration across
 workers. The cache key covers the popcorn build, the description, the images, the project file

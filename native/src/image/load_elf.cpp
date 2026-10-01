@@ -15,6 +15,8 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <tuple>
+#include <vector>
 
 namespace popcorn::image
 {
@@ -230,6 +232,8 @@ auto load_abi(elf_file const& elf) -> arch::float_abi
   return detail::hard_float_abi(*attributes);
 }
 
+constexpr std::uint64_t address_end = std::uint64_t{1} << 32;
+
 auto debug_section_bytes(elf_file const& elf, std::string_view name) -> std::span<std::byte const>
 {
   auto const* sh = elf.section_header(name);
@@ -242,6 +246,18 @@ auto debug_section_bytes(elf_file const& elf, std::string_view name) -> std::spa
     throw image_error{std::string{name}, 0, "compressed debug sections are not supported"};
   }
   return elf.section_bytes(*sh);
+}
+
+auto debug_functions(detail::debug_sections const& sections) -> std::vector<detail::function_die>
+{
+  try
+  {
+    return detail::scan_functions(sections);
+  }
+  catch(image_error const&)
+  {
+    return {};
+  }
 }
 
 void load_lines(elf_file const& elf, image& img)
@@ -260,12 +276,36 @@ void load_lines(elf_file const& elf, image& img)
       .str         = debug_section_bytes(elf, ".debug_str"),
       .line_str    = debug_section_bytes(elf, ".debug_line_str"),
       .str_offsets = debug_section_bytes(elf, ".debug_str_offsets"),
+      .addr        = debug_section_bytes(elf, ".debug_addr"),
   };
 
-  auto const units = detail::compile_units(sections);
-  auto       table = detail::decode_lines(sections, units);
-  img.files        = std::move(table.files);
-  img.lines        = std::move(table.rows);
+  auto const                    units     = detail::compile_units(sections);
+  auto const                    functions = debug_functions(sections);
+  std::vector<detail::file_ref> wanted;
+  for(auto const& die : functions)
+  {
+    wanted.push_back({.line_offset = die.line_offset, .index = die.file});
+  }
+  auto table = detail::decode_lines(sections, units, wanted);
+  img.files  = std::move(table.files);
+  img.lines  = std::move(table.rows);
+  for(auto const& [die, file] : std::views::zip(functions, table.wanted))
+  {
+    if(file and die.high < address_end)
+    {
+      img.functions.push_back(
+          {.low  = static_cast<address>(die.low) & ~address{1},
+           .high = static_cast<address>(die.high) & ~address{1},
+           .file = *file,
+           .line = die.line});
+    }
+  }
+  auto const key = [](debug_function const& held) {
+    return std::tuple{held.low, held.high, held.file, held.line};
+  };
+  std::ranges::sort(img.functions, {}, key);
+  auto const repeats = std::ranges::unique(img.functions, {}, key);
+  img.functions.erase(repeats.begin(), repeats.end());
 }
 }
 

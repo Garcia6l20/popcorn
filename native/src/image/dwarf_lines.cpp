@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <ranges>
+#include <span>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -69,7 +72,9 @@ void decode_one_program(
     compile_unit_ref const&                         unit,
     std::vector<raw_row>&                           out,
     std::unordered_map<std::string, std::uint32_t>& global_file_ids,
-    std::vector<std::string>&                       global_files)
+    std::vector<std::string>&                       global_files,
+    std::span<file_ref const>                       wanted,
+    std::vector<std::optional<std::string>>&        wanted_paths)
 {
   dwarf_cursor cursor{sections.line, ".debug_line"};
   cursor.seek(static_cast<std::size_t>(unit.line_offset));
@@ -241,6 +246,18 @@ void decode_one_program(
     return normalize_path(std::filesystem::path{unit.comp_dir} / dir / name);
   };
 
+  for(auto const& [ref, path] : std::views::zip(wanted, wanted_paths))
+  {
+    if(ref.line_offset
+       == unit.line_offset
+       and ref.index
+       < files.size()
+       and not files[ref.index].first.empty())
+    {
+      path = resolve_file(ref.index);
+    }
+  }
+
   std::unordered_map<std::uint32_t, std::uint32_t> local_to_global;
   auto resolve_file_id = [&](std::uint32_t file_idx) -> std::uint32_t {
     auto const [it, inserted] = local_to_global.try_emplace(file_idx, 0);
@@ -398,15 +415,34 @@ void decode_one_program(
 }
 }
 
-auto decode_lines(debug_sections const& sections, std::span<compile_unit_ref const> units)
-    -> line_table
+auto decode_lines(
+    debug_sections const&             sections,
+    std::span<compile_unit_ref const> units,
+    std::span<file_ref const>         wanted) -> line_table
 {
   std::vector<raw_row>                           rows;
   line_table                                     table;
   std::unordered_map<std::string, std::uint32_t> global_file_ids;
+  std::vector<std::optional<std::string>>        wanted_paths(wanted.size());
   for(auto const& unit : units)
   {
-    decode_one_program(sections, unit, rows, global_file_ids, table.files);
+    decode_one_program(sections, unit, rows, global_file_ids, table.files, wanted, wanted_paths);
+  }
+  table.wanted.reserve(wanted.size());
+  for(auto& path : wanted_paths)
+  {
+    if(not path)
+    {
+      table.wanted.emplace_back();
+      continue;
+    }
+    auto const [held, fresh] =
+        global_file_ids.try_emplace(*path, static_cast<std::uint32_t>(table.files.size()));
+    if(fresh)
+    {
+      table.files.push_back(std::move(*path));
+    }
+    table.wanted.emplace_back(held->second);
   }
 
   std::ranges::stable_sort(rows, [](raw_row const& a, raw_row const& b) {
