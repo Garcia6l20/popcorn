@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from popcorn import _core
 from popcorn._enums import FaultKind, StopReason
@@ -39,6 +40,11 @@ class Stop:
         time: Virtual time since reset.
         fault: The fault, set exactly when reason is FAULT.
         detail: What caused the stop beyond its reason, such as the loop of a SPIN.
+        registers: The core registers at the stop when a FAULT ended a `Machine.call`, taken
+            before the call restored the caller's: r0 to r12, sp, lr, pc, xpsr, msp, psp,
+            and the primask, basepri, faultmask and control the core has, read-only. None for
+            any other stop, whose registers are the machine's own. Not part of the hash or the
+            repr.
     """
 
     reason: StopReason
@@ -48,6 +54,7 @@ class Stop:
     time: VirtualTime
     fault: Fault | None = None
     detail: str = ""
+    registers: Mapping[str, int] | None = field(default=None, hash=False, repr=False)
 
     def __str__(self) -> str:
         text = f"{self.reason.name} at {self.location}"

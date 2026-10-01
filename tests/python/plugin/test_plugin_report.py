@@ -424,3 +424,18 @@ def test_a_teardown_error_gets_a_section(pytester: pytest.Pytester) -> None:
     result = run(pytester)
     result.assert_outcomes(passed=1, errors=1)
     result.stdout.fnmatch_lines(["*RuntimeError: teardown broke*", HEADER, "machine (*):"])
+
+
+def test_a_fault_inside_a_call_reports_the_faulting_frames(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, until="ready", elf=FAULT_ELF)
+    pytester.makepyfile("""
+        async def test_call_faults(machine):
+            await machine.call("level1", 1, budget=10_000)
+            assert False, "after the call"
+        """)
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [HEADER, "  stop: FAULT at *level3*", "  call stack:", "    #0 *level3*", "    #1 *level2*"]
+    )

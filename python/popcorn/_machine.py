@@ -9,8 +9,9 @@ import difflib
 import functools
 import os
 import threading
+import types
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, cast, overload, runtime_checkable
 
 from popcorn import _core
@@ -782,6 +783,11 @@ class Machine:
         a handler raised, restores the same as a return, and the machine runs on from where it
         was.
 
+        A FAULT that ends the call carries the faulting registers in `stop.registers`, taken
+        before the restore, and `popcorn.report.stop_report` shows and unwinds those. The fault
+        status registers stay set as on hardware: CFSR bits are sticky, so a later fault of the
+        caller reports them OR'ed with its own until the firmware clears them.
+
         Args:
             fn: Function address, symbol or name.
             args: Arguments in declaration order.
@@ -853,10 +859,22 @@ class Machine:
                     stop_when=None,
                     exact=None,
                 )
+                if stop.reason is StopReason.FAULT:
+                    stop = replace(stop, registers=self._fault_context())
+                    self._last_stop = stop
             finally:
                 bits = self._handle.end_call()
         value = decode(result_slot, bits) if stop.reason is StopReason.RETURNED else 0
         return CallResult(value, bits, stop)
+
+    def _fault_context(self) -> Mapping[str, int]:
+        names = list(self._handle.register_names())
+        captured = {
+            name: self._handle.read_register(names.index(name))
+            for name in _FAULT_CONTEXT
+            if name in names
+        }
+        return types.MappingProxyType(captured)
 
     def _signature(self, fn: int | str | Symbol, entry: int) -> Signature:
         name = fn if isinstance(fn, str) else fn.name if isinstance(fn, Symbol) else f"{fn:#x}"
@@ -1498,6 +1516,20 @@ def _model_makers(
             )
     return {name: functools.partial(build_model, maker) for name, maker in models.items()}
 
+
+_FAULT_CONTEXT = (
+    *(f"r{n}" for n in range(13)),
+    "sp",
+    "lr",
+    "pc",
+    "xpsr",
+    "msp",
+    "psp",
+    "primask",
+    "basepri",
+    "faultmask",
+    "control",
+)
 
 type AttachedDevice = I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget
 """A device `Machine(devices=)` takes, of `popcorn.board` or `popcorn.devices`."""

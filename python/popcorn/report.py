@@ -12,8 +12,10 @@ peripheral window, so taking a report changes no peripheral state.
 Limits:
 
 - The report reads the machine as it is: take it right after the stop, before anything else
-  runs. A `Machine.call` restores the caller's context when it ends, so a fault inside a call
-  reports the call's stop but the caller's registers and stack.
+  runs. A fault inside a `Machine.call` is the exception: its stop carries the registers taken
+  before the call restored the caller's, and the report shows and unwinds those, over the
+  stack memory as it is when the report is taken. Build it before running the machine again:
+  with `stack=CURRENT`, the caller's later pushes overwrite the faulted frames.
 - Prologues are decoded from the function's first instruction. A shrink-wrapped function, one
   that saves registers only on some paths after its entry, can be misread while pc is on a path
   that skipped the save.
@@ -113,7 +115,8 @@ class Report:
 
     Attributes:
         stop: The stop.
-        registers: Core registers when the report was taken.
+        registers: Core registers when the report was taken, or those the stop carries for a
+            fault inside a `Machine.call`.
         fault_bits: Fault status bits set, by register, when the stop is a fault.
         frames: The call stack, innermost first.
         ring: The trace ring's last records, or why it could not be read.
@@ -155,7 +158,9 @@ class Report:
 
 
 def stop_report(machine: Machine, stop: Stop, *, ring: bool = True) -> Report:
-    """Explain `stop` from the state of `machine`, which must be stopped.
+    """Explain `stop` from the state of `machine`, which must be stopped, and from the
+    registers `stop` carries for a fault inside a `Machine.call`, the machine's own standing
+    in for any it lacks.
 
     Args:
         machine: The machine, stopped where `stop` left it.
@@ -166,7 +171,14 @@ def stop_report(machine: Machine, stop: Stop, *, ring: bool = True) -> Report:
     Raises:
         MachineRunning: A run is active.
     """
-    registers = {name: getattr(machine.reg, name) for name in _CORE_REGISTERS}
+    captured: Mapping[str, int] = stop.registers or {}
+
+    def register(name: str) -> int:
+        value = captured.get(name)
+        return int(getattr(machine.reg, name)) if value is None else value
+
+    registers = {name: register(name) for name in _CORE_REGISTERS}
+    psp = register("psp")
 
     regions = [(r.start, r.start + r.size) for r in machine.description.regions]
 
@@ -185,7 +197,7 @@ def stop_report(machine: Machine, stop: Stop, *, ring: bool = True) -> Report:
         registers["pc"],
         registers["lr"],
         registers["sp"],
-        machine.reg.psp,
+        psp,
     )
     frames = tuple(_frame(machine, read32, f) for f in raw)
     bits = {} if stop.fault is None else fault_bits(stop.fault.cfsr, stop.fault.hfsr)

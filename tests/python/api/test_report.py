@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import tempfile
 from pathlib import Path
+from typing import cast
 
 import popcorn
 import pytest
@@ -469,7 +471,6 @@ def ready_for_calls() -> popcorn.Machine:
     return m
 
 
-@pytest.mark.xfail(strict=True, reason="report: a fault inside a call shows the caller")
 def test_a_fault_inside_a_call_reports_the_faulting_frames() -> None:
     m = ready_for_calls()
     caller = {name: int(getattr(m.reg, name)) for name in ("pc", "sp", "lr")}
@@ -482,3 +483,48 @@ def test_a_fault_inside_a_call_reports_the_faulting_frames() -> None:
     assert names == ["level3", "level2", "level1"]
     assert all(f.exact for f in report.frames[:3])
 
+
+def test_only_a_fault_inside_a_call_carries_registers() -> None:
+    m = ready_for_calls()
+    result = asyncio.run(m.call("level1", 1, budget=10_000))
+    assert result.stop.registers is not None
+    assert result.stop.registers["pc"] == result.stop.pc
+    assert m.last_stop == result.stop
+    with pytest.raises(TypeError):
+        cast(dict[str, int], result.stop.registers)["pc"] = 0
+    assert "registers" not in repr(result.stop)
+    budget = asyncio.run(m.call("level1", 1, budget=3))
+    assert budget.stop.reason is popcorn.StopReason.BUDGET
+    assert budget.stop.registers is None
+    _, plain = nested()
+    assert plain.reason is popcorn.StopReason.FAULT
+    assert plain.registers is None
+
+
+def test_a_handler_fault_inside_a_call_unwinds_through_the_call_stack() -> None:
+    m = ready_for_calls()
+    m.nvic.pend(0)
+    result = asyncio.run(
+        m.call(
+            "worker",
+            budget=10_000,
+            interrupts=True,
+            stack=popcorn.Stack.PROCESS,
+            stack_top=0x200B_0000,
+        )
+    )
+    assert result.stop.reason is popcorn.StopReason.FAULT
+    report = stop_report(m, result.stop, ring=False)
+    names = [f.location.symbol for f in report.frames[:3]]
+    assert names == ["in_handler", "IRQ0_Handler", "worker"]
+    assert [f.via for f in report.frames[:3]] == [Via.PC, Via.PROLOGUE, Via.EXCEPTION]
+
+
+def test_registers_a_stop_lacks_come_from_the_machine() -> None:
+    m = ready_for_calls()
+    result = asyncio.run(m.call("level1", 1, budget=10_000))
+    assert result.stop.registers is not None
+    partial = {k: v for k, v in result.stop.registers.items() if k not in ("r12", "psp")}
+    report = stop_report(m, dataclasses.replace(result.stop, registers=partial), ring=False)
+    assert report.registers["pc"] == result.stop.pc
+    assert report.registers["r12"] == m.reg.r12
