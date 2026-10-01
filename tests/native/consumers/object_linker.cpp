@@ -21,22 +21,24 @@ inline constexpr address arena_base      = 0x3000'0000;
 auto with_linker_regions(mcu_description description) -> mcu_description
 {
   description.regions.push_back({
-      .name     = "trampolines",
-      .start    = trampoline_base,
-      .size     = 0x1000,
-      .kind     = region_kind::rom,
-      .acc      = {.read = true, .write = false, .execute = true},
-      .secure   = false,
-      .physical = std::nullopt
+      .name       = "trampolines",
+      .start      = trampoline_base,
+      .size       = 0x1000,
+      .kind       = region_kind::rom,
+      .acc        = {.read = true, .write = false, .execute = true},
+      .secure     = false,
+      .physical   = std::nullopt,
+      .controller = std::nullopt,
   });
   description.regions.push_back({
-      .name     = "arena",
-      .start    = arena_base,
-      .size     = 0x1'0000,
-      .kind     = region_kind::ram,
-      .acc      = {.read = true, .write = true, .execute = false},
-      .secure   = false,
-      .physical = std::nullopt
+      .name       = "arena",
+      .start      = arena_base,
+      .size       = 0x1'0000,
+      .kind       = region_kind::ram,
+      .acc        = {.read = true, .write = true, .execute = false},
+      .secure     = false,
+      .physical   = std::nullopt,
+      .controller = std::nullopt,
   });
   return description;
 }

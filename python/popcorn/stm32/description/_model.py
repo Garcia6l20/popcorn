@@ -128,6 +128,7 @@ class RegionDesc:
     kind: RegionKind
     acc: RegionAccess
     secure: bool
+    controller: str | None = None
     physical: int | None = field(default=None, metadata={"minimum": 0, "maximum": 4294967295})
 
 

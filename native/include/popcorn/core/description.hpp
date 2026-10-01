@@ -186,6 +186,9 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] region_desc
   bool secure{};
   /** @brief Start of the region this one aliases and shares storage with. */
   std::optional<address> physical;
+  /** @brief Peripheral whose model serves CPU and DMA stores to this read-only region, such as
+   * the FLASH interface of a flash bank. */
+  std::optional<std::string> controller;
 
   /** @brief Member-wise equality. */
   friend auto operator==(region_desc const&, region_desc const&) -> bool = default;

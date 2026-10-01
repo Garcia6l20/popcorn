@@ -546,13 +546,14 @@ TEST_CASE("a guest store through one rwx window reaches code running at the othe
 {
   auto desc = m33();
   desc.regions.push_back({
-      .name     = "SRAM_ALIAS",
-      .start    = 0x1000'0000,
-      .size     = 768 * 1024,
-      .kind     = popcorn::region_kind::ram,
-      .acc      = {.read = true, .write = true, .execute = true},
-      .secure   = false,
-      .physical = 0x2000'0000
+      .name       = "SRAM_ALIAS",
+      .start      = 0x1000'0000,
+      .size       = 768 * 1024,
+      .kind       = popcorn::region_kind::ram,
+      .acc        = {.read = true, .write = true, .execute = true},
+      .secure     = false,
+      .physical   = 0x2000'0000,
+      .controller = std::nullopt,
   });
   auto const ram_fn   = sym("run", "ram_fn");
   auto const aliased  = ram_fn - 0x2000'0000 + 0x1000'0000;

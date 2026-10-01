@@ -234,3 +234,12 @@ def test_all_optional_dataclass_without_metadata_is_not_a_selector() -> None:
     result = from_mapping(_AllOptionalNotASelector, {}, file="test")
     assert result.a is None
     assert result.b is None
+
+
+def test_region_controller_round_trips() -> None:
+    data = _toy()
+    regions = cast(list[dict[str, object]], data["regions"])
+    regions[0]["controller"] = "UART1"
+    description = load_json(json.dumps(data), file="controller.json")
+    assert description.regions[0].controller == "UART1"
+    assert json.loads(dump_json(description)) == data

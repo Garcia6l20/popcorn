@@ -199,7 +199,8 @@ source = "RM0456 rev 6, 74.8.6/74.8.7 UCPD status register (UCPD_SR) / UCPD inte
 
 
 [memory]
-source = "RM0456 rev 6, 7.3.1 Tables 51 to 53: the 512-byte OTP area at 0x0BFA0000 in the nonsecure information block, its alias at 0x0FFA0000 in the secure information block. 7.2: OTP data cannot be erased and is written once, through the flash interface, so a CPU store is refused. Each region is 1 KB, the emulator's page granularity: the 512 bytes past the OTP area read as erased instead of faulting"
+source = "RM0456 rev 6, 7.3.1 Tables 51 to 53: the 512-byte OTP area at 0x0BFA0000 in the nonsecure information block, its alias at 0x0FFA0000 in the secure information block. 7.2: OTP data cannot be erased and is written once, through the flash interface, so a CPU store is refused. Each region is 1 KB, the emulator's page granularity: the 512 bytes past the OTP area read as erased instead of faulting. RM0456 rev 6, 7.3.7: flash is programmed by 32-bit stores into the main memory range while FLASH_NSCR.PG is set, and erased through FLASH_NSCR, so the FLASH interface serves stores into both flash windows. The OTP regions get no controller: OTP programming is not modelled"
+controller = { Flash_NS = "FLASH", Flash_S = "FLASH" }
 add = [
   { name = "OTP_NS", start = 0x0BFA0000, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
   { name = "OTP_S", start = 0x0FFA0000, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = true, physical = 0x0BFA0000 },

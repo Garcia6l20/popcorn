@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from popcorn.stm32.description._cubemx import read_part
+from popcorn.stm32.description._cubemx import read_part, read_rzone
 from popcorn.stm32.description._model import (
     ReadEffect,
     RegionAccess,
@@ -9,6 +9,7 @@ from popcorn.stm32.description._model import (
     WriteEffect,
 )
 from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
+from popcorn.stm32.description._sources import Sources
 from popcorn.stm32.description._svd import expand_svd
 
 from .conftest import target_from_svd, target_peripheral
@@ -56,13 +57,18 @@ _CLEAR_REGISTERS = [
 
 
 @pytest.fixture(scope="session")
-def u575_target_and_report(st_svd_u575: Path, st_cubemx_db: Path) -> _TargetAndReport:
+def u575_target_and_report(
+    u575_sources: Sources, st_svd_u575: Path, st_cubemx_db: Path
+) -> _TargetAndReport:
     device = expand_svd(st_svd_u575.read_bytes(), file=str(st_svd_u575))
     part = read_part(
         (st_cubemx_db / "mcu" / "STM32U575QGIx.xml").read_bytes(), file="STM32U575QGIx.xml"
     )
     db_ips = {ip.instance: ip for ip in part.ips}
     target = target_from_svd(device, db_ips)
+    target.regions = read_rzone(
+        u575_sources.rzone.read_bytes(), file=str(u575_sources.rzone)
+    ).regions
 
     patches = load_patches([STM32U5_TOML], part="STM32U575QGIx", svd_name="STM32U575.svd")
     report = apply_patches(patches, target)
@@ -207,6 +213,8 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
     assert report.core_fields_set == 1
+    assert report.regions_added == 2
+    assert report.controllers_set == 2
 
 
 _ARCH_WINDOWS = (0xE000_0000, 0xE000_1000, 0xE000_2000, 0xE000_E000)
@@ -246,3 +254,17 @@ def test_otp_is_a_read_only_region_with_a_secure_alias(
     for region in (otp, alias):
         assert region.kind is RegionKind.ROM
         assert region.acc == RegionAccess(read=True, write=False, execute=False)
+
+
+def test_flash_windows_are_served_by_the_flash_interface(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, report = u575_target_and_report
+    assert report.controllers_set == 2
+    controllers = {r.name: r.controller for r in target.regions}
+    assert controllers["Flash_NS"] == "FLASH"
+    assert controllers["Flash_S"] == "FLASH"
+    assert controllers["OTP_NS"] is None
+    assert controllers["OTP_S"] is None
+    assert sum(c is not None for c in controllers.values()) == 2
+    assert target_peripheral(target, "FLASH").alias_of is None

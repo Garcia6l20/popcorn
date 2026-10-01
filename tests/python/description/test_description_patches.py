@@ -2,10 +2,11 @@ import copy
 from pathlib import Path
 
 import pytest
-from popcorn.stm32.description._cubemx import DbIp, read_part
+from popcorn.stm32.description._cubemx import DbIp, read_part, read_rzone
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import RegionAccess, RegionDesc, RegionKind
 from popcorn.stm32.description._patches import PatchTarget, apply_patches, load_patches
+from popcorn.stm32.description._sources import Sources
 from popcorn.stm32.description._svd import expand_svd
 
 from .conftest import target_from_svd, target_peripheral
@@ -488,13 +489,18 @@ def test_drop_without_source_is_an_error(tmp_path: Path) -> None:
         load_patches([path], part="TOY1", svd_name="synthetic.svd")
 
 
-def test_u575_alias_rule_sets_98_peripherals(st_svd_u575: Path, st_cubemx_db: Path) -> None:
+def test_u575_alias_rule_sets_98_peripherals(
+    u575_sources: Sources, st_svd_u575: Path, st_cubemx_db: Path
+) -> None:
     device = expand_svd(st_svd_u575.read_bytes(), file=str(st_svd_u575))
     part = read_part(
         (st_cubemx_db / "mcu" / "STM32U575QGIx.xml").read_bytes(), file="STM32U575QGIx.xml"
     )
     db_ips = {ip.instance: ip for ip in part.ips}
     target = target_from_svd(device, db_ips)
+    target.regions = read_rzone(
+        u575_sources.rzone.read_bytes(), file=str(u575_sources.rzone)
+    ).regions
 
     patches = load_patches([STM32U5_TOML], part="STM32U575QGIx", svd_name="STM32U575.svd")
     assert len(patches) == 1
@@ -645,3 +651,157 @@ def test_memory_add_refuses_two_added_regions_that_overlap(tmp_path: Path) -> No
     with pytest.raises(DescriptionError) as excinfo:
         apply_patches(patches, target)
     assert excinfo.value.key == "memory.add.OTP2"
+
+
+def _controller_patch(tmp_path: Path, controller: str, *entries: str) -> Path:
+    lines = ",\n".join(f"  {entry}" for entry in entries)
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[memory]
+source = "probe"
+controller = {{ {controller} }}
+add = [
+{lines}
+]
+"""
+    return _write_patch(tmp_path, text)
+
+
+def test_memory_controller_names_the_peripheral_serving_stores(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    path = _controller_patch(tmp_path, 'OTP = "A", OTP_S = "C"', _OTP, _OTP_ALIAS)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.controllers_set == 2
+    assert [(r.name, r.controller) for r in target.regions] == [
+        ("SRAM", None),
+        ("OTP", "A"),
+        ("OTP_S", "C"),
+    ]
+
+
+def test_memory_controller_alone_needs_no_added_region(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    target.regions[0].acc = RegionAccess(read=True, write=False, execute=True)
+    text = """
+format = 1
+[match]
+parts = ["TOY*"]
+[memory]
+source = "probe"
+controller = { SRAM = "D" }
+"""
+    report = apply_patches(
+        load_patches([_write_patch(tmp_path, text)], part="TOY1", svd_name="synthetic.svd"),
+        target,
+    )
+    assert report.controllers_set == 1
+    assert report.regions_added == 0
+    assert target.regions[0].controller == "D"
+
+
+@pytest.mark.parametrize(
+    ("controller", "region", "reason"),
+    [
+        ('NOWHERE = "A"', "NOWHERE", "an existing region"),
+        ('SRAM = "A"', "SRAM", "a read-only region"),
+        ('OTP = "NOPE"', "OTP", "a peripheral of the description that is not an alias"),
+    ],
+)
+def test_memory_controller_refuses_a_bad_region_or_peripheral(
+    tmp_path: Path, controller: str, region: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    path = _controller_patch(tmp_path, controller, _OTP)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.key == f"memory.controller.{region}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
+def test_memory_controller_refuses_a_second_controller(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    first = _controller_patch(tmp_path, 'OTP = "A"', _OTP)
+    second = tmp_path / "second.toml"
+    second.write_text(
+        """
+format = 1
+[match]
+parts = ["TOY*"]
+[memory]
+source = "probe"
+controller = { OTP = "C" }
+""",
+        encoding="utf-8",
+    )
+    patches = load_patches([first, second], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "memory.controller.OTP"
+    assert excinfo.value.expected == "a region without a controller"
+
+
+def test_memory_controller_refuses_a_dropped_peripheral(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[peripherals]
+source = "probe"
+drop = ["C"]
+[memory]
+source = "probe"
+controller = {{ OTP = "C" }}
+add = [{_OTP}]
+"""
+    patches = load_patches([_write_patch(tmp_path, text)], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "memory.controller.OTP"
+    assert excinfo.value.expected == "a peripheral of the description that is not an alias"
+
+
+def test_memory_without_add_or_controller_is_refused(tmp_path: Path) -> None:
+    text = """
+format = 1
+[match]
+parts = ["TOY*"]
+[memory]
+source = "probe"
+"""
+    path = _write_patch(tmp_path, text)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, _synthetic_target())
+    assert excinfo.value.key == "memory"
+    assert excinfo.value.expected == "an add or a controller entry"
+
+
+def test_memory_controller_refuses_an_alias(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+[memory]
+source = "probe"
+controller = {{ OTP = "SEC_D" }}
+add = [{_OTP}]
+"""
+    patches = load_patches([_write_patch(tmp_path, text)], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "memory.controller.OTP"
+    assert excinfo.value.expected == "a peripheral of the description that is not an alias"

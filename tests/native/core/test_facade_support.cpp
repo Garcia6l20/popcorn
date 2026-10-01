@@ -349,13 +349,14 @@ TEST_CASE("a description alias never lands in the scratch region")
 {
   auto desc = m33();
   desc.regions.push_back({
-      .name     = "ALIAS",
-      .start    = 0x6000'0000,
-      .size     = 0x1000,
-      .kind     = popcorn::region_kind::ram,
-      .acc      = {.read = true, .write = true, .execute = false},
-      .secure   = false,
-      .physical = arena
+      .name       = "ALIAS",
+      .start      = 0x6000'0000,
+      .size       = 0x1000,
+      .kind       = popcorn::region_kind::ram,
+      .acc        = {.read = true, .write = true, .execute = false},
+      .secure     = false,
+      .physical   = arena,
+      .controller = std::nullopt,
   });
   CHECK(
       config_key([&] {

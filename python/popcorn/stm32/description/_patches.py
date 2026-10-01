@@ -1,6 +1,7 @@
 """Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
-IP renames, IRQ add/drop, core overrides, added memory regions. popcorn's own TOML format, so
-these dataclasses are the format definition, not a mirror of any C++ or schema type."""
+IP renames, IRQ add/drop, core overrides, added memory regions, region controllers. popcorn's
+own TOML format, so these dataclasses are the format definition, not a mirror of any C++ or
+schema type."""
 
 import copy
 import fnmatch
@@ -63,8 +64,9 @@ class PatchPeripherals:
 
 @dataclass(slots=True, kw_only=True)
 class PatchMemory:
-    add: list[RegionDesc]
     source: str
+    add: list[RegionDesc] | None = None
+    controller: dict[str, str] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -148,6 +150,7 @@ class PatchReport:
     irqs_added: int = 0
     core_fields_set: int = 0
     regions_added: int = 0
+    controllers_set: int = 0
 
 
 def _matches(match: PatchMatch, part: str, svd_name: str) -> bool:
@@ -432,9 +435,16 @@ _ENGINE_PAGE = 0x400
 
 
 def _apply_memory(
-    rule: PatchMemory, regions: list[RegionDesc], report: PatchReport, *, file: str
+    rule: PatchMemory,
+    regions: list[RegionDesc],
+    peripherals: Mapping[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
 ) -> None:
-    for added in rule.add:
+    if not rule.add and not rule.controller:
+        raise DescriptionError(file, 0, "memory", "an add or a controller entry")
+    for added in rule.add or []:
         key = f"memory.add.{added.name}"
         if added.size == 0 or added.start + added.size > 1 << 32:
             raise DescriptionError(file, 0, key, "a non-empty range inside the 32-bit space")
@@ -453,13 +463,29 @@ def _apply_memory(
                 raise DescriptionError(file, 0, key, f"a range clear of region {region.name}")
         regions.append(copy.deepcopy(added))
         report.regions_added += 1
+    by_name = {region.name: region for region in regions}
+    for name, peripheral in (rule.controller or {}).items():
+        key = f"memory.controller.{name}"
+        region = by_name.get(name)
+        if region is None:
+            raise DescriptionError(file, 0, key, "an existing region")
+        if region.acc.write:
+            raise DescriptionError(file, 0, key, "a read-only region")
+        if region.controller is not None:
+            raise DescriptionError(file, 0, key, "a region without a controller")
+        if peripheral not in peripherals or peripherals[peripheral].alias_of is not None:
+            raise DescriptionError(
+                file, 0, key, "a peripheral of the description that is not an alias"
+            )
+        region.controller = peripheral
+        report.controllers_set += 1
 
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
     """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
-    fields, cross rules, IRQ drops and adds, core, memory regions. Drops come first, so a later
-    rule naming a dropped peripheral fails as naming an unknown one. Validates every rule before
-    mutating @p target: an error leaves it exactly as it was."""
+    fields, cross rules, IRQ drops and adds, core, memory regions and their controllers. Drops
+    come first, so a later rule naming a dropped peripheral fails as naming an unknown one.
+    Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
     core = copy.deepcopy(target.core)
@@ -523,7 +549,7 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
 
     for loaded in patches:
         if loaded.patch.memory is not None:
-            _apply_memory(loaded.patch.memory, regions, report, file=str(loaded.path))
+            _apply_memory(loaded.patch.memory, regions, by_name, report, file=str(loaded.path))
 
     target.peripherals = peripherals
     target.irqs = irqs

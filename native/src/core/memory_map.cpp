@@ -98,13 +98,14 @@ auto machine::mapped_region::scratch_region(
     }
   }
   auto              owned = std::make_unique<region_desc const>(region_desc{
-      .name     = name,
-      .start    = scratch.start,
-      .size     = scratch.size,
-      .kind     = region_kind::ram,
-      .acc      = {.read = true, .write = true, .execute = false},
-      .secure   = false,
-      .physical = std::nullopt,
+      .name       = name,
+      .start      = scratch.start,
+      .size       = scratch.size,
+      .kind       = region_kind::ram,
+      .acc        = {.read = true, .write = true, .execute = false},
+      .secure     = false,
+      .physical   = std::nullopt,
+      .controller = std::nullopt,
   });
   auto const* const desc  = owned.get();
   return std::make_unique<mapped_region>(
