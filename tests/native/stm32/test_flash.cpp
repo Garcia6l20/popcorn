@@ -51,6 +51,10 @@ constexpr std::uint32_t optstrt    = 1u << 17;
 constexpr std::uint32_t eopie      = 1u << 24;
 constexpr std::uint32_t errie      = 1u << 25;
 constexpr std::uint32_t all_errors = 0x20fb;
+constexpr std::uint32_t hsion      = 1u << 8;
+constexpr std::uint32_t sw_hsi16   = 1;
+constexpr std::uint32_t vos_range1 = 3u << 16;
+constexpr std::uint32_t lpm        = 1u << 11;
 
 auto pnb(std::uint32_t page) -> std::uint32_t
 {
@@ -142,9 +146,10 @@ struct flash_rig
     REQUIRE(field("FLASH_NSCR", "LOCK") == 0);
   }
 
-  [[nodiscard]] auto at(std::string_view reg) const -> address
+  [[nodiscard]] auto at(std::string_view reg, std::string_view peripheral = "FLASH") const
+      -> address
   {
-    auto const& desc  = f.target->peripheral("FLASH").description();
+    auto const& desc  = f.target->peripheral(peripheral).description();
     auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
     REQUIRE(found != desc.registers.end());
     return desc.base + found->offset;
@@ -153,6 +158,40 @@ struct flash_rig
   void write(std::string_view reg, std::uint32_t value) const
   {
     REQUIRE(f.target->mem().write(at(reg), 4, value).has_value());
+  }
+
+  void write(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
+  {
+    REQUIRE(f.target->mem().write(at(reg, peripheral), 4, value).has_value());
+  }
+
+  void spin() const
+  {
+    call("spin", {2000});
+  }
+
+  [[nodiscard]] auto latency_warnings() const -> std::size_t
+  {
+    return static_cast<std::size_t>(
+        std::ranges::count_if(logged, [](core::log_record const& record) {
+          return record.peripheral == "FLASH" and record.reg == "FLASH_ACR";
+        }));
+  }
+
+  void switch_to_hsi16() const
+  {
+    write("RCC", "RCC_CR", read_reg("RCC", "RCC_CR") | hsion);
+    spin();
+    REQUIRE(f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+    write("RCC", "RCC_CFGR1", sw_hsi16);
+    spin();
+    REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == sw_hsi16);
+  }
+
+  [[nodiscard]] auto read_reg(std::string_view peripheral, std::string_view reg) const
+      -> std::uint32_t
+  {
+    return word(at(reg, peripheral));
   }
 
   [[nodiscard]] auto word(address from) const -> std::uint32_t
@@ -686,4 +725,98 @@ TEST_CASE("BWR and write protection are logged once as not modelled")
   CHECK(mentions("write protection") == 1);
   CHECK(mentions("BWR") == 1);
   CHECK(rig.words(last_page + 16, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+}
+
+TEST_CASE("raising HCLK past LATENCY warns once, the RM0456 order does not")
+{
+  flash_rig rig;
+  rig.logged.clear();
+  rig.write("FLASH_ACR", 1);
+  rig.switch_to_hsi16();
+  CHECK(rig.latency_warnings() == 0);
+
+  flash_rig late;
+  late.write("FLASH_ACR", 0);
+  late.logged.clear();
+  late.switch_to_hsi16();
+  REQUIRE(late.latency_warnings() == 1);
+  CHECK(late.logged.back().message.contains("after an HCLK change"));
+  CHECK(late.logged.back().message.contains("16000000"));
+  CHECK(late.logged.back().message.contains("range 4"));
+}
+
+TEST_CASE("a FLASH_ACR write below the table warns once per HCLK, range and LATENCY")
+{
+  flash_rig rig;
+  rig.write("FLASH_ACR", 1);
+  rig.switch_to_hsi16();
+  rig.logged.clear();
+  rig.write("FLASH_ACR", 0);
+  rig.write("FLASH_ACR", 0);
+  REQUIRE(rig.latency_warnings() == 1);
+  CHECK(rig.logged.back().message.contains("on a FLASH_ACR write"));
+  rig.write("FLASH_ACR", 1);
+  CHECK(rig.latency_warnings() == 1);
+  auto const saved = rig.f.target->snapshot();
+  rig.f.target->restore(saved);
+  rig.write("FLASH_ACR", 0);
+  CHECK(rig.latency_warnings() == 2);
+}
+
+TEST_CASE("with LPM set, Table 55 asks one wait state for 16 MHz in range 1")
+{
+  flash_rig rig;
+  rig.write("PWR", "PWR_VOSR", vos_range1);
+  rig.spin();
+  rig.write("FLASH_ACR", 0);
+  rig.switch_to_hsi16();
+  rig.logged.clear();
+  rig.write("FLASH_ACR", 1 | lpm);
+  CHECK(rig.latency_warnings() == 0);
+  rig.write("FLASH_ACR", lpm);
+  CHECK(rig.latency_warnings() == 1);
+}
+
+TEST_CASE("lowering the voltage range under a fast HCLK warns when the range applies")
+{
+  flash_rig rig;
+  rig.write("PWR", "PWR_VOSR", vos_range1);
+  rig.spin();
+  REQUIRE(rig.f.field("PWR", "PWR_SVMSR", "ACTVOS") == 3);
+  rig.write("FLASH_ACR", 0);
+  rig.switch_to_hsi16();
+  rig.logged.clear();
+  rig.write("PWR", "PWR_VOSR", 0);
+  CHECK(rig.latency_warnings() == 0);
+  rig.spin();
+  CHECK(rig.f.field("PWR", "PWR_SVMSR", "ACTVOS") == 0);
+  REQUIRE(rig.latency_warnings() == 1);
+  CHECK(rig.logged.back().message.contains("after a voltage range change"));
+  CHECK(rig.logged.back().message.contains("range 4"));
+}
+
+TEST_CASE("under strict_peripherals each latency violation raises model_error")
+{
+  flash_rig rig{{}, true};
+  rig.write("FLASH_ACR", 1);
+  rig.switch_to_hsi16();
+  rig.logged.clear();
+  CHECK_THROWS_AS(
+      static_cast<void>(rig.f.target->mem().write(rig.at("FLASH_ACR"), 4, 0)),
+      popcorn::model_error);
+  CHECK_THROWS_AS(
+      static_cast<void>(rig.f.target->mem().write(rig.at("FLASH_ACR"), 4, 0)),
+      popcorn::model_error);
+  CHECK(rig.latency_warnings() == 2);
+
+  flash_rig late{{}, true};
+  late.write("FLASH_ACR", 0);
+  late.write("RCC", "RCC_CR", late.read_reg("RCC", "RCC_CR") | hsion);
+  late.spin();
+  late.write("RCC", "RCC_CFGR1", sw_hsi16);
+  late.f.set("r0", 2000);
+  late.f.set("pc", sym("flash_ll", "spin"));
+  CHECK_THROWS_AS(
+      static_cast<void>(late.f.target->run_slice({.max_instructions = icount{100'000}})),
+      popcorn::model_error);
 }

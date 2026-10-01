@@ -1,5 +1,6 @@
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "voltage_range.hpp"
 
 #include <reflex/enum.hpp>
 
@@ -41,17 +42,18 @@ struct pwr_state
 /**
  * @brief PWR voltage scaling of the STM32U5, RM0456 section 10.10.4: VOSRDY follows a VOS change
  *        and BOOSTRDY follows BOOSTEN after the board's ready delay, and PWR_SVMSR.ACTVOS takes
- *        the new range with VOSRDY. Low-power modes are not modelled: the first write to
- *        PWR_CR1 logs one warning per machine life naming the LPMS mode, and a deep-sleep WFI idles
- * as a plain WFI.
+ *        the new range with VOSRDY, which the FLASH model is told for its latency check.
+ *        Low-power modes are not modelled: the first write to PWR_CR1 logs one warning per
+ *        machine life naming the LPMS mode, and a deep-sleep WFI idles as a plain WFI.
  */
-class pwr final : public dispatch_model<pwr, pwr_state>
+class pwr final : public dispatch_model<pwr, pwr_state>, public voltage_range_source
 {
 public:
   pwr(model_context& ctx, peripheral_desc const& desc, pwr_options const& options);
 
-  void reset(register_file& regs, reset_kind kind) override;
-  void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void               reset(register_file& regs, reset_kind kind) override;
+  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
+  [[nodiscard]] auto active_range() const -> std::uint32_t override;
 
   void vosr_written(std::uint32_t old, std::uint32_t now);
   void cr1_written(std::uint32_t old, std::uint32_t now);
@@ -123,6 +125,11 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
                      reflex::enum_value_name(modes_by_lpms[low_power_.of(now)])));
 }
 
+auto pwr::active_range() const -> std::uint32_t
+{
+  return 4u - get(regs_, active_range_);
+}
+
 void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind > booster_ready or payload != state_.generation[kind])
@@ -134,6 +141,13 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
     update(regs_, range_ready_, 1);
     update(regs_, active_range_, get(regs_, range_));
     update(regs_, active_range_ready_, 1);
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto* const listener = dynamic_cast<voltage_range_listener*>(peer))
+      {
+        listener->on_voltage_range_change();
+      }
+    }
   }
   else if(get(regs_, booster_) != 0)
   {

@@ -1,6 +1,7 @@
 #include "factories.hpp"
 #include "hsi16_source.hpp"
 #include "model_base.hpp"
+#include "voltage_range.hpp"
 
 #include <popcorn/core/types.hpp>
 
@@ -11,7 +12,11 @@
 #include <expected>
 #include <format>
 #include <memory>
+#include <optional>
+#include <set>
 #include <span>
+#include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -77,6 +82,56 @@ auto all_of_byte(std::span<std::byte const> bytes, std::byte value) -> bool
   return std::ranges::all_of(bytes, [value](std::byte b) { return b == value; });
 }
 
+constexpr std::uint64_t mhz = 1'000'000;
+
+constexpr std::array<std::array<std::uint64_t, 5>, 4> normal_read_max_mhz{
+    {
+     {32, 64, 96, 128, 160},
+     {30, 60, 90, 110, 0},
+     {24, 48, 55, 0, 0},
+     {12, 25, 0, 0, 0},
+     }
+};
+
+constexpr std::array<std::uint64_t, 3> low_power_range4_max_mhz{8, 16, 25};
+
+auto first_wait_states(std::span<std::uint64_t const> max_mhz, std::uint64_t hclk)
+    -> std::optional<std::uint32_t>
+{
+  for(std::uint32_t ws = 0; ws < max_mhz.size() and max_mhz[ws] != 0; ++ws)
+  {
+    if(hclk <= max_mhz[ws] * mhz)
+    {
+      return ws;
+    }
+  }
+  return std::nullopt;
+}
+
+/**
+ * @brief Wait states RM0456 7.3.3 asks for, Table 54 with LPM clear, Table 55 with LPM set.
+ * @param hclk HCLK in Hz.
+ * @param range Voltage range, 1 to 4.
+ * @param low_power FLASH_ACR.LPM.
+ * @return The least LATENCY, empty when HCLK is above the maximum of the range.
+ */
+auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_power)
+    -> std::optional<std::uint32_t>
+{
+  if(low_power and range == 4)
+  {
+    return first_wait_states(low_power_range4_max_mhz, hclk);
+  }
+  auto const normal = first_wait_states(normal_read_max_mhz[range - 1], hclk);
+  if(not low_power or not normal)
+  {
+    return normal;
+  }
+  auto const tens   = (hclk + 10 * mhz - 1) / (10 * mhz);
+  auto const needed = static_cast<std::uint32_t>(tens > 0 ? tens - 1 : 0);
+  return std::max(*normal, needed);
+}
+
 /**
  * @brief FLASH interface of the STM32U5, non-secure registers, RM0456 section 7.
  *
@@ -104,6 +159,15 @@ auto all_of_byte(std::span<std::byte const> bytes, std::byte value) -> bool
  * BWR, is logged once and programs quad-word by quad-word. HSI16 is kept on while PG or STRT is
  * set, through the RCC model.
  *
+ * Latency, RM0456 7.3.3: FLASH_ACR.LATENCY is compared with Table 54, or Table 55 with LPM set,
+ * for HCLK and the voltage range PWR_SVMSR.ACTVOS applies, on a FLASH_ACR write, an HCLK change
+ * and a range change. Silicon refuses nothing and reads wrong data with too few wait states, so
+ * a violation logs a model_warning once per HCLK, range and LATENCY since power-on or the last
+ * restore, naming its trigger. Under strict_peripherals every violation logs it and raises
+ * model_error, which a violation found in an RCC or PWR event carries out of the run. Without a
+ * PWR model the range is taken as range 1, the most permissive, so no violation is invented. A
+ * correct RM0456 10.5.4 sequence never violates the table at those points.
+ *
  * Deviations: a store into flash while BSY is set stalls the bus on silicon until BSY clears.
  * The model lets the store complete at once and applies it by the rules above when BSY clears,
  * so the next instructions run earlier than on silicon. The held stores have no bound: a store
@@ -112,12 +176,15 @@ auto all_of_byte(std::span<std::byte const> bytes, std::byte value) -> bool
  * executing without a stall. STRT written while BSY is set, which RM0456 leaves undefined, is
  * ignored: STRT stays set and no flag is raised.
  */
-class flash final : public dispatch_model<flash, flash_state>
+class flash final : public dispatch_model<flash, flash_state>,
+                    public clock_listener,
+                    public voltage_range_listener
 {
 public:
   flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void load(std::span<std::byte const> in) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_write(
       register_file& regs,
@@ -133,6 +200,10 @@ public:
       std::uint32_t      value,
       access_ctx         ctx) -> std::expected<void, bus_error> override;
 
+  void on_clock_change() override;
+  void on_voltage_range_change() override;
+
+  void access_written(std::uint32_t old, std::uint32_t now);
   void key_written(std::uint32_t old, std::uint32_t now);
   void control_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
@@ -149,45 +220,51 @@ private:
   void               program();
   void               hold_hsi16(bool held);
   void               note_unmodelled_protection();
+  void               check_latency(std::string_view trigger);
 
-  flash_options      options_;
-  register_file&     regs_;
-  region_desc const* storage_{};
-  reg_ref            key_;
-  reg_ref            status_;
-  field_ref          lock_;
-  field_ref          option_lock_;
-  field_ref          start_;
-  field_ref          option_start_;
-  field_ref          program_;
-  field_ref          page_erase_;
-  field_ref          bank1_erase_;
-  field_ref          bank2_erase_;
-  field_ref          page_;
-  field_ref          bank_;
-  field_ref          burst_;
-  field_ref          end_irq_;
-  field_ref          error_irq_;
-  field_ref          end_;
-  field_ref          operation_error_;
-  field_ref          program_error_;
-  field_ref          protection_error_;
-  field_ref          alignment_error_;
-  field_ref          size_error_;
-  field_ref          sequence_error_;
-  field_ref          option_error_;
-  field_ref          busy_;
-  field_ref          waiting_;
-  irq_line&          line_;
-  std::uint32_t      clearable_{};
-  bool               rejected_{};
-  bool               page_logged_{};
-  bool               burst_logged_{};
-  bool               protection_logged_{};
+  flash_options                                                     options_;
+  register_file&                                                    regs_;
+  region_desc const*                                                storage_{};
+  reg_ref                                                           key_;
+  reg_ref                                                           status_;
+  field_ref                                                         lock_;
+  field_ref                                                         option_lock_;
+  field_ref                                                         start_;
+  field_ref                                                         option_start_;
+  field_ref                                                         program_;
+  field_ref                                                         page_erase_;
+  field_ref                                                         bank1_erase_;
+  field_ref                                                         bank2_erase_;
+  field_ref                                                         page_;
+  field_ref                                                         bank_;
+  field_ref                                                         burst_;
+  field_ref                                                         end_irq_;
+  field_ref                                                         error_irq_;
+  field_ref                                                         end_;
+  field_ref                                                         operation_error_;
+  field_ref                                                         program_error_;
+  field_ref                                                         protection_error_;
+  field_ref                                                         alignment_error_;
+  field_ref                                                         size_error_;
+  field_ref                                                         sequence_error_;
+  field_ref                                                         option_error_;
+  field_ref                                                         busy_;
+  field_ref                                                         waiting_;
+  irq_line&                                                         line_;
+  field_ref                                                         latency_;
+  field_ref                                                         low_power_read_;
+  core::clock_domain                                                hclk_;
+  std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> latency_logged_;
+  std::uint32_t                                                     clearable_{};
+  bool                                                              rejected_{};
+  bool                                                              page_logged_{};
+  bool                                                              burst_logged_{};
+  bool                                                              protection_logged_{};
 };
 
-constexpr std::array<write_entry<flash>, 3> flash_writes{
+constexpr std::array<write_entry<flash>, 4> flash_writes{
     {
+     {"FLASH_ACR", &flash::access_written},
      {"FLASH_NSKEYR", &flash::key_written},
      {"FLASH_NSCR", &flash::control_written},
      {"FLASH_NSSR", &flash::status_written},
@@ -209,7 +286,8 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
       alignment_error_{field("FLASH_NSSR", "PGAERR")}, size_error_{field("FLASH_NSSR", "SIZERR")},
       sequence_error_{field("FLASH_NSSR", "PGSERR")}, option_error_{field("FLASH_NSSR", "OPTWERR")},
       busy_{field("FLASH_NSSR", "BSY")}, waiting_{field("FLASH_NSSR", "WDW")},
-      line_{irq("FLASH_IRQn")}
+      line_{irq("FLASH_IRQn")}, latency_{field("FLASH_ACR", "LATENCY")},
+      low_power_read_{field("FLASH_ACR", "LPM")}, hclk_{ctx.clock.domain("hclk")}
 {
   for(auto const flag :
       {end_, operation_error_, program_error_, protection_error_, alignment_error_, size_error_,
@@ -511,6 +589,66 @@ void flash::finish()
     }
     store(one.addr, one.size, one.value);
   }
+}
+
+void flash::check_latency(std::string_view trigger)
+{
+  auto const hclk = ctx_.clock.hz(hclk_);
+  if(hclk == 0)
+  {
+    return;
+  }
+  std::uint32_t range = 1;
+  for(auto* const peer : ctx_.peers.all())
+  {
+    if(auto const* const source = dynamic_cast<voltage_range_source const*>(peer))
+    {
+      range = source->active_range();
+    }
+  }
+  auto const latency  = get(regs_, latency_);
+  auto const required = required_wait_states(hclk, range, get(regs_, low_power_read_) != 0);
+  if(required and latency >= *required)
+  {
+    return;
+  }
+  if(latency_logged_.emplace(hclk, range, latency).second or ctx_.strict_peripherals)
+  {
+    warn(
+        "FLASH_ACR",
+        required ? std::format(
+                       "{}: LATENCY {} is below the {} wait states RM0456 7.3.3 asks for HCLK {} "
+                       "Hz in voltage range {}, silicon would read wrong data",
+                       trigger, latency, *required, hclk, range)
+                 : std::format(
+                       "{}: HCLK {} Hz is above the maximum of voltage range {}, RM0456 7.3.3",
+                       trigger, hclk, range));
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(desc_.name, "FLASH_ACR", reg("FLASH_ACR").offset);
+  }
+}
+
+void flash::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  latency_logged_.clear();
+}
+
+void flash::on_clock_change()
+{
+  check_latency("after an HCLK change");
+}
+
+void flash::on_voltage_range_change()
+{
+  check_latency("after a voltage range change");
+}
+
+void flash::access_written(std::uint32_t, std::uint32_t)
+{
+  check_latency("on a FLASH_ACR write");
 }
 
 void flash::key_written(std::uint32_t, std::uint32_t now)

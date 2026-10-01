@@ -86,3 +86,13 @@ __attribute__((noipa)) void wait_idle(void)
   }
   DONE();
 }
+
+void spin(uint32_t count);
+
+__attribute__((noipa)) void spin(uint32_t count)
+{
+  for(uint32_t volatile i = 0; i < count; ++i)
+  {
+  }
+  DONE();
+}
