@@ -1147,6 +1147,12 @@ struct machine::run_state
   [[nodiscard]] auto idle_jump(slice_request const& request) -> std::optional<slice_end>;
   [[nodiscard]] auto exit_list(slice_request const& request) const -> std::vector<address>;
   [[nodiscard]] auto bound_reached(slice_request const& request) -> std::optional<slice_end>;
+  /** @brief Whether until must not stop the slice yet: leave_until is set and nothing executed. */
+  [[nodiscard]] auto leaving_until(slice_request const& request) const -> bool;
+  /** @brief Arms the engine to execute the block at until without stopping on it: until is out
+   * of the exits and the deadline is one instruction away, so the next block entry ends the engine
+   * run, a branch to itself included, and no later hit of until is skipped. */
+  void               step_off_until(slice_request const& request);
   [[nodiscard]] auto trap_after(uc_err err) -> std::optional<slice_end>;
   [[nodiscard]] auto engine_run() -> uc_err;
   void               rethrow_failure();

@@ -75,6 +75,8 @@ struct[[= py::rename{"SliceArgs"}]] slice_args
   std::optional<std::uint64_t> exact_instructions{};
   /** @brief Stop with reason time on reaching this virtual time since reset, in picoseconds. */
   std::optional<std::uint64_t> until_time_ps{};
+  /** @brief Execute at least one instruction before until stops a slice starting at it. */
+  bool leave_until{};
 };
 
 /** @brief A decoded processor fault. */

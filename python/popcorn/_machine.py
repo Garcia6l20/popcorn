@@ -1214,7 +1214,11 @@ class Machine:
         """Run until a stop, one slice at a time, yielding to the event loop between slices.
 
         Args:
-            until: Stop with ADDRESS before executing this address or symbol.
+            until: Stop with ADDRESS before executing this address or symbol. A run starting
+                at it executes at least one instruction first, so a repeated
+                `run(until=hook)` goes on to the next hit, as a debugger's continue. An
+                interrupt pending at the start runs its handler first: a handler returning to
+                this address stops the run there again.
             budget: Stop with BUDGET at the first block boundary past this many instructions,
                 `default_budget` when None.
             for_: Stop with TIME after this much virtual time. An idle core, WFI with nothing
@@ -1262,7 +1266,8 @@ class Machine:
         """Run until `event` is ready, a USER stop, or until `for_` elapses, a TIME stop as late
         as `run(for_=)` allows.
 
-        A `Reached` event stops exactly before its target, an ADDRESS stop. Other events stop at
+        A `Reached` event stops exactly before its target, an ADDRESS stop, and a target equal to
+        the current pc continues as `run(until=)` does. Other events stop at
         the first event boundary or slice end after they became ready. Inside `running()`, the
         background run is not driven twice: this awaits the driver, which checks the event at
         slice boundaries.
@@ -1374,17 +1379,20 @@ class Machine:
         predicate = None if stop_when is None else self._handler(stop_when)
         remaining = budget
         left = exact
+        executed = 0
         while True:
             if remaining is not None:
                 args.budget_left = remaining
             if left is not None:
                 args.exact_instructions = left
+            args.leave_until = executed == 0
             self._ports.pump()
             outcome = self._handle.run_slice(args, predicate)
             self._ports.pump()
             if outcome.stopped is not None:
                 self._last_stop = stop_of(outcome.stopped)
                 return self._last_stop
+            executed += outcome.executed
             if remaining is not None:
                 remaining = max(remaining - outcome.executed, 0)
             if left is not None:

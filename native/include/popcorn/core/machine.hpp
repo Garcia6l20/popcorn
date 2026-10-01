@@ -105,7 +105,7 @@ struct slice_request
   /** @brief Wall time after which the slice ends, read every 256 blocks. */
   std::chrono::nanoseconds wall_budget{std::chrono::milliseconds{1}};
   /** @brief Stop with stop_reason::address before executing this address. A slice that starts at
-   * this address stops at once, 0 instructions executed. */
+   * this address stops at once, 0 instructions executed, unless leave_until is set. */
   std::optional<address> until{};
   /** @brief Instructions left in the run's budget, stop with stop_reason::budget at the first
    * block boundary at or past them. The caller subtracts `slice_result::executed` between
@@ -121,6 +121,10 @@ struct slice_request
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */
   std::function<bool()> stop_when{};
+  /** @brief A slice that starts at until executes at least one instruction before until may stop
+   * it, so a run resuming from its own until address goes on to the next hit. The caller sets it
+   * until the run has executed an instruction. */
+  bool leave_until{};
 };
 
 /** @brief Outcome of one native slice. */

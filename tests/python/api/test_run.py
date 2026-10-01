@@ -182,7 +182,6 @@ def test_a_negative_for_is_a_value_error(machines: Machines) -> None:
     assert not m.busy
 
 
-@pytest.mark.xfail(strict=True, reason="run: until at the start pc stops after 0 instructions")
 def test_a_run_from_its_until_address_goes_on_to_the_next_hit(hooked: popcorn.Machine) -> None:
     hooked.reg.pc = hooked.sym("write_three")
     arguments: list[int] = []
@@ -193,3 +192,15 @@ def test_a_run_from_its_until_address_goes_on_to_the_next_hit(hooked: popcorn.Ma
         assert stop.instructions > before
         arguments.append(hooked.reg.r0)
     assert arguments == [1, 2, 3]
+
+
+def test_a_run_from_its_until_address_with_nothing_to_spend_stops_at_once(
+    hooked: popcorn.Machine,
+) -> None:
+    hooked.reg.pc = hooked.sym("writer")
+    before = hooked.instructions
+    budget = asyncio.run(hooked.run(until="writer", budget=0))
+    timed = asyncio.run(hooked.run(until="writer", for_=ms(0)))
+    assert (budget.reason, timed.reason) == (popcorn.StopReason.BUDGET, popcorn.StopReason.TIME)
+    assert hooked.instructions == before
+    assert hooked.pc == hooked.sym("writer")

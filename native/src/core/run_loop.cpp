@@ -673,6 +673,19 @@ auto machine::run_state::exit_list(slice_request const& request) const -> std::v
   return list;
 }
 
+auto machine::run_state::leaving_until(slice_request const& request) const -> bool
+{
+  return request.leave_until and executed.value == 0;
+}
+
+void machine::run_state::step_off_until(slice_request const& request)
+{
+  auto list = exit_list(request);
+  list.erase(std::ranges::find(list, *request.until));
+  set_exits(std::move(list));
+  deadline = std::min(deadline, add_sat(owner.clock_.now(), 1));
+}
+
 auto machine::run_state::bound_reached(slice_request const& request) -> std::optional<slice_end>
 {
   if(return_watch != 0 and arch->pc() == return_watch)
@@ -696,7 +709,7 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
   {
     return slice_end{make_stop(stop_reason::time, {}, std::nullopt)};
   }
-  if(request.until and owner.arch_->pc() == *request.until)
+  if(request.until and owner.arch_->pc() == *request.until and not leaving_until(request))
   {
     return slice_end{make_stop(stop_reason::address, {}, std::nullopt)};
   }
@@ -880,10 +893,19 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       spin.previous         = {};
     }
     boundary_stop      = false;
+    auto const leaving = leaving_until(request) and request.until and arch->pc() == *request.until;
+    if(leaving)
+    {
+      step_off_until(request);
+    }
     auto const started = owner.clock_.now();
     auto const err     = engine_run();
     auto const ran     = owner.clock_.now().value - started.value;
     executed.value += ran;
+    if(leaving)
+    {
+      set_exits(exit_list(request));
+    }
     if(ran == 0)
     {
       std::ignore = wall_expired_now();

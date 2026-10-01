@@ -46,6 +46,7 @@ auto machine_handle::run_slice(
       .exact_instructions = std::nullopt,
       .until_time         = std::nullopt,
       .stop_when          = stop_when.value_or(std::function<bool()>{}),
+      .leave_until        = args.leave_until,
   };
   if(args.budget_left)
   {

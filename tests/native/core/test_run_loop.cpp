@@ -313,6 +313,65 @@ TEST_CASE("until at the current pc stops at once with nothing executed")
   CHECK(slice.stopped->where.pc == entry);
 }
 
+TEST_CASE("leave_until at until runs one pass of the loop before until stops it again")
+{
+  auto       f    = alu(10);
+  auto const body = sym("alu", "alu_body");
+  auto const into =
+      f.run({.wall_budget = std::chrono::seconds{60}, .until = body, .leave_until = true});
+  REQUIRE(into.stopped.has_value());
+  CHECK(into.stopped->reason == stop_reason::address);
+  CHECK(into.stopped->where.pc == body);
+  CHECK(f.reg("r1") == 1);
+  CHECK(f.reg("r2") == 0);
+  for(std::uint32_t pass = 1; pass <= 2; ++pass)
+  {
+    auto const again =
+        f.run({.wall_budget = std::chrono::seconds{60}, .until = body, .leave_until = true});
+    REQUIRE(again.stopped.has_value());
+    CHECK(again.stopped->reason == stop_reason::address);
+    CHECK(again.stopped->where.pc == body);
+    CHECK(again.executed.value == 5);
+    CHECK(f.reg("r0") == 10 - pass);
+  }
+}
+
+TEST_CASE("leave_until on a branch to itself stops after that one instruction")
+{
+  auto       f    = alu(1);
+  auto const done = sym("alu", "alu_done");
+  REQUIRE(f.run_to_stop({.until = done}).reason == stop_reason::address);
+  auto const again =
+      f.run({.wall_budget = std::chrono::seconds{60}, .until = done, .leave_until = true});
+  REQUIRE(again.stopped.has_value());
+  CHECK(again.stopped->reason == stop_reason::address);
+  CHECK(again.stopped->where.pc == done);
+  CHECK(again.executed.value == 1);
+}
+
+TEST_CASE("leave_until keeps a budget of 0 and exact steps as they are")
+{
+  auto       f     = alu(10);
+  auto const entry = sym("alu", "alu_entry");
+  auto const none  = f.run(
+      {.wall_budget = std::chrono::seconds{60},
+       .until       = entry,
+       .budget_left = icount{0},
+       .leave_until = true});
+  REQUIRE(none.stopped.has_value());
+  CHECK(none.stopped->reason == stop_reason::budget);
+  CHECK(none.executed.value == 0);
+  auto const two = f.run(
+      {.wall_budget        = std::chrono::seconds{60},
+       .until              = entry,
+       .exact_instructions = icount{2},
+       .leave_until        = true});
+  REQUIRE(two.stopped.has_value());
+  CHECK(two.stopped->reason == stop_reason::budget);
+  CHECK(two.executed.value == 2);
+  CHECK(f.reg("pc") == alu_pc(2));
+}
+
 TEST_CASE("debugger patches of flash reach the next run through both addresses")
 {
   fixture<>  f{m33(), "basic"};
