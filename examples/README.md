@@ -10,6 +10,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/i2c](stm32u575/i2c) | LL | a 24xx EEPROM page write with acknowledge polling, configs swapping the device, a scripted TableTarget |
 | [stm32u575/i2c_mock](stm32u575/i2c_mock) | LL | a temperature sensor written in Python as an `I2CTarget`: scripted readings, the configuration word the firmware wrote, NACK injection and recovery |
 | [stm32u575/iwdg](stm32u575/iwdg) | HAL | IWDG refresh, a watchdog reset request 500 ms after the last refresh, IWDGRSTF after the reset |
+| [stm32u575/pwr_flash](stm32u575/pwr_flash) | LL | voltage range 1 and 4 wait states before 160 MHz, a page erase and a quad-word program read back through `machine.mem`, PGSERR from a store without PG, a too low wait-state count failing a strict run |
 | [stm32u575/python_model](stm32u575/python_model) | HAL IT | the RNG, which popcorn does not model, served by a `popcorn.model.Model` written in Python: register handlers, a scheduled DRDY, the interrupt line, a seed from the project file |
 | [stm32u575/rcc](stm32u575/rcc) | LL | HSE bypass to a 160 MHz PLL1, voltage range, flash latency, SysTick period in virtual time |
 | [stm32u575/sai](stm32u575/sai) | HAL DMA | a 48 kHz I2S sine on SAI1 block A from a circular GPDMA linked list, frames captured from Python with their start times, half and complete callbacks |
