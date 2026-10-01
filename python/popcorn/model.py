@@ -331,6 +331,12 @@ class Model(_core.ModelBase):
         """Description of the whole MCU, a copy."""
         return self._context.part()
 
+    @property
+    def strict_peripherals(self) -> bool:
+        """Whether the machine runs with strict_peripherals, fixed for the machine's life: a
+        model may raise ModelError where it would only warn."""
+        return self._context.strict_peripherals()
+
     def peer(self, peripheral: str) -> Model | None:
         """The Python model of another peripheral of the machine, None when it has none.
 

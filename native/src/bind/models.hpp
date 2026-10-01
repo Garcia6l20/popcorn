@@ -103,6 +103,10 @@ public:
   [[= py::doc{"Instructions executed since reset."}]] [[nodiscard]] auto instructions() const
       -> std::uint64_t;
 
+  /** @brief Whether the machine runs with strict_peripherals, fixed for the machine's life. */
+  [[= py::doc{"Whether the machine runs with strict_peripherals, fixed for the machine's life."}]]
+      [[nodiscard]] auto strict_peripherals() const -> bool;
+
   /**
    * @brief Asks the run to stop at the next block boundary.
    * @param reason Reason the stop reports.

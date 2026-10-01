@@ -9,6 +9,7 @@ import itertools
 import sys
 import traceback
 import types
+import warnings
 import weakref
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -626,3 +627,63 @@ def test_an_event_keeps_its_virtual_time_across_a_core_clock_change(
     late = stamp.fired[0].ps - start.ps - 100_000_000
     assert 0 <= late < 1_000_000
     assert m.instructions - counted > 48 * 200 * 9 // 10
+
+
+class Picky(Model):
+    """Refuses a CR value above 1: a warning, or a ModelError under strict_peripherals."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.strict_at_build = self.strict_peripherals
+
+    @on_write("CR")
+    def _cr(self, old: int, new: int) -> None:
+        if new <= 1:
+            return
+        message = f"CR written with {new}, only 0 and 1 are defined"
+        if self.strict_peripherals:
+            raise popcorn.ModelError(message, peripheral=self.peripheral, register="CR")
+        warnings.warn(message, stacklevel=1)
+
+
+def picky_of(m: popcorn.Machine) -> Picky:
+    model = m.model("TIMER")
+    assert isinstance(model, Picky)
+    return model
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_model_sees_whether_the_machine_runs_strict(strict: bool) -> None:
+    m = machine({"TIMER": Picky}, strict_peripherals=strict)
+    picky = picky_of(m)
+    assert picky.strict_peripherals is strict
+    assert picky.strict_at_build is strict
+    saved = m.snapshot()
+    call(m, "write_timer_cr", 1)
+    m.restore(saved)
+    assert picky.strict_peripherals is strict
+
+
+def test_a_model_warns_unless_the_machine_runs_strict() -> None:
+    m = machine({"TIMER": Picky})
+    with pytest.warns(UserWarning, match="CR written with 5"):
+        call(m, "write_timer_cr", 5)
+    assert m.periph.TIMER.CR.value == 5
+
+
+def test_a_model_raises_a_model_error_under_strict_peripherals() -> None:
+    m = machine({"TIMER": Picky}, strict_peripherals=True)
+    with pytest.raises(popcorn.ModelError, match="CR written with 5") as caught:
+        call(m, "write_timer_cr", 5)
+    assert (caught.value.peripheral, caught.value.register) == ("TIMER", "CR")
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_strict_peripherals_stays_the_machines_own_across_a_loaded_snapshot(
+    strict: bool, tmp_path: Path
+) -> None:
+    saved = tmp_path / "picky.snap"
+    machine({"TIMER": Picky}, strict_peripherals=not strict).snapshot().save(saved)
+    m = machine({"TIMER": Picky}, strict_peripherals=strict)
+    m.restore(popcorn.Snapshot.load(saved))
+    assert picky_of(m).strict_peripherals is strict

@@ -126,6 +126,11 @@ auto model_context_view::instructions() const -> std::uint64_t
   return context().clock.now().value;
 }
 
+auto model_context_view::strict_peripherals() const -> bool
+{
+  return context().strict_peripherals;
+}
+
 void model_context_view::request_stop(stop_reason reason, std::string detail)
 {
   if(not is_enumerator(reason))
