@@ -7,10 +7,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from popcorn import Machine, PopcornError, Project
+from popcorn import Machine, PopcornError, Project, Snapshot
 from popcorn.pytest._options import UNSET, marker_options
 from popcorn.pytest._report import TraceOnFail, trace_directory, track
-from popcorn.pytest._session import Booted, Key, PopcornSession, popcorn_session
+from popcorn.pytest._session import Booted, Devices, Key, PopcornSession, popcorn_session
 
 
 class MachineFactory:
@@ -24,6 +24,16 @@ class MachineFactory:
 
     Booted machines get the test's default instruction budget, the `budget` of its marker or
     `--popcorn-budget`. Machines not booted get none: it would bound their boot too.
+
+    `devices` gives bus devices instead of the project file's, as `Project.machine(devices=)`
+    takes them. A device serves one machine: an instance given before, to a machine still
+    open, is refused. A boot with devices is shared, in the process and through the boot
+    cache, with the boots whose devices have the same classes, class sources, `snapshot()` and
+    instance attributes. Devices holding anything other than plain values or their own
+    methods, such as a function, and `popcorn.devices` devices are booted for each machine.
+    Not keyed: class attributes changed at run time, module globals or class-level containers
+    a device reads, and the modules a device imports. A stale boot matters only when the
+    firmware talks to the device before `[boot] until`.
     """
 
     def __init__(self, session: PopcornSession, test: ItemSettings, item: pytest.Item) -> None:
@@ -35,28 +45,51 @@ class MachineFactory:
         self._machines: list[Machine] = []
 
     def __call__(
-        self, config: str | None = None, *, strict: bool | None = None, booted: bool = True
+        self,
+        config: str | None = None,
+        *,
+        strict: bool | None = None,
+        booted: bool = True,
+        devices: Devices | None = None,
     ) -> Machine:
         """A new machine of `config`, the test's by default, and `strict`, the config's by
-        default.
+        default, with `devices` instead of the project file's devices of their peripherals.
 
         Raises:
             RuntimeError: `booted` and the key is not booted yet while an event loop runs.
+            ConfigError: A device serves another live machine, or `Project.machine` refuses
+                `devices`.
         """
         key = self._key(config, strict)
         if not booted:
-            return self._keep(self._session.build(key), key)
+            return self._keep(self._session.build(key, devices), key)
+        if devices is not None:
+            key = self._session.device_key(key, devices)
         try:
-            return self._restored(key, self._session.booted(key))
+            if devices is None:
+                snapshot = self._session.booted(key).decoded()
+                return self._ready(key, self._session.build(key), snapshot)
+            return self._ready(key, *self._session.booted_with(key, devices))
         except PopcornError:
             self._track_failed(key)
             raise
 
-    async def booted(self, config: str | None = None, *, strict: bool | None = None) -> Machine:
+    async def booted(
+        self,
+        config: str | None = None,
+        *,
+        strict: bool | None = None,
+        devices: Devices | None = None,
+    ) -> Machine:
         """A new booted machine as `factory()` gives, booting the key on the running loop."""
         key = self._key(config, strict)
+        if devices is not None:
+            key = self._session.device_key(key, devices)
         try:
-            return self._restored(key, await self._session.booted_async(key))
+            if devices is None:
+                snapshot = (await self._session.booted_async(key)).decoded()
+                return self._ready(key, self._session.build(key), snapshot)
+            return self._ready(key, *await self._session.booted_with_async(key, devices))
         except PopcornError:
             self._track_failed(key)
             raise
@@ -74,9 +107,9 @@ class MachineFactory:
             strict = self._default.strict
         return self._session.key(config, strict)
 
-    def _restored(self, key: Key, booted: Booted) -> Machine:
-        machine = self._keep(self._session.build(key), key)
-        machine.restore(booted.decoded())
+    def _ready(self, key: Key, machine: Machine, snapshot: Snapshot) -> Machine:
+        self._keep(machine, key)
+        machine.restore(snapshot)
         machine.default_budget = self._budget
         return machine
 

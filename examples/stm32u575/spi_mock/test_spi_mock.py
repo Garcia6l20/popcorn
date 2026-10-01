@@ -7,21 +7,17 @@ two milliseconds of counts. Channel 1 is converted a few tens of microseconds af
 so its mirror lags by less than one millisecond of counts.
 
 Two ways to attach a mock: the project file's `[board.SPI1] devices`, which the `machine`
-fixture uses, and `Machine(devices={"SPI1": [adc]})`, built in the test, which can pass what a
-project file cannot, here a Python function as the sample source.
-
-A hand-built machine gets only what the test passes: here the description, the images and the
-devices. It does not get the project's `[clock]` core_hz and cpi, `[models] strict`, `[boot]`
-vtor, arena_base and memory_init, `[board.X] model` replacements, `[board.RCC]` clock sources
-or `connect = "pty"` bridges. This project file sets none of them, so the two machines match.
-`popcorn_project.boot(machine)` runs `[boot] until` within `[boot] budget`. The plugin's
-failure report covers the `machine` and `machine_factory` machines only, not this one.
+fixture uses, and `machine_factory.booted(devices={"SPI1": [adc]})`, which can pass what a
+project file cannot, here a Python function as the sample source. The factory machine keeps the
+rest of the project build. An ADC holding a function cannot key the boot cache: that machine
+boots each time.
 """
 
 import itertools
 
 import pytest
-from popcorn import Machine, Project, StopReason
+from popcorn import Machine, StopReason
+from popcorn.pytest import MachineFactory
 from popcorn.units import VirtualTime, ms
 from spiadc import FULL_SCALE, Adc
 
@@ -68,8 +64,8 @@ async def test_each_conversion_is_one_chip_select_period(machine: Machine) -> No
     assert device.bad_frames == 0
 
 
-async def test_a_source_function_given_through_machine_devices(
-    popcorn_project: Project,
+async def test_a_source_function_given_through_the_factory(
+    machine_factory: MachineFactory,
 ) -> None:
     served: list[tuple[int, int]] = []
 
@@ -78,12 +74,7 @@ async def test_a_source_function_given_through_machine_devices(
         served.append((channel, value))
         return value
 
-    machine = Machine(
-        popcorn_project.description(),
-        image=popcorn_project.images(),
-        devices={"SPI1": [Adc(cs="PB0", source=source)]},
-    )
-    await popcorn_project.boot(machine)
+    machine = await machine_factory.booted(devices={"SPI1": [Adc(cs="PB0", source=source)]})
     await run_to_done(machine)
 
     assert served[0::2] == [(0, value) for value in samples(machine, 0)]

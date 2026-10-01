@@ -31,13 +31,11 @@ uv run pytest -q examples/stm32u575/spi_mock
 - `test_spi_mock.py`:
   - the ramp read back from `adc_result`, rising with virtual time, channel 1 its mirror;
   - one select and one deselect per conversion, each holding two 16-bit frames;
-  - `Machine(devices={"SPI1": [Adc(cs="PB0", source=source)]})` built in the test, with a
+  - `machine_factory.booted(devices={"SPI1": [Adc(cs="PB0", source=source)]})`, with a
     Python function as the source that also records what it served. It shows what a project
-    file cannot pass. A hand-built machine gets only what the test passes: not the project's
-    `[clock]`, `[models] strict`, `[boot]` vtor, arena_base and memory_init, `[board.X] model`,
-    `[board.RCC]` or pty bridges. This project file sets none of them.
-    `popcorn_project.boot(machine)` runs `[boot] until` within its budget. The plugin's failure
-    report does not cover such a machine.
+    file cannot pass. The factory machine keeps the rest of the project build and is covered
+    by the plugin's failure report. An ADC holding a function cannot key the boot cache, so
+    that machine boots each time.
 - `firmware/main.c`: the chip select and the two-frame conversion.
 
 ## Rebuild the firmware

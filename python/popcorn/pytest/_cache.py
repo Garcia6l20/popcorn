@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import enum
 import fcntl
 import functools
 import hashlib
 import inspect
 import json
 import os
-from collections.abc import AsyncGenerator, Mapping
+import types
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -20,6 +22,8 @@ import pytest
 import popcorn
 from popcorn import Machine, Project, Snapshot, Stop, StopReason, _core, description_digest
 from popcorn._devices import ParamError, project_params
+from popcorn._machine import AttachedDevice
+from popcorn.board import I2CTarget, SpiTarget
 from popcorn.units import VirtualTime
 
 FORMAT = "popcorn-boot-cache 1"
@@ -60,13 +64,86 @@ def _param_files(cls: type, params: Mapping[str, object], base: Path) -> list[st
     return files
 
 
-def cache_key(project: Project, strict: bool) -> str:
-    """The name of a boot of `project`, as its config applies, with strictness `strict`.
+def _plain(value: object, owner: object) -> str | None:
+    if value is None or isinstance(value, bool | int | float | str | bytes | bytearray):
+        return repr(value)
+    if isinstance(value, enum.Enum):
+        return f"{type(value).__qualname__}.{value.name}"
+    if isinstance(value, types.MethodType) and value.__self__ is owner:
+        return f"method {value.__func__.__qualname__}"
+    if isinstance(value, list | tuple | set | frozenset):
+        kind = type(cast(object, value))
+        items: list[str] = []
+        for item in cast(Iterable[object], value):
+            plain = _plain(item, owner)
+            if plain is None:
+                return None
+            items.append(plain)
+        if issubclass(kind, set | frozenset):
+            items.sort()
+        return f"{kind.__name__}[{', '.join(items)}]"
+    if isinstance(value, dict):
+        pairs: list[str] = []
+        for key, item in cast(dict[object, object], value).items():
+            plain_key, plain_item = _plain(key, owner), _plain(item, owner)
+            if plain_key is None or plain_item is None:
+                return None
+            pairs.append(f"{plain_key}: {plain_item}")
+        return f"dict[{', '.join(sorted(pairs))}]"
+    return None
+
+
+def _device_line(device: AttachedDevice) -> str | None:
+    if not isinstance(device, I2CTarget | SpiTarget):
+        return None
+    cls = type(device)
+    try:
+        state = device.snapshot()
+        attributes = _plain(vars(device), device)
+    except Exception:
+        return None
+    if attributes is None:
+        return None
+    return f"{cls.__module__}.{cls.__qualname__} {_class_source(cls)} {state.hex()} {attributes}"
+
+
+def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevice]]) -> str | None:
+    """The digest of `devices` as `Project.machine(devices=)` takes them, None when a device
+    cannot be keyed.
+
+    A device is keyed by its class and the class's source file, its `snapshot()` and its
+    instance attributes. It can be keyed when it is a `popcorn.board.I2CTarget` or `SpiTarget`
+    whose attributes hold only None, bool, int, float, str, bytes, bytearray, enum members,
+    methods of the device itself, and lists, tuples, sets and dicts of these. A
+    `popcorn.devices` device keeps its parameters natively and cannot be keyed.
+
+    Not keyed: class attributes changed at run time, module globals or class-level containers
+    the device reads, and the modules its class imports. A stale entry matters only when the
+    firmware talks to the device before `[boot] until`.
+    """
+    aliases = {
+        p.name: p.alias_of for p in project.description().peripherals if p.alias_of is not None
+    }
+    lines: list[str] = []
+    for key, targets in sorted(devices.items(), key=lambda item: aliases.get(item[0], item[0])):
+        name = aliases.get(key, key)
+        lines.append(name)
+        for target in targets:
+            line = _device_line(target)
+            if line is None:
+                return None
+            lines.append(f"{name} {line}")
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+
+def cache_key(project: Project, strict: bool, devices: str | None = None) -> str:
+    """The name of a boot of `project`, as its config applies, with strictness `strict` and the
+    device set of digest `devices`, None for the project file's.
 
     It covers the popcorn version and native extension, the description, every image, the
     project file with its config, `strict`, every `.py` file under the `[models] python`
-    directories, the source file of every board model and device class, and the content of every
-    file a model or device parameter names. A module outside
+    directories, the source file of every board model and device class, the content of every
+    file a model or device parameter names, and `devices`. A module outside
     those directories that a model imports is not covered: `--cache-clear` drops the cache.
     """
     lines = [
@@ -78,6 +155,8 @@ def cache_key(project: Project, strict: bool) -> str:
         project.digest,
         str(strict),
     ]
+    if devices is not None:
+        lines.append(f"devices {devices}")
     for directory in project.file.models.python:
         root = Path(directory)
         for path in sorted(root.rglob("*.py")):

@@ -18,7 +18,8 @@ Fixtures:
   it: the next test gets a new machine restored from the saved boot. A project without
   `[boot] until` boots to the reset state. A failed boot errors every test using the machine,
   booted once.
-- `machine_factory`: a `MachineFactory`, new machines separate from `machine`.
+- `machine_factory`: a `MachineFactory`, new machines separate from `machine`, with the
+  project file's bus devices or the test's own.
 
 A failing test that used a popcorn machine gets a "popcorn" section in its report, one block per
 machine: the stop of the failing exception or of the machine's last run, the fault registers

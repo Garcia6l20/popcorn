@@ -7,7 +7,7 @@ import importlib
 import inspect
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -205,7 +205,11 @@ class Project:
         return dict(self._board)
 
     def machine(
-        self, config: str | None = None, *, strict_peripherals: bool | None = None
+        self,
+        config: str | None = None,
+        *,
+        strict_peripherals: bool | None = None,
+        devices: Mapping[str, Sequence[AttachedDevice]] | None = None,
     ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
         board models, bus devices, `[board.RCC]` clock sources, `connect = "pty"` bridges,
@@ -216,20 +220,28 @@ class Project:
             config: A config to apply instead of this project's, reloading the file.
             strict_peripherals: Whether unmodelled peripheral accesses raise ModelError,
                 `[models] strict` when None. Not part of `digest`.
+            devices: Bus devices per I2C or SPI peripheral name or alias, as
+                `Machine(devices=)` takes them. A listed peripheral gets these devices instead
+                of its `[board.X] devices`, none for an empty list. A peripheral not listed
+                keeps the project file's. Not part of `digest`.
 
         Raises:
             ConfigError: As `load`, `description` and `board`, a memory_init symbol or range is
                 invalid, an I2C target sits on a peripheral that is not an I2C bus or an SPI
                 device on one that is not an SPI bus, an address is outside 0x08 to 0x77, a
-                device class refuses its parameters, or `Machine(devices=)` refuses them.
+                device class refuses its parameters, two `devices` keys name one peripheral, or
+                `Machine(devices=)` refuses them.
             ImageError: An image cannot be read or does not fit the memory map.
             ModelError: A `connect` peripheral is not a UART.
         """
         if config is not None and config != self.config:
-            return Project.load(self.path, config).machine(strict_peripherals=strict_peripherals)
+            return Project.load(self.path, config).machine(
+                strict_peripherals=strict_peripherals, devices=devices
+            )
         file = self._loaded.file
         description = self.description()
         served = {p.name for p in description.peripherals if p.alias_of is None}
+        given = _given_devices(description, devices or {})
         models: dict[str, Callable[[], Model]] = {}
         for name, entry in self.board().items():
             if entry.model is None:
@@ -237,11 +249,12 @@ class Project:
             if name not in served:
                 raise self._error(f"board.{name}", f"a peripheral of {description.part}")
             models[name] = functools.partial(entry.model, **entry.params)
-        devices = {
+        attached = {
             name: self._devices(name, entry, description)
             for name, entry in self.board().items()
-            if entry.devices
+            if entry.devices and name not in given
         }
+        attached.update(given)
         clocks = file.board.get("RCC")
         rcc = None
         if clocks is not None and (clocks.hse_hz is not None or clocks.lse_hz is not None):
@@ -288,7 +301,7 @@ class Project:
             arena_base=_arena_base(file.boot.arena_base),
             arena_size=file.boot.arena_size or DEFAULT_ARENA_SIZE,
             models=models,
-            devices=devices,
+            devices=attached,
             rcc=rcc,
             audio=audio,
         )
@@ -463,6 +476,23 @@ def _toml(value: object) -> TomlValue:
     if isinstance(value, dict):
         return {str(k): _toml(v) for k, v in cast(dict[object, object], value).items()}
     raise TypeError(f"not a TOML value: {value!r}")
+
+
+def _given_devices(
+    description: MachineDescription, devices: Mapping[str, Sequence[AttachedDevice]]
+) -> dict[str, list[AttachedDevice]]:
+    aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
+    given: dict[str, list[AttachedDevice]] = {}
+    for key, targets in devices.items():
+        name = aliases.get(key, key)
+        if name in given:
+            raise ConfigError(
+                f"devices.{key}: {name} is listed twice, once through an alias",
+                key=f"devices.{key}",
+                expected="each peripheral once",
+            )
+        given[name] = list(targets)
+    return given
 
 
 def _arena_base(value: object) -> int | None:
