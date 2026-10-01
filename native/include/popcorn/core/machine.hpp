@@ -235,6 +235,12 @@ public:
   /** @brief Whether a slice is running, true inside handlers too. */
   [[nodiscard]] auto running() const noexcept -> bool;
 
+  /**
+   * @brief Events waiting in the event queue, model and core events alike. An event a model
+   *        superseded without cancelling it counts until it is dispatched.
+   */
+  [[nodiscard]] auto pending_events() const -> std::size_t;
+
   /** @brief Virtual clock, for reading instruction count, time and domain rates. */
   [[nodiscard]] auto virtual_clock() const noexcept -> core::clock const&;
 

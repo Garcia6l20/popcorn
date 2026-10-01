@@ -179,3 +179,18 @@ def test_a_stepped_store_and_a_debugger_write_charge_no_block_ahead(
     m.mem.u32[RCC_CFGR2] = cfgr2
     assert m.time == start
     assert period_ps(m) == old
+
+
+def test_pending_events_counts_the_hse_ready_event_until_it_fires(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF))
+    m.reset()
+    assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS
+    m.reg.pc = m.sym("Default_Handler")
+    before = m.pending_events
+    m.mem.u32[RCC_CR] |= HSEON
+    assert m.pending_events == before + 1
+    asyncio.run(m.run(for_=ms(1)))
+    assert m.periph.RCC.RCC_CR.HSERDY == 1
+    assert m.pending_events == before

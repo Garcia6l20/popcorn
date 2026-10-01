@@ -137,6 +137,11 @@ auto machine::running() const noexcept -> bool
   return run_->running;
 }
 
+auto machine::pending_events() const -> std::size_t
+{
+  return scheduler_.pending().size();
+}
+
 auto machine::virtual_clock() const noexcept -> core::clock const&
 {
   return clock_;

@@ -285,6 +285,11 @@ public:
   [[= py::doc{"Whether a call begun by begin_call has not been ended."}]] [[nodiscard]] auto
       in_call() const noexcept -> bool;
 
+  /** @brief Events waiting in the machine's event queue. */
+  [[= py::doc{
+      "Events waiting in the event queue, model and core events alike."}]] [[nodiscard]] auto
+      pending_events() const -> std::size_t;
+
   /**
    * @brief Intercepts calls to an address.
    * @param at Function entry.

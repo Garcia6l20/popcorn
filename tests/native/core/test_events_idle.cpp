@@ -724,3 +724,18 @@ TEST_CASE("a call that enables a timer the caller had off leaves no duplicate ex
   CHECK(counted >= 9);
   CHECK(counted <= 11);
 }
+
+TEST_CASE("pending_events counts scheduled events until they are cancelled or dispatched")
+{
+  auto       f       = booted("calls");
+  auto&      events  = f.module->attached_events();
+  auto const before  = f.target->pending_events();
+  auto const now     = f.target->virtual_clock().now().value;
+  std::ignore        = events.schedule(icount{now + 10}, 1, 1);
+  auto const dropped = events.schedule(icount{now + 20}, 1, 2);
+  CHECK(f.target->pending_events() == before + 2);
+  events.cancel(dropped);
+  CHECK(f.target->pending_events() == before + 1);
+  REQUIRE(f.run_to_stop({.budget_left = icount{200}}).reason == stop_reason::budget);
+  CHECK(f.target->pending_events() == before);
+}

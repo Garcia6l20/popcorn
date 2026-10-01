@@ -524,6 +524,16 @@ class Machine:
         self._require_stopped()
         return self._handle.pc()
 
+    @property
+    def pending_events(self) -> int:
+        """Events waiting in the event queue, model and core events alike.
+
+        A model event superseded without being cancelled counts until it is dispatched, so a
+        count that grows with guest work shows a model leaving stale events behind.
+        """
+        self._require_stopped()
+        return self._handle.pending_events()
+
     def load(self, image: Image) -> None:
         """Load one more image over memory, such as an application after a bootloader.
 

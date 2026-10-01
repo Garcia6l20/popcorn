@@ -221,6 +221,11 @@ auto machine_handle::in_call() const noexcept -> bool
   return machine_->in_call();
 }
 
+auto machine_handle::pending_events() const -> std::size_t
+{
+  return machine_->pending_events();
+}
+
 auto machine_handle::model(std::string const& peripheral) const -> reflex::py::nb::object
 {
   return detail::python_object(machine_->model(peripheral));
