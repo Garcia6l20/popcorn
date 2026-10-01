@@ -1,0 +1,12 @@
+[project]
+name = "sai-sine"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/sai_sine.elf"
+
+[boot]
+until = "main"
+budget = 1_000_000
