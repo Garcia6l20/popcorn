@@ -197,6 +197,23 @@ effect = "clear"
 pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
 source = "RM0456 rev 6, 74.8.6/74.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR)"
 
+[[registers]]
+peripheral = "RNG"
+name = "NSCR"
+offset = 0x0C
+width = 32
+reset = 0x0003FFFF
+acc = "read_write"
+fields = [
+  { name = "EN_OSC6", lsb = 15, width = 3 },
+  { name = "EN_OSC5", lsb = 12, width = 3 },
+  { name = "EN_OSC4", lsb = 9, width = 3 },
+  { name = "EN_OSC3", lsb = 6, width = 3 },
+  { name = "EN_OSC2", lsb = 3, width = 3 },
+  { name = "EN_OSC1", lsb = 0, width = 3 },
+]
+source = "RM0456 rev 6, 48.7.4 RNG noise source control register (RNG_NSCR): offset 0x00C, reset 0x0003FFFF, EN_OSC1 to EN_OSC6 rw in bits 17:0, bits 31:18 reserved. ST's STM32U575 SVD omits it, and HAL_RNG_Init writes it. Plain storage: the CONDRST and CONFIGLOCK write gating is not modelled"
+
 
 [memory]
 source = "RM0456 rev 6, 7.3.1 Tables 51 to 53: the 512-byte OTP area at 0x0BFA0000 in the nonsecure information block, its alias at 0x0FFA0000 in the secure information block. 7.2: OTP data cannot be erased and is written once, through the flash interface, so a CPU store is refused. Each region is 1 KB, the emulator's page granularity: the 512 bytes past the OTP area read as erased instead of faulting. RM0456 rev 6, 7.3.7: flash is programmed by 32-bit stores into the main memory range while FLASH_NSCR.PG is set, and erased through FLASH_NSCR, so the FLASH interface serves stores into both flash windows. The OTP regions get no controller: OTP programming is not modelled"

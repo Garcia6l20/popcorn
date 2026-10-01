@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from popcorn.stm32.description._cubemx import read_part, read_rzone
 from popcorn.stm32.description._model import (
+    Access,
     ReadEffect,
     RegionAccess,
     RegionKind,
@@ -213,6 +214,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
     assert report.core_fields_set == 1
+    assert report.registers_added == 1
     assert report.regions_added == 2
     assert report.controllers_set == 2
 
@@ -268,3 +270,23 @@ def test_flash_windows_are_served_by_the_flash_interface(
     assert controllers["OTP_S"] is None
     assert sum(c is not None for c in controllers.values()) == 2
     assert target_peripheral(target, "FLASH").alias_of is None
+
+
+def test_rng_has_the_nscr_register_st_svd_omits(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, _ = u575_target_and_report
+    for name in ("RNG", "SEC_RNG"):
+        registers = target_peripheral(target, name).registers
+        assert [(r.name, r.offset) for r in registers] == [
+            ("CR", 0x0),
+            ("SR", 0x4),
+            ("DR", 0x8),
+            ("NSCR", 0xC),
+            ("HTCR", 0x10),
+        ]
+        nscr = registers[3]
+        assert (nscr.width, nscr.reset, nscr.acc) == (32, 0x0003_FFFF, Access.READ_WRITE)
+        assert [(f.name, f.lsb, f.width) for f in nscr.fields] == [
+            (f"EN_OSC{n}", 3 * (n - 1), 3) for n in range(6, 0, -1)
+        ]

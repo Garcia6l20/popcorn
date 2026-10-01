@@ -34,13 +34,12 @@ uv run pytest -q examples/stm32u575/python_model
   - a machine built without the model, strict, raises ModelError naming RNG;
   - the words the firmware received equal the seeded sequence, computed in the test from
     `rngmodel.words`, and `machine.model("RNG")` returns the model;
+  - `HAL_RNG_Init` writes RNG_NSCR, a register ST's SVD omits and popcorn's description
+    adds, so no unmodelled-register warning is logged;
   - an intercept on `HAL_RNG_ReadyDataCallback` shows each later word one conversion after
     the last;
   - the `seeded` config gives another sequence.
 - `firmware/main.c`: the HSI48 and RNG init, the interrupt-driven requests.
-
-Every run logs "write of RNG at offset 0xc, no register there": the HAL writes RNG_NSCR,
-which ST's SVD does not declare. It is a warning, not a failure.
 
 ## Rebuild the firmware
 

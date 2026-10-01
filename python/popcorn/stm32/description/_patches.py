@@ -1,7 +1,7 @@
 """Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
-IP renames, IRQ add/drop, core overrides, added memory regions, region controllers. popcorn's
-own TOML format, so these dataclasses are the format definition, not a mirror of any C++ or
-schema type."""
+IP renames, IRQ add/drop, core overrides, added registers, added memory regions, region
+controllers. popcorn's own TOML format, so these dataclasses are the format definition, not a
+mirror of any C++ or schema type."""
 
 import copy
 import fnmatch
@@ -14,6 +14,7 @@ from popcorn.stm32.description._binder import from_mapping
 from popcorn.stm32.description._cubemx import DbIp
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
+    Access,
     CoreDesc,
     CrossEffect,
     CrossRule,
@@ -115,6 +116,25 @@ class CrossRuleSpec:
 
 
 @dataclass(slots=True, kw_only=True)
+class AddedField:
+    name: str
+    lsb: int = field(metadata={"minimum": 0, "maximum": 31})
+    width: int = field(metadata={"minimum": 1, "maximum": 32})
+
+
+@dataclass(slots=True, kw_only=True)
+class RegisterAdd:
+    peripheral: str
+    name: str
+    offset: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    width: int
+    reset: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    acc: Access
+    fields: list[AddedField]
+    source: str
+
+
+@dataclass(slots=True, kw_only=True)
 class Patch:
     format: int = field(default=1, metadata={"const": 1})
     match: PatchMatch
@@ -127,6 +147,7 @@ class Patch:
     svd: PatchSvd | None = None
     fields: list[FieldsRule] | None = None
     cross: list[CrossRuleSpec] | None = None
+    registers: list[RegisterAdd] | None = None
     memory: PatchMemory | None = None
 
 
@@ -148,6 +169,7 @@ class PatchReport:
     cross_rules_added: int = 0
     irqs_dropped: int = 0
     irqs_added: int = 0
+    registers_added: int = 0
     core_fields_set: int = 0
     regions_added: int = 0
     controllers_set: int = 0
@@ -286,6 +308,79 @@ def _apply_aliases(
         peripheral.ip = base_peripheral.ip
         peripheral.ip_version = base_peripheral.ip_version
         report.aliased += 1
+
+
+def _apply_register_add(
+    rule: RegisterAdd,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    peripheral = peripherals.get(rule.peripheral)
+    if peripheral is None or peripheral.alias_of is not None:
+        raise DescriptionError(
+            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
+        )
+    if rule.width not in (8, 16, 32):
+        raise DescriptionError(file, 0, f"{key}.width", "8, 16 or 32")
+    size = rule.width // 8
+    if rule.offset % size != 0 or rule.offset + size > peripheral.size:
+        raise DescriptionError(
+            file, 0, f"{key}.offset", f"an offset aligned to {size} inside {peripheral.size:#x}"
+        )
+    if rule.reset >> rule.width:
+        raise DescriptionError(file, 0, f"{key}.reset", f"a value of {rule.width} bits")
+    for register in peripheral.registers:
+        if register.name == rule.name:
+            raise DescriptionError(file, 0, f"{key}.name", f"a name not used in {peripheral.name}")
+        if (
+            rule.offset < register.offset + register.width // 8
+            and register.offset < rule.offset + size
+        ):
+            raise DescriptionError(file, 0, f"{key}.offset", f"a range clear of {register.name}")
+    taken = 0
+    names: set[str] = set()
+    for added in rule.fields:
+        if added.name in names:
+            raise DescriptionError(file, 0, f"{key}.fields.{added.name}", "each name once")
+        names.add(added.name)
+        if added.lsb + added.width > rule.width:
+            raise DescriptionError(
+                file, 0, f"{key}.fields.{added.name}", f"bits inside the {rule.width}-bit register"
+            )
+        bits = ((1 << added.width) - 1) << added.lsb
+        if taken & bits:
+            raise DescriptionError(
+                file, 0, f"{key}.fields.{added.name}", "bits clear of the other fields"
+            )
+        taken |= bits
+    register = RegisterDesc(
+        name=rule.name,
+        offset=rule.offset,
+        width=rule.width,
+        reset=rule.reset,
+        reset_mask=(1 << rule.width) - 1,
+        acc=rule.acc,
+        fields=[
+            FieldDesc(
+                name=added.name,
+                lsb=added.lsb,
+                width=added.width,
+                acc=rule.acc,
+                on_write=WriteEffect.MODIFY,
+                on_read=ReadEffect.NONE,
+            )
+            for added in sorted(rule.fields, key=lambda added: added.lsb, reverse=True)
+        ],
+    )
+    for target in peripherals.values():
+        if target is peripheral or target.alias_of == peripheral.name:
+            target.registers = sorted(
+                [*target.registers, copy.deepcopy(register)], key=lambda r: r.offset
+            )
+    report.registers_added += 1
 
 
 def _apply_fields(
@@ -483,8 +578,10 @@ def _apply_memory(
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
     """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
-    fields, cross rules, IRQ drops and adds, core, memory regions and their controllers. Drops
-    come first, so a later rule naming a dropped peripheral fails as naming an unknown one.
+    added registers, fields, cross rules, IRQ drops and adds, core, memory regions and their
+    controllers. Drops come first, so a later rule naming a dropped peripheral fails as naming an
+    unknown one. An added register lands in the named peripheral and in each of its aliases, so
+    fields and cross rules may name it.
     Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
@@ -513,6 +610,10 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     for loaded in patches:
         if loaded.patch.aliases is not None:
             _apply_aliases(loaded.patch.aliases, by_name, report, file=str(loaded.path))
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.registers or []):
+            _apply_register_add(rule, by_name, report, file=str(loaded.path), key=f"registers[{j}]")
 
     fields_touched: set[tuple[str, str, str, str]] = set()
     for loaded in patches:

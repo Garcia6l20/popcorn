@@ -26,6 +26,7 @@ BUDGET = 2_000_000
 pytestmark = pytest.mark.popcorn(budget=BUDGET)
 
 COUNT = 8
+RNG_NSCR_NIST_VALUE = 0x17CBB
 
 
 async def run_to_done(machine: Machine) -> None:
@@ -55,6 +56,14 @@ async def test_the_firmware_gets_the_seeded_sequence(machine: Machine) -> None:
     model = machine.model("RNG")
     assert isinstance(model, Rng)
     assert model.served == COUNT
+
+
+async def test_hal_rng_init_writes_nscr_into_the_description(
+    machine: Machine, caplog: pytest.LogCaptureFixture
+) -> None:
+    await run_to_done(machine)
+    assert machine.periph.RNG.NSCR.value == RNG_NSCR_NIST_VALUE
+    assert not [r for r in caplog.records if "no register there" in r.getMessage()]
 
 
 async def test_each_later_word_waits_one_conversion(machine: Machine) -> None:

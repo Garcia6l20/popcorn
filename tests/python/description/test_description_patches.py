@@ -4,7 +4,13 @@ from pathlib import Path
 import pytest
 from popcorn.stm32.description._cubemx import DbIp, read_part, read_rzone
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._model import RegionAccess, RegionDesc, RegionKind
+from popcorn.stm32.description._model import (
+    Access,
+    RegionAccess,
+    RegionDesc,
+    RegionKind,
+    WriteEffect,
+)
 from popcorn.stm32.description._patches import PatchTarget, apply_patches, load_patches
 from popcorn.stm32.description._sources import Sources
 from popcorn.stm32.description._svd import expand_svd
@@ -805,3 +811,148 @@ add = [{_OTP}]
         apply_patches(patches, target)
     assert excinfo.value.key == "memory.controller.OTP"
     assert excinfo.value.expected == "a peripheral of the description that is not an alias"
+
+
+_NEW_FIELDS = '[{ name = "LOW", lsb = 0, width = 3 }, { name = "HIGH", lsb = 3, width = 3 }]'
+
+
+def _register_patch(tmp_path: Path, entry: str, *, extra: str = "") -> Path:
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+{extra}
+[[registers]]
+{entry}
+source = "probe"
+"""
+    return _write_patch(tmp_path, text)
+
+
+def _register_entry(**overrides: str) -> str:
+    keys = {
+        "peripheral": '"D"',
+        "name": '"NSCR"',
+        "offset": "0x08",
+        "width": "32",
+        "reset": "0x3F",
+        "acc": '"read_write"',
+        "fields": _NEW_FIELDS,
+    } | overrides
+    return "\n".join(f"{key} = {value}" for key, value in keys.items())
+
+
+def test_registers_add_lands_in_the_peripheral_and_its_aliases(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    fields_rule = """
+[[fields]]
+instances = ["D"]
+registers = ["NSCR"]
+fields = ["LOW"]
+on_write = "one_to_clear"
+source = "probe"
+"""
+    path = _register_patch(tmp_path, _register_entry(offset="0x04"), extra=fields_rule)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.registers_added == 1
+    for name in ("D", "SEC_D"):
+        peripheral = target_peripheral(target, name)
+        assert [(r.name, r.offset) for r in peripheral.registers] == [("CR", 0), ("NSCR", 4)]
+    added = target_peripheral(target, "D").registers[1]
+    assert (added.width, added.reset, added.reset_mask, added.acc) == (
+        32,
+        0x3F,
+        0xFFFF_FFFF,
+        Access.READ_WRITE,
+    )
+    assert [(f.name, f.lsb, f.width, f.acc) for f in added.fields] == [
+        ("HIGH", 3, 3, Access.READ_WRITE),
+        ("LOW", 0, 3, Access.READ_WRITE),
+    ]
+    assert added.fields[1].on_write == WriteEffect.ONE_TO_CLEAR
+    assert target_peripheral(target, "SEC_D").registers[1].fields[1].on_write == (
+        WriteEffect.MODIFY
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "key", "reason"),
+    [
+        (
+            {"peripheral": '"Z"'},
+            "peripheral",
+            "a peripheral of the description that is not an alias",
+        ),
+        (
+            {"peripheral": '"SEC_D"'},
+            "peripheral",
+            "a peripheral of the description that is not an alias",
+        ),
+        ({"width": "24"}, "width", "8, 16 or 32"),
+        ({"offset": "0x06"}, "offset", "an offset aligned to 4 inside 0x400"),
+        ({"offset": "0x400"}, "offset", "an offset aligned to 4 inside 0x400"),
+        ({"width": "16", "offset": "0x3FE", "reset": "0x10000"}, "reset", "a value of 16 bits"),
+        ({"name": '"CR"'}, "name", "a name not used in D"),
+        ({"offset": "0x00"}, "offset", "a range clear of CR"),
+        ({"width": "8", "offset": "0x03", "reset": "0"}, "offset", "a range clear of CR"),
+        (
+            {"fields": '[{ name = "TOP", lsb = 30, width = 3 }]'},
+            "fields.TOP",
+            "bits inside the 32-bit register",
+        ),
+        (
+            {"fields": '[{ name = "A", lsb = 0, width = 3 }, { name = "B", lsb = 2, width = 2 }]'},
+            "fields.B",
+            "bits clear of the other fields",
+        ),
+        (
+            {"fields": '[{ name = "A", lsb = 0, width = 1 }, { name = "A", lsb = 4, width = 1 }]'},
+            "fields.A",
+            "each name once",
+        ),
+    ],
+)
+def test_registers_add_refuses_a_bad_register(
+    tmp_path: Path, overrides: dict[str, str], key: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    path = _register_patch(tmp_path, _register_entry(**overrides))
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.key == f"registers[0].{key}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
+def test_registers_add_refuses_two_adds_at_one_offset(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    second = f"""
+[[registers]]
+{_register_entry(name='"NSCR2"')}
+source = "probe"
+"""
+    path = _register_patch(tmp_path, _register_entry(), extra=second)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert excinfo.value.key == "registers[1].offset"
+    assert excinfo.value.expected == "a range clear of NSCR2"
+
+
+def test_registers_add_needs_a_source(tmp_path: Path) -> None:
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[[registers]]
+{_register_entry()}
+"""
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([_write_patch(tmp_path, text)], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "registers[0].source"
+    assert excinfo.value.expected == "required"
