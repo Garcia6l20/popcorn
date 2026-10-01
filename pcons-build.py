@@ -118,8 +118,8 @@ if VARIANT != "asan":
     project.Alias("stage-python", *staged_sources)
     regs_path = build_dir / "popcorn" / "arm" / "_regs.py"
     regs = project.Command(
-        "popcorn.arm._regs",
         env,
+        name="popcorn.arm._regs",
         target=regs_path,
         command=[str(build_dir / "popcorn-regs-gen"), str(regs_path)],
     )

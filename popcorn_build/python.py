@@ -64,8 +64,8 @@ def add_stub(extension: Target, package: str, name: str, after: Sequence[Target]
     project = context.current_project
     stub_path = build_dir / package / f"{name}.pyi"
     stub = project.Command(
-        f"{package}.{name}-stub",
         project.default_environment,
+        name=f"{package}.{name}-stub",
         target=stub_path,
         command=[
             interpreter,

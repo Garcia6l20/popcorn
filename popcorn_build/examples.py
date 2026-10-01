@@ -156,10 +156,7 @@ def add_example_firmware(
         script,
         prebuilt,
     )
-    target.private.compile_flags.append(
-        PathToken(prefix="-I", path=example_dir / "firmware", path_type="absolute")
-    )
-    target.private.include_dirs.extend(include_dirs)
+    target.private.include_dirs.extend([example_dir / "firmware", *include_dirs])
     target.private.defines.extend(
         [
             "STM32U575xx",
