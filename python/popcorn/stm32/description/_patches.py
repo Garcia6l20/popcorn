@@ -81,6 +81,7 @@ class PatchSignature:
     uid_words: list[int]
     packages: dict[str, int]
     source: str
+    content: list[RegionContent] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -649,6 +650,12 @@ def _apply_signature(
     code = rule.packages.get(_package_key(part))
     if code is not None:
         words.append(("package", rule.package, code.to_bytes(2, "little")))
+    for index, piece in enumerate(rule.content or []):
+        if not piece.data or any(not 0 <= byte <= 0xFF for byte in piece.data):
+            raise DescriptionError(
+                file, 0, f"signature.content[{index}].data", "bytes, at least one"
+            )
+        words.append((f"content[{index}]", piece.offset, bytes(piece.data)))
     for name, offset, data in words:
         _add_content(region, offset, data, file=file, key=f"signature.{name}")
         report.signature_words += 1

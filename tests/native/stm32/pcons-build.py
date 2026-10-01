@@ -68,6 +68,7 @@ u575_programs = [
         ("stm32-i2c", "test_i2c.cpp"),
         ("stm32-sai", "test_sai.cpp"),
         ("stm32-otg-fs", "test_otg_fs.cpp"),
+        ("stm32-adc", "test_adc.cpp"),
     )
 ]
 for program in u575_programs:

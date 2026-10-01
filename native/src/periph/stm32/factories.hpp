@@ -93,4 +93,10 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the USB OTG_FS core reset model, RM0456 section 72. */
 [[nodiscard]] auto otg_fs_factory() -> model_factory;
+
+/** @brief Factory of the ADC1 model, RM0456 section 33. */
+[[nodiscard]] auto adc_factory() -> model_factory;
+
+/** @brief Factory of the ADC12 common register model, RM0456 section 33.7. */
+[[nodiscard]] auto adc_common_factory() -> model_factory;
 }

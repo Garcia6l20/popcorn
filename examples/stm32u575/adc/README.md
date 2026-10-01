@@ -7,6 +7,11 @@ enabled until ADRDY. It converts VREFINT and the temperature sensor once each at
 them into VDDA in mV and a temperature in degrees C with `__LL_ADC_CALC_VREFANALOG_VOLTAGE` and
 `__LL_ADC_CALC_TEMPERATURE`, then converts VREFINT again at 12 bits, and reaches `measured`.
 
+popcorn's ADC1 model completes the regulator start-up, the calibration, the enable and each
+conversion at the write. It converts at VDDA = VREF+ = 3.0 V and 30 C: VREFINT reads the
+factory VREFINT_CAL word and the temperature sensor TS_CAL1, both stored in the signature page
+at datasheet typical values, so the LL macros give 3000 mV and 30 C. Other channels read 0.
+
 ## Run
 
 From the repository root:

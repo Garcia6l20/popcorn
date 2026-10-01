@@ -18,7 +18,6 @@ VREFINT_CAL = 6635
 TS_CAL1 = 4107
 
 
-@pytest.mark.xfail(strict=True, reason="adc: no ADC1 model, LDORDY never sets")
 async def test_vdda_and_temperature_at_reset_conditions(machine: Machine) -> None:
     stop = await machine.run(until="measured", for_=ms(50))
     assert stop.reason is StopReason.ADDRESS, stop

@@ -218,7 +218,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.registers_added == 5
     assert report.regions_added == 4
     assert report.controllers_set == 2
-    assert report.signature_words == 3
+    assert report.signature_words == 6
 
 
 _ARCH_WINDOWS = (0xE000_0000, 0xE000_1000, 0xE000_2000, 0xE000_E000)
@@ -332,5 +332,8 @@ def test_the_device_signature_page_holds_package_uid_and_flash_size(
     assert [(piece.offset, bytes(piece.data)) for piece in page.content or []] == [
         (0x100, bytes([0b00011, 0])),
         (0x300, bytes.fromhex("140032") + b"\x00\x01NROCPOP"),
+        (0x310, (4107).to_bytes(2, "little")),
+        (0x342, (5472).to_bytes(2, "little")),
         (0x3A0, bytes([0x00, 0x04])),
+        (0x3A5, (6635).to_bytes(2, "little")),
     ]

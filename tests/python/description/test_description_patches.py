@@ -1028,6 +1028,25 @@ def test_signature_writes_package_uid_and_flash_size_into_its_region(tmp_path: P
     assert _content(target, "OTP_S") == []
 
 
+def test_signature_content_entries_land_in_its_region_beside_the_words(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    target.db_part = _part()
+    path = _signature_patch(
+        tmp_path, content="[{ offset = 0x3A5, data = [0xEB, 0x19] }, { offset = 0x10, data = [7] }]"
+    )
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.signature_words == 5
+    assert _content(target, "OTP") == [
+        (0x10, b"\x07"),
+        (0x100, bytes.fromhex("0000")),
+        (0x300, bytes.fromhex("110000002200000033000000")),
+        (0x3A0, (1024).to_bytes(2, "little")),
+        (0x3A5, b"\xeb\x19"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("part", "code"),
     [
@@ -1083,6 +1102,26 @@ def test_signature_package_code_follows_package_dsi_and_smps(
         ({"uid": "0x3F8"}, "signature.uid", "an offset leaving 12 bytes inside OTP"),
         ({"uid": "0x0F8"}, "signature.package", "bytes clear of the content at 0xf8"),
         ({"flash_size": "0x30A"}, "signature.uid", "bytes clear of the content at 0x30a"),
+        (
+            {"content": "[{ offset = 0x200, data = [] }]"},
+            "signature.content[0].data",
+            "bytes, at least one",
+        ),
+        (
+            {"content": "[{ offset = 0x200, data = [1] }, { offset = 0x210, data = [0x100] }]"},
+            "signature.content[1].data",
+            "bytes, at least one",
+        ),
+        (
+            {"content": "[{ offset = 0x3FF, data = [1, 2] }]"},
+            "signature.content[0]",
+            "an offset leaving 2 bytes inside OTP",
+        ),
+        (
+            {"content": "[{ offset = 0x305, data = [1] }]"},
+            "signature.content[0]",
+            "bytes clear of the content at 0x300",
+        ),
     ],
 )
 def test_signature_refuses_a_bad_region_word_or_layout(
