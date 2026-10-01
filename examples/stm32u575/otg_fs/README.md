@@ -4,7 +4,9 @@ An STM32U575 application starts HSI48, selects it as the 48 MHz ICLK, powers VDD
 up the OTG_FS core in device mode with `HAL_PCD_Init`, sets the FIFO sizes and calls
 `HAL_PCD_Start`. It records both HAL status codes and reaches `usb_core_ready`.
 
-There is no USB traffic: no host attaches, nothing enumerates and the core raises no interrupt.
+popcorn models the OTG_FS core resets only: GRSTCTL.CSRST, RXFFLSH and TXFFLSH read 0 as soon
+as they are written, and AHBIDL reads 1. There is no USB traffic: no host attaches, nothing
+enumerates and the core raises no interrupt.
 
 ## Run
 

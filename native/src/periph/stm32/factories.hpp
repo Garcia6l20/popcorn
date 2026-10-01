@@ -90,4 +90,7 @@ namespace popcorn::periph::stm32
  * @param b Board whose `audio` wires each audio block, copied: the endpoints stay shared.
  */
 [[nodiscard]] auto sai_factory(board const& b) -> model_factory;
+
+/** @brief Factory of the USB OTG_FS core reset model, RM0456 section 72. */
+[[nodiscard]] auto otg_fs_factory() -> model_factory;
 }
