@@ -7,7 +7,7 @@
     "patched_fields": 217,
     "peripherals": 197,
     "regions": 14,
-    "registers": 4718
+    "registers": 4726
   },
   "part": "STM32U575QGIx",
   "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
@@ -17,6 +17,6 @@
     "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",
     "peripherals": "78b67184903f9487aa56b7dd49d1abf323984cdf70fc8b7d8e521b14e9e345a4",
     "regions": "7c7845fbdf3df917b3c3efd6f60c0f31ce8a63fa8229aa41617efa14a76cf3eb",
-    "registers": "8b6ddb5d66670e80ed12211a2156b55b80b9ee8b1b716ee9677d840ad758595e"
+    "registers": "8dfd6f3bb5fc41331ef08b372e16a534a402794a2eb12f52f982c68aa4fd7005"
   }
 }

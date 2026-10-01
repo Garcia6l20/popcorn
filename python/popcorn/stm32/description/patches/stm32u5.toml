@@ -214,6 +214,46 @@ fields = [
 ]
 source = "RM0456 rev 6, 48.7.4 RNG noise source control register (RNG_NSCR): offset 0x00C, reset 0x0003FFFF, EN_OSC1 to EN_OSC6 rw in bits 17:0, bits 31:18 reserved. ST's STM32U575 SVD omits it, and HAL_RNG_Init writes it. Plain storage: the CONDRST and CONFIGLOCK write gating is not modelled"
 
+[[registers]]
+peripheral = "OTG_FS"
+name = "GSNPSID"
+offset = 0x40
+width = 32
+reset = 0x4F54310A
+acc = "read_only"
+fields = []
+source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GSNPSID at 0x040 and GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, and HAL stm32u5xx_ll_usb.h:341-342 defines USB_OTG_CORE_ID_310A 0x4F54310A, the core ID the U5 HAL compares GSNPSID with. RM0456 rev 6 72.15 leaves 0x040 to 0x050 undocumented and ST's STM32U575 SVD omits them. Drivers read GSNPSID to pick the core revision, tinyusb's dwc2 refuses a core whose ID is not 0x4F54xxxx"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG1"
+offset = 0x44
+width = 32
+reset = 0x00000000
+acc = "read_only"
+fields = []
+source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, RM0456 rev 6 72.15 leaves them undocumented and ST's STM32U575 SVD omits them. Read as 0, no U575 reference value: on STM32, tinyusb takes the FIFO size and endpoint count from its static dwc2_stm32.h table and reads GHWCFG2 only on USB traffic"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG2"
+offset = 0x48
+width = 32
+reset = 0x00000000
+acc = "read_only"
+fields = []
+source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, RM0456 rev 6 72.15 leaves them undocumented and ST's STM32U575 SVD omits them. Read as 0, no U575 reference value: on STM32, tinyusb takes the FIFO size and endpoint count from its static dwc2_stm32.h table and reads GHWCFG2 only on USB traffic"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG3"
+offset = 0x4C
+width = 32
+reset = 0x00000000
+acc = "read_only"
+fields = []
+source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, RM0456 rev 6 72.15 leaves them undocumented and ST's STM32U575 SVD omits them. Read as 0, no U575 reference value: on STM32, tinyusb takes the FIFO size and endpoint count from its static dwc2_stm32.h table and reads GHWCFG2 only on USB traffic"
+
 
 [memory]
 source = "RM0456 rev 6, 7.3.1 Tables 51 to 53: the 512-byte OTP area at 0x0BFA0000 in the nonsecure information block, its alias at 0x0FFA0000 in the secure information block. 7.2: OTP data cannot be erased and is written once, through the flash interface, so a CPU store is refused. Each region is 1 KB, the emulator's page granularity: the 512 bytes past the OTP area read as erased instead of faulting. RM0456 rev 6, 7.3.7: flash is programmed by 32-bit stores into the main memory range while FLASH_NSCR.PG is set, and erased through FLASH_NSCR, so the FLASH interface serves stores into both flash windows. The OTP regions get no controller: OTP programming is not modelled"

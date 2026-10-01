@@ -215,7 +215,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
     assert report.core_fields_set == 1
-    assert report.registers_added == 1
+    assert report.registers_added == 5
     assert report.regions_added == 4
     assert report.controllers_set == 2
     assert report.signature_words == 3
@@ -291,6 +291,23 @@ def test_rng_has_the_nscr_register_st_svd_omits(
         assert [(f.name, f.lsb, f.width) for f in nscr.fields] == [
             (f"EN_OSC{n}", 3 * (n - 1), 3) for n in range(6, 0, -1)
         ]
+
+
+def test_otg_fs_has_the_core_id_and_hardware_configuration_words(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, _ = u575_target_and_report
+    for name in ("OTG_FS", "SEC_OTG_FS"):
+        registers = {r.name: r for r in target_peripheral(target, name).registers}
+        added = [registers[n] for n in ("GSNPSID", "GHWCFG1", "GHWCFG2", "GHWCFG3")]
+        assert [(r.offset, r.width, r.reset, r.acc, r.fields) for r in added] == [
+            (0x40, 32, 0x4F54_310A, Access.READ_ONLY, []),
+            (0x44, 32, 0, Access.READ_ONLY, []),
+            (0x48, 32, 0, Access.READ_ONLY, []),
+            (0x4C, 32, 0, Access.READ_ONLY, []),
+        ]
+        assert registers["CID"].offset == 0x3C
+        assert registers["GLPMCFG"].offset == 0x54
 
 
 def test_the_device_signature_page_holds_package_uid_and_flash_size(

@@ -10,6 +10,7 @@
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 volatile uint32_t init_status  = NOT_RUN;
 volatile uint32_t start_status = NOT_RUN;
+volatile uint32_t core_id;
 
 void SysTick_Handler(void);
 
@@ -98,6 +99,7 @@ int main(void)
   SystemClock_Config();
   MX_USB_OTG_FS_PCD_Init();
   start_status = HAL_PCD_Start(&hpcd_USB_OTG_FS);
+  core_id      = USB_OTG_FS->GSNPSID;
   usb_core_ready();
   for(;;)
   {
