@@ -180,3 +180,16 @@ def test_a_negative_for_is_a_value_error(machines: Machines) -> None:
     with pytest.raises(ValueError, match="negative"):
         asyncio.run(m.wait_for(AfterInstructions(1), for_=ms(-1)))
     assert not m.busy
+
+
+@pytest.mark.xfail(strict=True, reason="run: until at the start pc stops after 0 instructions")
+def test_a_run_from_its_until_address_goes_on_to_the_next_hit(hooked: popcorn.Machine) -> None:
+    hooked.reg.pc = hooked.sym("write_three")
+    arguments: list[int] = []
+    for _ in range(3):
+        before = hooked.instructions
+        stop = asyncio.run(hooked.run(until="writer", budget=10_000))
+        assert stop.reason is popcorn.StopReason.ADDRESS
+        assert stop.instructions > before
+        arguments.append(hooked.reg.r0)
+    assert arguments == [1, 2, 3]
