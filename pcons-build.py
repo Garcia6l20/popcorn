@@ -116,7 +116,6 @@ if VARIANT != "asan":
     for staged in staged_sources:
         staged.build_tier = "default"
     project.Alias("stage-python", *staged_sources)
-    stub = add_stub(ext, "popcorn", "_core", after=staged_sources)
     regs_path = build_dir / "popcorn" / "arm" / "_regs.py"
     regs = project.Command(
         "popcorn.arm._regs",
@@ -126,7 +125,8 @@ if VARIANT != "asan":
     )
     regs.depends(regs_gen)
     regs.build_tier = "default"
-    obs_python = obs.add_python([*staged_sources, ext])
+    obs_python = obs.add_python([*staged_sources, regs, ext])
+    stub = add_stub(ext, "popcorn", "_core", after=[*staged_sources, regs, obs_python[0]])
 
     if get_var("PCONS_BUILD_WHEEL", False):
         project.Alias(
