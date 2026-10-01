@@ -13,7 +13,7 @@ Python extension links Unicorn statically, so an installed popcorn extension is
 a combined work subject to GPL-2.0-only.
 
 Unicorn CPU emulator, popcorn fork at commit
-2a9d2c61fe90215e98c6e07c5b2727076e25e913, submodule third_party/unicorn
+c388e255f7418e1f1402cb3b35fce663be08fcbb, submodule third_party/unicorn
   https://github.com/Garcia6l20/unicorn, branch popcorn
   Upstream: https://github.com/unicorn-engine/unicorn, commit
   938efd13aeab73155f31cf707a2094c6ccaa36dd, modified as follows.
@@ -31,6 +31,18 @@ Unicorn CPU emulator, popcorn fork at commit
   - bindings/: regenerated the ARM constant files of the dotnet, go, java,
     pascal, python, ruby and zig bindings with the two new register ids.
   - tests/unit/test_arm.c: added test_arm_v8m_stack_limit_regs.
+  2026-10-01, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - include/unicorn/unicorn.h, include/uc_priv.h, uc.c,
+    qemu/accel/tcg/cputlb.c: added UC_CTL_UC_DROP_STORE and
+    uc_ctl_drop_store(), which a UC_HOOK_MEM_WRITE_PROT callback returning
+    true calls to discard the store and continue. Upstream either commits
+    the store into the read-only memory or discards it, depending on how the
+    region was mapped and written.
+  - bindings/: regenerated the unicorn_const files of the dotnet, go, java,
+    pascal, python, ruby and zig bindings with the new control id.
+  - tests/unit/test_mem.c: added test_mem_write_prot_drop_store,
+    test_mem_write_prot_handled_commits and
+    test_mem_write_prot_drop_store_scope.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.0, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.
