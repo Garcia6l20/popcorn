@@ -1,5 +1,6 @@
 #include "backup_domain.hpp"
 #include "factories.hpp"
+#include "hsi16_source.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
 
@@ -257,6 +258,7 @@ struct rcc_state
   std::array<std::uint32_t, source_count + 1> generation{};
   std::uint32_t                               pending{};
   std::uint8_t                                lsi_forced{};
+  std::uint8_t                                hsi16_held{};
 
   friend auto operator==(rcc_state const&, rcc_state const&) -> bool = default;
 };
@@ -304,9 +306,10 @@ struct timer
  *        spin stop names its loop. A write that would stop the core clock, switching off the
  *        oscillator that drives it or changing PLL1 while it drives it, is refused and logs one
  *        warning per machine life. A started IWDG keeps the LSI on until the next reset, RM0456
- *        section 11.4.16.
+ *        section 11.4.16. FLASH programming or erase keeps HSI16 on while it runs, RM0456
+ *        sections 7.3.6 and 7.3.7.
  */
-class rcc final : public dispatch_model<rcc, rcc_state>, public lsi_source
+class rcc final : public dispatch_model<rcc, rcc_state>, public lsi_source, public hsi16_source
 {
 public:
   rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options);
@@ -314,6 +317,7 @@ public:
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void force_lsi() override;
+  void hold_hsi16(bool held) override;
 
   void                            cr_written(std::uint32_t old, std::uint32_t now);
   void                            icscr1_written(std::uint32_t old, std::uint32_t now);
@@ -509,7 +513,8 @@ auto rcc::is_on(source which) const -> bool
 {
   return get(regs_, osc_[std::to_underlying(which)].on)
       != 0
-      or (which == source::lsi and state_.lsi_forced != 0);
+      or (which == source::lsi and state_.lsi_forced != 0)
+      or (which == source::hsi16 and state_.hsi16_held != 0);
 }
 
 auto rcc::pll_input(std::size_t pll) const -> source
@@ -921,6 +926,7 @@ void rcc::reset(register_file& regs, reset_kind kind)
   }
   state_.pending    = 0;
   state_.lsi_forced = 0;
+  state_.hsi16_held = 0;
   if(not is_on(source::lsi))
   {
     update(regs_, osc_[std::to_underlying(source::lsi)].ready, 0);
@@ -936,6 +942,23 @@ void rcc::force_lsi()
   if(not was and not is_ready(lsi))
   {
     start(lsi);
+  }
+}
+
+void rcc::hold_hsi16(bool held)
+{
+  auto const hsi    = source::hsi16;
+  auto const was    = is_on(hsi);
+  state_.hsi16_held = held ? 1 : 0;
+  auto const is     = is_on(hsi);
+  if(is and not was and not is_ready(hsi))
+  {
+    start(hsi);
+  }
+  else if(was and not is and (in_use() >> std::to_underlying(hsi) & 1u) == 0)
+  {
+    stop(hsi);
+    settle(true);
   }
 }
 }

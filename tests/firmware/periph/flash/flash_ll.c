@@ -42,3 +42,47 @@ int main(void)
   LOG(locked());
   DONE();
 }
+
+uint32_t words[16];
+
+void copy_words(uint32_t volatile* dst, uint32_t const* src, uint32_t count);
+void store_half(uint16_t volatile* dst, uint32_t value);
+void store_byte(uint8_t volatile* dst, uint32_t value);
+void store_double(uint32_t volatile* dst, uint32_t low, uint32_t high);
+void wait_idle(void);
+
+__attribute__((noipa)) void copy_words(uint32_t volatile* dst, uint32_t const* src, uint32_t count)
+{
+  for(uint32_t i = 0; i < count; ++i)
+  {
+    dst[i] = src[i];
+  }
+  DONE();
+}
+
+__attribute__((noipa)) void store_half(uint16_t volatile* dst, uint32_t value)
+{
+  *dst = (uint16_t)value;
+  DONE();
+}
+
+__attribute__((noipa)) void store_byte(uint8_t volatile* dst, uint32_t value)
+{
+  *dst = (uint8_t)value;
+  DONE();
+}
+
+__attribute__((noipa)) void store_double(uint32_t volatile* dst, uint32_t low, uint32_t high)
+{
+  __asm__ volatile("vmov d0, %1, %2\nvstr d0, [%0]" ::"r"(dst), "r"(low), "r"(high)
+                   : "d0", "memory");
+  DONE();
+}
+
+__attribute__((noipa)) void wait_idle(void)
+{
+  while(READ_BIT(FLASH->NSSR, FLASH_NSSR_BSY) != 0)
+  {
+  }
+  DONE();
+}

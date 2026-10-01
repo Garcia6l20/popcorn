@@ -27,7 +27,7 @@ constexpr std::array<builtin, 19> builtins{
      {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
      {"DCACHE", "STM32U5xx1_v0_0", [](board const& b) { return dcache_factory(b.caches); }},
      {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }},
-     {"flash", "v1.0.0_U5_Cube", [](board const&) { return flash_factory(); }},
+     {"flash", "v1.0.0_U5_Cube", [](board const& b) { return flash_factory(b.flash); }},
      {"GPIO", "STM32U5x_gpio_*", [](board const&) { return gpio_factory(); }, "GPIO?"},
      {"EXTI", "", [](board const&) { return exti_factory(); }},
      {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }},

@@ -3,6 +3,7 @@
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/caches.hpp>
+#include <popcorn/periph/stm32/flash.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
 
@@ -35,8 +36,11 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto pwr_factory(pwr_options options) -> model_factory;
 
-/** @brief Factory of the FLASH register model, RM0456 section 7. */
-[[nodiscard]] auto flash_factory() -> model_factory;
+/**
+ * @brief Factory of the FLASH model, RM0456 section 7.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto flash_factory(flash_options options) -> model_factory;
 
 /** @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1. */
 [[nodiscard]] auto gpio_factory() -> model_factory;

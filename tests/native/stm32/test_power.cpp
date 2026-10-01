@@ -158,7 +158,7 @@ TEST_CASE("FLASH_NSCR ignores writes while locked and clears STRT once unlocked"
   CHECK_FALSE(write(nskeyr->offset, 0x4567'0123u).has_value());
 }
 
-TEST_CASE("PWR and FLASH log what v1 does not model, once each")
+TEST_CASE("PWR logs what v1 does not model, once")
 {
   stm32_fixture                 f{u575(), "flash_ll"};
   std::vector<core::log_record> logged;
@@ -182,13 +182,6 @@ TEST_CASE("PWR and FLASH log what v1 does not model, once each")
   CHECK(logged[0].peripheral == "PWR");
   CHECK(logged[0].reg == "PWR_CR1");
   CHECK(logged[0].message.contains("stop2"));
-  write("FLASH", "FLASH_NSKEYR", 0x4567'0123u);
-  write("FLASH", "FLASH_NSKEYR", 0xcdef'89abu);
-  write("FLASH", "FLASH_NSCR", 1);
-  write("FLASH", "FLASH_NSCR", 1u << 16);
-  REQUIRE(logged.size() == 2);
-  CHECK(logged[1].peripheral == "FLASH");
-  CHECK(logged[1].message.contains("PG requested"));
 }
 
 TEST_CASE("a snapshot between the two FLASH keys restores the half-done sequence")

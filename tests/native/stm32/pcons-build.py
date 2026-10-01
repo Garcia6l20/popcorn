@@ -56,6 +56,7 @@ u575_programs = [
         ("stm32-rcc", "test_rcc.cpp"),
         ("stm32-caches", "test_caches.cpp"),
         ("stm32-power", "test_power.cpp"),
+        ("stm32-flash", "test_flash.cpp"),
         ("stm32-gpio", "test_gpio.cpp"),
         ("stm32-gpdma", "test_gpdma.cpp"),
         ("stm32-dma-routing", "test_dma_routing.cpp"),
