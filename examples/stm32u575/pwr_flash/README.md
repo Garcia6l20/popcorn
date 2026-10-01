@@ -7,7 +7,9 @@ instruction cache on. RAMCFG WSC stays 0: RM0456 Table 47 asks for no SRAM wait 
 160 MHz in range 1. Then it programs its own flash with plain register accesses, as RM0456
 sections 7.3.6 and 7.3.7 describe: unlock FLASH_NSCR, erase the last page of bank 2 with PER
 and STRT, program one quad-word with PG and four word stores, wait for BSY each time. A last
-store into flash without PG shows the PGSERR flag. The code uses LL and CMSIS only.
+store into flash without PG shows the PGSERR flag. Last, it reads the device electronic
+signature of RM0456 chapter 76 with `LL_GetFlashSize`, `LL_GetPackageType` and the
+`LL_GetUID_Word` calls. The code uses LL and CMSIS only.
 
 `[models] strict = true` makes any register access the models do not serve, and any flash wait
 state count below RM0456 Table 54 for the clock and voltage range, fail the run instead of being
@@ -27,8 +29,10 @@ uv run pytest -q examples/stm32u575/pwr_flash
   flash is part of the chip.
 - `test_pwr_flash.py`: the data page read through `machine.mem` before the erase, after it and
   after the program, the FLASH_NSSR flags through the peripheral view, the erase and program
-  times in virtual time, and a wait-state count too low for 160 MHz failing the run.
-- `firmware/main.c`: the clock sequence, then the erase, program and stray store.
+  times in virtual time, a wait-state count too low for 160 MHz failing the run, and the
+  device signature as the firmware read it.
+- `firmware/main.c`: the clock sequence, then the erase, program and stray store, then the
+  signature reads.
 
 The FLASH model holds BSY for the typical times of the STM32U575 datasheet, DS13737 Table 86:
 1.5 ms for a page erase, 118 us for a quad-word. The firmware polls BSY, so the virtual time

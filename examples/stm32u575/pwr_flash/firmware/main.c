@@ -6,6 +6,7 @@
 #include "stm32u5xx_ll_pwr.h"
 #include "stm32u5xx_ll_rcc.h"
 #include "stm32u5xx_ll_system.h"
+#include "stm32u5xx_ll_utils.h"
 
 #define UNLOCK_KEY1  0x45670123u
 #define UNLOCK_KEY2  0xCDEF89ABu
@@ -19,9 +20,10 @@
    | FLASH_NSSR_PGSERR \
    | FLASH_NSSR_OPTWERR)
 
-volatile uint32_t erase_status;
-volatile uint32_t program_status;
-volatile uint32_t stray_status;
+volatile uint32_t                erase_status;
+volatile uint32_t                program_status;
+volatile uint32_t                stray_status;
+volatile struct device_signature signature;
 
 static uint32_t const record[4] = {0xC0FFEE00u, 0x12345678u, 0x9ABCDEF0u, 0x0BADF00Du};
 
@@ -35,6 +37,9 @@ __attribute__((noipa)) void record_programmed(void)
 {}
 
 __attribute__((noipa)) void flash_done(void)
+{}
+
+__attribute__((noipa)) void signature_read(void)
 {}
 
 __attribute__((noipa)) void set_latency(uint32_t wait_states)
@@ -153,6 +158,12 @@ int main(void)
   stray_status = store_without_pg(DATA_ADDRESS + 16u);
   SET_BIT(FLASH->NSCR, FLASH_NSCR_LOCK);
   flash_done();
+  signature.flash_kb = LL_GetFlashSize();
+  signature.package  = LL_GetPackageType();
+  signature.uid[0]   = LL_GetUID_Word0();
+  signature.uid[1]   = LL_GetUID_Word1();
+  signature.uid[2]   = LL_GetUID_Word2();
+  signature_read();
   for(;;)
   {
     __WFI();
