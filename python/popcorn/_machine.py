@@ -1254,11 +1254,11 @@ class Machine:
                 `default_budget` when None.
             for_: Stop with TIME after this much virtual time. An idle core, WFI with nothing
                 due, sleeps to the deadline and stops with TIME, not IDLE. The stop lands on the
-                first boundary at or after the deadline, so `time` can pass it. While the core
-                clock rate holds, it passes by less than one instruction from an idle core, and
-                by up to one translated block, under 512 instruction times, from a core
-                executing code. The time is checked at block entry, where the whole block is
-                charged.
+                first boundary at or after the deadline, so `time` can pass it: by less than one
+                instruction from an idle core, and by up to one translated block, under 512
+                instruction times, from a core executing code. The time is checked at block
+                entry, where the whole block is charged. A store that changes the core clock
+                rate charges the rest of its block at the new rate.
             stop_when: Sync predicate evaluated at event boundaries and slice ends, never per
                 instruction. Stops with USER when it returns True. An exception it raises
                 reaches the caller with its traceback.

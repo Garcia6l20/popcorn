@@ -678,6 +678,11 @@ struct machine::run_state
   /** @brief Address of the block the engine runs, the pc MMIO callbacks see without the exact
    * pc hook, read by mmio records instead of the engine register. */
   address block_pc{};
+  /** @brief Instructions of that block, as the block hook charged them. */
+  std::uint32_t block_size{};
+  /** @brief Whether the MMIO write being served comes from the CPU through a window whose model
+   * drives the core clock, so that pc is exact. */
+  bool exact_write = false;
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
@@ -721,6 +726,9 @@ struct machine::run_state
   std::vector<std::unique_ptr<mmio_window>> windows{};
   /** @brief Memory hook making MMIO pc exact while a consumer needs it. */
   exact_pc_hook exact_pc{};
+  /** @brief Store hook over the windows of models that drive the core clock, installed for the
+   * machine's life. */
+  exact_pc_hook clock_pc{};
   /** @brief Clock value at which the block hook stops the engine. */
   icount deadline{};
   /** @brief Instructions executed in the slice. */
@@ -829,6 +837,10 @@ struct machine::run_state
   /** @brief Lowers the engine deadline to the earliest event after a model call, and ends the
    * engine run when the call changed the instruction rate. */
   void after_model(std::uint64_t instruction_hz);
+
+  /** @brief Instructions of the running block after the current one, charged to the clock but
+   * not retired yet, 0 unless an exact CPU write to a clock-driving model is being served. */
+  [[nodiscard]] auto charged_ahead() const -> std::uint64_t;
 
   /** @brief Records the first model bus error of a CPU access in the engine run. */
   void record_bus_fault(address addr, arch::memory_op op) noexcept;

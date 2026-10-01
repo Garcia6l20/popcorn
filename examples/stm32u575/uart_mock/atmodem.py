@@ -7,9 +7,9 @@ Everything runs in the test's coroutine, no host thread. A read of a stream is a
 `Machine.wait_for` on a non-address event, which stops at the first event boundary or slice
 end after the event became ready, so the machine stops a little after the command's last
 frame. The modem times its reply from that frame's own time and runs to it with
-`Machine.run(for_=)`. That time stop lands on the first boundary at or after the deadline.
-While the core clock rate holds, it is less than one instruction late while the firmware
-sleeps in WFI, and up to one translated block late while it executes code.
+`Machine.run(for_=)`. That time stop lands on the first boundary at or after the deadline:
+less than one instruction late while the firmware sleeps in WFI, and up to one translated
+block late while it executes code.
 """
 
 from collections.abc import Mapping

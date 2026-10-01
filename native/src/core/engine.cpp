@@ -50,10 +50,12 @@ void on_access(uc_struct*, uc_mem_type, std::uint64_t, int, std::int64_t, void*)
 
 void exact_pc_hook::configure(
     uc_struct*                                           engine,
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges)
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges,
+    int                                                  types)
 {
   engine_ = engine;
   ranges_ = std::move(ranges);
+  types_  = types;
 }
 
 void exact_pc_hook::acquire()
@@ -64,8 +66,7 @@ void exact_pc_hook::acquire()
     {
       uc_hook    hook = 0;
       auto const err  = uc_hook_add(
-          engine_, &hook, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, reinterpret_cast<void*>(&on_access),
-          nullptr, first, last);
+          engine_, &hook, types_, reinterpret_cast<void*>(&on_access), nullptr, first, last);
       if(err != UC_ERR_OK)
       {
         release_all();

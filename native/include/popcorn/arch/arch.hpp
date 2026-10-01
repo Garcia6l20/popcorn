@@ -371,6 +371,20 @@ public:
   [[nodiscard]] virtual auto pc() const -> address = 0;
 
   /**
+   * @brief Counts the instructions that start in [@p from, @p to), decoding code memory.
+   * @param from Address of the first instruction.
+   * @param to Address of an instruction after it.
+   * @return The count, empty when the arch cannot count or @p to is not on an instruction
+   *         boundary from @p from. The default cannot count.
+   */
+  [[nodiscard]] virtual auto
+      instructions_between([[maybe_unused]] address from, [[maybe_unused]] address to) const
+      -> std::optional<std::uint32_t>
+  {
+    return std::nullopt;
+  }
+
+  /**
    * @brief Address to start the engine at to resume at pc(), with the instruction set state the
    *        engine needs, such as the Arm Thumb bit.
    */

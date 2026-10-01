@@ -53,8 +53,12 @@ public:
    * @brief Sets the engine and the guest ranges, inclusive, the hook covers once installed.
    * @param engine Engine to hook.
    * @param ranges First and last address of each MMIO range.
+   * @param types Accesses the hook covers, loads and stores by default.
    */
-  void configure(uc_struct* engine, std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges);
+  void configure(
+      uc_struct*                                           engine,
+      std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges,
+      int types = UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE);
 
   /**
    * @brief Takes a reference, installing the hook on the first one.
@@ -81,5 +85,6 @@ private:
   std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges_{};
   std::vector<uc_hook>                                 hooks_{};
   std::uint32_t                                        users_{};
+  int                                                  types_{};
 };
 }

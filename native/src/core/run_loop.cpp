@@ -291,6 +291,7 @@ void machine::run_state::on_block(
   }
   if(not run.stepping)
   {
+    run.block_size = size;
     run.owner.clock_driver_.advance(icount{size});
   }
   if(run.spin_on) [[unlikely]]

@@ -78,6 +78,7 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
   run_->spin_on            = options_.spin_threshold != 0;
   hooks_->remover          = [run = run_.get()](std::uint64_t id) { run->remove_hook(id); };
   clock_driver_.on_rate_change([this] { scheduler_.rekey(clock_); });
+  clock_driver_.on_charged_ahead([run = run_.get()] { return run->charged_ahead(); });
   arch_ = factory(description_.core);
   if(not arch_)
   {
@@ -109,6 +110,7 @@ machine::machine(mcu_description description, arch::arch_factory factory, machin
 machine::~machine()
 {
   clock_driver_.on_rate_change({});
+  clock_driver_.on_charged_ahead({});
   hooks_->remover = nullptr;
   peripherals_.clear();
   arch_.reset();

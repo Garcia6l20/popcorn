@@ -70,6 +70,18 @@ public:
   [[nodiscard]] virtual auto claims() const -> std::vector<std::string> = 0;
 
   /**
+   * @brief Whether a CPU write to this model can change the core clock rate. The machine then
+   *        makes the pc of the CPU writes to its registers exact, at the cost of a memory hook
+   *        on them, so that a rate change charges the rest of its translated block at the new
+   *        rate.
+   * @return False by default.
+   */
+  [[nodiscard]] virtual auto drives_core_clock() const noexcept -> bool
+  {
+    return false;
+  }
+
+  /**
    * @brief Brings the model to its reset state and pokes the reset values of its claimed
    *        registers.
    * @param regs Storage of the peripheral.

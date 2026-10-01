@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <exception>
+#include <initializer_list>
 #include <optional>
 #include <ranges>
 #include <string>
@@ -490,4 +491,28 @@ TEST_CASE("VTOR reads bits 6:0 clear and a write drops the unaligned reset table
   CHECK(f.reg("r6") == 0);
   CHECK(f.reg("pc") == handler2 + 4);
   CHECK(f.word(vtor) == table_b);
+}
+
+TEST_CASE("instructions_between counts Thumb instructions of 16 and 32 bits")
+{
+  arch_fixture      f{m33(), "scs", {}};
+  constexpr address at = 0x2008'0000;
+  for(auto const& [offset, half] : std::initializer_list<std::pair<address, std::uint32_t>>{
+          {0, 0xbf00},
+          {2, 0xf3af},
+          {4, 0x8000},
+          {6, 0xbf00},
+          {8, 0xe7fe}
+  })
+  {
+    REQUIRE(f.target->mem().write(at + offset, 2, half));
+  }
+  CHECK(f.module->instructions_between(at, at) == 0u);
+  CHECK(f.module->instructions_between(at, at + 2) == 1u);
+  CHECK(f.module->instructions_between(at, at + 6) == 2u);
+  CHECK(f.module->instructions_between(at, at + 8) == 3u);
+  CHECK_FALSE(f.module->instructions_between(at, at + 4).has_value());
+  CHECK_FALSE(f.module->instructions_between(at + 2, at).has_value());
+  CHECK_FALSE(f.module->instructions_between(at, at + 3).has_value());
+  CHECK_FALSE(f.module->instructions_between(0xF000'0000, 0xF000'0004).has_value());
 }

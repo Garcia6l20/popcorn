@@ -38,8 +38,11 @@ clock::~clock() = default;
 
 void clock::start_epoch()
 {
-  state_.epoch_time   = time();
-  state_.epoch_icount = state_.now;
+  auto const elapsed = state_.now.value - state_.epoch_icount.value;
+  auto const ahead   = charged_ahead_ ? std::min(charged_ahead_(), elapsed) : 0;
+  state_.epoch_time =
+      vtime{state_.epoch_time.ps + vtime_from_instructions(elapsed - ahead, instruction_hz()).ps};
+  state_.epoch_icount = icount{state_.now.value - ahead};
 }
 
 void clock::set_core_hz(std::uint64_t hz)
@@ -101,6 +104,11 @@ void clock_driver::restore(clock_state const& saved)
 void clock_driver::on_rate_change(std::function<void()> hook)
 {
   clock_.on_epoch_ = std::move(hook);
+}
+
+void clock_driver::on_charged_ahead(std::function<std::uint64_t()> ahead)
+{
+  clock_.charged_ahead_ = std::move(ahead);
 }
 
 scheduler::~scheduler() = default;

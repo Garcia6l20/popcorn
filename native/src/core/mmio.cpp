@@ -149,6 +149,19 @@ void machine::run_state::map_peripherals()
     }
   }
   exact_pc.configure(engine, std::move(ranges));
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> clock_ranges;
+  for(auto const& window : windows)
+  {
+    if(window->slot->model and window->slot->model->drives_core_clock())
+    {
+      clock_ranges.emplace_back(window->base, std::uint64_t{window->base} + window->size - 1);
+    }
+  }
+  if(not clock_ranges.empty())
+  {
+    clock_pc.configure(engine, std::move(clock_ranges), UC_HOOK_MEM_WRITE);
+    clock_pc.acquire();
+  }
 }
 
 auto machine::run_state::window_at(address addr, std::uint8_t size) const noexcept -> mmio_window*
@@ -240,9 +253,11 @@ auto machine::run_state::dispatch_write(
     std::expected<void, bus_error> done{};
     {
       handler_scope const scope{in_handler};
-      done = slot.model->on_write(
+      exact_write = by == initiator::cpu and slot.model->drives_core_clock();
+      done        = slot.model->on_write(
           slot.regs, offset, size, old, value & size_mask(size),
           {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = window.secure});
+      exact_write = false;
     }
     after_model(hz);
     if(done)
@@ -303,6 +318,20 @@ void machine::run_state::after_model(std::uint64_t instruction_hz)
   {
     stop_flag = true;
   }
+}
+
+auto machine::run_state::charged_ahead() const -> std::uint64_t
+{
+  if(not exact_write or stepping)
+  {
+    return 0;
+  }
+  auto const before = arch->instructions_between(block_pc, arch->pc());
+  if(not before or *before >= block_size)
+  {
+    return 0;
+  }
+  return block_size - *before - 1;
 }
 
 void machine::run_state::record_bus_fault(address addr, arch::memory_op op) noexcept

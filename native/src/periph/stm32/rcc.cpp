@@ -314,8 +314,12 @@ class rcc final : public dispatch_model<rcc, rcc_state>, public lsi_source, publ
 public:
   rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options);
 
-  void reset(register_file& regs, reset_kind kind) override;
-  void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void               reset(register_file& regs, reset_kind kind) override;
+  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
+  [[nodiscard]] auto drives_core_clock() const noexcept -> bool override
+  {
+    return true;
+  }
   void force_lsi() override;
   void hold_hsi16(bool held) override;
 

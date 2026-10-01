@@ -116,6 +116,17 @@ NOP = bytes.fromhex("00bf")
 HERE = bytes.fromhex("fee7")
 
 
+NOP_W = bytes.fromhex("aff30080")
+
+
+def on_main(u575: popcorn.MachineDescription) -> popcorn.Machine:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF))
+    m.reset()
+    assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS
+    m.mem.write(CODE + 0x1000, HERE)
+    return m
+
+
 def period_ps(m: popcorn.Machine) -> int:
     m.reg.pc = CODE + 0x1000
     start = m.time
@@ -123,25 +134,48 @@ def period_ps(m: popcorn.Machine) -> int:
     return (m.time - start).ps // 100
 
 
-@pytest.mark.xfail(strict=True, reason="clock: the block of a rate change runs at the old rate")
-@pytest.mark.parametrize("nops", [0, 100, 400])
+@pytest.mark.parametrize(("wide", "nops"), [(0, 0), (0, 100), (0, 400), (5, 10)])
 def test_the_rest_of_a_block_runs_at_the_rate_its_store_set(
-    u575: popcorn.MachineDescription, nops: int
+    u575: popcorn.MachineDescription, wide: int, nops: int
 ) -> None:
-    m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF))
-    m.reset()
-    assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS
-    m.mem.write(CODE + 0x1000, HERE)
+    m = on_main(u575)
     old = period_ps(m)
-    m.mem.write(CODE, STORE + NOP * nops + HERE)
+    m.mem.write(CODE, NOP_W * wide + STORE + NOP * nops + HERE)
     m.reg.r0 = RCC_CFGR2
     m.reg.r1 = m.mem.u32[RCC_CFGR2] | HPRE_DIV512
     m.reg.pc = CODE
     start, counted = m.time, m.instructions
-    assert asyncio.run(m.run(budget=nops + 1)).reason is StopReason.BUDGET
+    assert asyncio.run(m.run(budget=wide + nops + 1)).reason is StopReason.BUDGET
     assert m.periph.RCC.RCC_CFGR2.HPRE == HPRE_DIV512
-    after_store = m.instructions - counted - 1
+    after_store = m.instructions - counted - wide - 1
     elapsed = (m.time - start).ps
     new = period_ps(m)
     assert new > 500 * old
-    assert abs(elapsed - (old + new * after_store)) <= after_store + 1
+    assert abs(elapsed - ((wide + 1) * old + new * after_store)) <= after_store + 1
+
+
+def test_a_stepped_store_and_a_debugger_write_charge_no_block_ahead(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = on_main(u575)
+    old = period_ps(m)
+    m.mem.write(CODE, STORE + NOP * 20 + HERE)
+    m.reg.r0 = CODE + 0x2000
+    m.reg.pc = CODE
+    assert asyncio.run(m.run(budget=22)).reason is StopReason.BUDGET
+    cfgr2 = m.mem.u32[RCC_CFGR2]
+    m.reg.r0 = RCC_CFGR2
+    m.reg.r1 = cfgr2 | HPRE_DIV512
+    m.reg.pc = CODE
+    start = m.time
+    asyncio.run(m.step())
+    assert (m.time - start).ps == old
+    assert m.periph.RCC.RCC_CFGR2.HPRE == HPRE_DIV512
+    m.reg.r0 = CODE + 0x2000
+    m.reg.pc = CODE
+    assert asyncio.run(m.run(budget=22)).reason is StopReason.BUDGET
+    assert m.pc == CODE + len(STORE + NOP * 20)
+    start = m.time
+    m.mem.u32[RCC_CFGR2] = cfgr2
+    assert m.time == start
+    assert period_ps(m) == old

@@ -343,6 +343,32 @@ auto cortex_m::pc() const -> address
            : at;
 }
 
+auto cortex_m::instructions_between(address from, address to) const -> std::optional<std::uint32_t>
+{
+  if(to < from or (to - from) % 2 != 0)
+  {
+    return std::nullopt;
+  }
+  std::vector<std::uint16_t> code((to - from) / 2);
+  if(not code.empty()
+     and not context_->services.read_block(
+         from, std::as_writable_bytes(std::span{code}), initiator::debugger))
+  {
+    return std::nullopt;
+  }
+  std::uint32_t count = 0;
+  std::size_t   at    = 0;
+  for(; at < code.size(); ++count)
+  {
+    at += (code[at] >> 11) >= 0b11101u ? 2 : 1;
+  }
+  if(at != code.size())
+  {
+    return std::nullopt;
+  }
+  return count;
+}
+
 auto cortex_m::resume_address() const -> address
 {
   return pc() | 1u;
