@@ -687,3 +687,28 @@ def test_strict_peripherals_stays_the_machines_own_across_a_loaded_snapshot(
     m = machine({"TIMER": Picky}, strict_peripherals=strict)
     m.restore(popcorn.Snapshot.load(saved))
     assert picky_of(m).strict_peripherals is strict
+
+
+_CONTEXT = ("r0", "r1", "r2", "r3", "r4", "r12", "sp", "lr", "pc", "xpsr")
+
+
+def context_of(m: popcorn.Machine) -> dict[str, int]:
+    return {name: int(getattr(m.reg, name)) for name in _CONTEXT}
+
+
+@pytest.mark.parametrize(
+    ("models", "fn"),
+    [({"TIMER": Picky}, "write_timer_cr"), ({}, "touch_unmodelled")],
+)
+def test_a_model_error_inside_a_call_restores_the_interrupted_context(
+    models: Mapping[str, Callable[[], Model]], fn: str
+) -> None:
+    m = machine(models, strict_peripherals=True)
+    before = context_of(m)
+    with pytest.raises(popcorn.ModelError):
+        asyncio.run(m.call(fn, *([5] if fn == "write_timer_cr" else []), budget=10_000))
+    assert context_of(m) == before
+    assert not m.busy
+    stop = asyncio.run(m.step())
+    assert stop.reason is popcorn.StopReason.BUDGET
+    assert m.pc != before["pc"]

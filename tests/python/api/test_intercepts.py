@@ -195,3 +195,14 @@ def test_the_log_pairs_recursive_returns_innermost_first(hooked: popcorn.Machine
 def test_the_strlen_stub_counts_raw_bytes(hooked: popcorn.Machine) -> None:
     hooked.stub_libc()
     assert call(hooked, "use_strlen_ff").value == 4
+
+
+def test_a_handler_error_inside_a_call_restores_the_interrupted_context(
+    hooked: popcorn.Machine,
+) -> None:
+    names = ("r0", "r1", "r2", "r3", "r12", "sp", "lr", "pc", "xpsr")
+    before = {name: int(getattr(hooked.reg, name)) for name in names}
+    hooked.intercept("note", failing_handler)
+    with pytest.raises(LookupError, match="handler failed"):
+        call(hooked, "note_then_fault")
+    assert {name: int(getattr(hooked.reg, name)) for name in names} == before

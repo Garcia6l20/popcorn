@@ -771,6 +771,13 @@ class Machine:
         double unless `popcorn.f32(v)`, and `returns` names the result kind, I32 by default. An
         arena block or a variable passes its address. A struct by value is refused.
 
+        When the call ends, the interrupted context comes back: the registers and the whole core
+        state, the System Control Space included, so NVIC enables and priorities, SCB, SysTick,
+        MPU, DWT and ITM writes the call made are reverted. Interrupts that became pending
+        during the call stay pending. Memory and the device peripherals' registers keep the
+        call's writes. An exception that ends the call, a ModelError or one a handler raised,
+        restores the same as a return, and the machine runs on from where it was.
+
         Args:
             fn: Function address, symbol or name.
             args: Arguments in declaration order.
@@ -797,6 +804,8 @@ class Machine:
             SymbolError: `fn` names no symbol.
             NotImplementedError: A parameter is a struct passed by value.
             MachineBusy: A run, step, wait or call is active.
+            ModelError: A model failed during the call, or the call touched an unmodelled
+                register under strict_peripherals.
         """
         entry = self.address_of(fn)
         signature = self._signature(fn, entry)

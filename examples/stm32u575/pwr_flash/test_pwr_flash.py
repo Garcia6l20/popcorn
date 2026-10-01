@@ -87,12 +87,16 @@ async def test_a_store_without_pg_sets_pgserr_and_leaves_flash_unchanged(
 
 
 async def test_too_few_wait_states_at_160_mhz_fail_a_strict_run(machine: Machine) -> None:
-    """The machine is not used after the ModelError: the failed call leaves it mid-run."""
+    """The ModelError ends the call with the interrupted context restored, as a return does. The
+    store that raised it stays: FLASH_ACR.LATENCY reads 1 afterwards."""
     await run_to(machine, "flash_done")
     assert machine.periph.FLASH.FLASH_ACR.LATENCY == 4
+    pc, sp = machine.pc, machine.reg.sp
 
     with pytest.raises(ModelError, match="FLASH"):
         await machine.call("set_latency", 1, budget=1_000)
+    assert (machine.pc, machine.reg.sp) == (pc, sp)
+    assert machine.periph.FLASH.FLASH_ACR.LATENCY == 1
 
 
 async def test_the_firmware_reads_the_device_signature(machine: Machine) -> None:
