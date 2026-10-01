@@ -348,6 +348,30 @@ public:
       attach_uart(std::string const& peripheral) -> uart_link;
 
   /**
+   * @brief Names of the peripherals whose model is a built-in SAI, in description order.
+   */
+  [[= py::doc{"Names of the peripherals whose model is a built-in SAI."}]] [[nodiscard]] auto
+      audio_names() const -> std::vector<std::string>;
+
+  /**
+   * @brief Connects an SAI audio block of the machine to Python, replacing its attachment.
+   * @param peripheral SAI instance name.
+   * @param block Audio block, `A` or `B`.
+   * @param decimation Frame time multiplier, 1 for the configured rate.
+   * @param external_frame_hz Frame rate of an external clock master, 0 for none.
+   * @throws config_error when the description has no such peripheral or @p block is neither
+   *         `A` nor `B`.
+   * @throws model_error when the peripheral's model is not a built-in SAI.
+   */
+  [[= py::doc{
+      "Connect an SAI audio block to Python, replacing its attachment."}]] [[nodiscard]] auto
+      attach_audio(
+          std::string const& peripheral,
+          std::string const& block,
+          std::uint32_t      decimation,
+          std::uint32_t      external_frame_hz) -> audio_link;
+
+  /**
    * @brief Drives a GPIO pin from outside the MCU, or releases it.
    * @param peripheral GPIO port name.
    * @param pin Pin number, 0 to 15.

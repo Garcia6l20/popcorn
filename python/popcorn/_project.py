@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 from popcorn import _core
+from popcorn._audio import AudioOptions, Block
 from popcorn._description import MachineDescription, load_description
 from popcorn._devices import ParamError, check_address, project_params
 from popcorn._enums import StopReason
@@ -249,6 +250,31 @@ class Project:
                 hse_hz=defaults.hse_hz if clocks.hse_hz is None else clocks.hse_hz,
                 lse_hz=defaults.lse_hz if clocks.lse_hz is None else clocks.lse_hz,
             )
+        ips = {p.name: p.ip for p in description.peripherals}
+        audio: dict[str, dict[Block, AudioOptions]] = {}
+        for name, entry in file.board.items():
+            blocks: tuple[tuple[Block, _core.AudioBlockEntry | None], ...] = (
+                ("A", entry.a),
+                ("B", entry.b),
+            )
+            for letter, block in blocks:
+                if block is None:
+                    continue
+                if entry.model is not None or ips.get(name) != "SAI":
+                    raise self._error(
+                        f"board.{name}.{letter}", "an audio block of an SAI with the built-in model"
+                    )
+                defaults = AudioOptions()
+                audio.setdefault(name, {})[letter] = AudioOptions(
+                    decimation=(
+                        defaults.decimation if block.decimation is None else block.decimation
+                    ),
+                    external_frame_hz=(
+                        defaults.external_frame_hz
+                        if block.external_frame_hz is None
+                        else block.external_frame_hz
+                    ),
+                )
         m = Machine(
             description,
             image=self.images(),
@@ -264,6 +290,7 @@ class Project:
             models=models,
             devices=devices,
             rcc=rcc,
+            audio=audio,
         )
         for name, entry in self.board().items():
             if entry.connect is None:

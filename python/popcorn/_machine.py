@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast, overload, runtime_checkable
 
 from popcorn import _core
 from popcorn._arena import Arena
+from popcorn._audio import AudioOptions, AudioPorts, Block
 from popcorn._call import (
     F32,
     I32_SLOT,
@@ -304,6 +305,7 @@ class Machine:
     __slots__ = (
         "__weakref__",
         "_arena",
+        "_audio",
         "_background",
         "_board",
         "_busy",
@@ -355,6 +357,7 @@ class Machine:
             Mapping[str, Sequence[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget]] | None
         ) = None,
         rcc: RccOptions | None = None,
+        audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -382,6 +385,9 @@ class Machine:
                 model of the peripheral serves them. A device serves one live machine at a time.
             rcc: Clock sources the board gives the built-in RCC model, None for its defaults,
                 a 16 MHz HSE and a 32.768 kHz LSE.
+            audio: Options of SAI audio blocks by SAI instance and block, such as
+                `{"SAI1": {"A": AudioOptions(decimation=4)}}`. An alias, such as `SEC_SAI1`,
+                names the SAI serving it. Blocks not listed get `AudioOptions()`.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
@@ -390,6 +396,9 @@ class Machine:
                 a chip select pin the description lacks, a device already serving a live
                 machine or listed twice. With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz
                 or above 1 MHz, an RCC with a Python model or one no built-in model serves.
+                With `audio`: a key that is not an SAI with the built-in model, two keys naming
+                one SAI, a block other than A or B, a decimation below 1 or a negative frame
+                rate, named as `audio.<SAI>.<block>`.
             ImageError: An image does not fit the memory map.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
@@ -429,13 +438,27 @@ class Machine:
             self._wait_until,
             self._require_owner,
         )
+        aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
+        sais = self._handle.audio_names()
+        self._audio = AudioPorts(
+            self._handle.attach_audio,
+            sais,
+            aliases,
+            _checked_audio(audio or {}, sais, aliases),
+            self._wait_until,
+            self._require_owner,
+        )
         self._devices = attached
         for targets in attached.values():
             for target in targets:
                 attach(target, self)
         self._board = Board(self._ports, attached)
         access = ViewAccess(
-            self._handle, self._require_stopped, self._ports.stream, self._require_owner
+            self._handle,
+            self._require_stopped,
+            self._ports.stream,
+            self._require_owner,
+            self._audio.stream,
         )
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
@@ -1123,7 +1146,9 @@ class Machine:
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
-        restore. Bytes already in the UART's receiver return to the snapshot's state.
+        restore. Bytes already in the UART's receiver return to the snapshot's state. SAI
+        frames not read yet and words written to a receiving block and not served yet are
+        dropped, and each `AudioStream.dropped` restarts at 0.
         """
         self._require_idle()
         machine_id = snapshot.machine_id
@@ -1138,6 +1163,7 @@ class Machine:
         self._handle.restore(snapshot.native)
         self._last_stop = None
         self._ports.discard()
+        self._audio.discard()
         if self._arena is not None:
             self._arena.reset(snapshot.arena_offset)
 
@@ -1450,6 +1476,50 @@ type AttachedDevice = I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget
 """A device `Machine(devices=)` takes, of `popcorn.board` or `popcorn.devices`."""
 
 _BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI"}
+
+
+def _is_u32(value: object, lowest: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and lowest <= value < 1 << 32
+
+
+def _checked_audio(
+    audio: Mapping[str, Mapping[Block, AudioOptions]],
+    sais: Sequence[str],
+    aliases: Mapping[str, str],
+) -> dict[str, dict[Block, AudioOptions]]:
+    """`audio` keyed by the SAI serving each key, checked against the built-in SAIs `sais`."""
+    checked: dict[str, dict[Block, AudioOptions]] = {}
+    for key, blocks in audio.items():
+        name = aliases.get(key, key)
+        if name not in sais:
+            raise ConfigError(
+                f"audio.{key}: an SAI with the built-in model, one of {', '.join(sais) or 'none'}",
+                key=f"audio.{key}",
+                expected="an SAI with the built-in model",
+            )
+        if name in checked:
+            raise ConfigError(
+                f"audio.{key}: {name} is listed twice, once through an alias",
+                key=f"audio.{key}",
+                expected="each SAI once",
+            )
+        checked[name] = {}
+        for block, options in blocks.items():
+            at = f"audio.{key}.{block}"
+            if block not in ("A", "B"):
+                raise ConfigError(f"{at}: an audio block A or B", key=at, expected="A or B")
+            for field, value, lowest in (
+                ("decimation", options.decimation, 1),
+                ("external_frame_hz", options.external_frame_hz, 0),
+            ):
+                if not _is_u32(value, lowest):
+                    raise ConfigError(
+                        f"{at}.{field}: an int from {lowest} to 2**32 - 1, not {value!r}",
+                        key=f"{at}.{field}",
+                        expected=f"an int from {lowest} to 2**32 - 1",
+                    )
+            checked[name][block] = options
+    return checked
 
 
 def _checked_devices(

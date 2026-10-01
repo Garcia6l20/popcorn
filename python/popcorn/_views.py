@@ -5,13 +5,14 @@ from __future__ import annotations
 import enum
 import struct
 from collections.abc import Callable, Iterator, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._enums import PinMode
 from popcorn._errors import ConfigError, EmulationError
 
 if TYPE_CHECKING:
+    from popcorn._audio import AudioStream
     from popcorn._description import MachineDescription
     from popcorn._streams import UartStream
 
@@ -20,7 +21,7 @@ class ViewAccess:
     """What a view needs from its machine: the native handle, the running check, the check
     that a board stimulus comes from the machine's thread, and its UART streams."""
 
-    __slots__ = ("check", "handle", "ports", "stimulus")
+    __slots__ = ("audio", "check", "handle", "ports", "stimulus")
 
     def __init__(
         self,
@@ -28,11 +29,13 @@ class ViewAccess:
         check: Callable[[], None],
         ports: Callable[[str], UartStream] | None = None,
         stimulus: Callable[[], None] = lambda: None,
+        audio: Callable[[str, str], AudioStream] | None = None,
     ) -> None:
         self.handle = handle
         self.check = check
         self.ports = ports
         self.stimulus = stimulus
+        self.audio = audio
 
 
 class ScalarView[T: (int, float)]:
@@ -295,6 +298,18 @@ class PeripheralView:
         if self._access.ports is None:
             raise AttributeError(f"{self._name} has no port in this machine")
         return self._access.ports(self._name)
+
+    def audio(self, block: Literal["A", "B"]) -> AudioStream:
+        """The far end of audio block `block` of this SAI, connected at machine build.
+
+        Raises:
+            AttributeError: The machine has no audio streams.
+            ModelError: The peripheral's model is not the built-in SAI.
+            ConfigError: `block` is neither "A" nor "B".
+        """
+        if self._access.audio is None:
+            raise AttributeError(f"{self._name} has no audio blocks in this machine")
+        return self._access.audio(self._name, block)
 
     def pin(self, number: int) -> Pin:
         """Pin `number` of this GPIO port.

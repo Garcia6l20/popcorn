@@ -1,8 +1,9 @@
-"""What is wired to the MCU: UART streams, host ptys, GPIO pins, the NVIC, I2C and SPI devices,
-and the clock sources of the RCC."""
+"""What is wired to the MCU: UART streams, SAI audio streams, host ptys, GPIO pins, the NVIC,
+I2C and SPI devices, and the clock sources of the RCC."""
 
 from __future__ import annotations
 
+from popcorn._audio import AudioFrame, AudioOptions, AudioStream
 from popcorn._devices import I2CTarget, SpiTarget
 from popcorn._enums import PinMode
 from popcorn._nvic import Irqs, Nvic
@@ -11,6 +12,9 @@ from popcorn._streams import Board, Frame, UartStream
 from popcorn._views import Pin
 
 __all__ = [
+    "AudioFrame",
+    "AudioOptions",
+    "AudioStream",
     "Board",
     "Frame",
     "I2CTarget",

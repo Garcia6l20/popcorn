@@ -2,6 +2,7 @@
 
 #include <popcorn/core/types.hpp>
 
+#include <reflex/serde/annotations.hpp>
 #include <reflex/serde/toml_value.hpp>
 
 #include <cstdint>
@@ -120,6 +121,15 @@ struct device_entry
   [[= extra_keys]] std::map<std::string, reflex::serde::toml::value> params{};
 };
 
+/** @brief `[board.<SAI>.A]` or `[board.<SAI>.B]`: the attachment of one audio block. */
+struct audio_block_entry
+{
+  /** @brief Frame time multiplier, at least 1. */
+  std::optional<std::uint32_t> decimation{};
+  /** @brief Frame rate in Hz of the external clock master of a slave block, 0 for none. */
+  std::optional<std::uint32_t> external_frame_hz{};
+};
+
 /** @brief `[board.<periph>]`. */
 struct board_entry
 {
@@ -133,6 +143,10 @@ struct board_entry
   std::optional<std::uint64_t> hse_hz{};
   /** @brief LSE frequency in Hz the board gives the RCC model, `[board.RCC]` only. */
   std::optional<std::uint64_t> lse_hz{};
+  /** @brief Audio block A of an SAI with the built-in model, `[board.<SAI>.A]`. */
+  [[= reflex::serde::rename{"A"}]] std::optional<audio_block_entry> a{};
+  /** @brief Audio block B of an SAI with the built-in model, `[board.<SAI>.B]`. */
+  [[= reflex::serde::rename{"B"}]] std::optional<audio_block_entry> b{};
   /** @brief Every other key, the model's constructor keyword arguments. */
   [[= extra_keys]] std::map<std::string, reflex::serde::toml::value> params{};
 };

@@ -82,6 +82,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::config::boot_section>("BootSection");
   m.bind<popcorn::config::clock_section>("ClockSection");
   m.bind<popcorn::config::device_entry>("DeviceEntry");
+  m.bind<popcorn::config::audio_block_entry>("AudioBlockEntry");
   m.bind<popcorn::config::board_entry>("BoardEntry");
   m.bind<popcorn::config::models_section>("ModelsSection");
   m.bind<popcorn::config::project_file>("ProjectFile");

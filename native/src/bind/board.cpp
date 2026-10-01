@@ -71,6 +71,184 @@ void uart_link::set_frame_limit(std::uint64_t limit)
   }
 }
 
+namespace detail
+{
+void audio_queue_endpoint::transmitted(
+    std::span<std::uint32_t const> slots,
+    periph::stm32::audio_format    format,
+    vtime                          at)
+{
+  while(starts.size() >= limit)
+  {
+    pop_front();
+    ++dropped;
+  }
+  auto const count = static_cast<std::uint8_t>(slots.size());
+  if(runs.empty() or runs.back().format != format or runs.back().slots != count)
+  {
+    runs.push_back({.format = format, .slots = count, .frames = 0});
+  }
+  ++runs.back().frames;
+  words.insert(words.end(), slots.begin(), slots.end());
+  starts.push_back(at.ps);
+}
+
+void audio_queue_endpoint::receive(
+    std::span<std::uint32_t> slots,
+    periph::stm32::audio_format,
+    vtime)
+{
+  for(auto& slot : slots)
+  {
+    if(pending.empty())
+    {
+      slot = 0;
+      continue;
+    }
+    slot = pending.front();
+    pending.pop_front();
+  }
+}
+
+void audio_queue_endpoint::pop_front()
+{
+  auto& run = runs.front();
+  words.erase(words.begin(), words.begin() + run.slots);
+  starts.pop_front();
+  if(--run.frames == 0)
+  {
+    runs.pop_front();
+  }
+}
+
+auto audio_queue_endpoint::take(std::uint64_t count) -> std::vector<audio_record>
+{
+  std::vector<audio_record> out;
+  out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(count, starts.size())));
+  while(out.size() < count and not starts.empty())
+  {
+    auto const& run = runs.front();
+    out.push_back({
+        .slots        = {words.begin(), words.begin() + run.slots},
+        .data_bits    = run.format.data_bits,
+        .active_slots = run.format.active_slots,
+        .mono         = run.format.mono,
+        .at_ps        = starts.front(),
+    });
+    pop_front();
+  }
+  return out;
+}
+}
+
+audio_link::audio_link(
+    periph::stm32::audio_port&  port,
+    periph::stm32::audio_block  block,
+    std::uint32_t               decimation,
+    std::uint32_t               external_frame_hz,
+    std::shared_ptr<bool const> alive)
+    : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, alive_{std::move(alive)}
+{
+  port.attach(
+      block,
+      {.endpoint = endpoint_, .decimation = decimation, .external_frame_hz = external_frame_hz});
+}
+
+auto audio_link::endpoint() const -> detail::audio_queue_endpoint&
+{
+  if(not *alive_)
+  {
+    throw config_error("audio", 0, "machine", "an SAI whose machine still exists");
+  }
+  return *endpoint_;
+}
+
+auto audio_link::available() const -> std::uint64_t
+{
+  return endpoint().starts.size();
+}
+
+auto audio_link::dropped() const -> std::uint64_t
+{
+  return endpoint().dropped;
+}
+
+auto audio_link::queued() const -> std::uint64_t
+{
+  return endpoint().pending.size();
+}
+
+auto audio_link::drain(std::uint64_t count) -> std::vector<audio_record>
+{
+  return endpoint().take(count);
+}
+
+void audio_link::write(std::vector<std::uint32_t> const& words)
+{
+  auto& queue = endpoint();
+  queue.pending.insert(queue.pending.end(), words.begin(), words.end());
+}
+
+void audio_link::discard()
+{
+  auto& queue = endpoint();
+  queue.words.clear();
+  queue.starts.clear();
+  queue.runs.clear();
+  queue.pending.clear();
+  queue.dropped = 0;
+}
+
+void audio_link::set_frame_limit(std::uint64_t limit)
+{
+  if(limit == 0)
+  {
+    throw config_error("audio", 0, "limit", "a frame limit of at least 1");
+  }
+  auto& queue = endpoint();
+  queue.limit = limit;
+  while(queue.starts.size() > limit)
+  {
+    queue.pop_front();
+    ++queue.dropped;
+  }
+}
+
+auto machine_handle::audio_names() const -> std::vector<std::string>
+{
+  std::vector<std::string> names;
+  for(auto const& unit : machine_->description().peripherals)
+  {
+    if(not unit.alias_of
+       and dynamic_cast<periph::stm32::audio_port*>(machine_->model(unit.name))
+       != nullptr)
+    {
+      names.push_back(unit.name);
+    }
+  }
+  return names;
+}
+
+auto machine_handle::attach_audio(
+    std::string const& peripheral,
+    std::string const& block,
+    std::uint32_t      decimation,
+    std::uint32_t      external_frame_hz) -> audio_link
+{
+  auto* const port = dynamic_cast<periph::stm32::audio_port*>(machine_->model(peripheral));
+  if(port == nullptr)
+  {
+    throw model_error(peripheral, "", 0);
+  }
+  if(block != "A" and block != "B")
+  {
+    throw config_error(peripheral, 0, "block", std::format("an audio block A or B, not {}", block));
+  }
+  return audio_link{
+      *port, block == "A" ? periph::stm32::audio_block::a : periph::stm32::audio_block::b,
+      decimation, external_frame_hz, alive_};
+}
+
 auto machine_handle::uart_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;

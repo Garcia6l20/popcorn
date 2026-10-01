@@ -346,13 +346,27 @@ template <typename T> consteval auto extra_member() -> std::meta::info
   return std::meta::info{};
 }
 
+consteval auto key_name(std::meta::info member) -> std::string_view
+{
+  for(auto const note : std::meta::annotations_of(member))
+  {
+    if(std::meta::remove_cv(std::meta::type_of(note)) == ^^reflex::serde::rename)
+    {
+      return std::define_static_string(*std::meta::extract<reflex::serde::rename>(note));
+    }
+  }
+  return std::meta::identifier_of(member);
+}
+
+template <std::meta::info Member> constexpr std::string_view key_of = key_name(Member);
+
 template <typename T> auto key_names() -> std::string
 {
   std::string names;
   template for(constexpr auto member : decoded_members<T>())
   {
     names += names.empty() ? "" : ", ";
-    names += std::meta::identifier_of(member);
+    names += key_of<member>;
   }
   return names;
 }
@@ -370,7 +384,7 @@ auto decode_table(toml::value const& value, std::string const& path, context con
   template for(constexpr auto member : decoded_members<T>())
   {
     using member_type               = typename[:std::meta::type_of(member):];
-    constexpr std::string_view name = std::meta::identifier_of(member);
+    constexpr std::string_view name = key_of<member>;
     auto const                 key  = join(path, name);
     if(auto const found = table.find(std::string{name}); found != table.end())
     {
@@ -656,13 +670,23 @@ void check_values(project_file const& file, context const& ctx)
           std::format("board.{}.lse_hz", name),
           std::format("an LSE frequency above 0 Hz and at most 1 MHz, not {} Hz", *entry.lse_hz));
     }
+    for(auto const& [letter, block] : {
+            std::pair{"A", &entry.a},
+            std::pair{"B", &entry.b}
+    })
+    {
+      if(*block and (*block)->decimation == 0u)
+      {
+        ctx.fail(std::format("board.{}.{}.decimation", name, letter), "a decimation of at least 1");
+      }
+    }
     if(not entry.model and not entry.params.empty())
     {
       ctx.fail(
           std::format("board.{}.{}", name, entry.params.begin()->first),
           std::format(
-              "a key of board.{}: connect, model, devices, hse_hz, lse_hz, or a model parameter "
-              "with model set",
+              "a key of board.{}: connect, model, devices, hse_hz, lse_hz, A, B, or a model "
+              "parameter with model set",
               name));
     }
   }
