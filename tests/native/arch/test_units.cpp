@@ -167,18 +167,6 @@ TEST_CASE("SysTick COUNTFLAG and missed crossings coalesce")
   CHECK(systick::countflag(s, 150));
 }
 
-TEST_CASE("a call end keeps the live fired count unless the call reprogrammed SysTick")
-{
-  namespace systick = armv8m::systick;
-  armv8m::systick_state const saved{
-      .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 99, .fired = 2};
-  auto live  = saved;
-  live.fired = 7;
-  CHECK(systick::fired_after_call(live, saved, 450) == 7u);
-  live.rvr = 49;
-  CHECK(systick::fired_after_call(live, saved, 450) == 4u);
-}
-
 TEST_CASE("valid_v7_exc_return accepts the six ARMv7-M values only")
 {
   for(std::uint32_t const value :

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn.trace import Irq
 
 from .conftest import CALLEE_ELF
 
@@ -277,7 +278,6 @@ def strict_callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
     return m
 
 
-@pytest.mark.xfail(strict=True, reason="call: end_call reloads the whole SCS")
 @pytest.mark.parametrize("register", SCS_WRITES)
 @pytest.mark.parametrize("ending", ["returned", "model_error"])
 def test_scs_writes_made_in_a_call_stay(
@@ -297,7 +297,6 @@ def test_scs_writes_made_in_a_call_stay(
     assert strict_callee.mem.u32[address] == value
 
 
-@pytest.mark.xfail(strict=True, reason="call: end_call reloads the whole SCS")
 def test_a_cyccnt_written_in_a_call_counts_on_from_its_value(
     strict_callee: popcorn.Machine,
 ) -> None:
@@ -309,7 +308,29 @@ def test_a_cyccnt_written_in_a_call_counts_on_from_its_value(
     assert start <= strict_callee.mem.u32[0xE000_1004] < start + 100
 
 
-@pytest.mark.xfail(strict=True, reason="call: end_call reloads the whole SCS")
+def raising(c: popcorn.Call) -> popcorn.Return:
+    raise LookupError(f"handler failed at {c.function:#x}")
+
+
+def test_a_handler_active_when_a_call_ends_is_neither_resumed_nor_pended(
+    callee: popcorn.Machine,
+) -> None:
+    asyncio.run(callee.run(budget=50_000))
+    ticks = callee.mem.u32[callee.sym("ticks")]
+    pc, sp = callee.pc, callee.reg.sp
+    callee.intercept("SysTick_Handler", raising)
+    with pytest.raises(LookupError, match="handler failed"):
+        call(callee, "wait_flag", budget=20_000, interrupts=True)
+    assert (callee.pc, callee.reg.sp, callee.reg.xpsr & 0x1FF) == (pc, sp, 0)
+    systick_active = 1 << 11
+    systick_pending = 1 << 26
+    assert callee.mem.u32[0xE000_ED24] & systick_active == 0
+    assert callee.mem.u32[0xE000_ED04] & systick_pending == 0
+    callee.remove_hooks()
+    asyncio.run(callee.run(budget=50_000))
+    assert callee.mem.u32[callee.sym("ticks")] > ticks
+
+
 def test_a_fault_that_ends_a_call_keeps_its_status_and_nothing_pending(
     callee: popcorn.Machine,
 ) -> None:
@@ -324,3 +345,22 @@ def test_a_fault_that_ends_a_call_keeps_its_status_and_nothing_pending(
     stop = asyncio.run(callee.run(budget=50_000))
     assert stop.reason is popcorn.StopReason.BUDGET
     assert callee.mem.u32[callee.sym("ticks")] > ticks
+
+
+SVC_THEN_RETURN = bytes.fromhex("00df7047")
+SVC_AT = 0x2000_F000
+SVCALL = 11
+
+
+def test_an_svc_left_pending_by_a_call_ending_on_budget_is_dropped(
+    hooked: popcorn.Machine,
+) -> None:
+    hooked.mem.write(SVC_AT, SVC_THEN_RETURN)
+    svcall_pended = 1 << 15
+    result = call(hooked, SVC_AT | 1, budget=1)
+    assert result.stop.reason is popcorn.StopReason.BUDGET
+    assert hooked.mem.u32[0xE000_ED24] & svcall_pended == 0
+    hooked.ring.clear()
+    asyncio.run(hooked.run(budget=200))
+    entered = [r.number for r in hooked.ring.records() if isinstance(r, Irq)]
+    assert SVCALL not in entered

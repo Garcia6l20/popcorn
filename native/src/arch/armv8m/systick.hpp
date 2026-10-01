@@ -135,28 +135,4 @@ inline constexpr std::uint32_t countflag_bit = 1u << 16;
   }
   return n;
 }
-
-/**
- * @brief Crossings to keep as dispatched when a call ends and restores the pre-call state.
- * @param live State at the end of the call.
- * @param saved State from before the call.
- * @param t Ticks of the saved anchor at the end of the call.
- * @return The live count when the call left SysTick's configuration and anchor alone, else the
- *         crossings of the saved anchor up to @p t: no tick is delivered twice.
- */
-[[nodiscard]] constexpr auto fired_after_call(
-    systick_state const& live,
-    systick_state const& saved,
-    std::uint64_t        t) noexcept -> std::uint64_t
-{
-  auto const same = live.csr
-                 == saved.csr
-                and live.rvr
-                 == saved.rvr
-                and live.anchor
-                 == saved.anchor
-                and live.anchor_value
-                 == saved.anchor_value;
-  return same ? live.fired : crossings_through(saved, t);
-}
 }

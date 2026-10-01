@@ -365,22 +365,25 @@ void cortex_m::save(std::vector<std::byte>& out) const
 
 void cortex_m::load(std::span<std::byte const> in)
 {
-  auto const live = state_;
-  state_          = reflex::serde::bson::deserializer{in}.load<state>();
+  auto live = state_;
+  state_    = reflex::serde::bson::deserializer{in}.load<state>();
   set_context(engine_handle(), state_.special, stack_limits());
   generation_ = std::max(generation_, state_.systick.generation_floor) + 1;
   if(in_call_)
   {
-    in_call_             = false;
-    state_.systick.fired = systick::fired_after_call(live.systick, state_.systick, systick_ticks());
+    in_call_ = false;
     for(std::uint32_t number = exc_nmi; number < exception_count(); ++number)
     {
-      if(not synchronous(number))
+      if(synchronous(number))
       {
-        put_bit(state_.exceptions.pending, number, test_bit(live.exceptions.pending, number));
+        put_bit(live.exceptions.pending, number, test_bit(state_.exceptions.pending, number));
       }
     }
-    state_.exceptions.level = live.exceptions.level;
+    live.exceptions.active = std::move(state_.exceptions.active);
+    state_.exceptions      = std::move(live.exceptions);
+    state_.scs             = std::move(live.scs);
+    state_.systick         = live.systick;
+    state_.cyccnt          = live.cyccnt;
     for(auto number = exc_irq0; number < exception_count(); ++number)
     {
       if(test_bit(state_.exceptions.level, number))

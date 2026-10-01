@@ -771,12 +771,16 @@ class Machine:
         double unless `popcorn.f32(v)`, and `returns` names the result kind, I32 by default. An
         arena block or a variable passes its address. A struct by value is refused.
 
-        When the call ends, the interrupted context comes back: the registers and the whole core
-        state, the System Control Space included, so NVIC enables and priorities, SCB, SysTick,
-        MPU, DWT and ITM writes the call made are reverted. Interrupts that became pending
-        during the call stay pending. Memory and the device peripherals' registers keep the
-        call's writes. An exception that ends the call, a ModelError or one a handler raised,
-        restores the same as a return, and the machine runs on from where it was.
+        When the call ends, the interrupted execution context comes back: the core registers,
+        the special registers, the active exceptions, the sleep state and the interrupt masking.
+        The System Control Space keeps the call's writes, as memory and the device peripherals
+        do: NVIC enables and priorities, SCB configuration and fault status, SysTick, MPU, DWT
+        and ITM. Interrupts made pending during the call stay pending. A synchronous exception
+        the call left pending, SVC, HardFault, MemManage, BusFault or UsageFault, is dropped. A
+        handler still active when the call ends is not resumed and its interrupt is not pended
+        again. An exception that ends the call, a ModelError or one
+        a handler raised, restores the same as a return, and the machine runs on from where it
+        was.
 
         Args:
             fn: Function address, symbol or name.

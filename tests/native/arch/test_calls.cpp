@@ -363,7 +363,7 @@ TEST_CASE("a SysTick pended before an unmasked call is taken once")
   CHECK(ticks(f) == t0 + 11);
 }
 
-TEST_CASE("a call that reprograms SysTick leaves the pre-call phase and generation intact")
+TEST_CASE("a call that reprograms SysTick keeps the new reload, counted once")
 {
   for(auto const rewrite : {false, true})
   {
@@ -373,14 +373,15 @@ TEST_CASE("a call that reprograms SysTick leaves the pre-call phase and generati
     REQUIRE(
         call(f, frame("reprogram_systick", {}), icount{1000}).stopped.reason
         == stop_reason::returned);
+    CHECK(f.target->mem().read(0xE000'E014, 4) == 1999u);
     if(rewrite)
     {
       auto const csr = f.target->mem().read(0xE000'E010, 4);
       REQUIRE(csr.has_value());
       REQUIRE(f.target->mem().write(0xE000'E010, 4, *csr & 0x7u));
     }
-    run_for(f, 10 * period);
-    CHECK(ticks(f) == t0 + 10);
+    run_for(f, 10 * period + period / 4);
+    CHECK(ticks(f) == t0 + 20);
   }
 }
 

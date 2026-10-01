@@ -92,3 +92,15 @@ async def test_a_second_machine_from_the_boot_snapshot_takes_presses(
     await press(second)
     assert second.var("presses").value == 1
     assert second.periph.GPIOA.pin(5).level
+
+
+async def test_an_interrupt_enabled_by_a_call_stays_enabled(machine: Machine) -> None:
+    await settle(machine)
+    irq = EXTI13 - 16
+    machine.nvic.disable(irq)
+    await press(machine)
+    assert machine.var("presses").value == 0
+    await machine.call("HAL_NVIC_EnableIRQ", irq)
+    assert machine.nvic.enabled(irq)
+    await press(machine)
+    assert machine.var("presses").value == 1
