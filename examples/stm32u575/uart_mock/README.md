@@ -28,7 +28,8 @@ uv run pytest -q examples/stm32u575/uart_mock
   `commands` and `answered` record the virtual times.
 - `test_uart_mock.py`:
   - every command answered: the three results OK, the signal quality 17, the `AT` latency
-    5 or 6 ms, each reply 5 ms after its command's last byte, within 10 us;
+    5 or 6 ms, each reply 5 ms after its command's last byte, within 10 us: the firmware
+    sleeps in WFI, and a time stop from an idle core lands less than one instruction late;
   - an `ERROR` reply to `AT+SEND`;
   - no reply to `AT+CSQ`: the firmware times out after 100 ms and the session goes on.
 - `firmware/main.c`: the receive-to-idle wait with its timeout, the reply parsing.

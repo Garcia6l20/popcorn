@@ -107,7 +107,9 @@ class UartStream:
     async def read(self, n: int, *, for_: VirtualDuration | None = None) -> bytes:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them.
 
-        Inside `running()`, this awaits the background run instead of driving the machine.
+        Inside `running()`, this awaits the background run instead of driving the machine. The
+        run stops as `Machine.wait_for` does: after the last frame's own time, at the first event
+        boundary or slice end, or past `for_` by the bound `Machine.run` gives for its `for_`.
 
         Returns:
             Up to `n` bytes, fewer when `for_` elapsed or the core went idle first.

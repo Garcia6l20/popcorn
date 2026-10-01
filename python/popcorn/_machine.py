@@ -1218,7 +1218,12 @@ class Machine:
             budget: Stop with BUDGET at the first block boundary past this many instructions,
                 `default_budget` when None.
             for_: Stop with TIME after this much virtual time. An idle core, WFI with nothing
-                due, sleeps to the deadline and stops with TIME, not IDLE.
+                due, sleeps to the deadline and stops with TIME, not IDLE. The stop lands on the
+                first boundary at or after the deadline, so `time` can pass it. While the core
+                clock rate holds, it passes by less than one instruction from an idle core, and
+                by up to one translated block, under 512 instruction times, from a core
+                executing code. The time is checked at block entry, where the whole block is
+                charged.
             stop_when: Sync predicate evaluated at event boundaries and slice ends, never per
                 instruction. Stops with USER when it returns True. An exception it raises
                 reaches the caller with its traceback.
@@ -1254,7 +1259,8 @@ class Machine:
             raise _stop_error(stop, "the run waiting for UART data")
 
     async def wait_for(self, event: Event, *, for_: VirtualDuration | None = None) -> Stop:
-        """Run until `event` is ready, a USER stop, or until `for_` elapses, a TIME stop.
+        """Run until `event` is ready, a USER stop, or until `for_` elapses, a TIME stop as late
+        as `run(for_=)` allows.
 
         A `Reached` event stops exactly before its target, an ADDRESS stop. Other events stop at
         the first event boundary or slice end after they became ready. Inside `running()`, the

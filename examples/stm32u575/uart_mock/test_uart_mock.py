@@ -3,10 +3,10 @@
 The firmware sends `AT`, `AT+CSQ` and `AT+SEND=hello`, each followed by a receive-to-idle of
 the reply with a 100 ms timeout, and records how each was answered in `modem_result`.
 `atmodem.AtModem` reads the commands from `machine.periph.USART2.port` and answers from a
-script 5 ms of virtual time after each command's last byte, in the test's own coroutine. A
-run stops at the first event boundary or slice end after its condition holds
-(`Machine.wait_for`), so a reply leaves at most a few microseconds late. The test allows
-10 us.
+script 5 ms of virtual time after each command's last byte, in the test's own coroutine. The
+firmware sleeps in WFI while it waits for a reply, and a time stop from an idle core lands less
+than one instruction after its deadline (`Machine.run`). At 4 MHz that is under 250 ns, inside
+the 10 us the test allows.
 
 USART2 runs from PCLK1 at the 4 MHz reset clock, so BRR is 35 and a byte takes 87.5 us.
 `at_latency_ms` is the HAL tick count from the end of `AT` to the end of its reply: the 5 ms
