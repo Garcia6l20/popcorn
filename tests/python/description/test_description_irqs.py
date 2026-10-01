@@ -223,8 +223,8 @@ def test_u575_irq_table_with_header(
     assert table.by_peripheral["OTFDEC1"] == []
     assert table.by_peripheral["OTFDEC2"] == []
 
-    b2r_external = {26, 29, 30, 31, 32, 33, 34, 61, 63, 64}
-    assert b2r_external <= by_number.keys()
+    board_external_irqs = {26, 29, 30, 31, 32, 33, 34, 61, 63, 64}
+    assert board_external_irqs <= by_number.keys()
     assert by_number[26] == "EXTI15_IRQn"
     assert by_number[63] == "USART3_IRQn"
     assert by_number[64] == "UART4_IRQn"

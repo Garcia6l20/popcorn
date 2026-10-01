@@ -150,7 +150,7 @@ auto snapshots(core::machine& target) -> core::snapshot
 void boot(core::machine& target)
 {
   target.load(image::load_elf("build/bootloader.elf"));
-  target.load(image::load_elf("build/b2r.elf"));
+  target.load(image::load_elf("build/firmware.elf"));
   for(auto const& loaded : target.loaded_images())
   {
     auto const where = loaded.locate(0x0800'0100);
