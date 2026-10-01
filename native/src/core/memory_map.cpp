@@ -289,9 +289,10 @@ void remove_translated(
     if(from < to)
     {
       auto const guest = std::uint64_t{window.start} - window.offset;
-      check(
-          uc_ctl_remove_cache(engine, guest + from, guest + to),
-          std::format("removing translated code at {:#010x}", guest + from));
+      if(auto const err = uc_ctl_remove_cache(engine, guest + from, guest + to); err != UC_ERR_OK)
+      {
+        check(err, std::format("removing translated code at {:#010x}", guest + from));
+      }
     }
   }
 }
