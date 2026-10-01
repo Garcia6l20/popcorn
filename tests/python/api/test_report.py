@@ -458,3 +458,27 @@ def test_a_caller_that_saved_no_lr_is_not_given_the_live_lr() -> None:
     memory.put32(sp + 4, 0)
     frames = unwind(memory, functions, 0x1002, 0x3005, sp, 0)
     assert [(f.pc, f.via) for f in frames] == [(0x1002, Via.PC), (0x2008, Via.PROLOGUE)]
+
+
+def ready_for_calls() -> popcorn.Machine:
+    m = popcorn.Machine(M33_JSON, image=popcorn.Image.elf(FAULT_ELF))
+    m.reset()
+    assert asyncio.run(m.run(until=m.sym("ready"), budget=10_000)).reason is (
+        popcorn.StopReason.ADDRESS
+    )
+    return m
+
+
+@pytest.mark.xfail(strict=True, reason="report: a fault inside a call shows the caller")
+def test_a_fault_inside_a_call_reports_the_faulting_frames() -> None:
+    m = ready_for_calls()
+    caller = {name: int(getattr(m.reg, name)) for name in ("pc", "sp", "lr")}
+    result = asyncio.run(m.call("level1", 1, budget=10_000))
+    assert result.stop.reason is popcorn.StopReason.FAULT
+    assert {name: int(getattr(m.reg, name)) for name in caller} == caller
+    report = stop_report(m, result.stop)
+    assert report.registers["pc"] == result.stop.pc
+    names = [f.location.symbol for f in report.frames[:3]]
+    assert names == ["level3", "level2", "level1"]
+    assert all(f.exact for f in report.frames[:3])
+
