@@ -554,6 +554,7 @@ TEST_CASE("a guest store through one rwx window reaches code running at the othe
       .secure     = false,
       .physical   = 0x2000'0000,
       .controller = std::nullopt,
+      .content    = std::nullopt,
   });
   auto const ram_fn   = sym("run", "ram_fn");
   auto const aliased  = ram_fn - 0x2000'0000 + 0x1000'0000;

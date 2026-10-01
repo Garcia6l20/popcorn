@@ -95,7 +95,6 @@ async def test_too_few_wait_states_at_160_mhz_fail_a_strict_run(machine: Machine
         await machine.call("set_latency", 1, budget=1_000)
 
 
-@pytest.mark.xfail(strict=True, reason="signature: flash size register unmapped")
 async def test_the_firmware_reads_the_device_signature(machine: Machine) -> None:
     await run_to(machine, "signature_read")
 

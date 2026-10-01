@@ -262,11 +262,40 @@
       ],
       "type": "object"
     },
+    "region_content": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "items": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "offset": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "offset",
+        "data"
+      ],
+      "type": "object"
+    },
     "region_desc": {
       "additionalProperties": false,
       "properties": {
         "acc": {
           "$ref": "#/$defs/region_access"
+        },
+        "content": {
+          "items": {
+            "$ref": "#/$defs/region_content"
+          },
+          "type": "array"
         },
         "controller": {
           "type": "string"

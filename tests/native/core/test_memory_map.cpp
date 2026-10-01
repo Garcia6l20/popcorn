@@ -203,6 +203,69 @@ TEST_CASE("machine construction refuses what it cannot map")
   }
 }
 
+TEST_CASE("region content is in a read-only region from power-on, through its alias too")
+{
+  auto       desc         = m33();
+  auto const size         = desc.regions[0].size;
+  desc.regions[0].content = std::vector<popcorn::region_content>{
+      {.offset = 0x100,    .data = {0x03, 0x00}},
+      {.offset = size - 2, .data = {0x00, 0x04}},
+  };
+  core::machine target{desc, popcorn::testing::test_arch_factory(), {}};
+  auto const    memory = target.mem();
+  CHECK(memory.read(0x0800'0100, 4) == 0xffff'0003u);
+  CHECK(memory.read(0x0800'0000 + size - 4, 4) == 0x0400'ffffu);
+  CHECK(memory.read(0x0000'0100, 2) == 0x0003u);
+  CHECK(memory.read(0x0800'00fc, 4) == 0xffff'ffffu);
+}
+
+TEST_CASE(
+    "region content outside its region, out of order, on an alias or in ram is a config_error")
+{
+  auto       desc = m33();
+  auto const size = desc.regions[0].size;
+  auto const key  = [&] {
+    return config_key([&] { core::machine{desc, popcorn::testing::test_arch_factory(), {}}; });
+  };
+  SUBCASE("past the end")
+  {
+    desc.regions[0].content = std::vector<popcorn::region_content>{
+        {.offset = size - 1, .data = {0x00, 0x04}}
+    };
+    CHECK(key() == "regions.FLASH.content[0]");
+  }
+  SUBCASE("overlapping the previous bytes")
+  {
+    desc.regions[0].content = std::vector<popcorn::region_content>{
+        {.offset = 0x10, .data = {1, 2, 3}},
+        {.offset = 0x12, .data = {4}      },
+    };
+    CHECK(key() == "regions.FLASH.content[1]");
+  }
+  SUBCASE("before the previous bytes")
+  {
+    desc.regions[0].content = std::vector<popcorn::region_content>{
+        {.offset = 0x10, .data = {1}},
+        {.offset = 0x08, .data = {2}},
+    };
+    CHECK(key() == "regions.FLASH.content[1]");
+  }
+  SUBCASE("on an alias region")
+  {
+    desc.regions[1].content = std::vector<popcorn::region_content>{
+        {.offset = 0, .data = {1}}
+    };
+    CHECK(key() == "regions.FLASH_ALIAS.content");
+  }
+  SUBCASE("on a ram region")
+  {
+    desc.regions[2].content = std::vector<popcorn::region_content>{
+        {.offset = 0, .data = {1}}
+    };
+    CHECK(key() == "regions.SRAM.content");
+  }
+}
+
 TEST_CASE("a debugger write through an alias reads back through its target and the reverse")
 {
   core::machine target{m33(), popcorn::testing::test_arch_factory(), {}};

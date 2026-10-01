@@ -33,7 +33,7 @@ def test_golden_dump_matches_expected_counts(u575_sources: Sources) -> None:
 
     assert golden["counts"]["peripherals"] == 197
     assert golden["counts"]["aliases"] == 98
-    assert golden["counts"]["regions"] == 12
+    assert golden["counts"]["regions"] == 14
     assert golden["counts"]["irqs"] == 121
 
 

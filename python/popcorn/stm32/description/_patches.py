@@ -1,7 +1,7 @@
 """Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
 IP renames, IRQ add/drop, core overrides, added registers, added memory regions, region
-controllers. popcorn's own TOML format, so these dataclasses are the format definition, not a
-mirror of any C++ or schema type."""
+controllers, the device signature. popcorn's own TOML format, so these dataclasses are the format
+definition, not a mirror of any C++ or schema type."""
 
 import copy
 import fnmatch
@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from popcorn.stm32.description._binder import from_mapping
-from popcorn.stm32.description._cubemx import DbIp
+from popcorn.stm32.description._cubemx import DbIp, DbPart
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
@@ -22,7 +22,9 @@ from popcorn.stm32.description._model import (
     IrqDesc,
     PeripheralDesc,
     ReadEffect,
+    RegionContent,
     RegionDesc,
+    RegionKind,
     RegisterDesc,
     WriteEffect,
 )
@@ -68,6 +70,17 @@ class PatchMemory:
     source: str
     add: list[RegionDesc] | None = None
     controller: dict[str, str] | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class PatchSignature:
+    region: str
+    flash_size: int = field(metadata={"minimum": 0})
+    package: int = field(metadata={"minimum": 0})
+    uid: int = field(metadata={"minimum": 0})
+    uid_words: list[int]
+    packages: dict[str, int]
+    source: str
 
 
 @dataclass(slots=True, kw_only=True)
@@ -149,6 +162,7 @@ class Patch:
     cross: list[CrossRuleSpec] | None = None
     registers: list[RegisterAdd] | None = None
     memory: PatchMemory | None = None
+    signature: PatchSignature | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -158,6 +172,7 @@ class PatchTarget:
     core: CoreDesc
     db_ips: Mapping[str, DbIp] = field(default_factory=dict[str, DbIp])
     regions: list[RegionDesc] = field(default_factory=list[RegionDesc])
+    db_part: DbPart | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -173,6 +188,7 @@ class PatchReport:
     core_fields_set: int = 0
     regions_added: int = 0
     controllers_set: int = 0
+    signature_words: int = 0
 
 
 def _matches(match: PatchMatch, part: str, svd_name: str) -> bool:
@@ -576,12 +592,74 @@ def _apply_memory(
         report.controllers_set += 1
 
 
+def _add_content(region: RegionDesc, offset: int, data: bytes, *, file: str, key: str) -> None:
+    if offset + len(data) > region.size:
+        raise DescriptionError(
+            file, 0, key, f"an offset leaving {len(data)} bytes inside {region.name}"
+        )
+    content = region.content or []
+    for piece in content:
+        if offset < piece.offset + len(piece.data) and piece.offset < offset + len(data):
+            raise DescriptionError(file, 0, key, f"bytes clear of the content at {piece.offset:#x}")
+    region.content = sorted(
+        [*content, RegionContent(offset=offset, data=list(data))], key=lambda piece: piece.offset
+    )
+
+
+_SMPS_SUFFIX = "Q"
+_DSI_IP = "DSIHOST"
+
+
+def _package_key(part: DbPart) -> str:
+    key = part.package
+    if any(ip.name == _DSI_IP for ip in part.ips):
+        key += " DSI"
+    if part.ref_name.endswith(_SMPS_SUFFIX):
+        key += " SMPS"
+    return key
+
+
+def _apply_signature(
+    rule: PatchSignature,
+    regions: list[RegionDesc],
+    part: DbPart | None,
+    report: PatchReport,
+    *,
+    file: str,
+) -> None:
+    region = next((r for r in regions if r.name == rule.region), None)
+    if region is None or region.kind is not RegionKind.ROM or region.physical is not None:
+        raise DescriptionError(
+            file, 0, "signature.region", "a read-only region of the description, not an alias"
+        )
+    if part is None:
+        raise DescriptionError(file, 0, "signature", "the CubeMX part of the description")
+    if len(rule.uid_words) != 3 or any(not 0 <= word < 1 << 32 for word in rule.uid_words):
+        raise DescriptionError(file, 0, "signature.uid_words", "three 32-bit words")
+    for name, value in rule.packages.items():
+        if not 0 <= value <= 0x1F:
+            raise DescriptionError(file, 0, f"signature.packages.{name}", "a PKG code, 0 to 0x1f")
+    flash_kib = part.flash_kib[0]
+    if flash_kib >= 1 << 16:
+        raise DescriptionError(file, 0, "signature.flash_size", "a flash size below 64 MB")
+    words = [
+        ("flash_size", rule.flash_size, flash_kib.to_bytes(2, "little")),
+        ("uid", rule.uid, b"".join(word.to_bytes(4, "little") for word in rule.uid_words)),
+    ]
+    code = rule.packages.get(_package_key(part))
+    if code is not None:
+        words.append(("package", rule.package, code.to_bytes(2, "little")))
+    for name, offset, data in words:
+        _add_content(region, offset, data, file=file, key=f"signature.{name}")
+        report.signature_words += 1
+
+
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
     """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
     added registers, fields, cross rules, IRQ drops and adds, core, memory regions and their
-    controllers. Drops come first, so a later rule naming a dropped peripheral fails as naming an
-    unknown one. An added register lands in the named peripheral and in each of its aliases, so
-    fields and cross rules may name it.
+    controllers, the device signature. Drops come first, so a later rule naming a dropped
+    peripheral fails as naming an unknown one. An added register lands in the named peripheral
+    and in each of its aliases, so fields and cross rules may name it.
     Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
@@ -651,6 +729,12 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     for loaded in patches:
         if loaded.patch.memory is not None:
             _apply_memory(loaded.patch.memory, regions, by_name, report, file=str(loaded.path))
+
+    for loaded in patches:
+        if loaded.patch.signature is not None:
+            _apply_signature(
+                loaded.patch.signature, regions, target.db_part, report, file=str(loaded.path)
+            )
 
     target.peripherals = peripherals
     target.irqs = irqs

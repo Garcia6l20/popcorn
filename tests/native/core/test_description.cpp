@@ -113,7 +113,8 @@ TEST_CASE("optional members and every effect round-trip")
       {true, true, false},
       true,
       popcorn::address{0x2000'0000},
-      std::string{"TIM1"}
+      std::string{"TIM1"},
+      std::vector<popcorn::region_content>{{.offset = 0x10, .data = {0x00, 0x04}}}
   });
   popcorn::peripheral_desc sec;
   sec.name     = "SEC_TIM1";
@@ -137,6 +138,7 @@ TEST_CASE("optional members and every effect round-trip")
   auto const text = popcorn::dump_description(description);
   CHECK(text.contains("\"alias_of\":\"TIM1\""));
   CHECK(text.contains("\"controller\":\"TIM1\""));
+  CHECK(text.contains("\"content\":[{\"offset\":16,\"data\":[0,4]}]"));
   CHECK(text.contains("\"on_read\":\"modify_external\""));
   CHECK(popcorn::parse_description(text, "dump") == description);
 }
@@ -149,6 +151,7 @@ TEST_CASE("absent optional members are omitted from the output")
   CHECK_FALSE(text.contains("alternate_of"));
   CHECK_FALSE(text.contains("physical"));
   CHECK_FALSE(text.contains("controller"));
+  CHECK_FALSE(text.contains("content"));
   CHECK_FALSE(text.contains("null"));
 }
 

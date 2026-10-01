@@ -29,6 +29,7 @@ auto with_linker_regions(mcu_description description) -> mcu_description
       .secure     = false,
       .physical   = std::nullopt,
       .controller = std::nullopt,
+      .content    = std::nullopt,
   });
   description.regions.push_back({
       .name       = "arena",
@@ -39,6 +40,7 @@ auto with_linker_regions(mcu_description description) -> mcu_description
       .secure     = false,
       .physical   = std::nullopt,
       .controller = std::nullopt,
+      .content    = std::nullopt,
   });
   return description;
 }

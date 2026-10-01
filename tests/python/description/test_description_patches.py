@@ -2,7 +2,7 @@ import copy
 from pathlib import Path
 
 import pytest
-from popcorn.stm32.description._cubemx import DbIp, read_part, read_rzone
+from popcorn.stm32.description._cubemx import DbIp, DbPart, read_part, read_rzone
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
@@ -507,6 +507,7 @@ def test_u575_alias_rule_sets_98_peripherals(
     target.regions = read_rzone(
         u575_sources.rzone.read_bytes(), file=str(u575_sources.rzone)
     ).regions
+    target.db_part = part
 
     patches = load_patches([STM32U5_TOML], part="STM32U575QGIx", svd_name="STM32U575.svd")
     assert len(patches) == 1
@@ -956,3 +957,164 @@ parts = ["TOY*"]
         load_patches([_write_patch(tmp_path, text)], part="TOY1", svd_name="synthetic.svd")
     assert excinfo.value.key == "registers[0].source"
     assert excinfo.value.expected == "required"
+
+
+_SIG_REGIONS = f"""
+[memory]
+source = "probe"
+add = [{_OTP}, {_OTP_ALIAS}]
+"""
+
+
+def _signature_patch(tmp_path: Path, name: str = "patch.toml", **overrides: str) -> Path:
+    keys = {
+        "region": '"OTP"',
+        "package": "0x100",
+        "uid": "0x300",
+        "flash_size": "0x3A0",
+        "uid_words": "[0x11, 0x22, 0x33]",
+        "packages": '{ "LQFP64" = 0x00, "LQFP64 SMPS" = 0x08, "LQFP100 DSI SMPS" = 0x14 }',
+        "source": '"probe"',
+    } | overrides
+    body = "\n".join(f"{key} = {value}" for key, value in keys.items())
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+{_SIG_REGIONS if name == "patch.toml" else ""}
+[signature]
+{body}
+"""
+    return _write_patch(tmp_path, text, name)
+
+
+def _part(ref_name: str = "TOY1", package: str = "LQFP64", *ips: str) -> DbPart:
+    return DbPart(
+        ref_name=ref_name,
+        family="TOY",
+        line="TOY",
+        die="DIE1",
+        ram_kib=[64],
+        flash_kib=[1024],
+        ips=[DbIp(instance=ip, name=ip, version="") for ip in ips],
+        package=package,
+    )
+
+
+def _signed(tmp_path: Path, part: DbPart | None, *paths: Path) -> PatchTarget:
+    target = _synthetic_target()
+    target.db_part = part
+    files = list(paths) or [_signature_patch(tmp_path)]
+    apply_patches(load_patches(files, part="TOY1", svd_name="synthetic.svd"), target)
+    return target
+
+
+def _content(target: PatchTarget, region: str) -> list[tuple[int, bytes]]:
+    found = next(r for r in target.regions if r.name == region)
+    return [(piece.offset, bytes(piece.data)) for piece in found.content or []]
+
+
+def test_signature_writes_package_uid_and_flash_size_into_its_region(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.db_part = _part()
+    patches = load_patches([_signature_patch(tmp_path)], part="TOY1", svd_name="synthetic.svd")
+    report = apply_patches(patches, target)
+    assert report.signature_words == 3
+    assert _content(target, "OTP") == [
+        (0x100, bytes.fromhex("0000")),
+        (0x300, bytes.fromhex("110000002200000033000000")),
+        (0x3A0, (1024).to_bytes(2, "little")),
+    ]
+    assert _content(target, "OTP_S") == []
+
+
+@pytest.mark.parametrize(
+    ("part", "code"),
+    [
+        (_part("TOY1Q"), b"\x08\x00"),
+        (_part("TOY1Q", "LQFP100", "DSIHOST"), b"\x14\x00"),
+        (_part("TOY1", "LQFP100", "DSIHOST"), None),
+        (_part("TOY1", "UFQFPN48"), None),
+    ],
+)
+def test_signature_package_code_follows_package_dsi_and_smps(
+    tmp_path: Path, part: DbPart, code: bytes | None
+) -> None:
+    pieces = dict(_content(_signed(tmp_path, part), "OTP"))
+    assert pieces.get(0x100) == code
+    assert pieces[0x3A0] == (1024).to_bytes(2, "little")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "key", "reason"),
+    [
+        (
+            {"region": '"NOPE"'},
+            "signature.region",
+            "a read-only region of the description, not an alias",
+        ),
+        (
+            {"region": '"OTP_S"'},
+            "signature.region",
+            "a read-only region of the description, not an alias",
+        ),
+        (
+            {"region": '"SRAM"'},
+            "signature.region",
+            "a read-only region of the description, not an alias",
+        ),
+        ({"uid_words": "[1, 2]"}, "signature.uid_words", "three 32-bit words"),
+        (
+            {"packages": '{ "LQFP64" = 0x20 }'},
+            "signature.packages.LQFP64",
+            "a PKG code, 0 to 0x1f",
+        ),
+        (
+            {"packages": '{ "LQFP64" = -1 }'},
+            "signature.packages.LQFP64",
+            "a PKG code, 0 to 0x1f",
+        ),
+        ({"uid_words": "[1, 2, 0x100000000]"}, "signature.uid_words", "three 32-bit words"),
+        (
+            {"flash_size": "0x3FF"},
+            "signature.flash_size",
+            "an offset leaving 2 bytes inside OTP",
+        ),
+        ({"uid": "0x3F8"}, "signature.uid", "an offset leaving 12 bytes inside OTP"),
+        ({"uid": "0x0F8"}, "signature.package", "bytes clear of the content at 0xf8"),
+        ({"flash_size": "0x30A"}, "signature.uid", "bytes clear of the content at 0x30a"),
+    ],
+)
+def test_signature_refuses_a_bad_region_word_or_layout(
+    tmp_path: Path, overrides: dict[str, str], key: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    target.db_part = _part()
+    before = copy.deepcopy(target)
+    path = _signature_patch(tmp_path, **overrides)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert (excinfo.value.file, excinfo.value.key, excinfo.value.expected) == (
+        str(path),
+        key,
+        reason,
+    )
+    assert target == before
+
+
+def test_signature_needs_the_cubemx_part(tmp_path: Path) -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        _signed(tmp_path, None)
+    assert (excinfo.value.key, excinfo.value.expected) == (
+        "signature",
+        "the CubeMX part of the description",
+    )
+
+
+def test_a_second_signature_over_the_same_bytes_is_refused(tmp_path: Path) -> None:
+    first = _signature_patch(tmp_path)
+    second = _signature_patch(tmp_path, "second.toml")
+    with pytest.raises(DescriptionError) as excinfo:
+        _signed(tmp_path, _part(), first, second)
+    assert (excinfo.value.file, excinfo.value.key) == (str(second), "signature.flash_size")

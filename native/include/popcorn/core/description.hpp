@@ -169,6 +169,18 @@ struct region_access
   friend auto operator==(region_access const&, region_access const&) -> bool = default;
 };
 
+/** @brief Bytes a region holds from power-on, over the fill of its kind. */
+struct region_content
+{
+  /** @brief Offset of the first byte in the region. */
+  std::uint32_t offset{};
+  /** @brief The bytes. */
+  std::vector<std::uint8_t> data;
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(region_content const&, region_content const&) -> bool = default;
+};
+
 /** @brief Memory region. */
 struct[[= reflex::serde::omit_if_empty{^^std::optional}]] region_desc
 {
@@ -189,6 +201,9 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] region_desc
   /** @brief Peripheral whose model serves CPU and DMA stores to this read-only region, such as
    * the FLASH interface of a flash bank. */
   std::optional<std::string> controller;
+  /** @brief Bytes the region holds from power-on, such as a factory-programmed device
+   * signature, in offset order and not overlapping. Only on a rom region without physical. */
+  std::optional<std::vector<region_content>> content;
 
   /** @brief Member-wise equality. */
   friend auto operator==(region_desc const&, region_desc const&) -> bool = default;

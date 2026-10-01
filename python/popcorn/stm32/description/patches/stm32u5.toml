@@ -221,4 +221,15 @@ controller = { Flash_NS = "FLASH", Flash_S = "FLASH" }
 add = [
   { name = "OTP_NS", start = 0x0BFA0000, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
   { name = "OTP_S", start = 0x0FFA0000, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = true, physical = 0x0BFA0000 },
+  { name = "SIG_NS", start = 0x0BFA0400, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+  { name = "SIG_S", start = 0x0FFA0400, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = true, physical = 0x0BFA0400 },
 ]
+
+[signature]
+source = "RM0456 rev 6, chapter 76 device electronic signature, in the system memory page SIG_NS at 0x0BFA0400: 76.3 package data register at 0x0BFA0500, PKG[4:0] from the table of 76.3 keyed by the CubeMX package, DSI when the part has DSIHOST, SMPS for a part name ending in Q; a package absent from that table leaves the register erased, which LL_GetPackageType reads as 0x1F, WLCSP150 SMPS: wrong for the UFQFPN48 and UFBGA64 SMPS parts. 76.1 unique device ID at 0x0BFA0700, 96 bits, here a fixed value: wafer coordinates 0x00320014, wafer 1, lot POPCORN in ASCII. 76.2 flash size data register at 0x0BFA07A0, FLASH_SIZE in KB from the CubeMX part. SIG_S is the same page in the secure information block, as OTP_S"
+region = "SIG_NS"
+package = 0x100
+uid = 0x300
+flash_size = 0x3A0
+uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
+packages = { "LQFP64" = 0x00, "WLCSP72 SMPS" = 0x01, "LQFP100" = 0x02, "UFBGA132" = 0x03, "LQFP144" = 0x04, "LQFP48" = 0x05, "UFBGA169" = 0x07, "TFBGA169" = 0x07, "LQFP64 SMPS" = 0x08, "WLCSP90 SMPS" = 0x09, "LQFP100 SMPS" = 0x0A, "UFBGA132 SMPS" = 0x0B, "LQFP144 SMPS" = 0x0C, "LQFP48 SMPS" = 0x0D, "UFBGA169 SMPS" = 0x0F, "TFBGA169 SMPS" = 0x0F, "UFBGA64" = 0x12, "UFBGA100" = 0x13, "LQFP100 DSI SMPS" = 0x14, "LQFP144 DSI SMPS" = 0x15, "UFBGA144 DSI SMPS" = 0x19, "WLCSP208 DSI SMPS" = 0x1B, "TFBGA216 DSI SMPS" = 0x1C, "UFBGA100 SMPS" = 0x1D, "WLCSP56 SMPS" = 0x1E, "WLCSP150 SMPS" = 0x1F, "WLCSP150 DSI SMPS" = 0x1F }

@@ -34,6 +34,10 @@ uv run pytest -q examples/stm32u575/pwr_flash
 - `firmware/main.c`: the clock sequence, then the erase, program and stray store, then the
   signature reads.
 
+popcorn's STM32U5 description holds the signature page at 0x0BFA0400: the flash size and the
+package code of the part from its CubeMX data, and a fixed unique ID, so every run reads the
+same signature.
+
 The FLASH model holds BSY for the typical times of the STM32U575 datasheet, DS13737 Table 86:
 1.5 ms for a page erase, 118 us for a quad-word. The firmware polls BSY, so the virtual time
 between its steps shows them.

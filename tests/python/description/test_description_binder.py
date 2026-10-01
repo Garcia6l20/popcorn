@@ -243,3 +243,16 @@ def test_region_controller_round_trips() -> None:
     description = load_json(json.dumps(data), file="controller.json")
     assert description.regions[0].controller == "UART1"
     assert json.loads(dump_json(description)) == data
+
+
+def test_region_content_round_trips_and_stays_optional() -> None:
+    data = _toy()
+    assert "content" not in cast(list[dict[str, object]], data["regions"])[0]
+    assert load_json(json.dumps(data), file="plain.json").regions[0].content is None
+    regions = cast(list[dict[str, object]], data["regions"])
+    regions[0]["content"] = [{"offset": 0x10, "data": [0, 4]}]
+    description = load_json(json.dumps(data), file="content.json")
+    content = description.regions[0].content
+    assert content is not None
+    assert [(piece.offset, piece.data) for piece in content] == [(0x10, [0, 4])]
+    assert json.loads(dump_json(description)) == data

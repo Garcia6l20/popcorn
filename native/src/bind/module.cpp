@@ -71,6 +71,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::cross_rule>("CrossRule");
   m.bind<popcorn::peripheral_desc>("PeripheralDesc");
   m.bind<popcorn::region_access>("RegionAccess");
+  m.bind<popcorn::region_content>("RegionContent");
   m.bind<popcorn::region_desc>("RegionDesc");
   m.bind<popcorn::irq_desc>("IrqDesc");
   m.bind<popcorn::core_desc>("CoreDesc");

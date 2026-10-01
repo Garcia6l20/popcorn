@@ -27,6 +27,7 @@ class DbPart:
     ram_kib: list[int]
     flash_kib: list[int]
     ips: list[DbIp]
+    package: str = ""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -108,6 +109,7 @@ def read_part(data: bytes, *, file: str) -> DbPart:
         ram_kib=ram_kib,
         flash_kib=flash_kib,
         ips=ips,
+        package=root.get("Package") or "",
     )
 
 

@@ -10,6 +10,7 @@
 #include <ranges>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace popcorn::core
 {
@@ -51,6 +52,34 @@ auto overlaps(std::uint64_t start, std::uint64_t end, address other, std::uint64
   return start < other + size and other < end;
 }
 
+void check_content(std::string const& part, region_desc const& region)
+{
+  if(not region.content)
+  {
+    return;
+  }
+  if(region.physical or region.kind != region_kind::rom)
+  {
+    throw config_error(
+        part, 0, region_key(region) + ".content", "content only on a rom region that is no alias");
+  }
+  std::uint64_t end = 0;
+  for(auto const& [index, piece] : std::views::enumerate(*region.content))
+  {
+    auto const first = std::uint64_t{piece.offset};
+    auto const last  = first + piece.data.size();
+    if(first < end or last > region.size)
+    {
+      throw config_error(
+          part, 0, std::format("{}.content[{}]", region_key(region), index),
+          std::format(
+              "bytes in offset order, clear of the previous ones, inside {:#x} bytes",
+              region.size));
+    }
+    end = last;
+  }
+}
+
 auto allocate(region_desc const& region) -> std::shared_ptr<host_buffer>
 {
   auto buffer   = std::make_shared<host_buffer>();
@@ -60,6 +89,15 @@ auto allocate(region_desc const& region) -> std::shared_ptr<host_buffer>
   std::ranges::fill_n(
       buffer->bytes.get(), region.size,
       region.kind == region_kind::rom ? std::byte{0xff} : std::byte{0});
+  if(region.content)
+  {
+    for(auto const& piece : *region.content)
+    {
+      std::ranges::transform(
+          piece.data, buffer->bytes.get() + piece.offset,
+          [](std::uint8_t value) { return std::byte{value}; });
+    }
+  }
   return buffer;
 }
 }
@@ -106,6 +144,7 @@ auto machine::mapped_region::scratch_region(
       .secure     = false,
       .physical   = std::nullopt,
       .controller = std::nullopt,
+      .content    = std::nullopt,
   });
   auto const* const desc  = owned.get();
   return std::make_unique<mapped_region>(
@@ -135,6 +174,7 @@ auto machine::mapped_region::build(
           description.part, 0, region_key(region),
           std::format("start and size multiples of the engine page size, {} bytes", page));
     }
+    check_content(description.part, region);
     memory.push_back(
         std::make_unique<mapped_region>(mapped_region{.desc = &region, .buffer = {}, .offset = 0}));
   }

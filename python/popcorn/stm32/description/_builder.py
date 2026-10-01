@@ -100,6 +100,7 @@ def build_description_with_report(sources: Sources) -> tuple[McuDescription, Pat
         core=core,
         db_ips=db_ips,
         regions=rzone.regions,
+        db_part=db_part,
     )
     loaded_patches = load_patches(sources.patches, part=sources.part, svd_name=sources.svd.name)
     report = apply_patches(loaded_patches, target)

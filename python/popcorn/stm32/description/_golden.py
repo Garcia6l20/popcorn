@@ -5,11 +5,11 @@ Table format, one line per item, in description order (already deterministic, sp
   R periph reg offset width access reset mask nfields alternate_of
   F periph reg field lsb width access on_write on_read
   I number name
-  G name start size kind read write execute secure physical
+  G name start size kind read write execute secure physical content
   C cpu revision fpu fpu_double mpu mpu_regions mpu_regions_secure sau_regions trustzone dsp
     nvic_prio_bits num_irqs vendor_systick_config reset_clock_hz
 Addresses, offsets, resets and masks are lower-case hex; every other number is decimal; a missing
-optional value is "-".
+optional value is "-". Region content is offset:hexbytes pieces joined by commas.
 """
 
 import hashlib
@@ -89,9 +89,15 @@ def _dump_regions(description: McuDescription) -> str:
     lines: list[str] = []
     for r in description.regions:
         physical = f"{r.physical:#010x}" if r.physical is not None else "-"
+        content = (
+            ",".join(f"{piece.offset:#x}:{bytes(piece.data).hex()}" for piece in r.content)
+            if r.content
+            else "-"
+        )
         lines.append(
             f"G {r.name} {r.start:#010x} {r.size:#010x} {r.kind.value} "
-            f"{int(r.acc.read)} {int(r.acc.write)} {int(r.acc.execute)} {int(r.secure)} {physical}"
+            f"{int(r.acc.read)} {int(r.acc.write)} {int(r.acc.execute)} {int(r.secure)} {physical} "
+            f"{content}"
         )
     return "\n".join(lines) + "\n"
 

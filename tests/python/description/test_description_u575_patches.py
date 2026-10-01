@@ -70,6 +70,7 @@ def u575_target_and_report(
     target.regions = read_rzone(
         u575_sources.rzone.read_bytes(), file=str(u575_sources.rzone)
     ).regions
+    target.db_part = part
 
     patches = load_patches([STM32U5_TOML], part="STM32U575QGIx", svd_name="STM32U575.svd")
     report = apply_patches(patches, target)
@@ -215,8 +216,9 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.irqs_added == 1
     assert report.core_fields_set == 1
     assert report.registers_added == 1
-    assert report.regions_added == 2
+    assert report.regions_added == 4
     assert report.controllers_set == 2
+    assert report.signature_words == 3
 
 
 _ARCH_WINDOWS = (0xE000_0000, 0xE000_1000, 0xE000_2000, 0xE000_E000)
@@ -242,8 +244,7 @@ def test_no_peripheral_overlaps_an_arch_module_window(
 def test_otp_is_a_read_only_region_with_a_secure_alias(
     u575_target_and_report: _TargetAndReport,
 ) -> None:
-    target, report = u575_target_and_report
-    assert report.regions_added == 2
+    target, _ = u575_target_and_report
     regions = {r.name: r for r in target.regions}
     otp, alias = regions["OTP_NS"], regions["OTP_S"]
     assert (otp.start, otp.size, otp.secure, otp.physical) == (0x0BFA_0000, 0x400, False, None)
@@ -290,3 +291,29 @@ def test_rng_has_the_nscr_register_st_svd_omits(
         assert [(f.name, f.lsb, f.width) for f in nscr.fields] == [
             (f"EN_OSC{n}", 3 * (n - 1), 3) for n in range(6, 0, -1)
         ]
+
+
+def test_the_device_signature_page_holds_package_uid_and_flash_size(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, _ = u575_target_and_report
+    regions = {r.name: r for r in target.regions}
+    page, alias = regions["SIG_NS"], regions["SIG_S"]
+    assert (page.start, page.size, page.kind, page.physical) == (
+        0x0BFA_0400,
+        0x400,
+        RegionKind.ROM,
+        None,
+    )
+    assert (alias.start, alias.secure, alias.physical, alias.content) == (
+        0x0FFA_0400,
+        True,
+        0x0BFA_0400,
+        None,
+    )
+    assert page.acc == RegionAccess(read=True, write=False, execute=False)
+    assert [(piece.offset, bytes(piece.data)) for piece in page.content or []] == [
+        (0x100, bytes([0b00011, 0])),
+        (0x300, bytes.fromhex("140032") + b"\x00\x01NROCPOP"),
+        (0x3A0, bytes([0x00, 0x04])),
+    ]

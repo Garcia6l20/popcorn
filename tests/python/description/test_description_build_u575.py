@@ -21,7 +21,7 @@ def test_build_u575_matches_expected_shape(u575_sources: Sources) -> None:
 
     assert len(description.peripherals) == 197
     assert sum(1 for p in description.peripherals if p.alias_of is not None) == 98
-    assert len(description.regions) == 12
+    assert len(description.regions) == 14
     assert len(description.irqs) == 121
 
     assert description.sources["svd"]

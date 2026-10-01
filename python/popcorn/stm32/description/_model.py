@@ -115,6 +115,12 @@ class RegionAccess:
     execute: bool
 
 
+@dataclass(slots=True, kw_only=True)
+class RegionContent:
+    offset: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    data: list[int]
+
+
 class RegionKind(StrEnum):
     ROM = "rom"
     RAM = "ram"
@@ -128,6 +134,7 @@ class RegionDesc:
     kind: RegionKind
     acc: RegionAccess
     secure: bool
+    content: list[RegionContent] | None = None
     controller: str | None = None
     physical: int | None = field(default=None, metadata={"minimum": 0, "maximum": 4294967295})
 
