@@ -106,3 +106,42 @@ def test_a_bad_board_clock_names_its_key_and_line(tmp_path: Path, board: str, ke
     with pytest.raises(ConfigError) as caught:
         popcorn.Project.load(path)
     assert (caught.value.key, caught.value.line) == (key, 4)
+
+
+RCC_CFGR2 = 0x4602_0C20
+HPRE_DIV512 = 0xF
+CODE = 0x2008_0000
+STORE = bytes.fromhex("0160")
+NOP = bytes.fromhex("00bf")
+HERE = bytes.fromhex("fee7")
+
+
+def period_ps(m: popcorn.Machine) -> int:
+    m.reg.pc = CODE + 0x1000
+    start = m.time
+    assert asyncio.run(m.run(budget=100)).reason is StopReason.BUDGET
+    return (m.time - start).ps // 100
+
+
+@pytest.mark.xfail(strict=True, reason="clock: the block of a rate change runs at the old rate")
+@pytest.mark.parametrize("nops", [0, 100, 400])
+def test_the_rest_of_a_block_runs_at_the_rate_its_store_set(
+    u575: popcorn.MachineDescription, nops: int
+) -> None:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF))
+    m.reset()
+    assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS
+    m.mem.write(CODE + 0x1000, HERE)
+    old = period_ps(m)
+    m.mem.write(CODE, STORE + NOP * nops + HERE)
+    m.reg.r0 = RCC_CFGR2
+    m.reg.r1 = m.mem.u32[RCC_CFGR2] | HPRE_DIV512
+    m.reg.pc = CODE
+    start, counted = m.time, m.instructions
+    assert asyncio.run(m.run(budget=nops + 1)).reason is StopReason.BUDGET
+    assert m.periph.RCC.RCC_CFGR2.HPRE == HPRE_DIV512
+    after_store = m.instructions - counted - 1
+    elapsed = (m.time - start).ps
+    new = period_ps(m)
+    assert new > 500 * old
+    assert abs(elapsed - (old + new * after_store)) <= after_store + 1
