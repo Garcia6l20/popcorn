@@ -467,3 +467,28 @@ TEST_CASE("with EWIF set, the IWDG IRQ follows EWIE once EWU clears")
   r.write_early(ewie | 0xFFF, [&] { REQUIRE_FALSE(r.irq_pending()); });
   CHECK(r.irq_pending());
 }
+
+TEST_CASE("KR reloads replace the expiry and early wakeup events instead of queueing more")
+{
+  auto f = entered("idle");
+  bus  b{f};
+  b.write("IWDG", "KR", 0xCCCC);
+  b.write("IWDG", "KR", 0x5555);
+  b.write("IWDG", "PR", 1);
+  b.write("IWDG", "RLR", 2048);
+  b.write("IWDG", "EWCR", (1u << 15) | 204u);
+  REQUIRE(run_for(f, ms).reason == stop_reason::time);
+  REQUIRE(b.read("IWDG", "SR") == 0);
+  auto const queued = [&] { return f.target->snapshot().data().events.pending.size(); };
+  auto const before = queued();
+  for(int reload = 0; reload < 1000; ++reload)
+  {
+    b.write("IWDG", "KR", 0xAAAA);
+  }
+  CHECK(queued() == before);
+  CHECK(f.target->pending_events() == before);
+  REQUIRE(run_for(f, 460 * ms).reason == stop_reason::time);
+  CHECK(f.field("IWDG", "SR", "EWIF") == 0);
+  REQUIRE(run_for(f, 2 * ms).reason == stop_reason::time);
+  CHECK(f.field("IWDG", "SR", "EWIF") == 1);
+}

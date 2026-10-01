@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 namespace popcorn::periph::stm32
 {
@@ -42,6 +43,7 @@ struct iwdg_state
   std::uint64_t                                     anchor_frac{};
   std::uint64_t                                     hz{};
   std::array<std::uint32_t, first_update + updates> generation{};
+  std::array<std::uint64_t, first_update + updates> queued{};
   std::array<std::uint64_t, updates>                update_due{};
   std::uint32_t                                     start{};
   std::uint32_t                                     divider{4};
@@ -102,6 +104,8 @@ private:
   void finish_update(update_index which);
   void reschedule();
   void schedule_at_tick(std::uint32_t kind, std::uint64_t ticks);
+  void post(std::uint32_t kind, std::uint64_t due);
+  void withdraw(std::uint32_t kind);
   void bite();
   void interrupt();
 
@@ -184,7 +188,22 @@ void iwdg::schedule_at_tick(std::uint32_t kind, std::uint64_t ticks)
 {
   auto const at  = anchor() + wide{ticks} * tick_unit();
   auto const due = std::max(static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz), now_ps());
-  ctx_.events.schedule_at(vtime{due}, kind, ++state_.generation[kind], ctx_.clock);
+  post(kind, due);
+}
+
+void iwdg::post(std::uint32_t kind, std::uint64_t due)
+{
+  withdraw(kind);
+  state_.queued[kind] =
+      ctx_.events.schedule_at(vtime{due}, kind, ++state_.generation[kind], ctx_.clock) + 1;
+}
+
+void iwdg::withdraw(std::uint32_t kind)
+{
+  if(auto const seq = std::exchange(state_.queued[kind], 0); seq != 0)
+  {
+    ctx_.events.cancel(seq - 1);
+  }
 }
 
 void iwdg::reschedule()
@@ -224,9 +243,7 @@ void iwdg::schedule_update(std::size_t which)
     }
     due = now_ps() + (update_cycles * ps_per_second + hz - 1) / hz;
   }
-  ctx_.events.schedule_at(
-      vtime{std::max(due, now_ps())}, first_update + static_cast<std::uint32_t>(which),
-      ++state_.generation[first_update + which], ctx_.clock);
+  post(first_update + static_cast<std::uint32_t>(which), std::max(due, now_ps()));
 }
 
 void iwdg::schedule_updates()
