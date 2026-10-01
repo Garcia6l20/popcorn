@@ -14,7 +14,7 @@ from .conftest import CALLEE_ELF
 
 def call(
     m: popcorn.Machine,
-    fn: str,
+    fn: str | int,
     *args: object,
     budget: int | None = None,
     stack: popcorn.Stack = popcorn.Stack.CURRENT,
@@ -254,3 +254,73 @@ def test_the_fallback_return_address_skips_mapped_memory(m33_json: Path) -> None
     result = call(m, "add", 1, 2)
     assert result.value == 3
     assert result.stop.pc == 0x6F00_1000
+
+
+STORE_TWICE = bytes.fromhex("0160 1160 7047")
+STORE_AT = 0x200B_8000
+SCRATCH = 0x200B_C000
+SCS_WRITES = {
+    "NVIC_ISER0": (0xE000_E100, 0x10),
+    "NVIC_IPR0": (0xE000_E400, 0xA0),
+    "VTOR": (0xE000_ED08, 0x2000_0000),
+    "SHPR3": (0xE000_ED20, 0x00E0_0000),
+    "SYST_RVR": (0xE000_E014, 0x1234),
+    "MPU_RNR": (0xE000_ED98, 3),
+}
+
+
+@pytest.fixture
+def strict_callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF), strict_peripherals=True)
+    m.reset()
+    m.mem.write(STORE_AT, STORE_TWICE)
+    return m
+
+
+@pytest.mark.xfail(strict=True, reason="call: end_call reloads the whole SCS")
+@pytest.mark.parametrize("register", SCS_WRITES)
+@pytest.mark.parametrize("ending", ["returned", "model_error"])
+def test_scs_writes_made_in_a_call_stay(
+    strict_callee: popcorn.Machine, m33: popcorn.MachineDescription, register: str, ending: str
+) -> None:
+    address, value = SCS_WRITES[register]
+    unmodelled = next(p.base for p in m33.peripherals if p.ip == "unmodelled")
+    second = SCRATCH if ending == "returned" else unmodelled
+    pc, sp = strict_callee.pc, strict_callee.reg.sp
+    if ending == "returned":
+        result = call(strict_callee, STORE_AT | 1, address, value, second, budget=100)
+        assert result.stop.reason is popcorn.StopReason.RETURNED
+    else:
+        with pytest.raises(popcorn.ModelError):
+            call(strict_callee, STORE_AT | 1, address, value, second, budget=100)
+    assert (strict_callee.pc, strict_callee.reg.sp) == (pc, sp)
+    assert strict_callee.mem.u32[address] == value
+
+
+@pytest.mark.xfail(strict=True, reason="call: end_call reloads the whole SCS")
+def test_a_cyccnt_written_in_a_call_counts_on_from_its_value(
+    strict_callee: popcorn.Machine,
+) -> None:
+    strict_callee.mem.u32[0xE000_EDFC] = 1 << 24
+    strict_callee.mem.u32[0xE000_1000] = 1
+    start = 0x1000_0000
+    result = call(strict_callee, STORE_AT | 1, 0xE000_1004, start, SCRATCH, budget=100)
+    assert result.stop.reason is popcorn.StopReason.RETURNED
+    assert start <= strict_callee.mem.u32[0xE000_1004] < start + 100
+
+
+@pytest.mark.xfail(strict=True, reason="call: end_call reloads the whole SCS")
+def test_a_fault_that_ends_a_call_keeps_its_status_and_nothing_pending(
+    callee: popcorn.Machine,
+) -> None:
+    asyncio.run(callee.run(budget=50_000))
+    ticks = callee.mem.u32[callee.sym("ticks")]
+    shcsr = callee.mem.u32[0xE000_ED24]
+    result = call(callee, "fault", budget=1_000)
+    assert result.stop.reason is popcorn.StopReason.FAULT
+    assert result.stop.fault is not None
+    assert callee.mem.u32[0xE000_ED28] == result.stop.fault.cfsr != 0
+    assert callee.mem.u32[0xE000_ED24] == shcsr
+    stop = asyncio.run(callee.run(budget=50_000))
+    assert stop.reason is popcorn.StopReason.BUDGET
+    assert callee.mem.u32[callee.sym("ticks")] > ticks
