@@ -66,6 +66,7 @@ def stages(asan: bool) -> list[Stage]:
         ("test", _pcons("-B", "build", "test")),
         ("pytest", _python_tool("pytest", "-q", "tests/python")),
         *_examples(),
+        ("examples", _python_tool("pytest", "-q", "-n", "4", "examples")),
         ("pyright", _python_tool("pyright")),
         ("ruff", _python_tool("ruff", "check", ".")),
         ("black", _python_tool("black", "--check", "-q", ".")),

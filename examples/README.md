@@ -26,8 +26,7 @@ Every example has the same layout:
 - `prebuilt/<name>.elf` the committed firmware, used as is without arm-none-eabi-gcc
 - `popcorn.toml` the project file: chip, image, boot, board devices
 - `test_*.py` the tests. pytest loads the `popcorn.pytest` plugin by its entry point
-- `pytest.ini` makes the example directory the pytest rootdir, so its `popcorn.toml` is the
-  project
+- `pytest.ini` makes the example directory the pytest rootdir, so a copied example stands alone
 
 Run one example from the repository root:
 
@@ -41,8 +40,14 @@ Or from its own directory:
 cd examples/stm32u575/spi && uv run pytest -q
 ```
 
+Or every example in one session, each test booting the `popcorn.toml` of its directory:
+
+```sh
+uv run pytest -q examples
+```
+
 `uv run pcons run check` runs every example as its own gate stage, after the `tests/python`
-suite. The examples double as model regression tests: each one fails when the model it drives
+suite, then all of them in one session with `-n 4`. The examples double as model regression tests: each one fails when the model it drives
 breaks.
 
 With arm-none-eabi-gcc on PATH, `uv run pcons -B build -j4` rebuilds every example's firmware.
