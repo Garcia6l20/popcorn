@@ -51,7 +51,9 @@ struct setup_packet
  * Isochronous transactions have no handshake on the bus, and the calls report them this way:
  * an iso IN the device answers with a packet is `ack` with the data, a zero-length packet
  * included. An iso OUT the device takes is `ack`. `none` means the endpoint is not addressed
- * or not enabled for this frame. `nak` and `stall` never occur for iso.
+ * or not enabled for this frame, or the device could not take the iso OUT packet: above the
+ * maximum packet size, no room in the receive FIFO, or a global OUT NAK. `nak` and `stall` never
+ * occur for iso.
  */
 enum class handshake : std::uint8_t
 {

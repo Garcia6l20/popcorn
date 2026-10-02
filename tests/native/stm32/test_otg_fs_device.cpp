@@ -1,5 +1,6 @@
 #include "stm32_fixture.hpp"
 
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/usb.hpp>
@@ -10,8 +11,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -29,6 +33,9 @@ using popcorn::testing::u575;
 
 constexpr std::uint64_t us      = 1'000'000;
 constexpr std::uint32_t otg_irq = 73;
+
+constexpr std::uint32_t bulk        = 2;
+constexpr std::uint32_t isochronous = 1;
 
 constexpr std::uint32_t pktsts_global_out_nak = 1;
 constexpr std::uint32_t pktsts_out_data       = 2;
@@ -256,6 +263,64 @@ struct rig
                          | mask("DOEPTSIZ0", "PKTCNT", 1)
                          | mask("DOEPTSIZ0", "STUPCNT", get("DOEPTSIZ0", "STUPCNT")));
     write("DOEPCTL0", read("DOEPCTL0") | mask("DOEPCTL0", "EPENA") | mask("DOEPCTL0", "CNAK"));
+  }
+
+  void open_in(std::size_t n, std::uint32_t type, std::uint32_t mps, std::uint32_t depth) const
+  {
+    auto const fifo = std::format("DIEPTXF{}", n);
+    auto const ctl  = std::format("DIEPCTL{}", n);
+    write(fifo, mask(fifo, "INEPTXFD", depth));
+    write(
+        ctl, mask(ctl, "MPSIZ", mps)
+                 | mask(ctl, "USBAEP")
+                 | mask(ctl, "EPTYP", type)
+                 | mask(ctl, "TXFNUM", static_cast<std::uint32_t>(n))
+                 | (type == isochronous ? 0u : mask(ctl, "SD0PID_SEVNFRM")));
+  }
+
+  void open_out(std::size_t n, std::uint32_t type, std::uint32_t mps) const
+  {
+    auto const ctl = std::format("DOEPCTL{}", n);
+    write(
+        ctl, mask(ctl, "MPSIZ", mps)
+                 | mask(ctl, "USBAEP")
+                 | mask(ctl, "EPTYP", type)
+                 | (type == isochronous ? 0u : mask(ctl, "SD0PID_SEVNFRM")));
+  }
+
+  [[nodiscard]] auto next_parity_bit(std::string_view ctl, std::string_view odd) const
+      -> std::uint32_t
+  {
+    return (get("DSTS", "FNSOF") & 1u) != 0 ? mask(ctl, "SD0PID_SEVNFRM") : mask(ctl, odd);
+  }
+
+  void arm_in(std::size_t n, std::uint32_t bytes, std::uint32_t packets, bool iso = false) const
+  {
+    auto const size = std::format("DIEPTSIZ{}", n);
+    auto const ctl  = std::format("DIEPCTL{}", n);
+    write(size, mask(size, "XFRSIZ", bytes) | mask(size, "PKTCNT", packets));
+    write(
+        ctl, read(ctl)
+                 | mask(ctl, "EPENA")
+                 | mask(ctl, "CNAK")
+                 | (iso ? next_parity_bit(ctl, "SODDFRM") : 0u));
+  }
+
+  void arm_out(std::size_t n, std::uint32_t bytes, std::uint32_t packets, bool iso = false) const
+  {
+    auto const size = std::format("DOEPTSIZ{}", n);
+    auto const ctl  = std::format("DOEPCTL{}", n);
+    write(size, mask(size, "XFRSIZ", bytes) | mask(size, "PKTCNT", packets));
+    write(
+        ctl, read(ctl)
+                 | mask(ctl, "EPENA")
+                 | mask(ctl, "CNAK")
+                 | (iso ? next_parity_bit(ctl, "SD1PID_SODDFRM") : 0u));
+  }
+
+  void frame(std::uint16_t number) const
+  {
+    port().start_of_frame(number, now());
   }
 };
 
@@ -869,4 +934,362 @@ TEST_CASE("a machine reset releases the pull-up and empties the FIFOs")
   CHECK_FALSE(r.host->changes[1].first);
   CHECK(r.get("GINTSTS", "RXFLVL") == 0);
   CHECK(r.read("GRXSTSR_DEVICE") == 0);
+}
+
+TEST_CASE("a bulk OUT of 64 then a short 10 with XFRSIZ 128 completes on the short packet")
+{
+  rig const r;
+  r.enumerate();
+  r.open_out(2, bulk, 64);
+  r.arm_out(2, 128, 2);
+  std::vector<std::uint8_t> full(64, 0xa5);
+  std::vector<std::uint8_t> tail(10, 0x5a);
+  CHECK(r.port().out(0, 2, full, usb::data_pid::data0, r.now()) == usb::handshake::ack);
+  CHECK(r.port().out(0, 2, tail, usb::data_pid::data1, r.now()) == usb::handshake::ack);
+  CHECK(r.get("DOEPTSIZ2", "XFRSIZ") == 54);
+  CHECK(r.get("DOEPCTL2", "EPENA") == 0);
+  auto const first = r.pop();
+  CHECK(first.pktsts == pktsts_out_data);
+  CHECK(first.bytes == 64);
+  CHECK(first.dpid == 0);
+  static_cast<void>(r.pop_words(16));
+  auto const second = r.pop();
+  CHECK(second.pktsts == pktsts_out_data);
+  CHECK(second.bytes == 10);
+  CHECK(second.dpid == 2);
+  CHECK(r.pop_words(3).front() == 0x5a5a5a5au);
+  CHECK(r.get("DOEPINT2", "XFRC") == 0);
+  auto const done = r.pop();
+  CHECK(done.pktsts == pktsts_out_done);
+  CHECK(done.endpoint == 2);
+  CHECK(r.get("DOEPINT2", "XFRC") == 1);
+}
+
+TEST_CASE("a STALLed bulk IN answers STALL, clear stall with SD0PID restarts at DATA0")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(1, bulk, 64, 32);
+  std::array<std::uint8_t, 8> bytes{1, 2, 3, 4, 5, 6, 7, 8};
+  r.arm_in(1, 8, 1);
+  r.push("DFIFO1", bytes);
+  REQUIRE(r.port().in(0, 1, r.now()).pid == usb::data_pid::data0);
+  r.write("DIEPCTL1", r.read("DIEPCTL1") | r.mask("DIEPCTL1", "STALL"));
+  CHECK(r.port().in(0, 1, r.now()).hs == usb::handshake::stall);
+  r.write(
+      "DIEPCTL1",
+      (r.read("DIEPCTL1") & ~r.mask("DIEPCTL1", "STALL")) | r.mask("DIEPCTL1", "SD0PID_SEVNFRM"));
+  CHECK(r.get("DIEPCTL1", "STALL") == 0);
+  CHECK(r.port().in(0, 1, r.now()).hs == usb::handshake::nak);
+  r.arm_in(1, 8, 1);
+  r.push("DFIFO1", bytes);
+  auto const packet = r.port().in(0, 1, r.now());
+  CHECK(packet.hs == usb::handshake::ack);
+  CHECK(packet.pid == usb::data_pid::data0);
+}
+
+TEST_CASE("SNAK and EPDIS on a bulk IN endpoint take effect on their write")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(1, bulk, 64, 32);
+  r.arm_in(1, 64, 1);
+  r.write("DIEPCTL1", r.read("DIEPCTL1") | r.mask("DIEPCTL1", "SNAK"));
+  CHECK(r.get("DIEPINT1", "INEPNE") == 1);
+  CHECK(r.port().in(0, 1, r.now()).hs == usb::handshake::nak);
+  r.write("DIEPCTL1", r.read("DIEPCTL1") | r.mask("DIEPCTL1", "EPDIS"));
+  CHECK(r.get("DIEPINT1", "EPDISD") == 1);
+  CHECK(r.get("DIEPCTL1", "EPENA") == 0);
+  r.set("DIEPMSK", "EPDM", 1);
+  r.set("DAINTMSK", "IEPM", 1u << 1);
+  CHECK(r.get("DAINT", "IEPINT") == 1u << 1);
+  CHECK(r.get("GINTSTS", "IEPINT") == 1);
+}
+
+TEST_CASE("a snapshot during a bulk IN with 64 of 130 bytes taken resumes with the second packet")
+{
+  rig const first;
+  first.enumerate();
+  first.open_in(1, bulk, 64, 32);
+  first.arm_in(1, 130, 3);
+  std::vector<std::uint8_t> payload(130);
+  for(std::size_t index = 0; index < payload.size(); ++index)
+  {
+    payload[index] = static_cast<std::uint8_t>(3 * index);
+  }
+  first.push("DFIFO1", std::span{payload}.first(128));
+  REQUIRE(first.port().in(0, 1, first.now()).data.size() == 64);
+  auto const saved = first.f->target->snapshot();
+
+  rig const other;
+  other.port().attach(other.host);
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  auto const second = other.port().in(0, 1, other.now());
+  CHECK(second.hs == usb::handshake::ack);
+  CHECK(second.pid == usb::data_pid::data1);
+  CHECK(second.data == std::vector<std::uint8_t>(payload.begin() + 64, payload.begin() + 128));
+  other.push("DFIFO1", std::span{payload}.subspan(128));
+  auto const third = other.port().in(0, 1, other.now());
+  CHECK(third.data == std::vector<std::uint8_t>(payload.begin() + 128, payload.end()));
+  CHECK(other.get("DIEPINT1", "XFRC") == 1);
+}
+
+TEST_CASE("an iso IN armed for an odd frame answers only in odd frames, IISOIXFR when missed")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(3, isochronous, 34, 16);
+  r.frame(10);
+  r.arm_in(3, 32, 1, true);
+  CHECK(r.get("DIEPCTL3", "EONUM_DPIP") == 1);
+  std::array<std::uint8_t, 32> pcm{};
+  r.push("DFIFO3", pcm);
+  CHECK(r.port().in(0, 3, r.now()).hs == usb::handshake::none);
+  r.run_for(1000 * us);
+  CHECK(r.get("GINTSTS", "EOPF") == 1);
+  CHECK(r.get("GINTSTS", "IISOIXFR") == 0);
+  r.frame(11);
+  r.run_for(1000 * us);
+  CHECK(r.get("GINTSTS", "IISOIXFR") == 1);
+  r.write("GINTSTS", r.mask("GINTSTS", "IISOIXFR"));
+  r.frame(13);
+  auto const packet = r.port().in(0, 3, r.now());
+  CHECK(packet.hs == usb::handshake::ack);
+  CHECK(packet.pid == usb::data_pid::data0);
+  CHECK(packet.data.size() == 32);
+  CHECK(r.get("DIEPINT3", "XFRC") == 1);
+  r.run_for(1000 * us);
+  CHECK(r.get("GINTSTS", "IISOIXFR") == 0);
+}
+
+TEST_CASE("an iso IN re-armed each frame the way TinyUSB does sends 32 bytes every frame")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(3, isochronous, 34, 16);
+  r.set("GINTMSK", "IISOIXFRM", 1);
+  r.frame(100);
+  std::array<std::uint8_t, 32> pcm{};
+  std::size_t                  sent  = 0;
+  auto const                   queue = [&] {
+    for(auto& sample : pcm)
+    {
+      sample = static_cast<std::uint8_t>(sent);
+    }
+    r.arm_in(3, 32, 1, true);
+    r.push("DFIFO3", pcm);
+  };
+  queue();
+  for(std::uint16_t frame = 101; frame < 111; ++frame)
+  {
+    r.frame(frame);
+    auto const packet = r.port().in(0, 3, r.now());
+    REQUIRE(packet.hs == usb::handshake::ack);
+    CHECK(packet.pid == usb::data_pid::data0);
+    CHECK(packet.data == std::vector<std::uint8_t>(32, static_cast<std::uint8_t>(sent)));
+    REQUIRE(r.get("DIEPINT3", "XFRC") == 1);
+    r.write("DIEPINT3", r.mask("DIEPINT3", "XFRC"));
+    ++sent;
+    queue();
+    r.run_for(1000 * us);
+    CHECK(r.get("GINTSTS", "IISOIXFR") == 0);
+  }
+  CHECK(sent == 10);
+}
+
+TEST_CASE("an iso OUT of 32 bytes per frame for 10 frames gives 10 PKTSTS 2 and 3 pairs")
+{
+  rig const r;
+  r.enumerate();
+  r.open_out(3, isochronous, 34);
+  r.frame(200);
+  r.arm_out(3, 34, 1, true);
+  std::size_t pairs = 0;
+  for(std::uint16_t frame = 201; frame < 211; ++frame)
+  {
+    r.frame(frame);
+    std::vector<std::uint8_t> pcm(32, static_cast<std::uint8_t>(frame));
+    auto const                pid = (frame % 2) != 0 ? usb::data_pid::data1 : usb::data_pid::data0;
+    REQUIRE(r.port().out(0, 3, pcm, pid, r.now()) == usb::handshake::ack);
+    auto const data = r.pop();
+    CHECK(data.pktsts == pktsts_out_data);
+    CHECK(data.endpoint == 3);
+    CHECK(data.bytes == 32);
+    CHECK(data.dpid == 0);
+    CHECK(r.pop_words(8).front() == 0x01010101u * static_cast<std::uint8_t>(frame));
+    if(r.pop().pktsts == pktsts_out_done)
+    {
+      ++pairs;
+    }
+    r.write("DOEPINT3", r.mask("DOEPINT3", "XFRC"));
+    r.arm_out(3, 34, 1, true);
+    r.run_for(1000 * us);
+    CHECK(r.get("GINTSTS", "IPXFR") == 0);
+  }
+  CHECK(pairs == 10);
+}
+
+TEST_CASE("an iso OUT outside its frame is dropped and INCOMPISOOUT rises at EOPF")
+{
+  rig const r;
+  r.enumerate();
+  r.open_out(3, isochronous, 34);
+  r.frame(300);
+  r.arm_out(3, 34, 1, true);
+  CHECK(r.get("DOEPCTL3", "EONUM_DPIP") == 1);
+  std::vector<std::uint8_t> pcm(32);
+  CHECK(r.port().out(0, 3, pcm, usb::data_pid::data0, r.now()) == usb::handshake::none);
+  CHECK(r.get("GINTSTS", "RXFLVL") == 0);
+  r.run_for(1000 * us);
+  CHECK(r.get("GINTSTS", "IPXFR") == 0);
+  r.frame(301);
+  r.run_for(1000 * us);
+  CHECK(r.get("GINTSTS", "IPXFR") == 1);
+}
+
+TEST_CASE("FIFOs above the 320 words of FIFO RAM warn when an IN endpoint is activated")
+{
+  rig const                     r;
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  r.write("GRXFSIZ", r.mask("GRXFSIZ", "RXFD", 128));
+  r.write("HNPTXFSIZ", r.mask("HNPTXFSIZ", "NPTXFD", 16));
+  r.open_in(1, bulk, 64, 64);
+  CHECK(logged.empty());
+  r.open_in(2, bulk, 64, 128);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].kind == core::log_kind::model_warning);
+  CHECK(logged[0].message.contains("336 words"));
+}
+
+TEST_CASE("TinyUSB-sized FIFOs within the 320 words of FIFO RAM do not warn")
+{
+  rig const                     r;
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  r.write("GRXFSIZ", r.mask("GRXFSIZ", "RXFD", 60));
+  r.write("HNPTXFSIZ", r.mask("HNPTXFSIZ", "NPTXFD", 16));
+  r.open_in(1, 3, 8, 2);
+  r.open_in(2, bulk, 64, 16);
+  r.open_in(3, isochronous, 34, 9);
+  r.open_in(4, 3, 64, 16);
+  CHECK(logged.empty());
+}
+
+TEST_CASE("a zero-length iso IN completes in its frame without IISOIXFR")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(3, isochronous, 34, 16);
+  r.frame(20);
+  r.arm_in(3, 0, 1, true);
+  r.frame(21);
+  auto const packet = r.port().in(0, 3, r.now());
+  CHECK(packet.hs == usb::handshake::ack);
+  CHECK(packet.data.empty());
+  CHECK(r.get("DIEPINT3", "XFRC") == 1);
+  CHECK(r.get("DIEPCTL3", "EPENA") == 0);
+  CHECK(r.get("DIEPTSIZ3", "PKTCNT") == 0);
+  r.run_for(1000 * us);
+  CHECK(r.get("GINTSTS", "IISOIXFR") == 0);
+}
+
+TEST_CASE("an iso IN re-armed for the other parity after IISOIXFR goes out in the next frame")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(3, isochronous, 34, 16);
+  r.frame(30);
+  r.arm_in(3, 32, 1, true);
+  r.frame(31);
+  r.run_for(1000 * us);
+  REQUIRE(r.get("GINTSTS", "IISOIXFR") == 1);
+  r.write("GINTSTS", r.mask("GINTSTS", "IISOIXFR"));
+  REQUIRE(r.get("DIEPCTL3", "EPENA") == 1);
+  r.write("DIEPTSIZ3", r.mask("DIEPTSIZ3", "XFRSIZ", 32) | r.mask("DIEPTSIZ3", "PKTCNT", 1));
+  r.write("DIEPCTL3", r.read("DIEPCTL3") | r.mask("DIEPCTL3", "SD0PID_SEVNFRM"));
+  CHECK(r.get("DIEPCTL3", "EONUM_DPIP") == 0);
+  std::array<std::uint8_t, 32> pcm{};
+  r.push("DFIFO3", pcm);
+  CHECK(r.port().in(0, 3, r.now()).hs == usb::handshake::none);
+  r.frame(32);
+  auto const packet = r.port().in(0, 3, r.now());
+  CHECK(packet.hs == usb::handshake::ack);
+  CHECK(packet.data.size() == 32);
+  r.run_for(1000 * us);
+  CHECK(r.get("GINTSTS", "IISOIXFR") == 0);
+}
+
+TEST_CASE("a snapshot mid iso frame after the packet went out raises no IISOIXFR at EOPF")
+{
+  rig const first;
+  first.enumerate();
+  first.open_in(3, isochronous, 34, 16);
+  first.frame(40);
+  first.arm_in(3, 32, 2, true);
+  std::array<std::uint8_t, 32> pcm{};
+  first.push("DFIFO3", pcm);
+  first.frame(41);
+  REQUIRE(first.port().in(0, 3, first.now()).data.size() == 32);
+  REQUIRE(first.get("DIEPCTL3", "EPENA") == 1);
+  auto const saved = first.f->target->snapshot();
+
+  rig const other;
+  other.port().attach(other.host);
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  other.run_for(1000 * us);
+  CHECK(other.get("GINTSTS", "EOPF") == 1);
+  CHECK(other.get("GINTSTS", "IISOIXFR") == 0);
+}
+
+TEST_CASE("an interrupt IN endpoint NAKs until armed, then sends with toggles like bulk")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(1, 3, 8, 4);
+  CHECK(r.port().in(0, 1, r.now()).hs == usb::handshake::nak);
+  std::array<std::uint8_t, 8> report{0x01, 0x02};
+  for(auto const pid : {usb::data_pid::data0, usb::data_pid::data1})
+  {
+    r.arm_in(1, 8, 1);
+    r.push("DFIFO1", report);
+    auto const packet = r.port().in(0, 1, r.now());
+    CHECK(packet.hs == usb::handshake::ack);
+    CHECK(packet.pid == pid);
+    CHECK(packet.data == std::vector<std::uint8_t>(report.begin(), report.end()));
+    CHECK(r.get("DIEPINT1", "XFRC") == 1);
+    r.write("DIEPINT1", r.mask("DIEPINT1", "XFRC"));
+  }
+  CHECK(r.port().in(0, 1, r.now()).hs == usb::handshake::nak);
+}
+
+TEST_CASE("a bus reset clears USBAEP on EP1-5 and keeps EP0")
+{
+  rig const r;
+  r.enumerate();
+  r.open_in(1, bulk, 64, 16);
+  r.open_out(2, bulk, 64);
+  r.port().bus_reset(r.now());
+  CHECK(r.get("DIEPCTL1", "USBAEP") == 0);
+  CHECK(r.get("DOEPCTL2", "USBAEP") == 0);
+  CHECK(r.get("DOEPCTL0", "USBAEP") == 1);
+}
+
+TEST_CASE("an iso OUT is not taken under a global OUT NAK")
+{
+  rig const r;
+  r.enumerate();
+  r.open_out(3, isochronous, 34);
+  r.frame(50);
+  r.arm_out(3, 34, 1, true);
+  r.frame(51);
+  r.write("DCTL", r.read("DCTL") | r.mask("DCTL", "SGONAK"));
+  REQUIRE(r.pop().pktsts == pktsts_global_out_nak);
+  std::vector<std::uint8_t> pcm(32);
+  CHECK(r.port().out(0, 3, pcm, usb::data_pid::data0, r.now()) == usb::handshake::none);
+  CHECK(r.get("GINTSTS", "RXFLVL") == 0);
 }

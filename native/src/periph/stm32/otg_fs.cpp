@@ -43,6 +43,8 @@ constexpr std::uint32_t pktsts_out_done       = 3;
 constexpr std::uint32_t pktsts_setup_done     = 4;
 constexpr std::uint32_t pktsts_setup_data     = 6;
 constexpr std::uint8_t  set_address           = 5;
+constexpr std::uint32_t isochronous           = 1;
+constexpr std::size_t   fifo_ram_words        = 320;
 
 enum warning : std::uint32_t
 {
@@ -56,6 +58,9 @@ enum warning : std::uint32_t
   rx_empty         = 1u << 7,
   babble           = 1u << 8,
   setup_overflow   = 1u << 9,
+  fifo_ram         = 1u << 10,
+  iso_dropped      = 1u << 11,
+  iso_packets      = 1u << 12,
 };
 
 struct rx_packet
@@ -69,6 +74,7 @@ struct rx_packet
 struct endpoint_state
 {
   std::uint8_t toggle{};
+  bool         served{};
 
   friend auto operator==(endpoint_state const&, endpoint_state const&) -> bool = default;
 };
@@ -96,6 +102,7 @@ struct otg_fs_state
 
 struct in_fields
 {
+  field_ref                type;
   field_ref                packet_size;
   field_ref                active;
   field_ref                nak;
@@ -120,6 +127,7 @@ struct in_fields
 
 struct out_fields
 {
+  field_ref                type;
   field_ref                active;
   field_ref                packet_size;
   field_ref                nak;
@@ -216,6 +224,19 @@ struct out_fields
  * Host: wake-ups the host asks for are model events. The host's bytes are saved in the model
  * state, and after a load the host hears of a pull-up that differs from the saved one.
  *
+ * Isochronous endpoints, EPTYP 1 on EP1-5: SEVNFRM and SODDFRM pick the frame parity the
+ * transfer runs in, EONUM reads it back, compared with the frame of the last SOF. Data are
+ * always DATA0 and no toggle flips, NAK and STALL do not apply. An iso IN in its frame sends
+ * the oldest recorded packet, a zero-length packet that completes a transfer armed with XFRSIZ
+ * 0, or a zero-length packet that does not count when nothing is ready.
+ * An iso OUT in its frame is taken as a bulk OUT is, a packet that does not fit is dropped. In
+ * another frame, or disabled, the endpoint does not answer. At EOPF an iso endpoint enabled for
+ * the frame that moved no packet raises IISOIXFR for IN, INCOMPISOOUT, GINTSTS.IPXFR, for OUT.
+ * DIEPTSIZn.MCNT is ignored: one packet per frame, as full speed allows, and an iso endpoint
+ * armed with PKTCNT above 1 is unmodelled. A bus reset clears USBAEP on EP1-5. Activating an IN
+ * endpoint, or resizing a FIFO while one is active, warns once when GRXFSIZ, DIEPTXF0 and the
+ * TX FIFOs of the active IN endpoints add up to more than the 320 words of FIFO RAM.
+ *
  * Endpoint control: CNAK and SNAK set NAKSTS, SNAK also DIEPINT.INEPNE, at once. EPDIS on an
  * enabled endpoint disables it at once with EPDISD. EPENA, and STALL on EP0, are set-only: the
  * core clears them. SGINAK and SGONAK take effect at once, GINAKEFF and GONAKEFF follow DCTL
@@ -268,6 +289,7 @@ public:
 
   void plain_written(std::uint32_t old, std::uint32_t now);
   void refresh_written(std::uint32_t old, std::uint32_t now);
+  void fifo_size_written(std::uint32_t old, std::uint32_t now);
   void link_written(std::uint32_t old, std::uint32_t now);
   void usb_config_written(std::uint32_t old, std::uint32_t now);
   void reset_control_written(std::uint32_t old, std::uint32_t now);
@@ -291,6 +313,13 @@ private:
   [[nodiscard]] auto in_packet_size(std::size_t n) const -> std::uint32_t;
   [[nodiscard]] auto out_packet_size(std::size_t n) const -> std::uint32_t;
   [[nodiscard]] auto bus_address() const -> std::uint8_t;
+  [[nodiscard]] auto frame_parity() const -> std::uint8_t;
+  void               check_fifo_ram();
+  template <typename Fields>
+  void check_iso_packets(std::string_view reg, Fields const& ep, std::size_t n);
+  void end_periodic_frame();
+  auto in_isochronous(std::size_t n) -> usb::in_result;
+  auto out_isochronous(std::size_t n, std::span<std::uint8_t const> data) -> usb::handshake;
   [[nodiscard]] auto unpacketed_words(std::size_t n) const -> std::size_t;
   void               packetize(std::size_t n);
   [[nodiscard]] auto is_control(std::uint32_t word) const -> bool;
@@ -343,6 +372,8 @@ private:
   field_ref                         early_suspend_;
   field_ref                         suspend_;
   field_ref                         wake_up_;
+  field_ref                         incomplete_iso_in_;
+  field_ref                         incomplete_iso_out_;
   field_ref                         otg_pending_;
   field_ref                         rx_level_;
   field_ref                         np_tx_empty_;
@@ -384,14 +415,14 @@ constexpr std::array<write_entry<otg_fs>, 73> otg_fs_writes{
      {"GINTMSK", &otg_fs::refresh_written},
      {"GRXSTSR_DEVICE", &otg_fs::plain_written},
      {"GRXSTSP_DEVICE", &otg_fs::plain_written},
-     {"GRXFSIZ", &otg_fs::refresh_written},
-     {"HNPTXFSIZ", &otg_fs::refresh_written},
+     {"GRXFSIZ", &otg_fs::fifo_size_written},
+     {"HNPTXFSIZ", &otg_fs::fifo_size_written},
      {"GCCFG", &otg_fs::link_written},
-     {"DIEPTXF1", &otg_fs::refresh_written},
-     {"DIEPTXF2", &otg_fs::refresh_written},
-     {"DIEPTXF3", &otg_fs::refresh_written},
-     {"DIEPTXF4", &otg_fs::refresh_written},
-     {"DIEPTXF5", &otg_fs::refresh_written},
+     {"DIEPTXF1", &otg_fs::fifo_size_written},
+     {"DIEPTXF2", &otg_fs::fifo_size_written},
+     {"DIEPTXF3", &otg_fs::fifo_size_written},
+     {"DIEPTXF4", &otg_fs::fifo_size_written},
+     {"DIEPTXF5", &otg_fs::fifo_size_written},
      {"DCFG", &otg_fs::plain_written},
      {"DCTL", &otg_fs::device_control_written},
      {"DSTS", &otg_fs::plain_written},
@@ -476,7 +507,8 @@ otg_fs::otg_fs(model_context& ctx, peripheral_desc const& desc)
       bus_reset_{field("GINTSTS", "USBRST")}, enumeration_done_{field("GINTSTS", "ENUMDNE")},
       start_of_frame_{field("GINTSTS", "SOF")}, end_of_periodic_{field("GINTSTS", "EOPF")},
       early_suspend_{field("GINTSTS", "ESUSP")}, suspend_{field("GINTSTS", "USBSUSP")},
-      wake_up_{field("GINTSTS", "WKUPINT")}, otg_pending_{field("GINTSTS", "OTGINT")},
+      wake_up_{field("GINTSTS", "WKUPINT")}, incomplete_iso_in_{field("GINTSTS", "IISOIXFR")},
+      incomplete_iso_out_{field("GINTSTS", "IPXFR")}, otg_pending_{field("GINTSTS", "OTGINT")},
       rx_level_{field("GINTSTS", "RXFLVL")}, np_tx_empty_{field("GINTSTS", "NPTXFE")},
       in_nak_effective_{field("GINTSTS", "GINAKEFF")},
       out_nak_effective_{field("GINTSTS", "GONAKEFF")}, in_pending_{field("GINTSTS", "IEPINT")},
@@ -505,6 +537,7 @@ auto otg_fs::in_fields_of(std::size_t n) const -> in_fields
   auto const status   = std::format("DIEPINT{}", n);
   auto const transfer = std::format("DIEPTSIZ{}", n);
   return {
+      .type          = field(control, "EPTYP"),
       .packet_size   = field(control, "MPSIZ"),
       .active        = field(control, "USBAEP"),
       .nak           = field(control, "NAKSTS"),
@@ -535,6 +568,7 @@ auto otg_fs::out_fields_of(std::size_t n) const -> out_fields
   auto const status   = std::format("DOEPINT{}", n);
   auto const transfer = std::format("DOEPTSIZ{}", n);
   return {
+      .type        = field(control, "EPTYP"),
       .active      = field(control, "USBAEP"),
       .packet_size = field(control, "MPSIZ"),
       .nak         = field(control, "NAKSTS"),
@@ -911,6 +945,12 @@ void otg_fs::refresh_written(std::uint32_t, std::uint32_t)
   refresh();
 }
 
+void otg_fs::fifo_size_written(std::uint32_t, std::uint32_t)
+{
+  check_fifo_ram();
+  refresh();
+}
+
 void otg_fs::link_written(std::uint32_t, std::uint32_t)
 {
   if(get(regs_, session_request_) != 0 or get(regs_, host_negotiation_) != 0)
@@ -1054,6 +1094,11 @@ void otg_fs::in_control_written(std::uint32_t old, std::uint32_t now)
         "DFIFOn feeds IN endpoint n",
         shared_tx_fifo);
   }
+  if(n != 0 and ep.active.of(old) == 0 and ep.active.of(now) != 0)
+  {
+    check_fifo_ram();
+  }
+  check_iso_packets(std::format("DIEPCTL{}", n), ep, n);
   refresh();
 }
 
@@ -1106,6 +1151,7 @@ void otg_fs::out_control_written(std::uint32_t old, std::uint32_t now)
       update(regs_, *bit, 0);
     }
   }
+  check_iso_packets(std::format("DOEPCTL{}", n), ep, n);
   refresh();
 }
 
@@ -1147,7 +1193,7 @@ void otg_fs::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   else if(kind == periodic_end)
   {
-    update(regs_, end_of_periodic_, 1);
+    end_periodic_frame();
   }
   else if(host_)
   {
@@ -1215,6 +1261,11 @@ void otg_fs::bus_reset(vtime at)
   state_.suspended       = false;
   state_.in              = {};
   state_.out             = {};
+  for(std::size_t n = 1; n < endpoints; ++n)
+  {
+    update(regs_, in_[n].active, 0);
+    update(regs_, out_[n].active, 0);
+  }
   update(regs_, suspended_status_, 0);
   update(regs_, bus_reset_, 1);
   schedule(enumeration_done, at.ps + enumeration_ps);
@@ -1228,6 +1279,14 @@ void otg_fs::start_of_frame(std::uint16_t frame, vtime at)
     return;
   }
   state_.frame = frame;
+  for(auto& ep : state_.in)
+  {
+    ep.served = false;
+  }
+  for(auto& ep : state_.out)
+  {
+    ep.served = false;
+  }
   update(regs_, frame_number_, frame);
   update(regs_, start_of_frame_, 1);
   schedule(periodic_end, at.ps + frame_ps * periodic_percent[get(regs_, periodic_interval_)] / 100);
@@ -1282,6 +1341,10 @@ auto otg_fs::out(
   if(endpoint != 0 and get(regs_, ep.active) == 0)
   {
     return usb::handshake::none;
+  }
+  if(endpoint != 0 and get(regs_, ep.type) == isochronous)
+  {
+    return out_isochronous(endpoint, data);
   }
   if(get(regs_, ep.stall) != 0)
   {
@@ -1342,6 +1405,10 @@ auto otg_fs::in(std::uint8_t address, std::uint8_t endpoint, vtime) -> usb::in_r
   {
     return {};
   }
+  if(endpoint != 0 and get(regs_, ep.type) == isochronous)
+  {
+    return in_isochronous(endpoint);
+  }
   if(get(regs_, ep.stall) != 0)
   {
     return refused(usb::handshake::stall);
@@ -1388,6 +1455,167 @@ auto otg_fs::in(std::uint8_t address, std::uint8_t endpoint, vtime) -> usb::in_r
   packetize(endpoint);
   refresh();
   return result;
+}
+
+auto otg_fs::frame_parity() const -> std::uint8_t
+{
+  return static_cast<std::uint8_t>(state_.frame & 1u);
+}
+
+auto otg_fs::in_isochronous(std::size_t n) -> usb::in_result
+{
+  auto const& ep    = in_[n];
+  auto&       state = state_.in[n];
+  if(get(regs_, ep.enable) == 0 or state.toggle != frame_parity())
+  {
+    return {};
+  }
+  auto&          written = state_.tx_packets[n];
+  auto&          fifo    = state_.tx_fifo[n];
+  usb::in_result result{.hs = usb::handshake::ack, .pid = usb::data_pid::data0, .data = {}};
+  auto const     packets = get(regs_, ep.packets);
+  if(packets == 0)
+  {
+    return result;
+  }
+  auto bytes = std::size_t{0};
+  if(not written.empty())
+  {
+    bytes = written.front();
+    written.erase(written.begin());
+  }
+  else if(not fifo.empty() or get(regs_, ep.size) != 0)
+  {
+    return result;
+  }
+  result.data.resize(bytes);
+  for(std::size_t index = 0; index < bytes; ++index)
+  {
+    result.data[index] = static_cast<std::uint8_t>(fifo[index / 4] >> (8 * (index % 4)));
+  }
+  fifo.erase(fifo.begin(), fifo.begin() + static_cast<std::ptrdiff_t>(words_for(bytes)));
+  state.served = true;
+  update(regs_, ep.packets, packets - 1);
+  if(packets == 1)
+  {
+    update(regs_, ep.enable, 0);
+    update(regs_, ep.complete, 1);
+  }
+  packetize(n);
+  refresh();
+  return result;
+}
+
+auto otg_fs::out_isochronous(std::size_t n, std::span<std::uint8_t const> data) -> usb::handshake
+{
+  auto const& ep    = out_[n];
+  auto&       state = state_.out[n];
+  if(get(regs_, ep.enable)
+     == 0
+     or state.toggle
+     != frame_parity()
+     or get(regs_, out_nak_status_)
+     != 0)
+  {
+    return usb::handshake::none;
+  }
+  auto const largest   = out_packet_size(n);
+  auto const packets   = get(regs_, ep.packets);
+  auto const completes = packets <= 1 or data.size() < largest;
+  auto const needed    = 1 + words_for(data.size()) + (completes ? 1 : 0);
+  if(data.size() > largest or rx_used() + needed > get(regs_, rx_depth_))
+  {
+    notice(
+        std::format("DOEPCTL{}", n),
+        std::format(
+            "iso OUT packet of {} bytes on endpoint {} dropped: above the maximum packet size {} "
+            "or no room in the receive FIFO",
+            data.size(), n, largest),
+        iso_dropped);
+    return usb::handshake::none;
+  }
+  auto const endpoint = static_cast<std::uint32_t>(n);
+  push_rx(status_word(endpoint, data.size(), 0, pktsts_out_data, state_.frame), pack(data));
+  state.served    = true;
+  auto const size = get(regs_, ep.size);
+  update(
+      regs_, ep.size,
+      size - std::min<std::uint32_t>(size, static_cast<std::uint32_t>(data.size())));
+  update(regs_, ep.packets, packets > 0 ? packets - 1 : 0);
+  if(completes)
+  {
+    push_rx(status_word(endpoint, 0, 0, pktsts_out_done, state_.frame), {});
+    update(regs_, ep.enable, 0);
+  }
+  refresh();
+  return usb::handshake::ack;
+}
+
+void otg_fs::end_periodic_frame()
+{
+  update(regs_, end_of_periodic_, 1);
+  auto const parity = frame_parity();
+  for(std::size_t n = 1; n < endpoints; ++n)
+  {
+    auto const pending = [&](auto const& ep, endpoint_state const& state) {
+      auto const iso      = get(regs_, ep.type) == isochronous;
+      auto const enabled  = get(regs_, ep.enable) != 0;
+      auto const in_frame = state.toggle == parity;
+      return iso and enabled and in_frame and not state.served;
+    };
+    if(pending(in_[n], state_.in[n]))
+    {
+      update(regs_, incomplete_iso_in_, 1);
+    }
+    if(pending(out_[n], state_.out[n]))
+    {
+      update(regs_, incomplete_iso_out_, 1);
+    }
+  }
+}
+
+template <typename Fields>
+void otg_fs::check_iso_packets(std::string_view reg, Fields const& ep, std::size_t n)
+{
+  if(n
+     != 0
+     and get(regs_, ep.type)
+     == isochronous
+     and get(regs_, ep.enable)
+     != 0
+     and get(regs_, ep.packets)
+     > 1)
+  {
+    unmodelled(
+        reg,
+        "an isochronous endpoint armed with PKTCNT above 1 is not modelled: one packet goes per "
+        "frame and the transfer spans frames",
+        iso_packets);
+  }
+}
+
+void otg_fs::check_fifo_ram()
+{
+  auto total  = std::size_t{get(regs_, rx_depth_)} + tx_depth(0);
+  auto active = false;
+  for(std::size_t n = 1; n < endpoints; ++n)
+  {
+    if(get(regs_, in_[n].active) != 0)
+    {
+      total += tx_depth(n);
+      active = true;
+    }
+  }
+  if(active and total > fifo_ram_words)
+  {
+    notice(
+        "GRXFSIZ",
+        std::format(
+            "the receive FIFO and the TX FIFOs of the active IN endpoints take {} words, above "
+            "the {} words of the OTG_FS FIFO RAM",
+            total, fifo_ram_words),
+        fifo_ram);
+  }
 }
 
 void otg_fs::suspend(vtime)
