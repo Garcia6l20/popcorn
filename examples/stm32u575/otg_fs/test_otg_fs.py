@@ -29,3 +29,4 @@ async def test_the_pcd_driver_brings_the_core_up(machine: Machine) -> None:
     assert grstctl.CSRST == 0
     assert grstctl.RXFFLSH == 0
     assert grstctl.TXFFLSH == 0
+    assert not machine.nvic.pending(machine.irq.OTG_FS_IRQn)

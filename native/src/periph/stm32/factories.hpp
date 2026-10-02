@@ -91,7 +91,7 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto sai_factory(board const& b) -> model_factory;
 
-/** @brief Factory of the USB OTG_FS core reset model, RM0456 section 72. */
+/** @brief Factory of the USB OTG_FS device core model, RM0456 section 72. */
 [[nodiscard]] auto otg_fs_factory() -> model_factory;
 
 /** @brief Factory of the ADC1 model, RM0456 section 33. */
