@@ -313,6 +313,22 @@ TEST_CASE("until at the current pc stops at once with nothing executed")
   CHECK(slice.stopped->where.pc == entry);
 }
 
+TEST_CASE("until inside the block it runs into charges only the instructions before it")
+{
+  auto       f      = alu(10);
+  auto const body   = sym("alu", "alu_body");
+  auto const before = f.target->virtual_clock().now();
+  auto const slice  = f.run({.wall_budget = std::chrono::seconds{60}, .until = body});
+  REQUIRE(slice.stopped.has_value());
+  CHECK(slice.stopped->reason == stop_reason::address);
+  CHECK(slice.stopped->where.pc == body);
+  CHECK(slice.executed.value == 3);
+  CHECK(f.target->virtual_clock().now().value - before.value == 3);
+  CHECK(slice.stopped->instructions == f.target->virtual_clock().now());
+  CHECK(f.reg("r1") == 1);
+  CHECK(f.reg("r2") == 0);
+}
+
 TEST_CASE("leave_until at until runs one pass of the loop before until stops it again")
 {
   auto       f    = alu(10);

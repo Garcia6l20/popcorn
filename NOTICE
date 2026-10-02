@@ -13,7 +13,7 @@ Python extension links Unicorn statically, so an installed popcorn extension is
 a combined work subject to GPL-2.0-only.
 
 Unicorn CPU emulator, popcorn fork at commit
-c388e255f7418e1f1402cb3b35fce663be08fcbb, submodule third_party/unicorn
+a8dc2c609795d8d12442fbc9f49f10b5747c4208, submodule third_party/unicorn
   https://github.com/Garcia6l20/unicorn, branch popcorn
   Upstream: https://github.com/unicorn-engine/unicorn, commit
   938efd13aeab73155f31cf707a2094c6ccaa36dd, modified as follows.
@@ -43,6 +43,12 @@ c388e255f7418e1f1402cb3b35fce663be08fcbb, submodule third_party/unicorn
   - tests/unit/test_mem.c: added test_mem_write_prot_drop_store,
     test_mem_write_prot_handled_commits and
     test_mem_write_prot_drop_store_scope.
+  2026-10-02, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/accel/tcg/translator.c: UC_HOOK_BLOCK_ICOUNT leaves out the exit
+    that ends a block, an until address or a uc_ctl exit inside it, which
+    executes no instruction. Upstream counts it.
+  - tests/unit/test_ctl.c: added test_block_icount_hook_until_mid_block and
+    test_block_icount_hook_until_mid_block_arm.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.0, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.
