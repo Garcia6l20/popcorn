@@ -40,7 +40,9 @@ test_tb_ranges = add_doctest(
         **{f"POPCORN_FW_{name.upper()}": str(elf) for (_, name), (elf, _) in tb_firmware.items()},
     },
 )
-test_tb_ranges.private.include_dirs.append(obs_sources)
+test_tb_ranges.private.include_dirs.extend(
+    [obs_sources, str(project_dir / "native" / "src" / "arch" / "armv8m")]
+)
 for _, target in tb_firmware.values():
     if target is not None:
         test_tb_ranges.depends(target)

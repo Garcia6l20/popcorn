@@ -59,6 +59,13 @@ system_ends:
     adds r0, r0, #1
     nop
     adds r0, r0, #1
+    sev
+    wfe
+    adds r0, r0, #1
+    yield
+    adds r0, r0, #1
+    vmsr fpscr, r1
+    adds r0, r0, #1
     bx lr
 
     .global flow_ends, flow_case0, flow_case1, flow_join

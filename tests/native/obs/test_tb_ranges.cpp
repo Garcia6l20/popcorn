@@ -1,3 +1,4 @@
+#include "cortex_m.hpp"
 #include "tb.hpp"
 #include "thumb.hpp"
 
@@ -35,11 +36,14 @@ namespace obs  = popcorn::obs;
 using popcorn::address;
 using popcorn::address_range;
 using popcorn::stop_reason;
+using popcorn::arch::armv8m::cortex_m;
 using popcorn::testing::firmware;
 using popcorn::testing::m33;
 using popcorn::testing::m33_code_alias;
 using popcorn::testing::sym;
-using fixture = popcorn::testing::machine_fixture<>;
+using popcorn::testing::test_arch;
+using fixture        = popcorn::testing::machine_fixture<>;
+using armv8m_fixture = popcorn::testing::machine_fixture<cortex_m>;
 
 struct block_records
 {
@@ -59,7 +63,7 @@ struct block_records
   }
 };
 
-auto memory_of(fixture const& f) -> obs::memory_reader
+auto memory_of(auto const& f) -> obs::memory_reader
 {
   return [&f](address at, std::span<std::byte> out) -> std::size_t {
     auto const read = f.target->mem().read_block(at, out);
@@ -67,7 +71,7 @@ auto memory_of(fixture const& f) -> obs::memory_reader
   };
 }
 
-auto code_of(fixture const& f) -> obs::code_bytes
+auto code_of(auto const& f) -> obs::code_bytes
 {
   return obs::code_bytes{f.target->loaded_images(), memory_of(f)};
 }
@@ -88,7 +92,7 @@ auto insns_in(address start, std::uint32_t size, obs::code_bytes& code) -> std::
   return count;
 }
 
-auto executable_ranges(fixture const& f) -> std::vector<address_range>
+auto executable_ranges(auto const& f) -> std::vector<address_range>
 {
   std::vector<address_range> ranges;
   for(auto const& loaded : f.target->loaded_images())
@@ -134,7 +138,7 @@ auto blocks_at(obs::coverage_set const& set, address start)
 }
 
 auto oracle_mismatches(
-    fixture const&                 f,
+    auto const&                    f,
     obs::coverage_set const&       set,
     block_records const&           seen,
     std::span<address_range const> ranges) -> std::vector<std::string>
@@ -185,10 +189,8 @@ auto oracle_mismatches(
   return mismatches;
 }
 
-auto pure_mismatches(
-    fixture const&                 f,
-    block_records const&           seen,
-    std::span<address_range const> skip) -> std::vector<std::string>
+auto pure_mismatches(auto const& f, block_records const& seen, std::span<address_range const> skip)
+    -> std::vector<std::string>
 {
   auto                     code = code_of(f);
   std::vector<std::string> mismatches;
@@ -231,7 +233,7 @@ auto require_none(std::vector<std::string> const& mismatches)
   CHECK(mismatches.empty());
 }
 
-auto tb_ranges(fixture const& f) -> std::vector<address_range>
+auto tb_ranges(auto const& f) -> std::vector<address_range>
 {
   auto       ranges = executable_ranges(f);
   auto const ram    = sym("tb", "ram_code") - 0x2000'0000 + 0x0a00'0000;
@@ -246,7 +248,7 @@ auto ldm_range() -> address_range
 
 struct tb_run
 {
-  fixture                    f{m33_code_alias(), "tb", {}};
+  armv8m_fixture             f{m33_code_alias(), "tb", {}};
   block_records              seen;
   obs::coverage_set          set;
   std::vector<address_range> ranges;
@@ -400,7 +402,11 @@ TEST_CASE("the oracle agrees with collect under an intercept code hook")
           run.set.groups.at(0).split, multi_size_starts(run.set)));
 }
 
-TEST_CASE("P2 firmware: collect and pure decode agree with the engine")
+TEST_CASE_TEMPLATE(
+    "P2 firmware: collect and pure decode agree with the engine",
+    Arch,
+    test_arch,
+    cortex_m)
 {
   struct workload
   {
@@ -417,9 +423,9 @@ TEST_CASE("P2 firmware: collect and pure decode agree with the engine")
   for(auto const& load : workloads)
   {
     CAPTURE(load.name);
-    fixture       f{m33(), load.name, {}};
-    block_records seen;
-    auto const    ranges = executable_ranges(f);
+    popcorn::testing::machine_fixture<Arch> f{m33(), load.name, {}};
+    block_records                           seen;
+    auto const                              ranges = executable_ranges(f);
     f.target->enable_coverage(ranges);
     auto const sink = f.target->add_trace_sink({core::trace_kind::block}, seen.sink());
     f.set("pc", sym(load.name, load.entry) | 1);
