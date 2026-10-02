@@ -60,15 +60,20 @@ def test_the_session_directory_holds_one_file_per_process_and_key(
         """
         from pathlib import Path
 
-        import pytest
+        from popcorn.pytest import _coverage
 
-        @pytest.hookimpl(trylast=True)
-        def pytest_sessionfinish(session):
-            from popcorn.pytest._session import COVERAGE
+        merge = _coverage.merge_session
 
-            run = session.config.stash[COVERAGE]
-            names = sorted(path.name for path in run.directory.iterdir())
-            Path("files.txt").write_text("\\n".join(names) + "\\n" + str(run.directory))
+        def listed(directory, lcov, **options):
+            names = sorted(path.name for path in Path(directory).iterdir())
+            Path("files.txt").write_text("\\n".join(names) + "\\n" + str(directory))
+            return merge(directory, lcov, **options)
+
+        def pytest_configure(config):
+            _coverage.merge_session = listed
+
+        def pytest_unconfigure(config):
+            _coverage.merge_session = merge
         """,
     )
     pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=a.info")

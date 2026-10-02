@@ -157,15 +157,11 @@ wheels = [
 [[package]]
 name = "pcons"
 version = "0.30.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/Garcia6l20/pcons.git?rev=d5be306ae23109cf0b5729da19ebd265308bd4c1#d5be306ae23109cf0b5729da19ebd265308bd4c1" }
 dependencies = [
     { name = "click" },
     { name = "tomli-w" },
     { name = "watchfiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/62/86/568fef5bd7320673b91f20e1a918f18d36fc159e59acfe0b56af925cb5fe/pcons-0.30.0.tar.gz", hash = "sha256:41963896c38fb1bfef79f16aad7cb997f9a994467a38785572076a659907d045", size = 4085041, upload-time = "2026-09-27T16:04:09.284Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/96/c1d60498b3a5a77fc6eb0840a19037cbd15e2bd18e5dbaa51b77190b7005/pcons-0.30.0-py3-none-any.whl", hash = "sha256:f34c8c3a16f77d677b732fedbd3f72b76833a7df3d0cdb9a35c06627cae2ab0e", size = 749004, upload-time = "2026-09-27T16:04:07.607Z" },
 ]
 
 [[package]]
@@ -213,7 +209,7 @@ requires-dist = [{ name = "pyelftools" }]
 dev = [
     { name = "black" },
     { name = "jsonschema" },
-    { name = "pcons", specifier = "==0.30.0" },
+    { name = "pcons", git = "https://github.com/Garcia6l20/pcons.git?rev=d5be306ae23109cf0b5729da19ebd265308bd4c1" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio", specifier = "==1.4.0" },

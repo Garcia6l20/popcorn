@@ -25,7 +25,7 @@ Every example has the same layout:
 - `firmware/` the C sources, as a CubeMX project would have them
 - `prebuilt/<name>.elf` the committed firmware, used as is without arm-none-eabi-gcc
 - `popcorn.toml` the project file: chip, image, boot, board devices
-- `test_*.py` the tests, and `conftest.py` loading the `popcorn.pytest` plugin
+- `test_*.py` the tests. pytest loads the `popcorn.pytest` plugin by its entry point
 - `pytest.ini` makes the example directory the pytest rootdir, so its `popcorn.toml` is the
   project
 

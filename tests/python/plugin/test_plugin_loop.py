@@ -50,7 +50,7 @@ def test_without_the_plugin_an_async_test_fails(pytester: pytest.Pytester) -> No
         async def test_sleeps():
             pass
         """)
-    pytester.runpytest("-p", "no:asyncio").assert_outcomes(failed=1)
+    pytester.runpytest("-p", "no:asyncio", "-p", "no:popcorn.pytest").assert_outcomes(failed=1)
 
 
 def test_a_failing_async_assert_fails_with_its_message(pytester: pytest.Pytester) -> None:

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["pcons==0.30.0"]
+requires = ["pcons @ git+https://github.com/Garcia6l20/pcons.git@d5be306ae23109cf0b5729da19ebd265308bd4c1"]
 build-backend = "pcons.pyproject"
 
 [project]
@@ -10,9 +10,12 @@ dependencies = [
     "pyelftools",
 ]
 
+[project.entry-points.pytest11]
+"popcorn.pytest" = "popcorn.pytest"
+
 [dependency-groups]
 dev = [
-    "pcons==0.30.0",
+    "pcons",
     "pytest",
     "pyright",
     "ruff",
@@ -48,3 +51,6 @@ venv = ".venv"
 
 [tool.uv]
 no-build-isolation-package = ["popcorn"]
+
+[tool.uv.sources]
+pcons = { git = "https://github.com/Garcia6l20/pcons.git", rev = "d5be306ae23109cf0b5729da19ebd265308bd4c1" }

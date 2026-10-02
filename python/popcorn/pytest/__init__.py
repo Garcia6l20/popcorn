@@ -1,6 +1,8 @@
 """pytest plugin for popcorn machines.
 
-Load it from the root `conftest.py` of a test suite:
+pytest loads it by its `pytest11` entry point wherever popcorn is installed, no conftest needed.
+`-p no:popcorn.pytest` turns it off. With `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, load it from the
+root `conftest.py` of a test suite:
 
     pytest_plugins = ["popcorn.pytest"]
 
@@ -121,8 +123,7 @@ do not merge with those of a farther marker. Every marked test has its marker ch
 whether it uses a popcorn fixture or not.
 """
 
-from popcorn.pytest._fixtures import MachineFactory
-from popcorn.pytest._options import Settings
+import pytest
 
 pytest_plugins = [
     "popcorn.pytest._options",
@@ -132,5 +133,10 @@ pytest_plugins = [
     "popcorn.pytest._report",
     "popcorn.pytest._coverage",
 ]
+
+pytest.register_assert_rewrite(*pytest_plugins)
+
+from popcorn.pytest._fixtures import MachineFactory  # noqa: E402
+from popcorn.pytest._options import Settings  # noqa: E402
 
 __all__ = ["MachineFactory", "Settings"]
