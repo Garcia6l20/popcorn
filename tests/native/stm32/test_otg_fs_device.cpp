@@ -4,6 +4,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/usb.hpp>
+#include <popcorn/periph/usb_host.hpp>
 
 #include <doctest/doctest.h>
 
@@ -12,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -1292,4 +1294,200 @@ TEST_CASE("an iso OUT is not taken under a global OUT NAK")
   std::vector<std::uint8_t> pcm(32);
   CHECK(r.port().out(0, 3, pcm, usb::data_pid::data0, r.now()) == usb::handshake::none);
   CHECK(r.get("GINTSTS", "RXFLVL") == 0);
+}
+
+namespace
+{
+struct scripted_firmware
+{
+  std::optional<usb::setup_packet> setup;
+  std::vector<usb::setup_packet>   requests;
+};
+
+auto firmware_device() -> std::vector<std::uint8_t>
+{
+  return {18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x09, 0x12, 0x02, 0x00, 0x00, 0x01, 1, 2, 0, 1};
+}
+
+auto firmware_configuration() -> std::vector<std::uint8_t>
+{
+  return {9, 2, 32, 0, 1,    1, 0,  0x80, 50, 9, 4, 0,    0, 2,  0xff, 0,
+          0, 0, 7,  5, 0x01, 2, 64, 0,    0,  7, 5, 0x81, 2, 64, 0,    0};
+}
+
+auto firmware_reply(usb::setup_packet const& setup) -> std::optional<std::vector<std::uint8_t>>
+{
+  if(setup.request_type != 0x80 or setup.request != 6)
+  {
+    return std::nullopt;
+  }
+  std::vector<std::uint8_t> reply;
+  switch(setup.value)
+  {
+    case 0x0100:
+      reply = firmware_device();
+      break;
+    case 0x0200:
+      reply = firmware_configuration();
+      break;
+    case 0x0300:
+      reply = {4, 3, 0x09, 0x04};
+      break;
+    case 0x0301:
+      reply = {8, 3, 'p', 0, 'o', 0, 'p', 0};
+      break;
+    case 0x0302:
+      reply = {6, 3, 'f', 0, 'w', 0};
+      break;
+    default:
+      return std::nullopt;
+  }
+  reply.resize(std::min<std::size_t>(reply.size(), setup.length));
+  return reply;
+}
+
+void arm_status_out(rig const& r)
+{
+  r.write("DOEPTSIZ0", r.mask("DOEPTSIZ0", "PKTCNT", 1) | r.mask("DOEPTSIZ0", "STUPCNT", 3));
+  r.write(
+      "DOEPCTL0", r.read("DOEPCTL0") | r.mask("DOEPCTL0", "EPENA") | r.mask("DOEPCTL0", "CNAK"));
+}
+
+void send_in0(rig const& r, std::span<std::uint8_t const> bytes)
+{
+  auto const packets =
+      std::max<std::uint32_t>(1, static_cast<std::uint32_t>((bytes.size() + 63) / 64));
+  r.write(
+      "DIEPTSIZ0", r.mask("DIEPTSIZ0", "XFRSIZ", static_cast<std::uint32_t>(bytes.size()))
+                       | r.mask("DIEPTSIZ0", "PKTCNT", packets));
+  r.write(
+      "DIEPCTL0", r.read("DIEPCTL0") | r.mask("DIEPCTL0", "EPENA") | r.mask("DIEPCTL0", "CNAK"));
+  r.push("DFIFO0", bytes);
+}
+
+void answer(rig const& r, usb::setup_packet const& setup)
+{
+  if(auto const reply = firmware_reply(setup))
+  {
+    send_in0(r, *reply);
+    arm_status_out(r);
+    return;
+  }
+  if(setup.request_type == 0 and setup.request == 5)
+  {
+    r.set("DCFG", "DAD", setup.value);
+  }
+  else if(setup.request_type != 0 or setup.request != 9)
+  {
+    r.write("DIEPCTL0", r.read("DIEPCTL0") | r.mask("DIEPCTL0", "STALL"));
+    return;
+  }
+  send_in0(r, {});
+}
+
+void service(rig const& r, scripted_firmware& fw)
+{
+  if(r.get("GINTSTS", "USBRST") != 0)
+  {
+    r.write("GINTSTS", r.mask("GINTSTS", "USBRST"));
+    r.set("DCFG", "DAD", 0);
+    r.write("DOEPTSIZ0", r.mask("DOEPTSIZ0", "STUPCNT", 3));
+  }
+  if(r.get("GINTSTS", "ENUMDNE") != 0)
+  {
+    r.write("GINTSTS", r.mask("GINTSTS", "ENUMDNE"));
+  }
+  while(r.get("GINTSTS", "RXFLVL") != 0)
+  {
+    auto const entry = r.pop();
+    if(entry.pktsts == pktsts_setup_data)
+    {
+      auto const words = r.pop_words(2);
+      fw.setup         = usb::setup_packet{
+          .request_type = static_cast<std::uint8_t>(words[0]),
+          .request      = static_cast<std::uint8_t>(words[0] >> 8),
+          .value        = static_cast<std::uint16_t>(words[0] >> 16),
+          .index        = static_cast<std::uint16_t>(words[1]),
+          .length       = static_cast<std::uint16_t>(words[1] >> 16)};
+    }
+    else if(entry.pktsts == pktsts_setup_done and fw.setup)
+    {
+      r.write("DOEPINT0", r.mask("DOEPINT0", "STUP"));
+      fw.requests.push_back(*fw.setup);
+      answer(r, *fw.setup);
+    }
+    else if(entry.pktsts == pktsts_out_data)
+    {
+      static_cast<void>(r.pop_words((entry.bytes + 3) / 4));
+    }
+  }
+}
+
+void run_firmware(rig const& r, scripted_firmware& fw, std::function<bool()> const& done)
+{
+  for(std::size_t slice = 0; slice < 20'000 and not done(); ++slice)
+  {
+    r.run_for(25 * us);
+    service(r, fw);
+  }
+}
+}
+
+TEST_CASE("the virtual host enumerates the OTG_FS model run by a register-level firmware")
+{
+  rig const                r;
+  std::vector<std::string> warnings;
+  usb::host_options        options;
+  options.warn           = [&](std::string const& message) { warnings.push_back(message); };
+  auto const        host = std::make_shared<usb::host>(r.port(), std::move(options));
+  scripted_firmware fw;
+  r.power_up();
+  r.port().attach(host);
+  r.set("DCTL", "SDIS", 0);
+  CHECK(host->state() == usb::device_state::powered);
+  run_firmware(r, fw, [&] { return host->state() == usb::device_state::configured; });
+  REQUIRE(host->state() == usb::device_state::configured);
+  CHECK(warnings.empty());
+  CHECK(host->address() == 1);
+  CHECK(r.get("DCFG", "DAD") == 1);
+  CHECK(std::ranges::equal(host->device_bytes(), firmware_device()));
+  CHECK(std::ranges::equal(host->configuration_bytes(), firmware_configuration()));
+  CHECK(host->strings().size() == 3);
+  REQUIRE(fw.requests.size() == 9);
+  CHECK(fw.requests.front().value == 0x0100);
+  CHECK(fw.requests.front().length == 64);
+  CHECK(fw.requests.back().request == 9);
+  std::vector<usb::setup_packet> logged;
+  for(auto const& entry : host->log())
+  {
+    if(entry.kind == usb::log_kind::request)
+    {
+      CHECK(entry.status == usb::transfer_status::completed);
+      logged.push_back(entry.setup);
+    }
+  }
+  CHECK(logged == fw.requests);
+
+  auto const saved = r.f->target->snapshot();
+  rig const  other;
+  auto const restored = std::make_shared<usb::host>(other.port(), usb::host_options{});
+  other.port().attach(restored);
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(restored->state() == usb::device_state::configured);
+  CHECK(restored->address() == 1);
+  auto const id =
+      restored->control({.request_type = 0x80, .request = 6, .value = 0x0100, .length = 18});
+  scripted_firmware                 again;
+  std::vector<usb::transfer_result> results;
+  run_firmware(other, again, [&] {
+    auto taken = restored->take_results();
+    results.insert(results.end(), taken.begin(), taken.end());
+    return not results.empty();
+  });
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].id == id);
+  CHECK(results[0].status == usb::transfer_status::completed);
+  CHECK(results[0].data == firmware_device());
+  CHECK(again.requests.size() == 1);
 }
