@@ -17,7 +17,8 @@ class Settings:
     """The plugin's command-line options, parsed once per session.
 
     Attributes:
-        project: The project file, `--popcorn-project` or `<rootdir>/popcorn.toml`.
+        project: The project file, `--popcorn-project` or `<rootdir>/popcorn.toml`: the
+            project of a test without a nearer one.
         config: The `[configs.NAME]` applied when a test names none, `--popcorn-config`.
         cov: The lcov file written at session end, `--popcorn-cov`.
         trace_on_fail: Whether a failing test keeps its trace, `--popcorn-trace-on-fail`.
@@ -25,6 +26,8 @@ class Settings:
         strict: Whether unmodelled peripheral accesses raise, `--popcorn-strict`.
         budget: The default instruction budget of `run`, `wait_for` and `call`,
             `--popcorn-budget`.
+        nearest: Whether a test uses the `popcorn.toml` nearest above it, up to the rootdir,
+            instead of `project`. False with `--popcorn-project`.
         ring: How many lines of the collapsed trace ring a failure report shows, 0 for none,
             `--popcorn-ring`.
     """
@@ -37,6 +40,7 @@ class Settings:
     strict: bool
     budget: int | None
     ring: int = 0
+    nearest: bool = True
 
     @classmethod
     def from_config(cls, config: pytest.Config) -> Settings:
@@ -57,6 +61,7 @@ class Settings:
             strict=config.getoption("popcorn_strict") is True,
             budget=budget if isinstance(budget, int) else None,
             ring=ring if isinstance(ring, int) else 0,
+            nearest=project is None,
         )
 
 
@@ -75,7 +80,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption(
         "--popcorn-project",
         metavar="PATH",
-        help="project file, default <rootdir>/popcorn.toml",
+        help="project file of every test, default the popcorn.toml nearest above each test, up "
+        "to <rootdir>/popcorn.toml",
     )
     group.addoption(
         "--popcorn-config",

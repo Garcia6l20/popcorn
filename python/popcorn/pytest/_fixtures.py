@@ -105,7 +105,7 @@ class MachineFactory:
         config = self._default.config if config is None else config
         if strict is None and config == self._default.config:
             strict = self._default.strict
-        return self._session.key(config, strict)
+        return self._session.key(config, strict, self._default.project)
 
     def _ready(self, key: Key, machine: Machine, snapshot: Snapshot) -> Machine:
         self._keep(machine, key)
@@ -156,7 +156,7 @@ def settings_of(item: pytest.Item, session: PopcornSession) -> ItemSettings:
     if strict is None and settings.strict:
         strict = True
     budget = settings.budget if options.budget is UNSET else options.budget
-    return ItemSettings(session.key(config, strict), budget)
+    return ItemSettings(session.key(config, strict, session.project_of(item.path)), budget)
 
 
 @pytest.fixture(scope="session")

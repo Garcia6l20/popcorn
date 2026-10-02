@@ -11,7 +11,7 @@ Fixtures:
 
 - `popcorn_project`, session scope: the `popcorn.Project` of `--popcorn-project`, by default
   `popcorn.toml` in the pytest rootdir.
-- `machine`: the project's machine, built and booted once per session and process, then
+- `machine`: the test's project's machine, built and booted once per session and process, then
   restored from its boot snapshot before each test. Every test gets the same object. The plugin
   removes the hooks a test installed, empties the intercept logs, the call baseline and the
   trace ring. A test that loads another image, opens a pty or leaves the machine running spoils
@@ -20,6 +20,12 @@ Fixtures:
   booted once.
 - `machine_factory`: a `MachineFactory`, new machines separate from `machine`, with the
   project file's bus devices or the test's own.
+
+The project of a test is the `popcorn.toml` nearest above its file, up to the rootdir, else
+`<rootdir>/popcorn.toml`. `--popcorn-project` gives every test its file. One session can then
+run the tests of several projects, each booted once per configuration and process. A project
+other than the rootdir's is named in the report section and the summary line by its path from
+the rootdir. `popcorn_project` is still the rootdir's or `--popcorn-project`'s.
 
 A failing test that used a popcorn machine gets a "popcorn" section in its report, one block per
 machine: the stop of the failing exception or of the machine's last run, the fault registers
