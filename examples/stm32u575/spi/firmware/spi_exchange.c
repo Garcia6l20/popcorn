@@ -19,7 +19,6 @@ static struct
 
 void spi_exchange(uint8_t const* out, uint8_t* in, uint32_t size)
 {
-  taskENTER_CRITICAL();
   transfer.out      = out;
   transfer.in       = in;
   transfer.size     = size;
@@ -30,7 +29,6 @@ void spi_exchange(uint8_t const* out, uint8_t* in, uint32_t size)
   LL_SPI_EnableIT_RXP(SPI1);
   LL_SPI_EnableIT_TXP(SPI1);
   LL_SPI_EnableIT_EOT(SPI1);
-  taskEXIT_CRITICAL();
   LL_SPI_Enable(SPI1);
   LL_SPI_StartMasterTransfer(SPI1);
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);

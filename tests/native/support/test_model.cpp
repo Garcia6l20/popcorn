@@ -51,6 +51,10 @@ auto test_model::on_read(
   {
     context_.irqs.front().lower();
   }
+  if((offset & ~std::uint32_t{3}) == ctrl_offset and raise_on_ctrl_read)
+  {
+    raise_at_once();
+  }
   auto const shifted = word >> (8 * (offset % 4));
   return size == 4 ? shifted : shifted & ((std::uint32_t{1} << (8 * size)) - 1);
 }
@@ -84,7 +88,11 @@ auto test_model::on_write(
   if(offset == ctrl_offset and (value & 1u) != 0)
   {
     go_time = context_.clock.time();
-    if(time_delay_ps)
+    if(raise_on_go)
+    {
+      raise_at_once();
+    }
+    else if(time_delay_ps)
     {
       std::ignore =
           context_.events.schedule_at(vtime{go_time->ps + *time_delay_ps}, 0, 0, context_.clock);
@@ -149,6 +157,15 @@ void test_model::note(std::string message, address pc) const
          .pc         = pc,
          .peripheral = "TESTDEV",
          .message    = std::move(message)});
+  }
+}
+
+void test_model::raise_at_once() const
+{
+  context_.irqs.front().raise();
+  if(pulse)
+  {
+    context_.irqs.front().lower();
   }
 }
 

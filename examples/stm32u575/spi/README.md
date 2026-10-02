@@ -6,9 +6,9 @@ sets up the clock tree, the pins and SPI1. A FreeRTOS task then runs every instr
 `spi_exchange`, an interrupt-driven transfer written on LL, and sleeps on a task notification
 until the end of transfer. A second task counts scheduler ticks.
 
-`spi_exchange` programs TSIZE and enables the TXP, RXP and EOT interrupts in a critical section,
-before it sets SPE and starts the transfer. Hand-written drivers often use that order, and
-RM0456 allows it: while SPE is clear, no SPI interrupt other than MODF reaches the NVIC.
+`spi_exchange` programs TSIZE and enables the TXP, RXP and EOT interrupts, then sets SPE and
+starts the transfer. Hand-written drivers often use that order, and RM0456 allows it: while SPE
+is clear, no SPI interrupt other than MODF reaches the NVIC.
 
 The application is linked 0xC000 into flash, as if a bootloader started it. An 8-byte header
 comes first and the vector table follows at 0x0800C008. VTOR cannot hold that address because

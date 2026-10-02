@@ -69,6 +69,7 @@ core_firmware = {
         "branches",
         "spin",
         "fnv",
+        "irq",
     )
 }
 m33_env = {
@@ -85,7 +86,10 @@ if basic_firmware is not None:
     test_machine_load.depends(basic_firmware)
 
 test_run_loop = add_doctest(
-    "core-run-loop", [here / "test_run_loop.cpp"], [test_support, core], env=m33_env
+    "core-run-loop",
+    [here / "test_run_loop.cpp", here / "test_precise_exit.cpp"],
+    [test_support, core],
+    env=m33_env,
 )
 test_events = add_doctest(
     "core-events", [here / "test_events_idle.cpp"], [test_support, core], env=m33_env

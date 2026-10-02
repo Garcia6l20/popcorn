@@ -232,6 +232,10 @@ private:
   std::size_t       used_ = 0;
 };
 
+/** @brief Largest instruction of the supported cores in bytes, the bound of every decode from
+ * a block start: a block of n instructions spans at most n times this. */
+inline constexpr address max_insn_bytes = 4;
+
 /** @brief Coverage counters of a machine, cumulative across restores. */
 struct coverage_state
 {
@@ -699,7 +703,7 @@ struct machine::run_state
   /** @brief Address of the block the engine runs, the pc MMIO callbacks see without the exact
    * pc hook, read by mmio records instead of the engine register. */
   address block_pc{};
-  /** @brief Instructions of that block, as the block hook charged them. */
+  /** @brief Instructions of that block, as the block hook counted them, also while stepping. */
   std::uint32_t block_size{};
   /** @brief Whether the MMIO write being served comes from the CPU through a window whose model
    * drives the core clock, so that pc is exact. */
@@ -707,6 +711,9 @@ struct machine::run_state
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
+  /** @brief Whether an access in the engine run asked the engine to stop right after its
+   * instruction, set by request_precise_exit() and taken by take_precise_exit(). */
+  bool precise_exit = false;
   /** @brief Whether spin detection runs, machine_options::spin_threshold above 0. */
   bool spin_on = false;
   /** @brief Spin detection state. */
@@ -862,6 +869,14 @@ struct machine::run_state
   /** @brief Instructions of the running block after the current one, charged to the clock but
    * not retired yet, 0 unless an exact CPU write to a clock-driving model is being served. */
   [[nodiscard]] auto charged_ahead() const -> std::uint64_t;
+
+  /** @brief Asks the engine to stop right after the instruction being executed, so a pending
+   * interrupt an access of that instruction made deliverable is taken before the next one. */
+  void request_precise_exit();
+
+  /** @brief Serves a CPU access from an engine callback through @p access, then asks for a
+   * precise exit when the access made a pending interrupt deliverable. */
+  template <typename Access> auto raising_access(Access access) -> decltype(access());
 
   /** @brief Records the first model bus error of a CPU access in the engine run. */
   void record_bus_fault(address addr, arch::memory_op op) noexcept;
@@ -1188,7 +1203,13 @@ struct machine::run_state
   void               step_off_until(slice_request const& request);
   [[nodiscard]] auto trap_after(uc_err err) -> std::optional<slice_end>;
   [[nodiscard]] auto engine_run() -> uc_err;
-  void               rethrow_failure();
+  /** @brief After an engine run that requested a precise exit: when the engine took it inside
+   * the running block, takes back the block's instructions after the one it completed, none
+   * while stepping, where every instruction is charged as it runs. When it took it after the
+   * block's last instruction, at a branch target, the block ran whole: no refund, and coverage
+   * records no cut. When it took none, a fault or a trap ended the run: coverage keeps its cut. */
+  void take_precise_exit();
+  void rethrow_failure();
   [[nodiscard]] auto
       make_stop(stop_reason reason, std::string detail, std::optional<fault_info> fault) const
       -> stop;

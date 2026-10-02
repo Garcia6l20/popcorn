@@ -15,8 +15,6 @@ namespace
 {
 constexpr std::size_t first_edge_slots = 1024;
 
-constexpr address max_insn_bytes = 4;
-
 auto edge_hash(address from, address to) noexcept -> std::uint64_t
 {
   return (std::uint64_t{from} << 32 | to) * 0x9e37'79b9'7f4a'7c15;

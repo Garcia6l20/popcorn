@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <format>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -35,6 +36,7 @@ void machine::run_state::map_peripherals()
 {
   std::uint32_t page = 0;
   check(uc_ctl_get_page_size(engine, &page), "reading the engine page size");
+  check(uc_ctl_exit_after_insn_enable(engine), "enabling exits after an instruction");
   auto const& units = owner.description_.peripherals;
   for(auto const& [index, unit] : std::views::enumerate(units))
   {
@@ -338,6 +340,47 @@ auto machine::run_state::charged_ahead() const -> std::uint64_t
   return block_size - *before - 1;
 }
 
+void machine::run_state::request_precise_exit()
+{
+  check(uc_ctl_exit_after_insn(engine), "asking the engine to stop after the instruction");
+  precise_exit = true;
+}
+
+void machine::run_state::take_precise_exit()
+{
+  std::uint64_t taken = 0;
+  check(
+      uc_ctl_exit_after_insn_taken(engine, &taken),
+      "reading the instruction the engine stopped after");
+  if(taken == 0)
+  {
+    return;
+  }
+  auto const at     = static_cast<address>(taken);
+  auto const inside = at - block_pc < max_insn_bytes * block_size;
+  auto const before = inside ? arch->instructions_between(block_pc, at) : std::nullopt;
+  if(not before or *before + 1 >= block_size)
+  {
+    coverage.open_insns = 0;
+    return;
+  }
+  if(not stepping)
+  {
+    owner.clock_driver_.retract(icount{block_size - *before - 1});
+  }
+}
+
+template <typename Access>
+auto machine::run_state::raising_access(Access access) -> decltype(access())
+{
+  auto result = access();
+  if(not precise_exit and arch->pending() and arch->deliverable_now())
+  {
+    request_precise_exit();
+  }
+  return result;
+}
+
 void machine::run_state::record_bus_fault(address addr, arch::memory_op op) noexcept
 {
   if(not bus_fault)
@@ -412,9 +455,11 @@ auto machine::run_state::on_mmio_read(
   auto&         run    = *window.run;
   std::uint32_t value  = 0;
   run.guarded([&] {
-    auto const read = run.dispatch_read(
-        window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
-        initiator::cpu);
+    auto const read = run.raising_access([&] {
+      return run.dispatch_read(
+          window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
+          initiator::cpu);
+    });
     if(read)
     {
       value = *read;
@@ -438,9 +483,11 @@ void machine::run_state::on_mmio_write(
   auto const& window = *static_cast<mmio_window const*>(user);
   auto&       run    = *window.run;
   run.guarded([&] {
-    auto const done = run.dispatch_write(
-        window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
-        static_cast<std::uint32_t>(value), initiator::cpu);
+    auto const done = run.raising_access([&] {
+      return run.dispatch_write(
+          window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
+          static_cast<std::uint32_t>(value), initiator::cpu);
+    });
     if(not done)
     {
       run.record_bus_fault(window.base + static_cast<address>(offset), arch::memory_op::write);
@@ -468,8 +515,10 @@ auto machine::run_state::on_shared_read(
   auto const&   window = shared.member_at(addr);
   std::uint32_t value  = 0;
   run.guarded([&] {
-    auto const read = run.dispatch_read(
-        window, addr - window.base, static_cast<std::uint8_t>(size), initiator::cpu);
+    auto const read = run.raising_access([&] {
+      return run.dispatch_read(
+          window, addr - window.base, static_cast<std::uint8_t>(size), initiator::cpu);
+    });
     if(read)
     {
       value = *read;
@@ -495,9 +544,11 @@ void machine::run_state::on_shared_write(
   auto const  addr   = static_cast<address>(shared.base + offset);
   auto const& window = shared.member_at(addr);
   run.guarded([&] {
-    auto const done = run.dispatch_write(
-        window, addr - window.base, static_cast<std::uint8_t>(size),
-        static_cast<std::uint32_t>(value), initiator::cpu);
+    auto const done = run.raising_access([&] {
+      return run.dispatch_write(
+          window, addr - window.base, static_cast<std::uint8_t>(size),
+          static_cast<std::uint32_t>(value), initiator::cpu);
+    });
     if(not done)
     {
       run.record_bus_fault(addr, arch::memory_op::write);

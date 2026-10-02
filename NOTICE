@@ -13,7 +13,7 @@ Python extension links Unicorn statically, so an installed popcorn extension is
 a combined work subject to GPL-2.0-only.
 
 Unicorn CPU emulator, popcorn fork at commit
-a8dc2c609795d8d12442fbc9f49f10b5747c4208, submodule third_party/unicorn
+182707e3da8c2284cfaa5b85d7ca3b0f6758a299, submodule third_party/unicorn
   https://github.com/Garcia6l20/unicorn, branch popcorn
   Upstream: https://github.com/unicorn-engine/unicorn, commit
   938efd13aeab73155f31cf707a2094c6ccaa36dd, modified as follows.
@@ -49,6 +49,17 @@ a8dc2c609795d8d12442fbc9f49f10b5747c4208, submodule third_party/unicorn
     executes no instruction. Upstream counts it.
   - tests/unit/test_ctl.c: added test_block_icount_hook_until_mid_block and
     test_block_icount_hook_until_mid_block_arm.
+  - include/unicorn/unicorn.h, include/uc_priv.h, uc.c, qemu/tcg/tcg-op.c,
+    qemu/target/arm/translate.c, translate.h, internals.h, helper.h,
+    op_helper.c, qemu/arm.h, qemu/aarch64.h, symbols.sh: added
+    UC_CTL_UC_USE_EXIT_AFTER_INSN, off by default, and
+    UC_CTL_UC_EXIT_AFTER_INSN, which a memory callback calls to stop once the
+    A32 or T32 instruction being executed completes, with pc on the next
+    instruction, after the IT block inside one. Upstream can only stop with
+    pc on the access instruction, which a resume runs again.
+  - bindings/: regenerated the unicorn_const files of the dotnet, go, java,
+    pascal, python, ruby and zig bindings with the two new control ids.
+  - tests/unit/test_arm.c: added the test_arm_exit_after_insn tests.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.0, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.

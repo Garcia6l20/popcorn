@@ -292,9 +292,9 @@ void machine::run_state::on_block(
       return false;
     });
   }
+  run.block_size = size;
   if(not run.stepping)
   {
-    run.block_size = size;
     run.owner.clock_driver_.advance(icount{size});
   }
   if(run.spin_on) [[unlikely]]
@@ -904,7 +904,11 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     }
     auto const started = owner.clock_driver_.exact_now();
     auto const err     = engine_run();
-    auto const ran     = owner.clock_driver_.exact_now().value - started.value;
+    if(std::exchange(precise_exit, false))
+    {
+      take_precise_exit();
+    }
+    auto const ran = owner.clock_driver_.exact_now().value - started.value;
     if(coverage_on)
     {
       auto const pc = arch->pc();

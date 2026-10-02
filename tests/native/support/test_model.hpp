@@ -20,7 +20,8 @@ namespace popcorn::testing
  *        every access, and on request fails or throws on reads, requests a stop on writes, and
  *        on a `CTRL.GO` write patches a halfword through DMA or halves the core clock. go_delay
  *        replaces the delay, and data_on_event sets `DATA` to 1 when the event fires.
- *        Test-only.
+ *        raise_on_go and raise_on_ctrl_read raise the line within the access instead, and pulse
+ *        lowers it again before the access returns. Test-only.
  */
 class test_model final : public periph::model
 {
@@ -106,6 +107,13 @@ public:
   /** @brief Whether the `CTRL.GO` event also sets `DATA` to 1. */
   bool data_on_event = false;
 
+  /** @brief Whether a `CTRL.GO` write raises the IRQ line at once, instead of the event. */
+  bool raise_on_go = false;
+  /** @brief Whether a read of `CTRL` raises the IRQ line at once. */
+  bool raise_on_ctrl_read = false;
+  /** @brief Whether a line raised at once is lowered again before the access returns. */
+  bool pulse = false;
+
   /** @brief Whether load() throws a std::runtime_error. */
   bool throw_load = false;
 
@@ -130,6 +138,7 @@ public:
 
 private:
   void note(std::string message, address pc = 0) const;
+  void raise_at_once() const;
 
   periph::model_context& context_;
 };
