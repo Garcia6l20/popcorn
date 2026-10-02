@@ -180,6 +180,27 @@ __attribute__((naked)) void gap_read(void)
                    ".ltorg\n");
 }
 
+__attribute__((naked)) void hole_read(void)
+{
+  __asm__ volatile("ldr r1, =0x40030300\n"
+                   "ldr r2, =results\n"
+                   "ldr r3, [r1]\n"
+                   "str r3, [r2]\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
+__attribute__((naked)) void gap_writes(void)
+{
+  __asm__ volatile("ldr r1, =0x40030200\n"
+                   "ldr r2, =0x40030300\n"
+                   "ldr r0, =0x1a5a5\n"
+                   "strh r0, [r1]\n"
+                   "strb r0, [r2, #1]\n"
+                   "bkpt #0\n"
+                   ".ltorg\n");
+}
+
 __attribute__((naked)) void go_and_wait(void)
 {
   __asm__ volatile("cpsid i\n"

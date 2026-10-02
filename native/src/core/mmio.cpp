@@ -188,6 +188,7 @@ auto machine::run_state::dispatch_read(
   if(word >= slot.layout.words())
   {
     warn_unregistered(window, offset, false, by);
+    note_watched(window.base + offset, size, 0, false, by);
     return 0u;
   }
   if(slot.claimed[word] != 0)
@@ -216,6 +217,7 @@ auto machine::run_state::dispatch_read(
   if(rules == nullptr)
   {
     warn_unregistered(window, offset, false, by);
+    note_watched(window.base + offset, size, 0, false, by);
     return 0u;
   }
   if(not slot.model and (slot.logged[word] == 0 or owner.options_.strict_peripherals))
@@ -244,6 +246,7 @@ auto machine::run_state::dispatch_write(
   if(word >= slot.layout.words())
   {
     warn_unregistered(window, offset, true, by);
+    note_watched(window.base + offset, size, value, true, by);
     return {};
   }
   if(slot.claimed[word] != 0)
@@ -271,6 +274,7 @@ auto machine::run_state::dispatch_write(
   if(rules == nullptr)
   {
     warn_unregistered(window, offset, true, by);
+    note_watched(window.base + offset, size, value, true, by);
     return {};
   }
   if(not slot.model and (slot.logged[word] == 0 or owner.options_.strict_peripherals))

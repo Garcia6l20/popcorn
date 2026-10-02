@@ -30,6 +30,7 @@ using fixture = popcorn::testing::machine_fixture<>;
 constexpr address pair_cr    = 0x4003'0000;
 constexpr address second_dr  = 0x4003'0100;
 constexpr address gap        = 0x4003'0200;
+constexpr address hole       = 0x4003'0300;
 constexpr address common_ccr = 0x4003'0308;
 constexpr address sec_ccr    = 0x5003'0308;
 constexpr address sec_dr     = 0x5003'0100;
@@ -131,7 +132,7 @@ TEST_CASE("the debugger reaches the same storage as the CPU in a shared page")
   CHECK(word(f, gap) == 0);
 }
 
-TEST_CASE("watches see CPU accesses to a shared page, none at a gap address, as at every gap")
+TEST_CASE("watches see CPU accesses to a shared page, at a gap address as at a register")
 {
   auto                         f = booted();
   std::vector<core::watch_hit> hits;
@@ -143,10 +144,106 @@ TEST_CASE("watches see CPU accesses to a shared page, none at a gap address, as 
   auto const empty = f.target->add_watch(gap, 4, core::watch_kind::read, record);
   f.set("pc", sym("periph", "shared_accesses"));
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
-  REQUIRE(hits.size() == 1);
+  REQUIRE(hits.size() == 2);
   CHECK(hits[0].addr == common_ccr);
   CHECK(hits[0].write);
   CHECK(hits[0].value == 0xc3);
+  CHECK(hits[1].addr == gap);
+  CHECK_FALSE(hits[1].write);
+  CHECK(hits[1].value == 0);
+  CHECK(hits[1].by == popcorn::initiator::cpu);
+}
+
+TEST_CASE("a CPU write past a peripheral's registers or in a hole between them fires a write watch")
+{
+  auto                         f = booted();
+  std::vector<core::watch_hit> hits;
+  auto const                   record = [&hits](core::watch_hit const& hit) {
+    hits.push_back(hit);
+    return core::watch_action::resume;
+  };
+  auto const past_write = f.target->add_watch(gap, 4, core::watch_kind::write, record);
+  auto const past_read  = f.target->add_watch(gap, 4, core::watch_kind::read, record);
+  auto const hole_write = f.target->add_watch(hole, 4, core::watch_kind::write, record);
+  auto const hole_read  = f.target->add_watch(hole, 4, core::watch_kind::read, record);
+  f.set("pc", sym("periph", "gap_writes"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(hits.size() == 2);
+  CHECK(hits[0].addr == gap);
+  CHECK(hits[0].write);
+  CHECK(hits[0].size == 2);
+  CHECK(hits[0].value == 0xa5a5);
+  CHECK(hits[1].addr == hole + 1);
+  CHECK(hits[1].write);
+  CHECK(hits[1].size == 1);
+  CHECK(hits[1].value == 0xa5);
+}
+
+TEST_CASE("a CPU read in a hole between registers fires a read watch with 0")
+{
+  auto                         f = booted();
+  std::vector<core::watch_hit> hits;
+  auto const                   record = [&hits](core::watch_hit const& hit) {
+    hits.push_back(hit);
+    return core::watch_action::resume;
+  };
+  auto const hole_read  = f.target->add_watch(hole, 4, core::watch_kind::read, record);
+  auto const hole_write = f.target->add_watch(hole, 4, core::watch_kind::write, record);
+  REQUIRE(f.target->mem().write(sym("periph", "results"), 4, 0xffff'ffff));
+  f.set("pc", sym("periph", "hole_read"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(results(f)[0] == 0);
+  REQUIRE(hits.size() == 1);
+  CHECK(hits[0].addr == hole);
+  CHECK_FALSE(hits[0].write);
+  CHECK(hits[0].value == 0);
+}
+
+TEST_CASE("a DMA access to a gap or a hole fires a watch with the dma initiator")
+{
+  auto                         f = booted();
+  std::vector<core::watch_hit> hits;
+  auto const                   record = [&hits](core::watch_hit const& hit) {
+    hits.push_back(hit);
+    return core::watch_action::resume;
+  };
+  auto const all_gap  = f.target->add_watch(gap, 4, core::watch_kind::access, record);
+  auto const all_hole = f.target->add_watch(hole, 4, core::watch_kind::access, record);
+  auto&      services = f.module->attached_services();
+  REQUIRE(services.write(gap, 4, 0x1234, popcorn::initiator::dma));
+  REQUIRE(services.read(gap, 4, popcorn::initiator::dma));
+  REQUIRE(services.write(hole, 4, 0x5678, popcorn::initiator::dma));
+  REQUIRE(services.read(hole, 4, popcorn::initiator::dma));
+  REQUIRE(hits.size() == 4);
+  CHECK(
+      std::ranges::all_of(hits, [](auto const& hit) { return hit.by == popcorn::initiator::dma; }));
+  CHECK(hits[0].addr == gap);
+  CHECK(hits[0].write);
+  CHECK(hits[0].value == 0x1234);
+  CHECK(hits[1].addr == gap);
+  CHECK_FALSE(hits[1].write);
+  CHECK(hits[1].value == 0);
+  CHECK(hits[2].addr == hole);
+  CHECK(hits[2].write);
+  CHECK(hits[2].value == 0x5678);
+  CHECK(hits[3].addr == hole);
+  CHECK_FALSE(hits[3].write);
+  CHECK(hits[3].value == 0);
+}
+
+TEST_CASE("a debugger access to a gap or a hole fires no watch")
+{
+  auto                         f = booted();
+  std::vector<core::watch_hit> hits;
+  auto const                   record = [&hits](core::watch_hit const& hit) {
+    hits.push_back(hit);
+    return core::watch_action::resume;
+  };
+  auto const all_gap  = f.target->add_watch(gap, 4, core::watch_kind::access, record);
+  auto const all_hole = f.target->add_watch(hole, 4, core::watch_kind::access, record);
+  CHECK(word(f, gap) == 0);
+  CHECK(word(f, hole) == 0);
+  CHECK(hits.empty());
 }
 
 TEST_CASE("a gap read in a shared page under strict_peripherals warns and reads 0")
