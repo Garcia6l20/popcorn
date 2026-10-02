@@ -45,6 +45,7 @@ class Tracked:
 
 MACHINES = pytest.StashKey[list[Tracked]]()
 NAME_LENGTH = 150
+RING_HINT = "trace ring: not shown, pass --popcorn-ring=N for its last N lines"
 CALL_FAILED = pytest.StashKey[bool]()
 KEPT_TRACE = pytest.StashKey[Path]()
 
@@ -157,8 +158,9 @@ def exception_stop(error: BaseException | None) -> Stop | None:
     return None
 
 
-def section_text(tracked: list[Tracked], error: BaseException | None) -> str:
-    """The report of every tracked machine, in the order the test got them.
+def section_text(tracked: list[Tracked], error: BaseException | None, ring: int = 0) -> str:
+    """The report of every tracked machine, in the order the test got them, each with the last
+    `ring` lines of its collapsed trace ring, or a hint naming `--popcorn-ring` for 0.
 
     A machine whose last stop is the stop the failing error carries is marked "(raised)". A stop
     of the error that is no machine's last stop is printed first.
@@ -170,25 +172,33 @@ def section_text(tracked: list[Tracked], error: BaseException | None) -> str:
         lines += [f"exception stop: {stop}", ""]
     for entry, own in zip(tracked, last, strict=True):
         raised = " (raised)" if stop is not None and own == stop else ""
-        lines += [f"{entry.label} ({entry.key}){raised}:", _machine_text(entry.machine, own), ""]
+        lines += [
+            f"{entry.label} ({entry.key}){raised}:",
+            _machine_text(entry.machine, own, ring),
+            "",
+        ]
     return "\n".join(lines).rstrip()
 
 
-def _machine_text(machine: Machine, stop: Stop | None) -> str:
+def _machine_text(machine: Machine, stop: Stop | None, ring: int) -> str:
     if machine.busy:
         return "  still running: stop or await it before the test ends to get a report"
     if stop is not None:
-        return _indent(stop_report(machine, stop).text())
-    lines = ["no stop since the test started", "registers:"]
-    values = {name: int(getattr(machine.reg, name)) for name in _REGISTERS}
-    names = list(values)
-    for row in range(0, len(names), 4):
-        cells = [f"{name:>4} {values[name]:#010x}" for name in names[row : row + 4]]
-        lines.append("  " + "  ".join(cells))
-    ring = machine.ring.dump()
-    if ring:
-        lines.append("trace ring:")
-        lines.extend(f"  {line}" for line in ring.splitlines())
+        report = stop_report(machine, stop, ring=ring > 0, ring_last=ring or None, collapse=True)
+        lines = [report.text()]
+    else:
+        lines = ["no stop since the test started", "registers:"]
+        values = {name: int(getattr(machine.reg, name)) for name in _REGISTERS}
+        names = list(values)
+        for row in range(0, len(names), 4):
+            cells = [f"{name:>4} {values[name]:#010x}" for name in names[row : row + 4]]
+            lines.append("  " + "  ".join(cells))
+        dump = machine.ring.dump(last=ring, collapse=True) if ring else ""
+        if dump:
+            lines.append("trace ring:")
+            lines.extend(f"  {line}" for line in dump.splitlines())
+    if not ring:
+        lines.append(RING_HINT)
     return _indent("\n".join(lines))
 
 
@@ -220,7 +230,7 @@ def pytest_runtest_makereport(
     if report.failed and tracked:
         error = None if call.excinfo is None else call.excinfo.value
         try:
-            text = section_text(tracked, error)
+            text = section_text(tracked, error, item.config.stash[SETTINGS].ring)
         except Exception as broken:
             text = f"popcorn report failed: {type(broken).__name__}: {broken}"
         kept = item.stash.get(KEPT_TRACE, None)

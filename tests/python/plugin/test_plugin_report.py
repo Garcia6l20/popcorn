@@ -27,7 +27,7 @@ def test_an_assertion_after_a_run_reports_its_stop(pytester: pytest.Pytester) ->
             stop = await machine.run(budget=1000)
             assert stop.reason is popcorn.StopReason.ADDRESS
         """)
-    result = run(pytester)
+    result = run(pytester, "--popcorn-ring=50")
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines(
         [
@@ -40,6 +40,7 @@ def test_an_assertion_after_a_run_reports_its_stop(pytester: pytest.Pytester) ->
             "  trace ring:",
         ]
     )
+    result.stdout.no_fnmatch_line("*--popcorn-ring=N*")
 
 
 FAULT = """
@@ -115,7 +116,7 @@ def test_the_ring_holds_this_test_only(pytester: pytest.Pytester) -> None:
             await machine.call("alu_mark")
             assert False, "second"
         """)
-    result = run(pytester)
+    result = run(pytester, "--popcorn-ring=4096")
     result.assert_outcomes(passed=1, failed=1)
     text = result.stdout.str()
     ring = text[text.index("trace ring:") : text.index("short test summary")]
@@ -167,10 +168,51 @@ def test_a_cancelled_run_leaves_no_stop_but_its_ring(pytester: pytest.Pytester) 
                     await machine.run()
             assert False
         """)
-    result = run(pytester)
+    result = run(pytester, "--popcorn-ring=50")
     result.stdout.fnmatch_lines(
         [HEADER, "  no stop since the test started", "  trace ring:", "* stop  BUDGET at *"]
     )
+
+
+POLL = """
+import popcorn
+
+async def test_polls(machine):
+    await machine.run(budget=20_000)
+    assert False
+"""
+
+
+def test_the_ring_is_not_shown_by_default(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile(POLL)
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [HEADER, "  call stack:", "*", "  trace ring: not shown, pass --popcorn-ring=N *"]
+    )
+    result.stdout.no_fnmatch_line("  trace ring:")
+    result.stdout.no_fnmatch_line("* block *")
+
+
+def test_the_ring_is_shown_on_request(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile(POLL)
+    result = run(pytester, "--popcorn-ring=5")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [HEADER, "  call stack:", "*", "  trace ring:", "* stop  BUDGET at *"]
+    )
+    result.stdout.no_fnmatch_line("*--popcorn-ring=N*")
+
+
+def test_a_negative_ring_is_a_usage_error(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    result = run(pytester, "--popcorn-ring=-1")
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*--popcorn-ring must be 0 or above, not -1*"])
 
 
 def test_an_error_stop_that_is_no_last_stop_is_printed_first(pytester: pytest.Pytester) -> None:

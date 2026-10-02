@@ -25,6 +25,8 @@ class Settings:
         strict: Whether unmodelled peripheral accesses raise, `--popcorn-strict`.
         budget: The default instruction budget of `run`, `wait_for` and `call`,
             `--popcorn-budget`.
+        ring: How many lines of the collapsed trace ring a failure report shows, 0 for none,
+            `--popcorn-ring`.
     """
 
     project: Path
@@ -34,6 +36,7 @@ class Settings:
     trace_dir: Path | None
     strict: bool
     budget: int | None
+    ring: int = 0
 
     @classmethod
     def from_config(cls, config: pytest.Config) -> Settings:
@@ -44,6 +47,7 @@ class Settings:
         trace = config.getoption("popcorn_trace_on_fail")
         name = config.getoption("popcorn_config")
         budget = config.getoption("popcorn_budget")
+        ring = config.getoption("popcorn_ring")
         return cls(
             project=project if project is not None else config.rootpath / "popcorn.toml",
             config=name if isinstance(name, str) else None,
@@ -52,6 +56,7 @@ class Settings:
             trace_dir=_path(trace, here) if trace else None,
             strict=config.getoption("popcorn_strict") is True,
             budget=budget if isinstance(budget, int) else None,
+            ring=ring if isinstance(ring, int) else 0,
         )
 
 
@@ -65,7 +70,7 @@ def _path(value: object, base: Path) -> Path | None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Register the six `--popcorn-*` options."""
+    """Register the seven `--popcorn-*` options."""
     group = parser.getgroup("popcorn", "popcorn firmware emulation")
     group.addoption(
         "--popcorn-project",
@@ -103,18 +108,28 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help="default instruction budget of run, wait_for and call",
     )
+    group.addoption(
+        "--popcorn-ring",
+        type=int,
+        default=0,
+        metavar="N",
+        help="show the last N lines of the trace ring in a failure report, repeated record "
+        "groups collapsed, default 0: not shown",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register the `popcorn` marker and parse the options.
 
     Raises:
-        pytest.UsageError: `--popcorn-budget` is not above 0.
+        pytest.UsageError: `--popcorn-budget` is not above 0, or `--popcorn-ring` is below 0.
     """
     config.addinivalue_line("markers", MARKER)
     settings = Settings.from_config(config)
     if settings.budget is not None and settings.budget <= 0:
         raise pytest.UsageError(f"--popcorn-budget must be above 0, not {settings.budget}")
+    if settings.ring < 0:
+        raise pytest.UsageError(f"--popcorn-ring must be 0 or above, not {settings.ring}")
     config.stash[SETTINGS] = settings
 
 

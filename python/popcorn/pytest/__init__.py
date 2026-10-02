@@ -23,8 +23,11 @@ Fixtures:
 
 A failing test that used a popcorn machine gets a "popcorn" section in its report, one block per
 machine: the stop of the failing exception or of the machine's last run, the fault registers
-decoded, the call stack and the trace ring. A machine without a stop since the test started shows
-its registers and ring. The report of a setup error from a failed boot shows the boot's stop.
+decoded and the call stack. A machine without a stop since the test started shows its registers.
+The report of a setup error from a failed boot shows the boot's stop. With `--popcorn-ring=N`,
+each block ends with the last N lines of the machine's trace ring, a group of up to 8 records
+repeated back to back printed once with its repeat count: a poll loop takes a few lines. Without
+it, a one-line hint names the option.
 
 With `--popcorn-trace-on-fail=DIR`, the `machine` fixture traces every test with
 `popcorn.trace.ALL` and keeps `DIR/<node id>.pctr` for a test whose call failed, named in its
@@ -92,7 +95,8 @@ async test and fixture. They run on its loops, everything else on popcorn's. Mix
 Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture, are left to it.
 
 Options, registered for `pytest --help`: `--popcorn-project`, `--popcorn-config`,
-`--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`.
+`--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`,
+`--popcorn-ring`.
 
     @pytest.mark.popcorn(config="variant", budget=1_000_000, strict=True)
     async def test_variant(machine: popcorn.Machine) -> None: ...

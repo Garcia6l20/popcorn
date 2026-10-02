@@ -11,6 +11,7 @@ from pathlib import Path
 import popcorn
 import pytest
 from popcorn import _obs
+from popcorn._observe import collapsed
 from popcorn.coverage import Coverage, ImageKind
 from popcorn.trace import ALL, Block, Mmio, Stop, TraceKind, read
 
@@ -167,6 +168,65 @@ def test_the_ring_dump_names_registers_and_the_stop() -> None:
     dump = m.ring.dump()
     assert "TIMER.CR" in dump
     assert "stop  ADDRESS at" in dump or "stop  RETURNED at" in dump
+
+
+def test_a_collapsed_dump_prints_a_repeated_call_once() -> None:
+    m = modelled()
+    m.ring.clear()
+    for _ in range(5):
+        asyncio.run(m.call("start_timer", 10))
+    full = m.ring.dump().splitlines()
+    short = m.ring.dump(collapse=True).splitlines()
+    assert len(full) == 15
+    assert short[:3] == full[:3]
+    assert (
+        short[3] == f"{'':>12} ... 3 records repeated 4 more times, last at {full[-1].split()[0]}"
+    )
+    assert len(short) == 4
+
+
+def test_a_dump_keeps_its_last_lines() -> None:
+    m = modelled()
+    asyncio.run(m.call("start_timer", 10))
+    full = m.ring.dump().splitlines()
+    assert len(full) > 2
+    last = m.ring.dump(last=2).splitlines()
+    assert last == [f"... {len(full) - 2} earlier lines", *full[-2:]]
+    assert m.ring.dump(last=len(full)).splitlines() == full
+
+
+def test_a_dump_refuses_a_last_below_one() -> None:
+    m = modelled()
+    with pytest.raises(ValueError, match="last must be at least 1, not 0"):
+        m.ring.dump(last=0)
+
+
+def test_collapse_finds_a_single_repeated_record() -> None:
+    lines = [(t, "mmio  write32 IWDG.KR = 0xaaaa at f") for t in range(10, 15)]
+    assert collapsed(lines) == [
+        f"{10:>12} mmio  write32 IWDG.KR = 0xaaaa at f",
+        f"{'':>12} ... record repeated 4 more times, last at 14",
+    ]
+
+
+def test_collapse_finds_an_alternating_loop_and_keeps_the_rest() -> None:
+    loop = ["block loop 3 insn", "mmio  write32 IWDG.KR = 0xaaaa at loop"]
+    lines = [(0, "call  main r0=0x0")]
+    lines += [(1 + i, loop[i % 2]) for i in range(6)]
+    lines += [(7, "stop  BUDGET at loop")]
+    assert collapsed(lines) == [
+        f"{0:>12} call  main r0=0x0",
+        f"{1:>12} {loop[0]}",
+        f"{2:>12} {loop[1]}",
+        f"{'':>12} ... 2 records repeated 2 more times, last at 5",
+        f"{7:>12} stop  BUDGET at loop",
+    ]
+
+
+def test_collapse_leaves_distinct_records_alone() -> None:
+    lines = [(t, f"irq   enter {t}") for t in range(4)]
+    assert collapsed(lines) == [f"{t:>12} irq   enter {t}" for t in range(4)]
+    assert collapsed([]) == []
 
 
 def test_a_wrapped_ring_keeps_absolute_times() -> None:

@@ -157,7 +157,14 @@ class Report:
         return "\n".join(lines)
 
 
-def stop_report(machine: Machine, stop: Stop, *, ring: bool = True) -> Report:
+def stop_report(
+    machine: Machine,
+    stop: Stop,
+    *,
+    ring: bool = True,
+    ring_last: int | None = None,
+    collapse: bool = False,
+) -> Report:
     """Explain `stop` from the state of `machine`, which must be stopped, and from the
     registers `stop` carries for a fault inside a `Machine.call`, the machine's own standing
     in for any it lacks.
@@ -167,6 +174,8 @@ def stop_report(machine: Machine, stop: Stop, *, ring: bool = True) -> Report:
         stop: The stop to explain.
         ring: Whether to include the trace ring. When the ring cannot be written or read, the
             report says why instead of raising, so the ring never hides the failure it reports.
+        ring_last: The ring's last lines to keep, as `Ring.dump(last=)` takes it.
+        collapse: Whether to collapse repeated record groups, as `Ring.dump(collapse=)`.
 
     Raises:
         MachineRunning: A run is active.
@@ -204,7 +213,7 @@ def stop_report(machine: Machine, stop: Stop, *, ring: bool = True) -> Report:
     text = ""
     if ring:
         try:
-            text = machine.ring.dump()
+            text = machine.ring.dump(last=ring_last, collapse=collapse)
         except OSError as error:
             text = f"ring unavailable: {error}"
     return Report(stop, registers, bits, frames, text)

@@ -180,28 +180,82 @@ class Ring:
             self._handle.write_ring(os.fspath(path))
             return list(read(path))
 
-    def dump(self) -> str:
-        """The kept records, one line each: instruction count, kind, symbolized pc, detail."""
-        return "\n".join(self._line(record) for record in self.records())
+    def dump(self, *, last: int | None = None, collapse: bool = False) -> str:
+        """The kept records, one line each: instruction count, kind, symbolized pc, detail.
 
-    def _line(self, record: Record) -> str:
+        Args:
+            last: Keep only the last `last` lines, after a first line counting those left out.
+                None keeps every line.
+            collapse: Print a group of up to 8 records repeated back to back, times aside, once,
+                then one line with the repeat count and the time of the last repeat. A poll
+                loop then takes a few lines instead of the whole ring.
+
+        Raises:
+            ValueError: `last` is below 1.
+        """
+        if last is not None and last < 1:
+            raise ValueError(f"last must be at least 1, not {last}")
+        lines = [(record.time, self._body(record)) for record in self.records()]
+        text = collapsed(lines) if collapse else [f"{time:>12} {body}" for time, body in lines]
+        if last is not None and len(text) > last:
+            hidden = len(text) - last
+            text = [f"... {hidden} earlier line{'s' if hidden != 1 else ''}", *text[-last:]]
+        return "\n".join(text)
+
+    def _body(self, record: Record) -> str:
         match record:
-            case Block(time, pc, icount):
-                return f"{time:>12} block {self._locate(pc)} {icount} insn"
-            case Mem(time, pc, address, value, size, write):
+            case Block(_, pc, icount):
+                return f"block {self._locate(pc)} {icount} insn"
+            case Mem(_, pc, address, value, size, write):
                 access = f"{'write' if write else 'read'}{size * 8} {address:#010x}"
-                return f"{time:>12} mem   {access} = {value:#x} at {self._locate(pc)}"
-            case Mmio(time, pc, address, value, size, write, register):
+                return f"mem   {access} = {value:#x} at {self._locate(pc)}"
+            case Mmio(_, pc, address, value, size, write, register):
                 access = (
                     f"{'write' if write else 'read'}{size * 8} {register or f'{address:#010x}'}"
                 )
-                return f"{time:>12} mmio  {access} = {value:#x} at {self._locate(pc)}"
-            case Irq(time, number, enter):
-                return f"{time:>12} irq   {'enter' if enter else 'exit'} {number}"
-            case Call(time, pc, r0, symbol):
-                return f"{time:>12} call  {symbol or self._locate(pc)} r0={r0:#x}"
-            case Stop(time, pc, reason):
-                return f"{time:>12} stop  {StopReason(reason).name} at {self._locate(pc)}"
+                return f"mmio  {access} = {value:#x} at {self._locate(pc)}"
+            case Irq(_, number, enter):
+                return f"irq   {'enter' if enter else 'exit'} {number}"
+            case Call(_, pc, r0, symbol):
+                return f"call  {symbol or self._locate(pc)} r0={r0:#x}"
+            case Stop(_, pc, reason):
+                return f"stop  {StopReason(reason).name} at {self._locate(pc)}"
+
+
+_PERIOD = 8
+
+
+def collapsed(lines: Sequence[tuple[int, str]]) -> list[str]:
+    """`lines` of (time, text) as `Ring.dump(collapse=True)` prints them. At each line, the
+    period of up to 8 lines whose back-to-back repeats cover the most lines wins, the shorter on
+    a tie."""
+    bodies = [body for _, body in lines]
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        best_period, best_repeats = 0, 1
+        for period in range(1, _PERIOD + 1):
+            if i + 2 * period > len(lines):
+                break
+            group = bodies[i : i + period]
+            repeats = 1
+            while bodies[i + repeats * period : i + (repeats + 1) * period] == group:
+                repeats += 1
+            if repeats > 1 and repeats * period > best_repeats * best_period:
+                best_period, best_repeats = period, repeats
+        if best_period == 0:
+            out.append(f"{lines[i][0]:>12} {bodies[i]}")
+            i += 1
+            continue
+        out.extend(f"{time:>12} {body}" for time, body in lines[i : i + best_period])
+        i += best_period * best_repeats
+        more = best_repeats - 1
+        what = "record" if best_period == 1 else f"{best_period} records"
+        out.append(
+            f"{'':>12} ... {what} repeated {more} more time{'s' if more != 1 else ''}, "
+            f"last at {lines[i - best_period][0]}"
+        )
+    return out
 
 
 def forward_log(part: str, record: _core.LogRecord) -> None:
