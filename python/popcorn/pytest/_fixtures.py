@@ -164,11 +164,12 @@ def _popcorn_session(request: pytest.FixtureRequest) -> PopcornSession:
     return popcorn_session(request.config)
 
 
-@pytest.fixture(scope="session")
-def popcorn_project(_popcorn_session: PopcornSession) -> Project:
-    """The project file, `--popcorn-project` or `<rootdir>/popcorn.toml`, with `--popcorn-config`
-    applied."""
-    return _popcorn_session.project(_popcorn_session.settings.config)
+@pytest.fixture
+def popcorn_project(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) -> Project:
+    """The test's project file, the `popcorn.toml` nearest above it or `--popcorn-project`, with
+    `--popcorn-config` applied."""
+    project = _popcorn_session.project_of(_item(request).path)
+    return _popcorn_session.project(_popcorn_session.settings.config, project)
 
 
 @pytest.fixture

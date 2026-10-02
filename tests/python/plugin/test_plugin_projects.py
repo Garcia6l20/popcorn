@@ -100,3 +100,13 @@ def test_a_project_file_above_the_rootdir_is_ignored(pytester: pytest.Pytester) 
     result = run(pytester, "example")
     result.assert_outcomes(errors=1)
     result.stdout.fnmatch_lines([f"*no project file {example / 'popcorn.toml'}*up to {example}*"])
+
+
+def test_the_project_fixture_is_the_test_project(pytester: pytest.Pytester) -> None:
+    driver, fault = two_projects(pytester)
+    for directory, name in ((driver, "driver"), (fault, "fault")):
+        (directory / f"test_{name}_project.py").write_text(
+            "def test_project(popcorn_project):\n"
+            f"    assert str(popcorn_project.path) == {str(directory / 'popcorn.toml')!r}\n"
+        )
+    run(pytester).assert_outcomes(passed=4)
