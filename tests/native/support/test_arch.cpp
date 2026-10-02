@@ -2,6 +2,7 @@
 
 #include "upper_case.hpp"
 
+#include <popcorn/arch/armv8m/thumb.hpp>
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <format>
 #include <memory>
 #include <optional>
@@ -385,6 +387,20 @@ auto test_arch::instructions_between(address from, address to) const -> std::opt
     return std::nullopt;
   }
   return count;
+}
+
+auto test_arch::ends_block_before(address from, address to) const -> std::optional<bool>
+{
+  if(to < from)
+  {
+    return std::nullopt;
+  }
+  std::vector<std::byte> code(to - from);
+  if(not code.empty() and not context_->services.read_block(from, code, initiator::debugger))
+  {
+    return std::nullopt;
+  }
+  return popcorn::arch::armv8m::thumb::last_ends_block(from, code);
 }
 
 auto test_arch::resume_address() const -> address

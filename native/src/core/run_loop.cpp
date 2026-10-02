@@ -905,7 +905,8 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     auto const ran     = owner.clock_.now().value - started.value;
     if(coverage_on)
     {
-      coverage.leave(*arch, arch->pc());
+      auto const pc = arch->pc();
+      coverage.leave(*arch, pc, std::ranges::contains(exit_list(request), pc));
     }
     executed.value += ran;
     if(leaving)

@@ -12,9 +12,6 @@ core = project.get_target("popcorn_core")
 obs = project.get_target("popcorn_obs")
 obs_sources = str(project_dir / "native" / "src" / "obs")
 
-test_thumb = add_doctest("obs-thumb", [here / "test_thumb.cpp"], [obs, core])
-test_thumb.private.include_dirs.append(obs_sources)
-
 branches_elf, branches_firmware = firmware("core", "branches")
 test_ranges = add_doctest(
     "obs-ranges",

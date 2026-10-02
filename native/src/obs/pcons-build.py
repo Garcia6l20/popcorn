@@ -9,7 +9,6 @@ here = Path(__file__).resolve().parent
 core = project.get_target("popcorn_core")
 
 sources = [
-    here / "thumb.cpp",
     here / "ranges.cpp",
     here / "tb.cpp",
     here / "collect.cpp",

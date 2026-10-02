@@ -1,5 +1,4 @@
-#include "thumb.hpp"
-
+#include <popcorn/arch/armv8m/thumb.hpp>
 #include <popcorn/obs/coverage.hpp>
 
 #include <algorithm>
@@ -20,6 +19,8 @@
 
 namespace popcorn::obs
 {
+namespace thumb = arch::armv8m::thumb;
+
 namespace
 {
 using count = std::uint64_t;

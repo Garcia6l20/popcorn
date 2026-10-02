@@ -1,7 +1,6 @@
 #pragma once
 
-#include "thumb.hpp"
-
+#include <popcorn/arch/armv8m/thumb.hpp>
 #include <popcorn/core/coverage.hpp>
 #include <popcorn/image/image.hpp>
 #include <popcorn/obs/coverage.hpp>
@@ -14,6 +13,8 @@
 
 namespace popcorn::obs
 {
+namespace thumb = arch::armv8m::thumb;
+
 /** @brief Engine page size bounding a translated block, 1 KiB for M-profile cores. */
 inline constexpr std::uint32_t tb_page = 1024;
 

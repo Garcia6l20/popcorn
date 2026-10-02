@@ -264,11 +264,14 @@ struct coverage_state
   /**
    * @brief Closes the block counted last as execution leaves it: a cut at @p pc when @p pc is one
    *        of its instructions, which therefore did not run. Called after each engine run, which
-   *        ends with the block it entered last, and where an intercept returns.
+   *        ends with the block it entered last, and where an intercept returns. The engine counts
+   *        no instruction at an exit, so a block left at an exit after all its counted
+   *        instructions is cut too, unless the last of them ends a block by itself.
    * @param core Arch decoding the block's instructions.
    * @param pc Next instruction to run.
+   * @param at_exit Whether the engine stopped at @p pc because it is one of its exits.
    */
-  void leave(arch::arch const& core, address pc);
+  void leave(arch::arch const& core, address pc, bool at_exit);
 };
 
 /** @brief Loop tracking of spin detection, active while machine_options::spin_threshold is set.

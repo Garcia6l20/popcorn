@@ -10,7 +10,7 @@
 #include <span>
 #include <string_view>
 
-namespace popcorn::obs::thumb
+namespace popcorn::arch::armv8m::thumb
 {
 /**
  * @brief Size of a Thumb instruction from its first halfword.
@@ -114,6 +114,15 @@ auto block_end_rows() noexcept -> std::span<block_end_row const>;
  * @return Its ending kind, the target of a direct branch, and whether it is conditional.
  */
 auto classify(insn const& i) noexcept -> flow;
+
+/**
+ * @brief Whether the last instruction of a run of code ends its translated block, see classify().
+ * @param at Guest address of the first byte.
+ * @param bytes Code from @p at to right after the instruction.
+ * @return Whether it ends its block, empty when @p bytes is empty or its end is not an
+ *         instruction boundary from @p at.
+ */
+auto last_ends_block(address at, std::span<std::byte const> bytes) noexcept -> std::optional<bool>;
 
 /**
  * @brief Whether an instruction is an IT instruction.

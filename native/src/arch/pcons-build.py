@@ -13,6 +13,7 @@ sources = [
             "faults.cpp",
             "calls.cpp",
             "sleep.cpp",
+            "thumb.cpp",
             "factory.cpp",
         )
     ),

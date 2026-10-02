@@ -141,7 +141,7 @@ void coverage_state::count(address addr, std::uint32_t insns)
   open_insns   = insns;
 }
 
-void coverage_state::leave(arch::arch const& core, address pc)
+void coverage_state::leave(arch::arch const& core, address pc, bool at_exit)
 {
   auto const insns = std::exchange(open_insns, 0u);
   if(pc - previous > max_insn_bytes * insns)
@@ -149,7 +149,11 @@ void coverage_state::leave(arch::arch const& core, address pc)
     return;
   }
   auto const ran = core.instructions_between(previous, pc);
-  if(not ran or *ran >= insns)
+  if(not ran or *ran > insns)
+  {
+    return;
+  }
+  if(*ran == insns and not(at_exit and core.ends_block_before(previous, pc) == false))
   {
     return;
   }

@@ -1,6 +1,5 @@
-#include "thumb.hpp"
-
 #include <popcorn/arch/armv8m/armv8m.hpp>
+#include <popcorn/arch/armv8m/thumb.hpp>
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/image/image.hpp>
@@ -31,7 +30,7 @@ namespace
 namespace core  = popcorn::core;
 namespace image = popcorn::image;
 namespace obs   = popcorn::obs;
-namespace thumb = popcorn::obs::thumb;
+namespace thumb = popcorn::arch::armv8m::thumb;
 using popcorn::address;
 using popcorn::stop_reason;
 using popcorn::testing::firmware;

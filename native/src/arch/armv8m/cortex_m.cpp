@@ -4,6 +4,7 @@
 #include "registers.hpp"
 #include "systick.hpp"
 
+#include <popcorn/arch/armv8m/thumb.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/services.hpp>
 
@@ -343,7 +344,8 @@ auto cortex_m::pc() const -> address
            : at;
 }
 
-auto cortex_m::instructions_between(address from, address to) const -> std::optional<std::uint32_t>
+auto cortex_m::halfwords(address from, address to) const
+    -> std::optional<std::vector<std::uint16_t>>
 {
   if(to < from or (to - from) % 2 != 0)
   {
@@ -356,17 +358,37 @@ auto cortex_m::instructions_between(address from, address to) const -> std::opti
   {
     return std::nullopt;
   }
+  return code;
+}
+
+auto cortex_m::instructions_between(address from, address to) const -> std::optional<std::uint32_t>
+{
+  auto const code = halfwords(from, to);
+  if(not code)
+  {
+    return std::nullopt;
+  }
   std::uint32_t count = 0;
   std::size_t   at    = 0;
-  for(; at < code.size(); ++count)
+  for(; at < code->size(); ++count)
   {
-    at += (code[at] >> 11) >= 0b11101u ? 2 : 1;
+    at += thumb::size((*code)[at]) / 2;
   }
-  if(at != code.size())
+  if(at != code->size())
   {
     return std::nullopt;
   }
   return count;
+}
+
+auto cortex_m::ends_block_before(address from, address to) const -> std::optional<bool>
+{
+  auto const code = halfwords(from, to);
+  if(not code)
+  {
+    return std::nullopt;
+  }
+  return thumb::last_ends_block(from, std::as_bytes(std::span{*code}));
 }
 
 auto cortex_m::resume_address() const -> address

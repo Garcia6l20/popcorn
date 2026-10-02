@@ -516,3 +516,34 @@ TEST_CASE("instructions_between counts Thumb instructions of 16 and 32 bits")
   CHECK_FALSE(f.module->instructions_between(at, at + 3).has_value());
   CHECK_FALSE(f.module->instructions_between(0xF000'0000, 0xF000'0004).has_value());
 }
+
+TEST_CASE("ends_block_before tells a block-ending instruction from one the block runs past")
+{
+  arch_fixture                     f{m33(), "scs", {}};
+  constexpr address                at = 0x2008'0000;
+  std::vector<std::uint16_t> const code{
+      0x2001, 0xd1fe, 0x4770, 0xbd00, 0xbf08, 0x4770, 0xbf08, 0x4608,
+      0xf000, 0xf800, 0xf3af, 0x8000, 0xf85d, 0xfb04, 0xe7fe,
+  };
+  for(auto const& [index, half] : std::views::enumerate(code))
+  {
+    REQUIRE(f.target->mem().write(at + 2 * static_cast<address>(index), 2, half));
+  }
+  auto const ends = [&](address from, address to) { return f.module->ends_block_before(from, to); };
+  CHECK(ends(at, at + 2) == false);
+  CHECK(ends(at, at + 4) == true);
+  CHECK(ends(at + 4, at + 6) == true);
+  CHECK(ends(at, at + 8) == true);
+  CHECK(ends(at + 8, at + 10) == false);
+  CHECK(ends(at + 8, at + 12) == true);
+  CHECK(ends(at + 12, at + 16) == false);
+  CHECK(ends(at + 12, at + 20) == true);
+  CHECK(ends(at + 16, at + 24) == false);
+  CHECK(ends(at, at + 28) == true);
+  CHECK(ends(at + 28, at + 30) == true);
+  CHECK_FALSE(ends(at, at).has_value());
+  CHECK_FALSE(ends(at + 16, at + 18).has_value());
+  CHECK_FALSE(ends(at + 2, at).has_value());
+  CHECK_FALSE(ends(at, at + 3).has_value());
+  CHECK_FALSE(ends(0xF000'0000, 0xF000'0004).has_value());
+}

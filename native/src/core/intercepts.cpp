@@ -282,7 +282,7 @@ void machine::run_state::on_code_site(
         case intercept_action::returns:
           if(run.coverage_on)
           {
-            run.coverage.leave(*run.arch, static_cast<address>(addr));
+            run.coverage.leave(*run.arch, static_cast<address>(addr), false);
           }
           run.arch->return_to_caller(result.value(), result.abi().value_or(run.abi_at(entry.at)));
           run.coverage.has_previous = false;

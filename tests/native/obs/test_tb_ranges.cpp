@@ -1,7 +1,7 @@
 #include "cortex_m.hpp"
 #include "tb.hpp"
-#include "thumb.hpp"
 
+#include <popcorn/arch/armv8m/thumb.hpp>
 #include <popcorn/core/coverage.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
@@ -83,7 +83,7 @@ auto insns_in(address start, std::uint32_t size, obs::code_bytes& code) -> std::
   std::uint32_t count  = 0;
   while(offset < size)
   {
-    auto const decoded = popcorn::obs::thumb::read(start + offset, bytes.subspan(offset));
+    auto const decoded = popcorn::arch::armv8m::thumb::read(start + offset, bytes.subspan(offset));
     REQUIRE(decoded.has_value());
     offset += decoded->size;
     ++count;

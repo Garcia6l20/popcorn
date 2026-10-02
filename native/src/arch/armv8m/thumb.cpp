@@ -1,11 +1,11 @@
-#include "thumb.hpp"
+#include <popcorn/arch/armv8m/thumb.hpp>
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <utility>
 
-namespace popcorn::obs::thumb
+namespace popcorn::arch::armv8m::thumb
 {
 namespace
 {
@@ -304,6 +304,26 @@ auto classify(insn const& i) noexcept -> flow
     result.target = i.at + 4 + offset(found->form, i.bits);
   }
   return result;
+}
+
+auto last_ends_block(address at, std::span<std::byte const> bytes) noexcept -> std::optional<bool>
+{
+  std::optional<insn> last;
+  std::size_t         offset = 0;
+  while(offset < bytes.size())
+  {
+    last = read(at + static_cast<address>(offset), bytes.subspan(offset));
+    if(not last)
+    {
+      return std::nullopt;
+    }
+    offset += last->size;
+  }
+  if(not last)
+  {
+    return std::nullopt;
+  }
+  return classify(*last).kind != ending::none;
 }
 
 auto is_it(insn const& i) noexcept -> bool

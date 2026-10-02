@@ -13,6 +13,7 @@ test_support = project.get_target("popcorn-test-support")
 core_data = project_dir / "tests" / "data" / "core"
 
 add_doctest("arch-interface", [here / "test_interface.cpp"], [core])
+add_doctest("arch-thumb", [here / "test_thumb.cpp"], [core])
 
 arch_firmware = {
     name: firmware("arch", name)

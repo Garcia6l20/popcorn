@@ -4,6 +4,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/trace.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -12,9 +13,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <ranges>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -265,4 +268,30 @@ TEST_CASE("an intercept that returns or stops and resumes leaves no false edge")
     CHECK(edges.front().to != seven);
     CHECK(edges.front().hits == 1);
   }
+}
+
+TEST_CASE("a block left at an exit after all its counted instructions is cut unless it ended")
+{
+  fixture    f{m33(), "alu", {}};
+  auto const entry = sym("alu", "alu_entry");
+  auto const body  = sym("alu", "alu_body");
+  auto const loop  = body + 10;
+
+  auto const left = [&](address start, std::uint32_t insns, address pc, bool at_exit) {
+    core::coverage_state state;
+    state.previous   = start;
+    state.open_insns = insns;
+    state.leave(*f.module, pc, at_exit);
+    return state.cuts;
+  };
+  using cuts = std::map<std::pair<address, address>, std::uint64_t>;
+  cuts const cut_at_body{
+      {std::pair{entry, body}, 1}
+  };
+  CHECK(left(entry, 3, body, true) == cut_at_body);
+  CHECK(left(entry, 3, body, false).empty());
+  CHECK(left(entry, 4, body, false) == cut_at_body);
+  CHECK(left(body, 5, loop, true).empty());
+  CHECK(left(entry, 2, body, true).empty());
+  CHECK(left(entry, 0, entry, true).empty());
 }

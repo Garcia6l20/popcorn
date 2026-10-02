@@ -52,6 +52,8 @@ public:
   [[nodiscard]] auto pc() const -> address override;
   [[nodiscard]] auto instructions_between(address from, address to) const
       -> std::optional<std::uint32_t> override;
+  [[nodiscard]] auto ends_block_before(address from, address to) const
+      -> std::optional<bool> override;
   [[nodiscard]] auto resume_address() const -> address override;
   [[nodiscard]] auto registers() const -> std::span<cpu_register const> override;
   void               prepare_call(call_frame const& frame) override;
@@ -89,6 +91,9 @@ public:
 
 private:
   friend class system_space;
+
+  [[nodiscard]] auto halfwords(address from, address to) const
+      -> std::optional<std::vector<std::uint16_t>>;
 
   struct window_user
   {

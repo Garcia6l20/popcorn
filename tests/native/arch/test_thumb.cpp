@@ -1,4 +1,4 @@
-#include "thumb.hpp"
+#include <popcorn/arch/armv8m/thumb.hpp>
 
 #include <doctest/doctest.h>
 
@@ -7,13 +7,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <initializer_list>
 #include <optional>
 #include <set>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace
 {
-namespace thumb = popcorn::obs::thumb;
+namespace thumb = popcorn::arch::armv8m::thumb;
 using popcorn::address;
 using thumb::ending;
 
@@ -27,6 +30,17 @@ auto narrow(std::uint16_t bits) -> thumb::insn
 auto wide(std::uint16_t first, std::uint16_t second, address where = at) -> thumb::insn
 {
   return {.at = where, .bits = std::uint32_t{first} << 16 | second, .size = 4};
+}
+
+auto little_endian(std::initializer_list<std::uint16_t> halves) -> std::vector<std::byte>
+{
+  std::vector<std::byte> bytes;
+  for(auto const half : halves)
+  {
+    bytes.push_back(static_cast<std::byte>(half & 0xff));
+    bytes.push_back(static_cast<std::byte>(half >> 8));
+  }
+  return bytes;
 }
 
 struct expected_row
@@ -186,4 +200,25 @@ TEST_CASE("is_it matches IT and not the hints")
   CHECK_FALSE(thumb::is_it(narrow(0xbf00)));
   CHECK_FALSE(thumb::is_it(narrow(0xbf30)));
   CHECK_FALSE(thumb::is_it(wide(0xf3af, 0x8008)));
+}
+
+TEST_CASE("last_ends_block classifies the last whole instruction of a run")
+{
+  auto const ends = [](std::initializer_list<std::uint16_t> halves) {
+    return thumb::last_ends_block(at, little_endian(halves));
+  };
+  CHECK(ends({0x2001}) == false);
+  CHECK(ends({0x2001, 0xd1fe}) == true);
+  CHECK(ends({0x4770}) == true);
+  CHECK(ends({0x2001, 0xbd00}) == true);
+  CHECK(ends({0xbf08}) == false);
+  CHECK(ends({0xbf08, 0x4770}) == true);
+  CHECK(ends({0xbf08, 0x4608}) == false);
+  CHECK(ends({0x2001, 0xf000, 0xf800}) == true);
+  CHECK(ends({0xf000, 0xf800, 0xf3af, 0x8000}) == false);
+  CHECK(ends({0xf3af, 0x8000, 0xf85d, 0xfb04}) == true);
+  CHECK_FALSE(ends({}).has_value());
+  CHECK_FALSE(ends({0x2001, 0xf000}).has_value());
+  auto const odd = little_endian({0x2001, 0x4770});
+  CHECK_FALSE(thumb::last_ends_block(at, std::span{odd}.first(3)).has_value());
 }

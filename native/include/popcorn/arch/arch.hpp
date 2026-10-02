@@ -385,6 +385,23 @@ public:
   }
 
   /**
+   * @brief Whether the instruction that ends at @p to ends the translated block holding it, by
+   *        its encoding: a branch, a write to the program counter, an exception or a system
+   *        instruction the engine ends a block after. A block also ends where the engine's page
+   *        or instruction limit falls, which this does not tell.
+   * @param from Address of an instruction at or before it, decoding starts there.
+   * @param to Address right after it.
+   * @return Whether it ends its block, empty when the arch cannot decode, @p to equals @p from or
+   *         is not on an instruction boundary from @p from. The default cannot decode.
+   */
+  [[nodiscard]] virtual auto
+      ends_block_before([[maybe_unused]] address from, [[maybe_unused]] address to) const
+      -> std::optional<bool>
+  {
+    return std::nullopt;
+  }
+
+  /**
    * @brief Address to start the engine at to resume at pc(), with the instruction set state the
    *        engine needs, such as the Arm Thumb bit.
    */
