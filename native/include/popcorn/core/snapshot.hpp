@@ -14,7 +14,7 @@
 namespace popcorn::core
 {
 /** @brief Version of the snapshot_data layout, stamped by the machine and checked on restore. */
-inline constexpr std::uint32_t snapshot_format_version = 3;
+inline constexpr std::uint32_t snapshot_format_version = 4;
 
 /** @brief Opaque state saved by one owner: the arch module or one peripheral model. */
 struct snapshot_part
@@ -232,10 +232,12 @@ auto encode_snapshot(snapshot_data const& data) -> std::vector<std::byte>;
 /**
  * @brief Reads back bytes encode_snapshot() wrote.
  * @param bytes Serialized content.
- * @return The content, format snapshot_format_version. Format 2, the layout before virtual-time
- *         events, is also read: its events load as deadline::instructions, their meaning then.
- * @throws config_error when @p bytes is malformed or its format is neither
- *         snapshot_format_version nor 2.
+ * @return The content, format snapshot_format_version. Formats 2 and 3 are also read. Format 2,
+ *         the layout before virtual-time events: its events load as deadline::instructions,
+ *         their meaning then. Format 3, the layout before the clock hold: its clock loads with
+ *         nothing held, clock_state::held and held_time 0, as every format 3 machine ran.
+ * @throws config_error when @p bytes is malformed or its format is not
+ *         snapshot_format_version, 3 or 2.
  */
 auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data;
 }

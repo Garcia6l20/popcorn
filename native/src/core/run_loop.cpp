@@ -171,6 +171,8 @@ void machine::run_state::reset_machine(reset_kind kind)
   fresh.now             = {};
   fresh.epoch_icount    = {};
   fresh.epoch_time      = {};
+  fresh.held            = {};
+  fresh.held_time       = {};
   fresh.core_hz         = core_clock_hz(owner.description_, owner.options_);
   fresh.cpi             = owner.options_.cpi;
   owner.clock_driver_.restore(fresh);
@@ -268,7 +270,7 @@ void machine::run_state::on_block(
     void*         user) noexcept
 {
   auto&      run = *static_cast<run_state*>(user);
-  auto const now = run.owner.clock_.now();
+  auto const now = run.owner.clock_driver_.exact_now();
   run.block_pc   = static_cast<address>(addr);
   if(run.stop_flag
      or now
@@ -334,7 +336,7 @@ void machine::run_state::on_step(
     void* user) noexcept
 {
   auto&      run = *static_cast<run_state*>(user);
-  auto const now = run.owner.clock_.now();
+  auto const now = run.owner.clock_driver_.exact_now();
   if(run.stop_flag or now >= run.deadline or now >= run.owner.scheduler_.earliest())
   {
     uc_emu_stop(engine);
@@ -522,7 +524,7 @@ void machine::run_state::remove_step_hook() noexcept
 
 auto machine::run_state::next_deadline(slice_request const& request) const -> icount
 {
-  auto const now      = owner.clock_.now();
+  auto const now      = owner.clock_driver_.exact_now();
   auto const progress = icount{executed.value + jumped.value};
   auto       bound    = add_sat(now, left(request.max_instructions, progress));
   if(request.budget_left)
@@ -572,7 +574,7 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
 auto machine::run_state::dispatch_due(slice_request const& request) -> std::optional<slice_end>
 {
   std::uint32_t countdown = wall_check_blocks;
-  while(auto const due = owner.scheduler_.pop_due(owner.clock_.now()))
+  while(auto const due = owner.scheduler_.pop_due(owner.clock_driver_.exact_now()))
   {
     if(due->id.owner == arch::arch_event_owner)
     {
@@ -610,7 +612,7 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
 
 auto machine::run_state::count_instant(event const& due) -> std::optional<slice_end>
 {
-  auto const now = owner.clock_.now();
+  auto const now = owner.clock_driver_.exact_now();
   if(now != instant)
   {
     instant        = now;
@@ -643,7 +645,7 @@ auto machine::run_state::idle_jump(slice_request const& request) -> std::optiona
   {
     return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
   }
-  auto const now = owner.clock_.now();
+  auto const now = owner.clock_driver_.exact_now();
   auto target = add_sat(now, left(request.max_instructions, icount{executed.value + jumped.value}));
   if(next)
   {
@@ -685,7 +687,7 @@ void machine::run_state::step_off_until(slice_request const& request)
   auto list = exit_list(request);
   list.erase(std::ranges::find(list, *request.until));
   set_exits(std::move(list));
-  deadline = std::min(deadline, add_sat(owner.clock_.now(), 1));
+  deadline = std::min(deadline, add_sat(owner.clock_driver_.exact_now(), 1));
 }
 
 auto machine::run_state::bound_reached(slice_request const& request) -> std::optional<slice_end>
@@ -707,7 +709,7 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
   {
     return slice_end{make_stop(stop_reason::budget, {}, std::nullopt)};
   }
-  if(request.until_time and owner.clock_.time() >= *request.until_time)
+  if(request.until_time and owner.clock_driver_.exact_time() >= *request.until_time)
   {
     return slice_end{make_stop(stop_reason::time, {}, std::nullopt)};
   }
@@ -900,9 +902,9 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       step_off_until(request);
     }
-    auto const started = owner.clock_.now();
+    auto const started = owner.clock_driver_.exact_now();
     auto const err     = engine_run();
-    auto const ran     = owner.clock_.now().value - started.value;
+    auto const ran     = owner.clock_driver_.exact_now().value - started.value;
     if(coverage_on)
     {
       auto const pc = arch->pc();

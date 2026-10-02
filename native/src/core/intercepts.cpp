@@ -214,7 +214,7 @@ void machine::run_state::on_return_block(address addr)
         .occurrence   = entry.calls,
         .args         = std::move(frame.args),
         .value        = arch->call_result(call),
-        .instructions = icount{owner.clock_.now().value - frame.entered.value},
+        .instructions = icount{owner.clock_driver_.exact_now().value - frame.entered.value},
     };
     ++entry.calls;
     handler_scope const scope{in_handler};
@@ -256,7 +256,7 @@ void machine::run_state::on_code_site(
             .args    = frame.args
                      | std::views::transform(&arch::call_arg::bits)
                      | std::ranges::to<std::vector>(),
-            .entered = run.owner.clock_.now(),
+            .entered = run.owner.clock_driver_.exact_now(),
         });
         run.refresh_return_watch();
         continue;

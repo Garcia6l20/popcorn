@@ -3,6 +3,7 @@
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -44,6 +45,12 @@ struct clock_state
   std::vector<std::string> domain_names;
   /** @brief Clock domain frequencies in Hz, 0 while unset, same indices as domain_names. */
   std::vector<std::uint64_t> domain_hz;
+  /** @brief Instruction count clock::now() holds at after clock_driver::retract, 0 when nothing
+   * is held: cleared once execution passes both held values. */
+  icount held{};
+  /** @brief Virtual time clock::time() holds at after clock_driver::retract, 0 when nothing is
+   * held. */
+  vtime held_time{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(clock_state const&, clock_state const&) -> bool = default;
@@ -83,10 +90,15 @@ public:
    *        the engine leaves before its end, for any reason, an intercept that returns or stops,
    *        a code hook stop, an exception or a fault, counts its full length: deterministic, not
    *        exact. Instructions single-stepped for exact_instructions count one by one.
+   *
+   * The one exception is a block cut right after an access that made an interrupt deliverable:
+   * the run loop takes back the instructions it did not run, see clock_driver::retract. now()
+   * never goes back for that: it holds at the largest value it reached until execution passes
+   * it, so a model never reads a count below one it already read.
    */
   [[nodiscard]] auto now() const noexcept -> icount
   {
-    return state_.now;
+    return std::max(state_.now, state_.held);
   }
 
   /** @brief Core clock frequency in Hz. */
@@ -117,10 +129,7 @@ public:
    */
   [[nodiscard]] auto time() const -> vtime
   {
-    return vtime{
-        state_.epoch_time.ps
-        + vtime_from_instructions(state_.now.value - state_.epoch_icount.value, instruction_hz())
-              .ps};
+    return std::max(time_at(now()), state_.held_time);
   }
 
   /**
@@ -199,6 +208,22 @@ private:
 
   void start_epoch();
 
+  [[nodiscard]] auto time_at(icount count) const -> vtime
+  {
+    return vtime{
+        state_.epoch_time.ps
+        + vtime_from_instructions(count.value - state_.epoch_icount.value, instruction_hz()).ps};
+  }
+
+  void release_passed_hold()
+  {
+    if(state_.now >= state_.held and time_at(state_.now) >= state_.held_time)
+    {
+      state_.held      = {};
+      state_.held_time = {};
+    }
+  }
+
   clock_state                    state_;
   std::function<void()>          on_epoch_;
   std::function<std::uint64_t()> charged_ahead_;
@@ -223,18 +248,62 @@ public:
    *        block, not once per slice, so now() is exact to the block for models and rate changes.
    * @param executed Instructions in the block, as the block hook counts them.
    */
-  void advance(icount executed) noexcept
+  void advance(icount executed)
   {
     clock_.state_.now.value += executed.value;
+    if(clock_.state_.held.value != 0) [[unlikely]]
+    {
+      clock_.release_passed_hold();
+    }
+  }
+
+  /**
+   * @brief Takes back instructions advance() charged for a block the engine left early, never
+   *        past the start of the current epoch. clock::now() and clock::time() keep returning
+   *        the values they reached before until execution passes them: models never read time
+   *        going back. The held values are part of clock_state, so a snapshot keeps them.
+   *
+   * While held, the two can disagree: a rate change inside the hold starts its epoch at the
+   * exact count, so time() stays held at the old rate's value while now() is held at the old
+   * count, and time() later resumes from the new epoch. A time-keyed event already overdue at
+   * scheduling, and an event a model schedules at now(), key to the held now(): they fire once
+   * execution reaches it, not at the exact count.
+   * @param unrun Instructions charged but not run.
+   */
+  void retract(icount unrun)
+  {
+    clock_.state_.held      = clock_.now();
+    clock_.state_.held_time = clock_.time();
+    auto& now               = clock_.state_.now.value;
+    now -= std::min(unrun.value, now - clock_.state_.epoch_icount.value);
+  }
+
+  /**
+   * @brief Instructions executed since reset, exact after a retract(), where clock::now() holds
+   *        at the value it reached. Budgets and deadlines count with it.
+   */
+  [[nodiscard]] auto exact_now() const noexcept -> icount
+  {
+    return clock_.state_.now;
+  }
+
+  /** @brief Virtual time of exact_now(), where clock::time() holds after a retract(). */
+  [[nodiscard]] auto exact_time() const -> vtime
+  {
+    return clock_.time_at(clock_.state_.now);
   }
 
   /**
    * @brief Moves time to a deadline while the core idles, as a tickless WFI does.
    * @param deadline Instruction count to move to, not before now.
    */
-  void jump_to(icount deadline) noexcept pre(deadline.value >= clock_.state_.now.value)
+  void jump_to(icount deadline) pre(deadline.value >= clock_.state_.now.value)
   {
     clock_.state_.now = deadline;
+    if(clock_.state_.held.value != 0)
+    {
+      clock_.release_passed_hold();
+    }
   }
 
   /** @brief Copy of the clock state, for a snapshot. */

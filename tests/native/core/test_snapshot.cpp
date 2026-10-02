@@ -124,7 +124,8 @@ TEST_CASE("a saved form with a future format is a config_error")
   CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::config_error);
 }
 
-TEST_CASE("the format 2 form encode_snapshot(filled()) wrote at 55a536c reads back as format 3")
+TEST_CASE(
+    "the format 2 form encode_snapshot(filled()) wrote at 55a536c reads back as the current format")
 {
   char const* const path = std::getenv("POPCORN_SNAPSHOT_V2");
   REQUIRE(path != nullptr);
@@ -141,6 +142,24 @@ TEST_CASE("the format 2 form encode_snapshot(filled()) wrote at 55a536c reads ba
     CHECK(pending.due_ps == 0);
   }
   CHECK(back == data);
+}
+
+TEST_CASE("a format 3 snapshot reads back as the current format, its clock holding nothing")
+{
+  auto data   = filled();
+  data.format = 3;
+  auto back   = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.format == core::snapshot_format_version);
+  CHECK(back.clock.held == popcorn::icount{0});
+  CHECK(back.clock.held_time == popcorn::vtime{0});
+}
+
+TEST_CASE("the clock hold survives the saved form")
+{
+  auto data            = filled();
+  data.clock.held      = popcorn::icount{170};
+  data.clock.held_time = popcorn::vtime{17'500'000};
+  CHECK(core::decode_snapshot(core::encode_snapshot(data)) == data);
 }
 
 TEST_CASE("time-keyed events survive the saved form")

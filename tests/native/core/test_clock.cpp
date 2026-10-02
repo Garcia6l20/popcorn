@@ -116,3 +116,144 @@ TEST_CASE("time since power-on adds the time run before resets to the current ti
   CHECK(clock.time() == popcorn::vtime{1'000'000});
   CHECK(clock.since_power_on() == popcorn::vtime{4'000'000});
 }
+
+TEST_CASE("a retract takes back unrun instructions and holds now and time until passed")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({30});
+  CHECK(driver.exact_now().value == 70);
+  CHECK(driver.exact_time() == popcorn::vtime{70'000'000});
+  CHECK(clock.now().value == 100);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  driver.advance({10});
+  CHECK(driver.exact_now().value == 80);
+  CHECK(clock.now().value == 100);
+  driver.advance({25});
+  CHECK(driver.exact_now().value == 105);
+  CHECK(clock.now().value == 105);
+  CHECK(clock.time() == popcorn::vtime{105'000'000});
+}
+
+TEST_CASE("a second retract inside the hold keeps the larger held value")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({30});
+  driver.advance({20});
+  driver.retract({15});
+  CHECK(driver.exact_now().value == 75);
+  CHECK(clock.now().value == 100);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+}
+
+TEST_CASE("a retract never goes back past the start of the epoch")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  clock.set_core_hz(2'000'000);
+  driver.advance({5});
+  driver.retract({30});
+  CHECK(driver.exact_now().value == 100);
+  CHECK(driver.exact_time() == popcorn::vtime{100'000'000});
+}
+
+TEST_CASE("time holds through a rate change made inside the hold")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  clock.set_core_hz(4'000'000);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  CHECK(driver.exact_time() == popcorn::vtime{50'000'000});
+  driver.advance({200});
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+  driver.advance({4});
+  CHECK(clock.time() == popcorn::vtime{101'000'000});
+}
+
+TEST_CASE("a restore drops the held values")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  auto const                  saved = driver.state();
+  driver.advance({100});
+  driver.retract({30});
+  driver.restore(saved);
+  CHECK(clock.now().value == 0);
+  CHECK(clock.time() == popcorn::vtime{0});
+}
+
+TEST_CASE("the clock state carries the hold, and a restore reinstates it")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({30});
+  auto const saved = driver.state();
+  CHECK(saved.held == popcorn::icount{100});
+  CHECK(saved.held_time == popcorn::vtime{100'000'000});
+  driver.advance({50});
+  driver.restore(saved);
+  CHECK(driver.exact_now().value == 70);
+  CHECK(clock.now().value == 100);
+  CHECK(clock.time() == popcorn::vtime{100'000'000});
+}
+
+TEST_CASE("the hold clears once execution passes it, by advance or jump")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  auto const unheld = [&] {
+    auto state      = driver.state();
+    state.held      = {};
+    state.held_time = {};
+    return state;
+  };
+  driver.retract({30});
+  driver.advance({29});
+  CHECK(driver.state().held == popcorn::icount{100});
+  driver.advance({1});
+  CHECK(driver.state() == unheld());
+  CHECK(driver.state().held == popcorn::icount{0});
+
+  driver.retract({10});
+  driver.jump_to({95});
+  CHECK(driver.state().held == popcorn::icount{100});
+  driver.jump_to({100});
+  CHECK(driver.state().held == popcorn::icount{0});
+  CHECK(driver.state().held_time == popcorn::vtime{0});
+}
+
+TEST_CASE("the hold stays while time is still held after a rate change")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  clock.set_core_hz(4'000'000);
+  driver.advance({50});
+  CHECK(driver.state().held_time == popcorn::vtime{100'000'000});
+  driver.advance({150});
+  CHECK(driver.state().held == popcorn::icount{0});
+  CHECK(driver.state().held_time == popcorn::vtime{0});
+}
+
+TEST_CASE("the hold stays while the count is still held after a slower rate")
+{
+  popcorn::core::clock        clock{1'000'000};
+  popcorn::core::clock_driver driver{clock};
+  driver.advance({100});
+  driver.retract({50});
+  clock.set_core_hz(500'000);
+  driver.advance({25});
+  CHECK(driver.state().held == popcorn::icount{100});
+  CHECK(clock.now().value == 100);
+  driver.advance({25});
+  CHECK(driver.state().held == popcorn::icount{0});
+}
