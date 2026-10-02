@@ -1,7 +1,7 @@
 """Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
-IP renames, IRQ add/drop, core overrides, added registers, added memory regions, region
-controllers, the device signature. popcorn's own TOML format, so these dataclasses are the format
-definition, not a mirror of any C++ or schema type."""
+IP renames, IRQ add/drop, core overrides, peripheral sizes, added registers, added memory regions,
+region controllers, the device signature. popcorn's own TOML format, so these dataclasses are the
+format definition, not a mirror of any C++ or schema type."""
 
 import copy
 import fnmatch
@@ -149,6 +149,13 @@ class RegisterAdd:
 
 
 @dataclass(slots=True, kw_only=True)
+class PeripheralSizeSet:
+    peripheral: str
+    size: int = field(metadata={"minimum": 1, "maximum": 4294967295})
+    source: str
+
+
+@dataclass(slots=True, kw_only=True)
 class Patch:
     format: int = field(default=1, metadata={"const": 1})
     match: PatchMatch
@@ -161,6 +168,7 @@ class Patch:
     svd: PatchSvd | None = None
     fields: list[FieldsRule] | None = None
     cross: list[CrossRuleSpec] | None = None
+    peripheral_sizes: list[PeripheralSizeSet] | None = None
     registers: list[RegisterAdd] | None = None
     memory: PatchMemory | None = None
     signature: PatchSignature | None = None
@@ -185,6 +193,7 @@ class PatchReport:
     cross_rules_added: int = 0
     irqs_dropped: int = 0
     irqs_added: int = 0
+    sizes_set: int = 0
     registers_added: int = 0
     core_fields_set: int = 0
     regions_added: int = 0
@@ -325,6 +334,27 @@ def _apply_aliases(
         peripheral.ip = base_peripheral.ip
         peripheral.ip_version = base_peripheral.ip_version
         report.aliased += 1
+
+
+def _apply_peripheral_size(
+    rule: PeripheralSizeSet,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    peripheral = peripherals.get(rule.peripheral)
+    if peripheral is None or peripheral.alias_of is not None:
+        raise DescriptionError(
+            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
+        )
+    if rule.size < peripheral.size:
+        raise DescriptionError(file, 0, f"{key}.size", f"a size of at least {peripheral.size:#x}")
+    for target in peripherals.values():
+        if target is peripheral or target.alias_of == peripheral.name:
+            target.size = rule.size
+    report.sizes_set += 1
 
 
 def _apply_register_add(
@@ -663,10 +693,11 @@ def _apply_signature(
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
     """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
-    added registers, fields, cross rules, IRQ drops and adds, core, memory regions and their
-    controllers, the device signature. Drops come first, so a later rule naming a dropped
-    peripheral fails as naming an unknown one. An added register lands in the named peripheral
-    and in each of its aliases, so fields and cross rules may name it.
+    peripheral sizes, added registers, fields, cross rules, IRQ drops and adds, core, memory
+    regions and their controllers, the device signature. Drops come first, so a later rule naming
+    a dropped peripheral fails as naming an unknown one. A peripheral size and an added register
+    land in the named peripheral and in each of its aliases, so fields and cross rules may name
+    the register.
     Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
@@ -695,6 +726,12 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     for loaded in patches:
         if loaded.patch.aliases is not None:
             _apply_aliases(loaded.patch.aliases, by_name, report, file=str(loaded.path))
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.peripheral_sizes or []):
+            _apply_peripheral_size(
+                rule, by_name, report, file=str(loaded.path), key=f"peripheral_sizes[{j}]"
+            )
 
     for loaded in patches:
         for j, rule in enumerate(loaded.patch.registers or []):

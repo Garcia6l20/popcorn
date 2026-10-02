@@ -215,7 +215,8 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
     assert report.core_fields_set == 1
-    assert report.registers_added == 5
+    assert report.sizes_set == 1
+    assert report.registers_added == 13
     assert report.regions_added == 4
     assert report.controllers_set == 2
     assert report.signature_words == 6
@@ -299,15 +300,58 @@ def test_otg_fs_has_the_core_id_and_hardware_configuration_words(
     target, _ = u575_target_and_report
     for name in ("OTG_FS", "SEC_OTG_FS"):
         registers = {r.name: r for r in target_peripheral(target, name).registers}
-        added = [registers[n] for n in ("GSNPSID", "GHWCFG1", "GHWCFG2", "GHWCFG3")]
+        added = [registers[n] for n in ("GSNPSID", "GHWCFG1", "GHWCFG2", "GHWCFG3", "GHWCFG4")]
         assert [(r.offset, r.width, r.reset, r.acc, r.fields) for r in added] == [
             (0x40, 32, 0x4F54_310A, Access.READ_ONLY, []),
             (0x44, 32, 0, Access.READ_ONLY, []),
-            (0x48, 32, 0, Access.READ_ONLY, []),
-            (0x4C, 32, 0, Access.READ_ONLY, []),
+            (0x48, 32, 0x229E_D520, Access.READ_ONLY, []),
+            (0x4C, 32, 0x0200_D1E8, Access.READ_ONLY, []),
+            (0x50, 32, 0x17F0_8030, Access.READ_ONLY, []),
         ]
         assert registers["CID"].offset == 0x3C
         assert registers["GLPMCFG"].offset == 0x54
+
+
+def test_otg_fs_ghwcfg2_describes_six_slave_mode_full_speed_device_endpoints(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, _ = u575_target_and_report
+    ghwcfg2 = next(r for r in target_peripheral(target, "OTG_FS").registers if r.name == "GHWCFG2")
+    assert (ghwcfg2.reset >> 10) & 0xF == 5
+    assert (ghwcfg2.reset >> 3) & 0x3 == 0
+    assert (ghwcfg2.reset >> 8) & 0x3 == 1
+    assert (ghwcfg2.reset >> 6) & 0x3 == 0
+
+
+def test_otg_fs_has_the_fifo_windows_and_gdfifocfg(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, _ = u575_target_and_report
+    otg = target_peripheral(target, "OTG_FS")
+    sec = target_peripheral(target, "SEC_OTG_FS")
+    assert otg.size == 0x20000
+    assert sec.size == 0x20000
+    assert sec.base == otg.base + 0x1000_0000
+    for peripheral in (otg, sec):
+        registers = {r.name: r for r in peripheral.registers}
+        for n in range(6):
+            fifo = registers[f"DFIFO{n}"]
+            assert (fifo.offset, fifo.width, fifo.reset, fifo.acc, fifo.fields) == (
+                0x1000 * (n + 1),
+                32,
+                0,
+                Access.READ_WRITE,
+                [],
+            )
+            assert fifo.offset + 4 <= peripheral.size
+        assert registers["DFIFO3"].offset == 0x4000
+        gdfifocfg = registers["GDFIFOCFG"]
+        assert (gdfifocfg.offset, gdfifocfg.width, gdfifocfg.reset, gdfifocfg.acc) == (
+            0x5C,
+            32,
+            0,
+            Access.READ_WRITE,
+        )
 
 
 def test_the_device_signature_page_holds_package_uid_and_flash_size(

@@ -224,6 +224,11 @@ acc = "read_only"
 fields = []
 source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GSNPSID at 0x040 and GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, and HAL stm32u5xx_ll_usb.h:341-342 defines USB_OTG_CORE_ID_310A 0x4F54310A, the core ID the U5 HAL compares GSNPSID with. RM0456 rev 6 72.15 leaves 0x040 to 0x050 undocumented and ST's STM32U575 SVD omits them. Drivers read GSNPSID to pick the core revision, tinyusb's dwc2 refuses a core whose ID is not 0x4F54xxxx"
 
+[[peripheral_sizes]]
+peripheral = "OTG_FS"
+size = 0x20000
+source = "RM0456 rev 6 72.15 table 783: the six FIFO push/pop windows sit at 0x1000 * (n + 1) from the OTG_FS base. ST's STM32U575 SVD sizes the peripheral 0xe04. The 0x20000 direct FIFO access window is left out"
+
 [[registers]]
 peripheral = "OTG_FS"
 name = "GHWCFG1"
@@ -232,27 +237,107 @@ width = 32
 reset = 0x00000000
 acc = "read_only"
 fields = []
-source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, RM0456 rev 6 72.15 leaves them undocumented and ST's STM32U575 SVD omits them. Read as 0, no U575 reference value: on STM32, tinyusb takes the FIFO size and endpoint count from its static dwc2_stm32.h table and reads GHWCFG2 only on USB traffic"
+source = "TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS, which has the same core ID 0x4F54310A, since ST documents no value for the STM32U575 and RM0456 rev 6 72.15 leaves 0x040 to 0x050 undocumented. GHWCFG1 is 0 there (no endpoint direction configuration), TinyUSB does not read it. CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C"
 
 [[registers]]
 peripheral = "OTG_FS"
 name = "GHWCFG2"
 offset = 0x48
 width = 32
-reset = 0x00000000
+reset = 0x229ED520
 acc = "read_only"
 fields = []
-source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, RM0456 rev 6 72.15 leaves them undocumented and ST's STM32U575 SVD omits them. Read as 0, no U575 reference value: on STM32, tinyusb takes the FIFO size and endpoint count from its static dwc2_stm32.h table and reads GHWCFG2 only on USB traffic"
+source = "TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS, which has the same core ID 0x4F54310A, since ST documents no value for the STM32U575 and RM0456 rev 6 72.15 leaves 0x040 to 0x050 undocumented. TinyUSB 0.21 dwc2_ep_count() is GHWCFG2.num_dev_ep + 1 and bounds its endpoint interrupt loop in dcd_dwc2.c. Decoded with the dwc2_ghwcfg2_t layout: op_mode 0, arch 0 (slave), single_point 1, hs_phy_type 0 (not supported), fs_phy_type 1 (dedicated), num_dev_ep 5 (six endpoints with EP0), num_host_ch 11, enable_dynamic_fifo 1. CMSIS stm32u575xx.h places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C"
 
 [[registers]]
 peripheral = "OTG_FS"
 name = "GHWCFG3"
 offset = 0x4C
 width = 32
-reset = 0x00000000
+reset = 0x0200D1E8
 acc = "read_only"
 fields = []
-source = "CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C, RM0456 rev 6 72.15 leaves them undocumented and ST's STM32U575 SVD omits them. Read as 0, no U575 reference value: on STM32, tinyusb takes the FIFO size and endpoint count from its static dwc2_stm32.h table and reads GHWCFG2 only on USB traffic"
+source = "TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS, which has the same core ID 0x4F54310A, since ST documents no value for the STM32U575 and RM0456 rev 6 72.15 leaves 0x040 to 0x050 undocumented. CMSIS stm32u575xx.h places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG4"
+offset = 0x50
+width = 32
+reset = 0x17F08030
+acc = "read_only"
+fields = []
+source = "TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS, which has the same core ID 0x4F54310A, since ST documents no value for the STM32U575 and RM0456 rev 6 72.15 leaves 0x040 to 0x050 undocumented. CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef leaves 0x050 reserved, TinyUSB dwc2_type.h places ghwcfg4 there"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GDFIFOCFG"
+offset = 0x5C
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "TinyUSB dfifo_device_init in dcd_dwc2.c writes GDFIFOCFG on every bus reset. The 3.10a core has no such register function, so it is plain storage. ST's STM32U575 SVD omits it and CMSIS stm32u575xx.h USB_OTG_GlobalTypeDef places GDFIFOCFG at 0x05C"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO0"
+offset = 0x1000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO1"
+offset = 0x2000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO2"
+offset = 0x3000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO3"
+offset = 0x4000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO4"
+offset = 0x5000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO5"
+offset = 0x6000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0456 rev 6 72.15 table 783, the FIFO access windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB push/pop window per endpoint or channel. Only word 0 of each window is described, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
 
 
 [memory]

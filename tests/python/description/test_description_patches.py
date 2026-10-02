@@ -931,6 +931,53 @@ def test_registers_add_refuses_a_bad_register(
     assert target == before
 
 
+def _size_patch(tmp_path: Path, size: str, peripheral: str = '"D"') -> Path:
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+
+[[peripheral_sizes]]
+peripheral = {peripheral}
+size = {size}
+source = "probe"
+"""
+    return _write_patch(tmp_path, text)
+
+
+def test_peripheral_sizes_grow_the_peripheral_and_its_aliases(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    path = _size_patch(tmp_path, "0x2000")
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.sizes_set == 1
+    assert [target_peripheral(target, n).size for n in ("D", "SEC_D")] == [0x2000, 0x2000]
+
+
+@pytest.mark.parametrize(
+    ("size", "peripheral", "reason"),
+    [
+        ("0x2000", '"Z"', "a peripheral of the description that is not an alias"),
+        ("0x2000", '"SEC_D"', "a peripheral of the description that is not an alias"),
+        ("0x100", '"D"', "a size of at least 0x400"),
+    ],
+)
+def test_peripheral_sizes_refuse_a_bad_rule(
+    tmp_path: Path, size: str, peripheral: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    path = _size_patch(tmp_path, size, peripheral)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
 def test_registers_add_refuses_two_adds_at_one_offset(tmp_path: Path) -> None:
     target = _synthetic_target()
     second = f"""
