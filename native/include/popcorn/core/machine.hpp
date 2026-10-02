@@ -546,6 +546,7 @@ private:
   void do_request_stop(stop_reason reason, std::string detail) override;
   void do_request_reset(reset_kind kind) override;
   void do_end_slice() override;
+  void do_end_after_instruction() override;
   auto do_read(address addr, std::uint8_t size, initiator by)
       -> std::expected<std::uint32_t, bus_error> override;
   auto do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)

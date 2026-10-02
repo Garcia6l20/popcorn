@@ -31,6 +31,8 @@ public:
   std::optional<reset_kind> reset;
   /** @brief Number of end_slice() calls. */
   std::uint32_t slice_ends{};
+  /** @brief Number of end_after_instruction() calls. */
+  std::uint32_t instruction_ends{};
   /** @brief Bus master of the last access. */
   std::optional<initiator> last_by;
   /** @brief Records passed to log(), in order. */
@@ -63,6 +65,11 @@ private:
   void do_end_slice() override
   {
     ++slice_ends;
+  }
+
+  void do_end_after_instruction() override
+  {
+    ++instruction_ends;
   }
 
   auto do_read(address addr, std::uint8_t size, initiator by)

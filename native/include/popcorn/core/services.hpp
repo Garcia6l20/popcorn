@@ -127,6 +127,20 @@ public:
   }
 
   /**
+   * @brief From a memory access callback during a run: ends the engine run right after the
+   *        instruction being executed, so the interrupt an access of that instruction made
+   *        deliverable is taken before the next one, as the hardware does. For the arch's own
+   *        memory windows, such as the Arm SCS, after a store that pends or unmasks an
+   *        exception. Inside a Thumb IT block the run ends after the block. Peripheral model
+   *        accesses need not call it: the machine checks them itself. No effect anywhere else,
+   *        such as a debugger access between slices.
+   */
+  void end_after_instruction()
+  {
+    do_end_after_instruction();
+  }
+
+  /**
    * @brief Reads guest memory or a peripheral register as a bus master. Memory, MMIO dispatch
    *        and watches see the access as made by @p by, exactly as a guest access.
    * @param addr Guest address, aligned to @p size.
@@ -217,6 +231,7 @@ private:
   virtual void do_request_stop(stop_reason reason, std::string detail) = 0;
   virtual void do_request_reset(reset_kind kind)                       = 0;
   virtual void do_end_slice()                                          = 0;
+  virtual void do_end_after_instruction()                              = 0;
   virtual auto do_read(address addr, std::uint8_t size, initiator by)
       -> std::expected<std::uint32_t, bus_error> = 0;
   virtual auto do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)

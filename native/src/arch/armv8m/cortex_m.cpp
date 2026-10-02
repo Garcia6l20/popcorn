@@ -114,8 +114,14 @@ void cortex_m::mmio_write(
   auto const& access = *static_cast<window_user const*>(user);
   try
   {
-    access.self->space_.write(
+    auto&      self = *access.self;
+    auto const was  = self.pending() and self.deliverable_now();
+    self.space_.write(
         access.which, static_cast<std::uint32_t>(offset), size, static_cast<std::uint32_t>(value));
+    if(not was and self.pending() and self.deliverable_now())
+    {
+      self.context_->services.end_after_instruction();
+    }
   }
   catch(...)
   {

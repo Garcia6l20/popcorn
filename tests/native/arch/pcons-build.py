@@ -21,6 +21,7 @@ arch_firmware = {
 }
 arch_firmware["abi"] = firmware("abi", "abi")
 arch_firmware["rom_store"] = firmware("core", "rom_store")
+arch_firmware["irq"] = firmware("core", "irq")
 for variant in (
     "exceptions_m4",
     "exceptions_m7",
@@ -50,6 +51,7 @@ arch_tests = [
         ("arch-variants", "test_variants.cpp"),
         ("arch-rtos", "test_rtos.cpp"),
         ("arch-store-controller", "test_store_controller.cpp"),
+        ("arch-scs-exit", "test_scs_exit.cpp"),
     )
 ]
 for test in arch_tests:

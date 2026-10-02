@@ -228,6 +228,14 @@ auto machine::trace() noexcept -> trace_ring&
   return trace_;
 }
 
+void machine::do_end_after_instruction()
+{
+  if(run_->in_engine)
+  {
+    run_->request_precise_exit();
+  }
+}
+
 void machine::do_trace(trace_record const& record)
 {
   run_->emit(record, arch_->pc(), true);
