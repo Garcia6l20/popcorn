@@ -420,7 +420,7 @@ TEST_CASE("JADSTART logs one warning and clears, continuous mode logs none")
   CHECK(logged[0].message.contains("JADSTART"));
 }
 
-TEST_CASE("CONT, DISCEN and SQR1.L log nothing, EXTEN logs one warning, SQ1 converts first")
+TEST_CASE("CONT, DISCEN and SQR1.L log nothing, SQ1 converts first")
 {
   struct setting
   {
@@ -430,7 +430,6 @@ TEST_CASE("CONT, DISCEN and SQR1.L log nothing, EXTEN logs one warning, SQ1 conv
   for(auto const [reg, value] : {
           setting{"ADC_CFGR1", cont    },
           setting{"ADC_CFGR1", 1u << 16},
-          setting{"ADC_CFGR1", 1u << 10},
           setting{"ADC_SQR1",  1u      },
   })
   {
@@ -444,7 +443,7 @@ TEST_CASE("CONT, DISCEN and SQR1.L log nothing, EXTEN logs one warning, SQ1 conv
     f.write("ADC1", "ADC_CR", advregen | adstart);
     f.settle();
     CHECK(f.read("ADC_DR") == vrefint_cal);
-    CHECK(logged.size() == (value == 1u << 10 ? 1u : 0u));
+    CHECK(logged.empty());
   }
 }
 
@@ -1476,4 +1475,320 @@ TEST_CASE("DISCEN with CONT converts as DISCEN alone and logs once, a model_erro
           f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
       popcorn::model_error);
   CHECK(f.cr("ADSTART") == 0);
+}
+
+namespace
+{
+constexpr std::uint64_t ms            = 1'000'000'000;
+constexpr std::uint32_t exten_rising  = 1u << 10;
+constexpr std::uint32_t exten_falling = 2u << 10;
+constexpr std::uint32_t exten_both    = 3u << 10;
+constexpr std::uint64_t tim15_period  = 500 * ms;
+constexpr std::uint64_t tim15_clock   = 250'000;
+constexpr std::uint64_t latency       = 3 * adc_cycle_ps;
+
+[[nodiscard]] constexpr auto extsel(std::uint32_t selection) -> std::uint32_t
+{
+  return selection << 5;
+}
+
+auto tim15_trgo(
+    adc_fixture const& f,
+    std::uint32_t      prescaler = 124,
+    std::uint32_t      reload    = 15'999,
+    std::uint32_t      mode      = 2,
+    bool               one_pulse = false) -> std::uint64_t
+{
+  f.put("RCC", "RCC_APB2ENR", "TIM15EN", 1);
+  f.write("TIM15", "PSC", prescaler);
+  f.write("TIM15", "ARR", reload);
+  f.write("TIM15", "EGR", 1);
+  f.write("TIM15", "SR", 0);
+  f.put("TIM15", "CR2", "MMS", mode);
+  f.put("TIM15", "CR1", "OPM", one_pulse ? 1u : 0u);
+  auto const start = f.now();
+  f.put("TIM15", "CR1", "CEN", 1);
+  return start;
+}
+
+void read_scan(adc_fixture const& f, std::uint64_t edge)
+{
+  auto const update = edge + latency;
+  f.run_until(update + scan_eoc(0) - us);
+  CHECK(f.isr("EOC") == 0);
+  for(std::size_t rank = 0; rank < scan_channels.size(); ++rank)
+  {
+    CAPTURE(rank);
+    f.run_until(update + scan_eoc(rank));
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("EOS") == (rank == 9 ? 1u : 0u));
+    CHECK(f.cpu_read("ADC_DR") == scan_code(rank));
+  }
+  CHECK(f.cr("ADSTART") == 1);
+  f.write("ADC1", "ADC_ISR", (1u << 3) | eosmp);
+}
+}
+
+TEST_CASE("EXTSEL 14 starts the scan at each TIM15 update, ADSTART stays set")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  auto const start = tim15_trgo(f);
+  static_cast<void>(start_scan(f));
+  f.run_until(start + 10 * us);
+  CHECK(f.cr("ADSTART") == 1);
+  CHECK(f.isr("EOSMP") == 0);
+  f.run_until(start + tim15_period - us);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.isr("EOSMP") == 0);
+  for(std::uint64_t round = 1; round <= 5; ++round)
+  {
+    CAPTURE(round);
+    read_scan(f, start + round * tim15_period);
+  }
+  f.run_until(start + 2'600 * ms);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.isr("EOS") == 0);
+  CHECK(f.cr("ADSTART") == 1);
+}
+
+TEST_CASE("a TIM15 update during a scan is ignored, the next one after it starts a scan")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  auto const start = tim15_trgo(f, 0, 399);
+  static_cast<void>(start_scan(f));
+  auto const first = start + 100 * us + latency;
+  f.run_until(first + scan_ps);
+  CHECK(f.isr("EOS") == 1);
+  f.write("ADC1", "ADC_ISR", (1u << 3) | (1u << 2) | ovr);
+  CHECK(f.cpu_read("ADC_DR") == scan_code(9));
+  auto const second = start + 1'200 * us + latency;
+  f.run_until(second + scan_eoc(0) - us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(second + scan_eoc(0));
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.cpu_read("ADC_DR") == scan_code(0));
+  f.run_until(second + scan_ps - us);
+  CHECK(f.isr("EOS") == 0);
+  f.run_until(second + scan_ps);
+  CHECK(f.isr("EOS") == 1);
+}
+
+TEST_CASE("ADSTP stops the triggers: TIM15 schedules nothing at its next update")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  auto const idle  = f.target->pending_events();
+  auto const start = tim15_trgo(f);
+  static_cast<void>(start_scan(f));
+  read_scan(f, start + tim15_period);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  CHECK(f.cr("ADSTART") == 0);
+  f.run_until(start + 2 * tim15_period + scan_ps);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.isr("EOSMP") == 0);
+  CHECK(f.field("TIM15", "SR", "UIF") == 1);
+  CHECK(f.target->pending_events() == idle);
+}
+
+TEST_CASE(
+    "EXTSEL selecting a signal no model produces logs once per selection and converts nothing")
+{
+  struct selection
+  {
+    std::uint32_t    value;
+    std::string_view signal;
+  };
+  for(auto const [value, signal] : {
+          selection{6,  "trigger exti11"    },
+          selection{0,  "trigger tim1_oc1"  },
+          selection{10, "trigger tim1_trgo2"},
+          selection{17, "reserved"          },
+          selection{31, "reserved"          },
+  })
+  {
+    CAPTURE(value);
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    REQUIRE(f.target->model("TIM1") != nullptr);
+    downstream_scan(f, ovrmod | exten_rising | extsel(value));
+    static_cast<void>(start_scan(f));
+    f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+    static_cast<void>(start_scan(f));
+    f.run_until(f.now() + 2 * scan_ps);
+    CHECK(f.isr("EOC") == 0);
+    CHECK(f.cr("ADSTART") == 1);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].peripheral == "ADC1");
+    CHECK(logged[0].reg == "ADC_CFGR1");
+    CHECK(logged[0].message.contains(signal));
+  }
+  adc_fixture const f{u575(), {}, true, true};
+  downstream_scan(f, ovrmod | exten_rising | extsel(6));
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
+      popcorn::model_error);
+}
+
+TEST_CASE("after a DMNGT 01 end, a TIM15 trigger starts a sequence but issues no request")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_oneshot | exten_rising | extsel(14));
+  single_dma(f, 20);
+  auto const start = tim15_trgo(f);
+  static_cast<void>(start_scan(f));
+  auto const update = start + tim15_period;
+  f.run_until(update + scan_eoc(4) + 2 * us);
+  CHECK(dma_flag(f, "TCF") == 1);
+  CHECK(f.field("GPDMA1", "GPDMA_C1CR", "EN") == 0);
+  CHECK(f.cr("ADSTART") == 1);
+  clear_dma_flags(f);
+  f.write("GPDMA1", "GPDMA_C1BR1", 20);
+  f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+  f.run_until(update + tim15_period + latency + scan_ps);
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.read("ADC_DR") == scan_code(9));
+  CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 20);
+  CHECK(
+      buffer_words(f, 6)
+      == std::vector<std::uint32_t>{
+          scan_code(0), scan_code(1), scan_code(2), scan_code(3), scan_code(4), 0});
+}
+
+TEST_CASE("a snapshot between two triggered scans resumes with the same scan in a fresh machine")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  auto const start = tim15_trgo(f);
+  static_cast<void>(start_scan(f));
+  read_scan(f, start + tim15_period);
+  f.run_until(start + 750 * ms);
+  auto const saved = f.target->snapshot();
+  read_scan(f, start + 2 * tim15_period);
+
+  adc_fixture const other;
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  read_scan(other, start + 2 * tim15_period);
+  other.run_until(start + 2 * tim15_period + 2 * scan_ps);
+  CHECK(other.isr("EOC") == 0);
+}
+
+TEST_CASE(
+    "EXTEN picks the TRGO edges: a pulse falls one timer clock after it rises, MMS 001 is CEN")
+{
+  struct setting
+  {
+    std::uint32_t exten;
+    std::uint32_t mode;
+  };
+  for(auto const [exten, mode] : {
+          setting{exten_rising,  2},
+          setting{exten_falling, 2},
+          setting{exten_both,    2},
+          setting{exten_rising,  1},
+          setting{exten_falling, 1},
+          setting{exten_both,    1},
+  })
+  {
+    CAPTURE(exten);
+    CAPTURE(mode);
+    adc_fixture const f;
+    downstream_scan(f, ovrmod | exten | extsel(14));
+    f.put("RCC", "RCC_APB2ENR", "TIM15EN", 1);
+    f.put("TIM15", "CR2", "MMS", mode);
+    f.write("TIM15", "PSC", 124);
+    f.write("TIM15", "ARR", 15'999);
+    f.write("TIM15", "EGR", 1);
+    f.write("TIM15", "SR", 0);
+    static_cast<void>(start_scan(f));
+    auto const start = f.now();
+    f.write("TIM15", "CR1", mode == 1 ? 1u << 3 | 1u : 1u);
+    std::vector<std::uint64_t> edges;
+    if(mode == 2)
+    {
+      edges.push_back(start + tim15_period + (exten == exten_falling ? tim15_clock : 0));
+    }
+    else
+    {
+      if(exten != exten_falling)
+      {
+        edges.push_back(start);
+      }
+      if(exten != exten_rising)
+      {
+        edges.push_back(start + tim15_period);
+      }
+    }
+    for(auto const edge : edges)
+    {
+      read_scan(f, edge);
+    }
+    f.run_until(start + 2 * tim15_period - us);
+    CHECK(f.isr("EOC") == 0);
+  }
+}
+
+TEST_CASE("a trigger starts the sequence tLATR later: 3, 7, 13 ADC clocks for PRESC 0 to 2")
+{
+  struct setting
+  {
+    std::uint32_t presc;
+    std::uint64_t divider;
+    std::uint64_t cycles;
+  };
+  for(auto const [presc, divider, cycles] : {
+          setting{0, 1, 3 },
+          setting{1, 2, 7 },
+          setting{2, 4, 13},
+          setting{3, 6, 19},
+  })
+  {
+    CAPTURE(presc);
+    adc_fixture const f;
+    f.put("RCC", "RCC_CFGR1", "SW", 1);
+    f.run_until(f.now() + 200 * us);
+    REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == 1);
+    downstream_scan(f, ovrmod | exten_rising | extsel(14));
+    f.write("ADC12", "ADC12_CCR", vrefen | vsensesel | (presc << 18));
+    auto const start = tim15_trgo(f, 499);
+    static_cast<void>(start_scan(f));
+    auto const eoc = start + tim15_period + (cycles + scan_eoc_cycles[0]) * divider * adc_cycle_ps;
+    f.run_until(eoc - adc_cycle_ps);
+    CHECK(f.isr("EOC") == 0);
+    f.run_until(eoc);
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.cpu_read("ADC_DR") == scan_code(0));
+  }
+}
+
+TEST_CASE("DISCEN with DISCNUM 2 converts three ranks per TIM15 update, ADSTART stays set")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | discen | (2u << 17) | exten_rising | extsel(14));
+  auto const start = tim15_trgo(f);
+  static_cast<void>(start_scan(f));
+  for(std::size_t group = 0; group < 3; ++group)
+  {
+    CAPTURE(group);
+    auto const first  = 3 * group;
+    auto const begin  = start + (group + 1) * tim15_period + latency;
+    auto const before = first == 0 ? 0 : scan_eoc(first - 1);
+    for(auto rank = first; rank < first + 3; ++rank)
+    {
+      CAPTURE(rank);
+      auto const end = begin + scan_eoc(rank) - before;
+      f.run_until(end - us);
+      CHECK(f.isr("EOC") == 0);
+      f.run_until(end);
+      CHECK(f.isr("EOC") == 1);
+      CHECK(f.cpu_read("ADC_DR") == scan_code(rank));
+    }
+    f.run_until(begin + tim15_period / 2);
+    CHECK(f.isr("EOC") == 0);
+    CHECK(f.isr("EOS") == 0);
+    CHECK(f.cr("ADSTART") == 1);
+  }
 }

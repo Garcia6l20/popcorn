@@ -2,10 +2,13 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
+
+#include <reflex/enum.hpp>
 
 #include <algorithm>
 #include <array>
@@ -44,6 +47,47 @@ constexpr std::size_t   fifo_depth          = 8;
 constexpr std::uint32_t dma_one_shot        = 1;
 constexpr std::uint32_t dma_mdf             = 2;
 constexpr std::uint32_t dma_circular        = 3;
+constexpr std::size_t   trigger_selections  = 32;
+constexpr std::uint32_t exten_rising        = 1;
+constexpr std::uint32_t exten_falling       = 2;
+
+enum class regular_trigger : std::uint8_t
+{
+  tim1_oc1   = 0,
+  tim1_oc2   = 1,
+  tim1_oc3   = 2,
+  tim2_oc2   = 3,
+  tim3_trgo  = 4,
+  tim4_oc4   = 5,
+  exti11     = 6,
+  tim8_trgo  = 7,
+  tim8_trgo2 = 8,
+  tim1_trgo  = 9,
+  tim1_trgo2 = 10,
+  tim2_trgo  = 11,
+  tim4_trgo  = 12,
+  tim6_trgo  = 13,
+  tim15_trgo = 14,
+  tim3_oc4   = 15,
+  exti15     = 16,
+  lptim1_ch1 = 18,
+  lptim2_ch1 = 19,
+  lptim3_ch1 = 20,
+  lptim4_out = 21,
+};
+
+[[nodiscard]] auto trigger_signal(std::uint32_t selection) -> std::string
+{
+  template for(constexpr auto e :
+               std::define_static_array(std::meta::enumerators_of(^^regular_trigger)))
+  {
+    if(std::to_underlying([:e:]) == selection)
+    {
+      return std::string{std::meta::identifier_of(e)};
+    }
+  }
+  return std::format("adc_ext_trg{}", selection);
+}
 
 using wide = unsigned __int128;
 
@@ -203,20 +247,38 @@ struct offset_fields
  * @brief ADC1 of the STM32U5, RM0456 section 33: its power-up handshake, done at the write, and
  *        regular sequences converted in virtual time. ADVREGEN out of deep power-down sets
  *        LDORDY, DEEPPWD clears ADVREGEN, ADCAL clears at once, ADEN sets ADRDY, ADDIS clears
- *        ADEN. An ADC_CR write taking ADSTART from 0 to 1 with ADEN starts the regular sequence,
- *        the SQR1.L + 1 ranks of SQ1 to SQ16. Each rank is one conversion of N x (SMP + TSAR)
- *        ADC clock cycles, SMP from the SMPR field of its channel, the ADC clock being the
- *        `adc1` kernel clock divided by ADC12_CCR.PRESC, N the oversampling ratio with ROVSE and
- *        1 without. A rank starts when the one before ends: sampling never overlaps the previous
- *        conversion. EOSMP sets at the end of each sampling phase, EOC with each result, EOS with
- *        the last rank's. CONT 0 stops after the last rank and clears ADSTART, CONT 1 starts
- *        over at rank 0. DISCEN 1 converts DISCNUM + 1 ranks per start, fewer in the last
+ *        ADEN. With EXTEN 0, an ADC_CR write taking ADSTART from 0 to 1 with ADEN starts the
+ *        regular sequence, the SQR1.L + 1 ranks of SQ1 to SQ16. Each rank is one conversion of
+ *        N x (SMP + TSAR) ADC clock cycles, SMP from the SMPR field of its channel, the ADC clock
+ *        being the `adc1` kernel clock divided by ADC12_CCR.PRESC, N the oversampling ratio with
+ *        ROVSE and 1 without. A rank starts when the one before ends: sampling never overlaps the
+ *        previous conversion. EOSMP sets at the end of each sampling phase, EOC with each result,
+ *        EOS with the last rank's. CONT 0 stops after the last rank and clears ADSTART, CONT 1
+ *        starts over at rank 0. DISCEN 1 converts DISCNUM + 1 ranks per start, fewer in the last
  *        subgroup, the next start going on from the next rank, clears ADSTART at the EOC ending
- *        the subgroup and ignores CONT. EXTEN not 0 logs a warning once and the ADSTART write
- *        starts the sequence as with the software trigger. ADSTP and ADDIS drop a conversion in
- *        progress and reset the sequence to rank 0. Without a kernel clock a conversion waits for
- *        one, logged once. Each ADEN rising edge with the ADC clock outside 5 to 55 MHz logs a
- *        warning and the conversions keep their computed time.
+ *        the subgroup and ignores CONT.
+ *
+ *        Hardware triggers, RM0456 33.4.19: with EXTEN not 0, the ADSTART write starts nothing
+ *        and ADC1 listens, as a trigger_sink, to the signal EXTSEL selects in RM0456 Table 308,
+ *        such as `tim15_trgo` for 14, while ADEN and ADSTART are set. EXTEN 01 detects the
+ *        signal's rising edges, 10 its falling edges, 11 both: a timer's TRGO pulse rises at its
+ *        event and falls one timer kernel clock later. Each detected edge while no conversion
+ *        runs starts the sequence, or the next DISCEN subgroup, tLATR later: 3, 7 or 13 ADC
+ *        clock cycles for PRESC 0, 1 or 2, datasheet DS13737 table 103. The datasheet gives no
+ *        value for a larger PRESC: a divider D of 4 or more takes 3 x D + 1 cycles, the rule its
+ *        values for D 2 and 4 follow, unverified. An edge during a conversion or the latency is
+ *        ignored. ADSTART stays set at the end of a sequence or subgroup, RM0456
+ *        33.4.16, and clears with ADSTP or ADDIS only. ADC1 tells the selected signal's source
+ *        when its listening starts or stops. A selection no model produces, the reserved EXTSEL
+ *        17 and 22 to 31 included, logs a warning once per selection when ADC1 starts listening
+ *        to it, a model_error under strict_peripherals, and no conversion starts. A
+ *        config_error or model_error the per-sequence checks raise at a trigger surfaces from
+ *        the source's event or register access that gave the edge.
+ *
+ *        ADSTP and ADDIS drop a conversion in progress and reset the sequence to rank 0.
+ *        Without a kernel clock a conversion waits for one, logged once. Each ADEN rising edge
+ *        with the ADC clock outside 5 to 55 MHz logs a warning and the conversions keep their
+ *        computed time.
  *
  *        Results, RM0456 33.4.27: with OVRMOD 0, ADC_DR shows the head of an eight-result FIFO,
  *        a CPU or DMA read of ADC_DR pops it, and EOC stays set while results are left. A result
@@ -226,7 +288,9 @@ struct offset_fields
  *        result is unread and OVR is clear. Under DMNGT 01, once the GPDMA channel serving that
  *        request completes, the conversion in progress is dropped, the sequence resets to rank
  *        0, ADSTART stays set, and no request rises until an ADC_CR write takes ADSTART from 0
- *        to 1: RM0456 ties the re-arm to nothing, this reading is unverified. DMNGT 10, the MDF
+ *        to 1: RM0456 ties the re-arm to nothing, this reading is unverified. A hardware trigger
+ *        then starts sequences without a request, and their results land in ADC_DR: the data
+ *        register RM0456 33.4.27 calls frozen after the DMA end is not modelled. DMNGT 10, the MDF
  *        path, requests nothing. ADC1_IRQn is high while an ADC_ISR flag is set with its ADC_IER
  *        enable.
  *
@@ -242,7 +306,7 @@ struct offset_fields
  *        reaches the samples held after it. The ADC clock a conversion started with times all
  *        its samples.
  *
- *        Injected conversions and hardware triggers are not modelled and log a warning once.
+ *        Injected conversions are not modelled and log a warning once.
  *        DMNGT 10, AUTDLY, LFTRIG, LSHIFT, offsets and gain compensation leave the conversions
  *        unchanged and log a warning once, a model_error under strict_peripherals. Two settings
  *        RM0456 forbids log a warning once, a model_error under strict_peripherals: an ADSTART
@@ -256,18 +320,28 @@ struct offset_fields
 class adc final : public dispatch_model<adc, adc_state>,
                   public analog_port,
                   public clock_listener,
-                  public dma_requester
+                  public dma_requester,
+                  public trigger_sink
 {
 public:
   adc(model_context& ctx, peripheral_desc const& desc, supply_options supply);
 
-  void reset(register_file& regs, reset_kind kind) override;
-  void on_event(std::uint32_t kind, std::uint64_t payload) override;
-  void on_clock_change() override;
-  void transfer_completed(std::uint32_t request) override;
+  void               reset(register_file& regs, reset_kind kind) override;
+  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void               on_clock_change() override;
+  void               transfer_completed(std::uint32_t request) override;
+  [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
+  auto on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void               drive(std::uint8_t channel, std::uint32_t microvolts) override;
   [[nodiscard]] auto input(std::uint8_t channel) const -> std::uint32_t override;
@@ -300,6 +374,9 @@ private:
   [[nodiscard]] auto calibration(address at, std::string_view name) const -> std::uint16_t;
   [[nodiscard]] auto sample(std::uint32_t channel) const -> std::uint32_t;
   [[nodiscard]] auto dma_level() const -> bool;
+  [[nodiscard]] auto listened() const -> std::optional<std::uint32_t>;
+  void               retune(std::optional<std::uint32_t> was);
+  [[nodiscard]] auto trigger_latency_ps() -> std::uint64_t;
   void               require_factory_word(std::uint32_t channel) const;
   void               prepare();
   void               begin_sequence(std::uint64_t start_ps);
@@ -342,6 +419,7 @@ private:
   field_ref                                    dma_mode_;
   field_ref                                    resolution_;
   field_ref                                    trigger_;
+  field_ref                                    trigger_select_;
   field_ref                                    overrun_mode_;
   field_ref                                    continuous_;
   field_ref                                    auto_delay_;
@@ -361,7 +439,7 @@ private:
   std::vector<std::pair<field_ref, field_ref>> interrupts_;
   std::uint32_t                                set_only_{};
   std::uint32_t                                clearable_{};
-  bool                                         trigger_logged_{};
+  std::array<bool, trigger_selections>         unproduced_logged_{};
   bool                                         injected_logged_{};
   bool                                         no_clock_logged_{};
   bool                                         auto_delay_logged_{};
@@ -399,9 +477,9 @@ adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
       end_of_conversion_{field("ADC_ISR", "EOC")}, end_of_sequence_{field("ADC_ISR", "EOS")},
       overrun_{field("ADC_ISR", "OVR")}, regulator_ready_{field("ADC_ISR", "LDORDY")},
       dma_mode_{field("ADC_CFGR1", "DMNGT")}, resolution_{field("ADC_CFGR1", "RES")},
-      trigger_{field("ADC_CFGR1", "EXTEN")}, overrun_mode_{field("ADC_CFGR1", "OVRMOD")},
-      continuous_{field("ADC_CFGR1", "CONT")}, auto_delay_{field("ADC_CFGR1", "AUTDLY")},
-      discontinuous_{field("ADC_CFGR1", "DISCEN")},
+      trigger_{field("ADC_CFGR1", "EXTEN")}, trigger_select_{field("ADC_CFGR1", "EXTSEL")},
+      overrun_mode_{field("ADC_CFGR1", "OVRMOD")}, continuous_{field("ADC_CFGR1", "CONT")},
+      auto_delay_{field("ADC_CFGR1", "AUTDLY")}, discontinuous_{field("ADC_CFGR1", "DISCEN")},
       discontinuous_count_{field("ADC_CFGR1", "DISCNUM")}, length_{field("ADC_SQR1", "L")},
       data_{field("ADC_DR", "RDATA")}, oversampling_{field("ADC_CFGR2", "ROVSE")},
       oversampling_ratio_{field("ADC_CFGR2", "OSR")},
@@ -648,7 +726,14 @@ void adc::cr_written(std::uint32_t old, std::uint32_t now)
     if(enable_.of(now) != 0 and not busy())
     {
       update(regs_, start_, 0);
-      begin_sequence(ctx_.clock.time().ps);
+      if(get(regs_, trigger_) == 0)
+      {
+        begin_sequence(ctx_.clock.time().ps);
+      }
+      else
+      {
+        prepare();
+      }
       update(regs_, start_, 1);
     }
   }
@@ -696,10 +781,6 @@ void adc::prepare()
     forbidden(
         discontinuous_continuous_logged_, "ADC_CFGR1",
         "DISCEN and CONT both set, forbidden by RM0456 33.4.15: converted as DISCEN alone");
-  }
-  if(get(regs_, trigger_) != 0)
-  {
-    warn_once(trigger_logged_, "ADC_CFGR1", "EXTEN: hardware triggers");
   }
   if(get(regs_, auto_delay_) != 0)
   {
@@ -822,13 +903,14 @@ void adc::finish()
 
 void adc::advance(std::uint64_t end_ps, bool last)
 {
-  state_.rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
+  state_.rank      = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
+  auto const stays = get(regs_, trigger_) != 0 ? 1u : 0u;
   if(get(regs_, discontinuous_) != 0)
   {
     if(last or state_.subgroup_left <= 1)
     {
       state_.subgroup_left = 0;
-      update(regs_, start_, 0);
+      update(regs_, start_, stays);
       return;
     }
     --state_.subgroup_left;
@@ -837,7 +919,7 @@ void adc::advance(std::uint64_t end_ps, bool last)
   }
   if(last and get(regs_, continuous_) == 0)
   {
-    update(regs_, start_, 0);
+    update(regs_, start_, stays);
     return;
   }
   begin_rank(end_ps);
@@ -910,6 +992,103 @@ void adc::signal()
     line_.lower();
   }
   request_.set(dma_level());
+}
+
+auto adc::listened() const -> std::optional<std::uint32_t>
+{
+  if(get(regs_, enable_) == 0 or get(regs_, start_) == 0 or get(regs_, trigger_) == 0)
+  {
+    return std::nullopt;
+  }
+  return get(regs_, trigger_select_);
+}
+
+auto adc::listens(std::string_view signal) const -> bool
+{
+  auto const selected = listened();
+  auto const named    = reflex::to_enum_value<regular_trigger>(signal);
+  return selected and named and std::to_underlying(*named) == *selected;
+}
+
+void adc::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps)
+{
+  auto const polarity = get(regs_, trigger_);
+  auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
+                                                     : (polarity & exten_falling) != 0;
+  if(not detected or busy() or not listens(signal))
+  {
+    return;
+  }
+  begin_sequence(at_ps + trigger_latency_ps());
+}
+
+auto adc::trigger_latency_ps() -> std::uint64_t
+{
+  auto const hz = ctx_.clock.hz(kernel_);
+  if(hz == 0)
+  {
+    return 0;
+  }
+  auto const div    = divider();
+  auto const cycles = div == 1 ? 3u : 3u * div + 1u;
+  return static_cast<std::uint64_t>((wide{cycles} * div * ps_per_second + hz - 1u) / hz);
+}
+
+auto adc::on_write(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     access) -> std::expected<void, bus_error>
+{
+  auto const word = offset & ~3u;
+  if(word != start_.offset and word != trigger_.offset)
+  {
+    return dispatch_model::on_write(regs, offset, size, old, value, access);
+  }
+  auto const config   = regs_.peek(trigger_.offset);
+  auto const next     = word == trigger_.offset ? merge_write(config, offset, size, value) : config;
+  auto const external = trigger_.of(config) != 0;
+  auto const moved    = trigger_select_.of(next) != trigger_select_.of(config);
+  if(external)
+  {
+    static_cast<void>(interest_changed(ctx_.peers, trigger_signal(trigger_select_.of(config))));
+  }
+  if(trigger_.of(next) != 0 and (not external or moved))
+  {
+    static_cast<void>(interest_changed(ctx_.peers, trigger_signal(trigger_select_.of(next))));
+  }
+  auto const was    = listened();
+  auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
+  retune(was);
+  return result;
+}
+
+void adc::retune(std::optional<std::uint32_t> was)
+{
+  auto const now = listened();
+  if(now == was)
+  {
+    return;
+  }
+  if(was)
+  {
+    static_cast<void>(interest_changed(ctx_.peers, trigger_signal(*was)));
+  }
+  if(not now)
+  {
+    return;
+  }
+  auto const signal = trigger_signal(*now);
+  if(not interest_changed(ctx_.peers, signal))
+  {
+    unmodelled(
+        unproduced_logged_[*now], "ADC_CFGR1",
+        signal.starts_with("adc_ext_trg")
+            ? std::format("EXTSEL {}: reserved trigger selection", *now)
+            : std::format("EXTSEL {}: trigger {}", *now, signal));
+  }
 }
 
 void adc::transfer_completed(std::uint32_t request)
