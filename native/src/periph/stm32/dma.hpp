@@ -41,4 +41,34 @@ protected:
   /** @brief Destroys the interface, only through its model. */
   ~dma_controller() = default;
 };
+
+/**
+ * @brief A model that issues DMA requests and must know when a channel serving it ends, found
+ *        by the controller through the machine's peers.
+ */
+class dma_requester
+{
+public:
+  /** @brief Creates the interface. */
+  dma_requester() = default;
+  /** @brief Not copyable. */
+  dma_requester(dma_requester const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(dma_requester const&) -> dma_requester& = delete;
+  /** @brief Not movable. */
+  dma_requester(dma_requester&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(dma_requester&&) -> dma_requester& = delete;
+
+  /**
+   * @brief A hardware-requested channel completed its last transfer, its TC with LLR = 0. Called
+   *        from a controller event, never inside a requester's register callback.
+   * @param request Request number of the channel, its request selection field.
+   */
+  virtual void transfer_completed(std::uint32_t request) = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~dma_requester() = default;
+};
 }

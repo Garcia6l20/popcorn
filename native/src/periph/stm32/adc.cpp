@@ -1,3 +1,5 @@
+#include "dma.hpp"
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 
@@ -16,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -35,6 +38,12 @@ constexpr std::uint64_t min_adc_hz          = 5'000'000;
 constexpr std::uint64_t max_adc_hz          = 55'000'000;
 constexpr std::uint64_t ps_per_second       = 1'000'000'000'000;
 constexpr std::uint32_t conversion_end      = 0;
+constexpr std::uint32_t sampling_end        = 1;
+constexpr std::size_t   ranks               = 16;
+constexpr std::size_t   fifo_depth          = 8;
+constexpr std::uint32_t dma_one_shot        = 1;
+constexpr std::uint32_t dma_mdf             = 2;
+constexpr std::uint32_t dma_circular        = 3;
 
 using wide = unsigned __int128;
 
@@ -53,6 +62,10 @@ struct adc_state
   std::uint32_t                       sum{};
   bool                                converting{};
   bool                                waiting_clock{};
+  std::uint8_t                        rank{};
+  std::uint8_t                        subgroup_left{};
+  std::vector<std::uint32_t>          data;
+  bool                                dma_stopped{};
 
   friend auto operator==(adc_state const&, adc_state const&) -> bool = default;
 };
@@ -188,21 +201,40 @@ struct offset_fields
 
 /**
  * @brief ADC1 of the STM32U5, RM0456 section 33: its power-up handshake, done at the write, and
- *        software-triggered regular conversions of the SQ1 channel in virtual time. ADVREGEN out
- *        of deep power-down sets LDORDY, DEEPPWD clears ADVREGEN, ADCAL clears at once, ADEN
- *        sets ADRDY, ADDIS clears ADEN. ADSTART with ADEN starts a conversion of N x (SMP +
- *        TSAR) ADC clock cycles, the ADC clock being the `adc1` kernel clock divided by
- *        ADC12_CCR.PRESC, N the oversampling ratio with ROVSE and 1 without. At its end ADC_DR
- *        takes the code, EOC and EOS set, ADSTART clears, and a CPU or DMA read of ADC_DR clears
- *        EOC. ADSTP and ADDIS drop a conversion in progress. Without a kernel clock a conversion
- *        waits for one, logged once. Each ADEN rising edge with the ADC clock outside 5 to 55 MHz
- *        logs a warning and the conversions keep their computed time.
+ *        regular sequences converted in virtual time. ADVREGEN out of deep power-down sets
+ *        LDORDY, DEEPPWD clears ADVREGEN, ADCAL clears at once, ADEN sets ADRDY, ADDIS clears
+ *        ADEN. An ADC_CR write taking ADSTART from 0 to 1 with ADEN starts the regular sequence,
+ *        the SQR1.L + 1 ranks of SQ1 to SQ16. Each rank is one conversion of N x (SMP + TSAR)
+ *        ADC clock cycles, SMP from the SMPR field of its channel, the ADC clock being the
+ *        `adc1` kernel clock divided by ADC12_CCR.PRESC, N the oversampling ratio with ROVSE and
+ *        1 without. A rank starts when the one before ends: sampling never overlaps the previous
+ *        conversion. EOSMP sets at the end of each sampling phase, EOC with each result, EOS with
+ *        the last rank's. CONT 0 stops after the last rank and clears ADSTART, CONT 1 starts
+ *        over at rank 0. DISCEN 1 converts DISCNUM + 1 ranks per start, fewer in the last
+ *        subgroup, the next start going on from the next rank, clears ADSTART at the EOC ending
+ *        the subgroup and ignores CONT. EXTEN not 0 logs a warning once and the ADSTART write
+ *        starts the sequence as with the software trigger. ADSTP and ADDIS drop a conversion in
+ *        progress and reset the sequence to rank 0. Without a kernel clock a conversion waits for
+ *        one, logged once. Each ADEN rising edge with the ADC clock outside 5 to 55 MHz logs a
+ *        warning and the conversions keep their computed time.
+ *
+ *        Results, RM0456 33.4.27: with OVRMOD 0, ADC_DR shows the head of an eight-result FIFO,
+ *        a CPU or DMA read of ADC_DR pops it, and EOC stays set while results are left. A result
+ *        finding the FIFO full sets OVR and is discarded, as is every result while OVR stays set.
+ *        With OVRMOD 1, a result overwrites ADC_DR and sets OVR when EOC was still set. A
+ *        debugger read pops nothing. DMNGT 01 and 11 hold the `adc1_dma` request high while a
+ *        result is unread and OVR is clear. Under DMNGT 01, once the GPDMA channel serving that
+ *        request completes, the conversion in progress is dropped, the sequence resets to rank
+ *        0, ADSTART stays set, and no request rises until an ADC_CR write takes ADSTART from 0
+ *        to 1: RM0456 ties the re-arm to nothing, this reading is unverified. DMNGT 10, the MDF
+ *        path, requests nothing. ADC1_IRQn is high while an ADC_ISR flag is set with its ADC_IER
+ *        enable.
  *
  *        Codes against VDDA, the board's `supply_options`: an external channel 1 to 17 reads
  *        its driven input, `analog_port`, as V x 16384 / VDDA, floored and saturated. VREFINT
  *        reads the factory VREFINT_CAL and the temperature sensor TS_CAL1, at 30 C, both scaled
  *        by 3000 / VDDA, when ADC12_CCR connects them, and 0 otherwise. Each word is read from
- *        the description's signature content when a conversion of its channel starts, a
+ *        the description's signature content when a sequence converting its channel starts, a
  *        config_error when absent. VBAT reads 0. A 14-bit code loses two bits per RES step. The
  *        oversampler sums N codes at the resolution and shifts the sum right by OVSS, rounding to
  *        nearest. Sample k of a conversion holds the input at the end of its sampling window,
@@ -210,13 +242,21 @@ struct offset_fields
  *        reaches the samples held after it. The ADC clock a conversion started with times all
  *        its samples.
  *
- *        Continuous, discontinuous, triggered and multi-channel sequences, injected conversions,
- *        DMA, interrupts and watchdogs are not modelled and log a warning once. LSHIFT, offsets
- *        and gain compensation leave the result unchanged and log a warning once, a model_error
- *        under strict_peripherals. A reserved ADC12_CCR.PRESC divides by 256, logged once by
- *        ADC12, a model_error under strict_peripherals.
+ *        Injected conversions and hardware triggers are not modelled and log a warning once.
+ *        DMNGT 10, AUTDLY, LFTRIG, LSHIFT, offsets and gain compensation leave the conversions
+ *        unchanged and log a warning once, a model_error under strict_peripherals. Two settings
+ *        RM0456 forbids log a warning once, a model_error under strict_peripherals: an ADSTART
+ *        write with ADEN 0 or ADDIS 1, ignored with ADSTART left at 0, and DISCEN with CONT,
+ *        converted as DISCEN alone. Only the single DMA request is modelled: the burst request
+ *        RM0456 33.4.27 raises at four results is not. A GPDMA channel reading ADC_DR in bursts
+ *        of more than one beat starts each burst on the single request, and a beat finding the
+ *        FIFO empty reads the last result again. The analog watchdogs are not modelled. A reserved
+ * ADC12_CCR.PRESC divides by 256, logged once by ADC12, a model_error under strict_peripherals.
  */
-class adc final : public dispatch_model<adc, adc_state>, public analog_port, public clock_listener
+class adc final : public dispatch_model<adc, adc_state>,
+                  public analog_port,
+                  public clock_listener,
+                  public dma_requester
 {
 public:
   adc(model_context& ctx, peripheral_desc const& desc, supply_options supply);
@@ -224,6 +264,7 @@ public:
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_clock_change() override;
+  void transfer_completed(std::uint32_t request) override;
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -233,6 +274,11 @@ public:
   [[nodiscard]] auto vdda_mv() const -> std::uint32_t override;
 
   void cr_written(std::uint32_t old, std::uint32_t now);
+  void isr_written(std::uint32_t old, std::uint32_t now);
+  void plain_written(std::uint32_t, std::uint32_t)
+  {
+    signal();
+  }
   void dr_written(std::uint32_t, std::uint32_t)
   {}
 
@@ -247,60 +293,93 @@ private:
   void               hold_until(std::uint64_t ps);
   [[nodiscard]] auto ratio() const -> std::uint32_t;
   [[nodiscard]] auto channel() const -> std::uint32_t;
+  [[nodiscard]] auto channel_at(std::size_t rank) const -> std::uint32_t;
+  [[nodiscard]] auto length() const -> std::size_t;
+  [[nodiscard]] auto busy() const -> bool;
   [[nodiscard]] auto external(std::uint8_t channel) const -> std::size_t;
   [[nodiscard]] auto calibration(address at, std::string_view name) const -> std::uint16_t;
   [[nodiscard]] auto sample(std::uint32_t channel) const -> std::uint32_t;
+  [[nodiscard]] auto dma_level() const -> bool;
   void               require_factory_word(std::uint32_t channel) const;
-  void               begin();
-  void               schedule();
+  void               prepare();
+  void               begin_sequence(std::uint64_t start_ps);
+  void               begin_rank(std::uint64_t start_ps);
+  void               schedule(std::uint64_t start_ps);
+  void               schedule_sampling_end(std::uint64_t not_before_ps);
   void               finish();
+  void               advance(std::uint64_t end_ps, bool last);
+  void               land(std::uint32_t result);
+  void               pop();
   void               abort();
+  void               signal();
   void               check_clock_range();
-  void               check_unmodelled();
+  void               check_unmodelled(std::uint32_t channel);
   void               warn_once(bool& logged, std::string_view reg, std::string_view what);
   void               unmodelled(bool& logged, std::string_view name, std::string_view what);
+  void               forbidden(bool& logged, std::string_view name, std::string message);
+  void               refuse_start(bool refused);
 
-  register_file&                     regs_;
-  supply_options                     supply_;
-  core::clock_domain                 kernel_;
-  field_ref                          enable_;
-  field_ref                          disable_;
-  field_ref                          start_;
-  field_ref                          stop_;
-  field_ref                          injected_start_;
-  field_ref                          regulator_;
-  field_ref                          deep_power_down_;
-  field_ref                          calibrate_;
-  field_ref                          ready_;
-  field_ref                          end_of_conversion_;
-  field_ref                          end_of_sequence_;
-  field_ref                          regulator_ready_;
-  field_ref                          resolution_;
-  field_ref                          continuous_;
-  field_ref                          discontinuous_;
-  field_ref                          trigger_;
-  field_ref                          length_;
-  field_ref                          first_channel_;
-  field_ref                          data_;
-  field_ref                          oversampling_;
-  field_ref                          oversampling_ratio_;
-  field_ref                          oversampling_shift_;
-  field_ref                          left_shift_;
-  field_ref                          gain_;
-  std::array<field_ref, channels>    sampling_;
-  std::array<offset_fields, offsets> offsets_;
-  std::uint32_t                      set_only_{};
-  bool                               sequence_logged_{};
-  bool                               injected_logged_{};
-  bool                               no_clock_logged_{};
-  bool                               left_shift_logged_{};
-  bool                               offset_logged_{};
-  bool                               gain_logged_{};
+  register_file&                               regs_;
+  supply_options                               supply_;
+  core::clock_domain                           kernel_;
+  irq_line&                                    line_;
+  dma_signal                                   request_;
+  reg_ref                                      isr_;
+  field_ref                                    enable_;
+  field_ref                                    disable_;
+  field_ref                                    start_;
+  field_ref                                    stop_;
+  field_ref                                    injected_start_;
+  field_ref                                    regulator_;
+  field_ref                                    deep_power_down_;
+  field_ref                                    calibrate_;
+  field_ref                                    ready_;
+  field_ref                                    end_of_sampling_;
+  field_ref                                    end_of_conversion_;
+  field_ref                                    end_of_sequence_;
+  field_ref                                    overrun_;
+  field_ref                                    regulator_ready_;
+  field_ref                                    dma_mode_;
+  field_ref                                    resolution_;
+  field_ref                                    trigger_;
+  field_ref                                    overrun_mode_;
+  field_ref                                    continuous_;
+  field_ref                                    auto_delay_;
+  field_ref                                    discontinuous_;
+  field_ref                                    discontinuous_count_;
+  field_ref                                    length_;
+  field_ref                                    data_;
+  field_ref                                    oversampling_;
+  field_ref                                    oversampling_ratio_;
+  field_ref                                    oversampling_shift_;
+  field_ref                                    low_frequency_;
+  field_ref                                    left_shift_;
+  field_ref                                    gain_;
+  std::array<field_ref, ranks>                 sequence_;
+  std::array<field_ref, channels>              sampling_;
+  std::array<offset_fields, offsets>           offsets_;
+  std::vector<std::pair<field_ref, field_ref>> interrupts_;
+  std::uint32_t                                set_only_{};
+  std::uint32_t                                clearable_{};
+  bool                                         trigger_logged_{};
+  bool                                         injected_logged_{};
+  bool                                         no_clock_logged_{};
+  bool                                         auto_delay_logged_{};
+  bool                                         low_frequency_logged_{};
+  bool                                         mdf_logged_{};
+  bool                                         start_refused_logged_{};
+  bool                                         discontinuous_continuous_logged_{};
+  bool                                         left_shift_logged_{};
+  bool                                         offset_logged_{};
+  bool                                         gain_logged_{};
 };
 
-constexpr std::array<write_entry<adc>, 2> adc_writes{
+constexpr std::array<write_entry<adc>, 5> adc_writes{
     {
+     {"ADC_ISR", &adc::isr_written},
+     {"ADC_IER", &adc::plain_written},
      {"ADC_CR", &adc::cr_written},
+     {"ADC_CFGR1", &adc::plain_written},
      {"ADC_DR", &adc::dr_written},
      }
 };
@@ -310,20 +389,30 @@ constexpr std::array<std::string_view, offsets> offset_registers{
 
 adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
     : dispatch_model{ctx, desc, "ADC", adc_writes}, regs_{ctx.regs}, supply_{supply},
-      kernel_{ctx.clock.domain(lower(desc.name))}, enable_{field("ADC_CR", "ADEN")},
-      disable_{field("ADC_CR", "ADDIS")}, start_{field("ADC_CR", "ADSTART")},
-      stop_{field("ADC_CR", "ADSTP")}, injected_start_{field("ADC_CR", "JADSTART")},
-      regulator_{field("ADC_CR", "ADVREGEN")}, deep_power_down_{field("ADC_CR", "DEEPPWD")},
-      calibrate_{field("ADC_CR", "ADCAL")}, ready_{field("ADC_ISR", "ADRDY")},
+      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
+      request_{ctx.peers, lower(desc.name) + "_dma"}, isr_{reg("ADC_ISR")},
+      enable_{field("ADC_CR", "ADEN")}, disable_{field("ADC_CR", "ADDIS")},
+      start_{field("ADC_CR", "ADSTART")}, stop_{field("ADC_CR", "ADSTP")},
+      injected_start_{field("ADC_CR", "JADSTART")}, regulator_{field("ADC_CR", "ADVREGEN")},
+      deep_power_down_{field("ADC_CR", "DEEPPWD")}, calibrate_{field("ADC_CR", "ADCAL")},
+      ready_{field("ADC_ISR", "ADRDY")}, end_of_sampling_{field("ADC_ISR", "EOSMP")},
       end_of_conversion_{field("ADC_ISR", "EOC")}, end_of_sequence_{field("ADC_ISR", "EOS")},
-      regulator_ready_{field("ADC_ISR", "LDORDY")}, resolution_{field("ADC_CFGR1", "RES")},
-      continuous_{field("ADC_CFGR1", "CONT")}, discontinuous_{field("ADC_CFGR1", "DISCEN")},
-      trigger_{field("ADC_CFGR1", "EXTEN")}, length_{field("ADC_SQR1", "L")},
-      first_channel_{field("ADC_SQR1", "SQ1")}, data_{field("ADC_DR", "RDATA")},
-      oversampling_{field("ADC_CFGR2", "ROVSE")}, oversampling_ratio_{field("ADC_CFGR2", "OSR")},
-      oversampling_shift_{field("ADC_CFGR2", "OVSS")}, left_shift_{field("ADC_CFGR2", "LSHIFT")},
-      gain_{field("ADC_GCOMP", "GCOMP")}
+      overrun_{field("ADC_ISR", "OVR")}, regulator_ready_{field("ADC_ISR", "LDORDY")},
+      dma_mode_{field("ADC_CFGR1", "DMNGT")}, resolution_{field("ADC_CFGR1", "RES")},
+      trigger_{field("ADC_CFGR1", "EXTEN")}, overrun_mode_{field("ADC_CFGR1", "OVRMOD")},
+      continuous_{field("ADC_CFGR1", "CONT")}, auto_delay_{field("ADC_CFGR1", "AUTDLY")},
+      discontinuous_{field("ADC_CFGR1", "DISCEN")},
+      discontinuous_count_{field("ADC_CFGR1", "DISCNUM")}, length_{field("ADC_SQR1", "L")},
+      data_{field("ADC_DR", "RDATA")}, oversampling_{field("ADC_CFGR2", "ROVSE")},
+      oversampling_ratio_{field("ADC_CFGR2", "OSR")},
+      oversampling_shift_{field("ADC_CFGR2", "OVSS")}, low_frequency_{field("ADC_CFGR2", "LFTRIG")},
+      left_shift_{field("ADC_CFGR2", "LSHIFT")}, gain_{field("ADC_GCOMP", "GCOMP")}
 {
+  for(std::size_t rank = 0; rank < ranks; ++rank)
+  {
+    sequence_[rank] =
+        field(std::format("ADC_SQR{}", (rank + 1) / 5 + 1), std::format("SQ{}", rank + 1));
+  }
   for(std::size_t index = 0; index < channels; ++index)
   {
     sampling_[index] = field(index < 10 ? "ADC_SMPR1" : "ADC_SMPR2", std::format("SMP{}", index));
@@ -339,6 +428,23 @@ adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
     set_only_ |= bit.mask();
   }
   set_only_ |= field("ADC_CR", "JADSTP").mask();
+  auto const& status = describe("ADC_ISR");
+  for(auto const& flag : status.fields)
+  {
+    if(flag.on_write == write_effect::one_to_clear)
+    {
+      clearable_ |= field("ADC_ISR", flag.name).mask();
+    }
+  }
+  for(auto const& enable : describe("ADC_IER").fields)
+  {
+    auto const flag = std::string_view{enable.name}.substr(0, enable.name.size() - 2);
+    if(enable.name.ends_with("IE")
+       and std::ranges::contains(status.fields, flag, &field_desc::name))
+    {
+      interrupts_.emplace_back(field("ADC_ISR", flag), field("ADC_IER", enable.name));
+    }
+  }
 }
 
 auto adc::common() const -> adc_common const*
@@ -398,7 +504,22 @@ auto adc::ratio() const -> std::uint32_t
 
 auto adc::channel() const -> std::uint32_t
 {
-  return get(regs_, first_channel_);
+  return channel_at(state_.rank);
+}
+
+auto adc::channel_at(std::size_t rank) const -> std::uint32_t
+{
+  return get(regs_, sequence_[std::min(rank, ranks - 1)]);
+}
+
+auto adc::length() const -> std::size_t
+{
+  return get(regs_, length_) + std::size_t{1};
+}
+
+auto adc::busy() const -> bool
+{
+  return state_.converting or state_.waiting_clock;
 }
 
 auto adc::external(std::uint8_t channel) const -> std::size_t
@@ -452,6 +573,10 @@ void adc::reset(register_file& regs, reset_kind)
     regs.poke(reg(name).offset, describe(name).reset);
   }
   abort();
+  state_.data.clear();
+  state_.dma_stopped = false;
+  request_.resolve();
+  signal();
 }
 
 auto adc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -460,7 +585,7 @@ auto adc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   auto const value = dispatch_model::on_read(regs, offset, size, ctx);
   if((offset & ~3u) == data_.offset and ctx.by != initiator::debugger)
   {
-    update(regs_, end_of_conversion_, 0);
+    pop();
   }
   return value;
 }
@@ -468,6 +593,15 @@ auto adc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
 void adc::cr_written(std::uint32_t old, std::uint32_t now)
 {
   now |= old & set_only_;
+  auto const refused = start_.of(now)
+                    != 0
+                   and start_.of(old)
+                    == 0
+                   and (enable_.of(old) == 0 or disable_.of(now) != 0);
+  if(refused)
+  {
+    now = start_.with(now, 0);
+  }
   if(deep_power_down_.of(now) != 0)
   {
     now = regulator_.with(now, 0);
@@ -488,6 +622,8 @@ void adc::cr_written(std::uint32_t old, std::uint32_t now)
     update(regs_, start_, 0);
     update(regs_, stop_, 0);
     abort();
+    signal();
+    refuse_start(refused);
     return;
   }
   if(enable_.of(now) != 0 and enable_.of(old) == 0)
@@ -503,13 +639,41 @@ void adc::cr_written(std::uint32_t old, std::uint32_t now)
     update(regs_, stop_, 0);
     update(regs_, start_, 0);
     abort();
+    signal();
     return;
   }
-  auto const busy = state_.converting or state_.waiting_clock;
-  if(start_.of(now) != 0 and enable_.of(now) != 0 and not busy)
+  if(start_.of(now) != 0 and start_.of(old) == 0)
   {
-    begin();
+    state_.dma_stopped = false;
+    if(enable_.of(now) != 0 and not busy())
+    {
+      update(regs_, start_, 0);
+      begin_sequence(ctx_.clock.time().ps);
+      update(regs_, start_, 1);
+    }
   }
+  signal();
+  refuse_start(refused);
+}
+
+void adc::refuse_start(bool refused)
+{
+  if(refused)
+  {
+    forbidden(
+        start_refused_logged_, "ADC_CR",
+        "ADSTART written with ADEN 0 or ADDIS 1, RM0456 33.6.3: the write is ignored");
+  }
+}
+
+void adc::isr_written(std::uint32_t old, std::uint32_t now)
+{
+  regs_.poke(isr_.offset, old & ~(now & clearable_));
+  if(end_of_sampling_.of(old) != 0 and get(regs_, end_of_sampling_) == 0 and state_.converting)
+  {
+    schedule_sampling_end(ctx_.clock.time().ps);
+  }
+  signal();
 }
 
 void adc::check_clock_range()
@@ -525,21 +689,50 @@ void adc::check_clock_range()
   }
 }
 
-void adc::begin()
+void adc::prepare()
 {
-  if(get(regs_, continuous_)
-     + get(regs_, discontinuous_)
-     + get(regs_, trigger_)
-     + get(regs_, length_)
-     != 0)
+  if(get(regs_, discontinuous_) != 0 and get(regs_, continuous_) != 0)
   {
-    warn_once(
-        sequence_logged_, "ADC_CFGR1",
-        "CONT, DISCEN, EXTEN or SQR1.L: continuous, discontinuous, triggered or multi-channel "
-        "sequences, SQ1 converted once");
+    forbidden(
+        discontinuous_continuous_logged_, "ADC_CFGR1",
+        "DISCEN and CONT both set, forbidden by RM0456 33.4.15: converted as DISCEN alone");
   }
-  check_unmodelled();
-  require_factory_word(channel());
+  if(get(regs_, trigger_) != 0)
+  {
+    warn_once(trigger_logged_, "ADC_CFGR1", "EXTEN: hardware triggers");
+  }
+  if(get(regs_, auto_delay_) != 0)
+  {
+    unmodelled(auto_delay_logged_, "ADC_CFGR1", "AUTDLY: auto-delayed conversions");
+  }
+  if(get(regs_, low_frequency_) != 0)
+  {
+    unmodelled(low_frequency_logged_, "ADC_CFGR2", "LFTRIG: low frequency trigger mode");
+  }
+  if(get(regs_, dma_mode_) == dma_mdf)
+  {
+    unmodelled(mdf_logged_, "ADC_CFGR1", "DMNGT 10: the MDF data path");
+  }
+  for(std::size_t rank = 0; rank < length(); ++rank)
+  {
+    check_unmodelled(channel_at(rank));
+    require_factory_word(channel_at(rank));
+  }
+}
+
+void adc::begin_sequence(std::uint64_t start_ps)
+{
+  prepare();
+  if(get(regs_, discontinuous_) == 0 or state_.rank >= length())
+  {
+    state_.rank = 0;
+  }
+  state_.subgroup_left = static_cast<std::uint8_t>(get(regs_, discontinuous_count_) + 1u);
+  begin_rank(start_ps);
+}
+
+void adc::begin_rank(std::uint64_t start_ps)
+{
   if(ctx_.clock.hz(kernel_) == 0)
   {
     if(not std::exchange(no_clock_logged_, true))
@@ -549,10 +742,10 @@ void adc::begin()
     state_.waiting_clock = true;
     return;
   }
-  schedule();
+  schedule(start_ps);
 }
 
-void adc::check_unmodelled()
+void adc::check_unmodelled(std::uint32_t channel)
 {
   if(get(regs_, left_shift_) != 0)
   {
@@ -564,16 +757,16 @@ void adc::check_unmodelled()
   }
   for(auto const& offset : offsets_)
   {
-    if(get(regs_, offset.value) != 0 and get(regs_, offset.channel) == channel())
+    if(get(regs_, offset.value) != 0 and get(regs_, offset.channel) == channel)
     {
       unmodelled(offset_logged_, offset.reg, "OFFSET: offset of the result");
     }
   }
 }
 
-void adc::schedule()
+void adc::schedule(std::uint64_t start_ps)
 {
-  state_.start_ps      = ctx_.clock.time().ps;
+  state_.start_ps      = start_ps;
   state_.clock_hz      = ctx_.clock.hz(kernel_);
   state_.divider       = divider();
   state_.held          = 0;
@@ -584,10 +777,28 @@ void adc::schedule()
   ctx_.events.schedule_at(
       vtime{after(std::uint64_t{ratio()} * conversion())}, conversion_end, state_.generation,
       ctx_.clock);
+  if(get(regs_, end_of_sampling_) == 0)
+  {
+    schedule_sampling_end(start_ps);
+  }
+}
+
+void adc::schedule_sampling_end(std::uint64_t not_before_ps)
+{
+  for(std::uint32_t k = 0, samples = ratio(); k < samples; ++k)
+  {
+    auto const at = after(std::uint64_t{k} * conversion() + sampling());
+    if(at > not_before_ps)
+    {
+      ctx_.events.schedule_at(vtime{at}, sampling_end, state_.generation, ctx_.clock);
+      return;
+    }
+  }
 }
 
 void adc::finish()
 {
+  auto const end    = after(std::uint64_t{ratio()} * conversion());
   state_.converting = false;
   for(auto const samples = ratio(); state_.held < samples; ++state_.held)
   {
@@ -599,10 +810,74 @@ void adc::finish()
     auto const shift = get(regs_, oversampling_shift_);
     result           = shift == 0 ? state_.sum : (state_.sum + (1u << (shift - 1u))) >> shift;
   }
-  update(regs_, data_, result);
+  land(result);
+  auto const last = std::size_t{state_.rank} + 1u >= length();
+  if(last)
+  {
+    update(regs_, end_of_sequence_, 1);
+  }
+  advance(end, last);
+  signal();
+}
+
+void adc::advance(std::uint64_t end_ps, bool last)
+{
+  state_.rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
+  if(get(regs_, discontinuous_) != 0)
+  {
+    if(last or state_.subgroup_left <= 1)
+    {
+      state_.subgroup_left = 0;
+      update(regs_, start_, 0);
+      return;
+    }
+    --state_.subgroup_left;
+    begin_rank(end_ps);
+    return;
+  }
+  if(last and get(regs_, continuous_) == 0)
+  {
+    update(regs_, start_, 0);
+    return;
+  }
+  begin_rank(end_ps);
+}
+
+void adc::land(std::uint32_t result)
+{
+  if(get(regs_, overrun_mode_) == 0)
+  {
+    if(get(regs_, overrun_) != 0 or state_.data.size() >= fifo_depth)
+    {
+      update(regs_, overrun_, 1);
+      return;
+    }
+  }
+  else
+  {
+    if(get(regs_, end_of_conversion_) != 0)
+    {
+      update(regs_, overrun_, 1);
+    }
+    state_.data.clear();
+  }
+  state_.data.push_back(result);
+  update(regs_, data_, state_.data.front());
   update(regs_, end_of_conversion_, 1);
-  update(regs_, end_of_sequence_, 1);
-  update(regs_, start_, 0);
+}
+
+void adc::pop()
+{
+  if(not state_.data.empty())
+  {
+    state_.data.erase(state_.data.begin());
+  }
+  if(not state_.data.empty())
+  {
+    update(regs_, data_, state_.data.front());
+  }
+  update(regs_, end_of_conversion_, state_.data.empty() ? 0u : 1u);
+  signal();
 }
 
 void adc::abort()
@@ -610,22 +885,67 @@ void adc::abort()
   ++state_.generation;
   state_.converting    = false;
   state_.waiting_clock = false;
+  state_.rank          = 0;
+  state_.subgroup_left = 0;
+}
+
+auto adc::dma_level() const -> bool
+{
+  auto const mode    = get(regs_, dma_mode_);
+  auto const enabled = mode == dma_circular or (mode == dma_one_shot and not state_.dma_stopped);
+  return enabled and not state_.data.empty() and get(regs_, overrun_) == 0;
+}
+
+void adc::signal()
+{
+  auto const level = std::ranges::any_of(interrupts_, [this](auto const& pair) {
+    return get(regs_, pair.first) != 0 and get(regs_, pair.second) != 0;
+  });
+  if(level)
+  {
+    line_.raise();
+  }
+  else
+  {
+    line_.lower();
+  }
+  request_.set(dma_level());
+}
+
+void adc::transfer_completed(std::uint32_t request)
+{
+  if(get(regs_, dma_mode_) != dma_one_shot or not request_.carries(request))
+  {
+    return;
+  }
+  state_.dma_stopped = true;
+  abort();
+  signal();
 }
 
 void adc::on_event(std::uint32_t kind, std::uint64_t payload)
 {
-  if(kind != conversion_end or payload != state_.generation or not state_.converting)
+  if(payload != state_.generation or not state_.converting)
   {
     return;
   }
-  finish();
+  if(kind == sampling_end)
+  {
+    update(regs_, end_of_sampling_, 1);
+    signal();
+    return;
+  }
+  if(kind == conversion_end)
+  {
+    finish();
+  }
 }
 
 void adc::on_clock_change()
 {
   if(state_.waiting_clock and ctx_.clock.hz(kernel_) != 0)
   {
-    schedule();
+    schedule(ctx_.clock.time().ps);
   }
 }
 
@@ -675,6 +995,18 @@ void adc::warn_once(bool& logged, std::string_view reg, std::string_view what)
     return;
   }
   warn(reg, std::format("{} not modelled", what));
+}
+
+void adc::forbidden(bool& logged, std::string_view name, std::string message)
+{
+  if(not std::exchange(logged, true))
+  {
+    warn(name, std::move(message));
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(desc_.name, std::string{name}, reg(name).offset);
+  }
 }
 
 void adc::unmodelled(bool& logged, std::string_view name, std::string_view what)

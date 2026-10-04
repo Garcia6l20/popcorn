@@ -4,6 +4,7 @@
 
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/model.hpp>
 
 #include <doctest/doctest.h>
 #include <reflex/serde/bson.hpp>
@@ -13,12 +14,15 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <format>
 #include <initializer_list>
 #include <iterator>
+#include <memory>
 #include <ostream>
 #include <ranges>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -1734,4 +1738,102 @@ TEST_CASE("TCEM 3 on a 2D channel raises HT only at the 2D half of the last item
           {'H', 24},
           {'T', 32}
   });
+}
+
+namespace
+{
+class requester_probe final : public popcorn::periph::model,
+                              public popcorn::periph::stm32::dma_requester
+{
+public:
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  void transfer_completed(std::uint32_t request) override
+  {
+    completed.push_back(request);
+  }
+
+  std::vector<std::uint32_t> completed;
+};
+
+auto probed_machine() -> stm32_fixture
+{
+  auto options          = popcorn::testing::stm32_options();
+  options.models["CRC"] = [](popcorn::periph::model_context&, popcorn::peripheral_desc const&)
+      -> std::shared_ptr<popcorn::periph::model> { return std::make_shared<requester_probe>(); };
+  stm32_fixture f{u575(), "rcc_ll", std::move(options)};
+  f.set("pc", sym("rcc_ll", "idle"));
+  return f;
+}
+
+auto probe(stm32_fixture const& f) -> requester_probe&
+{
+  auto* const found = dynamic_cast<requester_probe*>(f.target->model("CRC"));
+  REQUIRE(found != nullptr);
+  return *found;
+}
+}
+
+TEST_CASE("a finished hardware-requested channel tells each requester its REQSEL, once")
+{
+  auto f = probed_machine();
+  write(f, "GPDMA_C0TR1", bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", bit("GPDMA_C0TR2", "SWREQ"));
+  write(f, "GPDMA_C0BR1", 8);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  idle_for(f, std::chrono::microseconds{50});
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+  CHECK(probe(f).completed.empty());
+
+  write(f, "GPDMA_C0FCR", bit("GPDMA_C0FCR", "TCF"));
+  write(f, "GPDMA_C0TR2", paced_request * bit("GPDMA_C0TR2", "REQSEL"));
+  write(f, "GPDMA_C0BR1", 8);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  idle_for(f, std::chrono::microseconds{20});
+  CHECK(probe(f).completed.empty());
+  pace(f, true);
+  idle_for(f, std::chrono::microseconds{50});
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+  CHECK(probe(f).completed == std::vector<std::uint32_t>{paced_request});
+  idle_for(f, std::chrono::microseconds{50});
+  CHECK(probe(f).completed == std::vector<std::uint32_t>{paced_request});
 }

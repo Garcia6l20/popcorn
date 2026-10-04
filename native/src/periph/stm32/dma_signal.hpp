@@ -70,6 +70,15 @@ public:
     return controller_ != nullptr or resolve();
   }
 
+  /**
+   * @brief Whether @p request is this signal's request number on its controller.
+   * @param request Request number a controller reports.
+   */
+  [[nodiscard]] auto carries(std::uint32_t request) -> bool
+  {
+    return routed() and request_ == request;
+  }
+
 private:
   peer_directory const* peers_;
   std::string           signal_;

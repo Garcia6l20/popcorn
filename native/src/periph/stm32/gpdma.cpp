@@ -174,7 +174,8 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  *        RM0456 GPDMA_CxTR2.TCEM and 17.7. A channel enabled with BNDT 0 raises the complete
  *        transfer event once its first item is loaded when its TCEM before that load is 2, and
  *        no event under 0 and 1. A request level held by a requester across a machine reset is
- *        cleared: the requester announces it again on its next change.
+ *        cleared: the requester announces it again on its next change. A hardware-requested channel
+ *        that completes, its TC with LLR = 0, tells every `dma_requester` peer its REQSEL.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>, public dma_controller
 {
@@ -758,6 +759,18 @@ void gpdma::finish(std::size_t ch, flag_index flag)
   update(regs_, c.enable, 0);
   update(regs_, c.idle, 1);
   raise_flag(ch, flag);
+  if(flag != transfer_complete or get(regs_, c.software) != 0)
+  {
+    return;
+  }
+  auto const request = get(regs_, c.request);
+  for(auto* const peer : ctx_.peers.all())
+  {
+    if(auto* const requester = dynamic_cast<dma_requester*>(peer); requester != nullptr)
+    {
+      requester->transfer_completed(request);
+    }
+  }
 }
 
 void gpdma::raise_flag(std::size_t ch, flag_index flag)

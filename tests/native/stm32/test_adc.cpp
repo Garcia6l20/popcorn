@@ -12,8 +12,11 @@
 #include <reflex/serde/bson.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
+#include <ranges>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -202,7 +205,7 @@ struct adc_fixture : stm32_fixture
     write("ADC1", "ADC_SQR1", channel << 6);
     write("ADC1", "ADC_CR", advregen | adstart);
     settle();
-    return read("ADC_DR");
+    return cpu_read("ADC_DR");
   }
 };
 
@@ -332,25 +335,55 @@ TEST_CASE("a conversion sets EOC and EOS and clears ADSTART at its end, reading 
   CHECK(f.isr("EOS") == 1);
 }
 
-TEST_CASE("ADSTART converts nothing while ADC1 is disabled")
+TEST_CASE(
+    "an ADSTART write with ADEN 0 or ADDIS 1 is ignored and logs once, a model_error when "
+    "strict")
 {
-  adc_fixture const f;
-  f.write("ADC12", "ADC12_CCR", vrefen);
-  f.write("ADC1", "ADC_CR", advregen | adstart);
-  f.settle();
-  CHECK(f.isr("EOC") == 0);
-  CHECK(f.read("ADC_DR") == 0);
+  {
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    f.write("ADC12", "ADC12_CCR", vrefen);
+    f.write("ADC1", "ADC_CR", advregen | adstart);
+    CHECK(f.cr("ADSTART") == 0);
+    f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+    CHECK(f.cr("ADSTART") == 0);
+    CHECK(f.cr("ADEN") == 1);
+    f.settle();
+    CHECK(f.isr("EOC") == 0);
+    CHECK(f.read("ADC_DR") == 0);
+    f.write("ADC1", "ADC_CR", advregen | aden | addis | adstart);
+    CHECK(f.cr("ADSTART") == 0);
+    CHECK(f.cr("ADEN") == 0);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].reg == "ADC_CR");
+    CHECK(logged[0].message.contains("ADSTART"));
+    f.enable();
+    f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+    CHECK(f.cr("ADSTART") == 1);
+    f.settle();
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.read("ADC_DR") == vrefint_cal);
+    CHECK(logged.size() == 1);
+  }
+  adc_fixture const f{u575(), {}, true, true};
+  CHECK_THROWS_AS(
+      static_cast<void>(f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | adstart)),
+      popcorn::model_error);
+  CHECK(f.cr("ADSTART") == 0);
 }
 
 TEST_CASE("ADSTP clears ADSTART and itself")
 {
   adc_fixture const f;
-  f.write("ADC1", "ADC_CR", advregen | adstart);
+  f.enable();
+  f.write("ADC1", "ADC_SMPR1", 7u);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
   REQUIRE(f.cr("ADSTART") == 1);
-  f.write("ADC1", "ADC_CR", advregen | adstp);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
   CHECK(f.cr("ADSTP") == 0);
   CHECK(f.cr("ADSTART") == 0);
-  f.enable();
+  CHECK(f.cr("ADEN") == 1);
   f.write("ADC1", "ADC_CR", advregen | aden | adstp);
   CHECK(f.cr("ADSTP") == 0);
   CHECK(f.cr("ADSTART") == 0);
@@ -370,7 +403,7 @@ TEST_CASE("RES drops two bits of the 14-bit code per step")
   }
 }
 
-TEST_CASE("continuous mode and JADSTART each log one warning, JADSTART clears")
+TEST_CASE("JADSTART logs one warning and clears, continuous mode logs none")
 {
   adc_fixture const             f;
   std::vector<core::log_record> logged;
@@ -382,13 +415,12 @@ TEST_CASE("continuous mode and JADSTART each log one warning, JADSTART clears")
   f.write("ADC1", "ADC_CR", advregen | aden | jadstart);
   f.write("ADC1", "ADC_CR", advregen | aden | jadstart);
   CHECK(f.cr("JADSTART") == 0);
-  REQUIRE(logged.size() == 2);
-  CHECK(logged[0].reg == "ADC_CFGR1");
-  CHECK(logged[1].reg == "ADC_CR");
-  CHECK(logged[1].message.contains("JADSTART"));
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].reg == "ADC_CR");
+  CHECK(logged[0].message.contains("JADSTART"));
 }
 
-TEST_CASE("each unmodelled regular mode logs one warning and converts SQ1 once")
+TEST_CASE("CONT, DISCEN and SQR1.L log nothing, EXTEN logs one warning, SQ1 converts first")
 {
   struct setting
   {
@@ -412,7 +444,7 @@ TEST_CASE("each unmodelled regular mode logs one warning and converts SQ1 once")
     f.write("ADC1", "ADC_CR", advregen | adstart);
     f.settle();
     CHECK(f.read("ADC_DR") == vrefint_cal);
-    CHECK(logged.size() == 1);
+    CHECK(logged.size() == (value == 1u << 10 ? 1u : 0u));
   }
 }
 
@@ -849,4 +881,599 @@ TEST_CASE("a reserved PRESC divides by 256 and logs once, a model_error when str
       static_cast<void>(
           f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
       popcorn::model_error);
+}
+
+namespace
+{
+constexpr std::uint32_t    res12          = 1u << 2;
+constexpr std::uint32_t    ovrmod         = 1u << 12;
+constexpr std::uint32_t    discen         = 1u << 16;
+constexpr std::uint32_t    dmngt_oneshot  = 1u;
+constexpr std::uint32_t    dmngt_mdf      = 2u;
+constexpr std::uint32_t    dmngt_circular = 3u;
+constexpr std::uint32_t    eosmp          = 1u << 1;
+constexpr std::uint32_t    ovr            = 1u << 4;
+constexpr std::uint32_t    eosmpie        = 1u << 1;
+constexpr std::uint32_t    eosie          = 1u << 3;
+constexpr std::uint32_t    ovrie          = 1u << 4;
+constexpr std::uint64_t    adc_cycle_ps   = 62'500;
+constexpr std::uint32_t    adc1_irq       = 37;
+constexpr std::uint32_t    dma_enable     = 1u << 0;
+constexpr std::uint32_t    dma_suspend    = 1u << 2;
+constexpr std::uint32_t    dma_word_copy  = 0x400A'0002;
+constexpr std::uint32_t    self_link      = 0x3801'0000;
+constexpr popcorn::address buffer         = 0x2001'1000;
+constexpr popcorn::address node_0         = 0x2001'2000;
+constexpr popcorn::address node_1         = 0x2001'2020;
+
+constexpr std::array<std::uint32_t, 10> scan_channels{2, 3, 4, 5, 6, 14, 15, 16, 19, 0};
+constexpr std::array<std::uint64_t, 10> scan_eoc_cycles{408,  816,  1224, 1888,  2296,
+                                                        2704, 3112, 3520, 10152, 16784};
+
+[[nodiscard]] constexpr auto scan_input_uv(std::uint32_t channel, std::uint32_t round = 0)
+    -> std::uint32_t
+{
+  return channel * 100'000 + round * 10'000;
+}
+
+[[nodiscard]] constexpr auto scan_code(std::size_t rank, std::uint32_t round = 0) -> std::uint32_t
+{
+  auto const channel = scan_channels[rank];
+  if(channel == 19)
+  {
+    return ts_cal1 >> 2;
+  }
+  if(channel == 0)
+  {
+    return vrefint_cal >> 2;
+  }
+  return static_cast<std::uint32_t>(
+             std::uint64_t{scan_input_uv(channel, round)} * 16384 / 3'000'000)
+      >> 2;
+}
+
+[[nodiscard]] constexpr auto scan_eoc(std::size_t rank) -> std::uint64_t
+{
+  return scan_eoc_cycles[rank] * adc_cycle_ps;
+}
+
+constexpr std::uint64_t scan_ps = 16784 * adc_cycle_ps;
+
+void drive_scan_inputs(adc_fixture const& f, std::uint32_t round = 0)
+{
+  for(auto const channel : scan_channels)
+  {
+    if(channel >= 1 and channel <= 17)
+    {
+      f.port().drive(static_cast<std::uint8_t>(channel), scan_input_uv(channel, round));
+    }
+  }
+}
+
+void downstream_scan(adc_fixture const& f, std::uint32_t cfgr1)
+{
+  drive_scan_inputs(f);
+  f.write("ADC12", "ADC12_CCR", vrefen | vsensesel);
+  f.enable();
+  f.write(
+      "ADC1", "ADC_SMPR1",
+      (7u << 0) | (4u << 6) | (4u << 9) | (4u << 12) | (5u << 15) | (4u << 18));
+  f.write("ADC1", "ADC_SMPR2", (4u << 12) | (4u << 15) | (4u << 18) | (7u << 27));
+  f.write("ADC1", "ADC_SQR1", 9u | (2u << 6) | (3u << 12) | (4u << 18) | (5u << 24));
+  f.write("ADC1", "ADC_SQR2", 6u | (14u << 6) | (15u << 12) | (16u << 18) | (19u << 24));
+  f.write("ADC1", "ADC_SQR3", 0u);
+  f.write("ADC1", "ADC_CFGR1", res12 | cfgr1);
+  f.write("ADC1", "ADC_CFGR2", (7u << 16) | (3u << 5) | 1u);
+}
+
+auto start_scan(adc_fixture const& f) -> std::uint64_t
+{
+  auto const start = f.now();
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  return start;
+}
+
+auto pending(adc_fixture const& f) -> bool
+{
+  auto const word = f.target->mem().read(0xe000'e200u + 4 * (adc1_irq / 32), 4);
+  REQUIRE(word.has_value());
+  return (*word >> (adc1_irq % 32) & 1u) != 0;
+}
+
+void unpend(adc_fixture const& f)
+{
+  REQUIRE(f.target->mem().write(0xe000'e280u + 4 * (adc1_irq / 32), 4, 1u << (adc1_irq % 32)));
+}
+
+auto buffer_words(adc_fixture const& f, std::size_t count) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::size_t index = 0; index < count; ++index)
+  {
+    auto const word = f.target->mem().read(buffer + 4 * index, 4);
+    REQUIRE(word.has_value());
+    out.push_back(static_cast<std::uint32_t>(*word));
+  }
+  return out;
+}
+
+void downstream_dma(adc_fixture const& f)
+{
+  auto const source = static_cast<std::uint32_t>(f.at("ADC1", "ADC_DR"));
+  auto const place  = [&](popcorn::address at, std::initializer_list<std::uint32_t> words) {
+    for(auto const [index, word] : std::views::enumerate(words))
+    {
+      REQUIRE(f.target->mem().write(at + 4 * static_cast<std::uint32_t>(index), 4, word));
+    }
+  };
+  place(
+      node_0, {dma_word_copy, 0x8000'0000, 40, source, static_cast<std::uint32_t>(buffer),
+               self_link | (node_1 & 0xfffcu)});
+  place(node_1, {40, source, static_cast<std::uint32_t>(buffer), self_link | (node_1 & 0xfffcu)});
+  f.write("GPDMA1", "GPDMA_C1TR1", dma_word_copy);
+  f.write("GPDMA1", "GPDMA_C1TR2", 0x4000'0000);
+  f.write("GPDMA1", "GPDMA_C1BR1", 0);
+  f.write("GPDMA1", "GPDMA_C1LBAR", node_0 & 0xffff'0000u);
+  f.write("GPDMA1", "GPDMA_C1LLR", 0xF801'0000 | (node_0 & 0xfffcu));
+  f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+}
+
+void single_dma(adc_fixture const& f, std::uint32_t bytes, std::uint32_t control = dma_enable)
+{
+  f.write("GPDMA1", "GPDMA_C1TR1", dma_word_copy);
+  f.write("GPDMA1", "GPDMA_C1TR2", 0);
+  f.write("GPDMA1", "GPDMA_C1BR1", bytes);
+  f.write("GPDMA1", "GPDMA_C1SAR", static_cast<std::uint32_t>(f.at("ADC1", "ADC_DR")));
+  f.write("GPDMA1", "GPDMA_C1DAR", static_cast<std::uint32_t>(buffer));
+  f.write("GPDMA1", "GPDMA_C1LLR", 0);
+  f.write("GPDMA1", "GPDMA_C1CR", control);
+}
+
+auto dma_flag(adc_fixture const& f, std::string_view name) -> std::uint32_t
+{
+  return f.field("GPDMA1", "GPDMA_C1SR", name);
+}
+
+void clear_dma_flags(adc_fixture const& f)
+{
+  f.write("GPDMA1", "GPDMA_C1FCR", (1u << 8) | (1u << 9));
+}
+
+auto scan_codes(std::size_t first, std::size_t count, std::uint32_t round = 0)
+    -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::size_t rank = first; rank < first + count; ++rank)
+  {
+    out.push_back(scan_code(rank % scan_channels.size(), round));
+  }
+  return out;
+}
+
+struct step03_adc_state
+{
+  std::array<std::uint32_t, 20> input_uv{};
+  std::uint32_t                 generation{};
+  std::uint64_t                 start_ps{};
+  std::uint64_t                 clock_hz{};
+  std::uint32_t                 divider{};
+  std::uint32_t                 held{};
+  std::uint32_t                 sum{};
+  bool                          converting{};
+  bool                          waiting_clock{};
+};
+
+struct step04_adc_state
+{
+  std::array<std::uint32_t, 20> input_uv{};
+  std::uint32_t                 generation{};
+  std::uint64_t                 start_ps{};
+  std::uint64_t                 clock_hz{};
+  std::uint32_t                 divider{};
+  std::uint32_t                 held{};
+  std::uint32_t                 sum{};
+  bool                          converting{};
+  bool                          waiting_clock{};
+  std::uint8_t                  rank{};
+  std::uint8_t                  subgroup_left{};
+  std::vector<std::uint32_t>    data;
+  bool                          dma_stopped{};
+};
+}
+
+TEST_CASE("the ten-rank scan ends each rank N x (SMP + TSAR) after the last, EOS with the tenth")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod);
+  auto const start = start_scan(f);
+  for(std::size_t rank = 0; rank < scan_channels.size(); ++rank)
+  {
+    CAPTURE(rank);
+    f.run_until(start + scan_eoc(rank) - us);
+    CHECK(f.isr("EOC") == 0);
+    CHECK(f.isr("EOS") == 0);
+    CHECK(f.cr("ADSTART") == 1);
+    f.run_until(start + scan_eoc(rank));
+    CHECK(f.isr("EOC") == 1);
+    CHECK(f.isr("EOS") == (rank == 9 ? 1u : 0u));
+    CHECK(f.cpu_read("ADC_DR") == scan_code(rank));
+  }
+  CHECK(f.cr("ADSTART") == 0);
+  CHECK(scan_ps == 1'049 * us);
+  f.run_until(start + 3 * scan_ps);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.isr("OVR") == 0);
+}
+
+TEST_CASE("CONT repeats the scan back to back, ADSTP stops it, the next ADSTART begins at rank 0")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | cont);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_ps + scan_eoc(0));
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.cr("ADSTART") == 1);
+  CHECK(f.read("ADC_DR") == scan_code(0));
+  f.run_until(start + scan_ps + scan_eoc(3));
+  CHECK(f.read("ADC_DR") == scan_code(3));
+  f.run_until(start + scan_ps + scan_eoc(3) + 100 * adc_cycle_ps);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  CHECK(f.cr("ADSTART") == 0);
+  static_cast<void>(f.cpu_read("ADC_DR"));
+  f.write("ADC1", "ADC_ISR", ovr);
+  f.run_until(f.now() + 2 * scan_ps);
+  CHECK(f.isr("EOC") == 0);
+  auto const again = start_scan(f);
+  f.run_until(again + scan_eoc(0) - us);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(again + scan_eoc(0));
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.cpu_read("ADC_DR") == scan_code(0));
+}
+
+TEST_CASE(
+    "DISCEN converts DISCNUM + 1 ranks per ADSTART, ADSTART clears at the subgroup's last EOC")
+{
+  adc_fixture const f;
+  downstream_scan(f, discen | (2u << 17));
+  std::vector<std::vector<std::uint32_t>> converted;
+  for(std::size_t trigger = 0; trigger < 5; ++trigger)
+  {
+    CAPTURE(trigger);
+    auto const start = start_scan(f);
+    if(trigger == 0)
+    {
+      f.run_until(start + scan_eoc(0));
+      CHECK(f.isr("EOC") == 1);
+      CHECK(f.cr("ADSTART") == 1);
+      f.run_until(start + scan_eoc(1));
+      CHECK(f.cr("ADSTART") == 1);
+      f.run_until(start + scan_eoc(2) - us);
+      CHECK(f.cr("ADSTART") == 1);
+      f.run_until(start + scan_eoc(2));
+      CHECK(f.cr("ADSTART") == 0);
+    }
+    f.run_until(start + scan_ps);
+    CHECK(f.cr("ADSTART") == 0);
+    CHECK(f.isr("EOS") == (trigger == 3 ? 1u : 0u));
+    f.write("ADC1", "ADC_ISR", 1u << 3);
+    std::vector<std::uint32_t> results;
+    while(f.isr("EOC") != 0)
+    {
+      results.push_back(f.cpu_read("ADC_DR"));
+    }
+    converted.push_back(results);
+  }
+  CHECK(
+      converted
+      == std::vector<std::vector<std::uint32_t>>{
+          scan_codes(0, 3), scan_codes(3, 3), scan_codes(6, 3), scan_codes(9, 1),
+          scan_codes(0, 3)});
+}
+
+TEST_CASE("OVRMOD 1 sets OVR at an EOC over an unread one, ADC_DR holds the latest")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(0));
+  CHECK(f.isr("OVR") == 0);
+  CHECK(f.read("ADC_DR") == scan_code(0));
+  f.run_until(start + scan_eoc(1));
+  CHECK(f.isr("OVR") == 1);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.read("ADC_DR") == scan_code(1));
+  f.run_until(start + scan_eoc(2));
+  CHECK(f.read("ADC_DR") == scan_code(2));
+  CHECK(f.cpu_read("ADC_DR") == scan_code(2));
+  CHECK(f.isr("EOC") == 0);
+}
+
+TEST_CASE("OVRMOD 0 keeps eight results, discards while OVR stays set, lands again once cleared")
+{
+  adc_fixture const f;
+  downstream_scan(f, cont);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(7));
+  CHECK(f.isr("OVR") == 0);
+  f.run_until(start + scan_eoc(8));
+  CHECK(f.isr("OVR") == 1);
+  CHECK(f.read("ADC_DR") == scan_code(0));
+  CHECK(f.cpu_read("ADC_DR") == scan_code(0));
+  CHECK(f.read("ADC_DR") == scan_code(1));
+  f.run_until(start + scan_ps + scan_eoc(1));
+  CHECK(f.isr("OVR") == 1);
+  std::vector<std::uint32_t> drained;
+  while(f.isr("EOC") != 0)
+  {
+    drained.push_back(f.cpu_read("ADC_DR"));
+  }
+  CHECK(drained == scan_codes(1, 7));
+  f.write("ADC1", "ADC_ISR", ovr);
+  f.run_until(start + scan_ps + scan_eoc(2));
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.isr("OVR") == 0);
+  CHECK(f.cpu_read("ADC_DR") == scan_code(2));
+}
+
+TEST_CASE("EOSMP sets at the end of each sampling phase, again after a clear")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_SMPR1", 7u << 15);
+  f.write("ADC1", "ADC_CFGR2", (1u << 16) | (1u << 5) | 1u);
+  f.write("ADC1", "ADC_IER", eosmpie);
+  auto const start = f.now();
+  f.start(5);
+  f.run_until(start + 814 * adc_cycle_ps - us);
+  CHECK(f.isr("EOSMP") == 0);
+  CHECK_FALSE(pending(f));
+  f.run_until(start + 814 * adc_cycle_ps);
+  CHECK(f.isr("EOSMP") == 1);
+  CHECK(pending(f));
+  f.run_until(start + 831 * adc_cycle_ps);
+  f.write("ADC1", "ADC_ISR", eosmp);
+  unpend(f);
+  CHECK_FALSE(pending(f));
+  f.run_until(start + (831 + 814) * adc_cycle_ps - us);
+  CHECK(f.isr("EOSMP") == 0);
+  f.run_until(start + (831 + 814) * adc_cycle_ps);
+  CHECK(f.isr("EOSMP") == 1);
+  CHECK(pending(f));
+  f.run_until(start + 2 * 831 * adc_cycle_ps);
+  CHECK(f.read("ADC_DR") == 5461);
+}
+
+TEST_CASE("ADC1_IRQn follows each enabled flag: OVRIE at the overrun, EOSIE at the end of scan")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod);
+  f.write("ADC1", "ADC_IER", ovrie);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(0));
+  CHECK_FALSE(pending(f));
+  f.run_until(start + scan_eoc(1));
+  CHECK(pending(f));
+  f.write("ADC1", "ADC_ISR", ovr);
+  unpend(f);
+  f.run_until(f.now() + us);
+  CHECK_FALSE(pending(f));
+  f.write("ADC1", "ADC_IER", eosie);
+  f.run_until(start + scan_eoc(9) - us);
+  CHECK(f.isr("OVR") == 1);
+  CHECK_FALSE(pending(f));
+  f.run_until(start + scan_eoc(9));
+  CHECK(pending(f));
+  f.write("ADC1", "ADC_ISR", 1u << 3);
+  unpend(f);
+  f.run_until(f.now() + us);
+  CHECK_FALSE(pending(f));
+}
+
+TEST_CASE("DMNGT 10 logs one warning, requests nothing, ADC_DR keeps the result")
+{
+  adc_fixture const             f;
+  std::vector<core::log_record> logged;
+  auto const                    sink = recorder(f, logged);
+  downstream_scan(f, ovrmod | dmngt_mdf);
+  single_dma(f, 8);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_ps + 10 * us);
+  CHECK(f.read("ADC_DR") == scan_code(9));
+  CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 8);
+  start_scan(f);
+  f.run_until(f.now() + scan_ps + 10 * us);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].reg == "ADC_CFGR1");
+  CHECK(logged[0].message.contains("DMNGT"));
+}
+
+TEST_CASE("DMNGT 11 feeds the downstream circular list: TC per scan, HT after five words")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_circular);
+  downstream_dma(f);
+  for(std::uint32_t round = 0; round < 3; ++round)
+  {
+    CAPTURE(round);
+    drive_scan_inputs(f, round);
+    auto const start = start_scan(f);
+    f.run_until(start + scan_eoc(4) - us);
+    CHECK(dma_flag(f, "HTF") == 0);
+    f.run_until(start + scan_eoc(4) + 2 * us);
+    CHECK(dma_flag(f, "HTF") == 1);
+    CHECK(dma_flag(f, "TCF") == 0);
+    f.run_until(start + scan_eoc(9) + 2 * us);
+    CHECK(dma_flag(f, "TCF") == 1);
+    CHECK(buffer_words(f, 10) == scan_codes(0, 10, round));
+    CHECK(f.isr("OVR") == 0);
+    CHECK(f.isr("EOC") == 0);
+    clear_dma_flags(f);
+  }
+  CHECK(f.field("GPDMA1", "GPDMA_C1CR", "EN") == 1);
+}
+
+TEST_CASE("an overrun blocks the DMA requests until OVR is cleared, then the latest result moves")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_circular);
+  single_dma(f, 40, dma_enable | dma_suspend);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(1));
+  CHECK(f.isr("OVR") == 1);
+  f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+  f.run_until(f.now() + 5 * us);
+  CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 40);
+  f.write("ADC1", "ADC_ISR", ovr);
+  f.run_until(f.now() + 5 * us);
+  CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 36);
+  CHECK(buffer_words(f, 2) == std::vector<std::uint32_t>{scan_code(1), 0});
+  f.run_until(start + scan_eoc(2) + 2 * us);
+  CHECK(buffer_words(f, 2) == scan_codes(1, 2));
+}
+
+TEST_CASE("DMNGT 01 stops at the channel's last transfer until an ADSTART 0 to 1 write")
+{
+  adc_fixture const f;
+  downstream_scan(f, ovrmod | dmngt_oneshot);
+  single_dma(f, 20);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(4) + 2 * us);
+  CHECK(dma_flag(f, "TCF") == 1);
+  CHECK(f.field("GPDMA1", "GPDMA_C1CR", "EN") == 0);
+  CHECK(
+      buffer_words(f, 6)
+      == std::vector<std::uint32_t>{
+          scan_code(0), scan_code(1), scan_code(2), scan_code(3), scan_code(4), 0});
+  f.run_until(start + 2 * scan_ps);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(f.isr("EOS") == 0);
+  CHECK(f.cr("ADSTART") == 1);
+  CHECK(f.read("ADC_DR") == scan_code(4));
+
+  clear_dma_flags(f);
+  f.write("GPDMA1", "GPDMA_C1BR1", 20);
+  f.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+  f.write("ADC1", "ADC_CR", advregen | aden);
+  f.run_until(f.now() + scan_ps);
+  CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 20);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  f.run_until(f.now() + scan_ps);
+  CHECK(f.field("GPDMA1", "GPDMA_C1BR1", "BNDT") == 20);
+  auto const again = start_scan(f);
+  f.run_until(again + scan_eoc(4) + 2 * us);
+  CHECK(dma_flag(f, "TCF") == 1);
+  auto const words = buffer_words(f, 11);
+  CHECK(
+      std::vector<std::uint32_t>(words.begin() + 5, words.end())
+      == std::vector<std::uint32_t>{
+          scan_code(0), scan_code(1), scan_code(2), scan_code(3), scan_code(4), 0});
+}
+
+TEST_CASE("a snapshot mid-scan with two results queued for the DMA resumes to the same buffer")
+{
+  adc_fixture const f;
+  downstream_scan(f, dmngt_circular);
+  downstream_dma(f);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(3) + 2 * us);
+  f.write("GPDMA1", "GPDMA_C1CR", dma_enable | dma_suspend);
+  f.run_until(start + scan_eoc(5) + 100 * adc_cycle_ps);
+  CHECK(
+      buffer_words(f, 6)
+      == std::vector<std::uint32_t>{scan_code(0), scan_code(1), scan_code(2), scan_code(3), 0, 0});
+  CHECK(f.isr("EOC") == 1);
+  auto const saved = f.target->snapshot();
+
+  auto const finish = [&](adc_fixture const& g) {
+    g.write("GPDMA1", "GPDMA_C1CR", dma_enable);
+    g.run_until(start + scan_eoc(9) + 2 * us);
+    CHECK(buffer_words(g, 10) == scan_codes(0, 10));
+    CHECK(g.isr("EOS") == 1);
+    CHECK(g.isr("OVR") == 0);
+    CHECK(g.field("GPDMA1", "GPDMA_C1SR", "TCF") == 1);
+  };
+  finish(f);
+  f.target->restore(saved);
+  finish(f);
+  adc_fixture const other;
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  finish(other);
+}
+
+TEST_CASE("an ADC state saved before the sequence loads mid-conversion as rank 0, the scan goes on")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.port().drive(6, 2'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_SQR1", 1u | (5u << 6) | (6u << 12));
+  auto const start = f.now();
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  f.run_until(start + 22 * adc_cycle_ps);
+  REQUIRE(f.cpu_read("ADC_DR") == 5461);
+  f.run_until(start + 33 * adc_cycle_ps);
+  std::vector<std::byte> current;
+  f.target->model("ADC1")->save(current);
+  auto const now = reflex::serde::bson::deserializer{
+      std::span<std::byte const>{
+          current}}.load<step04_adc_state>();
+  REQUIRE(now.converting);
+  REQUIRE(now.rank == 1);
+  step03_adc_state const old{
+      .input_uv      = now.input_uv,
+      .generation    = now.generation,
+      .start_ps      = now.start_ps,
+      .clock_hz      = now.clock_hz,
+      .divider       = now.divider,
+      .held          = now.held,
+      .sum           = now.sum,
+      .converting    = now.converting,
+      .waiting_clock = now.waiting_clock};
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(old);
+  f.target->model("ADC1")->load(bytes);
+  f.run_until(start + 44 * adc_cycle_ps);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.isr("EOS") == 0);
+  CHECK(f.cpu_read("ADC_DR") == 5461);
+  f.run_until(start + 66 * adc_cycle_ps);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.isr("EOS") == 1);
+  CHECK(f.cpu_read("ADC_DR") == 10922);
+  CHECK(f.cr("ADSTART") == 0);
+}
+
+TEST_CASE("DISCEN with CONT converts as DISCEN alone and logs once, a model_error when strict")
+{
+  {
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    downstream_scan(f, discen | cont | (1u << 17));
+    for(std::size_t trigger = 0; trigger < 2; ++trigger)
+    {
+      CAPTURE(trigger);
+      auto const start = start_scan(f);
+      f.run_until(start + scan_ps);
+      CHECK(f.cr("ADSTART") == 0);
+      std::vector<std::uint32_t> results;
+      while(f.isr("EOC") != 0)
+      {
+        results.push_back(f.cpu_read("ADC_DR"));
+      }
+      CHECK(results == scan_codes(2 * trigger, 2));
+    }
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].reg == "ADC_CFGR1");
+    CHECK(logged[0].message.contains("DISCEN"));
+  }
+  adc_fixture const f{u575(), {}, true, true};
+  downstream_scan(f, discen | cont);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
+      popcorn::model_error);
+  CHECK(f.cr("ADSTART") == 0);
 }
