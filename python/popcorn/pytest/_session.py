@@ -541,3 +541,10 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
             f"popcorn: {dropped} unreadable boot cache entr{'y' if dropped == 1 else 'ies'} "
             "dropped and booted again"
         )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Drop the plugin state so its machines die before interpreter teardown."""
+    if SESSION in config.stash:
+        del config.stash[SESSION]
