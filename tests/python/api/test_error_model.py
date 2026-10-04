@@ -10,12 +10,15 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn.board import UsbHost, UsbHostOptions
+from popcorn.units import ms, s
 
 from .conftest import DRIVER_ELF, M33_JSON, ROOT, Machines
 from .models_example import Timer
 
 MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
+USB_ELF = ROOT / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
 ENGINE_TEXT = re.compile(r"\bUC_ERR|\buc_[a-z_]+\(|unicorn", re.IGNORECASE)
 
 
@@ -138,6 +141,40 @@ def second_run(_: Path, machines: Machines) -> object:
     return asyncio.run(body())
 
 
+def usb_host(attached: bool) -> UsbHost:
+    from popcorn.stm32 import mcu
+
+    m = popcorn.Machine(
+        mcu("STM32U575QGIx"),
+        image=popcorn.Image.elf(USB_ELF),
+        usb={"OTG_FS": UsbHostOptions(attached=attached)},
+    )
+    m.reset()
+    return m.periph.OTG_FS.host
+
+
+def usb_stall(_: Path, __: Machines) -> object:
+    host = usb_host(True)
+
+    async def body() -> bytes:
+        await host.wait_configured(for_=s(2))
+        return await host.control(0x83, 0, 0, 0, 2)
+
+    return asyncio.run(body())
+
+
+def usb_not_configured(_: Path, __: Machines) -> object:
+    return asyncio.run(usb_host(False).wait_configured(for_=ms(10)))
+
+
+def usb_no_device(_: Path, __: Machines) -> object:
+    return asyncio.run(usb_host(False).control(0x80, 6, 0x0100, 0, 18))
+
+
+def _usb(status: str) -> Callable[[popcorn.PopcornError], bool]:
+    return lambda e: isinstance(e, popcorn.UsbError) and e.status == status
+
+
 def _config(key: str) -> Callable[[popcorn.PopcornError], bool]:
     return lambda e: isinstance(e, popcorn.ConfigError) and key in e.key
 
@@ -193,6 +230,9 @@ CASES = [
     Case("garbage snapshot", garbage_snapshot, popcorn.ConfigError, lambda e: bool(e.args)),
     Case("state while running", state_while_running, popcorn.MachineRunning, lambda e: True),
     Case("second run", second_run, popcorn.MachineBusy, lambda e: True),
+    Case("usb stall", usb_stall, popcorn.UsbStall, _usb("stalled")),
+    Case("usb not configured", usb_not_configured, popcorn.UsbTimeout, _usb("DETACHED")),
+    Case("usb no device", usb_no_device, popcorn.UsbError, _usb("cancelled")),
 ]
 
 

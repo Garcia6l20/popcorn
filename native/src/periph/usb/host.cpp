@@ -1496,7 +1496,7 @@ void host::load(std::span<std::byte const> in)
   auto& impl = *impl_;
   if(in.empty())
   {
-    impl.detach(0);
+    impl.detach(impl.port.now().ps);
     impl.results.clear();
     return;
   }

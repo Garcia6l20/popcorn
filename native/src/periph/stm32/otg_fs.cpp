@@ -2,7 +2,9 @@
 #include "model_base.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/stm32/usb.hpp>
 #include <popcorn/periph/usb.hpp>
+#include <popcorn/periph/usb_host.hpp>
 
 #include <algorithm>
 #include <array>
@@ -26,9 +28,11 @@ constexpr std::size_t   endpoints        = 6;
 constexpr std::uint32_t enumeration_done = 0;
 constexpr std::uint32_t periodic_end     = 1;
 constexpr std::uint32_t host_wake        = 2;
+constexpr std::uint32_t idle_suspend     = 3;
 constexpr std::uint64_t ps_per_us        = 1'000'000;
 constexpr std::uint64_t enumeration_ps   = 10 * ps_per_us;
 constexpr std::uint64_t frame_ps         = 1000 * ps_per_us;
+constexpr std::uint64_t idle_ps          = 3 * frame_ps;
 constexpr std::uint32_t all_tx_fifos     = 0x10;
 constexpr std::uint32_t full_speed_48mhz = 3;
 constexpr std::uint32_t endpoint_stride  = 0x20;
@@ -81,7 +85,7 @@ struct endpoint_state
 
 struct otg_fs_state
 {
-  std::array<std::uint32_t, 3>                      generation{};
+  std::array<std::uint32_t, 4>                      generation{};
   std::vector<rx_packet>                            rx_fifo;
   std::vector<std::uint32_t>                        rx_data;
   std::array<std::vector<std::uint32_t>, endpoints> tx_fifo{};
@@ -95,6 +99,7 @@ struct otg_fs_state
   bool                                              address_pending{};
   bool                                              b_valid{};
   bool                                              pulled_up{};
+  bool                                              cable{};
   bool                                              suspended{};
 
   friend auto operator==(otg_fs_state const&, otg_fs_state const&) -> bool = default;
@@ -222,7 +227,13 @@ struct out_fields
  * PKTCNT decrements per packet sent, XFRC and the end of the transfer follow it reaching 0.
  *
  * Host: wake-ups the host asks for are model events. The host's bytes are saved in the model
- * state, and after a load the host hears of a pull-up that differs from the saved one.
+ * state, and after a load the host hears of a pull-up that differs from the saved one. A board
+ * host, built from the board's usb_hosts, is owned by the model and reached through
+ * usb_host_port: its cable is model state, plugged at power-on as the board says, kept across
+ * other resets. A host given to attach() replaces it until the next plug(), and is not saved.
+ * Unplugging a device that pulls D+ up leaves the bus idle, as B-valid stays forced: 3 ms later
+ * the device suspends as suspend() does, ESUSP, USBSUSP and DSTS.SUSPSTS. Plugging back cancels
+ * a suspend still pending, and the host's bus reset ends one already taken.
  *
  * Isochronous endpoints, EPTYP 1 on EP1-5: SEVNFRM and SODDFRM pick the frame parity the
  * transfer runs in, EONUM reads it back, compared with the frame of the last SOF. Data are
@@ -252,10 +263,12 @@ struct out_fields
  * battery charging detection, test modes, a TX FIFO numbered other than its endpoint. DMA and LPM
  * are not modelled either.
  */
-class otg_fs final : public dispatch_model<otg_fs, otg_fs_state>, public usb::device_port
+class otg_fs final : public dispatch_model<otg_fs, otg_fs_state>,
+                     public usb::device_port,
+                     public usb_host_port
 {
 public:
-  otg_fs(model_context& ctx, peripheral_desc const& desc);
+  otg_fs(model_context& ctx, peripheral_desc const& desc, std::optional<usb_host_options> wired);
 
   void reset(register_file& regs, reset_kind kind) override;
   void save(std::vector<std::byte>& out) const override;
@@ -286,6 +299,11 @@ public:
   void suspend(vtime at) override;
   void resume(vtime at) override;
   void wake_at(vtime at) override;
+  [[nodiscard]] auto now() const -> vtime override;
+
+  [[nodiscard]] auto board_host() -> usb::host* override;
+  [[nodiscard]] auto plugged() const -> bool override;
+  void               plug(bool attached) override;
 
   void plain_written(std::uint32_t old, std::uint32_t now);
   void refresh_written(std::uint32_t old, std::uint32_t now);
@@ -307,7 +325,6 @@ private:
   [[nodiscard]] auto out_fields_of(std::size_t n) const -> out_fields;
   [[nodiscard]] auto b_valid() const -> bool;
   [[nodiscard]] auto on_bus(std::uint8_t address) const -> bool;
-  [[nodiscard]] auto now() const -> vtime;
   [[nodiscard]] auto rx_used() const -> std::size_t;
   [[nodiscard]] auto tx_depth(std::size_t n) const -> std::size_t;
   [[nodiscard]] auto in_packet_size(std::size_t n) const -> std::uint32_t;
@@ -334,9 +351,13 @@ private:
   void               schedule(std::uint32_t kind, std::uint64_t at_ps);
   void               unmodelled(std::string_view name, std::string message, warning kind);
   void               notice(std::string_view name, std::string message, warning kind);
+  void               select_host();
+  void               enter_suspend();
 
   register_file&                    regs_;
   std::shared_ptr<usb::host_side>   host_;
+  std::shared_ptr<usb::host>        board_host_;
+  bool                              plugged_at_power_on_{};
   irq_line&                         line_;
   std::array<in_fields, endpoints>  in_;
   std::array<out_fields, endpoints> out_;
@@ -482,7 +503,10 @@ constexpr std::array<write_entry<otg_fs>, 73> otg_fs_writes{
      }
 };
 
-otg_fs::otg_fs(model_context& ctx, peripheral_desc const& desc)
+otg_fs::otg_fs(
+    model_context&                  ctx,
+    peripheral_desc const&          desc,
+    std::optional<usb_host_options> wired)
     : dispatch_model{ctx, desc, "OTG_FS", otg_fs_writes}, regs_{ctx.regs},
       line_{irq("OTG_FS_IRQn")}, in_{[this]<std::size_t... n>(std::index_sequence<n...>) {
         return std::array<in_fields, endpoints>{in_fields_of(n)...};
@@ -529,6 +553,22 @@ otg_fs::otg_fs(model_context& ctx, peripheral_desc const& desc)
   {
     clear_on_one_ |= field("GINTSTS", name).mask();
   }
+  if(wired)
+  {
+    if(not wired->host.warn)
+    {
+      wired->host.warn = [this](std::string const& message) { warn("host", message); };
+    }
+    board_host_          = std::make_shared<usb::host>(*this, std::move(wired->host));
+    plugged_at_power_on_ = wired->attached;
+    state_.cable         = wired->attached;
+    select_host();
+  }
+}
+
+void otg_fs::select_host()
+{
+  host_ = state_.cable ? board_host_ : nullptr;
 }
 
 auto otg_fs::in_fields_of(std::size_t n) const -> in_fields
@@ -589,7 +629,7 @@ auto otg_fs::out_fields_of(std::size_t n) const -> out_fields
   };
 }
 
-void otg_fs::reset(register_file& regs, reset_kind)
+void otg_fs::reset(register_file& regs, reset_kind kind)
 {
   for(auto const& name : claims())
   {
@@ -597,6 +637,7 @@ void otg_fs::reset(register_file& regs, reset_kind)
   }
   auto const generation = state_.generation;
   auto const pulled     = state_.pulled_up;
+  auto const cable      = state_.cable;
   state_                = {};
   state_.generation     = generation;
   for(auto& count : state_.generation)
@@ -604,6 +645,11 @@ void otg_fs::reset(register_file& regs, reset_kind)
     ++count;
   }
   state_.pulled_up = pulled;
+  state_.cable     = cable;
+  if(board_host_ and kind == reset_kind::power_on and cable != plugged_at_power_on_)
+  {
+    plug(plugged_at_power_on_);
+  }
   link(false);
   refresh();
 }
@@ -1195,6 +1241,13 @@ void otg_fs::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     end_periodic_frame();
   }
+  else if(kind == idle_suspend)
+  {
+    if(not state_.cable)
+    {
+      enter_suspend();
+    }
+  }
   else if(host_)
   {
     host_->on_time(vtime{state_.wake_ps});
@@ -1213,7 +1266,7 @@ void otg_fs::save(std::vector<std::byte>& out) const
 {
   auto saved = state_;
   saved.host.clear();
-  if(host_)
+  if(board_host_ ? host_ == board_host_ : host_ != nullptr)
   {
     host_->save(saved.host);
   }
@@ -1224,7 +1277,13 @@ void otg_fs::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
   auto const blob = std::exchange(state_.host, {});
-  if(host_)
+  if(board_host_)
+  {
+    select_host();
+    board_host_->load(
+        state_.cable ? std::span<std::byte const>{blob} : std::span<std::byte const>{});
+  }
+  else if(host_)
   {
     host_->load(blob);
   }
@@ -1235,6 +1294,38 @@ void otg_fs::attach(std::shared_ptr<usb::host_side> host)
 {
   host_ = std::move(host);
   link(true);
+  refresh();
+}
+
+auto otg_fs::board_host() -> usb::host*
+{
+  return board_host_.get();
+}
+
+auto otg_fs::plugged() const -> bool
+{
+  return board_host_ != nullptr and state_.cable;
+}
+
+void otg_fs::plug(bool attached)
+{
+  if(not board_host_)
+  {
+    return;
+  }
+  auto const was_up = state_.pulled_up and host_ == board_host_;
+  state_.cable      = attached;
+  select_host();
+  link(true);
+  if(attached)
+  {
+    ++state_.generation[idle_suspend];
+  }
+  else if(was_up)
+  {
+    board_host_->pull_up_changed(false, now());
+    schedule(idle_suspend, now().ps + idle_ps);
+  }
   refresh();
 }
 
@@ -1608,10 +1699,14 @@ void otg_fs::check_fifo_ram()
 
 void otg_fs::suspend(vtime)
 {
-  if(not pulled_up())
+  if(pulled_up())
   {
-    return;
+    enter_suspend();
   }
+}
+
+void otg_fs::enter_suspend()
+{
   state_.suspended = true;
   update(regs_, suspended_status_, 1);
   update(regs_, early_suspend_, 1);
@@ -1632,10 +1727,14 @@ void otg_fs::resume(vtime)
 }
 }
 
-auto otg_fs_factory() -> model_factory
+auto otg_fs_factory(board const& b) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<otg_fs>(ctx, desc);
+  return [hosts = b.usb_hosts](
+             model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    auto const found = hosts.find(desc.name);
+    return std::make_shared<otg_fs>(
+        ctx, desc,
+        found == hosts.end() ? std::nullopt : std::optional<usb_host_options>{found->second});
   };
 }
 }

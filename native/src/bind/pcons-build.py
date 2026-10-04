@@ -14,6 +14,7 @@ sources = [
     here / "errors.cpp",
     here / "config.cpp",
     here / "board.cpp",
+    here / "usb.cpp",
     here / "model_context.cpp",
     here / "model_trampoline.cpp",
     here / "devices.cpp",

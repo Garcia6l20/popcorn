@@ -5,10 +5,13 @@
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <optional>
 #include <ranges>
@@ -77,6 +80,45 @@ auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32
   return options;
 }
 
+auto key_of(std::string const& usb) -> std::string
+{
+  return std::format("usb.{}", usb);
+}
+
+auto usb_factories(mcu_description const& description, machine_config const& config)
+    -> std::map<std::string, periph::model_factory, std::less<>>
+{
+  periph::stm32::board board;
+  for(auto const& [name, host] : config.usb_hosts)
+  {
+    if(host.reset_ns == 0 or host.timeout_ns == 0)
+    {
+      throw config_error("usb", 0, key_of(name), "a bus reset and a request timeout above 0 ns");
+    }
+    periph::stm32::usb_host_options options{.attached = host.attached};
+    options.host.debounce   = std::chrono::nanoseconds{static_cast<std::int64_t>(host.debounce_ns)};
+    options.host.reset_time = std::chrono::nanoseconds{static_cast<std::int64_t>(host.reset_ns)};
+    options.host.request_timeout =
+        std::chrono::nanoseconds{static_cast<std::int64_t>(host.timeout_ns)};
+    board.usb_hosts.emplace(name, std::move(options));
+  }
+  auto all = periph::stm32::factories(board, description);
+  std::map<std::string, periph::model_factory, std::less<>> out;
+  for(auto const& name : config.usb_hosts | std::views::keys)
+  {
+    auto const unit  = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
+      return p.name == name and not p.alias_of;
+    });
+    auto       found = all.find(name);
+    if(unit == description.peripherals.end() or unit->ip != "USB_OTG_FS" or found == all.end())
+    {
+      throw config_error("usb", 0, key_of(name), "a USB device controller a built-in model serves");
+    }
+    out.emplace(name, std::move(found->second));
+  }
+  return out;
+}
+
 auto options_of(mcu_description const& description, machine_config const& config)
     -> core::machine_options
 {
@@ -121,6 +163,13 @@ auto options_of(mcu_description const& description, machine_config const& config
         throw config_error(
             "devices", 0, std::format("devices.{}", name), "a peripheral without a Python model");
       }
+    }
+  }
+  for(auto& [name, factory] : usb_factories(description, config))
+  {
+    if(not options.models.emplace(name, std::move(factory)).second)
+    {
+      throw config_error("usb", 0, key_of(name), "a USB device controller without a Python model");
     }
   }
   if(config.arena_start)

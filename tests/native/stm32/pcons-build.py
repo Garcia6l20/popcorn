@@ -36,6 +36,9 @@ firmwares = {
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in firmwares.items()},
+    "POPCORN_FW_USB_CDC": str(
+        project_dir / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
+    ),
 }
 
 base = add_doctest(
@@ -69,6 +72,7 @@ u575_programs = [
         ("stm32-sai", "test_sai.cpp"),
         ("stm32-otg-fs", "test_otg_fs.cpp"),
         ("stm32-otg-fs-device", "test_otg_fs_device.cpp"),
+        ("stm32-otg-fs-host", "test_otg_fs_host.cpp"),
         ("stm32-adc", "test_adc.cpp"),
     )
 ]

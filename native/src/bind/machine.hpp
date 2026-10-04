@@ -5,6 +5,7 @@
 #include "image.hpp"
 #include "observability.hpp"
 #include "snapshot.hpp"
+#include "usb.hpp"
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/machine.hpp>
@@ -58,6 +59,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief Python bus targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
    * instances in attachment order, served by the built-in bus model of that peripheral. */
   std::map<std::string, std::vector<reflex::py::nb::object>> python_devices{};
+  /** @brief Virtual USB host per USB device controller name, served by the built-in model of
+   * that controller. */
+  std::map<std::string, usb_host_config> usb_hosts{};
 };
 
 /** @brief Bounds of one slice, core::slice_request without the predicate. */
@@ -377,6 +381,23 @@ public:
           std::string const& block,
           std::uint32_t      decimation,
           std::uint32_t      external_frame_hz) -> audio_link;
+
+  /**
+   * @brief Names of the peripherals whose built-in model has a virtual USB host, in description
+   *        order.
+   */
+  [[= py::doc{
+      "Names of the peripherals whose built-in model has a virtual USB host."}]] [[nodiscard]] auto
+      usb_names() const -> std::vector<std::string>;
+
+  /**
+   * @brief Connects the virtual USB host of a device controller to Python.
+   * @param peripheral Controller instance name.
+   * @throws config_error when the description has no such peripheral.
+   * @throws model_error when the peripheral's model has no virtual USB host.
+   */
+  [[= py::doc{"Connect the virtual USB host of a device controller to Python."}]] [[nodiscard]] auto
+      attach_usb(std::string const& peripheral) -> usb_link;
 
   /**
    * @brief Drives a GPIO pin from outside the MCU, or releases it.

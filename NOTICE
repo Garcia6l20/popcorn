@@ -103,3 +103,9 @@ FreeRTOS kernel, V11.3.1, Copyright Amazon.com, Inc. or its affiliates
   https://github.com/FreeRTOS/FreeRTOS-Kernel
   License: MIT, see LICENSES/FreeRTOS-Kernel-LICENSE.md. The kernel, its
   non-secure GCC Cortex-M33 port and heap_4 are used by the examples.
+
+TinyUSB, 0.21.0, Copyright 2012-2026 hathach (tinyusb.org)
+  https://github.com/hathach/tinyusb
+  License: MIT, see LICENSES/tinyusb-LICENSE. The device stack, its CDC and HID
+  class drivers and the Synopsys DWC2 device controller driver are used by the
+  usb_cdc example.

@@ -10,6 +10,7 @@
 #include <popcorn/periph/stm32/rcc.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
+#include <popcorn/periph/stm32/usb.hpp>
 
 #include <chrono>
 #include <functional>
@@ -60,6 +61,10 @@ struct board
    * `SAI1_A`. The SAI model copies the attachments when the machine is built: the endpoints stay
    * shared. */
   std::map<std::string, audio_attachment, std::less<>> audio{};
+  /** @brief The virtual host wired to each USB device controller by instance name, such as
+   * `OTG_FS`. A controller without one sees no host, as with no cable. The model copies the
+   * options when the machine is built and builds its host from them. */
+  std::map<std::string, usb_host_options, std::less<>> usb_hosts{};
 };
 
 /**

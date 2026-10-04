@@ -43,3 +43,9 @@ sha256 = "da9c9567368db9b2f1d053a344e7892587af6ee50398f0f14fba53405cc7c041"
 version = "11.3.1"
 build = "none"
 firmware = true
+
+[packages.tinyusb]
+url = "https://github.com/hathach/tinyusb.git@dae3f9a366bfcddbf9dcf1b48d7500286a849539"
+version = "0.21.0"
+build = "none"
+firmware = true

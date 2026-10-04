@@ -23,6 +23,9 @@ from popcorn._errors import (
     ModelError,
     PopcornError,
     SymbolError,
+    UsbError,
+    UsbStall,
+    UsbTimeout,
 )
 from popcorn._hooks import (
     Initiator,
@@ -101,6 +104,9 @@ __all__ = [
     "SymbolError",
     "TomlValue",
     "TraceRecording",
+    "UsbError",
+    "UsbStall",
+    "UsbTimeout",
     "ValueKind",
     "Var",
     "Watch",

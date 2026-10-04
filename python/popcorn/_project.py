@@ -28,7 +28,9 @@ from popcorn._image import Image
 from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, AttachedDevice, Machine
 from popcorn._rcc import RccOptions
 from popcorn._stop import Stop
+from popcorn._usb import UsbHostOptions
 from popcorn.model import Model
+from popcorn.units import ms
 
 type TomlValue = int | float | bool | str | list[TomlValue] | dict[str, TomlValue]
 """A TOML value as tomllib gives it."""
@@ -212,8 +214,8 @@ class Project:
         devices: Mapping[str, Sequence[AttachedDevice]] | None = None,
     ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
-        board models, bus devices, `[board.RCC]` clock sources, `connect = "pty"` bridges,
-        `[boot] memory_init` written. Not
+        board models, bus devices, `[board.RCC]` clock sources, SAI audio blocks, USB hosts,
+        `connect = "pty"` bridges, `[boot] memory_init` written. Not
         reset. Each call builds new device instances, so two machines never share one.
 
         Args:
@@ -229,8 +231,9 @@ class Project:
             ConfigError: As `load`, `description` and `board`, a memory_init symbol or range is
                 invalid, an I2C target sits on a peripheral that is not an I2C bus or an SPI
                 device on one that is not an SPI bus, an address is outside 0x08 to 0x77, a
-                device class refuses its parameters, two `devices` keys name one peripheral, or
-                `Machine(devices=)` refuses them.
+                device class refuses its parameters, two `devices` keys name one peripheral,
+                `Machine(devices=)` refuses them, or a `host` table is on a peripheral that is
+                not a USB device controller with the built-in model.
             ImageError: An image cannot be read or does not fit the memory map.
             ModelError: A `connect` peripheral is not a UART.
         """
@@ -288,6 +291,22 @@ class Project:
                         else block.external_frame_hz
                     ),
                 )
+        usb: dict[str, UsbHostOptions] = {}
+        for name, entry in file.board.items():
+            if entry.host is None:
+                continue
+            if entry.model is not None or ips.get(name) != "USB_OTG_FS":
+                raise self._error(
+                    f"board.{name}.host", "a USB device controller with the built-in model"
+                )
+            defaults = UsbHostOptions()
+            host = entry.host
+            usb[name] = UsbHostOptions(
+                attached=host.attached,
+                debounce=defaults.debounce if host.debounce_ms is None else ms(host.debounce_ms),
+                reset=defaults.reset if host.reset_ms is None else ms(host.reset_ms),
+                timeout=defaults.timeout if host.timeout_ms is None else ms(host.timeout_ms),
+            )
         m = Machine(
             description,
             image=self.images(),
@@ -304,6 +323,7 @@ class Project:
             devices=attached,
             rcc=rcc,
             audio=audio,
+            usb=usb,
         )
         for name, entry in self.board().items():
             if entry.connect is None:

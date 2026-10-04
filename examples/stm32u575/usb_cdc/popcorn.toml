@@ -1,0 +1,15 @@
+[project]
+name = "usb-cdc"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/usb_cdc.elf"
+
+[boot]
+until = "main"
+budget = 1_000_000
+
+[board.OTG_FS]
+host = {}

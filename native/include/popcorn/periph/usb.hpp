@@ -239,6 +239,10 @@ public:
    */
   virtual void wake_at(vtime at) = 0;
 
+  /** @brief Virtual time of the device model's clock, the time a host acts at outside its
+   * callbacks, a restore for instance. */
+  [[nodiscard]] virtual auto now() const -> vtime = 0;
+
 protected:
   /** @brief Destroys the interface, only through its implementation. */
   ~device_port() = default;

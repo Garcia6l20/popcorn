@@ -130,6 +130,19 @@ struct audio_block_entry
   std::optional<std::uint32_t> external_frame_hz{};
 };
 
+/** @brief `[board.<USB>] host`: the virtual USB host wired to a USB device controller. */
+struct usb_host_entry
+{
+  /** @brief Whether the cable is plugged at power-on. */
+  bool attached{true};
+  /** @brief Connect debounce before the attach reset in milliseconds, empty for 100. */
+  std::optional<std::uint32_t> debounce_ms{};
+  /** @brief SE0 time of a bus reset in milliseconds, empty for 10. */
+  std::optional<std::uint32_t> reset_ms{};
+  /** @brief Time a control transfer may take after its SETUP in milliseconds, empty for 5000. */
+  std::optional<std::uint32_t> timeout_ms{};
+};
+
 /** @brief `[board.<periph>]`. */
 struct board_entry
 {
@@ -147,6 +160,8 @@ struct board_entry
   [[= reflex::serde::rename{"A"}]] std::optional<audio_block_entry> a{};
   /** @brief Audio block B of an SAI with the built-in model, `[board.<SAI>.B]`. */
   [[= reflex::serde::rename{"B"}]] std::optional<audio_block_entry> b{};
+  /** @brief The virtual host of a USB device controller with the built-in model. */
+  std::optional<usb_host_entry> host{};
   /** @brief Every other key, the model's constructor keyword arguments. */
   [[= extra_keys]] std::map<std::string, reflex::serde::toml::value> params{};
 };

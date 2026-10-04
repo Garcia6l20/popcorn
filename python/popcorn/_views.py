@@ -15,13 +15,15 @@ if TYPE_CHECKING:
     from popcorn._audio import AudioStream
     from popcorn._description import MachineDescription
     from popcorn._streams import UartStream
+    from popcorn._usb import UsbHost
 
 
 class ViewAccess:
     """What a view needs from its machine: the native handle, the running check, the check
-    that a board stimulus comes from the machine's thread, and its UART streams."""
+    that a board stimulus comes from the machine's thread, its UART and audio streams and its
+    USB hosts."""
 
-    __slots__ = ("audio", "check", "handle", "ports", "stimulus")
+    __slots__ = ("audio", "check", "handle", "ports", "stimulus", "usb")
 
     def __init__(
         self,
@@ -30,12 +32,14 @@ class ViewAccess:
         ports: Callable[[str], UartStream] | None = None,
         stimulus: Callable[[], None] = lambda: None,
         audio: Callable[[str, str], AudioStream] | None = None,
+        usb: Callable[[str], UsbHost] | None = None,
     ) -> None:
         self.handle = handle
         self.check = check
         self.ports = ports
         self.stimulus = stimulus
         self.audio = audio
+        self.usb = usb
 
 
 class ScalarView[T: (int, float)]:
@@ -310,6 +314,19 @@ class PeripheralView:
         if self._access.audio is None:
             raise AttributeError(f"{self._name} has no audio blocks in this machine")
         return self._access.audio(self._name, block)
+
+    @property
+    def host(self) -> UsbHost:
+        """The virtual USB host of this device controller, built with the machine from
+        `[board.<NAME>] host` or `Machine(usb=)`.
+
+        Raises:
+            AttributeError: The machine has no USB hosts.
+            ModelError: The controller has no virtual host.
+        """
+        if self._access.usb is None:
+            raise AttributeError(f"{self._name} has no USB host in this machine")
+        return self._access.usb(self._name)
 
     def pin(self, number: int) -> Pin:
         """Pin `number` of this GPIO port.

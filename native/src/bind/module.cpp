@@ -59,6 +59,8 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::core::intercept_result>("InterceptResult");
   m.bind<popcorn::core::watch_hit>("WatchHit");
   m.bind_enum<popcorn::periph::stm32::pin_mode>("PinMode");
+  m.bind_enum<popcorn::periph::usb::device_state>("UsbDeviceState");
+  m.bind_enum<popcorn::periph::usb::transfer_status>("UsbTransferStatus");
   m.bind_enum<popcorn::core::log_kind>("LogKind");
   m.bind<popcorn::core::log_record>("LogRecord");
   m.bind_enum<popcorn::access>("Access");
@@ -84,6 +86,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::config::clock_section>("ClockSection");
   m.bind<popcorn::config::device_entry>("DeviceEntry");
   m.bind<popcorn::config::audio_block_entry>("AudioBlockEntry");
+  m.bind<popcorn::config::usb_host_entry>("UsbHostEntry");
   m.bind<popcorn::config::board_entry>("BoardEntry");
   m.bind<popcorn::config::models_section>("ModelsSection");
   m.bind<popcorn::config::project_file>("ProjectFile");

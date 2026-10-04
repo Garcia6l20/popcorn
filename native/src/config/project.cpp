@@ -680,13 +680,26 @@ void check_values(project_file const& file, context const& ctx)
         ctx.fail(std::format("board.{}.{}.decimation", name, letter), "a decimation of at least 1");
       }
     }
+    if(entry.host)
+    {
+      for(auto const& [key, ms] : {
+              std::pair{"reset_ms",   entry.host->reset_ms  },
+              std::pair{"timeout_ms", entry.host->timeout_ms}
+      })
+      {
+        if(ms == 0u)
+        {
+          ctx.fail(std::format("board.{}.host.{}", name, key), "a time above 0 ms");
+        }
+      }
+    }
     if(not entry.model and not entry.params.empty())
     {
       ctx.fail(
           std::format("board.{}.{}", name, entry.params.begin()->first),
           std::format(
-              "a key of board.{}: connect, model, devices, hse_hz, lse_hz, A, B, or a model "
-              "parameter with model set",
+              "a key of board.{}: connect, model, devices, hse_hz, lse_hz, A, B, host, or a "
+              "model parameter with model set",
               name));
     }
   }

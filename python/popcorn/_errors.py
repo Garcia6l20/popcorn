@@ -145,6 +145,28 @@ class BudgetExceeded(EmulationError):
         self.budget = budget
 
 
+class UsbError(EmulationError):
+    """A USB transfer the virtual host ran did not complete.
+
+    Attributes:
+        status: How a request ended: `stalled`, `timed_out`, `error`, `overflow` or
+            `cancelled`. From `UsbHost.wait_configured`, the enumeration step that failed, such
+            as `get_configuration`, or else the device state, such as `DETACHED`.
+    """
+
+    def __init__(self, message: str, *, status: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class UsbStall(UsbError):
+    """The device answered a USB request with STALL."""
+
+
+class UsbTimeout(UsbError):
+    """A USB request, or the enumeration, did not end in time."""
+
+
 class ModelError(PopcornError):
     """A peripheral model failed, or an unmodelled register was accessed under strict rules.
 

@@ -72,6 +72,7 @@ from popcorn._rcc import RccOptions
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, UartPorts
+from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget
@@ -334,6 +335,7 @@ class Machine:
         "_slice_instructions",
         "_slice_wall_ns",
         "_thread",
+        "_usb",
         "_waiters",
     )
 
@@ -359,6 +361,7 @@ class Machine:
         ) = None,
         rcc: RccOptions | None = None,
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
+        usb: Mapping[str, UsbHostOptions] | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -389,6 +392,10 @@ class Machine:
             audio: Options of SAI audio blocks by SAI instance and block, such as
                 `{"SAI1": {"A": AudioOptions(decimation=4)}}`. An alias, such as `SEC_SAI1`,
                 names the SAI serving it. Blocks not listed get `AudioOptions()`.
+            usb: Virtual USB host per USB device controller, such as
+                `{"OTG_FS": UsbHostOptions()}`, built with the machine and owned by the built-in
+                model of the controller. An alias names the controller serving it. A controller
+                not listed has no host: it sees no VBUS and never enumerates.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
@@ -399,7 +406,9 @@ class Machine:
                 or above 1 MHz, an RCC with a Python model or one no built-in model serves.
                 With `audio`: a key that is not an SAI with the built-in model, two keys naming
                 one SAI, a block other than A or B, a decimation below 1 or a negative frame
-                rate, named as `audio.<SAI>.<block>`.
+                rate, named as `audio.<SAI>.<block>`. With `usb`: a key that is not a USB device
+                controller with the built-in model, two keys naming one controller, a bus reset
+                or a timeout not above 0, named as `usb.<NAME>`.
             ImageError: An image does not fit the memory map.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
@@ -422,6 +431,8 @@ class Machine:
         if rcc is not None:
             config.rcc_hse_hz = rcc.hse_hz
             config.rcc_lse_hz = rcc.lse_hz
+        aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
+        config.usb_hosts = checked_usb(usb or {}, aliases)
         self._description = description
         self._config_digest = config_digest
         self._handle = _core.MachineHandle(description, config)
@@ -439,13 +450,19 @@ class Machine:
             self._wait_until,
             self._require_owner,
         )
-        aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
         sais = self._handle.audio_names()
         self._audio = AudioPorts(
             self._handle.attach_audio,
             sais,
             aliases,
             _checked_audio(audio or {}, sais, aliases),
+            self._wait_until,
+            self._require_owner,
+        )
+        self._usb = UsbHosts(
+            self._handle.attach_usb,
+            self._handle.usb_names(),
+            aliases,
             self._wait_until,
             self._require_owner,
         )
@@ -460,6 +477,7 @@ class Machine:
             self._ports.stream,
             self._require_owner,
             self._audio.stream,
+            self._usb.host,
         )
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
@@ -1189,7 +1207,9 @@ class Machine:
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
         restore. Bytes already in the UART's receiver return to the snapshot's state. SAI
         frames not read yet and words written to a receiving block and not served yet are
-        dropped, and each `AudioStream.dropped` restarts at 0.
+        dropped, and each `AudioStream.dropped` restarts at 0. A USB host returns to the
+        snapshot's state, its cable and the control requests it had queued included: results of
+        control requests not collected yet are dropped.
         """
         self._require_idle()
         machine_id = snapshot.machine_id
@@ -1205,6 +1225,7 @@ class Machine:
         self._last_stop = None
         self._ports.discard()
         self._audio.discard()
+        self._usb.discard()
         if self._arena is not None:
             self._arena.reset(snapshot.arena_offset)
 

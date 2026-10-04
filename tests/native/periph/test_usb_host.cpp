@@ -268,6 +268,13 @@ public:
     s.wake = at.ps;
   }
 
+  [[nodiscard]] auto now() const -> vtime override
+  {
+    return vtime{clock};
+  }
+
+  std::uint64_t clock{};
+
 private:
   auto answer_out(std::uint8_t address, std::uint8_t endpoint, std::span<std::uint8_t const> data)
       -> usb::handshake
@@ -482,8 +489,10 @@ struct rig
     {
       auto const at = *dev.s.wake;
       dev.s.wake.reset();
+      dev.clock = at;
       host->on_time(vtime{at});
     }
+    dev.clock = end;
   }
 
   [[nodiscard]] auto driver(std::string_view name) const -> probe*
@@ -1124,6 +1133,20 @@ TEST_CASE("a restore drops the user results of the abandoned timeline")
   r.host->control(descriptor(1, 0, 0, 18));
   r.host->load({});
   CHECK(r.host->take_results().empty());
+}
+
+TEST_CASE("an empty load detaches at the device's current time, not at 0")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  r.host->load({});
+  CHECK(r.host->state() == usb::device_state::detached);
+  r.host->control(descriptor(1, 0, 0, 18));
+  auto const results = r.host->take_results();
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].status == usb::transfer_status::cancelled);
+  CHECK(results[0].at.ps == t0 + second);
 }
 
 TEST_CASE("a host snapshot keeps byte blobs as BSON binary, a 4 KiB driver state takes about 4 KiB")

@@ -21,6 +21,13 @@ EXAMPLES_PREFIX = "example-firmware"
 HAL_BASE = ("", "cortex", "rcc", "rcc_ex", "gpio", "pwr", "pwr_ex")
 FREERTOS_SOURCES = ("tasks.c", "queue.c", "list.c", "timers.c")
 FREERTOS_PORT = Path("portable") / "GCC" / "ARM_CM33_NTZ" / "non_secure"
+TINYUSB_SOURCES = (
+    "tusb.c",
+    "common/tusb_fifo.c",
+    "device/usbd.c",
+    "portable/synopsys/dwc2/dcd_dwc2.c",
+    "portable/synopsys/dwc2/dwc2_common.c",
+)
 ROM_REGION = re.compile(
     r"(ROM\s*\(rx\)\s*:\s*ORIGIN\s*=\s*)0x08000000(\s*,\s*LENGTH\s*=\s*)(\d+)K", re.IGNORECASE
 )
@@ -98,6 +105,7 @@ def add_example_firmware(
     hal: Sequence[str] = (),
     ll: Sequence[str] = (),
     freertos: bool = False,
+    tinyusb: Sequence[str] = (),
     defines: Sequence[str] = (),
     flash_offset: int = 0,
 ) -> tuple[Path, Target | None]:
@@ -106,8 +114,10 @@ def add_example_firmware(
 
     The firmware links ST's startup, system file and STM32U575xx_FLASH.ld with newlib-nano, the
     HAL modules @p hal with the ones every HAL project needs, the LL modules @p ll, and with
-    @p freertos the FreeRTOS kernel on its non-secure Cortex-M33 port and heap_4. Headers are
-    looked up in @p example_dir/firmware first.
+    @p freertos the FreeRTOS kernel on its non-secure Cortex-M33 port and heap_4, and with
+    @p tinyusb the TinyUSB device stack, its Synopsys DWC2 device driver and the device class
+    drivers named, such as `cdc` and `hid`. Headers are looked up in @p example_dir/firmware
+    first, where a TinyUSB firmware keeps its `tusb_config.h`.
 
     @param flash_offset Link the image this many bytes into flash, as an application behind a
     bootloader is. 0 keeps ST's layout.
@@ -145,6 +155,11 @@ def add_example_firmware(
         all_sources += [kernel / source for source in FREERTOS_SOURCES]
         all_sources += [port / "port.c", port / "portasm.c", kernel / "portable/MemMang/heap_4.c"]
         include_dirs += [kernel / "include", port]
+    if tinyusb:
+        stack = firmware_source("tinyusb") / "src"
+        all_sources += [stack / source for source in TINYUSB_SOURCES]
+        all_sources += [stack / "class" / name / f"{name}_device.c" for name in tinyusb]
+        include_dirs.append(stack)
 
     script = _linker_script(device, name, flash_offset)
     elf, target = checked_program(

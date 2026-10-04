@@ -274,8 +274,53 @@ TEST_CASE("a board key without a model is an error")
   CHECK(error.line() == 4);
   CHECK(
       error.expected()
-      == "a key of board.UART4: connect, model, devices, hse_hz, lse_hz, A, B, or a model "
-         "parameter with model set");
+      == "a key of board.UART4: connect, model, devices, hse_hz, lse_hz, A, B, host, or a "
+         "model parameter with model set");
+}
+
+TEST_CASE("board.<USB>.host takes the cable and the timings of a virtual host")
+{
+  SUBCASE("an empty table plugs the cable at power-on with the default timings")
+  {
+    scratch_file const file{std::string{minimal} + "[board.OTG_FS]\nhost = {}\n"};
+    auto const         loaded = config::load_project(file.path());
+    auto const&        host   = loaded.file.board.at("OTG_FS").host;
+    REQUIRE(host.has_value());
+    CHECK(host->attached);
+    CHECK_FALSE(host->debounce_ms.has_value());
+    CHECK_FALSE(host->reset_ms.has_value());
+    CHECK_FALSE(host->timeout_ms.has_value());
+  }
+  SUBCASE("every key")
+  {
+    scratch_file const file{
+        std::string{minimal}
+        + "[board.OTG_FS]\nhost = { attached = false, debounce_ms = 50, reset_ms = 20, "
+          "timeout_ms = 1000 }\n"};
+    auto const  loaded = config::load_project(file.path());
+    auto const& host   = loaded.file.board.at("OTG_FS").host;
+    REQUIRE(host.has_value());
+    CHECK_FALSE(host->attached);
+    CHECK(host->debounce_ms == 50u);
+    CHECK(host->reset_ms == 20u);
+    CHECK(host->timeout_ms == 1000u);
+  }
+  SUBCASE("a reset or a timeout of 0 is refused")
+  {
+    for(auto const* key : {"reset_ms", "timeout_ms"})
+    {
+      auto const error = failure_of(
+          std::string{minimal} + std::format("[board.OTG_FS]\nhost = {{ {} = 0 }}\n", key));
+      CHECK(error.key() == std::format("board.OTG_FS.host.{}", key));
+      CHECK(error.expected() == "a time above 0 ms");
+    }
+  }
+  SUBCASE("an unknown key is refused")
+  {
+    auto const error =
+        failure_of(std::string{minimal} + "[board.OTG_FS]\nhost = { atached = true }\n");
+    CHECK(error.key() == "board.OTG_FS.host.atached");
+  }
 }
 
 TEST_CASE("board.<SAI>.A and B take the options of an audio block")
