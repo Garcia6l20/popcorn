@@ -5,6 +5,8 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 
 | example | firmware style | shows |
 | --- | --- | --- |
+| [stm32u575/adc](stm32u575/adc) | LL | ADC1 power-up, calibration, VREFINT and the temperature sensor read against the factory words, timed conversions |
+| [stm32u575/adc_watchdog](stm32u575/adc_watchdog) | HAL DMA | a TIM15-triggered 4-channel ADC1 scan, 8x oversampling, circular GPDMA, AWD3 on one input: inputs driven with `ADC1.input(n).volts`, `[supply] vdda_mv`, the strict threshold comparison, scan timing |
 | [stm32u575/gpdma](stm32u575/gpdma) | HAL DMA | USART1 TX over GPDMA1, a normal block then a two-node linked list, frames back to back while the CPU sleeps in WFI |
 | [stm32u575/gpio](stm32u575/gpio) | HAL | a host-driven button on an EXTI falling edge toggling an LED, WFI between presses |
 | [stm32u575/i2c](stm32u575/i2c) | LL | a 24xx EEPROM page write with acknowledge polling, configs swapping the device, a scripted TableTarget |
@@ -14,6 +16,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/python_model](stm32u575/python_model) | HAL IT | the RNG, which popcorn does not model, served by a `popcorn.model.Model` written in Python: register handlers, a scheduled DRDY, the interrupt line, a seed from the project file |
 | [stm32u575/rcc](stm32u575/rcc) | LL | HSE bypass to a 160 MHz PLL1, voltage range, flash latency, SysTick period in virtual time |
 | [stm32u575/sai](stm32u575/sai) | HAL DMA | a 48 kHz I2S sine on SAI1 block A from a circular GPDMA linked list, frames captured from Python with their start times, half and complete callbacks |
+| [stm32u575/sai_codec](stm32u575/sai_codec) | HAL DMA | an I2C codec written in Python clocking a slave SAI1 pair through `DeviceBoard.set_audio_clock` and `[board.SAI1.A] clocked_by`, two 2D circular GPDMA nodes interleaving and splitting an `int16_t[2][64]`, per-2D-block callbacks, a snapshot mid-stream |
 | [stm32u575/spi](stm32u575/spi) | FreeRTOS, HAL init, LL driver | AT25SF NOR flash on the hardware SS output, an interrupt-driven transfer from a task, an application linked behind a bootloader offset |
 | [stm32u575/spi_mock](stm32u575/spi_mock) | HAL | a two-channel ADC written in Python as a `SpiTarget` on a software chip select: samples from a function of virtual time, chip select framing, `Machine(devices=)` next to the project file |
 | [stm32u575/tim](stm32u575/tim) | LL | TIM2 1 kHz update interrupt toggling PA5, TIM16 one-pulse after 50 ms, update period in virtual time |
