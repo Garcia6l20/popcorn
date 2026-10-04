@@ -1,5 +1,41 @@
 """The virtual USB host of a device controller: cable, enumeration, descriptors, control
-requests, CDC ACM streams, HID functions and USB Audio 2.0 functions, in virtual time."""
+requests, CDC ACM streams, HID functions and USB Audio 2.0 functions, in virtual time.
+
+`[board.OTG_FS] host = {}` in the project file plugs a full-speed host into the controller,
+`machine.periph.OTG_FS.host` is its `UsbHost`. Everything below Python runs in model events:
+no Python call per transaction.
+
+Example:
+    host = machine.periph.OTG_FS.host
+    await host.wait_configured(for_=s(1))
+    cdc = host.cdc()
+    await cdc.wait_ready(for_=ms(100))
+    await cdc.write(b"abc")
+
+Time model:
+    - A SOF goes every 1 ms. The isochronous and interrupt transactions of a frame go at its
+      start, before any control or bulk transaction.
+    - Control and bulk transactions take one slot each, round robin, every slot starting after
+      the bus time of the previous transaction. A control stage the device NAKs while its
+      interrupt handler runs is retried within the frame.
+    - When every control and bulk pipe with work NAKed in a row, the next pass starts 10 us
+      after that NAK ends, as long as its transaction fits before the next SOF.
+    - A newly opened isochronous pipe sends its first packet 2 frames later, as Linux does.
+      An interrupt pipe is first polled in the next frame.
+    - The same writes at the same virtual times give the same transactions at the same times.
+
+Snapshots:
+    - Data Python wrote and the device has not taken is model state. A snapshot keeps it and a
+      restore puts it back as it was, whether the function is bound or not.
+    - Data the device sent and Python has not read is dropped at restore.
+    - The request log, `UsbHost.requests`, is outside snapshots. A restore keeps it, so slice
+      it from the length it had at the start of a test.
+
+Drift:
+    The host models no feedback endpoint and the device has no second clock. The device's
+    isochronous rate is the host's frame rate, 1 ms per frame, so a test cannot show the clock
+    drift that a real host and device correct with feedback or adaptive clocking.
+"""
 
 from __future__ import annotations
 
@@ -914,7 +950,7 @@ class UacStream:
 
     async def start(self) -> None:
         """Select the stream's alternate setting and run the machine until the device
-        acknowledged it. Isochronous packets go from the next frame.
+        acknowledged it. The first isochronous packet goes 2 frames after the pipe opens.
 
         It sends what Linux sends when it prepares a stream: the clock's validity and GET_CUR
         of its frequency, SET_CUR when the rate differs and the clock takes it, the validity

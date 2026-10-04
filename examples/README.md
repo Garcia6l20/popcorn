@@ -19,6 +19,8 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/tim](stm32u575/tim) | LL | TIM2 1 kHz update interrupt toggling PA5, TIM16 one-pulse after 50 ms, update period in virtual time |
 | [stm32u575/uart_mock](stm32u575/uart_mock) | HAL IT | an AT modem written in Python on the host end of USART2: replies in virtual time from the test's coroutine, an ERROR reply, a reply that never comes and the firmware's timeout |
 | [stm32u575/usart](stm32u575/usart) | HAL IT | a printf banner and a receive-to-idle line echo, frame timing at the BRR rate |
+| [stm32u575/usb_audio](stm32u575/usb_audio) | HAL, TinyUSB | a UAC2 headset on `[board.OTG_FS] host = {}`: the Linux snd-usb-audio probe sequence, a 16 kHz mono sine looped from `host.audio().speaker` to `mic.read_frames` with frame times, `drain`, `stop`, a snapshot taken mid-stream |
+| [stm32u575/usb_cdc](stm32u575/usb_cdc) | HAL, TinyUSB | a CDC ACM and two HID composite device enumerated by the virtual host: `wait_configured`, descriptors, a `host.cdc()` echo across a snapshot and an unplug, the same through `m.board.pty("OTG_FS")`, which `connect = "pty"` in the project file does at build, HID reports with their times |
 
 Every example has the same layout:
 
