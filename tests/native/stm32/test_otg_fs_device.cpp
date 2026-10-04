@@ -1468,6 +1468,14 @@ TEST_CASE("the virtual host enumerates the OTG_FS model run by a register-level 
   }
   CHECK(logged == fw.requests);
 
+  std::vector<std::byte> host_state;
+  host->save(host_state);
+  std::vector<std::byte> model_state;
+  r.f->target->model("OTG_FS")->save(model_state);
+  MESSAGE("OTG_FS state ", model_state.size(), " B, host blob ", host_state.size(), " B");
+  CHECK_FALSE(std::ranges::search(model_state, host_state).empty());
+  CHECK(model_state.size() < host_state.size() + 4096);
+
   auto const saved = r.f->target->snapshot();
   rig const  other;
   auto const restored = std::make_shared<usb::host>(other.port(), usb::host_options{});

@@ -4,6 +4,7 @@
 #include <reflex/serde/bson.hpp>
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -11,6 +12,7 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -72,7 +74,7 @@ struct transfer_state
   origin                       source{};
   std::uint32_t                owner{};
   setup_packet                 setup{};
-  std::vector<std::uint8_t>    data{};
+  std::vector<std::byte>       data{};
   std::uint32_t                length{};
   std::uint32_t                offset{};
   bool                         zero_packet{};
@@ -100,7 +102,7 @@ struct driver_record
 {
   std::string               name{};
   std::vector<std::uint8_t> interfaces{};
-  std::vector<std::uint8_t> bytes{};
+  std::vector<std::byte>    bytes{};
 };
 
 struct host_state
@@ -121,8 +123,8 @@ struct host_state
   bool                              step_active{};
   bool                              enumerated{};
   std::optional<enumeration_action> failed{};
-  std::vector<std::uint8_t>         device_bytes{};
-  std::vector<std::uint8_t>         configuration_bytes{};
+  std::vector<std::byte>            device_bytes{};
+  std::vector<std::byte>            configuration_bytes{};
   std::vector<string_descriptor>    strings{};
   std::vector<std::uint8_t>         string_indices{};
   std::vector<pipe_state>           pipes{};
@@ -193,26 +195,21 @@ auto period_of(endpoint_info const& endpoint) -> std::uint32_t
   return std::max<std::uint32_t>(endpoint.interval, 1);
 }
 
-auto to_bytes(std::span<std::uint8_t const> in) -> std::vector<std::byte>
+static_assert(std::same_as<std::uint8_t, unsigned char>);
+
+auto octets(std::span<std::byte const> in) -> std::span<std::uint8_t const>
 {
-  std::vector<std::byte> out{};
-  out.reserve(in.size());
-  for(auto const byte : in)
-  {
-    out.push_back(std::byte{byte});
-  }
-  return out;
+  return {reinterpret_cast<std::uint8_t const*>(in.data()), in.size()};
 }
 
-auto from_bytes(std::span<std::byte const> in) -> std::vector<std::uint8_t>
+auto to_byte_vector(std::span<std::uint8_t const> in) -> std::vector<std::byte>
 {
-  std::vector<std::uint8_t> out{};
-  out.reserve(in.size());
-  for(auto const byte : in)
-  {
-    out.push_back(std::to_integer<std::uint8_t>(byte));
-  }
-  return out;
+  return std::ranges::to<std::vector<std::byte>>(std::as_bytes(in));
+}
+
+auto copy_octets(std::span<std::byte const> in) -> std::vector<std::uint8_t>
+{
+  return std::ranges::to<std::vector<std::uint8_t>>(octets(in));
 }
 }
 
@@ -229,18 +226,13 @@ auto configuration_info::function_of(std::uint8_t number) const -> std::vector<s
 {
   for(auto const& association : associations)
   {
-    if(number
-       >= association.first_interface
-       and number
-       < association.first_interface
-       + association.count)
+    auto const first = int{association.first_interface};
+    auto const last  = first + association.count;
+    if(number >= first and number < last)
     {
-      std::vector<std::uint8_t> found{};
-      for(std::uint8_t n = 0; n < association.count; ++n)
-      {
-        found.push_back(static_cast<std::uint8_t>(association.first_interface + n));
-      }
-      return found;
+      return std::views::iota(first, last)
+           | std::views::transform([](int n) { return static_cast<std::uint8_t>(n); })
+           | std::ranges::to<std::vector>();
     }
   }
   return {number};
@@ -458,25 +450,37 @@ struct host::impl
   }
 
   auto enqueue_control(
-      origin                    source,
-      std::uint32_t             owner,
-      setup_packet              setup,
-      std::vector<std::uint8_t> data) -> transfer_id
+      origin                        source,
+      std::uint32_t                 owner,
+      setup_packet                  setup,
+      std::span<std::uint8_t const> data) -> transfer_id
   {
-    if(is_in(setup))
+    std::vector<std::byte> stage_data{};
+    if(not is_in(setup))
     {
-      data.clear();
-    }
-    else
-    {
-      data.resize(setup.length);
+      stage_data = to_byte_vector(data);
+      stage_data.resize(setup.length);
     }
     return enqueue(
         default_pipe, {.source = source,
                        .owner  = owner,
                        .setup  = setup,
-                       .data   = std::move(data),
+                       .data   = std::move(stage_data),
                        .length = setup.length});
+  }
+
+  [[nodiscard]] auto owns(pipe_state const& pipe, std::size_t driver, std::string_view action) const
+      -> bool
+  {
+    if(pipe.owner == driver)
+    {
+      return true;
+    }
+    warn(
+        std::format(
+            "USB {} on pipe {} from class driver {}, the pipe is driver {}'s: ignored", action,
+            pipe.id, driver, pipe.owner));
+    return false;
   }
 
   void attach(std::uint64_t at)
@@ -547,11 +551,26 @@ struct host::impl
     drivers.clear();
     s.drivers.clear();
     std::erase_if(s.pipes, [](pipe_state const& pipe) { return pipe.id != default_pipe; });
-    if(auto* const control = find_pipe(default_pipe); control and not control->queue.empty())
+    auto* const control = find_pipe(default_pipe);
+    if(control != nullptr)
     {
-      auto& head  = control->queue.front();
-      head.step   = stage::setup;
-      head.offset = 0;
+      std::erase_if(control->queue, [&](transfer_state const& transfer) {
+        if(transfer.source != origin::driver)
+        {
+          return false;
+        }
+        settle_log(transfer.id, transfer_status::cancelled);
+        return true;
+      });
+    }
+    if(control != nullptr and not control->queue.empty())
+    {
+      auto& head      = control->queue.front();
+      head.step       = stage::setup;
+      head.offset     = 0;
+      head.errors     = 0;
+      head.logged     = false;
+      head.started_ps = std::nullopt;
       if(is_in(head.setup))
       {
         head.data.clear();
@@ -583,7 +602,7 @@ struct host::impl
         s.string_indices.push_back(index);
       }
     };
-    if(auto const device = parse_device_descriptor(s.device_bytes))
+    if(auto const device = parse_device_descriptor(octets(s.device_bytes)))
     {
       add(device->manufacturer_string);
       add(device->product_string);
@@ -609,7 +628,9 @@ struct host::impl
     {
       return parsed->value;
     }
-    return s.configuration_bytes.size() > 5 ? s.configuration_bytes[5] : 1;
+    return s.configuration_bytes.size() > 5
+             ? std::to_integer<std::uint8_t>(s.configuration_bytes[5])
+             : 1;
   }
 
   void advance(std::uint64_t at)
@@ -647,8 +668,9 @@ struct host::impl
           return;
         case get_configuration:
         {
-          auto const total = s.configuration_bytes.size() >= 4 ? le16(s.configuration_bytes, 2)
-                                                               : configuration_head;
+          auto const total = s.configuration_bytes.size() >= 4
+                               ? le16(octets(s.configuration_bytes), 2)
+                               : configuration_head;
           enqueue_control(
               origin::enumeration, 0, descriptor_request(configuration_type, 0, 0, total), {});
           return;
@@ -743,7 +765,7 @@ struct host::impl
     {
       case get_device_head:
       case get_device:
-        s.device_bytes = result.data;
+        s.device_bytes = to_byte_vector(result.data);
         learn_packet0(result.data);
         break;
       case set_address:
@@ -751,12 +773,12 @@ struct host::impl
         s.device  = device_state::address;
         break;
       case get_configuration_head:
-        s.configuration_bytes = result.data;
+        s.configuration_bytes = to_byte_vector(result.data);
         break;
       case get_configuration:
       {
-        s.configuration_bytes = result.data;
-        auto config           = parse_configuration(s.configuration_bytes);
+        s.configuration_bytes = to_byte_vector(result.data);
+        auto config           = parse_configuration(octets(s.configuration_bytes));
         if(not config)
         {
           warn(std::format("USB enumeration stopped: configuration descriptor {}", config.error()));
@@ -768,11 +790,12 @@ struct host::impl
         break;
       }
       case get_languages:
-        s.strings.push_back({.index = 0, .bytes = result.data});
+        s.strings.push_back({.index = 0, .bytes = to_byte_vector(result.data)});
         s.language = result.data.size() >= 4 ? le16(result.data, 2) : 0;
         break;
       case get_strings:
-        s.strings.push_back({.index = s.string_indices[s.string_cursor], .bytes = result.data});
+        s.strings.push_back(
+            {.index = s.string_indices[s.string_cursor], .bytes = to_byte_vector(result.data)});
         ++s.string_cursor;
         advance(at);
         return;
@@ -791,6 +814,29 @@ struct host::impl
     s.step_active = false;
     ++s.step;
     advance(at);
+  }
+
+  [[nodiscard]] auto claimable(
+      std::string const&            name,
+      std::span<std::uint8_t const> claimed,
+      std::span<std::uint8_t const> taken) const -> bool
+  {
+    for(std::size_t at = 0; at < claimed.size(); ++at)
+    {
+      auto const number  = claimed[at];
+      auto const missing = parsed->find(number) == nullptr;
+      auto const busy =
+          std::ranges::contains(taken, number) or std::ranges::contains(claimed.first(at), number);
+      if(missing or busy)
+      {
+        warn(
+            std::format(
+                "USB class driver {} claims interface {}, which is {}: not bound", name, number,
+                missing ? "not in the configuration" : "already taken"));
+        return false;
+      }
+    }
+    return true;
   }
 
   void bind_drivers()
@@ -815,7 +861,7 @@ struct host::impl
           continue;
         }
         auto claimed = factory.claim(*parsed, interface);
-        if(claimed.empty())
+        if(claimed.empty() or not claimable(factory.name, claimed, taken))
         {
           continue;
         }
@@ -879,7 +925,7 @@ struct host::impl
         {.id     = transfer.id,
          .status = status,
          .setup  = transfer.setup,
-         .data   = std::move(transfer.data),
+         .data   = copy_octets(transfer.data),
          .at     = vtime{at},
          .frame  = frame_number()});
   }
@@ -953,14 +999,13 @@ struct host::impl
           }
           pipe.toggle          = flip(pipe.toggle);
           auto const remaining = transfer.length - transfer.data.size();
-          if(answer.data.size() > remaining)
+          auto const packet    = std::as_bytes(std::span{answer.data});
+          if(packet.size() > remaining)
           {
-            transfer.data.insert(
-                transfer.data.end(), answer.data.begin(),
-                answer.data.begin() + static_cast<std::ptrdiff_t>(remaining));
+            transfer.data.append_range(packet.first(remaining));
             return {.time = time, .progress = true, .done = transfer_status::overflow};
           }
-          transfer.data.insert(transfer.data.end(), answer.data.begin(), answer.data.end());
+          transfer.data.append_range(packet);
           if(answer.data.size() < pipe.max_packet or transfer.data.size() == transfer.length)
           {
             transfer.step = stage::status;
@@ -974,7 +1019,7 @@ struct host::impl
               std::min<std::size_t>(pipe.max_packet, transfer.data.size() - transfer.offset);
           auto const time = bus_time(transfer_type::control, false, chunk);
           auto const hs   = port.out(
-              s.address, 0, std::span{transfer.data}.subspan(transfer.offset, chunk), pipe.toggle,
+              s.address, 0, octets(transfer.data).subspan(transfer.offset, chunk), pipe.toggle,
               vtime{at});
           if(hs != handshake::ack)
           {
@@ -1037,7 +1082,7 @@ struct host::impl
         {
           return {.time = time, .progress = true, .done = transfer_status::error};
         }
-        transfer.data = std::move(answer.data);
+        transfer.data = to_byte_vector(answer.data);
         return {.time = time, .progress = true, .done = transfer_status::completed};
       }
       if(answer.hs != handshake::ack)
@@ -1054,14 +1099,13 @@ struct host::impl
       }
       pipe.toggle          = flip(pipe.toggle);
       auto const remaining = transfer.length - transfer.data.size();
-      if(answer.data.size() > remaining)
+      auto const packet    = std::as_bytes(std::span{answer.data});
+      if(packet.size() > remaining)
       {
-        transfer.data.insert(
-            transfer.data.end(), answer.data.begin(),
-            answer.data.begin() + static_cast<std::ptrdiff_t>(remaining));
+        transfer.data.append_range(packet.first(remaining));
         return {.time = time, .progress = true, .done = transfer_status::overflow};
       }
-      transfer.data.insert(transfer.data.end(), answer.data.begin(), answer.data.end());
+      transfer.data.append_range(packet);
       if(answer.data.size() < pipe.max_packet or transfer.data.size() == transfer.length)
       {
         return {.time = time, .progress = true, .done = transfer_status::completed};
@@ -1071,7 +1115,8 @@ struct host::impl
     if(iso)
     {
       auto const time = bus_time(pipe.type, false, transfer.data.size());
-      auto const hs   = port.out(s.address, endpoint, transfer.data, data_pid::data0, vtime{at});
+      auto const hs =
+          port.out(s.address, endpoint, octets(transfer.data), data_pid::data0, vtime{at});
       return {
           .time     = time,
           .progress = true,
@@ -1081,7 +1126,7 @@ struct host::impl
         std::min<std::size_t>(pipe.max_packet, transfer.data.size() - transfer.offset);
     auto const time = bus_time(pipe.type, false, chunk);
     auto const hs   = port.out(
-        s.address, endpoint, std::span{transfer.data}.subspan(transfer.offset, chunk), pipe.toggle,
+        s.address, endpoint, octets(transfer.data).subspan(transfer.offset, chunk), pipe.toggle,
         vtime{at});
     if(hs != handshake::ack)
     {
@@ -1238,6 +1283,11 @@ struct host::impl
         auto const cost = bus_time(type, (pipe->endpoint & device_to_host) != 0, size);
         if(cursor + cost > limit)
         {
+          if(type == transfer_type::isochronous)
+          {
+            pipe->next_poll = s.frame_index + pipe->period;
+            finish(id, transfer_status::error, cursor);
+          }
           continue;
         }
         pipe->next_poll   = s.frame_index + pipe->period;
@@ -1326,25 +1376,32 @@ auto host_context::open_pipe(endpoint_info const& endpoint) -> pipe_id
 
 void host_context::close_pipe(pipe_id pipe)
 {
-  if(pipe == default_pipe)
+  auto&             impl  = *host_->impl_;
+  auto const* const found = impl.find_pipe(pipe);
+  if(pipe == default_pipe or found == nullptr or not impl.owns(*found, driver_, "close"))
   {
     return;
   }
-  std::erase_if(host_->impl_->s.pipes, [&](pipe_state const& entry) { return entry.id == pipe; });
+  std::erase_if(impl.s.pipes, [&](pipe_state const& entry) { return entry.id == pipe; });
 }
 
 auto host_context::submit(pipe_id pipe, transfer_request request) -> transfer_id
 {
-  auto& impl = *host_->impl_;
-  if(pipe == default_pipe or impl.find_pipe(pipe) == nullptr)
+  auto&             impl  = *host_->impl_;
+  auto const* const found = pipe == default_pipe ? nullptr : impl.find_pipe(pipe);
+  if(found == nullptr)
   {
     impl.warn(std::format("USB transfer on pipe {}, which is not open: dropped", pipe));
+    return 0;
+  }
+  if(not impl.owns(*found, driver_, "transfer"))
+  {
     return 0;
   }
   return impl.enqueue(
       pipe, {.source      = origin::driver,
              .owner       = static_cast<std::uint32_t>(driver_),
-             .data        = std::move(request.data),
+             .data        = to_byte_vector(request.data),
              .length      = request.length,
              .zero_packet = request.zero_packet});
 }
@@ -1352,7 +1409,23 @@ auto host_context::submit(pipe_id pipe, transfer_request request) -> transfer_id
 auto host_context::control(setup_packet setup, std::vector<std::uint8_t> data) -> transfer_id
 {
   return host_->impl_->enqueue_control(
-      origin::driver, static_cast<std::uint32_t>(driver_), setup, std::move(data));
+      origin::driver, static_cast<std::uint32_t>(driver_), setup, data);
+}
+
+void host_context::reset_toggle(pipe_id pipe)
+{
+  auto&       impl  = *host_->impl_;
+  auto* const found = pipe == default_pipe ? nullptr : impl.find_pipe(pipe);
+  if(found == nullptr)
+  {
+    impl.warn(
+        std::format("USB toggle reset on pipe {}, which is not an open data pipe: ignored", pipe));
+    return;
+  }
+  if(impl.owns(*found, driver_, "toggle reset"))
+  {
+    found->toggle = data_pid::data0;
+  }
 }
 
 auto host_context::queued(pipe_id pipe) const -> std::size_t
@@ -1412,9 +1485,7 @@ void host::save(std::vector<std::byte>& out) const
   {
     if(auto const& driver = impl_->drivers[index].driver)
     {
-      std::vector<std::byte> bytes{};
-      driver->save(bytes);
-      saved.drivers[index].bytes = from_bytes(bytes);
+      driver->save(saved.drivers[index].bytes);
     }
   }
   reflex::serde::bson::serializer{out}.dump(saved);
@@ -1426,24 +1497,37 @@ void host::load(std::span<std::byte const> in)
   if(in.empty())
   {
     impl.detach(0);
+    impl.results.clear();
     return;
   }
   impl.s = reflex::serde::bson::deserializer{in}.template load<host_state>();
+  impl.results.clear();
   impl.parsed.reset();
-  if(auto config = parse_configuration(impl.s.configuration_bytes))
+  if(auto config = parse_configuration(octets(impl.s.configuration_bytes)))
   {
     impl.parsed = std::move(*config);
+  }
+  auto const kept_at = [&](std::size_t index) {
+    if(index >= impl.drivers.size() or index >= impl.s.drivers.size())
+    {
+      return false;
+    }
+    auto const& current = impl.drivers[index];
+    auto const& record  = impl.s.drivers[index];
+    return current.name == record.name and current.interfaces == record.interfaces;
+  };
+  for(std::size_t index = 0; index < impl.drivers.size(); ++index)
+  {
+    if(not kept_at(index))
+    {
+      impl.drivers[index].driver.reset();
+    }
   }
   std::vector<bound_driver> drivers{};
   for(std::size_t index = 0; index < impl.s.drivers.size(); ++index)
   {
     auto& record = impl.s.drivers[index];
-    if(index
-       < impl.drivers.size()
-       and impl.drivers[index].name
-       == record.name
-       and impl.drivers[index].interfaces
-       == record.interfaces)
+    if(kept_at(index))
     {
       drivers.push_back(std::move(impl.drivers[index]));
     }
@@ -1451,19 +1535,19 @@ void host::load(std::span<std::byte const> in)
     {
       auto const factory =
           std::ranges::find(impl.options.drivers, record.name, &driver_factory::name);
-      if(factory == impl.options.drivers.end() or not factory->make)
+      auto const buildable = factory != impl.options.drivers.end() and factory->make;
+      if(not buildable)
       {
         impl.warn(std::format("USB host restore: no class driver named {}", record.name));
       }
       drivers.push_back(
           {.name       = record.name,
            .interfaces = record.interfaces,
-           .driver = factory == impl.options.drivers.end() or not factory->make ? nullptr
-                                                                                : factory->make()});
+           .driver     = buildable ? factory->make() : nullptr});
     }
     if(drivers.back().driver)
     {
-      drivers.back().driver->load(to_bytes(record.bytes));
+      drivers.back().driver->load(record.bytes);
     }
     record.bytes.clear();
   }
@@ -1497,12 +1581,12 @@ auto host::failed_step() const -> std::optional<enumeration_action>
 
 auto host::device_bytes() const -> std::span<std::uint8_t const>
 {
-  return impl_->s.device_bytes;
+  return octets(impl_->s.device_bytes);
 }
 
 auto host::configuration_bytes() const -> std::span<std::uint8_t const>
 {
-  return impl_->s.configuration_bytes;
+  return octets(impl_->s.configuration_bytes);
 }
 
 auto host::configuration() const -> configuration_info const*
@@ -1534,7 +1618,7 @@ auto host::control(setup_packet setup, std::vector<std::uint8_t> data) -> transf
          .frame  = impl.frame_number()});
     return id;
   }
-  return impl.enqueue_control(origin::user, 0, setup, std::move(data));
+  return impl.enqueue_control(origin::user, 0, setup, data);
 }
 
 auto host::take_results() -> std::vector<transfer_result>

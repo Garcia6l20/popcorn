@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -37,10 +38,11 @@ enum class token : std::uint8_t
 
 struct token_record
 {
-  std::uint64_t  at{};
-  token          kind{};
-  std::uint8_t   endpoint{};
-  usb::handshake hs{};
+  std::uint64_t                at{};
+  token                        kind{};
+  std::uint8_t                 endpoint{};
+  usb::handshake               hs{};
+  std::optional<usb::data_pid> pid{};
 };
 
 struct request_record
@@ -64,6 +66,8 @@ struct device_script
   bool                                                           stalled{};
   usb::data_pid                                                  toggle{};
   std::uint32_t                                                  data_naks{};
+  std::uint32_t                                                  data_nones{};
+  std::uint32_t                                                  setup_nones{};
   bool                                                           silent{};
   bool                                                           stall_class{};
   std::vector<std::uint8_t>                                      stalled_strings{};
@@ -164,8 +168,12 @@ public:
 
   auto setup(std::uint8_t address, usb::setup_packet packet, vtime at) -> usb::handshake override
   {
-    if(address != s.address)
+    if(address != s.address or s.setup_nones != 0)
     {
+      if(address == s.address)
+      {
+        --s.setup_nones;
+      }
       s.tokens.push_back({at.ps, token::setup, 0, usb::handshake::none});
       return usb::handshake::none;
     }
@@ -234,11 +242,11 @@ public:
       out(std::uint8_t                  address,
           std::uint8_t                  endpoint,
           std::span<std::uint8_t const> data,
-          usb::data_pid,
-          vtime at) -> usb::handshake override
+          usb::data_pid                 pid,
+          vtime                         at) -> usb::handshake override
   {
     auto const hs = answer_out(address, endpoint, data);
-    s.tokens.push_back({at.ps, token::out, endpoint, hs});
+    s.tokens.push_back({at.ps, token::out, endpoint, hs, pid});
     return hs;
   }
 
@@ -326,6 +334,11 @@ private:
       {
         return {.hs = usb::handshake::nak, .data = {}};
       }
+      if(s.data_nones != 0)
+      {
+        --s.data_nones;
+        return {};
+      }
       if(s.data_naks != 0)
       {
         --s.data_naks;
@@ -367,6 +380,15 @@ struct probe final : usb::class_driver
   std::vector<usb::pipe_id>                                  pipes{};
   std::vector<std::byte>                                     memory{};
   std::size_t                                                loads{};
+  std::function<void()>                                      on_destroy{};
+
+  ~probe() override
+  {
+    if(on_destroy)
+    {
+      on_destroy();
+    }
+  }
 
   void configured(usb::host_context& ctx) override
   {
@@ -514,6 +536,32 @@ auto expected_requests() -> std::vector<std::pair<std::uint8_t, usb::setup_packe
   };
 }
 
+auto fixed_claim(std::string name, std::uint8_t class_code, std::vector<std::uint8_t> claim)
+    -> usb::driver_factory
+{
+  return {
+      .name  = std::move(name),
+      .claim = [class_code, claim](
+                   usb::configuration_info const&,
+                   usb::interface_info const& interface) -> std::vector<std::uint8_t> {
+        return interface.class_code == class_code ? claim : std::vector<std::uint8_t>{};
+      },
+      .make = []() -> std::unique_ptr<usb::class_driver> { return std::make_unique<probe>(); }};
+}
+
+auto out_pids(device_script const& script, std::uint8_t endpoint) -> std::vector<usb::data_pid>
+{
+  std::vector<usb::data_pid> pids;
+  for(auto const& record : script.tokens)
+  {
+    if(record.kind == token::out and record.endpoint == endpoint and record.pid)
+    {
+      pids.push_back(*record.pid);
+    }
+  }
+  return pids;
+}
+
 auto requests_of(device_script const& script)
     -> std::vector<std::pair<std::uint8_t, usb::setup_packet>>
 {
@@ -591,7 +639,8 @@ TEST_CASE("enumeration sends the Linux sequence, SET_CONFIGURATION 1 last, at th
   REQUIRE(r.host->configuration() != nullptr);
   CHECK(r.host->language() == 0x0409);
   REQUIRE(r.host->strings().size() == 6);
-  CHECK(r.host->strings()[2].bytes == utf16("composite"));
+  auto const composite = utf16("composite");
+  CHECK(std::ranges::equal(r.host->strings()[2].bytes, std::as_bytes(std::span{composite})));
 
   REQUIRE(r.dev.s.resets.size() == 2);
   CHECK(r.dev.s.resets[0] == t0 + 100 * ms);
@@ -866,6 +915,8 @@ TEST_CASE("bulk OUT ends with a ZLP on a full last packet, bulk IN ends on a sho
   CHECK(received[2].empty());
   CHECK(received[3].size() == 64);
   CHECK(received[4].size() == 6);
+  using enum usb::data_pid;
+  CHECK(out_pids(r.dev.s, 2) == std::vector{data0, data1, data0, data1, data0});
   REQUIRE(acm->transfers.size() == 3);
   auto const in = std::ranges::find(
       acm->transfers, acm->pipes[1], &std::pair<usb::pipe_id, usb::transfer_result>::first);
@@ -1046,4 +1097,414 @@ TEST_CASE("user control requests queue their results, a detach cancels the ones 
   r.run_until(t0 + 3 * second);
   CHECK(r.host->state() == usb::device_state::configured);
   CHECK(requests_of(r.dev.s) == expected_requests());
+}
+
+TEST_CASE("a restore drops the user results of the abandoned timeline")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  std::vector<std::byte> bytes;
+  r.host->save(bytes);
+  auto const device    = r.dev.s;
+  auto const abandoned = r.host->control(descriptor(3, 0, 0, 255));
+  r.run_until(t0 + second + 10 * ms);
+
+  r.host->load(bytes);
+  r.dev.s = device;
+  CHECK(r.host->take_results().empty());
+  auto const fresh = r.host->control(descriptor(3, 0, 0, 255));
+  CHECK(fresh == abandoned);
+  r.run_until(t0 + second + 10 * ms);
+  auto const results = r.host->take_results();
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].id == fresh);
+  CHECK(results[0].status == usb::transfer_status::completed);
+
+  r.host->control(descriptor(1, 0, 0, 18));
+  r.host->load({});
+  CHECK(r.host->take_results().empty());
+}
+
+TEST_CASE("a host snapshot keeps byte blobs as BSON binary, a 4 KiB driver state takes about 4 KiB")
+{
+  usb::host_options options;
+  options.drivers.push_back(probe_factory("hid", 3, [](usb::host_context&, probe& self) {
+    self.memory.assign(4096, std::byte{0x5a});
+  }));
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + second);
+  std::vector<std::byte> empty_state;
+  r.driver("hid")->memory.clear();
+  r.host->save(empty_state);
+  r.driver("hid")->memory.assign(4096, std::byte{0x5a});
+  std::vector<std::byte> full_state;
+  r.host->save(full_state);
+  MESSAGE(
+      "host state ", empty_state.size(), " B, with a 4096 B driver blob ", full_state.size(), " B");
+  CHECK(full_state.size() - empty_state.size() == 4096);
+  CHECK(empty_state.size() < 2048);
+}
+
+TEST_CASE(
+    "a bus reset rewinds the control transfer in progress: error count, log and timeout start over")
+{
+  usb::host_options options;
+  options.enumeration.insert(
+      options.enumeration.begin() + 1,
+      {.action = usb::enumeration_action::wait, .wait = std::chrono::milliseconds{20}});
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + 115 * ms);
+  REQUIRE(r.dev.s.requests.size() == 1);
+  REQUIRE(r.dev.s.resets.size() == 1);
+  r.dev.s.data_nones = 2;
+  r.dev.s.data_naks  = 1'000'000;
+  auto const id      = r.host->control(descriptor(1, 0, 0, 18));
+  auto const before  = r.dev.s.tokens.size();
+  r.run_until(t0 + 125 * ms);
+  REQUIRE(r.dev.s.resets.size() == 1);
+  CHECK(
+      std::ranges::count_if(
+          r.dev.s.tokens | std::views::drop(before),
+          [](token_record const& record) { return record.hs == usb::handshake::none; })
+      == 2);
+
+  r.dev.s.setup_nones = 2;
+  r.run_until(t0 + 200 * ms);
+  REQUIRE(r.dev.s.resets.size() == 2);
+  CHECK(r.dev.s.setup_nones == 0);
+  CHECK(r.host->take_results().empty());
+  REQUIRE(r.dev.s.requests.size() == 3);
+  auto const first = r.dev.s.requests[1].at;
+  CHECK(first < r.dev.s.resets[1]);
+  std::vector<std::uint64_t> logged;
+  for(auto const& entry : r.host->log())
+  {
+    if(entry.kind == usb::log_kind::request and entry.id == id)
+    {
+      logged.push_back(entry.at.ps);
+    }
+  }
+  REQUIRE(logged.size() == 2);
+  CHECK(logged[0] == first);
+  auto const restart = logged[1];
+  CHECK(restart > r.dev.s.resets[1]);
+  CHECK(restart < r.dev.s.requests[2].at);
+
+  r.run_until(first + 5 * second + 5 * ms);
+  CHECK(r.host->take_results().empty());
+  r.run_until(restart + 5 * second + 2 * ms);
+  auto const results = r.host->take_results();
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].id == id);
+  CHECK(results[0].status == usb::transfer_status::timed_out);
+  CHECK(results[0].at.ps >= restart + 5 * second);
+}
+
+TEST_CASE("a bus reset drops the control transfers of the drivers it unbinds")
+{
+  usb::host_options options;
+  options.enumeration.push_back({.action = usb::enumeration_action::bus_reset});
+  options.drivers.push_back(probe_factory("acm", 2, [](usb::host_context& ctx, probe&) {
+    ctx.control({.request_type = 0xa1, .request = 0x21, .length = 7});
+  }));
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(r.dev.s.resets.size() == 3);
+  CHECK(r.host->drivers().empty());
+  CHECK(r.host->state() == usb::device_state::default_);
+  CHECK(std::ranges::none_of(r.dev.s.requests, [](request_record const& record) {
+    return record.setup.request_type == 0xa1;
+  }));
+  auto const log   = r.host->log();
+  auto const found = std::ranges::find_if(log, [](usb::log_entry const& entry) {
+    return entry.kind == usb::log_kind::request and entry.setup.request_type == 0xa1;
+  });
+  CHECK(found == log.end());
+}
+
+TEST_CASE("a load destroys every driver it does not keep before it builds a replacement")
+{
+  auto events  = std::make_shared<std::vector<std::string>>();
+  auto narrow  = std::make_shared<bool>(false);
+  auto options = [&] {
+    usb::host_options chosen;
+    chosen.drivers.push_back(
+        {.name  = "acm",
+         .claim = [narrow](
+                      usb::configuration_info const& config,
+                      usb::interface_info const&     interface) -> std::vector<std::uint8_t> {
+           if(interface.class_code != 2)
+           {
+             return {};
+           }
+           return *narrow ? std::vector<std::uint8_t>{interface.number}
+                          : config.function_of(interface.number);
+         },
+         .make = [events]() -> std::unique_ptr<usb::class_driver> {
+           events->push_back("make");
+           auto driver        = std::make_unique<probe>();
+           driver->on_destroy = [events] { events->push_back("destroy"); };
+           return driver;
+         }});
+    return chosen;
+  };
+  rig a{options()};
+  a.plug();
+  a.run_until(t0 + second);
+  std::vector<std::byte> bytes;
+  a.host->save(bytes);
+
+  *narrow = true;
+  rig b{options()};
+  b.plug();
+  b.run_until(t0 + second);
+  REQUIRE(b.host->drivers().size() == 1);
+  CHECK(b.host->drivers()[0].interfaces == std::vector<std::uint8_t>{0});
+  events->clear();
+  b.dev.s = a.dev.s;
+  b.host->load(bytes);
+  CHECK(*events == std::vector<std::string>{"destroy", "make"});
+  REQUIRE(b.host->drivers().size() == 1);
+  CHECK(b.host->drivers()[0].interfaces == std::vector<std::uint8_t>{0, 1});
+}
+
+TEST_CASE("an iso packet that would end past EOPF ends in error in its own frame")
+{
+  usb::host_options options;
+  options.drivers.push_back(probe_factory("hid", 3, [](usb::host_context& ctx, probe& self) {
+    for(std::uint8_t const address : {0x84, 0x85})
+    {
+      self.pipes.push_back(ctx.open_pipe(
+          {.address    = address,
+           .type       = usb::transfer_type::isochronous,
+           .max_packet = 512,
+           .interval   = 1}));
+    }
+    self.on_frame = [](usb::host_context& frame_ctx, probe& driver, std::uint16_t) {
+      for(auto const pipe : driver.pipes)
+      {
+        if(frame_ctx.queued(pipe) == 0)
+        {
+          frame_ctx.submit(pipe, {.length = 512});
+        }
+      }
+    };
+  }));
+  rig r{std::move(options)};
+  r.dev.s.iso_endpoints = {4, 5};
+  r.plug();
+  r.run_until(t0 + second);
+  auto* const driver = r.driver("hid");
+  REQUIRE(driver != nullptr);
+  driver->transfers.clear();
+  for(std::uint8_t n = 0; n < 10; ++n)
+  {
+    r.dev.s.in_queue[4].push_back(std::vector<std::uint8_t>(512, n));
+  }
+  auto const before = r.dev.s.tokens.size();
+  r.run_until(t0 + second + 5 * ms);
+  CHECK(
+      std::ranges::none_of(
+          r.dev.s.tokens | std::views::drop(before),
+          [](token_record const& record) { return record.endpoint == 5; }));
+  std::vector<std::uint16_t> sent;
+  std::vector<std::uint16_t> dropped;
+  for(auto const& [pipe, result] : driver->transfers)
+  {
+    if(pipe == driver->pipes[0])
+    {
+      CHECK(result.status == usb::transfer_status::completed);
+      sent.push_back(result.frame);
+    }
+    else
+    {
+      CHECK(result.status == usb::transfer_status::error);
+      CHECK(result.data.empty());
+      dropped.push_back(result.frame);
+    }
+  }
+  CHECK(sent.size() == 5);
+  CHECK(dropped == sent);
+}
+
+TEST_CASE("a driver cannot close, submit on or reset the toggle of another driver's pipe")
+{
+  usb::host_options options;
+  options.drivers.push_back(probe_factory("acm", 2, [](usb::host_context& ctx, probe& self) {
+    auto const* const data = ctx.configuration().find(ctx.interfaces()[1]);
+    self.pipes.push_back(ctx.open_pipe(data->endpoints[0]));
+  }));
+  options.drivers.push_back(probe_factory("hid", 3));
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + second);
+  auto* const acm  = r.driver("acm");
+  auto const  pipe = acm->pipes[0];
+  auto        mine = r.host->context(r.driver_index("acm"));
+  auto        hers = r.host->context(r.driver_index("hid"));
+  CHECK(
+      mine.submit(
+          pipe,
+          {
+              .data = {1, 2, 3}
+  })
+      != 0);
+  r.run_until(t0 + second + 5 * ms);
+  REQUIRE(r.warnings.empty());
+
+  hers.close_pipe(pipe);
+  CHECK(hers.submit(pipe, {.data = {9}}) == 0);
+  hers.reset_toggle(pipe);
+  REQUIRE(r.warnings.size() == 3);
+  for(auto const& warning : r.warnings)
+  {
+    CHECK(warning.find("ignored") != std::string::npos);
+  }
+  CHECK(mine.queued(pipe) == 0);
+  CHECK(mine.submit(pipe, {.data = {4}}) != 0);
+  r.run_until(t0 + second + 10 * ms);
+  REQUIRE(r.dev.s.received[2].size() == 2);
+  CHECK(r.dev.s.received[2][1] == std::vector<std::uint8_t>{4});
+  using enum usb::data_pid;
+  CHECK(out_pids(r.dev.s, 2) == std::vector{data0, data1});
+  CHECK(acm->transfers.size() == 2);
+}
+
+TEST_CASE("a claim naming a missing or taken interface binds nothing and the next factory is tried")
+{
+  usb::host_options options;
+  options.drivers.push_back(probe_factory("acm", 2));
+  options.drivers.push_back(fixed_claim("thief", 3, {2, 0}));
+  options.drivers.push_back(fixed_claim("ghost", 3, {2, 7}));
+  options.drivers.push_back(fixed_claim("twice", 3, {2, 2}));
+  options.drivers.push_back(probe_factory("hid", 3));
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + second);
+  CHECK(r.host->state() == usb::device_state::configured);
+  auto const drivers = r.host->drivers();
+  REQUIRE(drivers.size() == 2);
+  CHECK(drivers[0].name == "acm");
+  CHECK(drivers[1].name == "hid");
+  CHECK(drivers[1].interfaces == std::vector<std::uint8_t>{2});
+  REQUIRE(r.warnings.size() == 3);
+  CHECK(
+      r.warnings[0].find("thief claims interface 0, which is already taken") != std::string::npos);
+  CHECK(
+      r.warnings[1].find("ghost claims interface 7, which is not in the configuration")
+      != std::string::npos);
+  CHECK(
+      r.warnings[2].find("twice claims interface 2, which is already taken") != std::string::npos);
+}
+
+TEST_CASE("drivers are destroyed when the device detaches and when an empty snapshot loads")
+{
+  std::size_t       destroyed = 0;
+  usb::host_options options;
+  options.drivers.push_back(probe_factory(
+      "hid", 3, [&](usb::host_context&, probe& self) { self.on_destroy = [&] { ++destroyed; }; }));
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(r.host->drivers().size() == 1);
+  r.host->pull_up_changed(false, vtime{t0 + second});
+  CHECK(destroyed == 1);
+  CHECK(r.host->drivers().empty());
+
+  r.plug(t0 + 2 * second);
+  r.run_until(t0 + 3 * second);
+  REQUIRE(r.host->drivers().size() == 1);
+  r.host->load({});
+  CHECK(destroyed == 2);
+}
+
+TEST_CASE(
+    "reset_toggle starts a bulk pipe again at DATA0, and refuses the default or an unknown pipe")
+{
+  usb::host_options options;
+  options.drivers.push_back(probe_factory("acm", 2, [](usb::host_context& ctx, probe& self) {
+    auto const* const data = ctx.configuration().find(ctx.interfaces()[1]);
+    self.pipes.push_back(ctx.open_pipe(data->endpoints[0]));
+  }));
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + second);
+  auto const pipe = r.driver("acm")->pipes[0];
+  auto       ctx  = r.host->context(r.driver_index("acm"));
+  ctx.submit(pipe, {.data = {1}});
+  r.run_until(t0 + second + 5 * ms);
+  ctx.reset_toggle(pipe);
+  ctx.submit(pipe, {.data = {2}});
+  r.run_until(t0 + second + 10 * ms);
+  ctx.submit(pipe, {.data = {3}});
+  r.run_until(t0 + second + 15 * ms);
+  using enum usb::data_pid;
+  CHECK(out_pids(r.dev.s, 2) == std::vector{data0, data0, data1});
+  CHECK(r.warnings.empty());
+
+  ctx.reset_toggle(0);
+  ctx.reset_toggle(pipe + 100);
+  CHECK(r.warnings.size() == 2);
+}
+
+TEST_CASE("control OUT data packets run DATA1, DATA0, DATA1 and every status OUT is DATA1")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  auto const statuses = out_pids(r.dev.s, 0);
+  REQUIRE(statuses.size() == expected_requests().size() - 2);
+  CHECK(
+      std::ranges::all_of(statuses, [](usb::data_pid pid) { return pid == usb::data_pid::data1; }));
+
+  r.dev.s.tokens.clear();
+  std::vector<std::uint8_t> payload(130);
+  for(std::size_t n = 0; n < payload.size(); ++n)
+  {
+    payload[n] = static_cast<std::uint8_t>(n);
+  }
+  auto const id = r.host->control({.request_type = 0x21, .request = 0x20, .length = 130}, payload);
+  r.run_until(t0 + second + 10 * ms);
+  auto const results = r.host->take_results();
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].id == id);
+  CHECK(results[0].status == usb::transfer_status::completed);
+  CHECK(r.dev.s.class_out == payload);
+  using enum usb::data_pid;
+  CHECK(out_pids(r.dev.s, 0) == std::vector{data1, data0, data1});
+  CHECK(r.dev.s.tokens.back().kind == token::in);
+}
+
+TEST_CASE("three missing handshakes in a row end a control data stage in error, two do not")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  r.dev.s.data_nones = 2;
+  r.host->control(descriptor(1, 0, 0, 18));
+  r.run_until(t0 + second + 10 * ms);
+  auto results = r.host->take_results();
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].status == usb::transfer_status::completed);
+  CHECK(results[0].data == device_bytes());
+
+  r.dev.s.data_nones = 3;
+  auto const before  = r.dev.s.tokens.size();
+  r.host->control(descriptor(1, 0, 0, 18));
+  r.run_until(t0 + second + 20 * ms);
+  results = r.host->take_results();
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].status == usb::transfer_status::error);
+  CHECK(results[0].data.empty());
+  CHECK(
+      std::ranges::count_if(
+          r.dev.s.tokens | std::views::drop(before),
+          [](token_record const& record) {
+            return record.kind == token::in and record.hs == usb::handshake::none;
+          })
+      == 3);
 }

@@ -86,7 +86,7 @@ struct otg_fs_state
   std::vector<std::uint32_t>                        rx_data;
   std::array<std::vector<std::uint32_t>, endpoints> tx_fifo{};
   std::array<std::vector<std::uint16_t>, endpoints> tx_packets{};
-  std::vector<std::uint8_t>                         host;
+  std::vector<std::byte>                            host;
   std::uint64_t                                     wake_ps{};
   std::array<endpoint_state, endpoints>             in{};
   std::array<endpoint_state, endpoints>             out{};
@@ -1215,13 +1215,7 @@ void otg_fs::save(std::vector<std::byte>& out) const
   saved.host.clear();
   if(host_)
   {
-    std::vector<std::byte> bytes;
-    host_->save(bytes);
-    saved.host.reserve(bytes.size());
-    for(auto const byte : bytes)
-    {
-      saved.host.push_back(std::to_integer<std::uint8_t>(byte));
-    }
+    host_->save(saved.host);
   }
   reflex::serde::bson::serializer{out}.dump(saved);
 }
@@ -1229,16 +1223,10 @@ void otg_fs::save(std::vector<std::byte>& out) const
 void otg_fs::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
-  auto const             blob = std::exchange(state_.host, {});
-  std::vector<std::byte> bytes;
-  bytes.reserve(blob.size());
-  for(auto const byte : blob)
-  {
-    bytes.push_back(std::byte{byte});
-  }
+  auto const blob = std::exchange(state_.host, {});
   if(host_)
   {
-    host_->load(bytes);
+    host_->load(blob);
   }
   link(false);
 }

@@ -48,7 +48,10 @@ enum class transfer_status : std::uint8_t
   stalled,
   /** @brief A control transfer not done within host_options::request_timeout. */
   timed_out,
-  /** @brief No handshake three times in a row, or an isochronous packet not answered. */
+  /**
+   * @brief No handshake three times in a row, or an isochronous packet not answered or not sent
+   *        because it would have ended past the frame's EOPF point.
+   */
   error,
   /** @brief An IN packet longer than the space left in the transfer, the data clipped. */
   overflow,
@@ -276,7 +279,7 @@ struct string_descriptor
   /** @brief String index. */
   std::uint8_t index{};
   /** @brief The descriptor bytes, bLength and bDescriptorType included. */
-  std::vector<std::uint8_t> bytes{};
+  std::vector<std::byte> bytes{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(string_descriptor const&, string_descriptor const&) -> bool = default;
@@ -304,7 +307,20 @@ public:
   class_driver(class_driver&&) = delete;
   /** @brief Not move-assignable. */
   auto operator=(class_driver&&) -> class_driver& = delete;
-  /** @brief Destroys the driver. */
+  /**
+   * @brief Destroys the driver. This is the unbind signal, there is no other callback: the host
+   *        destroys a driver when the device detaches, at a bus reset, when SET_CONFIGURATION
+   *        binds the drivers again, at a load() whose state does not name it with the same
+   *        interfaces, and with the host. The host is changing its state then: the destructor
+   *        must not reach it, through a host_context or otherwise. Its pipes and transfers are
+   *        gone with it, without callbacks, its control transfers queued at a bus reset
+   *        included. A driver is always destroyed before the driver that replaces it is built:
+   *        at a load(), every driver not kept dies before the first factory make().
+   *
+   * State that must survive a re-bind or a restore, the queues Python reads and fills for
+   * instance, lives outside the driver, in an object that outlives the host, such as one its
+   * factory captures.
+   */
   virtual ~class_driver() = default;
 
   /**
@@ -357,7 +373,9 @@ struct driver_factory
   std::string name{};
   /**
    * @brief Interfaces the driver takes, given the configuration and the alternate setting 0 of
-   *        an interface not taken yet. Empty when it does not take that interface.
+   *        an interface not taken yet. Empty when it does not take that interface. A claim that
+   *        names an interface the configuration lacks, or one already taken, binds nothing: the
+   *        host warns and tries the next factory.
    */
   std::function<std::vector<std::uint8_t>(configuration_info const&, interface_info const&)>
       claim{};
@@ -472,7 +490,8 @@ public:
 
   /**
    * @brief Closes a pipe at once: no transaction on it from now, its queued transfers dropped
-   *        without callbacks. Unknown pipes are ignored.
+   *        without callbacks. Unknown pipes are ignored. A pipe of another driver stays open,
+   *        with a warning.
    * @param pipe The pipe.
    */
   void close_pipe(pipe_id pipe);
@@ -483,7 +502,8 @@ public:
    * @param pipe The pipe.
    * @param request The transfer.
    * @return The transfer, reported through class_driver::transfer_done(), or 0 when the pipe
-   *         is not open: the transfer is then dropped with a warning.
+   *         is not open or belongs to another driver: the transfer is then dropped with a
+   *         warning.
    */
   auto submit(pipe_id pipe, transfer_request request) -> transfer_id;
 
@@ -494,6 +514,15 @@ public:
    * @return The transfer, reported through class_driver::control_done().
    */
   auto control(setup_packet setup, std::vector<std::uint8_t> data = {}) -> transfer_id;
+
+  /**
+   * @brief Sets the data toggle of a pipe back to DATA0, as the device does when it takes a
+   *        CLEAR_FEATURE(ENDPOINT_HALT), USB 2.0 9.4.5. Call it when that request completes. The
+   *        default pipe, whose toggles follow its stages, an unknown pipe and a pipe of another
+   *        driver are left as they are, with a warning.
+   * @param pipe The pipe.
+   */
+  void reset_toggle(pipe_id pipe);
 
   /** @brief Transfers queued on a pipe, the one in progress included. */
   [[nodiscard]] auto queued(pipe_id pipe) const -> std::size_t;
