@@ -1,4 +1,4 @@
-"""Views of a stopped machine: memory, core registers, peripheral registers."""
+"""Views of the machine state: memory, core registers, peripheral registers."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._enums import PinMode
-from popcorn._errors import ConfigError, EmulationError
+from popcorn._errors import ConfigError, EmulationError, MachineRunning
 
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
@@ -19,16 +19,27 @@ if TYPE_CHECKING:
 
 
 class ViewAccess:
-    """What a view needs from its machine: the native handle, the running check, the check
-    that a board stimulus comes from the machine's thread, its UART and audio streams and its
-    USB hosts."""
+    """What a view needs from its machine: the native handle, the running check of writes and
+    of reads, the check that a board stimulus comes from the machine's thread, its UART and
+    audio streams and its USB hosts."""
 
-    __slots__ = ("audio", "check", "handle", "ports", "stimulus", "usb")
+    __slots__ = (
+        "audio",
+        "check",
+        "handle",
+        "ports",
+        "readable",
+        "readable_memory",
+        "stimulus",
+        "usb",
+    )
 
     def __init__(
         self,
         handle: _core.MachineHandle,
         check: Callable[[], None],
+        readable: Callable[[], None],
+        readable_memory: Callable[[int, int], None],
         ports: Callable[[str], UartStream] | None = None,
         stimulus: Callable[[], None] = lambda: None,
         audio: Callable[[str, str], AudioStream] | None = None,
@@ -36,6 +47,8 @@ class ViewAccess:
     ) -> None:
         self.handle = handle
         self.check = check
+        self.readable = readable
+        self.readable_memory = readable_memory
         self.ports = ports
         self.stimulus = stimulus
         self.audio = audio
@@ -53,7 +66,7 @@ class ScalarView[T: (int, float)]:
         self._size = struct.calcsize(self._format)
 
     def __getitem__(self, address: int) -> T:
-        self._access.check()
+        self._access.readable_memory(address, self._size)
         value: T = struct.unpack(
             self._format, self._access.handle.read_memory(address, self._size)
         )[0]
@@ -91,7 +104,7 @@ class Memory:
 
     def read(self, address: int, size: int) -> bytes:
         """`size` bytes from `address`."""
-        self._access.check()
+        self._access.readable_memory(address, size)
         return self._access.handle.read_memory(address, size)
 
     def write(self, address: int, data: bytes) -> None:
@@ -104,16 +117,18 @@ class Memory:
         replacement characters.
 
         Reads up to the end of each 64-byte block at once, byte by byte where a block read
-        meets a bus error, so a string ending just before unmapped memory still reads.
+        meets a bus error, so a string ending just before unmapped memory still reads. During a
+        run the block is read byte by byte where it leaves the memory regions.
         """
-        self._access.check()
+        self._access.readable()
         data = bytearray()
         while len(data) < limit:
             at = address + len(data)
             size = min(64 - at % 64, limit - len(data))
             try:
+                self._access.readable_memory(at, size)
                 chunk = self._access.handle.read_memory(at, size)
-            except EmulationError:
+            except EmulationError, MachineRunning:
                 chunk = self._bytes_until_nul(at, size)
             end = chunk.find(b"\0")
             if end >= 0:
@@ -125,6 +140,7 @@ class Memory:
     def _bytes_until_nul(self, address: int, size: int) -> bytes:
         data = bytearray()
         for at in range(address, address + size):
+            self._access.readable_memory(at, 1)
             byte = self._access.handle.read_memory(at, 1)
             data += byte
             if byte == b"\0":
@@ -155,7 +171,7 @@ class RegisterBank[R: enum.Enum]:
         return index
 
     def __getitem__(self, register: R) -> int:
-        self._access.check()
+        self._access.readable()
         return self._access.handle.read_register(self._slot(register))
 
     def __setitem__(self, register: R, value: int) -> None:
@@ -184,7 +200,9 @@ class RegisterView:
     """One peripheral register: `.value` for the whole word, a field by name as a bit slice.
 
     `value` and fields read and write the register storage without the model's access effects.
-    `read()` and `write()` go over the bus, as `m.mem` does, so a model reacts.
+    `read()` and `write()` go over the bus, as `m.mem` does, so a model reacts. While a run is
+    active, `value` and fields read from the thread running it, at the state of the last slice
+    boundary. `read()` and writes raise MachineRunning there, except from a handler of the run.
     """
 
     __slots__ = ("_access", "_base", "_fields", "_name", "_offset", "_peripheral", "_width")
@@ -239,8 +257,13 @@ class RegisterView:
 
     @property
     def value(self) -> int:
-        """Stored value of the whole register."""
-        self._access.check()
+        """Stored value of the whole register, the word as the models last updated it.
+
+        A register a model computes lazily, such as TIM CNT or the RTC calendar TR, DR and SSR,
+        shows its value at the model's last access or event, on a stopped machine as during a
+        run.
+        """
+        self._access.readable()
         return self._access.handle.peek(self._peripheral, self._offset, self._width)
 
     @value.setter
@@ -359,10 +382,11 @@ class Pin:
     Setting `level` drives the pin from outside the MCU: an input reads it, an output keeps its
     own level. The drive is board state, kept across an MCU reset and restored by snapshots.
     Driving works inside `running()` too, like a signal from the board: the firmware sees the
-    new level at the next slice boundary. Reads raise MachineRunning there. A drive from
-    another thread while a run is active raises RuntimeError: the GPIO model runs on the
-    machine's thread. Every access raises
-    ModelError when the port's model is not a GPIO port.
+    new level at the next slice boundary. Reads work there too, at the state of the last slice
+    boundary, the drive included. While a run is active, a drive from another thread raises
+    RuntimeError and a read from another thread raises MachineRunning: the GPIO model runs on
+    the machine's thread. Every access raises ModelError when the port's model is not a GPIO
+    port.
     """
 
     __slots__ = ("_access", "number", "port")
@@ -376,7 +400,7 @@ class Pin:
     @property
     def level(self) -> bool:
         """Level as the input data register reads it."""
-        self._access.check()
+        self._access.readable()
         return self._access.handle.gpio_level(self.port, self.number)
 
     @level.setter
@@ -396,13 +420,13 @@ class Pin:
     @property
     def mode(self) -> PinMode:
         """Mode the firmware configured."""
-        self._access.check()
+        self._access.readable()
         return PinMode(self._access.handle.gpio_mode(self.port, self.number).value)
 
     @property
     def alternate(self) -> int:
         """Alternate function number."""
-        self._access.check()
+        self._access.readable()
         return self._access.handle.gpio_alternate(self.port, self.number)
 
     def __repr__(self) -> str:

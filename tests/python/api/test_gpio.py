@@ -61,13 +61,14 @@ def test_a_drive_inside_running_reaches_the_firmware(board: popcorn.Machine) -> 
     asyncio.run(body())
     board.periph.GPIOA.pin(0).release()
     assert board.mem.u32[board.sym("pin_seen")] == 1
-    with pytest.raises(popcorn.MachineRunning):
 
-        async def read() -> bool:
-            async with board.running():
-                return board.periph.GPIOA.pin(0).level
+    async def read() -> bool:
+        async with board.running():
+            board.periph.GPIOA.pin(0).level = 1
+            return board.periph.GPIOA.pin(0).level
 
-        asyncio.run(read())
+    assert asyncio.run(read())
+    board.periph.GPIOA.pin(0).release()
 
 
 def test_a_drive_survives_a_reset_and_a_snapshot_restores_it(board: popcorn.Machine) -> None:

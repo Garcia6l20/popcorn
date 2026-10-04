@@ -301,8 +301,18 @@ class Machine:
     Built powered off: nothing runs until `reset()`. Emulation advances in slices on the event
     loop thread, each bounded by `slice_instructions` and `slice_wall_budget`, yielding to the
     loop between slices. Sync access to the machine while a run is active raises
-    MachineRunning, except from a handler of that run, and except `time` read from the thread
-    running it.
+    MachineRunning, except from a handler of that run.
+
+    Pure reads of emulated state are also allowed from the thread running the run: `time`,
+    `instructions`, `pc`, `pending_events`, core registers, `mem` reads inside memory regions,
+    `var` reads, peripheral register `value` and fields, and pin `level`, `mode` and
+    `alternate`. A `running()` body and other tasks of the run's event loop run between
+    slices, so they read the state at the last slice boundary. Python code the run calls inside
+    a slice runs on that thread too: Python models' `on_read` and `on_write`, log and trace
+    sinks, pin listeners and `stop_when`. The same reads are allowed there and return mid-slice
+    values, so a Python model can read `mem`, `var`, `reg` and `pc`. A `mem` read outside memory
+    regions is a bus read a model reacts to and stays refused outside handlers, as do all writes
+    other than board stimuli. Any other thread gets MachineRunning.
     """
 
     __slots__ = (
@@ -329,6 +339,7 @@ class Machine:
         "_memory",
         "_nvic",
         "_peripherals",
+        "_plain_memory",
         "_ports",
         "_registers",
         "_ring",
@@ -446,6 +457,10 @@ class Machine:
         self._waiters: list[_Waiter] = []
         self._thread = threading.get_ident()
         self._run_thread: int | None = None
+        arena = () if arena_base is None else ((arena_base, arena_base + arena_size),)
+        self._plain_memory = tuple(
+            sorted([*((r.start, r.start + r.size) for r in description.regions), *arena])
+        )
         self._ports = UartPorts(
             self._handle.attach_uart,
             self._handle.uart_names(),
@@ -478,6 +493,8 @@ class Machine:
         access = ViewAccess(
             self._handle,
             self._require_stopped,
+            self._require_readable,
+            self._require_memory_readable,
             self._ports.stream,
             self._require_owner,
             self._audio.stream,
@@ -530,36 +547,49 @@ class Machine:
 
     @property
     def instructions(self) -> int:
-        """Instructions executed since reset."""
-        self._require_stopped()
+        """Instructions executed since reset.
+
+        Readable while a run is active, from the thread running it or a handler of it, like
+        `time`: between slices it reads the count at the last slice boundary.
+
+        Raises:
+            MachineRunning: Read from another thread than the one running the active run,
+                outside a handler of it.
+        """
+        self._require_readable()
         return self._handle.instructions()
 
     @property
     def time(self) -> VirtualTime:
         """Virtual time since reset.
 
-        Readable while a run is active, from the thread running it: the run executes slices on
-        that thread, so Python code there, a `running()` body included, only runs between slices.
-        It then reads the time the run has reached at its last slice boundary: a stimulus given
-        now, such as a pin drive or a stream write, enters the machine at that time. From a
-        handler it reads the time inside the slice. It never decreases during a run.
+        Readable while a run is active, from the thread running it. A `running()` body or another
+        task of the run's event loop runs between slices: it reads the time the run has reached
+        at its last slice boundary, and a stimulus given now, such as a pin drive or a stream
+        write, enters the machine at that time. Python code the run calls inside a slice, a
+        handler, a Python model, a sink or a pin listener, reads the time inside the slice. It
+        never decreases during a run.
 
         Raises:
             MachineRunning: Read from another thread than the one running the active run,
                 outside a handler of it.
         """
-        if (
-            self._busy
-            and _HANDLER_OF.get() is not self
-            and threading.get_ident() != self._run_thread
-        ):
-            raise MachineRunning("the machine is running, read its time from the run's thread")
+        self._require_readable()
         return VirtualTime(self._handle.time_ps())
 
     @property
     def pc(self) -> int:
-        """Address of the next instruction."""
-        self._require_stopped()
+        """Address of the next instruction.
+
+        Readable while a run is active, from the thread running it or a handler of it. Between
+        slices it is the instruction the next slice starts at, before any pending exception is
+        taken. From a handler it is where the core is paused inside the slice.
+
+        Raises:
+            MachineRunning: Read from another thread than the one running the active run,
+                outside a handler of it.
+        """
+        self._require_readable()
         return self._handle.pc()
 
     @property
@@ -567,9 +597,14 @@ class Machine:
         """Events waiting in the event queue, model and core events alike.
 
         A model event superseded without being cancelled counts until it is dispatched, so a
-        count that grows with guest work shows a model leaving stale events behind.
+        count that grows with guest work shows a model leaving stale events behind. Readable
+        while a run is active, from the thread running it or a handler of it.
+
+        Raises:
+            MachineRunning: Read from another thread than the one running the active run,
+                outside a handler of it.
         """
-        self._require_stopped()
+        self._require_readable()
         return self._handle.pending_events()
 
     def load(self, image: Image) -> None:
@@ -606,12 +641,21 @@ class Machine:
 
     @property
     def mem(self) -> Memory:
-        """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`."""
+        """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`.
+
+        Reads inside memory regions, the arena included, work while a run is active from the
+        thread running it, at the state of the last slice boundary. Other reads and all writes
+        raise MachineRunning there, except from a handler of the run.
+        """
         return self._memory
 
     @property
     def reg(self) -> Registers:
-        """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`."""
+        """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`.
+
+        Reads work while a run is active from the thread running it, at the state of the last
+        slice boundary. Writes raise MachineRunning there, except from a handler of the run.
+        """
         return self._registers
 
     @property
@@ -744,6 +788,9 @@ class Machine:
 
     def var(self, name: str) -> Var:
         """A module-scope variable of the loaded ELF images, typed from their DWARF.
+
+        Its reads follow `mem`: a variable in a memory region reads while a run is active, from
+        the thread running it, at the state of the last slice boundary.
 
         Raises:
             SymbolError: No loaded image declares the variable, with close matches.
@@ -1434,6 +1481,32 @@ class Machine:
     def _require_stopped(self) -> None:
         if self._busy and _HANDLER_OF.get() is not self:
             raise MachineRunning("the machine is running, stop or await it first")
+
+    def _require_readable(self) -> None:
+        if (
+            self._busy
+            and _HANDLER_OF.get() is not self
+            and threading.get_ident() != self._run_thread
+        ):
+            raise MachineRunning("the machine is running, read it from the run's thread")
+
+    def _require_memory_readable(self, address: int, size: int) -> None:
+        self._require_readable()
+        if self._busy and _HANDLER_OF.get() is not self and not self._plain(address, size):
+            raise MachineRunning(
+                f"the machine is running, {size} bytes at {address:#010x} leave the memory "
+                "regions, a bus read a model reacts to: stop or await it first"
+            )
+
+    def _plain(self, address: int, size: int) -> bool:
+        at = address
+        end = address + size
+        for start, stop in self._plain_memory:
+            if at >= end:
+                break
+            if start <= at < stop:
+                at = stop
+        return at >= end
 
     def _handler(self, predicate: Callable[[Machine], bool]) -> Callable[[], bool]:
         def call() -> bool:

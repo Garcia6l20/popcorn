@@ -44,7 +44,7 @@ def test_sync_access_from_another_task_during_a_run_is_machine_running(
             m.reset()
         assert isinstance(caught.value, popcorn.PopcornError)
         with pytest.raises(popcorn.MachineRunning):
-            _ = m.instructions
+            _ = m.last_stop
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
@@ -307,6 +307,111 @@ def test_a_handler_of_a_run_on_another_thread_reads_the_time(machines: Machines)
     assert len(seen) == 5
     assert all(a <= b for a, b in itertools.pairwise(seen))
     assert seen[-1] <= stop.time
+
+
+def test_memory_reads_inside_running_at_the_point_the_run_reached(machines: Machines) -> None:
+    m = machines(slice_instructions=10_000)
+    value = m.var("alu_value")
+    address = m.sym("alu_value")
+
+    async def scenario() -> tuple[list[int], list[int], int, int, int]:
+        values: list[int] = []
+        counts: list[int] = []
+        async with m.running():
+            for _ in range(50):
+                await asyncio.sleep(0)
+                values.append(int(value.value))
+                counts.append(m.instructions)
+            data = m.mem.read(address, 4)
+            raw = int.from_bytes(data, "little")
+            word = m.mem.u32[address]
+            pc = m.pc
+            assert m.reg.pc == pc
+            assert m.pending_events >= 0
+            text = data.split(b"\0")[0].decode("utf-8", errors="replace")
+            assert m.mem.cstring(address, 4) == text
+        return values, counts, raw, word, m.instructions
+
+    values, counts, raw, word, after = asyncio.run(scenario())
+    assert len(set(values)) > 1
+    assert all(a <= b for a, b in itertools.pairwise(counts))
+    assert raw == word == values[-1] == value.value
+    assert counts[-1] == after
+
+
+def test_a_handler_reads_memory_and_variables(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    seen: list[int] = []
+
+    def predicate(machine: popcorn.Machine) -> bool:
+        seen.append(int(machine.var("alu_value").value))
+        assert machine.mem.u32[machine.sym("alu_value")] == seen[-1]
+        return len(seen) >= 5
+
+    stop = asyncio.run(m.run(stop_when=predicate))
+    assert stop.reason is popcorn.StopReason.USER
+    assert len(set(seen)) > 1
+    assert m.var("alu_value").value == seen[-1]
+
+
+def test_reads_from_another_thread_during_a_run_are_machine_running(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    address = m.sym("alu_value")
+    reads = (
+        lambda: m.mem.u32[address],
+        lambda: m.mem.read(address, 4),
+        lambda: m.var("alu_value").value,
+        lambda: m.instructions,
+        lambda: m.pc,
+        lambda: m.reg.r0,
+        lambda: m.pending_events,
+        lambda: m.periph.TESTDEV.RW.value,
+        lambda: m.periph.TESTDEV.pin(0).level,
+        lambda: m.periph.TESTDEV.pin(0).mode,
+        lambda: m.periph.TESTDEV.pin(0).alternate,
+    )
+
+    async def scenario() -> None:
+        async with m.running():
+            for read in reads:
+                with pytest.raises(popcorn.MachineRunning, match="the run's thread"):
+                    await asyncio.to_thread(read)
+
+    asyncio.run(scenario())
+
+
+def test_writes_and_bus_reads_inside_running_are_machine_running(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    value = m.var("alu_value")
+    address = m.sym("alu_value")
+    testdev = m.description.peripherals[0].base
+    sram = next(r for r in m.description.regions if r.name == "SRAM")
+
+    async def scenario() -> None:
+        async with m.running():
+            await asyncio.sleep(0)
+            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+                m.mem.u32[address] = 1
+            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+                m.mem.write(address, b"\0")
+            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+                value.value = 1
+            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+                m.reg.r0 = 1
+            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+                m.periph.TESTDEV.RW.value = 1
+            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+                _ = m.mem.u32[testdev]
+            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+                _ = m.periph.TESTDEV.RW.read()
+            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+                _ = m.nvic.pending(0)
+            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+                m.periph.TESTDEV.RW.write(1)
+            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+                _ = m.mem.read(sram.start + sram.size - 4, 16)
+
+    asyncio.run(scenario())
 
 
 def test_a_run_inside_running_is_machine_busy(machines: Machines) -> None:

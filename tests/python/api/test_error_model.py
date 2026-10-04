@@ -120,9 +120,9 @@ def garbage_snapshot(tmp_path: Path, _: Machines) -> object:
 def state_while_running(_: Path, machines: Machines) -> object:
     m = machines()
 
-    async def body() -> int:
+    async def body() -> popcorn.Stop | None:
         async with m.running():
-            return m.pc
+            return m.last_stop
 
     return asyncio.run(body())
 
