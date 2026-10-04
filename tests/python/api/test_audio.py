@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import struct
 from pathlib import Path
 from typing import Literal, cast
@@ -526,3 +527,27 @@ def test_a_project_file_wires_the_codec_clock_as_audio_options_do(tmp_path: Path
         later.at - earlier.at == SLAVE_FRAME for earlier, later in itertools.pairwise(frames)
     )
     assert sender.external_frame_hz == 0
+
+
+def unclocked_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "external frame rate" in r.getMessage()]
+
+
+def test_a_block_wired_to_a_codec_waits_for_its_clock_without_a_warning(
+    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+) -> None:
+    codec = CodecStandIn()
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        m = codec_machine(u575, codec, codec_words())
+        stop = asyncio.run(m.run(budget=BUDGET, stop_when=lambda _: codec.started_ps != 0))
+        assert stop.reason is StopReason.USER, stop
+    assert m.periph.SAI1.ACR1.SAIAEN == 1
+    assert unclocked_warnings(caplog) == []
+
+
+def test_a_slave_block_nothing_clocks_logs_once_that_it_sees_no_frame(
+    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        codec_dma_machine(u575)
+    assert len(unclocked_warnings(caplog)) == 1

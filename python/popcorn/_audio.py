@@ -54,7 +54,8 @@ class AudioOptions:
             `DeviceBoard.set_audio_clock`, as `<I2C>:<address>` such as "I2C1:0x38" or
             `<SPI>:<chip select>` such as "SPI1:PA4", "SPI1:SS" for the hardware NSS. A bus
             alias, such as "SEC_I2C1", names the bus serving it. None for none: no device may
-            drive it.
+            drive it. A wired block enabled while its clock is stopped waits without the
+            warning an unclocked slave block logs.
     """
 
     decimation: int = 1
@@ -190,7 +191,7 @@ class AudioPorts:
 
     def __init__(
         self,
-        connect: Callable[[str, str, int, int], _core.AudioLink],
+        connect: Callable[[str, str, int, int, bool], _core.AudioLink],
         sais: Iterable[str],
         aliases: Mapping[str, str],
         options: Mapping[str, Mapping[Block, AudioOptions]],
@@ -207,7 +208,11 @@ class AudioPorts:
             for block in BLOCKS:
                 chosen = options.get(name, {}).get(block, AudioOptions())
                 self._links[name, block] = connect(
-                    name, block, chosen.decimation, chosen.external_frame_hz
+                    name,
+                    block,
+                    chosen.decimation,
+                    chosen.external_frame_hz,
+                    chosen.clocked_by is not None,
                 )
         self._streams: dict[tuple[str, Block], AudioStream] = {}
 

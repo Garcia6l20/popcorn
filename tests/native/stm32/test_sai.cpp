@@ -1143,6 +1143,25 @@ TEST_CASE("an attachment with an external rate starts a slave block waiting for 
   CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{0, slave_frame});
 }
 
+TEST_CASE("a slave block whose clock a device drives waits for it without a warning")
+{
+  rig                           r{"idle", source_words(256), {.clock_wired = true}};
+  bus                           b{*r.f};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto& port = port_of(r);
+  slave_a(b);
+  b.run_until(b.now() + 100 * us);
+  CHECK(r.a->frames.empty());
+  CHECK(logged.empty());
+  auto const t = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 130 * us);
+  CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{0, slave_frame});
+  CHECK(logged.empty());
+}
+
 TEST_CASE("decimation stretches the frame time and is logged once")
 {
   rig                           r{"idle", {}, {.decimation = 8}};

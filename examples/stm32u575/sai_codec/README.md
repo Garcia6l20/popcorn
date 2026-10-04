@@ -99,8 +99,7 @@ before block A.
 
 ## The external clock
 
-- Block A has no clock until the codec's power-on byte. Its enable logs
-  `slave block without an external frame rate: it sees no frame` and the block waits.
+- Block A has no clock until the codec's power-on byte. Enabled before, it waits for the clock.
 - A clock started from stopped frames from the call. A clock stopped ends the frame in
   progress. A rate change takes effect at the next frame boundary.
 - The clock rate and phase are board state. A snapshot keeps them, and a restore resets the

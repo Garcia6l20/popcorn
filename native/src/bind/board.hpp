@@ -200,6 +200,7 @@ public:
    * @param block Audio block.
    * @param decimation Frame time multiplier, 0 or 1 for the configured rate.
    * @param external_frame_hz Frame rate of an external clock master, 0 for none.
+   * @param clock_wired A bus device drives the external clock at run time.
    * @param alive Cleared when the machine is destroyed.
    */
   [[= py::skip]] audio_link(
@@ -207,6 +208,7 @@ public:
       periph::stm32::audio_block  block,
       std::uint32_t               decimation,
       std::uint32_t               external_frame_hz,
+      bool                        clock_wired,
       std::shared_ptr<bool const> alive);
 
   /** @brief Frames transmitted and not drained yet. */

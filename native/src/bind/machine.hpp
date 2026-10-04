@@ -373,6 +373,7 @@ public:
    * @param block Audio block, `A` or `B`.
    * @param decimation Frame time multiplier, 1 for the configured rate.
    * @param external_frame_hz Frame rate of an external clock master, 0 for none.
+   * @param clock_wired A bus device drives the external clock at run time.
    * @throws config_error when the description has no such peripheral or @p block is neither
    *         `A` nor `B`.
    * @throws model_error when the peripheral's model is not a built-in SAI.
@@ -383,7 +384,8 @@ public:
           std::string const& peripheral,
           std::string const& block,
           std::uint32_t      decimation,
-          std::uint32_t      external_frame_hz) -> audio_link;
+          std::uint32_t      external_frame_hz,
+          bool               clock_wired) -> audio_link;
 
   /**
    * @brief Names of the peripherals whose built-in model has a virtual USB host, in description

@@ -146,13 +146,16 @@ audio_link::audio_link(
     periph::stm32::audio_block  block,
     std::uint32_t               decimation,
     std::uint32_t               external_frame_hz,
+    bool                        clock_wired,
     std::shared_ptr<bool const> alive)
     : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, port_{&port}, block_{block},
       alive_{std::move(alive)}
 {
   port.attach(
-      block,
-      {.endpoint = endpoint_, .decimation = decimation, .external_frame_hz = external_frame_hz});
+      block, {.endpoint          = endpoint_,
+              .decimation        = decimation,
+              .external_frame_hz = external_frame_hz,
+              .clock_wired       = clock_wired});
 }
 
 auto audio_link::endpoint() const -> detail::audio_queue_endpoint&
@@ -253,7 +256,8 @@ auto machine_handle::attach_audio(
     std::string const& peripheral,
     std::string const& block,
     std::uint32_t      decimation,
-    std::uint32_t      external_frame_hz) -> audio_link
+    std::uint32_t      external_frame_hz,
+    bool               clock_wired) -> audio_link
 {
   auto* const port = dynamic_cast<periph::stm32::audio_port*>(machine_->model(peripheral));
   if(port == nullptr)
@@ -264,9 +268,8 @@ auto machine_handle::attach_audio(
   {
     throw config_error(peripheral, 0, "block", std::format("an audio block A or B, not {}", block));
   }
-  return audio_link{
-      *port, block == "A" ? periph::stm32::audio_block::a : periph::stm32::audio_block::b,
-      decimation, external_frame_hz, alive_};
+  auto const which = block == "A" ? periph::stm32::audio_block::a : periph::stm32::audio_block::b;
+  return audio_link{*port, which, decimation, external_frame_hz, clock_wired, alive_};
 }
 
 auto machine_handle::uart_names() const -> std::vector<std::string>

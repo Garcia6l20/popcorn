@@ -90,6 +90,9 @@ struct audio_attachment
    * 0 for none: such a block then sees no frame. Unused by master and synchronous blocks. The
    * clock it describes already runs: its phase is taken at the block's first enable. */
   std::uint32_t external_frame_hz{};
+  /** @brief A bus device drives the external clock of the block at run time. A slave block
+   * enabled with that clock stopped then waits for it without logging. */
+  bool clock_wired{};
 };
 
 /**

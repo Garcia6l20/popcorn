@@ -661,8 +661,9 @@ void sai::start(std::size_t source, std::uint64_t from_ps)
   auto const r  = frame_rate(source);
   if(r.hz == 0)
   {
-    block.stalled = true;
-    if(not std::exchange(no_clock_logged_, true))
+    block.stalled    = true;
+    auto const wired = not master(source) and wired_[source].clock_wired;
+    if(not wired and not std::exchange(no_clock_logged_, true))
     {
       warn(
           std::format("{}CR1", source == 0 ? 'A' : 'B'),
