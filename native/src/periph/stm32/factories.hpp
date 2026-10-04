@@ -97,8 +97,11 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto otg_fs_factory(board const& b) -> model_factory;
 
-/** @brief Factory of the ADC1 model, RM0456 section 33. */
-[[nodiscard]] auto adc_factory() -> model_factory;
+/**
+ * @brief Factory of the ADC1 model, RM0456 section 33.
+ * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
+ */
+[[nodiscard]] auto adc_factory(supply_options supply) -> model_factory;
 
 /** @brief Factory of the ADC12 common register model, RM0456 section 33.7. */
 [[nodiscard]] auto adc_common_factory() -> model_factory;

@@ -43,7 +43,7 @@ constexpr std::array<builtin, 22> builtins{
      {"I2C", "i2c2_v1_1U5*", [](board const& b) { return i2c_factory(b); }},
      {"SAI", "sai1_L5*", [](board const& b) { return sai_factory(b); }},
      {"USB_OTG_FS", "otgfs1_v3_0_Cube", [](board const& b) { return otg_fs_factory(b); }},
-     {"ADC", "aditf5_40v1_U5_Cube", [](board const&) { return adc_factory(); }},
+     {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
      {"ADC12", "*", [](board const&) { return adc_common_factory(); }},
      }
 };
