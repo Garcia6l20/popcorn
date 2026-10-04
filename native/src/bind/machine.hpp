@@ -56,6 +56,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief LSE frequency in Hz the board gives the RCC model, above 0 and at most 1 MHz, empty for
    * the model's default. */
   std::optional<std::uint64_t> rcc_lse_hz{};
+  /** @brief VDDA in millivolts the board gives the ADC model, from 1620 to 3600, empty for the
+   * model's default of 3000. */
+  std::optional<std::uint32_t> vdda_mv{};
   /** @brief Python bus targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
    * instances in attachment order, served by the built-in bus model of that peripheral. */
   std::map<std::string, std::vector<reflex::py::nb::object>> python_devices{};
@@ -441,6 +444,28 @@ public:
       gpio_alternate(std::string const& peripheral, std::uint8_t pin) const -> std::uint8_t;
 
   /**
+   * @brief Drives an external ADC channel from outside the MCU.
+   * @param peripheral ADC name.
+   * @param channel External channel, 1 to 17 on ADC1.
+   * @param microvolts Input voltage in microvolts.
+   * @throws config_error when the ADC is unknown or the channel is not external.
+   * @throws model_error when the peripheral's model is not the built-in ADC.
+   */
+  [[= py::doc{"Drive an external ADC channel from outside, in microvolts."}]] void
+      adc_drive(std::string const& peripheral, std::uint8_t channel, std::uint32_t microvolts);
+
+  /**
+   * @brief Voltage driven on an external ADC channel.
+   * @param peripheral ADC name.
+   * @param channel External channel, 1 to 17 on ADC1.
+   * @return The input in microvolts, 0 when never driven.
+   * @throws config_error when the ADC is unknown or the channel is not external.
+   * @throws model_error when the peripheral's model is not the built-in ADC.
+   */
+  [[= py::doc{"Voltage driven on an external ADC channel, in microvolts."}]] [[nodiscard]] auto
+      adc_input(std::string const& peripheral, std::uint8_t channel) const -> std::uint32_t;
+
+  /**
    * @brief Code ranges of functions, for coverage and traces.
    * @param names Function names.
    * @throws symbol_error when no loaded image has a name.
@@ -540,6 +565,7 @@ public:
 private:
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
+  [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
 
   std::shared_ptr<bool>                   alive_;
   std::map<std::string, detail::usb_hubs> hubs_;

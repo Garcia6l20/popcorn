@@ -104,6 +104,13 @@ struct clock_section
   double cpi{1.0};
 };
 
+/** @brief `[supply]`: the board's supply voltages. */
+struct supply_section
+{
+  /** @brief VDDA in millivolts, also the ADC reference, empty for 3000. */
+  std::optional<std::uint32_t> vdda_mv{};
+};
+
 /**
  * @brief One device on a bus of `[board.<periph>] devices`: an I2C target by its address, or an
  *        SPI device by its chip select, never both.
@@ -194,6 +201,8 @@ struct project_file
   boot_section boot{};
   /** @brief `[clock]`. */
   clock_section clock{};
+  /** @brief `[supply]`. */
+  supply_section supply{};
   /** @brief `[board.<periph>]`. */
   std::map<std::string, board_entry> board{};
   /** @brief `[models]`. */

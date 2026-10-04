@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import math
 import struct
 from collections.abc import Callable, Iterator, Sequence
 from typing import TYPE_CHECKING, Literal
@@ -363,6 +364,20 @@ class PeripheralView:
             )
         return Pin(self._access, self._name, number)
 
+    def input(self, channel: int) -> AnalogInput:
+        """External channel `channel` of this ADC.
+
+        Raises:
+            ConfigError: `channel` is not 1 to 17.
+        """
+        if not 1 <= channel <= 17:
+            raise ConfigError(
+                f"{self._name}: no external channel {channel}",
+                key="channel",
+                expected="an external channel from 1 to 17",
+            )
+        return AnalogInput(self._access, self._name, channel)
+
     def __getattr__(self, name: str) -> RegisterView:
         register = self._registers.get(name)
         if register is None:
@@ -431,6 +446,44 @@ class Pin:
 
     def __repr__(self) -> str:
         return f"Pin({self.port}, {self.number})"
+
+
+class AnalogInput:
+    """One external ADC channel, `m.periph.ADC1.input(5)`, through the ADC model.
+
+    Setting `volts` drives the channel from outside the MCU, in whole microvolts. The drive is
+    board state, kept across an MCU reset and restored by snapshots. A conversion reads the value
+    in force when it ends: V x 16384 / VDDA at 14 bits, floored, saturated at VDDA, VDDA from
+    `SupplyOptions`. Driving works inside `running()` too, like a signal from the board: a
+    conversion ending after the next slice boundary sees it. While a run is active, a drive from
+    another thread raises RuntimeError and a read from another thread raises MachineRunning.
+    Every access raises ModelError when the peripheral's model is not the built-in ADC.
+    """
+
+    __slots__ = ("_access", "adc", "channel")
+
+    def __init__(self, access: ViewAccess, adc: str, channel: int) -> None:
+        """View a channel. Use `m.periph.<ADCx>.input(n)` instead."""
+        self._access = access
+        self.adc = adc
+        self.channel = channel
+
+    @property
+    def volts(self) -> float:
+        """Voltage driven on the channel, 0.0 when never driven."""
+        self._access.readable()
+        return self._access.handle.adc_input(self.adc, self.channel) / 1e6
+
+    @volts.setter
+    def volts(self, value: float) -> None:
+        microvolts = round(value * 1e6) if math.isfinite(value) else -1
+        if not 0 <= microvolts <= 0xFFFF_FFFF:
+            raise ValueError(f"{value!r} V is not a voltage from 0 to 4294.967295 V")
+        self._access.stimulus()
+        self._access.handle.adc_drive(self.adc, self.channel, microvolts)
+
+    def __repr__(self) -> str:
+        return f"AnalogInput({self.adc}, {self.channel})"
 
 
 class Peripherals:

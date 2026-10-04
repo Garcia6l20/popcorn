@@ -80,6 +80,35 @@ auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32
   return options;
 }
 
+auto supply_factories(mcu_description const& description, std::uint32_t vdda_mv)
+    -> std::map<std::string, periph::model_factory, std::less<>>
+{
+  using periph::stm32::vdda_max_mv;
+  using periph::stm32::vdda_min_mv;
+  if(vdda_mv < vdda_min_mv or vdda_mv > vdda_max_mv)
+  {
+    throw config_error(
+        "supply", 0, "supply.vdda_mv",
+        std::format("a VDDA from {} to {} mV, not {} mV", vdda_min_mv, vdda_max_mv, vdda_mv));
+  }
+  periph::stm32::board board;
+  board.supply.vdda_mv = vdda_mv;
+  auto all             = periph::stm32::factories(board, description);
+  std::map<std::string, periph::model_factory, std::less<>> out;
+  for(auto const& unit : description.peripherals)
+  {
+    if(unit.ip != "ADC" or unit.alias_of)
+    {
+      continue;
+    }
+    if(auto found = all.find(unit.name); found != all.end())
+    {
+      out.emplace(unit.name, std::move(found->second));
+    }
+  }
+  return out;
+}
+
 auto key_of(std::string const& usb) -> std::string
 {
   return std::format("usb.{}", usb);
@@ -181,6 +210,13 @@ auto options_of(
     if(not options.models.emplace(name, std::move(factory)).second)
     {
       throw config_error("usb", 0, key_of(name), "a USB device controller without a Python model");
+    }
+  }
+  if(config.vdda_mv)
+  {
+    for(auto& [name, factory] : supply_factories(description, *config.vdda_mv))
+    {
+      options.models.try_emplace(name, std::move(factory));
     }
   }
   if(config.arena_start)

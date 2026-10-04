@@ -84,6 +84,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::config::memory_init_entry>("MemoryInit");
   m.bind<popcorn::config::boot_section>("BootSection");
   m.bind<popcorn::config::clock_section>("ClockSection");
+  m.bind<popcorn::config::supply_section>("SupplySection");
   m.bind<popcorn::config::device_entry>("DeviceEntry");
   m.bind<popcorn::config::audio_block_entry>("AudioBlockEntry");
   m.bind<popcorn::config::usb_host_entry>("UsbHostEntry");

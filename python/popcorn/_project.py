@@ -28,6 +28,7 @@ from popcorn._image import Image
 from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, AttachedDevice, Machine
 from popcorn._rcc import RccOptions
 from popcorn._stop import Stop
+from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions
 from popcorn.model import Model
 from popcorn.units import ms
@@ -215,7 +216,7 @@ class Project:
     ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
         board models, bus devices, `[board.RCC]` clock sources, SAI audio blocks, USB hosts,
-        `connect = "pty"` bridges, `[boot] memory_init` written. Not
+        `[supply]` voltages, `connect = "pty"` bridges, `[boot] memory_init` written. Not
         reset. Each call builds new device instances, so two machines never share one.
 
         `connect = "pty"` bridges through `Board.pty`, so the pty owns what the firmware sends:
@@ -272,6 +273,8 @@ class Project:
                 hse_hz=defaults.hse_hz if clocks.hse_hz is None else clocks.hse_hz,
                 lse_hz=defaults.lse_hz if clocks.lse_hz is None else clocks.lse_hz,
             )
+        vdda_mv = file.supply.vdda_mv
+        supply = None if vdda_mv is None else SupplyOptions(vdda_mv=vdda_mv)
         ips = {p.name: p.ip for p in description.peripherals}
         audio: dict[str, dict[Block, AudioOptions]] = {}
         for name, entry in file.board.items():
@@ -332,6 +335,7 @@ class Project:
             rcc=rcc,
             audio=audio,
             usb=usb,
+            supply=supply,
         )
         for name, entry in self.board().items():
             if entry.connect is None:

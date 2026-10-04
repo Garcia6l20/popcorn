@@ -72,6 +72,7 @@ from popcorn._rcc import RccOptions
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, UartPorts
+from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
@@ -375,6 +376,7 @@ class Machine:
         rcc: RccOptions | None = None,
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
         usb: Mapping[str, UsbHostOptions] | None = None,
+        supply: SupplyOptions | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -409,6 +411,8 @@ class Machine:
                 `{"OTG_FS": UsbHostOptions()}`, built with the machine and owned by the built-in
                 model of the controller. An alias names the controller serving it. A controller
                 not listed has no host: it sees no VBUS and never enumerates.
+            supply: Supply voltages of the board, None for its defaults, a 3.0 V VDDA. VDDA is
+                the reference of every conversion of the built-in ADC model.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
@@ -421,7 +425,8 @@ class Machine:
                 one SAI, a block other than A or B, a decimation below 1 or a negative frame
                 rate, named as `audio.<SAI>.<block>`. With `usb`: a key that is not a USB device
                 controller with the built-in model, two keys naming one controller, a bus reset
-                or a timeout not above 0, named as `usb.<NAME>`.
+                or a timeout not above 0, named as `usb.<NAME>`. With `supply`: a VDDA outside 1620
+                to 3600 mV.
             ImageError: An image does not fit the memory map.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
@@ -444,6 +449,8 @@ class Machine:
         if rcc is not None:
             config.rcc_hse_hz = rcc.hse_hz
             config.rcc_lse_hz = rcc.lse_hz
+        if supply is not None:
+            config.vdda_mv = supply.vdda_mv
         aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
         config.usb_hosts = checked_usb(usb or {}, aliases)
         self._description = description

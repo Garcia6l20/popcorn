@@ -1,6 +1,7 @@
 #include <popcorn/config/project.hpp>
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/stm32/supply.hpp>
 
 #include <reflex/hash/sha256.hpp>
 #include <reflex/meta.hpp>
@@ -627,6 +628,12 @@ void check_values(project_file const& file, context const& ctx)
   if(file.clock.core_hz == 0u)
   {
     ctx.fail("clock.core_hz", "a core clock above 0 Hz");
+  }
+  using periph::stm32::vdda_max_mv;
+  using periph::stm32::vdda_min_mv;
+  if(auto const vdda = file.supply.vdda_mv; vdda and (*vdda < vdda_min_mv or *vdda > vdda_max_mv))
+  {
+    ctx.fail("supply.vdda_mv", std::format("a VDDA from {} to {} mV", vdda_min_mv, vdda_max_mv));
   }
   for(auto const& [name, entry] : file.board)
   {

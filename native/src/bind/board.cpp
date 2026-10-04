@@ -308,6 +308,30 @@ auto machine_handle::gpio_mode(std::string const& peripheral, std::uint8_t pin) 
   return gpio(peripheral, pin).mode(pin);
 }
 
+auto machine_handle::analog(std::string const& peripheral) const -> periph::stm32::analog_port&
+{
+  auto* const port = dynamic_cast<periph::stm32::analog_port*>(machine_->model(peripheral));
+  if(port == nullptr)
+  {
+    throw model_error(peripheral, "", 0);
+  }
+  return *port;
+}
+
+void machine_handle::adc_drive(
+    std::string const& peripheral,
+    std::uint8_t       channel,
+    std::uint32_t      microvolts)
+{
+  analog(peripheral).drive(channel, microvolts);
+}
+
+auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t channel) const
+    -> std::uint32_t
+{
+  return analog(peripheral).input(channel);
+}
+
 auto machine_handle::gpio_alternate(std::string const& peripheral, std::uint8_t pin) const
     -> std::uint8_t
 {
