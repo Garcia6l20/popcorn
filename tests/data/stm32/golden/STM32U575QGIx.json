@@ -4,7 +4,7 @@
     "cross_rules": 570,
     "fields": 48130,
     "irqs": 121,
-    "patched_fields": 217,
+    "patched_fields": 218,
     "peripherals": 197,
     "regions": 14,
     "registers": 4742
@@ -13,7 +13,7 @@
   "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
   "tables": {
     "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
-    "fields": "9af20763c413268707cdb959921e66fef926c3cc86b72f2a7c0e0a443c47a706",
+    "fields": "aaa665cb37846ce34901671188edc5d114e53f099c8c7e5f51831d77ad59a9ac",
     "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",
     "peripherals": "6b799cd0463550b253f8674bd32cc43415cbf11d1f2051253816f0aef6091863",
     "regions": "5a071bac5b4adfeafced09321591a3a72a4a4a87a925348d53ec2fb90dac3c3e",

@@ -114,6 +114,7 @@ class FieldsRule:
     instances: list[str] | None = field(default=None, metadata=_INSTANCE_SELECTOR)
     on_write: WriteEffect | None = None
     on_read: ReadEffect | None = None
+    width: int | None = field(default=None, metadata={"minimum": 1, "maximum": 32})
     each: EachRange | None = None
 
 
@@ -450,6 +451,15 @@ def _apply_fields(
                 )
                 for field_name in rule.fields:
                     field_desc = _find_field(register, field_name, file=file, key=f"{key}.fields")
+                    if rule.width is not None:
+                        marker = (peripheral.name, register.name, field_desc.name, "width")
+                        if marker in touched:
+                            raise DescriptionError(
+                                file, 0, f"{key}.width", "a field not already patched"
+                            )
+                        touched.add(marker)
+                        _resize_field(register, field_desc, rule.width, file=file, key=key)
+                        report.fields_touched += 1
                     if rule.on_write is not None:
                         marker = (peripheral.name, register.name, field_desc.name, "on_write")
                         if marker in touched:
@@ -468,6 +478,20 @@ def _apply_fields(
                         touched.add(marker)
                         field_desc.on_read = rule.on_read
                         report.fields_touched += 1
+
+
+def _resize_field(
+    register: RegisterDesc, resized: FieldDesc, width: int, *, file: str, key: str
+) -> None:
+    if resized.lsb + width > register.width:
+        raise DescriptionError(
+            file, 0, f"{key}.width", f"bits inside the {register.width}-bit register"
+        )
+    bits = ((1 << width) - 1) << resized.lsb
+    for other in register.fields:
+        if other is not resized and bits & (((1 << other.width) - 1) << other.lsb):
+            raise DescriptionError(file, 0, f"{key}.width", "bits clear of the other fields")
+    resized.width = width
 
 
 def _apply_cross(

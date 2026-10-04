@@ -102,6 +102,13 @@ on_write = "zero_to_clear"
 source = "RM0456 rev 6, 56.7.5 TIM15 status register (TIM15_SR): every field rc_w0, all 8 SVD fields listed. Same HAL SR = ~flag concern as the TIM1/TIM8 rule above"
 
 [[fields]]
+instances = ["TIM15"]
+registers = ["CR2"]
+fields = ["MMS"]
+width = 3
+source = "RM0456 rev 6, 56.7.2 TIM15 control register 2 (TIM15_CR2): MMS[2:0] in bits 6:4, codes 100 and 101 select OC1REFC and OC2REFC. ST's STM32U575 SVD gives MMS bits 5:4 only, so bit 6 would not read back"
+
+[[fields]]
 instances = ["TIM16", "TIM17"]
 registers = ["SR"]
 fields = ["UIF", "CC1IF", "COMIF", "BIF", "CC1OF"]

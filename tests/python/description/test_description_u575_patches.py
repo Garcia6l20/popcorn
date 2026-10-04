@@ -170,6 +170,15 @@ def test_tim16_sr_every_field_zero_to_clear_and_no_cc2if(
     assert all(f.on_write.value == "zero_to_clear" for f in by_name.values())
 
 
+def test_tim15_cr2_mms_is_three_bits_wide(u575_target_and_report: _TargetAndReport) -> None:
+    target, _ = u575_target_and_report
+    cr2 = next(r for r in target_peripheral(target, "TIM15").registers if r.name == "CR2")
+    assert [(f.name, f.lsb, f.width) for f in cr2.fields if f.name in ("MMS", "TI1S")] == [
+        ("TI1S", 7, 1),
+        ("MMS", 4, 3),
+    ]
+
+
 def test_adc4_eocal_and_ldordy_one_to_clear(u575_target_and_report: _TargetAndReport) -> None:
     target, _ = u575_target_and_report
     adc4 = target_peripheral(target, "ADC4")
@@ -210,7 +219,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     _, report = u575_target_and_report
     assert report.ip_renamed == 26
     assert report.aliased == 98
-    assert report.fields_touched == 217
+    assert report.fields_touched == 218
     assert report.cross_rules_added == 570
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1

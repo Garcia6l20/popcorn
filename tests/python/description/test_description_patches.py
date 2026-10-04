@@ -288,6 +288,55 @@ def test_two_rules_setting_one_field_differently_is_an_error(tmp_path: Path) -> 
     assert excinfo.value.key == "fields[1].on_write"
 
 
+def _width_patch(tmp_path: Path, field: str, width: int, *, twice: bool = False) -> Path:
+    rule = f"""
+[[fields]]
+instances = ["A"]
+registers = ["SR"]
+fields = ["{field}"]
+width = {width}
+source = "probe"
+"""
+    text = """
+format = 1
+[match]
+parts = ["TOY*"]
+""" + rule * (2 if twice else 1)
+    return _write_patch(tmp_path, text)
+
+
+def test_a_width_rule_widens_the_field_in_place(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    path = _width_patch(tmp_path, "R", 3)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    sr = next(r for r in target_peripheral(target, "A").registers if r.name == "SR")
+    assert [(f.name, f.lsb, f.width) for f in sr.fields] == [("F", 0, 1), ("R", 1, 3)]
+    assert next(f for f in sr.fields if f.name == "R").on_read.value == "clear"
+    assert report.fields_touched == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "width", "twice", "reason"),
+    [
+        ("F", 2, False, "bits clear of the other fields"),
+        ("R", 32, False, "bits inside the 32-bit register"),
+        ("R", 2, True, "a field not already patched"),
+    ],
+)
+def test_a_width_rule_refuses_an_overlap_an_overflow_or_a_second_width(
+    tmp_path: Path, field: str, width: int, twice: bool, reason: str
+) -> None:
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    path = _width_patch(tmp_path, field, width, twice=twice)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == f"fields[{1 if twice else 0}].width"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
 def test_alias_base_mismatch_is_an_error(tmp_path: Path) -> None:
     text = """
     format = 1

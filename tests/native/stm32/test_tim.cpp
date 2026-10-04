@@ -1,5 +1,6 @@
 #include "dma.hpp"
 #include "stm32_fixture.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/log.hpp>
@@ -781,4 +782,296 @@ TEST_CASE("selecting DMA burst mode logs once")
   auto const warnings =
       std::ranges::count(logged, core::log_kind::model_warning, &core::log_record::kind);
   CHECK(warnings == 1);
+}
+
+namespace
+{
+class trigger_probe final : public periph::model, public stm32::trigger_sink
+{
+public:
+  explicit trigger_probe(periph::model_context& ctx) : context{ctx}
+  {}
+
+  periph::model_context&     context;
+  std::string                watched{"tim15_trgo"};
+  bool                       listening{};
+  std::vector<std::uint64_t> pulses;
+  std::vector<std::uint64_t> falls;
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+  [[nodiscard]] auto listens(std::string_view signal) const -> bool override
+  {
+    return listening and signal == watched;
+  }
+  void triggered(std::string_view, stm32::trigger_edge edge, std::uint64_t at_ps) override
+  {
+    (edge == stm32::trigger_edge::rising ? pulses : falls).push_back(at_ps);
+  }
+
+  void listen(bool on)
+  {
+    static_cast<void>(stm32::interest_changed(context.peers, watched));
+    listening = on;
+    CHECK(stm32::interest_changed(context.peers, watched));
+  }
+};
+
+auto with_probe() -> core::machine_options
+{
+  auto options = popcorn::testing::stm32_options();
+  options.models.emplace("DAC1", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+    return std::make_shared<trigger_probe>(ctx);
+  });
+  return options;
+}
+
+constexpr std::uint32_t master_reset   = 0;
+constexpr std::uint32_t master_enable  = 1;
+constexpr std::uint32_t master_update  = 2;
+constexpr std::uint32_t master_compare = 3;
+constexpr std::uint64_t tim15_period   = 500 * ms;
+constexpr std::uint64_t tim15_clock_ps = 250'000;
+
+auto later(std::vector<std::uint64_t> times, std::uint64_t by) -> std::vector<std::uint64_t>
+{
+  for(auto& at : times)
+  {
+    at += by;
+  }
+  return times;
+}
+
+struct trgo
+{
+  stm32_fixture  f;
+  bus            b{f};
+  trigger_probe* sink{};
+  std::uint64_t  start{};
+
+  explicit trgo(std::uint32_t mode) : f{entered("idle", with_probe())}
+  {
+    sink = f.model_of<trigger_probe>("DAC1");
+    REQUIRE(sink != nullptr);
+    b.set("RCC", "RCC_APB2ENR", "TIM15EN", 1);
+    b.write("TIM15", "PSC", 124);
+    b.write("TIM15", "ARR", 15'999);
+    b.write("TIM15", "EGR", 1);
+    b.write("TIM15", "SR", 0);
+    b.set("TIM15", "CR2", "MMS", mode);
+  }
+
+  [[nodiscard]] auto now() const -> std::uint64_t
+  {
+    return f.target->virtual_clock().time().ps;
+  }
+
+  void begin()
+  {
+    start = now();
+    b.set("TIM15", "CR1", "CEN", 1);
+  }
+
+  void run_until(std::uint64_t ps) const
+  {
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{ps}}).reason
+        == stop_reason::time);
+  }
+
+  [[nodiscard]] auto updates(std::uint64_t first, std::uint64_t last) const
+      -> std::vector<std::uint64_t>
+  {
+    std::vector<std::uint64_t> out;
+    for(auto k = first; k <= last; ++k)
+    {
+      out.push_back(start + k * tim15_period);
+    }
+    return out;
+  }
+};
+}
+
+TEST_CASE("TIM15 MMS 010 pulses a listening sink at each update's own time, UIF left set")
+{
+  trgo t{master_update};
+  t.sink->listen(true);
+  t.begin();
+  t.run_until(t.start + 2'600 * ms);
+  CHECK(t.sink->pulses == t.updates(1, 5));
+  CHECK(t.sink->falls == later(t.updates(1, 5), tim15_clock_ps));
+  CHECK(t.b.bits("TIM15", "SR", "UIF") == 1);
+}
+
+TEST_CASE("TIM15 MMS 010 with no sink listening schedules nothing after its first update")
+{
+  trgo       t{master_update};
+  auto const idle = t.f.target->pending_events();
+  t.begin();
+  t.run_until(t.start + 600 * ms);
+  CHECK(t.b.bits("TIM15", "SR", "UIF") == 1);
+  CHECK(t.f.target->pending_events() == idle);
+  t.sink->listen(true);
+  CHECK(t.f.target->pending_events() == idle + 1);
+  t.run_until(t.start + 1'100 * ms);
+  CHECK(t.sink->pulses == t.updates(2, 2));
+}
+
+TEST_CASE("a sink listening mid-period gets the next update, no earlier one is replayed")
+{
+  trgo t{master_update};
+  t.begin();
+  t.run_until(t.start + 1'250 * ms);
+  CHECK(t.b.bits("TIM15", "SR", "UIF") == 1);
+  t.sink->listen(true);
+  t.run_until(t.start + 2'600 * ms);
+  CHECK(t.sink->pulses == t.updates(3, 5));
+  t.sink->listen(false);
+  t.run_until(t.start + 3'600 * ms);
+  CHECK(t.sink->pulses == t.updates(3, 5));
+}
+
+TEST_CASE("a TIM15 read 3 us after an update it did not schedule pulses once, at the update")
+{
+  trgo t{master_update};
+  t.begin();
+  t.run_until(t.start + 1'250 * ms);
+  static_cast<void>(t.b.read("TIM15", "CNT"));
+  t.sink->listening = true;
+  t.run_until(t.start + 3 * tim15_period + 3 * us);
+  CHECK(t.sink->pulses.empty());
+  static_cast<void>(t.b.read("TIM15", "CNT"));
+  CHECK(t.sink->pulses == t.updates(3, 3));
+  t.run_until(t.start + 2'100 * ms);
+  CHECK(t.sink->pulses == t.updates(3, 4));
+}
+
+TEST_CASE("MMS 000 pulses at each UG write, MMS 001 at the CEN rising edge")
+{
+  SUBCASE("reset")
+  {
+    trgo t{master_reset};
+    t.sink->listen(true);
+    t.begin();
+    t.run_until(t.start + 700 * ms);
+    CHECK(t.sink->pulses.empty());
+    t.b.write("TIM15", "EGR", 1);
+    t.run_until(t.start + 900 * ms);
+    t.b.write("TIM15", "EGR", 1);
+    t.run_until(t.start + 2'000 * ms);
+    CHECK(t.sink->pulses == std::vector<std::uint64_t>{t.start + 700 * ms, t.start + 900 * ms});
+  }
+  SUBCASE("enable")
+  {
+    trgo t{master_enable};
+    t.sink->listen(true);
+    t.begin();
+    t.run_until(t.start + 1'200 * ms);
+    CHECK(t.sink->pulses == std::vector<std::uint64_t>{t.start});
+    CHECK(t.sink->falls.empty());
+    t.b.set("TIM15", "CR1", "CEN", 0);
+    CHECK(t.sink->falls == std::vector<std::uint64_t>{t.start + 1'200 * ms});
+    t.b.set("TIM15", "CR1", "OPM", 1);
+    t.b.set("TIM15", "CR1", "CEN", 1);
+    t.run_until(t.start + 2'000 * ms);
+    CHECK(t.b.bits("TIM15", "CR1", "CEN") == 0);
+    auto const restart = t.start + 1'200 * ms;
+    CHECK(t.sink->pulses == std::vector<std::uint64_t>{t.start, restart});
+    CHECK(t.sink->falls == std::vector<std::uint64_t>{restart, t.start + 1'500 * ms});
+  }
+}
+
+TEST_CASE("MMS 011 pulses at each CC1 match, CC1IF left set")
+{
+  trgo t{master_compare};
+  t.b.write("TIM15", "CCR1", 4'000);
+  t.sink->listen(true);
+  t.begin();
+  t.run_until(t.start + 1'200 * ms);
+  CHECK(
+      t.sink->pulses
+      == std::vector<std::uint64_t>{t.start + 125 * ms, t.start + 625 * ms, t.start + 1'125 * ms});
+  CHECK(t.b.bits("TIM15", "SR", "CC1IF") == 1);
+}
+
+TEST_CASE("MMS 100 logs one warning and pulses nothing")
+{
+  trgo                          t{master_reset};
+  std::vector<core::log_record> logged;
+  auto const                    log_sink =
+      t.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  t.b.set("TIM15", "CR2", "MMS", 4);
+  t.b.set("TIM15", "CR2", "MMS", 5);
+  CHECK(t.b.bits("TIM15", "CR2", "MMS") == 5);
+  t.sink->listen(true);
+  t.begin();
+  t.b.write("TIM15", "EGR", 1);
+  t.run_until(t.start + 1'200 * ms);
+  CHECK(t.sink->pulses.empty());
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].peripheral == "TIM15");
+  CHECK(logged[0].reg == "CR2");
+}
+
+TEST_CASE("a snapshot between two pulses restores to the same pulse times in a fresh machine")
+{
+  trgo t{master_update};
+  t.sink->listen(true);
+  t.begin();
+  t.run_until(t.start + 1'250 * ms);
+  REQUIRE(t.sink->pulses == t.updates(1, 2));
+  auto const saved = t.f.target->snapshot();
+  t.run_until(t.start + 2'600 * ms);
+  CHECK(t.sink->pulses == t.updates(1, 5));
+
+  trgo other{master_update};
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  other.sink->listening = true;
+  other.run_until(t.start + 2'600 * ms);
+  CHECK(other.sink->pulses == t.updates(3, 5));
+}
+
+TEST_CASE("MMS 010 pulses on UG with URS set, UDIS suppresses the UG and overflow pulses")
+{
+  trgo t{master_update};
+  t.b.set("TIM15", "CR1", "URS", 1);
+  t.sink->listen(true);
+  t.begin();
+  t.run_until(t.start + 100 * ms);
+  t.b.write("TIM15", "EGR", 1);
+  CHECK(t.b.bits("TIM15", "SR", "UIF") == 0);
+  t.run_until(t.start + 700 * ms);
+  CHECK(
+      t.sink->pulses
+      == std::vector<std::uint64_t>{t.start + 100 * ms, t.start + 100 * ms + tim15_period});
+  t.b.set("TIM15", "CR1", "UDIS", 1);
+  t.b.write("TIM15", "EGR", 1);
+  t.run_until(t.start + 2'000 * ms);
+  CHECK(t.sink->pulses.size() == 2);
 }
