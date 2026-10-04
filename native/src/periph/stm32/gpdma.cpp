@@ -40,6 +40,7 @@ struct channel_state
   std::uint8_t  packed_bytes{};
   bool          half_reported{};
   bool          scheduled{};
+  std::uint8_t  destination_beats{};
 
   friend auto operator==(channel_state const&, channel_state const&) -> bool = default;
 };
@@ -52,54 +53,69 @@ struct gpdma_state
   friend auto operator==(gpdma_state const&, gpdma_state const&) -> bool = default;
 };
 
+/** @brief The 2D addressing fields of channels 12 to 15 and their LLI updates, RM0456 17.8. */
+struct two_d_fields
+{
+  reg_ref   tr3;
+  reg_ref   br2;
+  field_ref update_tr3;
+  field_ref update_br2;
+  field_ref repeat;
+  field_ref source_decrement;
+  field_ref destination_decrement;
+  field_ref block_source_decrement;
+  field_ref block_destination_decrement;
+  field_ref source_offset;
+  field_ref destination_offset;
+  field_ref block_source_offset;
+  field_ref block_destination_offset;
+  field_ref destination_burst;
+};
+
 struct channel_fields
 {
-  reg_ref                  lbar;
-  reg_ref                  fcr;
-  reg_ref                  sr;
-  reg_ref                  cr;
-  reg_ref                  tr1;
-  reg_ref                  tr2;
-  reg_ref                  br1;
-  reg_ref                  sar;
-  reg_ref                  dar;
-  reg_ref                  llr;
-  field_ref                enable;
-  field_ref                reset;
-  field_ref                suspend;
-  field_ref                link_step;
-  field_ref                idle;
-  field_ref                suspended;
-  field_ref                source_width;
-  field_ref                source_increment;
-  field_ref                source_burst;
-  field_ref                destination_width;
-  field_ref                destination_increment;
-  field_ref                request;
-  field_ref                software;
-  field_ref                event_mode;
-  field_ref                bytes;
-  field_ref                link_base;
-  field_ref                link_address;
-  field_ref                update_link;
-  field_ref                update_destination;
-  field_ref                update_source;
-  field_ref                update_block;
-  field_ref                update_tr2;
-  field_ref                update_tr1;
-  std::array<field_ref, 7> flag;
-  std::array<field_ref, 7> clear;
-  std::array<field_ref, 7> interrupt_enable;
-  field_ref                packing;
-  field_ref                source_exchange;
-  field_ref                byte_exchange;
-  field_ref                half_exchange;
-  std::optional<reg_ref>   tr3;
-  std::optional<reg_ref>   br2;
-  std::optional<field_ref> repeat;
-  std::optional<field_ref> update_tr3;
-  std::optional<field_ref> update_br2;
-  irq_line*                line{};
+  reg_ref                     lbar;
+  reg_ref                     fcr;
+  reg_ref                     sr;
+  reg_ref                     cr;
+  reg_ref                     tr1;
+  reg_ref                     tr2;
+  reg_ref                     br1;
+  reg_ref                     sar;
+  reg_ref                     dar;
+  reg_ref                     llr;
+  field_ref                   enable;
+  field_ref                   reset;
+  field_ref                   suspend;
+  field_ref                   link_step;
+  field_ref                   idle;
+  field_ref                   suspended;
+  field_ref                   source_width;
+  field_ref                   source_increment;
+  field_ref                   source_burst;
+  field_ref                   destination_width;
+  field_ref                   destination_increment;
+  field_ref                   request;
+  field_ref                   software;
+  field_ref                   event_mode;
+  field_ref                   bytes;
+  field_ref                   link_base;
+  field_ref                   link_address;
+  field_ref                   update_link;
+  field_ref                   update_destination;
+  field_ref                   update_source;
+  field_ref                   update_block;
+  field_ref                   update_tr2;
+  field_ref                   update_tr1;
+  std::array<field_ref, 7>    flag;
+  std::array<field_ref, 7>    clear;
+  std::array<field_ref, 7>    interrupt_enable;
+  field_ref                   packing;
+  field_ref                   source_exchange;
+  field_ref                   byte_exchange;
+  field_ref                   half_exchange;
+  std::optional<two_d_fields> two_d;
+  irq_line*                   line{};
 };
 
 constexpr std::array<std::string_view, 7> flag_names{"TCF",  "HTF",   "DTEF", "ULEF",
@@ -119,7 +135,6 @@ enum flag_index : std::size_t
 
 enum class unsupported : std::uint8_t
 {
-  two_d,
   link_step,
 };
 
@@ -139,14 +154,27 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  *        to the values the item started with, RM0456 GPDMA_CxBR1, so a last item with every update
  *        bit 0 and LA not 0 runs again without reading memory. A link with LLR.ULL = 0 keeps LLR:
  *        the item is recursive and the next link reads it again. Only LLR = 0 completes the
- *        channel. Not modelled: 2D addressing on channels 12 to 15, whose TR3 and BR2 linked-list
- *        words are still consumed in RM order, link step mode, each logging once and running as
- *        plain 1D run-to-completion, and triggers. The half transfer event rises at the half of
- *        each block under TCEM 0, 1 and 2, and only in the last item, the one running with LLR = 0,
- *        under TCEM 3. A channel enabled with BNDT 0 raises the complete transfer event once its
- *        first item is loaded when its TCEM before that load is 2, and no event under 0 and 1.
- *        A request level held by a requester across a machine reset is cleared: the requester
- *        announces it again on its next change.
+ *        channel. Channels 12 to 15 add 2D addressing, RM0456 17.4.10: BRC + 1 blocks per
+ *        item, BNDT reloaded for each. SAO is added, or subtracted under SDEC, after each source
+ *        burst of SBL_1 + 1 beats, never after a burst shortened by the block end. DAO likewise
+ *        after each destination burst of DBL_1 + 1 items, counted after the data handling, so
+ *        packing and unpacking change the count. A destination burst left partial by the block
+ *        end gets no DAO, an assumption: RM0456 is silent on it. BRSAO and BRDAO apply after
+ *        every block, per BRSDEC and BRDDEC, on top of the burst offsets. SAO, BRSAO not a
+ *        multiple of the source width and DAO, BRDAO not a multiple of the destination width
+ *        are user setting errors. A state saved before the destination burst count existed loads
+ *        with the count 0, exact when the save fell on a destination burst boundary, as it always
+ *        does with one-item destination bursts. Not modelled: link step mode, logging once and
+ *        running to completion, and triggers. The half transfer event rises at the half of each
+ *        block under TCEM 0, 1 and 2, and only in the last item, the one running with LLR = 0,
+ *        under TCEM 3. On channels 12 to 15, TCEM 0 keeps the block level, while TCEM 1 and 2,
+ *        and 3 in the last item, raise the half transfer once the rounded-up half of the BRC + 1
+ *        blocks is done, and TCEM 1 raises the complete transfer at the end of the 2D block.
+ *        With BRC 0 that half is the one block, so the half transfer rises at the block end,
+ *        RM0456 GPDMA_CxTR2.TCEM and 17.7. A channel enabled with BNDT 0 raises the complete
+ *        transfer event once its first item is loaded when its TCEM before that load is 2, and
+ *        no event under 0 and 1. A request level held by a requester across a machine reset is
+ *        cleared: the requester announces it again on its next change.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>, public dma_controller
 {
@@ -173,6 +201,10 @@ private:
   auto               convert(std::size_t ch, std::uint32_t value) -> bool;
   auto               deliver(std::size_t ch, std::uint32_t value) -> bool;
   void               block_done(std::size_t ch);
+  void               offset(field_ref amount, field_ref decrement, reg_ref target);
+  void               block_offsets(std::size_t ch);
+  void               two_d_half(std::size_t ch, std::uint32_t mode);
+  auto               repeat_block(std::size_t ch, std::uint32_t mode) -> bool;
   auto               link(std::size_t ch) -> bool;
   void               latch(std::size_t ch);
   void               finish(std::size_t ch, flag_index flag);
@@ -185,7 +217,7 @@ private:
   reg_ref                              misr_;
   std::array<field_ref, channels>      masked_{};
   core::clock_domain                   hclk_;
-  std::array<bool, 2>                  unsupported_logged_{};
+  std::array<bool, 1>                  unsupported_logged_{};
   bool                                 stopped_clock_logged_{};
 };
 
@@ -284,11 +316,22 @@ gpdma::gpdma(model_context& ctx, peripheral_desc const& desc)
     }
     if(ch >= first_2d)
     {
-      c.tr3        = reg(p + "TR3");
-      c.br2        = reg(p + "BR2");
-      c.repeat     = field(p + "BR1", "BRC");
-      c.update_tr3 = field(p + "LLR", "UT3");
-      c.update_br2 = field(p + "LLR", "UB2");
+      c.two_d = two_d_fields{
+          .tr3                         = reg(p + "TR3"),
+          .br2                         = reg(p + "BR2"),
+          .update_tr3                  = field(p + "LLR", "UT3"),
+          .update_br2                  = field(p + "LLR", "UB2"),
+          .repeat                      = field(p + "BR1", "BRC"),
+          .source_decrement            = field(p + "BR1", "SDEC"),
+          .destination_decrement       = field(p + "BR1", "DDEC"),
+          .block_source_decrement      = field(p + "BR1", "BRSDEC"),
+          .block_destination_decrement = field(p + "BR1", "BRDDEC"),
+          .source_offset               = field(p + "TR3", "SAO"),
+          .destination_offset          = field(p + "TR3", "DAO"),
+          .block_source_offset         = field(p + "BR2", "BRSAO"),
+          .block_destination_offset    = field(p + "BR2", "BRDAO"),
+          .destination_burst           = field(p + "TR1", "DBL_1"),
+      };
     }
     c.line      = &irq(std::format("GPDMA1_Channel{}_IRQn", ch));
     masked_[ch] = field("GPDMA_MISR", std::format("MIS{}", ch));
@@ -305,12 +348,13 @@ void gpdma::reset(register_file& regs, reset_kind)
   for(auto& c : state_.channel)
   {
     ++c.generation;
-    c.scheduled     = false;
-    c.half_reported = false;
-    c.block_bytes   = 0;
-    c.repeat        = 0;
-    c.packed        = 0;
-    c.packed_bytes  = 0;
+    c.scheduled         = false;
+    c.half_reported     = false;
+    c.block_bytes       = 0;
+    c.repeat            = 0;
+    c.packed            = 0;
+    c.packed_bytes      = 0;
+    c.destination_beats = 0;
   }
   for(std::size_t ch = 0; ch < channels; ++ch)
   {
@@ -352,18 +396,31 @@ auto gpdma::valid(std::size_t ch) const -> bool
   auto const whole   = bytes % sw == 0 and (not packing or bytes % dw == 0);
   auto const source  = regs_.peek(c.sar.offset) % sw == 0;
   auto const target  = regs_.peek(c.dar.offset) % dw == 0;
-  return widths and whole and source and target;
+  auto const offsets = not c.two_d
+                    or (get(regs_, c.two_d->source_offset)
+                        % sw
+                        == 0
+                        and get(regs_, c.two_d->block_source_offset)
+                        % sw
+                        == 0
+                        and get(regs_, c.two_d->destination_offset)
+                        % dw
+                        == 0
+                        and get(regs_, c.two_d->block_destination_offset)
+                        % dw
+                        == 0);
+  return widths and whole and source and target and offsets;
 }
 
 void gpdma::warn_once(std::size_t ch, unsupported feature)
 {
-  constexpr std::array<std::string_view, 2> names{"2D addressing", "link step mode"};
+  constexpr std::array<std::string_view, 1> names{"link step mode"};
   auto const                                what = names[std::to_underlying(feature)];
   if(not std::exchange(unsupported_logged_[std::to_underlying(feature)], true))
   {
     warn(
         std::format("GPDMA_C{}CR", ch),
-        std::format("channel {} uses {}, not modelled: it runs as a 1D transfer", ch, what));
+        std::format("channel {} uses {}, not modelled: it runs to completion", ch, what));
   }
 }
 
@@ -380,10 +437,6 @@ void gpdma::start(std::size_t ch)
   {
     warn_once(ch, unsupported::link_step);
   }
-  if(c.br2 and (regs_.peek(c.br2->offset) != 0 or regs_.peek(c.tr3->offset) != 0))
-  {
-    warn_once(ch, unsupported::two_d);
-  }
   update(regs_, c.idle, 0);
   if(get(regs_, c.bytes) == 0)
   {
@@ -398,9 +451,10 @@ void gpdma::start(std::size_t ch)
     }
   }
   latch(ch);
-  s.half_reported = false;
-  s.packed        = 0;
-  s.packed_bytes  = 0;
+  s.half_reported     = false;
+  s.packed            = 0;
+  s.packed_bytes      = 0;
+  s.destination_beats = 0;
   schedule(ch);
 }
 
@@ -463,6 +517,15 @@ auto gpdma::deliver(std::size_t ch, std::uint32_t value) -> bool
   {
     regs_.poke(c.dar.offset, destination + dw);
   }
+  if(c.two_d)
+  {
+    auto& s = state_.channel[ch];
+    if(++s.destination_beats > get(regs_, c.two_d->destination_burst))
+    {
+      s.destination_beats = 0;
+      offset(c.two_d->destination_offset, c.two_d->destination_decrement, c.dar);
+    }
+  }
   return true;
 }
 
@@ -502,11 +565,12 @@ auto gpdma::convert(std::size_t ch, std::uint32_t value) -> bool
 
 void gpdma::burst(std::size_t ch)
 {
-  auto&      c     = ch_[ch];
-  auto&      s     = state_.channel[ch];
-  auto const sw    = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
-  auto const beats = get(regs_, c.source_burst) + 1;
-  for(std::uint32_t beat = 0; beat < beats and get(regs_, c.bytes) != 0; ++beat)
+  auto&         c     = ch_[ch];
+  auto&         s     = state_.channel[ch];
+  auto const    sw    = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
+  auto const    beats = get(regs_, c.source_burst) + 1;
+  std::uint32_t beat  = 0;
+  for(; beat < beats and get(regs_, c.bytes) != 0; ++beat)
   {
     auto const source = regs_.peek(c.sar.offset);
     auto const value  = ctx_.services.read(source, sw, initiator::dma);
@@ -521,9 +585,13 @@ void gpdma::burst(std::size_t ch)
     }
     update(regs_, c.bytes, get(regs_, c.bytes) - sw);
   }
+  if(c.two_d and beat == beats)
+  {
+    offset(c.two_d->source_offset, c.two_d->source_decrement, c.sar);
+  }
   auto const mode = get(regs_, c.event_mode);
   auto const last = regs_.peek(c.llr.offset) == 0;
-  auto const half = mode < 3 or last;
+  auto const half = c.two_d ? mode == 0 : mode < 3 or last;
   if(half and not s.half_reported and get(regs_, c.bytes) * 2 <= s.block_bytes)
   {
     s.half_reported = true;
@@ -542,6 +610,10 @@ void gpdma::block_done(std::size_t ch)
   auto&      c    = ch_[ch];
   auto&      s    = state_.channel[ch];
   auto const mode = get(regs_, c.event_mode);
+  if(c.two_d and repeat_block(ch, mode))
+  {
+    return;
+  }
   if(regs_.peek(c.llr.offset) == 0)
   {
     finish(ch, transfer_complete);
@@ -564,12 +636,64 @@ void gpdma::block_done(std::size_t ch)
   schedule(ch);
 }
 
+auto gpdma::repeat_block(std::size_t ch, std::uint32_t mode) -> bool
+{
+  auto const& c = ch_[ch];
+  auto&       s = state_.channel[ch];
+  block_offsets(ch);
+  two_d_half(ch, mode);
+  auto const left = get(regs_, c.two_d->repeat);
+  if(left == 0)
+  {
+    return false;
+  }
+  update(regs_, c.two_d->repeat, left - 1);
+  update(regs_, c.bytes, s.block_bytes);
+  if(mode == 0)
+  {
+    s.half_reported = false;
+    raise_flag(ch, transfer_complete);
+  }
+  schedule(ch);
+  return true;
+}
+
+void gpdma::offset(field_ref amount, field_ref decrement, reg_ref target)
+{
+  auto const value = get(regs_, amount);
+  auto const now   = regs_.peek(target.offset);
+  regs_.poke(target.offset, get(regs_, decrement) != 0 ? now - value : now + value);
+}
+
+void gpdma::block_offsets(std::size_t ch)
+{
+  auto const& d                        = *ch_[ch].two_d;
+  state_.channel[ch].destination_beats = 0;
+  offset(d.block_source_offset, d.block_source_decrement, ch_[ch].sar);
+  offset(d.block_destination_offset, d.block_destination_decrement, ch_[ch].dar);
+}
+
+void gpdma::two_d_half(std::size_t ch, std::uint32_t mode)
+{
+  auto& s = state_.channel[ch];
+  if(mode == 0 or (mode == 3 and regs_.peek(ch_[ch].llr.offset) != 0) or s.half_reported)
+  {
+    return;
+  }
+  auto const done = s.repeat - get(regs_, ch_[ch].two_d->repeat) + 1;
+  if(done >= (s.repeat + 2u) / 2)
+  {
+    s.half_reported = true;
+    raise_flag(ch, half_transfer);
+  }
+}
+
 void gpdma::latch(std::size_t ch)
 {
   auto const& c = ch_[ch];
   auto&       s = state_.channel[ch];
   s.block_bytes = get(regs_, c.bytes);
-  s.repeat      = c.repeat ? static_cast<std::uint16_t>(get(regs_, *c.repeat)) : 0;
+  s.repeat      = c.two_d ? static_cast<std::uint16_t>(get(regs_, c.two_d->repeat)) : 0;
 }
 
 auto gpdma::link(std::size_t ch) -> bool
@@ -594,7 +718,8 @@ auto gpdma::link(std::size_t ch) -> bool
     return true;
   };
   auto const two_d = [&] {
-    return not c.tr3 or (load(*c.update_tr3, *c.tr3) and load(*c.update_br2, *c.br2));
+    return not c.two_d
+        or (load(c.two_d->update_tr3, c.two_d->tr3) and load(c.two_d->update_br2, c.two_d->br2));
   };
   auto const loaded = load(c.update_tr1, c.tr1)
                   and load(c.update_tr2, c.tr2)
@@ -611,9 +736,9 @@ auto gpdma::link(std::size_t ch) -> bool
   if(c.update_block.of(llr) == 0)
   {
     update(regs_, c.bytes, s.block_bytes);
-    if(c.repeat)
+    if(c.two_d)
     {
-      update(regs_, *c.repeat, s.repeat);
+      update(regs_, c.two_d->repeat, s.repeat);
     }
   }
   if(not valid(ch))

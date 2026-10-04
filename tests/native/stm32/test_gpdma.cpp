@@ -228,6 +228,10 @@ TEST_CASE("a linked-list item of channel 12 consumes its TR3 and BR2 words in RM
                      | bit("GPDMA_C12LLR", "UDA")
                      | bit("GPDMA_C12LLR", "UT3")
                      | bit("GPDMA_C12LLR", "ULL");
+  for(std::uint32_t index = 32; index < 96; ++index)
+  {
+    REQUIRE(f.target->mem().write(copy_from + index, 1, (index * 11u + 1u) & 0xffu));
+  }
   for(auto const [index, word] :
       std::views::enumerate(std::array<std::uint32_t, 5>{16, copy_from + 16, copy_to + 16, 4, 0}))
   {
@@ -242,7 +246,18 @@ TEST_CASE("a linked-list item of channel 12 consumes its TR3 and BR2 words in RM
   write(f, "GPDMA_C12LLR", updates | (node & 0xfffcu));
   write(f, "GPDMA_C12CR", bit("GPDMA_C12CR", "EN"));
   idle_for(f, std::chrono::microseconds{100});
-  CHECK(copied(f, 32));
+  CHECK(copied(f, 16));
+  std::vector<std::uint32_t> second;
+  std::vector<std::uint32_t> every_fifth;
+  for(std::uint32_t index = 0; index < 16; ++index)
+  {
+    auto const byte = f.target->mem().read(copy_to + 16 + index, 1);
+    REQUIRE(byte.has_value());
+    second.push_back(static_cast<std::uint32_t>(*byte));
+    every_fifth.push_back(((16 + 5 * index) * 11u + 1u) & 0xffu);
+  }
+  CHECK(second == every_fifth);
+  CHECK(f.field("GPDMA1", "GPDMA_C12TR3", "SAO") == 4);
   CHECK(f.field("GPDMA1", "GPDMA_C12SR", "ULEF") == 0);
   CHECK(f.field("GPDMA1", "GPDMA_C12SR", "USEF") == 0);
   CHECK(f.field("GPDMA1", "GPDMA_C12SR", "TCF") == 1);
@@ -743,6 +758,7 @@ struct new_channel_state
   std::uint8_t  packed_bytes{};
   bool          half_reported{};
   bool          scheduled{};
+  std::uint8_t  destination_beats{};
 };
 
 struct new_gpdma_state
@@ -1022,5 +1038,700 @@ TEST_CASE("an odd block raises its half transfer once the rounded-up half is mov
       == std::vector<event>{
           {'H', 4},
           {'T', 7}
+  });
+}
+
+namespace
+{
+constexpr popcorn::address stereo     = 0x2002'0000;
+constexpr popcorn::address port       = 0x2002'1000;
+constexpr popcorn::address list_head  = 0x2002'2000;
+constexpr popcorn::address list_tail  = 0x2002'2020;
+constexpr std::uint32_t    list_link  = 0x3801'0000;
+constexpr std::uint32_t    list_frame = 1024;
+
+struct two_d_registers
+{
+  std::uint32_t channel{};
+  std::uint32_t request{};
+  std::uint32_t tr1{};
+  std::uint32_t tr2{};
+  std::uint32_t br1{};
+  std::uint32_t sar{};
+  std::uint32_t dar{};
+  std::uint32_t tr3{};
+  std::uint32_t br2{};
+};
+
+constexpr two_d_registers tx_list{
+    .channel = 12,
+    .request = 36,
+    .tr1     = 0x4002'0009,
+    .tr2     = 0x8000'0424,
+    .br1     = 0x41FF'0004,
+    .sar     = stereo,
+    .dar     = port,
+    .tr3     = 0x0000'03FE,
+    .br2     = 0x0000'07FE,
+};
+
+constexpr two_d_registers rx_list{
+    .channel = 13,
+    .request = 37,
+    .tr1     = 0x4009'0002,
+    .tr2     = 0x8000'0025,
+    .br1     = 0x81FF'0008,
+    .sar     = port,
+    .dar     = stereo,
+    .tr3     = 0x03FE'0000,
+    .br2     = 0x07FE'0000,
+};
+
+auto name_of(std::uint32_t channel, std::string_view reg) -> std::string
+{
+  return std::format("GPDMA_C{}{}", channel, reg);
+}
+
+void put(stm32_fixture const& f, std::uint32_t channel, std::string_view reg, std::uint32_t value)
+{
+  write(f, name_of(channel, reg), value);
+}
+
+auto peek(stm32_fixture const& f, std::uint32_t channel, std::string_view reg) -> std::uint32_t
+{
+  return reg_value(f, name_of(channel, reg));
+}
+
+void start_list(stm32_fixture const& f, two_d_registers const& r, std::uint32_t channel_llr)
+{
+  place(
+      f, list_head,
+      std::array{
+          r.tr1, r.tr2, r.br1, r.sar, r.dar, r.tr3, r.br2, list_link | (list_tail & 0xfffcu)});
+  place(f, list_tail, std::array{r.br1, r.sar, r.dar, list_link | (list_tail & 0xfffcu)});
+  put(f, r.channel, "TR2", 1u << 30);
+  put(f, r.channel, "BR1", 0);
+  put(f, r.channel, "LBAR", list_head & 0xffff'0000u);
+  put(f, r.channel, "LLR", channel_llr | (list_head & 0xfffcu));
+  put(f, r.channel, "CR", 0x0042'1F00);
+  put(f, r.channel, "CR", 0x0042'1F01);
+}
+
+void request_pulse(stm32_fixture const& f, std::uint32_t request)
+{
+  auto* const controller =
+      dynamic_cast<popcorn::periph::stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  controller->on_request(request, true);
+  idle_for(f, std::chrono::nanoseconds{1'500});
+  controller->on_request(request, false);
+  idle_for(f, std::chrono::microseconds{1});
+}
+
+auto flags_at(stm32_fixture const& f, std::uint32_t channel, std::uint32_t at) -> std::vector<event>
+{
+  std::vector<event> out;
+  for(auto const found : take_events(f, std::format("{}", channel), 0))
+  {
+    out.push_back({found.kind, at});
+  }
+  return out;
+}
+
+void fill_stereo(stm32_fixture const& f)
+{
+  for(std::uint32_t index = 0; index < 512; ++index)
+  {
+    REQUIRE(f.target->mem().write(stereo + 2 * index, 2, index));
+    REQUIRE(f.target->mem().write(stereo + 1024 + 2 * index, 2, 0x8000u | index));
+  }
+}
+
+struct tx_position
+{
+  std::uint32_t sar{};
+  std::uint32_t repeat{};
+  std::uint32_t bytes{};
+
+  friend auto operator==(tx_position const&, tx_position const&) -> bool = default;
+};
+
+auto operator<<(std::ostream& out, tx_position const& at) -> std::ostream&
+{
+  return out << std::format("SAR {:#x} BRC {} BNDT {}", at.sar, at.repeat, at.bytes);
+}
+
+auto tx_expected(std::uint32_t done) -> tx_position
+{
+  auto const block = (done - 1) / 2;
+  if((done - 1) % 2 == 0)
+  {
+    return {.sar = stereo + 2 * block + 1024, .repeat = 511 - block, .bytes = 2};
+  }
+  if(block < 511)
+  {
+    return {.sar = stereo + 2 * block + 2, .repeat = 510 - block, .bytes = 4};
+  }
+  return {.sar = stereo, .repeat = 511, .bytes = 4};
+}
+
+auto half_and_complete(std::uint32_t lists) -> std::vector<event>
+{
+  std::vector<event> out;
+  for(std::uint32_t list = 0; list < lists; ++list)
+  {
+    out.push_back({'H', list * list_frame + list_frame / 2});
+    out.push_back({'T', (list + 1) * list_frame});
+  }
+  return out;
+}
+}
+
+TEST_CASE("a 2D circular list on channel 12 reads the two halves of a stereo buffer frame by frame")
+{
+  constexpr std::array<std::uint32_t, 13> watched{1,   2,   3,   4,   5,    6,   510,
+                                                  511, 512, 513, 514, 1023, 1024};
+  auto                                    f = idle_machine();
+  fill_stereo(f);
+  start_list(f, tx_list, 0xFE01'0000);
+  CHECK(flags_at(f, 12, 0).empty());
+  std::vector<event>         seen;
+  std::vector<std::uint32_t> wrong_words;
+  for(std::uint32_t pulse = 1; pulse <= 3 * list_frame; ++pulse)
+  {
+    request_pulse(f, tx_list.request);
+    auto const done  = (pulse - 1) % list_frame + 1;
+    auto const frame = (done - 1) / 2;
+    auto const word  = f.target->mem().read(port, 4);
+    REQUIRE(word.has_value());
+    if(*word != ((done - 1) % 2 == 0 ? frame : 0x8000u | frame))
+    {
+      wrong_words.push_back(pulse);
+    }
+    if(std::ranges::contains(watched, done))
+    {
+      CAPTURE(pulse);
+      CHECK(
+          tx_position{
+              .sar    = peek(f, 12, "SAR"),
+              .repeat = f.field("GPDMA1", "GPDMA_C12BR1", "BRC"),
+              .bytes  = f.field("GPDMA1", "GPDMA_C12BR1", "BNDT")}
+          == tx_expected(done));
+    }
+    std::ranges::copy(flags_at(f, 12, pulse), std::back_inserter(seen));
+  }
+  CHECK(wrong_words.empty());
+  CHECK(seen == half_and_complete(3));
+  CHECK(peek(f, 12, "DAR") == port);
+  CHECK(f.field("GPDMA1", "GPDMA_C12CR", "EN") == 1);
+  CHECK(f.field("GPDMA1", "GPDMA_C12SR", "USEF") == 0);
+}
+
+namespace
+{
+auto rx_halves(stm32_fixture const& f)
+    -> std::pair<std::vector<std::uint32_t>, std::vector<std::uint32_t>>
+{
+  std::pair<std::vector<std::uint32_t>, std::vector<std::uint32_t>> out;
+  for(std::uint32_t index = 0; index < 512; ++index)
+  {
+    auto const left  = f.target->mem().read(stereo + 2 * index, 2);
+    auto const right = f.target->mem().read(stereo + 1024 + 2 * index, 2);
+    REQUIRE(left.has_value());
+    REQUIRE(right.has_value());
+    out.first.push_back(static_cast<std::uint32_t>(*left));
+    out.second.push_back(static_cast<std::uint32_t>(*right));
+  }
+  return out;
+}
+
+auto rx_round(std::uint32_t first)
+    -> std::pair<std::vector<std::uint32_t>, std::vector<std::uint32_t>>
+{
+  std::pair<std::vector<std::uint32_t>, std::vector<std::uint32_t>> out;
+  for(std::uint32_t index = 0; index < 512; ++index)
+  {
+    out.first.push_back((first + 2 * index) & 0xffffu);
+    out.second.push_back((first + 2 * index + 1) & 0xffffu);
+  }
+  return out;
+}
+
+auto rx_pulses(stm32_fixture const& f, std::uint32_t from, std::uint32_t to) -> std::vector<event>
+{
+  std::vector<event> seen;
+  for(std::uint32_t pulse = from; pulse < to; ++pulse)
+  {
+    REQUIRE(f.target->mem().write(port, 4, 0x0001'0000u | pulse));
+    request_pulse(f, rx_list.request);
+    std::ranges::copy(flags_at(f, 13, pulse + 1), std::back_inserter(seen));
+  }
+  return seen;
+}
+}
+
+TEST_CASE("a 2D circular list on channel 13 writes each frame's two slots into two buffer halves")
+{
+  auto f = idle_machine();
+  start_list(f, rx_list, 0xFE01'0000);
+  CHECK(flags_at(f, 13, 0).empty());
+  std::vector<event> seen;
+  for(std::uint32_t list = 0; list < 3; ++list)
+  {
+    CAPTURE(list);
+    std::ranges::copy(
+        rx_pulses(f, list * list_frame, (list + 1) * list_frame), std::back_inserter(seen));
+    CHECK(rx_halves(f) == rx_round(list * list_frame));
+    CHECK(peek(f, 13, "DAR") == stereo);
+    CHECK(f.field("GPDMA1", "GPDMA_C13BR1", "BRC") == 511);
+  }
+  CHECK(seen == half_and_complete(3));
+  CHECK(f.field("GPDMA1", "GPDMA_C13CR", "EN") == 1);
+}
+
+namespace
+{
+struct two_d_copy
+{
+  std::uint32_t tr1{};
+  std::uint32_t tcem{};
+  std::uint32_t br1{};
+  std::uint32_t tr3{};
+  std::uint32_t br2{};
+  std::uint32_t sar{copy_from};
+  std::uint32_t dar{copy_to};
+  std::uint32_t llr{};
+};
+
+auto halfwords() -> std::uint32_t
+{
+  return tr1(1, 1, 0) | bit("GPDMA_C12TR1", "SINC") | bit("GPDMA_C12TR1", "DINC");
+}
+
+auto repeat(std::uint32_t blocks) -> std::uint32_t
+{
+  return blocks * bit("GPDMA_C12BR1", "BRC");
+}
+
+void start_two_d(stm32_fixture const& f, two_d_copy const& copy)
+{
+  put(f, 12, "TR1", copy.tr1);
+  put(f, 12, "TR2", bit("GPDMA_C12TR2", "SWREQ") | copy.tcem * bit("GPDMA_C12TR2", "TCEM"));
+  put(f, 12, "BR1", copy.br1);
+  put(f, 12, "TR3", copy.tr3);
+  put(f, 12, "BR2", copy.br2);
+  put(f, 12, "SAR", copy.sar);
+  put(f, 12, "DAR", copy.dar);
+  put(f, 12, "LBAR", node & 0xffff'0000u);
+  put(f, 12, "LLR", copy.llr);
+  put(f, 12, "CR", bit("GPDMA_C12CR", "EN"));
+}
+
+auto two_d_events(stm32_fixture const& f, std::size_t wanted) -> std::vector<event>
+{
+  std::vector<event> out;
+  for(int count = 0; count < 4000 and out.size() < wanted; ++count)
+  {
+    std::ranges::copy(take_events(f, "12", copy_to), std::back_inserter(out));
+    if(f.field("GPDMA1", "GPDMA_C12CR", "EN") == 0)
+    {
+      break;
+    }
+    step(f);
+  }
+  return out;
+}
+
+auto run_two_d(two_d_copy const& copy, std::size_t wanted) -> std::vector<event>
+{
+  auto f = long_source();
+  start_two_d(f, copy);
+  return two_d_events(f, wanted);
+}
+
+auto finish_two_d(two_d_copy const& copy) -> stm32_fixture
+{
+  auto f = long_source();
+  start_two_d(f, copy);
+  for(int count = 0; count < 4000 and f.field("GPDMA1", "GPDMA_C12CR", "EN") != 0; ++count)
+  {
+    step(f);
+  }
+  REQUIRE(f.field("GPDMA1", "GPDMA_C12CR", "EN") == 0);
+  return f;
+}
+
+auto bytes_at(stm32_fixture const& f, popcorn::address at, std::uint32_t length)
+    -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t index = 0; index < length; ++index)
+  {
+    auto const byte = f.target->mem().read(at + index, 1);
+    REQUIRE(byte.has_value());
+    out.push_back(static_cast<std::uint32_t>(*byte));
+  }
+  return out;
+}
+
+auto joined(std::initializer_list<std::vector<std::uint32_t>> parts) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(auto const& part : parts)
+  {
+    std::ranges::copy(part, std::back_inserter(out));
+  }
+  return out;
+}
+}
+
+TEST_CASE("channel 12 raises TC and HT per 2D block under TCEM 1 and per block under TCEM 0")
+{
+  auto const restore = loop_a & 0xfffcu;
+  CHECK(
+      run_two_d(
+          {
+              .tr1 = halfwords(), .tcem = 1, .br1 = 4 | repeat(7), .llr = restore
+  },
+          4)
+      == std::vector<event>{{'H', 16}, {'T', 32}, {'H', 48}, {'T', 64}});
+  CHECK(
+      run_two_d(
+          {
+              .tr1 = halfwords(), .tcem = 0, .br1 = 4 | repeat(7), .llr = restore
+  },
+          8)
+      == std::vector<event>{
+          {'H', 2}, {'T', 4}, {'H', 6}, {'T', 8}, {'H', 10}, {'T', 12}, {'H', 14}, {'T', 16}});
+  CHECK(
+      run_two_d(
+          {
+              .tr1 = halfwords(), .tcem = 3, .br1 = 4 | repeat(7)
+  },
+          4)
+      == std::vector<event>{{'H', 16}, {'T', 32}});
+}
+
+TEST_CASE("a 2D block of one repeat raises HT with TC at its end, BRC 2 raises HT after two blocks")
+{
+  CHECK(
+      run_two_d(
+          {
+              .tr1 = halfwords(), .tcem = 1, .br1 = 4
+  },
+          4)
+      == std::vector<event>{{'H', 4}, {'T', 4}});
+  CHECK(
+      run_two_d(
+          {
+              .tr1 = halfwords(), .tcem = 1, .br1 = 4 | repeat(2)
+  },
+          4)
+      == std::vector<event>{{'H', 8}, {'T', 12}});
+}
+
+TEST_CASE("SAO follows each full source burst, a burst shortened by the block end gets none")
+{
+  auto const f = finish_two_d(
+      {.tr1 = halfwords() | 3u * bit("GPDMA_C12TR1", "SBL_1"), .tcem = 0, .br1 = 20, .tr3 = 8});
+  CHECK(peek(f, 12, "SAR") == copy_from + 36);
+  CHECK(peek(f, 12, "DAR") == copy_to + 20);
+  CHECK(bytes_at(f, copy_to, 20) == joined({source_bytes({0, 16}, 8), source_bytes({32}, 4)}));
+}
+
+TEST_CASE("DAO follows each destination burst of DBL_1 + 1 packed words")
+{
+  auto const f = finish_two_d(
+      {.tr1  = tr1(1, 2, 2)
+             | bit("GPDMA_C12TR1", "SINC")
+             | bit("GPDMA_C12TR1", "DINC")
+             | bit("GPDMA_C12TR1", "DBL_1"),
+       .tcem = 0,
+       .br1  = 16,
+       .tr3  = 8u * bit("GPDMA_C12TR3", "DAO")});
+  CHECK(peek(f, 12, "DAR") == copy_to + 32);
+  CHECK(
+      bytes_at(f, copy_to, 24)
+      == joined({source_bytes({0}, 8), std::vector<std::uint32_t>(8, 0), source_bytes({8}, 8)}));
+}
+
+TEST_CASE("SDEC and BRDDEC subtract their offsets, the address arithmetic wraps unsigned")
+{
+  SUBCASE("SDEC")
+  {
+    auto const f = finish_two_d(
+        {.tr1 = halfwords(),
+         .br1 = 8 | bit("GPDMA_C12BR1", "SDEC"),
+         .tr3 = 6,
+         .sar = copy_from + 16});
+    CHECK(peek(f, 12, "SAR") == copy_from);
+    CHECK(bytes_at(f, copy_to, 8) == source_bytes({16, 12, 8, 4}, 2));
+  }
+  SUBCASE("BRDDEC")
+  {
+    auto const f = finish_two_d(
+        {.tr1 = halfwords(),
+         .br1 = 4 | repeat(1) | bit("GPDMA_C12BR1", "BRDDEC"),
+         .br2 = 12u * bit("GPDMA_C12BR2", "BRDAO"),
+         .dar = copy_to + 16});
+    CHECK(peek(f, 12, "DAR") == copy_to);
+    CHECK(bytes_at(f, copy_to + 8, 4) == source_bytes({4}, 4));
+    CHECK(bytes_at(f, copy_to + 16, 4) == source_bytes({0}, 4));
+  }
+  SUBCASE("below the SRAM base")
+  {
+    constexpr popcorn::address low = 0x2000'8000;
+    auto const                 f   = finish_two_d(
+        {.tr1 = halfwords(),
+         .br1 = 4 | bit("GPDMA_C12BR1", "BRDDEC"),
+         .br2 = 0xFFF0u * bit("GPDMA_C12BR2", "BRDAO"),
+         .dar = low});
+    CHECK(peek(f, 12, "DAR") == low + 4 - 0xFFF0);
+    CHECK(f.field("GPDMA1", "GPDMA_C12SR", "TCF") == 1);
+    CHECK(f.field("GPDMA1", "GPDMA_C12SR", "DTEF") == 0);
+  }
+}
+
+TEST_CASE("an offset not a multiple of its data width is a user error at enable, nothing moves")
+{
+  struct offending
+  {
+    std::string_view name;
+    std::uint32_t    tr3{};
+    std::uint32_t    br2{};
+  };
+  for(auto const& [name, tr3, br2] : {
+          offending{"SAO 3",   3,        0       },
+          offending{"DAO 2",   2u << 16, 0       },
+          offending{"BRSAO 1", 0,        1       },
+          offending{"BRDAO 6", 0,        6u << 16},
+  })
+  {
+    CAPTURE(name);
+    auto f = long_source();
+    start_two_d(
+        f, {.tr1 = tr1(1, 2, 0) | bit("GPDMA_C12TR1", "SINC") | bit("GPDMA_C12TR1", "DINC"),
+            .br1 = 4,
+            .tr3 = tr3,
+            .br2 = br2});
+    idle_for(f, std::chrono::microseconds{10});
+    CHECK(f.field("GPDMA1", "GPDMA_C12SR", "USEF") == 1);
+    CHECK(f.field("GPDMA1", "GPDMA_C12CR", "EN") == 0);
+    CHECK(f.field("GPDMA1", "GPDMA_C12BR1", "BNDT") == 4);
+    CHECK(peek(f, 12, "DAR") == copy_to);
+  }
+}
+
+TEST_CASE("a node 0 loaded without UT3 and UB2 takes its TR3 word as LLR, TR3 and BR2 stay")
+{
+  auto f = idle_machine();
+  put(f, 12, "TR3", 0x0004'0002);
+  put(f, 12, "BR2", 0x0008'0006);
+  start_list(f, tx_list, 0xF801'0000);
+  CHECK(peek(f, 12, "TR1") == tx_list.tr1);
+  CHECK(peek(f, 12, "TR2") == tx_list.tr2);
+  CHECK(peek(f, 12, "BR1") == tx_list.br1);
+  CHECK(peek(f, 12, "SAR") == tx_list.sar);
+  CHECK(peek(f, 12, "DAR") == tx_list.dar);
+  CHECK(peek(f, 12, "LLR") == tx_list.tr3);
+  CHECK(peek(f, 12, "TR3") == 0x0004'0002);
+  CHECK(peek(f, 12, "BR2") == 0x0008'0006);
+  CHECK(f.field("GPDMA1", "GPDMA_C12CR", "EN") == 1);
+  CHECK(f.field("GPDMA1", "GPDMA_C12SR", "USEF") == 0);
+  CHECK(f.field("GPDMA1", "GPDMA_C12SR", "ULEF") == 0);
+}
+
+namespace
+{
+constexpr std::uint32_t mid_block_300 = 601;
+
+struct rx_outcome
+{
+  std::vector<event>                                                seen;
+  std::pair<std::vector<std::uint32_t>, std::vector<std::uint32_t>> halves;
+  std::uint32_t                                                     status{};
+  std::uint32_t                                                     dar{};
+
+  friend auto operator==(rx_outcome const&, rx_outcome const&) -> bool = default;
+};
+
+auto rx_rest(stm32_fixture const& f) -> rx_outcome
+{
+  rx_outcome out;
+  out.seen   = rx_pulses(f, mid_block_300, list_frame);
+  out.halves = rx_halves(f);
+  out.status = peek(f, 13, "SR");
+  out.dar    = peek(f, 13, "DAR");
+  return out;
+}
+
+auto rx_at_block_300() -> stm32_fixture
+{
+  auto f = idle_machine();
+  start_list(f, rx_list, 0xFE01'0000);
+  auto const seen = rx_pulses(f, 0, mid_block_300);
+  REQUIRE(
+      seen
+      == std::vector<event>{
+          {'H', 512}
+  });
+  REQUIRE(f.field("GPDMA1", "GPDMA_C13BR1", "BRC") == 211);
+  REQUIRE(f.field("GPDMA1", "GPDMA_C13BR1", "BNDT") == 4);
+  REQUIRE(peek(f, 13, "DAR") == stereo + 1024 + 600);
+  return f;
+}
+
+struct repeat_channel_state
+{
+  std::uint32_t generation{};
+  std::uint32_t block_bytes{};
+  std::uint16_t repeat{};
+  std::uint32_t packed{};
+  std::uint8_t  packed_bytes{};
+  bool          half_reported{};
+  bool          scheduled{};
+};
+
+struct repeat_gpdma_state
+{
+  std::array<repeat_channel_state, 16> channel{};
+  std::array<std::uint8_t, 128>        request{};
+};
+
+auto without_beats(new_gpdma_state const& now) -> repeat_gpdma_state
+{
+  repeat_gpdma_state out{.request = now.request};
+  for(auto const [index, c] : std::views::enumerate(now.channel))
+  {
+    out.channel[static_cast<std::size_t>(index)] = {
+        .generation    = c.generation,
+        .block_bytes   = c.block_bytes,
+        .repeat        = c.repeat,
+        .packed        = c.packed,
+        .packed_bytes  = c.packed_bytes,
+        .half_reported = c.half_reported,
+        .scheduled     = c.scheduled,
+    };
+  }
+  return out;
+}
+}
+
+TEST_CASE(
+    "a snapshot mid-block 300 of a 2D list resumes to the same buffer, in place and serialized")
+{
+  auto       f     = rx_at_block_300();
+  auto const saved = f.target->snapshot();
+  auto const whole = rx_rest(f);
+  CHECK(whole.halves == rx_round(0));
+  CHECK(
+      whole.seen
+      == std::vector<event>{
+          {'T', 1024}
+  });
+
+  f.target->restore(saved);
+  CHECK(rx_rest(f) == whole);
+
+  auto other = idle_machine();
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(rx_rest(other) == whole);
+}
+
+TEST_CASE("a GPDMA state saved before the destination burst count loads and resumes a 2D block")
+{
+  auto       f     = rx_at_block_300();
+  auto const saved = f.target->snapshot();
+  auto const whole = rx_rest(f);
+
+  std::vector<std::byte> current;
+  f.target->restore(saved);
+  f.target->model("GPDMA1")->save(current);
+  auto const now = reflex::serde::bson::deserializer{
+      std::span<std::byte const>{
+          current}}.load<new_gpdma_state>();
+  REQUIRE(now.channel[13].repeat == 511);
+  REQUIRE(now.channel[13].block_bytes == 8);
+  REQUIRE(now.channel[13].half_reported);
+  REQUIRE(now.channel[13].destination_beats == 0);
+  REQUIRE_FALSE(now.channel[13].scheduled);
+  std::vector<std::byte> old;
+  reflex::serde::bson::serializer{old}.dump(without_beats(now));
+
+  auto other = idle_machine();
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  other.target->model("GPDMA1")->load(old);
+  std::vector<std::byte> loaded_bytes;
+  other.target->model("GPDMA1")->save(loaded_bytes);
+  auto const loaded = reflex::serde::bson::deserializer{
+      std::span<std::byte const>{
+          loaded_bytes}}.load<new_gpdma_state>();
+  CHECK(loaded.channel[13].destination_beats == 0);
+  CHECK(loaded.channel[13].repeat == 511);
+  CHECK(rx_rest(other) == whole);
+}
+
+TEST_CASE("a snapshot inside a destination burst restores its item count into a fresh machine")
+{
+  two_d_copy const packed{
+      .tr1  = tr1(1, 2, 2)
+            | bit("GPDMA_C12TR1", "SINC")
+            | bit("GPDMA_C12TR1", "DINC")
+            | bit("GPDMA_C12TR1", "DBL_1"),
+      .tcem = 0,
+      .br1  = 16,
+      .tr3  = 8u * bit("GPDMA_C12TR3", "DAO")};
+  auto f = long_source();
+  start_two_d(f, packed);
+  for(int count = 0; count < 4000 and peek(f, 12, "DAR") != copy_to + 4; ++count)
+  {
+    step(f);
+  }
+  REQUIRE(peek(f, 12, "DAR") == copy_to + 4);
+  auto const saved = f.target->snapshot();
+  auto       other = long_source();
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(int count = 0; count < 4000 and other.field("GPDMA1", "GPDMA_C12CR", "EN") != 0; ++count)
+  {
+    step(other);
+  }
+  CHECK(peek(other, 12, "DAR") == copy_to + 32);
+  CHECK(
+      bytes_at(other, copy_to, 24)
+      == joined({source_bytes({0}, 8), std::vector<std::uint32_t>(8, 0), source_bytes({8}, 8)}));
+}
+
+TEST_CASE("a destination burst left partial by the block end gets no DAO, the next block restarts")
+{
+  auto const f = finish_two_d(
+      {.tr1  = tr1(0, 2, 2)
+             | bit("GPDMA_C12TR1", "SINC")
+             | bit("GPDMA_C12TR1", "DINC")
+             | bit("GPDMA_C12TR1", "DBL_1"),
+       .tcem = 0,
+       .br1  = 12 | repeat(1),
+       .tr3  = 8u * bit("GPDMA_C12TR3", "DAO")});
+  CHECK(peek(f, 12, "DAR") == copy_to + 40);
+  CHECK(
+      bytes_at(f, copy_to, 40)
+      == joined(
+          {source_bytes({0}, 8), std::vector<std::uint32_t>(8, 0), source_bytes({8}, 12),
+           std::vector<std::uint32_t>(8, 0), source_bytes({20}, 4)}));
+}
+
+TEST_CASE("TCEM 3 on a 2D channel raises HT only at the 2D half of the last item")
+{
+  auto f = long_source();
+  place(f, loop_a, std::array{4 | repeat(3), std::uint32_t{0}});
+  start_two_d(
+      f, {.tr1  = halfwords(),
+          .tcem = 3,
+          .br1  = 4 | repeat(3),
+          .llr  = llr("UB1") | llr("ULL") | (loop_a & 0xfffcu)});
+  CHECK(
+      two_d_events(f, 4)
+      == std::vector<event>{
+          {'H', 24},
+          {'T', 32}
   });
 }
