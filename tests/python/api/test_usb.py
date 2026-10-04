@@ -1,18 +1,20 @@
 """The virtual USB host of OTG_FS from Python: wiring, cable, enumeration state, control
-requests, snapshots, the project file and the CDC ACM stream.
+requests, snapshots, the project file, the CDC ACM stream and the HID streams.
 
 The firmware is the usb_cdc example's: TinyUSB 0.21.0, a CDC ACM plus HID composite device."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn.board import CdcLineCoding, UsbHost, UsbHostOptions, UsbState
+from popcorn.board import CdcLineCoding, HidStream, UsbHost, UsbHostOptions, UsbState
 from popcorn.units import ms, s
 
 pytest_plugins = ["pytester"]
@@ -61,7 +63,7 @@ def test_the_host_enumerates_from_power_on(u575: popcorn.MachineDescription) -> 
     assert host.failed_step is None
     assert host.device_descriptor[:2] == b"\x12\x01"
     assert host.strings[2] == "TinyUSB Device"
-    assert [i.number for i in host.interfaces] == [0, 1, 2]
+    assert [i.number for i in host.interfaces] == [0, 1, 2, 3]
     data = host.interfaces[1]
     assert [(e.number, e.is_in, e.max_packet) for e in data.endpoints] == [
         (2, False, 64),
@@ -118,7 +120,8 @@ def test_a_device_that_never_answers_raises_usb_timeout(
     m = usb_machine(u575, UsbHostOptions(timeout=ms(20)))
     host = m.periph.OTG_FS.host
     asyncio.run(host.wait_configured(for_=s(2)))
-    asyncio.run(m.run(for_=ms(20), stop_when=lambda _: host.cdc().dtr))
+    asyncio.run(m.run(for_=ms(20), stop_when=lambda _: host.hid(1).report_descriptor != b""))
+    assert host.hid(1).report_descriptor != b""
     m.periph.OTG_FS.GAHBCFG.GINTMSK = 0
     before = m.time
     with pytest.raises(popcorn.UsbTimeout) as caught:
@@ -285,7 +288,11 @@ def test_the_cdc_driver_sets_the_line_coding_then_dtr_and_rts(
     m, host = configured(u575)
     cdc = host.cdc()
     asyncio.run(m.run(for_=ms(10)))
-    classes = [(r.request_type, r.request, r.value, r.index, r.length) for r in host.requests[-2:]]
+    classes = [
+        (r.request_type, r.request, r.value, r.index, r.length)
+        for r in host.requests
+        if r.request_type == 0x21 and r.index == 0
+    ]
     assert classes == [(0x21, SET_LINE_CODING, 0, 0, 7), (0x21, SET_CONTROL_LINE_STATE, 3, 0, 0)]
     assert all(r.status == "completed" for r in host.requests)
     assert (cdc.bound, cdc.dtr, cdc.rts) == (True, True, True)
@@ -442,3 +449,116 @@ def test_bytes_written_unplugged_survive_a_restore_into_a_fresh_machine(
         return await cdc.read(6, for_=ms(50))
 
     assert asyncio.run(body()) == b"QUEUED"
+
+
+async def queue_report(hid: HidStream, data: bytes) -> None:
+    """Queue an output report without waiting for the device: the write is cancelled once its
+    run started, which leaves the report queued."""
+    writing = asyncio.create_task(hid.write_report(data))
+    await asyncio.sleep(0)
+    writing.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await writing
+
+
+def test_hid_streams_exist_before_configuration_and_are_checked_after(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575)
+    host = m.periph.OTG_FS.host
+    early = host.hid(1)
+    assert (early.function, early.bound, early.report_descriptor) == (1, False, b"")
+    with pytest.raises(ValueError, match="0 or more"):
+        host.hid(-1)
+    asyncio.run(host.wait_configured(for_=s(2)))
+    asyncio.run(m.run(for_=ms(20), stop_when=lambda _: early.report_descriptor != b""))
+    assert early.report_descriptor != b""
+    assert host.hid(1) is early
+    assert early.bound
+    assert repr(early) == "HidStream(OTG_FS, 1)"
+    with pytest.raises(ValueError, match="2 HID functions, no 2"):
+        host.hid(2)
+
+
+def test_a_feature_request_with_no_hid_driver_bound_raises(
+    u575: popcorn.MachineDescription,
+) -> None:
+    hid = usb_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host.hid()
+    with pytest.raises(popcorn.UsbError, match="no HID driver") as caught:
+        asyncio.run(hid.get_feature(1, 2))
+    assert caught.value.status == "unbound"
+    with pytest.raises(popcorn.UsbError, match="no HID driver"):
+        asyncio.run(hid.set_feature(b"\x01\x02"))
+
+
+BAD_HID_CALLS: list[tuple[Callable[[HidStream], Coroutine[Any, Any, object]], str]] = [
+    (lambda hid: hid.write_report(b""), "at least 2 bytes"),
+    (lambda hid: hid.write_report(b"\x02"), "at least 2 bytes"),
+    (lambda hid: hid.write_report(b"\x02" + bytes(0xFFFF)), "at most 0xffff"),
+    (lambda hid: hid.write_report(b"\x00" + bytes(0x10000)), "at most 0xffff"),
+    (lambda hid: hid.get_feature(256, 2), "report ID"),
+    (lambda hid: hid.get_feature(1, 0), "length"),
+    (lambda hid: hid.set_feature(b""), "at least"),
+    (lambda hid: hid.read_reports(-1), "cannot read"),
+]
+
+
+@pytest.mark.parametrize(("call", "match"), BAD_HID_CALLS)
+def test_hid_calls_refuse_bad_arguments(
+    u575: popcorn.MachineDescription,
+    call: Callable[[HidStream], Coroutine[Any, Any, object]],
+    match: str,
+) -> None:
+    hid = usb_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host.hid()
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(call(hid))
+
+
+def test_an_output_report_written_unplugged_survives_a_restore_into_a_fresh_machine(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(attached=False))
+    asyncio.run(queue_report(m.periph.OTG_FS.host.hid(), b"\x02\x77"))
+    assert m.periph.OTG_FS.host.hid().queued == 1
+    saved = popcorn.Snapshot.from_bytes(m.snapshot().to_bytes())
+
+    other = usb_machine(u575, UsbHostOptions(attached=False))
+    host = other.periph.OTG_FS.host
+    hid = host.hid()
+    asyncio.run(queue_report(hid, b"\x02\x11"))
+    asyncio.run(queue_report(hid, b"\x02\x12"))
+    assert hid.queued == 2
+    other.restore(saved)
+    assert not host.attached
+    assert hid.queued == 1
+
+    async def body() -> None:
+        await host.attach()
+        await host.wait_configured(for_=s(1))
+        await other.run(for_=ms(50), stop_when=lambda _: other.var("hid_led_writes").value >= 1)
+
+    asyncio.run(body())
+    assert (hid.queued, other.var("hid_led").value, other.var("hid_led_writes").value) == (
+        0,
+        0x77,
+        1,
+    )
+
+
+def test_an_unplugged_function_keeps_its_report_descriptor_across_a_restore(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    hid = host.hid()
+    asyncio.run(m.run(for_=ms(20), stop_when=lambda _: hid.report_descriptor != b""))
+    descriptor = hid.report_descriptor
+    assert descriptor != b""
+    asyncio.run(host.detach())
+    assert (hid.bound, hid.report_descriptor) == (False, descriptor)
+    saved = popcorn.Snapshot.from_bytes(m.snapshot().to_bytes())
+    m.restore(saved)
+    assert (hid.bound, hid.report_descriptor) == (False, descriptor)
+
+    fresh = usb_machine(u575)
+    fresh.restore(saved)
+    assert fresh.periph.OTG_FS.host.hid().report_descriptor == descriptor

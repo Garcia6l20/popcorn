@@ -1,5 +1,5 @@
 """The virtual USB host of a device controller: cable, enumeration, descriptors, control
-requests and CDC ACM streams, in virtual time."""
+requests, CDC ACM streams and HID functions, in virtual time."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ TIMEOUT = s(5)
 PARITIES = "NOEMS"
 STOP_BITS = (1, 1.5, 2)
 DATA_BITS = (5, 6, 7, 8, 16)
+FEATURE = 3
 
 
 class UsbState(enum.Enum):
@@ -431,6 +432,279 @@ class CdcStream:
         return f"CdcStream({self.name}, {self.function})"
 
 
+@dataclass(frozen=True, slots=True)
+class HidReport:
+    """One input report a HID function sent on its interrupt IN endpoint.
+
+    Attributes:
+        data: Its bytes as the packet carried them, the report ID first when the device numbers
+            its reports, as hidraw reads them.
+        at: Virtual time of the transaction that carried it.
+    """
+
+    data: bytes
+    at: VirtualTime
+
+
+class HidStream:
+    """A HID interface of a USB device, `m.periph.OTG_FS.host.hid()`: input reports with their
+    times, output and feature reports, in virtual time.
+
+    The host's HID driver binds each interface of class 0x03 whose HID descriptor announces a
+    report descriptor. At configuration it probes as Linux usbhid does: SET_IDLE with duration 0
+    for every report, then GET_DESCRIPTOR of the report descriptor, tried up to 4 times while it
+    comes back short or fails. Once the descriptor is read it keeps one interrupt IN transfer of
+    one packet pending, polled every bInterval frames, as if hidraw were open: an input report is
+    one packet. An interrupt IN STALL is cleared as usbhid does, with
+    CLEAR_FEATURE(ENDPOINT_HALT), and reading goes on. A failed descriptor read leaves the
+    function idle, with a warning on the controller's log.
+
+    Reports follow hidraw: the report ID comes first, and an ID of 0, for a device that does not
+    number its reports, is not sent. Output reports go out one at a time on the interrupt OUT
+    endpoint when the interface has one, else as SET_REPORT(Output) on the default pipe. Input
+    reports are queued up to 65536, the oldest dropped first and counted in `dropped`.
+
+    The stream outlives the driver: it exists before the device is configured, an unplug keeps
+    the reports received and the output reports not sent yet, and a replug binds the same stream
+    again. `Machine.restore` drops the input reports not read yet, and puts back the output
+    reports not yet taken by the device as the snapshot had them, bound or not.
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "_link",
+        "_pending",
+        "_stimulus",
+        "_wait",
+        "_writes",
+        "function",
+        "name",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        function: int,
+        link: _core.HidLink,
+        wait: Waiter,
+        stimulus: Callable[[], None],
+    ) -> None:
+        """Wrap a native link. Use `m.periph.<NAME>.host.hid()` instead."""
+        self.name = name
+        self.function = function
+        self._link = link
+        self._wait = wait
+        self._stimulus = stimulus
+        self._pending: set[int] = set()
+        self._writes: set[int] = set()
+
+    @property
+    def bound(self) -> bool:
+        """Whether the host has bound its HID driver to the interface."""
+        return self._link.bound()
+
+    @property
+    def report_descriptor(self) -> bytes:
+        """The report descriptor the driver read, raw, empty before. An unplug keeps it."""
+        return self._link.report_descriptor()
+
+    @property
+    def available(self) -> int:
+        """Input reports received, not read yet."""
+        return self._link.available()
+
+    @property
+    def queued(self) -> int:
+        """Output reports written and not yet taken by the device, the one in progress
+        included."""
+        return self._link.queued()
+
+    @property
+    def dropped(self) -> int:
+        """Input reports dropped because the queue held its limit, since the machine was built
+        or the last `Machine.restore`."""
+        return self._link.dropped()
+
+    async def read_reports(self, n: int, *, for_: VirtualDuration | None = None) -> list[HidReport]:
+        """Run the machine until `n` input reports arrived, or `for_` elapsed, and take them.
+
+        Returns:
+            Up to `n` reports, oldest first, fewer when `for_` elapsed or the core went idle.
+
+        Raises:
+            ValueError: `n` is negative.
+            EmulationError: The run stopped for another reason, such as a fault.
+        """
+        if n < 0:
+            raise ValueError(f"cannot read {n} reports")
+        if self._link.available() < n:
+            await self._wait(lambda: self._link.available() >= n, for_)
+        return [
+            HidReport(bytes(record.data), VirtualTime(record.at_ps))
+            for record in self._link.drain(n)
+        ]
+
+    async def write_report(self, data: bytes) -> None:
+        """Send an output report and run the machine until the device took it.
+
+        It waits behind the output reports written before, and until the device is configured
+        and its report descriptor read. When the call raises EmulationError or is cancelled,
+        the report stays queued and is sent later, as the machine runs: only its result is
+        dropped.
+
+        Args:
+            data: The report as hidraw takes it: the report ID first, 0 when the device does not
+                number its reports, which is then not sent.
+
+        Raises:
+            ValueError: `data` is shorter than 2 bytes, as hidraw refuses, or carries more than
+                0xffff bytes on the bus, the ID 0 dropped.
+            UsbStall: The device answered STALL.
+            UsbTimeout: The SET_REPORT did not end within the host's timeout.
+            UsbError: The transfer ended otherwise, a detach included.
+            EmulationError: The run ended before the device took the report.
+            RuntimeError: Called from another thread while a run is active.
+        """
+        data = bytes(data)
+        if len(data) < 2:
+            raise ValueError(f"an output report is at least 2 bytes, not {len(data)}")
+        stage = len(data) - 1 if data[0] == 0 else len(data)
+        if stage > 0xFFFF:
+            raise ValueError(
+                f"an output report carries at most 0xffff bytes on the bus, not {stage}"
+            )
+        self._stimulus()
+        write = self._link.write(data)
+        self._writes.add(write)
+        results: list[_core.UsbTransferStatus] = []
+
+        def ended() -> bool:
+            if not results and write in self._writes:
+                status = self._link.take_written(write)
+                if status is not None:
+                    results.append(status)
+            return bool(results)
+
+        try:
+            if not ended():
+                await self._wait(ended, None)
+        finally:
+            self._writes.discard(write)
+            if not results:
+                self._link.forget_written(write)
+        label = f"output report {data[0]}"
+        if not results:
+            raise EmulationError(f"{self._where}: the run ended before {label} did")
+        _raise_for(results[0], f"{self._where}: {label}")
+
+    async def get_feature(self, report_id: int, length: int) -> bytes:
+        """Send GET_REPORT(Feature) and run the machine until it ends, as hidraw's
+        HIDIOCGFEATURE.
+
+        Args:
+            report_id: Report ID, 0 when the device does not number its reports.
+            length: Bytes asked for, the report ID byte included. For ID 0 the request asks one
+                byte fewer, the ID is not on the bus.
+
+        Returns:
+            The report, its ID first: the bytes the device sent, after a 0 for ID 0.
+
+        Raises:
+            ValueError: `report_id` is not 0 to 255, or `length` not 1 to 0xffff.
+            UsbError: No HID driver is bound to the interface, or the request ended neither
+                completed, stalled nor timed out.
+            UsbStall: The device answered STALL.
+            UsbTimeout: The request did not end within the host's timeout.
+            RuntimeError: Called from another thread while a run is active.
+        """
+        if not 0 <= report_id <= 0xFF:
+            raise ValueError(f"a report ID is 0 to 255, not {report_id}")
+        if not 1 <= length <= 0xFFFF:
+            raise ValueError(f"length is 1 to 0xffff, not {length}")
+        self._stimulus()
+        w_length = length - 1 if report_id == 0 else length
+        reply = await self._request(
+            self._link.get_report(FEATURE, report_id, w_length),
+            f"GET_REPORT feature {report_id}",
+        )
+        return (b"\x00" if report_id == 0 else b"") + bytes(reply.data)
+
+    async def set_feature(self, data: bytes) -> None:
+        """Send SET_REPORT(Feature) and run the machine until it ends, as hidraw's
+        HIDIOCSFEATURE.
+
+        Args:
+            data: The report, its ID first, 0 when the device does not number its reports, which
+                is then not sent.
+
+        Raises:
+            ValueError: `data` is empty, or its data stage longer than 0xffff bytes.
+            UsbError: No HID driver is bound to the interface, or the request ended neither
+                completed, stalled nor timed out.
+            UsbStall: The device answered STALL.
+            UsbTimeout: The request did not end within the host's timeout.
+            RuntimeError: Called from another thread while a run is active.
+        """
+        data = bytes(data)
+        if not data:
+            raise ValueError("a feature report has at least its report ID byte")
+        stage = data[1:] if data[0] == 0 else data
+        if len(stage) > 0xFFFF:
+            raise ValueError(f"a data stage is at most 0xffff bytes, not {len(stage)}")
+        self._stimulus()
+        await self._request(
+            self._link.set_report(FEATURE, data[0], stage), f"SET_REPORT feature {data[0]}"
+        )
+
+    def discard(self) -> None:
+        """Forget the requests and reports waited for, at a restore."""
+        self._pending.clear()
+        self._writes.clear()
+
+    @property
+    def _where(self) -> str:
+        return f"{self.name} HID function {self.function}"
+
+    async def _request(self, transfer: int, label: str) -> _core.HidReplyRecord:
+        if transfer == 0:
+            raise UsbError(f"{self._where}: {label} with no HID driver bound", status="unbound")
+        self._pending.add(transfer)
+        results: list[_core.HidReplyRecord] = []
+
+        def ended() -> bool:
+            if not results and transfer in self._pending:
+                reply = self._link.take_result(transfer)
+                if reply is not None:
+                    results.append(reply)
+            return bool(results)
+
+        try:
+            if not ended():
+                await self._wait(ended, None)
+        finally:
+            self._pending.discard(transfer)
+            if not results:
+                self._link.forget(transfer)
+        if not results:
+            raise EmulationError(f"{self._where}: the run ended before {label} did")
+        _raise_for(results[0].status, f"{self._where}: {label}")
+        return results[0]
+
+    def __repr__(self) -> str:
+        return f"HidStream({self.name}, {self.function})"
+
+
+def _raise_for(status: _core.UsbTransferStatus, label: str) -> None:
+    if status is _core.UsbTransferStatus.completed:
+        return
+    message = f"{label} ended {status.name}"
+    if status is _core.UsbTransferStatus.stalled:
+        raise UsbStall(message, status=status.name)
+    if status is _core.UsbTransferStatus.timed_out:
+        raise UsbTimeout(message, status=status.name)
+    raise UsbError(message, status=status.name)
+
+
 class UsbHost:
     """The virtual USB host of a device controller, `m.periph.OTG_FS.host`.
 
@@ -445,6 +719,8 @@ class UsbHost:
         "_bridges",
         "_cdc",
         "_cdc_link",
+        "_hid",
+        "_hid_link",
         "_link",
         "_pending",
         "_results",
@@ -461,9 +737,10 @@ class UsbHost:
         stimulus: Callable[[], None],
         bridges: Mapping[str, PtyBridge],
         cdc_link: Callable[[int], _core.CdcLink],
+        hid_link: Callable[[int], _core.HidLink],
     ) -> None:
-        """Wrap a native link. `cdc_link` gives the link of a CDC function by index. Use
-        `m.periph.<NAME>.host` instead."""
+        """Wrap a native link. `cdc_link` and `hid_link` give the link of a CDC or HID function
+        by index. Use `m.periph.<NAME>.host` instead."""
         self.name = name
         self._link = link
         self._wait = wait
@@ -473,6 +750,8 @@ class UsbHost:
         self._results: dict[int, _core.UsbControlResult] = {}
         self._pending: set[int] = set()
         self._cdc: dict[int, CdcStream] = {}
+        self._hid_link = hid_link
+        self._hid: dict[int, HidStream] = {}
 
     @property
     def attached(self) -> bool:
@@ -582,6 +861,24 @@ class UsbHost:
             )
         return stream
 
+    def hid(self, function: int = 0) -> HidStream:
+        """The stream of a HID interface of the device, the same one on later calls.
+
+        Args:
+            function: The n-th HID interface in interface order, 0 for the first.
+
+        Raises:
+            ValueError: `function` is negative, or the configuration is read and has no such
+                interface. Before it is read, any index is taken.
+        """
+        stream = self._hid.get(function)
+        if stream is None:
+            link = self._hid_link(function)
+            stream = self._hid[function] = HidStream(
+                self.name, function, link, self._wait, self._stimulus
+            )
+        return stream
+
     async def wait_configured(self, *, for_: VirtualDuration | None = None) -> None:
         """Run the machine until the host configured the device, or `for_` elapsed.
 
@@ -682,6 +979,8 @@ class UsbHost:
         self._results.clear()
         for stream in self._cdc.values():
             stream.discard()
+        for hid in self._hid.values():
+            hid.discard()
 
     def _collected(self, transfer: int) -> bool:
         for result in self._link.take_results():
@@ -701,6 +1000,7 @@ class UsbHosts:
         "_bridges",
         "_cdc_links",
         "_connect",
+        "_hid_links",
         "_hosts",
         "_links",
         "_names",
@@ -727,6 +1027,7 @@ class UsbHosts:
         self._bridges: Mapping[str, PtyBridge] = {} if bridges is None else bridges
         self._hosts: dict[str, UsbHost] = {}
         self._cdc_links: dict[tuple[str, int], _core.CdcLink] = {}
+        self._hid_links: dict[tuple[str, int], _core.HidLink] = {}
         self._links: dict[str, _core.UsbLink] = {}
 
     def serves(self, name: str) -> bool:
@@ -755,6 +1056,7 @@ class UsbHosts:
                 self._stimulus,
                 self._bridges,
                 functools.partial(self.cdc_link, name),
+                functools.partial(self.hid_link, name),
             )
         return found
 
@@ -780,6 +1082,27 @@ class UsbHosts:
         link = self._cdc_links.get(key)
         if link is None:
             link = self._cdc_links[key] = native.cdc(function)
+        return link
+
+    def hid_link(self, name: str, function: int) -> _core.HidLink:
+        """The native link of HID function `function` of the host of controller `name`.
+
+        Raises:
+            ModelError: The controller has no virtual host.
+            ValueError: `function` is negative, or the configuration is read and has no such
+                function.
+        """
+        host = self.host(name)
+        if function < 0:
+            raise ValueError(f"a HID function index is 0 or more, not {function}")
+        native = self._links[host.name]
+        count = native.hid_functions()
+        if count is not None and function >= count:
+            raise ValueError(f"{host.name}: the device has {count} HID functions, no {function}")
+        key = (host.name, function)
+        link = self._hid_links.get(key)
+        if link is None:
+            link = self._hid_links[key] = native.hid(function)
         return link
 
     def discard(self) -> None:

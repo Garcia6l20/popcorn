@@ -2,6 +2,7 @@
 
 #include <popcorn/periph/stm32/usb.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
+#include <popcorn/periph/usb_hid.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 #include <reflex/py.hpp>
@@ -16,6 +17,19 @@
 namespace popcorn::bind
 {
 namespace py = reflex::py;
+
+namespace detail
+{
+/** @brief The class driver channels of one virtual USB host, shared by its factories and the
+ * links. */
+struct usb_hubs
+{
+  /** @brief CDC ACM channels. */
+  std::shared_ptr<periph::usb::cdc_hub> cdc{std::make_shared<periph::usb::cdc_hub>()};
+  /** @brief HID channels. */
+  std::shared_ptr<periph::usb::hid_hub> hid{std::make_shared<periph::usb::hid_hub>()};
+};
+}
 
 /** @brief Options of the virtual USB host a machine wires to a USB device controller. */
 struct[[= py::rename{"UsbHostConfig"}]] usb_host_config
@@ -263,6 +277,155 @@ private:
   std::shared_ptr<bool const>           alive_;
 };
 
+/** @brief One input report a HID function sent. */
+struct[[= py::rename{"HidReportRecord"}]] hid_report_record
+{
+  /** @brief Its bytes, the report ID first when the device numbers its reports. */
+  [[= py::readonly]] std::vector<std::uint8_t> data{};
+  /** @brief Virtual time of the transaction that carried it, in picoseconds. */
+  [[= py::readonly]] std::uint64_t at_ps{};
+};
+
+/** @brief How a GET_REPORT or SET_REPORT queued through a HidLink ended. */
+struct[[= py::rename{"HidReplyRecord"}]] hid_reply_record
+{
+  /** @brief How it ended. */
+  [[= py::readonly]] periph::usb::transfer_status status{};
+  /** @brief Data stage received for GET_REPORT, empty for SET_REPORT. */
+  [[= py::readonly]] std::vector<std::uint8_t> data{};
+};
+
+/**
+ * @brief One HID function of a virtual USB host connected to Python, by function index: the
+ *        n-th HID interface in interface order. Its queues outlive the drivers the host binds,
+ *        so the link works before the device is configured and across an unplug. Valid while
+ *        the machine lives, every method raises ConfigError after.
+ */
+class[[= py::rename{"HidLink"}]] hid_link
+{
+public:
+  /**
+   * @brief Connects to the channel of one function.
+   * @param port The controller.
+   * @param hub The channels of the controller's host.
+   * @param function Function index.
+   * @param alive Cleared when the machine is destroyed.
+   */
+  [[= py::skip]] hid_link(
+      periph::stm32::usb_host_port&         port,
+      std::shared_ptr<periph::usb::hid_hub> hub,
+      std::size_t                           function,
+      std::shared_ptr<bool const>           alive);
+
+  /**
+   * @brief Queues an output report. The driver sends it from the next frame once the report
+   *        descriptor is read.
+   * @param data The report as hidraw takes it, the report ID first, 0 when unnumbered.
+   * @return The handle its result carries.
+   * @throws config_error when @p data is shorter than 2 bytes, as hidraw refuses, or carries
+   *         more than 0xffff bytes on the bus.
+   */
+  [[= py::doc{"Queue an output report, return the id its result carries."}]] auto
+      write(reflex::py::nb::bytes const& data) -> std::uint64_t;
+
+  /**
+   * @brief Takes the result of an output report queued here.
+   * @param id Its handle.
+   * @return How it ended, empty while it runs.
+   */
+  [[= py::doc{"Take how an output report queued here ended, None while it runs."}]] auto
+      take_written(std::uint64_t id) -> std::optional<periph::usb::transfer_status>;
+
+  /**
+   * @brief Stops waiting for an output report queued here: its result is dropped, the report
+   *        is still sent.
+   * @param id Its handle.
+   */
+  [[= py::doc{"Stop waiting for an output report queued here, drop its result."}]] void
+      forget_written(std::uint64_t id);
+
+  /** @brief Output reports queued and not yet taken by the device, the one in progress
+   * included. */
+  [[= py::doc{"Output reports queued and not yet taken by the device."}]] [[nodiscard]] auto
+      queued() const -> std::uint64_t;
+
+  /** @brief Input reports received and not read yet. */
+  [[= py::doc{"Input reports received and not read yet."}]] [[nodiscard]] auto available() const
+      -> std::uint64_t;
+
+  /**
+   * @brief Takes the oldest input reports.
+   * @param count Most reports taken.
+   */
+  [[= py::doc{"Take at most count of the oldest input reports."}]] auto drain(std::uint64_t count)
+      -> std::vector<hid_report_record>;
+
+  /** @brief Input reports dropped because the queue held its limit. */
+  [[= py::doc{"Input reports dropped because the queue was full."}]] [[nodiscard]] auto
+      dropped() const -> std::uint64_t;
+
+  /**
+   * @brief Sets the most input reports the queue keeps, 65536 by default.
+   * @param limit Reports, at least 1.
+   * @throws config_error when @p limit is 0.
+   */
+  [[= py::doc{"Set the most input reports the queue keeps, for tests."}]] void
+      set_report_limit(std::uint64_t limit);
+
+  /** @brief Whether a HID driver is bound to the function. */
+  [[= py::doc{"Whether a HID driver is bound to the function."}]] [[nodiscard]] auto bound() const
+      -> bool;
+
+  /** @brief The report descriptor the driver read, empty before. */
+  [[= py::doc{"The report descriptor the driver read, empty before."}]] [[nodiscard]] auto
+      report_descriptor() const -> reflex::py::nb::bytes;
+
+  /**
+   * @brief Queues GET_REPORT through the bound driver.
+   * @param type Report type, 1 input, 2 output, 3 feature.
+   * @param id Report ID, 0 when unnumbered.
+   * @param length wLength.
+   * @return The handle its result carries, 0 when no driver is bound.
+   */
+  [[= py::doc{"Queue GET_REPORT, return its id, 0 when unbound."}]] auto
+      get_report(std::uint8_t type, std::uint8_t id, std::uint16_t length) -> std::uint32_t;
+
+  /**
+   * @brief Queues SET_REPORT through the bound driver.
+   * @param type Report type, 1 input, 2 output, 3 feature.
+   * @param id Report ID, 0 when unnumbered.
+   * @param data The data stage.
+   * @return The handle its result carries, 0 when no driver is bound.
+   */
+  [[= py::doc{"Queue SET_REPORT, return its id, 0 when unbound."}]] auto
+      set_report(std::uint8_t type, std::uint8_t id, reflex::py::nb::bytes const& data)
+          -> std::uint32_t;
+
+  /**
+   * @brief Takes the result of a request queued here.
+   * @param id Its handle.
+   * @return How it ended and its data, empty while it runs.
+   */
+  [[= py::doc{"Take how a request queued here ended, None while it runs."}]] auto
+      take_result(std::uint32_t id) -> std::optional<hid_reply_record>;
+
+  /**
+   * @brief Stops waiting for a request queued here: its result, now or later, is dropped.
+   * @param id Its handle.
+   */
+  [[= py::doc{"Stop waiting for a request queued here, drop its result."}]] void
+      forget(std::uint32_t id);
+
+private:
+  [[nodiscard]] auto channel() const -> periph::usb::hid_channel&;
+  auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
+
+  periph::stm32::usb_host_port*         port_;
+  std::shared_ptr<periph::usb::hid_hub> hub_;
+  std::size_t                           function_;
+  std::shared_ptr<bool const>           alive_;
+};
+
 /**
  * @brief The virtual USB host of a device controller connected to Python. The host and its
  *        cable live in the controller model and its snapshots: this link only reads them and
@@ -275,13 +438,13 @@ public:
   /**
    * @brief Connects to the board host of a controller.
    * @param port The controller.
-   * @param hub The channels of the host's CDC ACM functions.
+   * @param hubs The channels of the host's class drivers.
    * @param alive Cleared when the machine is destroyed.
    */
   [[= py::skip]] usb_link(
-      periph::stm32::usb_host_port&         port,
-      std::shared_ptr<periph::usb::cdc_hub> hub,
-      std::shared_ptr<bool const>           alive);
+      periph::stm32::usb_host_port& port,
+      detail::usb_hubs              hubs,
+      std::shared_ptr<bool const>   alive);
 
   /** @brief Whether the cable is plugged. */
   [[= py::doc{"Whether the cable is plugged."}]] [[nodiscard]] auto plugged() const -> bool;
@@ -365,12 +528,24 @@ public:
   [[= py::doc{"Connect to the n-th CDC ACM function."}]] [[nodiscard]] auto
       cdc(std::uint64_t function) const -> cdc_link;
 
+  /** @brief HID functions of the configuration read, empty before it is read. */
+  [[= py::doc{
+      "HID functions of the configuration read, None before it is read."}]] [[nodiscard]] auto
+      hid_functions() const -> std::optional<std::uint64_t>;
+
+  /**
+   * @brief Connects to a HID function.
+   * @param function Function index, the n-th HID interface in interface order.
+   */
+  [[= py::doc{"Connect to the n-th HID function."}]] [[nodiscard]] auto
+      hid(std::uint64_t function) const -> hid_link;
+
 private:
   [[nodiscard]] auto host() const -> periph::usb::host&;
   [[nodiscard]] auto port() const -> periph::stm32::usb_host_port&;
 
-  periph::stm32::usb_host_port*         port_;
-  std::shared_ptr<periph::usb::cdc_hub> hub_;
-  std::shared_ptr<bool const>           alive_;
+  periph::stm32::usb_host_port* port_;
+  detail::usb_hubs              hubs_;
+  std::shared_ptr<bool const>   alive_;
 };
 }

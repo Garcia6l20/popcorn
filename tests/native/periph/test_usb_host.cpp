@@ -1,5 +1,6 @@
 #include <popcorn/periph/usb.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
+#include <popcorn/periph/usb_hid.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 #include <doctest/doctest.h>
@@ -84,6 +85,9 @@ struct device_script
   std::vector<std::uint8_t>                                      class_out{};
   std::optional<std::vector<std::uint8_t>>                       config_bytes{};
   std::vector<std::uint8_t>                                      halted{};
+  std::optional<std::vector<std::uint8_t>>                       report_descriptor{};
+  std::uint32_t                                                  short_descriptors{};
+  std::map<std::uint16_t, std::vector<std::uint8_t>>             class_replies{};
 };
 
 auto utf16(std::string_view text) -> std::vector<std::uint8_t>
@@ -192,6 +196,28 @@ public:
     if(kind == 1)
     {
       s.stalled = s.stall_class;
+      if(auto const reply = s.class_replies.find(packet.value);
+         reply != s.class_replies.end() and (packet.request_type & 0x80u) != 0)
+      {
+        s.reply = reply->second;
+        s.reply.resize(std::min<std::size_t>(s.reply.size(), packet.length));
+      }
+      return usb::handshake::ack;
+    }
+    if(packet.request_type == 0x81 and packet.request == 6 and (packet.value >> 8) == 0x22)
+    {
+      if(not s.report_descriptor)
+      {
+        s.stalled = true;
+        return usb::handshake::ack;
+      }
+      s.reply = *s.report_descriptor;
+      if(s.short_descriptors != 0)
+      {
+        --s.short_descriptors;
+        s.reply.resize(s.reply.size() / 2);
+      }
+      s.reply.resize(std::min<std::size_t>(s.reply.size(), packet.length));
       return usb::handshake::ack;
     }
     if(packet.request_type == 0x80 and packet.request == 6)
@@ -1973,4 +1999,535 @@ TEST_CASE("OUT bytes of an unbound function are saved with the host and sent aft
   rig{cdc_options_with(hub)}.host->save(empty_hub);
   b.host->load(empty_hub);
   CHECK(fresh->channel(0).out.empty());
+}
+
+namespace
+{
+auto report_descriptor(std::size_t length) -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> bytes(length);
+  for(std::size_t n = 0; n < length; ++n)
+  {
+    bytes[n] = static_cast<std::uint8_t>(0x40 + n);
+  }
+  return bytes;
+}
+
+auto hid_options_with(std::shared_ptr<usb::hid_hub> const& hub) -> usb::host_options
+{
+  usb::host_options options;
+  options.drivers.push_back(usb::hid_factory(hub));
+  return options;
+}
+
+auto hid_out_configuration() -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> bytes{9, 2,    0, 0, 1, 1,    0,    0x80, 50,   9, 4,    0,  0, 2,
+                                  3, 0,    0, 0, 9, 0x21, 0x11, 0x01, 0,    1, 0x22, 12, 0, 7,
+                                  5, 0x01, 3, 8, 0, 1,    7,    5,    0x81, 3, 8,    0,  1};
+  bytes[2] = static_cast<std::uint8_t>(bytes.size());
+  bytes[3] = static_cast<std::uint8_t>(bytes.size() >> 8);
+  return bytes;
+}
+
+constexpr usb::setup_packet
+    set_idle_request{.request_type = 0x21, .request = 0x0a, .value = 0, .index = 2, .length = 0};
+
+auto report_descriptor_request(std::uint16_t length, std::uint16_t interface = 2)
+    -> usb::setup_packet
+{
+  return {
+      .request_type = 0x81, .request = 6, .value = 0x2200, .index = interface, .length = length};
+}
+
+auto setups_after_configuration(device_script const& script) -> std::vector<usb::setup_packet>
+{
+  auto const configured = std::ranges::find_if(script.requests, [](request_record const& record) {
+    return record.setup.request_type == 0 and record.setup.request == 9;
+  });
+  std::vector<usb::setup_packet> out;
+  for(auto const& record :
+      std::ranges::subrange(configured, script.requests.end()) | std::views::drop(1))
+  {
+    out.push_back(record.setup);
+  }
+  return out;
+}
+
+auto in_tokens(device_script const& script, std::uint8_t endpoint) -> std::vector<std::uint64_t>
+{
+  std::vector<std::uint64_t> out;
+  for(auto const& record : script.tokens)
+  {
+    if(record.kind == token::in and record.endpoint == endpoint)
+    {
+      out.push_back(record.at);
+    }
+  }
+  return out;
+}
+}
+
+TEST_CASE("the HID driver sends SET_IDLE 0, then reads the report descriptor, as usbhid probes")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(r.host->drivers().size() == 1);
+  CHECK(r.host->drivers()[0].name == usb::hid_name);
+  CHECK(r.host->drivers()[0].interfaces == std::vector<std::uint8_t>{2});
+  REQUIRE(r.host->configuration() != nullptr);
+  CHECK(usb::hid_functions(*r.host->configuration()) == std::vector<std::uint8_t>{2});
+  CHECK(
+      setups_after_configuration(r.dev.s)
+      == std::vector{set_idle_request, report_descriptor_request(25)});
+  auto const& channel = hub->channel(0);
+  CHECK(channel.interface == std::optional<std::uint8_t>{2});
+  CHECK(channel.report_descriptor == report_descriptor(25));
+  CHECK(r.warnings.empty());
+}
+
+TEST_CASE(
+    "HID input reports keep their packet time, polled every bInterval frames from the descriptor")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto const descriptor =
+      std::ranges::find(r.dev.s.requests, report_descriptor_request(25), &request_record::setup);
+  REQUIRE(descriptor != r.dev.s.requests.end());
+  auto const polls = in_tokens(r.dev.s, 3);
+  REQUIRE(polls.size() >= 3);
+  CHECK(polls.front() > descriptor->at);
+  CHECK(polls[1] - polls[0] == 10 * ms);
+  CHECK(polls[2] - polls[1] == 10 * ms);
+
+  r.dev.s.in_queue[3] = {
+      std::vector<std::uint8_t>{1, 7},
+      std::vector<std::uint8_t>{1, 8}
+  };
+  r.run_until(t0 + second + 30 * ms);
+  auto& channel = hub->channel(0);
+  CHECK(channel.queued() == 0);
+  auto const reports = channel.take(5);
+  REQUIRE(reports.size() == 2);
+  CHECK(reports[0].data == std::vector<std::uint8_t>{1, 7});
+  CHECK(reports[1].data == std::vector<std::uint8_t>{1, 8});
+  CHECK(reports[1].at.ps - reports[0].at.ps == 10 * ms);
+  auto const answered = std::ranges::find_if(r.dev.s.tokens, [](token_record const& record) {
+    return record.kind == token::in and record.endpoint == 3 and record.hs == usb::handshake::ack;
+  });
+  REQUIRE(answered != r.dev.s.tokens.end());
+  CHECK(reports[0].at.ps == answered->at);
+}
+
+TEST_CASE(
+    "a report descriptor read short or failed is tried 4 times, a failure leaves the function idle")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.dev.s.short_descriptors = 2;
+  r.plug();
+  r.run_until(t0 + second);
+  CHECK(
+      setups_after_configuration(r.dev.s)
+      == std::vector{
+          set_idle_request, report_descriptor_request(25), report_descriptor_request(25),
+          report_descriptor_request(25)});
+  CHECK(hub->channel(0).report_descriptor == report_descriptor(25));
+
+  auto const stalled = std::make_shared<usb::hid_hub>();
+  rig        f{hid_options_with(stalled)};
+  f.plug();
+  f.run_until(t0 + second);
+  CHECK(
+      setups_after_configuration(f.dev.s)
+      == std::vector{
+          set_idle_request, report_descriptor_request(25), report_descriptor_request(25),
+          report_descriptor_request(25), report_descriptor_request(25)});
+  REQUIRE(f.warnings.size() == 1);
+  CHECK(f.warnings[0].find("ended stalled 4 times, the function stays idle") != std::string::npos);
+  CHECK(in_tokens(f.dev.s, 3).empty());
+  CHECK(stalled->channel(0).interface == std::optional<std::uint8_t>{2});
+}
+
+TEST_CASE(
+    "without an interrupt OUT endpoint, output reports go as SET_REPORT(Output), ID 0 not sent")
+{
+  auto const hub     = std::make_shared<usb::hid_hub>();
+  auto&      channel = hub->channel(0);
+  auto const early   = channel.write({2, 0x5a});
+  channel.awaited_writes.insert(early);
+  rig r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto const late = channel.write({0, 1, 2});
+  channel.awaited_writes.insert(late);
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(
+      setups_after_configuration(r.dev.s)
+      == std::vector{
+          set_idle_request, report_descriptor_request(25),
+          usb::setup_packet{
+                            .request_type = 0x21, .request = 9, .value = 0x0202, .index = 2, .length = 2},
+          usb::setup_packet{
+                            .request_type = 0x21, .request = 9, .value = 0x0200, .index = 2, .length = 2}
+  });
+  CHECK(r.dev.s.class_out == std::vector<std::uint8_t>{2, 0x5a, 1, 2});
+  CHECK(channel.written.at(early) == usb::transfer_status::completed);
+  CHECK(channel.written.at(late) == usb::transfer_status::completed);
+  CHECK(channel.queued() == 0);
+  CHECK(r.warnings.empty());
+}
+
+TEST_CASE("with an interrupt OUT endpoint, output reports go on it, a STALL reaches the result")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.config_bytes      = hid_out_configuration();
+  r.dev.s.report_descriptor = report_descriptor(12);
+  r.plug();
+  r.run_until(t0 + second);
+  CHECK(
+      setups_after_configuration(r.dev.s)
+      == std::vector{
+          usb::setup_packet{
+                            .request_type = 0x21, .request = 0x0a, .value = 0, .index = 0, .length = 0},
+          report_descriptor_request(12, 0)
+  });
+  auto& channel = hub->channel(0);
+  for(auto const& report : {
+          std::vector<std::uint8_t>{0, 'a', 'b'},
+          std::vector<std::uint8_t>{3, 'x'}
+  })
+  {
+    channel.awaited_writes.insert(channel.write(report));
+  }
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(
+      r.dev.s.received[1]
+      == packet_list{
+          bytes_of("ab"), std::vector<std::uint8_t>{3, 'x'}
+  });
+  CHECK(channel.written.size() == 2);
+  r.dev.s.halted  = {0x01};
+  auto const lost = channel.write({0, 'z'});
+  channel.awaited_writes.insert(lost);
+  channel.write({0, 'w'});
+  r.run_until(t0 + second + 20 * ms);
+  CHECK(channel.written.at(lost) == usb::transfer_status::stalled);
+  REQUIRE(r.warnings.size() == 1);
+  CHECK(r.warnings[0].find("output report 4 ended stalled") != std::string::npos);
+  CHECK(r.dev.s.received[1].size() == 2);
+}
+
+TEST_CASE("GET_REPORT and SET_REPORT queued for the binding report their data and a STALL")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor     = report_descriptor(25);
+  r.dev.s.class_replies[0x0301] = {1, 9, 8};
+  r.plug();
+  r.run_until(t0 + second);
+  auto&      channel = hub->channel(0);
+  auto const get     = r.host->context(0).control(
+      {.request_type = 0xa1, .request = 1, .value = 0x0301, .index = 2, .length = 3});
+  channel.awaited.insert(get);
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(channel.results.at(get).status == usb::transfer_status::completed);
+  CHECK(channel.results.at(get).data == std::vector<std::uint8_t>{1, 9, 8});
+
+  r.dev.s.stall_class = true;
+  auto const set      = r.host->context(0).control(
+      {.request_type = 0x21, .request = 9, .value = 0x0300, .index = 2, .length = 1}, {7});
+  channel.awaited.insert(set);
+  r.run_until(t0 + second + 20 * ms);
+  CHECK(channel.results.at(set).status == usb::transfer_status::stalled);
+  CHECK(channel.awaited.empty());
+}
+
+TEST_CASE("an interrupt IN STALL is cleared as usbhid does and reading carries on at DATA0")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  r.dev.s.in_queue[3] = {
+      std::vector<std::uint8_t>{1, 1}
+  };
+  r.run_until(t0 + second + 20 * ms);
+  r.dev.s.halted = {0x83};
+  r.run_until(t0 + second + 40 * ms);
+  CHECK(r.dev.s.halted.empty());
+  auto const clear = std::ranges::find(
+      r.dev.s.requests,
+      usb::setup_packet{.request_type = 2, .request = 1, .value = 0, .index = 0x83, .length = 0},
+      &request_record::setup);
+  REQUIRE(clear != r.dev.s.requests.end());
+  r.dev.s.in_queue[3] = {
+      std::vector<std::uint8_t>{1, 2},
+      std::vector<std::uint8_t>{1, 3}
+  };
+  r.run_until(t0 + second + 80 * ms);
+  auto const reports = hub->channel(0).take(10);
+  REQUIRE(reports.size() == 3);
+  CHECK(reports[1].data == std::vector<std::uint8_t>{1, 2});
+  CHECK(reports[2].data == std::vector<std::uint8_t>{1, 3});
+  CHECK(reports[1].at.ps > clear->at);
+  CHECK(r.warnings.empty());
+}
+
+TEST_CASE(
+    "a restore sends the output reports the snapshot had pending and drops later input reports")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        a{hid_options_with(hub)};
+  a.dev.s.report_descriptor = report_descriptor(25);
+  a.plug();
+  a.run_until(t0 + second);
+  auto& channel = hub->channel(0);
+  channel.write({2, 'a'});
+  channel.write({2, 'b'});
+  std::vector<std::byte> saved;
+  a.host->save(saved);
+  auto const device_at_save = a.dev.s;
+
+  a.dev.s.in_queue[3] = {
+      std::vector<std::uint8_t>{1, 5}
+  };
+  a.run_until(t0 + second + 20 * ms);
+  CHECK(a.dev.s.class_out == std::vector<std::uint8_t>{2, 'a', 2, 'b'});
+  CHECK(channel.in.size() == 1);
+
+  auto* const kept = a.host->drivers()[0].driver.get();
+  hub->discard();
+  a.host->load(saved);
+  CHECK(a.host->drivers()[0].driver.get() == kept);
+  CHECK(channel.in.empty());
+  CHECK(channel.queued() == 2);
+  CHECK(channel.report_descriptor == report_descriptor(25));
+  CHECK(channel.write({2, 'c'}) == 3);
+  a.run_until(t0 + second + 40 * ms);
+  CHECK(a.dev.s.class_out == std::vector<std::uint8_t>{2, 'a', 2, 'b', 2, 'a', 2, 'b', 2, 'c'});
+
+  auto const fresh = std::make_shared<usb::hid_hub>();
+  rig        b{hid_options_with(fresh)};
+  b.dev.s = device_at_save;
+  b.host->load(saved);
+  CHECK(fresh->channel(0).queued() == 2);
+  CHECK(fresh->channel(0).interface == std::optional<std::uint8_t>{2});
+  CHECK(fresh->channel(0).write({2, 'd'}) == 3);
+  b.run_until(t0 + second + 20 * ms);
+  CHECK(b.dev.s.class_out == std::vector<std::uint8_t>{2, 'a', 2, 'b', 2, 'd'});
+}
+
+TEST_CASE(
+    "output reports of an unbound HID function are saved with the host and sent after the restore")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        a{hid_options_with(hub)};
+  hub->channel(0).write({2, 'e'});
+  std::vector<std::byte> saved;
+  a.host->save(saved);
+
+  auto const fresh = std::make_shared<usb::hid_hub>();
+  rig        b{hid_options_with(fresh)};
+  b.dev.s.report_descriptor = report_descriptor(25);
+  fresh->channel(0).write({2, 's'});
+  b.host->load(saved);
+  REQUIRE(fresh->channel(0).out.size() == 1);
+  CHECK(fresh->channel(0).out.front().data == std::vector<std::uint8_t>{2, 'e'});
+  b.plug();
+  b.run_until(t0 + second);
+  CHECK(b.dev.s.class_out == std::vector<std::uint8_t>{2, 'e'});
+}
+
+TEST_CASE("an unplug cancels the awaited output report in flight and keeps the queued ones")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto&      channel = hub->channel(0);
+  auto const awaited = channel.write({2, 'q'});
+  channel.awaited_writes.insert(awaited);
+  channel.write({2, 'r'});
+  auto end = t0 + second;
+  while(channel.in_flight == 0)
+  {
+    end += 20 * us;
+    r.run_until(end);
+  }
+  CHECK(channel.in_flight == awaited);
+  r.host->pull_up_changed(false, vtime{end});
+  CHECK_FALSE(channel.interface.has_value());
+  CHECK(channel.written.at(awaited) == usb::transfer_status::cancelled);
+  CHECK(channel.queued() == 1);
+  r.dev.s.class_out.clear();
+  r.plug(end + 10 * ms);
+  r.run_until(t0 + 3 * second);
+  CHECK(r.dev.s.class_out == std::vector<std::uint8_t>{2, 'r'});
+}
+
+TEST_CASE("the CDC ACM and HID drivers bind together, each to its own interfaces")
+{
+  auto const cdc     = std::make_shared<usb::cdc_hub>();
+  auto const hid     = std::make_shared<usb::hid_hub>();
+  auto       options = cdc_options_with(cdc);
+  options.drivers.push_back(usb::hid_factory(hid));
+  rig r{std::move(options)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(r.host->drivers().size() == 2);
+  CHECK(r.host->drivers()[0].name == usb::cdc_acm_name);
+  CHECK(r.host->drivers()[1].name == usb::hid_name);
+  CHECK(
+      setups_after_configuration(r.dev.s)
+      == std::vector{
+          line_coding_request, line_state_request(3), set_idle_request,
+          report_descriptor_request(25)});
+  cdc->channel(0).out.append_range(bytes_of("hi"));
+  hid->channel(0).write({2, 'h'});
+  r.dev.s.in_queue[2] = {bytes_of("HI")};
+  r.dev.s.in_queue[3] = {
+      std::vector<std::uint8_t>{1, 4}
+  };
+  r.run_until(t0 + second + 20 * ms);
+  CHECK(r.dev.s.received[2] == packet_list{bytes_of("hi")});
+  CHECK(r.dev.s.class_out.back() == 'h');
+  CHECK(cdc->channel(0).take(10)[0].data == bytes_of("HI"));
+  CHECK(hid->channel(0).take(10)[0].data == std::vector<std::uint8_t>{1, 4});
+  CHECK(r.warnings.empty());
+}
+
+namespace
+{
+auto hid_interface(std::vector<std::uint8_t> hid, bool on_endpoint = false) -> usb::interface_info
+{
+  usb::interface_info setting{.number = 0, .class_code = 3};
+  setting.endpoints.push_back(
+      {.address = 0x81, .type = usb::transfer_type::interrupt, .max_packet = 8, .interval = 1});
+  (on_endpoint ? setting.endpoints.front().extra : setting.extra) = std::move(hid);
+  return setting;
+}
+}
+
+TEST_CASE("the report descriptor length comes from the HID descriptor as usbhid_parse finds it")
+{
+  std::vector<std::uint8_t> const valid{9, 0x21, 0x11, 0x01, 0, 1, 0x22, 25, 0};
+  CHECK(
+      usb::hid_report_descriptor_length(hid_interface(valid)) == std::optional<std::uint16_t>{25});
+  CHECK(
+      usb::hid_report_descriptor_length(hid_interface(valid, true))
+      == std::optional<std::uint16_t>{25});
+  CHECK(
+      usb::hid_report_descriptor_length(
+          hid_interface({9, 0x21, 0x11, 0x01, 0, 2, 0x22, 25, 0, 0x23, 4, 0}))
+      == std::optional<std::uint16_t>{});
+  CHECK(
+      usb::hid_report_descriptor_length(
+          hid_interface({12, 0x21, 0x11, 0x01, 0, 2, 0x22, 25, 0, 0x23, 4, 0}))
+      == std::optional<std::uint16_t>{25});
+  CHECK_FALSE(
+      usb::hid_report_descriptor_length(hid_interface({9, 0x21, 0x11, 0x01, 0, 1, 0x23, 25, 0})));
+  CHECK_FALSE(
+      usb::hid_report_descriptor_length(
+          hid_interface({9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0x01, 0x10})));
+  CHECK(
+      usb::hid_report_descriptor_length(
+          hid_interface({9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0x00, 0x10}))
+      == std::optional<std::uint16_t>{4096});
+  CHECK_FALSE(
+      usb::hid_report_descriptor_length(hid_interface({9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0, 0})));
+  CHECK_FALSE(
+      usb::hid_report_descriptor_length(hid_interface({9, 0x21, 0x11, 0x01, 0, 0, 0x22, 25, 0})));
+  CHECK_FALSE(usb::hid_report_descriptor_length(hid_interface({})));
+}
+
+TEST_CASE("a binding empties the report descriptor until the new device's one is read")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto& channel = hub->channel(0);
+  CHECK(channel.report_descriptor == report_descriptor(25));
+  r.host->pull_up_changed(false, vtime{t0 + second});
+  CHECK(channel.report_descriptor == report_descriptor(25));
+
+  r.dev.s.report_descriptor = std::vector<std::uint8_t>(25, 0x77);
+  r.plug(t0 + second + 10 * ms);
+  auto end = t0 + second + 10 * ms;
+  while(r.host->drivers().empty())
+  {
+    end += 20 * us;
+    r.run_until(end);
+  }
+  CHECK(channel.interface == std::optional<std::uint8_t>{2});
+  CHECK(channel.report_descriptor.empty());
+  r.run_until(end + 50 * ms);
+  CHECK(channel.report_descriptor == std::vector<std::uint8_t>(25, 0x77));
+}
+
+TEST_CASE("the report descriptor of an unbound function is saved with the host")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        a{hid_options_with(hub)};
+  a.dev.s.report_descriptor = report_descriptor(25);
+  a.plug();
+  a.run_until(t0 + second);
+  a.host->pull_up_changed(false, vtime{t0 + second});
+  std::vector<std::byte> saved;
+  a.host->save(saved);
+
+  auto const fresh = std::make_shared<usb::hid_hub>();
+  rig        b{hid_options_with(fresh)};
+  fresh->channel(0).report_descriptor = {1, 2, 3};
+  fresh->channel(1).report_descriptor = {4};
+  b.host->load(saved);
+  CHECK(fresh->channel(0).report_descriptor == report_descriptor(25));
+  CHECK(fresh->channel(1).report_descriptor.empty());
+  CHECK_FALSE(fresh->channel(0).interface.has_value());
+
+  std::vector<std::byte> empty_hub;
+  rig{hid_options_with(std::make_shared<usb::hid_hub>())}.host->save(empty_hub);
+  b.host->load(empty_hub);
+  CHECK(fresh->channel(0).report_descriptor.empty());
+}
+
+TEST_CASE("an output report above 0xffff bytes on the bus ends in error unsent, the next one goes")
+{
+  auto const hub = std::make_shared<usb::hid_hub>();
+  rig        r{hid_options_with(hub)};
+  r.dev.s.report_descriptor = report_descriptor(25);
+  r.plug();
+  r.run_until(t0 + second);
+  auto&                     channel = hub->channel(0);
+  std::vector<std::uint8_t> big(0x10000, 0x55);
+  big.front()     = 2;
+  auto const huge = channel.write(big);
+  channel.awaited_writes.insert(huge);
+  std::vector<std::uint8_t> edge(0x10000, 0x66);
+  edge.front()   = 0;
+  auto const fit = channel.write(edge);
+  channel.awaited_writes.insert(fit);
+  r.run_until(t0 + second + 300 * ms);
+  CHECK(channel.written.at(huge) == usb::transfer_status::error);
+  REQUIRE(r.warnings.size() == 1);
+  CHECK(r.warnings[0].find("carries 65536 bytes, above 0xffff, not sent") != std::string::npos);
+  CHECK(channel.written.at(fit) == usb::transfer_status::completed);
+  auto const sent = setups_after_configuration(r.dev.s).back();
+  CHECK(sent.value == 0x0200);
+  CHECK(sent.length == 0xffff);
+  CHECK(r.dev.s.class_out.size() == 0xffff);
 }

@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #define BUTTON_PORT        GPIOC
 #define BUTTON_PIN         GPIO_PIN_13
@@ -13,6 +14,13 @@
 volatile uint32_t usb_mounted;
 volatile uint32_t cdc_connected;
 volatile uint32_t hid_reports;
+volatile uint32_t hid_led;
+volatile uint32_t hid_led_writes;
+volatile uint32_t hid_echoes;
+uint8_t           hid_feature[HID_IO_FEATURE_SIZE] = {0xf0, 0xf1, 0xf2, 0xf3};
+static uint8_t    hid_echo[HID_IO_REPORT_SIZE];
+static uint16_t   hid_echo_length;
+static bool       hid_echo_pending;
 volatile uint32_t usb_suspends;
 static uint32_t   mounted_at;
 static bool       announced;
@@ -118,10 +126,10 @@ static void cdc_task(void)
 static void hid_task(bool* pressed)
 {
   bool const level = HAL_GPIO_ReadPin(BUTTON_PORT, BUTTON_PIN) == GPIO_PIN_SET;
-  if(level && !*pressed && tud_hid_ready())
+  if(level && !*pressed && tud_hid_n_ready(HID_BUTTON))
   {
     uint8_t const report = (uint8_t)(hid_reports + 1);
-    if(tud_hid_report(REPORT_ID_BUTTON, &report, sizeof report))
+    if(tud_hid_n_report(HID_BUTTON, REPORT_ID_BUTTON, &report, sizeof report))
     {
       ++hid_reports;
       *pressed = true;
@@ -130,6 +138,13 @@ static void hid_task(bool* pressed)
   else if(!level)
   {
     *pressed = false;
+  }
+  if(hid_echo_pending
+     && tud_hid_n_ready(HID_IO)
+     && tud_hid_n_report(HID_IO, 0, hid_echo, hid_echo_length))
+  {
+    hid_echo_pending = false;
+    ++hid_echoes;
   }
 }
 
@@ -167,9 +182,20 @@ uint16_t tud_hid_get_report_cb(
     uint8_t*          buffer,
     uint16_t          reqlen)
 {
-  (void)instance;
-  (void)report_type;
-  if(report_id != REPORT_ID_BUTTON || reqlen < 1)
+  if(instance == HID_IO && report_type == HID_REPORT_TYPE_FEATURE)
+  {
+    uint16_t const count = reqlen < sizeof hid_feature ? reqlen : (uint16_t)sizeof hid_feature;
+    memcpy(buffer, hid_feature, count);
+    return count;
+  }
+  if(instance
+     != HID_BUTTON
+     || report_type
+     != HID_REPORT_TYPE_INPUT
+     || report_id
+     != REPORT_ID_BUTTON
+     || reqlen
+     < 1)
   {
     return 0;
   }
@@ -184,11 +210,31 @@ void tud_hid_set_report_cb(
     uint8_t const*    buffer,
     uint16_t          bufsize)
 {
-  (void)instance;
-  (void)report_id;
-  (void)report_type;
-  (void)buffer;
-  (void)bufsize;
+  if(instance
+     == HID_BUTTON
+     && report_id
+     == REPORT_ID_LED
+     && report_type
+     == HID_REPORT_TYPE_OUTPUT
+     && bufsize
+     >= 1)
+  {
+    hid_led = buffer[0];
+    ++hid_led_writes;
+  }
+  else if(instance == HID_IO && report_type == HID_REPORT_TYPE_FEATURE)
+  {
+    memcpy(hid_feature, buffer, bufsize < sizeof hid_feature ? bufsize : sizeof hid_feature);
+  }
+  else if(instance == HID_IO && report_type == HID_REPORT_TYPE_OUTPUT && !hid_echo_pending)
+  {
+    hid_echo_length = bufsize < sizeof hid_echo ? bufsize : (uint16_t)sizeof hid_echo;
+    for(uint16_t i = 0; i < hid_echo_length; ++i)
+    {
+      hid_echo[i] = (uint8_t)~buffer[i];
+    }
+    hid_echo_pending = true;
+  }
 }
 
 int main(void)

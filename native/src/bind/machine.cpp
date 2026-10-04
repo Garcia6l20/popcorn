@@ -85,12 +85,12 @@ auto key_of(std::string const& usb) -> std::string
   return std::format("usb.{}", usb);
 }
 
-using cdc_hubs = std::map<std::string, std::shared_ptr<periph::usb::cdc_hub>>;
+using usb_hub_map = std::map<std::string, detail::usb_hubs>;
 
 auto usb_factories(
     mcu_description const& description,
     machine_config const&  config,
-    cdc_hubs const&        hubs) -> std::map<std::string, periph::model_factory, std::less<>>
+    usb_hub_map const&     hubs) -> std::map<std::string, periph::model_factory, std::less<>>
 {
   periph::stm32::board board;
   for(auto const& [name, host] : config.usb_hosts)
@@ -104,8 +104,10 @@ auto usb_factories(
     options.host.reset_time = std::chrono::nanoseconds{static_cast<std::int64_t>(host.reset_ns)};
     options.host.request_timeout =
         std::chrono::nanoseconds{static_cast<std::int64_t>(host.timeout_ns)};
+    auto const& channels = hubs.at(name);
     options.host.drivers.push_back(
-        periph::usb::cdc_acm_factory(hubs.at(name), {.dtr = host.dtr, .rts = host.rts}));
+        periph::usb::cdc_acm_factory(channels.cdc, {.dtr = host.dtr, .rts = host.rts}));
+    options.host.drivers.push_back(periph::usb::hid_factory(channels.hid));
     board.usb_hosts.emplace(name, std::move(options));
   }
   auto all = periph::stm32::factories(board, description);
@@ -128,7 +130,7 @@ auto usb_factories(
 auto options_of(
     mcu_description const& description,
     machine_config const&  config,
-    cdc_hubs const&        hubs) -> core::machine_options
+    usb_hub_map const&     hubs) -> core::machine_options
 {
   if(not std::isfinite(config.cpi) or not(config.cpi > 0.0))
   {
@@ -195,10 +197,10 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   detail::building_scope const building{alive_};
   for(auto const& name : config.usb_hosts | std::views::keys)
   {
-    cdc_hubs_.emplace(name, std::make_shared<periph::usb::cdc_hub>());
+    hubs_.emplace(name, detail::usb_hubs{});
   }
   machine_ = std::make_unique<core::machine>(
-      description, factory_for(description), options_of(description, config, cdc_hubs_));
+      description, factory_for(description), options_of(description, config, hubs_));
 }
 
 machine_handle::~machine_handle()
@@ -260,9 +262,10 @@ auto machine_handle::snapshot() const -> snapshot_handle
 void machine_handle::restore(snapshot_handle const& saved)
 {
   reflex::py::nb::gil_scoped_release unlocked;
-  for(auto const& hub : cdc_hubs_ | std::views::values)
+  for(auto const& hubs : hubs_ | std::views::values)
   {
-    hub->discard();
+    hubs.cdc->discard();
+    hubs.hid->discard();
   }
   machine_->restore(saved.native());
 }

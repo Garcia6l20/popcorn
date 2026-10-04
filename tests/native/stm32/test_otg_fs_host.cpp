@@ -70,7 +70,14 @@ public:
         {
           bulk_out_ = ctx.open_pipe(endpoint);
         }
-        else if(endpoint.type == usb::transfer_type::interrupt and setting.class_code == 3)
+        else if(
+            endpoint.type
+            == usb::transfer_type::interrupt
+            and endpoint.in()
+            and setting.class_code
+            == 3
+            and report_
+            == 0)
         {
           report_ = ctx.open_pipe(endpoint);
         }
@@ -253,7 +260,7 @@ TEST_CASE("the board host enumerates the TinyUSB firmware from power-on")
   CHECK(r.host().address() == 1);
   CHECK_FALSE(r.host().failed_step().has_value());
   REQUIRE(r.host().configuration() != nullptr);
-  CHECK(r.host().configuration()->interfaces.size() == 3);
+  CHECK(r.host().configuration()->interfaces.size() == 4);
 }
 
 TEST_CASE("an unplugged board host sees nothing until the cable is plugged")

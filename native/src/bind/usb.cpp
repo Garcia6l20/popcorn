@@ -221,11 +221,177 @@ auto cdc_link::serial_state() const -> std::uint16_t
   return channel().serial_state;
 }
 
-usb_link::usb_link(
+hid_link::hid_link(
     periph::stm32::usb_host_port&         port,
-    std::shared_ptr<periph::usb::cdc_hub> hub,
+    std::shared_ptr<periph::usb::hid_hub> hub,
+    std::size_t                           function,
     std::shared_ptr<bool const>           alive)
-    : port_{&port}, hub_{std::move(hub)}, alive_{std::move(alive)}
+    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
+{}
+
+auto hid_link::channel() const -> periph::usb::hid_channel&
+{
+  if(not *alive_)
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return hub_->channel(function_);
+}
+
+auto hid_link::write(reflex::py::nb::bytes const& data) -> std::uint64_t
+{
+  auto&             queues = channel();
+  auto const* const bytes  = static_cast<std::uint8_t const*>(data.data());
+  auto const        stage  = data.size() == 0 ? 0 : data.size() - (bytes[0] == 0 ? 1 : 0);
+  if(data.size() < 2 or stage > 0xffff)
+  {
+    throw config_error(
+        "usb", 0, "report",
+        std::format(
+            "a report of at least 2 bytes, at most 0xffff on the bus, not {} bytes", data.size()));
+  }
+  auto const id = queues.write({bytes, bytes + data.size()});
+  queues.awaited_writes.insert(id);
+  return id;
+}
+
+auto hid_link::take_written(std::uint64_t id) -> std::optional<periph::usb::transfer_status>
+{
+  auto& written = channel().written;
+  auto  found   = written.find(id);
+  if(found == written.end())
+  {
+    return std::nullopt;
+  }
+  auto const status = found->second;
+  written.erase(found);
+  return status;
+}
+
+void hid_link::forget_written(std::uint64_t id)
+{
+  auto& queues = channel();
+  queues.awaited_writes.erase(id);
+  queues.written.erase(id);
+}
+
+auto hid_link::queued() const -> std::uint64_t
+{
+  return channel().queued();
+}
+
+auto hid_link::available() const -> std::uint64_t
+{
+  return channel().in.size();
+}
+
+auto hid_link::drain(std::uint64_t count) -> std::vector<hid_report_record>
+{
+  return channel().take(count)
+       | std::views::transform([](usb::hid_report const& report) {
+           return hid_report_record{.data = report.data, .at_ps = report.at.ps};
+         })
+       | std::ranges::to<std::vector>();
+}
+
+auto hid_link::dropped() const -> std::uint64_t
+{
+  return channel().dropped;
+}
+
+void hid_link::set_report_limit(std::uint64_t limit)
+{
+  if(limit == 0)
+  {
+    throw config_error("usb", 0, "limit", "a report limit of at least 1");
+  }
+  channel().set_limit(limit);
+}
+
+auto hid_link::bound() const -> bool
+{
+  return channel().interface.has_value();
+}
+
+auto hid_link::report_descriptor() const -> reflex::py::nb::bytes
+{
+  return bytes_of(channel().report_descriptor);
+}
+
+auto hid_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
+    -> std::uint32_t
+{
+  auto&       queues = channel();
+  auto* const host   = port_->board_host();
+  if(not queues.interface or host == nullptr)
+  {
+    return 0;
+  }
+  auto const interface = *queues.interface;
+  auto const drivers   = host->drivers();
+  auto const found     = std::ranges::find_if(drivers, [&](usb::bound_driver const& bound) {
+    return bound.name == usb::hid_name and bound.interfaces == std::vector{interface};
+  });
+  if(found == drivers.end())
+  {
+    return 0;
+  }
+  setup.index   = interface;
+  auto const id = host->context(static_cast<std::size_t>(found - drivers.begin()))
+                      .control(setup, std::move(data));
+  queues.awaited.insert(id);
+  return id;
+}
+
+auto hid_link::get_report(std::uint8_t type, std::uint8_t id, std::uint16_t length) -> std::uint32_t
+{
+  return request(
+      {.request_type = 0xa1,
+       .request      = 0x01,
+       .value        = static_cast<std::uint16_t>(type << 8 | id),
+       .index        = 0,
+       .length       = length},
+      {});
+}
+
+auto hid_link::set_report(std::uint8_t type, std::uint8_t id, reflex::py::nb::bytes const& data)
+    -> std::uint32_t
+{
+  auto const* const first = static_cast<std::uint8_t const*>(data.data());
+  return request(
+      {.request_type = 0x21,
+       .request      = 0x09,
+       .value        = static_cast<std::uint16_t>(type << 8 | id),
+       .index        = 0,
+       .length       = static_cast<std::uint16_t>(data.size())},
+      std::vector<std::uint8_t>(first, first + data.size()));
+}
+
+auto hid_link::take_result(std::uint32_t id) -> std::optional<hid_reply_record>
+{
+  auto& results = channel().results;
+  auto  found   = results.find(id);
+  if(found == results.end())
+  {
+    return std::nullopt;
+  }
+  hid_reply_record record{.status = found->second.status, .data = std::move(found->second.data)};
+  results.erase(found);
+  return record;
+}
+
+void hid_link::forget(std::uint32_t id)
+{
+  auto& queues = channel();
+  queues.awaited.erase(id);
+  queues.results.erase(id);
+}
+
+usb_link::usb_link(
+    periph::stm32::usb_host_port& port,
+    detail::usb_hubs              hubs,
+    std::shared_ptr<bool const>   alive)
+    : port_{&port}, hubs_{std::move(hubs)}, alive_{std::move(alive)}
 {}
 
 auto usb_link::port() const -> periph::stm32::usb_host_port&
@@ -386,7 +552,22 @@ auto usb_link::cdc_functions() const -> std::optional<std::uint64_t>
 
 auto usb_link::cdc(std::uint64_t function) const -> cdc_link
 {
-  return cdc_link{port(), hub_, static_cast<std::size_t>(function), alive_};
+  return cdc_link{port(), hubs_.cdc, static_cast<std::size_t>(function), alive_};
+}
+
+auto usb_link::hid_functions() const -> std::optional<std::uint64_t>
+{
+  auto const* const configuration = host().configuration();
+  if(configuration == nullptr)
+  {
+    return std::nullopt;
+  }
+  return usb::hid_functions(*configuration).size();
+}
+
+auto usb_link::hid(std::uint64_t function) const -> hid_link
+{
+  return hid_link{port(), hubs_.hid, static_cast<std::size_t>(function), alive_};
 }
 
 auto machine_handle::usb_names() const -> std::vector<std::string>
@@ -410,9 +591,7 @@ auto machine_handle::attach_usb(std::string const& peripheral) -> usb_link
   {
     throw model_error(peripheral, "", 0);
   }
-  auto hub = cdc_hubs_.find(peripheral);
-  return usb_link{
-      *port, hub != cdc_hubs_.end() ? hub->second : std::make_shared<periph::usb::cdc_hub>(),
-      alive_};
+  auto const hubs = hubs_.find(peripheral);
+  return usb_link{*port, hubs != hubs_.end() ? hubs->second : detail::usb_hubs{}, alive_};
 }
 }
