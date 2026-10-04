@@ -12,11 +12,15 @@ them with AWD3:
 - AWD3 watches IN6 with a window of 1241 to 2482, 1.0 V to 2.0 V at 3.3 V. Each result out of
   the window calls `HAL_ADCEx_LevelOutOfWindow3Callback`, which counts `monitor.alarms`.
 
-The project file sets the board supply that ADC1 converts against:
+The project file sets the board supply that ADC1 converts against, and makes any register
+access popcorn does not model fail the run:
 
 ```toml
 [supply]
 vdda_mv = 3300
+
+[models]
+strict = true
 ```
 
 A test building its own machine passes `Machine(supply=SupplyOptions(vdda_mv=3300))`, with
@@ -92,8 +96,9 @@ the DMA has moved that result.
   the range from 0 to 1023". `ADC_OVERSAMPLING_RATIO_8` is the ADC4 encoding. On ADC1 it selects
   9 samples, so with the right shift of 3 every code reads 9/8 too high, 698 instead of 620 at
   0.5 V. The firmware writes 7.
-- `HAL_ADCEx_Calibration_Start` reads DBGMCU_IDCODE to pick a calibration sequence. popcorn has
-  no DBGMCU model: the read logs one warning and returns the description's reset value.
+- `HAL_ADCEx_Calibration_Start` reads DBGMCU_IDCODE to pick a calibration sequence. popcorn
+  returns 0x30076482, DEV_ID 0x482 and REV_ID 0x3007, so HAL runs the sequence for revision U
+  and later.
 
 ## Model limits
 

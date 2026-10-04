@@ -74,6 +74,7 @@ u575_programs = [
         ("stm32-otg-fs-device", "test_otg_fs_device.cpp"),
         ("stm32-otg-fs-host", "test_otg_fs_host.cpp"),
         ("stm32-adc", "test_adc.cpp"),
+        ("stm32-dbgmcu", "test_dbgmcu.cpp"),
     )
 ]
 for program in u575_programs:

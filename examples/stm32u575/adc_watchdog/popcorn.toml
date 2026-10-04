@@ -13,3 +13,6 @@ budget = 1_000_000
 
 [supply]
 vdda_mv = 3300
+
+[models]
+strict = true

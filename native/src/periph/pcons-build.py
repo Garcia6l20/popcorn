@@ -24,6 +24,7 @@ sources += [
         "sai.cpp",
         "otg_fs.cpp",
         "adc.cpp",
+        "dbgmcu.cpp",
     )
 ]
 sources += [here / "usb" / name for name in ("host.cpp", "cdc_acm.cpp", "hid.cpp", "uac2.cpp")]
