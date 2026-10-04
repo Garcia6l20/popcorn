@@ -17,6 +17,30 @@
   ((31u << SAI_xFRCR_FRL_Pos) | (15u << SAI_xFRCR_FSALL_Pos) | SAI_xFRCR_FSDEF | SAI_xFRCR_FSOFF)
 #define SAI_SLOTR_STEREO ((1u << SAI_xSLOTR_NBSLOT_Pos) | (3u << SAI_xSLOTR_SLOTEN_Pos))
 
+#define STEREO_FRAMES       512u
+#define STEREO_EVENTS       5u
+#define STEREO_HALVES       3u
+#define STEREO_TX_CR1_SLAVE 0x00000282u
+#define STEREO_RX_CR1_SYNC  0x00000683u
+#define STEREO_TX_CR1_MASTER \
+  ((4u << SAI_xCR1_DS_Pos) | SAI_xCR1_CKSTR | (4u << SAI_xCR1_MCKDIV_Pos))
+#define STEREO_FRCR         0x00051F3Fu
+#define STEREO_SLOTR        0x00030100u
+#define STEREO_IMR          0x61u
+#define STEREO_CCR          0x00421F00u
+#define STEREO_TX_CTR1      0x40020009u
+#define STEREO_TX_CBR1      0x41FF0004u
+#define STEREO_TX_CTR3      0x000003FEu
+#define STEREO_TX_CBR2      0x000007FEu
+#define STEREO_RX_CTR1      0x40090002u
+#define STEREO_RX_CBR1      0x81FF0008u
+#define STEREO_RX_CTR3      0x03FE0000u
+#define STEREO_RX_CBR2      0x07FE0000u
+#define STEREO_NODE_LINK    0x38010000u
+#define STEREO_CHANNEL_LINK 0xFE010000u
+#define STEREO_HALF_TAG     0x00480000u
+#define STEREO_COMPLETE_TAG 0x00540000u
+
 uint32_t          received[DUPLEX_WORDS];
 volatile uint32_t received_count;
 
@@ -41,6 +65,43 @@ struct ring_node
 
 static struct ring_node node;
 
+struct stereo_list
+{
+  uint32_t head[8];
+  uint32_t tail[4];
+};
+
+struct stereo_events
+{
+  uint32_t halves;
+  uint32_t completes;
+  uint32_t count;
+  uint32_t at[STEREO_EVENTS];
+};
+
+struct stereo_path
+{
+  SAI_Block_TypeDef*   tx_block;
+  SAI_Block_TypeDef*   rx_block;
+  DMA_Channel_TypeDef* tx_channel;
+  DMA_Channel_TypeDef* rx_channel;
+  uint32_t             tx_ctr2;
+  uint32_t             rx_ctr2;
+  uint32_t             tx_cr1;
+  IRQn_Type            tx_irq;
+  IRQn_Type            rx_irq;
+};
+
+uint16_t tx_stereo[2][STEREO_FRAMES];
+uint16_t rx_stereo[2][STEREO_FRAMES];
+
+struct stereo_events stereo_tx_events;
+struct stereo_events stereo_rx_events;
+volatile uint32_t    stereo_start;
+
+static struct stereo_list tx_list __attribute__((aligned(32)));
+static struct stereo_list rx_list __attribute__((aligned(32)));
+
 void idle(void);
 void tx_poll(void);
 void duplex_irq(void);
@@ -51,6 +112,12 @@ void dma16_zero(void);
 void dma16_sign(void);
 void GPDMA1_Channel0_IRQHandler(void);
 void GPDMA1_Channel1_IRQHandler(void);
+void codec_dma(void);
+void pair_dma(void);
+void GPDMA1_Channel12_IRQHandler(void);
+void GPDMA1_Channel13_IRQHandler(void);
+void GPDMA1_Channel14_IRQHandler(void);
+void GPDMA1_Channel15_IRQHandler(void);
 int  main(void);
 
 void idle(void)
@@ -322,6 +389,175 @@ void dma16_zero(void)
 void dma16_sign(void)
 {
   dma16(LL_DMA_DATA_ALIGN_SIGNEXTPADD);
+}
+
+static void stereo_event(DMA_Channel_TypeDef* channel, struct stereo_events* events, uint32_t tag)
+{
+  uint32_t const now = TIM2->CNT;
+  if((channel->CSR & DMA_CSR_HTF) != 0)
+  {
+    channel->CFCR = DMA_CFCR_HTF;
+    LOG(tag | STEREO_HALF_TAG | ++events->halves);
+    if(events->count < STEREO_EVENTS)
+    {
+      events->at[events->count++] = now;
+    }
+  }
+  if((channel->CSR & DMA_CSR_TCF) != 0)
+  {
+    channel->CFCR = DMA_CFCR_TCF;
+    LOG(tag | STEREO_COMPLETE_TAG | ++events->completes);
+    if(events->count < STEREO_EVENTS)
+    {
+      events->at[events->count++] = now;
+    }
+  }
+}
+
+void GPDMA1_Channel12_IRQHandler(void)
+{
+  stereo_event(GPDMA1_Channel12, &stereo_tx_events, 0x0C000000u);
+}
+
+void GPDMA1_Channel13_IRQHandler(void)
+{
+  stereo_event(GPDMA1_Channel13, &stereo_rx_events, 0x0D000000u);
+}
+
+void GPDMA1_Channel14_IRQHandler(void)
+{
+  stereo_event(GPDMA1_Channel14, &stereo_tx_events, 0x0E000000u);
+}
+
+void GPDMA1_Channel15_IRQHandler(void)
+{
+  stereo_event(GPDMA1_Channel15, &stereo_rx_events, 0x0F000000u);
+}
+
+static void free_running_tim2(void)
+{
+  RCC->APB1ENR1 |= RCC_APB1ENR1_TIM2EN;
+  (void)RCC->APB1ENR1;
+  TIM2->PSC = 3u;
+  TIM2->ARR = 0xFFFFFFFFu;
+  TIM2->EGR = TIM_EGR_UG;
+  TIM2->SR  = 0u;
+  TIM2->CR1 = TIM_CR1_CEN;
+}
+
+static void stereo_block(SAI_Block_TypeDef* block, uint32_t cr1)
+{
+  block->CR1   = cr1;
+  block->CR2   = SAI_xCR2_FFLUSH;
+  block->FRCR  = STEREO_FRCR;
+  block->SLOTR = STEREO_SLOTR;
+  block->IMR   = STEREO_IMR;
+}
+
+static void stereo_channel(
+    DMA_Channel_TypeDef* channel,
+    struct stereo_list*  list,
+    uint32_t const       head[7],
+    uint32_t             tail_br1,
+    IRQn_Type            irq)
+{
+  uint32_t const node_link = STEREO_NODE_LINK | ((uint32_t)list->tail & 0xFFFCu);
+  for(uint32_t index = 0; index < 7u; ++index)
+  {
+    list->head[index] = head[index];
+  }
+  list->head[7]  = node_link;
+  list->tail[0]  = tail_br1;
+  list->tail[1]  = head[3];
+  list->tail[2]  = head[4];
+  list->tail[3]  = node_link;
+  channel->CTR2  = DMA_CTR2_TCEM_0;
+  channel->CBR1  = 0u;
+  channel->CLBAR = (uint32_t)list->head & 0xFFFF0000u;
+  channel->CLLR  = STEREO_CHANNEL_LINK | ((uint32_t)list->head & 0xFFFCu);
+  channel->CCR   = STEREO_CCR;
+  NVIC_EnableIRQ(irq);
+}
+
+static uint32_t checksum(uint16_t const buffer[2][STEREO_FRAMES])
+{
+  uint32_t sum = 0;
+  for(uint32_t index = 0; index < STEREO_FRAMES; ++index)
+  {
+    sum = sum * 31u + buffer[0][index];
+    sum = sum * 31u + buffer[1][index];
+  }
+  return sum;
+}
+
+static void stereo(struct stereo_path const* path)
+{
+  for(uint32_t index = 0; index < STEREO_FRAMES; ++index)
+  {
+    tx_stereo[0][index] = (uint16_t)index;
+    tx_stereo[1][index] = (uint16_t)(0x8000u | index);
+  }
+  free_running_tim2();
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  stereo_block(path->tx_block, path->tx_cr1);
+  stereo_block(path->rx_block, STEREO_RX_CR1_SYNC);
+  uint32_t const tx_head[7] = {STEREO_TX_CTR1,
+                               path->tx_ctr2,
+                               STEREO_TX_CBR1,
+                               (uint32_t)tx_stereo,
+                               (uint32_t)&path->tx_block->DR,
+                               STEREO_TX_CTR3,
+                               STEREO_TX_CBR2};
+  uint32_t const rx_head[7] = {
+      STEREO_RX_CTR1,      path->rx_ctr2,  STEREO_RX_CBR1, (uint32_t)&path->rx_block->DR,
+      (uint32_t)rx_stereo, STEREO_RX_CTR3, STEREO_RX_CBR2};
+  stereo_channel(path->tx_channel, &tx_list, tx_head, STEREO_TX_CBR1, path->tx_irq);
+  stereo_channel(path->rx_channel, &rx_list, rx_head, STEREO_RX_CBR1, path->rx_irq);
+  path->tx_channel->CCR |= DMA_CCR_EN;
+  path->tx_block->CR1 |= SAI_xCR1_DMAEN;
+  while((path->tx_block->SR & SAI_xSR_FLVL) == 0)
+  {
+  }
+  path->tx_block->CR1 |= SAI_xCR1_SAIEN;
+  stereo_start = TIM2->CNT;
+  path->rx_channel->CCR |= DMA_CCR_EN;
+  path->rx_block->CR1 |= SAI_xCR1_DMAEN;
+  path->rx_block->CR1 |= SAI_xCR1_SAIEN;
+  while(stereo_tx_events.halves < STEREO_HALVES || stereo_rx_events.halves < STEREO_HALVES)
+  {
+    __WFI();
+  }
+  path->rx_channel->CCR |= DMA_CCR_SUSP;
+  path->tx_channel->CCR |= DMA_CCR_SUSP;
+  LOG(checksum(tx_stereo));
+  LOG(checksum(rx_stereo));
+  DONE();
+}
+
+void codec_dma(void)
+{
+  struct stereo_path const path = {
+      SAI1_Block_A, SAI1_Block_B,        GPDMA1_Channel12,      GPDMA1_Channel13,      0x80000424u,
+      0x80000025u,  STEREO_TX_CR1_SLAVE, GPDMA1_Channel12_IRQn, GPDMA1_Channel13_IRQn,
+  };
+  clocks();
+  stereo(&path);
+}
+
+void pair_dma(void)
+{
+  struct stereo_path const path = {
+      SAI2_Block_A, SAI2_Block_B,         GPDMA1_Channel14,      GPDMA1_Channel15,      0x80000426u,
+      0x80000027u,  STEREO_TX_CR1_MASTER, GPDMA1_Channel14_IRQn, GPDMA1_Channel15_IRQn,
+  };
+  RCC->CR |= RCC_CR_HSION;
+  while((RCC->CR & RCC_CR_HSIRDY) == 0)
+  {
+  }
+  RCC->CCIPR2 = (RCC->CCIPR2 & ~RCC_CCIPR2_SAI2SEL) | (4u << RCC_CCIPR2_SAI2SEL_Pos);
+  RCC->APB2ENR |= RCC_APB2ENR_SAI2EN;
+  (void)RCC->APB2ENR;
+  stereo(&path);
 }
 
 int main(void)

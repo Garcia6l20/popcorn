@@ -14,9 +14,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -1181,4 +1183,198 @@ TEST_CASE("GPDMA widens 16-bit samples to the 32-bit data register, 0-padded or 
       CHECK(r.a->frames[index / 2].format.data_bits == 32);
     }
   }
+}
+
+namespace
+{
+constexpr std::uint32_t stereo_frames = 512;
+constexpr std::uint32_t stereo_halves = 1280;
+
+auto stereo_words(std::uint32_t frames) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t frame = 0; frame < frames; ++frame)
+  {
+    out.push_back(0x1000u | frame);
+    out.push_back(0x2000u | frame);
+  }
+  return out;
+}
+
+struct stereo_rig
+{
+  std::shared_ptr<recorder>      tx = std::make_shared<recorder>();
+  std::shared_ptr<recorder>      rx = std::make_shared<recorder>(stereo_words(1400));
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+
+  stereo_rig(std::string_view entry, std::string const& instance, std::uint32_t external_hz)
+  {
+    board.audio[instance + "_A"] = {.endpoint = tx, .external_frame_hz = external_hz};
+    board.audio[instance + "_B"] = {.endpoint = rx};
+    auto options                 = popcorn::testing::stm32_options();
+    options.models               = stm32::factories(board, u575());
+    f = std::make_unique<stm32_fixture>(u575(), "sai_ll", std::move(options));
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
+            .reason
+        == stop_reason::address);
+    f->set("pc", sym("sai_ll", entry));
+  }
+
+  [[nodiscard]] auto read(std::string_view name, std::uint32_t offset, std::uint8_t size) const
+      -> std::uint32_t
+  {
+    auto const value = f->target->mem().read(sym("sai_ll", name) + offset, size);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+
+  [[nodiscard]] auto halfword(std::string_view name, std::uint32_t half, std::uint32_t frame) const
+      -> std::uint32_t
+  {
+    return read(name, 2 * (half * stereo_frames + frame), 2);
+  }
+
+  [[nodiscard]] auto event_ticks(std::string_view name) const -> std::vector<std::int64_t>
+  {
+    std::vector<std::int64_t> out;
+    auto const                start = read("stereo_start", 0, 4);
+    for(std::uint32_t index = 0; index < read(name, 8, 4); ++index)
+    {
+      out.push_back(static_cast<std::int64_t>(read(name, 12 + 4 * index, 4) - start));
+    }
+    return out;
+  }
+};
+
+auto stereo_checksum(stereo_rig const& r, std::string_view name) -> std::uint32_t
+{
+  std::uint32_t sum = 0;
+  for(std::uint32_t frame = 0; frame < stereo_frames; ++frame)
+  {
+    sum = sum * 31u + r.halfword(name, 0, frame);
+    sum = sum * 31u + r.halfword(name, 1, frame);
+  }
+  return sum;
+}
+
+auto stereo_log(std::uint32_t tag) -> std::vector<std::uint32_t>
+{
+  return {
+      tag | 0x0048'0001u, tag | 0x0054'0001u, tag | 0x0048'0002u, tag | 0x0054'0002u,
+      tag | 0x0048'0003u};
+}
+
+auto stereo_blocks() -> std::array<std::uint64_t, 5>
+{
+  return {255, 511, 767, 1023, 1279};
+}
+
+void check_stereo(
+    stereo_rig const& r,
+    std::uint32_t     tx_tag,
+    std::uint32_t     rx_tag,
+    std::string_view  rx_channel,
+    std::uint64_t     frame)
+{
+  constexpr std::uint64_t latency = us;
+  auto const              log     = r.f->log();
+  REQUIRE(log.size() == 12);
+  std::vector<std::uint32_t> tx_log;
+  std::vector<std::uint32_t> rx_log;
+  for(auto const word : std::span{log}.first(10))
+  {
+    (word >> 24 == tx_tag >> 24 ? tx_log : rx_log).push_back(word);
+  }
+  CHECK(tx_log == stereo_log(tx_tag));
+  CHECK(rx_log == stereo_log(rx_tag));
+  CHECK(log[10] == stereo_checksum(r, "tx_stereo"));
+  CHECK(log[11] == stereo_checksum(r, "rx_stereo"));
+
+  auto const& sent = r.tx->frames;
+  REQUIRE(sent.size() >= stereo_halves);
+  auto const                 t0 = sent[0].at.ps;
+  std::vector<std::uint32_t> wrong_frames;
+  for(std::uint32_t index = 0; index < stereo_halves; ++index)
+  {
+    auto const k = index % stereo_frames;
+    if(sent[index].slots
+       != std::vector<std::uint32_t>{k, 0x8000u | k}
+       or sent[index].at.ps
+       != t0
+       + index
+       * frame)
+    {
+      wrong_frames.push_back(index);
+    }
+  }
+  CHECK(wrong_frames.empty());
+
+  auto const repeat = r.f->field("GPDMA1", std::format("GPDMA_C{}BR1", rx_channel), "BRC");
+  auto const bytes  = r.f->field("GPDMA1", std::format("GPDMA_C{}BR1", rx_channel), "BNDT");
+  auto const done   = stereo_frames - 1 - repeat;
+  CAPTURE(repeat);
+  CAPTURE(bytes);
+  std::vector<std::uint32_t> wrong_slots;
+  for(std::uint32_t k = 0; k < stereo_frames; ++k)
+  {
+    auto const left  = k < done or (k == done and bytes == 4) ? 1024 + k : 512 + k;
+    auto const right = k < done ? 1024 + k : 512 + k;
+    if(r.halfword("rx_stereo", 0, k)
+       != (0x1000u | left)
+       or r.halfword("rx_stereo", 1, k)
+       != (0x2000u | right))
+    {
+      wrong_slots.push_back(k);
+    }
+  }
+  CHECK(wrong_slots.empty());
+
+  auto const bit = frame / 64;
+  auto const due = [&](std::uint64_t at) { return static_cast<std::int64_t>((at - t0) / us); };
+  std::vector<std::int64_t> tx_due;
+  std::vector<std::int64_t> rx_due;
+  for(auto const block : stereo_blocks())
+  {
+    tx_due.push_back(due(t0 + block * frame + latency));
+    rx_due.push_back(due(t0 + (block + 1) * frame + 48 * bit + latency));
+  }
+  auto const tx_seen = r.event_ticks("stereo_tx_events");
+  auto const rx_seen = r.event_ticks("stereo_rx_events");
+  CAPTURE(tx_due);
+  CAPTURE(rx_due);
+  CAPTURE(tx_seen);
+  CAPTURE(rx_seen);
+  REQUIRE(tx_seen.size() == tx_due.size());
+  REQUIRE(rx_seen.size() == rx_due.size());
+  std::vector<std::int64_t> late;
+  for(std::size_t index = 0; index < tx_due.size(); ++index)
+  {
+    late.push_back(tx_seen[index] - tx_due[index]);
+    late.push_back(rx_seen[index] - rx_due[index]);
+  }
+  CAPTURE(late);
+  CHECK(std::ranges::min(late) >= 0);
+  CHECK(std::ranges::max(late) <= 5);
+  CHECK(std::ranges::max(late) - std::ranges::min(late) <= 1);
+}
+}
+
+TEST_CASE("a 2D circular GPDMA list runs a slave SAI1 pair from and to two stereo buffers")
+{
+  stereo_rig r{"codec_dma", "SAI1", 16'000};
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{1'000'000'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  check_stereo(r, 0x0C00'0000, 0x0D00'0000, "13", 62'500'000);
+}
+
+TEST_CASE("a 2D circular GPDMA list runs an SAI2 master pair on channels 14 and 15")
+{
+  stereo_rig r{"pair_dma", "SAI2", 0};
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{1'000'000'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  check_stereo(r, 0x0E00'0000, 0x0F00'0000, "15", frame_ps);
 }

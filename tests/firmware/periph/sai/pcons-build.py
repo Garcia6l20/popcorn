@@ -8,5 +8,15 @@ add_ll_firmware(
     "sai_ll",
     [here / "sai_ll.c"],
     [],
-    ["idle", "tx_poll", "duplex_irq", "underrun", "dma", "dma16_zero", "dma16_sign"],
+    [
+        "idle",
+        "tx_poll",
+        "duplex_irq",
+        "underrun",
+        "dma",
+        "dma16_zero",
+        "dma16_sign",
+        "codec_dma",
+        "pair_dma",
+    ],
 )
