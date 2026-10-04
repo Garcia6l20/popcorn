@@ -217,6 +217,10 @@ public:
   [[= py::doc{"Whether a CDC ACM driver is bound to the function."}]] [[nodiscard]] auto
       bound() const -> bool;
 
+  /** @brief Whether the bound driver's SET_CONTROL_LINE_STATE of configuration has ended. */
+  [[= py::doc{"Whether the bound driver's SET_CONTROL_LINE_STATE of configuration has ended."}]]
+      [[nodiscard]] auto ready() const -> bool;
+
   /**
    * @brief Queues SET_LINE_CODING through the bound driver.
    * @param baud dwDTERate.
@@ -375,6 +379,10 @@ public:
   /** @brief Whether a HID driver is bound to the function. */
   [[= py::doc{"Whether a HID driver is bound to the function."}]] [[nodiscard]] auto bound() const
       -> bool;
+
+  /** @brief Whether the bound driver has read the report descriptor. */
+  [[= py::doc{"Whether the bound driver has read the report descriptor."}]] [[nodiscard]] auto
+      ready() const -> bool;
 
   /** @brief The report descriptor the driver read, empty before. */
   [[= py::doc{"The report descriptor the driver read, empty before."}]] [[nodiscard]] auto

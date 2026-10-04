@@ -131,6 +131,11 @@ auto cdc_link::bound() const -> bool
   return channel().comm_interface.has_value();
 }
 
+auto cdc_link::ready() const -> bool
+{
+  return channel().ready;
+}
+
 auto cdc_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
     -> std::uint32_t
 {
@@ -311,6 +316,11 @@ void hid_link::set_report_limit(std::uint64_t limit)
 auto hid_link::bound() const -> bool
 {
   return channel().interface.has_value();
+}
+
+auto hid_link::ready() const -> bool
+{
+  return channel().ready;
 }
 
 auto hid_link::report_descriptor() const -> reflex::py::nb::bytes

@@ -301,7 +301,8 @@ class Machine:
     Built powered off: nothing runs until `reset()`. Emulation advances in slices on the event
     loop thread, each bounded by `slice_instructions` and `slice_wall_budget`, yielding to the
     loop between slices. Sync access to the machine while a run is active raises
-    MachineRunning, except from a handler of that run.
+    MachineRunning, except from a handler of that run, and except `time` read from the thread
+    running it.
     """
 
     __slots__ = (
@@ -331,6 +332,7 @@ class Machine:
         "_ports",
         "_registers",
         "_ring",
+        "_run_thread",
         "_sentinel",
         "_slice_instructions",
         "_slice_wall_ns",
@@ -443,6 +445,7 @@ class Machine:
         self._background = False
         self._waiters: list[_Waiter] = []
         self._thread = threading.get_ident()
+        self._run_thread: int | None = None
         self._ports = UartPorts(
             self._handle.attach_uart,
             self._handle.uart_names(),
@@ -533,8 +536,24 @@ class Machine:
 
     @property
     def time(self) -> VirtualTime:
-        """Virtual time since reset."""
-        self._require_stopped()
+        """Virtual time since reset.
+
+        Readable while a run is active, from the thread running it: the run executes slices on
+        that thread, so Python code there, a `running()` body included, only runs between slices.
+        It then reads the time the run has reached at its last slice boundary: a stimulus given
+        now, such as a pin drive or a stream write, enters the machine at that time. From a
+        handler it reads the time inside the slice. It never decreases during a run.
+
+        Raises:
+            MachineRunning: Read from another thread than the one running the active run,
+                outside a handler of it.
+        """
+        if (
+            self._busy
+            and _HANDLER_OF.get() is not self
+            and threading.get_ident() != self._run_thread
+        ):
+            raise MachineRunning("the machine is running, read its time from the run's thread")
         return VirtualTime(self._handle.time_ps())
 
     @property
@@ -1390,10 +1409,12 @@ class Machine:
         if self._busy:
             raise MachineBusy("a run, step, wait or running() is already active on this machine")
         self._busy = True
+        self._run_thread = threading.get_ident()
         try:
             yield
         finally:
             self._busy = False
+            self._run_thread = None
 
     def _require_idle(self) -> None:
         if self._busy:

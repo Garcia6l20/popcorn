@@ -152,6 +152,7 @@ public:
       return;
     }
     channel_->comm_interface.reset();
+    channel_->ready     = false;
     channel_->in_flight = 0;
     for(auto const id : channel_->awaited)
     {
@@ -251,7 +252,7 @@ public:
     }
     if(result.id == s_.line_state_request)
     {
-      s_.ready = true;
+      s_.ready = channel_->ready = true;
       send(ctx);
     }
     if(result.id == s_.clear_halt_request)
@@ -344,6 +345,7 @@ public:
     channel_->coding       = s_.coding;
     channel_->line_state   = s_.line_state;
     channel_->serial_state = s_.serial_state;
+    channel_->ready        = s_.ready;
   }
 
 private:
@@ -467,6 +469,7 @@ void cdc_channel::discard()
   coding       = {};
   line_state   = 0;
   serial_state = 0;
+  ready        = false;
   awaited.clear();
   results.clear();
 }

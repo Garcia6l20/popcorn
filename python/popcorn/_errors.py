@@ -151,7 +151,8 @@ class UsbError(EmulationError):
     Attributes:
         status: How a request ended: `stalled`, `timed_out`, `error`, `overflow` or
             `cancelled`. From `UsbHost.wait_configured`, the enumeration step that failed, such
-            as `get_configuration`, or else the device state, such as `DETACHED`.
+            as `get_configuration`, or else the device state, such as `DETACHED`. From
+            `CdcStream.wait_ready` and `HidStream.wait_ready`, `unbound` or `not_ready`.
     """
 
     def __init__(self, message: str, *, status: str = "") -> None:

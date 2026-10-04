@@ -88,6 +88,10 @@ struct hid_channel
   std::vector<std::uint8_t> report_descriptor{};
   /** @brief Interface of the bound driver, empty while none is bound. */
   std::optional<std::uint8_t> interface{};
+  /** @brief Whether the bound driver has read the report descriptor and submitted its first
+   * interrupt IN transfer, after which output reports may go out. False while no driver is
+   * bound. */
+  bool ready{};
   /** @brief Control transfers submitted for the binding whose result is not in yet. */
   std::set<transfer_id> awaited{};
   /** @brief Results of awaited control transfers not collected yet. */

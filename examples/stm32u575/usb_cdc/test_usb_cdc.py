@@ -137,6 +137,18 @@ async def test_the_cdc_function_echoes_upper_cased(machine: Machine) -> None:
     assert machine.var("cdc_connected").value == 1
 
 
+async def test_wait_ready_waits_for_dtr_after_the_configuration(machine: Machine) -> None:
+    host = machine.periph.OTG_FS.host
+    earlier = len(host.requests)
+    cdc = host.cdc()
+    await host.wait_configured(for_=s(2))
+    assert cdc.bound and not cdc.dtr
+    await cdc.wait_ready(for_=ms(20))
+    assert cdc.ready and cdc.dtr and cdc.rts
+    states = [r for r in host.requests[earlier:] if r.request == SET_CONTROL_LINE_STATE]
+    assert (states[-1].status, states[-1].value) == ("completed", 3)
+
+
 async def test_1000_bytes_come_back_in_order_in_packets_of_64(machine: Machine) -> None:
     cdc = machine.periph.OTG_FS.host.cdc()
     await machine.periph.OTG_FS.host.wait_configured(for_=s(2))
@@ -218,6 +230,7 @@ def serial_client(path: str, line: bytes) -> bytes:
 
 async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(machine: Machine) -> None:
     host = machine.periph.OTG_FS.host
+    earlier = len(host.requests)
     await host.wait_configured(for_=s(1))
     path = machine.board.pty("OTG_FS")
     assert machine.board.ptys == {"OTG_FS": path}
@@ -226,7 +239,9 @@ async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(machine: Ma
         before = len(host.requests)
         await asyncio.sleep(0.1)
     assert len(host.requests) == before
-    assert not [r for r in host.requests if r.request == SET_CONTROL_LINE_STATE and r.value != 3]
+    assert not [
+        r for r in host.requests[earlier:] if r.request == SET_CONTROL_LINE_STATE and r.value != 3
+    ]
     with pytest.raises(RuntimeError, match="bridged"):
         await host.cdc().read(1)
 
@@ -234,9 +249,8 @@ async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(machine: Ma
 async def hid_ready(machine: Machine) -> UsbHost:
     """Wait until both HID interfaces have read their report descriptor."""
     host = machine.periph.OTG_FS.host
-    await host.wait_configured(for_=s(2))
-    await machine.run(for_=ms(50), stop_when=lambda _: host.hid(1).report_descriptor != b"")
-    assert host.hid(1).report_descriptor != b""
+    await host.hid(0).wait_ready(for_=s(2))
+    await host.hid(1).wait_ready(for_=ms(50))
     return host
 
 
@@ -254,7 +268,9 @@ def press(machine: Machine) -> int:
 
 
 async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machine) -> None:
+    earlier = len(machine.periph.OTG_FS.host.requests)
     host = await hid_ready(machine)
+    requests = host.requests[earlier:]
     hid = [
         (r.request_type, r.request, r.value, r.index, r.length)
         for r in requests
@@ -268,9 +284,7 @@ async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machi
     ]
     assert hid == [
         (0x21, SET_IDLE, 0, 2, 0),
-    earlier = len(machine.periph.OTG_FS.host.requests)
         (0x81, 6, REPORT_DESCRIPTOR, 2, sizes[0]),
-    requests = host.requests[earlier:]
         (0x21, SET_IDLE, 0, 3, 0),
         (0x81, 6, REPORT_DESCRIPTOR, 3, sizes[1]),
     ]
@@ -289,6 +303,21 @@ async def test_a_button_press_sends_one_report_within_one_interval(machine: Mach
     assert report.data == b"\x01\x01"
     assert pressed < report.at.ps <= pressed + ms(11).ps
     assert machine.var("hid_reports").value == 1
+
+
+async def test_a_press_timed_inside_running_reports_within_one_interval(
+    machine: Machine,
+) -> None:
+    hid = (await hid_ready(machine)).hid()
+    async with machine.running():
+        await asyncio.sleep(0.01)
+        before = machine.time
+        pressed = press(machine)
+        [report] = await hid.read_reports(1, for_=ms(50))
+        after = machine.time
+    assert before.ps == pressed
+    assert pressed < report.at.ps <= pressed + ms(11).ps
+    assert report.at <= after
 
 
 async def test_two_presses_5_ms_apart_give_two_reports_5_ms_apart_within_one_interval(

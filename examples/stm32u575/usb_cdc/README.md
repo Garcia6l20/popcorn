@@ -21,17 +21,31 @@ configured device.
 host = {}                     # cable plugged at power-on, default timings
 # host = { attached = false } # plugged later with `await host.attach()`
 # host = { dtr = false }      # the CDC driver leaves DTR off at configuration
-# connect = "pty"             # bridge the first CDC ACM function to a host pty
+# connect = "pty"             # bridge the first CDC ACM function to a host pty at build,
+#                             # host.cdc() reads then raise RuntimeError
 ```
 
 The host's CDC ACM driver binds the CDC function at configuration: SET_LINE_CODING 115200 8N1,
 then SET_CONTROL_LINE_STATE with DTR and RTS. `host.cdc()` is the function as a byte stream,
 `machine.board.pty("OTG_FS")` bridges it to a host pty any serial tool opens.
 
+`cdc.bound` turns True at configuration, before those two requests went out.
+`await cdc.wait_ready(for_=...)` runs until they ended, so `cdc.dtr` holds what the device
+acknowledged and written bytes go out. With `host = { dtr = false }` the control line state
+still goes out, DTR off, and `wait_ready` waits for it the same way.
+
+The pty owns what the device sends. With `connect = "pty"`, every machine of the project is
+bridged at build, and `host.cdc()` reads raise
+`RuntimeError: OTG_FS is bridged to /dev/pts/N` for the life of the machine. Writes are not
+refused, they mix with the pty client's bytes. To keep `host.cdc()` reads in most tests, leave
+`connect` out and call `machine.board.pty("OTG_FS")` in the tests that want the pty: it
+bridges on first call.
+
 The host's HID driver probes each HID interface as Linux usbhid does, SET_IDLE 0 then
 GET_DESCRIPTOR of the report descriptor, and then polls its interrupt IN endpoint.
 `host.hid(n)` is the n-th HID interface: `read_reports` gives input reports with their times,
 `write_report`, `get_feature` and `set_feature` take reports as hidraw does, report ID first.
+`await hid.wait_ready(for_=...)` runs until the report descriptor is read and polling started.
 
 ## Run
 

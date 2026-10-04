@@ -213,6 +213,14 @@ class CdcStream:
     the bytes received and the bytes not sent yet, and a replug binds the same stream again.
     `Machine.restore` drops the bytes received and not read yet, and puts back the bytes not
     yet taken by the device as the snapshot had them, bound or not.
+
+    A pty bridge owns what the device sends. Once the function is bridged, by
+    `connect = "pty"` in `popcorn.toml` or by `m.board.pty(name)`, `read` and `read_packets`
+    raise `RuntimeError("OTG_FS is bridged to /dev/pts/N")`, the key and path of the bridge,
+    for the life of the machine. `write` is not refused, its bytes mix with the pty client's.
+    `connect = "pty"` bridges at build, for every test of the project. A test that reads the
+    stream leaves `connect` out, and a test that wants the pty calls `m.board.pty(name)`,
+    which bridges on first call.
     """
 
     __slots__ = (
@@ -248,8 +256,26 @@ class CdcStream:
 
     @property
     def bound(self) -> bool:
-        """Whether the host has bound its CDC ACM driver to the function."""
+        """Whether the host has bound its CDC ACM driver to the function.
+
+        True from the moment the device is configured, before the driver's SET_LINE_CODING and
+        SET_CONTROL_LINE_STATE went out: `dtr`, `rts` and `line_coding` are not the device's yet,
+        and bytes written still wait. `ready` tells when they are. False again once the device is
+        unplugged, reset by the bus or restored to a snapshot taken before configuration.
+        """
         return self._link.bound()
+
+    @property
+    def ready(self) -> bool:
+        """Whether the function is bound and the driver's SET_LINE_CODING and
+        SET_CONTROL_LINE_STATE of configuration have ended, whatever their status.
+
+        From then on `dtr`, `rts` and `line_coding` hold what the device acknowledged and bytes
+        written go out. With `UsbHostOptions.dtr` False the SET_CONTROL_LINE_STATE still goes
+        out, with DTR off, so ready means the same. A device that stalls the request is ready
+        too, with `dtr` False: check `dtr` when the test needs it set. A snapshot keeps it.
+        """
+        return self._link.bound() and self._link.ready()
 
     @property
     def available(self) -> int:
@@ -313,7 +339,8 @@ class CdcStream:
 
         Raises:
             ValueError: `n` is negative.
-            RuntimeError: The function is bridged to a pty, which takes what the device sends.
+            RuntimeError: The function is bridged to a pty, which takes what the device sends:
+                `connect = "pty"` or `m.board.pty(name)`.
             EmulationError: The run stopped for another reason, such as a fault.
         """
         self._check_read(n)
@@ -331,6 +358,26 @@ class CdcStream:
             CdcPacket(bytes(record.data), VirtualTime(record.at_ps))
             for record in self._link.drain_packets(n)
         ]
+
+    async def wait_ready(self, *, for_: VirtualDuration | None = None) -> None:
+        """Run the machine until `ready`, or `for_` elapsed.
+
+        `UsbHost.wait_configured` returns before the driver's requests end, 3 ms before on the
+        TinyUSB 0.21.0 example. Inside `running()`, this awaits the background run instead of
+        driving the machine.
+
+        Raises:
+            UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
+                went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
+            EmulationError: The run stopped for another reason, such as a fault.
+        """
+        if not self.ready:
+            await self._wait(lambda: self.ready, for_)
+        if not self.ready:
+            status = "not_ready" if self.bound else "unbound"
+            raise UsbTimeout(
+                f"{self.name} CDC function {self.function}: not ready, {status}", status=status
+            )
 
     async def set_control_line_state(self, *, dtr: bool = True, rts: bool = True) -> None:
         """Send SET_CONTROL_LINE_STATE and run the machine until it ends. The only way DTR
@@ -500,8 +547,24 @@ class HidStream:
 
     @property
     def bound(self) -> bool:
-        """Whether the host has bound its HID driver to the interface."""
+        """Whether the host has bound its HID driver to the interface.
+
+        True from the moment the device is configured, before SET_IDLE and the report descriptor
+        read: no input report is polled and output reports still wait. `ready` tells when they
+        start. False again once the device is unplugged, reset by the bus or restored to a
+        snapshot taken before configuration.
+        """
         return self._link.bound()
+
+    @property
+    def ready(self) -> bool:
+        """Whether the interface is bound, the driver has read the report descriptor and has
+        started polling.
+
+        At that point the driver has submitted its first interrupt IN transfer and output reports
+        may go out. A function whose descriptor read failed stays idle and never becomes ready.
+        """
+        return self._link.bound() and self._link.ready()
 
     @property
     def report_descriptor(self) -> bytes:
@@ -524,6 +587,20 @@ class HidStream:
         """Input reports dropped because the queue held its limit, since the machine was built
         or the last `Machine.restore`."""
         return self._link.dropped()
+
+    async def wait_ready(self, *, for_: VirtualDuration | None = None) -> None:
+        """Run the machine until `ready`, or `for_` elapsed, as `CdcStream.wait_ready`.
+
+        Raises:
+            UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
+                went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
+            EmulationError: The run stopped for another reason, such as a fault.
+        """
+        if not self.ready:
+            await self._wait(lambda: self.ready, for_)
+        if not self.ready:
+            status = "not_ready" if self.bound else "unbound"
+            raise UsbTimeout(f"{self._where}: not ready, {status}", status=status)
 
     async def read_reports(self, n: int, *, for_: VirtualDuration | None = None) -> list[HidReport]:
         """Run the machine until `n` input reports arrived, or `for_` elapsed, and take them.

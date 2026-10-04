@@ -1654,6 +1654,7 @@ TEST_CASE("the CDC ACM driver binds through the association and sets 115200 8N1,
   auto const& channel = hub->channel(0);
   CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
   CHECK(channel.line_state == 3);
+  CHECK(channel.ready);
   CHECK(channel.coding == usb::line_coding{});
   CHECK(r.warnings.empty());
 }
@@ -1666,6 +1667,7 @@ TEST_CASE("the CDC ACM driver leaves DTR off when its options say so")
   r.run_until(t0 + second);
   CHECK(class_requests(r.dev.s) == std::vector{line_coding_request, line_state_request(2)});
   CHECK(hub->channel(0).line_state == 2);
+  CHECK(hub->channel(0).ready);
 }
 
 TEST_CASE("CDC OUT bytes go in packets of 64, with a ZLP after a full last one only")
@@ -1827,8 +1829,10 @@ TEST_CASE("a restore sends the OUT bytes the snapshot had pending and drops late
 
   auto* const kept = a.host->drivers()[0].driver.get();
   hub->discard();
+  CHECK_FALSE(channel.ready);
   a.host->load(saved);
   CHECK(a.host->drivers()[0].driver.get() == kept);
+  CHECK(channel.ready);
   CHECK(channel.in_bytes == 0);
   CHECK(std::ranges::equal(channel.out, bytes_of("abc")));
   CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
@@ -1842,6 +1846,7 @@ TEST_CASE("a restore sends the OUT bytes the snapshot had pending and drops late
   b.host->load(saved);
   CHECK(std::ranges::equal(fresh->channel(0).out, bytes_of("abc")));
   CHECK(fresh->channel(0).comm_interface == std::optional<std::uint8_t>{0});
+  CHECK(fresh->channel(0).ready);
   b.run_until(t0 + second + 10 * ms);
   CHECK(b.dev.s.received[2] == packet_list{bytes_of("abc")});
 }
@@ -1896,6 +1901,7 @@ TEST_CASE("an unplug unbinds the CDC channel and keeps it, a replug binds the sa
   r.host->pull_up_changed(false, vtime{t0 + second + 10 * ms});
   CHECK(r.host->drivers().empty());
   CHECK_FALSE(channel.comm_interface.has_value());
+  CHECK_FALSE(channel.ready);
   CHECK(channel.take(5)[0].data == bytes_of("a"));
   CHECK(channel.take(5).empty());
   channel.out.append_range(bytes_of("zz"));
@@ -1906,6 +1912,7 @@ TEST_CASE("an unplug unbinds the CDC channel and keeps it, a replug binds the sa
   r.run_until(t0 + 3 * second);
   CHECK(r.host->state() == usb::device_state::configured);
   CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
+  CHECK(channel.ready);
   CHECK(r.dev.s.received[2] == packet_list{bytes_of("zz")});
   CHECK(&hub->channel(0) == &channel);
 }
@@ -2086,6 +2093,7 @@ TEST_CASE("the HID driver sends SET_IDLE 0, then reads the report descriptor, as
   auto const& channel = hub->channel(0);
   CHECK(channel.interface == std::optional<std::uint8_t>{2});
   CHECK(channel.report_descriptor == report_descriptor(25));
+  CHECK(channel.ready);
   CHECK(r.warnings.empty());
 }
 
@@ -2154,6 +2162,7 @@ TEST_CASE(
   CHECK(f.warnings[0].find("ended stalled 4 times, the function stays idle") != std::string::npos);
   CHECK(in_tokens(f.dev.s, 3).empty());
   CHECK(stalled->channel(0).interface == std::optional<std::uint8_t>{2});
+  CHECK_FALSE(stalled->channel(0).ready);
 }
 
 TEST_CASE(
@@ -2308,8 +2317,10 @@ TEST_CASE(
 
   auto* const kept = a.host->drivers()[0].driver.get();
   hub->discard();
+  CHECK_FALSE(channel.ready);
   a.host->load(saved);
   CHECK(a.host->drivers()[0].driver.get() == kept);
+  CHECK(channel.ready);
   CHECK(channel.in.empty());
   CHECK(channel.queued() == 2);
   CHECK(channel.report_descriptor == report_descriptor(25));

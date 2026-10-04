@@ -15,7 +15,7 @@ import popcorn
 import pytest
 from popcorn import _core
 from popcorn.board import CdcLineCoding, HidStream, UsbHost, UsbHostOptions, UsbState
-from popcorn.units import ms, s
+from popcorn.units import VirtualTime, ms, s
 
 pytest_plugins = ["pytester"]
 
@@ -324,6 +324,77 @@ def test_dtr_off_by_option_leaves_the_firmware_unconnected_until_python_sets_it(
     assert m.var("cdc_connected").value == 1
 
 
+def test_wait_ready_runs_past_configuration_until_the_control_line_state_ended(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575)
+    host = m.periph.OTG_FS.host
+    cdc = host.cdc()
+
+    async def body() -> VirtualTime:
+        await host.wait_configured(for_=s(2))
+        configured_at = m.time
+        assert (cdc.bound, cdc.ready, cdc.dtr) == (True, False, False)
+        await cdc.wait_ready(for_=ms(20))
+        return configured_at
+
+    configured_at = asyncio.run(body())
+    assert (cdc.ready, cdc.dtr, cdc.rts) == (True, True, True)
+    [state] = [r for r in host.requests if r.request == SET_CONTROL_LINE_STATE]
+    assert state.status == "completed"
+    assert configured_at < state.at < m.time
+    asyncio.run(cdc.wait_ready(for_=ms(1)))
+
+
+def test_wait_ready_with_dtr_off_waits_for_the_control_line_state_too(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(dtr=False, rts=False))
+    cdc = m.periph.OTG_FS.host.cdc()
+    asyncio.run(cdc.wait_ready(for_=s(2)))
+    assert (cdc.ready, cdc.dtr, cdc.rts) == (True, False, False)
+    assert line_states(m.periph.OTG_FS.host) == [0]
+    assert m.var("cdc_connected").value == 0
+
+
+def test_wait_ready_raises_usb_timeout_unbound_or_not_ready(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(attached=False))
+    host = m.periph.OTG_FS.host
+    cdc = host.cdc()
+    with pytest.raises(popcorn.UsbTimeout, match="not ready, unbound") as unbound:
+        asyncio.run(cdc.wait_ready(for_=ms(5)))
+    assert unbound.value.status == "unbound"
+
+    async def configured_then_wait() -> None:
+        await host.attach()
+        await host.wait_configured(for_=s(1))
+        await cdc.wait_ready(for_=ms(1))
+
+    with pytest.raises(popcorn.UsbTimeout, match="not ready, not_ready") as pending:
+        asyncio.run(configured_then_wait())
+    assert pending.value.status == "not_ready"
+    assert cdc.bound
+
+
+def test_ready_follows_the_binding_through_a_restore_and_an_unplug(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+    early = m.snapshot()
+    asyncio.run(cdc.wait_ready(for_=ms(20)))
+    ready = m.snapshot()
+
+    m.restore(early)
+    assert (cdc.bound, cdc.ready) == (True, False)
+    m.restore(ready)
+    assert (cdc.bound, cdc.ready) == (True, True)
+    asyncio.run(host.detach())
+    assert (cdc.bound, cdc.ready) == (False, False)
+
+
 def test_dtr_drops_only_on_request(u575: popcorn.MachineDescription) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
@@ -562,3 +633,18 @@ def test_an_unplugged_function_keeps_its_report_descriptor_across_a_restore(
     fresh = usb_machine(u575)
     fresh.restore(saved)
     assert fresh.periph.OTG_FS.host.hid().report_descriptor == descriptor
+
+
+def test_hid_wait_ready_runs_until_the_report_descriptor_is_read(
+    u575: popcorn.MachineDescription,
+) -> None:
+    _, host = configured(u575)
+    first, second = host.hid(0), host.hid(1)
+    assert (second.bound, second.ready, second.report_descriptor) == (True, False, b"")
+    asyncio.run(second.wait_ready(for_=ms(50)))
+    assert first.ready and second.ready
+    assert second.report_descriptor != b""
+    asyncio.run(host.detach())
+    assert (second.bound, second.ready) == (False, False)
+    with pytest.raises(popcorn.UsbTimeout, match="not ready, unbound"):
+        asyncio.run(second.wait_ready(for_=ms(5)))

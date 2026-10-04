@@ -88,6 +88,9 @@ struct cdc_channel
   std::uint16_t serial_state{};
   /** @brief Communication interface of the bound driver, empty while none is bound. */
   std::optional<std::uint8_t> comm_interface{};
+  /** @brief Whether the bound driver's SET_CONTROL_LINE_STATE of configuration has ended,
+   * whatever its status: OUT bytes go out from then on. False while no driver is bound. */
+  bool ready{};
   /** @brief Control transfers submitted for the binding whose result is not in yet. */
   std::set<transfer_id> awaited{};
   /** @brief Results of awaited control transfers not collected yet. */

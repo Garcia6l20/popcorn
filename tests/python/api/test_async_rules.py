@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
+import threading
 import time
 
 import popcorn
 import pytest
-from popcorn.units import ms
+from popcorn.units import VirtualTime, ms
 
 from .conftest import Machines
 
@@ -224,6 +226,87 @@ def test_wait_for_inside_running_awaits_the_driver(machines: Machines) -> None:
     assert ready.reason is popcorn.StopReason.USER
     assert 50_000 <= ready.instructions < 50_000 + 10_000 + 64
     assert timed.reason is popcorn.StopReason.TIME
+
+
+def test_time_reads_inside_running_at_the_point_the_run_reached(machines: Machines) -> None:
+    m = machines(slice_instructions=10_000)
+
+    async def scenario() -> tuple[list[VirtualTime], popcorn.Stop, VirtualTime]:
+        times = [m.time]
+        async with m.running():
+            for _ in range(50):
+                await asyncio.sleep(0)
+                times.append(m.time)
+            stop = await m.wait_for(AfterInstructions(10**12), for_=ms(1))
+            at_stop = m.time
+            with pytest.raises(popcorn.MachineRunning, match="the run's thread"):
+                await asyncio.to_thread(lambda: m.time)
+        return times, stop, at_stop
+
+    times, stop, at_stop = asyncio.run(scenario())
+    assert all(a <= b for a, b in itertools.pairwise(times))
+    assert times[-1] > times[0]
+    assert stop.reason is popcorn.StopReason.TIME
+    assert at_stop == stop.time
+    assert m.time >= at_stop
+
+
+def test_time_reads_from_another_task_during_a_run(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> list[VirtualTime]:
+        run = asyncio.create_task(m.run(for_=ms(5)))
+        times: list[VirtualTime] = []
+        while not run.done():
+            times.append(m.time)
+            await asyncio.sleep(0)
+        stop = await run
+        times.append(stop.time)
+        return times
+
+    times = asyncio.run(scenario())
+    assert len(times) > 2
+    assert all(a <= b for a, b in itertools.pairwise(times))
+    assert m.time == times[-1]
+
+
+def test_time_from_the_building_thread_during_a_run_on_another_thread_is_machine_running(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+    done = threading.Event()
+
+    async def scenario() -> popcorn.Stop:
+        run = asyncio.create_task(
+            asyncio.to_thread(asyncio.run, m.run(stop_when=lambda _: done.is_set()))
+        )
+        while not m.busy:
+            await asyncio.sleep(0.001)
+        try:
+            with pytest.raises(popcorn.MachineRunning, match="the run's thread"):
+                _ = m.time
+        finally:
+            done.set()
+        return await run
+
+    stop = asyncio.run(scenario())
+    assert stop.reason is popcorn.StopReason.USER
+    assert m.time == stop.time
+
+
+def test_a_handler_of_a_run_on_another_thread_reads_the_time(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    seen: list[VirtualTime] = []
+
+    def predicate(machine: popcorn.Machine) -> bool:
+        seen.append(machine.time)
+        return len(seen) >= 5
+
+    stop = asyncio.run(asyncio.to_thread(asyncio.run, m.run(stop_when=predicate)))
+    assert stop.reason is popcorn.StopReason.USER
+    assert len(seen) == 5
+    assert all(a <= b for a, b in itertools.pairwise(seen))
+    assert seen[-1] <= stop.time
 
 
 def test_a_run_inside_running_is_machine_busy(machines: Machines) -> None:

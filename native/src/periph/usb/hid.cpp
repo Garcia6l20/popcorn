@@ -137,6 +137,7 @@ public:
       return;
     }
     channel_->interface.reset();
+    channel_->ready = false;
     if(channel_->in_flight != 0 and channel_->awaited_writes.erase(channel_->in_flight) != 0)
     {
       channel_->written[channel_->in_flight] = transfer_status::cancelled;
@@ -263,6 +264,7 @@ public:
     channel_->in_flight         = s_.in_flight;
     channel_->next_write        = std::max(channel_->next_write, s_.in_flight + 1);
     channel_->report_descriptor = as_octets(s_.descriptor);
+    channel_->ready             = s_.ready;
   }
 
 private:
@@ -305,7 +307,7 @@ private:
     }
     s_.descriptor               = as_bytes(result.data);
     channel_->report_descriptor = result.data;
-    s_.ready                    = true;
+    s_.ready = channel_->ready = true;
     ctx.submit(s_.in_pipe, {.length = s_.in_packet});
     send(ctx);
   }
@@ -438,6 +440,7 @@ void hid_channel::discard()
   awaited_writes.clear();
   written.clear();
   report_descriptor.clear();
+  ready = false;
   awaited.clear();
   results.clear();
 }

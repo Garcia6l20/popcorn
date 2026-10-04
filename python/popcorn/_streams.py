@@ -422,9 +422,12 @@ class Board:
         """Bridge UART `name`, or a CDC ACM function of the virtual USB host of controller
         `name`, to a new host pty and return its path, the same one on later calls.
 
-        A bridged UART is read by the pty only: its `port` refuses reads, as the `cdc()` stream
-        of a bridged CDC function does. A CDC function's pty is keyed `name` in `ptys` for
-        function 0, `name.<function>` for the others.
+        The pty owns what the firmware sends, for the life of the machine: reads of the UART's
+        `port`, or of the CDC function's `host.cdc()` stream, raise
+        `RuntimeError("<key> is bridged to <path>")`, the key as in `ptys`. `connect = "pty"` in
+        `popcorn.toml` calls this at build for every machine of the project. Call it from the
+        test that wants the pty instead, to keep stream reads in the others. A CDC function's
+        pty is keyed `name` in `ptys` for function 0, `name.<function>` for the others.
 
         Args:
             name: UART instance, or USB device controller with a virtual host.

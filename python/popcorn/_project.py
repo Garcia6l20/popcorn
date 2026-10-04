@@ -218,6 +218,11 @@ class Project:
         `connect = "pty"` bridges, `[boot] memory_init` written. Not
         reset. Each call builds new device instances, so two machines never share one.
 
+        `connect = "pty"` bridges through `Board.pty`, so the pty owns what the firmware sends:
+        reads of that UART's `port`, or of that USB controller's first CDC ACM function through
+        `host.cdc()`, raise RuntimeError on every machine built. Leave `connect` out and call
+        `m.board.pty(name)` in the tests that want the pty.
+
         Args:
             config: A config to apply instead of this project's, reloading the file.
             strict_peripherals: Whether unmodelled peripheral accesses raise ModelError,
