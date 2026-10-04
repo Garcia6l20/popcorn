@@ -7,7 +7,7 @@ here = Path(__file__).resolve().parent
 add_ll_firmware(
     "sai_ll",
     [here / "sai_ll.c"],
-    [],
+    ["i2c"],
     [
         "idle",
         "tx_poll",
@@ -18,5 +18,6 @@ add_ll_firmware(
         "dma16_sign",
         "codec_dma",
         "pair_dma",
+        "codec_i2c",
     ],
 )

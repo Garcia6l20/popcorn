@@ -14,9 +14,9 @@ from typing import Literal, cast
 import popcorn
 import pytest
 from popcorn import StopReason
-from popcorn.board import AudioOptions, AudioStream
+from popcorn.board import AudioFrame, AudioOptions, AudioStream, I2CTarget
 from popcorn.model import Model
-from popcorn.units import VirtualDuration, ms, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
 SAI_ELF = PREBUILT / "sai_ll.elf"
@@ -24,6 +24,9 @@ BUDGET = 100_000_000
 FRAMES = 64
 FRAME = us(64)
 SLAVE_FRAME = VirtualDuration(62_500_000)
+STEREO_FRAMES = 512
+CODEC_FRAMES = 1400
+TIM2_CNT = 0x4000_0024
 
 type Block = Literal["A", "B"]
 
@@ -339,4 +342,187 @@ def test_an_external_clock_set_from_another_thread_during_a_run_is_refused(
 
     with pytest.raises(RuntimeError, match="another thread"):
         asyncio.run(body())
+    assert sender.external_frame_hz == 0
+
+
+class CodecStandIn(I2CTarget):
+    """An audio codec on I2C whose register 0x0F, written 1 or 0, starts or stops the frame
+    clock it drives into SAI1 block A at 16 kHz, the clock master of the board."""
+
+    register: int
+    selected: bool
+    started_ps: int
+    stopped_ps: int
+
+    def __init__(self, address: int = 0x38) -> None:
+        super().__init__(address)
+        self.register = 0
+        self.selected = False
+        self.started_ps = 0
+        self.stopped_ps = 0
+
+    def on_write(self, byte: int, at: VirtualTime) -> bool:
+        if not self.selected:
+            self.register, self.selected = byte, True
+        elif self.register == 0x0F:
+            self.board.set_audio_clock("SAI1", "A", 16_000 if byte & 1 else 0)
+            if byte & 1:
+                self.started_ps = at.ps
+            else:
+                self.stopped_ps = at.ps
+        return True
+
+    def on_stop(self, at: VirtualTime) -> None:
+        self.selected = False
+
+
+def codec_words() -> list[int]:
+    return [word for k in range(CODEC_FRAMES) for word in (0x1000 | k, 0x2000 | k)]
+
+
+def codec_machine(
+    u575: popcorn.MachineDescription, codec: CodecStandIn, words: list[int]
+) -> popcorn.Machine:
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(SAI_ELF),
+        devices={"I2C1": [codec]},
+        audio={"SAI1": {"A": AudioOptions(clocked_by="I2C1:0x38")}},
+    )
+    at_main(m)
+    m.reg.pc = m.sym("codec_i2c")
+    asyncio.run(m.periph.SAI1.audio("B").write(words))
+    return m
+
+
+def halfwords(m: popcorn.Machine, name: str) -> list[list[int]]:
+    raw = m.mem.read(m.sym(name), 4 * STEREO_FRAMES)
+    flat = struct.unpack(f"<{2 * STEREO_FRAMES}H", raw)
+    return [list(flat[:STEREO_FRAMES]), list(flat[STEREO_FRAMES:])]
+
+
+def event_ticks(m: popcorn.Machine, name: str) -> list[int]:
+    count = m.mem.u32[m.sym(name) + 8]
+    return [m.mem.u32[m.sym(name) + 12 + 4 * index] for index in range(count)]
+
+
+def test_a_python_codec_on_i2c_starts_and_stops_the_sai1_clock_of_the_audio_path(
+    u575: popcorn.MachineDescription,
+) -> None:
+    codec = CodecStandIn()
+    m = codec_machine(u575, codec, codec_words())
+    stop = asyncio.run(m.run(budget=1_000_000_000))
+    assert stop.reason is StopReason.USER, stop
+    t0 = VirtualTime(codec.started_ps)
+    t_stop = VirtualTime(codec.stopped_ps)
+    assert t0 < t_stop
+
+    sent = asyncio.run(m.periph.SAI1.audio("A").read_frames(m.periph.SAI1.audio("A").available))
+    count = len(sent)
+    assert count > 1280
+    assert VirtualDuration(0) <= sent[0].at - t0 <= us(1)
+    t0 = sent[0].at
+    assert [frame.at - t0 for frame in sent] == [k * SLAVE_FRAME for k in range(count)]
+    assert [frame.slots for frame in sent] == [
+        (k % STEREO_FRAMES, 0x8000 | k % STEREO_FRAMES) for k in range(count)
+    ]
+    assert sent[-1].at < t_stop <= sent[-1].at + SLAVE_FRAME
+
+    tx, rx = halfwords(m, "tx_stereo"), halfwords(m, "rx_stereo")
+    last = [max(f for f in range(count) if f % STEREO_FRAMES == k) for k in range(STEREO_FRAMES)]
+    assert rx == [[0x1000 | j for j in last], [0x2000 | j for j in last]]
+    assert m.periph.SAI1.ASR.OVRUDR == 0
+    assert m.periph.SAI1.BSR.OVRUDR == 0
+
+    sums = log(m)
+    assert sums[-2:] == [checksum(tx), checksum(rx)]
+    halves = 0x00480000
+    completes = 0x00540000
+    events = [halves | 1, completes | 1, halves | 2, completes | 2, halves | 3]
+    assert [word for word in sums[:-2] if word >> 24 == 0x0D][:5] == [
+        0x0D000000 | e for e in events
+    ]
+    assert [word for word in sums[:-2] if word >> 24 == 0x0C][:5] == [
+        0x0C000000 | e for e in events
+    ]
+
+    epoch = m.time - us(m.mem.u32[TIM2_CNT])
+    due_tx = [t0 + (block * SLAVE_FRAME) for block in (255, 511, 767, 1023, 1279)]
+    due_rx = [t0 + block * SLAVE_FRAME + us(46.875) for block in (255, 511, 767, 1023, 1279)]
+    late = [
+        seen - (due - epoch).ps // 1_000_000
+        for name, dues in (("stereo_tx_events", due_tx), ("stereo_rx_events", due_rx))
+        for seen, due in zip(event_ticks(m, name), dues, strict=True)
+    ]
+    assert min(late) >= 0
+    assert max(late) <= 5
+    assert max(late) - min(late) <= 1
+
+
+def checksum(buffer: list[list[int]]) -> int:
+    total = 0
+    for k in range(STEREO_FRAMES):
+        total = (total * 31 + buffer[0][k]) & 0xFFFFFFFF
+        total = (total * 31 + buffer[1][k]) & 0xFFFFFFFF
+    return total
+
+
+def test_a_codec_run_restored_mid_stream_into_a_fresh_machine_and_codec_runs_the_same(
+    u575: popcorn.MachineDescription,
+) -> None:
+    words = codec_words()
+    codec = CodecStandIn()
+    m = codec_machine(u575, codec, words)
+    asyncio.run(m.run(budget=1_000_000_000, stop_when=lambda _: codec.started_ps != 0))
+    t0 = VirtualTime(codec.started_ps)
+    asyncio.run(m.run(for_=t0 + ms(20) - m.time))
+    sender, receiver = m.periph.SAI1.audio("A"), m.periph.SAI1.audio("B")
+    asyncio.run(sender.read_frames(sender.available))
+    unserved = words[len(words) - receiver.queued :]
+    saved = m.snapshot()
+    stop = asyncio.run(m.run(budget=1_000_000_000))
+    assert stop.reason is StopReason.USER, stop
+    rest = asyncio.run(sender.read_frames(sender.available))
+
+    fresh = CodecStandIn()
+    other = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(SAI_ELF),
+        devices={"I2C1": [fresh]},
+        audio={"SAI1": {"A": AudioOptions(clocked_by="I2C1:0x38")}},
+    )
+    other.restore(popcorn.Snapshot.from_bytes(saved.to_bytes()))
+    assert fresh.started_ps == codec.started_ps
+    asyncio.run(other.periph.SAI1.audio("B").write(unserved))
+    stop = asyncio.run(other.run(budget=1_000_000_000))
+    assert stop.reason is StopReason.USER, stop
+    again = other.periph.SAI1.audio("A")
+    frames: list[AudioFrame] = asyncio.run(again.read_frames(again.available))
+    assert frames == rest
+    assert fresh.stopped_ps == codec.stopped_ps
+    assert log(other) == log(m)
+    for name in ("tx_stereo", "rx_stereo"):
+        assert halfwords(other, name) == halfwords(m, name)
+    for name in ("stereo_tx_events", "stereo_rx_events"):
+        assert event_ticks(other, name) == event_ticks(m, name)
+
+
+def test_a_project_file_wires_the_codec_clock_as_audio_options_do(tmp_path: Path) -> None:
+    board = (
+        f'[models]\npython = ["{Path(__file__).parent}"]\n'
+        '[board.I2C1]\ndevices = [{ address = 0x38, model = "test_audio:CodecStandIn" }]\n'
+        '[board.SAI1.A]\nclocked_by = "I2C1:0x38"\n'
+    )
+    m = project(tmp_path, board).machine()
+    at_main(m)
+    m.reg.pc = m.sym("codec_i2c")
+    asyncio.run(m.periph.SAI1.audio("B").write(codec_words()))
+    stop = asyncio.run(m.run(budget=1_000_000_000))
+    assert stop.reason is StopReason.USER, stop
+    sender = m.periph.SAI1.audio("A")
+    assert sender.available > 1280
+    frames = asyncio.run(sender.read_frames(sender.available))
+    assert all(
+        later.at - earlier.at == SLAVE_FRAME for earlier, later in itertools.pairwise(frames)
+    )
     assert sender.external_frame_hz == 0

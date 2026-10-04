@@ -2,6 +2,7 @@
 #include "stm32u5xx.h"
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_dma.h"
+#include "stm32u5xx_ll_i2c.h"
 
 #define FRAMES               64u
 #define DUPLEX_WORDS         64u
@@ -40,6 +41,11 @@
 #define STEREO_CHANNEL_LINK 0xFE010000u
 #define STEREO_HALF_TAG     0x00480000u
 #define STEREO_COMPLETE_TAG 0x00540000u
+
+#define CODEC_ADDRESS        (0x38u << 1)
+#define CODEC_CLOCK_REGISTER 0x0Fu
+#define TIMING_100K_AT_4M    0x00420F13u
+#define CODEC_DRAIN_TICKS    1000u
 
 uint32_t          received[DUPLEX_WORDS];
 volatile uint32_t received_count;
@@ -114,6 +120,7 @@ void GPDMA1_Channel0_IRQHandler(void);
 void GPDMA1_Channel1_IRQHandler(void);
 void codec_dma(void);
 void pair_dma(void);
+void codec_i2c(void);
 void GPDMA1_Channel12_IRQHandler(void);
 void GPDMA1_Channel13_IRQHandler(void);
 void GPDMA1_Channel14_IRQHandler(void);
@@ -490,7 +497,7 @@ static uint32_t checksum(uint16_t const buffer[2][STEREO_FRAMES])
   return sum;
 }
 
-static void stereo(struct stereo_path const* path)
+static void stereo_begin(struct stereo_path const* path)
 {
   for(uint32_t index = 0; index < STEREO_FRAMES; ++index)
   {
@@ -523,15 +530,25 @@ static void stereo(struct stereo_path const* path)
   path->rx_channel->CCR |= DMA_CCR_EN;
   path->rx_block->CR1 |= SAI_xCR1_DMAEN;
   path->rx_block->CR1 |= SAI_xCR1_SAIEN;
-  while(stereo_tx_events.halves < STEREO_HALVES || stereo_rx_events.halves < STEREO_HALVES)
-  {
-    __WFI();
-  }
+}
+
+static void stereo_end(struct stereo_path const* path)
+{
   path->rx_channel->CCR |= DMA_CCR_SUSP;
   path->tx_channel->CCR |= DMA_CCR_SUSP;
   LOG(checksum(tx_stereo));
   LOG(checksum(rx_stereo));
   DONE();
+}
+
+static void stereo(struct stereo_path const* path)
+{
+  stereo_begin(path);
+  while(stereo_tx_events.halves < STEREO_HALVES || stereo_rx_events.halves < STEREO_HALVES)
+  {
+    __WFI();
+  }
+  stereo_end(path);
 }
 
 void codec_dma(void)
@@ -558,6 +575,57 @@ void pair_dma(void)
   RCC->APB2ENR |= RCC_APB2ENR_SAI2EN;
   (void)RCC->APB2ENR;
   stereo(&path);
+}
+
+static void codec_clock(uint8_t on)
+{
+  uint8_t const command[2] = {CODEC_CLOCK_REGISTER, on};
+  LL_I2C_HandleTransfer(
+      I2C1, CODEC_ADDRESS, LL_I2C_ADDRSLAVE_7BIT, 2u, LL_I2C_MODE_AUTOEND,
+      LL_I2C_GENERATE_START_WRITE);
+  for(uint32_t index = 0; index < 2u; ++index)
+  {
+    while(!LL_I2C_IsActiveFlag_TXIS(I2C1))
+    {
+    }
+    LL_I2C_TransmitData8(I2C1, command[index]);
+  }
+  while(!LL_I2C_IsActiveFlag_STOP(I2C1))
+  {
+  }
+  LL_I2C_ClearFlag_STOP(I2C1);
+}
+
+void codec_i2c(void)
+{
+  struct stereo_path const path = {
+      SAI1_Block_A, SAI1_Block_B,        GPDMA1_Channel12,      GPDMA1_Channel13,      0x80000424u,
+      0x80000025u,  STEREO_TX_CR1_SLAVE, GPDMA1_Channel12_IRQn, GPDMA1_Channel13_IRQn,
+  };
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_I2C1);
+  LL_I2C_InitTypeDef const i2c = {
+      .PeripheralMode  = LL_I2C_MODE_I2C,
+      .Timing          = TIMING_100K_AT_4M,
+      .AnalogFilter    = LL_I2C_ANALOGFILTER_ENABLE,
+      .DigitalFilter   = 0,
+      .OwnAddress1     = 0,
+      .TypeAcknowledge = LL_I2C_ACK,
+      .OwnAddrSize     = LL_I2C_OWNADDRESS1_7BIT,
+  };
+  LL_I2C_Init(I2C1, &i2c);
+  clocks();
+  stereo_begin(&path);
+  codec_clock(1u);
+  while(stereo_rx_events.halves < STEREO_HALVES)
+  {
+    __WFI();
+  }
+  codec_clock(0u);
+  uint32_t const stopped = TIM2->CNT;
+  while(TIM2->CNT - stopped < CODEC_DRAIN_TICKS)
+  {
+  }
+  stereo_end(&path);
 }
 
 int main(void)
