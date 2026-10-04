@@ -147,7 +147,8 @@ audio_link::audio_link(
     std::uint32_t               decimation,
     std::uint32_t               external_frame_hz,
     std::shared_ptr<bool const> alive)
-    : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, alive_{std::move(alive)}
+    : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, port_{&port}, block_{block},
+      alive_{std::move(alive)}
 {
   port.attach(
       block,
@@ -161,6 +162,25 @@ auto audio_link::endpoint() const -> detail::audio_queue_endpoint&
     throw config_error("audio", 0, "machine", "an SAI whose machine still exists");
   }
   return *endpoint_;
+}
+
+auto audio_link::port() const -> periph::stm32::audio_port&
+{
+  if(not *alive_)
+  {
+    throw config_error("audio", 0, "machine", "an SAI whose machine still exists");
+  }
+  return *port_;
+}
+
+void audio_link::set_external_frame_hz(std::uint32_t frame_hz)
+{
+  port().set_external_clock(block_, frame_hz);
+}
+
+auto audio_link::external_frame_hz() const -> std::uint32_t
+{
+  return port().external_clock(block_);
 }
 
 auto audio_link::available() const -> std::uint64_t

@@ -135,6 +135,10 @@ struct audio_block_entry
   std::optional<std::uint32_t> decimation{};
   /** @brief Frame rate in Hz of the external clock master of a slave block, 0 for none. */
   std::optional<std::uint32_t> external_frame_hz{};
+  /** @brief Bus device driving the block's external clock, `<I2C>:<address>` such as
+   * `I2C1:0x38`, or `<SPI>:<chip select>` such as `SPI1:PA4`, `SS` for the hardware NSS. Empty
+   * for none. */
+  std::optional<std::string> clocked_by{};
 };
 
 /** @brief `[board.<USB>] host`: the virtual USB host wired to a USB device controller. */

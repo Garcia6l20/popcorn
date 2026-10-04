@@ -8,6 +8,7 @@
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
 #include <array>
@@ -658,6 +659,488 @@ TEST_CASE("a slave block runs at the board's external frame rate, none without i
     CHECK(logged[0].peripheral == "SAI1");
     CHECK(logged[0].message.contains("external frame rate"));
   }
+}
+
+namespace
+{
+constexpr std::uint64_t slave_frame = 62'500'000;
+constexpr auto          clock_a     = stm32::audio_block::a;
+
+auto port_of(rig const& r) -> stm32::audio_port&
+{
+  auto* const port = dynamic_cast<stm32::audio_port*>(r.f->target->model("SAI1"));
+  REQUIRE(port != nullptr);
+  return *port;
+}
+
+void slave_a(bus const& b)
+{
+  b.stereo16("A", 32, false);
+  for(std::uint32_t index = 0; index < 8; ++index)
+  {
+    b.push('A', ramp(index));
+  }
+  b.put(
+      "ACR1", {
+                  {"MODE",   2},
+                  {"DS",     4},
+                  {"SAIAEN", 1}
+  });
+}
+
+void sync_b(bus const& b)
+{
+  b.stereo16("B", 32, false);
+  b.put(
+      "BCR1", {
+                  {"MODE",   3},
+                  {"DS",     4},
+                  {"SYNCEN", 1},
+                  {"SAIAEN", 1}
+  });
+}
+
+auto since(std::vector<stm32::captured_audio_frame> const& frames, std::uint64_t origin)
+    -> std::vector<std::int64_t>
+{
+  std::vector<std::int64_t> out;
+  for(auto const& frame : frames)
+  {
+    out.push_back(static_cast<std::int64_t>(frame.at.ps) - static_cast<std::int64_t>(origin));
+  }
+  return out;
+}
+
+auto since(std::vector<received_call> const& calls, std::uint64_t origin)
+    -> std::vector<std::int64_t>
+{
+  std::vector<std::int64_t> out;
+  for(auto const& call : calls)
+  {
+    out.push_back(static_cast<std::int64_t>(call.at) - static_cast<std::int64_t>(origin));
+  }
+  return out;
+}
+
+auto tail(std::vector<stm32::captured_audio_frame> const& frames, std::size_t from)
+    -> std::vector<stm32::captured_audio_frame>
+{
+  return {frames.begin() + static_cast<std::ptrdiff_t>(from), frames.end()};
+}
+
+auto restored(core::snapshot const& saved) -> core::snapshot
+{
+  return core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))};
+}
+}
+
+TEST_CASE("an external clock started at run time frames a waiting slave pair from that instant")
+{
+  rig   r{"idle"};
+  bus   b{*r.f};
+  auto& port = port_of(r);
+  sync_b(b);
+  slave_a(b);
+  b.run_until(b.now() + 100 * us);
+  CHECK(r.a->frames.empty());
+  CHECK(r.b->calls.empty());
+  CHECK(port.external_clock(clock_a) == 0);
+  auto const t = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  CHECK(port.external_clock(clock_a) == 16'000);
+  CHECK(port.external_clock(stm32::audio_block::b) == 0);
+  b.run_until(t + 130 * us);
+  CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{0, slave_frame});
+  REQUIRE_FALSE(r.a->frames.empty());
+  CHECK(r.a->frames[0].slots == std::vector<std::uint32_t>{ramp(0), ramp(1)});
+  CHECK(since(r.b->calls, t) == std::vector<std::int64_t>{0, slave_frame});
+}
+
+TEST_CASE("a stopped external clock ends the frame in progress, a restart frames at once")
+{
+  rig   r{"idle"};
+  bus   b{*r.f};
+  auto& port = port_of(r);
+  slave_a(b);
+  auto const t = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 100 * us);
+  port.set_external_clock(clock_a, 0);
+  CHECK(port.external_clock(clock_a) == 0);
+  b.run_until(t + 300 * us);
+  CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{0, slave_frame});
+  CHECK(b.get("ACR1", "SAIAEN") == 1);
+  auto const again = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(again + 70 * us);
+  REQUIRE(r.a->frames.size() == 3);
+  CHECK(r.a->frames[2].at.ps == again);
+}
+
+TEST_CASE("an external rate change takes effect at the end of the frame in progress")
+{
+  rig   r{"idle"};
+  bus   b{*r.f};
+  auto& port = port_of(r);
+  slave_a(b);
+  auto const t = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 100 * us);
+  port.set_external_clock(clock_a, 8'000);
+  CHECK(port.external_clock(clock_a) == 8'000);
+  b.run_until(t + 400 * us);
+  CHECK(
+      since(r.a->frames, t)
+      == std::vector<std::int64_t>{0, slave_frame, 2 * slave_frame, 4 * slave_frame});
+}
+
+TEST_CASE("a slave pair enabled after the external clock started waits for its next frame")
+{
+  rig        r{"idle"};
+  bus        b{*r.f};
+  auto&      port = port_of(r);
+  auto const t    = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 70 * us);
+  slave_a(b);
+  b.run_until(t + 100 * us);
+  sync_b(b);
+  CHECK(r.a->frames.empty());
+  CHECK(b.get("ASR", "FLVL") == 5);
+  b.run_until(t + 200 * us);
+  CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{2 * slave_frame});
+  CHECK(since(r.b->calls, t) == std::vector<std::int64_t>{2 * slave_frame});
+}
+
+TEST_CASE("a build-time external clock takes its phase at the first enable, re-enables align")
+{
+  rig   r{"idle", {}, {.external_frame_hz = 16'000}};
+  bus   b{*r.f};
+  auto& port = port_of(r);
+  CHECK(port.external_clock(clock_a) == 16'000);
+  slave_a(b);
+  auto const start = b.now();
+  b.run_until(start + 100 * us);
+  b.set("ACR1", "SAIAEN", 0);
+  b.run_until(start + 200 * us);
+  CHECK(b.get("ACR1", "SAIAEN") == 0);
+  b.set("ACR1", "SAIAEN", 1);
+  b.run_until(start + 380 * us);
+  CHECK(
+      since(r.a->frames, start)
+      == std::vector<std::int64_t>{0, slave_frame, 4 * slave_frame, 5 * slave_frame});
+}
+
+TEST_CASE("a power-on reset powers the codec down: its clock returns to the wiring, no phase")
+{
+  rig   r{"idle", {}, {.external_frame_hz = 8'000}};
+  bus   b{*r.f};
+  auto& port = port_of(r);
+  slave_a(b);
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(b.now() + 100 * us);
+  r.f->target->reset(popcorn::reset_kind::power_on);
+  CHECK(port.external_clock(clock_a) == 8'000);
+  REQUIRE(
+      r.f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
+          .reason
+      == stop_reason::address);
+  r.f->set("pc", sym("sai_ll", "idle"));
+  b.run_until(b.now() + 30 * us);
+  auto const before = r.a->frames.size();
+  slave_a(b);
+  auto const enabled_at = b.now();
+  b.run_until(enabled_at + 130 * us);
+  REQUIRE(r.a->frames.size() == before + 1);
+  CHECK(r.a->frames[before].at.ps == enabled_at);
+}
+
+TEST_CASE("a pin reset keeps the codec clock running in phase, the next enable joins it")
+{
+  rig   r{"idle"};
+  bus   b{*r.f};
+  auto& port  = port_of(r);
+  auto& clock = r.f->target->virtual_clock();
+  slave_a(b);
+  auto const started = clock.since_power_on().ps;
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(b.now() + 100 * us);
+  r.f->target->reset(popcorn::reset_kind::pin);
+  CHECK(port.external_clock(clock_a) == 16'000);
+  REQUIRE(
+      r.f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
+          .reason
+      == stop_reason::address);
+  r.f->set("pc", sym("sai_ll", "idle"));
+  b.run_until(b.now() + 30 * us);
+  auto const before = r.a->frames.size();
+  slave_a(b);
+  auto const offset     = clock.since_power_on().ps - b.now();
+  auto const enabled_at = clock.since_power_on().ps;
+  auto const due = started + (enabled_at - started + slave_frame - 1) / slave_frame * slave_frame;
+  CHECK(due > enabled_at);
+  b.run_until(due - offset + 70 * us);
+  REQUIRE(r.a->frames.size() == before + 1);
+  CHECK(r.a->frames[before].at.ps + offset == due);
+}
+
+TEST_CASE("a rate change on a block waiting for its first frame holds after the block is disabled")
+{
+  rig        r{"idle"};
+  bus        b{*r.f};
+  auto&      port = port_of(r);
+  auto const t    = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 130 * us);
+  slave_a(b);
+  b.run_until(t + 140 * us);
+  port.set_external_clock(clock_a, 8'000);
+  b.run_until(t + 150 * us);
+  b.set("ACR1", "SAIAEN", 0);
+  CHECK(b.get("ACR1", "SAIAEN") == 0);
+  b.run_until(t + 200 * us);
+  b.set("ACR1", "SAIAEN", 1);
+  b.run_until(t + 450 * us);
+  CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{5 * slave_frame});
+}
+
+TEST_CASE("a stop and a start within one frame keep the phase of a clock no block uses")
+{
+  rig        r{"idle"};
+  bus        b{*r.f};
+  auto&      port = port_of(r);
+  auto const t    = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 70 * us);
+  port.set_external_clock(clock_a, 0);
+  b.run_until(t + 100 * us);
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 150 * us);
+  slave_a(b);
+  b.run_until(t + 260 * us);
+  CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{3 * slave_frame});
+
+  SUBCASE("a start after the stop's frame end takes a new phase")
+  {
+    port.set_external_clock(clock_a, 0);
+    b.set("ACR1", "SAIAEN", 0);
+    b.run_until(t + 400 * us);
+    port.set_external_clock(clock_a, 16'000);
+    auto const again = b.now();
+    b.run_until(again + 20 * us);
+    b.set("ACR1", "SAIAEN", 1);
+    b.run_until(again + 130 * us);
+    REQUIRE_FALSE(r.a->frames.empty());
+    CHECK(r.a->frames.back().at.ps == again + slave_frame);
+  }
+}
+
+TEST_CASE("a stop and a start within one frame keep a running block framing in phase")
+{
+  rig   r{"idle"};
+  bus   b{*r.f};
+  auto& port = port_of(r);
+  slave_a(b);
+  auto const t = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 100 * us);
+  port.set_external_clock(clock_a, 0);
+  b.run_until(t + 110 * us);
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 260 * us);
+  CHECK(
+      since(r.a->frames, t)
+      == std::vector<std::int64_t>{0, slave_frame, 2 * slave_frame, 3 * slave_frame});
+}
+
+TEST_CASE("the external clock is snapshot state, in place and into a machine built without it")
+{
+  rig   first{"idle"};
+  bus   b{*first.f};
+  auto& port = port_of(first);
+  slave_a(b);
+  auto const stopped = first.f->target->snapshot();
+  auto const t       = b.now();
+  port.set_external_clock(clock_a, 16'000);
+  b.run_until(t + 100 * us);
+  auto const saved = first.f->target->snapshot();
+  auto const done  = first.a->frames.size();
+  b.run_until(t + 400 * us);
+  auto const rest = tail(first.a->frames, done);
+  REQUIRE(rest.size() == 5);
+
+  first.f->target->restore(saved);
+  first.a->frames.clear();
+  CHECK(port.external_clock(clock_a) == 16'000);
+  b.run_until(t + 400 * us);
+  CHECK(first.a->frames == rest);
+
+  first.f->target->restore(stopped);
+  first.a->frames.clear();
+  CHECK(port.external_clock(clock_a) == 0);
+  b.run_until(b.now() + 300 * us);
+  CHECK(first.a->frames.empty());
+
+  rig other{"idle"};
+  bus o{*other.f};
+  other.f->target->restore(restored(saved));
+  CHECK(port_of(other).external_clock(clock_a) == 16'000);
+  o.run_until(t + 400 * us);
+  CHECK(other.a->frames == rest);
+}
+
+TEST_CASE("a snapshot keeps the phase of a running external clock no block uses yet")
+{
+  rig        first{"idle"};
+  bus        b{*first.f};
+  auto const t = b.now();
+  port_of(first).set_external_clock(clock_a, 16'000);
+  b.run_until(t + 70 * us);
+  auto const saved = first.f->target->snapshot();
+  slave_a(b);
+  b.run_until(t + 200 * us);
+  CHECK(since(first.a->frames, t) == std::vector<std::int64_t>{2 * slave_frame});
+
+  rig other{"idle"};
+  bus o{*other.f};
+  other.f->target->restore(restored(saved));
+  slave_a(o);
+  o.run_until(t + 200 * us);
+  CHECK(since(other.a->frames, t) == std::vector<std::int64_t>{2 * slave_frame});
+}
+
+namespace
+{
+struct saved_block
+{
+  std::uint32_t              generation{};
+  std::vector<std::uint32_t> fifo;
+  std::vector<std::uint32_t> frame;
+  std::uint64_t              anchor_ps{};
+  std::uint64_t              frames{};
+  std::uint64_t              next_ps{};
+  std::uint64_t              hz{};
+  std::uint64_t              cycles{};
+  std::uint32_t              bits{};
+  std::uint32_t              position{};
+  std::int8_t                resume_slot{-1};
+  bool                       ticking{};
+  bool                       stalled{};
+  bool                       active{};
+  bool                       stopping{};
+  bool                       waiting{};
+};
+
+struct saved_clock
+{
+  std::uint32_t hz{};
+  std::uint64_t anchor_ps{};
+  bool          anchored{};
+};
+
+struct new_sai_state
+{
+  std::array<saved_block, 2>                block{};
+  std::optional<std::array<saved_clock, 2>> clock{};
+};
+
+struct old_sai_state
+{
+  std::array<saved_block, 2> block{};
+};
+
+auto without_clock(core::snapshot const& saved) -> core::snapshot
+{
+  auto data = core::decode_snapshot(core::encode_snapshot(saved.data()));
+  auto part = std::ranges::find(data.models, std::string{"SAI1"}, &core::snapshot_part::owner);
+  REQUIRE(part != data.models.end());
+  auto const now = reflex::serde::bson::deserializer{
+      std::span<std::byte const>{
+          part->data}}.load<new_sai_state>();
+  REQUIRE(now.clock.has_value());
+  REQUIRE(now.block[0].ticking);
+  part->data.clear();
+  reflex::serde::bson::serializer{part->data}.dump(old_sai_state{.block = now.block});
+  return core::snapshot{std::move(data)};
+}
+}
+
+TEST_CASE("an SAI state saved before the external clock loads and keeps the machine's clock")
+{
+  rig first{"idle", {}, {.external_frame_hz = 16'000}};
+  bus b{*first.f};
+  slave_a(b);
+  auto const start = b.now();
+  b.run_until(start + 100 * us);
+  auto const old  = without_clock(first.f->target->snapshot());
+  auto const done = first.a->frames.size();
+  b.run_until(start + 400 * us);
+  auto const rest = tail(first.a->frames, done);
+  REQUIRE(rest.size() == 5);
+
+  SUBCASE("built with the rate: the block runs on, its next enable takes a new phase")
+  {
+    rig other{"idle", {}, {.external_frame_hz = 16'000}};
+    bus o{*other.f};
+    other.f->target->restore(old);
+    CHECK(port_of(other).external_clock(clock_a) == 16'000);
+    o.run_until(start + 400 * us);
+    CHECK(other.a->frames == rest);
+    o.set("ACR1", "SAIAEN", 0);
+    o.run_until(start + 470 * us);
+    CHECK(o.get("ACR1", "SAIAEN") == 0);
+    o.set("ACR1", "SAIAEN", 1);
+    auto const enabled_at = o.now();
+    o.run_until(enabled_at + 70 * us);
+    REQUIRE_FALSE(other.a->frames.empty());
+    CHECK(other.a->frames.back().at.ps == enabled_at);
+  }
+  SUBCASE("built without a rate: the block ends its frame and waits")
+  {
+    rig other{"idle"};
+    bus o{*other.f};
+    other.f->target->restore(old);
+    CHECK(port_of(other).external_clock(clock_a) == 0);
+    o.run_until(start + 400 * us);
+    CHECK(other.a->frames == std::vector<stm32::captured_audio_frame>{rest[0]});
+    CHECK(o.get("ACR1", "SAIAEN") == 1);
+  }
+}
+
+TEST_CASE("frame sync errors never rise on an external clock, their enables log nothing")
+{
+  rig                           r{"idle", {}, {.external_frame_hz = 16'000}};
+  bus                           b{*r.f};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  b.put(
+      "AIM", {
+                 {"AFSDETIE", 1},
+                 {"LFSDETIE", 1}
+  });
+  slave_a(b);
+  b.run_until(b.now() + 100 * slave_frame);
+  CHECK(r.a->frames.size() == 100);
+  CHECK(b.get("ASR", "AFSDET") == 0);
+  CHECK(b.get("ASR", "LFSDET") == 0);
+  CHECK_FALSE(pending(*r.f, sai_irq));
+  CHECK(logged.empty());
+}
+
+TEST_CASE("an attachment with an external rate starts a slave block waiting for a clock")
+{
+  rig   r{"idle"};
+  bus   b{*r.f};
+  auto& port = port_of(r);
+  slave_a(b);
+  b.run_until(b.now() + 100 * us);
+  CHECK(r.a->frames.empty());
+  auto const t = b.now();
+  port.attach(clock_a, {.endpoint = r.a, .external_frame_hz = 16'000});
+  CHECK(port.external_clock(clock_a) == 16'000);
+  b.run_until(t + 130 * us);
+  CHECK(since(r.a->frames, t) == std::vector<std::int64_t>{0, slave_frame});
 }
 
 TEST_CASE("decimation stretches the frame time and is logged once")

@@ -8,21 +8,24 @@ import re
 import types
 import typing
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from fractions import Fraction
 from pathlib import Path
 
 from popcorn import _core
 from popcorn._enums import ResetKind
-from popcorn._errors import ModelError
+from popcorn._errors import ConfigError, ModelError
 from popcorn._state import StateReader, declared_fields, encode
 from popcorn.units import VirtualDuration, VirtualTime
+
+if typing.TYPE_CHECKING:
+    from popcorn._audio import Block
 
 _CS = re.compile(r"P([A-Z])(\d{1,2})")
 _DURATION = re.compile(r"(\d+(?:\.\d*)?|\.\d+) (s|ms|us|ns|ps)")
 _UNIT_PS = {"s": 10**12, "ms": 10**9, "us": 10**6, "ns": 10**3, "ps": 1}
 _STATES: weakref.WeakKeyDictionary[type, tuple[tuple[str, type], ...]] = weakref.WeakKeyDictionary()
-_ATTACHED: dict[int, weakref.ReferenceType[object]] = {}
+_ATTACHED: dict[int, tuple[weakref.ReferenceType[object], weakref.WeakMethod[AudioClock]]] = {}
 
 
 def _state_of(
@@ -82,6 +85,46 @@ def _word(device: object, method: str, value: object, bits: int) -> int:
 type BusDevice = _core.I2CTargetBase | _core.SpiTargetBase
 """A device the native I2C or SPI models serve: a `popcorn.board` target or a
 `popcorn.devices` device."""
+
+type AudioClock = Callable[[BusDevice, str, Block, int], None]
+"""What a machine does when a device sets an audio clock: the device, the SAI, the block, the
+frame rate."""
+
+
+class DeviceBoard:
+    """What a bus device may drive on the board of the machine it serves, `target.board`.
+
+    It holds no machine: each call finds the live machine through the device's weak
+    attachment, so a device keeping this object keeps nothing alive.
+    """
+
+    __slots__ = ("_device",)
+
+    def __init__(self, device: BusDevice) -> None:
+        """Act for `device`. Use `I2CTarget.board` or `SpiTarget.board` instead."""
+        self._device = device
+
+    def set_audio_clock(self, sai: str, block: Block, frame_hz: int) -> None:
+        """Start, change or stop the external frame clock of an SAI block, as
+        `AudioStream.external_frame_hz` does, from a bus callback at its exact virtual time.
+
+        Raises:
+            ConfigError: The device serves no live machine, or the board does not wire the
+                block's clock to this device, `AudioOptions.clocked_by`.
+            ValueError: `frame_hz` is outside 0 to 2**32 - 1.
+        """
+        held = _ATTACHED.get(id(self._device))
+        clock = None if held is None else held[1]()
+        if clock is None:
+            raise ConfigError(
+                f"{self._device!r} serves no live machine",
+                key="devices",
+                expected="a device serving a live machine",
+            )
+        clock(self._device, sai, block, frame_hz)
+
+    def __repr__(self) -> str:
+        return f"DeviceBoard({self._device!r})"
 
 
 def chip_select(cs: str | None) -> tuple[str, int | None]:
@@ -223,7 +266,10 @@ class I2CTarget(_core.I2CTargetBase):
     MCU. On POWER_ON and BROWN_OUT an override clears the volatile state and every time it
     keeps: after POWER_ON the times passed restart from 0.
 
-    Lifetime: a target serves one machine at a time and must not keep a reference to it.
+    Board: `board` is what the target may drive on the board, such as the SAI clock of a codec.
+
+    Lifetime: a target serves one machine at a time and must not keep a reference to it. It may
+    keep its `board`, which holds no machine.
     """
 
     def __init__(self, address: int) -> None:
@@ -240,6 +286,11 @@ class I2CTarget(_core.I2CTargetBase):
     def address(self) -> int:
         """The 7-bit address the target answers."""
         return self._bus_address
+
+    @property
+    def board(self) -> DeviceBoard:
+        """What the target may drive on the board of the machine it serves."""
+        return DeviceBoard(self)
 
     def on_start(self, read: bool, at: VirtualTime) -> bool:
         """A START or repeated START addressed the target, `read` for a read transfer.
@@ -319,7 +370,7 @@ class SpiTarget(_core.SpiTargetBase):
     Project files: a class used from `[board.X] devices` with a `cs` key takes `cs` as a keyword
     argument and passes it to `super().__init__`.
 
-    Time, state, reset and lifetime: as `I2CTarget`.
+    Time, state, reset, board and lifetime: as `I2CTarget`.
     """
 
     def __init__(self, cs: str | None = None) -> None:
@@ -338,6 +389,11 @@ class SpiTarget(_core.SpiTargetBase):
     def cs(self) -> str | None:
         """The chip select pin, None for the hardware SS output."""
         return self._cs
+
+    @property
+    def board(self) -> DeviceBoard:
+        """What the device may drive on the board of the machine it serves."""
+        return DeviceBoard(self)
 
     def on_select(self, selected: bool, at: VirtualTime) -> None:
         """The chip select changed, `selected` when it went low."""
@@ -380,13 +436,14 @@ class SpiTarget(_core.SpiTargetBase):
 def serving(device: BusDevice) -> object | None:
     """The live machine `device` serves, None when it serves none."""
     held = _ATTACHED.get(id(device))
-    return None if held is None else held()
+    return None if held is None else held[0]()
 
 
-def attach(device: BusDevice, machine: object) -> None:
-    """Mark `device` as serving `machine`. The mark is weak: once that machine is gone the
-    device may serve another one. Keyed by identity, so a device defining `__eq__` works."""
+def attach(device: BusDevice, machine: object, audio_clock: AudioClock) -> None:
+    """Mark `device` as serving `machine`, `audio_clock` a method of `machine` its
+    `DeviceBoard` calls. The mark is weak: once that machine is gone the device may serve
+    another one. Keyed by identity, so a device defining `__eq__` works."""
     key = id(device)
     if key not in _ATTACHED:
         weakref.finalize(device, _ATTACHED.pop, key, None)
-    _ATTACHED[key] = weakref.ref(machine)
+    _ATTACHED[key] = (weakref.ref(machine), weakref.WeakMethod(audio_clock))

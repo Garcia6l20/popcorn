@@ -14,6 +14,7 @@
 #include <expected>
 #include <format>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -55,9 +56,19 @@ struct block_state
   friend auto operator==(block_state const&, block_state const&) -> bool = default;
 };
 
+struct board_clock
+{
+  std::uint32_t hz{};
+  std::uint64_t anchor_ps{};
+  bool          anchored{};
+
+  friend auto operator==(board_clock const&, board_clock const&) -> bool = default;
+};
+
 struct sai_state
 {
-  std::array<block_state, blocks> block{};
+  std::array<block_state, blocks>                block{};
+  std::optional<std::array<board_clock, blocks>> clock{};
 
   friend auto operator==(sai_state const&, sai_state const&) -> bool = default;
 };
@@ -99,6 +110,17 @@ struct rate
   std::uint64_t hz{};
   std::uint64_t cycles{};
 };
+
+struct grid_point
+{
+  std::uint64_t frames{};
+  std::uint64_t at_ps{};
+};
+
+constexpr auto index_of(audio_block block) -> std::size_t
+{
+  return block == audio_block::a ? 0 : 1;
+}
 
 auto lower(std::string_view name) -> std::string
 {
@@ -150,6 +172,19 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
  *        69.4.16, through the GPDMA peer, also while SAIEN is clear, levels announced again in
  *        reset. Not modelled, logged once: SPDIF, AC'97, PDM, companding, mute, synchronization
  *        with another SAI. The frame and slot timing ignore FSOFF and FBOFF.
+ *
+ *        The external clock of each block is board state saved in snapshots: a rate and the
+ *        time of one of its frame boundaries since power-on. A power-on or brown-out reset powers
+ *        the codec down, the clock returns to the board's wired rate with no phase. Other resets
+ *        keep it running in phase. A clock started from stopped has a boundary at the start. A
+ *        rate change or a stop takes effect at the clock's next frame boundary, whether a block
+ *        runs on it or not, so a stop and a start within one frame keep the phase. A slave block
+ *        enabled while its clock runs starts at the next boundary, at once on the first enable
+ *        of a clock with no phase, which fixes it. The external clock is defined by its frame
+ *        rate and always matches the block's frame, so AFSDET and LFSDET never rise, as with a
+ *        correctly wired codec, and their interrupt enables log nothing. A state saved before the
+ *        external clock existed loads with the clocks of the machine loading it, their phase
+ *        taken again at the next enable.
  */
 class sai final : public dispatch_model<sai, sai_state>, public audio_port, public clock_listener
 {
@@ -167,8 +202,11 @@ public:
       std::uint32_t  old,
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
-  void on_clock_change() override;
-  void attach(audio_block block, audio_attachment attachment) override;
+  void               on_clock_change() override;
+  void               load(std::span<std::byte const> in) override;
+  void               attach(audio_block block, audio_attachment attachment) override;
+  void               set_external_clock(audio_block which, std::uint32_t frame_hz) override;
+  [[nodiscard]] auto external_clock(audio_block which) const -> std::uint32_t override;
 
   template <std::size_t B> void control_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t B> void fifo_written(std::uint32_t old, std::uint32_t now);
@@ -187,7 +225,13 @@ private:
   [[nodiscard]] auto slot_on(std::size_t b, std::size_t slot) const -> bool;
   [[nodiscard]] auto mono(std::size_t b) const -> bool;
   [[nodiscard]] auto mask(std::size_t b) const -> std::uint32_t;
+  [[nodiscard]] auto clock_rate(std::size_t b) const -> rate;
   [[nodiscard]] auto frame_rate(std::size_t b) const -> rate;
+  [[nodiscard]] auto clocked(std::size_t b) const -> bool;
+  [[nodiscard]] auto clock(std::size_t b) -> board_clock&;
+  [[nodiscard]] auto board_now() const -> std::uint64_t;
+  [[nodiscard]] auto running(std::size_t b) const -> bool;
+  [[nodiscard]] auto boundary(std::size_t b, std::uint64_t now) const -> grid_point;
   [[nodiscard]] auto clock_valid(std::size_t b) const -> bool;
   [[nodiscard]] auto format(std::size_t b) const -> audio_format;
   [[nodiscard]] auto too_short(std::size_t source) -> bool;
@@ -202,6 +246,8 @@ private:
   [[nodiscard]] auto time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t;
 
   void start(std::size_t source, std::uint64_t from_ps);
+  void follow_clock(std::size_t b);
+  void open(std::size_t source);
   void run(std::size_t source, std::uint32_t position);
   void begin(std::size_t b);
   void take(std::size_t b, std::size_t slot);
@@ -252,7 +298,13 @@ sai::sai(
       block_{fields_of('A'), fields_of('B')}, pdm_enable_{field("PDMCR", "PDMEN")},
       kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
       requests_{requests_of(ctx.peers, desc.name)}
-{}
+{
+  auto& clocks = state_.clock.emplace();
+  for(std::size_t b = 0; b < blocks; ++b)
+  {
+    clocks[b].hz = wired_[b].external_frame_hz;
+  }
+}
 
 auto sai::fields_of(char prefix) const -> block_fields
 {
@@ -382,20 +434,65 @@ auto sai::mask(std::size_t b) const -> std::uint32_t
   return bits >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << bits) - 1u;
 }
 
+auto sai::clock_rate(std::size_t b) const -> rate
+{
+  return {
+      .hz     = (*state_.clock)[b].hz,
+      .cycles = std::uint64_t{std::max<std::uint32_t>(wired_[b].decimation, 1)}};
+}
+
 auto sai::frame_rate(std::size_t b) const -> rate
 {
-  auto const& wiring     = wired_[b];
-  auto const  decimation = std::uint64_t{std::max<std::uint32_t>(wiring.decimation, 1)};
   if(not master(b))
   {
-    return {.hz = wiring.external_frame_hz, .cycles = decimation};
+    return clock_rate(b);
   }
-  auto const divider = std::uint64_t{std::max<std::uint32_t>(get(regs_, block_[b].divider), 1)};
-  auto const bits    = std::uint64_t{get(regs_, block_[b].frame_length)} + 1u;
+  auto const decimation = std::uint64_t{std::max<std::uint32_t>(wired_[b].decimation, 1)};
+  auto const divider    = std::uint64_t{std::max<std::uint32_t>(get(regs_, block_[b].divider), 1)};
+  auto const bits       = std::uint64_t{get(regs_, block_[b].frame_length)} + 1u;
   auto const cycles = on(block_[b].no_divider)
                         ? divider * bits
                         : divider * (std::uint64_t{get(regs_, block_[b].oversampling)} + 1u) * 256u;
   return {.hz = ctx_.clock.hz(kernel_), .cycles = cycles * decimation};
+}
+
+auto sai::clocked(std::size_t b) const -> bool
+{
+  return not master(b) and get(regs_, block_[b].sync) == 0;
+}
+
+auto sai::clock(std::size_t b) -> board_clock&
+{
+  return (*state_.clock)[b];
+}
+
+auto sai::board_now() const -> std::uint64_t
+{
+  return ctx_.clock.since_power_on().ps;
+}
+
+auto sai::running(std::size_t b) const -> bool
+{
+  auto const& c = (*state_.clock)[b];
+  return c.hz
+      != 0
+      or (c.anchored and board_now() < c.anchor_ps)
+      or (state_.block[b].ticking and clocked(b));
+}
+
+auto sai::boundary(std::size_t b, std::uint64_t now) const -> grid_point
+{
+  auto const& c = (*state_.clock)[b];
+  auto const  r = clock_rate(b);
+  if(now <= c.anchor_ps or r.hz == 0)
+  {
+    return {.frames = 0, .at_ps = c.anchor_ps};
+  }
+  auto const period = static_cast<wide>(r.cycles) * ps_per_second;
+  auto const frames = (static_cast<wide>(now - c.anchor_ps) * r.hz + period - 1) / period;
+  return {
+      .frames = static_cast<std::uint64_t>(frames),
+      .at_ps  = c.anchor_ps + static_cast<std::uint64_t>(frames * period / r.hz)};
 }
 
 auto sai::clock_valid(std::size_t b) const -> bool
@@ -406,7 +503,7 @@ auto sai::clock_valid(std::size_t b) const -> bool
   return not checked or (power_of_two and bits >= 8);
 }
 
-void sai::reset(register_file& regs, reset_kind)
+void sai::reset(register_file& regs, reset_kind kind)
 {
   for(auto const& name : claims())
   {
@@ -417,6 +514,13 @@ void sai::reset(register_file& regs, reset_kind)
     auto const generation = block.generation + 1;
     block                 = {};
     block.generation      = generation;
+  }
+  if(kind == reset_kind::power_on or kind == reset_kind::brown_out)
+  {
+    for(std::size_t b = 0; b < blocks; ++b)
+    {
+      clock(b) = {.hz = wired_[b].external_frame_hz};
+    }
   }
   for(auto& request : requests_)
   {
@@ -511,7 +615,30 @@ void sai::enable(std::size_t b)
     block.waiting = true;
     return;
   }
-  start(b, ctx_.clock.time().ps);
+  if(master(b))
+  {
+    start(b, ctx_.clock.time().ps);
+    return;
+  }
+  follow_clock(b);
+}
+
+void sai::follow_clock(std::size_t b)
+{
+  auto& c = clock(b);
+  if(c.hz == 0)
+  {
+    start(b, ctx_.clock.time().ps);
+    return;
+  }
+  auto const now = board_now();
+  if(not c.anchored)
+  {
+    c.anchor_ps = now;
+    c.anchored  = true;
+  }
+  c.anchor_ps = boundary(b, now).at_ps;
+  start(b, c.anchor_ps - (now - ctx_.clock.time().ps));
 }
 
 void sai::disable(std::size_t b)
@@ -560,6 +687,14 @@ void sai::start(std::size_t source, std::uint64_t from_ps)
   block.cycles    = r.cycles;
   block.bits      = frame_bits(source);
   block.ticking   = true;
+  if(auto const first = time_at(source, 0); first > ctx_.clock.time().ps)
+  {
+    block.position = 0;
+    block.next_ps  = first;
+    ctx_.events.schedule_at(
+        vtime{first}, static_cast<std::uint32_t>(source), block.generation, ctx_.clock);
+    return;
+  }
   for(std::size_t b = 0; b < blocks; ++b)
   {
     if((b == source or follows(b, source)) and enabled(b))
@@ -568,6 +703,32 @@ void sai::start(std::size_t source, std::uint64_t from_ps)
     }
   }
   run(source, 0);
+}
+
+void sai::open(std::size_t source)
+{
+  auto&      block = state_.block[source];
+  auto const r     = frame_rate(source);
+  if(r.hz == block.hz and r.cycles == block.cycles and frame_bits(source) == block.bits)
+  {
+    for(std::size_t b = 0; b < blocks; ++b)
+    {
+      if((b == source or follows(b, source)) and enabled(b))
+      {
+        begin(b);
+      }
+    }
+    run(source, 0);
+    return;
+  }
+  auto const at = block.next_ps;
+  block.ticking = false;
+  if(clocked(source) and r.hz != 0)
+  {
+    clock(source).anchor_ps = at + board_now() - ctx_.clock.time().ps;
+    clock(source).anchored  = true;
+  }
+  start(source, at);
 }
 
 auto sai::frame_bits(std::size_t b) const -> std::uint32_t
@@ -657,6 +818,11 @@ void sai::run(std::size_t source, std::uint32_t position)
       }
     }
     auto const r = frame_rate(source);
+    if(clocked(source) and r.hz != 0 and (r.hz != block.hz or r.cycles != block.cycles))
+    {
+      clock(source).anchor_ps = end_ps + board_now() - ctx_.clock.time().ps;
+      clock(source).anchored  = true;
+    }
     if(not enabled(source) or r.hz == 0 or too_short(source))
     {
       block.ticking = false;
@@ -807,7 +973,14 @@ void sai::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     return;
   }
-  run(kind, state_.block[kind].position);
+  if(state_.block[kind].position == 0)
+  {
+    open(kind);
+  }
+  else
+  {
+    run(kind, state_.block[kind].position);
+  }
   flags();
 }
 
@@ -815,7 +988,7 @@ void sai::on_clock_change()
 {
   for(std::size_t b = 0; b < blocks; ++b)
   {
-    if(state_.block[b].stalled and enabled(b) and frame_rate(b).hz != 0)
+    if(state_.block[b].stalled and enabled(b) and master(b) and frame_rate(b).hz != 0)
     {
       start(b, ctx_.clock.time().ps);
     }
@@ -894,7 +1067,67 @@ auto sai::on_write(
 
 void sai::attach(audio_block block, audio_attachment attachment)
 {
-  wired_[block == audio_block::a ? 0 : 1] = std::move(attachment);
+  auto const b  = index_of(block);
+  wired_[b]     = std::move(attachment);
+  auto const hz = wired_[b].external_frame_hz;
+  if(hz == 0 or running(b))
+  {
+    set_external_clock(block, hz);
+    return;
+  }
+  clock(b) = {.hz = hz};
+  if(state_.block[b].stalled and enabled(b) and clocked(b))
+  {
+    follow_clock(b);
+    flags();
+  }
+}
+
+void sai::set_external_clock(audio_block which, std::uint32_t frame_hz)
+{
+  auto const b   = index_of(which);
+  auto&      c   = clock(b);
+  auto const now = board_now();
+  if(c.hz == frame_hz)
+  {
+    return;
+  }
+  if(not running(b))
+  {
+    c = {.hz = frame_hz, .anchor_ps = now, .anchored = true};
+  }
+  else
+  {
+    if(c.anchored)
+    {
+      c.anchor_ps = boundary(b, now).at_ps;
+    }
+    c.hz = frame_hz;
+  }
+  if(frame_hz != 0 and state_.block[b].stalled and enabled(b) and clocked(b))
+  {
+    follow_clock(b);
+    flags();
+  }
+}
+
+auto sai::external_clock(audio_block which) const -> std::uint32_t
+{
+  return (*state_.clock)[index_of(which)].hz;
+}
+
+void sai::load(std::span<std::byte const> in)
+{
+  auto kept = state_.clock;
+  dispatch_model::load(in);
+  if(not state_.clock)
+  {
+    for(auto& c : *kept)
+    {
+      c.anchored = false;
+    }
+    state_.clock = kept;
+  }
 }
 
 void sai::flags()

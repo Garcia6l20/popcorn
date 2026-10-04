@@ -239,11 +239,24 @@ public:
    */
   [[= py::doc{"Set the most transmitted frames the queue keeps, for tests."}]] void
       set_frame_limit(std::uint64_t limit);
+  /**
+   * @brief Starts, changes or stops the external frame clock of the block, as the board drives
+   *        it, periph::stm32::audio_port::set_external_clock().
+   * @param frame_hz Frames per second, 0 to stop.
+   */
+  [[= py::doc{"Start, change or stop the block's external frame clock, 0 to stop."}]] void
+      set_external_frame_hz(std::uint32_t frame_hz);
+  /** @brief The external frame rate set last, 0 when stopped. */
+  [[= py::doc{"The block's external frame rate, 0 when stopped."}]] [[nodiscard]] auto
+      external_frame_hz() const -> std::uint32_t;
 
 private:
   [[nodiscard]] auto endpoint() const -> detail::audio_queue_endpoint&;
+  [[nodiscard]] auto port() const -> periph::stm32::audio_port&;
 
   std::shared_ptr<detail::audio_queue_endpoint> endpoint_;
+  periph::stm32::audio_port*                    port_;
+  periph::stm32::audio_block                    block_;
   std::shared_ptr<bool const>                   alive_;
 };
 }

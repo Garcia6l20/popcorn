@@ -4,7 +4,7 @@ ADC inputs, the NVIC, I2C and SPI devices, the clock sources of the RCC and the 
 from __future__ import annotations
 
 from popcorn._audio import AudioFrame, AudioOptions, AudioStream
-from popcorn._devices import I2CTarget, SpiTarget
+from popcorn._devices import DeviceBoard, I2CTarget, SpiTarget
 from popcorn._enums import PinMode
 from popcorn._nvic import Irqs, Nvic
 from popcorn._rcc import RccOptions
@@ -42,6 +42,7 @@ __all__ = [
     "CdcLineCoding",
     "CdcPacket",
     "CdcStream",
+    "DeviceBoard",
     "Frame",
     "HidReport",
     "HidStream",

@@ -48,11 +48,18 @@ class AudioOptions:
     Attributes:
         decimation: Frame time multiplier, at least 1, 1 for the configured rate.
         external_frame_hz: Frame rate in Hz of the external clock master of a slave block in
-            asynchronous mode, 0 for none.
+            asynchronous mode, 0 for none. A clock already running at power-on: its phase is
+            taken at the block's first enable.
+        clocked_by: The bus device driving the block's external clock through
+            `DeviceBoard.set_audio_clock`, as `<I2C>:<address>` such as "I2C1:0x38" or
+            `<SPI>:<chip select>` such as "SPI1:PA4", "SPI1:SS" for the hardware NSS. A bus
+            alias, such as "SEC_I2C1", names the bus serving it. None for none: no device may
+            drive it.
     """
 
     decimation: int = 1
     external_frame_hz: int = 0
+    clocked_by: str | None = None
 
 
 class AudioStream:
@@ -103,6 +110,30 @@ class AudioStream:
         """Words written and not served to the receiving block yet."""
         return self._link.queued()
 
+    @property
+    def external_frame_hz(self) -> int:
+        """Frame rate of the external clock master of this slave block, 0 when stopped.
+
+        Setting it starts, changes or stops the clock, as the board drives it. A running clock
+        changes rate or stops at the end of its frame in progress, so a stop and a start within
+        one frame keep its phase. A stopped clock starts at once: an enabled asynchronous slave
+        block starts its first frame now, one enabled later at the clock's next frame boundary.
+        Board state: `Machine.restore` restores it, a reset keeps it in phase, except POWER_ON
+        and BROWN_OUT, which power the codec down and return it to `AudioOptions`.
+
+        Raises:
+            RuntimeError: Set from another thread while a run is active.
+            ValueError: Set to a value outside 0 to 2**32 - 1.
+        """
+        return self._link.external_frame_hz()
+
+    @external_frame_hz.setter
+    def external_frame_hz(self, hz: int) -> None:
+        self._stimulus()
+        if not _is_frame_rate(hz):
+            raise ValueError(f"an external frame rate is 0 to 2**32 - 1 Hz, not {hz!r}")
+        self._link.set_external_frame_hz(hz)
+
     async def read_frames(self, n: int, *, for_: VirtualDuration | None = None) -> list[AudioFrame]:
         """Run the machine until `n` frames arrived, or `for_` elapsed, and take them.
 
@@ -146,6 +177,10 @@ class AudioStream:
 
     def __repr__(self) -> str:
         return f"AudioStream({self.name}.{self.block})"
+
+
+def _is_frame_rate(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1 << 32
 
 
 class AudioPorts:

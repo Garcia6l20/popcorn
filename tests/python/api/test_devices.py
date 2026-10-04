@@ -8,12 +8,12 @@ import struct
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import popcorn
 import pytest
 from popcorn import ConfigError, ModelError, ResetKind, StopReason, _core
-from popcorn.board import I2CTarget, SpiTarget
+from popcorn.board import AudioOptions, DeviceBoard, I2CTarget, SpiTarget
 from popcorn.model import Model
 from popcorn.units import VirtualTime
 
@@ -674,3 +674,113 @@ def test_project_devices_given_for_a_peripheral_are_not_built(
     )
     given = Eeprom24(0x50, 16)
     assert broken.machine(devices={"I2C1": [given]}).board.devices("I2C1") == (given,)
+
+
+def clocked_machine(u575: popcorn.MachineDescription, *devices: I2CTarget) -> popcorn.Machine:
+    return popcorn.Machine(
+        u575,
+        devices={"I2C1": list(devices)},
+        audio={"SEC_SAI1": {"A": AudioOptions(clocked_by="I2C1:0x38")}},
+    )
+
+
+def test_a_device_drives_the_clock_of_the_sai_block_wired_to_it_only(
+    u575: popcorn.MachineDescription,
+) -> None:
+    codec, other = I2CTarget(0x38), I2CTarget(0x39)
+    m = clocked_machine(u575, codec, other)
+    assert isinstance(codec.board, DeviceBoard)
+    codec.board.set_audio_clock("SAI1", "A", 16_000)
+    assert m.periph.SAI1.audio("A").external_frame_hz == 16_000
+    codec.board.set_audio_clock("SEC_SAI1", "A", 0)
+    assert m.periph.SAI1.audio("A").external_frame_hz == 0
+    for device, sai, block in (
+        (other, "SAI1", "A"),
+        (codec, "SAI1", "B"),
+        (codec, "SAI2", "A"),
+        (codec, "USART1", "A"),
+    ):
+        with pytest.raises(ConfigError) as refused:
+            device.board.set_audio_clock(sai, cast(Literal["A", "B"], block), 8_000)
+        assert refused.value.key.endswith(".clocked_by"), (device, sai, block)
+    assert m.periph.SAI1.audio("A").external_frame_hz == 0
+    assert m.periph.SAI1.audio("B").external_frame_hz == 0
+    with pytest.raises(ValueError, match=r"2\*\*32"):
+        codec.board.set_audio_clock("SAI1", "A", -1)
+
+
+def test_a_device_board_without_a_live_machine_is_refused(
+    u575: popcorn.MachineDescription,
+) -> None:
+    codec = I2CTarget(0x38)
+    with pytest.raises(ConfigError):
+        codec.board.set_audio_clock("SAI1", "A", 16_000)
+    m = clocked_machine(u575, codec)
+    kept = codec.board
+    watch = weakref.ref(m)
+    del m
+    gc.collect()
+    assert watch() is None
+    with pytest.raises(ConfigError):
+        kept.set_audio_clock("SAI1", "A", 16_000)
+    again = clocked_machine(u575, codec)
+    kept.set_audio_clock("SAI1", "A", 16_000)
+    assert again.periph.SAI1.audio("A").external_frame_hz == 16_000
+
+
+@pytest.mark.parametrize(
+    ("clocked_by", "key"),
+    [
+        ("I2C1:0x39", "audio.SAI1.A.clocked_by"),
+        ("I2C2:0x38", "audio.SAI1.A.clocked_by"),
+        ("I2C1", "audio.SAI1.A.clocked_by"),
+        ("I2C1:size", "audio.SAI1.A.clocked_by"),
+        ("SPI1:PA4", "audio.SAI1.A.clocked_by"),
+        (cast(str, 0x38), "audio.SAI1.A.clocked_by"),
+    ],
+)
+def test_a_clocked_by_naming_no_attached_device_is_refused_at_build(
+    u575: popcorn.MachineDescription, clocked_by: str, key: str
+) -> None:
+    codec = I2CTarget(0x38)
+    with pytest.raises(ConfigError) as refused:
+        popcorn.Machine(
+            u575,
+            devices={"I2C1": [codec], "SPI1": [SpiTarget()]},
+            audio={"SAI1": {"A": AudioOptions(clocked_by=clocked_by)}},
+        )
+    assert refused.value.key == key
+    assert popcorn.Machine(u575, devices={"I2C1": [codec]}).board.devices("I2C1") == (codec,)
+
+
+def test_clocked_by_names_an_spi_device_by_its_chip_select(
+    u575: popcorn.MachineDescription,
+) -> None:
+    on_ss, on_pin = SpiTarget(), SpiTarget("PA4")
+    m = popcorn.Machine(
+        u575,
+        devices={"SPI1": [on_ss, on_pin]},
+        audio={
+            "SAI1": {
+                "A": AudioOptions(clocked_by="SPI1:SS"),
+                "B": AudioOptions(clocked_by="SPI1:PA4"),
+            }
+        },
+    )
+    on_ss.board.set_audio_clock("SAI1", "A", 48_000)
+    on_pin.board.set_audio_clock("SAI1", "B", 44_100)
+    assert m.periph.SAI1.audio("A").external_frame_hz == 48_000
+    assert m.periph.SAI1.audio("B").external_frame_hz == 44_100
+    with pytest.raises(ConfigError):
+        on_pin.board.set_audio_clock("SAI1", "A", 0)
+
+
+def test_clocked_by_names_a_bus_through_its_alias(u575: popcorn.MachineDescription) -> None:
+    codec = I2CTarget(0x38)
+    m = popcorn.Machine(
+        u575,
+        devices={"I2C1": [codec]},
+        audio={"SAI1": {"A": AudioOptions(clocked_by="SEC_I2C1:0x38")}},
+    )
+    codec.board.set_audio_clock("SAI1", "A", 16_000)
+    assert m.periph.SAI1.audio("A").external_frame_hz == 16_000

@@ -327,7 +327,7 @@ TEST_CASE("board.<SAI>.A and B take the options of an audio block")
 {
   scratch_file const file{
       std::string{minimal}
-      + "[board.SAI1.A]\ndecimation = 4\n[board.SAI1.B]\n"
+      + "[board.SAI1.A]\ndecimation = 4\nclocked_by = \"I2C1:0x38\"\n[board.SAI1.B]\n"
         "external_frame_hz = 48_000\n"};
   auto const  loaded = config::load_project(file.path());
   auto const& entry  = loaded.file.board.at("SAI1");
@@ -336,15 +336,17 @@ TEST_CASE("board.<SAI>.A and B take the options of an audio block")
   CHECK(entry.a->decimation == 4u);
   CHECK(not entry.a->external_frame_hz);
   CHECK(entry.b->external_frame_hz == 48'000u);
+  CHECK(entry.a->clocked_by == "I2C1:0x38");
+  CHECK(not entry.b->clocked_by);
   CHECK(entry.params.empty());
-  CHECK(loaded.line_of("board.SAI1.B.external_frame_hz") == 6);
+  CHECK(loaded.line_of("board.SAI1.B.external_frame_hz") == 7);
 }
 
 TEST_CASE("an audio block table refuses unknown keys and a decimation of 0")
 {
   auto error = failure_of(std::string{minimal} + "[board.SAI1.A]\ndecimaton = 4\n");
   CHECK(error.key() == "board.SAI1.A.decimaton");
-  CHECK(error.expected() == "a key of board.SAI1.A: decimation, external_frame_hz");
+  CHECK(error.expected() == "a key of board.SAI1.A: decimation, external_frame_hz, clocked_by");
   error = failure_of(std::string{minimal} + "[board.SAI1.B]\ndecimation = 0\n");
   CHECK(error.key() == "board.SAI1.B.decimation");
   CHECK(error.expected() == "a decimation of at least 1");

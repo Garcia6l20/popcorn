@@ -299,6 +299,7 @@ class Project:
                         if block.external_frame_hz is None
                         else block.external_frame_hz
                     ),
+                    clocked_by=block.clocked_by,
                 )
         usb: dict[str, UsbHostOptions] = {}
         for name, entry in file.board.items():

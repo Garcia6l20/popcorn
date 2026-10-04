@@ -87,7 +87,8 @@ struct audio_attachment
    * block starts with a value above 1. 0 counts as 1. */
   std::uint32_t decimation{1};
   /** @brief Frame rate in Hz of the external clock master of a slave block in asynchronous mode,
-   * 0 for none: such a block then sees no frame. Unused by master and synchronous blocks. */
+   * 0 for none: such a block then sees no frame. Unused by master and synchronous blocks. The
+   * clock it describes already runs: its phase is taken at the block's first enable. */
   std::uint32_t external_frame_hz{};
 };
 
@@ -110,12 +111,35 @@ public:
   auto operator=(audio_port&&) -> audio_port& = delete;
 
   /**
-   * @brief Wires an audio block, replacing the board's attachment. Not saved in snapshots. A
-   *        decimation or external frame rate change takes effect at the block's next frame.
+   * @brief Wires an audio block, replacing the board's attachment. The endpoint and the
+   *        decimation are not saved in snapshots, a decimation change takes effect at the block's
+   *        next frame. The external frame rate is set as set_external_clock() sets it, except
+   *        that a clock started from stopped takes its phase at the block's next enable, or at
+   *        once when the block is enabled and waits for a clock.
    * @param block Audio block.
    * @param attachment Endpoint, decimation and external frame rate.
    */
   virtual void attach(audio_block block, audio_attachment attachment) = 0;
+
+  /**
+   * @brief Sets the frame rate of the external clock master of a slave block, as the board
+   *        drives it. Board state: a snapshot restores it, a reset other than power-on or
+   *        brown-out keeps it in phase, those two return it to the attachment's rate. A running
+   *        clock changes rate or stops at the end of its frame in progress, so a stop and a
+   *        start within one frame keep its phase. A stopped clock starts now: an enabled
+   *        asynchronous slave block starts its first frame at once, one enabled later starts on
+   *        the clock's next frame boundary.
+   * @param block Audio block.
+   * @param frame_hz Frames per second, 0 to stop.
+   */
+  virtual void set_external_clock(audio_block block, std::uint32_t frame_hz) = 0;
+
+  /**
+   * @brief The external frame rate set last.
+   * @param block Audio block.
+   * @return Frames per second, 0 when stopped.
+   */
+  [[nodiscard]] virtual auto external_clock(audio_block block) const -> std::uint32_t = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */

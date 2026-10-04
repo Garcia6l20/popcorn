@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Protocol, cast, overload, runtime_checkable
 
 from popcorn import _core
 from popcorn._arena import Arena
-from popcorn._audio import AudioOptions, AudioPorts, Block
+from popcorn._audio import BLOCKS, AudioOptions, AudioPorts, Block
 from popcorn._call import (
     F32,
     I32_SLOT,
@@ -325,6 +325,7 @@ class Machine:
         "_busy",
         "_call_baseline",
         "_callback_table",
+        "_clocked",
         "_config_digest",
         "_coverage",
         "_default_budget",
@@ -423,7 +424,8 @@ class Machine:
                 or above 1 MHz, an RCC with a Python model or one no built-in model serves.
                 With `audio`: a key that is not an SAI with the built-in model, two keys naming
                 one SAI, a block other than A or B, a decimation below 1 or a negative frame
-                rate, named as `audio.<SAI>.<block>`. With `usb`: a key that is not a USB device
+                rate, or a `clocked_by` naming no device of `devices`, named as
+                `audio.<SAI>.<block>`. With `usb`: a key that is not a USB device
                 controller with the built-in model, two keys naming one controller, a bus reset
                 or a timeout not above 0, named as `usb.<NAME>`. With `supply`: a VDDA outside 1620
                 to 3600 mV.
@@ -476,11 +478,13 @@ class Machine:
             self._require_owner,
         )
         sais = self._handle.audio_names()
+        audio_options = _checked_audio(audio or {}, sais, aliases)
+        self._clocked = _clock_wiring(audio_options, attached, aliases)
         self._audio = AudioPorts(
             self._handle.attach_audio,
             sais,
             aliases,
-            _checked_audio(audio or {}, sais, aliases),
+            audio_options,
             self._wait_until,
             self._require_owner,
         )
@@ -495,7 +499,7 @@ class Machine:
         self._devices = attached
         for targets in attached.values():
             for target in targets:
-                attach(target, self)
+                attach(target, self, self._device_audio_clock)
         self._board = Board(self._ports, attached, self._usb)
         access = ViewAccess(
             self._handle,
@@ -1478,6 +1482,17 @@ class Machine:
                 "the machine is running, handlers included, stop or await it first"
             )
 
+    def _device_audio_clock(self, device: BusDevice, sai: str, block: Block, frame_hz: int) -> None:
+        name = self._audio.serving(sai)
+        if block not in BLOCKS or self._clocked.get((name, block)) is not device:
+            key = f"audio.{name}.{block}.clocked_by"
+            raise ConfigError(
+                f"{key}: the board does not wire this clock to {device!r}",
+                key=key,
+                expected=f"the device {device!r}",
+            )
+        self._audio.stream(name, block).external_frame_hz = frame_hz
+
     def _require_owner(self) -> None:
         if self._busy and threading.get_ident() != self._thread:
             raise RuntimeError(
@@ -1717,6 +1732,55 @@ def _checked_audio(
                     )
             checked[name][block] = options
     return checked
+
+
+def _clock_wiring(
+    audio: Mapping[str, Mapping[Block, AudioOptions]],
+    attached: Mapping[str, Sequence[BusDevice]],
+    aliases: Mapping[str, str],
+) -> dict[tuple[str, Block], BusDevice]:
+    """The device each `clocked_by` of `audio` names among the `attached` devices, keyed by the
+    bus serving them, by SAI and block. A bus alias, such as `SEC_I2C1`, names the bus serving
+    it. Of two devices matching, the first attached, as on the bus."""
+    wired: dict[tuple[str, Block], BusDevice] = {}
+    for name, blocks in audio.items():
+        for block, options in blocks.items():
+            named = options.clocked_by
+            if named is None:
+                continue
+            at = f"audio.{name}.{block}.clocked_by"
+            found = _device_named(named, attached, aliases)
+            if found is None:
+                raise ConfigError(
+                    f'{at}: a device of devices such as "I2C1:0x38" or "SPI1:PA4", '
+                    f"not {named!r}",
+                    key=at,
+                    expected='a bus device attached to the machine, such as "I2C1:0x38"',
+                )
+            wired[name, block] = found
+    return wired
+
+
+def _device_named(
+    named: object, attached: Mapping[str, Sequence[BusDevice]], aliases: Mapping[str, str]
+) -> BusDevice | None:
+    if not isinstance(named, str):
+        return None
+    bus, colon, where = named.partition(":")
+    if not colon:
+        return None
+    for device in attached.get(aliases.get(bus, bus), ()):
+        if isinstance(device, _core.SpiTargetBase):
+            if (cs_of(device) or "SS") == where:
+                return device
+            continue
+        try:
+            address = int(where, 0)
+        except ValueError:
+            return None
+        if getattr(device, "address", None) == address:
+            return device
+    return None
 
 
 def _checked_devices(

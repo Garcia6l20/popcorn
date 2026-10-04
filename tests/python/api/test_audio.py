@@ -16,13 +16,14 @@ import pytest
 from popcorn import StopReason
 from popcorn.board import AudioOptions, AudioStream
 from popcorn.model import Model
-from popcorn.units import ms, us
+from popcorn.units import VirtualDuration, ms, us
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
 SAI_ELF = PREBUILT / "sai_ll.elf"
 BUDGET = 100_000_000
 FRAMES = 64
 FRAME = us(64)
+SLAVE_FRAME = VirtualDuration(62_500_000)
 
 type Block = Literal["A", "B"]
 
@@ -246,3 +247,96 @@ def test_a_block_table_needs_an_sai_with_the_built_in_model(
     with pytest.raises(popcorn.ConfigError) as caught:
         project(tmp_path, board).machine()
     assert caught.value.key == key
+
+
+def codec_dma_machine(u575: popcorn.MachineDescription) -> tuple[popcorn.Machine, AudioStream]:
+    m = sai_machine(u575)
+    m.reg.pc = m.sym("codec_dma")
+    stop = asyncio.run(m.run(budget=BUDGET, stop_when=lambda m: m.periph.SAI1.BCR1.SAIAEN == 1))
+    assert stop.reason is StopReason.USER, stop
+    stop = asyncio.run(m.run(for_=ms(1), budget=BUDGET))
+    assert stop.reason is StopReason.TIME, stop
+    assert m.periph.SAI1.ACR1.SAIAEN == 1
+    return m, m.periph.SAI1.audio("A")
+
+
+def test_the_external_clock_starts_changes_and_stops_a_slave_block_from_the_test_body(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, sender = codec_dma_machine(u575)
+    assert (sender.available, sender.external_frame_hz) == (0, 0)
+
+    t0 = m.time
+    sender.external_frame_hz = 16_000
+    assert sender.external_frame_hz == 16_000
+    asyncio.run(m.run(for_=ms(1)))
+    first = asyncio.run(sender.read_frames(sender.available))
+    assert [frame.at - t0 for frame in first] == [k * SLAVE_FRAME for k in range(16)]
+
+    sender.external_frame_hz = 8_000
+    asyncio.run(m.run(for_=ms(1)))
+    slower = asyncio.run(sender.read_frames(sender.available))
+    assert [frame.at - t0 for frame in slower] == [
+        16 * SLAVE_FRAME,
+        *(17 * SLAVE_FRAME + k * 2 * SLAVE_FRAME for k in range(7)),
+    ]
+
+    stopped = m.time
+    sender.external_frame_hz = 0
+    asyncio.run(m.run(for_=ms(2)))
+    last = asyncio.run(sender.read_frames(sender.available))
+    assert [frame.at - t0 for frame in last] == [31 * SLAVE_FRAME]
+    assert all(frame.at < stopped for frame in last)
+    assert sender.external_frame_hz == 0
+
+
+def test_the_external_clock_is_board_state_restored_by_a_snapshot(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, sender = codec_dma_machine(u575)
+    stopped = m.snapshot()
+    t0 = m.time
+    sender.external_frame_hz = 16_000
+    asyncio.run(m.run(for_=us(100)))
+    running = m.snapshot()
+
+    m.restore(stopped)
+    assert sender.external_frame_hz == 0
+    asyncio.run(m.run(for_=ms(1)))
+    assert sender.available == 0
+
+    other = popcorn.Machine(u575, image=popcorn.Image.elf(SAI_ELF))
+    other.restore(popcorn.Snapshot.from_bytes(running.to_bytes()))
+    again = other.periph.SAI1.audio("A")
+    assert again.external_frame_hz == 16_000
+    asyncio.run(other.run(for_=ms(1)))
+    frames = asyncio.run(again.read_frames(again.available))
+    assert [frame.at - t0 for frame in frames] == [k * SLAVE_FRAME for k in range(1, 17)]
+
+
+@pytest.mark.parametrize("hz", [-1, True, 1 << 32, cast(int, 16_000.0)])
+def test_an_external_frame_rate_outside_32_bits_is_a_value_error(
+    u575: popcorn.MachineDescription, hz: int
+) -> None:
+    sender = popcorn.Machine(u575).periph.SAI1.audio("A")
+    with pytest.raises(ValueError, match=r"2\*\*32"):
+        sender.external_frame_hz = hz
+    assert sender.external_frame_hz == 0
+
+
+def test_an_external_clock_set_from_another_thread_during_a_run_is_refused(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = sai_machine(u575)
+    sender = m.periph.SAI1.audio("A")
+
+    def start() -> None:
+        sender.external_frame_hz = 16_000
+
+    async def body() -> None:
+        async with m.running():
+            await asyncio.to_thread(start)
+
+    with pytest.raises(RuntimeError, match="another thread"):
+        asyncio.run(body())
+    assert sender.external_frame_hz == 0
