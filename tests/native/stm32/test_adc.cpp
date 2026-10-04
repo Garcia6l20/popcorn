@@ -33,21 +33,22 @@ using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::u575;
 
-constexpr std::uint32_t aden        = 1u << 0;
-constexpr std::uint32_t addis       = 1u << 1;
-constexpr std::uint32_t adstart     = 1u << 2;
-constexpr std::uint32_t jadstart    = 1u << 3;
-constexpr std::uint32_t adstp       = 1u << 4;
-constexpr std::uint32_t advregen    = 1u << 28;
-constexpr std::uint32_t deeppwd     = 1u << 29;
-constexpr std::uint32_t adcal       = 1u << 31;
-constexpr std::uint32_t vrefen      = 1u << 22;
-constexpr std::uint32_t vsensesel   = 1u << 23;
-constexpr std::uint32_t cont        = 1u << 13;
-constexpr std::uint32_t vrefint_cal = 6635;
-constexpr std::uint32_t ts_cal1     = 4107;
-constexpr std::uint64_t ns          = 1'000;
-constexpr std::uint64_t us          = 1'000'000;
+constexpr std::uint32_t aden         = 1u << 0;
+constexpr std::uint32_t addis        = 1u << 1;
+constexpr std::uint32_t adstart      = 1u << 2;
+constexpr std::uint32_t jadstart     = 1u << 3;
+constexpr std::uint32_t adstp        = 1u << 4;
+constexpr std::uint32_t advregen     = 1u << 28;
+constexpr std::uint32_t deeppwd      = 1u << 29;
+constexpr std::uint32_t adcal        = 1u << 31;
+constexpr std::uint32_t vrefen       = 1u << 22;
+constexpr std::uint32_t vsensesel    = 1u << 23;
+constexpr std::uint32_t cont         = 1u << 13;
+constexpr std::uint32_t vrefint_cal  = 6635;
+constexpr std::uint32_t ts_cal1      = 4107;
+constexpr std::uint64_t ns           = 1'000;
+constexpr std::uint64_t us           = 1'000'000;
+constexpr std::uint32_t all_channels = 0xF'FFFF;
 
 auto options_with(
     stm32::supply_options           supply,
@@ -77,6 +78,7 @@ struct adc_fixture : stm32_fixture
       hsi16();
       put("RCC", "RCC_AHB2ENR1", "ADC12EN", 1);
     }
+    write("ADC1", "ADC_PCSEL", all_channels);
   }
 
   [[nodiscard]] auto at(std::string_view peripheral, std::string_view reg) const -> popcorn::address
@@ -1078,6 +1080,32 @@ struct step04_adc_state
   std::vector<std::uint32_t>    data;
   bool                          dma_stopped{};
 };
+
+struct step06_adc_state
+{
+  std::array<std::uint32_t, 20> input_uv{};
+  std::uint32_t                 generation{};
+  std::uint64_t                 start_ps{};
+  std::uint64_t                 clock_hz{};
+  std::uint32_t                 divider{};
+  std::uint32_t                 held{};
+  std::uint32_t                 sum{};
+  bool                          converting{};
+  bool                          waiting_clock{};
+  std::uint8_t                  rank{};
+  std::uint8_t                  subgroup_left{};
+  std::vector<std::uint32_t>    data;
+  bool                          dma_stopped{};
+  std::uint8_t                  filter_count{};
+};
+
+auto live_state(adc_fixture const& f) -> step06_adc_state
+{
+  std::vector<std::byte> current;
+  f.target->model("ADC1")->save(current);
+  return reflex::serde::bson::deserializer{std::span<std::byte const>{current}}
+      .load<step06_adc_state>();
+}
 }
 
 TEST_CASE("the ten-rank scan ends each rank N x (SMP + TSAR) after the last, EOS with the tenth")
@@ -1413,11 +1441,7 @@ TEST_CASE("an ADC state saved before the sequence loads mid-conversion as rank 0
   f.run_until(start + 22 * adc_cycle_ps);
   REQUIRE(f.cpu_read("ADC_DR") == 5461);
   f.run_until(start + 33 * adc_cycle_ps);
-  std::vector<std::byte> current;
-  f.target->model("ADC1")->save(current);
-  auto const now = reflex::serde::bson::deserializer{
-      std::span<std::byte const>{
-          current}}.load<step04_adc_state>();
+  auto const now = live_state(f);
   REQUIRE(now.converting);
   REQUIRE(now.rank == 1);
   step03_adc_state const old{
@@ -1791,4 +1815,385 @@ TEST_CASE("DISCEN with DISCNUM 2 converts three ranks per TIM15 update, ADSTART 
     CHECK(f.isr("EOS") == 0);
     CHECK(f.cr("ADSTART") == 1);
   }
+}
+
+namespace
+{
+constexpr std::uint32_t awd1sgl         = 1u << 22;
+constexpr std::uint32_t awd1en          = 1u << 23;
+constexpr std::uint32_t awd1            = 1u << 7;
+constexpr std::uint32_t awd2            = 1u << 8;
+constexpr std::uint32_t awd3            = 1u << 9;
+constexpr std::uint32_t awd3ie          = 1u << 9;
+constexpr std::uint64_t res12_cycles    = 5 + 15;
+constexpr std::uint64_t downstream_ovs  = 8 * (36 + 15);
+constexpr std::uint32_t oversampled_8x3 = (7u << 16) | (3u << 5) | 1u;
+constexpr std::uint64_t just_before     = 500 * ns;
+
+[[nodiscard]] constexpr auto awd1ch(std::uint32_t channel) -> std::uint32_t
+{
+  return channel << 26;
+}
+
+[[nodiscard]] constexpr auto awdfilt1(std::uint32_t count) -> std::uint32_t
+{
+  return count << 29;
+}
+
+[[nodiscard]] constexpr auto uv_for_code14(std::uint32_t code, std::uint32_t vdda_mv = 3000)
+    -> std::uint32_t
+{
+  return static_cast<std::uint32_t>((std::uint64_t{code} * vdda_mv * 1000 + 16383) / 16384);
+}
+
+constexpr auto out_of_window = uv_for_code14(4 * 2001);
+constexpr auto in_window     = uv_for_code14(4 * 1000);
+
+auto watchdog_flags(adc_fixture const& f) -> std::uint32_t
+{
+  return f.read("ADC_ISR") & (awd1 | awd2 | awd3);
+}
+
+auto watched(
+    adc_fixture const& f,
+    std::uint32_t      channel,
+    std::uint32_t      microvolts,
+    std::uint64_t      cycles = res12_cycles) -> std::uint32_t
+{
+  f.port().drive(static_cast<std::uint8_t>(channel), microvolts);
+  auto const start = f.now();
+  f.start(channel);
+  f.run_until(start + cycles * adc_cycle_ps - just_before);
+  CHECK(f.isr("EOC") == 0);
+  CHECK(watchdog_flags(f) == 0);
+  f.run_until(start + cycles * adc_cycle_ps);
+  CHECK(f.isr("EOC") == 1);
+  auto const flags = watchdog_flags(f);
+  static_cast<void>(f.cpu_read("ADC_DR"));
+  f.write("ADC1", "ADC_ISR", flags);
+  return flags;
+}
+
+struct expected_flags
+{
+  std::uint32_t code;
+  std::uint32_t flags;
+};
+}
+
+TEST_CASE("AWD1 on one channel flags a result strictly outside LTR1 to HTR1 at its EOC, not before")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en | awd1sgl | awd1ch(5));
+  f.write("ADC1", "ADC_LTR1", 4000);
+  f.write("ADC1", "ADC_HTR1", 8000);
+  for(auto const [code, flags] : {
+          expected_flags{999,  awd1},
+          expected_flags{1000, 0   },
+          expected_flags{2000, 0   },
+          expected_flags{2001, awd1},
+  })
+  {
+    CAPTURE(code);
+    CHECK(watched(f, 5, uv_for_code14(4 * code)) == flags);
+  }
+  CHECK(watched(f, 6, out_of_window) == 0);
+}
+
+TEST_CASE("AWD1 on all channels flags the out-of-window rank of a scan at that rank's EOC")
+{
+  adc_fixture const f;
+  f.enable();
+  f.port().drive(4, in_window);
+  f.port().drive(5, out_of_window);
+  f.port().drive(6, in_window);
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
+  f.write("ADC1", "ADC_HTR1", 8000);
+  f.write("ADC1", "ADC_SQR1", 2u | (4u << 6) | (5u << 12) | (6u << 18));
+  auto const start = f.now();
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  f.run_until(start + res12_cycles * adc_cycle_ps);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(watchdog_flags(f) == 0);
+  f.run_until(start + 2 * res12_cycles * adc_cycle_ps - just_before);
+  CHECK(watchdog_flags(f) == 0);
+  f.run_until(start + 2 * res12_cycles * adc_cycle_ps);
+  CHECK(watchdog_flags(f) == awd1);
+  f.write("ADC1", "ADC_ISR", awd1);
+  f.run_until(start + 3 * res12_cycles * adc_cycle_ps);
+  CHECK(f.isr("EOS") == 1);
+  CHECK(watchdog_flags(f) == 0);
+}
+
+TEST_CASE("AWD2 and AWD3 guard the channels of their masks only")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12);
+  f.write("ADC1", "ADC_AWD2CR", 0x24);
+  f.write("ADC1", "ADC_HTR2", 4000);
+  f.write("ADC1", "ADC_AWD3CR", 1u << 3);
+  f.write("ADC1", "ADC_HTR3", 4000);
+  CHECK(watched(f, 3, out_of_window) == awd3);
+  CHECK(watched(f, 5, out_of_window) == awd2);
+  CHECK(watched(f, 2, out_of_window) == awd2);
+  CHECK(watched(f, 4, out_of_window) == 0);
+  CHECK(watched(f, 5, in_window) == 0);
+}
+
+TEST_CASE("AWD3 the downstream way, 8x shift 3 at VDDA 3300, trips at 1499341 uV, then 1398632 uV")
+{
+  adc_fixture const f{u575(), {.vdda_mv = 3300}};
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12);
+  f.write("ADC1", "ADC_CFGR2", oversampled_8x3);
+  f.write("ADC1", "ADC_SMPR1", 4u << 9);
+  f.write("ADC1", "ADC_AWD3CR", 1u << 3);
+  f.write("ADC1", "ADC_LTR3", 0);
+  f.write("ADC1", "ADC_HTR3", 7440);
+  CHECK(watched(f, 3, 26'000, downstream_ovs) == 0);
+  CHECK(watched(f, 3, 1'499'340, downstream_ovs) == 0);
+  CHECK(watched(f, 3, 1'499'341, downstream_ovs) == awd3);
+  f.write("ADC1", "ADC_LTR3", 6944);
+  f.write("ADC1", "ADC_HTR3", 16384);
+  CHECK(watched(f, 3, 2'720'000, downstream_ovs) == 0);
+  CHECK(watched(f, 3, 1'398'633, downstream_ovs) == 0);
+  CHECK(watched(f, 3, 1'398'632, downstream_ovs) == awd3);
+  CHECK(watched(f, 3, 3'600'000, downstream_ovs) == 0);
+}
+
+TEST_CASE("the compared value is the result before alignment: RES 14 as is, RES 8 shifted by 6")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", awd1en);
+  f.write("ADC1", "ADC_HTR1", 8191);
+  CHECK(watched(f, 5, uv_for_code14(8191), 22) == 0);
+  CHECK(watched(f, 5, uv_for_code14(8192), 22) == awd1);
+  f.write("ADC1", "ADC_CFGR1", awd1en | (3u << 2));
+  f.write("ADC1", "ADC_HTR1", 100u << 6);
+  CHECK(watched(f, 5, uv_for_code14(100u << 6), 16) == 0);
+  CHECK(watched(f, 5, uv_for_code14(101u << 6), 16) == awd1);
+}
+
+TEST_CASE("AWDFILT1 n flags from the n + 1-th consecutive out-of-window result, in-window restarts")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en | awd1sgl | awd1ch(5));
+  f.write("ADC1", "ADC_HTR1", awdfilt1(3) | 8000);
+  for(int round = 0; round < 3; ++round)
+  {
+    CHECK(watched(f, 5, out_of_window) == 0);
+  }
+  CHECK(watched(f, 5, in_window) == 0);
+  for(int round = 0; round < 3; ++round)
+  {
+    CHECK(watched(f, 5, out_of_window) == 0);
+  }
+  CHECK(watched(f, 6, in_window) == 0);
+  CHECK(watched(f, 5, out_of_window) == awd1);
+  CHECK(watched(f, 5, out_of_window) == awd1);
+  CHECK(watched(f, 5, in_window) == 0);
+  CHECK(watched(f, 5, out_of_window) == 0);
+}
+
+TEST_CASE("AWDFILT1 7 saturates its count at 8: every result from the eighth on flags, no wrap")
+{
+  adc_fixture const f;
+  f.enable();
+  f.port().drive(5, out_of_window);
+  f.write("ADC1", "ADC_CFGR1", res12 | ovrmod | cont | awd1en);
+  f.write("ADC1", "ADC_HTR1", awdfilt1(7) | 8000);
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  auto const start = f.now();
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  for(std::uint64_t result = 1; result <= 300; ++result)
+  {
+    CAPTURE(result);
+    f.run_until(start + result * res12_cycles * adc_cycle_ps);
+    REQUIRE(watchdog_flags(f) == (result >= 8 ? awd1 : 0u));
+    f.write("ADC1", "ADC_ISR", awd1);
+  }
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  CHECK(live_state(f).filter_count == 8);
+}
+
+TEST_CASE("under OVRMOD 0 a result the overrun discards still sets AWD3 at its EOC")
+{
+  adc_fixture const f;
+  f.enable();
+  f.port().drive(5, in_window);
+  f.write("ADC1", "ADC_CFGR1", res12 | cont);
+  f.write("ADC1", "ADC_AWD3CR", 1u << 5);
+  f.write("ADC1", "ADC_HTR3", 8000);
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  auto const start = f.now();
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  f.run_until(start + 9 * res12_cycles * adc_cycle_ps);
+  CHECK(f.isr("OVR") == 1);
+  CHECK(watchdog_flags(f) == 0);
+  f.port().drive(5, out_of_window);
+  f.run_until(start + 10 * res12_cycles * adc_cycle_ps - just_before);
+  CHECK(watchdog_flags(f) == 0);
+  f.run_until(start + 10 * res12_cycles * adc_cycle_ps);
+  CHECK(watchdog_flags(f) == awd3);
+  CHECK(f.read("ADC_DR") == 1000);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  std::vector<std::uint32_t> results;
+  while(f.isr("EOC") != 0)
+  {
+    results.push_back(f.cpu_read("ADC_DR"));
+  }
+  CHECK(results == std::vector<std::uint32_t>(8, 1000));
+}
+
+TEST_CASE("a changed input alone sets no watchdog flag")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
+  f.write("ADC1", "ADC_HTR1", 8000);
+  f.write("ADC1", "ADC_AWD3CR", 1u << 5);
+  f.write("ADC1", "ADC_HTR3", 8000);
+  f.port().drive(5, out_of_window);
+  f.run_until(f.now() + 100 * us);
+  CHECK(watchdog_flags(f) == 0);
+  CHECK(watched(f, 5, out_of_window) == (awd1 | awd3));
+}
+
+TEST_CASE("AWD3IE raises ADC1_IRQn with the AWD3 flag, writing AWD3 clears both")
+{
+  adc_fixture const f;
+  f.enable();
+  f.port().drive(5, out_of_window);
+  f.write("ADC1", "ADC_CFGR1", res12);
+  f.write("ADC1", "ADC_AWD3CR", 1u << 5);
+  f.write("ADC1", "ADC_HTR3", 8000);
+  f.write("ADC1", "ADC_IER", awd3ie);
+  auto const start = f.now();
+  f.start(5);
+  f.run_until(start + res12_cycles * adc_cycle_ps - just_before);
+  CHECK_FALSE(pending(f));
+  f.run_until(start + res12_cycles * adc_cycle_ps);
+  CHECK(f.isr("AWD3") == 1);
+  CHECK(pending(f));
+  f.write("ADC1", "ADC_ISR", awd3);
+  unpend(f);
+  f.run_until(f.now() + us);
+  CHECK(f.isr("AWD3") == 0);
+  CHECK_FALSE(pending(f));
+}
+
+TEST_CASE("a snapshot with two out-of-window results counted flags the third, in a fresh machine")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
+  f.write("ADC1", "ADC_HTR1", awdfilt1(2) | 8000);
+  CHECK(watched(f, 5, out_of_window) == 0);
+  CHECK(watched(f, 5, out_of_window) == 0);
+  REQUIRE(live_state(f).filter_count == 2);
+  auto const saved = f.target->snapshot();
+  CHECK(watched(f, 5, out_of_window) == awd1);
+  f.target->restore(saved);
+  CHECK(watched(f, 5, out_of_window) == awd1);
+  adc_fixture const other;
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(live_state(other).filter_count == 2);
+  CHECK(watched(other, 5, out_of_window) == awd1);
+}
+
+TEST_CASE("an ADC state saved before the watchdogs loads with the AWDFILT1 count at 0")
+{
+  adc_fixture const f;
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
+  f.write("ADC1", "ADC_HTR1", awdfilt1(1) | 8000);
+  CHECK(watched(f, 5, out_of_window) == 0);
+  auto const now = live_state(f);
+  REQUIRE(now.filter_count == 1);
+  step04_adc_state const old{
+      .input_uv      = now.input_uv,
+      .generation    = now.generation,
+      .start_ps      = now.start_ps,
+      .clock_hz      = now.clock_hz,
+      .divider       = now.divider,
+      .held          = now.held,
+      .sum           = now.sum,
+      .converting    = now.converting,
+      .waiting_clock = now.waiting_clock,
+      .rank          = now.rank,
+      .subgroup_left = now.subgroup_left,
+      .data          = now.data,
+      .dma_stopped   = now.dma_stopped};
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(old);
+  f.target->model("ADC1")->load(bytes);
+  CHECK(live_state(f).filter_count == 0);
+  CHECK(watched(f, 5, out_of_window) == 0);
+  CHECK(watched(f, 5, out_of_window) == awd1);
+}
+
+TEST_CASE("AWDFILT1 with AWD1EN and a DMA mode logs once at the start, a model_error when strict")
+{
+  {
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    f.enable();
+    f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
+    f.write("ADC1", "ADC_HTR1", awdfilt1(1) | 8000);
+    CHECK(watched(f, 5, in_window) == 0);
+    f.write("ADC1", "ADC_CFGR1", res12 | awd1en | dmngt_circular);
+    CHECK(watched(f, 5, in_window) == 0);
+    CHECK(watched(f, 5, in_window) == 0);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].reg == "ADC_HTR1");
+    CHECK(logged[0].message.contains("AWDFILT1"));
+  }
+  adc_fixture const f{u575(), {}, true, true};
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", res12 | awd1en | dmngt_circular);
+  f.write("ADC1", "ADC_HTR1", awdfilt1(1) | 8000);
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
+      popcorn::model_error);
+}
+
+TEST_CASE(
+    "a channel converted with its PCSEL bit clear logs once and converts, a model_error when "
+    "strict")
+{
+  {
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    f.enable();
+    f.write("ADC1", "ADC_CFGR1", res12);
+    f.write("ADC1", "ADC_PCSEL", all_channels & ~(1u << 5));
+    CHECK(watched(f, 6, in_window) == 0);
+    CHECK(logged.empty());
+    CHECK(watched(f, 5, in_window) == 0);
+    REQUIRE(logged.size() == 1);
+    CHECK(logged[0].reg == "ADC_PCSEL");
+    CHECK(logged[0].message.contains("channel 5"));
+    f.port().drive(5, in_window);
+    f.start(5);
+    f.settle();
+    CHECK(f.cpu_read("ADC_DR") == 1000);
+    CHECK(logged.size() == 1);
+  }
+  adc_fixture const f{u575(), {}, true, true};
+  f.enable();
+  f.write("ADC1", "ADC_PCSEL", 0);
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
+      popcorn::model_error);
+  CHECK(f.cr("ADSTART") == 0);
 }

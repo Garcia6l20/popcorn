@@ -24,6 +24,7 @@ PLL2ON = 1 << 26
 ADC12EN = 1 << 10
 ADCDACSEL_PLL2R = 2 << 12
 ADCDACSEL_HSI16 = 4 << 12
+ALL_CHANNELS = 0xF_FFFF
 
 
 def settle(m: popcorn.Machine, duration: int = 200) -> None:
@@ -67,6 +68,7 @@ def at_72_mhz(m: popcorn.Machine) -> None:
 
 
 def enable(m: popcorn.Machine) -> None:
+    m.periph.ADC1.ADC_PCSEL.write(ALL_CHANNELS)
     m.periph.ADC1.ADC_CR.write(ADVREGEN)
     m.periph.ADC1.ADC_CR.write(ADVREGEN | ADEN)
 

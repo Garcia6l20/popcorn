@@ -50,6 +50,8 @@ constexpr std::uint32_t dma_circular        = 3;
 constexpr std::size_t   trigger_selections  = 32;
 constexpr std::uint32_t exten_rising        = 1;
 constexpr std::uint32_t exten_falling       = 2;
+constexpr std::size_t   watchdogs           = 3;
+constexpr std::uint8_t  max_filter_count    = 8;
 
 enum class regular_trigger : std::uint8_t
 {
@@ -110,6 +112,7 @@ struct adc_state
   std::uint8_t                        subgroup_left{};
   std::vector<std::uint32_t>          data;
   bool                                dma_stopped{};
+  std::uint8_t                        filter_count{};
 
   friend auto operator==(adc_state const&, adc_state const&) -> bool = default;
 };
@@ -311,11 +314,27 @@ struct offset_fields
  *        unchanged and log a warning once, a model_error under strict_peripherals. Two settings
  *        RM0456 forbids log a warning once, a model_error under strict_peripherals: an ADSTART
  *        write with ADEN 0 or ADDIS 1, ignored with ADSTART left at 0, and DISCEN with CONT,
- *        converted as DISCEN alone. Only the single DMA request is modelled: the burst request
- *        RM0456 33.4.27 raises at four results is not. A GPDMA channel reading ADC_DR in bursts
- *        of more than one beat starts each burst on the single request, and a beat finding the
- *        FIFO empty reads the last result again. The analog watchdogs are not modelled. A reserved
- * ADC12_CCR.PRESC divides by 256, logged once by ADC12, a model_error under strict_peripherals.
+ *        converted as DISCEN alone. A sequence converting a channel whose ADC_PCSEL bit is
+ *        clear logs a warning once, a model_error under strict_peripherals, and converts it as if
+ *        the bit were set, RM0456 33.4.12. Only the single DMA request is modelled: the burst
+ * request RM0456 33.4.27 raises at four results is not. A GPDMA channel reading ADC_DR in bursts of
+ * more than one beat starts each burst on the single request, and a beat finding the FIFO empty
+ * reads the last result again. A reserved ADC12_CCR.PRESC divides by 256, logged once by ADC12, a
+ * model_error under strict_peripherals.
+ *
+ *        Analog watchdogs, RM0456 33.4.30: each regular conversion's result, after the
+ *        oversampler, is compared before alignment, as Q = result << (2 x RES), the 14-bit frame
+ *        of RM0456 Table 318. A guarded result is out of window when Q < LTRx or Q > HTRx,
+ *        strictly. AWD1 guards the AWD1CH channel with AWD1SGL, every channel without, while
+ *        AWD1EN is set. AWD2 and AWD3 guard the channels set in AWD2CH and AWD3CH. An
+ *        out-of-window result sets AWDx at its EOC, before the result lands, so a result an
+ *        overrun discards still sets it. AWD1 counts consecutive out-of-window results of its
+ *        guarded channels, saturating at 8, and sets AWD1 at each result once the count exceeds
+ *        AWDFILT1: AWDFILT1 n flags from the n + 1-th on. An in-window result restarts the count.
+ *        A changed input alone sets nothing. JAWD1EN guards the injected group, which never
+ *        converts. AWDFILT1 with AWD1EN and DMNGT set gates the DMA requests by the window on
+ *        hardware: not modelled, logged once at the sequence start, a model_error under
+ *        strict_peripherals.
  */
 class adc final : public dispatch_model<adc, adc_state>,
                   public analog_port,
@@ -385,12 +404,15 @@ private:
   void               schedule_sampling_end(std::uint64_t not_before_ps);
   void               finish();
   void               advance(std::uint64_t end_ps, bool last);
+  [[nodiscard]] auto guarded(std::size_t watchdog, std::uint32_t channel) const -> bool;
+  void               watch(std::uint32_t channel, std::uint32_t result);
   void               land(std::uint32_t result);
   void               pop();
   void               abort();
   void               signal();
   void               check_clock_range();
   void               check_unmodelled(std::uint32_t channel);
+  void               check_preselection(std::uint32_t channel);
   void               warn_once(bool& logged, std::string_view reg, std::string_view what);
   void               unmodelled(bool& logged, std::string_view name, std::string_view what);
   void               forbidden(bool& logged, std::string_view name, std::string message);
@@ -436,6 +458,15 @@ private:
   std::array<field_ref, ranks>                 sequence_;
   std::array<field_ref, channels>              sampling_;
   std::array<offset_fields, offsets>           offsets_;
+  std::array<field_ref, channels>              preselection_;
+  field_ref                                    watchdog1_;
+  field_ref                                    watchdog1_single_;
+  field_ref                                    watchdog1_channel_;
+  field_ref                                    watchdog1_filter_;
+  std::array<field_ref, watchdogs>             watchdog_flags_;
+  std::array<field_ref, watchdogs>             watchdog_low_;
+  std::array<field_ref, watchdogs>             watchdog_high_;
+  std::array<field_ref, watchdogs>             watchdog_channels_;
   std::vector<std::pair<field_ref, field_ref>> interrupts_;
   std::uint32_t                                set_only_{};
   std::uint32_t                                clearable_{};
@@ -450,6 +481,8 @@ private:
   bool                                         left_shift_logged_{};
   bool                                         offset_logged_{};
   bool                                         gain_logged_{};
+  bool                                         watchdog_filter_dma_logged_{};
+  bool                                         preselection_logged_{};
 };
 
 constexpr std::array<write_entry<adc>, 5> adc_writes{
@@ -484,8 +517,23 @@ adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
       data_{field("ADC_DR", "RDATA")}, oversampling_{field("ADC_CFGR2", "ROVSE")},
       oversampling_ratio_{field("ADC_CFGR2", "OSR")},
       oversampling_shift_{field("ADC_CFGR2", "OVSS")}, low_frequency_{field("ADC_CFGR2", "LFTRIG")},
-      left_shift_{field("ADC_CFGR2", "LSHIFT")}, gain_{field("ADC_GCOMP", "GCOMP")}
+      left_shift_{field("ADC_CFGR2", "LSHIFT")}, gain_{field("ADC_GCOMP", "GCOMP")},
+      watchdog1_{field("ADC_CFGR1", "AWD1EN")}, watchdog1_single_{field("ADC_CFGR1", "AWD1SGL")},
+      watchdog1_channel_{field("ADC_CFGR1", "AWD1CH")},
+      watchdog1_filter_{field("ADC_HTR1", "AWDFILT1")}
 {
+  for(std::size_t index = 0; index < watchdogs; ++index)
+  {
+    auto const number      = index + 1;
+    watchdog_flags_[index] = field("ADC_ISR", std::format("AWD{}", number));
+    watchdog_low_[index]   = field(std::format("ADC_LTR{}", number), std::format("LTR{}", number));
+    watchdog_high_[index]  = field(std::format("ADC_HTR{}", number), std::format("HTR{}", number));
+    if(index != 0)
+    {
+      watchdog_channels_[index] =
+          field(std::format("ADC_AWD{}CR", number), std::format("AWD{}CH", number));
+    }
+  }
   for(std::size_t rank = 0; rank < ranks; ++rank)
   {
     sequence_[rank] =
@@ -493,6 +541,7 @@ adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
   }
   for(std::size_t index = 0; index < channels; ++index)
   {
+    preselection_[index] = field("ADC_PCSEL", std::format("PCSEL{}", index));
     sampling_[index] = field(index < 10 ? "ADC_SMPR1" : "ADC_SMPR2", std::format("SMP{}", index));
   }
   for(std::size_t index = 0; index < offsets; ++index)
@@ -652,7 +701,8 @@ void adc::reset(register_file& regs, reset_kind)
   }
   abort();
   state_.data.clear();
-  state_.dma_stopped = false;
+  state_.dma_stopped  = false;
+  state_.filter_count = 0;
   request_.resolve();
   signal();
 }
@@ -794,9 +844,21 @@ void adc::prepare()
   {
     unmodelled(mdf_logged_, "ADC_CFGR1", "DMNGT 10: the MDF data path");
   }
+  if(get(regs_, watchdog1_)
+     != 0
+     and get(regs_, watchdog1_filter_)
+     != 0
+     and get(regs_, dma_mode_)
+     != 0)
+  {
+    unmodelled(
+        watchdog_filter_dma_logged_, "ADC_HTR1",
+        "AWDFILT1 with DMNGT: DMA requests gated by the AWD1 window");
+  }
   for(std::size_t rank = 0; rank < length(); ++rank)
   {
     check_unmodelled(channel_at(rank));
+    check_preselection(channel_at(rank));
     require_factory_word(channel_at(rank));
   }
 }
@@ -842,6 +904,18 @@ void adc::check_unmodelled(std::uint32_t channel)
     {
       unmodelled(offset_logged_, offset.reg, "OFFSET: offset of the result");
     }
+  }
+}
+
+void adc::check_preselection(std::uint32_t channel)
+{
+  if(channel < channels and get(regs_, preselection_[channel]) == 0)
+  {
+    forbidden(
+        preselection_logged_, "ADC_PCSEL",
+        std::format(
+            "channel {} converted with its PCSEL bit clear, RM0456 33.4.12: converted as if set",
+            channel));
   }
 }
 
@@ -891,6 +965,7 @@ void adc::finish()
     auto const shift = get(regs_, oversampling_shift_);
     result           = shift == 0 ? state_.sum : (state_.sum + (1u << (shift - 1u))) >> shift;
   }
+  watch(channel(), result);
   land(result);
   auto const last = std::size_t{state_.rank} + 1u >= length();
   if(last)
@@ -923,6 +998,43 @@ void adc::advance(std::uint64_t end_ps, bool last)
     return;
   }
   begin_rank(end_ps);
+}
+
+auto adc::guarded(std::size_t watchdog, std::uint32_t channel) const -> bool
+{
+  if(watchdog == 0)
+  {
+    return get(regs_, watchdog1_)
+        != 0
+       and (get(regs_, watchdog1_single_) == 0 or get(regs_, watchdog1_channel_) == channel);
+  }
+  return channel < channels and (get(regs_, watchdog_channels_[watchdog]) >> channel & 1u) != 0;
+}
+
+void adc::watch(std::uint32_t channel, std::uint32_t result)
+{
+  auto const compared = std::uint64_t{result} << (2 * get(regs_, resolution_));
+  for(std::size_t watchdog = 0; watchdog < watchdogs; ++watchdog)
+  {
+    if(not guarded(watchdog, channel))
+    {
+      continue;
+    }
+    auto out = compared
+             < get(regs_, watchdog_low_[watchdog])
+            or compared
+             > get(regs_, watchdog_high_[watchdog]);
+    if(watchdog == 0)
+    {
+      state_.filter_count =
+          out ? std::min<std::uint8_t>(state_.filter_count + 1u, max_filter_count) : 0;
+      out = state_.filter_count > get(regs_, watchdog1_filter_);
+    }
+    if(out)
+    {
+      update(regs_, watchdog_flags_[watchdog], 1);
+    }
+  }
 }
 
 void adc::land(std::uint32_t result)
