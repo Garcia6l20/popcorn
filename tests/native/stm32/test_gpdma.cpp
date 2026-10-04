@@ -6,12 +6,17 @@
 #include <popcorn/core/snapshot.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <initializer_list>
+#include <iterator>
 #include <ranges>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -485,4 +490,329 @@ TEST_CASE("a snapshot with packed bytes queued restores into a fresh machine to 
   other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
   CHECK(finish_paced(other) == times);
   CHECK(copied_bytes(other, 8) == words);
+}
+
+namespace
+{
+constexpr popcorn::address loop_a = node;
+constexpr popcorn::address loop_b = node + 0x20;
+
+auto llr(std::string_view field) -> std::uint32_t
+{
+  return bit("GPDMA_C0LLR", field);
+}
+
+auto reg_value(stm32_fixture const& f, std::string_view reg) -> std::uint32_t
+{
+  auto const& regs = f.target->peripheral("GPDMA1");
+  auto const  found =
+      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != regs.description().registers.end());
+  return regs.peek(found->offset);
+}
+
+auto source_byte(std::uint32_t index) -> std::uint32_t
+{
+  return (index * 11u + 1u) & 0xffu;
+}
+
+auto long_source() -> stm32_fixture
+{
+  auto f = idle_machine();
+  for(std::uint32_t index = 32; index < 64; ++index)
+  {
+    REQUIRE(f.target->mem().write(copy_from + index, 1, source_byte(index)));
+  }
+  return f;
+}
+
+void place(stm32_fixture const& f, popcorn::address at, std::span<std::uint32_t const> words)
+{
+  for(auto const [index, word] : std::views::enumerate(words))
+  {
+    REQUIRE(f.target->mem().write(at + 4 * static_cast<std::uint32_t>(index), 4, word));
+  }
+}
+
+void start_copy(stm32_fixture const& f, std::uint32_t bytes, std::uint32_t link, std::uint32_t tcem)
+{
+  write(f, "GPDMA_C0TR1", bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", bit("GPDMA_C0TR2", "SWREQ") | tcem * bit("GPDMA_C0TR2", "TCEM"));
+  write(f, "GPDMA_C0BR1", bytes);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0LBAR", node & 0xffff'0000u);
+  write(f, "GPDMA_C0LLR", link);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+}
+
+void suspend(stm32_fixture const& f)
+{
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN") | bit("GPDMA_C0CR", "SUSP"));
+}
+
+void step(stm32_fixture const& f)
+{
+  idle_for(f, std::chrono::nanoseconds{250});
+}
+
+auto bndt_at_block_ends(stm32_fixture const& f, popcorn::address end) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> seen;
+  auto                       last = reg_value(f, "GPDMA_C0DAR");
+  for(int count = 0; count < 2000 and last < end; ++count)
+  {
+    step(f);
+    auto const now = reg_value(f, "GPDMA_C0DAR");
+    if(now != last and (now - copy_to) % 16 == 0)
+    {
+      seen.push_back(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT"));
+    }
+    last = now;
+  }
+  return seen;
+}
+
+auto destination_bytes(stm32_fixture const& f, std::uint32_t length) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t index = 0; index < length; ++index)
+  {
+    auto const byte = f.target->mem().read(copy_to + index, 1);
+    REQUIRE(byte.has_value());
+    out.push_back(static_cast<std::uint32_t>(*byte));
+  }
+  return out;
+}
+
+auto source_bytes(std::initializer_list<std::uint32_t> blocks, std::uint32_t length)
+    -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(auto const first : blocks)
+  {
+    for(std::uint32_t index = 0; index < length; ++index)
+    {
+      out.push_back(source_byte(first + index));
+    }
+  }
+  return out;
+}
+
+auto count_completions(stm32_fixture const& f, int wanted, auto&& on_complete) -> int
+{
+  int completed = 0;
+  for(int count = 0; count < 2000 and completed < wanted; ++count)
+  {
+    step(f);
+    if(f.field("GPDMA1", "GPDMA_C0SR", "TCF") != 0)
+    {
+      write(f, "GPDMA_C0FCR", bit("GPDMA_C0FCR", "TCF"));
+      ++completed;
+      on_complete(completed);
+    }
+  }
+  return completed;
+}
+
+auto restore_loop() -> stm32_fixture
+{
+  auto       f       = long_source();
+  auto const updates = llr("USA") | llr("ULL");
+  place(f, loop_a, std::array{copy_from, updates | (loop_b & 0xfffcu)});
+  place(f, loop_b, std::array{copy_from + 16, updates | (loop_a & 0xfffcu)});
+  start_copy(f, 16, updates | (loop_b & 0xfffcu), 0);
+  return f;
+}
+}
+
+TEST_CASE("an item with UB1 clear and another update bit set restores BNDT on each link")
+{
+  auto f = restore_loop();
+  CHECK(bndt_at_block_ends(f, copy_to + 64) == std::vector<std::uint32_t>{16, 16, 16, 16});
+  suspend(f);
+  CHECK(destination_bytes(f, 64) == source_bytes({0, 16, 0, 16}, 16));
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "USEF") == 0);
+  CHECK(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 1);
+}
+
+TEST_CASE("a last item with every update bit clear and LA set runs again, as long as enabled")
+{
+  auto const link = loop_a & 0xfffcu;
+  SUBCASE("TCEM 0 raises a transfer complete per block")
+  {
+    auto f = long_source();
+    start_copy(f, 8, link, 0);
+    CHECK(count_completions(f, 5, [](int) {}) == 5);
+    suspend(f);
+    CHECK(reg_value(f, "GPDMA_C0SAR") == copy_from + 40);
+    CHECK(reg_value(f, "GPDMA_C0DAR") == copy_to + 40);
+    CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 8);
+    CHECK(reg_value(f, "GPDMA_C0LLR") == link);
+    CHECK(f.field("GPDMA1", "GPDMA_C0SR", "USEF") == 0);
+    CHECK(f.field("GPDMA1", "GPDMA_C0SR", "ULEF") == 0);
+    CHECK(destination_bytes(f, 40) == source_bytes({0}, 40));
+  }
+  SUBCASE("TCEM 3 raises no event, the channel transfer never ends")
+  {
+    auto f = long_source();
+    start_copy(f, 8, link, 3);
+    for(int count = 0; count < 2000 and reg_value(f, "GPDMA_C0SAR") < copy_from + 40; ++count)
+    {
+      step(f);
+    }
+    suspend(f);
+    CHECK(reg_value(f, "GPDMA_C0SAR") == copy_from + 40);
+    CHECK(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 0);
+    CHECK(f.field("GPDMA1", "GPDMA_C0SR", "HTF") == 0);
+    CHECK(f.field("GPDMA1", "GPDMA_C0SR", "USEF") == 0);
+    CHECK(destination_bytes(f, 40) == source_bytes({0}, 40));
+  }
+}
+
+TEST_CASE("an item with ULL clear is recursive: each link reads the same item again")
+{
+  auto       f    = long_source();
+  auto const link = llr("UB1") | llr("USA") | (loop_a & 0xfffcu);
+  place(f, loop_a, std::array{std::uint32_t{8}, copy_from});
+  start_copy(f, 8, link, 0);
+  auto const completed = count_completions(f, 4, [&](int done) {
+    if(done == 1)
+    {
+      place(f, loop_a, std::array{std::uint32_t{8}, copy_from + 16});
+    }
+  });
+  suspend(f);
+  CHECK(completed == 4);
+  CHECK(reg_value(f, "GPDMA_C0LLR") == link);
+  CHECK(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 1);
+  CHECK(destination_bytes(f, 32) == source_bytes({0, 0, 16, 16}, 8));
+}
+
+TEST_CASE("a snapshot one and a half blocks into a restoring list resumes in a fresh machine")
+{
+  auto f = restore_loop();
+  for(int count = 0; count < 2000 and reg_value(f, "GPDMA_C0DAR") < copy_to + 24; ++count)
+  {
+    step(f);
+  }
+  REQUIRE(reg_value(f, "GPDMA_C0DAR") == copy_to + 24);
+  auto const saved = f.target->snapshot();
+  auto const ends  = bndt_at_block_ends(f, copy_to + 64);
+  suspend(f);
+  auto const copy   = destination_bytes(f, 64);
+  auto const status = reg_value(f, "GPDMA_C0SR");
+  CHECK(ends == std::vector<std::uint32_t>{16, 16, 16});
+  CHECK(copy == source_bytes({0, 16, 0, 16}, 16));
+
+  auto other = idle_machine();
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(bndt_at_block_ends(other, copy_to + 64) == ends);
+  suspend(other);
+  CHECK(destination_bytes(other, 64) == copy);
+  CHECK(reg_value(other, "GPDMA_C0SR") == status);
+}
+
+namespace
+{
+struct old_channel_state
+{
+  std::uint32_t generation{};
+  std::uint32_t block_bytes{};
+  std::uint32_t packed{};
+  std::uint8_t  packed_bytes{};
+  bool          half_reported{};
+  bool          scheduled{};
+};
+
+struct old_gpdma_state
+{
+  std::array<old_channel_state, 16> channel{};
+  std::array<std::uint8_t, 128>     request{};
+};
+
+struct new_channel_state
+{
+  std::uint32_t generation{};
+  std::uint32_t block_bytes{};
+  std::uint16_t repeat{};
+  std::uint32_t packed{};
+  std::uint8_t  packed_bytes{};
+  bool          half_reported{};
+  bool          scheduled{};
+};
+
+struct new_gpdma_state
+{
+  std::array<new_channel_state, 16> channel{};
+  std::array<std::uint8_t, 128>     request{};
+};
+}
+
+TEST_CASE("a GPDMA state saved before the block repeat counter loads and resumes mid-block")
+{
+  auto f = paced_pack();
+  pace(f, true);
+  for(int count = 0; count < 200 and f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 6; ++count)
+  {
+    idle_for(f, std::chrono::nanoseconds{250});
+  }
+  pace(f, false);
+  idle_for(f, std::chrono::microseconds{2});
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 6);
+  auto const saved = f.target->snapshot();
+  auto const times = finish_paced(f);
+  auto const words = copied_bytes(f, 8);
+  REQUIRE(words == std::vector<std::uint8_t>(handled_bytes.begin(), handled_bytes.end()));
+
+  old_gpdma_state old{};
+  old.channel[0] = {
+      .generation    = 1,
+      .block_bytes   = 8,
+      .packed        = 0x0281,
+      .packed_bytes  = 2,
+      .half_reported = false,
+      .scheduled     = false,
+  };
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(old);
+
+  auto other = idle_machine();
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  other.target->model("GPDMA1")->load(bytes);
+  CHECK(finish_paced(other) == times);
+  CHECK(copied_bytes(other, 8) == words);
+
+  std::vector<std::byte> now;
+  other.target->model("GPDMA1")->save(now);
+  auto const loaded =
+      reflex::serde::bson::deserializer{std::span<std::byte const>{now}}.load<new_gpdma_state>();
+  CHECK(loaded.channel[0].block_bytes == 8);
+  CHECK(std::ranges::all_of(loaded.channel, [](auto const& c) { return c.repeat == 0; }));
+}
+
+TEST_CASE("a UB1 clear link restores the BNDT the last loaded item started with")
+{
+  auto       f     = long_source();
+  auto const moves = llr("USA") | llr("ULL");
+  place(f, loop_a, std::array{std::uint32_t{8}, copy_from + 16, moves | (loop_b & 0xfffcu)});
+  place(f, loop_b, std::array{copy_from + 32, moves | (loop_b & 0xfffcu)});
+  start_copy(f, 16, llr("UB1") | moves | (loop_a & 0xfffcu), 0);
+  std::vector<std::uint32_t> ends;
+  for(int count = 0; count < 2000 and ends.size() < 4; ++count)
+  {
+    auto const before = reg_value(f, "GPDMA_C0DAR");
+    step(f);
+    auto const now = reg_value(f, "GPDMA_C0DAR");
+    if(now != before and now >= copy_to + 16 and (now - copy_to) % 8 == 0)
+    {
+      ends.push_back(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT"));
+    }
+  }
+  suspend(f);
+  CHECK(ends == std::vector<std::uint32_t>{8, 8, 8, 8});
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "USEF") == 0);
+  auto expected = source_bytes({0}, 16);
+  std::ranges::copy(source_bytes({16, 32, 32}, 8), std::back_inserter(expected));
+  CHECK(destination_bytes(f, 40) == expected);
 }

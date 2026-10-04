@@ -35,6 +35,7 @@ struct channel_state
 {
   std::uint32_t generation{};
   std::uint32_t block_bytes{};
+  std::uint16_t repeat{};
   std::uint32_t packed{};
   std::uint8_t  packed_bytes{};
   bool          half_reported{};
@@ -95,6 +96,7 @@ struct channel_fields
   field_ref                half_exchange;
   std::optional<reg_ref>   tr3;
   std::optional<reg_ref>   br2;
+  std::optional<field_ref> repeat;
   std::optional<field_ref> update_tr3;
   std::optional<field_ref> update_br2;
   irq_line*                line{};
@@ -133,10 +135,14 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  *        and Table 141: SBX, then the width conversion of PAM, 0-padding or sign extension to a
  *        wider destination, right or left truncation to a narrower one, packing and unpacking
  *        LSB first, then DBX and DHX. BNDT counts source bytes. A packing channel needs BNDT to
- *        be a multiple of the destination width. Not modelled: 2D addressing on channels 12 to
- *        15, whose TR3 and BR2 linked-list words are still consumed in RM order, link step mode,
- *        each logging once and running as plain 1D run-to-completion, triggers, and the half
- *        transfer event under TCEM 2 and 3, which is only raised per block under TCEM 0 and 1.
+ *        be a multiple of the destination width. A link with LLR.UB1 = 0 restores BNDT and BRC
+ *        to the values the item started with, RM0456 GPDMA_CxBR1, so a last item with every update
+ *        bit 0 and LA not 0 runs again without reading memory. A link with LLR.ULL = 0 keeps LLR:
+ *        the item is recursive and the next link reads it again. Only LLR = 0 completes the
+ *        channel. Not modelled: 2D addressing on channels 12 to 15, whose TR3 and BR2 linked-list
+ *        words are still consumed in RM order, link step mode, each logging once and running as
+ *        plain 1D run-to-completion, triggers, and the half transfer event under TCEM 2 and 3,
+ *        which is only raised per block under TCEM 0 and 1.
  *        A request level held by a requester across a machine reset is cleared: the requester
  *        announces it again on its next change.
  */
@@ -166,6 +172,7 @@ private:
   auto               deliver(std::size_t ch, std::uint32_t value) -> bool;
   void               block_done(std::size_t ch);
   auto               link(std::size_t ch) -> bool;
+  void               latch(std::size_t ch);
   void               finish(std::size_t ch, flag_index flag);
   void               raise_flag(std::size_t ch, flag_index flag);
   void               interrupts(std::size_t ch);
@@ -277,6 +284,7 @@ gpdma::gpdma(model_context& ctx, peripheral_desc const& desc)
     {
       c.tr3        = reg(p + "TR3");
       c.br2        = reg(p + "BR2");
+      c.repeat     = field(p + "BR1", "BRC");
       c.update_tr3 = field(p + "LLR", "UT3");
       c.update_br2 = field(p + "LLR", "UB2");
     }
@@ -298,6 +306,7 @@ void gpdma::reset(register_file& regs, reset_kind)
     c.scheduled     = false;
     c.half_reported = false;
     c.block_bytes   = 0;
+    c.repeat        = 0;
     c.packed        = 0;
     c.packed_bytes  = 0;
   }
@@ -378,7 +387,7 @@ void gpdma::start(std::size_t ch)
   {
     return;
   }
-  s.block_bytes   = get(regs_, c.bytes);
+  latch(ch);
   s.half_reported = false;
   s.packed        = 0;
   s.packed_bytes  = 0;
@@ -538,14 +547,23 @@ void gpdma::block_done(std::size_t ch)
   {
     raise_flag(ch, transfer_complete);
   }
-  s.block_bytes   = get(regs_, c.bytes);
+  latch(ch);
   s.half_reported = false;
   schedule(ch);
+}
+
+void gpdma::latch(std::size_t ch)
+{
+  auto const& c = ch_[ch];
+  auto&       s = state_.channel[ch];
+  s.block_bytes = get(regs_, c.bytes);
+  s.repeat      = c.repeat ? static_cast<std::uint16_t>(get(regs_, *c.repeat)) : 0;
 }
 
 auto gpdma::link(std::size_t ch) -> bool
 {
   auto&      c    = ch_[ch];
+  auto&      s    = state_.channel[ch];
   auto const llr  = regs_.peek(c.llr.offset);
   auto const base = get(regs_, c.link_base) << 16;
   auto       at   = static_cast<popcorn::address>(base | c.link_address.of(llr) << 2);
@@ -578,9 +596,13 @@ auto gpdma::link(std::size_t ch) -> bool
     finish(ch, link_error);
     return false;
   }
-  if(c.update_link.of(llr) == 0)
+  if(c.update_block.of(llr) == 0)
   {
-    regs_.poke(c.llr.offset, 0);
+    update(regs_, c.bytes, s.block_bytes);
+    if(c.repeat)
+    {
+      update(regs_, *c.repeat, s.repeat);
+    }
   }
   if(not valid(ch))
   {
