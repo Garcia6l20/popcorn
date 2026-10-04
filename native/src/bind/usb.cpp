@@ -11,6 +11,7 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
@@ -397,6 +398,206 @@ void hid_link::forget(std::uint32_t id)
   queues.results.erase(id);
 }
 
+uac_link::uac_link(
+    periph::stm32::usb_host_port&          port,
+    std::shared_ptr<periph::usb::uac2_hub> hub,
+    std::size_t                            function,
+    std::shared_ptr<bool const>            alive)
+    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
+{}
+
+auto uac_link::channel() const -> periph::usb::uac2_channel&
+{
+  if(not *alive_)
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return hub_->channel(function_);
+}
+
+auto uac_link::host() const -> periph::usb::host*
+{
+  if(not *alive_)
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return port_->board_host();
+}
+
+auto uac_link::bound() const -> bool
+{
+  return channel().interface.has_value();
+}
+
+auto uac_link::ready() const -> bool
+{
+  return channel().ready;
+}
+
+auto uac_link::stream(bool mic) const -> uac_stream_record
+{
+  auto const& found =
+      channel().stream(mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+  if(not found.interface)
+  {
+    return {};
+  }
+  return {
+      .present    = true,
+      .interface  = *found.interface,
+      .alternate  = found.alternate,
+      .endpoint   = found.endpoint,
+      .max_packet = found.max_packet,
+      .channels   = found.format.channels,
+      .subslot    = found.format.subslot,
+      .bits       = found.format.bits,
+      .clock      = found.clock,
+      .rates      = found.rates,
+      .rate       = found.rate,
+      .running    = found.running,
+  };
+}
+
+auto uac_link::units() const -> std::vector<uac_unit_record>
+{
+  auto widen = [](std::optional<std::int16_t> value) -> std::optional<std::int32_t> {
+    return value ? std::optional<std::int32_t>{*value} : std::nullopt;
+  };
+  auto field = [](std::optional<usb::uac2_range> const& range,
+                  std::int32_t usb::uac2_range::* member) -> std::optional<std::int32_t> {
+    return range ? std::optional{(*range).*member} : std::nullopt;
+  };
+  std::vector<uac_unit_record> out;
+  for(auto const& unit : channel().units)
+  {
+    uac_unit_record record{
+        .id = unit.id, .channels = unit.channels, .controls = unit.controls, .mute = unit.mute};
+    for(std::size_t index = 0; index < unit.volume.size(); ++index)
+    {
+      record.volume.push_back(widen(unit.volume[index]));
+      record.volume_min.push_back(field(unit.volume_range[index], &usb::uac2_range::min));
+      record.volume_max.push_back(field(unit.volume_range[index], &usb::uac2_range::max));
+      record.volume_res.push_back(field(unit.volume_range[index], &usb::uac2_range::res));
+    }
+    out.push_back(std::move(record));
+  }
+  return out;
+}
+
+void uac_link::write(std::vector<std::int32_t> const& samples)
+{
+  channel().speaker.out.append_range(samples);
+}
+
+auto uac_link::queued() const -> std::uint64_t
+{
+  return channel().speaker.out.size();
+}
+
+auto uac_link::sent_at() const -> std::optional<std::uint64_t>
+{
+  auto const& at = channel().speaker.sent_at;
+  return at ? std::optional{at->ps} : std::nullopt;
+}
+
+auto uac_link::flushes() const -> std::uint64_t
+{
+  return channel().speaker.flushes;
+}
+
+auto uac_link::available() const -> std::uint64_t
+{
+  return channel().mic.in.size();
+}
+
+auto uac_link::drain(std::uint64_t count) -> std::vector<uac_frame_record>
+{
+  return channel().mic.take(count)
+       | std::views::transform([](usb::uac2_frame const& frame) {
+           return uac_frame_record{.samples = frame.samples, .at_ps = frame.at.ps};
+         })
+       | std::ranges::to<std::vector>();
+}
+
+auto uac_link::dropped() const -> std::uint64_t
+{
+  return channel().mic.dropped;
+}
+
+void uac_link::clear()
+{
+  channel().mic.in.clear();
+}
+
+void uac_link::set_frame_limit(std::uint64_t limit)
+{
+  if(limit == 0)
+  {
+    throw config_error("usb", 0, "limit", "a frame limit of at least 1");
+  }
+  channel().mic.set_limit(limit);
+}
+
+auto uac_link::start(bool mic) -> std::uint64_t
+{
+  auto* const owner = host();
+  if(owner == nullptr)
+  {
+    return 0;
+  }
+  return usb::uac2_start(
+      *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+}
+
+void uac_link::stop(bool mic)
+{
+  if(auto* const owner = host())
+  {
+    usb::uac2_stop(
+        *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+  }
+}
+
+auto uac_link::set_feature(
+    std::uint8_t unit,
+    std::uint8_t channel,
+    std::uint8_t control,
+    std::int32_t value) -> std::uint64_t
+{
+  auto* const owner = host();
+  if(owner
+     == nullptr
+     or (control
+         != std::to_underlying(usb::uac2_control::mute)
+         and control
+         != std::to_underlying(usb::uac2_control::volume)))
+  {
+    return 0;
+  }
+  return usb::uac2_set_feature(
+      *owner, *hub_, function_, unit, channel, static_cast<usb::uac2_control>(control), value);
+}
+
+auto uac_link::take_result(std::uint64_t id) -> std::optional<periph::usb::transfer_status>
+{
+  auto& results = channel().results;
+  auto  found   = results.find(id);
+  if(found == results.end())
+  {
+    return std::nullopt;
+  }
+  auto const status = found->second;
+  results.erase(found);
+  return status;
+}
+
+void uac_link::forget(std::uint64_t id)
+{
+  auto& queues = channel();
+  queues.awaited.erase(id);
+  queues.results.erase(id);
+}
+
 usb_link::usb_link(
     periph::stm32::usb_host_port& port,
     detail::usb_hubs              hubs,
@@ -578,6 +779,21 @@ auto usb_link::hid_functions() const -> std::optional<std::uint64_t>
 auto usb_link::hid(std::uint64_t function) const -> hid_link
 {
   return hid_link{port(), hubs_.hid, static_cast<std::size_t>(function), alive_};
+}
+
+auto usb_link::audio_functions() const -> std::optional<std::uint64_t>
+{
+  auto const* const configuration = host().configuration();
+  if(configuration == nullptr)
+  {
+    return std::nullopt;
+  }
+  return usb::uac2_functions(*configuration).size();
+}
+
+auto usb_link::audio(std::uint64_t function) const -> uac_link
+{
+  return uac_link{port(), hubs_.uac2, static_cast<std::size_t>(function), alive_};
 }
 
 auto machine_handle::usb_names() const -> std::vector<std::string>

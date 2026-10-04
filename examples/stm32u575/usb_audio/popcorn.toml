@@ -1,0 +1,15 @@
+[project]
+name = "usb-audio"
+
+[mcu]
+part = "STM32U575QGIx"
+
+[image.app]
+elf = "prebuilt/usb_audio.elf"
+
+[boot]
+until = "main"
+budget = 1_000_000
+
+[board.OTG_FS]
+host = {}

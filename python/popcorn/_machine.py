@@ -1232,7 +1232,9 @@ class Machine:
         control requests not collected yet are dropped. A CDC stream drops the bytes the device
         sent and Python did not read yet, and gets back the bytes written and not yet taken by
         the device as the snapshot had them. A HID stream likewise drops the input reports not
-        read yet and gets back the output reports not yet taken by the device.
+        read yet and gets back the output reports not yet taken by the device. A USB audio
+        function drops the microphone frames not read yet and gets back the speaker samples not
+        yet sent, and its streams run or not as the snapshot had them.
         """
         self._require_idle()
         machine_id = snapshot.machine_id

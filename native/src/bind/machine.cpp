@@ -108,6 +108,7 @@ auto usb_factories(
     options.host.drivers.push_back(
         periph::usb::cdc_acm_factory(channels.cdc, {.dtr = host.dtr, .rts = host.rts}));
     options.host.drivers.push_back(periph::usb::hid_factory(channels.hid));
+    options.host.drivers.push_back(periph::usb::uac2_factory(channels.uac2));
     board.usb_hosts.emplace(name, std::move(options));
   }
   auto all = periph::stm32::factories(board, description);
@@ -266,6 +267,7 @@ void machine_handle::restore(snapshot_handle const& saved)
   {
     hubs.cdc->discard();
     hubs.hid->discard();
+    hubs.uac2->discard();
   }
   machine_->restore(saved.native());
 }

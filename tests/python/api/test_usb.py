@@ -1,7 +1,9 @@
 """The virtual USB host of OTG_FS from Python: wiring, cable, enumeration state, control
-requests, snapshots, the project file, the CDC ACM stream and the HID streams.
+requests, snapshots, the project file, the CDC ACM stream, the HID streams and the USB Audio
+2.0 function.
 
-The firmware is the usb_cdc example's: TinyUSB 0.21.0, a CDC ACM plus HID composite device."""
+The firmware is the usb_cdc example's: TinyUSB 0.21.0, a CDC ACM plus HID composite device. The
+audio tests run the usb_audio example's: a TinyUSB 0.21.0 UAC2 headset, 16 kHz mono 16-bit."""
 
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ pytest_plugins = ["pytester"]
 
 ROOT = Path(__file__).parents[3]
 USB_ELF = ROOT / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
+AUDIO_ELF = ROOT / "examples" / "stm32u575" / "usb_audio" / "prebuilt" / "usb_audio.elf"
 OTG_ELF = ROOT / "examples" / "stm32u575" / "otg_fs" / "prebuilt" / "otg_fs_init.elf"
 BUDGET = 5_000_000
 
@@ -32,11 +35,13 @@ SET_CONTROL_LINE_STATE = 0x22
 
 
 def usb_machine(
-    u575: popcorn.MachineDescription, options: UsbHostOptions | None = None
+    u575: popcorn.MachineDescription,
+    options: UsbHostOptions | None = None,
+    elf: Path = USB_ELF,
 ) -> popcorn.Machine:
     m = popcorn.Machine(
         u575,
-        image=popcorn.Image.elf(USB_ELF),
+        image=popcorn.Image.elf(elf),
         usb={"OTG_FS": options or UsbHostOptions()},
     )
     m.reset()
@@ -648,3 +653,163 @@ def test_hid_wait_ready_runs_until_the_report_descriptor_is_read(
     assert (second.bound, second.ready) == (False, False)
     with pytest.raises(popcorn.UsbTimeout, match="not ready, unbound"):
         asyncio.run(second.wait_ready(for_=ms(5)))
+
+
+def audio_machine(
+    u575: popcorn.MachineDescription, options: UsbHostOptions | None = None
+) -> popcorn.Machine:
+    return usb_machine(u575, options, AUDIO_ELF)
+
+
+def test_audio_functions_exist_before_configuration_and_are_checked_after(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = audio_machine(u575)
+    host = m.periph.OTG_FS.host
+    early = host.audio(1)
+    assert (early.function, early.bound, early.ready, early.feature_units) == (1, False, False, ())
+    assert (early.speaker.bound, early.speaker.format, early.speaker.rate) == (False, None, 0)
+    with pytest.raises(ValueError, match="0 or more"):
+        host.audio(-1)
+    audio = host.audio()
+    asyncio.run(audio.wait_ready(for_=s(2)))
+    assert host.audio() is audio
+    assert repr(audio) == "UacFunction(OTG_FS, 0)"
+    assert (repr(audio.speaker), repr(audio.mic)) == ("UacSpeaker(OTG_FS, 0)", "UacMic(OTG_FS, 0)")
+    with pytest.raises(ValueError, match="1 audio functions, no 2"):
+        host.audio(2)
+
+
+def test_audio_wait_ready_raises_unbound_when_unplugged(u575: popcorn.MachineDescription) -> None:
+    audio = audio_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host.audio()
+    with pytest.raises(popcorn.UsbTimeout) as caught:
+        asyncio.run(audio.wait_ready(for_=ms(5)))
+    assert caught.value.status == "unbound"
+    with pytest.raises(popcorn.UsbError) as refused:
+        asyncio.run(audio.mic.start())
+    assert refused.value.status == "unbound"
+    with pytest.raises(popcorn.UsbError, match="no audio driver"):
+        asyncio.run(audio.set_mute(2, 0, True))
+    asyncio.run(audio.speaker.write([1, 2]))
+    audio.speaker.stop()
+    assert audio.speaker.queued == 0
+
+
+def test_a_stop_during_drain_raises_stopped(u575: popcorn.MachineDescription) -> None:
+    m = audio_machine(u575)
+    speaker = m.periph.OTG_FS.host.audio().speaker
+
+    async def body() -> str:
+        await m.periph.OTG_FS.host.audio().wait_ready(for_=s(2))
+        await speaker.start()
+        await speaker.write([1] * 1600)
+        async with m.running():
+            draining = asyncio.create_task(speaker.drain())
+            await asyncio.sleep(0)
+            speaker.stop()
+            with pytest.raises(popcorn.UsbError) as caught:
+                await draining
+        return caught.value.status
+
+    assert asyncio.run(body()) == "stopped"
+    assert speaker.queued == 0
+
+
+def test_speaker_writes_refuse_bad_samples(u575: popcorn.MachineDescription) -> None:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    speaker = audio.speaker
+    with pytest.raises(ValueError, match="4-byte sample"):
+        asyncio.run(speaker.write([1 << 31]))
+    asyncio.run(audio.wait_ready(for_=s(2)))
+    with pytest.raises(ValueError, match="2-byte sample"):
+        asyncio.run(speaker.write([0x8000]))
+    with pytest.raises(ValueError, match="2-byte sample"):
+        asyncio.run(speaker.write([True]))
+    asyncio.run(speaker.write([-0x8000, 0x7FFF]))
+    assert speaker.queued == 2
+    with pytest.raises(ValueError, match="-32768 to 32767"):
+        asyncio.run(audio.set_volume(2, 0, 0x8000))
+    with pytest.raises(ValueError, match="cannot read -1 frames"):
+        asyncio.run(audio.mic.read_frames(-1))
+
+
+def test_drain_raises_while_the_speaker_does_not_run(u575: popcorn.MachineDescription) -> None:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    asyncio.run(audio.wait_ready(for_=s(2)))
+    asyncio.run(audio.speaker.write([1, 2, 3]))
+    with pytest.raises(popcorn.UsbError) as caught:
+        asyncio.run(audio.speaker.drain())
+    assert caught.value.status == "stopped"
+    assert audio.speaker.queued == 3
+    assert audio.speaker.sent_at is None
+
+
+def test_a_start_inside_running_streams_from_the_background_run(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+
+    async def body() -> int:
+        await audio.wait_ready(for_=s(2))
+        async with m.running():
+            await audio.mic.start()
+            frames = await audio.mic.read_frames(5, for_=ms(20))
+            audio.mic.stop()
+        return len(frames)
+
+    assert asyncio.run(body()) == 5
+    assert not audio.mic.running
+
+
+def test_speaker_samples_written_unplugged_survive_a_restore_into_a_fresh_machine(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = audio_machine(u575, UsbHostOptions(attached=False))
+    asyncio.run(m.periph.OTG_FS.host.audio().speaker.write([5, 6, 7]))
+    saved = popcorn.Snapshot.from_bytes(m.snapshot().to_bytes())
+
+    other = audio_machine(u575, UsbHostOptions(attached=False))
+    host = other.periph.OTG_FS.host
+    speaker = host.audio().speaker
+    asyncio.run(speaker.write([1] * 10))
+    other.restore(saved)
+    assert speaker.queued == 3
+
+    async def body() -> None:
+        await host.attach()
+        audio = host.audio()
+        await audio.wait_ready(for_=s(1))
+        await audio.speaker.start()
+        await audio.speaker.drain(for_=ms(10))
+
+    asyncio.run(body())
+    assert speaker.queued == 0
+    assert speaker.sent_at is not None
+
+
+def test_a_restore_drops_mic_frames_and_keeps_the_streams_running(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+
+    async def start() -> None:
+        await audio.wait_ready(for_=s(2))
+        await audio.mic.start()
+        await m.run(for_=ms(5))
+
+    asyncio.run(start())
+    saved = m.snapshot()
+    asyncio.run(m.run(for_=ms(5)))
+    assert audio.mic.available >= 5
+    audio.mic.stop()
+    assert not audio.mic.running
+    m.restore(saved)
+    assert audio.mic.available == 0
+    assert audio.mic.dropped == 0
+    assert audio.mic.running
+    frames = asyncio.run(audio.mic.read_frames(3, for_=ms(5)))
+    assert len(frames) == 3

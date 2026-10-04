@@ -95,6 +95,7 @@ struct pipe_state
   std::uint32_t               period{1};
   data_pid                    toggle{};
   std::uint64_t               next_poll{};
+  bool                        overran{};
   std::vector<transfer_state> queue{};
 };
 
@@ -1307,6 +1308,15 @@ struct host::impl
           if(type == transfer_type::isochronous)
           {
             pipe->next_poll = s.frame_index + pipe->period;
+            if(not std::exchange(pipe->overran, true))
+            {
+              warn(
+                  std::format(
+                      "USB isochronous pipe {} to endpoint {:#04x}: a {}-byte packet does not "
+                      "fit before the frame's EOPF point, it ends error, as every packet that "
+                      "does not fit on this pipe",
+                      id, pipe->endpoint, size));
+            }
             finish(id, transfer_status::error, cursor);
           }
           continue;

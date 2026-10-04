@@ -26,5 +26,5 @@ sources += [
         "adc.cpp",
     )
 ]
-sources += [here / "usb" / name for name in ("host.cpp", "cdc_acm.cpp", "hid.cpp")]
+sources += [here / "usb" / name for name in ("host.cpp", "cdc_acm.cpp", "hid.cpp", "uac2.cpp")]
 sources += [here / "devices" / name for name in ("at25sf.cpp", "i2c_eeprom.cpp", "i2c_table.cpp")]

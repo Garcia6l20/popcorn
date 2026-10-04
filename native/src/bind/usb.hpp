@@ -4,6 +4,7 @@
 #include <popcorn/periph/usb_cdc_acm.hpp>
 #include <popcorn/periph/usb_hid.hpp>
 #include <popcorn/periph/usb_host.hpp>
+#include <popcorn/periph/usb_uac2.hpp>
 
 #include <reflex/py.hpp>
 
@@ -28,6 +29,8 @@ struct usb_hubs
   std::shared_ptr<periph::usb::cdc_hub> cdc{std::make_shared<periph::usb::cdc_hub>()};
   /** @brief HID channels. */
   std::shared_ptr<periph::usb::hid_hub> hid{std::make_shared<periph::usb::hid_hub>()};
+  /** @brief USB Audio 2.0 channels. */
+  std::shared_ptr<periph::usb::uac2_hub> uac2{std::make_shared<periph::usb::uac2_hub>()};
 };
 }
 
@@ -434,6 +437,207 @@ private:
   std::shared_ptr<bool const>           alive_;
 };
 
+/** @brief One audio streaming direction of an audio function, as the driver found it. */
+struct[[= py::rename{"UacStreamRecord"}]] uac_stream_record
+{
+  /** @brief Whether the bound driver found a streaming interface in this direction. */
+  [[= py::readonly]] bool present{};
+  /** @brief bInterfaceNumber of the audio streaming interface. */
+  [[= py::readonly]] std::uint8_t interface{};
+  /** @brief Alternate setting start() selects. */
+  [[= py::readonly]] std::uint8_t alternate{};
+  /** @brief bEndpointAddress of its isochronous endpoint. */
+  [[= py::readonly]] std::uint8_t endpoint{};
+  /** @brief wMaxPacketSize of that endpoint. */
+  [[= py::readonly]] std::uint16_t max_packet{};
+  /** @brief bNrChannels. */
+  [[= py::readonly]] std::uint8_t channels{};
+  /** @brief bSubslotSize, bytes per sample. */
+  [[= py::readonly]] std::uint8_t subslot{};
+  /** @brief bBitResolution. */
+  [[= py::readonly]] std::uint8_t bits{};
+  /** @brief bClockID of its clock source. */
+  [[= py::readonly]] std::uint8_t clock{};
+  /** @brief Sample rates of the clock's GET_RANGE, in Hz. */
+  [[= py::readonly]] std::vector<std::uint32_t> rates{};
+  /** @brief The rate it runs at, in Hz, 0 before the clock is read. */
+  [[= py::readonly]] std::uint32_t rate{};
+  /** @brief Whether its alternate setting is selected and an isochronous packet goes every
+   * frame. */
+  [[= py::readonly]] bool running{};
+};
+
+/** @brief A feature unit of an audio function and what the driver last read or wrote. */
+struct[[= py::rename{"UacUnitRecord"}]] uac_unit_record
+{
+  /** @brief bUnitID. */
+  [[= py::readonly]] std::uint8_t id{};
+  /** @brief Logical channels, the master channel excluded. */
+  [[= py::readonly]] std::uint8_t channels{};
+  /** @brief bmaControls, master first. */
+  [[= py::readonly]] std::vector<std::uint32_t> controls{};
+  /** @brief Mute per channel, master first, None where not read. */
+  [[= py::readonly]] std::vector<std::optional<bool>> mute{};
+  /** @brief Volume per channel in 1/256 dB, master first, None where not read. */
+  [[= py::readonly]] std::vector<std::optional<std::int32_t>> volume{};
+  /** @brief Volume minimum per channel, None where not read. */
+  [[= py::readonly]] std::vector<std::optional<std::int32_t>> volume_min{};
+  /** @brief Volume maximum per channel, None where not read. */
+  [[= py::readonly]] std::vector<std::optional<std::int32_t>> volume_max{};
+  /** @brief Volume resolution per channel, None where not read. */
+  [[= py::readonly]] std::vector<std::optional<std::int32_t>> volume_res{};
+};
+
+/** @brief One frame a microphone stream received. */
+struct[[= py::rename{"UacFrameRecord"}]] uac_frame_record
+{
+  /** @brief Samples, interleaved, empty for a gap. */
+  [[= py::readonly]] std::vector<std::int32_t> samples{};
+  /** @brief Virtual time of its transaction, in picoseconds. */
+  [[= py::readonly]] std::uint64_t at_ps{};
+};
+
+/**
+ * @brief One USB Audio 2.0 function of a virtual USB host connected to Python, by function
+ *        index: the n-th audio control interface in interface order. Its queues outlive the
+ *        drivers the host binds, so the link works before the device is configured and across an
+ *        unplug. Valid while the machine lives, every method raises ConfigError after.
+ */
+class[[= py::rename{"UacLink"}]] uac_link
+{
+public:
+  /**
+   * @brief Connects to the channel of one function.
+   * @param port The controller.
+   * @param hub The channels of the controller's host.
+   * @param function Function index.
+   * @param alive Cleared when the machine is destroyed.
+   */
+  [[= py::skip]] uac_link(
+      periph::stm32::usb_host_port&          port,
+      std::shared_ptr<periph::usb::uac2_hub> hub,
+      std::size_t                            function,
+      std::shared_ptr<bool const>            alive);
+
+  /** @brief Whether a USB Audio 2.0 driver is bound to the function. */
+  [[= py::doc{"Whether a USB Audio 2.0 driver is bound to the function."}]] [[nodiscard]] auto
+      bound() const -> bool;
+
+  /** @brief Whether the bound driver has ended its probe requests. */
+  [[= py::doc{"Whether the bound driver has ended its probe requests."}]] [[nodiscard]] auto
+      ready() const -> bool;
+
+  /**
+   * @brief One streaming direction.
+   * @param mic The microphone, else the speaker.
+   */
+  [[= py::doc{"The microphone stream when mic, else the speaker stream."}]] [[nodiscard]] auto
+      stream(bool mic) const -> uac_stream_record;
+
+  /** @brief Feature units, in the order the probe reached them. */
+  [[= py::doc{"Feature units, in the order the probe reached them."}]] [[nodiscard]] auto
+      units() const -> std::vector<uac_unit_record>;
+
+  /**
+   * @brief Queues samples for the speaker, interleaved. They go out once the speaker runs.
+   * @param samples Samples, each sent as the low bytes of its two's complement.
+   */
+  [[= py::doc{"Queue interleaved samples for the speaker."}]] void
+      write(std::vector<std::int32_t> const& samples);
+
+  /** @brief Speaker samples written and not yet put in a packet. */
+  [[= py::doc{"Speaker samples written and not yet put in a packet."}]] [[nodiscard]] auto
+      queued() const -> std::uint64_t;
+
+  /** @brief Time of the last speaker packet that carried written samples, in picoseconds. */
+  [[= py::doc{
+      "Time of the last speaker packet that carried written samples, in ps."}]] [[nodiscard]] auto
+      sent_at() const -> std::optional<std::uint64_t>;
+
+  /** @brief Stops that dropped written speaker samples, since the machine was built or the last
+   * restore. */
+  [[= py::doc{"Stops that dropped written speaker samples."}]] [[nodiscard]] auto flushes() const
+      -> std::uint64_t;
+
+  /** @brief Microphone frames received and not read yet. */
+  [[= py::doc{"Microphone frames received and not read yet."}]] [[nodiscard]] auto available() const
+      -> std::uint64_t;
+
+  /**
+   * @brief Takes the oldest microphone frames.
+   * @param count Most frames taken.
+   */
+  [[= py::doc{"Take at most count of the oldest microphone frames."}]] auto
+      drain(std::uint64_t count) -> std::vector<uac_frame_record>;
+
+  /** @brief Microphone frames dropped because the queue held its limit. */
+  [[= py::doc{"Microphone frames dropped because the queue was full."}]] [[nodiscard]] auto
+      dropped() const -> std::uint64_t;
+
+  /** @brief Drops the microphone frames not read yet. */
+  [[= py::doc{"Drop the microphone frames not read yet."}]] void clear();
+
+  /**
+   * @brief Sets the most microphone frames the queue keeps, 65536 by default.
+   * @param limit Frames, at least 1.
+   * @throws config_error when @p limit is 0.
+   */
+  [[= py::doc{"Set the most microphone frames the queue keeps, for tests."}]] void
+      set_frame_limit(std::uint64_t limit);
+
+  /**
+   * @brief Starts a stream through the bound driver.
+   * @param mic The microphone, else the speaker.
+   * @return The handle its result carries, 0 when no driver is bound, the stream is missing,
+   *         has no rate, runs or is starting.
+   */
+  [[= py::doc{"Start a stream, return the id its result carries, 0 when refused."}]] auto
+      start(bool mic) -> std::uint64_t;
+
+  /**
+   * @brief Stops a stream at once and queues SET_INTERFACE 0.
+   * @param mic The microphone, else the speaker.
+   */
+  [[= py::doc{"Stop a stream at once and queue SET_INTERFACE 0."}]] void stop(bool mic);
+
+  /**
+   * @brief Queues SET_CUR of a feature unit control through the bound driver.
+   * @param unit bUnitID.
+   * @param channel 0 for the master channel.
+   * @param control 1 mute, 2 volume.
+   * @param value The value.
+   * @return The handle its result carries, 0 when no driver is bound or the control is not
+   *         writable on that channel.
+   */
+  [[= py::doc{"Queue SET_CUR of a feature unit control, return its id, 0 when refused."}]] auto
+      set_feature(std::uint8_t unit, std::uint8_t channel, std::uint8_t control, std::int32_t value)
+          -> std::uint64_t;
+
+  /**
+   * @brief Takes the result of an operation queued here.
+   * @param id Its handle.
+   * @return How it ended, empty while it runs.
+   */
+  [[= py::doc{"Take how an operation queued here ended, None while it runs."}]] auto
+      take_result(std::uint64_t id) -> std::optional<periph::usb::transfer_status>;
+
+  /**
+   * @brief Stops waiting for an operation queued here: its result, now or later, is dropped.
+   * @param id Its handle.
+   */
+  [[= py::doc{"Stop waiting for an operation queued here, drop its result."}]] void
+      forget(std::uint64_t id);
+
+private:
+  [[nodiscard]] auto channel() const -> periph::usb::uac2_channel&;
+  [[nodiscard]] auto host() const -> periph::usb::host*;
+
+  periph::stm32::usb_host_port*          port_;
+  std::shared_ptr<periph::usb::uac2_hub> hub_;
+  std::size_t                            function_;
+  std::shared_ptr<bool const>            alive_;
+};
+
 /**
  * @brief The virtual USB host of a device controller connected to Python. The host and its
  *        cable live in the controller model and its snapshots: this link only reads them and
@@ -547,6 +751,17 @@ public:
    */
   [[= py::doc{"Connect to the n-th HID function."}]] [[nodiscard]] auto
       hid(std::uint64_t function) const -> hid_link;
+
+  /** @brief USB Audio 2.0 functions of the configuration read, empty before it is read. */
+  [[= py::doc{"USB Audio 2.0 functions of the configuration read, None before it is read."}]]
+      [[nodiscard]] auto audio_functions() const -> std::optional<std::uint64_t>;
+
+  /**
+   * @brief Connects to a USB Audio 2.0 function.
+   * @param function Function index, the n-th audio control interface in interface order.
+   */
+  [[= py::doc{"Connect to the n-th USB Audio 2.0 function."}]] [[nodiscard]] auto
+      audio(std::uint64_t function) const -> uac_link;
 
 private:
   [[nodiscard]] auto host() const -> periph::usb::host&;

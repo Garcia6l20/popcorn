@@ -2,6 +2,7 @@
 #include <popcorn/periph/usb_cdc_acm.hpp>
 #include <popcorn/periph/usb_hid.hpp>
 #include <popcorn/periph/usb_host.hpp>
+#include <popcorn/periph/usb_uac2.hpp>
 
 #include <doctest/doctest.h>
 
@@ -15,9 +16,11 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -88,6 +91,11 @@ struct device_script
   std::optional<std::vector<std::uint8_t>>                       report_descriptor{};
   std::uint32_t                                                  short_descriptors{};
   std::map<std::uint16_t, std::vector<std::uint8_t>>             class_replies{};
+  std::map<
+      std::tuple<std::uint8_t, std::uint8_t, std::uint16_t, std::uint16_t>,
+      std::vector<std::uint8_t>>
+                                                                                 audio_replies{};
+  std::set<std::tuple<std::uint8_t, std::uint8_t, std::uint16_t, std::uint16_t>> audio_stalls{};
 };
 
 auto utf16(std::string_view text) -> std::vector<std::uint8_t>
@@ -195,7 +203,19 @@ public:
     auto const kind = (packet.request_type >> 5) & 3u;
     if(kind == 1)
     {
-      s.stalled = s.stall_class;
+      s.stalled      = s.stall_class;
+      auto const key = std::tuple{packet.request_type, packet.request, packet.value, packet.index};
+      if(s.audio_stalls.contains(key))
+      {
+        s.stalled = true;
+        return usb::handshake::ack;
+      }
+      if(auto const reply = s.audio_replies.find(key); reply != s.audio_replies.end())
+      {
+        s.reply = reply->second;
+        s.reply.resize(std::min<std::size_t>(s.reply.size(), packet.length));
+        return usb::handshake::ack;
+      }
       if(auto const reply = s.class_replies.find(packet.value);
          reply != s.class_replies.end() and (packet.request_type & 0x80u) != 0)
       {
@@ -1398,6 +1418,10 @@ TEST_CASE("an iso packet that would end past EOPF ends in error in its own frame
   }
   CHECK(sent.size() == 5);
   CHECK(dropped == sent);
+  CHECK(
+      std::ranges::count_if(
+          r.warnings, [](std::string const& warning) { return warning.contains("EOPF"); })
+      == 1);
 }
 
 TEST_CASE("a driver cannot close, submit on or reset the toggle of another driver's pipe")
@@ -2541,4 +2565,648 @@ TEST_CASE("an output report above 0xffff bytes on the bus ends in error unsent, 
   CHECK(sent.value == 0x0200);
   CHECK(sent.length == 0xffff);
   CHECK(r.dev.s.class_out.size() == 0xffff);
+}
+
+namespace
+{
+constexpr std::uint16_t audio_clock_index = 0x0400;
+
+struct audio_device
+{
+  std::uint32_t rate{44'100};
+  std::uint8_t  clock_controls{0x07};
+  std::uint8_t  channels{2};
+};
+
+auto le32_bytes(std::uint32_t value) -> std::vector<std::uint8_t>
+{
+  return {
+      static_cast<std::uint8_t>(value), static_cast<std::uint8_t>(value >> 8),
+      static_cast<std::uint8_t>(value >> 16), static_cast<std::uint8_t>(value >> 24)};
+}
+
+auto audio_configuration(audio_device const& device) -> std::vector<std::uint8_t>
+{
+  auto const channels = device.channels;
+  auto const packet   = static_cast<std::uint16_t>((device.rate / 1000 + 1) * 2 * channels);
+  auto const lo       = static_cast<std::uint8_t>(packet);
+  auto const hi       = static_cast<std::uint8_t>(packet >> 8);
+  std::vector<std::uint8_t> bytes{
+      9,
+      2,
+      0,
+      0,
+      3,
+      1,
+      0,
+      0x80,
+      50,
+      8,
+      11,
+      0,
+      3,
+      1,
+      0,
+      0x20,
+      0,
+      9,
+      4,
+      0,
+      0,
+      0,
+      1,
+      1,
+      0x20,
+      0,
+      9,
+      0x24,
+      0x01,
+      0x00,
+      0x02,
+      0x08,
+      0,
+      0,
+      0,
+      8,
+      0x24,
+      0x0a,
+      4,
+      1,
+      device.clock_controls,
+      0,
+      0,
+      17,
+      0x24,
+      0x02,
+      1,
+      0x01,
+      0x01,
+      0,
+      4,
+      channels,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      18,
+      0x24,
+      0x06,
+      2,
+      1,
+      0x0f,
+      0,
+      0,
+      0,
+      0x0f,
+      0,
+      0,
+      0,
+      0x0f,
+      0,
+      0,
+      0,
+      0,
+      12,
+      0x24,
+      0x03,
+      3,
+      0x01,
+      0x03,
+      0,
+      2,
+      4,
+      0,
+      0,
+      0,
+      17,
+      0x24,
+      0x02,
+      0x11,
+      0x01,
+      0x02,
+      0,
+      4,
+      channels,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      12,
+      0x24,
+      0x03,
+      0x13,
+      0x01,
+      0x01,
+      0,
+      0x11,
+      4,
+      0,
+      0,
+      0,
+      9,
+      4,
+      1,
+      0,
+      0,
+      1,
+      2,
+      0x20,
+      0,
+      9,
+      4,
+      1,
+      1,
+      1,
+      1,
+      2,
+      0x20,
+      0,
+      16,
+      0x24,
+      0x01,
+      1,
+      0,
+      1,
+      1,
+      0,
+      0,
+      0,
+      channels,
+      0,
+      0,
+      0,
+      0,
+      0,
+      6,
+      0x24,
+      0x02,
+      1,
+      2,
+      16,
+      7,
+      5,
+      0x01,
+      0x09,
+      lo,
+      hi,
+      1,
+      8,
+      0x25,
+      0x01,
+      0,
+      0,
+      0,
+      0,
+      0,
+      9,
+      4,
+      2,
+      0,
+      0,
+      1,
+      2,
+      0x20,
+      0,
+      9,
+      4,
+      2,
+      1,
+      1,
+      1,
+      2,
+      0x20,
+      0,
+      16,
+      0x24,
+      0x01,
+      0x13,
+      0,
+      1,
+      1,
+      0,
+      0,
+      0,
+      channels,
+      0,
+      0,
+      0,
+      0,
+      0,
+      6,
+      0x24,
+      0x02,
+      1,
+      2,
+      16,
+      7,
+      5,
+      0x82,
+      0x05,
+      lo,
+      hi,
+      1,
+      8,
+      0x25,
+      0x01,
+      0,
+      0,
+      0,
+      0,
+      0};
+  auto const header = std::size_t{9 + 8 + 9};
+  auto const units  = std::size_t{8 + 17 + 18 + 12 + 17 + 12};
+  bytes[header + 6] = static_cast<std::uint8_t>(9 + units);
+  bytes[2]          = static_cast<std::uint8_t>(bytes.size());
+  bytes[3]          = static_cast<std::uint8_t>(bytes.size() >> 8);
+  return bytes;
+}
+
+using audio_key = std::tuple<std::uint8_t, std::uint8_t, std::uint16_t, std::uint16_t>;
+
+void answer_audio(device_script& script, audio_device const& device, std::uint32_t current)
+{
+  script.config_bytes = audio_configuration(device);
+  std::vector<std::uint8_t> range{1, 0};
+  for(auto const value : {device.rate, device.rate, 0u})
+  {
+    range.append_range(le32_bytes(value));
+  }
+  script.audio_replies[audio_key{0xa1, 2, 0x0100, audio_clock_index}] = range;
+  script.audio_replies[audio_key{0xa1, 1, 0x0100, audio_clock_index}] = le32_bytes(current);
+  script.audio_replies[audio_key{0xa1, 1, 0x0200, audio_clock_index}] = {1};
+  for(std::uint16_t channel = 0; channel <= device.channels; ++channel)
+  {
+    script.audio_replies[audio_key{0xa1, 1, static_cast<std::uint16_t>(0x0100 | channel), 0x0200}] =
+        {0};
+    script.audio_replies[audio_key{0xa1, 2, static_cast<std::uint16_t>(0x0200 | channel), 0x0200}] =
+        {1, 0, 0x00, 0xff, 0x00, 0x00, 0x00, 0x01};
+    script.audio_replies[audio_key{0xa1, 1, static_cast<std::uint16_t>(0x0200 | channel), 0x0200}] =
+        {0x80, 0xff};
+  }
+}
+
+auto audio_options_with(std::shared_ptr<usb::uac2_hub> const& hub) -> usb::host_options
+{
+  usb::host_options options;
+  options.drivers.push_back(usb::uac2_factory(hub));
+  return options;
+}
+
+auto setup_of(
+    std::uint8_t  type,
+    std::uint8_t  request,
+    std::uint16_t value,
+    std::uint16_t index,
+    std::uint16_t length) -> usb::setup_packet
+{
+  return {
+      .request_type = type, .request = request, .value = value, .index = index, .length = length};
+}
+
+auto clock_setup(
+    std::uint8_t  type,
+    std::uint8_t  request,
+    std::uint16_t selector,
+    std::uint16_t length) -> usb::setup_packet
+{
+  return setup_of(type, request, selector, audio_clock_index, length);
+}
+
+auto interface_setup(std::uint8_t alternate, std::uint8_t interface) -> usb::setup_packet
+{
+  return setup_of(0x01, 0x0b, alternate, interface, 0);
+}
+
+auto configured_audio(rig& r, std::shared_ptr<usb::uac2_hub> const& hub) -> usb::uac2_channel&
+{
+  r.plug();
+  r.run_until(t0 + second);
+  auto& channel = hub->channel(0);
+  REQUIRE(channel.interface == std::optional<std::uint8_t>{0});
+  REQUIRE(channel.ready);
+  return channel;
+}
+
+auto iso_out_sizes(device_script const& script, std::uint8_t endpoint) -> std::vector<std::size_t>
+{
+  auto const found = script.received.find(endpoint);
+  if(found == script.received.end())
+  {
+    return {};
+  }
+  return found->second
+       | std::views::transform(
+             [](std::vector<std::uint8_t> const& packet) { return packet.size(); })
+       | std::ranges::to<std::vector>();
+}
+}
+
+TEST_CASE(
+    "the UAC2 driver probes each streaming setting as snd-usb-audio, a stalled clock SET_CUR "
+    "included")
+{
+  auto const   hub = std::make_shared<usb::uac2_hub>();
+  rig          r{audio_options_with(hub)};
+  audio_device device{.rate = 48'000};
+  answer_audio(r.dev.s, device, 44'100);
+  auto range = r.dev.s.audio_replies[audio_key{0xa1, 2, 0x0100, audio_clock_index}];
+  range[0]   = 2;
+  range.append_range(le32_bytes(44'100));
+  range.append_range(le32_bytes(44'100));
+  range.append_range(le32_bytes(0));
+  r.dev.s.audio_replies[audio_key{0xa1, 2, 0x0100, audio_clock_index}] = range;
+  r.dev.s.audio_stalls.insert(audio_key{0x21, 1, 0x0100, audio_clock_index});
+  auto& channel = configured_audio(r, hub);
+
+  auto const setups = setups_after_configuration(r.dev.s);
+  auto const stream = [](std::uint8_t interface) {
+    return std::vector{clock_setup(0xa1, 2, 0x0100, 2), clock_setup(0xa1, 2, 0x0100, 26),
+                       interface_setup(0, interface),   clock_setup(0xa1, 1, 0x0200, 1),
+                       clock_setup(0xa1, 1, 0x0100, 4), clock_setup(0x21, 1, 0x0100, 4),
+                       interface_setup(1, interface),   interface_setup(0, interface)};
+  };
+  auto expected = stream(1);
+  expected.append_range(stream(2));
+  REQUIRE(setups.size() > expected.size());
+  CHECK(
+      std::vector(setups.begin(), setups.begin() + static_cast<std::ptrdiff_t>(expected.size()))
+      == expected);
+  CHECK(channel.speaker.rates == std::vector<std::uint32_t>{48'000, 44'100});
+  CHECK(channel.speaker.rate == 44'100);
+  CHECK(channel.mic.rate == 44'100);
+  CHECK(channel.speaker.format == usb::uac2_format{.channels = 2, .subslot = 2, .bits = 16});
+  CHECK(channel.mic.interface == std::optional<std::uint8_t>{2});
+
+  auto const& units = channel.units;
+  REQUIRE(units.size() == 1);
+  CHECK(units[0].id == 2);
+  CHECK(units[0].mute == std::vector<std::optional<bool>>{false, false, false});
+  CHECK(units[0].volume == std::vector<std::optional<std::int16_t>>{-128, -128, -128});
+  CHECK(
+      units[0].volume_range[1]
+      == std::optional{
+          usb::uac2_range{.min = -256, .max = 0, .res = 256}
+  });
+  CHECK(r.warnings.empty());
+}
+
+TEST_CASE("a UAC2 speaker at 44.1 kHz sends 44 samples per frame and 45 in one frame of 10")
+{
+  auto const hub = std::make_shared<usb::uac2_hub>();
+  rig        r{audio_options_with(hub)};
+  answer_audio(r.dev.s, {}, 44'100);
+  r.dev.s.iso_endpoints = {2};
+  auto& channel         = configured_audio(r, hub);
+  channel.speaker.out.assign(4 * 441, 0x1234);
+  auto const operation = usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::speaker);
+  REQUIRE(operation != 0);
+  r.run_until(t0 + second + 40 * ms);
+  CHECK(channel.results.at(operation) == usb::transfer_status::completed);
+  CHECK(channel.speaker.running);
+  auto const sizes = iso_out_sizes(r.dev.s, 1);
+  REQUIRE(sizes.size() >= 20);
+  std::vector<std::size_t> expected;
+  for(std::size_t frame = 1; frame <= 20; ++frame)
+  {
+    expected.push_back(frame % 10 == 0 ? 45 * 4 : 44 * 4);
+  }
+  CHECK(std::vector(sizes.begin(), sizes.begin() + 20) == expected);
+  auto const& first = r.dev.s.received[1].front();
+  CHECK(first[0] == 0x34);
+  CHECK(first[1] == 0x12);
+}
+
+TEST_CASE("UAC2 start reads the clock, selects the setting and settles once SET_INTERFACE ends")
+{
+  auto const hub = std::make_shared<usb::uac2_hub>();
+  rig        r{audio_options_with(hub)};
+  answer_audio(r.dev.s, {}, 44'100);
+  auto&      channel = configured_audio(r, hub);
+  auto const old     = r.dev.s.requests.size();
+  CHECK(usb::uac2_start(*r.host, *hub, 1, usb::uac2_direction::speaker) == 0);
+  auto const operation = usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::mic);
+  REQUIRE(operation != 0);
+  CHECK(usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::mic) == 0);
+  r.run_until(t0 + second + 20 * ms);
+  std::vector<usb::setup_packet> sent;
+  for(auto const& record : r.dev.s.requests | std::views::drop(old))
+  {
+    sent.push_back(record.setup);
+  }
+  CHECK(
+      sent
+      == std::vector{
+          clock_setup(0xa1, 1, 0x0200, 1), clock_setup(0xa1, 1, 0x0100, 4),
+          clock_setup(0xa1, 1, 0x0200, 1), interface_setup(1, 2)});
+  CHECK(channel.results.at(operation) == usb::transfer_status::completed);
+  CHECK(channel.mic.running);
+}
+
+TEST_CASE(
+    "UAC2 mic frames keep their time, decode signed samples and count a silent frame as a gap")
+{
+  auto const hub = std::make_shared<usb::uac2_hub>();
+  rig        r{audio_options_with(hub)};
+  answer_audio(r.dev.s, {.channels = 1}, 44'100);
+  r.dev.s.iso_endpoints = {2};
+  auto& channel         = configured_audio(r, hub);
+  REQUIRE(usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::mic) != 0);
+  r.run_until(t0 + second + 20 * ms);
+  REQUIRE(channel.mic.running);
+  channel.mic.in.clear();
+  r.dev.s.in_queue[2].push_back({0x01, 0x00, 0xff, 0xff});
+  r.dev.s.in_queue[2].push_back({});
+  auto const start = *r.dev.s.wake;
+  r.run_until(start + 3 * ms + 500 * us);
+  auto const frames = channel.mic.take(10);
+  REQUIRE(frames.size() >= 3);
+  CHECK(frames[0].samples == std::vector<std::int32_t>{1, -1});
+  CHECK(frames[1].samples.empty());
+  CHECK(frames[2].samples.empty());
+  CHECK(frames[1].at.ps - frames[0].at.ps == ms);
+}
+
+TEST_CASE("UAC2 stop from outside callbacks closes the pipe at once and queues SET_INTERFACE 0")
+{
+  auto const hub = std::make_shared<usb::uac2_hub>();
+  rig        r{audio_options_with(hub)};
+  answer_audio(r.dev.s, {}, 44'100);
+  auto& channel = configured_audio(r, hub);
+  REQUIRE(usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::speaker) != 0);
+  r.run_until(t0 + second + 20 * ms);
+  REQUIRE(channel.speaker.running);
+  channel.speaker.out.assign(1000, 7);
+  auto const packets  = iso_out_sizes(r.dev.s, 1).size();
+  auto const requests = r.dev.s.requests.size();
+  usb::uac2_stop(*r.host, *hub, 0, usb::uac2_direction::speaker);
+  CHECK_FALSE(channel.speaker.running);
+  CHECK(channel.speaker.out.empty());
+  CHECK(r.dev.s.requests.size() == requests);
+  r.run_until(t0 + second + 30 * ms);
+  CHECK(iso_out_sizes(r.dev.s, 1).size() == packets);
+  REQUIRE(r.dev.s.requests.size() == requests + 1);
+  CHECK(r.dev.s.requests.back().setup == interface_setup(0, 1));
+
+  auto const operation = usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::speaker);
+  REQUIRE(operation != 0);
+  usb::uac2_stop(*r.host, *hub, 0, usb::uac2_direction::speaker);
+  CHECK(channel.results.at(operation) == usb::transfer_status::cancelled);
+  r.run_until(t0 + second + 50 * ms);
+  CHECK_FALSE(channel.speaker.running);
+  CHECK(iso_out_sizes(r.dev.s, 1).size() == packets);
+}
+
+TEST_CASE("UAC2 speaker samples are host state: a restore puts back the queued ones, bound or not")
+{
+  auto const hub = std::make_shared<usb::uac2_hub>();
+  rig        a{audio_options_with(hub)};
+  answer_audio(a.dev.s, {}, 44'100);
+  auto& channel = configured_audio(a, hub);
+  REQUIRE(usb::uac2_start(*a.host, *hub, 0, usb::uac2_direction::speaker) != 0);
+  a.run_until(t0 + second + 20 * ms);
+  channel.speaker.out.assign(10 * 44, 5);
+  a.run_until(t0 + second + 22 * ms);
+  auto const queued = channel.speaker.out.size();
+  REQUIRE(queued < 10 * 44);
+  std::vector<std::byte> bytes;
+  a.host->save(bytes);
+  a.run_until(t0 + second + 40 * ms);
+  CHECK(channel.speaker.out.empty());
+
+  hub->discard();
+  a.host->load(bytes);
+  CHECK(channel.speaker.out.size() == queued);
+  CHECK(channel.speaker.running);
+
+  auto const fresh = std::make_shared<usb::uac2_hub>();
+  rig        b{audio_options_with(fresh)};
+  fresh->channel(0).speaker.out.assign(3, 9);
+  std::vector<std::byte> unbound;
+  b.host->save(unbound);
+  fresh->channel(0).speaker.out.assign(8, 1);
+  b.host->load(unbound);
+  CHECK(fresh->channel(0).speaker.out == std::deque<std::int32_t>{9, 9, 9});
+}
+
+TEST_CASE("the UAC2 claim needs an association, as Linux snd-usb-audio does for protocol 0x20")
+{
+  auto bytes  = audio_configuration({});
+  auto parsed = usb::parse_configuration(bytes);
+  REQUIRE(parsed);
+  CHECK(usb::uac2_functions(*parsed) == std::vector<std::uint8_t>{0});
+  CHECK(usb::uac2_claim(*parsed, parsed->interfaces[0]) == std::vector<std::uint8_t>{0, 1, 2});
+  parsed->associations.clear();
+  CHECK(usb::uac2_claim(*parsed, parsed->interfaces[0]).empty());
+}
+
+TEST_CASE("a UAC2 feature unit SET_CUR the device stalls is sent 10 times, as the Linux mixer does")
+{
+  auto const hub = std::make_shared<usb::uac2_hub>();
+  rig        r{audio_options_with(hub)};
+  answer_audio(r.dev.s, {}, 44'100);
+  r.dev.s.audio_stalls.insert(audio_key{0x21, 1, 0x0101, 0x0200});
+  auto&      channel = configured_audio(r, hub);
+  auto const old     = r.dev.s.requests.size();
+  CHECK(usb::uac2_set_feature(*r.host, *hub, 0, 9, 0, usb::uac2_control::mute, 1) == 0);
+  CHECK(usb::uac2_set_feature(*r.host, *hub, 0, 2, 3, usb::uac2_control::mute, 1) == 0);
+  auto const stalled = usb::uac2_set_feature(*r.host, *hub, 0, 2, 1, usb::uac2_control::mute, 1);
+  auto const done = usb::uac2_set_feature(*r.host, *hub, 0, 2, 0, usb::uac2_control::volume, -512);
+  REQUIRE(stalled != 0);
+  REQUIRE(done != 0);
+  r.run_until(t0 + second + 100 * ms);
+  auto const sent = std::ranges::count_if(
+      r.dev.s.requests | std::views::drop(old), [](request_record const& record) {
+        return record.setup.value == 0x0101 and record.setup.request_type == 0x21;
+      });
+  CHECK(sent == 10);
+  CHECK(channel.results.at(stalled) == usb::transfer_status::stalled);
+  CHECK(channel.results.at(done) == usb::transfer_status::completed);
+  CHECK(channel.units[0].volume[0] == std::optional<std::int16_t>{-512});
+  CHECK(channel.units[0].mute[1] == std::optional<bool>{false});
+}
+
+TEST_CASE(
+    "the UAC2 mixer walk stops at an effect unit and skips a feature unit whose source is missing")
+{
+  constexpr std::size_t feature_at   = 9 + 8 + 9 + 9 + 8 + 17;
+  constexpr std::size_t ac_total     = 9 + 8 + 9 + 6;
+  auto const            probed_units = [](std::vector<std::uint8_t> bytes) {
+    auto const hub = std::make_shared<usb::uac2_hub>();
+    rig        r{audio_options_with(hub)};
+    answer_audio(r.dev.s, {}, 44'100);
+    r.dev.s.config_bytes = std::move(bytes);
+    r.plug();
+    r.run_until(t0 + second);
+    REQUIRE(hub->channel(0).ready);
+    return hub->channel(0).units.size();
+  };
+
+  auto effect = audio_configuration({});
+  REQUIRE(effect[feature_at + 2] == 0x06);
+  effect[feature_at + 4] = 5;
+  std::vector<std::uint8_t> const unit{12, 0x24, 0x07, 5, 0x01, 0x00, 0x77, 0, 0, 0, 0, 0};
+  effect.insert(effect.begin() + static_cast<std::ptrdiff_t>(feature_at), unit.begin(), unit.end());
+  effect[ac_total] = static_cast<std::uint8_t>(effect[ac_total] + unit.size());
+  effect[2]        = static_cast<std::uint8_t>(effect.size());
+  effect[3]        = static_cast<std::uint8_t>(effect.size() >> 8);
+  CHECK(probed_units(effect) == 1);
+
+  auto missing            = audio_configuration({});
+  missing[feature_at + 4] = 0x77;
+  CHECK(probed_units(missing) == 0);
+}
+
+TEST_CASE("a UAC2 start is refused while the other stream runs on the same clock at another rate")
+{
+  auto const hub = std::make_shared<usb::uac2_hub>();
+  rig        r{audio_options_with(hub)};
+  answer_audio(r.dev.s, {}, 44'100);
+  auto const get_rate = audio_key{0xa1, 1, 0x0100, audio_clock_index};
+  auto const range    = audio_key{0xa1, 2, 0x0100, audio_clock_index};
+  r.dev.s.audio_replies.erase(get_rate);
+  r.dev.s.audio_stalls.insert(get_rate);
+  auto const full_ranges = [&] {
+    return std::ranges::count_if(r.dev.s.requests, [](request_record const& record) {
+      return record.setup.request == 2 and record.setup.value == 0x0100 and record.setup.length > 2;
+    });
+  };
+  r.plug();
+  auto at = t0;
+  while(full_ranges() == 0 and at < t0 + second)
+  {
+    at += 100 * us;
+    r.run_until(at);
+  }
+  REQUIRE(full_ranges() == 1);
+  std::vector<std::uint8_t> other{1, 0};
+  for(auto const value : {48'000u, 48'000u, 0u})
+  {
+    other.append_range(le32_bytes(value));
+  }
+  r.dev.s.audio_replies[range] = other;
+  r.run_until(t0 + second);
+  auto& channel = hub->channel(0);
+  REQUIRE(channel.ready);
+  REQUIRE(channel.speaker.clock == channel.mic.clock);
+  CHECK(channel.speaker.rate == 44'100);
+  CHECK(channel.mic.rate == 48'000);
+
+  auto const speaker = usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::speaker);
+  REQUIRE(speaker != 0);
+  r.run_until(t0 + second + 30 * ms);
+  CHECK(channel.results.at(speaker) == usb::transfer_status::completed);
+  REQUIRE(channel.speaker.running);
+  auto const requests = r.dev.s.requests.size();
+  CHECK(usb::uac2_start(*r.host, *hub, 0, usb::uac2_direction::mic) == 0);
+  r.run_until(t0 + second + 40 * ms);
+  CHECK_FALSE(channel.mic.running);
+  CHECK(r.dev.s.requests.size() == requests);
 }
