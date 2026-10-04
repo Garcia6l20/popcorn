@@ -18,5 +18,6 @@ add_ll_firmware(
         "idle",
         "tx_fifo_irq",
         "tx_dma",
+        "rx_dma_list",
     ],
 )

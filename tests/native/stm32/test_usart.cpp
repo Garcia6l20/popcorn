@@ -419,3 +419,26 @@ TEST_CASE("a snapshot mid-DMA transmission restores to the same remaining frames
           r.usart1->frames.begin() + static_cast<long>(mark), r.usart1->frames.end()}
       == rest);
 }
+
+TEST_CASE("a circular GPDMA list receives USART2 into a ring with HT and TC under TCEM 2")
+{
+  rig r{"rx_dma_list"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  std::vector<std::uint16_t> sent;
+  for(std::uint16_t index = 0; index < 40; ++index)
+  {
+    sent.push_back(static_cast<std::uint16_t>(0x40u + index));
+  }
+  r.port("USART2").receive(sent);
+  CHECK(
+      r.finish()
+      == std::vector<std::uint32_t>{
+          0x4800'0008, 0x5400'0000, 0x4800'0008, 0x5400'0000, 0x4800'0008});
+  auto const ring = sym("usart_ll", "ring");
+  for(std::uint32_t index = 0; index < 16; ++index)
+  {
+    auto const byte = r.f->target->mem().read(ring + index, 1);
+    REQUIRE(byte.has_value());
+    CHECK(*byte == 0x40u + (index < 8 ? 32u + index : 16u + index));
+  }
+}

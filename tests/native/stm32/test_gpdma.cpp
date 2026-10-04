@@ -13,11 +13,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <initializer_list>
 #include <iterator>
+#include <ostream>
 #include <ranges>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -815,4 +818,209 @@ TEST_CASE("a UB1 clear link restores the BNDT the last loaded item started with"
   auto expected = source_bytes({0}, 16);
   std::ranges::copy(source_bytes({16, 32, 32}, 8), std::back_inserter(expected));
   CHECK(destination_bytes(f, 40) == expected);
+}
+
+namespace
+{
+struct event
+{
+  char          kind{};
+  std::uint32_t moved{};
+
+  friend auto operator==(event const&, event const&) -> bool = default;
+};
+
+auto operator<<(std::ostream& out, event const& seen) -> std::ostream&
+{
+  return out << seen.kind << seen.moved;
+}
+
+auto take_events(stm32_fixture const& f, std::string_view channel, std::uint32_t base)
+    -> std::vector<event>
+{
+  auto const         sr  = std::format("GPDMA_C{}SR", channel);
+  auto const         fcr = std::format("GPDMA_C{}FCR", channel);
+  auto const         dar = std::format("GPDMA_C{}DAR", channel);
+  std::vector<event> out;
+  for(auto const& [kind, flag] : {
+          std::pair{'H', "HTF"},
+          {'T', "TCF"}
+  })
+  {
+    if(f.field("GPDMA1", sr, flag) != 0)
+    {
+      write(f, fcr, bit(fcr, flag));
+      out.push_back({kind, reg_value(f, dar) - base});
+    }
+  }
+  return out;
+}
+
+auto events_until_idle(stm32_fixture const& f) -> std::vector<event>
+{
+  std::vector<event> out;
+  for(int count = 0; count < 4000; ++count)
+  {
+    std::ranges::copy(take_events(f, "0", copy_to), std::back_inserter(out));
+    if(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0)
+    {
+      break;
+    }
+    step(f);
+  }
+  return out;
+}
+
+auto three_items(std::uint32_t tcem) -> stm32_fixture
+{
+  auto       f     = long_source();
+  auto const moves = llr("UB1") | llr("ULL");
+  place(f, loop_a, std::array{std::uint32_t{64}, moves | (loop_b & 0xfffcu)});
+  place(f, loop_b, std::array{std::uint32_t{64}, std::uint32_t{0}});
+  start_copy(f, 64, moves | (loop_a & 0xfffcu), tcem);
+  return f;
+}
+}
+
+TEST_CASE("TCEM 2 raises a half transfer at the half of each item and a complete after each link")
+{
+  auto const f = three_items(2);
+  CHECK(
+      events_until_idle(f)
+      == std::vector<event>{
+          {'H', 32 },
+          {'T', 64 },
+          {'H', 96 },
+          {'T', 128},
+          {'H', 160},
+          {'T', 192}
+  });
+}
+
+TEST_CASE("TCEM 3 raises one half transfer, at the half of the last item, and one complete")
+{
+  auto const f = three_items(3);
+  CHECK(
+      events_until_idle(f)
+      == std::vector<event>{
+          {'H', 160},
+          {'T', 192}
+  });
+}
+
+TEST_CASE("a channel started with BNDT 0 raises a complete at the first load only under TCEM 2")
+{
+  for(std::uint32_t const tcem : {0u, 1u, 2u})
+  {
+    CAPTURE(tcem);
+    auto       f     = long_source();
+    auto const moves = llr("UB1") | llr("ULL");
+    place(f, loop_a, std::array{std::uint32_t{8}, std::uint32_t{0}});
+    start_copy(f, 0, moves | (loop_a & 0xfffcu), tcem);
+    std::vector<event> expected{
+        {'H', 4},
+        {'T', 8}
+    };
+    if(tcem == 2)
+    {
+      expected.insert(expected.begin(), {'T', 0});
+    }
+    CHECK(events_until_idle(f) == expected);
+  }
+}
+
+TEST_CASE("a channel at TCEM 1 whose first item loads TCEM 2 raises nothing at start")
+{
+  auto       f     = long_source();
+  auto const moves = llr("UB1") | llr("ULL");
+  auto const tr2   = bit("GPDMA_C0TR2", "SWREQ") | 2u * bit("GPDMA_C0TR2", "TCEM");
+  place(f, loop_a, std::array{tr2, std::uint32_t{8}, moves | (loop_b & 0xfffcu)});
+  place(f, loop_b, std::array{std::uint32_t{8}, std::uint32_t{0}});
+  start_copy(f, 0, llr("UT2") | moves | (loop_a & 0xfffcu), 1);
+  CHECK(
+      events_until_idle(f)
+      == std::vector<event>{
+          {'H', 4 },
+          {'T', 8 },
+          {'H', 12},
+          {'T', 16}
+  });
+}
+
+TEST_CASE("a circular 1D list of ten requested words raises HT after five and TC after ten")
+{
+  constexpr std::uint32_t self_link = 0x3801'0000;
+  auto                    f         = idle_machine();
+  auto* const             controller =
+      dynamic_cast<popcorn::periph::stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  place(
+      f, loop_a,
+      std::array{
+          std::uint32_t{0x400A'0002}, std::uint32_t{0x8000'0000}, std::uint32_t{40}, copy_from,
+          copy_to, self_link | (loop_b & 0xfffcu)});
+  place(
+      f, loop_b, std::array{std::uint32_t{40}, copy_from, copy_to, self_link | (loop_b & 0xfffcu)});
+  write(f, "GPDMA_C1TR1", 0x400A'0002);
+  write(f, "GPDMA_C1TR2", 0x4000'0000);
+  write(f, "GPDMA_C1BR1", 0);
+  write(f, "GPDMA_C1LBAR", loop_a & 0xffff'0000u);
+  write(f, "GPDMA_C1LLR", 0xF801'0000 | (loop_a & 0xfffcu));
+  write(f, "GPDMA_C1CR", bit("GPDMA_C1CR", "EN"));
+  CHECK(take_events(f, "1", copy_to).empty());
+  std::vector<event> seen;
+  for(std::uint32_t round = 0; round < 3; ++round)
+  {
+    for(std::uint32_t index = 0; index < 10; ++index)
+    {
+      REQUIRE(f.target->mem().write(copy_from, 4, 0x100u * round + index));
+      controller->on_request(0, true);
+      idle_for(f, std::chrono::nanoseconds{1'500});
+      controller->on_request(0, false);
+      idle_for(f, std::chrono::microseconds{1});
+      for(auto const found : take_events(f, "1", copy_to))
+      {
+        seen.push_back({found.kind, 10 * round + index + 1});
+      }
+    }
+  }
+  CHECK(
+      seen
+      == std::vector<event>{
+          {'H', 5 },
+          {'T', 10},
+          {'H', 15},
+          {'T', 20},
+          {'H', 25},
+          {'T', 30}
+  });
+  for(std::uint32_t index = 0; index < 10; ++index)
+  {
+    auto const word = f.target->mem().read(copy_to + 4 * index, 4);
+    REQUIRE(word.has_value());
+    CHECK(*word == 0x200u + index);
+  }
+  CHECK(f.field("GPDMA1", "GPDMA_C1CR", "EN") == 1);
+}
+
+TEST_CASE("a first item loading BNDT 0 and LLR 0 is a user error with no complete under TCEM 2")
+{
+  auto f = long_source();
+  place(f, loop_a, std::array{std::uint32_t{0}, std::uint32_t{0}});
+  start_copy(f, 0, llr("UB1") | llr("ULL") | (loop_a & 0xfffcu), 2);
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "USEF") == 1);
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 0);
+  CHECK(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0);
+}
+
+TEST_CASE("an odd block raises its half transfer once the rounded-up half is moved")
+{
+  auto f = long_source();
+  start_copy(f, 7, 0, 0);
+  CHECK(
+      events_until_idle(f)
+      == std::vector<event>{
+          {'H', 4},
+          {'T', 7}
+  });
 }

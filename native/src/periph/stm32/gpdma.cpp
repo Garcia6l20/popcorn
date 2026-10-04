@@ -141,8 +141,10 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  *        the item is recursive and the next link reads it again. Only LLR = 0 completes the
  *        channel. Not modelled: 2D addressing on channels 12 to 15, whose TR3 and BR2 linked-list
  *        words are still consumed in RM order, link step mode, each logging once and running as
- *        plain 1D run-to-completion, triggers, and the half transfer event under TCEM 2 and 3,
- *        which is only raised per block under TCEM 0 and 1.
+ *        plain 1D run-to-completion, and triggers. The half transfer event rises at the half of
+ *        each block under TCEM 0, 1 and 2, and only in the last item, the one running with LLR = 0,
+ *        under TCEM 3. A channel enabled with BNDT 0 raises the complete transfer event once its
+ *        first item is loaded when its TCEM before that load is 2, and no event under 0 and 1.
  *        A request level held by a requester across a machine reset is cleared: the requester
  *        announces it again on its next change.
  */
@@ -383,9 +385,17 @@ void gpdma::start(std::size_t ch)
     warn_once(ch, unsupported::two_d);
   }
   update(regs_, c.idle, 0);
-  if(get(regs_, c.bytes) == 0 and not link(ch))
+  if(get(regs_, c.bytes) == 0)
   {
-    return;
+    auto const mode = get(regs_, c.event_mode);
+    if(not link(ch))
+    {
+      return;
+    }
+    if(mode == 2)
+    {
+      raise_flag(ch, transfer_complete);
+    }
   }
   latch(ch);
   s.half_reported = false;
@@ -512,7 +522,9 @@ void gpdma::burst(std::size_t ch)
     update(regs_, c.bytes, get(regs_, c.bytes) - sw);
   }
   auto const mode = get(regs_, c.event_mode);
-  if(mode < 2 and not s.half_reported and get(regs_, c.bytes) * 2 <= s.block_bytes)
+  auto const last = regs_.peek(c.llr.offset) == 0;
+  auto const half = mode < 3 or last;
+  if(half and not s.half_reported and get(regs_, c.bytes) * 2 <= s.block_bytes)
   {
     s.half_reported = true;
     raise_flag(ch, half_transfer);

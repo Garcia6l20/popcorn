@@ -25,6 +25,8 @@ void idle(void);
 void tx_fifo_irq(void);
 void tx_dma(void);
 void GPDMA1_Channel0_IRQHandler(void);
+void rx_dma_list(void);
+void GPDMA1_Channel3_IRQHandler(void);
 
 void idle(void)
 {
@@ -301,6 +303,71 @@ void tx_dma(void)
   {
   }
   LOG(dma_done);
+  DONE();
+}
+
+#define LIST_UPDATE \
+  (LL_DMA_UPDATE_CBR1 | LL_DMA_UPDATE_CSAR | LL_DMA_UPDATE_CDAR | LL_DMA_UPDATE_CLLR)
+#define RING_BYTES 16u
+
+uint8_t                  ring[RING_BYTES];
+static uint32_t          rx_node0[6] __attribute__((aligned(4)));
+static uint32_t          rx_node1[4] __attribute__((aligned(4)));
+static volatile uint32_t rx_events;
+
+void GPDMA1_Channel3_IRQHandler(void)
+{
+  uint32_t const moved = RING_BYTES - LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_3);
+  if(LL_DMA_IsActiveFlag_HT(GPDMA1, LL_DMA_CHANNEL_3))
+  {
+    LL_DMA_ClearFlag_HT(GPDMA1, LL_DMA_CHANNEL_3);
+    LOG(0x48000000u | moved);
+    ++rx_events;
+  }
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_3))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_3);
+    LOG(0x54000000u | moved);
+    ++rx_events;
+  }
+}
+
+void rx_dma_list(void)
+{
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART2_CLKSOURCE_PCLK1);
+  init(USART2, 115200);
+  enable(USART2);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  uint32_t const source = (uint32_t)&USART2->RDR;
+  uint32_t const next   = LIST_UPDATE | ((uint32_t)rx_node1 & 0xfffcu);
+  rx_node0[0]           = LL_DMA_SRC_FIXED | LL_DMA_DEST_INCREMENT;
+  rx_node0[1]           = LL_DMA_TCEM_EACH_LLITEM_TRANSFER
+                        | LL_DMA_DIRECTION_PERIPH_TO_MEMORY
+                        | LL_GPDMA1_REQUEST_USART2_RX;
+  rx_node0[2]           = RING_BYTES;
+  rx_node0[3]           = source;
+  rx_node0[4]           = (uint32_t)ring;
+  rx_node0[5]           = next;
+  rx_node1[0]           = RING_BYTES;
+  rx_node1[1]           = source;
+  rx_node1[2]           = (uint32_t)ring;
+  rx_node1[3]           = next;
+  LL_DMA_SetTransferEventMode(GPDMA1, LL_DMA_CHANNEL_3, LL_DMA_TCEM_RPT_BLK_TRANSFER);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_3, 0);
+  LL_DMA_SetLinkedListBaseAddr(GPDMA1, LL_DMA_CHANNEL_3, (uint32_t)rx_node0 & 0xffff0000u);
+  LL_DMA_ConfigLinkUpdate(
+      GPDMA1, LL_DMA_CHANNEL_3, LL_DMA_UPDATE_CTR1 | LL_DMA_UPDATE_CTR2 | LIST_UPDATE,
+      (uint32_t)rx_node0);
+  LL_DMA_EnableIT_HT(GPDMA1, LL_DMA_CHANNEL_3);
+  LL_DMA_EnableIT_TC(GPDMA1, LL_DMA_CHANNEL_3);
+  NVIC_EnableIRQ(GPDMA1_Channel3_IRQn);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_3);
+  LL_USART_EnableDMAReq_RX(USART2);
+  __asm__ volatile("bkpt #3" ::: "memory");
+  while(rx_events < 5)
+  {
+  }
   DONE();
 }
 
