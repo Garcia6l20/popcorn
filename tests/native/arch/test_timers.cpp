@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,6 +31,8 @@ using popcorn::testing::words_at;
 
 constexpr address       icsr         = 0xE000'ED04;
 constexpr address       syst_csr     = 0xE000'E010;
+constexpr address       syst_rvr     = 0xE000'E014;
+constexpr address       syst_cvr     = 0xE000'E018;
 constexpr std::uint32_t pendstset    = 1u << 26;
 constexpr std::uint64_t period       = 4000;
 constexpr std::uint64_t ps_per_instr = 250'000;
@@ -107,6 +110,181 @@ auto tick_entries(arch_fixture const& f) -> std::vector<std::uint64_t>
   }
   return out;
 }
+
+void put(arch_fixture const& f, address at, std::uint32_t value)
+{
+  REQUIRE(f.target->mem().write(at, 4, value));
+}
+
+auto get(arch_fixture const& f, address at) -> std::uint32_t
+{
+  auto const value = f.target->mem().read(at, 4);
+  REQUIRE(value.has_value());
+  return static_cast<std::uint32_t>(*value);
+}
+
+auto sleeping() -> arch_fixture
+{
+  auto f = booted();
+  f.set("pc", fn("tick_1khz"));
+  run_to_instruction(f, f.target->virtual_clock().now().value + 100);
+  return f;
+}
+
+auto now(arch_fixture const& f) -> std::uint64_t
+{
+  return f.target->virtual_clock().now().value;
+}
+
+void tickless_exit(arch_fixture const& f, std::uint32_t remainder, std::uint32_t control)
+{
+  put(f, syst_csr, control & ~1u);
+  put(f, syst_rvr, remainder);
+  put(f, syst_cvr, 0);
+  put(f, syst_csr, control);
+  put(f, syst_rvr, 3999);
+}
+
+struct tickless_idle
+{
+  static constexpr std::uint64_t seconds   = 5;
+  static constexpr std::uint64_t busy      = 200;
+  static constexpr std::uint64_t latency   = 20;
+  static constexpr std::uint32_t countflag = 1u << 16;
+  static constexpr std::uint32_t pendstclr = 1u << 25;
+  static constexpr std::uint32_t processor = 7;
+
+  arch_fixture const& f;
+  bool                core_clock{true};
+  std::uint64_t       stepped{};
+  std::uint64_t       tick_wakes{};
+  std::uint64_t       event_wakes{};
+  std::uint64_t       sleeps{};
+
+  [[nodiscard]] auto divisor() const -> std::uint32_t
+  {
+    return core_clock ? 1 : 8;
+  }
+
+  [[nodiscard]] auto one() const -> std::uint32_t
+  {
+    return static_cast<std::uint32_t>(period) / divisor();
+  }
+
+  [[nodiscard]] auto stopped() const -> std::uint32_t
+  {
+    return core_clock ? 6 : 2;
+  }
+
+  void start() const
+  {
+    put(f, syst_csr, stopped());
+    put(f, syst_rvr, one() - 1);
+    put(f, syst_cvr, 0);
+    put(f, syst_csr, stopped() | 1u);
+  }
+
+  [[nodiscard]] auto sleep(std::uint32_t expected) -> std::uint32_t
+  {
+    ++sleeps;
+    put(f, syst_csr, stopped());
+    auto const left   = get(f, syst_cvr);
+    auto       reload = (left == 0 ? one() : left) + one() * (expected - 1);
+    if((get(f, icsr) & pendstset) != 0)
+    {
+      put(f, icsr, pendstclr);
+      reload -= one();
+    }
+    put(f, syst_rvr, reload);
+    put(f, syst_cvr, 0);
+    put(f, syst_csr, stopped() | 1u);
+    return reload;
+  }
+
+  void wake(std::uint32_t expected, std::uint32_t reload)
+  {
+    put(f, syst_csr, stopped());
+    std::uint32_t complete{};
+    if((get(f, syst_csr) & countflag) != 0)
+    {
+      auto load = (one() - 1) - (reload - get(f, syst_cvr));
+      if(load == 0 or load > one())
+      {
+        load = one() - 1;
+      }
+      put(f, syst_rvr, load);
+      complete = expected - 1;
+      ++tick_wakes;
+    }
+    else
+    {
+      auto left = get(f, syst_cvr);
+      if(not core_clock and left == 0)
+      {
+        left = reload;
+      }
+      auto const done = expected * one() - left;
+      complete        = done / one();
+      put(f, syst_rvr, (complete + 1) * one() - done);
+      ++event_wakes;
+    }
+    put(f, syst_cvr, 0);
+    put(f, syst_csr, processor);
+    if(not core_clock)
+    {
+      put(f, syst_csr, processor & ~1u);
+      if((get(f, syst_csr) & countflag) != 0)
+      {
+        put(f, syst_cvr, 0);
+      }
+    }
+    put(f, syst_rvr, one() - 1);
+    if(not core_clock)
+    {
+      put(f, syst_csr, stopped() | 1u);
+    }
+    stepped += complete;
+  }
+
+  /**
+   * @brief Ticks, rounded up, lost to the reload edges the port does not compensate: on the
+   * processor clock one count at each of the two restarts per sleep, on the external reference one
+   * count at the restart on entry, the restart on wake being latched from the processor clock.
+   */
+  [[nodiscard]] auto edge_loss() const -> std::int64_t
+  {
+    return static_cast<std::int64_t>((sleeps * (core_clock ? 2 : divisor()) + period - 1) / period);
+  }
+
+  /**
+   * @brief Sleeps @p expected ticks at a time for #seconds, woken by events at the instruction
+   *        counts @p next returns or by SysTick, as the FreeRTOS ARMv8-M port does.
+   * @return Ticks the counted tick is behind the ticks of virtual time.
+   */
+  auto drift(std::uint32_t expected, auto next) -> std::int64_t
+  {
+    start();
+    auto const begin  = now(f);
+    auto const before = ticks(f);
+    auto const end    = begin + seconds * 1000 * period;
+    auto       event  = next(begin);
+    while(now(f) < end)
+    {
+      run_to_instruction(f, now(f) + busy);
+      event              = std::max(event, now(f) + busy);
+      auto const reload  = sleep(expected);
+      auto const crossed = now(f) + std::uint64_t{1 + reload} * divisor() + latency;
+      run_to_instruction(f, std::min({event, crossed, end}));
+      if(now(f) >= event)
+      {
+        event = next(event);
+      }
+      wake(expected, reload);
+    }
+    auto const counted = static_cast<std::int64_t>(ticks(f) - before + stepped);
+    return static_cast<std::int64_t>((now(f) - begin) / period) - counted;
+  }
+};
 }
 
 TEST_CASE("SysTick at 1 kHz ticks 1000 times a virtual second on the anchor's phase")
@@ -466,5 +644,167 @@ TEST_CASE("wfe respects PRIMASK: a masked IRQ leaves it asleep unless SEVONPEND 
     REQUIRE(f.target->mem().write(0xE000'E200, 4, 1u << 7));
     REQUIRE(f.run_to_stop().reason == stop_reason::user);
     CHECK(log_of(f) == std::vector<std::uint32_t>{0x7E});
+  }
+}
+
+TEST_CASE("a tickless exit reloads the remainder at the edge and the full tick at the next wrap")
+{
+  auto f = sleeping();
+  tickless_exit(f, 999, 7);
+  auto const written = now(f);
+  auto const before  = ticks(f);
+  CHECK(get(f, syst_rvr) == 3999);
+  run_to_instruction(f, written + 1000 - 100);
+  CHECK(ticks(f) == before);
+  run_to_instruction(f, written + 1000 + 100);
+  CHECK(ticks(f) == before + 1);
+  run_to_instruction(f, written + 1000 + period - 100);
+  CHECK(ticks(f) == before + 1);
+  run_to_instruction(f, written + 1000 + period + 100);
+  CHECK(ticks(f) == before + 2);
+}
+
+TEST_CASE("on the external reference an RVR write before the edge wins, one after it waits")
+{
+  constexpr std::uint64_t divisor = 8;
+  {
+    auto f = sleeping();
+    tickless_exit(f, 999, 3);
+    auto const written = now(f);
+    auto const before  = ticks(f);
+    run_to_instruction(f, written + divisor * 1000 + 100);
+    CHECK(ticks(f) == before);
+    run_to_instruction(f, written + divisor * period - 100);
+    CHECK(ticks(f) == before);
+    run_to_instruction(f, written + divisor * period + 100);
+    CHECK(ticks(f) == before + 1);
+  }
+  {
+    auto f = sleeping();
+    put(f, syst_csr, 2);
+    put(f, syst_rvr, 999);
+    put(f, syst_cvr, 0);
+    put(f, syst_csr, 3);
+    auto const written = now(f);
+    auto const before  = ticks(f);
+    run_to_instruction(f, written + 2 * divisor);
+    CHECK(get(f, syst_cvr) == 998);
+    put(f, syst_rvr, 3999);
+    run_to_instruction(f, written + divisor * 1000 + 100);
+    CHECK(ticks(f) == before + 1);
+    run_to_instruction(f, written + divisor * (1000 + period) - 100);
+    CHECK(ticks(f) == before + 1);
+    run_to_instruction(f, written + divisor * (1000 + period) + 100);
+    CHECK(ticks(f) == before + 2);
+  }
+}
+
+TEST_CASE("a CVR write while enabled reloads RVR as it is at the next processor clock")
+{
+  auto f = sleeping();
+  put(f, syst_rvr, 999);
+  put(f, syst_cvr, 0);
+  CHECK(get(f, syst_cvr) == 999);
+  put(f, syst_rvr, 3999);
+  auto const written = now(f);
+  auto const before  = ticks(f);
+  CHECK(get(f, syst_cvr) == 999);
+  run_to_instruction(f, written + 1000 + 100);
+  CHECK(ticks(f) == before + 1);
+  run_to_instruction(f, written + 1000 + period - 100);
+  CHECK(ticks(f) == before + 1);
+  run_to_instruction(f, written + 1000 + period + 100);
+  CHECK(ticks(f) == before + 2);
+}
+
+TEST_CASE("a switch to the external reference after the reload edge counts on from the reload")
+{
+  auto f = sleeping();
+  put(f, syst_rvr, 999);
+  put(f, syst_cvr, 0);
+  put(f, syst_csr, 3);
+  auto const written = now(f);
+  auto const before  = ticks(f);
+  CHECK(get(f, syst_cvr) == 999);
+  run_to_instruction(f, written + 8 * 999 - 4);
+  CHECK(ticks(f) == before);
+  run_to_instruction(f, written + 8 * 999 + 4);
+  CHECK(ticks(f) == before + 1);
+}
+
+TEST_CASE("a snapshot inside a tickless exit restores the reload it had latched or not")
+{
+  auto f = sleeping();
+  put(f, syst_csr, 6);
+  put(f, syst_rvr, 999);
+  put(f, syst_cvr, 0);
+  put(f, syst_csr, 7);
+  auto const enabled = core::encode_snapshot(f.target->snapshot().data());
+  put(f, syst_rvr, 3999);
+  auto const latched = core::encode_snapshot(f.target->snapshot().data());
+  auto const written = now(f);
+  auto const before  = ticks(f);
+  for(auto const* bytes : {&enabled, &latched})
+  {
+    CAPTURE(bytes == &latched);
+    auto other = booted();
+    other.target->reset();
+    other.target->restore(core::snapshot{core::decode_snapshot(*bytes)});
+    if(bytes == &enabled)
+    {
+      put(other, syst_rvr, 3999);
+    }
+    REQUIRE(get(other, syst_rvr) == 3999);
+    run_to_instruction(other, written + 1000 + 100);
+    CHECK(ticks(other) == before + 1);
+    run_to_instruction(other, written + 1000 + period - 100);
+    CHECK(ticks(other) == before + 1);
+    run_to_instruction(other, written + 1000 + period + 100);
+    CHECK(ticks(other) == before + 2);
+  }
+}
+
+namespace
+{
+auto every_ms(std::uint64_t at) -> std::uint64_t
+{
+  return at + period;
+}
+
+auto irregular()
+{
+  return [seed = std::uint32_t{12345}](std::uint64_t at) mutable {
+    seed = seed * 1'103'515'245u + 12'345u;
+    return at + 1200 + (seed >> 8) % 60'000;
+  };
+}
+}
+
+TEST_CASE("a tickless idle loses only the uncompensated reload edges against virtual time")
+{
+  for(auto const core_clock : {true, false})
+  {
+    CAPTURE(core_clock);
+    {
+      auto          f = sleeping();
+      tickless_idle idle{.f = f, .core_clock = core_clock};
+      auto const    drift = idle.drift(10, every_ms);
+      MESSAGE("woken every 1 ms, ticks behind: " << drift << ", edge loss: " << idle.edge_loss());
+      CHECK(std::abs(drift - idle.edge_loss()) <= 1);
+      if(core_clock)
+      {
+        CHECK(drift <= static_cast<std::int64_t>(tickless_idle::seconds));
+      }
+    }
+    {
+      auto          f = sleeping();
+      tickless_idle idle{.f = f, .core_clock = core_clock};
+      auto const    drift = idle.drift(8, irregular());
+      MESSAGE("woken irregularly, ticks behind: " << drift << ", edge loss: " << idle.edge_loss());
+      CHECK(idle.tick_wakes > 0);
+      CHECK(idle.event_wakes > 0);
+      CHECK(std::abs(drift - idle.edge_loss()) <= 1);
+      CHECK(drift <= static_cast<std::int64_t>(tickless_idle::seconds));
+    }
   }
 }

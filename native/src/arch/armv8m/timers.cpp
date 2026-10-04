@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <tuple>
 
 namespace popcorn::arch::armv8m
@@ -24,6 +25,14 @@ auto merge(std::uint32_t old, std::uint32_t value, std::uint32_t mask) noexcept 
 {
   return (old & ~mask) | (value & mask);
 }
+
+void take_passed_reload(systick_state& s, std::uint64_t t) noexcept
+{
+  if(systick::reload_passed(s, t))
+  {
+    s.reload = s.rvr;
+  }
+}
 }
 
 auto cortex_m::systick_ticks() const -> std::uint64_t
@@ -36,6 +45,7 @@ auto cortex_m::read_systick(std::uint32_t offset) -> std::uint32_t
 {
   auto&      s = state_.systick;
   auto const t = systick_ticks();
+  take_passed_reload(s, t);
   switch(offset)
   {
     case 0x010:
@@ -56,11 +66,14 @@ auto cortex_m::read_systick(std::uint32_t offset) -> std::uint32_t
 
 void cortex_m::write_systick(std::uint32_t offset, std::uint32_t value, std::uint32_t mask)
 {
-  auto&      s       = state_.systick;
-  auto const now     = context_->clock.now().value;
-  auto const t       = systick_ticks();
+  auto&      s   = state_.systick;
+  auto const now = context_->clock.now().value;
+  auto const t   = systick_ticks();
+  take_passed_reload(s, t);
+  auto const csr     = s.csr;
   auto const current = systick::value_at(s, t);
   auto const flag    = systick::countflag(s, t);
+  auto const pending = t < systick::start_tick(s) ? s.reload : std::nullopt;
   if(systick::interrupting(s) and systick::crossings_through(s, t) > s.fired)
   {
     set_exception_pending(exc_systick, true);
@@ -73,12 +86,20 @@ void cortex_m::write_systick(std::uint32_t offset, std::uint32_t value, std::uin
   {
     s.rvr = merge(s.rvr, value, mask & syst_rvr_writable);
   }
-  auto const cleared = offset == 0x018;
-  s.anchor           = now;
-  s.anchor_value     = cleared ? 0 : current;
-  s.flag             = not cleared and flag;
-  s.flag_since       = 0;
-  s.fired            = 0;
+  auto const cleared    = offset == 0x018;
+  auto const running    = (s.csr & systick::enable) != 0;
+  auto const same_clock = ((csr ^ s.csr) & systick::clksource) == 0;
+  s.anchor              = now;
+  s.anchor_value        = cleared ? 0 : current;
+  s.reload              = std::nullopt;
+  if(not cleared and running and same_clock and pending)
+  {
+    s.anchor_value = 0;
+    s.reload       = pending;
+  }
+  s.flag       = not cleared and flag;
+  s.flag_since = 0;
+  s.fired      = 0;
   ++generation_;
   arm_systick();
 }

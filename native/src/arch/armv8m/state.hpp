@@ -132,6 +132,9 @@ struct systick_state
   std::uint64_t anchor{};
   /** @brief Counter value at the anchor, and the frozen value while disabled. */
   std::uint32_t anchor_value{};
+  /** @brief RVR the counter took at the reload edge one tick after the anchor, set when an access
+   *         reached the counter at 0 after that edge. Empty when that reload takes RVR. */
+  std::optional<std::uint32_t> reload{};
   /** @brief Tick count since the anchor of the last COUNTFLAG clear. */
   std::uint64_t flag_since{};
   /** @brief COUNTFLAG carried over from before the anchor. */

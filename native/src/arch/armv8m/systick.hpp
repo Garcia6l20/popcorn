@@ -47,7 +47,22 @@ inline constexpr std::uint32_t countflag_bit = 1u << 16;
       std::floor(static_cast<long double>(elapsed) * cpi / static_cast<long double>(divisor(s))));
 }
 
-/** @brief Counter value @p t ticks after the anchor, the frozen value while disabled. */
+/** @brief Tick from which the counter counts down from start_value(): 1 after a latched reload. */
+[[nodiscard]] constexpr auto start_tick(systick_state const& s) noexcept -> std::uint64_t
+{
+  return s.reload ? 1 : 0;
+}
+
+/** @brief Counter value at start_tick(). */
+[[nodiscard]] constexpr auto start_value(systick_state const& s) noexcept -> std::uint32_t
+{
+  return s.reload.value_or(s.anchor_value);
+}
+
+/**
+ * @brief Counter value @p t ticks after the anchor, the frozen value while disabled. Before
+ *        start_tick() it is start_value(): the access came after the reload edge.
+ */
 [[nodiscard]] constexpr auto value_at(systick_state const& s, std::uint64_t t) noexcept
     -> std::uint32_t
 {
@@ -55,16 +70,22 @@ inline constexpr std::uint32_t countflag_bit = 1u << 16;
   {
     return s.anchor_value;
   }
-  if(t <= s.anchor_value)
+  if(t < start_tick(s))
   {
-    return static_cast<std::uint32_t>(s.anchor_value - t);
+    return start_value(s);
+  }
+  auto const u     = t - start_tick(s);
+  auto const start = start_value(s);
+  if(u <= start)
+  {
+    return static_cast<std::uint32_t>(start - u);
   }
   if(s.rvr == 0)
   {
     return 0;
   }
   auto const period = std::uint64_t{s.rvr} + 1;
-  return static_cast<std::uint32_t>(s.rvr - (t - s.anchor_value - 1) % period);
+  return static_cast<std::uint32_t>(s.rvr - (u - start - 1) % period);
 }
 
 /**
@@ -78,14 +99,27 @@ inline constexpr std::uint32_t countflag_bit = 1u << 16;
   {
     return std::nullopt;
   }
+  auto const start = std::uint64_t{start_value(s)};
   if(s.rvr == 0)
   {
-    return k == 1 and s.anchor_value > 0 ? std::optional{std::uint64_t{s.anchor_value}}
-                                         : std::nullopt;
+    return k == 1 and start > 0 ? std::optional{start_tick(s) + start} : std::nullopt;
   }
   auto const period = std::uint64_t{s.rvr} + 1;
-  auto const first  = s.anchor_value > 0 ? std::uint64_t{s.anchor_value} : period;
-  return first + (k - 1) * period;
+  auto const first  = start > 0 ? start : period;
+  return start_tick(s) + first + (k - 1) * period;
+}
+
+/**
+ * @brief Whether an access at tick @p t reaches the counter after its reload edge while the
+ *        counter is still at 0 from the anchor. On the processor clock that edge is the next
+ *        cycle, so any later access comes after it, even within the block that set the counter
+ *        to 0.
+ */
+[[nodiscard]] constexpr auto reload_passed(systick_state const& s, std::uint64_t t) noexcept -> bool
+{
+  auto const on_processor_clock = (s.csr & (enable | clksource)) == (enable | clksource);
+  auto const at_anchored_zero   = not s.reload and s.anchor_value == 0 and t == 0;
+  return on_processor_clock and at_anchored_zero;
 }
 
 /** @brief Crossings at or before tick @p t. */

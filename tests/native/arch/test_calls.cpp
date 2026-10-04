@@ -381,7 +381,7 @@ TEST_CASE("a call that reprograms SysTick keeps the new reload, counted once")
       REQUIRE(f.target->mem().write(0xE000'E010, 4, *csr & 0x7u));
     }
     run_for(f, 10 * period + period / 4);
-    CHECK(ticks(f) == t0 + 20);
+    CHECK(ticks(f) == t0 + 19);
   }
 }
 

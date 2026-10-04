@@ -130,6 +130,71 @@ TEST_CASE("SysTick with RVR 0 stops at 0 after its first crossing")
   CHECK_FALSE(systick::crossing(s, 1).has_value());
 }
 
+TEST_CASE("SysTick with a latched reload counts it from tick 1, then RVR from the next wrap")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state s{
+      .csr = systick::enable | systick::tickint | systick::clksource, .rvr = 3999, .reload = 999};
+  CHECK(systick::start_tick(s) == 1u);
+  CHECK(systick::start_value(s) == 999u);
+  CHECK(systick::value_at(s, 0) == 999u);
+  CHECK(systick::value_at(s, 1) == 999u);
+  CHECK(systick::value_at(s, 2) == 998u);
+  CHECK(systick::value_at(s, 1000) == 0u);
+  CHECK(systick::value_at(s, 1001) == 3999u);
+  CHECK(systick::value_at(s, 5000) == 0u);
+  CHECK(systick::value_at(s, 5001) == 3999u);
+  CHECK(systick::crossing(s, 1) == 1000u);
+  CHECK(systick::crossing(s, 2) == 5000u);
+  CHECK(systick::crossing(s, 3) == 9000u);
+  CHECK(systick::crossings_through(s, 999) == 0u);
+  CHECK(systick::crossings_through(s, 1000) == 1u);
+  CHECK(systick::crossings_through(s, 4999) == 1u);
+  CHECK(systick::crossings_through(s, 5000) == 2u);
+
+  s.reload = 0;
+  CHECK(systick::value_at(s, 0) == 0u);
+  CHECK(systick::value_at(s, 1) == 0u);
+  CHECK(systick::value_at(s, 2) == 3999u);
+  CHECK(systick::crossing(s, 1) == 4001u);
+  CHECK(systick::crossing(s, 2) == 8001u);
+  CHECK(systick::crossings_through(s, 4000) == 0u);
+  CHECK(systick::crossings_through(s, 4001) == 1u);
+
+  s.rvr = 0;
+  CHECK_FALSE(systick::crossing(s, 1).has_value());
+  CHECK(systick::crossings_through(s, 10'000) == 0u);
+  CHECK(systick::value_at(s, 10'000) == 0u);
+  s.reload = 5;
+  CHECK(systick::crossing(s, 1) == 6u);
+  CHECK_FALSE(systick::crossing(s, 2).has_value());
+  CHECK(systick::value_at(s, 6) == 0u);
+  CHECK(systick::value_at(s, 100) == 0u);
+  CHECK(systick::crossings_through(s, 5) == 0u);
+  CHECK(systick::crossings_through(s, 100) == 1u);
+
+  s.csr = 0;
+  CHECK(systick::value_at(s, 3) == 0u);
+}
+
+TEST_CASE("a SysTick reload edge counts as passed at tick 0 only on the processor clock")
+{
+  namespace systick = armv8m::systick;
+  armv8m::systick_state s{.csr = systick::enable | systick::clksource, .rvr = 3999};
+  CHECK(systick::reload_passed(s, 0));
+  CHECK_FALSE(systick::reload_passed(s, 1));
+  s.anchor_value = 1;
+  CHECK_FALSE(systick::reload_passed(s, 0));
+  s.anchor_value = 0;
+  s.reload       = 999;
+  CHECK_FALSE(systick::reload_passed(s, 0));
+  s.reload = std::nullopt;
+  s.csr    = systick::enable;
+  CHECK_FALSE(systick::reload_passed(s, 0));
+  s.csr = systick::clksource;
+  CHECK_FALSE(systick::reload_passed(s, 0));
+}
+
 TEST_CASE("SysTick ticks and expiries at a cpi of 1, 2 and 1.5 and the external divisor")
 {
   namespace systick = armv8m::systick;
