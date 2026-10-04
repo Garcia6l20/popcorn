@@ -257,7 +257,7 @@ async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machi
     host = await hid_ready(machine)
     hid = [
         (r.request_type, r.request, r.value, r.index, r.length)
-        for r in host.requests
+        for r in requests
         if r.index in (2, 3) and r.request in (SET_IDLE, 6)
     ]
     config = host.configuration_descriptor
@@ -268,11 +268,13 @@ async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machi
     ]
     assert hid == [
         (0x21, SET_IDLE, 0, 2, 0),
+    earlier = len(machine.periph.OTG_FS.host.requests)
         (0x81, 6, REPORT_DESCRIPTOR, 2, sizes[0]),
+    requests = host.requests[earlier:]
         (0x21, SET_IDLE, 0, 3, 0),
         (0x81, 6, REPORT_DESCRIPTOR, 3, sizes[1]),
     ]
-    assert all(r.status == "completed" for r in host.requests)
+    assert all(r.status == "completed" for r in requests)
     for index, name in enumerate(("desc_hid_report", "desc_hid_io_report")):
         array = machine.var(name)
         assert host.hid(index).report_descriptor == machine.mem.read(array.address, sizes[index])
