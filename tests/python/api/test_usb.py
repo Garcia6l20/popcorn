@@ -17,7 +17,7 @@ import popcorn
 import pytest
 from popcorn import _core
 from popcorn.board import CdcLineCoding, HidStream, UsbHost, UsbHostOptions, UsbState
-from popcorn.units import VirtualTime, ms, s
+from popcorn.units import VirtualTime, ms, s, us
 
 pytest_plugins = ["pytester"]
 
@@ -375,7 +375,7 @@ def test_wait_ready_raises_usb_timeout_unbound_or_not_ready(
     async def configured_then_wait() -> None:
         await host.attach()
         await host.wait_configured(for_=s(1))
-        await cdc.wait_ready(for_=ms(1))
+        await cdc.wait_ready(for_=us(200))
 
     with pytest.raises(popcorn.UsbTimeout, match="not ready, not_ready") as pending:
         asyncio.run(configured_then_wait())
@@ -693,6 +693,65 @@ def test_audio_wait_ready_raises_unbound_when_unplugged(u575: popcorn.MachineDes
     asyncio.run(audio.speaker.write([1, 2]))
     audio.speaker.stop()
     assert audio.speaker.queued == 0
+
+
+def test_a_drain_right_after_start_waits_for_the_first_packet_on_the_bus(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = audio_machine(u575)
+    speaker = m.periph.OTG_FS.host.audio().speaker
+
+    async def body() -> VirtualTime:
+        await m.periph.OTG_FS.host.audio().wait_ready(for_=s(2))
+        await speaker.start()
+        written = m.time
+        await speaker.write([1, 2, 3])
+        await speaker.drain(for_=ms(10))
+        return written
+
+    written = asyncio.run(body())
+    assert speaker.queued == 0
+    assert not speaker.sending
+    sent = speaker.sent_at
+    assert sent is not None
+    assert sent >= written
+
+
+@pytest.mark.parametrize("drop", ["stop", "unplug"])
+def test_a_drain_raises_stopped_when_the_last_packet_is_dropped_before_the_bus(
+    u575: popcorn.MachineDescription, drop: str
+) -> None:
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(AUDIO_ELF),
+        usb={"OTG_FS": UsbHostOptions()},
+        slice_instructions=1000,
+    )
+    m.reset()
+    host = m.periph.OTG_FS.host
+    speaker = host.audio().speaker
+
+    async def body() -> str:
+        await host.audio().wait_ready(for_=s(2))
+        await speaker.start()
+        await speaker.write([1, 2, 3])
+        await m.run(for_=ms(5), stop_when=lambda _: speaker.queued == 0 and speaker.sending)
+        assert speaker.queued == 0 and speaker.sending
+        async with m.running():
+            draining = asyncio.create_task(speaker.drain())
+            await asyncio.sleep(0)
+            assert speaker.sending
+            if drop == "stop":
+                speaker.stop()
+            else:
+                await host.detach()
+            with pytest.raises(popcorn.UsbError) as caught:
+                await draining
+        return caught.value.status
+
+    assert asyncio.run(body()) == "stopped"
+    assert not speaker.sending
+    assert speaker.sent_at is None
 
 
 def test_a_stop_during_drain_raises_stopped(u575: popcorn.MachineDescription) -> None:

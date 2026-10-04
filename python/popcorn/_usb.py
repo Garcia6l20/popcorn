@@ -1012,6 +1012,12 @@ class UacSpeaker(UacStream):
         return self._link.queued()
 
     @property
+    def sending(self) -> bool:
+        """Whether a packet carrying written samples waits to go on the bus. The first packet
+        of a stream waits two frames after `start` opens the pipe."""
+        return self._link.sending()
+
+    @property
     def sent_at(self) -> VirtualTime | None:
         """Virtual time of the last packet that carried written samples, None before any."""
         at = self._link.sent_at()
@@ -1044,14 +1050,17 @@ class UacSpeaker(UacStream):
         self._link.write(values)
 
     async def drain(self, *, for_: VirtualDuration | None = None) -> None:
-        """Run the machine until every sample written left in a packet, or `for_` elapsed, as
-        `UartStream.read` runs it. `sent_at` is then the last packet's time.
+        """Run the machine until every sample written went out in an isochronous packet, or
+        `for_` elapsed, as `UartStream.read` runs it. `sent_at` is then the time of the packet
+        that carried the last sample. The host sends the first packet of a stream two frames
+        after `start` opens the pipe, so a drain right after `start` waits for it.
 
         Raises:
-            UsbError: Samples are queued and the speaker is not running, or a `stop` dropped
-                them while the call waited, status `stopped`.
-            UsbTimeout: Samples are still queued when the run ends: `for_` elapsed or the core
-                went idle. Status `queued`.
+            UsbError: Samples are queued and the speaker is not running, or while the call
+                waited a `stop` dropped samples, or a `stop`, an unplug or a bus reset dropped
+                the packet not sent yet. Status `stopped`.
+            UsbTimeout: Samples are still queued or in a packet not sent yet when the run ends:
+                `for_` elapsed or the core went idle. Status `queued`.
             EmulationError: The run stopped for another reason, such as a fault.
         """
         flushes = self._link.flushes()
@@ -1060,16 +1069,20 @@ class UacSpeaker(UacStream):
                 f"{self._where}: {self._link.queued()} samples queued and the speaker stopped",
                 status="stopped",
             )
-        if self._link.queued():
-            await self._wait(
-                lambda: self._link.queued() == 0 or self._link.flushes() != flushes, for_
-            )
+        if self._unsent():
+            await self._wait(lambda: not self._unsent() or self._link.flushes() != flushes, for_)
         if self._link.flushes() != flushes:
             raise UsbError(f"{self._where}: stopped while draining", status="stopped")
-        if self._link.queued():
-            raise UsbTimeout(
-                f"{self._where}: {self._link.queued()} samples still queued", status="queued"
+        if self._unsent():
+            unsent = (
+                f"{self._link.queued()} samples still queued"
+                if self._link.queued()
+                else "the last packet not sent yet"
             )
+            raise UsbTimeout(f"{self._where}: {unsent}", status="queued")
+
+    def _unsent(self) -> bool:
+        return self._link.queued() != 0 or self._link.sending()
 
     def __repr__(self) -> str:
         return f"UacSpeaker({self.name}, {self.function})"

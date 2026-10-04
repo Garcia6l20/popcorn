@@ -37,6 +37,21 @@ constexpr std::uint16_t device_length       = 18;
 constexpr std::uint16_t configuration_head  = 9;
 constexpr std::uint16_t string_length       = 255;
 
+/**
+ * @brief Pause after a pass in which every busy control and bulk pipe NAKed, before the next
+ *        pass in the same frame. Pacing borrowed from EHCI 1.0 4.8.4.1 AsyncSchedSleepTime,
+ *        10 us. Real hosts at RL 0, Linux's setting for full speed behind a TT, retry faster.
+ *        The 10 us gap keeps the wake-up count bounded.
+ */
+constexpr std::uint64_t async_sleep_ps = 10'000'000;
+/**
+ * @brief Frames from the one a pipe opens in to its first isochronous packet: the earliest
+ *        start xHCI 1.2 4.11.2.5 allows, current frame + IST rounded up to a frame + 1, and the
+ *        lower bound of Linux's xhci_queue_isoc_tx_prepare(), MFINDEX + IST + XHCI_CFC_DELAY
+ *        10 microframes rounded up to a frame.
+ */
+constexpr std::uint64_t iso_start_frames = 2;
+
 constexpr std::uint8_t device_to_host            = 0x80;
 constexpr std::uint8_t get_descriptor            = 6;
 constexpr std::uint8_t set_address_request       = 5;
@@ -1215,9 +1230,14 @@ struct host::impl
       return;
     }
     auto const busy = busy_pipes();
-    if(busy == 0 or s.nak_streak >= busy)
+    if(busy == 0)
     {
       return;
+    }
+    if(s.nak_streak >= busy)
+    {
+      s.nak_streak = 0;
+      at += async_sleep_ps;
     }
     auto const index = pick();
     if(index and at + worst_time(s.pipes[*index]) <= *s.next_frame)
@@ -1392,8 +1412,10 @@ auto host_context::configuration() const -> configuration_info const&
 
 auto host_context::open_pipe(endpoint_info const& endpoint) -> pipe_id
 {
-  auto& s  = host_->impl_->s;
-  auto  id = s.next_pipe++;
+  auto&      s  = host_->impl_->s;
+  auto       id = s.next_pipe++;
+  auto const first_poll =
+      endpoint.type == transfer_type::isochronous ? iso_start_frames : std::uint64_t{1};
   s.pipes.push_back(
       {.id         = id,
        .owner      = static_cast<std::uint32_t>(driver_),
@@ -1401,7 +1423,7 @@ auto host_context::open_pipe(endpoint_info const& endpoint) -> pipe_id
        .type       = endpoint.type,
        .max_packet = endpoint.max_packet,
        .period     = period_of(endpoint),
-       .next_poll  = s.frame_index + 1});
+       .next_poll  = s.frame_index + first_poll});
   return id;
 }
 

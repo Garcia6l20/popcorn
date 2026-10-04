@@ -494,6 +494,11 @@ auto uac_link::queued() const -> std::uint64_t
   return channel().speaker.out.size();
 }
 
+auto uac_link::sending() const -> bool
+{
+  return channel().speaker.sending;
+}
+
 auto uac_link::sent_at() const -> std::optional<std::uint64_t>
 {
   auto const& at = channel().speaker.sent_at;

@@ -761,9 +761,13 @@ TEST_CASE("a table without the second reset skips it")
   CHECK(r.host->state() == usb::device_state::configured);
 }
 
-TEST_CASE("a data stage NAKed 50 times completes, one retry per frame, no busy loop")
+TEST_CASE(
+    "a data stage NAKed 50 times completes, retried within the frame every 10 us after the "
+    "NAKed transaction, no busy loop")
 {
-  rig r;
+  constexpr std::uint64_t zero_length_in = 9'371'571;
+  constexpr std::uint64_t retry_gap      = zero_length_in + 10 * us;
+  rig                     r;
   r.dev.s.data_naks = 50;
   r.plug();
   r.run_until(t0 + second);
@@ -778,7 +782,10 @@ TEST_CASE("a data stage NAKed 50 times completes, one retry per frame, no busy l
     }
   }
   REQUIRE(naks.size() == 50);
-  auto const& frames = r.dev.s.frames;
+  auto const& frames   = r.dev.s.frames;
+  auto const  frame_of = [&](std::uint64_t at) {
+    return std::ranges::upper_bound(frames, at) - frames.begin();
+  };
   for(std::size_t n = 0; n + 1 < frames.size(); ++n)
   {
     auto const in_frame = [&](token_record const& record) {
@@ -787,13 +794,26 @@ TEST_CASE("a data stage NAKed 50 times completes, one retry per frame, no busy l
     CHECK(
         std::ranges::count_if(
             naks, [&](std::uint64_t at) { return at >= frames[n] and at < frames[n + 1]; })
-        <= 1);
+        <= ms
+        / retry_gap
+        + 1);
     CHECK(std::ranges::count_if(r.dev.s.tokens, in_frame) <= 100);
   }
-  for(std::size_t n = 2; n < naks.size(); ++n)
+  auto crossings = 0;
+  for(std::size_t n = 1; n < naks.size(); ++n)
   {
-    CHECK(naks[n] - naks[n - 1] == ms);
+    CAPTURE(n);
+    if(frame_of(naks[n]) == frame_of(naks[n - 1]))
+    {
+      CHECK(naks[n] - naks[n - 1] == retry_gap);
+    }
+    else
+    {
+      ++crossings;
+      CHECK(naks[n] - naks[n - 1] > retry_gap);
+    }
   }
+  CHECK(crossings == 1);
 }
 
 TEST_CASE("a device that never answers the data stage times out after 5 s, the host stops there")
@@ -1000,7 +1020,9 @@ TEST_CASE("bulk OUT ends with a ZLP on a full last packet, bulk IN ends on a sho
   CHECK(in->second.data.size() == 74);
 }
 
-TEST_CASE("a NAKing bulk IN pipe resubmitted forever leaves room for control transfers")
+TEST_CASE(
+    "a NAKing bulk IN pipe resubmitted forever is polled 49 times a frame and leaves room for "
+    "control transfers")
 {
   usb::host_options options;
   options.drivers.push_back(probe_factory("acm", 2, [](usb::host_context& ctx, probe& self) {
@@ -1020,7 +1042,7 @@ TEST_CASE("a NAKing bulk IN pipe resubmitted forever leaves room for control tra
   auto const polls = std::ranges::count_if(
       r.dev.s.tokens | std::views::drop(before),
       [](token_record const& record) { return record.endpoint == 2 and record.kind == token::in; });
-  CHECK(polls == 10);
+  CHECK(polls == 490);
   r.host->context(index).control({.request_type = 0xa1, .request = 0x21, .length = 7});
   r.dev.s.in_queue[2] = {
       std::vector<std::uint8_t>{'h', 'i'}
@@ -1065,6 +1087,89 @@ TEST_CASE("an interrupt IN pipe is polled every bInterval frames")
   auto* const hid = r.driver("hid");
   REQUIRE(hid->transfers.size() == 1);
   CHECK(hid->transfers[0].second.data == std::vector<std::uint8_t>{1, 0x42});
+}
+
+TEST_CASE(
+    "new isochronous IN and OUT pipes send their first packet two frames after they open, a new "
+    "interrupt pipe polls in the next frame")
+{
+  usb::host_options options;
+  options.drivers.push_back(probe_factory("hid", 3));
+  rig r{std::move(options)};
+  r.dev.s.iso_endpoints = {4, 5};
+  r.plug();
+  r.run_until(t0 + second);
+  auto const opened = r.dev.s.frames.back() + 500 * us;
+  r.run_until(opened);
+  auto       ctx = r.host->context(r.driver_index("hid"));
+  auto const iso = ctx.open_pipe(
+      {.address = 0x84, .type = usb::transfer_type::isochronous, .max_packet = 34, .interval = 1});
+  auto const interrupt = ctx.open_pipe(
+      {.address = 0x83, .type = usb::transfer_type::interrupt, .max_packet = 8, .interval = 1});
+  auto const iso_out = ctx.open_pipe(
+      {.address = 0x05, .type = usb::transfer_type::isochronous, .max_packet = 34, .interval = 1});
+  ctx.submit(iso, {.length = 34});
+  ctx.submit(interrupt, {.length = 8});
+  ctx.submit(iso_out, {.data = std::vector<std::uint8_t>(32, 7), .length = 0});
+  auto const before = r.dev.s.tokens.size();
+  r.run_until(opened + 5 * ms);
+  auto const first = [&](std::uint8_t endpoint) {
+    auto const tokens = r.dev.s.tokens | std::views::drop(before);
+    auto const found  = std::ranges::find(tokens, endpoint, &token_record::endpoint);
+    REQUIRE(found != tokens.end());
+    return found->at;
+  };
+  auto const frame_of = [&](std::uint64_t at) {
+    return std::ranges::upper_bound(r.dev.s.frames, at) - r.dev.s.frames.begin();
+  };
+  CHECK(frame_of(first(3)) == frame_of(opened) + 1);
+  CHECK(frame_of(first(4)) == frame_of(opened) + 2);
+  CHECK(frame_of(first(5)) == frame_of(opened) + 2);
+  REQUIRE(r.dev.s.received.contains(5));
+  CHECK(r.dev.s.received[5].front() == std::vector<std::uint8_t>(32, 7));
+}
+
+TEST_CASE("a snapshot taken while the host sleeps after a NAKed pass restores the same retries")
+{
+  for(auto const offset : {0 * us, 5 * us, 10 * us, 15 * us})
+  {
+    CAPTURE(offset);
+    rig a;
+    a.dev.s.data_naks = 20;
+    a.plug();
+    a.run_until(t0 + 112 * ms);
+    auto const nak = std::ranges::find_if(a.dev.s.tokens, [](token_record const& record) {
+      return record.hs == usb::handshake::nak;
+    });
+    REQUIRE(nak != a.dev.s.tokens.end());
+    auto const cut = nak->at + offset;
+    rig        b;
+    rig        c;
+    c.dev.s.data_naks = 20;
+    c.plug();
+    c.run_until(cut);
+    std::vector<std::byte> bytes;
+    c.host->save(bytes);
+    b.dev.s = c.dev.s;
+    b.host->load(bytes);
+
+    a.run_until(t0 + second);
+    b.run_until(t0 + second);
+    REQUIRE(b.host->state() == usb::device_state::configured);
+    auto const tail = [&](rig const& x) {
+      std::vector<std::tuple<std::uint64_t, token, std::uint8_t, usb::handshake>> records;
+      for(auto const& record : x.dev.s.tokens)
+      {
+        if(record.at > cut)
+        {
+          records.emplace_back(record.at, record.kind, record.endpoint, record.hs);
+        }
+      }
+      return records;
+    };
+    CHECK(tail(a) == tail(b));
+    CHECK(a.dev.s.requests == b.dev.s.requests);
+  }
 }
 
 TEST_CASE("an iso pipe moves one packet per frame before EOPF, and closes synchronously")

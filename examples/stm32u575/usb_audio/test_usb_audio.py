@@ -95,11 +95,12 @@ async def ready_audio(machine: Machine) -> tuple[UsbHost, UacFunction]:
 
 async def streaming(machine: Machine) -> UacFunction:
     """The function with both streams running and the speaker's first packet gone. TinyUSB
-    0.21.0 arms its isochronous OUT endpoint for the frame after SET_INTERFACE's SETUP and does
-    not handle an incomplete isochronous OUT. The virtual host ends that request's status stage
-    a frame later and sends its first packet the frame after, in the other parity, so the model
-    always loses it. A real host loses 0 or 1 packet, depending on parity and its own delay. PCM
-    written after the first frames is never lost."""
+    0.21.0 arms its isochronous OUT endpoint for the frame after the one it handles
+    SET_INTERFACE in, and does not handle an incomplete isochronous OUT. The virtual host ends
+    that request in the frame of its SETUP and, as Linux on xHCI, sends the first packet two
+    frames later, in the other parity, so the model always loses it. A real host loses 0 or 1
+    packet, depending on its isochronous scheduling threshold and when it submits. PCM written
+    after the first frames is never lost."""
     _, audio = await ready_audio(machine)
     await audio.mic.start()
     await audio.speaker.start()

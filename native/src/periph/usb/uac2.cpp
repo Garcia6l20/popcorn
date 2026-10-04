@@ -418,7 +418,11 @@ public:
       return;
     }
     channel_->interface.reset();
-    channel_->ready           = false;
+    channel_->ready = false;
+    if(std::exchange(channel_->speaker.sending, false))
+    {
+      ++channel_->speaker.flushes;
+    }
     channel_->speaker.running = false;
     channel_->mic.running     = false;
     for(auto const id : channel_->awaited)
@@ -488,6 +492,7 @@ public:
     else if(speaker.pipe != 0 and pipe == speaker.pipe and std::exchange(speaker.carried, false))
     {
       channel_->speaker.sent_at = result.at;
+      channel_->speaker.sending = false;
     }
   }
 
@@ -1568,7 +1573,8 @@ private:
     auto const values = std::min<std::size_t>(samples, alt.max_packet / frame_bytes) * alt.channels;
     std::vector<std::uint8_t> packet;
     packet.reserve(values * alt.subslot);
-    stream.carried = not queue.empty();
+    stream.carried            = not queue.empty();
+    channel_->speaker.sending = stream.carried;
     for(std::size_t i = 0; i < values; ++i)
     {
       std::int32_t sample{};
@@ -1608,6 +1614,7 @@ private:
       {
         stream.interface.reset();
         stream.running = false;
+        stream.sending = false;
         continue;
       }
       auto const& alt   = s_.alts[state.alt];
@@ -1620,6 +1627,7 @@ private:
       stream.rates      = alt.rates;
       stream.rate       = state.rate;
       stream.running    = state.running;
+      stream.sending    = state.carried;
     }
     channel_->units.clear();
     for(auto const& unit : s_.units)
@@ -1839,13 +1847,16 @@ auto uac2_start(host& owner, uac2_hub& hub, std::size_t function, uac2_direction
 
 void uac2_stop(host& owner, uac2_hub& hub, std::size_t function, uac2_direction direction)
 {
-  auto& channel = hub.channel(function);
+  auto&      channel = hub.channel(function);
+  auto const dropped = direction
+                    == uac2_direction::speaker
+                   and (channel.speaker.sending or not channel.speaker.out.empty());
   if(auto const found = bound_driver_of(owner, channel))
   {
     auto ctx = owner.context(found->second);
     found->first->stop(ctx, direction);
   }
-  if(direction == uac2_direction::speaker and not channel.speaker.out.empty())
+  if(dropped)
   {
     channel.speaker.out.clear();
     ++channel.speaker.flushes;

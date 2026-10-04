@@ -492,8 +492,10 @@ public:
   [[nodiscard]] auto configuration() const -> configuration_info const&;
 
   /**
-   * @brief Opens a pipe to an endpoint, DATA0, after the pipes already open. An interrupt or
-   *        isochronous pipe is first served in the next frame.
+   * @brief Opens a pipe to an endpoint, DATA0, after the pipes already open. An interrupt pipe
+   *        is first served in the next frame. An isochronous pipe is first served two frames
+   *        after the current one, the earliest start xHCI 1.2 4.11.2.5 allows and the lower
+   *        bound of Linux's xHCI start frame for an isochronous URB.
    * @param endpoint The endpoint, from configuration().
    * @return The pipe.
    */
@@ -558,7 +560,9 @@ private:
  *        a SOF every 1 ms, the periodic transactions of the frame, isochronous then interrupt,
  *        before the EOPF point, then control and bulk transactions one per slot, round robin,
  *        each slot after the bus time of the previous transaction. When every control and bulk
- *        pipe with work NAKed in a row, the rest waits for the next frame.
+ *        pipe with work NAKed in a row, the next pass starts 10 us after that NAK ends, as long
+ *        as its transaction fits before the next SOF. The pacing is borrowed from EHCI's
+ *        AsyncSchedSleepTime. Real hosts at RL 0 retry faster, the gap bounds the wake-ups.
  *
  * The host acts only in host_side callbacks and through device_port::wake_at(). Its state,
  * drivers' included, is BSON in save(). The user control results and the request log are not.

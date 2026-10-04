@@ -123,11 +123,15 @@ struct uac2_stream
   /** @brief Speaker: samples written and not yet put in a packet, interleaved. Saved in the
    * driver's state, or with the factory while no driver is bound. */
   std::deque<std::int32_t> out{};
+  /** @brief Speaker: a packet carrying written samples is submitted and the host has not
+   * sent it yet. */
+  bool sending{};
   /** @brief Speaker: time of the last packet that carried written samples. Saved in the driver's
    * state. */
   std::optional<vtime> sent_at{};
-  /** @brief Speaker: stops that dropped written samples, so a drain in progress can tell a
-   * stop from a drained queue. */
+  /** @brief Speaker: stops that dropped written samples, queued or in a packet not sent, and
+   * unbinds that dropped such a packet, so a drain in progress can tell them from a drained
+   * queue. */
   std::uint64_t flushes{};
   /** @brief Mic: frames received and not taken yet, oldest first. */
   std::deque<uac2_frame> in{};

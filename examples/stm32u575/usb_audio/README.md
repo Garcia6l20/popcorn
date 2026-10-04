@@ -30,7 +30,7 @@ await audio.mic.start()                  # clock reads, then SET_INTERFACE 1
 await audio.speaker.start()
 await audio.speaker.write(samples)       # interleaved ints
 frames = await audio.mic.read_frames(160, for_=ms(200))
-await audio.speaker.drain()              # every written sample left in a packet
+await audio.speaker.drain()              # every written sample went out in a packet
 audio.mic.clear()                        # drop the frames not read yet
 audio.speaker.stop()                     # sync: pipe closed now, SET_INTERFACE 0 next run
 await audio.set_volume(unit=2, channel=1, volume=-10 * 256)
@@ -40,13 +40,14 @@ Each 1 ms frame carries 16 samples, the rate's share of a millisecond. The host'
 the device's clock: drift between host and device, which a real headset corrects with feedback
 or adaptive clocking, never happens here.
 
-TinyUSB 0.21.0 arms an isochronous OUT endpoint for the frame after the SETUP of
-SET_INTERFACE, and does not handle an incomplete isochronous OUT. The virtual host ends that
-request's status stage a frame later and sends its first speaker packet in the frame after,
-of the other parity: the model always loses the first speaker packet after each start. A real
-host retries faster and starts its isochronous stream later, and loses 0 or 1 packet,
-depending on parity and timing. Write PCM after the first frames: the tests run 4 ms after
-`start` before they write.
+TinyUSB 0.21.0 arms an isochronous OUT endpoint for the frame after the one in which it
+handles SET_INTERFACE, and does not handle an incomplete isochronous OUT. The virtual host
+retries a NAKed status stage within the frame, so SET_INTERFACE ends in the frame of its SETUP.
+Like Linux on an xHCI controller, the host then sends the first packet of the new stream two
+frames later, in the other parity: the model loses the first speaker packet after each start.
+A real host loses 0 or 1 packet, depending on its isochronous scheduling threshold and on when
+it submits: one more frame of delay lands in the armed parity. Write PCM after the first
+frames: the tests run 4 ms after `start` before they write.
 
 TinyUSB's microphone flow control sends 15 samples instead of 16 while its FIFO is below half
 full, at most once every 11 frames, so the loopback latency grows by a sample at a time until

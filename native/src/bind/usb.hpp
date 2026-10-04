@@ -549,15 +549,19 @@ public:
   [[= py::doc{"Speaker samples written and not yet put in a packet."}]] [[nodiscard]] auto
       queued() const -> std::uint64_t;
 
+  /** @brief Whether a speaker packet carrying written samples waits to go on the bus. */
+  [[= py::doc{"Whether a speaker packet carrying written samples waits to go on the bus."}]]
+      [[nodiscard]] auto sending() const -> bool;
+
   /** @brief Time of the last speaker packet that carried written samples, in picoseconds. */
   [[= py::doc{
       "Time of the last speaker packet that carried written samples, in ps."}]] [[nodiscard]] auto
       sent_at() const -> std::optional<std::uint64_t>;
 
-  /** @brief Stops that dropped written speaker samples, since the machine was built or the last
-   * restore. */
-  [[= py::doc{"Stops that dropped written speaker samples."}]] [[nodiscard]] auto flushes() const
-      -> std::uint64_t;
+  /** @brief Stops or unbinds that dropped written speaker samples, queued or in a packet not
+   * sent, since the machine was built or the last restore. */
+  [[= py::doc{"Stops or unbinds that dropped written speaker samples."}]] [[nodiscard]] auto
+      flushes() const -> std::uint64_t;
 
   /** @brief Microphone frames received and not read yet. */
   [[= py::doc{"Microphone frames received and not read yet."}]] [[nodiscard]] auto available() const
