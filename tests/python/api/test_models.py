@@ -17,9 +17,9 @@ from pathlib import Path
 import popcorn
 import pytest
 from popcorn.model import IrqLine, Model, on_read, on_write
-from popcorn.units import VirtualTime, us
+from popcorn.units import VirtualTime, ms, us
 
-from .conftest import ROOT
+from .conftest import ROOT, run_bounded
 from .models_example import Eeprom, Timer
 
 MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
@@ -712,3 +712,28 @@ def test_a_model_error_inside_a_call_restores_the_interrupted_context(
     stop = asyncio.run(m.step())
     assert stop.reason is popcorn.StopReason.BUDGET
     assert m.pc != before["pc"]
+
+
+class ExpiryFails(Timer):
+    def _expire(self) -> None:
+        raise LookupError("expiry failed")
+
+
+class StatusWriteFails(Timer):
+    @on_write("SR")
+    def _sr(self, old: int, new: int) -> None:
+        raise LookupError("SR write failed")
+
+
+@pytest.mark.parametrize("failing", [ExpiryFails, StatusWriteFails])
+def test_a_model_error_inside_running_raises_at_the_next_wait(failing: type[Timer]) -> None:
+    m = machine({"TIMER": failing})
+    call(m, "start_timer", 10)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(popcorn.Reached("stop_timer"), for_=ms(100))
+
+    with pytest.raises(LookupError, match="failed"):
+        run_bounded(scenario())
+    assert not m.busy

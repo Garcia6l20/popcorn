@@ -15,6 +15,8 @@ from popcorn.board import Frame
 from popcorn.model import Model
 from popcorn.units import VirtualTime, ms, us
 
+from .conftest import run_bounded
+
 FRAME_PS = 87_500_000
 USART1_TDR = 0x4001_3828
 
@@ -220,3 +222,20 @@ def test_a_write_from_another_thread_during_a_run_is_refused(board: popcorn.Mach
 
     with pytest.raises(RuntimeError, match="another thread"):
         asyncio.run(body())
+
+
+def test_a_read_inside_running_raises_a_handler_error(board: popcorn.Machine) -> None:
+    def boom(_: popcorn.WatchHit) -> None:
+        raise ValueError("echo watch failed")
+
+    board.watch("echoed", handler=boom)
+    uart = board.periph.USART1.port
+
+    async def body() -> bytes:
+        async with board.running():
+            await uart.write(b"hi")
+            return await uart.read(2, for_=ms(10))
+
+    with pytest.raises(ValueError, match="echo watch failed"):
+        run_bounded(body())
+    assert not board.busy

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Coroutine
 from pathlib import Path
 
 import popcorn
@@ -16,6 +18,22 @@ HOOKS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "hooks.elf"
 ABI_ELF = ROOT / "tests" / "firmware" / "abi" / "prebuilt" / "abi.elf"
 CALLEE_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "callee.elf"
 VIEWS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "views.elf"
+
+
+def run_bounded[T](coroutine: Coroutine[object, object, T], seconds: float = 2) -> T:
+    """Run `coroutine` like `asyncio.run`, failing the test instead of hanging past `seconds`."""
+
+    async def bounded() -> T:
+        task = asyncio.create_task(coroutine)
+        done, _ = await asyncio.wait([task], timeout=seconds)
+        if not done:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            pytest.fail(f"still waiting after {seconds} s of wall time")
+        return task.result()
+
+    return asyncio.run(bounded())
 
 
 @pytest.fixture

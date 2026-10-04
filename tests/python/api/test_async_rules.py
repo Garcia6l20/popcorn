@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn.units import VirtualTime, ms
 
-from .conftest import Machines
+from .conftest import Machines, run_bounded
 
 
 def test_a_second_concurrent_run_is_machine_busy(machines: Machines) -> None:
@@ -423,3 +423,229 @@ def test_a_run_inside_running_is_machine_busy(machines: Machines) -> None:
                 await m.run(budget=10)
 
     asyncio.run(scenario())
+
+
+def boom(_: object) -> None:
+    raise ValueError("handler failed")
+
+
+class Recorded:
+    """A handler raising ValueError, counting its calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, _: object) -> None:
+        """Count the call and fail."""
+        self.calls += 1
+        raise ValueError("handler failed")
+
+
+class Never:
+    """Never ready."""
+
+    def ready(self, machine: popcorn.Machine) -> bool:
+        """Always False."""
+        return False
+
+
+def test_an_on_return_error_inside_running_raises_at_the_next_wait(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    m.on_return("alu_mark", boom)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(Never(), for_=ms(100))
+
+    with pytest.raises(ValueError, match="handler failed"):
+        run_bounded(scenario())
+    assert not m.busy
+
+
+def test_an_intercept_error_inside_running_raises_at_the_next_wait(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def failing(_: popcorn.Call) -> popcorn.Return:
+        raise ValueError("handler failed")
+
+    m.intercept("alu_mark", failing)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(Never(), for_=ms(100))
+
+    with pytest.raises(ValueError, match="handler failed"):
+        run_bounded(scenario())
+    assert not m.busy
+
+
+def test_a_watch_error_inside_running_raises_at_the_next_wait(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    m.watch("alu_rounds", handler=boom)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(popcorn.Reached("idle_main"), for_=ms(100))
+
+    with pytest.raises(ValueError, match="handler failed"):
+        run_bounded(scenario())
+    assert not m.busy
+
+
+def test_a_handler_error_inside_running_raises_on_exit_without_a_wait(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+    handler = Recorded()
+    m.on_return("alu_mark", handler)
+    instructions: list[int] = []
+
+    async def scenario() -> None:
+        async with m.running():
+            while not handler.calls:
+                await asyncio.sleep(0.001)
+            instructions.append(m.instructions)
+            await asyncio.sleep(0.01)
+            instructions.append(m.instructions)
+
+    with pytest.raises(ValueError, match="handler failed"):
+        run_bounded(scenario())
+    assert instructions[0] == instructions[1]
+    assert not m.busy
+
+
+def test_every_wait_after_a_handler_error_raises_it(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    m.on_return("alu_mark", boom)
+    errors: list[BaseException] = []
+
+    async def scenario() -> None:
+        async with m.running():
+            first, second = await asyncio.gather(
+                m.wait_for(Never(), for_=ms(100)),
+                m.wait_for(Never()),
+                return_exceptions=True,
+            )
+            assert isinstance(first, ValueError)
+            assert isinstance(second, ValueError)
+            errors.extend((first, second))
+            await m.wait_for(Never())
+
+    with pytest.raises(ValueError, match="handler failed") as caught:
+        run_bounded(scenario())
+    assert errors == [caught.value, caught.value]
+    assert not m.busy
+
+
+def test_a_body_error_inside_running_carries_the_handler_error(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    handler = Recorded()
+    m.on_return("alu_mark", handler)
+
+    async def scenario() -> None:
+        async with m.running():
+            while not handler.calls:
+                await asyncio.sleep(0.001)
+            raise KeyError("body failed")
+
+    with pytest.raises(KeyError) as caught:
+        run_bounded(scenario())
+    assert caught.value.__notes__ == ["background run raised: ValueError('handler failed')"]
+
+
+def test_an_event_error_inside_running_fails_only_its_wait(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    class Broken:
+        def ready(self, machine: popcorn.Machine) -> bool:
+            raise ValueError("event failed")
+
+    async def scenario() -> popcorn.Stop:
+        async with m.running():
+            with pytest.raises(ValueError, match="event failed"):
+                await m.wait_for(Broken())
+            return await m.wait_for(AfterInstructions(50_000))
+
+    assert run_bounded(scenario()).reason is popcorn.StopReason.USER
+
+
+def test_a_wait_after_the_background_run_stopped_returns_that_stop(machines: Machines) -> None:
+    m = machines("fault")
+
+    async def scenario() -> popcorn.Stop | None:
+        async with m.running():
+            while m.instructions == 0:
+                await asyncio.sleep(0.001)
+            await asyncio.sleep(0.01)
+            return await m.wait_for(Never())
+        return None
+
+    with pytest.raises(popcorn.FaultError):
+        run_bounded(scenario())
+    assert not m.busy
+
+
+def test_a_pytest_failure_in_a_handler_inside_running_fails_the_wait(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def failing(_: object) -> None:
+        pytest.fail("checked in the handler")
+
+    m.on_return("alu_mark", failing)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(Never(), for_=ms(100))
+
+    with pytest.raises(pytest.fail.Exception, match="checked in the handler"):
+        run_bounded(scenario())
+    assert not m.busy
+
+
+def test_a_keyboard_interrupt_in_a_handler_inside_running_reaches_the_caller(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def interrupted(_: object) -> None:
+        raise KeyboardInterrupt
+
+    m.on_return("alu_mark", interrupted)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(Never(), for_=ms(100))
+
+    with pytest.raises(KeyboardInterrupt):
+        run_bounded(scenario())
+    assert not m.busy
+
+
+def test_a_machine_runs_again_after_a_handler_error_inside_running(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    saved = m.snapshot()
+    hook = m.on_return("alu_mark", boom)
+
+    async def failing() -> None:
+        async with m.running():
+            await m.wait_for(Never(), for_=ms(100))
+
+    async def passing() -> popcorn.Stop:
+        async with m.running():
+            return await m.wait_for(AfterInstructions(m.instructions + 50_000), for_=ms(100))
+
+    with pytest.raises(ValueError, match="handler failed"):
+        run_bounded(failing())
+    hook.remove()
+    assert run_bounded(passing()).reason is popcorn.StopReason.USER
+
+    m.on_return("alu_mark", boom)
+    m.restore(saved)
+    with pytest.raises(ValueError, match="handler failed"):
+        run_bounded(failing())
+    m.remove_hooks()
+    m.restore(saved)
+    assert run_bounded(passing()).reason is popcorn.StopReason.USER
+    assert not m.busy

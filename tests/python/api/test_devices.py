@@ -15,8 +15,9 @@ import pytest
 from popcorn import ConfigError, ModelError, ResetKind, StopReason, _core
 from popcorn.board import AudioOptions, DeviceBoard, I2CTarget, SpiTarget
 from popcorn.model import Model
-from popcorn.units import VirtualTime
+from popcorn.units import VirtualTime, ms
 
+from .conftest import run_bounded
 from .devices_example import Eeprom24, JedecDevice
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
@@ -784,3 +785,42 @@ def test_clocked_by_names_a_bus_through_its_alias(u575: popcorn.MachineDescripti
     )
     codec.board.set_audio_clock("SAI1", "A", 16_000)
     assert m.periph.SAI1.audio("A").external_frame_hz == 16_000
+
+
+@pytest.mark.parametrize("method", ["on_start", "on_write", "on_read"])
+def test_an_i2c_device_error_inside_running_raises_at_the_next_wait(
+    u575: popcorn.MachineDescription, method: str
+) -> None:
+    flaky = Flaky()
+    flaky.broken = method
+    m, _ = eeprom_machine(u575, flaky)
+    enter(m, "eeprom_rw")
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(popcorn.Reached("main"), for_=ms(100))
+
+    with pytest.raises(RuntimeError, match=f"{method} broke"):
+        run_bounded(scenario())
+    assert not m.busy
+
+
+class BrokenJedec(JedecDevice):
+    def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
+        raise RuntimeError("exchange broke")
+
+
+def test_an_spi_device_error_inside_running_raises_at_the_next_wait(
+    u575: popcorn.MachineDescription,
+) -> None:
+    device = BrokenJedec("PA4", (0x1F, 0x87, 0x01))
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, "poll")
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(popcorn.Reached("main"), for_=ms(100))
+
+    with pytest.raises(RuntimeError, match="exchange broke"):
+        run_bounded(scenario())
+    assert not m.busy

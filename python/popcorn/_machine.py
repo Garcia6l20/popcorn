@@ -331,6 +331,7 @@ class Machine:
         "_default_budget",
         "_description",
         "_devices",
+        "_ended",
         "_handle",
         "_images",
         "_installed",
@@ -463,6 +464,7 @@ class Machine:
         self._slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._busy = False
         self._background = False
+        self._ended: Stop | BaseException | None = None
         self._waiters: list[_Waiter] = []
         self._thread = threading.get_ident()
         self._run_thread: int | None = None
@@ -1415,7 +1417,8 @@ class Machine:
         the current pc continues as `run(until=)` does. Other events stop at
         the first event boundary or slice end after they became ready. Inside `running()`, the
         background run is not driven twice: this awaits the driver, which checks the event at
-        slice boundaries.
+        slice boundaries, and returns the stop that ended the background run or raises the
+        exception a handler of it raised.
 
         Raises:
             MachineBusy: A run, step or wait is active outside `running()`.
@@ -1434,35 +1437,55 @@ class Machine:
         An IDLE stop waits one wall budget and runs again, the firmware waiting for input. Any
         other stop ends the background run, and leaving the body then raises the error of that
         stop, carrying it: FaultError for FAULT, BudgetExceeded for BUDGET, EmulationError
-        otherwise. When the body itself raises, its exception propagates with a note naming the
-        background stop. Leaving the body cancels the run at a slice boundary.
+        otherwise. A pending or later `wait_for` returns that stop.
+
+        An exception a handler raises, an intercept, return hook, watch, Python model or bus
+        device, ends the background run at an instruction boundary. Every pending and later
+        waiter of the run, `wait_for` or a stream read, raises it, and leaving the body raises
+        it when the body did not. A BaseException such as pytest's failure takes the same path,
+        except KeyboardInterrupt and SystemExit, which asyncio raises out of the event loop.
+        When the body itself raises, a cancellation included, the body's exception wins: it
+        propagates with a note naming the background stop or the handler's exception. Leaving
+        the body cancels the run at a slice boundary.
 
         Raises:
             MachineBusy: A run, step or wait is active.
             EmulationError: The background run stopped for a reason other than IDLE.
+            BaseException: The exception a handler of the background run raised.
         """
         with self._exclusive():
             self._background = True
+            self._ended = None
             task = asyncio.create_task(self._drive_background())
             try:
                 yield
             except BaseException as error:
-                stopped = await self._end_background(task)
-                if stopped is not None:
-                    error.add_note(f"background run stopped: {stopped}")
+                ended = await self._end_background(task)
+                if isinstance(ended, Stop):
+                    error.add_note(f"background run stopped: {ended}")
+                elif ended is not None and ended is not error:
+                    error.add_note(f"background run raised: {ended!r}")
                 raise
-            stopped = await self._end_background(task)
-        if stopped is not None:
-            raise _stop_error(stopped)
+            ended = await self._end_background(task)
+        if isinstance(ended, BaseException):
+            raise ended
+        if ended is not None:
+            raise _stop_error(ended)
 
-    async def _end_background(self, task: asyncio.Task[Stop | None]) -> Stop | None:
+    async def _end_background(self, task: asyncio.Task[Stop | None]) -> Stop | BaseException | None:
         task.cancel()
-        stopped: Stop | None = None
-        with contextlib.suppress(asyncio.CancelledError):
-            stopped = await task
-        self._background = False
-        self._release_waiters(None)
-        return stopped
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except BaseException as error:
+            if error is not self._ended:
+                raise
+        finally:
+            self._background = False
+            self._release_waiters(None)
+        ended, self._ended = self._ended, None
+        return ended
 
     @contextlib.contextmanager
     def _exclusive(self) -> Generator[None]:
@@ -1586,28 +1609,40 @@ class Machine:
     async def _drive_background(self) -> Stop | None:
         self._last_stop = None
         args = self._slice_args()
-        while True:
-            deadlines = [
-                w.deadline_ps
-                for w in self._waiters
-                if w.deadline_ps is not None and not w.future.done()
-            ]
-            args.until_time_ps = min(deadlines, default=None)
-            self._ports.pump()
-            outcome = self._handle.run_slice(args, None)
-            self._ports.pump()
-            stopped = None if outcome.stopped is None else stop_of(outcome.stopped)
-            self._check_waiters()
-            if stopped is None or stopped.reason is StopReason.TIME:
-                await asyncio.sleep(0)
-            elif stopped.reason is StopReason.IDLE:
-                await asyncio.sleep(self._slice_wall_ns / 1e9)
-            else:
-                self._last_stop = stopped
-                self._release_waiters(stopped)
-                return stopped
+        try:
+            while True:
+                deadlines = [
+                    w.deadline_ps
+                    for w in self._waiters
+                    if w.deadline_ps is not None and not w.future.done()
+                ]
+                args.until_time_ps = min(deadlines, default=None)
+                self._ports.pump()
+                outcome = self._handle.run_slice(args, None)
+                self._ports.pump()
+                stopped = None if outcome.stopped is None else stop_of(outcome.stopped)
+                self._check_waiters()
+                if stopped is None or stopped.reason is StopReason.TIME:
+                    await asyncio.sleep(0)
+                elif stopped.reason is StopReason.IDLE:
+                    await asyncio.sleep(self._slice_wall_ns / 1e9)
+                else:
+                    self._last_stop = stopped
+                    self._ended = stopped
+                    self._release_waiters(stopped)
+                    return stopped
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            self._ended = error
+            self._release_waiters(error)
+            raise
 
     async def _await_driver(self, event: Event, for_: VirtualDuration | None) -> Stop:
+        if isinstance(self._ended, BaseException):
+            raise self._ended
+        if self._ended is not None:
+            return self._ended
         deadline = None if for_ is None else self._handle.time_ps() + for_.ps
         future: asyncio.Future[Stop] = asyncio.get_running_loop().create_future()
         self._waiters.append(_Waiter(event, deadline, future))
@@ -1639,15 +1674,17 @@ class Machine:
             if waiter.future.done():
                 self._waiters.remove(waiter)
 
-    def _release_waiters(self, stopped: Stop | None) -> None:
+    def _release_waiters(self, ended: Stop | BaseException | None) -> None:
         waiters, self._waiters = self._waiters, []
         for waiter in waiters:
             if waiter.future.done():
                 continue
-            if stopped is None:
+            if ended is None:
                 waiter.future.cancel()
+            elif isinstance(ended, BaseException):
+                waiter.future.set_exception(ended)
             else:
-                waiter.future.set_result(stopped)
+                waiter.future.set_result(ended)
 
     def __repr__(self) -> str:
         return f"Machine({self._description.part}, images={len(self._images)})"
