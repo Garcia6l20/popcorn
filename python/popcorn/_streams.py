@@ -1,4 +1,5 @@
-"""UART byte streams in virtual time, and their bridge to a host pty."""
+"""UART byte streams in virtual time, and host ptys bridged to UARTs and USB CDC ACM
+functions."""
 
 from __future__ import annotations
 
@@ -11,12 +12,15 @@ import tty
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from popcorn import _core
 from popcorn._devices import BusDevice, I2CTarget, SpiTarget
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.units import VirtualDuration, VirtualTime
+
+if TYPE_CHECKING:
+    from popcorn._usb import UsbHosts
 
 _LOG = logging.getLogger("popcorn")
 
@@ -135,8 +139,47 @@ class UartStream:
         return f"UartStream({self.name})"
 
 
+class PtyLink(Protocol):
+    """The byte link a pty bridge moves bytes through."""
+
+    def send(self, data: bytes, /) -> None:
+        """Queue bytes towards the firmware."""
+        ...
+
+    def available(self) -> int:
+        """Bytes the firmware sent and not taken yet."""
+        ...
+
+    def drain(self, count: int, /) -> bytes:
+        """Take at most `count` of the oldest bytes the firmware sent."""
+        ...
+
+
+class UartPtyLink:
+    """A UART link as a pty bridge takes it: the low 8 bits of each frame."""
+
+    __slots__ = ("_link",)
+
+    def __init__(self, link: _core.UartLink) -> None:
+        """Wrap a native UART link."""
+        self._link = link
+
+    def send(self, data: bytes, /) -> None:
+        """Queue bytes towards the firmware, one frame each."""
+        self._link.send(data)
+
+    def available(self) -> int:
+        """Frames the firmware transmitted, not taken yet."""
+        return self._link.available()
+
+    def drain(self, count: int, /) -> bytes:
+        """Take at most `count` of the oldest frames, their low 8 bits."""
+        return bytes(f.data & 0xFF for f in self._link.drain(count))
+
+
 class PtyBridge:
-    """A UART bridged to a host pty: host tools open `path` like a serial port.
+    """A UART or a USB CDC ACM function bridged to a host pty: host tools open `path` like a
+    serial port.
 
     Host bytes enter the firmware at the next slice boundary, stamped at the virtual time of
     that boundary: a pty is not deterministic. Bytes the firmware transmits reach the pty at
@@ -144,8 +187,10 @@ class PtyBridge:
     on the `popcorn` logger names the pty: the remedy is to run the machine, typically in
     `async with m.running()`.
 
-    Host input not yet delivered to the firmware is kept across a restore. Bytes already in
-    the UART's receiver return to the snapshot's state.
+    Host input not yet delivered to a UART is kept across a restore. Bytes already in the
+    UART's receiver return to the snapshot's state. Host input not yet taken by a USB device
+    returns to what the snapshot held. Opening or closing the pty sends nothing to the device:
+    a CDC function keeps the DTR its host set at configuration.
 
     Bytes for the host wait in a buffer while no tool reads the pty. The buffer keeps the last
     64 KiB: older bytes are dropped, with one warning naming the pty. `Machine.restore` empties
@@ -168,8 +213,8 @@ class PtyBridge:
         "path",
     )
 
-    def __init__(self, name: str, link: _core.UartLink, deadlock_warning: float) -> None:
-        """Open a pty for UART `name`. Use `m.board.pty(name)` instead."""
+    def __init__(self, name: str, link: PtyLink, deadlock_warning: float) -> None:
+        """Open a pty for `name` over `link`. Use `m.board.pty(name)` instead."""
         master, slave = os.openpty()
         tty.setraw(slave)
         os.set_blocking(master, False)
@@ -206,8 +251,7 @@ class PtyBridge:
             self._link.send(bytes(self._incoming))
             self._incoming.clear()
         self._waiting_since = None
-        frames = self._link.drain(self._link.available())
-        self._outgoing += bytes(f.data & 0xFF for f in frames)
+        self._outgoing += self._link.drain(self._link.available())
         if len(self._outgoing) > OUTGOING_LIMIT:
             del self._outgoing[: len(self._outgoing) - OUTGOING_LIMIT]
             if not self._overflowed:
@@ -344,23 +388,26 @@ class UartPorts:
 
 
 class Board:
-    """What is wired to the MCU: host ptys bridged to its UARTs and the Python devices on its
-    buses, `m.board`.
+    """What is wired to the MCU: host ptys bridged to its UARTs and USB CDC functions, and the
+    Python devices on its buses, `m.board`.
 
     Every built-in UART is connected to Python from power-on: its `port` holds what the
     firmware sent since power-on or the last `Machine.restore`, unless a pty bridge takes it.
     """
 
-    __slots__ = ("_devices", "_ports")
+    __slots__ = ("_devices", "_ports", "_usb")
 
     def __init__(
         self,
         ports: UartPorts,
         devices: Mapping[str, tuple[BusDevice, ...]],
+        usb: UsbHosts | None = None,
     ) -> None:
-        """Bridge the UARTs of `ports`, list `devices`. `Machine.board` builds it."""
+        """Bridge the UARTs of `ports` and the CDC functions of the hosts of `usb`, list
+        `devices`. `Machine.board` builds it."""
         self._ports = ports
         self._devices = dict(devices)
+        self._usb = usb
 
     def devices(
         self, peripheral: str
@@ -371,31 +418,49 @@ class Board:
             self._devices.get(peripheral, ()),
         )
 
-    def pty(self, name: str, *, deadlock_warning: float = 2.0) -> str:
-        """Bridge UART `name` to a new host pty and return its path, the same one on later calls.
+    def pty(self, name: str, *, function: int = 0, deadlock_warning: float = 2.0) -> str:
+        """Bridge UART `name`, or a CDC ACM function of the virtual USB host of controller
+        `name`, to a new host pty and return its path, the same one on later calls.
 
-        A bridged UART is read by the pty only: its `port` refuses reads.
+        A bridged UART is read by the pty only: its `port` refuses reads, as the `cdc()` stream
+        of a bridged CDC function does. A CDC function's pty is keyed `name` in `ptys` for
+        function 0, `name.<function>` for the others.
 
         Args:
-            name: UART instance.
+            name: UART instance, or USB device controller with a virtual host.
+            function: The n-th CDC ACM function of the device, in interface order. 0 for a
+                UART.
             deadlock_warning: Wall seconds host input may wait with no slice run before a
                 warning names the pty.
 
         Raises:
-            ModelError: The peripheral's model is not a UART.
+            ValueError: `function` is negative, above 0 for a UART, or beyond the CDC ACM
+                functions of a configuration already read.
+            ModelError: The peripheral's model is neither a UART nor a USB device controller
+                with a virtual host.
             ConfigError: The description has no such peripheral.
         """
         bridges = self._ports.bridges
+        if self._usb is not None and self._usb.serves(name):
+            link = self._usb.cdc_link(name, function)
+            key = cdc_key(self._usb.host(name).name, function)
+            bridge = bridges.get(key)
+            if bridge is None:
+                bridge = PtyBridge(key, link, deadlock_warning)
+                bridges[key] = bridge
+            return bridge.path
+        if function != 0:
+            raise ValueError(f"{name}: a UART has no function {function}, only 0")
         name = self._ports.serving(name)
         bridge = bridges.get(name)
         if bridge is None:
-            bridge = PtyBridge(name, self._ports.link(name), deadlock_warning)
+            bridge = PtyBridge(name, UartPtyLink(self._ports.link(name)), deadlock_warning)
             bridges[name] = bridge
         return bridge.path
 
     @property
     def ptys(self) -> dict[str, str]:
-        """Pty path of each bridged UART."""
+        """Pty path of each bridged UART and CDC function."""
         return {name: bridge.path for name, bridge in self._ports.bridges.items()}
 
     def close(self) -> None:
@@ -403,6 +468,12 @@ class Board:
         for bridge in self._ports.bridges.values():
             bridge.close()
         self._ports.bridges.clear()
+
+
+def cdc_key(name: str, function: int) -> str:
+    """The key of CDC ACM function `function` of controller `name` in `Board.ptys`: `name` for
+    function 0, `<name>.<function>` for the others."""
+    return name if function == 0 else f"{name}.{function}"
 
 
 def _readable(bridge: weakref.ref[PtyBridge]) -> None:

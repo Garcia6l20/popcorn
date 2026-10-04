@@ -235,7 +235,8 @@ class Project:
                 `Machine(devices=)` refuses them, or a `host` table is on a peripheral that is
                 not a USB device controller with the built-in model.
             ImageError: An image cannot be read or does not fit the memory map.
-            ModelError: A `connect` peripheral is not a UART.
+            ModelError: A `connect` peripheral is neither a UART nor a USB device controller
+                with a `host`.
         """
         if config is not None and config != self.config:
             return Project.load(self.path, config).machine(
@@ -306,6 +307,8 @@ class Project:
                 debounce=defaults.debounce if host.debounce_ms is None else ms(host.debounce_ms),
                 reset=defaults.reset if host.reset_ms is None else ms(host.reset_ms),
                 timeout=defaults.timeout if host.timeout_ms is None else ms(host.timeout_ms),
+                dtr=host.dtr,
+                rts=host.rts,
             )
         m = Machine(
             description,

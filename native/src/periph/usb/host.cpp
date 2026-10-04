@@ -105,6 +105,12 @@ struct driver_record
   std::vector<std::byte>    bytes{};
 };
 
+struct factory_record
+{
+  std::string            name{};
+  std::vector<std::byte> bytes{};
+};
+
 struct host_state
 {
   device_state                      device{};
@@ -133,6 +139,7 @@ struct host_state
   std::uint32_t                     nak_streak{};
   std::optional<pipe_id>            last_served{};
   std::vector<driver_record>        drivers{};
+  std::vector<factory_record>       factories{};
 };
 
 struct outcome
@@ -839,6 +846,20 @@ struct host::impl
     return true;
   }
 
+  void load_factories()
+  {
+    for(auto const& factory : options.drivers)
+    {
+      if(not factory.load)
+      {
+        continue;
+      }
+      auto const found = std::ranges::find(s.factories, factory.name, &factory_record::name);
+      factory.load(found == s.factories.end() ? std::span<std::byte const>{} : found->bytes);
+    }
+    s.factories.clear();
+  }
+
   void bind_drivers()
   {
     drivers.clear();
@@ -1480,6 +1501,13 @@ void host::on_time(vtime at)
 void host::save(std::vector<std::byte>& out) const
 {
   auto saved = impl_->s;
+  for(auto const& factory : impl_->options.drivers)
+  {
+    if(factory.save)
+    {
+      factory.save(saved.factories.emplace_back(factory_record{.name = factory.name}).bytes);
+    }
+  }
   for(std::size_t index = 0; index < saved.drivers.size() and index < impl_->drivers.size();
       ++index)
   {
@@ -1498,9 +1526,11 @@ void host::load(std::span<std::byte const> in)
   {
     impl.detach(impl.port.now().ps);
     impl.results.clear();
+    impl.load_factories();
     return;
   }
   impl.s = reflex::serde::bson::deserializer{in}.template load<host_state>();
+  impl.load_factories();
   impl.results.clear();
   impl.parsed.reset();
   if(auto config = parse_configuration(octets(impl.s.configuration_bytes)))

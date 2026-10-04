@@ -1,4 +1,5 @@
 #include <popcorn/periph/usb.hpp>
+#include <popcorn/periph/usb_cdc_acm.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 #include <doctest/doctest.h>
@@ -81,6 +82,8 @@ struct device_script
   std::map<std::uint8_t, std::vector<std::vector<std::uint8_t>>> received{};
   std::vector<std::uint8_t>                                      iso_endpoints{};
   std::vector<std::uint8_t>                                      class_out{};
+  std::optional<std::vector<std::uint8_t>>                       config_bytes{};
+  std::vector<std::uint8_t>                                      halted{};
 };
 
 auto utf16(std::string_view text) -> std::vector<std::uint8_t>
@@ -201,7 +204,7 @@ public:
       }
       else if(type == 2)
       {
-        s.reply = configuration_bytes();
+        s.reply = s.config_bytes.value_or(configuration_bytes());
       }
       else if(type == 3 and not std::ranges::contains(s.stalled_strings, index))
       {
@@ -230,6 +233,15 @@ public:
     else if(packet.request_type == 0 and packet.request == 9)
     {
       s.configuration = static_cast<std::uint8_t>(packet.value);
+    }
+    else if(packet.request_type == 2 and packet.request == 1 and packet.value == 0)
+    {
+      auto const endpoint = static_cast<std::uint8_t>(packet.index);
+      std::erase(s.halted, endpoint);
+      if((endpoint & 0x80u) != 0)
+      {
+        s.in_toggle[endpoint & 0x0fu] = usb::data_pid::data0;
+      }
     }
     else if(packet.request_type != 1 or packet.request != 11)
     {
@@ -292,6 +304,10 @@ private:
       s.class_out.insert(s.class_out.end(), data.begin(), data.end());
       return usb::handshake::ack;
     }
+    if(std::ranges::contains(s.halted, endpoint))
+    {
+      return usb::handshake::stall;
+    }
     s.received[endpoint].emplace_back(data.begin(), data.end());
     return usb::handshake::ack;
   }
@@ -304,6 +320,10 @@ private:
     }
     if(endpoint != 0)
     {
+      if(std::ranges::contains(s.halted, static_cast<std::uint8_t>(endpoint | 0x80u)))
+      {
+        return {.hs = usb::handshake::stall, .data = {}};
+      }
       auto& queue = s.in_queue[endpoint];
       if(std::ranges::contains(s.iso_endpoints, endpoint))
       {
@@ -1530,4 +1550,427 @@ TEST_CASE("three missing handshakes in a row end a control data stage in error, 
             return record.kind == token::in and record.hs == usb::handshake::none;
           })
       == 3);
+}
+
+namespace
+{
+using packet_list = std::vector<std::vector<std::uint8_t>>;
+
+auto cdc_options_with(std::shared_ptr<usb::cdc_hub> const& hub, usb::cdc_options cdc = {})
+    -> usb::host_options
+{
+  usb::host_options options;
+  options.drivers.push_back(usb::cdc_acm_factory(hub, cdc));
+  return options;
+}
+
+auto two_acm_configuration() -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> bytes{
+      9, 2, 0, 0,    4, 1,    0, 0x80, 50,   9,    4,  0, 0,    1,  2,  2,    1, 0, 5, 0x24,
+      6, 0, 1, 7,    5, 0x81, 3, 8,    0,    16,   9,  4, 1,    0,  2,  0x0a, 0, 0, 0, 7,
+      5, 2, 2, 64,   0, 0,    7, 5,    0x82, 2,    64, 0, 0,    9,  4,  2,    0, 1, 2, 2,
+      1, 0, 5, 0x24, 6, 2,    3, 7,    5,    0x83, 3,  8, 0,    16, 9,  4,    3, 0, 2, 0x0a,
+      0, 0, 0, 7,    5, 4,    2, 64,   0,    0,    7,  5, 0x84, 2,  64, 0,    0};
+  bytes[2] = static_cast<std::uint8_t>(bytes.size());
+  bytes[3] = static_cast<std::uint8_t>(bytes.size() >> 8);
+  return bytes;
+}
+
+auto class_requests(device_script const& script) -> std::vector<usb::setup_packet>
+{
+  std::vector<usb::setup_packet> out;
+  for(auto const& record : script.requests)
+  {
+    if(((record.setup.request_type >> 5) & 3u) == 1)
+    {
+      out.push_back(record.setup);
+    }
+  }
+  return out;
+}
+
+auto joined(std::span<std::vector<std::uint8_t> const> packets) -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> out;
+  for(auto const& packet : packets)
+  {
+    out.append_range(packet);
+  }
+  return out;
+}
+
+auto bytes_of(std::string_view text) -> std::vector<std::uint8_t>
+{
+  return {text.begin(), text.end()};
+}
+
+constexpr usb::setup_packet
+    line_coding_request{.request_type = 0x21, .request = 0x20, .value = 0, .index = 0, .length = 7};
+
+auto line_state_request(std::uint16_t lines, std::uint16_t comm = 0) -> usb::setup_packet
+{
+  return {.request_type = 0x21, .request = 0x22, .value = lines, .index = comm, .length = 0};
+}
+}
+
+TEST_CASE("the CDC ACM driver binds through the association and sets 115200 8N1, then DTR and RTS")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(r.host->drivers().size() == 1);
+  CHECK(r.host->drivers()[0].name == usb::cdc_acm_name);
+  CHECK(r.host->drivers()[0].interfaces == std::vector<std::uint8_t>{0, 1});
+  CHECK(class_requests(r.dev.s) == std::vector{line_coding_request, line_state_request(3)});
+  CHECK(r.dev.s.class_out == std::vector<std::uint8_t>{0x00, 0xc2, 0x01, 0x00, 0, 0, 8});
+  auto const& channel = hub->channel(0);
+  CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
+  CHECK(channel.line_state == 3);
+  CHECK(channel.coding == usb::line_coding{});
+  CHECK(r.warnings.empty());
+}
+
+TEST_CASE("the CDC ACM driver leaves DTR off when its options say so")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub, {.dtr = false})};
+  r.plug();
+  r.run_until(t0 + second);
+  CHECK(class_requests(r.dev.s) == std::vector{line_coding_request, line_state_request(2)});
+  CHECK(hub->channel(0).line_state == 2);
+}
+
+TEST_CASE("CDC OUT bytes go in packets of 64, with a ZLP after a full last one only")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  auto& channel = hub->channel(0);
+  channel.out.append_range(std::vector<std::uint8_t>(64, 'a'));
+  r.run_until(t0 + second + 10 * ms);
+  auto const& received = r.dev.s.received[2];
+  REQUIRE(received.size() == 2);
+  CHECK(received[0].size() == 64);
+  CHECK(received[1].empty());
+  CHECK(channel.out.empty());
+  CHECK(channel.in_flight == 0);
+
+  std::vector<std::uint8_t> big(1000);
+  for(std::size_t n = 0; n < big.size(); ++n)
+  {
+    big[n] = static_cast<std::uint8_t>(n * 7);
+  }
+  channel.out.append_range(big);
+  r.run_until(t0 + second + 30 * ms);
+  REQUIRE(received.size() == 2 + 16);
+  CHECK(
+      std::ranges::all_of(
+          received | std::views::drop(2) | std::views::take(15),
+          [](auto const& packet) { return packet.size() == 64; }));
+  CHECK(received.back().size() == 40);
+  CHECK(joined(std::span{received}.subspan(2)) == big);
+}
+
+TEST_CASE("CDC OUT bytes written before configuration wait for the control line state")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  hub->channel(0).out.append_range(bytes_of("early"));
+  rig r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  CHECK(r.dev.s.received[2] == packet_list{bytes_of("early")});
+  auto const line_state =
+      std::ranges::find(r.dev.s.requests, line_state_request(3), &request_record::setup);
+  REQUIRE(line_state != r.dev.s.requests.end());
+  auto const first_out = std::ranges::find_if(r.dev.s.tokens, [](token_record const& record) {
+    return record.kind == token::out and record.endpoint == 2;
+  });
+  REQUIRE(first_out != r.dev.s.tokens.end());
+  CHECK(first_out->at > line_state->at);
+}
+
+TEST_CASE("CDC IN packets keep their time, a read splits a packet and keeps the rest")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  r.dev.s.in_queue[2] = {bytes_of("hi"), bytes_of("!")};
+  r.run_until(t0 + second + 10 * ms);
+  auto& channel = hub->channel(0);
+  CHECK(channel.in_bytes == 3);
+  CHECK(channel.packets() == 2);
+  auto const first = channel.take(1);
+  REQUIRE(first.size() == 1);
+  CHECK(first[0].data == bytes_of("h"));
+  auto const rest = channel.take_packets(5);
+  REQUIRE(rest.size() == 2);
+  CHECK(rest[0].data == bytes_of("i"));
+  CHECK(rest[0].at == first[0].at);
+  CHECK(rest[1].data == bytes_of("!"));
+  CHECK(rest[1].at > rest[0].at);
+  CHECK(channel.in_bytes == 0);
+
+  channel.set_limit(2);
+  r.dev.s.in_queue[2] = {bytes_of("abc")};
+  r.run_until(t0 + second + 20 * ms);
+  CHECK(channel.dropped == 1);
+  CHECK(channel.take(10)[0].data == bytes_of("bc"));
+}
+
+TEST_CASE("a SERIAL_STATE notification split over two packets sets the serial state")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  r.dev.s.in_queue[1] = {
+      std::vector<std::uint8_t>{0xa1, 0x20, 0, 0, 0, 0, 2, 0},
+      std::vector<std::uint8_t>{0x03, 0x00}
+  };
+  r.run_until(t0 + second + 50 * ms);
+  CHECK(hub->channel(0).serial_state == 3);
+}
+
+TEST_CASE("a control line state request through the driver reaches the device and its result")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  auto&      channel = hub->channel(0);
+  auto const id      = r.host->context(0).control(line_state_request(0));
+  channel.awaited.insert(id);
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(channel.results.at(id) == usb::transfer_status::completed);
+  CHECK(channel.awaited.empty());
+  CHECK(channel.line_state == 0);
+  CHECK(class_requests(r.dev.s).back() == line_state_request(0));
+}
+
+TEST_CASE("two ACM functions without associations bind through their union descriptors")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.dev.s.config_bytes = two_acm_configuration();
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(r.host->drivers().size() == 2);
+  CHECK(r.host->drivers()[0].interfaces == std::vector<std::uint8_t>{0, 1});
+  CHECK(r.host->drivers()[1].interfaces == std::vector<std::uint8_t>{2, 3});
+  REQUIRE(r.host->configuration() != nullptr);
+  CHECK(usb::cdc_acm_functions(*r.host->configuration()) == std::vector<std::uint8_t>{0, 2});
+  CHECK(
+      class_requests(r.dev.s)
+      == std::vector{
+          line_coding_request, line_state_request(3),
+          usb::setup_packet{
+                            .request_type = 0x21, .request = 0x20, .value = 0, .index = 2, .length = 7},
+          line_state_request(3, 2)
+  });
+  CHECK(hub->channel(1).comm_interface == std::optional<std::uint8_t>{2});
+  hub->channel(1).out.append_range(bytes_of("xy"));
+  r.dev.s.in_queue[2] = {bytes_of("zero")};
+  r.dev.s.in_queue[4] = {bytes_of("one")};
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(r.dev.s.received[4] == packet_list{bytes_of("xy")});
+  CHECK(r.dev.s.received[2].empty());
+  CHECK(hub->channel(0).take(10)[0].data == bytes_of("zero"));
+  CHECK(hub->channel(1).take(10)[0].data == bytes_of("one"));
+}
+
+TEST_CASE("a restore sends the OUT bytes the snapshot had pending and drops later IN bytes")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        a{cdc_options_with(hub)};
+  a.plug();
+  a.run_until(t0 + second);
+  auto& channel = hub->channel(0);
+  channel.out.append_range(bytes_of("abc"));
+  std::vector<std::byte> saved;
+  a.host->save(saved);
+  auto const device_at_save = a.dev.s;
+
+  a.dev.s.in_queue[2] = {bytes_of("late")};
+  a.run_until(t0 + second + 10 * ms);
+  CHECK(a.dev.s.received[2] == packet_list{bytes_of("abc")});
+  CHECK(channel.in_bytes == 4);
+
+  auto* const kept = a.host->drivers()[0].driver.get();
+  hub->discard();
+  a.host->load(saved);
+  CHECK(a.host->drivers()[0].driver.get() == kept);
+  CHECK(channel.in_bytes == 0);
+  CHECK(std::ranges::equal(channel.out, bytes_of("abc")));
+  CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
+  CHECK(channel.line_state == 3);
+  a.run_until(t0 + second + 20 * ms);
+  CHECK(a.dev.s.received[2] == packet_list{bytes_of("abc"), bytes_of("abc")});
+
+  auto const fresh = std::make_shared<usb::cdc_hub>();
+  rig        b{cdc_options_with(fresh)};
+  b.dev.s = device_at_save;
+  b.host->load(saved);
+  CHECK(std::ranges::equal(fresh->channel(0).out, bytes_of("abc")));
+  CHECK(fresh->channel(0).comm_interface == std::optional<std::uint8_t>{0});
+  b.run_until(t0 + second + 10 * ms);
+  CHECK(b.dev.s.received[2] == packet_list{bytes_of("abc")});
+}
+
+TEST_CASE("a snapshot in the middle of an OUT transfer restores it in the middle")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        a{cdc_options_with(hub)};
+  a.plug();
+  a.run_until(t0 + second);
+  std::vector<std::uint8_t> big(1000);
+  for(std::size_t n = 0; n < big.size(); ++n)
+  {
+    big[n] = static_cast<std::uint8_t>(n * 13);
+  }
+  hub->channel(0).out.append_range(big);
+  auto end = t0 + second;
+  while(a.dev.s.received[2].size() < 4)
+  {
+    end += 20 * us;
+    a.run_until(end);
+  }
+  CHECK(hub->channel(0).in_flight == 1000);
+  std::vector<std::byte> saved;
+  a.host->save(saved);
+  auto const device_at_save = a.dev.s;
+  a.run_until(end + 10 * ms);
+  CHECK(joined(a.dev.s.received[2]) == big);
+
+  auto const fresh = std::make_shared<usb::cdc_hub>();
+  rig        b{cdc_options_with(fresh)};
+  b.dev.s     = device_at_save;
+  b.dev.clock = end;
+  b.host->load(saved);
+  CHECK(fresh->channel(0).in_flight == 1000);
+  CHECK(fresh->channel(0).out.empty());
+  b.run_until(end + 10 * ms);
+  CHECK(joined(b.dev.s.received[2]) == big);
+  CHECK(fresh->channel(0).in_flight == 0);
+  CHECK(b.dev.s.received[2] == a.dev.s.received[2]);
+}
+
+TEST_CASE("an unplug unbinds the CDC channel and keeps it, a replug binds the same channel again")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  r.dev.s.in_queue[2] = {bytes_of("a")};
+  r.run_until(t0 + second + 10 * ms);
+  auto& channel = hub->channel(0);
+  r.host->pull_up_changed(false, vtime{t0 + second + 10 * ms});
+  CHECK(r.host->drivers().empty());
+  CHECK_FALSE(channel.comm_interface.has_value());
+  CHECK(channel.take(5)[0].data == bytes_of("a"));
+  CHECK(channel.take(5).empty());
+  channel.out.append_range(bytes_of("zz"));
+  r.run_until(t0 + second + 50 * ms);
+  CHECK(r.dev.s.received[2].empty());
+
+  r.plug(t0 + second + 50 * ms);
+  r.run_until(t0 + 3 * second);
+  CHECK(r.host->state() == usb::device_state::configured);
+  CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
+  CHECK(r.dev.s.received[2] == packet_list{bytes_of("zz")});
+  CHECK(&hub->channel(0) == &channel);
+}
+
+TEST_CASE("a bulk IN STALL is cleared as Linux does and reading carries on at DATA0")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  r.dev.s.in_queue[2] = {bytes_of("a")};
+  r.run_until(t0 + second + 5 * ms);
+  r.dev.s.halted = {0x82};
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(r.dev.s.halted.empty());
+  auto const clear = std::ranges::find(
+      r.dev.s.requests,
+      usb::setup_packet{.request_type = 2, .request = 1, .value = 0, .index = 0x82, .length = 0},
+      &request_record::setup);
+  REQUIRE(clear != r.dev.s.requests.end());
+  r.dev.s.in_queue[2] = {bytes_of("b"), bytes_of("c")};
+  r.run_until(t0 + second + 20 * ms);
+  auto const read = hub->channel(0).take(10);
+  REQUIRE(read.size() == 3);
+  CHECK(read[1].data == bytes_of("b"));
+  CHECK(read[2].data == bytes_of("c"));
+  CHECK(read[1].at.ps > clear->at);
+  CHECK(r.warnings.empty());
+}
+
+TEST_CASE("a bulk OUT STALL stops writing with a warning and sends no request")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  auto const requests = r.dev.s.requests.size();
+  r.dev.s.halted      = {0x02};
+  auto& channel       = hub->channel(0);
+  channel.out.append_range(bytes_of("lost"));
+  r.run_until(t0 + second + 10 * ms);
+  REQUIRE(r.warnings.size() == 1);
+  CHECK(
+      r.warnings[0].find("bulk OUT ended stalled, 4 bytes lost, writing stops")
+      != std::string::npos);
+  CHECK(channel.in_flight == 0);
+  r.dev.s.halted.clear();
+  channel.out.append_range(bytes_of("next"));
+  r.run_until(t0 + second + 20 * ms);
+  CHECK(r.dev.s.received[2].empty());
+  CHECK(std::ranges::equal(channel.out, bytes_of("next")));
+  CHECK(r.dev.s.requests.size() == requests);
+}
+
+TEST_CASE("a notification cut short by a short packet is dropped, the next one parses")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        r{cdc_options_with(hub)};
+  r.plug();
+  r.run_until(t0 + second);
+  r.dev.s.in_queue[1] = {
+      std::vector<std::uint8_t>{0xa1, 0x20, 0, 0, 0, 0, 2, 0},
+      std::vector<std::uint8_t>{},
+      std::vector<std::uint8_t>{0xa1, 0x20, 0, 0, 0, 0, 2, 0},
+      std::vector<std::uint8_t>{0x05, 0x00}
+  };
+  r.run_until(t0 + second + 100 * ms);
+  CHECK(r.dev.s.in_queue[1].empty());
+  CHECK(hub->channel(0).serial_state == 5);
+}
+
+TEST_CASE("OUT bytes of an unbound function are saved with the host and sent after the restore")
+{
+  auto const hub = std::make_shared<usb::cdc_hub>();
+  rig        a{cdc_options_with(hub)};
+  hub->channel(0).out.append_range(bytes_of("early"));
+  std::vector<std::byte> saved;
+  a.host->save(saved);
+  hub->channel(0).out.clear();
+
+  auto const fresh = std::make_shared<usb::cdc_hub>();
+  rig        b{cdc_options_with(fresh)};
+  fresh->channel(0).out.append_range(bytes_of("stale"));
+  b.host->load(saved);
+  CHECK(std::ranges::equal(fresh->channel(0).out, bytes_of("early")));
+  b.plug();
+  b.run_until(t0 + second);
+  CHECK(b.dev.s.received[2] == packet_list{bytes_of("early")});
+
+  std::vector<std::byte> empty_hub;
+  rig{cdc_options_with(hub)}.host->save(empty_hub);
+  b.host->load(empty_hub);
+  CHECK(fresh->channel(0).out.empty());
 }

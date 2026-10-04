@@ -541,7 +541,8 @@ private:
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
 
-  std::shared_ptr<bool>          alive_;
-  std::unique_ptr<core::machine> machine_;
+  std::shared_ptr<bool>                                        alive_;
+  std::map<std::string, std::shared_ptr<periph::usb::cdc_hub>> cdc_hubs_;
+  std::unique_ptr<core::machine>                               machine_;
 };
 }

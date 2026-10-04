@@ -1,5 +1,5 @@
 """The virtual USB host of OTG_FS from Python: wiring, cable, enumeration state, control
-requests, snapshots and the project file.
+requests, snapshots, the project file and the CDC ACM stream.
 
 The firmware is the usb_cdc example's: TinyUSB 0.21.0, a CDC ACM plus HID composite device."""
 
@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn.board import UsbHost, UsbHostOptions, UsbState
+from popcorn.board import CdcLineCoding, UsbHost, UsbHostOptions, UsbState
 from popcorn.units import ms, s
 
 pytest_plugins = ["pytester"]
@@ -25,6 +26,7 @@ GET_DESCRIPTOR = 6
 SET_LINE_CODING = 0x20
 GET_LINE_CODING = 0x21
 LINE_CODING = bytes([0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08])
+SET_CONTROL_LINE_STATE = 0x22
 
 
 def usb_machine(
@@ -116,6 +118,7 @@ def test_a_device_that_never_answers_raises_usb_timeout(
     m = usb_machine(u575, UsbHostOptions(timeout=ms(20)))
     host = m.periph.OTG_FS.host
     asyncio.run(host.wait_configured(for_=s(2)))
+    asyncio.run(m.run(for_=ms(20), stop_when=lambda _: host.cdc().dtr))
     m.periph.OTG_FS.GAHBCFG.GINTMSK = 0
     before = m.time
     with pytest.raises(popcorn.UsbTimeout) as caught:
@@ -270,3 +273,172 @@ def test_a_boot_past_the_enumeration_is_cached_configured(
     ]
     states = (pytester.path / "states.txt").read_text().splitlines()
     assert states == ["CONFIGURED 1 01", "CONFIGURED 1 01"]
+
+
+def line_states(host: UsbHost) -> list[int]:
+    return [r.value for r in host.requests if r.request == SET_CONTROL_LINE_STATE]
+
+
+def test_the_cdc_driver_sets_the_line_coding_then_dtr_and_rts(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+    asyncio.run(m.run(for_=ms(10)))
+    classes = [(r.request_type, r.request, r.value, r.index, r.length) for r in host.requests[-2:]]
+    assert classes == [(0x21, SET_LINE_CODING, 0, 0, 7), (0x21, SET_CONTROL_LINE_STATE, 3, 0, 0)]
+    assert all(r.status == "completed" for r in host.requests)
+    assert (cdc.bound, cdc.dtr, cdc.rts) == (True, True, True)
+    assert cdc.line_coding == CdcLineCoding()
+    assert cdc.serial_state == 0
+    assert host.cdc() is cdc
+    assert repr(cdc) == "CdcStream(OTG_FS, 0)"
+
+
+def test_dtr_off_by_option_leaves_the_firmware_unconnected_until_python_sets_it(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(dtr=False))
+    host = m.periph.OTG_FS.host
+    cdc = host.cdc()
+
+    async def body() -> tuple[bytes, bytes]:
+        await host.wait_configured(for_=s(2))
+        await cdc.write(b"abc")
+        silent = await cdc.read(3, for_=ms(30))
+        await cdc.set_control_line_state(dtr=True, rts=False)
+        return silent, await cdc.read(3, for_=ms(30))
+
+    silent, echoed = asyncio.run(body())
+    assert silent == b""
+    assert echoed == b"ABC"
+    assert line_states(host) == [2, 1]
+    assert (cdc.dtr, cdc.rts) == (True, False)
+    assert m.var("cdc_connected").value == 1
+
+
+def test_dtr_drops_only_on_request(u575: popcorn.MachineDescription) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+
+    async def body() -> bytes:
+        await m.run(for_=ms(10))
+        assert m.var("cdc_connected").value == 1
+        await cdc.set_control_line_state(dtr=False)
+        await m.run(for_=ms(10))
+        await cdc.write(b"x")
+        return await cdc.read(1, for_=ms(20))
+
+    assert asyncio.run(body()) == b""
+    assert m.var("cdc_connected").value == 0
+    assert line_states(host) == [3, 2]
+
+
+def test_set_line_coding_reaches_the_device(u575: popcorn.MachineDescription) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+
+    async def body() -> bytes:
+        await cdc.set_line_coding(9600, data_bits=7, parity="E", stop_bits=2)
+        return await host.control(0xA1, GET_LINE_CODING, 0, 0, 7)
+
+    assert asyncio.run(body()) == bytes([0x80, 0x25, 0, 0, 2, 2, 7])
+    assert cdc.line_coding == CdcLineCoding(9600, 7, "E", 2)
+    del m
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"baud": 0}, "baud"),
+        ({"data_bits": 9}, "data_bits"),
+        ({"parity": "X"}, "parity"),
+        ({"stop_bits": 3}, "stop_bits"),
+    ],
+)
+def test_set_line_coding_refuses_bad_fields(
+    u575: popcorn.MachineDescription, kwargs: dict[str, Any], match: str
+) -> None:
+    cdc = usb_machine(u575).periph.OTG_FS.host.cdc()
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(cdc.set_line_coding(**kwargs))
+
+
+def test_a_request_with_no_driver_bound_raises(u575: popcorn.MachineDescription) -> None:
+    cdc = usb_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host.cdc()
+    assert not cdc.bound
+    with pytest.raises(popcorn.UsbError, match="no CDC ACM driver") as caught:
+        asyncio.run(cdc.set_control_line_state(dtr=False))
+    assert caught.value.status == "unbound"
+
+
+def test_cdc_functions_are_checked_once_the_configuration_is_read(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575)
+    host = m.periph.OTG_FS.host
+    early = host.cdc(1)
+    assert early.function == 1
+    with pytest.raises(ValueError, match="0 or more"):
+        host.cdc(-1)
+    asyncio.run(host.wait_configured(for_=s(2)))
+    with pytest.raises(ValueError, match="1 CDC ACM functions, no 2"):
+        host.cdc(2)
+    with pytest.raises(ValueError, match="no 1"):
+        m.board.pty("OTG_FS", function=1)
+    with pytest.raises(ValueError, match="UART has no function 1"):
+        m.board.pty("USART1", function=1)
+
+
+def test_a_pty_on_an_alias_is_keyed_by_the_controller(u575: popcorn.MachineDescription) -> None:
+    m = usb_machine(u575)
+    path = m.board.pty("SEC_OTG_FS")
+    assert m.board.ptys == {"OTG_FS": path}
+    assert m.board.pty("OTG_FS") == path
+    m.board.close()
+
+
+def test_connect_pty_bridges_the_cdc_function_from_the_project(
+    u575: popcorn.MachineDescription, tmp_path: Path
+) -> None:
+    del u575
+    board = '[board.OTG_FS]\nhost = { dtr = false, rts = false }\nconnect = "pty"\n'
+    m = project(tmp_path, board).machine()
+    assert set(m.board.ptys) == {"OTG_FS"}
+    m.reset()
+    host = m.periph.OTG_FS.host
+    asyncio.run(host.wait_configured(for_=s(2)))
+    asyncio.run(m.run(for_=ms(10)))
+    assert line_states(host) == [0]
+    m.board.close()
+
+
+def test_connect_pty_on_a_controller_without_a_host_is_refused(
+    u575: popcorn.MachineDescription, tmp_path: Path
+) -> None:
+    del u575
+    with pytest.raises(popcorn.ModelError):
+        project(tmp_path, '[board.OTG_FS]\nconnect = "pty"\n').machine()
+
+
+def test_bytes_written_unplugged_survive_a_restore_into_a_fresh_machine(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(attached=False))
+    asyncio.run(m.periph.OTG_FS.host.cdc().write(b"queued"))
+    saved = popcorn.Snapshot.from_bytes(m.snapshot().to_bytes())
+
+    other = usb_machine(u575, UsbHostOptions(attached=False))
+    host = other.periph.OTG_FS.host
+    cdc = host.cdc()
+    asyncio.run(cdc.write(b"stale"))
+    other.restore(saved)
+    assert not host.attached
+    assert cdc.queued == 6
+
+    async def body() -> bytes:
+        await host.attach()
+        await host.wait_configured(for_=s(1))
+        return await cdc.read(6, for_=ms(50))
+
+    assert asyncio.run(body()) == b"QUEUED"

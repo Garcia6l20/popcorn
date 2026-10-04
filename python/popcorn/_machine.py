@@ -465,12 +465,13 @@ class Machine:
             aliases,
             self._wait_until,
             self._require_owner,
+            self._ports.bridges,
         )
         self._devices = attached
         for targets in attached.values():
             for target in targets:
                 attach(target, self)
-        self._board = Board(self._ports, attached)
+        self._board = Board(self._ports, attached, self._usb)
         access = ViewAccess(
             self._handle,
             self._require_stopped,
@@ -1209,7 +1210,9 @@ class Machine:
         frames not read yet and words written to a receiving block and not served yet are
         dropped, and each `AudioStream.dropped` restarts at 0. A USB host returns to the
         snapshot's state, its cable and the control requests it had queued included: results of
-        control requests not collected yet are dropped.
+        control requests not collected yet are dropped. A CDC stream drops the bytes the device
+        sent and Python did not read yet, and gets back the bytes written and not yet taken by
+        the device as the snapshot had them.
         """
         self._require_idle()
         machine_id = snapshot.machine_id

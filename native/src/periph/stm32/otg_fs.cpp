@@ -230,7 +230,9 @@ struct out_fields
  * state, and after a load the host hears of a pull-up that differs from the saved one. A board
  * host, built from the board's usb_hosts, is owned by the model and reached through
  * usb_host_port: its cable is model state, plugged at power-on as the board says, kept across
- * other resets. A host given to attach() replaces it until the next plug(), and is not saved.
+ * other resets. Its bytes are saved with the cable unplugged too, a detached host then, so state
+ * its drivers keep for a later plug survives a restore. A host given to attach() replaces it until
+ * the next plug(), and is not saved.
  * Unplugging a device that pulls D+ up leaves the bus idle, as B-valid stays forced: 3 ms later
  * the device suspends as suspend() does, ESUSP, USBSUSP and DSTS.SUSPSTS. Plugging back cancels
  * a suspend still pending, and the host's bus reset ends one already taken.
@@ -1266,7 +1268,11 @@ void otg_fs::save(std::vector<std::byte>& out) const
 {
   auto saved = state_;
   saved.host.clear();
-  if(board_host_ ? host_ == board_host_ : host_ != nullptr)
+  if(board_host_ and (host_ == board_host_ or host_ == nullptr))
+  {
+    board_host_->save(saved.host);
+  }
+  else if(not board_host_ and host_ != nullptr)
   {
     host_->save(saved.host);
   }
@@ -1280,8 +1286,7 @@ void otg_fs::load(std::span<std::byte const> in)
   if(board_host_)
   {
     select_host();
-    board_host_->load(
-        state_.cable ? std::span<std::byte const>{blob} : std::span<std::byte const>{});
+    board_host_->load(blob);
   }
   else if(host_)
   {

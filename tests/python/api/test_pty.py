@@ -14,7 +14,7 @@ from typing import cast
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn._streams import OUTGOING_LIMIT, PtyBridge
+from popcorn._streams import OUTGOING_LIMIT, PtyBridge, UartPtyLink
 from popcorn.units import ms
 
 from .conftest import BOARD_ELF
@@ -144,7 +144,7 @@ class _Frame:
 def test_unread_pty_output_keeps_the_last_64_kib(caplog: pytest.LogCaptureFixture) -> None:
     sent = bytes(range(256)) * 1024
     link = FakeLink(sent[: len(sent) // 2])
-    bridge = PtyBridge("USART9", cast(_core.UartLink, link), 1.0)
+    bridge = PtyBridge("USART9", UartPtyLink(cast(_core.UartLink, link)), 1.0)
     try:
         with caplog.at_level(logging.WARNING, logger="popcorn"):
             bridge.pump()

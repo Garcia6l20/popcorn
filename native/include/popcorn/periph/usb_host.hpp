@@ -381,6 +381,17 @@ struct driver_factory
       claim{};
   /** @brief Builds a driver. */
   std::function<std::unique_ptr<class_driver>()> make{};
+  /**
+   * @brief Appends the state of this driver kind that lives outside its drivers and drives the
+   *        bus once a driver binds, bytes queued for a function not bound yet for instance. Saved
+   *        with the host, whatever the device state. Optional.
+   */
+  std::function<void(std::vector<std::byte>&)> save{};
+  /**
+   * @brief Restores what save() wrote, or a state with nothing pending from empty bytes. A
+   *        host load() calls it before it keeps, rebuilds or loads any driver. Optional.
+   */
+  std::function<void(std::span<std::byte const>)> load{};
 };
 
 /** @brief One step of the enumeration sequence. */

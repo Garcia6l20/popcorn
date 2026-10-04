@@ -98,6 +98,10 @@ static void button_init(void)
 static void cdc_task(void)
 {
   uint8_t buffer[64];
+  if(!tud_cdc_connected())
+  {
+    return;
+  }
   while(tud_cdc_available() > 0 && tud_cdc_write_available() > 0)
   {
     uint32_t room  = tud_cdc_write_available();

@@ -85,8 +85,12 @@ auto key_of(std::string const& usb) -> std::string
   return std::format("usb.{}", usb);
 }
 
-auto usb_factories(mcu_description const& description, machine_config const& config)
-    -> std::map<std::string, periph::model_factory, std::less<>>
+using cdc_hubs = std::map<std::string, std::shared_ptr<periph::usb::cdc_hub>>;
+
+auto usb_factories(
+    mcu_description const& description,
+    machine_config const&  config,
+    cdc_hubs const&        hubs) -> std::map<std::string, periph::model_factory, std::less<>>
 {
   periph::stm32::board board;
   for(auto const& [name, host] : config.usb_hosts)
@@ -100,6 +104,8 @@ auto usb_factories(mcu_description const& description, machine_config const& con
     options.host.reset_time = std::chrono::nanoseconds{static_cast<std::int64_t>(host.reset_ns)};
     options.host.request_timeout =
         std::chrono::nanoseconds{static_cast<std::int64_t>(host.timeout_ns)};
+    options.host.drivers.push_back(
+        periph::usb::cdc_acm_factory(hubs.at(name), {.dtr = host.dtr, .rts = host.rts}));
     board.usb_hosts.emplace(name, std::move(options));
   }
   auto all = periph::stm32::factories(board, description);
@@ -119,8 +125,10 @@ auto usb_factories(mcu_description const& description, machine_config const& con
   return out;
 }
 
-auto options_of(mcu_description const& description, machine_config const& config)
-    -> core::machine_options
+auto options_of(
+    mcu_description const& description,
+    machine_config const&  config,
+    cdc_hubs const&        hubs) -> core::machine_options
 {
   if(not std::isfinite(config.cpi) or not(config.cpi > 0.0))
   {
@@ -165,7 +173,7 @@ auto options_of(mcu_description const& description, machine_config const& config
       }
     }
   }
-  for(auto& [name, factory] : usb_factories(description, config))
+  for(auto& [name, factory] : usb_factories(description, config, hubs))
   {
     if(not options.models.emplace(name, std::move(factory)).second)
     {
@@ -185,8 +193,12 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
     : alive_{std::make_shared<bool>(true)}
 {
   detail::building_scope const building{alive_};
+  for(auto const& name : config.usb_hosts | std::views::keys)
+  {
+    cdc_hubs_.emplace(name, std::make_shared<periph::usb::cdc_hub>());
+  }
   machine_ = std::make_unique<core::machine>(
-      description, factory_for(description), options_of(description, config));
+      description, factory_for(description), options_of(description, config, cdc_hubs_));
 }
 
 machine_handle::~machine_handle()
@@ -248,6 +260,10 @@ auto machine_handle::snapshot() const -> snapshot_handle
 void machine_handle::restore(snapshot_handle const& saved)
 {
   reflex::py::nb::gil_scoped_release unlocked;
+  for(auto const& hub : cdc_hubs_ | std::views::values)
+  {
+    hub->discard();
+  }
   machine_->restore(saved.native());
 }
 

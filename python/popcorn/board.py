@@ -10,10 +10,14 @@ from popcorn._nvic import Irqs, Nvic
 from popcorn._rcc import RccOptions
 from popcorn._streams import Board, Frame, UartStream
 from popcorn._usb import (
+    CdcLineCoding,
+    CdcPacket,
+    CdcStream,
     UsbEndpoint,
     UsbHost,
     UsbHostOptions,
     UsbInterface,
+    UsbRequest,
     UsbState,
     UsbTransferType,
 )
@@ -24,6 +28,9 @@ __all__ = [
     "AudioOptions",
     "AudioStream",
     "Board",
+    "CdcLineCoding",
+    "CdcPacket",
+    "CdcStream",
     "Frame",
     "I2CTarget",
     "Irqs",
@@ -37,6 +44,7 @@ __all__ = [
     "UsbHost",
     "UsbHostOptions",
     "UsbInterface",
+    "UsbRequest",
     "UsbState",
     "UsbTransferType",
 ]

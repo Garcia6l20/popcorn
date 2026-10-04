@@ -141,6 +141,10 @@ struct usb_host_entry
   std::optional<std::uint32_t> reset_ms{};
   /** @brief Time a control transfer may take after its SETUP in milliseconds, empty for 5000. */
   std::optional<std::uint32_t> timeout_ms{};
+  /** @brief DTR the CDC ACM driver sets at configuration. */
+  bool dtr{true};
+  /** @brief RTS the CDC ACM driver sets at configuration. */
+  bool rts{true};
 };
 
 /** @brief `[board.<periph>]`. */
