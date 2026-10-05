@@ -108,4 +108,7 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the DBGMCU model, RM0456 section 75.12. */
 [[nodiscard]] auto dbgmcu_factory() -> model_factory;
+
+/** @brief Factory of the CRC model, RM0456 section 24. */
+[[nodiscard]] auto crc_factory() -> model_factory;
 }
