@@ -73,11 +73,6 @@ if VARIANT != "asan":
 
 obs = add_subdirectory("native/src/obs")
 
-popcorn_config = project.StaticLibrary(
-    "popcorn_config", env, sources=add_subdirectory("native/src/config").sources
-)
-popcorn_config.link(core)
-
 describe_schema = project.Program(
     "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
 )
@@ -100,7 +95,6 @@ if VARIANT != "asan":
     ext = add_extension("popcorn", "_core", add_subdirectory("native/src/bind").sources)
     ext.link(core)
     ext.link(obs.popcorn_obs)
-    ext.link(popcorn_config)
     if build_tests:
         smoke_ext = add_extension(
             "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]

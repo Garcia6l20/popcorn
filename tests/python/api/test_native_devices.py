@@ -12,9 +12,8 @@ from typing import cast
 import popcorn
 import pytest
 from popcorn import ConfigError, StopReason, _core
-from popcorn._devices import parse_duration
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget, TableWrite
-from popcorn.units import VirtualDuration, ms, ns, ps, s, us
+from popcorn.units import VirtualDuration, ms, ns, ps, us
 
 from .devices_example import Eeprom24
 from .projects import NATIVE_DEVICES
@@ -325,39 +324,22 @@ def test_a_project_declares_a_custom_at25sf_on_the_hardware_ss(
     assert second is not flash
 
 
-def _project(tmp_path: Path, device: str, bus: str = "SPI1", elf: Path = SPI_ELF) -> Path:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(
-        '[mcu]\npart = "STM32U575QGIx"\n'
-        f'[image.app]\nelf = "{elf}"\n'
-        '[boot]\nuntil = "main"\nbudget = 100_000_000\n'
-        f"[board.{bus}]\ndevices = [{device}]\n"
-    )
-    return path
-
-
-def test_a_project_file_takes_durations_as_strings(
-    u575: popcorn.MachineDescription, tmp_path: Path
+def test_a_project_device_takes_a_page_program_duration(
+    u575: popcorn.MachineDescription,
 ) -> None:
-    path = _project(
-        tmp_path,
-        '{ cs = "PA4", model = "popcorn.devices:At25sf", page_program = "1.2 ms" }',
+    project = NATIVE_DEVICES.replace(
+        board={
+            "SPI1": popcorn.Periph(
+                devices=[popcorn.Device(At25sf, cs="PA4", page_program=us(1200))]
+            )
+        }
     )
-    project = popcorn.Project.load(path)
     m = project.machine()
     asyncio.run(project.boot_machine(m))
     m.reg.pc = m.sym("write_read")
     slow = finish(m)
     quick = run(spi_machine(u575, At25sf("PA4", page_program=us(600))), "write_read")
     assert 1.8 * quick[0] < slow[0] < 2.2 * quick[0]
-
-
-def test_a_project_file_image_is_relative_to_the_project_file(tmp_path: Path) -> None:
-    (tmp_path / "flash.bin").write_bytes(b"\x5a\xa5")
-    path = _project(tmp_path, '{ model = "popcorn.devices:At25sf", image = "flash.bin" }')
-    (flash,) = popcorn.Project.load(path).machine().board.devices("SPI1")
-    assert isinstance(flash, At25sf)
-    assert flash.contents()[:3] == b"\x5a\xa5\xff"
 
 
 def test_a_project_device_takes_an_image_path(
@@ -436,61 +418,6 @@ def test_a_project_declares_native_i2c_devices(u575: popcorn.MachineDescription)
     assert device.contents()[0x10:0x24] == PATTERN
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ('"1500 ps"', "a whole number of nanoseconds"),
-        ('"600 parsecs"', "a duration such as"),
-        ('"600us"', "a duration such as"),
-        ('"0.5 ps"', "a whole number of picoseconds"),
-        ("600", "a duration such as"),
-    ],
-)
-def test_a_bad_project_file_duration_is_refused_on_its_key(
-    tmp_path: Path, value: str, expected: str
-) -> None:
-    path = _project(tmp_path, f'{{ model = "popcorn.devices:At25sf", page_program = {value} }}')
-    with pytest.raises(ConfigError, match=expected) as refused:
-        popcorn.Project.load(path).machine()
-    assert refused.value.key == "board.SPI1.devices[0].page_program"
-    assert refused.value.line == 9
-
-
-def test_a_project_file_table_target_takes_hex_and_decimal_register_keys(
-    u575: popcorn.MachineDescription, tmp_path: Path
-) -> None:
-    path = _project(
-        tmp_path,
-        '{ address = 0x38, model = "popcorn.devices:TableTarget", register_bytes = 2, '
-        'replies = { "0x4002" = [0x12, 0x34], "7" = [1] } }',
-        "I2C1",
-        I2C_ELF,
-    )
-    project = popcorn.Project.load(path)
-    m = project.machine()
-    asyncio.run(project.boot_machine(m))
-    m.reg.pc = m.sym("table")
-    assert finish(m) == [0x12, 0x34]
-    (table,) = m.board.devices("I2C1")
-    assert isinstance(table, TableTarget)
-    assert table.writes() == (TableWrite(0x4000, b"\x01"), TableWrite(0x4001, b"\x02\x03"))
-
-
-def test_a_project_file_table_key_that_is_no_integer_is_refused_on_its_key(
-    tmp_path: Path,
-) -> None:
-    path = _project(
-        tmp_path,
-        '{ address = 0x38, model = "popcorn.devices:TableTarget", replies = { "reg" = [1] } }',
-        "I2C1",
-        I2C_ELF,
-    )
-    with pytest.raises(ConfigError, match="integer keys") as refused:
-        popcorn.Project.load(path).machine()
-    assert refused.value.key == "board.I2C1.devices[0].replies"
-    assert refused.value.line == 9
-
-
 def bare_at25sf() -> _core.At25sfBase:
     return _core.At25sfBase(
         0x1F, 0x32, 0x17, 0x16, 64 << 10, "", b"", 600_000, 1, 1, 1, 1, 1, 1, 1, 1
@@ -519,24 +446,3 @@ def test_a_bad_project_argument_is_refused_on_the_entry() -> None:
     with pytest.raises(ConfigError, match="size") as refused:
         project.machine()
     assert refused.value.key == "board.SPI1.devices[0]"
-
-
-@pytest.mark.parametrize(
-    ("text", "duration"),
-    [
-        ("600 us", us(600)),
-        ("1.5 ms", us(1500)),
-        (".5 ns", ps(500)),
-        ("30 s", s(30)),
-        ("7 ps", ps(7)),
-        ("2. ns", ns(2)),
-    ],
-)
-def test_parse_duration_reads_a_number_and_a_unit(text: str, duration: VirtualDuration) -> None:
-    assert parse_duration(text) == duration
-
-
-@pytest.mark.parametrize("text", ["5", "5 min", "-1 ms", " 2 ns", "2 ns ", "2  ns", "1.5 ps", ""])
-def test_parse_duration_refuses_anything_else(text: str) -> None:
-    with pytest.raises(ValueError):
-        parse_duration(text)

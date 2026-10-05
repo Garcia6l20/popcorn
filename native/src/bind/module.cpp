@@ -1,4 +1,6 @@
-#include "config.hpp"
+// false positive on std::optional<std::string> move-assign in nanobind def_rw, PR 80635
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
 #include "description.hpp"
 #include "devices.hpp"
 #include "errors.hpp"
@@ -6,7 +8,6 @@
 #include "image.hpp"
 #include "machine.hpp"
 #include "models.hpp"
-#include "toml_caster.hpp"
 
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/description.hpp>
@@ -78,20 +79,6 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::irq_desc>("IrqDesc");
   m.bind<popcorn::core_desc>("CoreDesc");
   m.bind<popcorn::mcu_description>("McuDescription");
-  m.bind<popcorn::config::project_section>("ProjectSection");
-  m.bind<popcorn::config::mcu_section>("McuSection");
-  m.bind<popcorn::config::image_entry>("ImageEntry");
-  m.bind<popcorn::config::memory_init_entry>("MemoryInit");
-  m.bind<popcorn::config::boot_section>("BootSection");
-  m.bind<popcorn::config::clock_section>("ClockSection");
-  m.bind<popcorn::config::supply_section>("SupplySection");
-  m.bind<popcorn::config::device_entry>("DeviceEntry");
-  m.bind<popcorn::config::audio_block_entry>("AudioBlockEntry");
-  m.bind<popcorn::config::usb_host_entry>("UsbHostEntry");
-  m.bind<popcorn::config::board_entry>("BoardEntry");
-  m.bind<popcorn::config::models_section>("ModelsSection");
-  m.bind<popcorn::config::project_file>("ProjectFile");
-  m.bind<popcorn::config::loaded_project>("LoadedProject");
   popcorn::bind::detail::bind_model_base(m.handle);
   popcorn::bind::detail::bind_device_bases(m.handle);
   popcorn::bind::detail::bind_native_devices(m.handle);

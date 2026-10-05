@@ -1,11 +1,9 @@
-"""Projects: the Python spec, its digest, project files, configs, FR-CFG-4 errors, machine
-building and boot."""
+"""Projects: the Python spec, its digest, configs, FR-CFG-4 errors, machine building and boot."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import importlib
 import os
 import subprocess
 import sys
@@ -34,12 +32,6 @@ from .conftest import DRIVER_ELF, M33_JSON, ROOT
 DATA = ROOT / "tests" / "data" / "api"
 
 
-def write(tmp_path: Path, text: str) -> Path:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(text)
-    return path
-
-
 def minimal_project(
     *,
     vtor: int | None = None,
@@ -63,65 +55,6 @@ def minimal_project(
     )
 
 
-def minimal(**boot: str) -> str:
-    extra = "".join(f"{key} = {value}\n" for key, value in boot.items())
-    return (
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-        f'[image.app]\nelf = "{DRIVER_ELF}"\n'
-        f'[boot]\nuntil = "alu_mark"\n{extra}'
-    )
-
-
-def test_the_full_project_reads_back() -> None:
-    project = popcorn.Project.load(DATA / "full.toml")
-    assert project.name == "demo"
-    assert project.configs == {}
-    assert [type(image) for image in project.images] == [popcorn.Elf, popcorn.Bin]
-    board = project.board
-    assert board["UART4"].connect == "pty"
-    device = board["I2C1"].devices[0]
-    assert (device.address, device.cls.__name__, device.params) == (
-        0x50,
-        "Eeprom",
-        {"size": 8192},
-    )
-    model = board["TIM2"].model
-    assert model is not None and model.cls.__name__ == "Timer"
-    assert model.params == {"prescaler": 4}
-
-
-def test_a_config_overrides_keys() -> None:
-    project = popcorn.Project.load(DATA / "full.toml", "variant")
-    assert project.images[0].path.name == "basic.elf"
-    assert project.digest != popcorn.Project.load(DATA / "full.toml").digest
-
-
-def test_an_unknown_config_key_names_the_config() -> None:
-    with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(DATA / "full.toml", "broken")
-    assert caught.value.key == "configs.broken.image.app.elff"
-    assert caught.value.file == str(DATA / "full.toml")
-    assert caught.value.line == 47
-
-
-@pytest.mark.parametrize(
-    ("text", "key", "line"),
-    [
-        ('[mcu]\npart = "X"\nspeed = 1\n', "mcu.speed", 3),
-        ("[mcu]\npart = 7\n", "mcu.part", 2),
-        ('[mcu]\nioc = "a.ioc"\n', "mcu.part", 1),
-    ],
-    ids=["unknown key", "wrong type", "missing part"],
-)
-def test_invalid_files_name_file_line_and_key(
-    tmp_path: Path, text: str, key: str, line: int
-) -> None:
-    path = write(tmp_path, text)
-    with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(path)
-    assert (caught.value.file, caught.value.line, caught.value.key) == (str(path), line, key)
-
-
 def test_an_unknown_part_lists_close_matches() -> None:
     project = popcorn.Project(part="STM32U575QGI", images=[])
     try:
@@ -133,26 +66,6 @@ def test_an_unknown_part_lists_close_matches() -> None:
         assert isinstance(error, DescriptionError)
     else:
         pytest.fail("an unknown part built a description")
-
-
-@pytest.mark.parametrize(
-    ("model", "expected"),
-    [
-        ("absent_module:Eeprom", "an importable module"),
-        ("fake_models:Absent", "a class of fake_models"),
-        ("fake_models:NOT_A_CLASS", "a class, fake_models:NOT_A_CLASS is a int"),
-        ("fake_models", "module:Class"),
-    ],
-)
-def test_bad_model_references_name_the_key(tmp_path: Path, model: str, expected: str) -> None:
-    text = (
-        f'[mcu]\npart = "X"\n[models]\npython = ["{DATA / "models"}"]\n'
-        f'[board.TIM2]\nmodel = "{model}"\n'
-    )
-    with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(write(tmp_path, text))
-    assert caught.value.key == "board.TIM2.model"
-    assert caught.value.expected.startswith(expected)
 
 
 def test_a_description_for_another_part_is_refused() -> None:
@@ -199,27 +112,6 @@ def test_memory_init_writes_before_boot() -> None:
     minimal_project(memory_init=[popcorn.MemoryInit("spin_flag", b"\x01\x00\x00\x00")]).machine()
 
 
-def test_the_digest_follows_values_not_layout(tmp_path: Path) -> None:
-    a = tmp_path / "a.toml"
-    b = tmp_path / "b.toml"
-    c = tmp_path / "c.toml"
-    a.write_text('[mcu]\npart = "X"\n[board.UART4]\nconnect = "pty"\n')
-    b.write_text('# layout only\n[mcu]\n  part="X"\n\n[board.UART4]\nconnect   =  "pty"\n')
-    c.write_text('[mcu]\npart = "X"\n[board.UART4]\nconnect = "tcp"\n')
-    digest = [popcorn.Project.load(path).digest for path in (a, b, c)]
-    assert digest[0] == digest[1] != digest[2]
-
-
-def test_machine_with_a_config_reloads_the_file(tmp_path: Path) -> None:
-    text = (
-        minimal() + '\n[configs.same]\nboot.until = "alu_mark"\n[configs.slow]\nclock.cpi = 2.0\n'
-    )
-    path = write(tmp_path, text)
-    project = popcorn.Project.load(path)
-    assert popcorn.Project.load(path, "same").machine().config_digest == project.digest
-    assert popcorn.Project.load(path, "slow").machine().config_digest != project.digest
-
-
 def test_description_error_is_a_config_error() -> None:
     error = DescriptionError("part.svd", 4, "cpu.name", "a core name")
     assert isinstance(error, popcorn.ConfigError)
@@ -252,13 +144,6 @@ def test_the_description_package_imports_without_the_native_extension() -> None:
     assert done.stdout.strip() == "ok", done.stderr
 
 
-def test_python_side_errors_carry_the_line(tmp_path: Path) -> None:
-    text = f'[mcu]\npart = "OTHER"\ndescription = "{M33_JSON}"\n'
-    with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(write(tmp_path, text)).machine_description()
-    assert (caught.value.key, caught.value.line) == ("mcu.description", 3)
-
-
 def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.MachineDescription) -> None:
     handle = _core.MachineHandle(m33, _core.MachineConfig())
     with pytest.raises(popcorn.ConfigError) as caught:
@@ -279,10 +164,17 @@ def test_boot_arena_keys_set_or_disable_the_arena() -> None:
     assert default.arena.base == 0x6F00_0000
 
 
-def test_a_loaded_arena_base_of_true_is_refused_on_its_line(tmp_path: Path) -> None:
+def test_an_arena_base_of_true_is_refused() -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(write(tmp_path, minimal(arena_base="true")))
-    assert (caught.value.key, caught.value.line) == ("boot.arena_base", 8)
+        popcorn.Boot(arena_base=cast("Literal[False]", True))
+    assert caught.value.key == "boot.arena_base"
+
+
+def test_a_config_machine_carries_the_digest_of_its_project() -> None:
+    base = minimal_project()
+    project = base.with_configs(same=base.replace(), slow=base.replace(cpi=2.0))
+    assert project.config("same").machine().config_digest == project.digest
+    assert project.config("slow").machine().config_digest != project.digest
 
 
 class Target(I2CTarget):
@@ -342,35 +234,6 @@ def test_an_spi_class_used_with_cs_must_take_a_cs_keyword() -> None:
 def test_an_spi_class_taking_any_keyword_takes_cs() -> None:
     device = with_devices(popcorn.Device(Loose, cs="PA4", size=1)).board["TESTDEV"].devices[0]
     assert (device.cs, device.params) == ("PA4", {"size": 1})
-
-
-def test_the_full_project_equals_its_python_spec() -> None:
-    loaded = popcorn.Project.load(DATA / "full.toml")
-    models = importlib.import_module("fake_models")
-    eeprom = cast(type, models.Eeprom)
-    timer = cast(type, models.Timer)
-    spec = popcorn.Project(
-        name="demo",
-        part="POPCORN-M33-TEST",
-        description=M33_JSON,
-        images=[popcorn.Elf(DRIVER_ELF), popcorn.Bin(DATA / "blob.bin", 0x2000_0100)],
-        boot=popcorn.Boot(
-            vtor=0x0800_0000,
-            until="alu_mark",
-            budget=1_000_000,
-            memory_init=[popcorn.MemoryInit("spin_flag", bytes([1, 0, 0, 0]))],
-        ),
-        core_hz=8_000_000,
-        board={
-            "UART4": popcorn.Periph(connect="pty"),
-            "I2C1": popcorn.Periph(devices=[popcorn.Device(eeprom, address=0x50, size=8192)]),
-            "TIM2": popcorn.Periph(model=popcorn.Use(timer, prescaler=4)),
-        },
-        strict=True,
-    )
-    assert loaded == spec
-    assert loaded.digest == spec.digest
-    assert hash(loaded) == hash(spec)
 
 
 def sample() -> popcorn.Project:
@@ -563,14 +426,11 @@ def test_each_machine_model_gets_its_own_params() -> None:
     assert use.params["items"] == (1, 2)
 
 
-def test_the_digest_leaves_out_name_strict_configs_and_source() -> None:
+def test_the_digest_leaves_out_name_strict_and_configs() -> None:
     base = sample()
     changed = base.replace(name="other", strict=True).with_configs(fast=base.replace(cpi=1.0))
     assert changed != base
     assert changed.digest == base.digest
-    loaded = popcorn.Project.load(DATA / "full.toml")
-    assert loaded.source is not None
-    assert loaded.replace(source=None) == loaded
 
 
 @pytest.mark.parametrize(

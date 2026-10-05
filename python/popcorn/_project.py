@@ -6,12 +6,9 @@ import copy
 import dataclasses
 import functools
 import hashlib
-import importlib
 import inspect
 import json
 import math
-import os
-import sys
 from collections.abc import Buffer, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +17,7 @@ from typing import Literal, Self, cast
 from popcorn import _core
 from popcorn._audio import AudioOptions, Block
 from popcorn._description import MachineDescription, load_description
-from popcorn._devices import ParamError, check_address, project_params
+from popcorn._devices import check_address
 from popcorn._enums import StopReason
 from popcorn._errors import (
     BudgetExceeded,
@@ -36,7 +33,7 @@ from popcorn._stop import Stop
 from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions
 from popcorn.model import Model
-from popcorn.units import VirtualDuration, ms
+from popcorn.units import VirtualDuration
 
 type Param = (
     bool
@@ -320,34 +317,6 @@ class Boot:
         return dataclasses.replace(self, **changes)
 
 
-@dataclass(frozen=True, slots=True)
-class TomlSource:
-    """The project file a `Project` was read from by `Project.load`, for error lines and the
-    plugin's boot cache. Not part of equality or `digest`. Goes with `Project.load`.
-
-    Attributes:
-        path: Absolute path of the project file.
-        model_dirs: `[models] python` directories.
-        lines: Line of each dotted key in the file.
-    """
-
-    path: Path
-    model_dirs: tuple[Path, ...]
-    lines: Mapping[str, int]
-
-    def error(self, key: str, expected: str) -> ConfigError:
-        """The error `key` of a `Project` raises, named as the file names it."""
-        key = _toml_key(key)
-        line = _line_in(self.lines, key)
-        return ConfigError(
-            f"{self.path}:{line}: {key}: expected {expected}",
-            file=str(self.path),
-            line=line,
-            key=key,
-            expected=expected,
-        )
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Project:
     """What a machine is built from and how it boots.
@@ -375,7 +344,6 @@ class Project:
         board: What the board does with each peripheral, by name.
         strict: Whether an unmodelled peripheral access raises ModelError. Not in `digest`.
         configs: Named variants of this project, as `config` selects them. Not in `digest`.
-        source: The project file `load` read, None for a project declared in Python.
     """
 
     part: str
@@ -392,7 +360,6 @@ class Project:
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
     strict: bool = False
     configs: Mapping[str, Project] = field(default_factory=_FrozenMap[str, "Project"])
-    source: TomlSource | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "images", tuple(self.images))
@@ -400,19 +367,19 @@ class Project:
         object.__setattr__(self, "configs", _FrozenMap(self.configs))
         self._check_kinds()
         if not (math.isfinite(self.cpi) and self.cpi > 0.0):
-            raise self._error("cpi", "a finite number of cycles per instruction above 0")
+            raise _plain_error("cpi", "a finite number of cycles per instruction above 0")
         if self.core_hz is not None and self.core_hz <= 0:
-            raise self._error("core_hz", "a core clock above 0 Hz")
+            raise _plain_error("core_hz", "a core clock above 0 Hz")
         for name, periph in self.board.items():
             key = f"board.{name}"
             if periph.model is not None and periph.devices:
-                raise self._error(
+                raise _plain_error(
                     f"{key}.devices", "no devices on a peripheral that has a Python model"
                 )
             for index, device in enumerate(periph.devices):
                 at = f"{key}.devices[{index}]"
                 if device.address is not None and device.cs is not None:
-                    raise self._error(
+                    raise _plain_error(
                         f"{at}.cs",
                         "an address for an I2C target or a cs for an SPI device, not both",
                     )
@@ -420,12 +387,12 @@ class Project:
                     try:
                         check_address(device.address)
                     except ValueError as error:
-                        raise self._error(f"{at}.address", str(error)) from error
+                        raise _plain_error(f"{at}.address", str(error)) from error
 
     def _check_kinds(self) -> None:
         for index, image in enumerate(cast(tuple[object, ...], self.images)):
             if not isinstance(image, Elf | Bin | Hex):
-                raise self._error(
+                raise _plain_error(
                     f"images[{index}]", f"an Elf, Bin or Hex, not {type(image).__qualname__}"
                 )
             self._check_path(f"images[{index}].path", image.path)
@@ -434,23 +401,23 @@ class Project:
         for name, periph in cast(Mapping[object, object], self.board).items():
             key = f"board.{name}"
             if not isinstance(name, str):
-                raise self._error(key, f"a peripheral name, not {type(name).__qualname__}")
+                raise _plain_error(key, f"a peripheral name, not {type(name).__qualname__}")
             if not isinstance(periph, Periph):
-                raise self._error(key, f"a Periph, not {type(periph).__qualname__}")
+                raise _plain_error(key, f"a Periph, not {type(periph).__qualname__}")
             model = cast(object, periph.model)
             if model is not None and not isinstance(model, Use):
-                raise self._error(f"{key}.model", f"a Use, not {type(model).__qualname__}")
+                raise _plain_error(f"{key}.model", f"a Use, not {type(model).__qualname__}")
             if model is not None:
                 self._check_param_paths(f"{key}.model", model.params)
             for index, device in enumerate(cast(tuple[object, ...], periph.devices)):
                 if not isinstance(device, Device):
-                    raise self._error(
+                    raise _plain_error(
                         f"{key}.devices[{index}]", f"a Device, not {type(device).__qualname__}"
                     )
                 self._check_param_paths(f"{key}.devices[{index}]", device.params)
         for name, config in cast(Mapping[object, object], self.configs).items():
             if not isinstance(config, Project):
-                raise self._error(f"configs.{name}", f"a Project, not {type(config).__qualname__}")
+                raise _plain_error(f"configs.{name}", f"a Project, not {type(config).__qualname__}")
 
     def _check_param_paths(self, key: str, value: object) -> None:
         if isinstance(value, Path):
@@ -466,24 +433,11 @@ class Project:
         if path is None and key in ("svd", "description"):
             return
         if not isinstance(path, Path):
-            raise self._error(key, f"a Path, not {type(path).__qualname__}")
+            raise _plain_error(key, f"a Path, not {type(path).__qualname__}")
         if not path.is_absolute():
-            raise self._error(
+            raise _plain_error(
                 key, f"an absolute path such as Path(__file__).parent / {str(path)!r}, not {path}"
             )
-
-    @classmethod
-    def load(cls, path: str | os.PathLike[str], config: str | None = None) -> Project:
-        """Read a `popcorn.toml` project file, with `[configs.<config>]` applied when given.
-
-        `configs` stays empty: load each config by its name. `[models] python` directories are
-        appended to `sys.path` for the life of the process.
-
-        Raises:
-            ConfigError: The file is unreadable or invalid, the config does not exist, or a
-                model or device class cannot be imported or refuses a parameter value.
-        """
-        return _from_toml(_core.load_project(os.fspath(path), config))
 
     def replace(self, **changes: object) -> Project:
         """A copy with `changes` applied, as `dataclasses.replace`."""
@@ -509,7 +463,7 @@ class Project:
 
     @property
     def digest(self) -> str:
-        """SHA-256 of the canonical content, without `name`, `strict`, `configs` and `source`.
+        """SHA-256 of the canonical content, without `name`, `strict` and `configs`.
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys. It is what snapshots record as their config digest.
@@ -526,7 +480,7 @@ class Project:
         if self.description is not None:
             description = load_description(self.description)
             if description.part != self.part:
-                raise self._error(
+                raise _plain_error(
                     "description", f"the description of {self.part}, not {description.part}"
                 )
             return description
@@ -580,7 +534,7 @@ class Project:
             if periph.model is None:
                 continue
             if name not in served:
-                raise self._error(f"board.{name}", f"a peripheral of {description.part}")
+                raise _plain_error(f"board.{name}", f"a peripheral of {description.part}")
             models[name] = functools.partial(_built_model, periph.model)
         attached = {
             name: self._devices(name, periph, description)
@@ -593,7 +547,7 @@ class Project:
         for name, periph in self.board.items():
             for letter, options in periph.audio.items():
                 if periph.model is not None or ips.get(name) != "SAI":
-                    raise self._error(
+                    raise _plain_error(
                         f"board.{name}.{letter}", "an audio block of an SAI with the built-in model"
                     )
                 audio.setdefault(name, {})[letter] = options
@@ -602,7 +556,7 @@ class Project:
             if periph.host is None:
                 continue
             if periph.model is not None or ips.get(name) != "USB_OTG_FS":
-                raise self._error(
+                raise _plain_error(
                     f"board.{name}.host", "a USB device controller with the built-in model"
                 )
             usb[name] = periph.host
@@ -628,18 +582,18 @@ class Project:
             if periph.connect is None:
                 continue
             if periph.connect != "pty":
-                raise self._error(f"board.{name}.connect", f'"pty", not "{periph.connect}"')
+                raise _plain_error(f"board.{name}.connect", f'"pty", not "{periph.connect}"')
             m.board.pty(name)
         for index, init in enumerate(boot.memory_init):
             key = f"boot.memory_init[{index}]"
             try:
                 address = m.address_of(init.symbol)
             except SymbolError as error:
-                raise self._error(f"{key}.symbol", "a symbol of the loaded images") from error
+                raise _plain_error(f"{key}.symbol", "a symbol of the loaded images") from error
             try:
                 m.mem.write(address, init.data)
             except (ConfigError, EmulationError) as error:
-                raise self._error(f"{key}.data", f"bytes the memory accepts: {error}") from error
+                raise _plain_error(f"{key}.data", f"bytes the memory accepts: {error}") from error
         return m
 
     async def boot_machine(self, machine: Machine) -> Stop:
@@ -656,11 +610,11 @@ class Project:
         """
         boot = self.boot
         if boot.until is None:
-            raise self._error("boot.until", "a symbol boot runs to")
+            raise _plain_error("boot.until", "a symbol boot runs to")
         try:
             target = machine.address_of(boot.until)
         except SymbolError as error:
-            raise self._error("boot.until", "a symbol of the loaded images") from error
+            raise _plain_error("boot.until", "a symbol of the loaded images") from error
         machine.reset()
         stop = await machine.run(until=target, budget=boot.budget)
         if stop.reason is StopReason.ADDRESS and stop.pc == target:
@@ -688,7 +642,7 @@ class Project:
             if periph.model is not None:
                 model = periph.model.cls
                 if not issubclass(model, Model):
-                    raise self._error(
+                    raise _plain_error(
                         f"{key}.model",
                         f"a popcorn.model.Model subclass, not {_reference(periph.model.cls)}",
                     )
@@ -698,21 +652,21 @@ class Project:
                 cls = device.cls
                 if not issubclass(cls, _core.I2CTargetBase | _core.SpiTargetBase):
                     expected = "a popcorn.board.I2CTarget or SpiTarget subclass"
-                    raise self._error(f"{at}.model", f"{expected}, not {_reference(device.cls)}")
+                    raise _plain_error(f"{at}.model", f"{expected}, not {_reference(device.cls)}")
                 params = dict(device.params)
                 if issubclass(cls, _core.I2CTargetBase):
                     if device.address is None and device.cs is not None:
-                        raise self._error(f"{at}.cs", "no cs for an I2C target")
+                        raise _plain_error(f"{at}.cs", "no cs for an I2C target")
                     if device.address is None:
-                        raise self._error(f"{at}.address", "the address of an I2C target")
+                        raise _plain_error(f"{at}.address", "the address of an I2C target")
                     self._check_params(cls, (device.address,), params, at)
                 else:
                     if device.address is not None:
-                        raise self._error(
+                        raise _plain_error(
                             f"{at}.address", "no address for an SPI device, it has a cs"
                         )
                     if device.cs is not None and not _takes_cs(cls):
-                        raise self._error(
+                        raise _plain_error(
                             f"{at}.cs", f"a cs keyword accepted by {cls.__qualname__}"
                         )
                     chip: dict[str, Param] = {} if device.cs is None else {"cs": device.cs}
@@ -735,25 +689,20 @@ class Project:
             try:
                 if issubclass(cls, _core.I2CTargetBase):
                     if ip != "I2C":
-                        raise self._error(f"{at}.model", f"an I2C bus of {description.part}")
+                        raise _plain_error(f"{at}.model", f"an I2C bus of {description.part}")
                     built.append(make(cast(int, device.address), **params))
                 elif issubclass(cls, _core.SpiTargetBase):
                     if ip != "SPI":
-                        raise self._error(f"{at}.model", f"an SPI bus of {description.part}")
+                        raise _plain_error(f"{at}.model", f"an SPI bus of {description.part}")
                     if device.cs is not None and f"GPIO{device.cs[1]}" not in served:
-                        raise self._error(
+                        raise _plain_error(
                             f"{at}.cs", f"a chip select on a GPIO port of {description.part}"
                         )
                     chip = {} if device.cs is None else {"cs": device.cs}
                     built.append(make(**chip, **params))
             except (ValueError, TypeError) as error:
-                raise self._error(at, f"arguments {cls.__qualname__} accepts: {error}") from error
+                raise _plain_error(at, f"arguments {cls.__qualname__} accepts: {error}") from error
         return built
-
-    def _error(self, key: str, expected: str) -> ConfigError:
-        if self.source is not None:
-            return self.source.error(key, expected)
-        return _plain_error(key, expected)
 
     def _check_params(
         self, cls: type, args: tuple[object, ...], params: dict[str, Param], key: str
@@ -772,7 +721,7 @@ class Project:
             if not any(p.kind is p.VAR_KEYWORD for p in accepted):
                 for param in params:
                     if param not in named:
-                        raise self._error(
+                        raise _plain_error(
                             f"{key}.{param}",
                             f"a parameter of {cls.__qualname__}: {', '.join(named) or 'none'}",
                         ) from error
@@ -782,10 +731,10 @@ class Project:
                     and param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
                     and param.name not in params
                 ):
-                    raise self._error(
+                    raise _plain_error(
                         f"{key}.{param.name}", f"a value for {cls.__qualname__}({param.name})"
                     ) from error
-            raise self._error(key, f"arguments {cls.__qualname__} accepts: {error}") from error
+            raise _plain_error(key, f"arguments {cls.__qualname__} accepts: {error}") from error
 
 
 def _plain_error(key: str, expected: str) -> ConfigError:
@@ -855,7 +804,7 @@ def _canonical(value: object) -> object:
     if isinstance(value, type):
         return {"class": _reference(value)}
     if isinstance(value, Project):
-        skipped = {"name", "strict", "configs", "source"}
+        skipped = {"name", "strict", "configs"}
         fields = {
             f.name: _canonical(getattr(value, f.name))
             for f in dataclasses.fields(value)
@@ -874,184 +823,6 @@ def _canonical(value: object) -> object:
     if isinstance(value, list | tuple):
         return [_canonical(item) for item in cast(Sequence[object], value)]
     raise TypeError(f"not a project value: {value!r}")
-
-
-_TOML_KEYS = {
-    "part": "mcu.part",
-    "core": "mcu.core",
-    "svd": "mcu.svd",
-    "description": "mcu.description",
-    "core_hz": "clock.core_hz",
-    "cpi": "clock.cpi",
-    "strict": "models.strict",
-}
-
-
-def _toml_key(key: str) -> str:
-    if key in _TOML_KEYS:
-        return _TOML_KEYS[key]
-    if key.startswith("boot.memory_init[") and key.endswith(".data"):
-        return key.removesuffix(".data") + ".bytes"
-    return key
-
-
-def _without_indices(key: str) -> str:
-    out: list[str] = []
-    inside = False
-    for c in key:
-        if c == "[":
-            inside = True
-        elif c == "]":
-            inside = False
-        elif not inside:
-            out.append(c)
-    return "".join(out)
-
-
-def _line_in(lines: Mapping[str, int], key: str) -> int:
-    for candidate in (key, _without_indices(key)):
-        while candidate:
-            found = lines.get(candidate)
-            if found is not None:
-                return found
-            cut = max(candidate.rfind("."), candidate.rfind("["))
-            candidate = candidate[:cut] if cut >= 0 else ""
-    return 0
-
-
-def _from_toml(loaded: _core.LoadedProject) -> Project:
-    file = loaded.file
-    path = Path(loaded.path)
-    base = path.parent
-    source = TomlSource(path, tuple(Path(d) for d in file.models.python), dict(loaded.lines))
-    for directory in file.models.python:
-        if directory not in sys.path:
-            sys.path.append(directory)
-    images: list[ImageFile] = []
-    for name in file.image_order:
-        entry = file.image[name]
-        if entry.elf is not None:
-            images.append(Elf(Path(entry.elf)))
-        elif entry.hex is not None:
-            images.append(Hex(Path(entry.hex)))
-        elif entry.bin is not None and entry.at is not None:
-            images.append(Bin(Path(entry.bin), entry.at))
-    board: dict[str, Periph] = {}
-    rcc = None
-    for name, entry in file.board.items():
-        key = f"board.{name}"
-        model = None
-        if entry.model is not None:
-            params = cast(dict[str, Param], dict(entry.params))
-            model = Use(_resolve(source, entry.model, f"{key}.model"), **params)
-        devices: list[Device] = []
-        for index, device in enumerate(entry.devices):
-            at = f"{key}.devices[{index}]"
-            cls = _resolve(source, device.model, f"{at}.model")
-            try:
-                resolved = project_params(cls, device.params, base)
-            except ParamError as error:
-                raise source.error(f"{at}.{error.name}", error.expected) from error
-            devices.append(
-                Device(
-                    cls, address=device.address, cs=device.cs, **cast(dict[str, Param], resolved)
-                )
-            )
-        if name == "RCC" and (entry.hse_hz is not None or entry.lse_hz is not None):
-            defaults = RccOptions()
-            rcc = RccOptions(
-                hse_hz=defaults.hse_hz if entry.hse_hz is None else entry.hse_hz,
-                lse_hz=defaults.lse_hz if entry.lse_hz is None else entry.lse_hz,
-            )
-        audio: dict[Block, AudioOptions] = {}
-        blocks: tuple[tuple[Block, _core.AudioBlockEntry | None], ...] = (
-            ("A", entry.a),
-            ("B", entry.b),
-        )
-        for letter, block in blocks:
-            if block is None:
-                continue
-            defaults = AudioOptions()
-            audio[letter] = AudioOptions(
-                decimation=defaults.decimation if block.decimation is None else block.decimation,
-                external_frame_hz=(
-                    defaults.external_frame_hz
-                    if block.external_frame_hz is None
-                    else block.external_frame_hz
-                ),
-                clocked_by=block.clocked_by,
-            )
-        host = None
-        if entry.host is not None:
-            defaults = UsbHostOptions()
-            given = entry.host
-            host = UsbHostOptions(
-                attached=given.attached,
-                debounce=defaults.debounce if given.debounce_ms is None else ms(given.debounce_ms),
-                reset=defaults.reset if given.reset_ms is None else ms(given.reset_ms),
-                timeout=defaults.timeout if given.timeout_ms is None else ms(given.timeout_ms),
-                dtr=given.dtr,
-                rts=given.rts,
-            )
-        periph = Periph(
-            model=model,
-            devices=devices,
-            connect=cast(Literal["pty"] | None, entry.connect),
-            audio=audio,
-            host=host,
-        )
-        if periph != Periph():
-            board[name] = periph
-    memory_init: list[MemoryInit] = []
-    for index, init in enumerate(file.boot.memory_init):
-        try:
-            data = bytes.fromhex(init.bytes)
-        except ValueError as error:
-            raise source.error(
-                f"boot.memory_init[{index}].data", "hexadecimal digits, two per byte"
-            ) from error
-        memory_init.append(MemoryInit(init.symbol, data))
-    mcu = file.mcu
-    vdda_mv = file.supply.vdda_mv
-    return Project(
-        name=file.project.name,
-        part=mcu.part,
-        core=mcu.core,
-        svd=None if mcu.svd == "auto" else Path(mcu.svd),
-        description=None if mcu.description is None else Path(mcu.description),
-        images=images,
-        boot=Boot(
-            vtor=file.boot.vtor,
-            until=file.boot.until,
-            budget=file.boot.budget,
-            memory_init=memory_init,
-            arena_base=cast(int | Literal[False] | None, file.boot.arena_base),
-            arena_size=file.boot.arena_size,
-        ),
-        core_hz=file.clock.core_hz,
-        cpi=file.clock.cpi,
-        rcc=rcc,
-        supply=None if vdda_mv is None else SupplyOptions(vdda_mv=vdda_mv),
-        board=board,
-        strict=file.models.strict,
-        source=source,
-    )
-
-
-def _resolve(source: TomlSource, reference: str, key: str) -> type:
-    module_name, colon, class_name = reference.partition(":")
-    if not colon or not module_name or not class_name:
-        raise source.error(key, f"module:Class, not {reference}")
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as error:
-        raise source.error(key, f"an importable module, not {module_name}") from error
-    found: object = getattr(module, class_name, None)
-    if found is None:
-        raise source.error(key, f"a class of {module_name}, not {class_name}")
-    if not isinstance(found, type):
-        raise source.error(key, f"a class, {reference} is a {type(found).__name__}")
-    return found
 
 
 def _given_devices(

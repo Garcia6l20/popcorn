@@ -424,10 +424,11 @@ class Board:
 
         The pty owns what the firmware sends, for the life of the machine: reads of the UART's
         `port`, or of the CDC function's `host.cdc()` stream, raise
-        `RuntimeError("<key> is bridged to <path>")`, the key as in `ptys`. `connect = "pty"` in
-        `popcorn.toml` calls this at build for every machine of the project. Call it from the
-        test that wants the pty instead, to keep stream reads in the others. A CDC function's
-        pty is keyed `name` in `ptys` for function 0, `name.<function>` for the others.
+        `RuntimeError("<key> is bridged to <path>")`, the key as in `ptys`.
+        `Periph(connect="pty")` in a `Project` calls this at build for every machine of the
+        project. Call it from the test that wants the pty instead, to keep stream reads in the
+        others. A CDC function's pty is keyed `name` in `ptys` for function 0, `name.<function>`
+        for the others.
 
         Args:
             name: UART instance, or USB device controller with a virtual host.

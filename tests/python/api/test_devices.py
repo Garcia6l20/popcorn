@@ -487,17 +487,6 @@ def test_fr_per_5_a_project_wires_an_eeprom_the_firmware_uses(
     assert second.array == bytearray(b"\xff" * 4096)
 
 
-def _project(tmp_path: Path, devices: str) -> Path:
-    text = (DATA / "devices.toml").read_text()
-    text = text.replace('"../../firmware/', f'"{DATA.parent.parent}/firmware/')
-    text = text.replace('"../../python"', f'"{Path(__file__).parents[1]}"')
-    start = text.index("[board.I2C1]")
-    end = text.index("[models]")
-    path = tmp_path / "popcorn.toml"
-    path.write_text(text[:start] + devices + text[end:])
-    return path
-
-
 def eeprom_entry(
     *, address: int | None = 0x50, cs: str | None = None, size: int = 16
 ) -> popcorn.Device:
@@ -577,19 +566,6 @@ def test_project_devices_are_refused_with_their_key(
         DEVICES.replace(board=board).machine()
     assert caught.value.key == key
     assert caught.value.expected == expected
-
-
-def test_a_loaded_project_device_error_carries_its_line(
-    u575: popcorn.MachineDescription, tmp_path: Path
-) -> None:
-    entry = (
-        '[board.SPI1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
-        "size = 16 }]\n"
-    )
-    with pytest.raises(ConfigError) as caught:
-        popcorn.Project.load(_project(tmp_path, entry)).machine()
-    assert caught.value.key == "board.SPI1.devices[0].model"
-    assert caught.value.line > 0
 
 
 @pytest.mark.parametrize(("cs", "entry"), [("PA4", "poll"), (None, "hw_ss")])

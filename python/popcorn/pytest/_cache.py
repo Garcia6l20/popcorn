@@ -33,7 +33,6 @@ from popcorn import (
     _core,
     description_digest,
 )
-from popcorn._devices import ParamError, project_params
 from popcorn._machine import AttachedDevice
 from popcorn.board import I2CTarget, SpiTarget
 from popcorn.units import VirtualTime
@@ -126,14 +125,9 @@ def imported_sources(cls: type) -> list[str]:
     )
 
 
-def _param_files(cls: type, params: Mapping[str, object], base: Path) -> list[str]:
-    written = {name: value for name, value in params.items() if isinstance(value, str)}
-    try:
-        resolved = {**params, **project_params(cls, written, base)}
-    except ParamError:
-        return []
+def _param_files(params: Mapping[str, object]) -> list[str]:
     files: list[str] = []
-    for name, value in sorted(resolved.items()):
+    for name, value in sorted(params.items()):
         if isinstance(value, Path):
             digest = _file_digest(value) if value.is_file() else "missing"
             files.append(f"{name} {value} {digest}")
@@ -237,14 +231,13 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
     ]
     if devices is not None:
         lines.append(f"devices {devices}")
-    base = Path.cwd() if project.source is None else project.source.path.parent
     for name, periph in sorted(project.board.items()):
         uses: list[Use] = [] if periph.model is None else [periph.model]
         for use in [*uses, *periph.devices]:
             cls, params = use.cls, use.params
             lines.append(f"{name} {_class_source(cls)}")
             lines.extend(f"{name} {line}" for line in imported_sources(cls))
-            lines.extend(f"{name} {file}" for file in _param_files(cls, params, base))
+            lines.extend(f"{name} {file}" for file in _param_files(params))
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 

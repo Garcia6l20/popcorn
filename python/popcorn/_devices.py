@@ -3,27 +3,21 @@
 
 from __future__ import annotations
 
-import os
 import re
-import types
 import typing
 import weakref
-from collections.abc import Callable, Mapping
-from fractions import Fraction
-from pathlib import Path
+from collections.abc import Callable
 
 from popcorn import _core
 from popcorn._enums import ResetKind
 from popcorn._errors import ConfigError, ModelError
 from popcorn._state import StateReader, declared_fields, encode
-from popcorn.units import VirtualDuration, VirtualTime
+from popcorn.units import VirtualTime
 
 if typing.TYPE_CHECKING:
     from popcorn._audio import Block
 
 _CS = re.compile(r"P([A-Z])(\d{1,2})")
-_DURATION = re.compile(r"(\d+(?:\.\d*)?|\.\d+) (s|ms|us|ns|ps)")
-_UNIT_PS = {"s": 10**12, "ms": 10**9, "us": 10**6, "ns": 10**3, "ps": 1}
 _STATES: weakref.WeakKeyDictionary[type, tuple[tuple[str, type], ...]] = weakref.WeakKeyDictionary()
 _ATTACHED: dict[int, tuple[weakref.ReferenceType[object], weakref.WeakMethod[AudioClock]]] = {}
 
@@ -144,96 +138,6 @@ def chip_select(cs: str | None) -> tuple[str, int | None]:
 def cs_of(device: _core.SpiTargetBase) -> str | None:
     """The chip select pin name of an SPI device, None for the hardware SS output."""
     return typing.cast("str | None", getattr(device, "cs", None))
-
-
-def parse_duration(text: str) -> VirtualDuration:
-    """The duration `text` writes as a number, a space and a unit, such as "600 us" or "1.5 ms".
-
-    The unit is s, ms, us, ns or ps. The number is a decimal, read exactly.
-
-    Raises:
-        ValueError: `text` is not of that form or is not a whole number of picoseconds.
-    """
-    matched = _DURATION.fullmatch(text)
-    if matched is None:
-        raise ValueError(f'a duration such as "600 us", unit s, ms, us, ns or ps, not {text!r}')
-    value = Fraction(matched[1]) * _UNIT_PS[matched[2]]
-    if value.denominator != 1:
-        raise ValueError(f"a whole number of picoseconds, not {text!r}")
-    return VirtualDuration(int(value))
-
-
-class ParamError(ValueError):
-    """A project file parameter of a device is refused.
-
-    Attributes:
-        name: The parameter.
-        expected: What it should be.
-    """
-
-    def __init__(self, name: str, expected: str) -> None:
-        super().__init__(f"{name}: {expected}")
-        self.name = name
-        self.expected = expected
-
-
-def _accepts(hint: object, kinds: tuple[type, ...]) -> bool:
-    options = typing.get_args(hint) or (hint,)
-    return any((typing.get_origin(option) or option) in kinds for option in options)
-
-
-def _int_keyed(hint: object) -> bool:
-    options = typing.get_args(hint) if typing.get_origin(hint) is types.UnionType else (hint,)
-    return any(
-        typing.get_origin(option) in (Mapping, dict) and typing.get_args(option)[:1] == (int,)
-        for option in options
-    )
-
-
-def _keyed(name: str, table: Mapping[str, object]) -> dict[int, object]:
-    out: dict[int, object] = {}
-    for key, value in table.items():
-        try:
-            out[int(key, 0)] = value
-        except ValueError as error:
-            raise ParamError(name, f'integer keys such as "0x0F" or "15", not {key!r}') from error
-    return out
-
-
-def project_params(cls: type, params: Mapping[str, object], base: Path) -> dict[str, object]:
-    """`params` of a project file device for `cls`: a string for a parameter annotated
-    VirtualDuration read as a duration such as "600 us", a string for one annotated Path or
-    os.PathLike taken relative to `base`, and the string keys of a table for one annotated
-    Mapping[int, ...] read as integers such as "0x0F".
-
-    Raises:
-        ParamError: A duration is not such a string or not a whole number of nanoseconds, or a
-            key is not an integer.
-    """
-    try:
-        hints = typing.get_type_hints(cls.__init__)
-    except NameError, TypeError, AttributeError:
-        hints = {}
-    out = dict(params)
-    for name, value in params.items():
-        hint = hints.get(name)
-        if hint is None:
-            continue
-        if _accepts(hint, (VirtualDuration,)):
-            if not isinstance(value, str):
-                raise ParamError(name, f'a duration such as "600 us", not {value!r}')
-            try:
-                duration = parse_duration(value)
-            except ValueError as error:
-                raise ParamError(name, str(error)) from error
-            if duration.ps % 1000:
-                raise ParamError(name, f"a whole number of nanoseconds, not {value!r}")
-            out[name] = duration
-        elif isinstance(value, str) and _accepts(hint, (Path, os.PathLike)):
-            out[name] = base / value
-        elif isinstance(value, dict) and _int_keyed(hint):
-            out[name] = _keyed(name, typing.cast("dict[str, object]", value))
-    return out
 
 
 def check_address(address: int) -> None:

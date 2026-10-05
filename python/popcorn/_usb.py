@@ -253,10 +253,10 @@ class CdcStream:
     yet taken by the device as the snapshot had them, bound or not.
 
     A pty bridge owns what the device sends. Once the function is bridged, by
-    `connect = "pty"` in `popcorn.toml` or by `m.board.pty(name)`, `read` and `read_packets`
+    `Periph(connect="pty")` or by `m.board.pty(name)`, `read` and `read_packets`
     raise `RuntimeError("OTG_FS is bridged to /dev/pts/N")`, the key and path of the bridge,
     for the life of the machine. `write` is not refused, its bytes mix with the pty client's.
-    `connect = "pty"` bridges at build, for every test of the project. A test that reads the
+    `Periph(connect="pty")` bridges at build, for every test of the project. A test that reads the
     stream leaves `connect` out, and a test that wants the pty calls `m.board.pty(name)`,
     which bridges on first call.
     """

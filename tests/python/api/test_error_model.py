@@ -36,19 +36,6 @@ def machine() -> popcorn.Machine:
     return m
 
 
-def project(tmp_path: Path, text: str) -> popcorn.Project:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(text)
-    return popcorn.Project.load(path)
-
-
-def minimal(extra: str = "") -> str:
-    return (
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-        f'[image.app]\nelf = "{DRIVER_ELF}"\n[boot]\nuntil = "alu_mark"\n{extra}'
-    )
-
-
 def missing_description(tmp_path: Path, _: Machines) -> object:
     return popcorn.load_description(tmp_path / "absent.json")
 
@@ -110,10 +97,6 @@ def boot_budget(_: Path, __: Machines) -> object:
         boot=popcorn.Boot(until="alu_mark", budget=100),
     )
     return asyncio.run(loaded.boot_machine(loaded.machine()))
-
-
-def unknown_project_key(tmp_path: Path, _: Machines) -> object:
-    return project(tmp_path, minimal("colour = 3\n"))
 
 
 def garbage_snapshot(tmp_path: Path, _: Machines) -> object:
@@ -225,12 +208,6 @@ CASES = [
         boot_budget,
         popcorn.BudgetExceeded,
         lambda e: isinstance(e, popcorn.BudgetExceeded) and e.budget == 100,
-    ),
-    Case(
-        "project key",
-        unknown_project_key,
-        popcorn.ConfigError,
-        lambda e: isinstance(e, popcorn.ConfigError) and e.key == "boot.colour" and e.line > 0,
     ),
     Case("garbage snapshot", garbage_snapshot, popcorn.ConfigError, lambda e: bool(e.args)),
     Case("state while running", state_while_running, popcorn.MachineRunning, lambda e: True),

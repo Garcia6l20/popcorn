@@ -19,13 +19,11 @@ import pytest
 from popcorn.model import IrqLine, Model, on_read, on_write
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import ROOT, run_bounded
+from .conftest import run_bounded
 from .models_example import Eeprom, Timer
 from .projects import MODEL_ELF, MODEL_JSON, Plain, model_project
 from .projects import Eeprom as FakeEeprom
 from .projects import Timer as FakeTimer
-
-MODELS_DIR = ROOT / "tests" / "data" / "api" / "models"
 
 
 def machine(
@@ -578,35 +576,11 @@ def test_board_parameters_are_checked_against_the_constructor(
     assert caught.value.expected.startswith(expected)
 
 
-def test_a_loaded_board_parameter_error_carries_its_line(tmp_path: Path) -> None:
-    text = board('model = "fake_models:Timer"\nperiod = 4\n')
-    project = popcorn.Project.load(write(tmp_path, text))
-    with pytest.raises(popcorn.ConfigError) as caught:
-        project.machine()
-    assert caught.value.key == "board.TIMER.period"
-    assert caught.value.line > 0
-
-
 def test_a_board_model_needs_a_peripheral_of_the_description() -> None:
     project = model_project({"TIM9": popcorn.Periph(model=popcorn.Use(FakeTimer))})
     with pytest.raises(popcorn.ConfigError) as caught:
         project.machine()
     assert caught.value.key == "board.TIM9"
-
-
-def write(tmp_path: Path, text: str) -> Path:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(text)
-    return path
-
-
-def board(entry: str) -> str:
-    return (
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{MODEL_JSON}"\n'
-        f'[image.app]\nelf = "{MODEL_ELF}"\n'
-        f'[models]\npython = ["{MODELS_DIR}"]\n'
-        f"[board.TIMER]\n{entry}"
-    )
 
 
 class Stamp(Model):

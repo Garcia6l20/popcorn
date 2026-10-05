@@ -126,16 +126,17 @@ def test_the_supply_sets_vdda_from_the_machine_or_the_project(
 
 @pytest.mark.parametrize("vdda_mv", [1000, 1619, 3601, 3700])
 def test_a_vdda_outside_the_datasheet_range_is_refused(
-    tmp_path: Path, u575: popcorn.MachineDescription, vdda_mv: int
+    u575: popcorn.MachineDescription, vdda_mv: int
 ) -> None:
     with pytest.raises(ConfigError) as caught:
         popcorn.Machine(u575, supply=SupplyOptions(vdda_mv=vdda_mv))
     assert caught.value.key == "supply.vdda_mv"
-    path = tmp_path / "popcorn.toml"
-    path.write_text(f'[mcu]\npart = "STM32U575QGIx"\n[supply]\nvdda_mv = {vdda_mv}\n')
+    project = popcorn.Project(
+        part="STM32U575QGIx", images=[], supply=SupplyOptions(vdda_mv=vdda_mv)
+    )
     with pytest.raises(ConfigError) as caught:
-        popcorn.Project.load(path)
-    assert (caught.value.key, caught.value.line) == ("supply.vdda_mv", 4)
+        project.machine()
+    assert caught.value.key == "supply.vdda_mv"
 
 
 def test_only_external_channels_take_an_input(u575: popcorn.MachineDescription) -> None:

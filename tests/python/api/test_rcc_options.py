@@ -90,22 +90,6 @@ def test_board_rcc_in_the_project_sets_the_hse_rate(
     assert cycle_time(m).ps == CYCLES * 10**12 // 32_000_000
 
 
-@pytest.mark.parametrize(
-    ("board", "key"),
-    [
-        ("[board.RCC]\nhse_hz = 60_000_000\n", "board.RCC.hse_hz"),
-        ("[board.RCC]\nlse_hz = 0\n", "board.RCC.lse_hz"),
-        ("[board.PWR]\nhse_hz = 8_000_000\n", "board.PWR.hse_hz"),
-    ],
-)
-def test_a_bad_board_clock_names_its_key_and_line(tmp_path: Path, board: str, key: str) -> None:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(f'[mcu]\npart = "STM32U575QGIx"\n{board}')
-    with pytest.raises(ConfigError) as caught:
-        popcorn.Project.load(path)
-    assert (caught.value.key, caught.value.line) == (key, 4)
-
-
 RCC_CFGR2 = 0x4602_0C20
 HPRE_DIV512 = 0xF
 CODE = 0x2008_0000

@@ -12,7 +12,6 @@ sources = [
     here / "description.cpp",
     here / "image.cpp",
     here / "errors.cpp",
-    here / "config.cpp",
     here / "board.cpp",
     here / "usb.cpp",
     here / "model_context.cpp",
