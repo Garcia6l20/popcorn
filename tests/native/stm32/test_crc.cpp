@@ -9,6 +9,9 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <initializer_list>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -17,17 +20,24 @@ namespace core = popcorn::core;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::u575;
 
-constexpr std::uint32_t crc_base     = 0x4002'3000;
-constexpr std::uint32_t sec_crc_base = 0x5002'3000;
-constexpr std::uint32_t dr           = 0x00;
-constexpr std::uint32_t idr          = 0x04;
-constexpr std::uint32_t cr           = 0x08;
-constexpr std::uint32_t init         = 0x10;
-constexpr std::uint32_t pol          = 0x14;
-constexpr std::uint32_t cr_reset     = 1u << 0;
-constexpr std::uint32_t cr_rev_out   = 1u << 7;
-constexpr std::uint32_t one_word     = 0xDF8A'8A2B;
-constexpr std::uint32_t two_words    = 0x7D24'A31B;
+constexpr std::uint32_t    crc_base     = 0x4002'3000;
+constexpr std::uint32_t    sec_crc_base = 0x5002'3000;
+constexpr std::uint32_t    dr           = 0x00;
+constexpr std::uint32_t    idr          = 0x04;
+constexpr std::uint32_t    cr           = 0x08;
+constexpr std::uint32_t    init         = 0x10;
+constexpr std::uint32_t    pol          = 0x14;
+constexpr std::uint32_t    cr_reset     = 1u << 0;
+constexpr std::uint32_t    cr_poly16    = 1u << 3;
+constexpr std::uint32_t    cr_poly8     = 2u << 3;
+constexpr std::uint32_t    cr_poly7     = 3u << 3;
+constexpr std::uint32_t    cr_rev_byte  = 1u << 5;
+constexpr std::uint32_t    cr_rev_half  = 2u << 5;
+constexpr std::uint32_t    cr_rev_word  = 3u << 5;
+constexpr std::uint32_t    cr_rev_out   = 1u << 7;
+constexpr std::string_view check_input  = "123456789";
+constexpr std::uint32_t    one_word     = 0xDF8A'8A2B;
+constexpr std::uint32_t    two_words    = 0x7D24'A31B;
 
 auto idle(bool strict) -> stm32_fixture
 {
@@ -54,6 +64,27 @@ struct crc_rig
   void write(std::uint32_t offset, std::uint32_t value, std::uint32_t base = crc_base) const
   {
     REQUIRE(f.target->mem().write(base + offset, 4, value).has_value());
+  }
+
+  void store(std::uint32_t offset, std::uint8_t size, std::uint32_t value) const
+  {
+    REQUIRE(f.target->mem().write(crc_base + offset, size, value).has_value());
+  }
+
+  void feed_bytes(std::string_view bytes) const
+  {
+    for(auto const byte : bytes)
+    {
+      store(dr, 1, static_cast<std::uint8_t>(byte));
+    }
+  }
+
+  void configure(std::uint32_t control, std::uint32_t polynomial, std::uint32_t initial) const
+  {
+    write(cr, control);
+    write(pol, polynomial);
+    write(init, initial);
+    write(cr, control | cr_reset);
   }
 
   stm32_fixture                 f;
@@ -180,51 +211,205 @@ TEST_CASE("a software reset restores every reset value")
   CHECK(r.logged.empty());
 }
 
-TEST_CASE("narrow DR writes and non-default CR modes feed nothing and log once")
+TEST_CASE("byte writes feed CRC-32/MPEG-2")
+{
+  crc_rig const r;
+  r.feed_bytes(check_input);
+  CHECK(r.read(dr) == 0x0376'E6E7);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("word, half-word and byte writes mix in one CRC")
+{
+  crc_rig const r;
+  r.feed_bytes("12345");
+  CHECK(r.read(dr) == 0xBD9A'B747);
+  r.write(cr, cr_reset);
+  r.write(dr, 0x3132'3334);
+  r.store(dr, 1, 0x35);
+  CHECK(r.read(dr) == 0xBD9A'B747);
+  r.write(cr, cr_reset);
+  r.store(dr, 2, 0x3132);
+  r.store(dr, 2, 0x3334);
+  r.store(dr, 1, 0x35);
+  CHECK(r.read(dr) == 0xBD9A'B747);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("REV_IN reverses a word by byte, half-word or word, RM0456 24.3.3")
+{
+  crc_rig const r;
+  for(auto const& [control, expected] : {
+          std::pair{cr_rev_byte, 0xD35E'9975u},
+          std::pair{cr_rev_half, 0xADC6'814Bu},
+          std::pair{cr_rev_word, 0x271D'6588u},
+  })
+  {
+    r.write(cr, control | cr_reset);
+    r.write(dr, 0x1A2B'3C4D);
+    CHECK(r.read(dr) == expected);
+  }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("REV_OUT reverses the DR read and keeps the running CRC")
+{
+  crc_rig const r;
+  r.write(dr, 0x1234'5678);
+  r.write(cr, cr_rev_out);
+  CHECK(r.read(dr) == 0xD451'51FB);
+  CHECK(r.f.target->mem().read(crc_base + dr, 2) == 0x51FB);
+  r.write(cr, 0);
+  CHECK(r.read(dr) == one_word);
+  r.write(dr, 0x9ABC'DEF0);
+  CHECK(r.read(dr) == two_words);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("REV_IN by byte and REV_OUT feed CRC-32/ISO-HDLC")
+{
+  crc_rig const r;
+  r.write(cr, cr_rev_byte | cr_rev_out | cr_reset);
+  r.feed_bytes(check_input);
+  CHECK((r.read(dr) ^ 0xFFFF'FFFF) == 0xCBF4'3926);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("POLYSIZE 16, 8 and 7 compute in the low bits of DR")
+{
+  crc_rig const r;
+  r.configure(cr_poly16, 0x1021, 0xFFFF);
+  CHECK(r.read(dr) == 0xFFFF);
+  r.feed_bytes(check_input);
+  CHECK(r.read(dr) == 0x0000'29B1);
+  CHECK(r.f.target->mem().read(crc_base + dr, 2) == 0x29B1);
+
+  r.configure(cr_poly8, 0x07, 0);
+  r.feed_bytes(check_input);
+  CHECK(r.read(dr) == 0x0000'00F4);
+
+  r.configure(cr_poly7, 0x09, 0);
+  r.feed_bytes(check_input);
+  CHECK(r.read(dr) == 0x0000'0075);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("INIT and RESET load the low POLYSIZE bits of INIT")
+{
+  crc_rig const r;
+  r.write(cr, cr_poly8);
+  r.write(init, 0x1234'5678);
+  CHECK(r.read(dr) == 0x78);
+  r.write(dr, 0xFFFF'FFFF);
+  r.write(cr, cr_poly8 | cr_reset);
+  CHECK(r.read(dr) == 0x78);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("an even polynomial logs once and computes, a model_error when strict")
+{
+  {
+    crc_rig const r{false};
+    r.write(pol, 0x04C1'1DB6);
+    r.write(dr, 0x1234'5678);
+    CHECK(r.read(dr) != 0xFFFF'FFFF);
+    r.write(dr, 0x1234'5678);
+    REQUIRE(r.logged.size() == 1);
+    CHECK(r.logged[0].kind == core::log_kind::model_warning);
+    CHECK(r.logged[0].reg == "POL");
+  }
+  crc_rig const r;
+  r.write(pol, 0x04C1'1DB6);
+  CHECK_THROWS_AS(
+      static_cast<void>(r.f.target->mem().write(crc_base + dr, 4, 0x1234'5678)),
+      popcorn::model_error);
+}
+
+TEST_CASE("a snapshot with POLYSIZE 16 restores the running CRC")
+{
+  crc_rig const r;
+  r.configure(cr_poly16, 0x1021, 0xFFFF);
+  r.feed_bytes("1234");
+  auto const saved = r.f.target->snapshot();
+  r.feed_bytes("56789");
+  REQUIRE(r.read(dr) == 0x29B1);
+  r.f.target->restore(saved);
+  r.feed_bytes("56789");
+  CHECK(r.read(dr) == 0x29B1);
+
+  crc_rig const other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  other.feed_bytes("56789");
+  CHECK(other.read(dr) == 0x29B1);
+  CHECK(r.logged.empty());
+  CHECK(other.logged.empty());
+}
+
+TEST_CASE("a DR write that is not right-aligned is ignored and logs once")
 {
   crc_rig const r{false};
-  REQUIRE(r.f.target->mem().write(crc_base + dr, 1, 0x31).has_value());
-  REQUIRE(r.f.target->mem().write(crc_base + dr, 2, 0x3132).has_value());
+  r.store(dr + 1, 1, 0x31);
+  r.store(dr + 2, 2, 0x3132);
   CHECK(r.read(dr) == 0xFFFF'FFFF);
   REQUIRE(r.logged.size() == 1);
   CHECK(r.logged[0].kind == core::log_kind::model_warning);
   CHECK(r.logged[0].reg == "DR");
-
-  r.write(cr, cr_rev_out);
-  r.write(dr, 0x1234'5678);
-  r.write(dr, 0x1234'5678);
-  CHECK(r.read(dr) == 0xFFFF'FFFF);
-  REQUIRE(r.logged.size() == 2);
-  CHECK(r.logged[1].reg == "CR");
-
-  r.write(cr, 0);
-  r.write(dr, 0x1234'5678);
-  CHECK(r.read(dr) == one_word);
-  CHECK(r.logged.size() == 2);
 }
 
-TEST_CASE("a narrow write to a register other than DR is ignored and logs once")
+TEST_CASE("a REV_IN group wider than the write and REV_OUT below 32 bits log once")
 {
   crc_rig const r{false};
-  REQUIRE(r.f.target->mem().write(crc_base + idr, 1, 0x5A).has_value());
-  REQUIRE(r.f.target->mem().write(crc_base + init + 2, 2, 0).has_value());
+  r.write(cr, cr_rev_word | cr_reset);
+  r.store(dr, 1, 0x31);
+  r.store(dr, 2, 0x3132);
+  CHECK(r.read(dr) == 0xFFFF'FFFF);
+  REQUIRE(r.logged.size() == 1);
+  CHECK(r.logged[0].reg == "CR");
+
+  r.configure(cr_poly16 | cr_rev_out, 0x8005, 0);
+  r.feed_bytes(check_input);
+  CHECK(r.read(dr) == 0xFEE8);
+  CHECK(r.read(dr) == 0xFEE8);
+  REQUIRE(r.logged.size() == 2);
+  CHECK(r.logged[1].reg == "CR");
+}
+
+TEST_CASE("a narrow access to a register other than DR logs once per direction")
+{
+  crc_rig const r{false};
+  r.store(idr, 1, 0x5A);
+  r.store(init + 2, 2, 0);
   CHECK(r.read(idr) == 0);
   CHECK(r.read(init) == 0xFFFF'FFFF);
   REQUIRE(r.logged.size() == 1);
   CHECK(r.logged[0].kind == core::log_kind::model_warning);
   CHECK(r.logged[0].reg == "IDR");
+
+  r.write(pol, 0x1021);
+  CHECK(r.f.target->mem().read(crc_base + pol, 2) == 0x1021);
+  CHECK(r.f.target->mem().read(crc_base + idr, 1) == 0);
+  REQUIRE(r.logged.size() == 2);
+  CHECK(r.logged[1].reg == "POL");
 }
 
-TEST_CASE("unmodelled CRC accesses raise model_error under strict peripherals")
+TEST_CASE("forbidden and unmodelled CRC accesses raise model_error under strict peripherals")
 {
   crc_rig const r;
+  auto const    throws_on_write = [&](std::uint32_t offset, std::uint8_t size) {
+    CHECK_THROWS_AS(
+        static_cast<void>(r.f.target->mem().write(crc_base + offset, size, 0x31)),
+        popcorn::model_error);
+  };
+  throws_on_write(dr + 1, 1);
+  throws_on_write(idr, 2);
   CHECK_THROWS_AS(
-      static_cast<void>(r.f.target->mem().write(crc_base + dr, 1, 0x31)), popcorn::model_error);
+      static_cast<void>(r.f.target->mem().read(crc_base + pol, 2)), popcorn::model_error);
+  r.write(cr, cr_rev_word);
+  throws_on_write(dr, 1);
+  r.write(cr, cr_poly16 | cr_rev_out);
   CHECK_THROWS_AS(
-      static_cast<void>(r.f.target->mem().write(crc_base + idr, 2, 0x31)), popcorn::model_error);
-  r.write(cr, cr_rev_out);
-  CHECK_THROWS_AS(
-      static_cast<void>(r.f.target->mem().write(crc_base + dr, 4, 0x1234'5678)),
-      popcorn::model_error);
+      static_cast<void>(r.f.target->mem().read(crc_base + dr, 4)), popcorn::model_error);
+  r.write(cr, 0);
   CHECK(r.read(dr) == 0xFFFF'FFFF);
 }
