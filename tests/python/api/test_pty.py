@@ -8,8 +8,8 @@ import logging
 import os
 import select
 import selectors
-from pathlib import Path
-from typing import cast
+from fractions import Fraction
+from typing import Literal, cast
 
 import popcorn
 import pytest
@@ -174,30 +174,31 @@ def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:
         asyncio.run(board.periph.USART1.port.read(1))
 
 
-def test_the_project_file_connects_a_pty(tmp_path: Path, u575: popcorn.MachineDescription) -> None:
-    text = (
-        f'[mcu]\npart = "STM32U575QGIx"\n[image.app]\nelf = "{BOARD_ELF}"\n'
-        '[board.USART1]\nconnect = "pty"\n'
+def test_the_project_connects_a_pty(u575: popcorn.MachineDescription) -> None:
+    project = popcorn.Project(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(BOARD_ELF)],
+        board={"USART1": popcorn.Periph(connect="pty")},
     )
-    path = tmp_path / "popcorn.toml"
-    path.write_text(text)
-    m = popcorn.Project.load(path).machine()
+    m = project.machine()
     assert set(m.board.ptys) == {"USART1"}
     assert os.path.exists(m.board.ptys["USART1"])
 
 
-def test_other_connections_and_devices_are_refused(
-    tmp_path: Path, u575: popcorn.MachineDescription
-) -> None:
-    head = f'[mcu]\npart = "STM32U575QGIx"\n[image.app]\nelf = "{BOARD_ELF}"\n'
-    path = tmp_path / "popcorn.toml"
-    path.write_text(head + '[board.USART1]\nconnect = "socket"\n')
+def test_other_connections_and_devices_are_refused(u575: popcorn.MachineDescription) -> None:
+    socket = popcorn.Project(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(BOARD_ELF)],
+        board={"USART1": popcorn.Periph(connect=cast("Literal['pty']", "socket"))},
+    )
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(path).machine()
+        socket.machine()
     assert caught.value.key == "board.USART1.connect"
-    path.write_text(
-        head + '[board.I2C1]\ndevices = [{ address = 0x50, model = "fractions:Fraction" }]\n'
+    fraction = popcorn.Project(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(BOARD_ELF)],
+        board={"I2C1": popcorn.Periph(devices=[popcorn.Device(Fraction, address=0x50)])},
     )
     with pytest.raises(popcorn.ConfigError) as refused:
-        popcorn.Project.load(path).machine()
+        fraction.machine()
     assert refused.value.key == "board.I2C1.devices[0].model"

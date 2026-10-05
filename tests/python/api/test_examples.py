@@ -14,13 +14,11 @@ MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 
 
-def test_section_1_project_and_machine(tmp_path: Path) -> None:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-        f'[image.app]\nelf = "{DRIVER_ELF}"\n'
+def test_section_1_project_and_machine() -> None:
+    project = popcorn.Project(
+        part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(DRIVER_ELF)]
     )
-    assert asyncio.run(spec03.project_and_machine(path)).machine_id != 0
+    assert asyncio.run(spec03.project_and_machine(project)).machine_id != 0
     m = spec03.machine_without_project(popcorn.load_description(M33_JSON), DRIVER_ELF)
     assert m.images[0].path == DRIVER_ELF
 

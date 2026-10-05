@@ -9,14 +9,21 @@ import importlib
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn.board import AudioOptions, RccOptions, SupplyOptions, UsbHostOptions
+from popcorn.board import (
+    AudioOptions,
+    I2CTarget,
+    RccOptions,
+    SpiTarget,
+    SupplyOptions,
+    UsbHostOptions,
+)
 from popcorn.devices import At25sf, Eeprom24xx
 from popcorn.model import Model
 from popcorn.stm32.description import DescriptionError
@@ -31,6 +38,29 @@ def write(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "popcorn.toml"
     path.write_text(text)
     return path
+
+
+def minimal_project(
+    *,
+    vtor: int | None = None,
+    budget: int | None = None,
+    memory_init: Sequence[popcorn.MemoryInit] = (),
+    arena_base: int | Literal[False] | None = None,
+    arena_size: int | None = None,
+) -> popcorn.Project:
+    return popcorn.Project(
+        part="POPCORN-M33-TEST",
+        description=M33_JSON,
+        images=[popcorn.Elf(DRIVER_ELF)],
+        boot=popcorn.Boot(
+            vtor=vtor,
+            until="alu_mark",
+            budget=budget,
+            memory_init=memory_init,
+            arena_base=arena_base,
+            arena_size=arena_size,
+        ),
+    )
 
 
 def minimal(**boot: str) -> str:
@@ -92,8 +122,8 @@ def test_invalid_files_name_file_line_and_key(
     assert (caught.value.file, caught.value.line, caught.value.key) == (str(path), line, key)
 
 
-def test_an_unknown_part_lists_close_matches(tmp_path: Path) -> None:
-    project = popcorn.Project.load(write(tmp_path, '[mcu]\npart = "STM32U575QGI"\n'))
+def test_an_unknown_part_lists_close_matches() -> None:
+    project = popcorn.Project(part="STM32U575QGI", images=[])
     try:
         project.machine_description()
     except popcorn.ConfigError as error:
@@ -125,15 +155,15 @@ def test_bad_model_references_name_the_key(tmp_path: Path, model: str, expected:
     assert caught.value.expected.startswith(expected)
 
 
-def test_a_description_for_another_part_is_refused(tmp_path: Path) -> None:
-    text = f'[mcu]\npart = "OTHER"\ndescription = "{M33_JSON}"\n'
+def test_a_description_for_another_part_is_refused() -> None:
+    project = popcorn.Project(part="OTHER", description=M33_JSON, images=[])
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(write(tmp_path, text)).machine_description()
-    assert caught.value.key == "mcu.description"
+        project.machine_description()
+    assert caught.value.key == "description"
 
 
-def test_the_minimal_project_boots_to_its_symbol(tmp_path: Path) -> None:
-    project = popcorn.Project.load(write(tmp_path, minimal(budget="1_000_000")))
+def test_the_minimal_project_boots_to_its_symbol() -> None:
+    project = minimal_project(budget=1_000_000)
     m = project.machine()
     assert m.config_digest == project.digest
     stop = asyncio.run(project.boot_machine(m))
@@ -141,33 +171,32 @@ def test_the_minimal_project_boots_to_its_symbol(tmp_path: Path) -> None:
     assert stop.location.symbol == "alu_mark"
 
 
-def test_boot_raises_fault_error_on_a_fault(tmp_path: Path) -> None:
+def test_boot_raises_fault_error_on_a_fault() -> None:
     table = popcorn.Image.elf(DRIVER_ELF).lookup("vt_fault").value
-    project = popcorn.Project.load(write(tmp_path, minimal(vtor=hex(table))))
+    project = minimal_project(vtor=table)
     with pytest.raises(popcorn.FaultError) as caught:
         asyncio.run(project.boot_machine(project.machine()))
     assert caught.value.stop is not None
     assert caught.value.stop.reason is popcorn.StopReason.FAULT
 
 
-def test_boot_raises_budget_exceeded_before_its_symbol(tmp_path: Path) -> None:
-    project = popcorn.Project.load(write(tmp_path, minimal(budget="100")))
+def test_boot_raises_budget_exceeded_before_its_symbol() -> None:
+    project = minimal_project(budget=100)
     with pytest.raises(popcorn.BudgetExceeded) as caught:
         asyncio.run(project.boot_machine(project.machine()))
     assert caught.value.budget == 100
     assert caught.value.stop is not None
 
 
-def test_memory_init_needs_a_known_symbol(tmp_path: Path) -> None:
-    text = minimal() + '\nmemory_init = [{ symbol = "absent", bytes = "01" }]\n'
+def test_memory_init_needs_a_known_symbol() -> None:
+    project = minimal_project(memory_init=[popcorn.MemoryInit("absent", b"\x01")])
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(write(tmp_path, text)).machine()
+        project.machine()
     assert caught.value.key == "boot.memory_init[0].symbol"
 
 
-def test_memory_init_writes_before_boot(tmp_path: Path) -> None:
-    text = minimal() + '\nmemory_init = [{ symbol = "spin_flag", bytes = "01000000" }]\n'
-    popcorn.Project.load(write(tmp_path, text)).machine()
+def test_memory_init_writes_before_boot() -> None:
+    minimal_project(memory_init=[popcorn.MemoryInit("spin_flag", b"\x01\x00\x00\x00")]).machine()
 
 
 def test_the_digest_follows_values_not_layout(tmp_path: Path) -> None:
@@ -240,87 +269,78 @@ def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.MachineDesc
         handle.write_memory(0x3000_0000, b"\x00")
 
 
-def test_boot_arena_keys_set_or_disable_the_arena(tmp_path: Path) -> None:
-    moved = popcorn.Project.load(
-        write(tmp_path, minimal(arena_base="0x6E00_0000", arena_size="0x2000"))
-    ).machine()
+def test_boot_arena_keys_set_or_disable_the_arena() -> None:
+    moved = minimal_project(arena_base=0x6E00_0000, arena_size=0x2000).machine()
     assert (moved.arena.base, moved.arena.size) == (0x6E00_0000, 0x2000)
-    none = popcorn.Project.load(write(tmp_path, minimal(arena_base="false"))).machine()
+    none = minimal_project(arena_base=False).machine()
     with pytest.raises(popcorn.ConfigError, match="no arena"):
         _ = none.arena
-    default = popcorn.Project.load(write(tmp_path, minimal())).machine()
+    default = minimal_project().machine()
     assert default.arena.base == 0x6F00_0000
+
+
+def test_a_loaded_arena_base_of_true_is_refused_on_its_line(tmp_path: Path) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Project.load(write(tmp_path, minimal(arena_base="true")))
     assert (caught.value.key, caught.value.line) == ("boot.arena_base", 8)
 
 
-def _with_devices(tmp_path: Path, peripheral: str, device: str) -> Path:
-    models = tmp_path / "models"
-    models.mkdir(exist_ok=True)
-    (models / "bus_devices.py").write_text(
-        "from popcorn.board import I2CTarget, SpiTarget\n\n\n"
-        "class Target(I2CTarget):\n"
-        "    def __init__(self, address: int, size: int = 16) -> None:\n"
-        "        super().__init__(address)\n"
-        "        self.size = size\n\n\n"
-        "class Flash(SpiTarget):\n"
-        "    def __init__(self, address: int) -> None:\n"
-        "        super().__init__()\n\n\n"
-        "class NoCs(SpiTarget):\n"
-        "    def __init__(self, size: int) -> None:\n"
-        "        super().__init__()\n\n\n"
-        "class Loose(SpiTarget):\n"
-        "    def __init__(self, **options: object) -> None:\n"
-        '        super().__init__(options.get("cs"))\n\n\n'
-        "class NotADevice:\n"
-        "    def __init__(self, address: int) -> None:\n"
-        "        self.address = address\n"
-    )
-    return write(
-        tmp_path,
-        minimal()
-        + f"[board.{peripheral}]\ndevices = [\n  {device},\n]\n"
-        + f'[models]\npython = ["{models}"]\n',
-    )
+class Target(I2CTarget):
+    def __init__(self, address: int, size: int = 16) -> None:
+        super().__init__(address)
+        self.size = size
 
 
-def test_a_device_class_must_be_a_bus_target(tmp_path: Path) -> None:
-    path = _with_devices(
-        tmp_path, "TESTDEV", '{ address = 0x50, model = "bus_devices:NotADevice" }'
-    )
+class Flash(SpiTarget):
+    def __init__(self, address: int) -> None:
+        super().__init__()
+
+
+class NoCs(SpiTarget):
+    def __init__(self, size: int) -> None:
+        super().__init__()
+
+
+class Loose(SpiTarget):
+    def __init__(self, **options: object) -> None:
+        super().__init__(cast("str | None", options.get("cs")))
+
+
+class NotADevice:
+    def __init__(self, address: int) -> None:
+        self.address = address
+
+
+def with_devices(*devices: popcorn.Device) -> popcorn.Project:
+    return minimal_project().replace(board={"TESTDEV": popcorn.Periph(devices=devices)})
+
+
+def test_a_device_class_must_be_a_bus_target() -> None:
+    project = with_devices(popcorn.Device(NotADevice, address=0x50))
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(path).machine()
+        project.machine()
     assert caught.value.key == "board.TESTDEV.devices[0].model"
     assert "I2CTarget or SpiTarget" in caught.value.expected
-    assert caught.value.line == 9
 
 
-def test_devices_need_an_i2c_bus(tmp_path: Path) -> None:
-    path = _with_devices(tmp_path, "TESTDEV", '{ address = 0x50, model = "bus_devices:Target" }')
+def test_devices_need_an_i2c_bus() -> None:
+    project = with_devices(popcorn.Device(Target, address=0x50))
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(path).machine()
+        project.machine()
     assert caught.value.key == "board.TESTDEV.devices[0].model"
     assert caught.value.expected == "an I2C bus of POPCORN-M33-TEST"
-    assert caught.value.line == 9
 
 
-def test_an_spi_class_used_with_cs_must_take_a_cs_keyword(tmp_path: Path) -> None:
-    path = _with_devices(
-        tmp_path, "TESTDEV", '{ cs = "PA4", model = "bus_devices:NoCs", size = 1 }'
-    )
+def test_an_spi_class_used_with_cs_must_take_a_cs_keyword() -> None:
+    project = with_devices(popcorn.Device(NoCs, cs="PA4", size=1))
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(path).machine()
+        project.machine()
     assert caught.value.key == "board.TESTDEV.devices[0].cs"
     assert caught.value.expected == "a cs keyword accepted by NoCs"
-    assert caught.value.line == 9
 
 
-def test_an_spi_class_taking_any_keyword_takes_cs(tmp_path: Path) -> None:
-    path = _with_devices(
-        tmp_path, "TESTDEV", '{ cs = "PA4", model = "bus_devices:Loose", size = 1 }'
-    )
-    device = popcorn.Project.load(path).board["TESTDEV"].devices[0]
+def test_an_spi_class_taking_any_keyword_takes_cs() -> None:
+    device = with_devices(popcorn.Device(Loose, cs="PA4", size=1)).board["TESTDEV"].devices[0]
     assert (device.cs, device.params) == ("PA4", {"size": 1})
 
 

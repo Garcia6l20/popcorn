@@ -21,9 +21,10 @@ from popcorn.units import VirtualTime, ms, us
 
 from .conftest import ROOT, run_bounded
 from .models_example import Eeprom, Timer
+from .projects import MODEL_ELF, MODEL_JSON, Plain, model_project
+from .projects import Eeprom as FakeEeprom
+from .projects import Timer as FakeTimer
 
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
-MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 MODELS_DIR = ROOT / "tests" / "data" / "api" / "models"
 
 
@@ -536,44 +537,60 @@ def test_a_failed_model_restore_leaves_the_machine_unusable() -> None:
         asyncio.run(m.run(for_=us(1)))
 
 
-def test_the_project_file_wires_a_model_with_its_parameters(tmp_path: Path) -> None:
-    text = board('model = "fake_models:Timer"\nprescaler = 4\n')
-    model = popcorn.Project.load(write(tmp_path, text)).machine().model("TIMER")
+def test_the_project_wires_a_model_with_its_parameters() -> None:
+    project = model_project({"TIMER": popcorn.Periph(model=popcorn.Use(FakeTimer, prescaler=4))})
+    model = project.machine().model("TIMER")
     assert model is not None and vars(model)["prescaler"] == 4
 
 
 @pytest.mark.parametrize(
-    ("entry", "key", "expected"),
+    ("periph", "key", "expected"),
     [
-        ('model = "fake_models:Timer"\nperiod = 4\n', "board.TIMER.period", "a parameter of Timer"),
-        ('model = "fake_models:Plain"\n', "board.TIMER.model", "a popcorn.model.Model subclass"),
         (
-            'devices = [{ address = 0x50, model = "fake_models:Eeprom" }]\n',
+            popcorn.Periph(model=popcorn.Use(FakeTimer, period=4)),
+            "board.TIMER.period",
+            "a parameter of Timer",
+        ),
+        (
+            popcorn.Periph(model=popcorn.Use(Plain)),
+            "board.TIMER.model",
+            "a popcorn.model.Model subclass",
+        ),
+        (
+            popcorn.Periph(devices=[popcorn.Device(FakeEeprom, address=0x50)]),
             "board.TIMER.devices[0].size",
             "a value for Eeprom(size)",
         ),
         (
-            'devices = [{ address = 0x50, model = "fake_models:Eeprom", size = 8, speed = 1 }]\n',
+            popcorn.Periph(devices=[popcorn.Device(FakeEeprom, address=0x50, size=8, speed=1)]),
             "board.TIMER.devices[0].speed",
             "a parameter of Eeprom",
         ),
     ],
 )
 def test_board_parameters_are_checked_against_the_constructor(
-    tmp_path: Path, entry: str, key: str, expected: str
+    periph: popcorn.Periph, key: str, expected: str
 ) -> None:
-    project = popcorn.Project.load(write(tmp_path, board(entry)))
+    project = model_project({"TIMER": periph})
     with pytest.raises(popcorn.ConfigError) as caught:
         project.machine()
     assert caught.value.key == key
     assert caught.value.expected.startswith(expected)
+
+
+def test_a_loaded_board_parameter_error_carries_its_line(tmp_path: Path) -> None:
+    text = board('model = "fake_models:Timer"\nperiod = 4\n')
+    project = popcorn.Project.load(write(tmp_path, text))
+    with pytest.raises(popcorn.ConfigError) as caught:
+        project.machine()
+    assert caught.value.key == "board.TIMER.period"
     assert caught.value.line > 0
 
 
-def test_a_board_model_needs_a_peripheral_of_the_description(tmp_path: Path) -> None:
-    text = board('model = "fake_models:Timer"\n').replace("[board.TIMER]", "[board.TIM9]")
+def test_a_board_model_needs_a_peripheral_of_the_description() -> None:
+    project = model_project({"TIM9": popcorn.Periph(model=popcorn.Use(FakeTimer))})
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project.load(write(tmp_path, text)).machine()
+        project.machine()
     assert caught.value.key == "board.TIM9"
 
 

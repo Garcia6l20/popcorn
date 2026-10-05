@@ -79,15 +79,13 @@ def test_a_clock_outside_its_range_is_refused(
     assert caught.value.key == key
 
 
-def test_board_rcc_in_the_project_file_sets_the_hse_rate(
-    tmp_path: Path, u575: popcorn.MachineDescription
+def test_board_rcc_in_the_project_sets_the_hse_rate(
+    u575: popcorn.MachineDescription,
 ) -> None:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(
-        f'[mcu]\npart = "STM32U575QGIx"\n[image.app]\nelf = "{RCC_ELF}"\n'
-        "[board.RCC]\nhse_hz = 32_000_000\n"
+    project = popcorn.Project(
+        part="STM32U575QGIx", images=[popcorn.Elf(RCC_ELF)], rcc=RccOptions(hse_hz=32_000_000)
     )
-    m = popcorn.Project.load(path).machine()
+    m = project.machine()
     on_hse(m)
     assert cycle_time(m).ps == CYCLES * 10**12 // 32_000_000
 

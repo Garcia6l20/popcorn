@@ -10,9 +10,8 @@ from popcorn.model import IrqLine, Model, on_read, on_write
 from popcorn.units import ms, us
 
 
-async def project_and_machine(project_file: Path) -> popcorn.Snapshot:
-    """Section 1: a project file, a machine, a boot snapshot."""
-    project = popcorn.Project.load(project_file)
+async def project_and_machine(project: popcorn.Project) -> popcorn.Snapshot:
+    """Section 1: a project declared in Python, a machine, a boot snapshot."""
     m: popcorn.Machine = project.machine()
     m.reset()
     stop = await m.run(until=m.sym("alu_mark"), budget=500_000)

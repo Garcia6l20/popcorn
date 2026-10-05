@@ -46,17 +46,14 @@ def test_a_restored_run_stops_the_same_way(machines: Machines) -> None:
     assert state(m) == after
 
 
-def write_project(tmp_path: Path, name: str, extra: str = "") -> Path:
-    path = tmp_path / name
-    path.write_text(
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-        f'[image.app]\nelf = "{DRIVER_ELF}"\n{extra}'
+def make_project(cpi: float = 1.0) -> popcorn.Project:
+    return popcorn.Project(
+        part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(DRIVER_ELF)], cpi=cpi
     )
-    return path
 
 
 def test_a_saved_snapshot_loads_into_a_second_machine(tmp_path: Path) -> None:
-    project = popcorn.Project.load(write_project(tmp_path, "a.toml"))
+    project = make_project()
     first = project.machine()
     first.reset()
     asyncio.run(first.run(budget=5_000))
@@ -72,7 +69,7 @@ def test_a_saved_snapshot_loads_into_a_second_machine(tmp_path: Path) -> None:
 
 
 def test_a_changed_image_or_config_is_refused_naming_the_digest(tmp_path: Path) -> None:
-    project = popcorn.Project.load(write_project(tmp_path, "a.toml"))
+    project = make_project()
     m = project.machine()
     m.reset()
     m.snapshot().save(tmp_path / "boot.snap")
@@ -84,7 +81,7 @@ def test_a_changed_image_or_config_is_refused_naming_the_digest(tmp_path: Path) 
         other_image.load_snapshot(tmp_path / "boot.snap")
     assert image.value.key == "image_digests"
 
-    changed = popcorn.Project.load(write_project(tmp_path, "b.toml", "[clock]\ncpi = 2.0\n"))
+    changed = make_project(cpi=2.0)
     with pytest.raises(popcorn.ConfigError) as config:
         changed.machine().load_snapshot(tmp_path / "boot.snap")
     assert config.value.key == "config_digest"

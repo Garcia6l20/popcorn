@@ -102,8 +102,13 @@ def fault_in_running(_: Path, machines: Machines) -> object:
     return asyncio.run(body())
 
 
-def boot_budget(tmp_path: Path, _: Machines) -> object:
-    loaded = project(tmp_path, minimal("budget = 100\n"))
+def boot_budget(_: Path, __: Machines) -> object:
+    loaded = popcorn.Project(
+        part="POPCORN-M33-TEST",
+        description=M33_JSON,
+        images=[popcorn.Elf(DRIVER_ELF)],
+        boot=popcorn.Boot(until="alu_mark", budget=100),
+    )
     return asyncio.run(loaded.boot_machine(loaded.machine()))
 
 

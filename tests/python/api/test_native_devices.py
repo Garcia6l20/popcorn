@@ -17,10 +17,10 @@ from popcorn.devices import At25sf, Eeprom24xx, TableTarget, TableWrite
 from popcorn.units import VirtualDuration, ms, ns, ps, s, us
 
 from .devices_example import Eeprom24
+from .projects import NATIVE_DEVICES
 from .test_devices import BUDGET, I2C_ELF, SPI_ELF, enter, finish, pattern
 from .test_devices import log as logged
 
-DATA = Path(__file__).parents[2] / "data" / "api"
 CUSTOM = (0x1F, 0x87, 0x01)
 PATTERN = bytes(pattern(i) for i in range(20))
 
@@ -305,10 +305,10 @@ def test_the_machine_keeps_its_native_devices_alive(u575: popcorn.MachineDescrip
     assert held() is None
 
 
-def test_a_project_file_declares_a_custom_at25sf_on_the_hardware_ss(
+def test_a_project_declares_a_custom_at25sf_on_the_hardware_ss(
     u575: popcorn.MachineDescription,
 ) -> None:
-    project = popcorn.Project.load(DATA / "native_devices.toml")
+    project = NATIVE_DEVICES
     (entry,) = project.board["SPI1"].devices
     assert entry.cs is None
     assert entry.params["page_program"] == us(600)
@@ -360,17 +360,73 @@ def test_a_project_file_image_is_relative_to_the_project_file(tmp_path: Path) ->
     assert flash.contents()[:3] == b"\x5a\xa5\xff"
 
 
-def test_a_project_file_declares_native_i2c_devices(
+def test_a_project_device_takes_an_image_path(
     u575: popcorn.MachineDescription, tmp_path: Path
 ) -> None:
-    path = _project(
-        tmp_path,
-        '{ address = 0x50, model = "popcorn.devices:Eeprom24xx", size = 4096, page_size = 16, '
-        'write_cycle = "5 ms" }',
-        "I2C1",
-        I2C_ELF,
+    image = tmp_path / "flash.bin"
+    image.write_bytes(b"\x5a\xa5")
+    project = NATIVE_DEVICES.replace(
+        board={"SPI1": popcorn.Periph(devices=[popcorn.Device(At25sf, image=image)])}
     )
-    project = popcorn.Project.load(path)
+    asyncio.run(project.boot_machine(project.machine()))
+    (flash,) = project.machine().board.devices("SPI1")
+    assert isinstance(flash, At25sf)
+    assert flash.contents()[:3] == b"\x5a\xa5\xff"
+
+
+def test_a_project_table_target_takes_integer_register_keys(
+    u575: popcorn.MachineDescription,
+) -> None:
+    project = popcorn.Project(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(I2C_ELF)],
+        boot=popcorn.Boot(until="main", budget=BUDGET),
+        board={
+            "I2C1": popcorn.Periph(
+                devices=[
+                    popcorn.Device(
+                        TableTarget,
+                        address=0x38,
+                        register_bytes=2,
+                        replies={0x4002: [0x12, 0x34], 7: [1]},
+                    )
+                ]
+            )
+        },
+    )
+    m = project.machine()
+    asyncio.run(project.boot_machine(m))
+    m.reg.pc = m.sym("table")
+    assert finish(m) == [0x12, 0x34]
+    (table,) = m.board.devices("I2C1")
+    assert isinstance(table, TableTarget)
+    assert table.writes() == (TableWrite(0x4000, b"\x01"), TableWrite(0x4001, b"\x02\x03"))
+
+
+def test_a_project_integer_duration_is_refused() -> None:
+    project = NATIVE_DEVICES.replace(
+        board={"SPI1": popcorn.Periph(devices=[popcorn.Device(At25sf, page_program=600)])}
+    )
+    with pytest.raises(ConfigError, match="page_program") as refused:
+        project.machine()
+    assert refused.value.key == "board.SPI1.devices[0]"
+
+
+def test_a_project_declares_native_i2c_devices(u575: popcorn.MachineDescription) -> None:
+    project = popcorn.Project(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(I2C_ELF)],
+        boot=popcorn.Boot(until="main", budget=BUDGET),
+        board={
+            "I2C1": popcorn.Periph(
+                devices=[
+                    popcorn.Device(
+                        Eeprom24xx, address=0x50, size=4096, page_size=16, write_cycle=ms(5)
+                    )
+                ]
+            )
+        },
+    )
     m = project.machine()
     asyncio.run(project.boot_machine(m))
     m.reg.pc = m.sym("eeprom_rw")
@@ -456,10 +512,12 @@ def test_the_package_exports_the_devices_module() -> None:
     assert popcorn.devices.At25sf is At25sf
 
 
-def test_a_bad_project_file_argument_is_refused_on_the_entry(tmp_path: Path) -> None:
-    path = _project(tmp_path, '{ model = "popcorn.devices:At25sf", size = 100 }')
+def test_a_bad_project_argument_is_refused_on_the_entry() -> None:
+    project = NATIVE_DEVICES.replace(
+        board={"SPI1": popcorn.Periph(devices=[popcorn.Device(At25sf, size=100)])}
+    )
     with pytest.raises(ConfigError, match="size") as refused:
-        popcorn.Project.load(path).machine()
+        project.machine()
     assert refused.value.key == "board.SPI1.devices[0]"
 
 

@@ -1,5 +1,5 @@
 """The virtual USB host of OTG_FS from Python: wiring, cable, enumeration state, control
-requests, snapshots, the project file, the CDC ACM stream, the HID streams and the USB Audio
+requests, snapshots, the project, the CDC ACM stream, the HID streams and the USB Audio
 2.0 function.
 
 The firmware is the usb_cdc example's: TinyUSB 0.21.0, a CDC ACM plus HID composite device. The
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,8 @@ import pytest
 from popcorn import _core
 from popcorn.board import CdcLineCoding, HidStream, UsbHost, UsbHostOptions, UsbState
 from popcorn.units import VirtualTime, ms, s, us
+
+from .projects import Silent
 
 pytest_plugins = ["pytester"]
 
@@ -201,21 +203,21 @@ def test_usb_options_are_checked(
     assert caught.value.key == key
 
 
-def project(tmp_path: Path, board: str) -> popcorn.Project:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(
-        f'[mcu]\npart = "STM32U575QGIx"\n[image.app]\nelf = "{USB_ELF}"\n'
-        f'[boot]\nuntil = "main"\nbudget = {BUDGET}\n{board}'
+def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
+    return popcorn.Project(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(USB_ELF)],
+        boot=popcorn.Boot(until="main", budget=BUDGET),
+        board=board,
     )
-    return popcorn.Project.load(path)
 
 
-def test_a_project_file_wires_the_host_and_its_timings(
+def test_a_project_wires_the_host_and_its_timings(
     u575: popcorn.MachineDescription, tmp_path: Path
 ) -> None:
     del u575
-    board = "[board.OTG_FS]\nhost = { attached = false, debounce_ms = 20 }\n"
-    m = project(tmp_path, board).machine()
+    host_options = UsbHostOptions(attached=False, debounce=ms(20))
+    m = project({"OTG_FS": popcorn.Periph(host=host_options)}).machine()
     m.reset()
     host = m.periph.OTG_FS.host
     assert not host.attached
@@ -230,17 +232,16 @@ def test_a_project_file_wires_the_host_and_its_timings(
 @pytest.mark.parametrize(
     "board",
     [
-        "[board.USART1]\nhost = {}\n",
-        f'[models]\npython = ["{Path(__file__).parent}"]\n'
-        '[board.OTG_FS]\nmodel = "test_audio:Silent"\nhost = {}\n',
+        {"USART1": popcorn.Periph(host=UsbHostOptions())},
+        {"OTG_FS": popcorn.Periph(model=popcorn.Use(Silent), host=UsbHostOptions())},
     ],
 )
 def test_a_host_table_needs_a_usb_controller_with_the_built_in_model(
-    u575: popcorn.MachineDescription, tmp_path: Path, board: str
+    u575: popcorn.MachineDescription, board: dict[str, popcorn.Periph]
 ) -> None:
     del u575
     with pytest.raises(popcorn.ConfigError) as caught:
-        project(tmp_path, board).machine()
+        project(board).machine()
     assert caught.value.key.endswith(".host")
 
 
@@ -490,11 +491,11 @@ def test_a_pty_on_an_alias_is_keyed_by_the_controller(u575: popcorn.MachineDescr
 
 
 def test_connect_pty_bridges_the_cdc_function_from_the_project(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.MachineDescription,
 ) -> None:
     del u575
-    board = '[board.OTG_FS]\nhost = { dtr = false, rts = false }\nconnect = "pty"\n'
-    m = project(tmp_path, board).machine()
+    periph = popcorn.Periph(host=UsbHostOptions(dtr=False, rts=False), connect="pty")
+    m = project({"OTG_FS": periph}).machine()
     assert set(m.board.ptys) == {"OTG_FS"}
     m.reset()
     host = m.periph.OTG_FS.host
@@ -505,11 +506,11 @@ def test_connect_pty_bridges_the_cdc_function_from_the_project(
 
 
 def test_connect_pty_on_a_controller_without_a_host_is_refused(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.MachineDescription,
 ) -> None:
     del u575
     with pytest.raises(popcorn.ModelError):
-        project(tmp_path, '[board.OTG_FS]\nconnect = "pty"\n').machine()
+        project({"OTG_FS": popcorn.Periph(connect="pty")}).machine()
 
 
 def test_bytes_written_unplugged_survive_a_restore_into_a_fresh_machine(

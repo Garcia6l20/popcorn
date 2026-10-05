@@ -17,8 +17,10 @@ from popcorn.board import AudioOptions, DeviceBoard, I2CTarget, SpiTarget
 from popcorn.model import Model
 from popcorn.units import VirtualTime, ms
 
+from . import models_example
 from .conftest import run_bounded
 from .devices_example import Eeprom24, JedecDevice
+from .projects import DEVICES
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
 I2C_ELF = PREBUILT / "i2c_ll.elf"
@@ -464,10 +466,10 @@ def test_the_native_layer_refuses_devices_on_its_own(
 DATA = Path(__file__).parents[2] / "data" / "api"
 
 
-def test_fr_per_5_a_project_file_wires_an_eeprom_the_firmware_uses(
+def test_fr_per_5_a_project_wires_an_eeprom_the_firmware_uses(
     u575: popcorn.MachineDescription,
 ) -> None:
-    project = popcorn.Project.load(DATA / "devices.toml")
+    project = DEVICES
     m = project.machine()
     stop = asyncio.run(project.boot_machine(m))
     assert stop.reason is StopReason.ADDRESS
@@ -496,123 +498,138 @@ def _project(tmp_path: Path, devices: str) -> Path:
     return path
 
 
+def eeprom_entry(
+    *, address: int | None = 0x50, cs: str | None = None, size: int = 16
+) -> popcorn.Device:
+    return popcorn.Device(Eeprom24, address=address, cs=cs, size=size)
+
+
+def jedec_entry(*, address: int | None = None, cs: str | None = None) -> popcorn.Device:
+    return popcorn.Device(JedecDevice, address=address, cs=cs, jedec=[1, 2, 3])
+
+
 @pytest.mark.parametrize(
-    ("devices", "key", "expected"),
+    ("board", "key", "expected"),
     [
         (
-            '[board.SPI1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
-            "size = 16 }]\n",
+            {"SPI1": popcorn.Periph(devices=[eeprom_entry()])},
             "board.SPI1.devices[0].model",
             "an I2C bus of STM32U575QGIx",
         ),
         (
-            '[board.I2C1]\ndevices = [{ address = 0x07, model = "api.devices_example:Eeprom24", '
-            "size = 16 }]\n",
+            {"I2C1": popcorn.Periph(devices=[eeprom_entry(address=0x07)])},
             "board.I2C1.devices[0].address",
             "an I2C target address is 0x08 to 0x77, not 7",
         ),
         (
-            '[board.I2C1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
-            "size = 0 }]\n",
+            {"I2C1": popcorn.Periph(devices=[eeprom_entry(size=0)])},
             "board.I2C1.devices[0]",
             "arguments Eeprom24 accepts: an EEPROM size is a positive multiple of its page",
         ),
         (
-            '[board.I2C1]\nmodel = "api.models_example:Timer"\n'
-            'devices = [{ address = 0x50, model = "api.devices_example:Eeprom24", size = 16 }]\n',
+            {
+                "I2C1": popcorn.Periph(
+                    model=popcorn.Use(models_example.Timer), devices=[eeprom_entry()]
+                )
+            },
             "board.I2C1.devices",
             "no devices on a peripheral that has a Python model",
         ),
         (
-            '[board.I2C1]\ndevices = [{ cs = "PA4", model = "api.devices_example:JedecDevice", '
-            "jedec = [1, 2, 3] }]\n",
+            {"I2C1": popcorn.Periph(devices=[jedec_entry(cs="PA4")])},
             "board.I2C1.devices[0].model",
             "an SPI bus of STM32U575QGIx",
         ),
         (
-            '[board.SPI1]\ndevices = [{ address = 0x50, model = "api.devices_example:JedecDevice", '
-            "jedec = [1, 2, 3] }]\n",
+            {"SPI1": popcorn.Periph(devices=[jedec_entry(address=0x50)])},
             "board.SPI1.devices[0].address",
             "no address for an SPI device, it has a cs",
         ),
         (
-            '[board.I2C1]\ndevices = [{ model = "api.devices_example:Eeprom24", size = 16 }]\n',
+            {"I2C1": popcorn.Periph(devices=[eeprom_entry(address=None)])},
             "board.I2C1.devices[0].address",
             "the address of an I2C target",
         ),
         (
-            '[board.I2C1]\ndevices = [{ address = 0x50, cs = "PA4", '
-            'model = "api.devices_example:Eeprom24", size = 16 }]\n',
+            {"I2C1": popcorn.Periph(devices=[eeprom_entry(cs="PA4")])},
             "board.I2C1.devices[0].cs",
             "an address for an I2C target or a cs for an SPI device, not both",
         ),
         (
-            '[board.I2C1]\ndevices = [{ cs = "PA4", model = "api.devices_example:Eeprom24", '
-            "size = 16 }]\n",
+            {"I2C1": popcorn.Periph(devices=[eeprom_entry(address=None, cs="PA4")])},
             "board.I2C1.devices[0].cs",
             "no cs for an I2C target",
         ),
         (
-            '[board.SPI1]\ndevices = [{ cs = "PZ4", model = "api.devices_example:JedecDevice", '
-            "jedec = [1, 2, 3] }]\n",
+            {"SPI1": popcorn.Periph(devices=[jedec_entry(cs="PZ4")])},
             "board.SPI1.devices[0].cs",
             "a chip select on a GPIO port of STM32U575QGIx",
         ),
     ],
 )
 def test_project_devices_are_refused_with_their_key(
-    u575: popcorn.MachineDescription, tmp_path: Path, devices: str, key: str, expected: str
+    u575: popcorn.MachineDescription,
+    board: dict[str, popcorn.Periph],
+    key: str,
+    expected: str,
 ) -> None:
     with pytest.raises(ConfigError) as caught:
-        popcorn.Project.load(_project(tmp_path, devices)).machine()
+        DEVICES.replace(board=board).machine()
     assert caught.value.key == key
     assert caught.value.expected == expected
+
+
+def test_a_loaded_project_device_error_carries_its_line(
+    u575: popcorn.MachineDescription, tmp_path: Path
+) -> None:
+    entry = (
+        '[board.SPI1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
+        "size = 16 }]\n"
+    )
+    with pytest.raises(ConfigError) as caught:
+        popcorn.Project.load(_project(tmp_path, entry)).machine()
+    assert caught.value.key == "board.SPI1.devices[0].model"
     assert caught.value.line > 0
 
 
-def test_a_project_file_wires_spi_devices_by_chip_select(
-    u575: popcorn.MachineDescription, tmp_path: Path
+@pytest.mark.parametrize(("cs", "entry"), [("PA4", "poll"), (None, "hw_ss")])
+def test_a_project_wires_spi_devices_by_chip_select(
+    u575: popcorn.MachineDescription, cs: str | None, entry: str
 ) -> None:
-    for cs, entry in (("PA4", "poll"), (None, "hw_ss")):
-        chip = "" if cs is None else f'cs = "{cs}", '
-        text = (
-            '[mcu]\npart = "STM32U575QGIx"\n'
-            f'[image.app]\nelf = "{SPI_ELF}"\n'
-            '[boot]\nuntil = "main"\nbudget = 100_000_000\n'
-            "[board.SPI1]\n"
-            f'devices = [{{ {chip}model = "api.devices_example:JedecDevice", '
-            "jedec = [0x1F, 0x87, 0x01] }]\n"
-            f'[models]\npython = ["{Path(__file__).parents[1]}"]\n'
-        )
-        path = tmp_path / f"spi-{entry}.toml"
-        path.write_text(text)
-        project = popcorn.Project.load(path)
-        assert project.board["SPI1"].devices[0].cs == cs
-        m = project.machine()
-        asyncio.run(project.boot_machine(m))
-        m.reg.pc = m.sym(entry)
-        assert finish(m) == [0xFF, 0x1F, 0x87, 0x01]
-        (device,) = m.board.devices("SPI1")
-        assert isinstance(device, JedecDevice)
-        assert device.cs == cs
-
-
-def _two_bus_project(tmp_path: Path) -> popcorn.Project:
-    return popcorn.Project.load(
-        _project(
-            tmp_path,
-            '[board.I2C1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
-            "size = 4096 }]\n"
-            '[board.SPI1]\ndevices = [{ cs = "PA4", model = "api.devices_example:JedecDevice" }]\n'
-            "[configs.slow]\nclock.cpi = 2.0\n",
-        )
+    project = popcorn.Project(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(SPI_ELF)],
+        boot=popcorn.Boot(until="main", budget=BUDGET),
+        board={
+            "SPI1": popcorn.Periph(
+                devices=[popcorn.Device(JedecDevice, cs=cs, jedec=[0x1F, 0x87, 0x01])]
+            )
+        },
     )
+    assert project.board["SPI1"].devices[0].cs == cs
+    m = project.machine()
+    asyncio.run(project.boot_machine(m))
+    m.reg.pc = m.sym(entry)
+    assert finish(m) == [0xFF, 0x1F, 0x87, 0x01]
+    (device,) = m.board.devices("SPI1")
+    assert isinstance(device, JedecDevice)
+    assert device.cs == cs
+
+
+def _two_bus_project() -> popcorn.Project:
+    base = DEVICES.replace(
+        board={
+            "I2C1": popcorn.Periph(devices=[popcorn.Device(Eeprom24, address=0x50, size=4096)]),
+            "SPI1": popcorn.Periph(devices=[popcorn.Device(JedecDevice, cs="PA4")]),
+        }
+    )
+    return base.with_configs(slow=base.replace(cpi=2.0))
 
 
 def test_project_devices_replace_those_of_their_peripheral_only(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.MachineDescription,
 ) -> None:
-    project = _two_bus_project(tmp_path)
+    project = _two_bus_project()
     given = Eeprom24(0x50, 4096)
     m = project.machine(devices={"I2C1": [given]})
     assert m.config_digest == project.digest
@@ -626,14 +643,13 @@ def test_project_devices_replace_those_of_their_peripheral_only(
 
 
 def test_project_devices_through_an_alias_a_config_or_an_empty_list(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.MachineDescription,
 ) -> None:
-    project = _two_bus_project(tmp_path)
+    project = _two_bus_project()
     given = Eeprom24(0x50, 4096)
     assert project.machine(devices={"SEC_I2C1": [given]}).board.devices("I2C1") == (given,)
     other = Eeprom24(0x50, 4096)
-    assert project.source is not None
-    slow = popcorn.Project.load(project.source.path, "slow").machine(devices={"I2C1": [other]})
+    slow = project.config("slow").machine(devices={"I2C1": [other]})
     assert slow.config_digest != project.digest
     assert slow.board.devices("I2C1") == (other,)
     assert project.machine(devices={"SPI1": []}).board.devices("SPI1") == ()
@@ -653,27 +669,20 @@ def test_project_devices_through_an_alias_a_config_or_an_empty_list(
 )
 def test_refused_project_devices_name_their_key(
     u575: popcorn.MachineDescription,
-    tmp_path: Path,
     devices: dict[str, list[I2CTarget]],
     key: str,
     expected: str,
 ) -> None:
     with pytest.raises(ConfigError) as refused:
-        _two_bus_project(tmp_path).machine(devices=devices)
+        _two_bus_project().machine(devices=devices)
     assert refused.value.key == key
     assert refused.value.expected == expected
 
 
 def test_project_devices_given_for_a_peripheral_are_not_built(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.MachineDescription,
 ) -> None:
-    broken = popcorn.Project.load(
-        _project(
-            tmp_path,
-            '[board.I2C1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
-            "size = 0 }]\n",
-        )
-    )
+    broken = DEVICES.replace(board={"I2C1": popcorn.Periph(devices=[eeprom_entry(size=0)])})
     given = Eeprom24(0x50, 16)
     assert broken.machine(devices={"I2C1": [given]}).board.devices("I2C1") == (given,)
 

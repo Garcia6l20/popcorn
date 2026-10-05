@@ -9,6 +9,7 @@ import asyncio
 import itertools
 import logging
 import struct
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, cast
 
@@ -16,8 +17,9 @@ import popcorn
 import pytest
 from popcorn import StopReason
 from popcorn.board import AudioFrame, AudioOptions, AudioStream, I2CTarget
-from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
+
+from .projects import Silent
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
 SAI_ELF = PREBUILT / "sai_ll.elf"
@@ -30,10 +32,6 @@ CODEC_FRAMES = 1400
 TIM2_CNT = 0x4000_0024
 
 type Block = Literal["A", "B"]
-
-
-class Silent(Model):
-    """A Python model with no register behaviour, standing in for an SAI."""
 
 
 def ramp(index: int) -> int:
@@ -220,14 +218,13 @@ def test_a_write_from_another_thread_during_a_run_is_refused(
     assert receiver.queued == 0
 
 
-def project(tmp_path: Path, board: str) -> popcorn.Project:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(f'[mcu]\npart = "STM32U575QGIx"\n[image.app]\nelf = "{SAI_ELF}"\n{board}')
-    return popcorn.Project.load(path)
+def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
+    return popcorn.Project(part="STM32U575QGIx", images=[popcorn.Elf(SAI_ELF)], board=board)
 
 
-def test_a_project_file_sets_the_options_of_a_block(tmp_path: Path) -> None:
-    m = project(tmp_path, "[board.SAI1.A]\ndecimation = 2\n").machine()
+def test_a_project_sets_the_options_of_a_block() -> None:
+    options = AudioOptions(decimation=2)
+    m = project({"SAI1": popcorn.Periph(audio={"A": options})}).machine()
     at_main(m)
     run_entry(m, "tx_poll")
     frames = asyncio.run(m.periph.SAI1.audio("A").read_frames(2))
@@ -237,19 +234,25 @@ def test_a_project_file_sets_the_options_of_a_block(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("board", "key"),
     [
-        ("[board.USART1.A]\ndecimation = 2\n", "board.USART1.A"),
         (
-            f'[models]\npython = ["{Path(__file__).parent}"]\n'
-            '[board.SAI1]\nmodel = "test_audio:Silent"\n[board.SAI1.B]\ndecimation = 2\n',
+            {"USART1": popcorn.Periph(audio={"A": AudioOptions(decimation=2)})},
+            "board.USART1.A",
+        ),
+        (
+            {
+                "SAI1": popcorn.Periph(
+                    model=popcorn.Use(Silent), audio={"B": AudioOptions(decimation=2)}
+                )
+            },
             "board.SAI1.B",
         ),
     ],
 )
 def test_a_block_table_needs_an_sai_with_the_built_in_model(
-    tmp_path: Path, board: str, key: str
+    board: dict[str, popcorn.Periph], key: str
 ) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
-        project(tmp_path, board).machine()
+        project(board).machine()
     assert caught.value.key == key
 
 
@@ -508,13 +511,12 @@ def test_a_codec_run_restored_mid_stream_into_a_fresh_machine_and_codec_runs_the
         assert event_ticks(other, name) == event_ticks(m, name)
 
 
-def test_a_project_file_wires_the_codec_clock_as_audio_options_do(tmp_path: Path) -> None:
-    board = (
-        f'[models]\npython = ["{Path(__file__).parent}"]\n'
-        '[board.I2C1]\ndevices = [{ address = 0x38, model = "test_audio:CodecStandIn" }]\n'
-        '[board.SAI1.A]\nclocked_by = "I2C1:0x38"\n'
-    )
-    m = project(tmp_path, board).machine()
+def test_a_project_wires_the_codec_clock_as_audio_options_do() -> None:
+    board = {
+        "I2C1": popcorn.Periph(devices=[popcorn.Device(CodecStandIn, address=0x38)]),
+        "SAI1": popcorn.Periph(audio={"A": AudioOptions(clocked_by="I2C1:0x38")}),
+    }
+    m = project(board).machine()
     at_main(m)
     m.reg.pc = m.sym("codec_i2c")
     asyncio.run(m.periph.SAI1.audio("B").write(codec_words()))

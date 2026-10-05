@@ -101,18 +101,15 @@ def test_a_driven_channel_converts_at_the_default_vdda(u575: popcorn.MachineDesc
 
 
 def test_the_supply_sets_vdda_from_the_machine_or_the_project(
-    tmp_path: Path, u575: popcorn.MachineDescription
+    u575: popcorn.MachineDescription,
 ) -> None:
     assert SupplyOptions() == SupplyOptions(vdda_mv=3000)
     m = ready(u575, SupplyOptions(vdda_mv=3300))
     m.periph.ADC1.input(5).volts = 1.65
     assert convert(m, 5) == 8192
-    path = tmp_path / "popcorn.toml"
-    path.write_text(
-        f'[mcu]\npart = "STM32U575QGIx"\n[image.app]\nelf = "{RCC_ELF}"\n[supply]\nvdda_mv = 3300\n'
+    project = popcorn.Project(
+        part="STM32U575QGIx", images=[popcorn.Elf(RCC_ELF)], supply=SupplyOptions(vdda_mv=3300)
     )
-    project = popcorn.Project.load(path)
-    assert project.supply is not None and project.supply.vdda_mv == 3300
     m = project.machine()
     m.reset()
     assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS
