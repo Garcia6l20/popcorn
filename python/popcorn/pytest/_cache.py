@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import enum
 import fcntl
 import functools
 import hashlib
+import importlib.util
 import inspect
 import json
 import os
+import sys
 import types
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -58,6 +61,69 @@ def _class_source(cls: type) -> str:
     if source is None:
         return f"{cls.__module__}.{cls.__qualname__}"
     return f"{source} {_file_digest(Path(source))}"
+
+
+def _prefixes(name: str) -> list[str]:
+    parts = name.split(".")
+    return [".".join(parts[: index + 1]) for index in range(len(parts))]
+
+
+def _imported_names(tree: ast.Module, package: str | None) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.update(_prefixes(alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            written = "." * node.level + (node.module or "")
+            try:
+                base = importlib.util.resolve_name(written, package) if node.level else written
+            except ImportError, ValueError:
+                continue
+            names.update(_prefixes(base))
+            names.update(f"{base}.{alias.name}" for alias in node.names if alias.name != "*")
+    return names
+
+
+def _versioned(path: Path) -> bool:
+    roots = {Path(sys.base_prefix), Path(sys.prefix), Path(popcorn.__file__).resolve().parent}
+    return "site-packages" in path.parts or any(path.is_relative_to(root) for root in roots)
+
+
+def _origin(name: str) -> Path | None:
+    try:
+        spec = importlib.util.find_spec(name)
+    except Exception:
+        return None
+    if spec is None or spec.origin is None:
+        return None
+    origin = Path(spec.origin)
+    return origin if origin.is_file() else None
+
+
+def imported_sources(cls: type) -> list[str]:
+    """The cache key lines of the modules the source file of `cls` imports, at module level or
+    inside a function, with the packages on the way to each, one level deep. Modules of
+    popcorn, of the Python installation and of site-packages are left out, as versions cover
+    them."""
+    try:
+        source = inspect.getsourcefile(cls)
+    except TypeError:
+        return []
+    if source is None or not Path(source).is_file():
+        return []
+    try:
+        tree = ast.parse(Path(source).read_bytes(), source)
+    except SyntaxError:
+        return []
+    module = sys.modules.get(cls.__module__)
+    package = getattr(module, "__package__", None) or cls.__module__.rpartition(".")[0]
+    origins = {_origin(name) for name in _imported_names(tree, package)}
+    return sorted(
+        f"imports {origin} {_file_digest(origin)}"
+        for origin in origins
+        if origin is not None and origin != Path(source) and not _versioned(origin.resolve())
+    )
 
 
 def _param_files(cls: type, params: Mapping[str, object], base: Path) -> list[str]:
@@ -129,7 +195,7 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
 
     Not keyed: class attributes changed at run time, module globals or class-level containers
     the device reads, and the modules its class imports. A stale entry matters only when the
-    firmware talks to the device before `[boot] until`.
+    firmware talks to the device before `boot.until`.
     """
     aliases = {
         p.name: p.alias_of
@@ -149,14 +215,16 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
 
 
 def cache_key(project: Project, strict: bool, devices: str | None = None) -> str:
-    """The name of a boot of `project`, as its config applies, with strictness `strict` and the
-    device set of digest `devices`, None for the project file's.
+    """The name of a boot of `project` with strictness `strict` and the device set of digest
+    `devices`, None for the project's.
 
-    It covers the popcorn version and native extension, the description, every image, the
-    project file with its config, `strict`, every `.py` file under the `[models] python`
-    directories, the source file of every board model and device class, the content of every
-    file a model or device parameter names, and `devices`. A module outside
-    those directories that a model imports is not covered: `--cache-clear` drops the cache.
+    It covers the popcorn version and native extension, the description, every image,
+    `project.digest`, `strict`, the source file of every board model and device class and of
+    every module its source file imports, at module level or inside a function, with the
+    packages on the way to it, the content of every file a model or device parameter names,
+    and `devices`. Modules of popcorn, of the Python installation and of site-packages are left
+    out: the popcorn version, the extension digest and installed versions cover them. A module
+    imported only by those modules is not covered: `--cache-clear` drops the cache.
     """
     lines = [
         FORMAT,
@@ -169,16 +237,13 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
     ]
     if devices is not None:
         lines.append(f"devices {devices}")
-    source = project.source
-    for root in () if source is None else source.model_dirs:
-        for path in sorted(root.rglob("*.py")):
-            lines.append(f"{path.relative_to(root)} {_file_digest(path)}")
-    base = Path.cwd() if source is None else source.path.parent
+    base = Path.cwd() if project.source is None else project.source.path.parent
     for name, periph in sorted(project.board.items()):
         uses: list[Use] = [] if periph.model is None else [periph.model]
         for use in [*uses, *periph.devices]:
             cls, params = use.cls, use.params
             lines.append(f"{name} {_class_source(cls)}")
+            lines.extend(f"{name} {line}" for line in imported_sources(cls))
             lines.extend(f"{name} {file}" for file in _param_files(cls, params, base))
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 

@@ -28,7 +28,6 @@ def test_help_lists_the_options_and_marker(pytester: pytest.Pytester) -> None:
     options.stdout.fnmatch_lines(
         [
             "popcorn firmware emulation:",
-            "*--popcorn-project*",
             "*--popcorn-config*",
             "*--popcorn-cov*",
             "*--popcorn-trace-on-fail*",

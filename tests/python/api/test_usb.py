@@ -256,11 +256,19 @@ def u575_json(u575: popcorn.MachineDescription) -> Path:
 def test_a_boot_past_the_enumeration_is_cached_configured(
     u575_json: Path, pytester: pytest.Pytester
 ) -> None:
-    pytester.makeconftest('pytest_plugins = ["popcorn.pytest"]\n')
-    (pytester.path / "popcorn.toml").write_text(
-        f'[mcu]\npart = "STM32U575QGIx"\ndescription = "{u575_json}"\n'
-        f'[image.app]\nelf = "{USB_ELF}"\n'
-        f'[boot]\nuntil = "usb_configured"\nbudget = {BUDGET}\n[board.OTG_FS]\nhost = {{}}\n'
+    pytester.makeconftest(
+        "from pathlib import Path\n\nimport popcorn\nimport pytest\n"
+        "from popcorn.board import UsbHostOptions\n\n"
+        'pytest_plugins = ["popcorn.pytest"]\n\n\n'
+        '@pytest.fixture(scope="session")\n'
+        "def popcorn_project():\n"
+        "    return popcorn.Project(\n"
+        '        part="STM32U575QGIx",\n'
+        f"        description=Path({str(u575_json)!r}),\n"
+        f"        images=[popcorn.Elf(Path({str(USB_ELF)!r}))],\n"
+        f'        boot=popcorn.Boot(until="usb_configured", budget={BUDGET}),\n'
+        '        board={"OTG_FS": popcorn.Periph(host=UsbHostOptions())},\n'
+        "    )\n"
     )
     pytester.makepyfile(
         "from pathlib import Path\n\n\n"

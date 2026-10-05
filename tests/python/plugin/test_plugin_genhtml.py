@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import M33_JSON, ROOT, write_conftest
+from .helpers import ROOT, write_conftest, write_project
 
 pytest_plugins = ["pytester"]
 
@@ -40,11 +40,9 @@ def session(
     pytester: pytest.Pytester, elf: Path, until: str, tests: str, name: str, *args: str
 ) -> Path:
     """The lcov file of one session over `elf` booted until `until`, running `tests`."""
+    (pytester.path / "conftest.py").unlink(missing_ok=True)
     write_conftest(pytester)
-    (pytester.path / "popcorn.toml").write_text(
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-        f'[image.app]\nelf = "{elf}"\n[boot]\nuntil = "{until}"\n'
-    )
+    write_project(pytester, until, elf=elf)
     (pytester.path / "test_cov.py").write_text(tests)
     lcov = pytester.path / f"{name}.info"
     result = pytester.runpytest("-p", "no:asyncio", *args, f"--popcorn-cov={lcov}")

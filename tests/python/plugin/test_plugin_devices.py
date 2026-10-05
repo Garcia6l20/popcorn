@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import M33_JSON, ROOT, write_conftest
+from .helpers import M33_JSON, ROOT, write_conftest, write_project_conftest
 
 pytest_plugins = ["pytester"]
 
@@ -29,16 +29,21 @@ def u575_json() -> Path:
 @pytest.fixture
 def u575_project(u575_json: Path, pytester: pytest.Pytester) -> Path:
     write_conftest(pytester)
-    path = pytester.path / "popcorn.toml"
-    path.write_text(
-        f'[mcu]\npart = "STM32U575QGIx"\ndescription = "{u575_json}"\n'
-        f'[image.app]\nelf = "{I2C_ELF}"\n'
-        '[boot]\nuntil = "main"\nbudget = 100_000_000\n'
-        '[board.I2C1]\ndevices = [{ address = 0x50, model = "api.devices_example:Eeprom24", '
-        "size = 4096 }]\n"
-        f'[models]\npython = ["{API}"]\n'
+    return write_project_conftest(
+        pytester.path,
+        "popcorn.Project(\n"
+        '    part="STM32U575QGIx",\n'
+        f"    description=Path({str(u575_json)!r}),\n"
+        f"    images=[popcorn.Elf(Path({str(I2C_ELF)!r}))],\n"
+        '    boot=popcorn.Boot(until="main", budget=100_000_000),\n'
+        "    board={\n"
+        '        "I2C1": popcorn.Periph(\n'
+        "            devices=[popcorn.Device(Eeprom24, address=0x50, size=4096)]\n"
+        "        )\n"
+        "    },\n"
+        ")",
+        f"import sys\nsys.path.insert(0, {str(API)!r})\nfrom api.devices_example import Eeprom24",
     )
-    return path
 
 
 def summary(result: pytest.RunResult) -> str:
@@ -164,6 +169,8 @@ def test_a_device_given_twice_keeps_the_cached_boot(
 
 
 DIGEST = """
+from pathlib import Path
+
 import popcorn
 import pytest
 from popcorn import ResetKind
@@ -171,7 +178,7 @@ from popcorn.board import I2CTarget
 from popcorn.devices import TableTarget
 from popcorn.pytest._cache import devices_digest
 
-PROJECT = "{project}"
+M33_JSON = "{m33}"
 
 
 class Plain(I2CTarget):
@@ -186,7 +193,7 @@ class Plain(I2CTarget):
 
 @pytest.fixture(scope="module")
 def m33_project():
-    return popcorn.Project.load(PROJECT)
+    return popcorn.Project(part="POPCORN-M33-TEST", description=Path(M33_JSON), images=[])
 
 
 @pytest.mark.parametrize(
@@ -258,7 +265,5 @@ def test_a_native_device_leaves_the_set_unkeyed(m33_project: popcorn.Project) ->
 
 
 def test_the_device_digest(pytester: pytest.Pytester) -> None:
-    project = pytester.path / "digest.toml"
-    project.write_text(f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n')
-    pytester.makepyfile(DIGEST.replace("{project}", str(project)))
+    pytester.makepyfile(DIGEST.replace("{m33}", str(M33_JSON)))
     pytester.runpytest(*BASE).assert_outcomes(passed=19)

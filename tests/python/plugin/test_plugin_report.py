@@ -32,7 +32,7 @@ def test_an_assertion_after_a_run_reports_its_stop(pytester: pytest.Pytester) ->
     result.stdout.fnmatch_lines(
         [
             HEADER,
-            "machine (config=- strict=False):",
+            "machine (config=- digest=* strict=False):",
             "  stop: BUDGET at *Reset_Handler*",
             "  registers:",
             "  call stack:",
@@ -234,7 +234,7 @@ def test_an_error_stop_that_is_no_last_stop_is_printed_first(pytester: pytest.Py
         [
             HEADER,
             "exception stop: BUDGET at *",
-            "machine (config=- strict=False):",
+            "machine (config=- digest=* strict=False):",
             "  stop: BUDGET at *",
             "    instructions 11???, *",
         ]
@@ -272,9 +272,9 @@ def test_two_machines_get_two_blocks(pytester: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(
         [
             HEADER,
-            "machine (config=- strict=False):",
+            "machine (config=- digest=* strict=False):",
             "  no stop since the test started",
-            "machine_factory #1 (config=- strict=False):",
+            "machine_factory #1 (config=- digest=* strict=False):",
             "  stop: BUDGET at *",
         ]
     )
@@ -296,9 +296,9 @@ def test_the_machine_that_raised_is_marked(pytester: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(
         [
             HEADER,
-            "machine (config=- strict=False) (raised):",
+            "machine (config=- digest=* strict=False) (raised):",
             "  stop: FAULT at *",
-            "machine_factory #1 (config=- strict=False):",
+            "machine_factory #1 (config=- digest=* strict=False):",
             "  no stop since the test started",
         ]
     )
@@ -356,9 +356,9 @@ def test_the_faulting_factory_machine_carries_the_fault(pytester: pytest.Pyteste
     result.stdout.fnmatch_lines(
         [
             HEADER,
-            "machine_factory #1 (config=- strict=False):",
+            "machine_factory #1 (config=- digest=* strict=False):",
             "  stop: BUDGET at *",
-            "machine_factory #2 (config=- strict=False) (raised):",
+            "machine_factory #2 (config=- digest=* strict=False) (raised):",
             "  stop: FAULT at *",
             "  fault: * CFSR 0x* HFSR 0x*",
         ]
@@ -443,7 +443,7 @@ def test_a_factory_boot_failure_is_reported(pytester: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(
         [
             HEADER,
-            "machine_factory boot of config=- strict=False (*) (raised):",
+            "machine_factory boot of config=- digest=* strict=False (*) (raised):",
             "  stop: FAULT at *",
         ]
     )

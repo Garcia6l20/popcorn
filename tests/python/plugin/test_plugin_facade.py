@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Coroutine
-from pathlib import Path
 from typing import cast
 
 import popcorn
@@ -45,21 +44,19 @@ def hooked() -> popcorn.Machine:
     return m
 
 
-def model_project(tmp_path: Path) -> popcorn.Project:
-    path = tmp_path / "popcorn.toml"
-    path.write_text(
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{MODEL_JSON}"\n'
-        f'[image.app]\nelf = "{MODEL_ELF}"\n'
-        '[boot]\nuntil = "ready"\nbudget = 10_000\n'
-        "[models]\nstrict = false\n"
-        "[configs.variant]\nboot.budget = 20_000\n"
+def model_project() -> popcorn.Project:
+    base = popcorn.Project(
+        part="POPCORN-M33-TEST",
+        description=MODEL_JSON,
+        images=[popcorn.Elf(MODEL_ELF)],
+        boot=popcorn.Boot(until="ready", budget=10_000),
+        strict=False,
     )
-    return popcorn.Project.load(path)
+    return base.with_configs(variant=base.replace(boot=base.boot.replace(budget=20_000)))
 
 
 def variant(project: popcorn.Project) -> popcorn.Project:
-    assert project.source is not None
-    return popcorn.Project.load(project.source.path, "variant")
+    return project.config("variant")
 
 
 def touch(project: popcorn.Project, m: popcorn.Machine) -> popcorn.CallResult:
@@ -70,8 +67,8 @@ def touch(project: popcorn.Project, m: popcorn.Machine) -> popcorn.CallResult:
     return asyncio.run(body())
 
 
-def test_strict_peripherals_overrides_the_project_file(tmp_path: Path) -> None:
-    project = model_project(tmp_path)
+def test_strict_peripherals_overrides_the_project_file() -> None:
+    project = model_project()
     digest = project.digest
     assert touch(project, project.machine()).stop.reason is popcorn.StopReason.RETURNED
     with pytest.raises(popcorn.ModelError):
@@ -83,12 +80,8 @@ def test_strict_peripherals_overrides_the_project_file(tmp_path: Path) -> None:
     assert touch(project, lax).stop.reason is popcorn.StopReason.RETURNED
 
 
-def test_strict_none_keeps_the_file_strictness(tmp_path: Path) -> None:
-    project = model_project(tmp_path)
-    assert project.source is not None
-    path = project.source.path
-    path.write_text(path.read_text().replace("strict = false", "strict = true"))
-    strict = popcorn.Project.load(path)
+def test_strict_none_keeps_the_file_strictness() -> None:
+    strict = model_project().replace(strict=True)
     with pytest.raises(popcorn.ModelError):
         touch(strict, strict.machine(strict_peripherals=None))
     assert touch(strict, strict.machine(strict_peripherals=False)).stop.reason is (

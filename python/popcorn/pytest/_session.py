@@ -1,4 +1,5 @@
-"""Per-process plugin state: the projects, one booted machine per key, the boot counters."""
+"""Per-process plugin state: the projects by digest, one booted machine per key, the boot
+counters."""
 
 from __future__ import annotations
 
@@ -31,26 +32,35 @@ UNCACHED = "uncached"
 
 @dataclass(frozen=True, slots=True)
 class Key:
-    """What a booted machine depends on.
+    """What a booted machine depends on: equal keys share one boot.
 
     Attributes:
-        config: The `[configs.NAME]` applied, None for the base file.
+        digest: The `Project.digest` of the project the machine is built from, its config
+            applied.
         strict: Whether unmodelled peripheral accesses raise.
-        devices: The digest of the bus devices given instead of the project file's, UNCACHED
-            when they cannot be keyed, None for the project file's.
-        project: The project file relative to the rootdir, or absolute outside it, None for
-            `Settings.project`.
+        devices: The digest of the bus devices given instead of the project's, UNCACHED when
+            they cannot be keyed, None for the project's.
+        name: The project's `name`, for reports only, not compared.
+        config: The config name selected, None for the base project, for reports only, not
+            compared.
     """
 
-    config: str | None
+    digest: str
     strict: bool
     devices: str | None = None
-    project: str | None = None
+    name: str = field(default="", compare=False)
+    config: str | None = field(default=None, compare=False)
+
+    @property
+    def identity(self) -> str:
+        """The compared fields as text, equal in every process for equal keys."""
+        base = f"digest={self.digest} strict={self.strict}"
+        return base if self.devices is None else f"{base} devices={self.devices}"
 
     def __str__(self) -> str:
-        base = f"config={self.config or '-'} strict={self.strict}"
-        if self.project is not None:
-            base = f"project={self.project} {base}"
+        base = f"config={self.config or '-'} digest={self.digest[:12]} strict={self.strict}"
+        if self.name:
+            base = f"project={self.name} {base}"
         return base if self.devices is None else f"{base} devices={self.devices}"
 
 
@@ -62,7 +72,7 @@ class Booted:
         machine: The machine the `machine` fixture restores for every test of the key.
         snapshot: The boot snapshot, taken on `machine`.
         saved: `snapshot` in its saved form, restorable into any machine of the key.
-        boot_stop: The stop of the boot, None for a project without `[boot] until`. Read back
+        boot_stop: The stop of the boot, None for a project without `boot.until`. Read back
             from the cache entry on a cache hit, located in this machine.
         image_count: How many images the machine had after the build.
         ptys: The pty bridges the machine had after the build.
@@ -114,16 +124,12 @@ class PopcornSession:
     loop: OwnedLoop
     coverage: CoverageRun | None = None
     cache: Path | None = None
-    root: Path = field(default_factory=Path)
     coverage_failures: list[str] = field(default_factory=list[str])
     boots: int = 0
     cache_hits: int = 0
     cache_dropped: int = 0
     rebuilds: int = 0
-    _projects: dict[tuple[str | None, str | None], Project] = field(
-        default_factory=dict[tuple[str | None, str | None], Project]
-    )
-    _nearest: dict[Path, str | None] = field(default_factory=dict[Path, str | None])
+    _projects: dict[str, Project] = field(default_factory=dict[str, Project])
     _booted: dict[Key, Booted] = field(default_factory=dict[Key, Booted])
     _failed: dict[Key, BaseException] = field(default_factory=dict[Key, BaseException])
     _locks: dict[Key, asyncio.Lock] = field(default_factory=dict[Key, asyncio.Lock])
@@ -136,44 +142,26 @@ class PopcornSession:
         """The keys booted or tried in this process."""
         return [*self._booted, *self._failed, *self._device_keys]
 
-    def project(self, config: str | None = None, project: str | None = None) -> Project:
-        """The project file `project`, as `Key.project` names it, with `config` applied,
-        loaded once per file and config.
+    def key(self, project: Project, config: str | None, strict: bool | None) -> Key:
+        """The key of the config `config` of `project`, strictness from that config when
+        `strict` is None.
 
         Raises:
-            pytest.fail.Exception: No project file exists.
-            ConfigError: The file is invalid or has no such config.
+            ConfigError: `project` has no config `config`.
         """
-        if (project, config) not in self._projects:
-            path = self.settings.project if project is None else self.root / project
-            if not path.is_file():
-                pytest.fail(
-                    f"no project file {path}: pass --popcorn-project or add popcorn.toml next "
-                    f"to the test or in a directory above it, up to {self.root}",
-                    pytrace=False,
-                )
-            self._projects[project, config] = Project.load(path, config)
-        return self._projects[project, config]
-
-    def project_of(self, test: Path) -> str | None:
-        """The project of the test file `test`, as `Key.project` names it: the `popcorn.toml`
-        nearest above it, up to the rootdir, None for `Settings.project`."""
-        if not self.settings.nearest:
-            return None
-        directory = test.parent
-        if directory not in self._nearest:
-            self._nearest[directory] = self._nearest_from(directory)
-        return self._nearest[directory]
-
-    def key(self, config: str | None, strict: bool | None, project: str | None = None) -> Key:
-        """The key of `config` of `project`, strictness from its project file when `strict` is
-        None."""
+        selected = project.config(config)
+        digest = selected.digest
+        self._projects.setdefault(digest, selected)
         if strict is None:
-            strict = self.project(config, project).strict
-        return Key(config, strict, project=project)
+            strict = selected.strict
+        return Key(digest, strict, name=selected.name, config=config)
+
+    def project(self, key: Key) -> Project:
+        """The project `key` was made from by `key()`."""
+        return self._projects[key.digest]
 
     def device_key(self, key: Key, devices: Devices) -> Key:
-        """`key` with the bus devices `devices` given instead of the project file's.
+        """`key` with the bus devices `devices` given instead of the project's.
 
         Raises:
             ConfigError: A device serves another live machine.
@@ -186,14 +174,13 @@ class PopcornSession:
                         key=f"devices.{name}",
                         expected=f"{target!r} not serving another live machine",
                     )
-        digest = devices_digest(self.project(key.config, key.project), devices)
+        digest = devices_digest(self.project(key), devices)
         return dataclasses.replace(key, devices=UNCACHED if digest is None else digest)
 
     def build(self, key: Key, devices: Devices | None = None) -> Machine:
         """A new machine of `key` with `devices`, not reset, counting coverage under
         `--popcorn-cov`."""
-        project = self.project(key.config, key.project)
-        machine = project.machine(strict_peripherals=key.strict, devices=devices)
+        machine = self.project(key).machine(strict_peripherals=key.strict, devices=devices)
         if self.coverage is not None:
             machine.coverage.enable()
         return machine
@@ -270,7 +257,7 @@ class PopcornSession:
         if found is not None:
             return self.build(key, devices), found
         self._device_keys.add(key)
-        project = self.project(key.config, key.project)
+        project = self.project(key)
         if key.devices == UNCACHED:
             booted = await self._fresh_boot(key, project, devices)
             return booted.machine, booted.decoded()
@@ -321,21 +308,6 @@ class PopcornSession:
         for machine in self._failed_machines.values():
             machine.board.close()
 
-    def _nearest_from(self, directory: Path) -> str | None:
-        for candidate in (directory, *directory.parents):
-            path = candidate / "popcorn.toml"
-            if path.is_file():
-                if path == self.settings.project:
-                    return None
-                return (
-                    str(path.relative_to(self.root))
-                    if path.is_relative_to(self.root)
-                    else str(path)
-                )
-            if candidate == self.root:
-                break
-        return None
-
     def _save_boot_coverage(self, key: Key, machine: Machine, snapshot: Snapshot) -> None:
         assert self.coverage is not None
         boot = machine.coverage.collect()
@@ -353,7 +325,7 @@ class PopcornSession:
         return self._booted.get(key)
 
     async def _boot(self, key: Key) -> Booted:
-        project = self.project(key.config, key.project)
+        project = self.project(key)
         try:
             booted = await self._cached_boot(key, project)
         except Exception as error:
@@ -451,7 +423,7 @@ def boot_coverage_path(directory: Path, key: Key, snapshot: Snapshot) -> Path:
     """The file of the boot coverage of `key`: the same name in every process booting it, from
     the key and the digests of its boot snapshot."""
     identity = "\n".join(
-        (str(key), snapshot.description_digest, *snapshot.image_digests, snapshot.config_digest)
+        (key.identity, snapshot.description_digest, *snapshot.image_digests, snapshot.config_digest)
     )
     return directory / f"boot-{hashlib.sha256(identity.encode()).hexdigest()[:16]}.pcov"
 
@@ -480,7 +452,6 @@ def popcorn_session(config: pytest.Config) -> PopcornSession:
             owned_loop(config),
             config.stash.get(COVERAGE, None),
             cache_directory(config),
-            config.rootpath,
         )
     return session
 
@@ -488,7 +459,7 @@ def popcorn_session(config: pytest.Config) -> PopcornSession:
 def summary(session: PopcornSession) -> dict[str, object]:
     """The counters of `session`, as a worker hands them to the xdist controller."""
     return {
-        "keys": [str(key) for key in session.keys],
+        "keys": [key.identity for key in session.keys],
         "boots": session.boots,
         "cache_hits": session.cache_hits,
         "cache_dropped": session.cache_dropped,

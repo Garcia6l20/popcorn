@@ -8,25 +8,33 @@ root `conftest.py` of a test suite:
 
 Fixtures:
 
+    # conftest.py
+    @pytest.fixture(scope="session")
+    def popcorn_project() -> popcorn.Project:
+        return popcorn.Project(part="STM32U575QGIx", images=[popcorn.Elf(HERE / "app.elf")])
+
+    # test_app.py
     async def test_boot_state(machine: popcorn.Machine) -> None:
         await machine.call("check")
 
-- `popcorn_project`: the test's `popcorn.Project`, loaded once per session and process.
+- `popcorn_project`: the test's `popcorn.Project`, defined by the user in a conftest.py. The
+  nearest override above a test wins, as for any pytest fixture. The plugin's own fails the
+  tests that use a machine, naming the fix.
 - `machine`: the test's project's machine, built and booted once per session and process, then
   restored from its boot snapshot before each test. Every test gets the same object. The plugin
   removes the hooks a test installed, empties the intercept logs, the call baseline and the
   trace ring. A test that loads another image, opens a pty or leaves the machine running spoils
   it: the next test gets a new machine restored from the saved boot. A project without
-  `[boot] until` boots to the reset state. A failed boot errors every test using the machine,
+  `boot.until` boots to the reset state. A failed boot errors every test using the machine,
   booted once.
 - `machine_factory`: a `MachineFactory`, new machines separate from `machine`, with the
-  project file's bus devices or the test's own.
+  project's bus devices or the test's own, from the test's project or another one.
 
-The project of a test is the `popcorn.toml` nearest above its file, up to the rootdir, else
-`<rootdir>/popcorn.toml`. `--popcorn-project` gives every test its file. One session can then
-run the tests of several projects, each booted once per configuration and process. A project
-other than the rootdir's is named in the report section and the summary line by its path from
-the rootdir.
+A boot is keyed by the `Project.digest` of the project with its config applied, the
+strictness and the bus devices given. One session can run the tests of several conftest
+directories, each project booted once per key and process. Two config names with equal
+content share one boot. The report section names a key by the project's `name`, the config
+name and the first 12 hex digits of the digest.
 
 A failing test that used a popcorn machine gets a "popcorn" section in its report, one block per
 machine: the stop of the failing exception or of the machine's last run, the fault registers
@@ -60,17 +68,16 @@ warnings too.
 
 Boot snapshots are cached in `.pytest_cache/d/popcorn/boot`: a later session, or another xdist
 worker, restores a configuration's boot instead of running it, one boot per configuration across
-workers. The cache key covers the popcorn build, the description, the images, the project file
-with its config, the strictness, the `[models] python` directories and the source of every board
-model and device class. A module outside those directories that a model imports is not covered,
-and entries are never pruned: `--cache-clear` drops them all. `-p no:cacheprovider` turns the
-cache off.
+workers. The cache key covers the popcorn build, the description, the images, the project
+digest, the strictness, the source of every board model and device class and of the modules its
+source file imports outside popcorn, the Python installation and site-packages, and the files
+their parameters name. A module imported only by those modules is not covered, and entries are
+never pruned: `--cache-clear` drops them all. `-p no:cacheprovider` turns the cache off.
 
 Limits:
 
 - Host input queued on a UART and not delivered yet stays queued across the restore.
 - A trace opened with `machine.trace(...)` and never closed keeps its sink on the reused machine.
-- The `[models] python` directories stay on `sys.path` for the session.
 
 Async tests:
 
@@ -101,20 +108,21 @@ async test and fixture. They run on its loops, everything else on popcorn's. Mix
 
 Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture, are left to it.
 
-Options, registered for `pytest --help`: `--popcorn-project`, `--popcorn-config`,
-`--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`,
-`--popcorn-ring`.
+Options, registered for `pytest --help`: `--popcorn-config`, `--popcorn-cov`,
+`--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`.
 
     @pytest.mark.popcorn(config="variant", budget=1_000_000, strict=True)
     async def test_variant(machine: popcorn.Machine) -> None: ...
 
 Each setting of a test comes from its `popcorn` marker, else the command line, else the
-project file:
+project:
 
-- `config`: `--popcorn-config`, else the base file. `config=None` in a marker is the base file
-  even with `--popcorn-config`. It also selects the config of `popcorn_project`.
-- `strict`: None or absent, the command line then the project file; True or False overrides.
-  `--popcorn-strict` turns strictness on, else `[models] strict` applies.
+- `config`: a name in `popcorn_project.configs`, from `Project.with_configs`, else
+  `--popcorn-config`, else the base project. `config=None` in a marker is the base project even
+  with `--popcorn-config`. An unknown name fails the test, naming the known ones.
+  `popcorn_project` itself stays the user's value, no config applied.
+- `strict`: None or absent, the command line then the project; True or False overrides.
+  `--popcorn-strict` turns strictness on, else `Project.strict` of the config applies.
 - `budget`: `--popcorn-budget`, the `default_budget` of the test's booted machines, per `run`,
   `wait_for` and `call`, never a wall-clock timeout. `budget=None` in a marker is unbounded.
 

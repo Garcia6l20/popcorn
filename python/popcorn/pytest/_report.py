@@ -35,7 +35,7 @@ class Tracked:
     Attributes:
         label: How the report names it, `machine` or `machine_factory #<n>`.
         machine: The machine.
-        key: Its config and strictness, as text.
+        key: Its project, config and strictness, as text.
     """
 
     label: str

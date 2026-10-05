@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import importlib
 import shutil
+import sys
+from pathlib import Path
 
 import pytest
+from popcorn.pytest._cache import imported_sources
 
 from .coverage_suite import write_suite
-from .helpers import CALLEE_ELF, DRIVER_ELF, M33_JSON, write_conftest, write_project
+from .helpers import (
+    CALLEE_ELF,
+    DRIVER_ELF,
+    M33_JSON,
+    write_conftest,
+    write_project,
+    write_project_conftest,
+)
 
 pytest_plugins = ["pytester"]
 
@@ -52,15 +63,17 @@ def test_a_second_session_restores_the_same_state(pytester: pytest.Pytester) -> 
 
 
 def test_changes_invalidate_the_entry(pytester: pytest.Pytester) -> None:
-    write_conftest(pytester)
     image = pytester.path / "app.elf"
     shutil.copyfile(DRIVER_ELF, image)
-    project = pytester.path / "popcorn.toml"
 
-    def write(extra: str = "") -> None:
-        project.write_text(
-            f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-            f'[image.app]\nelf = "{image}"\n{extra}'
+    def write(extra: str = "", boot: str = "") -> None:
+        (pytester.path / "conftest.py").unlink(missing_ok=True)
+        write_conftest(pytester)
+        write_project_conftest(
+            pytester.path,
+            f'popcorn.Project(part="POPCORN-M33-TEST", description=Path({str(M33_JSON)!r}), '
+            f"images=[popcorn.Elf(Path({str(image)!r}))], boot=popcorn.Boot({boot}))",
+            extra,
         )
 
     def boots(*args: str) -> str:
@@ -75,7 +88,7 @@ def test_changes_invalidate_the_entry(pytester: pytest.Pytester) -> None:
     assert boots() == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
     write("# a comment\n")
     assert boots() == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
-    write("[boot]\nbudget = 1000\n")
+    write(boot="budget=1000")
     assert boots() == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
     assert boots("--popcorn-strict") == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
     assert boots("--popcorn-strict") == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
@@ -84,17 +97,25 @@ def test_changes_invalidate_the_entry(pytester: pytest.Pytester) -> None:
     assert boots("--cache-clear") == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
 
 
-def test_model_sources_invalidate_the_entry(pytester: pytest.Pytester) -> None:
+@pytest.mark.parametrize(
+    "imported",
+    [
+        "import mymodels_util\n\n\nclass Plain(Model):\n    NAME = 'first'\n",
+        "from mymodels_util import VALUE\n\n\nclass Plain(Model):\n    NAME = 'first'\n",
+        "\n\nclass Plain(Model):\n    NAME = 'first'\n\n    def value(self):\n"
+        "        from mymodels_util import VALUE\n\n        return VALUE\n",
+    ],
+    ids=["module", "constant", "lazy"],
+)
+def test_model_sources_invalidate_the_entry(pytester: pytest.Pytester, imported: str) -> None:
     write_conftest(pytester)
     models = pytester.mkdir("models")
-    (models / "mymodels.py").write_text(
-        "from popcorn.model import Model\n\nimport mymodels_util\n\n\n"
-        "class Plain(Model):\n    NAME = 'first'\n"
-    )
+    (models / "mymodels.py").write_text(f"from popcorn.model import Model\n{imported}")
     (models / "mymodels_util.py").write_text("VALUE = 1\n")
     write_project(
         pytester,
-        extra=f'[board.TESTDEV]\nmodel = "mymodels:Plain"\n[models]\npython = ["{models}"]\n',
+        extra='board={"TESTDEV": popcorn.Periph(model=popcorn.Use(Plain))},',
+        imports=f"import sys\nsys.path.insert(0, {str(models)!r})\nfrom mymodels import Plain",
     )
     pytester.makepyfile("def test_boot(machine):\n    pass\n")
 
@@ -113,6 +134,32 @@ def test_model_sources_invalidate_the_entry(pytester: pytest.Pytester) -> None:
     (models / "mymodels_util.py").write_text("VALUE = 2\n")
     assert boots() == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
     assert boots() == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
+
+
+def test_imported_packages_are_keyed_and_popcorn_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for package in ("keyed_pka", "keyed_pkb"):
+        (tmp_path / package / "sub").mkdir(parents=True)
+        for name in ("__init__.py", "sub/__init__.py", "sub/util.py"):
+            (tmp_path / package / name).write_text("VALUE = 1\n")
+    (tmp_path / "keyed_model.py").write_text(
+        "import keyed_pka.sub.util\nfrom keyed_pkb.sub import util\n"
+        "from popcorn.model import Model\n\n\nclass Plain(Model):\n    pass\n"
+    )
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+    importlib.invalidate_caches()
+    try:
+        plain = importlib.import_module("keyed_model").Plain
+        files = {Path(line.split()[1]) for line in imported_sources(plain)}
+    finally:
+        for name in [n for n in sys.modules if n.startswith(("keyed_pk", "keyed_model"))]:
+            del sys.modules[name]
+    assert files == {
+        tmp_path / package / name
+        for package in ("keyed_pka", "keyed_pkb")
+        for name in ("__init__.py", "sub/__init__.py", "sub/util.py")
+    }
 
 
 def test_a_corrupt_entry_is_dropped_and_booted_again(pytester: pytest.Pytester) -> None:
@@ -168,7 +215,7 @@ def test_cached_boots_give_the_same_lcov(pytester: pytest.Pytester) -> None:
 
 def test_the_async_lock_wait_keeps_the_loop_running(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, extra="[configs.other]\nboot.budget = 1_000_000\n")
+    write_project(pytester, configs="other=BASE.replace(boot=BASE.boot.replace(budget=1_000_000))")
     pytester.makepyfile("""
         import asyncio
         import fcntl
@@ -179,7 +226,7 @@ def test_the_async_lock_wait_keeps_the_loop_running(pytester: pytest.Pytester) -
         async def test_waits(machine_factory, popcorn_project, request):
             directory = cache_directory(request.config)
             directory.mkdir(parents=True, exist_ok=True)
-            project = type(popcorn_project).load(popcorn_project.source.path, "other")
+            project = popcorn_project.config("other")
             entry = Entry.of(directory, cache_key(project, False))
             holder = os.open(entry.lock, os.O_RDWR | os.O_CREAT)
             fcntl.flock(holder, fcntl.LOCK_EX)
@@ -209,10 +256,10 @@ def test_a_model_class_outside_the_model_directories_is_keyed(pytester: pytest.P
         "from popcorn.model import Model\n\n\nclass Plain(Model):\n    NAME = 'first'\n"
     )
     write_conftest(pytester, f"import sys\nsys.path.insert(0, {str(elsewhere)!r})\n")
-    models = pytester.mkdir("models")
     write_project(
         pytester,
-        extra=f'[board.TESTDEV]\nmodel = "othermod:Plain"\n[models]\npython = ["{models}"]\n',
+        extra='board={"TESTDEV": popcorn.Periph(model=popcorn.Use(Plain))},',
+        imports="from othermod import Plain",
     )
     pytester.makepyfile("def test_boot(machine):\n    pass\n")
 
@@ -252,8 +299,9 @@ def test_a_hit_restores_the_boot_stop(pytester: pytest.Pytester) -> None:
 
         from popcorn.pytest._session import Key, popcorn_session
 
-        def test_stop(machine, request):
-            stop = popcorn_session(request.config).booted(Key(None, False)).boot_stop
+        def test_stop(machine, popcorn_project, request):
+            key = Key(popcorn_project.digest, False)
+            stop = popcorn_session(request.config).booted(key).boot_stop
             with Path("stops.txt").open("a") as stops:
                 stops.write(f"{stop!r}\\n")
         """)
@@ -287,12 +335,14 @@ def write_model_project(pytester: pytest.Pytester) -> None:
     models = pytester.mkdir("models")
     (models / "loaded.py").write_text(MODELS)
     (pytester.path / "table.bin").write_bytes(b"\x01\x02")
+    table = pytester.path / "table.bin"
     write_project(
         pytester,
         extra=(
-            '[board.TESTDEV]\nmodel = "loaded:Loaded"\ndata = "table.bin"\n'
-            f'[models]\npython = ["{models}"]\n'
+            'board={"TESTDEV": popcorn.Periph(model=popcorn.Use('
+            f"Loaded, data=Path({str(table)!r})))}},"
         ),
+        imports=f"import sys\nsys.path.insert(0, {str(models)!r})\nfrom loaded import Loaded",
     )
     pytester.makepyfile("def test_boot(machine):\n    pass\n")
 

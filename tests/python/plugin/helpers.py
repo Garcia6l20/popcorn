@@ -61,9 +61,87 @@ def pytest_unconfigure(config):
 """
 
 
+def _merge(path: Path, before: str, after: str) -> Path:
+    """`path` written as `before`, its current content, then `after`."""
+    current = path.read_text() if path.is_file() else ""
+    path.write_text(f"{before}\n{current}\n{after}")
+    return path
+
+
 def write_conftest(pytester: pytest.Pytester, extra: str = "") -> Path:
-    """The inner root conftest loading the plugin, followed by `extra`."""
-    return pytester.makeconftest(CONFTEST + textwrap.dedent(extra))
+    """The inner root conftest loading the plugin, followed by `extra`, before any project
+    `write_project` put there."""
+    return _merge(pytester.path / "conftest.py", CONFTEST + textwrap.dedent(extra), "")
+
+
+PROJECT_FIXTURE = """
+@pytest.fixture(scope="session")
+def popcorn_project():
+    return PROJECT
+"""
+
+
+def write_project_conftest(directory: Path, project: str, imports: str = "") -> Path:
+    """The `conftest.py` of `directory` defining `popcorn_project` as the Python expression
+    `project`, after `imports`, appended to what the file holds."""
+    text = (
+        "from pathlib import Path\n\nimport popcorn\nimport pytest\n"
+        f"{textwrap.dedent(imports)}\n\nPROJECT = {project}\n{PROJECT_FIXTURE}"
+    )
+    return _merge(directory / "conftest.py", "", text)
+
+
+def write_project(
+    pytester: pytest.Pytester,
+    until: str | None = "alu_mark",
+    extra: str = "",
+    *,
+    vtor: str | None = None,
+    directory: Path | None = None,
+    elf: Path = DRIVER_ELF,
+    configs: str = "",
+    imports: str = "",
+) -> Path:
+    """A `conftest.py` defining `popcorn_project` over the M33 test description and `elf`,
+    `driver.elf` by default, in `directory` or the pytester directory.
+
+    `vtor` names a `vt_*` table of `elf` the boot starts from. `extra` holds more `Project`
+    keyword arguments as Python source, `configs` the keyword arguments of `with_configs`, where
+    `BASE` names the project before them, and `imports` the lines its expressions need.
+    """
+    boot = [] if until is None else [f"until={until!r}"]
+    if vtor is not None:
+        boot.append(f"vtor={popcorn.Image.elf(elf).lookup(vtor).value:#x}")
+    base = (
+        "popcorn.Project(\n"
+        '    part="POPCORN-M33-TEST",\n'
+        f"    description=Path({str(M33_JSON)!r}),\n"
+        f"    images=[popcorn.Elf(Path({str(elf)!r}))],\n"
+        f"    boot=popcorn.Boot({', '.join(boot)}),\n"
+        f"    {extra}\n"
+        ")"
+    )
+    project = f"BASE.with_configs({configs})" if configs else "BASE"
+    return write_project_conftest(
+        directory or pytester.path, project, f"{imports}\n\nBASE = {base}\n"
+    )
+
+
+def write_model_project(pytester: pytest.Pytester, extra: str = "") -> Path:
+    """A `conftest.py` defining `popcorn_project` over the model test description and
+    `model.elf`, booted to `ready`, lax about unmodelled peripherals. `extra` holds more
+    `Project` keyword arguments as Python source."""
+    return write_project_conftest(
+        pytester.path,
+        "popcorn.Project(\n"
+        '    part="POPCORN-M33-TEST",\n'
+        f"    description=Path({str(MODEL_JSON)!r}),\n"
+        f"    images=[popcorn.Elf(Path({str(MODEL_ELF)!r}))],\n"
+        '    boot=popcorn.Boot(until="ready", budget=10_000),\n'
+        "    strict=False,\n"
+        f"    {extra}\n"
+        ")",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,41 +157,3 @@ def read_loops(pytester: pytest.Pytester) -> Loops:
     """The loops the inner `record` calls saw, and whether popcorn's runner was created."""
     data = json.loads((pytester.path / "loops.json").read_text())
     return Loops(ids=data["ids"], closed=data["closed"], started=data["started"])
-
-
-def write_project(
-    pytester: pytest.Pytester,
-    until: str | None = "alu_mark",
-    extra: str = "",
-    *,
-    vtor: str | None = None,
-    directory: Path | None = None,
-    elf: Path = DRIVER_ELF,
-) -> Path:
-    """A `popcorn.toml` over the M33 test description and `elf`, `driver.elf` by default, in
-    `directory` or the pytester directory. `vtor` names a `vt_*` table of `elf` the boot starts
-    from."""
-    boot = "" if until is None else f'until = "{until}"\n'
-    if vtor is not None:
-        boot += f"vtor = {popcorn.Image.elf(elf).lookup(vtor).value:#x}\n"
-    text = (
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{M33_JSON}"\n'
-        f'[image.app]\nelf = "{elf}"\n'
-        f"{'[boot]' + chr(10) + boot if boot else ''}{textwrap.dedent(extra)}"
-    )
-    path = (directory or pytester.path) / "popcorn.toml"
-    path.write_text(text)
-    return path
-
-
-def write_model_project(pytester: pytest.Pytester, extra: str = "") -> Path:
-    """A `popcorn.toml` over the model test description and `model.elf`, booted to `ready`, lax
-    about unmodelled peripherals."""
-    path = pytester.path / "popcorn.toml"
-    path.write_text(
-        f'[mcu]\npart = "POPCORN-M33-TEST"\ndescription = "{MODEL_JSON}"\n'
-        f'[image.app]\nelf = "{MODEL_ELF}"\n'
-        '[boot]\nuntil = "ready"\nbudget = 10_000\n'
-        f"[models]\nstrict = false\n{textwrap.dedent(extra)}"
-    )
-    return path

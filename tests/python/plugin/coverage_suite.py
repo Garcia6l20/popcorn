@@ -4,20 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from .helpers import CALLEE_ELF, DRIVER_ELF, M33_JSON, write_conftest
+from .helpers import CALLEE_ELF, DRIVER_ELF, write_conftest, write_project
 
-PROJECT = f"""
-[mcu]
-part = "POPCORN-M33-TEST"
-description = "{M33_JSON}"
-
-[image.app]
-elf = "{CALLEE_ELF}"
-
-[configs.booted]
-image.app.elf = "{DRIVER_ELF}"
-boot.until = "alu_mark"
-"""
+BOOTED = (
+    f"booted=BASE.replace(images=[popcorn.Elf(Path({str(DRIVER_ELF)!r}))], "
+    'boot=popcorn.Boot(until="alu_mark"))'
+)
 
 TESTS = """
 import pytest
@@ -63,5 +55,5 @@ NODE_IDS = (
 def write_suite(pytester: pytest.Pytester, conftest: str = "") -> None:
     """The project, the conftest with `conftest` appended and `test_suite.py`."""
     write_conftest(pytester, conftest)
-    (pytester.path / "popcorn.toml").write_text(PROJECT)
+    write_project(pytester, until=None, elf=CALLEE_ELF, configs=BOOTED)
     (pytester.path / "test_suite.py").write_text(TESTS)

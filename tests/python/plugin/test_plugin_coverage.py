@@ -135,8 +135,9 @@ def test_a_boot_whose_coverage_cannot_be_saved_still_boots(pytester: pytest.Pyte
     result.stdout.fnmatch_lines(
         [
             "popcorn: firmware coverage written to *a.info",
-            "popcorn: boot coverage of config=- strict=False not saved: refused *boot-*.pcov",
-            "popcorn: boot coverage of config=booted strict=False not saved: refused *",
+            "popcorn: boot coverage of config=- digest=* strict=False not saved: refused "
+            "*boot-*.pcov",
+            "popcorn: boot coverage of config=booted digest=* strict=False not saved: refused *",
         ]
     )
 

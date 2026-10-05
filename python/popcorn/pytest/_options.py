@@ -17,22 +17,18 @@ class Settings:
     """The plugin's command-line options, parsed once per session.
 
     Attributes:
-        project: The project file, `--popcorn-project` or `<rootdir>/popcorn.toml`: the
-            project of a test without a nearer one.
-        config: The `[configs.NAME]` applied when a test names none, `--popcorn-config`.
+        config: The config of `popcorn_project` applied when a test names none,
+            `--popcorn-config`.
         cov: The lcov file written at session end, `--popcorn-cov`.
         trace_on_fail: Whether a failing test keeps its trace, `--popcorn-trace-on-fail`.
         trace_dir: Where kept traces go, None for the default location under the pytest cache.
         strict: Whether unmodelled peripheral accesses raise, `--popcorn-strict`.
         budget: The default instruction budget of `run`, `wait_for` and `call`,
             `--popcorn-budget`.
-        nearest: Whether a test uses the `popcorn.toml` nearest above it, up to the rootdir,
-            instead of `project`. False with `--popcorn-project`.
         ring: How many lines of the collapsed trace ring a failure report shows, 0 for none,
             `--popcorn-ring`.
     """
 
-    project: Path
     config: str | None
     cov: Path | None
     trace_on_fail: bool
@@ -40,20 +36,17 @@ class Settings:
     strict: bool
     budget: int | None
     ring: int = 0
-    nearest: bool = True
 
     @classmethod
     def from_config(cls, config: pytest.Config) -> Settings:
         """The settings of `config`, relative paths resolved against the invocation directory."""
         here = config.invocation_params.dir
-        project = _path(config.getoption("popcorn_project"), here)
         cov = _path(config.getoption("popcorn_cov"), here)
         trace = config.getoption("popcorn_trace_on_fail")
         name = config.getoption("popcorn_config")
         budget = config.getoption("popcorn_budget")
         ring = config.getoption("popcorn_ring")
         return cls(
-            project=project if project is not None else config.rootpath / "popcorn.toml",
             config=name if isinstance(name, str) else None,
             cov=cov,
             trace_on_fail=trace is not None,
@@ -61,7 +54,6 @@ class Settings:
             strict=config.getoption("popcorn_strict") is True,
             budget=budget if isinstance(budget, int) else None,
             ring=ring if isinstance(ring, int) else 0,
-            nearest=project is None,
         )
 
 
@@ -75,18 +67,12 @@ def _path(value: object, base: Path) -> Path | None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Register the seven `--popcorn-*` options."""
+    """Register the six `--popcorn-*` options."""
     group = parser.getgroup("popcorn", "popcorn firmware emulation")
-    group.addoption(
-        "--popcorn-project",
-        metavar="PATH",
-        help="project file of every test, default the popcorn.toml nearest above each test, up "
-        "to <rootdir>/popcorn.toml",
-    )
     group.addoption(
         "--popcorn-config",
         metavar="NAME",
-        help="[configs.NAME] of the project file applied when a test names none",
+        help="config NAME of popcorn_project applied when a test names none",
     )
     group.addoption(
         "--popcorn-cov",
@@ -155,9 +141,9 @@ class MarkerOptions:
     """The keywords of the closest `popcorn` marker of a test, `UNSET` where absent.
 
     Attributes:
-        config: The config to apply, None for the base file.
+        config: The config to apply, None for the base project.
         budget: The default instruction budget, None for unbounded runs.
-        strict: None or absent, the command line then the project file; True or False
+        strict: None or absent, the command line then the project; True or False
             overrides.
     """
 

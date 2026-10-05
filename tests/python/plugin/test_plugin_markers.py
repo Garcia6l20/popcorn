@@ -10,10 +10,10 @@ pytest_plugins = ["pytester"]
 
 NO_ASYNCIO = ("-p", "no:asyncio")
 
-VARIANT = """
-[configs.variant]
-boot.memory_init = [{ symbol = "alu_rounds", bytes = "07000000" }]
-"""
+VARIANT = (
+    "variant=BASE.replace(boot=BASE.boot.replace("
+    'memory_init=[popcorn.MemoryInit("alu_rounds", bytes.fromhex("07000000"))]))'
+)
 
 CONFIGS = """
 import pytest
@@ -22,11 +22,11 @@ def rounds(machine):
     return machine.mem.u32[machine.sym("alu_rounds")]
 
 def test_unmarked(machine, popcorn_project, request):
-    expected = 7 if request.config.getoption("popcorn_config") == "variant" else 0
+    option = request.config.getoption("popcorn_config")
+    expected = 7 if option == "variant" else 0
     assert rounds(machine) == expected
-    assert popcorn_project == type(popcorn_project).load(
-        popcorn_project.source.path, request.config.getoption("popcorn_config")
-    )
+    assert popcorn_project.boot.memory_init == ()
+    assert len(popcorn_project.config(option).boot.memory_init) == (1 if option == "variant" else 0)
 
 @pytest.mark.popcorn(config="variant")
 def test_variant(machine):
@@ -49,7 +49,7 @@ def run(pytester: pytest.Pytester, *args: str) -> pytest.RunResult:
 
 def test_config_from_marker_and_option(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, extra=VARIANT)
+    write_project(pytester, configs=VARIANT)
     pytester.makepyfile(CONFIGS)
     result = run(pytester)
     result.assert_outcomes(passed=4)
@@ -57,6 +57,50 @@ def test_config_from_marker_and_option(pytester: pytest.Pytester) -> None:
     result = run(pytester, "--popcorn-config=variant")
     result.assert_outcomes(passed=4)
     result.stdout.fnmatch_lines(["popcorn: 2 key(s), 0 boot(s), 2 from cache"])
+
+
+def test_an_unknown_config_name_fails_naming_the_known_ones(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, configs=VARIANT)
+    pytester.makepyfile("""
+        import pytest
+
+        @pytest.mark.popcorn(config="nope")
+        def test_marker(machine):
+            pass
+
+        def test_option(machine_factory):
+            pass
+        """)
+    marker = run(pytester, "-k", "test_marker")
+    marker.assert_outcomes(errors=1, deselected=1)
+    marker.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+    option = run(pytester, "-k", "test_option", "--popcorn-config=nope")
+    option.assert_outcomes(errors=1, deselected=1)
+    option.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+
+
+def test_two_config_names_with_equal_content_share_one_boot(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, configs=f"{VARIANT}, {VARIANT.replace('variant=', 'twin=', 1)}")
+    pytester.makepyfile("""
+        import pytest
+
+        SEEN = []
+
+        @pytest.mark.popcorn(config="variant")
+        def test_variant(machine):
+            SEEN.append(machine)
+            assert machine.mem.u32[machine.sym("alu_rounds")] == 7
+
+        @pytest.mark.popcorn(config="twin")
+        def test_twin(machine):
+            assert machine is SEEN[0]
+            assert machine.mem.u32[machine.sym("alu_rounds")] == 7
+        """)
+    result = run(pytester)
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines(["popcorn: 1 key(s), 1 boot(s), 0 from cache"])
 
 
 STRICT = """
@@ -196,7 +240,7 @@ def test_budget_is_reset_after_the_test(pytester: pytest.Pytester) -> None:
 
 def test_the_closest_marker_wins_without_merging(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, extra=VARIANT)
+    write_project(pytester, configs=VARIANT)
     pytester.makepyfile("""
         import pytest
 

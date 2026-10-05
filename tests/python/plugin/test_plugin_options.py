@@ -11,7 +11,6 @@ from .helpers import write_conftest
 pytest_plugins = ["pytester"]
 
 OPTIONS = (
-    "--popcorn-project=PATH",
     "--popcorn-config=NAME",
     "--popcorn-cov=LCOV",
     "--popcorn-trace-on-fail=[[]DIR]",
@@ -42,7 +41,6 @@ def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
         def test_defaults(request):
             settings = request.config.stash[SETTINGS]
             assert settings == Settings(
-                project=request.config.rootpath / "popcorn.toml",
                 config=None,
                 cov=None,
                 trace_on_fail=False,
@@ -69,7 +67,6 @@ def test_values_parse_relative_to_the_invocation_directory(
             settings = request.config.stash[SETTINGS]
             here = Path({str(here)!r})
             assert request.config.rootpath == here.parent
-            assert settings.project == here / "sub" / "p.toml"
             assert settings.config == "variant"
             assert settings.cov == here / "out" / "cov.info"
             assert settings.trace_on_fail
@@ -81,7 +78,6 @@ def test_values_parse_relative_to_the_invocation_directory(
     result = pytester.runpytest(
         "-p",
         "no:asyncio",
-        "--popcorn-project=sub/p.toml",
         "--popcorn-config=variant",
         "--popcorn-cov=out/cov.info",
         "--popcorn-trace-on-fail=traces",
@@ -91,23 +87,11 @@ def test_values_parse_relative_to_the_invocation_directory(
     result.assert_outcomes(passed=1)
 
 
-def test_the_default_project_is_at_the_rootdir(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_project_option_is_gone(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    pytester.makeini("[pytest]\n")
-    here = pytester.mkdir("here")
-    (here / "test_default.py").write_text(textwrap.dedent(f"""
-        from pathlib import Path
-
-        from popcorn.pytest._options import SETTINGS
-
-        def test_default_project(request):
-            project = request.config.stash[SETTINGS].project
-            assert project == Path({str(pytester.path)!r}) / "popcorn.toml"
-        """))
-    monkeypatch.chdir(here)
-    pytester.runpytest("-p", "no:asyncio").assert_outcomes(passed=1)
+    result = pytester.runpytest("-p", "no:asyncio", "--popcorn-project=popcorn.toml")
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*unrecognized arguments: --popcorn-project=popcorn.toml*"])
 
 
 def test_bare_trace_on_fail_takes_the_default_directory(pytester: pytest.Pytester) -> None:

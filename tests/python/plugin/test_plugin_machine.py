@@ -8,7 +8,14 @@ import pwd
 
 import pytest
 
-from .helpers import BOARD_ELF, CALLEE_ELF, write_conftest, write_project
+from .helpers import (
+    BOARD_ELF,
+    CALLEE_ELF,
+    DRIVER_ELF,
+    write_conftest,
+    write_project,
+    write_project_conftest,
+)
 
 pytest_plugins = ["pytester"]
 
@@ -200,10 +207,10 @@ def test_a_pty_spoils_the_machine(
     except DescriptionError as error:
         pytest.skip(f"no STM32U575 description: {error}")
     write_conftest(pytester)
-    (pytester.path / "popcorn.toml").write_text(
-        '[mcu]\npart = "STM32U575QGIx"\n'
-        f'[image.app]\nelf = "{BOARD_ELF}"\n'
-        '[boot]\nuntil = "ready"\nbudget = 1_000_000\n'
+    write_project_conftest(
+        pytester.path,
+        f'popcorn.Project(part="STM32U575QGIx", images=[popcorn.Elf(Path({str(BOARD_ELF)!r}))], '
+        'boot=popcorn.Boot(until="ready", budget=1_000_000))',
     )
     pytester.makepyfile("""
         SEEN = []
@@ -288,7 +295,7 @@ def test_without_boot_until_the_snapshot_is_the_reset_state(pytester: pytest.Pyt
     run(pytester).assert_outcomes(passed=1)
 
 
-def test_no_project_file(pytester: pytest.Pytester) -> None:
+def test_no_popcorn_project_override(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     pytester.makepyfile("""
         def test_uses_the_machine(machine):
@@ -299,7 +306,12 @@ def test_no_project_file(pytester: pytest.Pytester) -> None:
         """)
     result = run(pytester)
     result.assert_outcomes(passed=1, errors=1)
-    result.stdout.fnmatch_lines(["*no project file*pass --popcorn-project or add popcorn.toml*"])
+    result.stdout.fnmatch_lines(
+        [
+            "*define a `popcorn_project` fixture returning a `popcorn.Project` in a conftest.py "
+            "above this test*"
+        ]
+    )
 
 
 @pytest.mark.parametrize(
@@ -309,7 +321,7 @@ def test_no_project_file(pytester: pytest.Pytester) -> None:
         ("pytest.ini", "[pytest]\naddopts = -p no:asyncio\n"),
     ],
 )
-def test_the_project_file_of_an_ini_rootdir(
+def test_the_project_of_an_ini_rootdir(
     pytester: pytest.Pytester, inifile: str, content: str
 ) -> None:
     example = pytester.mkdir("example")
@@ -317,9 +329,10 @@ def test_the_project_file_of_an_ini_rootdir(
     (example / "conftest.py").write_text('pytest_plugins = ["popcorn.pytest"]\n')
     write_project(pytester, directory=example)
     (example / "test_example.py").write_text(
+        "from pathlib import Path\n\nimport popcorn\n\n\n"
         "def test_booted(machine, popcorn_project, request):\n"
         "    assert request.config.rootpath.name == 'example'\n"
-        "    assert popcorn_project.source.path.parent == request.config.rootpath\n"
+        f"    assert popcorn_project.images == (popcorn.Elf(Path({str(DRIVER_ELF)!r})),)\n"
         "    assert machine.pc == machine.sym('alu_mark')\n"
     )
     run(pytester, "example").assert_outcomes(passed=1)

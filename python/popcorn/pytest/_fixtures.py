@@ -20,12 +20,13 @@ class MachineFactory:
     first when no test did yet. From inside an async test, use `await factory.booted()` for a
     key not booted yet: the sync form cannot boot while the event loop runs.
     `factory(booted=False)` gives a new machine as `Project.machine` builds it, powered off and
-    not reset, for a test that boots it itself.
+    not reset, for a test that boots it itself. `factory(project=other)` builds from another
+    `popcorn.Project` than the test's, booted once per key as the test's own.
 
     Booted machines get the test's default instruction budget, the `budget` of its marker or
     `--popcorn-budget`. Machines not booted get none: it would bound their boot too.
 
-    `devices` gives bus devices instead of the project file's, as `Project.machine(devices=)`
+    `devices` gives bus devices instead of the project's, as `Project.machine(devices=)`
     takes them. A device serves one machine: an instance given before, to a machine still
     open, is refused. A boot with devices is shared, in the process and through the boot
     cache, with the boots whose devices have the same classes, class sources, `snapshot()` and
@@ -33,13 +34,14 @@ class MachineFactory:
     methods, such as a function, and `popcorn.devices` devices are booted for each machine.
     Not keyed: class attributes changed at run time, module globals or class-level containers
     a device reads, and the modules a device imports. A stale boot matters only when the
-    firmware talks to the device before `[boot] until`.
+    firmware talks to the device before `boot.until`.
     """
 
     def __init__(self, session: PopcornSession, test: ItemSettings, item: pytest.Item) -> None:
         """Make machines for the test `item` with `test` settings."""
         self._session = session
         self._item = item
+        self._project = test.project
         self._default = test.key
         self._budget = test.budget
         self._machines: list[Machine] = []
@@ -48,19 +50,29 @@ class MachineFactory:
         self,
         config: str | None = None,
         *,
+        project: Project | None = None,
         strict: bool | None = None,
         booted: bool = True,
         devices: Devices | None = None,
     ) -> Machine:
-        """A new machine of `config`, the test's by default, and `strict`, the config's by
-        default, with `devices` instead of the project file's devices of their peripherals.
+        """A new machine of the config `config` of `project`.
+
+        Args:
+            config: The config name, by default the test's for the test's project and the base
+                for another `project`.
+            project: The project, the test's `popcorn_project` by default.
+            strict: Whether unmodelled peripheral accesses raise, by default the test's for its
+                own project and config, else the selected config's `strict`.
+            booted: Whether the machine is restored from the boot snapshot of its key, or left
+                powered off and not reset.
+            devices: Bus devices instead of the project's devices of their peripherals.
 
         Raises:
             RuntimeError: `booted` and the key is not booted yet while an event loop runs.
-            ConfigError: A device serves another live machine, or `Project.machine` refuses
-                `devices`.
+            ConfigError: The project has no config `config`, a device serves another live
+                machine, or `Project.machine` refuses `devices`.
         """
-        key = self._key(config, strict)
+        key = self._key(config, project, strict)
         if not booted:
             return self._keep(self._session.build(key, devices), key)
         if devices is not None:
@@ -78,11 +90,12 @@ class MachineFactory:
         self,
         config: str | None = None,
         *,
+        project: Project | None = None,
         strict: bool | None = None,
         devices: Devices | None = None,
     ) -> Machine:
         """A new booted machine as `factory()` gives, booting the key on the running loop."""
-        key = self._key(config, strict)
+        key = self._key(config, project, strict)
         if devices is not None:
             key = self._session.device_key(key, devices)
         try:
@@ -101,11 +114,13 @@ class MachineFactory:
             machine.board.close()
         self._machines.clear()
 
-    def _key(self, config: str | None, strict: bool | None) -> Key:
+    def _key(self, config: str | None, project: Project | None, strict: bool | None) -> Key:
+        if project is not None:
+            return self._session.key(project, config, strict)
         config = self._default.config if config is None else config
         if strict is None and config == self._default.config:
             strict = self._default.strict
-        return self._session.key(config, strict, self._default.project)
+        return self._session.key(self._project, config, strict)
 
     def _ready(self, key: Key, machine: Machine, snapshot: Snapshot) -> Machine:
         self._keep(machine, key)
@@ -132,16 +147,19 @@ class ItemSettings:
     """The machine settings of one test.
 
     Attributes:
-        key: The config and strictness of its machines.
+        project: Its `popcorn_project`, no config applied.
+        key: The project, config and strictness of its machines.
         budget: The default instruction budget of its booted machines, None for unbounded.
     """
 
+    project: Project
     key: Key
     budget: int | None
 
 
-def settings_of(item: pytest.Item, session: PopcornSession) -> ItemSettings:
-    """The settings of `item`: marker over command line over project file, per setting.
+def settings_of(item: pytest.Item, session: PopcornSession, project: Project) -> ItemSettings:
+    """The settings of `item` with the project `project`: marker over command line over
+    project, per setting.
 
     `--popcorn-strict` can only turn strictness on, `strict=False` in a marker turns it off.
 
@@ -156,7 +174,7 @@ def settings_of(item: pytest.Item, session: PopcornSession) -> ItemSettings:
     if strict is None and settings.strict:
         strict = True
     budget = settings.budget if options.budget is UNSET else options.budget
-    return ItemSettings(session.key(config, strict, session.project_of(item.path)), budget)
+    return ItemSettings(project, session.key(project, config, strict), budget)
 
 
 @pytest.fixture(scope="session")
@@ -164,16 +182,26 @@ def _popcorn_session(request: pytest.FixtureRequest) -> PopcornSession:
     return popcorn_session(request.config)
 
 
-@pytest.fixture
-def popcorn_project(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) -> Project:
-    """The test's project file, the `popcorn.toml` nearest above it or `--popcorn-project`, with
-    `--popcorn-config` applied."""
-    project = _popcorn_session.project_of(_item(request).path)
-    return _popcorn_session.project(_popcorn_session.settings.config, project)
+MISSING_PROJECT = (
+    "define a `popcorn_project` fixture returning a `popcorn.Project` in a conftest.py above "
+    "this test"
+)
+
+
+@pytest.fixture(scope="session")
+def popcorn_project() -> Project:
+    """The project of the tests below a conftest.py, overridden there by the user.
+
+    The nearest override wins, as for any pytest fixture. Without one, the tests using
+    `machine` or `machine_factory` fail, naming the fix.
+    """
+    pytest.fail(MISSING_PROJECT, pytrace=False)
 
 
 @pytest.fixture
-def machine(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) -> Iterator[Machine]:
+def machine(
+    request: pytest.FixtureRequest, _popcorn_session: PopcornSession, popcorn_project: object
+) -> Iterator[Machine]:
     """The booted machine of this test's key, restored from its boot snapshot.
 
     Every test of one key gets the same machine object. Hooks, intercept logs, the call baseline
@@ -182,7 +210,8 @@ def machine(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) ->
     `--popcorn-budget`.
     """
     item = _item(request)
-    test = settings_of(item, _popcorn_session)
+    project = _checked(popcorn_project)
+    test = settings_of(item, _popcorn_session, project)
     try:
         booted = _restored(_popcorn_session, test.key)
     except PopcornError:
@@ -215,13 +244,24 @@ def machine(request: pytest.FixtureRequest, _popcorn_session: PopcornSession) ->
 
 @pytest.fixture
 def machine_factory(
-    request: pytest.FixtureRequest, _popcorn_session: PopcornSession
+    request: pytest.FixtureRequest, _popcorn_session: PopcornSession, popcorn_project: object
 ) -> Iterator[MachineFactory]:
     """A `MachineFactory` for this test, its machines closed after it."""
     item = _item(request)
-    factory = MachineFactory(_popcorn_session, settings_of(item, _popcorn_session), item)
+    project = _checked(popcorn_project)
+    factory = MachineFactory(_popcorn_session, settings_of(item, _popcorn_session, project), item)
     yield factory
     factory.close()
+
+
+def _checked(project: object) -> Project:
+    if not isinstance(project, Project):
+        pytest.fail(
+            f"popcorn_project returned {type(project).__name__}, not a popcorn.Project: "
+            f"{MISSING_PROJECT}",
+            pytrace=False,
+        )
+    return project
 
 
 def _item(request: pytest.FixtureRequest) -> pytest.Item:
