@@ -4,6 +4,7 @@
 #include <popcorn/periph/model.hpp>
 
 #include <mutex>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <utility>
@@ -76,18 +77,33 @@ void register_model(std::string_view ip, std::string_view ip_version_glob, model
       {.ip = std::string{ip}, .glob = std::string{ip_version_glob}, .factory = std::move(factory)});
 }
 
-auto find_model(peripheral_desc const& desc) -> model_factory
+namespace
 {
-  auto&                 entries = table();
-  std::lock_guard const lock{entries.guard};
-  for(auto const& entry : entries.entries | std::views::reverse)
+auto latest(std::string_view ip, std::string_view ip_version) -> registration const*
+{
+  for(auto const& entry : table().entries | std::views::reverse)
   {
-    if(entry.ip == desc.ip and glob_match(entry.glob, desc.ip_version))
+    if(entry.ip == ip and glob_match(entry.glob, ip_version))
     {
-      return entry.factory;
+      return &entry;
     }
   }
-  return {};
+  return nullptr;
+}
+}
+
+auto find_model(peripheral_desc const& desc) -> model_factory
+{
+  std::lock_guard const lock{table().guard};
+  auto const* const     entry = latest(desc.ip, desc.ip_version);
+  return entry != nullptr ? entry->factory : model_factory{};
+}
+
+auto registered_glob(std::string_view ip, std::string_view ip_version) -> std::optional<std::string>
+{
+  std::lock_guard const lock{table().guard};
+  auto const* const     entry = latest(ip, ip_version);
+  return entry != nullptr ? std::optional{entry->glob} : std::nullopt;
 }
 
 void model_context::request_stop(stop_reason reason, std::string detail)

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -117,13 +118,18 @@ TEST_CASE("the registry picks the latest matching registration, explicit wiring 
   periph::register_model("testdev", "v?", tagged("glob"));
   core::machine plain{m33(), popcorn::testing::test_arch_factory(), {}};
   CHECK(tag_of(plain, "TESTDEV") == "glob");
+  CHECK(periph::registered_glob("testdev", "v1") == "v?");
+  CHECK(periph::registered_glob("testdev", "v10") == "v1*");
+  CHECK(periph::registered_glob("testdev", "w1") == std::nullopt);
   periph::register_model("testdev", "v1*", tagged("second"));
   core::machine later{m33(), popcorn::testing::test_arch_factory(), {}};
   CHECK(tag_of(later, "TESTDEV") == "second");
+  CHECK(periph::registered_glob("testdev", "v1") == "v1*");
   core::machine explicit_wiring{m33(), popcorn::testing::test_arch_factory(), with_test_model()};
   CHECK(dynamic_cast<test_model*>(explicit_wiring.model("TESTDEV")) != nullptr);
   periph::register_model("testdev", "v1*", {});
   periph::register_model("testdev", "v?", {});
+  CHECK(periph::registered_glob("testdev", "v1") == std::nullopt);
 }
 
 TEST_CASE("attach resolves names, aliases and models")

@@ -11,6 +11,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -263,4 +264,14 @@ using model_factory =
  * @param factory Factory called once per matching peripheral instance.
  */
 void register_model(std::string_view ip, std::string_view ip_version_glob, model_factory factory);
+
+/**
+ * @brief Glob of the registration that serves a peripheral of an IP and IP version: the latest
+ *        whose IP equals @p ip and whose glob matches @p ip_version.
+ * @param ip IP name.
+ * @param ip_version IP version.
+ * @return The glob, empty when no registration matches.
+ */
+[[nodiscard]] auto registered_glob(std::string_view ip, std::string_view ip_version)
+    -> std::optional<std::string>;
 }

@@ -17,6 +17,9 @@ building: contextvars.ContextVar[_core.ModelContext | None] = contextvars.Contex
 )
 """Context of the model being built on this thread, None outside a build."""
 
+registered_classes: dict[tuple[str, str], type[object]] = {}
+"""Class of each `popcorn.model.register()` registration, by IP and glob."""
+
 
 def build_model(maker: Callable[[], Model], context: _core.ModelContext) -> Model:
     """Build a model for `context`'s peripheral, what the native factories call.

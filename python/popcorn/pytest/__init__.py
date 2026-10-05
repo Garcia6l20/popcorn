@@ -70,8 +70,10 @@ Boot snapshots are cached in `.pytest_cache/d/popcorn/boot`: a later session, or
 worker, restores a configuration's boot instead of running it, one boot per configuration across
 workers. The cache key covers the popcorn build, the description, the images, the project
 digest, the strictness, the source of every board model and device class and of the modules its
-source file imports outside popcorn, the Python installation and site-packages, and the files
-their parameters name. A module imported only by those modules is not covered, and entries are
+source file imports outside popcorn, the Python installation and site-packages, the files
+their parameters name, and for each peripheral without a board model the
+`popcorn.model.register()` registration that serves it, with its class source and imports in
+the same way. A module imported only by those modules is not covered, and entries are
 never pruned: `--cache-clear` drops them all. `-p no:cacheprovider` turns the cache off.
 
 Limits:

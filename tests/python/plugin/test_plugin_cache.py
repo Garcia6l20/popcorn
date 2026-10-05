@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import shutil
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from .helpers import (
     CALLEE_ELF,
     DRIVER_ELF,
     M33_JSON,
+    ROOT,
     write_conftest,
     write_project,
     write_project_conftest,
@@ -374,3 +377,124 @@ def test_a_model_restore_failure_falls_back_to_a_boot(
     broken = pytester.runpytest_subprocess(*BASE)
     broken.stdout.fnmatch_lines(["popcorn: 1 unreadable boot cache entry dropped and booted again"])
     assert summary(broken) == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
+
+
+REGISTERED = """
+from popcorn.model import Model
+
+
+class First(Model):
+    NAME = "first"
+
+
+class Second(Model):
+    NAME = "second"
+"""
+
+
+def registered_boots(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, board: str = ""
+) -> Callable[..., str]:
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    models = pytester.mkdir("models")
+    (models / "regmod.py").write_text(REGISTERED)
+
+    def boots(*registrations: str) -> str:
+        for directory in (pytester.path, models):
+            shutil.rmtree(directory / "__pycache__", ignore_errors=True)
+        (pytester.path / "conftest.py").unlink(missing_ok=True)
+        lines = "".join(
+            f"register({ip!r}, {glob!r})({cls})\n"
+            for ip, glob, cls in (r.split() for r in registrations)
+        )
+        write_conftest(
+            pytester,
+            f"import sys\nsys.path.insert(0, {str(models)!r})\n"
+            f"from popcorn.model import register\nfrom regmod import First, Second\n{lines}",
+        )
+        write_project(pytester, extra=board, imports="from regmod import First")
+        result = pytester.runpytest_subprocess(*BASE)
+        result.assert_outcomes(passed=1)
+        result.stdout.no_fnmatch_line("*dropped*")
+        return summary(result)
+
+    pytester.makepyfile("def test_boot(machine):\n    pass\n")
+    return boots
+
+
+BOOTED = "popcorn: 1 key(s), 1 boot(s), 0 from cache"
+CACHED = "popcorn: 1 key(s), 0 boot(s), 1 from cache"
+
+
+def test_a_registration_serving_the_machine_is_keyed(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    boots = registered_boots(pytester, monkeypatch)
+    assert boots() == BOOTED
+    assert boots("nosuchip * First") == CACHED
+    assert boots("testdev v2 First") == CACHED
+    assert boots("testdev v* First") == BOOTED
+    assert boots("testdev v* First") == CACHED
+    assert boots("testdev v1 Second") == BOOTED
+    regmod = pytester.path / "models" / "regmod.py"
+    regmod.write_text(regmod.read_text().replace('"second"', '"changed"'))
+    assert boots("testdev v1 Second") == BOOTED
+    assert boots() == CACHED
+
+
+def test_a_registration_under_a_board_model_is_not_keyed(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    boots = registered_boots(
+        pytester, monkeypatch, board='board={"TESTDEV": popcorn.Periph(model=popcorn.Use(First))},'
+    )
+    assert boots() == BOOTED
+    assert boots("testdev * Second") == CACHED
+
+
+def test_the_latest_matching_registration_is_keyed(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    boots = registered_boots(pytester, monkeypatch)
+    assert boots("testdev v* First", "testdev v1 Second") == BOOTED
+    assert boots("testdev v1 Second") == CACHED
+    assert boots("testdev v1 Second", "testdev v* First") == BOOTED
+    assert boots("testdev v* First", "testdev v1 Second", "testdev v* First") == CACHED
+
+
+BUILT_IN = """
+import popcorn
+from popcorn.model import Model, register, unregister
+from popcorn.pytest._cache import cache_key
+
+
+class Dma(Model):
+    pass
+
+
+project = popcorn.Project(part="STM32U575QGIx", images=[])
+keys = [cache_key(project, False)]
+unregister("GPDMA", "STM32U5_dma3_*")
+keys.append(cache_key(project, False))
+register("GPDMA", "STM32U5_dma3_*")(Dma)
+keys.append(cache_key(project, False))
+unregister("GPDMA", "STM32U5_dma3_*")
+keys.append(cache_key(project, False))
+print("keys", *(keys.index(key) for key in keys))
+"""
+
+
+def test_a_removed_built_in_registration_is_keyed(tmp_path: Path) -> None:
+    from popcorn.stm32 import mcu
+    from popcorn.stm32.description import DescriptionError
+
+    try:
+        mcu("STM32U575QGIx")
+    except DescriptionError as error:
+        pytest.skip(f"no STM32U575 description: {error}")
+    script = tmp_path / "built_in.py"
+    script.write_text(BUILT_IN)
+    result = subprocess.run(
+        [sys.executable, str(script)], cwd=ROOT, capture_output=True, text=True, check=True
+    )
+    assert result.stdout.splitlines()[-1] == "keys 0 1 2 1"

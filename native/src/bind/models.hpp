@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace popcorn::bind
@@ -148,6 +149,17 @@ private:
  */
 [[= py::doc{"Remove a registration of register_python_model."}]] void
     unregister_python_model(std::string const& ip, std::string const& version_glob);
+
+/**
+ * @brief Glob of the registration, built-in or Python, that serves a peripheral of an IP and IP
+ *        version in a machine built now.
+ * @param ip IP name.
+ * @param ip_version IP version.
+ * @return The glob, empty when no registration serves it.
+ */
+[[= py::doc{"Glob of the registration serving an IP version, or None."}]] [[nodiscard]] auto
+    registered_model_glob(std::string const& ip, std::string const& ip_version)
+        -> std::optional<std::string>;
 
 namespace detail
 {

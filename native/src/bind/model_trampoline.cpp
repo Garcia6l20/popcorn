@@ -211,4 +211,10 @@ void unregister_python_model(std::string const& ip, std::string const& version_g
 {
   periph::register_model(ip, version_glob, {});
 }
+
+auto registered_model_glob(std::string const& ip, std::string const& ip_version)
+    -> std::optional<std::string>
+{
+  return periph::registered_glob(ip, ip_version);
+}
 }

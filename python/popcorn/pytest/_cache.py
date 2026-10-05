@@ -25,6 +25,7 @@ import pytest
 import popcorn
 from popcorn import (
     Machine,
+    MachineDescription,
     Project,
     Snapshot,
     Stop,
@@ -34,6 +35,7 @@ from popcorn import (
     description_digest,
 )
 from popcorn._machine import AttachedDevice
+from popcorn._model_build import registered_classes
 from popcorn.board import I2CTarget, SpiTarget
 from popcorn.units import VirtualTime
 
@@ -208,6 +210,25 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
 
 
+def _registration_lines(project: Project, description: MachineDescription) -> list[str]:
+    wired = {name for name, periph in project.board.items() if periph.model is not None}
+    lines: list[str] = []
+    for p in sorted(description.peripherals, key=lambda p: p.name):
+        if p.alias_of is not None or p.name in wired:
+            continue
+        glob = _core.registered_model_glob(p.ip, p.ip_version)
+        if glob is None:
+            continue
+        cls = registered_classes.get((p.ip, glob))
+        if cls is None:
+            lines.append(f"{p.name} registered {p.ip} {glob} built-in")
+            continue
+        head = f"{p.name} registered {p.ip} {glob} {cls.__module__}:{cls.__qualname__}"
+        lines.append(f"{head} {_class_source(cls)}")
+        lines.extend(f"{p.name} registered {line}" for line in imported_sources(cls))
+    return lines
+
+
 def cache_key(project: Project, strict: bool, devices: str | None = None) -> str:
     """The name of a boot of `project` with strictness `strict` and the device set of digest
     `devices`, None for the project's.
@@ -216,15 +237,20 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
     `project.digest`, `strict`, the source file of every board model and device class and of
     every module its source file imports, at module level or inside a function, with the
     packages on the way to it, the content of every file a model or device parameter names,
-    and `devices`. Modules of popcorn, of the Python installation and of site-packages are left
-    out: the popcorn version, the extension digest and installed versions cover them. A module
-    imported only by those modules is not covered: `--cache-clear` drops the cache.
+    and `devices`. For each served peripheral without a board model, it covers the IP and glob
+    of the registration that serves it as the native registry resolves it, built-in or
+    `popcorn.model.register()`, and for the latter the class and its sources as for a board
+    model. A registration that serves no such peripheral is left out. Modules of popcorn, of
+    the Python installation and of site-packages are left out: the popcorn version, the
+    extension digest and installed versions cover them. A module imported only by those
+    modules is not covered: `--cache-clear` drops the cache.
     """
+    description = project.machine_description()
     lines = [
         FORMAT,
         popcorn.version(),
         _extension_digest(),
-        description_digest(project.machine_description()),
+        description_digest(description),
         *(image.load().digest for image in project.images),
         project.digest,
         str(strict),
@@ -238,6 +264,7 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
             lines.append(f"{name} {_class_source(cls)}")
             lines.extend(f"{name} {line}" for line in imported_sources(cls))
             lines.extend(f"{name} {file}" for file in _param_files(params))
+    lines.extend(_registration_lines(project, description))
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 

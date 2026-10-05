@@ -37,7 +37,7 @@ from popcorn import _core
 from popcorn._description import MachineDescription
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, ModelError
-from popcorn._model_build import build_model, building
+from popcorn._model_build import build_model, building, registered_classes
 from popcorn._state import StateReader, declared_fields, encode
 from popcorn.units import VirtualDuration, VirtualTime
 
@@ -541,8 +541,9 @@ def register[M: type[Model]](ip: str, version_glob: str = "*") -> Callable[[M], 
     def install(cls: M) -> M:
         if not issubclass(cls, Model):
             raise TypeError(f"{cls!r} is not a popcorn.model.Model subclass")
-        _REGISTERED[(ip, version_glob)] = functools.partial(build_model, cls)
         _core.register_python_model(ip, version_glob)
+        _REGISTERED[(ip, version_glob)] = functools.partial(build_model, cls)
+        registered_classes[(ip, version_glob)] = cls
         return cls
 
     return install
@@ -552,6 +553,7 @@ def unregister(ip: str, version_glob: str = "*") -> None:
     """Remove a registration of `register()`, for machines built from now on."""
     _core.unregister_python_model(ip, version_glob)
     _REGISTERED.pop((ip, version_glob), None)
+    registered_classes.pop((ip, version_glob), None)
 
 
 __all__ = [
