@@ -7,6 +7,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | --- | --- | --- |
 | [stm32u575/adc](stm32u575/adc) | LL | ADC1 power-up, calibration, VREFINT and the temperature sensor read against the factory words, timed conversions |
 | [stm32u575/adc_watchdog](stm32u575/adc_watchdog) | HAL DMA | a TIM15-triggered 4-channel ADC1 scan, 8x oversampling, circular GPDMA, AWD3 on one input: inputs driven with `ADC1.input(n).volts`, `[supply] vdda_mv`, the strict threshold comparison, scan timing |
+| [stm32u575/crc](stm32u575/crc) | HAL | the CRC unit from `HAL_CRC_Calculate` and `HAL_CRC_Accumulate`: CRC-32/MPEG-2 on words, CRC-32/ISO-HDLC with input and output reversal, CRC-16/IBM-3740, checked against a bit-serial Python reference |
 | [stm32u575/gpdma](stm32u575/gpdma) | HAL DMA | USART1 TX over GPDMA1, a normal block then a two-node linked list, frames back to back while the CPU sleeps in WFI |
 | [stm32u575/gpio](stm32u575/gpio) | HAL | a host-driven button on an EXTI falling edge toggling an LED, WFI between presses |
 | [stm32u575/i2c](stm32u575/i2c) | LL | a 24xx EEPROM page write with acknowledge polling, configs swapping the device, a scripted TableTarget |
