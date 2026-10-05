@@ -104,7 +104,7 @@ def fault_in_running(_: Path, machines: Machines) -> object:
 
 def boot_budget(tmp_path: Path, _: Machines) -> object:
     loaded = project(tmp_path, minimal("budget = 100\n"))
-    return asyncio.run(loaded.boot(loaded.machine()))
+    return asyncio.run(loaded.boot_machine(loaded.machine()))
 
 
 def unknown_project_key(tmp_path: Path, _: Machines) -> object:

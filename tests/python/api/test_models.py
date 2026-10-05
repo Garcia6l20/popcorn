@@ -564,7 +564,7 @@ def test_board_parameters_are_checked_against_the_constructor(
 ) -> None:
     project = popcorn.Project.load(write(tmp_path, board(entry)))
     with pytest.raises(popcorn.ConfigError) as caught:
-        project.board()
+        project.machine()
     assert caught.value.key == key
     assert caught.value.expected.startswith(expected)
     assert caught.value.line > 0

@@ -42,9 +42,11 @@ def received(machine: Machine) -> list[int]:
 
 async def test_without_a_model_a_strict_run_names_the_rng(popcorn_project: Project) -> None:
     machine = Machine(
-        popcorn_project.description(), image=popcorn_project.images(), strict_peripherals=True
+        popcorn_project.machine_description(),
+        image=[image.load() for image in popcorn_project.images],
+        strict_peripherals=True,
     )
-    await popcorn_project.boot(machine)
+    await popcorn_project.boot_machine(machine)
     with pytest.raises(ModelError, match="RNG"):
         await machine.run(for_=ms(20), budget=BUDGET)
 

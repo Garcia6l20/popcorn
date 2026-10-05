@@ -20,7 +20,16 @@ from typing import cast
 import pytest
 
 import popcorn
-from popcorn import Machine, Project, Snapshot, Stop, StopReason, _core, description_digest
+from popcorn import (
+    Machine,
+    Project,
+    Snapshot,
+    Stop,
+    StopReason,
+    Use,
+    _core,
+    description_digest,
+)
 from popcorn._devices import ParamError, project_params
 from popcorn._machine import AttachedDevice
 from popcorn.board import I2CTarget, SpiTarget
@@ -52,8 +61,9 @@ def _class_source(cls: type) -> str:
 
 
 def _param_files(cls: type, params: Mapping[str, object], base: Path) -> list[str]:
+    written = {name: value for name, value in params.items() if isinstance(value, str)}
     try:
-        resolved = project_params(cls, params, base)
+        resolved = {**params, **project_params(cls, written, base)}
     except ParamError:
         return []
     files: list[str] = []
@@ -122,7 +132,9 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
     firmware talks to the device before `[boot] until`.
     """
     aliases = {
-        p.name: p.alias_of for p in project.description().peripherals if p.alias_of is not None
+        p.name: p.alias_of
+        for p in project.machine_description().peripherals
+        if p.alias_of is not None
     }
     lines: list[str] = []
     for key, targets in sorted(devices.items(), key=lambda item: aliases.get(item[0], item[0])):
@@ -150,22 +162,22 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
         FORMAT,
         popcorn.version(),
         _extension_digest(),
-        description_digest(project.description()),
-        *(image.digest for image in project.images()),
+        description_digest(project.machine_description()),
+        *(image.load().digest for image in project.images),
         project.digest,
         str(strict),
     ]
     if devices is not None:
         lines.append(f"devices {devices}")
-    for directory in project.file.models.python:
-        root = Path(directory)
+    source = project.source
+    for root in () if source is None else source.model_dirs:
         for path in sorted(root.rglob("*.py")):
             lines.append(f"{path.relative_to(root)} {_file_digest(path)}")
-    base = project.path.parent
-    for name, entry in sorted(project.board().items()):
-        parts = [(entry.model, entry.params)] if entry.model is not None else []
-        parts += [(device.model, device.params) for device in entry.devices]
-        for cls, params in parts:
+    base = Path.cwd() if source is None else source.path.parent
+    for name, periph in sorted(project.board.items()):
+        uses: list[Use] = [] if periph.model is None else [periph.model]
+        for use in [*uses, *periph.devices]:
+            cls, params = use.cls, use.params
             lines.append(f"{name} {_class_source(cls)}")
             lines.extend(f"{name} {file}" for file in _param_files(cls, params, base))
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()

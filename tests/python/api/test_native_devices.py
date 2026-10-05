@@ -309,11 +309,11 @@ def test_a_project_file_declares_a_custom_at25sf_on_the_hardware_ss(
     u575: popcorn.MachineDescription,
 ) -> None:
     project = popcorn.Project.load(DATA / "native_devices.toml")
-    (entry,) = project.board()["SPI1"].devices
+    (entry,) = project.board["SPI1"].devices
     assert entry.cs is None
-    assert entry.params["page_program"] == "600 us"
+    assert entry.params["page_program"] == us(600)
     m = project.machine()
-    stop = asyncio.run(project.boot(m))
+    stop = asyncio.run(project.boot_machine(m))
     assert stop.reason is StopReason.ADDRESS
     m.reg.pc = m.sym("hw_ss")
     assert finish(m) == [0xFF, *CUSTOM]
@@ -345,7 +345,7 @@ def test_a_project_file_takes_durations_as_strings(
     )
     project = popcorn.Project.load(path)
     m = project.machine()
-    asyncio.run(project.boot(m))
+    asyncio.run(project.boot_machine(m))
     m.reg.pc = m.sym("write_read")
     slow = finish(m)
     quick = run(spi_machine(u575, At25sf("PA4", page_program=us(600))), "write_read")
@@ -372,7 +372,7 @@ def test_a_project_file_declares_native_i2c_devices(
     )
     project = popcorn.Project.load(path)
     m = project.machine()
-    asyncio.run(project.boot(m))
+    asyncio.run(project.boot_machine(m))
     m.reg.pc = m.sym("eeprom_rw")
     assert finish(m) == run(machine(u575, I2C_ELF, "I2C1", eeprom()), "eeprom_rw")
     (device,) = m.board.devices("I2C1")
@@ -412,7 +412,7 @@ def test_a_project_file_table_target_takes_hex_and_decimal_register_keys(
     )
     project = popcorn.Project.load(path)
     m = project.machine()
-    asyncio.run(project.boot(m))
+    asyncio.run(project.boot_machine(m))
     m.reg.pc = m.sym("table")
     assert finish(m) == [0x12, 0x34]
     (table,) = m.board.devices("I2C1")

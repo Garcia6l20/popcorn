@@ -57,9 +57,14 @@ def model_project(tmp_path: Path) -> popcorn.Project:
     return popcorn.Project.load(path)
 
 
+def variant(project: popcorn.Project) -> popcorn.Project:
+    assert project.source is not None
+    return popcorn.Project.load(project.source.path, "variant")
+
+
 def touch(project: popcorn.Project, m: popcorn.Machine) -> popcorn.CallResult:
     async def body() -> popcorn.CallResult:
-        await project.boot(m)
+        await project.boot_machine(m)
         return await m.call("touch_unmodelled", budget=10_000)
 
     return asyncio.run(body())
@@ -73,14 +78,15 @@ def test_strict_peripherals_overrides_the_project_file(tmp_path: Path) -> None:
         touch(project, project.machine(strict_peripherals=True))
     assert project.digest == digest
     with pytest.raises(popcorn.ModelError):
-        touch(project, project.machine("variant", strict_peripherals=True))
-    lax = project.machine("variant", strict_peripherals=False)
+        touch(project, variant(project).machine(strict_peripherals=True))
+    lax = variant(project).machine(strict_peripherals=False)
     assert touch(project, lax).stop.reason is popcorn.StopReason.RETURNED
 
 
 def test_strict_none_keeps_the_file_strictness(tmp_path: Path) -> None:
     project = model_project(tmp_path)
-    path = project.path
+    assert project.source is not None
+    path = project.source.path
     path.write_text(path.read_text().replace("strict = false", "strict = true"))
     strict = popcorn.Project.load(path)
     with pytest.raises(popcorn.ModelError):

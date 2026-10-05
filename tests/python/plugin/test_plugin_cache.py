@@ -179,7 +179,7 @@ def test_the_async_lock_wait_keeps_the_loop_running(pytester: pytest.Pytester) -
         async def test_waits(machine_factory, popcorn_project, request):
             directory = cache_directory(request.config)
             directory.mkdir(parents=True, exist_ok=True)
-            project = type(popcorn_project).load(popcorn_project.path, "other")
+            project = type(popcorn_project).load(popcorn_project.source.path, "other")
             entry = Entry.of(directory, cache_key(project, False))
             holder = os.open(entry.lock, os.O_RDWR | os.O_CREAT)
             fcntl.flock(holder, fcntl.LOCK_EX)

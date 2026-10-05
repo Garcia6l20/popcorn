@@ -24,7 +24,9 @@ def rounds(machine):
 def test_unmarked(machine, popcorn_project, request):
     expected = 7 if request.config.getoption("popcorn_config") == "variant" else 0
     assert rounds(machine) == expected
-    assert popcorn_project.config == request.config.getoption("popcorn_config")
+    assert popcorn_project == type(popcorn_project).load(
+        popcorn_project.source.path, request.config.getoption("popcorn_config")
+    )
 
 @pytest.mark.popcorn(config="variant")
 def test_variant(machine):

@@ -169,7 +169,7 @@ class PopcornSession:
         """The key of `config` of `project`, strictness from its project file when `strict` is
         None."""
         if strict is None:
-            strict = self.project(config, project).file.models.strict
+            strict = self.project(config, project).strict
         return Key(config, strict, project=project)
 
     def device_key(self, key: Key, devices: Devices) -> Key:
@@ -425,11 +425,11 @@ class PopcornSession:
             machine = self.build(key, devices)
             image_count = len(machine.images)
             ptys = machine.board.ptys
-            if project.file.boot.until is None:
+            if project.boot.until is None:
                 machine.reset()
                 stop = None
             else:
-                stop = await project.boot(machine)
+                stop = await project.boot_machine(machine)
             snapshot = machine.snapshot()
             if self.coverage is not None:
                 self._save_boot_coverage(key, machine, snapshot)

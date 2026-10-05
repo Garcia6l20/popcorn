@@ -469,7 +469,7 @@ def test_fr_per_5_a_project_file_wires_an_eeprom_the_firmware_uses(
 ) -> None:
     project = popcorn.Project.load(DATA / "devices.toml")
     m = project.machine()
-    stop = asyncio.run(project.boot(m))
+    stop = asyncio.run(project.boot_machine(m))
     assert stop.reason is StopReason.ADDRESS
     m.reg.pc = m.sym("eeprom_rw")
     result = finish(m)
@@ -587,9 +587,9 @@ def test_a_project_file_wires_spi_devices_by_chip_select(
         path = tmp_path / f"spi-{entry}.toml"
         path.write_text(text)
         project = popcorn.Project.load(path)
-        assert project.board()["SPI1"].devices[0].cs == cs
+        assert project.board["SPI1"].devices[0].cs == cs
         m = project.machine()
-        asyncio.run(project.boot(m))
+        asyncio.run(project.boot_machine(m))
         m.reg.pc = m.sym(entry)
         assert finish(m) == [0xFF, 0x1F, 0x87, 0x01]
         (device,) = m.board.devices("SPI1")
@@ -619,7 +619,7 @@ def test_project_devices_replace_those_of_their_peripheral_only(
     assert m.board.devices("I2C1") == (given,)
     (kept,) = m.board.devices("SPI1")
     assert isinstance(kept, JedecDevice)
-    asyncio.run(project.boot(m))
+    asyncio.run(project.boot_machine(m))
     m.reg.pc = m.sym("eeprom_rw")
     assert finish(m)[0] == 20
     assert bytes(given.array[0x10:0x24]) == bytes(pattern(i) for i in range(20))
@@ -632,7 +632,8 @@ def test_project_devices_through_an_alias_a_config_or_an_empty_list(
     given = Eeprom24(0x50, 4096)
     assert project.machine(devices={"SEC_I2C1": [given]}).board.devices("I2C1") == (given,)
     other = Eeprom24(0x50, 4096)
-    slow = project.machine("slow", devices={"I2C1": [other]})
+    assert project.source is not None
+    slow = popcorn.Project.load(project.source.path, "slow").machine(devices={"I2C1": [other]})
     assert slow.config_digest != project.digest
     assert slow.board.devices("I2C1") == (other,)
     assert project.machine(devices={"SPI1": []}).board.devices("SPI1") == ()

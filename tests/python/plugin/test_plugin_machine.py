@@ -39,7 +39,7 @@ def test_one_boot_restored_for_every_test(pytester: pytest.Pytester) -> None:
             assert machine.mem.u32[machine.sym("alu_rounds")] == 1
 
         def test_the_project(popcorn_project):
-            assert popcorn_project.file.boot.until == "alu_mark"
+            assert popcorn_project.boot.until == "alu_mark"
         """)
     result = run(pytester)
     result.assert_outcomes(passed=21)
@@ -165,13 +165,13 @@ def test_concurrent_async_boots_of_one_key_boot_once(pytester: pytest.Pytester) 
         import popcorn
 
         def pytest_configure(config):
-            boot = popcorn.Project.boot
+            boot = popcorn.Project.boot_machine
 
             async def slow_boot(self, machine):
                 await asyncio.sleep(0.01)
                 return await boot(self, machine)
 
-            popcorn.Project.boot = slow_boot
+            popcorn.Project.boot_machine = slow_boot
         """,
     )
     write_project(pytester)
@@ -319,7 +319,7 @@ def test_the_project_file_of_an_ini_rootdir(
     (example / "test_example.py").write_text(
         "def test_booted(machine, popcorn_project, request):\n"
         "    assert request.config.rootpath.name == 'example'\n"
-        "    assert popcorn_project.path.parent == request.config.rootpath\n"
+        "    assert popcorn_project.source.path.parent == request.config.rootpath\n"
         "    assert machine.pc == machine.sym('alu_mark')\n"
     )
     run(pytester, "example").assert_outcomes(passed=1)

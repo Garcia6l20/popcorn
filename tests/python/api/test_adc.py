@@ -112,7 +112,7 @@ def test_the_supply_sets_vdda_from_the_machine_or_the_project(
         f'[mcu]\npart = "STM32U575QGIx"\n[image.app]\nelf = "{RCC_ELF}"\n[supply]\nvdda_mv = 3300\n'
     )
     project = popcorn.Project.load(path)
-    assert project.file.supply.vdda_mv == 3300
+    assert project.supply is not None and project.supply.vdda_mv == 3300
     m = project.machine()
     m.reset()
     assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS

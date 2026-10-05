@@ -107,6 +107,6 @@ def test_the_project_fixture_is_the_test_project(pytester: pytest.Pytester) -> N
     for directory, name in ((driver, "driver"), (fault, "fault")):
         (directory / f"test_{name}_project.py").write_text(
             "def test_project(popcorn_project):\n"
-            f"    assert str(popcorn_project.path) == {str(directory / 'popcorn.toml')!r}\n"
+            f"    assert str(popcorn_project.source.path) == {str(directory / 'popcorn.toml')!r}\n"
         )
     run(pytester).assert_outcomes(passed=4)
