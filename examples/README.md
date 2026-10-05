@@ -85,6 +85,20 @@ PROJECT = BASE.with_configs(
 A test picks one with `@pytest.mark.popcorn(config="hot")`, `machine_factory("hot")` or the
 `--popcorn-config=hot` option. `machine_factory(project=other)` boots another `Project`.
 
+`popcorn_project` is always the base project. A test that boots machines itself takes
+`popcorn_selected_project` instead: the same project with the marker's config applied, else
+`--popcorn-config`'s, else the base. It is the project `machine` builds from. With
+`m = project.machine()`, `await project.boot_machine(m)` resets and boots a machine you built
+yourself.
+
+Migrating from the TOML project stack:
+
+- `popcorn_project` returned the project with `--popcorn-config` applied. It returns the base now,
+  use `popcorn_selected_project` for the applied one.
+- `--popcorn-project` is removed, the project comes from the `popcorn_project` fixture.
+- `boot(machine)` of the TOML-era `Project` is `boot_machine(machine)`.
+- `description()` of the TOML-era `Project` is `machine_description()`.
+
 Run one example from the repository root:
 
 ```sh

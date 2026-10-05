@@ -20,6 +20,9 @@ Fixtures:
 - `popcorn_project`: the test's `popcorn.Project`, defined by the user in a conftest.py. The
   nearest override above a test wins, as for any pytest fixture. The plugin's own fails the
   tests that use a machine, naming the fix.
+- `popcorn_selected_project`: `popcorn_project` with the test's config applied, selected as for
+  `machine`: the marker's, else `--popcorn-config`, else the base project. For tests that boot
+  machines themselves.
 - `machine`: the test's project's machine, built and booted once per session and process, then
   restored from its boot snapshot before each test. Every test gets the same object. The plugin
   removes the hooks a test installed, empties the intercept logs, the call baseline and the
@@ -123,6 +126,7 @@ project:
   `--popcorn-config`, else the base project. `config=None` in a marker is the base project even
   with `--popcorn-config`. An unknown name fails the test, naming the known ones.
   `popcorn_project` itself stays the user's value, no config applied.
+  `popcorn_selected_project` is the one with the config applied.
 - `strict`: None or absent, the command line then the project; True or False overrides.
   `--popcorn-strict` turns strictness on, else `Project.strict` of the config applies.
 - `budget`: `--popcorn-budget`, the `default_budget` of the test's booted machines, per `run`,

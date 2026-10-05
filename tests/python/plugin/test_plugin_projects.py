@@ -151,3 +151,78 @@ def test_the_project_fixture_is_the_test_project(pytester: pytest.Pytester) -> N
             f"def test_project(popcorn_project):\n    assert popcorn_project.name == {name!r}\n"
         )
     run(pytester).assert_outcomes(passed=4)
+
+
+SELECTED = """
+import pytest
+
+def test_unmarked(popcorn_selected_project, popcorn_project, machine, request):
+    option = request.config.getoption("popcorn_config")
+    assert popcorn_selected_project.digest == popcorn_project.config(option).digest
+    assert machine.config_digest == popcorn_selected_project.digest
+    assert len(popcorn_selected_project.boot.memory_init) == (1 if option == "variant" else 0)
+
+@pytest.mark.popcorn(config="variant")
+def test_marker(popcorn_selected_project, popcorn_project, machine):
+    assert popcorn_selected_project.digest == popcorn_project.config("variant").digest
+    assert popcorn_selected_project.digest != popcorn_project.digest
+    assert machine.config_digest == popcorn_selected_project.digest
+
+def test_machine_and_selected_project_share_one_digest(popcorn_selected_project, machine):
+    assert machine.config_digest == popcorn_selected_project.digest
+    assert popcorn_selected_project.config(None).digest == popcorn_selected_project.digest
+
+@pytest.mark.popcorn(config=None)
+def test_marker_none(popcorn_selected_project, popcorn_project, machine):
+    assert popcorn_selected_project.digest == popcorn_project.digest
+    assert machine.config_digest == popcorn_selected_project.digest
+"""
+
+VARIANT = (
+    "variant=BASE.replace(boot=BASE.boot.replace("
+    'memory_init=[popcorn.MemoryInit("alu_rounds", bytes.fromhex("07000000"))]))'
+)
+
+
+def test_the_selected_project_follows_marker_then_option(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, configs=VARIANT)
+    pytester.makepyfile(SELECTED)
+    run(pytester).assert_outcomes(passed=4)
+    run(pytester, "--popcorn-config=variant").assert_outcomes(passed=4)
+
+
+def test_an_unknown_selected_config_fails_naming_the_known_ones(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, configs=VARIANT)
+    pytester.makepyfile("""
+        import pytest
+
+        @pytest.mark.popcorn(config="nope")
+        def test_marker(popcorn_selected_project):
+            pass
+
+        def test_option(popcorn_selected_project):
+            pass
+        """)
+    marker = run(pytester, "-k", "test_marker")
+    marker.assert_outcomes(errors=1, deselected=1)
+    marker.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+    option = run(pytester, "-k", "test_option", "--popcorn-config=nope")
+    option.assert_outcomes(errors=1, deselected=1)
+    option.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+
+
+def test_the_selected_project_alone_boots_no_machine(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, configs=VARIANT)
+    pytester.makepyfile("""
+        import pytest
+        from popcorn.pytest._session import popcorn_session
+
+        @pytest.mark.popcorn(config="variant")
+        def test_alone(popcorn_selected_project, request):
+            assert len(popcorn_selected_project.boot.memory_init) == 1
+            assert popcorn_session(request.config).booted_machines() == []
+        """)
+    run(pytester).assert_outcomes(passed=1)

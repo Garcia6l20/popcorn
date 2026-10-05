@@ -1,4 +1,5 @@
-"""The plugin's fixtures: `popcorn_project`, `machine` and `machine_factory`."""
+"""The plugin's fixtures: `popcorn_project`, `popcorn_selected_project`, `machine` and
+`machine_factory`."""
 
 from __future__ import annotations
 
@@ -196,6 +197,23 @@ def popcorn_project() -> Project:
     `machine` or `machine_factory` fail, naming the fix.
     """
     pytest.fail(MISSING_PROJECT, pytrace=False)
+
+
+@pytest.fixture
+def popcorn_selected_project(
+    request: pytest.FixtureRequest, _popcorn_session: PopcornSession, popcorn_project: object
+) -> Project:
+    """The `popcorn_project` with this test's config applied.
+
+    The config is the one `machine` and `machine_factory` run under: the `popcorn` marker's,
+    else `--popcorn-config`, else none, which gives the base project. Use it to boot machines
+    by hand with the same behaviour as `machine`.
+
+    Raises:
+        ConfigError: The selected config does not exist.
+    """
+    project = _checked(popcorn_project)
+    return _popcorn_session.project(settings_of(_item(request), _popcorn_session, project).key)
 
 
 @pytest.fixture
