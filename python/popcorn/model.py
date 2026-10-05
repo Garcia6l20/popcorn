@@ -244,8 +244,8 @@ def _make_spec(cls: type[Model]) -> _Spec:
 class Model(_core.ModelBase):
     """Base of a peripheral model written in Python.
 
-    Built by its machine, from `Machine(models={name: cls})`, a project file's
-    `[board.<periph>] model`, or `register()`: the constructor takes the subclass's own
+    Built by its machine, from `Machine(models={name: cls})`, a project's
+    `Periph(model=Use(cls))`, or `register()`: the constructor takes the subclass's own
     parameters only and must call `super().__init__()` first.
 
     State: the annotated fields of type int, bool, float, bytes, bytearray or str are the model
@@ -303,7 +303,7 @@ class Model(_core.ModelBase):
         if context is None:
             raise TypeError(
                 f"{type(self).__qualname__} is built by its machine: pass the class to "
-                "Machine(models=...), a project file or popcorn.model.register"
+                "Machine(models=...), a project's Periph(model=) or popcorn.model.register"
             )
         super().__init__()
         spec = _spec_of(type(self))

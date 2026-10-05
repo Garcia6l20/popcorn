@@ -1,6 +1,6 @@
 """A temperature sensor mocked in Python on I2C1, read by an LL driver every 10 ms of TIM6 time.
 
-`tempsensor.TempSensor` is a `popcorn.board.I2CTarget`: the project file attaches it at 0x48
+`tempsensor.TempSensor` is a `popcorn.board.I2CTarget`: the project attaches it at 0x48
 with its scripted readings, the test reaches the same object through `machine.board.devices`.
 The firmware keeps a running mean in `sensor_result` and drives PA5 high above 30 degrees.
 

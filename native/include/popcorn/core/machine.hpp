@@ -52,7 +52,7 @@ struct machine_options
   double cpi{1.0};
   /** @brief Records kept by the always-on trace ring. */
   std::size_t trace_capacity{4096};
-  /** @brief Model factory per peripheral name, the project file's explicit wiring. Overrides the
+  /** @brief Model factory per peripheral name, set explicitly. Overrides the
    * `periph::register_model` registry for that peripheral. */
   std::map<std::string, periph::model_factory, std::less<>> models{};
   /** @brief Whether a processor fault stops the run, the default, or enters the firmware's
@@ -87,7 +87,7 @@ struct machine_options
    * the machine refuses with config_error, and of the arch module's system space, which the arch
    * module's attach refuses. A description alias never targets it. */
   std::optional<address_range> scratch{};
-  /** @brief Digest of the configuration the machine was built from, such as a project file,
+  /** @brief Digest of the configuration the machine was built from, such as a project digest,
    * stored in every snapshot as `snapshot_data::config_digest`. Opaque to the core. */
   std::string config_digest{};
 };

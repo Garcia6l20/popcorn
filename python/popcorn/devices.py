@@ -1,15 +1,15 @@
 """Native bus devices: an AT25SF serial NOR flash on SPI, a 24xx EEPROM and a table-scripted
 target on I2C.
 
-Attach them as `popcorn.board` targets are, with `Machine(devices=)` or a project file's
-`[board.X] devices`, for example
-`{ model = "popcorn.devices:At25sf", jedec = [0x1F, 0x87, 0x01], size = 4194304 }`. They run in
+Attach them as `popcorn.board` targets are, with `Machine(devices=)` or a project's
+`Periph(devices=[...])`, for example
+`Device(At25sf, jedec=[0x1F, 0x87, 0x01], size=4194304)`. They run in
 C++, the bus models call them without Python. Their state is part of every machine snapshot,
 and they reset on POWER_ON and BROWN_OUT as the native devices document.
 
-Durations are VirtualDuration values of a whole number of nanoseconds. A project file writes
-them as strings such as "600 us", and the register keys of `TableTarget` replies as strings
-such as "0x0F" or "15".
+Durations are VirtualDuration values of a whole number of nanoseconds. A project writes
+them with `popcorn.units`, such as `us(600)`, and the register keys of `TableTarget` replies as
+integers.
 
 Call `contents()`, `snapshot()` and `restore()` only from the machine's thread while it is
 stopped. `restore()` on an attached device sets its state behind the bus model, which keeps

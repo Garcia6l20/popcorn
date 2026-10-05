@@ -9,9 +9,10 @@ unit on each path, master plus one channel, mute and volume read-write. The main
 what the speaker receives to the microphone. Descriptors use TinyUSB's example values: VID
 0xCafe, PID 0x4010, strings `TinyUSB` and `TinyUSB Headset`.
 
-```toml
-[board.OTG_FS]
-host = {}
+```python
+board={
+    "OTG_FS": popcorn.Periph(host=UsbHostOptions()),
+},
 ```
 
 The host's audio driver binds the audio function at configuration and probes it as Linux

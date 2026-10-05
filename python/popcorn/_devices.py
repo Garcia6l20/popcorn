@@ -153,11 +153,11 @@ def check_address(address: int) -> None:
 class I2CTarget(_core.I2CTargetBase):
     """A target on an I2C bus, answering one 7-bit address, written in Python.
 
-    Attach it with `Machine(devices={"I2C1": [target]})` or a project file's
-    `[board.I2C1] devices`. The I2C model calls the `on_` methods at the end of each bus phase,
-    one byte at a time: the controller decides how many bytes it reads, so a target never knows
-    a transfer's length in advance. Of two targets answering one address, the first attached
-    answers.
+    Attach it with `Machine(devices={"I2C1": [target]})` or a project's
+    `Periph(devices=[Device(cls, address=...)])`. The I2C model calls the `on_` methods at the end
+    of each bus phase, one byte at a time: the controller decides how many bytes it reads, so a
+    target never knows a transfer's length in advance. Of two targets answering one address, the
+    first attached answers.
 
     Time: `at` is the virtual time since power-on, as a VirtualTime. Only POWER_ON restarts
     it: after a reset of another kind it keeps counting while the machine's own time restarts
@@ -261,18 +261,18 @@ class I2CTarget(_core.I2CTargetBase):
 class SpiTarget(_core.SpiTargetBase):
     """A device on an SPI bus, written in Python.
 
-    Attach it with `Machine(devices={"SPI1": [device]})` or a project file's
-    `[board.SPI1] devices`. The SPI model calls `on_select` on each chip select edge and
-    `on_exchange` for each frame while the device is selected, full duplex. Devices sharing a
-    chip select, or several on the hardware SS output, are all selected and see every frame,
-    their replies ANDed as on an open-drain MISO.
+    Attach it with `Machine(devices={"SPI1": [device]})` or a project's
+    `Periph(devices=[Device(cls, cs=...)])`. The SPI model calls `on_select` on each chip select
+    edge and `on_exchange` for each frame while the device is selected, full duplex. Devices
+    sharing a chip select, or several on the hardware SS output, are all selected and see every
+    frame, their replies ANDed as on an open-drain MISO.
 
     Chip select: `cs` names the GPIO pin, such as "PA4", active low. The SPI model follows the
     pin from the machine's first reset or snapshot load on. None selects the device by the SPI
     hardware SS output, from the start to the end of each transfer.
 
-    Project files: a class used from `[board.X] devices` with a `cs` key takes `cs` as a keyword
-    argument and passes it to `super().__init__`.
+    Projects: a class used in `Device(cls, cs=...)` takes `cs` as a keyword argument and passes
+    it to `super().__init__`.
 
     Time, state, reset, board and lifetime: as `I2CTarget`.
     """

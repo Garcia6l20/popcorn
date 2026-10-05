@@ -15,17 +15,13 @@ master:
 - The firmware powers the codec on with `HAL_I2C_Mem_Write`, waits for four complete callbacks on
   the receive side, then powers it off and reaches `codec_stopped`.
 
-The project file attaches the codec and wires its clock to block A:
+The `Project` in `conftest.py` attaches the codec and wires its clock to block A:
 
-```toml
-[models]
-python = ["."]
-
-[board.I2C1]
-devices = [{ address = 0x1A, model = "stereocodec:StereoCodec" }]
-
-[board.SAI1.A]
-clocked_by = "I2C1:0x1A"
+```python
+board={
+    "I2C1": popcorn.Periph(devices=[popcorn.Device(StereoCodec, address=0x1A)]),
+    "SAI1": popcorn.Periph(audio={"A": AudioOptions(clocked_by="I2C1:0x1A")}),
+},
 ```
 
 The codec starts and stops the clock from its I2C write handler:
@@ -36,9 +32,9 @@ self.board.set_audio_clock("SAI1", "A", 48_000 if self.power else 0)
 
 `clocked_by` is what allows the call: a device may drive the clock of the SAI blocks wired to
 it, and the call raises ConfigError for any other block. A test drives the same clock without a
-device through `machine.periph.SAI1.audio("A").external_frame_hz`. The Python equivalent of the
-project keys is `Machine(devices={"I2C1": [codec]}, audio={"SAI1": {"A":
-AudioOptions(clocked_by="I2C1:0x1A")}})`.
+device through `machine.periph.SAI1.audio("A").external_frame_hz`. A test building its own
+machine passes
+`Machine(devices={"I2C1": [codec]}, audio={"SAI1": {"A": AudioOptions(clocked_by="I2C1:0x1A")}})`.
 
 ## Run
 

@@ -1,9 +1,9 @@
 """A TinyUSB 0.21.0 USB Audio 2.0 headset, probed and streamed by popcorn's virtual host.
 
-`[board.OTG_FS] host = {}` in `popcorn.toml` plugs a virtual full-speed host into the OTG_FS
-model from power-on. It enumerates the device, then its audio driver probes the function as
-Linux snd-usb-audio does: the clock's sample rate range, current rate and validity for each
-streaming setting, then the mute and volume of each feature unit.
+`Periph(host=UsbHostOptions())` on OTG_FS in the project plugs a virtual full-speed host into
+the OTG_FS model from power-on. It enumerates the device, then its audio driver probes the
+function as Linux snd-usb-audio does: the clock's sample rate range, current rate and validity
+for each streaming setting, then the mute and volume of each feature unit.
 
 `machine.periph.OTG_FS.host.audio()` is the function. `audio.speaker` sends PCM on the
 isochronous OUT endpoint, `audio.mic` receives it on the isochronous IN endpoint, one packet per

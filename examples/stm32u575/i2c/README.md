@@ -16,10 +16,9 @@ uv run pytest -q examples/stm32u575/i2c
 
 ## Read first
 
-- `popcorn.toml`: the EEPROM on I2C1 as `popcorn.devices:Eeprom24xx` with a 5 ms write
-  cycle. `[configs.slow-eeprom]` doubles the write cycle. `[configs.scripted]` replaces the
-  EEPROM with a `popcorn.devices:TableTarget` that answers reads of register 0x0100 from a
-  table.
+- `conftest.py`: the EEPROM on I2C1 as `Device(Eeprom24xx, address=0x50, write_cycle=ms(5))`.
+  `with_configs` adds `slow-eeprom`, which doubles the write cycle, and `scripted`, which
+  replaces the EEPROM with a `TableTarget` that answers reads of register 0x0100 from a table.
 - `test_i2c.py`:
   - `Eeprom24xx.contents()` checked against what the firmware wrote.
   - `await machine_factory.booted("slow-eeprom")` builds a second machine from another config

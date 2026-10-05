@@ -28,8 +28,8 @@ uv run pytest -q examples/stm32u575/python_model
   virtual delay and returns a handle that `self.cancel` takes. `self.irq`, an `IrqLine`
   field, drives the interrupt. `self.regs` and `self.fields` read and write registers and
   fields by name. The annotated fields are the state snapshots save and a reset restores.
-- `popcorn.toml`: `[board.RNG] model = "rngmodel:Rng"` puts the model in the RNG slot, found
-  through `[models] python = ["."]`. `[configs.seeded]` passes `seed = 7` to its constructor.
+- `conftest.py`: `board={"RNG": Periph(model=Use(Rng))}` puts the model in the RNG slot.
+  `with_configs(seeded=...)` passes `seed=7` to its constructor.
 - `test_python_model.py`:
   - a machine built without the model, strict, raises ModelError naming RNG;
   - the words the firmware received equal the seeded sequence, computed in the test from

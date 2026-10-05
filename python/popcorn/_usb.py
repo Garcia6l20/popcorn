@@ -1,9 +1,9 @@
 """The virtual USB host of a device controller: cable, enumeration, descriptors, control
 requests, CDC ACM streams, HID functions and USB Audio 2.0 functions, in virtual time.
 
-`[board.OTG_FS] host = {}` in the project file plugs a full-speed host into the controller,
-`machine.periph.OTG_FS.host` is its `UsbHost`. Everything below Python runs in model events:
-no Python call per transaction.
+`Periph(host=UsbHostOptions())` on OTG_FS in the project plugs a full-speed host into the
+controller, `machine.periph.OTG_FS.host` is its `UsbHost`. Everything below Python runs in
+model events: no Python call per transaction.
 
 Example:
     host = machine.periph.OTG_FS.host
@@ -378,7 +378,7 @@ class CdcStream:
         Raises:
             ValueError: `n` is negative.
             RuntimeError: The function is bridged to a pty, which takes what the device sends:
-                `connect = "pty"` or `m.board.pty(name)`.
+                `Periph(connect="pty")` or `m.board.pty(name)`.
             EmulationError: The run stopped for another reason, such as a fault.
         """
         self._check_read(n)
@@ -1750,8 +1750,8 @@ class UsbHosts:
         if found is None:
             if name not in self._names:
                 raise ModelError(
-                    f"{name} has no virtual USB host: add `host = {{}}` to [board.{name}], or"
-                    f" pass usb={{{name!r}: UsbHostOptions()}} to Machine",
+                    f"{name} has no virtual USB host: add `Periph(host=UsbHostOptions())` to its"
+                    f" board entry, or pass usb={{{name!r}: UsbHostOptions()}} to Machine",
                     peripheral=name,
                 )
             found = self._hosts[name] = UsbHost(

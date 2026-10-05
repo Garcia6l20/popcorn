@@ -393,7 +393,7 @@ class Machine:
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice yields to the event loop.
             slice_wall_budget: Wall seconds after which a slice yields to the event loop.
-            config_digest: Digest of the configuration, such as a project file's, that snapshots
+            config_digest: Digest of the configuration, such as a project's digest, that snapshots
                 record.
             arena_base: First address of the call arena, a RAM region outside the description,
                 None for no arena. It must not overlap a region or a peripheral.

@@ -9,8 +9,8 @@ The firmware runs `HAL_CRC_Init` three times, then stops at `computed`:
 - a 16-bit polynomial 0x1021 from 0xFFFF on the same bytes: CRC-16/IBM-3740.
 
 The HAL feeds a byte buffer four bytes per word write, then a half-word and a byte write for the
-tail, so the last two CRCs also cover sub-word CRC_DR writes. The project file sets
-`[models] strict = true`: any register access the CRC model does not serve fails the run.
+tail, so the last two CRCs also cover sub-word CRC_DR writes. The project sets
+`Project(strict=True)`: any register access the CRC model does not serve fails the run.
 """
 
 import logging

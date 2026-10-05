@@ -1,7 +1,7 @@
 """A TinyUSB 0.21.0 composite device, CDC ACM plus HID, enumerated by popcorn's virtual host.
 
-`[board.OTG_FS] host = {}` in `popcorn.toml` plugs a virtual full-speed host into the OTG_FS
-model from power-on. It sees the pull-up TinyUSB enables in `tusb_init`, waits the 100 ms
+`Periph(host=UsbHostOptions())` on OTG_FS in the project plugs a virtual full-speed host into
+the OTG_FS model from power-on. It sees the pull-up TinyUSB enables in `tusb_init`, waits the 100 ms
 connect debounce, resets the bus, then enumerates as Linux does: device descriptor, a second
 reset, SET_ADDRESS 1, descriptors and strings, SET_CONFIGURATION 1. All of it runs natively in
 virtual time, in model events: Python only waits for the result.

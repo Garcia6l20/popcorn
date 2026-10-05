@@ -1,4 +1,4 @@
-"""Native bus devices from Python and project files: popcorn.devices."""
+"""Native bus devices from Python and projects: popcorn.devices."""
 
 from __future__ import annotations
 

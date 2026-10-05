@@ -11,8 +11,8 @@ An STM32U575 application computes three CRCs through ST's HAL CRC driver, `HAL_C
 | `ibm_3740` | polynomial 0x1021, 16 bits, init 0xFFFF, bytes | "123456789" | 0x29B1, CRC-16/IBM-3740 |
 
 The HAL writes a byte buffer to CRC_DR four bytes per word, then a half-word and a byte for the
-tail, so the byte cases also run the 16- and 8-bit CRC_DR writes. `popcorn.toml` sets
-`[models] strict = true`, so an access the CRC model does not serve fails the run.
+tail, so the byte cases also run the 16- and 8-bit CRC_DR writes. `conftest.py` sets
+`strict=True`, so an access the CRC model does not serve fails the run.
 
 ## Run
 

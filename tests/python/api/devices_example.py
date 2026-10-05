@@ -1,4 +1,4 @@
-"""Bus devices written in Python for the device tests and the project file examples."""
+"""Bus devices written in Python for the device tests and the project examples."""
 
 from __future__ import annotations
 

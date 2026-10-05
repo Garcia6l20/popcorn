@@ -25,8 +25,8 @@ uv run pytest -q examples/stm32u575/spi
 
 ## Read first
 
-- `popcorn.toml`: the chip, the prebuilt image, `[boot] vtor` entering the application's own
-  vector table, and the flash on SPI1 with its page program time set to 800 us.
+- `conftest.py`: the chip, the prebuilt image, `Boot(vtor=0x800C008)` entering the application's
+  own vector table, and the flash on SPI1 with its page program time set to 800 us.
 - `test_spi.py`: the `machine` fixture, the `popcorn` marker's instruction budget, runs to a
   symbol, intercepts that time two firmware hooks in virtual time, the DWARF view of
   `flash_result`, the flash contents, and a snapshot with its restore.

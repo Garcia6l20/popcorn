@@ -11,7 +11,7 @@ store into flash without PG shows the PGSERR flag. Last, it reads the device ele
 signature of RM0456 chapter 76 with `LL_GetFlashSize`, `LL_GetPackageType` and the
 `LL_GetUID_Word` calls. The code uses LL and CMSIS only.
 
-`[models] strict = true` makes any register access the models do not serve, and any flash wait
+`Project(strict=True)` makes any register access the models do not serve, and any flash wait
 state count below RM0456 Table 54 for the clock and voltage range, fail the run instead of being
 logged.
 
@@ -25,7 +25,7 @@ uv run pytest -q examples/stm32u575/pwr_flash
 
 ## Read first
 
-- `popcorn.toml`: the chip, the image, a boot to `main`, and strict models. No board device:
+- `conftest.py`: the chip, the image, a boot to `main`, and `strict=True`. No board device:
   flash is part of the chip.
 - `test_pwr_flash.py`: the data page read through `machine.mem` before the erase, after it and
   after the program, the FLASH_NSSR flags through the peripheral view, the erase and program

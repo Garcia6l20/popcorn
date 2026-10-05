@@ -6,9 +6,9 @@ converts both channels, 16 rounds with `HAL_Delay(1)` between them, into `adc_re
 two milliseconds of counts. Channel 1 is converted a few tens of microseconds after channel 0,
 so its mirror lags by less than one millisecond of counts.
 
-Two ways to attach a mock: the project file's `[board.SPI1] devices`, which the `machine`
-fixture uses, and `machine_factory.booted(devices={"SPI1": [adc]})`, which can pass what a
-project file cannot, here a Python function as the sample source. The factory machine keeps the
+Two ways to attach a mock: the project's `Periph(devices=[Device(Adc, ...)])` on SPI1, which the
+`machine` fixture uses, and `machine_factory.booted(devices={"SPI1": [adc]})`, which can pass what
+a project cannot, here a Python function as the sample source. The factory machine keeps the
 rest of the project build. An ADC holding a function cannot key the boot cache: that machine
 boots each time.
 """

@@ -1,7 +1,7 @@
 """SAI1 as a slave pair clocked by an I2C codec, two 2D circular GPDMA lists, HAL.
 
 `stereocodec.StereoCodec` is the codec, a `popcorn.board.I2CTarget` on I2C1 at 0x1A. The project
-file wires its frame clock to SAI1 block A with `[board.SAI1.A] clocked_by = "I2C1:0x1A"`, so its
+wires its frame clock to SAI1 block A with `AudioOptions(clocked_by="I2C1:0x1A")`, so its
 `self.board.set_audio_clock` may start and stop that clock. Block B is synchronous to A and
 frames with it.
 

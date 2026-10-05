@@ -2,7 +2,7 @@
 
 The firmware asks the HAL for eight random words, each by `HAL_RNG_GenerateRandomNumber_IT`,
 and stores them from `HAL_RNG_ReadyDataCallback`. `rngmodel.Rng` is a `popcorn.model.Model`:
-the project file puts it in the RNG slot with `[board.RNG] model`, and its words come from a
+the project puts it in the RNG slot with `Periph(model=Use(Rng))`, and its words come from a
 seeded sequence the test computes too.
 
 `HAL_RNG_Init` waits for the first DRDY without reading DR, so the first callback comes as

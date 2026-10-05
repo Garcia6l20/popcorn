@@ -4,7 +4,7 @@ The firmware is HAL only. TIM15 updates every 10 ms and its TRGO starts one regu
 IN1, IN2, IN5 and IN6, 12-bit, 8x oversampling shifted right by 3, so each result is the mean of
 8 samples. A circular GPDMA list moves each result into `samples`, two scans deep: the half
 transfer callback copies the first scan into `monitor.latest`, the complete callback the second.
-AWD3 watches IN6 with a 1241 to 2482 window, 1.0 V to 2.0 V at the 3.3 V supply the project file
+AWD3 watches IN6 with a 1241 to 2482 window, 1.0 V to 2.0 V at the 3.3 V supply the project
 sets. Each out-of-window result of IN6 calls `HAL_ADCEx_LevelOutOfWindow3Callback`, which counts
 `monitor.alarms`.
 

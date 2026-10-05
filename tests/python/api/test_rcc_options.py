@@ -1,4 +1,4 @@
-"""The board clock sources of the built-in STM32 RCC model: Machine(rcc=) and [board.RCC]."""
+"""The board clock sources of the built-in STM32 RCC model: Machine(rcc=) and Project(rcc=)."""
 
 from __future__ import annotations
 
