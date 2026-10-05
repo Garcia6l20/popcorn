@@ -325,23 +325,23 @@ TEST_CASE("an even polynomial logs once and computes, a model_error when strict"
       popcorn::model_error);
 }
 
-TEST_CASE("a snapshot with POLYSIZE 16 restores the running CRC")
+TEST_CASE("a snapshot with POLYSIZE 16, REV_IN and REV_OUT restores the running CRC")
 {
   crc_rig const r;
-  r.configure(cr_poly16, 0x1021, 0xFFFF);
+  r.configure(cr_poly16 | cr_rev_byte | cr_rev_out, 0x8005, 0);
   r.feed_bytes("1234");
   auto const saved = r.f.target->snapshot();
   r.feed_bytes("56789");
-  REQUIRE(r.read(dr) == 0x29B1);
+  REQUIRE(r.read(dr) == 0xBB3D);
   r.f.target->restore(saved);
   r.feed_bytes("56789");
-  CHECK(r.read(dr) == 0x29B1);
+  CHECK(r.read(dr) == 0xBB3D);
 
   crc_rig const other;
   other.f.target->restore(
       core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
   other.feed_bytes("56789");
-  CHECK(other.read(dr) == 0x29B1);
+  CHECK(other.read(dr) == 0xBB3D);
   CHECK(r.logged.empty());
   CHECK(other.logged.empty());
 }
@@ -357,22 +357,27 @@ TEST_CASE("a DR write that is not right-aligned is ignored and logs once")
   CHECK(r.logged[0].reg == "DR");
 }
 
-TEST_CASE("a REV_IN group wider than the write and REV_OUT below 32 bits log once")
+TEST_CASE("REV_IN reverses a byte write by the byte whatever its group")
 {
-  crc_rig const r{false};
-  r.write(cr, cr_rev_word | cr_reset);
-  r.store(dr, 1, 0x31);
-  r.store(dr, 2, 0x3132);
-  CHECK(r.read(dr) == 0xFFFF'FFFF);
-  REQUIRE(r.logged.size() == 1);
-  CHECK(r.logged[0].reg == "CR");
+  crc_rig const r;
+  for(auto const control : {cr_rev_byte, cr_rev_half, cr_rev_word})
+  {
+    r.write(cr, control | cr_rev_out | cr_reset);
+    r.feed_bytes(check_input);
+    CHECK((r.read(dr) ^ 0xFFFF'FFFF) == 0xCBF4'3926);
+  }
+  CHECK(r.logged.empty());
+}
 
-  r.configure(cr_poly16 | cr_rev_out, 0x8005, 0);
+TEST_CASE("REV_OUT reverses the low POLYSIZE bits, CRC-16/ARC")
+{
+  crc_rig const r;
+  r.configure(cr_poly16 | cr_rev_byte | cr_rev_out, 0x8005, 0);
   r.feed_bytes(check_input);
-  CHECK(r.read(dr) == 0xFEE8);
-  CHECK(r.read(dr) == 0xFEE8);
-  REQUIRE(r.logged.size() == 2);
-  CHECK(r.logged[1].reg == "CR");
+  CHECK(r.read(dr) == 0x0000'BB3D);
+  r.write(cr, cr_poly16 | cr_rev_byte);
+  CHECK(r.read(dr) == 0x0000'BCDD);
+  CHECK(r.logged.empty());
 }
 
 TEST_CASE("a narrow access to a register other than DR logs once per direction")
@@ -393,7 +398,7 @@ TEST_CASE("a narrow access to a register other than DR logs once per direction")
   CHECK(r.logged[1].reg == "POL");
 }
 
-TEST_CASE("forbidden and unmodelled CRC accesses raise model_error under strict peripherals")
+TEST_CASE("forbidden CRC accesses raise model_error under strict peripherals")
 {
   crc_rig const r;
   auto const    throws_on_write = [&](std::uint32_t offset, std::uint8_t size) {
@@ -405,11 +410,6 @@ TEST_CASE("forbidden and unmodelled CRC accesses raise model_error under strict 
   throws_on_write(idr, 2);
   CHECK_THROWS_AS(
       static_cast<void>(r.f.target->mem().read(crc_base + pol, 2)), popcorn::model_error);
-  r.write(cr, cr_rev_word);
-  throws_on_write(dr, 1);
-  r.write(cr, cr_poly16 | cr_rev_out);
-  CHECK_THROWS_AS(
-      static_cast<void>(r.f.target->mem().read(crc_base + dr, 4)), popcorn::model_error);
-  r.write(cr, 0);
   CHECK(r.read(dr) == 0xFFFF'FFFF);
+  CHECK(r.read(idr) == 0);
 }

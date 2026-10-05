@@ -67,8 +67,10 @@ struct crc_state
 /**
  * @brief CRC calculation unit of the STM32U5, RM0456 section 24. A right-aligned 8-, 16- or
  *        32-bit CRC_DR write feeds its bits MSB first through the low POLYSIZE bits of CRC_POL,
- *        after the REV_IN reversal by byte, half-word or word. The running CRC is kept
- *        unreversed in the CRC_DR storage word, REV_OUT reverses the CRC_DR read only. The
+ *        after the REV_IN reversal by byte, half-word or word, a group no wider than the
+ *        write. The running CRC is kept unreversed in the CRC_DR storage word, REV_OUT reverses
+ *        the low POLYSIZE bits of the CRC_DR read only, the bits above read 0. RM0456 gives
+ *        both readings for 32-bit data only, unverified on silicon below that. The
  *        computation completes on the write: the input buffer hides the 4 HCLK latency,
  *        24.3.3, so no access stalls. CR.RESET reloads CRC_DR from the low POLYSIZE bits of
  *        CRC_INIT and reads 0. A CRC_INIT write reloads CRC_DR, a CRC_POL write does not.
@@ -80,9 +82,6 @@ struct crc_state
  *        24.4 forbids, log once, raise model_error under strict_peripherals, and are ignored. A
  *        narrow read of another register logs once, raises model_error under
  *        strict_peripherals, and returns the stored bits.
- *        Not modelled, logged once, a model_error under strict_peripherals: a REV_IN group
- *        wider than the CRC_DR write, which feeds nothing, and REV_OUT with POLYSIZE other than
- *        32 bits, read unreversed.
  */
 class crc final : public dispatch_model<crc, crc_state>
 {
@@ -110,7 +109,7 @@ public:
 private:
   [[nodiscard]] auto polynomial_width() const -> unsigned;
   [[nodiscard]] auto crc_mask() const -> std::uint32_t;
-  [[nodiscard]] auto output() -> std::uint32_t;
+  [[nodiscard]] auto output() const -> std::uint32_t;
   void               feed(std::uint32_t data, unsigned width);
   void               set_crc(std::uint32_t value);
   void unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message);
@@ -125,9 +124,7 @@ private:
   field_ref      rev_in_;
   field_ref      rev_out_;
   bool           misaligned_logged_{};
-  bool           group_logged_{};
   bool           even_logged_{};
-  bool           output_logged_{};
   bool           narrow_write_logged_{};
   bool           narrow_read_logged_{};
 };
@@ -169,13 +166,6 @@ auto crc::on_write(
       return {};
     }
     auto const width = 8u * size;
-    if(input_groups[get(regs_, rev_in_)] > width)
-    {
-      unmodelled(
-          group_logged_, "CR", reg("CR").offset,
-          "REV_IN group wider than the CRC_DR write not modelled, the write is ignored");
-      return {};
-    }
     if((regs_.peek(poly_.offset) & 1u) == 0)
     {
       unmodelled(
@@ -249,21 +239,14 @@ auto crc::crc_mask() const -> std::uint32_t
   return width >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << width) - 1u;
 }
 
-auto crc::output() -> std::uint32_t
+auto crc::output() const -> std::uint32_t
 {
   auto const value = regs_.peek(data_.offset);
   if(get(regs_, rev_out_) == 0)
   {
     return value;
   }
-  if(polynomial_width() != 32)
-  {
-    unmodelled(
-        output_logged_, "CR", reg("CR").offset,
-        "REV_OUT with POLYSIZE other than 32 bits not modelled, CRC_DR reads unreversed");
-    return value;
-  }
-  return reversed(value, 32);
+  return reversed(value & crc_mask(), polynomial_width());
 }
 
 void crc::feed(std::uint32_t data, unsigned width)
@@ -271,7 +254,8 @@ void crc::feed(std::uint32_t data, unsigned width)
   auto const top   = polynomial_width() - 1;
   auto const mask  = crc_mask();
   auto const poly  = regs_.peek(poly_.offset) & mask;
-  auto const input = reversed_groups(data, width, input_groups[get(regs_, rev_in_)]);
+  auto const group = std::min(input_groups[get(regs_, rev_in_)], width);
+  auto const input = reversed_groups(data, width, group);
   auto       value = regs_.peek(data_.offset);
   for(auto bit = width; bit-- > 0;)
   {
