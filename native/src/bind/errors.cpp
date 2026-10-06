@@ -1,6 +1,7 @@
 #include "errors.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/host.hpp>
 
 #include <reflex/py.hpp>
 
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <exception>
 #include <meta>
+#include <stdexcept>
 #include <typeinfo>
 #include <utility>
 
@@ -136,6 +138,16 @@ void translate(std::exception_ptr const& thrown)
   {
     PyErr_SetString(PyExc_NotImplementedError, e.what());
   }
+  catch(core::machine_closed const&)
+  {
+    auto const type = errors_module().attr("EmulationError");
+    raise(type, type("the machine was closed"));
+  }
+  catch(core::operation_cancelled const& e)
+  {
+    auto const type = errors_module().attr("EmulationError");
+    raise(type, type(e.what()));
+  }
   catch(error const& e)
   {
     if(typeid(e) != typeid(error))
@@ -172,6 +184,11 @@ void set_python_error(std::exception_ptr const& thrown) noexcept
     catch(nb::python_error const& raised)
     {
       nb::python_error{raised}.restore();
+      return;
+    }
+    catch(std::invalid_argument const& invalid)
+    {
+      PyErr_SetString(PyExc_ValueError, invalid.what());
       return;
     }
     catch(...)

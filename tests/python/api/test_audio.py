@@ -203,19 +203,20 @@ def test_the_accessor_refuses_other_blocks_and_peripherals(
         asyncio.run(m.periph.SAI1.audio("B").write([1 << 32]))
 
 
-def test_a_write_from_another_thread_during_a_run_is_refused(
+def test_a_write_from_another_thread_during_a_run_is_posted(
     u575: popcorn.MachineDescription,
 ) -> None:
     m = sai_machine(u575)
     receiver = m.periph.SAI1.audio("B")
 
-    async def body() -> None:
-        async with m.running():
-            await asyncio.to_thread(asyncio.run, receiver.write([1]))
+    async def write() -> VirtualTime:
+        return await receiver.write([1])
 
-    with pytest.raises(RuntimeError, match="another thread"):
-        asyncio.run(body())
-    assert receiver.queued == 0
+    async def body() -> VirtualTime:
+        async with m.running():
+            return await asyncio.to_thread(asyncio.run, write())
+
+    assert asyncio.run(body()) >= VirtualTime(0)
 
 
 def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
@@ -344,9 +345,16 @@ def test_an_external_clock_set_from_another_thread_during_a_run_is_refused(
         async with m.running():
             await asyncio.to_thread(start)
 
-    with pytest.raises(RuntimeError, match="another thread"):
+    with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
         asyncio.run(body())
     assert sender.external_frame_hz == 0
+
+    async def posted() -> None:
+        async with m.running():
+            await m.write((m.ref.periph.SAI1.audio("A").external_frame_hz, 16_000))
+
+    asyncio.run(posted())
+    assert sender.external_frame_hz == 16_000
 
 
 class CodecStandIn(I2CTarget):

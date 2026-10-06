@@ -7,13 +7,14 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/vector.h>
 
-#include <chrono>
 #include <exception>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <variant>
 
@@ -94,65 +95,17 @@ auto machine_handle::lock_for_request() const -> core::held_lock
 {
   refuse_inside(*host_);
   detail::require_host_start();
-  auto held = detail::require_owned(detail::lock_releasing_gil(*host_));
+  auto held = lock_releasing();
   if(host_->busy(held, core::member_id{}))
   {
-    throw popcorn::machine_busy("the machine already runs a goal or a free run");
+    throw popcorn::machine_busy("a run, step, wait or running() is already active on this machine");
   }
   return held;
 }
 
-auto machine_handle::run_slice(slice_args const& args, std::optional<nb::object> stop_when)
-    -> slice_outcome
+auto machine_handle::lock_releasing() const -> core::held_lock
 {
-  core::run_goal goal{
-      .until      = args.until,
-      .budget     = std::nullopt,
-      .exact      = std::nullopt,
-      .until_time = std::nullopt,
-      .stop_when  = predicate_of(std::move(stop_when)),
-      .once =
-          core::single_slice{
-                             .bounds =
-                  {.max_instructions = icount{args.max_instructions},
-                   .wall_budget      = std::chrono::nanoseconds{args.wall_budget_ns}},
-                             .leave_until = args.leave_until,
-                             },
-  };
-  if(args.budget_left)
-  {
-    goal.budget = icount{*args.budget_left};
-  }
-  if(args.exact_instructions)
-  {
-    goal.exact = icount{*args.exact_instructions};
-  }
-  if(args.until_time_ps)
-  {
-    goal.until_time = vtime{*args.until_time_ps};
-  }
-  auto future = [&] {
-    auto const held = lock_for_request();
-    return host_->run(held, core::member_id{}, std::move(goal));
-  }();
-  detail::future_request<core::goal_result> request{
-      future, [](core::goal_result const&) { return nb::none(); }, cancel_goal(host_)};
-  detail::wait_releasing_gil(request, std::nullopt);
-  core::goal_result result;
-  try
-  {
-    result = future.get();
-  }
-  catch(nb::python_error const& raised)
-  {
-    throw nb::python_error(raised);
-  }
-  slice_outcome out{.stopped = std::nullopt, .executed = result.executed.value};
-  if(not result.yielded)
-  {
-    out.stopped = record(result.stopped);
-  }
-  return out;
+  return detail::require_owned(detail::lock_releasing_gil(*host_));
 }
 
 auto machine_handle::run_goal(
@@ -186,6 +139,54 @@ auto machine_handle::run_goal(
       cancel_goal(host_))};
 }
 
+auto machine_handle::call_goal(
+    arch::call_frame const&      frame,
+    std::optional<std::uint64_t> budget,
+    std::optional<nb::object>    prepare) -> host_future_handle
+{
+  auto           ended = std::make_shared<call_outcome>();
+  core::run_goal goal{.finish = [ended](core::machine& target, stop const* stopped) {
+    if(stopped != nullptr and stopped->reason == stop_reason::fault)
+    {
+      for(auto const& reg : target.regs().list())
+      {
+        ended->registers.push_back(target.regs().read(reg));
+      }
+    }
+    if(target.in_call())
+    {
+      ended->bits = target.end_call();
+    }
+  }};
+  if(budget)
+  {
+    goal.budget = icount{*budget};
+  }
+  auto future = [&] {
+    auto const              held = lock_for_request();
+    core::owner_scope const owning{*host_, held};
+    auto&                   target = host_->member(held, core::member_id{});
+    if(target.in_call())
+    {
+      throw popcorn::machine_busy("a call is already in progress on this machine");
+    }
+    if(prepare and not prepare->is_none())
+    {
+      (*prepare)();
+    }
+    target.begin_call(frame);
+    return host_->run(held, core::member_id{}, std::move(goal));
+  }();
+  return host_future_handle{std::make_shared<detail::future_request<core::goal_result>>(
+      std::move(future),
+      [ended](core::goal_result const& result) {
+        auto outcome    = *ended;
+        outcome.stopped = record(result.stopped);
+        return nb::cast(std::move(outcome));
+      },
+      cancel_goal(host_))};
+}
+
 void machine_handle::start()
 {
   auto const held = lock_for_request();
@@ -194,6 +195,15 @@ void machine_handle::start()
 
 auto machine_handle::halt() -> nb::object
 {
+  if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
+  {
+    auto const held = lock_releasing();
+    if(host_->busy(held, core::member_id{}) and not host_->session_open(held, core::member_id{}))
+    {
+      throw popcorn::machine_busy(
+          "a run, step or call is active, not a free run: cancel its task instead");
+    }
+  }
   std::optional<core::held_end> ended;
   {
     nb::gil_scoped_release const released;
@@ -210,16 +220,16 @@ auto machine_handle::halt() -> nb::object
   return detail::python_exception(std::get<std::exception_ptr>(*ended));
 }
 
-auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::uint64_t> deadline_ps)
+auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::uint64_t> for_ps)
     -> host_future_handle
 {
   core::waiter_spec spec{.ready = predicate_of(std::move(ready))};
-  if(deadline_ps)
+  if(for_ps)
   {
-    spec.deadline = vtime{*deadline_ps};
+    spec.after = vtime{*for_ps};
   }
   refuse_inside(*host_);
-  auto const held = detail::require_owned(detail::lock_releasing_gil(*host_));
+  auto const held = lock_releasing();
   if(not host_->session_open(held, core::member_id{}))
   {
     throw std::runtime_error("wait() needs a free run opened by start()");
@@ -229,6 +239,80 @@ auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::ui
   return host_future_handle{std::make_shared<detail::future_request<stop>>(
       std::move(future), [](stop const& stopped) { return nb::cast(record(stopped)); },
       [waiting = std::move(waiting)] mutable { waiting.drop(); })};
+}
+
+auto machine_handle::busy() const -> bool
+{
+  if(host_->owns_engine())
+  {
+    return core::detail::host_locks_held == 0;
+  }
+  auto const held = lock_releasing();
+  return host_->busy(held, core::member_id{});
+}
+
+auto machine_handle::session_open() const -> bool
+{
+  if(host_->owns_engine() and core::detail::host_locks_held > 0)
+  {
+    return false;
+  }
+  auto const held = lock_releasing();
+  return host_->session_open(held, core::member_id{});
+}
+
+auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
+    -> host_future_handle
+{
+  if(core::detail::on_host_thread or core::detail::host_locks_held > 0)
+  {
+    throw std::runtime_error("a handler accesses the machine directly");
+  }
+  auto callable = detail::held(std::move(body));
+  auto command  = [callable](core::machine&) {
+    detail::gil_entry const gil;
+    std::ignore = (*callable)();
+  };
+  std::optional<vtime> at;
+  if(at_ps)
+  {
+    at = vtime{*at_ps};
+  }
+  auto future = [&] {
+    auto const held = lock_releasing();
+    return host_->post(held, core::member_id{}, std::move(command), at);
+  }();
+  auto withdraw = [host = std::weak_ptr{host_}, future] {
+    if(auto const on = host.lock())
+    {
+      auto const held = detail::lock_releasing_gil(*on);
+      if(held.owns_lock())
+      {
+        std::ignore = on->withdraw(held, core::member_id{}, future);
+      }
+    }
+  };
+  return host_future_handle{std::make_shared<detail::future_request<vtime>>(
+      std::move(future), [](vtime const& ran) { return nb::cast(ran.ps); }, std::move(withdraw))};
+}
+
+auto machine_handle::parked(nb::object fn) -> nb::object
+{
+  return access([&fn](core::machine&) { return fn(); });
+}
+
+void machine_handle::set_boundary_hook(std::optional<nb::object> hook)
+{
+  std::shared_ptr<detail::python_callable> made;
+  if(hook and not hook->is_none())
+  {
+    made = detail::held_bare(std::move(*hook));
+  }
+  {
+    std::scoped_lock const lock{pump_->mutex};
+    std::swap(pump_->hook, made);
+    pump_->set.store(pump_->hook != nullptr);
+  }
 }
 
 auto machine_handle::instructions() const -> std::uint64_t

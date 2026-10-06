@@ -8,11 +8,14 @@
 
 #include <nanobind/nanobind.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace popcorn::bind::detail
 {
@@ -92,7 +95,41 @@ struct host_slot
 {
   /** @brief The host, expired once the handle destroyed it. */
   std::weak_ptr<core::host> host;
+  /** @brief Guards retired, a leaf: nothing is taken under it. */
+  mutable std::mutex retired_mutex{};
+  /** @brief Removals retire() could not run at once, run by the engine owner at the next
+   * boundary or once the host is closed. */
+  mutable std::vector<std::move_only_function<void()>> retired{};
+  /** @brief Whether retired may hold a removal, read without the mutex. */
+  mutable std::atomic<bool> retiring{false};
 };
+
+/**
+ * @brief Runs the removals queued on @p slot, on the engine owner or after the host closed.
+ *        Never throws.
+ */
+inline void run_retired(host_slot const& slot) noexcept
+{
+  if(not slot.retiring.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  std::vector<std::move_only_function<void()>> bodies;
+  {
+    std::scoped_lock const lock{slot.retired_mutex};
+    bodies = std::exchange(slot.retired, {});
+    slot.retiring.store(false, std::memory_order_release);
+  }
+  for(auto& body : bodies)
+  {
+    try
+    {
+      body();
+    }
+    catch(...)
+    {}
+  }
+}
 
 /** @brief Shared reference to a machine's host_slot, held by its views and links. */
 using host_ref = std::shared_ptr<host_slot const>;
@@ -113,7 +150,8 @@ auto host_access(core::host& on, Body&& body) -> std::invoke_result_t<Body, core
   auto const held = require_owned(lock_releasing_gil(on));
   if(on.busy(held, core::member_id{}) or not on.parked(held, core::member_id{}))
   {
-    throw popcorn::machine_running("the machine is running");
+    throw popcorn::machine_running(
+        "the machine is running: await m.read() or m.write(), or halt() it first");
   }
   core::owner_scope const owning{on, held};
   return std::invoke(std::forward<Body>(body), on.member(held, core::member_id{}));
@@ -155,7 +193,9 @@ auto host_access(host_ref const& ref, Body&& body) -> std::invoke_result_t<Body>
  * @brief Destroys what @p body owns on the engine's side: a hook handle, and what its hook
  *        feeds. Inline for the engine owner. Otherwise under the host mutex, taken with
  *        lock_releasing_gil(), as a command: at once while parked, at the next boundary on the
- *        host thread while running. Never throws, for destructors on any thread.
+ *        host thread while running. When the thread holds another host's mutex and this one is
+ *        taken, queued on the slot for the next boundary. Never throws, for destructors on any
+ *        thread.
  * @param ref The machine's host slot.
  * @param body Destroys or releases what it captured.
  */
@@ -172,7 +212,9 @@ inline void retire(host_ref const& ref, std::move_only_function<void()> body) no
     auto const held = lock_releasing_gil(*on);
     if(not held.owns_lock())
     {
-      std::ignore = std::make_unique<std::move_only_function<void()>>(std::move(body)).release();
+      std::scoped_lock const lock{ref->retired_mutex};
+      ref->retired.push_back(std::move(body));
+      ref->retiring.store(true, std::memory_order_release);
       return;
     }
     std::ignore = on->post(

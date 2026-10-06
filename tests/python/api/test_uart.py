@@ -212,15 +212,17 @@ def test_a_link_kept_past_its_handle_refuses_access(u575: popcorn.MachineDescrip
         link.queued()
 
 
-def test_a_write_from_another_thread_during_a_run_is_refused(board: popcorn.Machine) -> None:
+def test_a_write_from_another_thread_during_a_run_is_posted(board: popcorn.Machine) -> None:
     uart = board.periph.USART1.port
 
-    async def body() -> None:
-        async with board.running():
-            await asyncio.to_thread(asyncio.run, uart.write(b"x"))
+    async def write() -> VirtualTime:
+        return await uart.write(b"x")
 
-    with pytest.raises(RuntimeError, match="another thread"):
-        asyncio.run(body())
+    async def body() -> VirtualTime:
+        async with board.running():
+            return await asyncio.to_thread(asyncio.run, write())
+
+    assert asyncio.run(body()) >= VirtualTime(0)
 
 
 def test_a_read_inside_running_raises_a_handler_error(board: popcorn.Machine) -> None:

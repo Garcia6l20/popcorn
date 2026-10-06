@@ -1393,3 +1393,77 @@ TEST_CASE("a parked section whose body accesses the same host again runs it inli
   CHECK(nested.second == std::this_thread::get_id());
   CHECK_FALSE(h.on->owns_engine());
 }
+
+TEST_CASE("a goal's finish runs on the host thread before its future completes, a cancel too")
+{
+  hosted                       h{alu(100'000)};
+  std::atomic<std::thread::id> ran_on{};
+  std::atomic<int>             stopped{-1};
+  auto                         recorder = [&](core::machine&, popcorn::stop const* stop) {
+    ran_on  = std::this_thread::get_id();
+    stopped = stop == nullptr ? 0 : static_cast<int>(stop->reason);
+  };
+  auto const done = h.run({.until = sym("alu", "alu_done"), .finish = recorder}).get();
+  CHECK(done.stopped.reason == stop_reason::address);
+  CHECK(stopped == static_cast<int>(stop_reason::address));
+  CHECK(ran_on.load() != std::this_thread::get_id());
+  auto endless = h.run({.finish = recorder});
+  REQUIRE(settles([&h] { return h.on->state(0) == core::host_state::running; }));
+  h.on->cancel(0);
+  REQUIRE(endless.wait_for(5s));
+  CHECK(stopped == 0);
+  auto failed = core::host_future<core::goal_result>{};
+  failed      = h.run({.budget = icount{10}, .finish = [](core::machine&, popcorn::stop const*) {
+                    throw test_failure("finish failed");
+                       }});
+  require_error(
+      [&failed] {
+        try
+        {
+          std::ignore = failed.get();
+        }
+        catch(...)
+        {
+          return std::current_exception();
+        }
+        return std::exception_ptr{};
+      }(),
+      [] { CHECK_THROWS_AS(throw, test_failure); });
+  auto held = h.on->lock();
+  CHECK_FALSE(h.on->busy(held, 0));
+}
+
+TEST_CASE("a waiter's after counts from the first boundary that evaluates it")
+{
+  hosted     h{idle_forever()};
+  auto const before = h.now();
+  h.start();
+  auto const ended = h.wait({.after = vtime{1'000'000'000}}).future().get();
+  CHECK(ended.reason == stop_reason::time);
+  CHECK(ended.time.ps >= before.ps + 1'000'000'000);
+  auto const fixed = h.wait({.deadline = ended.time, .after = vtime{5'000'000'000}}).future().get();
+  CHECK(fixed.reason == stop_reason::time);
+  CHECK(fixed.time == ended.time);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("the boundary hook runs on the host thread as the engine owner around every slice")
+{
+  std::atomic<int>  calls{0};
+  std::atomic<bool> owned{true};
+  std::atomic<bool> elsewhere{true};
+  auto const        test_thread = std::this_thread::get_id();
+  hosted            h;
+  h.adopt(
+      alu(1'000'000), {.max_instructions = icount{10'000}, .wall_budget = long_wall},
+      {.boundary = [&](core::member_id who) {
+        ++calls;
+        owned     = owned and who == 0 and h.on->owns_engine();
+        elsewhere = elsewhere and std::this_thread::get_id() != test_thread;
+      }});
+  auto const done = h.run({.budget = icount{100'000}}).get();
+  CHECK(done.stopped.reason == stop_reason::budget);
+  CHECK(calls >= 2 * 10);
+  CHECK(owned);
+  CHECK(elsewhere);
+}

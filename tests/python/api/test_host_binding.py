@@ -182,6 +182,8 @@ def test_cancelling_the_awaiting_task_halts_the_goal(machines: Machines) -> None
         with pytest.raises(asyncio.CancelledError):
             await task
         assert endless.done()
+        with pytest.raises(popcorn.EmulationError, match="cancelled"):
+            endless.result(5)
 
     asyncio.run(body())
     assert not m.busy
@@ -289,6 +291,7 @@ def test_a_context_copy_runs_while_its_source_is_entered_on_the_loop(machines: M
 
 STRESS = """
 import asyncio
+import contextlib
 import sys
 import threading
 import time
@@ -296,6 +299,7 @@ import time
 import popcorn
 from popcorn.model import Model, on_write
 from popcorn.stm32 import mcu
+from popcorn.units import ms, us
 
 TIM6_CR1 = 0x4000_1000
 
@@ -308,6 +312,11 @@ class Probe(Model):
         self.writes += 1
 
 
+class Never:
+    def ready(self, machine):
+        return False
+
+
 sys.setswitchinterval(1e-5)
 m = popcorn.Machine(
     mcu("STM32U575QGIx"), image=popcorn.Image.elf({board!r}), models={{"TIM6": Probe}}
@@ -317,8 +326,23 @@ asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
 hits = []
 m.watch("pin_seen", handler=lambda hit: hits.append(1) and None)
 uart = m.periph.USART1.port
+audio = m.periph.SAI1.audio("B")
+cr1 = m.ref.mem.u32[TIM6_CR1]
 done = threading.Event()
-counts = {{"a": 0, "c": 0}}
+counts = {{"a": 0, "posted": 0, "withdrawn": 0, "c": 0, "audio": 0, "sessions": 0}}
+
+
+async def posts(n):
+    (pc,) = await m.read(m.ref.pc)
+    await m.write((cr1, n & 1))
+    counts["posted"] += 1
+    now = (await m.read()).time
+    stamped = asyncio.ensure_future(m.write((cr1, 1), at=now + ms(1000)))
+    await asyncio.sleep(0)
+    stamped.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await stamped
+    counts["withdrawn"] += 1
 
 
 def writer():
@@ -330,6 +354,7 @@ def writer():
             counts["a"] += 1
         except (popcorn.MachineRunning, popcorn.MachineBusy):
             pass
+        asyncio.run(posts(n))
 
 
 def drainer():
@@ -337,6 +362,19 @@ def drainer():
         if uart.available:
             uart._link.drain(uart.available)
             counts["c"] += 1
+        asyncio.run(audio.write([1]))
+        counts["audio"] += audio.available + 1
+
+
+async def session():
+    m.start()
+    try:
+        await m.wait_for(Never(), for_=us(200))
+        assert m._handle.session_open()
+        waiter = m._handle.wait(None, us(100).ps)
+        waiter.result(5)
+    finally:
+        m.halt()
 
 
 failures = []
@@ -349,14 +387,41 @@ runs = 0
 while time.monotonic() < until:
     asyncio.run(uart.write(b"x"))
     asyncio.run(m.run(budget=10_000))
+    asyncio.run(session())
+    counts["sessions"] += 1
     runs += 1
 done.set()
 for t in threads:
     t.join()
 assert not failures, failures
 assert runs > 0 and counts["a"] > 0 and counts["c"] > 0 and hits, (runs, counts, len(hits))
-print(runs, counts["a"], counts["c"], len(hits))
+assert counts["posted"] > 0 and counts["withdrawn"] > 0 and counts["audio"] > 0, counts
+print(runs, counts, len(hits))
 """
+
+
+CLOSED = """
+import asyncio
+
+import popcorn
+from popcorn import _core
+from popcorn.units import us
+
+m = popcorn.Machine(popcorn.load_description({m33!r}), image=popcorn.Image.elf({driver!r}))
+m.reset()
+pending = m.write((m.ref.reg.r0, 1), at=m.time + us(5))
+_core.shutdown_hosts()
+try:
+    asyncio.run(pending)
+except popcorn.EmulationError as error:
+    print(error)
+"""
+
+
+def test_a_command_pending_when_its_machine_closes_raises_closed() -> None:
+    child = run_child(CLOSED.format(m33=str(M33_JSON), driver=str(DRIVER_ELF)), CHILD_TIMEOUT)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "the machine was closed"
 
 
 def test_the_lock_order_holds_under_contention(u575: popcorn.MachineDescription) -> None:
@@ -429,7 +494,7 @@ for _ in range(3):
     goal.cancel()
     try:
         goal.result(5)
-    except RuntimeError:
+    except popcorn.EmulationError:
         pass
 assert asyncio.run(m.run(budget=1_000)).reason is popcorn.StopReason.BUDGET
 print("ok")

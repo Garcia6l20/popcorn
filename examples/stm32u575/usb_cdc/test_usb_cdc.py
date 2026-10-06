@@ -236,7 +236,8 @@ async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(machine: Ma
     assert machine.board.ptys == {"OTG_FS": path}
     async with machine.running():
         assert await asyncio.to_thread(serial_client, path, b"ping") == b"PING"
-        before = len(host.requests)
+        (requests,) = await machine.read(machine.ref.periph.OTG_FS.host.requests)
+        before = len(requests)
         await asyncio.sleep(0.1)
     assert len(host.requests) == before
     assert not [
@@ -260,11 +261,10 @@ async def led_written(machine: Machine, count: int) -> None:
     await machine.run(for_=ms(5), stop_when=lambda _: machine.var("hid_led_writes").value >= count)
 
 
-def press(machine: Machine) -> int:
+async def press(machine: Machine) -> int:
     """Press PC13, return the time of the press in picoseconds."""
-    button = machine.periph.GPIOC.pin(13)
-    button.level = True
-    return machine.time.ps
+    pressed = await machine.write((machine.ref.periph.GPIOC.pin(13).level, True))
+    return pressed.time.ps
 
 
 async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machine) -> None:
@@ -298,7 +298,7 @@ async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machi
 async def test_a_button_press_sends_one_report_within_one_interval(machine: Machine) -> None:
     host = await hid_ready(machine)
     hid = host.hid()
-    pressed = press(machine)
+    pressed = await press(machine)
     [report] = await hid.read_reports(1, for_=ms(50))
     assert report.data == b"\x01\x01"
     assert pressed < report.at.ps <= pressed + ms(11).ps
@@ -311,11 +311,9 @@ async def test_a_press_timed_inside_running_reports_within_one_interval(
     hid = (await hid_ready(machine)).hid()
     async with machine.running():
         await asyncio.sleep(0.01)
-        before = machine.time
-        pressed = press(machine)
+        pressed = await press(machine)
         [report] = await hid.read_reports(1, for_=ms(50))
-        after = machine.time
-    assert before.ps == pressed
+        after = (await machine.read()).time
     assert pressed < report.at.ps <= pressed + ms(11).ps
     assert report.at <= after
 
@@ -388,7 +386,7 @@ async def test_hid_and_cdc_run_at_once(machine: Machine) -> None:
     host = await hid_ready(machine)
     cdc, hid = host.cdc(), host.hid()
     await cdc.write(b"both")
-    press(machine)
+    await press(machine)
     await host.hid(1).write_report(b"\x00\x0f")
     [report] = await hid.read_reports(1, for_=ms(20))
     [echo] = await host.hid(1).read_reports(1, for_=ms(20))
@@ -433,7 +431,7 @@ async def test_a_restore_drops_unread_reports(machine: Machine) -> None:
     host = await hid_ready(machine)
     hid = host.hid()
     saved = machine.snapshot()
-    press(machine)
+    await press(machine)
     await machine.run(for_=ms(20))
     assert hid.available == 1
     machine.restore(saved)

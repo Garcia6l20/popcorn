@@ -209,6 +209,10 @@ private:
 [[= py::doc{"Number of machine threads running now."}]] [[nodiscard]] auto host_threads()
     -> std::uint64_t;
 
+/** @brief Whether the calling thread is the thread of some machine. */
+[[= py::doc{"Whether the calling thread is a machine thread, of any machine."}]] [[nodiscard]] auto
+    on_host_thread() -> bool;
+
 /** @brief Host mutexes the calling thread holds, above 0 inside a parked section. */
 [[= py::doc{
     "Host mutexes the calling thread holds, above 0 inside a parked section."}]] [[nodiscard]] auto

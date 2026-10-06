@@ -271,21 +271,18 @@ void machine_handle::gpio_drive(
     std::uint8_t        pin,
     std::optional<bool> level)
 {
-  auto& port = gpio(peripheral, pin);
-  access([&](core::machine&) { port.drive(pin, level); });
+  access([&](core::machine&) { gpio(peripheral, pin).drive(pin, level); });
 }
 
 auto machine_handle::gpio_level(std::string const& peripheral, std::uint8_t pin) const -> bool
 {
-  auto& port = gpio(peripheral, pin);
-  return access([&](core::machine&) { return port.level(pin); });
+  return access([&](core::machine&) { return gpio(peripheral, pin).level(pin); });
 }
 
 auto machine_handle::gpio_mode(std::string const& peripheral, std::uint8_t pin) const
     -> periph::stm32::pin_mode
 {
-  auto& port = gpio(peripheral, pin);
-  return access([&](core::machine&) { return port.mode(pin); });
+  return access([&](core::machine&) { return gpio(peripheral, pin).mode(pin); });
 }
 
 auto machine_handle::analog(std::string const& peripheral) const -> periph::stm32::analog_port&
@@ -303,21 +300,18 @@ void machine_handle::adc_drive(
     std::uint8_t       channel,
     std::uint32_t      microvolts)
 {
-  auto& port = analog(peripheral);
-  access([&](core::machine&) { port.drive(channel, microvolts); });
+  access([&](core::machine&) { analog(peripheral).drive(channel, microvolts); });
 }
 
 auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t channel) const
     -> std::uint32_t
 {
-  auto& port = analog(peripheral);
-  return access([&](core::machine&) { return port.input(channel); });
+  return access([&](core::machine&) { return analog(peripheral).input(channel); });
 }
 
 auto machine_handle::gpio_alternate(std::string const& peripheral, std::uint8_t pin) const
     -> std::uint8_t
 {
-  auto& port = gpio(peripheral, pin);
-  return access([&](core::machine&) { return port.alternate(pin); });
+  return access([&](core::machine&) { return gpio(peripheral, pin).alternate(pin); });
 }
 }

@@ -3,83 +3,88 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
+import gc
 import threading
 import types
 
 import popcorn
-from popcorn import _machine
+from popcorn import _host
+from popcorn.units import VirtualDuration
 
 from .conftest import Machines
 
+BUDGET = 1_000_000
 
-def slice_lines() -> set[int]:
-    """Lines of the facade that call into a native slice."""
-    source = inspect.getsource(_machine).splitlines()
-    return {n for n, line in enumerate(source, start=1) if "self._handle.run_slice(" in line}
+
+def from_bridge(frame: types.FrameType | None) -> bool:
+    """Whether the call comes from the bridge that completes an awaited request on the loop:
+    it runs on the machine's thread after the slices, not inside one."""
+    while frame is not None:
+        if frame.f_code.co_filename == _host.__file__:
+            return True
+        frame = frame.f_back
+    return False
 
 
 def calls_inside_slices(
-    m: popcorn.Machine, run: int, *, background: bool = False
-) -> tuple[int, int]:
-    """Python calls the facade made between slices, and calls made while a slice ran.
+    m: popcorn.Machine, *, free_for: VirtualDuration | None = None
+) -> list[str]:
+    """Python calls made on the machine's thread while it ran `BUDGET` instructions, or a free
+    run of `free_for`.
 
     A slice runs on the machine's thread, so a call made while it runs is a call on another
     thread than the test's. The profiler covers every thread, the machine's included, which
-    exists once the machine ran.
+    exists once the machine ran. The cycle collector is off meanwhile: it runs finalizers of
+    earlier tests' garbage on whichever thread allocates, the machine's included.
     """
     asyncio.run(m.step(1))
-    assert slice_lines()
-    facade = _machine.__file__
     test_thread = threading.get_ident()
-    between = 0
-    inside = 0
+    inside: list[str] = []
 
     def profile(frame: types.FrameType, event: str, arg: object) -> None:
-        nonlocal between, inside
-        if event != "call":
-            return
-        if threading.get_ident() != test_thread:
-            inside += 1
-            return
-        caller = frame.f_back
-        if (
-            caller is not None
-            and caller.f_code.co_filename == facade
-            and caller.f_code.co_name in ("_drive", "_drive_background")
-        ):
-            between += 1
+        if event == "call" and threading.get_ident() != test_thread and not from_bridge(frame):
+            inside.append(f"{frame.f_code.co_filename}:{frame.f_code.co_name}")
 
-    async def in_background() -> None:
-        async with m.running():
-            while m.busy and between < run:
-                await asyncio.sleep(0)
+    async def free_run(duration: VirtualDuration) -> None:
+        m.start()
+        try:
+            waiter = m._handle.wait(None, duration.ps)  # pyright: ignore[reportPrivateUsage]
+            await _host.awaited(waiter, lambda raw: raw)
+        finally:
+            m.halt()
 
+    gc.collect()
+    gc.disable()
     threading.setprofile_all_threads(profile)
     try:
-        asyncio.run(in_background() if background else m.run(budget=run))
+        if free_for is None:
+            stop = asyncio.run(m.run(budget=BUDGET))
+            assert stop.reason is popcorn.StopReason.BUDGET
+        else:
+            asyncio.run(free_run(free_for))
     finally:
         threading.setprofile_all_threads(None)
-    return between, inside
+        gc.enable()
+    return inside
 
 
 def test_a_plain_run_makes_no_python_call_inside_its_slices(machines: Machines) -> None:
     m = machines(slice_instructions=50_000)
-    between, inside = calls_inside_slices(m, 1_000_000)
-    assert between >= 20
-    assert inside == 0
+    assert calls_inside_slices(m) == []
 
 
 def test_an_installed_hook_is_the_only_crossing(machines: Machines) -> None:
     m = machines(slice_instructions=50_000)
     seen: list[int] = []
     m.intercept("alu_mark", lambda call: seen.append(call.function) or call.proceed())
-    _, inside = calls_inside_slices(m, 1_000_000)
-    assert len(seen) == 1 and inside >= 1
+    inside = calls_inside_slices(m)
+    assert len(seen) == 1 and inside
 
 
 def test_a_background_run_makes_no_python_call_inside_its_slices(machines: Machines) -> None:
+    twin = machines(slice_instructions=50_000)
+    took = asyncio.run(twin.run(budget=BUDGET)).time
     m = machines(slice_instructions=50_000)
-    between, inside = calls_inside_slices(m, 20, background=True)
-    assert between >= 20
-    assert inside == 0
+    before = m.instructions
+    assert calls_inside_slices(m, free_for=VirtualDuration(took.ps)) == []
+    assert m.instructions - before >= BUDGET // 2

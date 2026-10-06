@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn import ConfigError, StopReason
 from popcorn.board import AnalogInput, SupplyOptions
-from popcorn.units import us
+from popcorn.units import VirtualDuration, us
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
 RCC_ELF = PREBUILT / "rcc_ll.elf"
@@ -186,7 +186,12 @@ def test_a_drive_from_another_thread_during_a_run_raises(
                 await asyncio.sleep(0.001)
 
     asyncio.run(body())
-    assert len(errors) == 1 and isinstance(errors[0], RuntimeError)
+    assert len(errors) == 1 and isinstance(errors[0], popcorn.MachineRunning)
+
+
+class ConversionEnded:
+    def ready(self, machine: popcorn.Machine) -> bool:
+        return machine.periph.ADC1.ADC_ISR.EOC == 1
 
 
 def test_a_drive_inside_running_reaches_the_conversion(u575: popcorn.MachineDescription) -> None:
@@ -199,13 +204,12 @@ def test_a_drive_inside_running_reaches_the_conversion(u575: popcorn.MachineDesc
     adc.ADC_SQR1.write(5 << 6)
     adc.ADC_CR.write(ADVREGEN | ADEN | ADSTART)
 
+    driven = m.write((m.ref.periph.ADC1.input(5).volts, 1.5), at=m.time + VirtualDuration(1))
+
     async def body() -> None:
         async with m.running():
-            adc.input(5).volts = 1.5
-            for _ in range(10_000):
-                if adc.ADC_ISR.EOC == 1:
-                    break
-                await asyncio.sleep(0.001)
+            await driven
+            await m.wait_for(ConversionEnded())
 
     asyncio.run(body())
     assert adc.ADC_ISR.EOC == 1

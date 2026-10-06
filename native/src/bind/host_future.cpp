@@ -228,6 +228,11 @@ auto host_threads() -> std::uint64_t
   return live_host_threads.load();
 }
 
+auto on_host_thread() -> bool
+{
+  return core::detail::on_host_thread;
+}
+
 auto host_locks_held() -> std::uint64_t
 {
   return static_cast<std::uint64_t>(core::detail::host_locks_held);

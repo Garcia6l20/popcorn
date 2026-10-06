@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from operator import attrgetter
 
 from popcorn import _core
-from popcorn._devices import check_address, chip_select
+from popcorn._devices import check_address, chip_select, parked
 from popcorn._errors import ConfigError
 from popcorn.units import VirtualDuration, ms, s, us
 
@@ -274,9 +274,13 @@ class TableTarget(_core.TableTargetBase):
         return self._bus_address
 
     def writes(self) -> tuple[TableWrite, ...]:
-        """The write transfers recorded so far, oldest first."""
+        """The write transfers recorded so far, oldest first.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+        """
         recorded: Callable[[], list[tuple[int, bytes]]] = attrgetter("_writes")(self)
-        return tuple(TableWrite(reg, data) for reg, data in recorded())
+        return tuple(TableWrite(reg, data) for reg, data in parked(self, recorded))
 
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self._bus_address:#04x}>"

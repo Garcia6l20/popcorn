@@ -7,12 +7,13 @@ import asyncio
 import contextlib
 import logging
 import os
+import threading
 import time
 import tty
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from popcorn import _core
 from popcorn._devices import BusDevice, I2CTarget, SpiTarget
@@ -20,6 +21,7 @@ from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
+    from popcorn._refs import Pending
     from popcorn._usb import UsbHosts
 
 _LOG = logging.getLogger("popcorn")
@@ -27,8 +29,31 @@ _LOG = logging.getLogger("popcorn")
 OUTGOING_LIMIT = 64 * 1024
 """Bytes a pty keeps for the host while no tool reads it."""
 
-type Waiter = Callable[[Callable[[], bool], VirtualDuration | None], Awaitable[None]]
-"""Runs the machine until a predicate holds or a virtual duration elapses."""
+type Waiter = Callable[[Callable[[], bool], VirtualDuration | None], Awaitable[VirtualTime]]
+"""Runs the machine until a predicate holds or a virtual duration elapses, and returns the
+virtual time it stopped waiting at."""
+
+
+class Poster(Protocol):
+    """Runs a body as one command on the machine: at once while it is parked, at a block
+    boundary on its thread while it runs. The result is the body's value and the virtual time
+    it ran at."""
+
+    def __call__[T](
+        self,
+        body: Callable[[], T],
+        at: VirtualTime | None = None,
+        *,
+        cancel: bool = True,
+        follow: Callable[[tuple[T, VirtualTime]], Any] | None = None,
+    ) -> Pending[tuple[T, VirtualTime]]:
+        """Post `body`."""
+        ...
+
+
+def written(posted: Pending[tuple[None, VirtualTime]]) -> Pending[VirtualTime]:
+    """The time a posted stream write executed at, as its `Pending` value."""
+    return posted.mapped(lambda done: done[1])
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +89,7 @@ class UartStream:
     model's state and return to what the snapshot holds.
     """
 
-    __slots__ = ("__weakref__", "_bridges", "_dropped", "_link", "_stimulus", "_wait", "name")
+    __slots__ = ("__weakref__", "_bridges", "_dropped", "_link", "_post", "_wait", "name")
 
     def __init__(
         self,
@@ -72,7 +97,7 @@ class UartStream:
         link: _core.UartLink,
         wait: Waiter,
         bridges: dict[str, PtyBridge],
-        stimulus: Callable[[], None],
+        post: Poster,
         dropped: Callable[[], int],
     ) -> None:
         """Wrap a native link. Use `m.periph.<NAME>.port` instead."""
@@ -81,7 +106,7 @@ class UartStream:
         self._link = link
         self._wait = wait
         self._bridges = bridges
-        self._stimulus = stimulus
+        self._post = post
 
     @property
     def available(self) -> int:
@@ -96,17 +121,27 @@ class UartStream:
 
     @property
     def queued(self) -> int:
-        """Bytes written and not yet delivered to the firmware's receiver."""
-        return self._link.queued()
-
-    async def write(self, data: bytes) -> None:
-        """Queue bytes towards the firmware. They arrive as the machine runs.
+        """Bytes written and not yet delivered to the firmware's receiver.
 
         Raises:
-            RuntimeError: Called from another thread while a run is active.
+            MachineRunning: The machine is busy, read outside its callbacks: use
+                `m.read(m.ref.periph.<NAME>.port.queued)`.
         """
-        self._stimulus()
-        self._link.send(bytes(data))
+        return self._link.queued()
+
+    def write(self, data: bytes, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
+        """Queue bytes towards the firmware, posted at the call as one command: at once while the
+        machine is parked, at the next block boundary while it runs, or at the first boundary at
+        or after `at`. They arrive one frame time apart as the machine runs. Await the result
+        for the virtual time the bytes were queued at.
+
+        Raises:
+            RuntimeError: Called from a handler or a model.
+            ValueError: `at` before the time of a parked machine, from the await when running.
+        """
+        link = self._link
+        data = bytes(data)
+        return written(self._post(lambda: link.send(data), at))
 
     async def read(self, n: int, *, for_: VirtualDuration | None = None) -> bytes:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them.
@@ -202,19 +237,28 @@ class PtyBridge:
         "_finalizer",
         "_incoming",
         "_link",
+        "_lock",
         "_master",
         "_outgoing",
         "_overflowed",
         "_slave",
         "_waiting_since",
+        "_wake",
         "_watch",
         "deadlock_warning",
         "name",
         "path",
     )
 
-    def __init__(self, name: str, link: PtyLink, deadlock_warning: float) -> None:
-        """Open a pty for `name` over `link`. Use `m.board.pty(name)` instead."""
+    def __init__(
+        self,
+        name: str,
+        link: PtyLink,
+        deadlock_warning: float,
+        wake: Callable[[], None] = lambda: None,
+    ) -> None:
+        """Open a pty for `name` over `link`. `wake` makes a running machine take a slice.
+        Use `m.board.pty(name)` instead."""
         master, slave = os.openpty()
         tty.setraw(slave)
         os.set_blocking(master, False)
@@ -225,11 +269,13 @@ class PtyBridge:
         self._link = link
         self.deadlock_warning = deadlock_warning
         self._incoming = bytearray()
+        self._lock = threading.Lock()
+        self._wake = wake
         self._outgoing = bytearray()
         self._watch: list[asyncio.AbstractEventLoop | None] = [None]
         self._waiting_since: float | None = None
         self._overflowed = False
-        self._finalizer = weakref.finalize(self, _close, self._watch, master, slave)
+        self._finalizer = weakref.finalize(self, _close, self._watch, self._lock, master, slave)
         self.attach_loop()
 
     def attach_loop(self) -> None:
@@ -245,11 +291,13 @@ class PtyBridge:
         loop.add_reader(self._master, _readable, weakref.ref[PtyBridge](self))
 
     def pump(self) -> None:
-        """At a slice boundary: host bytes to the firmware, firmware bytes to the host."""
+        """At a slice boundary, on the machine's thread: host bytes to the firmware, firmware
+        bytes to the host."""
         self.attach_loop()
-        if self._incoming:
-            self._link.send(bytes(self._incoming))
-            self._incoming.clear()
+        with self._lock:
+            incoming, self._incoming = self._incoming, bytearray()
+        if incoming:
+            self._link.send(bytes(incoming))
         self._waiting_since = None
         self._outgoing += self._link.drain(self._link.available())
         if len(self._outgoing) > OUTGOING_LIMIT:
@@ -263,9 +311,10 @@ class PtyBridge:
                     OUTGOING_LIMIT,
                 )
         if self._outgoing:
-            with contextlib.suppress(BlockingIOError):
-                written = os.write(self._master, self._outgoing)
-                del self._outgoing[:written]
+            with self._lock, contextlib.suppress(BlockingIOError):
+                if self._finalizer.alive:
+                    written = os.write(self._master, self._outgoing)
+                    del self._outgoing[:written]
 
     def discard(self) -> None:
         """Drop the bytes waiting for the host, at a restore."""
@@ -281,7 +330,9 @@ class PtyBridge:
             data = os.read(self._master, 4096)
         except BlockingIOError, OSError:
             return
-        self._incoming += data
+        with self._lock:
+            self._incoming += data
+        self._wake()
         loop = self._watch[0]
         if self._waiting_since is None and loop is not None:
             since = self._waiting_since = time.monotonic()
@@ -307,11 +358,13 @@ class UartPorts:
     """The Python ends of a machine's UARTs, one link and one stream per UART."""
 
     __slots__ = (
+        "__weakref__",
         "_aliases",
+        "_bridged",
         "_connect",
         "_dropped_base",
         "_links",
-        "_stimulus",
+        "_post",
         "_streams",
         "_wait",
         "bridges",
@@ -323,17 +376,20 @@ class UartPorts:
         uarts: Iterable[str],
         aliases: Mapping[str, str],
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
+        bridged: Callable[[], None] = lambda: None,
     ) -> None:
         """Connect every UART named in `uarts` through `connect` at once, so each one queues
         what the firmware transmits from power-on. `aliases` maps an alias, such as a secure
         address window, to the peripheral serving it, which shares its link. Reads run the
-        machine through `wait`, writes are checked by `stimulus`."""
+        machine through `wait`, writes are posted through `post`. `bridged` is called when a
+        pty bridge is added, so the machine pumps it at slice boundaries."""
         self._aliases = dict(aliases)
         self._dropped_base: dict[str, int] = {}
         self._connect = connect
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
+        self._bridged = bridged
         self._links: dict[str, _core.UartLink] = {name: connect(name) for name in uarts}
         self._streams: dict[str, UartStream] = {}
         self.bridges: dict[str, PtyBridge] = {}
@@ -367,16 +423,28 @@ class UartPorts:
                 link,
                 self._wait,
                 self.bridges,
-                self._stimulus,
+                self._post,
                 lambda: link.dropped() - self._dropped_base.get(name, 0),
             )
             self._streams[name] = stream
         return stream
 
     def pump(self) -> None:
-        """Move pty bytes at a slice boundary. The machine calls it."""
-        for bridge in self.bridges.values():
+        """Move pty bytes at a slice boundary. The machine calls it on its thread."""
+        for bridge in list(self.bridges.values()):
             bridge.pump()
+
+    def bridge(self, key: str, make: Callable[[Callable[[], None]], PtyBridge]) -> PtyBridge:
+        """The bridge keyed `key`, made by `make(wake)` on first use."""
+        found = self.bridges.get(key)
+        if found is None:
+            found = self.bridges[key] = make(self.wake)
+            self._bridged()
+        return found
+
+    def wake(self) -> None:
+        """Make a running machine take a slice, so host input reaches it."""
+        self._post(lambda: None)
 
     def discard(self) -> None:
         """Drop transmitted frames not read yet and bytes waiting for ptys, at a restore."""
@@ -444,23 +512,19 @@ class Board:
                 with a virtual host.
             ConfigError: The description has no such peripheral.
         """
-        bridges = self._ports.bridges
         if self._usb is not None and self._usb.serves(name):
             link = self._usb.cdc_link(name, function)
             key = cdc_key(self._usb.host(name).name, function)
-            bridge = bridges.get(key)
-            if bridge is None:
-                bridge = PtyBridge(key, link, deadlock_warning)
-                bridges[key] = bridge
-            return bridge.path
+            return self._ports.bridge(
+                key, lambda wake: PtyBridge(key, link, deadlock_warning, wake)
+            ).path
         if function != 0:
             raise ValueError(f"{name}: a UART has no function {function}, only 0")
         name = self._ports.serving(name)
-        bridge = bridges.get(name)
-        if bridge is None:
-            bridge = PtyBridge(name, UartPtyLink(self._ports.link(name)), deadlock_warning)
-            bridges[name] = bridge
-        return bridge.path
+        uart = UartPtyLink(self._ports.link(name))
+        return self._ports.bridge(
+            name, lambda wake: PtyBridge(name, uart, deadlock_warning, wake)
+        ).path
 
     @property
     def ptys(self) -> dict[str, str]:
@@ -499,13 +563,13 @@ def _unwatch(watch: list[asyncio.AbstractEventLoop | None], fd: int) -> None:
         loop.remove_reader(fd)
 
 
-def _close(watch: list[asyncio.AbstractEventLoop | None], *fds: int) -> None:
+def _close(watch: list[asyncio.AbstractEventLoop | None], lock: threading.Lock, *fds: int) -> None:
     loop = watch[0]
     if loop is not None and loop.is_running() and not _running_here(loop):
         with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(_close_now, watch, *fds)
+            loop.call_soon_threadsafe(_close_now, watch, lock, *fds)
             return
-    _close_now(watch, *fds)
+    _close_now(watch, lock, *fds)
 
 
 def _running_here(loop: asyncio.AbstractEventLoop) -> bool:
@@ -515,8 +579,11 @@ def _running_here(loop: asyncio.AbstractEventLoop) -> bool:
         return False
 
 
-def _close_now(watch: list[asyncio.AbstractEventLoop | None], *fds: int) -> None:
+def _close_now(
+    watch: list[asyncio.AbstractEventLoop | None], lock: threading.Lock, *fds: int
+) -> None:
     _unwatch(watch, fds[0])
-    for fd in fds:
-        with contextlib.suppress(OSError):
-            os.close(fd)
+    with lock:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)

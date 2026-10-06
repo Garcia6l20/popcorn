@@ -92,6 +92,7 @@ struct member_slot
   bool                      halt_requested   = false;
   bool                      woken            = false;
   std::uint64_t             parks            = 0;
+  std::uint64_t             settled          = 0;
   std::vector<stamped>      stamps{};
   std::vector<stamped>      incoming{};
   std::uint64_t             next_seq = 0;
@@ -284,6 +285,10 @@ struct host_core
         }
         if(plan.cancel or plan.halt)
         {
+          if(slot->goal)
+          {
+            std::ignore = finish_goal(*slot, nullptr);
+          }
           park(*slot, done, [halt = plan.halt](member_slot& parked, deferred& later) {
             end_goal_cancelled(parked, later);
             if(halt)
@@ -302,6 +307,7 @@ struct host_core
         }
       }
       run_all(done);
+      publish_settled();
       for(auto const& [slot, plan] : std::views::zip(members, *plans))
       {
         if(not plan.slice)
@@ -317,6 +323,7 @@ struct host_core
           free_slice(*slot, plan.waiters, done);
         }
         run_all(done);
+        publish_settled();
       }
     }
     shut_down();
@@ -419,7 +426,46 @@ struct host_core
     slot.woken            = false;
     slot.state            = host_state::parked;
     ++slot.parks;
-    lock.unlock();
+  }
+
+  auto finish_goal(member_slot& slot, stop const* stopped) -> std::exception_ptr
+  {
+    if(not slot.goal or not slot.goal->goal.finish)
+    {
+      return {};
+    }
+    try
+    {
+      owner_scope const owning{this};
+      slot.goal->goal.finish(*slot.engine, stopped);
+      return {};
+    }
+    catch(...)
+    {
+      return std::current_exception();
+    }
+  }
+
+  void at_boundary(member_slot const& slot)
+  {
+    if(not hooks.boundary)
+    {
+      return;
+    }
+    auto const found = std::ranges::find_if(
+        members, [&slot](auto const& member) { return member.get() == &slot; });
+    hooks.boundary(static_cast<member_id>(found - members.begin()));
+  }
+
+  void publish_settled()
+  {
+    {
+      std::scoped_lock const lock{mutex};
+      for(auto const& slot : members)
+      {
+        slot->settled = slot->parks;
+      }
+    }
     parked_cv.notify_all();
   }
 
@@ -574,10 +620,12 @@ struct host_core
     try
     {
       owner_scope const owning{this};
+      at_boundary(slot);
       result = slot.engine->run_slice(request);
     }
     catch(...)
     {
+      std::ignore = finish_goal(slot, nullptr);
       park(slot, done, [error = std::current_exception()](member_slot& parked, deferred& later) {
         later.push_back([goal = std::move(parked.goal), error] mutable {
           goal->promise.fail(std::move(error));
@@ -586,6 +634,10 @@ struct host_core
       return;
     }
     after_slice(slot, request, result);
+    {
+      owner_scope const owning{this};
+      at_boundary(slot);
+    }
     goal.executed.value += result.executed.value;
     goal.remaining = remaining_after(goal.remaining, result.executed);
     if(goal.left)
@@ -600,8 +652,18 @@ struct host_core
           .executed = goal.executed,
           .yielded  = not result.stopped,
       };
-      park(slot, done, [&outcome](member_slot& parked, deferred& later) {
-        later.push_back([goal = std::move(parked.goal), outcome] { goal->promise.set(outcome); });
+      auto const failed = finish_goal(slot, outcome.yielded ? nullptr : &outcome.stopped);
+      park(slot, done, [&outcome, &failed](member_slot& parked, deferred& later) {
+        later.push_back([goal = std::move(parked.goal), outcome, failed] {
+          if(failed)
+          {
+            goal->promise.fail(failed);
+          }
+          else
+          {
+            goal->promise.set(outcome);
+          }
+        });
       });
     }
   }
@@ -614,32 +676,15 @@ struct host_core
     std::vector<std::pair<std::shared_ptr<waiter>, stop>> resolved;
     {
       owner_scope const owning{this};
+      auto const        now = slot.engine->virtual_clock().time();
       for(auto const& waiting : waiters)
       {
-        if(waiting->checked)
+        if(not waiting->checked and waiting->spec.after and not waiting->spec.deadline)
         {
-          continue;
-        }
-        waiting->checked = true;
-        if(waiting->spec.ready)
-        {
-          try
-          {
-            waiting->fired = waiting->spec.ready();
-          }
-          catch(...)
-          {
-            waiting->error = std::current_exception();
-            waiting->fired = true;
-          }
-        }
-        if(waiting->fired)
-        {
-          resolved.emplace_back(waiting, stop_here(*slot.engine, stop_reason::user));
+          waiting->spec.deadline = vtime{now.ps + waiting->spec.after->ps};
         }
       }
     }
-    std::erase_if(waiters, [](auto const& waiting) { return waiting->fired; });
     auto          predicates = std::make_shared<waiter_list>();
     slice_request request{
         .max_instructions = bounds.max_instructions,
@@ -652,7 +697,7 @@ struct host_core
         request.until_time =
             std::min(request.until_time.value_or(*waiting->spec.deadline), *waiting->spec.deadline);
       }
-      if(waiting->spec.ready)
+      if(waiting->spec.ready and waiting->checked)
       {
         predicates->push_back(waiting);
       }
@@ -686,6 +731,7 @@ struct host_core
     try
     {
       owner_scope const owning{this};
+      at_boundary(slot);
       result = slot.engine->run_slice(request);
     }
     catch(...)
@@ -696,6 +742,10 @@ struct host_core
     }
     request.stop_when = {};
     after_slice(slot, request, result);
+    {
+      owner_scope const owning{this};
+      at_boundary(slot);
+    }
     auto const reason = result.stopped ? std::optional{result.stopped->reason} : std::nullopt;
     auto const fired =
         std::ranges::any_of(*predicates, [](auto const& waiting) { return waiting->fired; });
@@ -709,11 +759,33 @@ struct host_core
       end_free_run(slot, held_end{std::move(*result.stopped)}, done);
       return;
     }
+    waiter_list current;
+    {
+      std::scoped_lock const lock{mutex};
+      current = slot.waiters;
+    }
+    std::erase_if(current, [](auto const& waiting) { return not waiting->live(); });
     {
       owner_scope const owning{this};
       auto const        now = slot.engine->virtual_clock().time();
-      for(auto const& waiting : waiters)
+      for(auto const& waiting : current)
       {
+        if(not waiting->checked and waiting->spec.after and not waiting->spec.deadline)
+        {
+          waiting->spec.deadline = vtime{now.ps + waiting->spec.after->ps};
+        }
+        if(not std::exchange(waiting->checked, true) and waiting->spec.ready)
+        {
+          try
+          {
+            waiting->fired = waiting->spec.ready();
+          }
+          catch(...)
+          {
+            waiting->error = std::current_exception();
+            waiting->fired = true;
+          }
+        }
         if(waiting->fired)
         {
           resolved.emplace_back(
@@ -833,8 +905,8 @@ struct host_core
         ++slot->parks;
       }
     }
-    parked_cv.notify_all();
     run_all(done);
+    publish_settled();
     ending.wait(fate::undecided);
     if(ending.load() == fate::orphaned)
     {
@@ -1209,7 +1281,7 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
   else
   {
     slot.waiters.push_back(waiting);
-    core_->notify_locked(slot);
+    core_->wake_locked(slot);
   }
   return waiter_handle{std::move(waiting), std::move(future)};
 }
@@ -1234,7 +1306,7 @@ void host::cancel(member_id who)
     return;
   }
   auto const parks = slot.parks;
-  core_->parked_cv.wait(lock, [&slot, parks] { return slot.parks != parks; });
+  core_->parked_cv.wait(lock, [&slot, parks] { return slot.settled > parks; });
 }
 
 auto host::halt(member_id who) -> std::optional<held_end>
@@ -1259,7 +1331,7 @@ auto host::halt(member_id who) -> std::optional<held_end>
       return std::nullopt;
     }
     auto const parks = slot.parks;
-    core_->parked_cv.wait(lock, [&slot, parks] { return slot.parks != parks; });
+    core_->parked_cv.wait(lock, [&slot, parks] { return slot.settled > parks; });
   }
   return core_->close_session(lock, slot);
 }
@@ -1297,11 +1369,16 @@ void host::close()
   {
     thread_.join();
   }
-  std::scoped_lock const lock{core_->mutex};
-  for(auto const& slot : core_->members)
+  std::vector<detail::stamped> stranded;
   {
-    slot->state = host_state::stopping;
+    std::scoped_lock const lock{core_->mutex};
+    for(auto const& slot : core_->members)
+    {
+      slot->state = host_state::stopping;
+      std::ranges::move(slot->take_stamps(), std::back_inserter(stranded));
+    }
   }
+  detail::fail_all(stranded, detail::closed_error());
 }
 
 void host::ensure_thread()

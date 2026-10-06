@@ -51,12 +51,21 @@ def test_pins_are_0_to_15_on_gpio_ports(board: popcorn.Machine) -> None:
         _ = board.periph.USART1.pin(0).level
 
 
+class PinSeen:
+    def __init__(self, at: int) -> None:
+        self.at = at
+
+    def ready(self, machine: popcorn.Machine) -> bool:
+        return machine.mem.u32[self.at] == 1
+
+
 def test_a_drive_inside_running_reaches_the_firmware(board: popcorn.Machine) -> None:
+    level = board.ref.periph.GPIOA.pin(0).level
+
     async def body() -> None:
         async with board.running():
-            board.periph.GPIOA.pin(0).level = 1
-            for _ in range(200):
-                await asyncio.sleep(0)
+            await board.write((level, True))
+            await board.wait_for(PinSeen(board.sym("pin_seen")))
 
     asyncio.run(body())
     board.periph.GPIOA.pin(0).release()
@@ -64,8 +73,9 @@ def test_a_drive_inside_running_reaches_the_firmware(board: popcorn.Machine) -> 
 
     async def read() -> bool:
         async with board.running():
-            board.periph.GPIOA.pin(0).level = 1
-            return board.periph.GPIOA.pin(0).level
+            await board.write((level, True))
+            (driven,) = await board.read(level)
+            return driven
 
     assert asyncio.run(read())
     board.periph.GPIOA.pin(0).release()
@@ -92,7 +102,7 @@ def test_a_drive_from_another_thread_during_a_run_is_refused(board: popcorn.Mach
         async with board.running():
             await asyncio.to_thread(setattr, pin, "level", 1)
 
-    with pytest.raises(RuntimeError, match="another thread"):
+    with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
         asyncio.run(body())
     asyncio.run(asyncio.to_thread(setattr, pin, "level", 1))
     assert pin.level

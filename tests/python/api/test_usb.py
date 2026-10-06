@@ -17,7 +17,7 @@ import popcorn
 import pytest
 from popcorn import _core
 from popcorn.board import CdcLineCoding, HidStream, UsbHost, UsbHostOptions, UsbState
-from popcorn.units import VirtualTime, ms, s, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .projects import Silent
 
@@ -700,7 +700,7 @@ def test_audio_wait_ready_raises_unbound_when_unplugged(u575: popcorn.MachineDes
     with pytest.raises(popcorn.UsbError, match="no audio driver"):
         asyncio.run(audio.set_mute(2, 0, True))
     asyncio.run(audio.speaker.write([1, 2]))
-    audio.speaker.stop()
+    asyncio.run(audio.speaker.stop())
     assert audio.speaker.queued == 0
 
 
@@ -746,16 +746,11 @@ def test_a_drain_raises_stopped_when_the_last_packet_is_dropped_before_the_bus(
         await speaker.write([1, 2, 3])
         await m.run(for_=ms(5), stop_when=lambda _: speaker.queued == 0 and speaker.sending)
         assert speaker.queued == 0 and speaker.sending
-        async with m.running():
-            draining = asyncio.create_task(speaker.drain())
-            await asyncio.sleep(0)
-            assert speaker.sending
-            if drop == "stop":
-                speaker.stop()
-            else:
-                await host.detach()
-            with pytest.raises(popcorn.UsbError) as caught:
-                await draining
+        at = m.time + VirtualDuration(1)
+        stamped = speaker.stop(at=at) if drop == "stop" else host.detach(at=at)
+        with pytest.raises(popcorn.UsbError) as caught:
+            await speaker.drain()
+        await stamped
         return caught.value.status
 
     assert asyncio.run(body()) == "stopped"
@@ -771,12 +766,11 @@ def test_a_stop_during_drain_raises_stopped(u575: popcorn.MachineDescription) ->
         await m.periph.OTG_FS.host.audio().wait_ready(for_=s(2))
         await speaker.start()
         await speaker.write([1] * 1600)
+        stopped = speaker.stop(at=m.time + ms(10))
         async with m.running():
-            draining = asyncio.create_task(speaker.drain())
-            await asyncio.sleep(0)
-            speaker.stop()
             with pytest.raises(popcorn.UsbError) as caught:
-                await draining
+                await speaker.drain()
+        await stopped
         return caught.value.status
 
     assert asyncio.run(body()) == "stopped"
@@ -825,7 +819,7 @@ def test_a_start_inside_running_streams_from_the_background_run(
         async with m.running():
             await audio.mic.start()
             frames = await audio.mic.read_frames(5, for_=ms(20))
-            audio.mic.stop()
+            await audio.mic.stop()
         return len(frames)
 
     assert asyncio.run(body()) == 5
@@ -873,7 +867,7 @@ def test_a_restore_drops_mic_frames_and_keeps_the_streams_running(
     saved = m.snapshot()
     asyncio.run(m.run(for_=ms(5)))
     assert audio.mic.available >= 5
-    audio.mic.stop()
+    asyncio.run(audio.mic.stop())
     assert not audio.mic.running
     m.restore(saved)
     assert audio.mic.available == 0

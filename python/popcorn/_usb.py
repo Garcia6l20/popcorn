@@ -43,11 +43,15 @@ import enum
 import functools
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
 from popcorn import _core
 from popcorn._errors import ConfigError, EmulationError, ModelError, UsbError, UsbStall, UsbTimeout
-from popcorn._streams import PtyBridge, Waiter, cdc_key
+from popcorn._streams import Poster, PtyBridge, Waiter, cdc_key, written
 from popcorn.units import VirtualDuration, VirtualTime, ms, s
+
+if TYPE_CHECKING:
+    from popcorn._refs import Pending
 
 LANGUAGES = 0
 DEBOUNCE = ms(100)
@@ -267,7 +271,7 @@ class CdcStream:
         "_key",
         "_link",
         "_pending",
-        "_stimulus",
+        "_post",
         "_wait",
         "function",
         "name",
@@ -280,7 +284,7 @@ class CdcStream:
         link: _core.CdcLink,
         wait: Waiter,
         bridges: Mapping[str, PtyBridge],
-        stimulus: Callable[[], None],
+        post: Poster,
     ) -> None:
         """Wrap a native link. Use `m.periph.<NAME>.host.cdc()` instead."""
         self.name = name
@@ -289,7 +293,7 @@ class CdcStream:
         self._link = link
         self._wait = wait
         self._bridges = bridges
-        self._stimulus = stimulus
+        self._post = post
         self._pending: set[int] = set()
 
     @property
@@ -359,14 +363,18 @@ class CdcStream:
         0 before any."""
         return self._link.serial_state()
 
-    async def write(self, data: bytes) -> None:
+    def write(self, data: bytes, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
         """Queue bytes for the device. They go out as the machine runs, once it is configured.
+        Posted at the call as one command, as `UartStream.write`: await the result for the time
+        they were queued at.
 
         Raises:
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
+            ValueError: `at` before the time of a parked machine, from the await when running.
         """
-        self._stimulus()
-        self._link.send(bytes(data))
+        link = self._link
+        data = bytes(data)
+        return written(self._post(lambda: link.send(data), at))
 
     async def read(self, n: int, *, for_: VirtualDuration | None = None) -> bytes:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them, as
@@ -417,27 +425,31 @@ class CdcStream:
                 f"{self.name} CDC function {self.function}: not ready, {status}", status=status
             )
 
-    async def set_control_line_state(self, *, dtr: bool = True, rts: bool = True) -> None:
+    async def set_control_line_state(self, *, dtr: bool = True, rts: bool = True) -> VirtualTime:
         """Send SET_CONTROL_LINE_STATE and run the machine until it ends. The only way DTR
         drops.
+
+        Returns:
+            The virtual time the request was seen ended.
 
         Raises:
             UsbError: No CDC ACM driver is bound to the function, or the request ended neither
                 completed, stalled nor timed out.
             UsbStall: The device answered STALL.
             UsbTimeout: The request did not end within the host's timeout.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
-        self._stimulus()
-        await self._request(
-            self._link.set_control_line_state(dtr, rts),
-            f"SET_CONTROL_LINE_STATE dtr={int(dtr)} rts={int(rts)}",
+        link = self._link
+        transfer, at = await self._post(lambda: link.set_control_line_state(dtr, rts))
+        return await self._request(
+            transfer, f"SET_CONTROL_LINE_STATE dtr={int(dtr)} rts={int(rts)}", at
         )
 
     async def set_line_coding(
         self, baud: int = 115200, data_bits: int = 8, parity: str = "N", stop_bits: float = 1
-    ) -> None:
-        """Send SET_LINE_CODING and run the machine until it ends.
+    ) -> VirtualTime:
+        """Send SET_LINE_CODING and run the machine until it ends, the virtual time it was seen
+        ended as the result.
 
         Args:
             baud: Bits per second, 1 to 0xffffffff.
@@ -451,7 +463,7 @@ class CdcStream:
                 completed, stalled nor timed out.
             UsbStall: The device answered STALL.
             UsbTimeout: The request did not end within the host's timeout.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
         if not 1 <= baud <= 0xFFFFFFFF:
             raise ValueError(f"baud is 1 to 0xffffffff, not {baud}")
@@ -461,12 +473,13 @@ class CdcStream:
             raise ValueError(f"parity is one of {', '.join(PARITIES)}, not {parity!r}")
         if stop_bits not in STOP_BITS:
             raise ValueError(f"stop_bits is one of {STOP_BITS}, not {stop_bits}")
-        self._stimulus()
-        await self._request(
-            self._link.set_line_coding(
-                baud, STOP_BITS.index(stop_bits), PARITIES.index(parity), data_bits
-            ),
-            f"SET_LINE_CODING {baud} {data_bits}{parity}{stop_bits:g}",
+        link = self._link
+        stop_code, parity_code = STOP_BITS.index(stop_bits), PARITIES.index(parity)
+        transfer, at = await self._post(
+            lambda: link.set_line_coding(baud, stop_code, parity_code, data_bits)
+        )
+        return await self._request(
+            transfer, f"SET_LINE_CODING {baud} {data_bits}{parity}{stop_bits:g}", at
         )
 
     def discard(self) -> None:
@@ -480,7 +493,7 @@ class CdcStream:
         if n < 0:
             raise ValueError(f"cannot read {n} bytes")
 
-    async def _request(self, transfer: int, label: str) -> None:
+    async def _request(self, transfer: int, label: str, posted_at: VirtualTime) -> VirtualTime:
         where = f"{self.name} CDC function {self.function}"
         if transfer == 0:
             raise UsbError(f"{where}: {label} with no CDC ACM driver bound", status="unbound")
@@ -494,9 +507,10 @@ class CdcStream:
                     results.append(status)
             return bool(results)
 
+        done_at = posted_at
         try:
             if not ended():
-                await self._wait(ended, None)
+                done_at = await self._wait(ended, None)
         finally:
             self._pending.discard(transfer)
             if not results:
@@ -505,7 +519,7 @@ class CdcStream:
             raise EmulationError(f"{where}: the run ended before {label} did")
         status = results[0]
         if status is _core.UsbTransferStatus.completed:
-            return
+            return done_at
         message = f"{where}: {label} ended {status.name}"
         if status is _core.UsbTransferStatus.stalled:
             raise UsbStall(message, status=status.name)
@@ -559,7 +573,7 @@ class HidStream:
         "__weakref__",
         "_link",
         "_pending",
-        "_stimulus",
+        "_post",
         "_wait",
         "_writes",
         "function",
@@ -572,14 +586,14 @@ class HidStream:
         function: int,
         link: _core.HidLink,
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
     ) -> None:
         """Wrap a native link. Use `m.periph.<NAME>.host.hid()` instead."""
         self.name = name
         self.function = function
         self._link = link
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
         self._pending: set[int] = set()
         self._writes: set[int] = set()
 
@@ -659,13 +673,15 @@ class HidStream:
             for record in self._link.drain(n)
         ]
 
-    async def write_report(self, data: bytes) -> None:
+    def write_report(self, data: bytes, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
         """Send an output report and run the machine until the device took it.
 
-        It waits behind the output reports written before, and until the device is configured
-        and its report descriptor read. When the call raises EmulationError or is cancelled,
-        the report stays queued and is sent later, as the machine runs: only its result is
-        dropped.
+        The report is queued at the call as one command, at the next block boundary or the
+        first one at or after `at`, as `UartStream.write`. Awaiting the result waits for the
+        device and returns the time the report was queued at. It waits behind the output
+        reports written before, and until the device is configured and its report descriptor
+        read. When the await raises EmulationError or is cancelled, the report stays queued and
+        is sent later, as the machine runs: only its result is dropped.
 
         Args:
             data: The report as hidraw takes it: the report ID first, 0 when the device does not
@@ -678,7 +694,7 @@ class HidStream:
             UsbTimeout: The SET_REPORT did not end within the host's timeout.
             UsbError: The transfer ended otherwise, a detach included.
             EmulationError: The run ended before the device took the report.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
         data = bytes(data)
         if len(data) < 2:
@@ -688,8 +704,18 @@ class HidStream:
             raise ValueError(
                 f"an output report carries at most 0xffff bytes on the bus, not {stage}"
             )
-        self._stimulus()
-        write = self._link.write(data)
+        link = self._link
+        report = data[0]
+        posted = self._post(
+            lambda: link.write(data),
+            at,
+            cancel=False,
+            follow=lambda queued: self._taken(queued, report),
+        )
+        return cast("Pending[VirtualTime]", posted)
+
+    async def _taken(self, queued: tuple[int, VirtualTime], report: int) -> VirtualTime:
+        write, at = queued
         self._writes.add(write)
         results: list[_core.UsbTransferStatus] = []
 
@@ -707,12 +733,13 @@ class HidStream:
             self._writes.discard(write)
             if not results:
                 self._link.forget_written(write)
-        label = f"output report {data[0]}"
+        label = f"output report {report}"
         if not results:
             raise EmulationError(f"{self._where}: the run ended before {label} did")
         _raise_for(results[0], f"{self._where}: {label}")
+        return at
 
-    async def get_feature(self, report_id: int, length: int) -> bytes:
+    async def get_feature(self, report_id: int, length: int) -> UsbData:
         """Send GET_REPORT(Feature) and run the machine until it ends, as hidraw's
         HIDIOCGFEATURE.
 
@@ -722,7 +749,8 @@ class HidStream:
                 byte fewer, the ID is not on the bus.
 
         Returns:
-            The report, its ID first: the bytes the device sent, after a 0 for ID 0.
+            The report, its ID first: the bytes the device sent, after a 0 for ID 0, with the
+            virtual time the request was seen ended as `.time`.
 
         Raises:
             ValueError: `report_id` is not 0 to 255, or `length` not 1 to 0xffff.
@@ -730,23 +758,21 @@ class HidStream:
                 completed, stalled nor timed out.
             UsbStall: The device answered STALL.
             UsbTimeout: The request did not end within the host's timeout.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
         if not 0 <= report_id <= 0xFF:
             raise ValueError(f"a report ID is 0 to 255, not {report_id}")
         if not 1 <= length <= 0xFFFF:
             raise ValueError(f"length is 1 to 0xffff, not {length}")
-        self._stimulus()
         w_length = length - 1 if report_id == 0 else length
-        reply = await self._request(
-            self._link.get_report(FEATURE, report_id, w_length),
-            f"GET_REPORT feature {report_id}",
-        )
-        return (b"\x00" if report_id == 0 else b"") + bytes(reply.data)
+        link = self._link
+        transfer, at = await self._post(lambda: link.get_report(FEATURE, report_id, w_length))
+        reply, done_at = await self._request(transfer, f"GET_REPORT feature {report_id}", at)
+        return UsbData((b"\x00" if report_id == 0 else b"") + bytes(reply.data), done_at)
 
-    async def set_feature(self, data: bytes) -> None:
+    async def set_feature(self, data: bytes) -> VirtualTime:
         """Send SET_REPORT(Feature) and run the machine until it ends, as hidraw's
-        HIDIOCSFEATURE.
+        HIDIOCSFEATURE, the virtual time it was seen ended as the result.
 
         Args:
             data: The report, its ID first, 0 when the device does not number its reports, which
@@ -758,7 +784,7 @@ class HidStream:
                 completed, stalled nor timed out.
             UsbStall: The device answered STALL.
             UsbTimeout: The request did not end within the host's timeout.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
         data = bytes(data)
         if not data:
@@ -766,10 +792,10 @@ class HidStream:
         stage = data[1:] if data[0] == 0 else data
         if len(stage) > 0xFFFF:
             raise ValueError(f"a data stage is at most 0xffff bytes, not {len(stage)}")
-        self._stimulus()
-        await self._request(
-            self._link.set_report(FEATURE, data[0], stage), f"SET_REPORT feature {data[0]}"
-        )
+        link = self._link
+        transfer, at = await self._post(lambda: link.set_report(FEATURE, data[0], stage))
+        _, done_at = await self._request(transfer, f"SET_REPORT feature {data[0]}", at)
+        return done_at
 
     def discard(self) -> None:
         """Forget the requests and reports waited for, at a restore."""
@@ -780,7 +806,9 @@ class HidStream:
     def _where(self) -> str:
         return f"{self.name} HID function {self.function}"
 
-    async def _request(self, transfer: int, label: str) -> _core.HidReplyRecord:
+    async def _request(
+        self, transfer: int, label: str, posted_at: VirtualTime
+    ) -> tuple[_core.HidReplyRecord, VirtualTime]:
         if transfer == 0:
             raise UsbError(f"{self._where}: {label} with no HID driver bound", status="unbound")
         self._pending.add(transfer)
@@ -793,9 +821,10 @@ class HidStream:
                     results.append(reply)
             return bool(results)
 
+        done_at = posted_at
         try:
             if not ended():
-                await self._wait(ended, None)
+                done_at = await self._wait(ended, None)
         finally:
             self._pending.discard(transfer)
             if not results:
@@ -803,7 +832,7 @@ class HidStream:
         if not results:
             raise EmulationError(f"{self._where}: the run ended before {label} did")
         _raise_for(results[0].status, f"{self._where}: {label}")
-        return results[0]
+        return results[0], done_at
 
     def __repr__(self) -> str:
         return f"HidStream({self.name}, {self.function})"
@@ -882,7 +911,7 @@ class UacStream:
         "_link",
         "_mic",
         "_pending",
-        "_stimulus",
+        "_post",
         "_wait",
         "function",
         "name",
@@ -895,7 +924,7 @@ class UacStream:
         link: _core.UacLink,
         mic: bool,
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
     ) -> None:
         """Wrap a native link. Use `m.periph.<NAME>.host.audio().speaker` or `.mic` instead."""
         self.name = name
@@ -903,7 +932,7 @@ class UacStream:
         self._link = link
         self._mic = mic
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
         self._pending: set[int] = set()
 
     @property
@@ -948,9 +977,10 @@ class UacStream:
         """Whether the setting is selected and an isochronous packet goes every frame."""
         return self._record().running
 
-    async def start(self) -> None:
+    async def start(self) -> VirtualTime:
         """Select the stream's alternate setting and run the machine until the device
-        acknowledged it. The first isochronous packet goes 2 frames after the pipe opens.
+        acknowledged it, the virtual time that was seen as the result. The first isochronous
+        packet goes 2 frames after the pipe opens.
 
         It sends what Linux sends when it prepares a stream: the clock's validity and GET_CUR
         of its frequency, SET_CUR when the rate differs and the clock takes it, the validity
@@ -965,12 +995,13 @@ class UacStream:
             UsbStall: The device stalled SET_INTERFACE or SET_CUR.
             UsbTimeout: A request did not end within the host's timeout.
             EmulationError: The run ended before the device acknowledged.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
         if self.running:
-            return
-        self._stimulus()
-        operation = self._link.start(self._mic)
+            _, now = await self._post(lambda: None)
+            return now
+        link, mic = self._link, self._mic
+        operation, posted_at = await self._post(lambda: link.start(mic))
         if operation == 0:
             if not self._link.bound():
                 status = "unbound"
@@ -991,9 +1022,10 @@ class UacStream:
                     results.append(status)
             return bool(results)
 
+        done_at = posted_at
         try:
             if not ended():
-                await self._wait(ended, None)
+                done_at = await self._wait(ended, None)
         finally:
             self._pending.discard(operation)
             if not results:
@@ -1001,21 +1033,25 @@ class UacStream:
         if not results:
             raise EmulationError(f"{self._where}: the run ended before the start did")
         _raise_for(results[0], f"{self._where}: start")
+        return done_at
 
-    def stop(self) -> None:
-        """Stop the stream at once, from async or sync code, the machine running or not.
+    def stop(self, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
+        """Stop the stream, posted at the call as one command: at once while the machine is
+        parked, at the next block boundary while it runs, or at the first one at or after `at`.
+        Await the result for the virtual time it ran at.
 
-        The host closes the pipe now: no isochronous packet goes from now on, and a speaker's
+        The host closes the pipe then: no isochronous packet goes from then on, and a speaker's
         samples not yet sent are dropped, whether it ran or not. SET_INTERFACE 0 is queued in the
         host state and goes on the bus as the machine runs, after any control request already
         queued. A start in progress is cancelled. A stream neither running nor starting sends no
         request.
 
         Raises:
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
+            ValueError: `at` before the time of a parked machine, from the await when running.
         """
-        self._stimulus()
-        self._link.stop(self._mic)
+        link, mic = self._link, self._mic
+        return written(self._post(lambda: link.stop(mic), at))
 
     def discard(self) -> None:
         """Forget the starts waited for, at a restore."""
@@ -1059,17 +1095,22 @@ class UacSpeaker(UacStream):
         at = self._link.sent_at()
         return None if at is None else VirtualTime(at)
 
-    async def write(self, samples: Sequence[int]) -> None:
-        """Queue samples for the device, interleaved, a whole number of frames of audio.
+    def write(
+        self, samples: Sequence[int], *, at: VirtualTime | None = None
+    ) -> Pending[VirtualTime]:
+        """Queue samples for the device, interleaved, a whole number of frames of audio. Posted
+        at the call as one command, as `UartStream.write`: await the result for the time they
+        were queued at.
 
         Args:
             samples: Signed samples of the format's subslot, `bytes_per_sample` bytes, as the bus
                 carries them. Before the format is known any 32-bit value is taken and its low
                 bytes are sent.
+            at: The first block boundary at or after it queues them, None for the next one.
 
         Raises:
             ValueError: A sample is out of range, or the count is not a multiple of the channels.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
         values = list(samples)
         layout = self.format
@@ -1082,8 +1123,8 @@ class UacSpeaker(UacStream):
             raise ValueError(
                 f"{len(values)} samples are not whole frames of {layout.channels} channels"
             )
-        self._stimulus()
-        self._link.write(values)
+        link = self._link
+        return written(self._post(lambda: link.write(values), at))
 
     async def drain(self, *, for_: VirtualDuration | None = None) -> None:
         """Run the machine until every sample written went out in an isochronous packet, or
@@ -1148,13 +1189,8 @@ class UacMic(UacStream):
         return self._link.dropped()
 
     def clear(self) -> None:
-        """Drop the frames received and not read yet, at once, as a restore does. The next frame
-        read is newer than the call.
-
-        Raises:
-            RuntimeError: Called from another thread while a run is active.
-        """
-        self._stimulus()
+        """Drop the frames received and not read yet, at once, as a restore does, from any
+        thread, the machine running or not. The next frame read is newer than the call."""
         self._link.clear()
 
     async def read_frames(self, n: int, *, for_: VirtualDuration | None = None) -> list[UacFrame]:
@@ -1206,7 +1242,7 @@ class UacFunction:
         "__weakref__",
         "_link",
         "_pending",
-        "_stimulus",
+        "_post",
         "_wait",
         "function",
         "mic",
@@ -1220,17 +1256,17 @@ class UacFunction:
         function: int,
         link: _core.UacLink,
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
     ) -> None:
         """Wrap a native link. Use `m.periph.<NAME>.host.audio()` instead."""
         self.name = name
         self.function = function
         self._link = link
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
         self._pending: set[int] = set()
-        self.speaker = UacSpeaker(name, function, link, False, wait, stimulus)
-        self.mic = UacMic(name, function, link, True, wait, stimulus)
+        self.speaker = UacSpeaker(name, function, link, False, wait, post)
+        self.mic = UacMic(name, function, link, True, wait, post)
 
     @property
     def bound(self) -> bool:
@@ -1284,8 +1320,9 @@ class UacFunction:
             status = "not_ready" if self.bound else "unbound"
             raise UsbTimeout(f"{self._where}: not ready, {status}", status=status)
 
-    async def set_mute(self, unit: int, channel: int, mute: bool) -> None:
-        """Send SET_CUR of a feature unit's mute and run the machine until it ends.
+    async def set_mute(self, unit: int, channel: int, mute: bool) -> VirtualTime:
+        """Send SET_CUR of a feature unit's mute and run the machine until it ends, the virtual
+        time it was seen ended as the result.
 
         Args:
             unit: bUnitID.
@@ -1298,11 +1335,11 @@ class UacFunction:
                 nor timed out. Linux sends a failed SET_CUR up to 10 times, so does the host.
             UsbStall: The device answered STALL.
             UsbTimeout: The request did not end within the host's timeout.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
-        await self._set(unit, channel, _MUTE, int(bool(mute)), f"mute {int(bool(mute))}")
+        return await self._set(unit, channel, _MUTE, int(bool(mute)), f"mute {int(bool(mute))}")
 
-    async def set_volume(self, unit: int, channel: int, volume: int) -> None:
+    async def set_volume(self, unit: int, channel: int, volume: int) -> VirtualTime:
         """Send SET_CUR of a feature unit's volume and run the machine until it ends, as
         `set_mute`.
 
@@ -1317,11 +1354,11 @@ class UacFunction:
             UsbError: As `set_mute`.
             UsbStall: The device answered STALL.
             UsbTimeout: The request did not end within the host's timeout.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
         if not -0x8000 <= volume <= 0x7FFF:
             raise ValueError(f"a volume is -32768 to 32767, not {volume}")
-        await self._set(unit, channel, _VOLUME, volume, f"volume {volume}")
+        return await self._set(unit, channel, _VOLUME, volume, f"volume {volume}")
 
     def discard(self) -> None:
         """Forget the requests and starts waited for, at a restore."""
@@ -1333,7 +1370,9 @@ class UacFunction:
     def _where(self) -> str:
         return f"{self.name} audio function {self.function}"
 
-    async def _set(self, unit: int, channel: int, control: int, value: int, label: str) -> None:
+    async def _set(
+        self, unit: int, channel: int, control: int, value: int, label: str
+    ) -> VirtualTime:
         where = f"{self._where}: SET_CUR unit {unit} channel {channel} {label}"
         if not self._link.bound():
             raise UsbError(f"{where} with no audio driver bound", status="unbound")
@@ -1342,8 +1381,10 @@ class UacFunction:
             raise ValueError(f"{where}: no such unit and channel")
         if not (found.controls[channel] >> (2 * (control - 1))) & 2:
             raise ValueError(f"{where}: the control is not writable")
-        self._stimulus()
-        operation = self._link.set_feature(unit, channel, control, value)
+        link = self._link
+        operation, posted_at = await self._post(
+            lambda: link.set_feature(unit, channel, control, value)
+        )
         if operation == 0:
             status = "refused" if self._link.bound() else "unbound"
             raise UsbError(f"{where} refused by the driver, {status}", status=status)
@@ -1357,9 +1398,10 @@ class UacFunction:
                     results.append(status)
             return bool(results)
 
+        done_at = posted_at
         try:
             if not ended():
-                await self._wait(ended, None)
+                done_at = await self._wait(ended, None)
         finally:
             self._pending.discard(operation)
             if not results:
@@ -1367,6 +1409,7 @@ class UacFunction:
         if not results:
             raise EmulationError(f"{where}: the run ended before it did")
         _raise_for(results[0], where)
+        return done_at
 
     def __repr__(self) -> str:
         return f"UacFunction({self.name}, {self.function})"
@@ -1381,6 +1424,22 @@ def _raise_for(status: _core.UsbTransferStatus, label: str) -> None:
     if status is _core.UsbTransferStatus.timed_out:
         raise UsbTimeout(message, status=status.name)
     raise UsbError(message, status=status.name)
+
+
+class UsbData(bytes):
+    """Bytes a USB request returned, and the virtual time it ended at.
+
+    Attributes:
+        time: Virtual time the request ended at.
+    """
+
+    time: VirtualTime
+
+    def __new__(cls, data: bytes, time: VirtualTime) -> UsbData:
+        """Pair `data` with the time its request ended at."""
+        made = super().__new__(cls, data)
+        made.time = time
+        return made
 
 
 class UsbHost:
@@ -1403,8 +1462,8 @@ class UsbHost:
         "_hid_link",
         "_link",
         "_pending",
+        "_post",
         "_results",
-        "_stimulus",
         "_wait",
         "name",
     )
@@ -1414,7 +1473,7 @@ class UsbHost:
         name: str,
         link: _core.UsbLink,
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
         bridges: Mapping[str, PtyBridge],
         cdc_link: Callable[[int], _core.CdcLink],
         hid_link: Callable[[int], _core.HidLink],
@@ -1425,7 +1484,7 @@ class UsbHost:
         self.name = name
         self._link = link
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
         self._bridges = bridges
         self._cdc_link = cdc_link
         self._results: dict[int, _core.UsbControlResult] = {}
@@ -1438,28 +1497,39 @@ class UsbHost:
 
     @property
     def attached(self) -> bool:
-        """Whether the cable is plugged."""
+        """Whether the cable is plugged.
+
+        Raises:
+            MachineRunning: The machine is busy, read outside its callbacks.
+        """
         return self._link.plugged()
 
-    async def attach(self) -> None:
-        """Plug the cable: the host sees the device's pull-up, then debounces and enumerates as
+    async def attach(self) -> VirtualTime:
+        """Plug the cable, as one command at the next block boundary, at once while the
+        machine is parked: the host sees the device's pull-up, then debounces and enumerates as
         the machine runs.
 
-        Raises:
-            RuntimeError: Called from another thread while a run is active.
-        """
-        self._stimulus()
-        self._link.plug(True)
-
-    async def detach(self) -> None:
-        """Unplug the cable: VBUS drops, the device is gone for the host, transfers in flight
-        end cancelled.
+        Returns:
+            The virtual time the cable was plugged at.
 
         Raises:
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
         """
-        self._stimulus()
-        self._link.plug(False)
+        link = self._link
+        _, at = await self._post(lambda: link.plug(True))
+        return at
+
+    def detach(self, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
+        """Unplug the cable, posted at the call as one command, as `UacStream.stop`: VBUS
+        drops, the device is gone for the host, transfers in flight end cancelled. Await the
+        result for the virtual time it ran at.
+
+        Raises:
+            RuntimeError: Called from a handler or a model.
+            ValueError: `at` before the time of a parked machine, from the await when running.
+        """
+        link = self._link
+        return written(self._post(lambda: link.plug(False), at))
 
     @property
     def state(self) -> UsbState:
@@ -1540,7 +1610,7 @@ class UsbHost:
         if stream is None:
             link = self._cdc_link(function)
             stream = self._cdc[function] = CdcStream(
-                self.name, function, link, self._wait, self._bridges, self._stimulus
+                self.name, function, link, self._wait, self._bridges, self._post
             )
         return stream
 
@@ -1558,7 +1628,7 @@ class UsbHost:
         if stream is None:
             link = self._hid_link(function)
             stream = self._hid[function] = HidStream(
-                self.name, function, link, self._wait, self._stimulus
+                self.name, function, link, self._wait, self._post
             )
         return stream
 
@@ -1576,7 +1646,7 @@ class UsbHost:
         if found is None:
             link = self._audio_link(function)
             found = self._audio[function] = UacFunction(
-                self.name, function, link, self._wait, self._stimulus
+                self.name, function, link, self._wait, self._post
             )
         return found
 
@@ -1591,22 +1661,25 @@ class UsbHost:
             EmulationError: The run stopped for another reason, such as a fault.
         """
         configured = UsbState.CONFIGURED.value
-        if self._link.state().value != configured:
-            await self._wait(
-                lambda: (
-                    self._link.state().value == configured or self._link.failed_step() is not None
-                ),
-                for_,
-            )
-        if self._link.state().value != configured:
-            failed = self._link.failed_step()
-            status = failed or self.state.name
+        link = self._link
+        seen: list[tuple[int, str | None]] = []
+
+        def settled() -> bool:
+            seen[:] = [(link.state().value, link.failed_step())]
+            return seen[0][0] == configured or seen[0][1] is not None
+
+        await self._wait(settled, for_)
+        if not seen:
+            settled()
+        state, failed = seen[0]
+        if state != configured:
+            status = failed or UsbState(state).name
             reason = f"enumeration failed at {failed}" if failed else f"state {status}"
             raise UsbTimeout(f"{self.name}: the device is not configured, {reason}", status=status)
 
     async def control(
         self, request_type: int, request: int, value: int, index: int, data_or_length: bytes | int
-    ) -> bytes:
+    ) -> UsbData:
         """Send a control request on the default pipe and run the machine until it ends.
 
         Args:
@@ -1618,12 +1691,13 @@ class UsbHost:
                 the data stage of an OUT request.
 
         Returns:
-            The data stage received for IN, at most wLength bytes, empty for OUT.
+            The data stage received for IN, at most wLength bytes, empty for OUT, with the
+            virtual time the request ended as `.time`.
 
         Raises:
             ValueError: A field is out of range, an IN request is given data, or an OUT request
                 a length above 0 instead of its data.
-            RuntimeError: Called from another thread while a run is active.
+            RuntimeError: Called from a handler or a model.
             UsbStall: The device answered STALL.
             UsbTimeout: The request did not end within the host's timeout, 5 s by default.
             UsbError: The request ended otherwise: no handshake three times in a row, more data
@@ -1652,12 +1726,13 @@ class UsbHost:
                 raise ValueError("an IN request takes wLength, not data")
             if length > 0xFFFF:
                 raise ValueError(f"an OUT data stage is at most 0xffff bytes, not {length}")
-        self._stimulus()
-        transfer = self._link.control(request_type, request, value, index, length, data)
+        link = self._link
+        transfer, _ = await self._post(
+            lambda: link.control(request_type, request, value, index, length, data)
+        )
         self._pending.add(transfer)
         try:
-            if not self._collected(transfer):
-                await self._wait(lambda: self._collected(transfer), None)
+            await self._wait(lambda: self._collected(transfer), None)
         finally:
             self._pending.discard(transfer)
         result = self._results.pop(transfer, None)
@@ -1665,9 +1740,9 @@ class UsbHost:
         if result is None:
             raise EmulationError(f"{self.name}: the run ended before control {setup} did")
         status = result.status.name
-        if result.status is _core.UsbTransferStatus.completed:
-            return bytes(result.data) if is_in else b""
         at = VirtualTime(result.at_ps)
+        if result.status is _core.UsbTransferStatus.completed:
+            return UsbData(bytes(result.data) if is_in else b"", at)
         message = f"{self.name}: control {setup} ended {status} at {at}"
         if result.status is _core.UsbTransferStatus.stalled:
             raise UsbStall(message, status=status)
@@ -1708,7 +1783,7 @@ class UsbHosts:
         "_hosts",
         "_links",
         "_names",
-        "_stimulus",
+        "_post",
         "_wait",
     )
 
@@ -1718,7 +1793,7 @@ class UsbHosts:
         names: Iterable[str],
         aliases: Mapping[str, str],
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
         bridges: Mapping[str, PtyBridge] | None = None,
     ) -> None:
         """Serve the hosts of the controllers `names` through `connect`. `bridges` are the
@@ -1727,7 +1802,7 @@ class UsbHosts:
         self._names = frozenset(names)
         self._aliases = dict(aliases)
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
         self._bridges: Mapping[str, PtyBridge] = {} if bridges is None else bridges
         self._hosts: dict[str, UsbHost] = {}
         self._cdc_links: dict[tuple[str, int], _core.CdcLink] = {}
@@ -1758,7 +1833,7 @@ class UsbHosts:
                 name,
                 self._links.setdefault(name, self._connect(name)),
                 self._wait,
-                self._stimulus,
+                self._post,
                 self._bridges,
                 functools.partial(self.cdc_link, name),
                 functools.partial(self.hid_link, name),

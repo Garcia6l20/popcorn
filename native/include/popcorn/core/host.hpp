@@ -94,6 +94,12 @@ struct run_goal
   /** @brief Run one slice only, the goal completing when it ends, with or without a stop. Empty
    * for a goal over as many slices as it needs. */
   std::optional<single_slice> once{};
+  /** @brief Called on the host thread as the engine owner when the goal ends, before the member
+   * parks and before its future completes: with the stop, or with null when it ended without
+   * one, by an error, a cancel or a yield. An exception it throws fails a goal that ended on a
+   * stop, and is dropped after an error or a cancel, which the goal fails with. Empty for
+   * none. */
+  std::function<void(machine&, stop const*)> finish{};
 };
 
 /** @brief Outcome of a goal. */
@@ -115,6 +121,10 @@ struct waiter_spec
   std::function<bool()> ready{};
   /** @brief Virtual time at which the waiter completes with a stop_reason::time stop. */
   std::optional<vtime> deadline{};
+  /** @brief Virtual time after the first boundary that evaluates the waiter at which it completes
+   * with a stop_reason::time stop, for a caller that cannot read the running clock. Ignored when
+   * deadline is set. */
+  std::optional<vtime> after{};
 };
 
 /** @brief How a free run ended by itself: the stop, or the exception a handler threw. */
@@ -129,6 +139,9 @@ struct host_hooks
   std::move_only_function<void()> thread_stopping{};
   /** @brief Called on the caller of cancel(), halt() and close() before it may block. */
   std::move_only_function<void()> before_block{};
+  /** @brief Called on the host thread as the engine owner before and after every slice of a
+   * goal or a free run, with the member. Empty for none. */
+  std::move_only_function<void(member_id)> boundary{};
 };
 
 class host;

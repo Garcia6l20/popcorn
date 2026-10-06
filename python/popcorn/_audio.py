@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._errors import ConfigError, ModelError
-from popcorn._streams import Waiter
+from popcorn._streams import Poster, Waiter, written
 from popcorn.units import VirtualDuration, VirtualTime
+
+if TYPE_CHECKING:
+    from popcorn._refs import Pending
 
 type Block = Literal["A", "B"]
 """An audio block of an SAI."""
@@ -78,7 +81,7 @@ class AudioStream:
     receiver sees 0 until the test writes again.
     """
 
-    __slots__ = ("_link", "_stimulus", "_wait", "block", "name")
+    __slots__ = ("_link", "_post", "_wait", "block", "name")
 
     def __init__(
         self,
@@ -86,14 +89,14 @@ class AudioStream:
         block: Block,
         link: _core.AudioLink,
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
     ) -> None:
         """Wrap a native link. Use `m.periph.<SAI>.audio(block)` instead."""
         self.name = name
         self.block = block
         self._link = link
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
 
     @property
     def available(self) -> int:
@@ -123,14 +126,14 @@ class AudioStream:
         and BROWN_OUT, which power the codec down and return it to `AudioOptions`.
 
         Raises:
-            RuntimeError: Set from another thread while a run is active.
+            MachineRunning: Read or set while the machine is busy, outside its callbacks: use
+                `m.ref.periph.<SAI>.audio(block).external_frame_hz`.
             ValueError: Set to a value outside 0 to 2**32 - 1.
         """
         return self._link.external_frame_hz()
 
     @external_frame_hz.setter
     def external_frame_hz(self, hz: int) -> None:
-        self._stimulus()
         if not _is_frame_rate(hz):
             raise ValueError(f"an external frame rate is 0 to 2**32 - 1 Hz, not {hz!r}")
         self._link.set_external_frame_hz(hz)
@@ -162,19 +165,22 @@ class AudioStream:
             for record in self._link.drain(n)
         ]
 
-    async def write(self, words: Sequence[int]) -> None:
+    def write(self, words: Sequence[int], *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
         """Queue words for a receiving block: one per slot in slot order, inactive slots
-        included. Once they are served the block receives 0.
+        included. Once they are served the block receives 0. Posted at the call as one command,
+        at the next block boundary or the first one at or after `at`, as `UartStream.write`:
+        await the result for the time they were queued at.
 
         Raises:
-            RuntimeError: Called from another thread while a run is active.
-            ValueError: A word is outside 0 to 2**32 - 1.
+            RuntimeError: Called from a handler or a model.
+            ValueError: A word is outside 0 to 2**32 - 1, or `at` as for `UartStream.write`.
         """
-        self._stimulus()
-        for word in words:
+        values = list(words)
+        for word in values:
             if isinstance(word, bool) or not 0 <= word < 1 << 32:
                 raise ValueError(f"an audio word is 0 to 2**32 - 1, not {word!r}")
-        self._link.write(list(words))
+        link = self._link
+        return written(self._post(lambda: link.write(values), at))
 
     def __repr__(self) -> str:
         return f"AudioStream({self.name}.{self.block})"
@@ -187,7 +193,7 @@ def _is_frame_rate(value: object) -> bool:
 class AudioPorts:
     """The Python ends of a machine's SAI blocks, one link and one stream per block."""
 
-    __slots__ = ("_aliases", "_links", "_stimulus", "_streams", "_wait")
+    __slots__ = ("_aliases", "_links", "_post", "_streams", "_wait")
 
     def __init__(
         self,
@@ -196,13 +202,13 @@ class AudioPorts:
         aliases: Mapping[str, str],
         options: Mapping[str, Mapping[Block, AudioOptions]],
         wait: Waiter,
-        stimulus: Callable[[], None],
+        post: Poster,
     ) -> None:
         """Connect both blocks of every SAI in `sais` through `connect` at once, with their
         `options`, so each one keeps what the firmware transmits from power-on."""
         self._aliases = dict(aliases)
         self._wait = wait
-        self._stimulus = stimulus
+        self._post = post
         self._links: dict[tuple[str, Block], _core.AudioLink] = {}
         for name in sais:
             for block in BLOCKS:
@@ -243,9 +249,7 @@ class AudioPorts:
                 raise ModelError(
                     f"{name} has no built-in SAI model, so no audio stream", peripheral=name
                 )
-            stream = self._streams[key] = AudioStream(
-                name, chosen, link, self._wait, self._stimulus
-            )
+            stream = self._streams[key] = AudioStream(name, chosen, link, self._wait, self._post)
         return stream
 
     def discard(self) -> None:

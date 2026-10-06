@@ -7,6 +7,7 @@ import re
 import typing
 import weakref
 from collections.abc import Callable
+from typing import cast
 
 from popcorn import _core
 from popcorn._enums import ResetKind
@@ -341,6 +342,18 @@ def serving(device: BusDevice) -> object | None:
     """The live machine `device` serves, None when it serves none."""
     held = _ATTACHED.get(id(device))
     return None if held is None else held[0]()
+
+
+def parked[T](device: BusDevice, read: Callable[[], T]) -> T:
+    """`read()` with the machine `device` serves parked, or from its callback.
+
+    Raises:
+        MachineRunning: That machine is busy, outside its callbacks.
+    """
+    handle: _core.MachineHandle | None = getattr(serving(device), "_handle", None)
+    if handle is None:
+        return read()
+    return cast(T, handle.parked(read))
 
 
 def attach(device: BusDevice, machine: object, audio_clock: AudioClock) -> None:

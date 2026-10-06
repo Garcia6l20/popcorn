@@ -123,21 +123,28 @@ def test_symbols_resolve_across_images(machines: Machines, driver: popcorn.Image
     assert "alu_mark" in caught.value.close_matches
 
 
-def test_views_read_but_refuse_writes_from_another_task_during_a_run(machines: Machines) -> None:
+def test_views_refuse_access_from_another_task_during_a_run_and_refs_reach_it(
+    machines: Machines,
+) -> None:
     m = machines()
+    word, r0, rw = m.ref.mem.u32[SRAM], m.ref.reg.r0, m.ref.periph.TESTDEV.RW
 
     async def scenario() -> None:
         task = asyncio.create_task(m.run())
         await asyncio.sleep(0)
-        _ = m.mem.u32[SRAM]
-        _ = m.reg.r0
-        _ = m.periph.TESTDEV.RW.value
+        for read in (lambda: m.mem.u32[SRAM], lambda: m.reg.r0, lambda: m.periph.TESTDEV.RW.value):
+            with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
+                read()
         with pytest.raises(popcorn.MachineRunning):
             m.mem.u32[SRAM] = 0
         with pytest.raises(popcorn.MachineRunning):
             m.reg.r0 = 0
         with pytest.raises(popcorn.MachineRunning):
             m.periph.TESTDEV.RW.value = 0
+        written = await m.write((word, 0x1234), (r0, 7), (rw, 0x55))
+        values = await m.read(word, r0, rw)
+        assert m.busy and values.time >= written.time
+        assert all(isinstance(value, int) for value in values)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -197,11 +204,7 @@ class EndsAt:
 
 def test_cstring_reads_blocks_and_falls_back_to_bytes_at_a_bus_error() -> None:
     fake = EndsAt(b"\x01" * 16 + b"abc\0", 20)
-    memory = popcorn.Memory(
-        ViewAccess(
-            cast(_core.MachineHandle, fake), lambda: None, lambda: None, lambda address, size: None
-        )
-    )
+    memory = popcorn.Memory(ViewAccess(cast(_core.MachineHandle, fake)))
     assert memory.cstring(16) == "abc"
     assert fake.reads[0] == (16, 48)
     assert fake.reads[1:] == [(16, 1), (17, 1), (18, 1), (19, 1)]

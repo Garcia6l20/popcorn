@@ -13,6 +13,8 @@ from popcorn.units import VirtualTime, ms
 
 from .conftest import Machines, run_bounded
 
+NVIC_ISPR0 = 0xE000_E200
+
 
 def test_a_second_concurrent_run_is_machine_busy(machines: Machines) -> None:
     m = machines()
@@ -236,10 +238,10 @@ def test_time_reads_inside_running_at_the_point_the_run_reached(machines: Machin
         async with m.running():
             for _ in range(50):
                 await asyncio.sleep(0)
-                times.append(m.time)
+                times.append((await m.read()).time)
             stop = await m.wait_for(AfterInstructions(10**12), for_=ms(1))
-            at_stop = m.time
-            with pytest.raises(popcorn.MachineRunning, match="the run's thread"):
+            at_stop = (await m.read()).time
+            with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
                 await asyncio.to_thread(lambda: m.time)
         return times, stop, at_stop
 
@@ -247,7 +249,7 @@ def test_time_reads_inside_running_at_the_point_the_run_reached(machines: Machin
     assert all(a <= b for a, b in itertools.pairwise(times))
     assert times[-1] > times[0]
     assert stop.reason is popcorn.StopReason.TIME
-    assert at_stop == stop.time
+    assert at_stop >= stop.time
     assert m.time >= at_stop
 
 
@@ -258,14 +260,13 @@ def test_time_reads_from_another_task_during_a_run(machines: Machines) -> None:
         run = asyncio.create_task(m.run(for_=ms(5)))
         times: list[VirtualTime] = []
         while not run.done():
-            times.append(m.time)
+            times.append((await m.read()).time)
             await asyncio.sleep(0)
         stop = await run
         times.append(stop.time)
         return times
 
     times = asyncio.run(scenario())
-    assert len(times) > 2
     assert all(a <= b for a, b in itertools.pairwise(times))
     assert m.time == times[-1]
 
@@ -283,7 +284,7 @@ def test_time_from_the_building_thread_during_a_run_on_another_thread_is_machine
         while not m.busy:
             await asyncio.sleep(0.001)
         try:
-            with pytest.raises(popcorn.MachineRunning, match="the run's thread"):
+            with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
                 _ = m.time
         finally:
             done.set()
@@ -320,23 +321,31 @@ def test_memory_reads_inside_running_at_the_point_the_run_reached(machines: Mach
         async with m.running():
             for _ in range(50):
                 await asyncio.sleep(0)
-                values.append(int(value.value))
-                counts.append(m.instructions)
-            data = m.mem.read(address, 4)
+                sampled, count = await m.read(m.ref.var("alu_value"), m.ref.instructions)
+                values.append(int(sampled))
+                counts.append(count)
+            data, word, variable, pc, reg_pc, pending, text = await m.read(
+                m.ref.mem.block(address, 4),
+                m.ref.mem.u32[address],
+                m.ref.var("alu_value"),
+                m.ref.pc,
+                m.ref.reg.pc,
+                m.ref.pending_events,
+                m.ref.mem.cstring(address, 4),
+            )
             raw = int.from_bytes(data, "little")
-            word = m.mem.u32[address]
-            pc = m.pc
-            assert m.reg.pc == pc
-            assert m.pending_events >= 0
-            text = data.split(b"\0")[0].decode("utf-8", errors="replace")
-            assert m.mem.cstring(address, 4) == text
+            assert reg_pc == pc
+            assert pending >= 0
+            assert text == data.split(b"\0")[0].decode("utf-8", errors="replace")
+            assert raw == word == int(variable)
         return values, counts, raw, word, m.instructions
 
     values, counts, raw, word, after = asyncio.run(scenario())
     assert len(set(values)) > 1
     assert all(a <= b for a, b in itertools.pairwise(counts))
-    assert raw == word == values[-1] == value.value
-    assert counts[-1] == after
+    assert raw == word
+    assert counts[-1] <= after
+    assert value.value == m.var("alu_value").value
 
 
 def test_a_handler_reads_memory_and_variables(machines: Machines) -> None:
@@ -374,7 +383,7 @@ def test_reads_from_another_thread_during_a_run_are_machine_running(machines: Ma
     async def scenario() -> None:
         async with m.running():
             for read in reads:
-                with pytest.raises(popcorn.MachineRunning, match="the run's thread"):
+                with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
                     await asyncio.to_thread(read)
 
     asyncio.run(scenario())
@@ -387,29 +396,46 @@ def test_writes_and_bus_reads_inside_running_are_machine_running(machines: Machi
     testdev = m.description.peripherals[0].base
     sram = next(r for r in m.description.regions if r.name == "SRAM")
 
+    refused = r"await m\.read"
+
     async def scenario() -> None:
         async with m.running():
             await asyncio.sleep(0)
-            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 m.mem.u32[address] = 1
-            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 m.mem.write(address, b"\0")
-            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 value.value = 1
-            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 m.reg.r0 = 1
-            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 m.periph.TESTDEV.RW.value = 1
-            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 _ = m.mem.u32[testdev]
-            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 _ = m.periph.TESTDEV.RW.read()
-            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 _ = m.nvic.pending(0)
-            with pytest.raises(popcorn.MachineRunning, match="stop or await"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 m.periph.TESTDEV.RW.write(1)
-            with pytest.raises(popcorn.MachineRunning, match="memory regions"):
+            with pytest.raises(popcorn.MachineRunning, match=refused):
                 _ = m.mem.read(sram.start + sram.size - 4, 16)
+            written = await m.write(
+                (m.ref.mem.u32[address], 1),
+                (m.ref.mem.block(address, 1), b"\0"),
+                (m.ref.var("alu_value"), 1),
+                (m.ref.reg.r0, 1),
+                (m.ref.periph.TESTDEV.RW, 1),
+                (m.ref.periph.TESTDEV.RW.bus, 1),
+            )
+            read = await m.read(
+                m.ref.mem.u32[testdev],
+                m.ref.periph.TESTDEV.RW.bus,
+                m.ref.mem.u32[NVIC_ISPR0],
+                m.ref.mem.block(sram.start + sram.size - 4, 4),
+            )
+            assert len(read) == 4 and read.time >= written.time
 
     asyncio.run(scenario())
 
@@ -504,9 +530,9 @@ def test_a_handler_error_inside_running_raises_on_exit_without_a_wait(
         async with m.running():
             while not handler.calls:
                 await asyncio.sleep(0.001)
-            instructions.append(m.instructions)
+            instructions.append((await m.read(m.ref.instructions))[0])
             await asyncio.sleep(0.01)
-            instructions.append(m.instructions)
+            instructions.append((await m.read(m.ref.instructions))[0])
 
     with pytest.raises(ValueError, match="handler failed"):
         run_bounded(scenario())
@@ -574,7 +600,7 @@ def test_a_wait_after_the_background_run_stopped_returns_that_stop(machines: Mac
 
     async def scenario() -> popcorn.Stop | None:
         async with m.running():
-            while m.instructions == 0:
+            while (await m.read(m.ref.instructions))[0] == 0:
                 await asyncio.sleep(0.001)
             await asyncio.sleep(0.01)
             return await m.wait_for(Never())
@@ -633,8 +659,9 @@ def test_a_machine_runs_again_after_a_handler_error_inside_running(machines: Mac
             await m.wait_for(Never(), for_=ms(100))
 
     async def passing() -> popcorn.Stop:
+        target = AfterInstructions(m.instructions + 50_000)
         async with m.running():
-            return await m.wait_for(AfterInstructions(m.instructions + 50_000), for_=ms(100))
+            return await m.wait_for(target, for_=ms(100))
 
     with pytest.raises(ValueError, match="handler failed"):
         run_bounded(failing())

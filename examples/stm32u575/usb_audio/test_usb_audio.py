@@ -216,8 +216,8 @@ async def test_stop_closes_the_stream_and_no_packet_follows(machine: Machine) ->
     host = machine.periph.OTG_FS.host
     audio = await streaming(machine)
     earlier = len(host.requests)
-    audio.speaker.stop()
-    audio.mic.stop()
+    await audio.speaker.stop()
+    await audio.mic.stop()
     await machine.run(for_=ms(10))
     assert not audio.speaker.running and not audio.mic.running
     assert (machine.var("speaker_alt").value, machine.var("mic_alt").value) == (0, 0)
@@ -232,19 +232,19 @@ async def test_stop_closes_the_stream_and_no_packet_follows(machine: Machine) ->
     assert machine.var("speaker_bytes").value == heard
 
 
-async def test_stop_from_sync_code_with_the_machine_stopped(machine: Machine) -> None:
+async def test_stop_with_the_machine_stopped_runs_at_once(machine: Machine) -> None:
     host = machine.periph.OTG_FS.host
     audio = await streaming(machine)
     await audio.speaker.write(SINE)
     sent = audio.speaker.sent_at
 
-    def teardown() -> None:
-        audio.speaker.stop()
-        audio.mic.stop()
+    async def teardown() -> None:
+        await audio.speaker.stop()
+        await audio.mic.stop()
 
     earlier = len(host.requests)
     stopped_at = machine.time
-    teardown()
+    await teardown()
     assert not audio.speaker.running and not audio.mic.running
     assert audio.speaker.queued == 0
     assert host.requests[earlier:] == ()

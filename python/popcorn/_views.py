@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._enums import PinMode
-from popcorn._errors import ConfigError, EmulationError, MachineRunning
+from popcorn._errors import ConfigError, EmulationError
 
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
@@ -20,38 +20,20 @@ if TYPE_CHECKING:
 
 
 class ViewAccess:
-    """What a view needs from its machine: the native handle, the running check of writes and
-    of reads, the check that a board stimulus comes from the machine's thread, its UART and
-    audio streams and its USB hosts."""
+    """What a view needs from its machine: the native handle, which refuses an access while the
+    machine is busy outside its callbacks, its UART and audio streams and its USB hosts."""
 
-    __slots__ = (
-        "audio",
-        "check",
-        "handle",
-        "ports",
-        "readable",
-        "readable_memory",
-        "stimulus",
-        "usb",
-    )
+    __slots__ = ("audio", "handle", "ports", "usb")
 
     def __init__(
         self,
         handle: _core.MachineHandle,
-        check: Callable[[], None],
-        readable: Callable[[], None],
-        readable_memory: Callable[[int, int], None],
         ports: Callable[[str], UartStream] | None = None,
-        stimulus: Callable[[], None] = lambda: None,
         audio: Callable[[str, str], AudioStream] | None = None,
         usb: Callable[[str], UsbHost] | None = None,
     ) -> None:
         self.handle = handle
-        self.check = check
-        self.readable = readable
-        self.readable_memory = readable_memory
         self.ports = ports
-        self.stimulus = stimulus
         self.audio = audio
         self.usb = usb
 
@@ -67,14 +49,12 @@ class ScalarView[T: (int, float)]:
         self._size = struct.calcsize(self._format)
 
     def __getitem__(self, address: int) -> T:
-        self._access.readable_memory(address, self._size)
         value: T = struct.unpack(
             self._format, self._access.handle.read_memory(address, self._size)
         )[0]
         return value
 
     def __setitem__(self, address: int, value: T) -> None:
-        self._access.check()
         try:
             data = struct.pack(self._format, value)
         except struct.error as error:
@@ -105,12 +85,10 @@ class Memory:
 
     def read(self, address: int, size: int) -> bytes:
         """`size` bytes from `address`."""
-        self._access.readable_memory(address, size)
         return self._access.handle.read_memory(address, size)
 
     def write(self, address: int, data: bytes) -> None:
         """Write `data` at `address`."""
-        self._access.check()
         self._access.handle.write_memory(address, data)
 
     def cstring(self, address: int, limit: int = 256) -> str:
@@ -118,18 +96,15 @@ class Memory:
         replacement characters.
 
         Reads up to the end of each 64-byte block at once, byte by byte where a block read
-        meets a bus error, so a string ending just before unmapped memory still reads. During a
-        run the block is read byte by byte where it leaves the memory regions.
+        meets a bus error, so a string ending just before unmapped memory still reads.
         """
-        self._access.readable()
         data = bytearray()
         while len(data) < limit:
             at = address + len(data)
             size = min(64 - at % 64, limit - len(data))
             try:
-                self._access.readable_memory(at, size)
                 chunk = self._access.handle.read_memory(at, size)
-            except EmulationError, MachineRunning:
+            except EmulationError:
                 chunk = self._bytes_until_nul(at, size)
             end = chunk.find(b"\0")
             if end >= 0:
@@ -141,7 +116,6 @@ class Memory:
     def _bytes_until_nul(self, address: int, size: int) -> bytes:
         data = bytearray()
         for at in range(address, address + size):
-            self._access.readable_memory(at, 1)
             byte = self._access.handle.read_memory(at, 1)
             data += byte
             if byte == b"\0":
@@ -172,11 +146,9 @@ class RegisterBank[R: enum.Enum]:
         return index
 
     def __getitem__(self, register: R) -> int:
-        self._access.readable()
         return self._access.handle.read_register(self._slot(register))
 
     def __setitem__(self, register: R, value: int) -> None:
-        self._access.check()
         if value < 0 or value >> 64:
             raise ValueError(f"{value} does not fit a register")
         self._access.handle.write_register(self._slot(register), value)
@@ -201,9 +173,9 @@ class RegisterView:
     """One peripheral register: `.value` for the whole word, a field by name as a bit slice.
 
     `value` and fields read and write the register storage without the model's access effects.
-    `read()` and `write()` go over the bus, as `m.mem` does, so a model reacts. While a run is
-    active, `value` and fields read from the thread running it, at the state of the last slice
-    boundary. `read()` and writes raise MachineRunning there, except from a handler of the run.
+    `read()` and `write()` go over the bus, as `m.mem` does, so a model reacts. Every access
+    raises MachineRunning while the machine is busy, outside its callbacks: `m.ref` refs reach
+    the register then.
     """
 
     __slots__ = ("_access", "_base", "_fields", "_name", "_offset", "_peripheral", "_width")
@@ -264,12 +236,10 @@ class RegisterView:
         shows its value at the model's last access or event, on a stopped machine as during a
         run.
         """
-        self._access.readable()
         return self._access.handle.peek(self._peripheral, self._offset, self._width)
 
     @value.setter
     def value(self, value: int) -> None:
-        self._access.check()
         if value < 0 or value >> self._width:
             raise ValueError(f"{value} does not fit the {self._width}-bit register {self._name}")
         self._access.handle.poke(self._peripheral, self._offset, self._width, value)
@@ -396,12 +366,9 @@ class Pin:
 
     Setting `level` drives the pin from outside the MCU: an input reads it, an output keeps its
     own level. The drive is board state, kept across an MCU reset and restored by snapshots.
-    Driving works inside `running()` too, like a signal from the board: the firmware sees the
-    new level at the next slice boundary. Reads work there too, at the state of the last slice
-    boundary, the drive included. While a run is active, a drive from another thread raises
-    RuntimeError and a read from another thread raises MachineRunning: the GPIO model runs on
-    the machine's thread. Every access raises ModelError when the port's model is not a GPIO
-    port.
+    While the machine is busy, every access raises MachineRunning outside its callbacks:
+    `m.write((m.ref.periph.GPIOA.pin(0).level, True))` drives the pin at a block boundary then.
+    Every access raises ModelError when the port's model is not a GPIO port.
     """
 
     __slots__ = ("_access", "number", "port")
@@ -415,33 +382,28 @@ class Pin:
     @property
     def level(self) -> bool:
         """Level as the input data register reads it."""
-        self._access.readable()
         return self._access.handle.gpio_level(self.port, self.number)
 
     @level.setter
     def level(self, value: bool | int) -> None:
-        self._access.stimulus()
         self._access.handle.gpio_drive(self.port, self.number, bool(value))
 
     def release(self) -> None:
         """Stop driving the pin, leaving it to its pull.
 
         Raises:
-            RuntimeError: Called from another thread while a run is active.
+            MachineRunning: The machine is busy, outside its callbacks.
         """
-        self._access.stimulus()
         self._access.handle.gpio_drive(self.port, self.number, None)
 
     @property
     def mode(self) -> PinMode:
         """Mode the firmware configured."""
-        self._access.readable()
         return PinMode(self._access.handle.gpio_mode(self.port, self.number).value)
 
     @property
     def alternate(self) -> int:
         """Alternate function number."""
-        self._access.readable()
         return self._access.handle.gpio_alternate(self.port, self.number)
 
     def __repr__(self) -> str:
@@ -454,10 +416,9 @@ class AnalogInput:
     Setting `volts` drives the channel from outside the MCU, in whole microvolts. The drive is
     board state, kept across an MCU reset and restored by snapshots. A conversion reads the value
     in force when it ends: V x 16384 / VDDA at 14 bits, floored, saturated at VDDA, VDDA from
-    `SupplyOptions`. Driving works inside `running()` too, like a signal from the board: a
-    conversion ending after the next slice boundary sees it. While a run is active, a drive from
-    another thread raises RuntimeError and a read from another thread raises MachineRunning.
-    Every access raises ModelError when the peripheral's model is not the built-in ADC.
+    `SupplyOptions`. While the machine is busy, every access raises MachineRunning outside its
+    callbacks: `m.write((m.ref.periph.ADC1.input(5).volts, 1.5))` drives it at a block boundary
+    then. Every access raises ModelError when the peripheral's model is not the built-in ADC.
     """
 
     __slots__ = ("_access", "adc", "channel")
@@ -471,7 +432,6 @@ class AnalogInput:
     @property
     def volts(self) -> float:
         """Voltage driven on the channel, 0.0 when never driven."""
-        self._access.readable()
         return self._access.handle.adc_input(self.adc, self.channel) / 1e6
 
     @volts.setter
@@ -479,7 +439,6 @@ class AnalogInput:
         microvolts = round(value * 1e6) if math.isfinite(value) else -1
         if not 0 <= microvolts <= 0xFFFF_FFFF:
             raise ValueError(f"{value!r} V is not a voltage from 0 to 4294.967295 V")
-        self._access.stimulus()
         self._access.handle.adc_drive(self.adc, self.channel, microvolts)
 
     def __repr__(self) -> str:

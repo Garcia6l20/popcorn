@@ -18,6 +18,8 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <tuple>
+#include <variant>
 
 namespace popcorn::bind
 {
@@ -227,12 +229,82 @@ auto options_of(
   }
   return options;
 }
+
+auto bounds_of(machine_config const& config) -> core::slice_bounds
+{
+  if(config.slice_instructions == 0 or config.slice_wall_ns <= 0)
+  {
+    throw config_error(
+        "machine", 0, "slice_instructions", "a slice of at least one instruction and 1 ns");
+  }
+  return {
+      .max_instructions = icount{config.slice_instructions},
+      .wall_budget      = std::chrono::nanoseconds{config.slice_wall_ns},
+  };
+}
+
+auto boundary_of(
+    std::weak_ptr<detail::host_slot const> slot,
+    std::weak_ptr<detail::boundary_pump>   pump) -> std::move_only_function<void(core::member_id)>
+{
+  return [slot = std::move(slot), pump = std::move(pump)](core::member_id) {
+    if(auto const reached = slot.lock())
+    {
+      detail::run_retired(*reached);
+    }
+    auto const hooked = pump.lock();
+    if(hooked == nullptr or not hooked->set.load())
+    {
+      return;
+    }
+    std::shared_ptr<detail::python_callable> hook;
+    {
+      std::scoped_lock const lock{hooked->mutex};
+      hook = hooked->hook;
+    }
+    if(hook == nullptr)
+    {
+      return;
+    }
+    detail::gil_entry const gil;
+    try
+    {
+      std::ignore = (*hook)();
+    }
+    catch(reflex::py::nb::python_error& raised)
+    {
+      raised.discard_as_unraisable("machine boundary hook");
+    }
+    hook.reset();
+  };
+}
+
+void report_unclaimed(core::held_end const& ended)
+{
+  if(auto const* const stopped = std::get_if<stop>(&ended))
+  {
+    auto const type   = reflex::py::nb::module_::import_("popcorn._errors").attr("EmulationError");
+    auto const raised = type(
+        std::format(
+            "a machine was destroyed with the end of its free run never raised: {} at {:#010x}",
+            stopped->detail.empty() ? "a stop" : stopped->detail, stopped->where.pc));
+    PyErr_SetRaisedException(raised.inc_ref().ptr());
+  }
+  else
+  {
+    PyErr_SetRaisedException(
+        detail::python_exception(std::get<std::exception_ptr>(ended)).inc_ref().ptr());
+  }
+  PyErr_WriteUnraisable(nullptr);
+}
 }
 
 machine_handle::machine_handle(mcu_description const& description, machine_config const& config)
     : alive_{detail::make_alive()}, slot_{std::make_shared<detail::host_slot>()},
+      pump_{std::make_shared<detail::boundary_pump>()},
       thread_live_{std::make_shared<std::atomic<bool>>(false)}
 {
+  auto const             bounds = bounds_of(config);
   reflex::py::nb::object cell;
   if(config.models_context and not config.models_context->is_none())
   {
@@ -258,9 +330,10 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   id_     = built->id();
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(std::move(built));
-  host_ = std::make_shared<core::host>(
-      std::move(members), core::slice_bounds{}, detail::python_thread_hooks(thread_live_));
-  slot_->host = host_;
+  auto hooks     = detail::python_thread_hooks(thread_live_);
+  hooks.boundary = boundary_of(slot_, pump_);
+  host_          = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
+  slot_->host    = host_;
   detail::register_host(host_);
 }
 
@@ -275,14 +348,25 @@ machine_handle::~machine_handle()
   }
   if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
   {
-    if(PyGILState_Check() != 0)
+    std::optional<core::held_end> ended;
+    auto const                    halt_and_close = [&] {
+      ended = host_->halt(core::member_id{});
+      host_->close();
+    };
+    auto const python = PyGILState_Check() != 0;
+    if(python)
     {
       reflex::py::nb::gil_scoped_release const released;
-      host_->close();
+      halt_and_close();
     }
     else
     {
-      host_->close();
+      halt_and_close();
+    }
+    detail::run_retired(*slot_);
+    if(ended and python)
+    {
+      report_unclaimed(*ended);
     }
   }
   host_.reset();

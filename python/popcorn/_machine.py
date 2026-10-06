@@ -1,19 +1,18 @@
-"""The emulated machine and its asyncio slice driver."""
+"""The emulated machine, run on its own thread and driven from asyncio."""
 
 from __future__ import annotations
 
-import asyncio
 import atexit
 import contextlib
 import contextvars
 import difflib
 import functools
 import os
-import threading
 import types
+import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Protocol, cast, overload, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, overload, runtime_checkable
 
 from popcorn import _core
 from popcorn._arena import Arena
@@ -48,7 +47,6 @@ from popcorn._errors import (
     ConfigError,
     EmulationError,
     FaultError,
-    MachineBusy,
     MachineRunning,
     SymbolError,
 )
@@ -65,11 +63,13 @@ from popcorn._hooks import (
     WatchHit,
     WatchKind,
 )
+from popcorn._host import awaited
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
 from popcorn._rcc import RccOptions
+from popcorn._refs import Pending, Readout, Ref, Refs
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, UartPorts
@@ -217,6 +217,8 @@ _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
 )
 
+_RUNNING = "the machine is running: await m.read() or m.write(), or halt() it first"
+
 atexit.register(_core.shutdown_hosts)
 
 
@@ -302,13 +304,6 @@ class _Ready:
         return self.predicate()
 
 
-@dataclass(slots=True)
-class _Waiter:
-    event: Event
-    deadline_ps: int | None
-    future: asyncio.Future[Stop]
-
-
 class Machine:
     """One emulated MCU: a description, the images loaded into it and its run state.
 
@@ -333,9 +328,7 @@ class Machine:
         "__weakref__",
         "_arena",
         "_audio",
-        "_background",
         "_board",
-        "_busy",
         "_call_baseline",
         "_callback_table",
         "_clocked",
@@ -344,7 +337,6 @@ class Machine:
         "_default_budget",
         "_description",
         "_devices",
-        "_ended",
         "_handle",
         "_images",
         "_installed",
@@ -356,17 +348,12 @@ class Machine:
         "_model_context",
         "_nvic",
         "_peripherals",
-        "_plain_memory",
         "_ports",
+        "_refs",
         "_registers",
         "_ring",
-        "_run_thread",
         "_sentinel",
-        "_slice_instructions",
-        "_slice_wall_ns",
-        "_thread",
         "_usb",
-        "_waiters",
     )
 
     def __init__(
@@ -405,8 +392,10 @@ class Machine:
             spin_threshold: Iterations of a loop making no progress before a SPIN stop, 0 off.
             strict_peripherals: Whether an unmodelled register access raises ModelError.
             vector_table: Address of the vector table reset reads, None for the default.
-            slice_instructions: Instructions after which a slice yields to the event loop.
-            slice_wall_budget: Wall seconds after which a slice yields to the event loop.
+            slice_instructions: Instructions after which a slice of the machine's thread serves
+                its requests and checks its waiters.
+            slice_wall_budget: Wall seconds after which a slice of the machine's thread serves
+                its requests and checks its waiters.
             config_digest: Digest of the configuration, such as a project's digest, that snapshots
                 record.
             arena_base: First address of the call arena, a RAM region outside the description,
@@ -470,30 +459,22 @@ class Machine:
             config.vdda_mv = supply.vdda_mv
         aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
         config.usb_hosts = checked_usb(usb or {}, aliases)
+        config.slice_instructions = slice_instructions
+        config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._description = description
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
         config.models_context = self._model_context
         self._handle = _core.MachineHandle(description, config)
         self._images: list[Image] = []
-        self._slice_instructions = slice_instructions
-        self._slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
-        self._busy = False
-        self._background = False
-        self._ended: Stop | BaseException | None = None
-        self._waiters: list[_Waiter] = []
-        self._thread = threading.get_ident()
-        self._run_thread: int | None = None
-        arena = () if arena_base is None else ((arena_base, arena_base + arena_size),)
-        self._plain_memory = tuple(
-            sorted([*((r.start, r.start + r.size) for r in description.regions), *arena])
-        )
+        self._refs: Refs | None = None
         self._ports = UartPorts(
             self._handle.attach_uart,
             self._handle.uart_names(),
             {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None},
             self._wait_until,
-            self._require_owner,
+            self._post,
+            self._bridged,
         )
         sais = self._handle.audio_names()
         audio_options = _checked_audio(audio or {}, sais, aliases)
@@ -504,14 +485,14 @@ class Machine:
             aliases,
             audio_options,
             self._wait_until,
-            self._require_owner,
+            self._post,
         )
         self._usb = UsbHosts(
             self._handle.attach_usb,
             self._handle.usb_names(),
             aliases,
             self._wait_until,
-            self._require_owner,
+            self._post,
             self._ports.bridges,
         )
         self._devices = attached
@@ -519,16 +500,7 @@ class Machine:
             for target in targets:
                 attach(target, self, self._device_audio_clock)
         self._board = Board(self._ports, attached, self._usb)
-        access = ViewAccess(
-            self._handle,
-            self._require_stopped,
-            self._require_readable,
-            self._require_memory_readable,
-            self._ports.stream,
-            self._require_owner,
-            self._audio.stream,
-            self._usb.host,
-        )
+        access = ViewAccess(self._handle, self._ports.stream, self._audio.stream, self._usb.host)
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
         self._peripherals = Peripherals(access, description)
@@ -572,54 +544,39 @@ class Machine:
 
     @property
     def busy(self) -> bool:
-        """Whether a run, step, wait or `running()` is active."""
-        return self._busy
+        """Whether a run, step, call or wait is active, or `start()` was called and `halt()`
+        not yet, even after the free run ended by itself."""
+        return self._handle.busy()
 
     @property
     def instructions(self) -> int:
         """Instructions executed since reset.
 
-        Readable while a run is active, from the thread running it or a handler of it, like
-        `time`: between slices it reads the count at the last slice boundary.
-
         Raises:
-            MachineRunning: Read from another thread than the one running the active run,
-                outside a handler of it.
+            MachineRunning: The machine is busy, read outside its callbacks: use
+                `m.read(m.ref.instructions)`.
         """
-        self._require_readable()
         return self._handle.instructions()
 
     @property
     def time(self) -> VirtualTime:
-        """Virtual time since reset.
-
-        Readable while a run is active, from the thread running it. A `running()` body or another
-        task of the run's event loop runs between slices: it reads the time the run has reached
-        at its last slice boundary, and a stimulus given now, such as a pin drive or a stream
-        write, enters the machine at that time. Python code the run calls inside a slice, a
-        handler, a Python model, a sink or a pin listener, reads the time inside the slice. It
-        never decreases during a run.
+        """Virtual time since reset. A handler, a Python model, a sink or a predicate reads the
+        time inside the slice.
 
         Raises:
-            MachineRunning: Read from another thread than the one running the active run,
-                outside a handler of it.
+            MachineRunning: The machine is busy, read outside its callbacks: the `.time` of any
+                `m.read()` result is the time of the boundary it executed at.
         """
-        self._require_readable()
         return VirtualTime(self._handle.time_ps())
 
     @property
     def pc(self) -> int:
-        """Address of the next instruction.
-
-        Readable while a run is active, from the thread running it or a handler of it. Between
-        slices it is the instruction the next slice starts at, before any pending exception is
-        taken. From a handler it is where the core is paused inside the slice.
+        """Address of the next instruction. From a handler it is where the core is paused.
 
         Raises:
-            MachineRunning: Read from another thread than the one running the active run,
-                outside a handler of it.
+            MachineRunning: The machine is busy, read outside its callbacks: use
+                `m.read(m.ref.pc)`.
         """
-        self._require_readable()
         return self._handle.pc()
 
     @property
@@ -627,14 +584,12 @@ class Machine:
         """Events waiting in the event queue, model and core events alike.
 
         A model event superseded without being cancelled counts until it is dispatched, so a
-        count that grows with guest work shows a model leaving stale events behind. Readable
-        while a run is active, from the thread running it or a handler of it.
+        count that grows with guest work shows a model leaving stale events behind.
 
         Raises:
-            MachineRunning: Read from another thread than the one running the active run,
-                outside a handler of it.
+            MachineRunning: The machine is busy, read outside its callbacks: use
+                `m.read(m.ref.pending_events)`.
         """
-        self._require_readable()
         return self._handle.pending_events()
 
     def load(self, image: Image) -> None:
@@ -642,7 +597,7 @@ class Machine:
 
         Raises:
             ImageError: A segment falls outside the description's memory regions.
-            MachineRunning: A run is active.
+            MachineRunning: The machine is busy.
         """
         self._require_stopped()
         self._handle.load(image.native)
@@ -663,7 +618,7 @@ class Machine:
         Memory is kept.
 
         Raises:
-            MachineRunning: A run is active, handlers of it included.
+            MachineRunning: The machine is busy, outside its handlers.
         """
         self._require_stopped()
         self._handle.reset(_core.ResetKind(kind.value))
@@ -673,9 +628,8 @@ class Machine:
     def mem(self) -> Memory:
         """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`.
 
-        Reads inside memory regions, the arena included, work while a run is active from the
-        thread running it, at the state of the last slice boundary. Other reads and all writes
-        raise MachineRunning there, except from a handler of the run.
+        Reads and writes raise MachineRunning while the machine is busy, outside its callbacks:
+        `m.read(m.ref.mem.u32[addr])` and `m.write` access it then.
         """
         return self._memory
 
@@ -683,10 +637,235 @@ class Machine:
     def reg(self) -> Registers:
         """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`.
 
-        Reads work while a run is active from the thread running it, at the state of the last
-        slice boundary. Writes raise MachineRunning there, except from a handler of the run.
+        Reads and writes raise MachineRunning while the machine is busy, outside its callbacks:
+        `m.read(m.ref.reg.r0)` and `m.write` access them then.
         """
         return self._registers
+
+    @property
+    def ref(self) -> Refs:
+        """References to the machine's state for `read` and `write`, parallel to `mem`, `reg`,
+        `periph` and `var`: `m.ref.reg.r0`, `m.ref.mem.u32[addr]`,
+        `m.ref.periph.GPIOA.pin(0).level`. Building one never touches the machine."""
+        if self._refs is None:
+            handle = self._handle
+            scalars: dict[str, Callable[[], int]] = {
+                "pc": handle.pc,
+                "instructions": handle.instructions,
+                "pending_events": handle.pending_events,
+            }
+            self._refs = Refs(
+                handle,
+                self._memory,
+                self._registers,
+                self._peripherals,
+                scalars.__getitem__,
+                self.var,
+            )
+        return self._refs
+
+    @overload
+    def read[A](self, a: Ref[A], /, *, at: VirtualTime | None = None) -> Pending[Readout[A]]: ...
+    @overload
+    def read[A, B](
+        self, a: Ref[A], b: Ref[B], /, *, at: VirtualTime | None = None
+    ) -> Pending[Readout[A, B]]: ...
+    @overload
+    def read[A, B, C](
+        self, a: Ref[A], b: Ref[B], c: Ref[C], /, *, at: VirtualTime | None = None
+    ) -> Pending[Readout[A, B, C]]: ...
+    @overload
+    def read[A, B, C, D](
+        self, a: Ref[A], b: Ref[B], c: Ref[C], d: Ref[D], /, *, at: VirtualTime | None = None
+    ) -> Pending[Readout[A, B, C, D]]: ...
+    @overload
+    def read[A, B, C, D, E](
+        self,
+        a: Ref[A],
+        b: Ref[B],
+        c: Ref[C],
+        d: Ref[D],
+        e: Ref[E],
+        /,
+        *,
+        at: VirtualTime | None = None,
+    ) -> Pending[Readout[A, B, C, D, E]]: ...
+    @overload
+    def read[A, B, C, D, E, F](
+        self,
+        a: Ref[A],
+        b: Ref[B],
+        c: Ref[C],
+        d: Ref[D],
+        e: Ref[E],
+        f: Ref[F],
+        /,
+        *,
+        at: VirtualTime | None = None,
+    ) -> Pending[Readout[A, B, C, D, E, F]]: ...
+    @overload
+    def read[A, B, C, D, E, F, G](
+        self,
+        a: Ref[A],
+        b: Ref[B],
+        c: Ref[C],
+        d: Ref[D],
+        e: Ref[E],
+        f: Ref[F],
+        g: Ref[G],
+        /,
+        *,
+        at: VirtualTime | None = None,
+    ) -> Pending[Readout[A, B, C, D, E, F, G]]: ...
+    @overload
+    def read[A, B, C, D, E, F, G, H](
+        self,
+        a: Ref[A],
+        b: Ref[B],
+        c: Ref[C],
+        d: Ref[D],
+        e: Ref[E],
+        f: Ref[F],
+        g: Ref[G],
+        h: Ref[H],
+        /,
+        *,
+        at: VirtualTime | None = None,
+    ) -> Pending[Readout[A, B, C, D, E, F, G, H]]: ...
+    @overload
+    def read(
+        self, *refs: Ref[Any], at: VirtualTime | None = None
+    ) -> Pending[Readout[*tuple[Any, ...]]]: ...
+    def read(
+        self, *refs: Ref[Any], at: VirtualTime | None = None
+    ) -> Pending[Readout[*tuple[Any, ...]]]:
+        """Read every ref at one block boundary, on the machine's thread while it runs, at once
+        while it is parked. Posted at the call: await the result for the values.
+
+        `r0, word = await m.read(m.ref.reg.r0, m.ref.mem.u32[a])`. No instruction executes
+        between the reads. With no ref it reads only the time, `(await m.read()).time`. With
+        `at`, the batch runs at the first block boundary at or after it, exactly at it when the
+        core is idle there: on a parked machine it waits for a run that reaches it.
+
+        Returns:
+            The values in argument order, with the virtual time they were read at.
+
+        Raises:
+            RuntimeError: Called from a handler or a model, of any machine.
+            ValueError: A ref of another machine, or `at` before the time of a parked machine.
+                From the await, `at` already past when a running machine takes the batch.
+            EmulationError: From the await, the batch was superseded by a reset or a restore
+                before `at`, or the machine was closed. A reset or restore of a parked machine
+                is seen at the next boundary of a run or the next stamped command.
+        """
+        self._refuse_on_host()
+        for index, ref in enumerate(refs):
+            self._own(ref, index)
+        getters = [ref.get for ref in refs]
+        values: list[object] = []
+
+        def body() -> None:
+            for index, get in enumerate(getters):
+                try:
+                    values.append(get())
+                except BaseException as error:
+                    error.add_note(f"reading argument {index}, {refs[index].label}")
+                    raise
+
+        return self._submit(body, at, lambda time: Readout(tuple(values), time))
+
+    def write(
+        self, *pairs: tuple[Ref[Any], object], at: VirtualTime | None = None
+    ) -> Pending[Readout[()]]:
+        """Write every pair, in order, at one block boundary, as `read` runs. Posted at the
+        call: await the result, whose `.time` is the time the writes executed at.
+
+        `await m.write((m.ref.reg.r0, 5), (m.ref.periph.GPIOA.pin(0).level, True))`. A write
+        that fails stops the batch, the writes before it stay applied, and the await raises its
+        exception with a note naming the argument.
+
+        Raises:
+            RuntimeError: Called from a handler or a model, of any machine.
+            TypeError: No pair, a pair that is not a (ref, value) tuple, a read-only ref, or a
+                value of the wrong type.
+            ValueError: A value out of range, a ref of another machine, or `at` as for `read`.
+            EmulationError: From the await, as for `read`.
+        """
+        self._refuse_on_host()
+        if not pairs:
+            raise TypeError("write() takes at least one (ref, value) pair")
+        for index, pair in enumerate(cast(tuple[object, ...], pairs)):
+            if not isinstance(pair, tuple) or len(cast(tuple[object, ...], pair)) != 2:
+                raise TypeError(f"write() argument {index} is not a (ref, value) pair")
+            ref, value = cast(tuple[object, object], pair)
+            self._own(ref, index)
+            cast(Ref[Any], ref).checked(value)
+        writes = [(ref.put, value, ref.label) for ref, value in pairs]
+
+        def body() -> None:
+            for index, (put, value, label) in enumerate(writes):
+                try:
+                    put(value)
+                except BaseException as error:
+                    error.add_note(f"writing argument {index}, {label}")
+                    raise
+
+        return self._submit(body, at, lambda time: Readout((), time))
+
+    def _own(self, ref: object, index: int) -> None:
+        if not isinstance(ref, Ref):
+            raise TypeError(f"argument {index} is not a ref of m.ref")
+        if ref.owner is not self._handle:
+            raise ValueError(f"argument {index}, {ref.label}, is a ref of another machine")
+
+    def _refuse_on_host(self) -> None:
+        if _core.on_host_thread() or _core.host_locks_held() > 0:
+            raise RuntimeError(
+                "a handler accesses the machine directly, it cannot await a machine request"
+            )
+
+    def _submit[R](
+        self,
+        body: Callable[[], None],
+        at: VirtualTime | None,
+        convert: Callable[[VirtualTime], R],
+        *,
+        cancel: bool = True,
+        follow: Callable[[R], Any] | None = None,
+    ) -> Pending[R]:
+        return Pending(
+            self._handle.submit(body, None if at is None else at.ps),
+            lambda ps: convert(VirtualTime(cast(int, ps))),
+            cancel=cancel,
+            follow=follow,
+        )
+
+    def _post[T](
+        self,
+        body: Callable[[], T],
+        at: VirtualTime | None = None,
+        *,
+        cancel: bool = True,
+        follow: Callable[[tuple[T, VirtualTime]], Any] | None = None,
+    ) -> Pending[tuple[T, VirtualTime]]:
+        """Run `body` as one command, from a stream or USB method: its result and its time."""
+        self._refuse_on_host()
+        result: list[T] = []
+
+        def run() -> None:
+            result.append(body())
+
+        return self._submit(run, at, lambda time: (result[0], time), cancel=cancel, follow=follow)
+
+    def _bridged(self) -> None:
+        ports = weakref.ref(self._ports)
+
+        def pump() -> None:
+            alive = ports()
+            if alive is not None:
+                alive.pump()
+
+        self._handle.set_boundary_hook(pump)
 
     @property
     def coverage(self) -> MachineCoverage:
@@ -700,7 +879,7 @@ class Machine:
         stop: cancelled, or ended by an exception of a handler or predicate.
 
         Raises:
-            MachineRunning: A run is active.
+            MachineRunning: The machine is busy.
         """
         self._require_stopped()
         return self._last_stop
@@ -770,10 +949,16 @@ class Machine:
             yield recording
         except BaseException as error:
             try:
-                recording.close()
+                self._close_trace(recording)
             except Exception as close_error:
                 error.add_note(f"closing the trace {recording.path} also failed: {close_error}")
             raise
+        self._close_trace(recording)
+
+    def _close_trace(self, recording: TraceRecording) -> None:
+        if self.busy and not self._handle.owns_engine():
+            self._post(recording.close)
+            return
         recording.close()
 
     @property
@@ -967,38 +1152,36 @@ class Machine:
         frame.stack_select = _core.CallStack[stack.value]
         frame.privileged = privileged
         frame.interrupts = interrupts
-        if isinstance(reset, Snapshot):
-            self.restore(reset)
-        elif reset:
-            if self._call_baseline is None:
-                self._call_baseline = self.snapshot()
-            else:
-                self.restore(self._call_baseline)
-        with self._exclusive():
-            self._handle.begin_call(frame)
-            try:
-                stop = await self._drive(
-                    until=None,
-                    budget=self._default_budget if budget is None else budget,
-                    for_=None,
-                    stop_when=None,
-                    exact=None,
-                )
-                if stop.reason is StopReason.FAULT:
-                    stop = replace(stop, registers=self._fault_context())
-                    self._last_stop = stop
-            finally:
-                bits = self._handle.end_call()
+
+        def prepare() -> None:
+            if isinstance(reset, Snapshot):
+                self.restore(reset)
+            elif reset:
+                if self._call_baseline is None:
+                    self._call_baseline = self.snapshot()
+                else:
+                    self.restore(self._call_baseline)
+
+        self._last_stop = None
+        outcome = await awaited(
+            self._handle.call_goal(
+                frame,
+                self._default_budget if budget is None else budget,
+                prepare if reset is not False else None,
+            ),
+            lambda raw: cast(_core.CallOutcome, raw),
+        )
+        stop = stop_of(outcome.stopped)
+        if stop.reason is StopReason.FAULT:
+            stop = replace(stop, registers=self._fault_context(outcome.registers))
+        self._last_stop = stop
+        bits = outcome.bits
         value = decode(result_slot, bits) if stop.reason is StopReason.RETURNED else 0
         return CallResult(value, bits, stop)
 
-    def _fault_context(self) -> Mapping[str, int]:
-        names = list(self._handle.register_names())
-        captured = {
-            name: self._handle.read_register(names.index(name))
-            for name in _FAULT_CONTEXT
-            if name in names
-        }
+    def _fault_context(self, values: Sequence[int]) -> Mapping[str, int]:
+        read = dict(zip(self._handle.register_names(), values, strict=True))
+        captured = {name: read[name] for name in _FAULT_CONTEXT if name in read}
         return types.MappingProxyType(captured)
 
     def _signature(self, fn: int | str | Symbol, entry: int) -> Signature:
@@ -1375,7 +1558,7 @@ class Machine:
         for_: VirtualDuration | None = None,
         stop_when: Callable[[Machine], bool] | None = None,
     ) -> Stop:
-        """Run until a stop, one slice at a time, yielding to the event loop between slices.
+        """Run on the machine's thread until a stop. The event loop is free meanwhile.
 
         Args:
             until: Stop with ADDRESS before executing this address or symbol. A run starting
@@ -1393,134 +1576,174 @@ class Machine:
                 entry, where the whole block is charged. A store that changes the core clock
                 rate charges the rest of its block at the new rate.
             stop_when: Sync predicate evaluated at event boundaries and slice ends, never per
-                instruction. Stops with USER when it returns True. An exception it raises
-                reaches the caller with its traceback.
+                instruction, on the machine's thread. Stops with USER when it returns True. An
+                exception it raises reaches the caller with its traceback.
+
+        Cancelling the awaiting task halts the run at the next block boundary.
 
         Raises:
-            MachineBusy: Another run, step, wait or `running()` is active.
+            MachineBusy: Another run, step, call, wait or free run is active.
         """
         _check_duration(for_)
         target = None if until is None else self.address_of(until)
-        with self._exclusive():
-            return await self._drive(
-                until=target,
-                budget=self._default_budget if budget is None else budget,
-                for_=for_,
-                stop_when=stop_when,
-                exact=None,
-            )
+        return await self._goal(
+            until=target,
+            budget=self._default_budget if budget is None else budget,
+            for_=for_,
+            stop_when=stop_when,
+            exact=None,
+        )
 
     async def step(self, n: int = 1) -> Stop:
         """Execute exactly `n` instructions, a BUDGET stop, or an earlier stop.
 
         Raises:
-            MachineBusy: Another run, step, wait or `running()` is active.
+            MachineBusy: Another run, step, call, wait or free run is active.
         """
         if n <= 0:
             raise ValueError("step count must be above 0")
-        with self._exclusive():
-            return await self._drive(until=None, budget=None, for_=None, stop_when=None, exact=n)
+        return await self._goal(until=None, budget=None, for_=None, stop_when=None, exact=n)
 
-    async def _wait_until(self, ready: Callable[[], bool], for_: VirtualDuration | None) -> None:
+    async def _goal(
+        self,
+        *,
+        until: int | None,
+        budget: int | None,
+        for_: VirtualDuration | None,
+        stop_when: Callable[[Machine], bool] | None,
+        exact: int | None,
+    ) -> Stop:
+        self._last_stop = None
+        stop = await awaited(
+            self._handle.run_goal(
+                until=until,
+                budget=budget,
+                exact=exact,
+                for_ps=None if for_ is None else for_.ps,
+                stop_when=None if stop_when is None else self._handler(stop_when),
+            ),
+            lambda raw: stop_of(cast(_core.StopInfo, raw)),
+        )
+        self._last_stop = stop
+        return stop
+
+    async def _wait_until(
+        self, ready: Callable[[], bool], for_: VirtualDuration | None
+    ) -> VirtualTime:
+        if not self.busy and ready():
+            return self.time
         stop = await self.wait_for(_Ready(ready), for_=for_)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, "the run waiting for UART data")
+        return stop.time
 
     async def wait_for(self, event: Event, *, for_: VirtualDuration | None = None) -> Stop:
         """Run until `event` is ready, a USER stop, or until `for_` elapses, a TIME stop as late
         as `run(for_=)` allows.
 
         A `Reached` event stops exactly before its target, an ADDRESS stop, and a target equal to
-        the current pc continues as `run(until=)` does. Other events stop at
-        the first event boundary or slice end after they became ready. Inside `running()`, the
-        background run is not driven twice: this awaits the driver, which checks the event at
-        slice boundaries, and returns the stop that ended the background run or raises the
-        exception a handler of it raised.
+        the current pc continues as `run(until=)` does. Other events stop at the first event
+        boundary or slice end after they became ready. Inside a free run, `start()` or
+        `running()`, this waits on the free run instead of driving it, checking the event on the
+        machine's thread at event boundaries and slice ends, `for_` counted from the first one.
+        It returns the stop that ended the free run, or raises the exception a handler of it
+        raised. Cancelling it then drops the wait only, the machine runs on.
 
         Raises:
-            MachineBusy: A run, step or wait is active outside `running()`.
+            MachineBusy: A run, step, call or wait is active outside a free run.
         """
         _check_duration(for_)
-        if self._background:
-            return await self._await_driver(event, for_)
+        if self._handle.session_open():
+            return await awaited(
+                self._handle.wait(self._handler(event.ready), None if for_ is None else for_.ps),
+                lambda raw: stop_of(cast(_core.StopInfo, raw)),
+            )
         if isinstance(event, Reached):
             return await self.run(until=event.target, for_=for_)
         return await self.run(for_=for_, stop_when=event.ready)
 
-    @contextlib.asynccontextmanager
-    async def running(self) -> AsyncGenerator[None]:
-        """Keep the machine running in a background task while the body awaits other things.
+    def start(self) -> None:
+        """Run the machine on its own thread until `halt()`, a free run.
 
-        An IDLE stop waits one wall budget and runs again, the firmware waiting for input. Any
-        other stop ends the background run, and leaving the body then raises the error of that
-        stop, carrying it: FaultError for FAULT, BudgetExceeded for BUDGET, EmulationError
-        otherwise. A pending or later `wait_for` returns that stop.
-
-        An exception a handler raises, an intercept, return hook, watch, Python model or bus
-        device, ends the background run at an instruction boundary. Every pending and later
-        waiter of the run, `wait_for` or a stream read, raises it, and leaving the body raises
-        it when the body did not. A BaseException such as pytest's failure takes the same path,
-        except KeyboardInterrupt and SystemExit, which asyncio raises out of the event loop.
-        When the body itself raises, a cancellation included, the body's exception wins: it
-        propagates with a note naming the background stop or the handler's exception. Leaving
-        the body cancels the run at a slice boundary.
+        An IDLE stop sleeps until a request or a timer wakes the core. Any other stop, or an
+        exception a handler raises, ends the free run and is held: every pending and later
+        `wait_for` and stream read returns that stop or raises that exception, and `halt()`
+        raises it. The machine stays busy until `halt()`.
 
         Raises:
-            MachineBusy: A run, step or wait is active.
-            EmulationError: The background run stopped for a reason other than IDLE.
-            BaseException: The exception a handler of the background run raised.
+            MachineBusy: A run, step, call, wait or free run is active.
+            RuntimeError: Called from a handler, which runs on a machine's thread.
         """
-        with self._exclusive():
-            self._background = True
-            self._ended = None
-            task = asyncio.create_task(self._drive_background())
-            try:
-                yield
-            except BaseException as error:
-                ended = await self._end_background(task)
-                if isinstance(ended, Stop):
-                    error.add_note(f"background run stopped: {ended}")
-                elif ended is not None and ended is not error:
-                    error.add_note(f"background run raised: {ended!r}")
-                raise
-            ended = await self._end_background(task)
+        self._refuse_on_host()
+        self._handle.start()
+        self._last_stop = None
+
+    def halt(self) -> None:
+        """Stop the free run `start()` started, at its next block boundary, and return once the
+        machine is parked. A no-op when nothing was started. One thread at a time starts and
+        halts a machine: a goal another thread starts while this call checks for one is halted.
+
+        Raises:
+            MachineBusy: A run, step or call is active instead, cancel its task.
+            RuntimeError: Called from a handler.
+            EmulationError: The free run stopped by itself: FaultError for FAULT,
+                BudgetExceeded for BUDGET, EmulationError otherwise, carrying the stop.
+            BaseException: The exception a handler raised during the free run.
+        """
+        ended = self._halted()
         if isinstance(ended, BaseException):
             raise ended
         if ended is not None:
             raise _stop_error(ended)
 
-    async def _end_background(self, task: asyncio.Task[Stop | None]) -> Stop | BaseException | None:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except BaseException as error:
-            if error is not self._ended:
-                raise
-        finally:
-            self._background = False
-            self._release_waiters(None)
-        ended, self._ended = self._ended, None
-        return ended
+    def _halted(self) -> Stop | BaseException | None:
+        self._refuse_on_host()
+        ended = self._handle.halt()
+        if isinstance(ended, BaseException):
+            return ended
+        if ended is None:
+            return None
+        stop = stop_of(cast(_core.StopInfo, ended))
+        self._last_stop = stop
+        return stop
 
-    @contextlib.contextmanager
-    def _exclusive(self) -> Generator[None]:
-        if self._busy:
-            raise MachineBusy("a run, step, wait or running() is already active on this machine")
-        self._busy = True
-        self._run_thread = threading.get_ident()
+    @contextlib.asynccontextmanager
+    async def running(self) -> AsyncGenerator[None]:
+        """Run the machine on its own thread while the body awaits other things: `start()` on
+        entry, `halt()` on exit.
+
+        Inside, the machine runs whether the body awaits or blocks. Sync reads, writes and
+        stimuli raise MachineRunning: `m.read` and `m.write` access the machine, `wait_for` and
+        stream reads wait on the free run. An IDLE stop sleeps until a request wakes the core.
+
+        Any other stop, or an exception a handler raises, an intercept, return hook, watch,
+        Python model or bus device, ends the free run at an instruction boundary. Every pending
+        and later waiter, `wait_for` or a stream read, returns that stop or raises that
+        exception, and leaving the body raises it: FaultError for FAULT, BudgetExceeded for
+        BUDGET, EmulationError for another stop, the handler's exception as is. When the body
+        itself raises, a cancellation included, the body's exception wins: it propagates with a
+        note naming the stop or the handler's exception.
+
+        Raises:
+            MachineBusy: A run, step, call, wait or free run is active.
+            EmulationError: The free run stopped for a reason other than IDLE.
+            BaseException: The exception a handler of the free run raised.
+        """
+        self.start()
         try:
             yield
-        finally:
-            self._busy = False
-            self._run_thread = None
+        except BaseException as error:
+            ended = self._halted()
+            if isinstance(ended, Stop):
+                error.add_note(f"background run stopped: {ended}")
+            elif ended is not None and ended is not error:
+                error.add_note(f"background run raised: {ended!r}")
+            raise
+        self.halt()
 
     def _require_idle(self) -> None:
-        if self._busy:
-            raise MachineRunning(
-                "the machine is running, handlers included, stop or await it first"
-            )
+        if self.busy:
+            raise MachineRunning(f"{_RUNNING}, handlers included")
 
     def _device_audio_clock(self, device: BusDevice, sai: str, block: Block, frame_hz: int) -> None:
         name = self._audio.serving(sai)
@@ -1533,43 +1756,9 @@ class Machine:
             )
         self._audio.stream(name, block).external_frame_hz = frame_hz
 
-    def _require_owner(self) -> None:
-        if self._busy and threading.get_ident() != self._thread and not self._handle.owns_engine():
-            raise RuntimeError(
-                "a board stimulus from another thread while the machine runs: call it from "
-                "the machine's thread"
-            )
-
     def _require_stopped(self) -> None:
-        if self._busy and _HANDLER_OF.get() is not self:
-            raise MachineRunning("the machine is running, stop or await it first")
-
-    def _require_readable(self) -> None:
-        if (
-            self._busy
-            and _HANDLER_OF.get() is not self
-            and threading.get_ident() != self._run_thread
-            and not self._handle.owns_engine()
-        ):
-            raise MachineRunning("the machine is running, read it from the run's thread")
-
-    def _require_memory_readable(self, address: int, size: int) -> None:
-        self._require_readable()
-        if self._busy and _HANDLER_OF.get() is not self and not self._plain(address, size):
-            raise MachineRunning(
-                f"the machine is running, {size} bytes at {address:#010x} leave the memory "
-                "regions, a bus read a model reacts to: stop or await it first"
-            )
-
-    def _plain(self, address: int, size: int) -> bool:
-        at = address
-        end = address + size
-        for start, stop in self._plain_memory:
-            if at >= end:
-                break
-            if start <= at < stop:
-                at = stop
-        return at >= end
+        if self.busy and not self._handle.owns_engine():
+            raise MachineRunning(_RUNNING)
 
     def _handler(self, predicate: Callable[[Machine], bool]) -> Callable[[], bool]:
         def call() -> bool:
@@ -1580,129 +1769,6 @@ class Machine:
                 _HANDLER_OF.reset(token)
 
         return call
-
-    def _slice_args(self) -> _core.SliceArgs:
-        args = _core.SliceArgs()
-        args.max_instructions = self._slice_instructions
-        args.wall_budget_ns = self._slice_wall_ns
-        return args
-
-    async def _drive(
-        self,
-        *,
-        until: int | None,
-        budget: int | None,
-        for_: VirtualDuration | None,
-        stop_when: Callable[[Machine], bool] | None,
-        exact: int | None,
-    ) -> Stop:
-        self._last_stop = None
-        args = self._slice_args()
-        args.until = until
-        if for_ is not None:
-            args.until_time_ps = self._handle.time_ps() + for_.ps
-        predicate = None if stop_when is None else self._handler(stop_when)
-        remaining = budget
-        left = exact
-        executed = 0
-        while True:
-            if remaining is not None:
-                args.budget_left = remaining
-            if left is not None:
-                args.exact_instructions = left
-            args.leave_until = executed == 0
-            self._ports.pump()
-            outcome = self._handle.run_slice(args, predicate)
-            self._ports.pump()
-            if outcome.stopped is not None:
-                self._last_stop = stop_of(outcome.stopped)
-                return self._last_stop
-            executed += outcome.executed
-            if remaining is not None:
-                remaining = max(remaining - outcome.executed, 0)
-            if left is not None:
-                left = max(left - outcome.executed, 1)
-            await asyncio.sleep(0)
-
-    async def _drive_background(self) -> Stop | None:
-        self._last_stop = None
-        args = self._slice_args()
-        try:
-            while True:
-                deadlines = [
-                    w.deadline_ps
-                    for w in self._waiters
-                    if w.deadline_ps is not None and not w.future.done()
-                ]
-                args.until_time_ps = min(deadlines, default=None)
-                self._ports.pump()
-                outcome = self._handle.run_slice(args, None)
-                self._ports.pump()
-                stopped = None if outcome.stopped is None else stop_of(outcome.stopped)
-                self._check_waiters()
-                if stopped is None or stopped.reason is StopReason.TIME:
-                    await asyncio.sleep(0)
-                elif stopped.reason is StopReason.IDLE:
-                    await asyncio.sleep(self._slice_wall_ns / 1e9)
-                else:
-                    self._last_stop = stopped
-                    self._ended = stopped
-                    self._release_waiters(stopped)
-                    return stopped
-        except asyncio.CancelledError:
-            raise
-        except BaseException as error:
-            self._ended = error
-            self._release_waiters(error)
-            raise
-
-    async def _await_driver(self, event: Event, for_: VirtualDuration | None) -> Stop:
-        if isinstance(self._ended, BaseException):
-            raise self._ended
-        if self._ended is not None:
-            return self._ended
-        deadline = None if for_ is None else self._handle.time_ps() + for_.ps
-        future: asyncio.Future[Stop] = asyncio.get_running_loop().create_future()
-        self._waiters.append(_Waiter(event, deadline, future))
-        return await future
-
-    def _stop_here(self, reason: StopReason) -> Stop:
-        pc = self._handle.pc()
-        return Stop(
-            reason=reason,
-            pc=pc,
-            location=location_of(self._handle.locate(pc)),
-            instructions=self._handle.instructions(),
-            time=VirtualTime(self._handle.time_ps()),
-        )
-
-    def _check_waiters(self) -> None:
-        now = self._handle.time_ps()
-        for waiter in list(self._waiters):
-            if waiter.future.done():
-                self._waiters.remove(waiter)
-                continue
-            try:
-                if self._handler(waiter.event.ready)():
-                    waiter.future.set_result(self._stop_here(StopReason.USER))
-                elif waiter.deadline_ps is not None and now >= waiter.deadline_ps:
-                    waiter.future.set_result(self._stop_here(StopReason.TIME))
-            except Exception as error:
-                waiter.future.set_exception(error)
-            if waiter.future.done():
-                self._waiters.remove(waiter)
-
-    def _release_waiters(self, ended: Stop | BaseException | None) -> None:
-        waiters, self._waiters = self._waiters, []
-        for waiter in waiters:
-            if waiter.future.done():
-                continue
-            if ended is None:
-                waiter.future.cancel()
-            elif isinstance(ended, BaseException):
-                waiter.future.set_exception(ended)
-            else:
-                waiter.future.set_result(ended)
 
     def __repr__(self) -> str:
         return f"Machine({self._description.part}, images={len(self._images)})"
