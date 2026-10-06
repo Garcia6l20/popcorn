@@ -319,7 +319,7 @@ void machine::run_state::after_model(std::uint64_t instruction_hz)
   deadline = std::min(deadline, owner.scheduler_.earliest());
   if(owner.clock_.instruction_hz() != instruction_hz and in_engine)
   {
-    stop_flag = true;
+    raise_stop();
   }
 }
 
@@ -384,7 +384,7 @@ void machine::run_state::record_bus_fault(address addr, arch::memory_op op) noex
   {
     bus_fault = unmapped_access{.addr = addr, .op = op};
   }
-  stop_flag = true;
+  raise_stop();
 }
 
 void machine::run_state::note_unmodelled(

@@ -12,6 +12,7 @@
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -678,8 +679,43 @@ struct machine::run_state
   std::uint64_t resets{};
   /** @brief Whether a failed restore left the machine unusable. */
   bool invalid = false;
-  /** @brief The one flag the block hook tests: a request, a failure or stale code is pending. */
-  bool stop_flag = false;
+  /** @brief Owners of the stop bits. Each side clears only its own bit, so no clear erases a set
+   * of the other side. */
+  enum stop_bit : std::uint8_t
+  {
+    /** @brief Engine thread: a request, a failure or stale code is pending. */
+    stop_internal = 1U << 0,
+    /** @brief Any thread, through machine::interrupt(): end the slice at the next boundary. */
+    stop_mail = 1U << 1,
+  };
+  /** @brief The bits the block hook tests. */
+  std::atomic<std::uint8_t> stop_bits{};
+
+  /** @brief Sets the engine thread's bit. */
+  void raise_stop() noexcept
+  {
+    stop_bits.fetch_or(stop_internal, std::memory_order_relaxed);
+  }
+
+  /** @brief Clears the engine thread's bit, leaving a mail bit set. */
+  void clear_internal_stop() noexcept
+  {
+    stop_bits.fetch_and(static_cast<std::uint8_t>(~stop_internal), std::memory_order_relaxed);
+  }
+
+  /** @brief Whether either bit is set. */
+  [[nodiscard]] auto stop_pending() const noexcept -> bool
+  {
+    return stop_bits.load(std::memory_order_relaxed) != 0;
+  }
+
+  /** @brief Clears the mail bit. @return Whether it was set. */
+  auto take_mail() noexcept -> bool
+  {
+    return (stop_bits.fetch_and(static_cast<std::uint8_t>(~stop_mail), std::memory_order_relaxed)
+            & stop_mail)
+        != 0;
+  }
   /** @brief Stop requested through machine_services. */
   std::optional<requested_stop> requested{};
   /** @brief Reset requested through machine_services. */
@@ -1140,7 +1176,7 @@ struct machine::run_state
       {
         failure = std::current_exception();
       }
-      stop_flag = true;
+      raise_stop();
       return true;
     }
   }

@@ -220,7 +220,7 @@ void machine::run_state::code_changed(
   if(in_engine)
   {
     stale_code.push_back({.buffer = &buffer, .first = first, .last = last});
-    stop_flag = true;
+    raise_stop();
     return;
   }
   remove_translated(engine, buffer, first, last);
@@ -241,7 +241,7 @@ void machine::run_state::drain_stale_code()
   }
   if(not payload_pending())
   {
-    stop_flag = false;
+    clear_internal_stop();
   }
 }
 
@@ -266,7 +266,7 @@ void machine::run_state::on_block(
   auto&      run = *static_cast<run_state*>(user);
   auto const now = run.owner.clock_driver_.exact_now();
   run.block_pc   = static_cast<address>(addr);
-  if(run.stop_flag
+  if(run.stop_pending()
      or now >= run.deadline
      or now >= run.owner.scheduler_.earliest()
      or (--run.wall_countdown == 0 and run.wall_expired_now())
@@ -329,7 +329,7 @@ void machine::run_state::on_step(
 {
   auto&      run = *static_cast<run_state*>(user);
   auto const now = run.owner.clock_driver_.exact_now();
-  if(run.stop_flag or now >= run.deadline or now >= run.owner.scheduler_.earliest())
+  if(run.stop_pending() or now >= run.deadline or now >= run.owner.scheduler_.earliest())
   {
     uc_emu_stop(engine);
     return;
@@ -350,8 +350,8 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
       run.spin.leave();
       return run.stop_on_pending();
     }
-    run.trap      = result;
-    run.stop_flag = true;
+    run.trap = result;
+    run.raise_stop();
     return true;
   });
   if(stops)
@@ -370,8 +370,8 @@ auto machine::run_state::on_invalid_insn(uc_struct* engine, void* user) noexcept
     resumes           = result.resumes();
     if(not resumes)
     {
-      run.trap      = result;
-      run.stop_flag = true;
+      run.trap = result;
+      run.raise_stop();
       return false;
     }
     return run.stop_on_pending();
@@ -422,8 +422,8 @@ auto machine::run_state::on_bad_access(
       return true;
     }
   }
-  run.unmapped  = unmapped_access{.addr = static_cast<address>(addr), .op = memory_op_of(type)};
-  run.stop_flag = true;
+  run.unmapped = unmapped_access{.addr = static_cast<address>(addr), .op = memory_op_of(type)};
+  run.raise_stop();
   return false;
 }
 
@@ -464,8 +464,8 @@ void machine::run_state::clear_slice() noexcept
   trap.reset();
   unmapped.reset();
   bus_fault.reset();
-  failure      = nullptr;
-  stop_flag    = false;
+  failure = nullptr;
+  clear_internal_stop();
   wall_expired = false;
 }
 
@@ -536,6 +536,7 @@ auto machine::run_state::next_deadline(slice_request const& request) const -> ic
 
 auto machine::run_state::handle_requests() -> std::optional<slice_end>
 {
+  auto const mail = not(trap or unmapped or bus_fault) and take_mail();
   if(requested)
   {
     auto const asked = *std::exchange(requested, std::nullopt);
@@ -558,6 +559,10 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
     {
       return slice_end{};
     }
+  }
+  if(mail)
+  {
+    return slice_end{};
   }
   return std::nullopt;
 }
@@ -941,13 +946,18 @@ auto machine::run_slice(slice_request const& request) -> slice_result
   return run_->run(request);
 }
 
+void machine::interrupt() noexcept
+{
+  run_->stop_bits.fetch_or(run_state::stop_mail, std::memory_order_relaxed);
+}
+
 void machine::do_request_stop(stop_reason reason, std::string detail)
 {
   if(not run_->requested)
   {
     run_->requested = requested_stop{.reason = reason, .detail = std::move(detail)};
   }
-  run_->stop_flag = true;
+  run_->raise_stop();
 }
 
 void machine::do_request_reset(reset_kind kind)
@@ -956,12 +966,12 @@ void machine::do_request_reset(reset_kind kind)
   {
     run_->reset_requested = kind;
   }
-  run_->stop_flag = true;
+  run_->raise_stop();
 }
 
 void machine::do_end_slice()
 {
   run_->end_requested = true;
-  run_->stop_flag     = true;
+  run_->raise_stop();
 }
 }

@@ -288,7 +288,7 @@ void machine::run_state::on_code_site(
         case intercept_action::stop:
           run.trap        = arch::trap_result::stop(*result.reason());
           run.resume_past = std::pair{static_cast<address>(addr), index + 1};
-          run.stop_flag   = true;
+          run.raise_stop();
           return true;
       }
     }

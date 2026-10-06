@@ -9,7 +9,7 @@ from pcons import find_c_toolchain, get_variant
 
 from popcorn_build.gcc_tools import gcc_ar_for
 
-VARIANTS = ("debug", "release", "asan")
+VARIANTS = ("debug", "release", "asan", "tsan")
 GCC_MINIMUM = (16, 1)
 
 project_dir = Path(__file__).resolve().parent.parent

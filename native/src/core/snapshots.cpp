@@ -377,7 +377,7 @@ void machine::restore(core::snapshot const& saved)
   run.requested.reset();
   run.reset_requested.reset();
   run.end_requested = false;
-  run.stop_flag     = false;
+  run.clear_internal_stop();
   ++generation_;
   run.invalid = false;
 }

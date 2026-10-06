@@ -48,6 +48,10 @@ env.link.flags.append("-fcontracts")
 if VARIANT == "asan":
     env.set_variant("debug")
     env.apply_preset("sanitize")
+elif VARIANT == "tsan":
+    env.set_variant("debug")
+    env.cxx.flags.append("-fsanitize=thread")
+    env.link.flags.append("-fsanitize=thread")
 else:
     env.set_variant(VARIANT)
     env.ar.cmd = gcc_ar
@@ -67,7 +71,7 @@ core.private.defines.extend(
 )
 core.link(package("unicorn"))
 core.link(package("reflex-serde"))
-if VARIANT != "asan":
+if VARIANT not in ("asan", "tsan"):
     core.private.compile_flags.append("-flto=auto")
     core.public.link_flags.extend(["-flto=2", "-Werror=lto-type-mismatch", "-Werror=odr"])
 
@@ -91,7 +95,7 @@ if build_examples:
     for script in sorted((project_dir / "examples").glob("*/*/pcons-build.py")):
         add_subdirectory(script.parent.relative_to(project_dir))
 
-if VARIANT != "asan":
+if VARIANT not in ("asan", "tsan"):
     ext = add_extension("popcorn", "_core", add_subdirectory("native/src/bind").sources)
     ext.link(core)
     ext.link(obs.popcorn_obs)

@@ -187,7 +187,8 @@ struct call_result
  * the whole slice, handlers included. For hooks this deliberately departs from the Python API
  * contract, which lets handlers edit a paused machine: adding or removing a hook flushes translated
  * code of the running slice. Between the slices of a call or of a run, running() is false: the
- * Python facade keeps its own guard for a run in progress.
+ * Python facade keeps its own guard for a run in progress. interrupt() is the one member callable
+ * from another thread.
  *
  * Neither copyable nor movable: contexts and views hold references to it.
  */
@@ -303,6 +304,13 @@ public:
    *         is rethrown, later ones of the same slice are dropped.
    */
   auto run_slice(slice_request const& request) -> slice_result;
+
+  /**
+   * @brief Ends the running slice at the next block boundary, from any thread. A slice that is
+   *        not running ends at its first boundary. The slice returns with an empty stop, the
+   *        machine resumable. Safe to call concurrently with run_slice().
+   */
+  void interrupt() noexcept;
 
   /**
    * @brief Begins a guest function call: saves the engine registers of `arch::arch::registers()`

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pcons import context
 
-from popcorn_build.config import project_dir
+from popcorn_build.config import VARIANT, project_dir
 from popcorn_build.firmware import firmware
 from popcorn_build.testing import add_doctest, alias_bare_name
 
@@ -169,6 +169,14 @@ test_spin = add_doctest("core-spin", [here / "test_spin.cpp"], [test_support, co
 for _, target in core_firmware.values():
     if target is not None:
         test_spin.depends(target)
+
+tsan_sources = [project_dir / "tests" / "native" / "tsan_longjmp.cpp"] if VARIANT == "tsan" else []
+test_host = add_doctest(
+    "core-host", [here / "test_host.cpp", *tsan_sources], [test_support, core], env=m33_env
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_host.depends(target)
 
 test_facade_support = add_doctest(
     "core-facade-support", [here / "test_facade_support.cpp"], [test_support, core], env=m33_env
