@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import gc
 import itertools
-import os
 import weakref
 
 import popcorn
@@ -15,7 +14,7 @@ from popcorn.board import Frame
 from popcorn.model import Model
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import run_bounded
+from .conftest import holds_pty, run_bounded
 
 FRAME_PS = 87_500_000
 USART1_TDR = 0x4001_3828
@@ -129,7 +128,7 @@ def test_a_stream_keeps_its_machine_and_both_are_freed_together(
     del uart
     gc.collect()
     assert machine() is None
-    assert not os.path.exists(path)
+    assert not holds_pty(path)
 
 
 def test_frames_sent_before_the_port_is_taken_wait_for_it(board: popcorn.Machine) -> None:

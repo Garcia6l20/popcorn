@@ -17,7 +17,7 @@ from popcorn import _core
 from popcorn._streams import OUTGOING_LIMIT, PtyBridge, UartPtyLink
 from popcorn.units import ms
 
-from .conftest import BOARD_ELF
+from .conftest import BOARD_ELF, holds_pty
 
 
 def client(path: str, line: bytes) -> bytes:
@@ -102,12 +102,12 @@ def test_a_pty_made_inside_a_loop_is_freed_with_its_machine(
         del m
         gc.collect()
         assert len(selector.get_map()) == before
-        return path, os.path.exists(path), before, watching
+        return path, holds_pty(path), before, watching
 
-    path, exists, before, watching = asyncio.run(
+    path, held, before, watching = asyncio.run(
         body(), loop_factory=lambda: asyncio.SelectorEventLoop(selector)
     )
-    assert not exists, path
+    assert not held, path
     assert watching == before + 1
 
 
@@ -115,7 +115,7 @@ def test_close_removes_every_pty(board: popcorn.Machine) -> None:
     path = board.board.pty("USART1")
     board.board.close()
     assert board.board.ptys == {}
-    assert not os.path.exists(path)
+    assert not holds_pty(path)
 
 
 class FakeLink:
@@ -165,7 +165,7 @@ def test_unread_pty_output_keeps_the_last_64_kib(caplog: pytest.LogCaptureFixtur
         assert received == sent[-len(received) :]
     finally:
         bridge.close()
-    assert not os.path.exists(bridge.path)
+    assert not holds_pty(bridge.path)
 
 
 def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import Coroutine
 from pathlib import Path
 
@@ -34,6 +35,28 @@ def run_bounded[T](coroutine: Coroutine[object, object, T], seconds: float = 2) 
         return task.result()
 
     return asyncio.run(bounded())
+
+
+def holds_pty(path: str) -> bool:
+    """Whether this process still has either end of pty `path` open.
+
+    Not `os.path.exists(path)`: devpts frees the index at the last close, and the next
+    `openpty()` of any process, a parallel test worker included, takes it again. The master
+    end links to `/dev/ptmx`, its index in the `tty-index` line of its fdinfo. The slave end
+    links to `<path> (deleted)` once its master is closed.
+    """
+    index = f"tty-index:\t{path.removeprefix('/dev/pts/')}"
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+            if target.removesuffix(" (deleted)") == path or (
+                target in ("/dev/ptmx", "/dev/pts/ptmx")
+                and index in Path(f"/proc/self/fdinfo/{fd}").read_text().splitlines()
+            ):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 @pytest.fixture
