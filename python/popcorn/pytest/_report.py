@@ -48,6 +48,7 @@ NAME_LENGTH = 150
 RING_HINT = "trace ring: not shown, pass --popcorn-ring=N for its last N lines"
 CALL_FAILED = pytest.StashKey[bool]()
 KEPT_TRACE = pytest.StashKey[Path]()
+HELD = pytest.StashKey[dict[int, BaseException | None]]()
 
 
 class TraceOnFail:
@@ -139,6 +140,42 @@ def track(item: pytest.Item, label: str, machine: Machine, key: object) -> None:
     item.stash.setdefault(MACHINES, list[Tracked]()).append(Tracked(label, machine, str(key)))
 
 
+def park(item: pytest.Item) -> None:
+    """Park every machine `item` tracks and keep what ended each free run by itself, and never
+    reached the test, for the teardown of its fixture."""
+    held = item.stash.setdefault(HELD, dict[int, BaseException | None]())
+    for entry in item.stash.get(MACHINES, list[Tracked]()):
+        if id(entry.machine) not in held:
+            held[id(entry.machine)] = park_ended(entry.machine)
+
+
+def park_ended(machine: Machine) -> BaseException | None:
+    """Park `machine`, returning what ended its free run by itself instead of raising it, None
+    when a wait already returned or raised it to the test."""
+    return machine._park()  # pyright: ignore[reportPrivateUsage]
+
+
+def take_held(item: pytest.Item, machine: Machine) -> BaseException | None:
+    """What ended the free run of `machine` when the report of `item` parked it, removed."""
+    return item.stash.get(HELD, dict[int, BaseException | None]()).pop(id(machine), None)
+
+
+def unclaimed(owner: str, ended: BaseException) -> None:
+    """Warn that `ended` ended a free run of `owner` and no test can raise it any more.
+
+    The warning is shown even under `-W error`, never raised: it is emitted from report hooks,
+    session end and cleanup that must finish.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("always", pytest.PytestUnraisableExceptionWarning)
+        warnings.warn(
+            pytest.PytestUnraisableExceptionWarning(
+                f"popcorn: {owner} was left running and its free run ended with {ended!r}"
+            ),
+            stacklevel=1,
+        )
+
+
 def exception_stop(error: BaseException | None) -> Stop | None:
     """The stop of the first error carrying one, depth first through exception groups, then
     through causes and contexts."""
@@ -166,7 +203,7 @@ def section_text(tracked: list[Tracked], error: BaseException | None, ring: int 
     of the error that is no machine's last stop is printed first.
     """
     stop = exception_stop(error)
-    last = [None if entry.machine.busy else entry.machine.last_stop for entry in tracked]
+    last = [entry.machine.last_stop for entry in tracked]
     lines: list[str] = []
     if stop is not None and stop not in last:
         lines += [f"exception stop: {stop}", ""]
@@ -181,8 +218,6 @@ def section_text(tracked: list[Tracked], error: BaseException | None, ring: int 
 
 
 def _machine_text(machine: Machine, stop: Stop | None, ring: int) -> str:
-    if machine.busy:
-        return "  still running: stop or await it before the test ends to get a report"
     if stop is not None:
         report = stop_report(machine, stop, ring=ring > 0, ring_last=ring or None, collapse=True)
         lines = [report.text()]
@@ -219,7 +254,7 @@ def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]
 ) -> Generator[None, pytest.TestReport, pytest.TestReport]:
     """Add the "popcorn" section to the report of a failing phase of a test that used a machine,
-    and release the test's machines after its teardown report.
+    parking its machines first, and release the test's machines after its teardown report.
 
     `tryfirst` makes this wrapper the outermost, so it sees the outcome after xfail handling.
     """
@@ -227,8 +262,10 @@ def pytest_runtest_makereport(
     tracked = item.stash.get(MACHINES, list[Tracked]())
     if call.when == "call" and report.failed:
         item.stash[CALL_FAILED] = True
+    error = None if call.excinfo is None else call.excinfo.value
+    if tracked and (report.failed or error is not None):
+        park(item)
     if report.failed and tracked:
-        error = None if call.excinfo is None else call.excinfo.value
         try:
             text = section_text(tracked, error, item.config.stash[SETTINGS].ring)
         except Exception as broken:
@@ -237,6 +274,12 @@ def pytest_runtest_makereport(
         if call.when == "call" and kept is not None:
             text += f"\ntrace: {kept}"
         report.sections.append(("popcorn", text))
-    if call.when == "teardown" and MACHINES in item.stash:
-        del item.stash[MACHINES]
+    if call.when == "teardown":
+        if MACHINES in item.stash:
+            del item.stash[MACHINES]
+        if HELD in item.stash:
+            for ended in item.stash[HELD].values():
+                if ended is not None:
+                    unclaimed(item.nodeid, ended)
+            del item.stash[HELD]
     return report

@@ -10,7 +10,14 @@ import pytest
 
 from popcorn import Machine, PopcornError, Project, Snapshot
 from popcorn.pytest._options import UNSET, marker_options
-from popcorn.pytest._report import TraceOnFail, trace_directory, track
+from popcorn.pytest._report import (
+    TraceOnFail,
+    park_ended,
+    take_held,
+    trace_directory,
+    track,
+    unclaimed,
+)
 from popcorn.pytest._session import Booted, Devices, Key, PopcornSession, popcorn_session
 
 
@@ -109,11 +116,26 @@ class MachineFactory:
             raise
 
     def close(self) -> None:
-        """Collect the coverage of every machine made and close its pty bridges."""
-        for machine in self._machines:
+        """Park every machine made, collect its coverage and close its pty bridges.
+
+        What ended a free run by itself and never reached the test is raised, the first one,
+        after every machine is closed. The others are warned as unraisable.
+
+        Raises:
+            BaseException: What ended the first such free run.
+        """
+        ends: list[BaseException] = []
+        for number, machine in enumerate(self._machines, start=1):
+            ended = take_held(self._item, machine) or park_ended(machine)
+            if ended is not None:
+                ends.append(ended)
+                if len(ends) > 1:
+                    unclaimed(f"machine_factory #{number} of {self._item.nodeid}", ended)
             self._session.collect(machine)
             machine.board.close()
         self._machines.clear()
+        if ends:
+            raise ends[0]
 
     def _key(self, config: str | None, project: Project | None, strict: bool | None) -> Key:
         if project is not None:
@@ -247,17 +269,22 @@ def machine(
         if not trace.start(m):
             trace = None
     yield m
+    held = take_held(item, m) or park_ended(m)
     closed = trace is None
     try:
         if trace is not None:
             trace.finish()
             closed = True
     finally:
+        if not closed and held is not None:
+            unclaimed(item.nodeid, held)
         if not closed or _spoiled(m, booted):
             _popcorn_session.rebuild(test.key)
         else:
             m.remove_hooks()
             m.set_call_baseline(None)
+    if held is not None:
+        raise held
 
 
 @pytest.fixture
@@ -290,6 +317,7 @@ def _item(request: pytest.FixtureRequest) -> pytest.Item:
 
 def _restored(session: PopcornSession, key: Key) -> Booted:
     booted = session.booted(key)
+    assert not booted.machine.busy, "the previous test's teardown parks the machine"
     try:
         booted.machine.restore(booted.snapshot)
     except PopcornError:
@@ -300,8 +328,4 @@ def _restored(session: PopcornSession, key: Key) -> Booted:
 
 
 def _spoiled(machine: Machine, booted: Booted) -> bool:
-    return (
-        machine.busy
-        or len(machine.images) != booted.image_count
-        or machine.board.ptys != booted.ptys
-    )
+    return len(machine.images) != booted.image_count or machine.board.ptys != booted.ptys

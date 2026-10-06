@@ -22,6 +22,7 @@ from popcorn.coverage import Coverage, worker_path
 from popcorn.pytest._cache import Entry, cache_directory, cache_key, devices_digest, locked
 from popcorn.pytest._loop import OwnedLoop, owned_loop
 from popcorn.pytest._options import SETTINGS, Settings
+from popcorn.pytest._report import park_ended, unclaimed
 
 type Devices = Mapping[str, Sequence[AttachedDevice]]
 """Bus devices per peripheral, as `Project.machine(devices=)` takes them."""
@@ -301,6 +302,18 @@ class PopcornSession:
         itself failed or the boot did not."""
         return self._failed_machines.get(key)
 
+    def park(self) -> None:
+        """Park the reused machines and those whose boot failed. What ended a free run by itself
+        is warned as unraisable: no test owns it any more."""
+        machines = [
+            *((f"the machine of {key}", booted.machine) for key, booted in self._booted.items()),
+            *((f"the failed boot of {key}", m) for key, m in self._failed_machines.items()),
+        ]
+        ends = [(owner, park_ended(machine)) for owner, machine in machines]
+        for owner, ended in ends:
+            if ended is not None:
+                unclaimed(owner, ended)
+
     def close(self) -> None:
         """Close the pty bridges of the reused machines and of those whose boot failed."""
         for booted in self._booted.values():
@@ -468,10 +481,12 @@ def summary(session: PopcornSession) -> dict[str, object]:
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Close the pty bridges and hand the counters to the xdist controller."""
+    """Park the machines, collect their coverage, close their pty bridges and hand the counters
+    to the xdist controller."""
     state = session.config.stash.get(SESSION, None)
     if state is None:
         return
+    state.park()
     for booted in state.booted_machines():
         state.collect(booted)
     state.close()

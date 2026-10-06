@@ -352,6 +352,7 @@ class Machine:
         "_registers",
         "_ring",
         "_sentinel",
+        "_surfaced",
         "_usb",
     )
 
@@ -517,6 +518,7 @@ class Machine:
         )
         self._call_baseline: Snapshot | None = None
         self._last_stop: Stop | None = None
+        self._surfaced: Stop | BaseException | None = None
         self._default_budget: int | None = None
         self._logs: dict[int, list[LogEntry]] = {}
         self._installed: list[Intercept | Watch] = []
@@ -1643,10 +1645,18 @@ class Machine:
         """
         _check_duration(for_)
         if self._handle.session_open():
-            return await awaited(
-                self._handle.wait(self._handler(event.ready), None if for_ is None else for_.ps),
-                lambda raw: stop_of(cast(_core.StopInfo, raw)),
-            )
+            try:
+                stop = await awaited(
+                    self._handle.wait(
+                        self._handler(event.ready), None if for_ is None else for_.ps
+                    ),
+                    lambda raw: stop_of(cast(_core.StopInfo, raw)),
+                )
+            except BaseException as error:
+                self._surfaced = error
+                raise
+            self._surfaced = stop
+            return stop
         if isinstance(event, Reached):
             return await self.run(until=event.target, for_=for_)
         return await self.run(for_=for_, stop_when=event.ready)
@@ -1666,6 +1676,7 @@ class Machine:
         self._refuse_on_host()
         self._handle.start()
         self._last_stop = None
+        self._surfaced = None
 
     def halt(self) -> None:
         """Stop the free run `start()` started, at its next block boundary, and return once the
@@ -1685,9 +1696,28 @@ class Machine:
         if ended is not None:
             raise _stop_error(ended)
 
+    def _park(self) -> BaseException | None:
+        """Bring the machine to parked whatever runs: cancel a goal, halt a free run.
+
+        Returns:
+            What ended the free run by itself, as `halt()` would raise it, instead of raising
+            it, None when nothing did or when a wait of this free run already returned or
+            raised it to its caller.
+        """
+        self._refuse_on_host()
+        ended = self._ended(self._handle.park())
+        surfaced, self._surfaced = self._surfaced, None
+        if ended is None or ended is surfaced:
+            return None
+        if isinstance(ended, Stop):
+            return None if ended == surfaced else _stop_error(ended)
+        return ended
+
     def _halted(self) -> Stop | BaseException | None:
         self._refuse_on_host()
-        ended = self._handle.halt()
+        return self._ended(self._handle.halt())
+
+    def _ended(self, ended: object) -> Stop | BaseException | None:
         if isinstance(ended, BaseException):
             return ended
         if ended is None:

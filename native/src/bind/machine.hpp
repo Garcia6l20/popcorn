@@ -277,6 +277,18 @@ public:
       halt() -> reflex::py::nb::object;
 
   /**
+   * @brief Parks the machine whatever runs: cancels an active goal, its future failing with
+   *        operation_cancelled, or closes the free run as halt() does, waiting with the GIL
+   *        released until the machine parks. A no-op on a parked machine. On a host thread it
+   *        only requests the end, as halt() does.
+   * @return None, the StopInfo that ended the free run by itself, or the exception a handler
+   *         raised in it.
+   * @throws machine_running inside a parked section.
+   */
+  [[= py::doc{"Cancel a goal or halt the free run, return what halt() returns."}]] auto park()
+      -> reflex::py::nb::object;
+
+  /**
    * @brief Waits on the free run.
    * @param ready Predicate called on the host thread at event boundaries and slice ends, in a
    *        copy of the caller's context, None for a deadline only.

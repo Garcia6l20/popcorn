@@ -204,6 +204,11 @@ auto machine_handle::halt() -> nb::object
           "a run, step or call is active, not a free run: cancel its task instead");
     }
   }
+  return park();
+}
+
+auto machine_handle::park() -> nb::object
+{
   std::optional<core::held_end> ended;
   {
     nb::gil_scoped_release const released;

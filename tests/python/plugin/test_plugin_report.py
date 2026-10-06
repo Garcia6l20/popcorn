@@ -241,7 +241,7 @@ def test_an_error_stop_that_is_no_last_stop_is_printed_first(pytester: pytest.Py
     )
 
 
-def test_a_running_machine_is_named_not_reported(pytester: pytest.Pytester) -> None:
+def test_a_running_machine_is_parked_then_reported(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester)
     pytester.makepyfile("""
@@ -254,7 +254,11 @@ def test_a_running_machine_is_named_not_reported(pytester: pytest.Pytester) -> N
             assert False
         """)
     result = run(pytester, "-W", "ignore")
-    result.stdout.fnmatch_lines([HEADER, "machine (*):", "  still running: *"])
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [HEADER, "machine (*):", "*no stop since the test started*", "*registers:*"]
+    )
+    result.stdout.no_fnmatch_line("*still running*")
 
 
 def test_two_machines_get_two_blocks(pytester: pytest.Pytester) -> None:

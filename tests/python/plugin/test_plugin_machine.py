@@ -107,7 +107,7 @@ def test_a_spoiled_machine_is_rebuilt_from_the_saved_boot(pytester: pytest.Pytes
             assert machine.busy
 
         def test_after_a_busy_machine(machine):
-            assert machine is not SEEN[1]
+            assert machine is SEEN[1]
             assert not machine.busy
         """)
     result = run(pytester, "-W", "ignore")
