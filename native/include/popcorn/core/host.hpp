@@ -296,8 +296,10 @@ public:
 
   /**
    * @brief Sets the callback run once on completion, on the completing thread after the value is
-   *        stored, outside every host mutex and outside the future's own mutex. Runs it at once
-   *        on this thread when the future is done. Replaces an earlier callback not yet run,
+   *        stored, outside the future's own mutex. The host thread completes outside every host
+   *        mutex. A caller completes under the host mutex it holds: a parked stamped post, a run
+   *        or a start failing stamps a parked reset superseded. Runs it at once on this thread
+   *        when the future is done. Replaces an earlier callback not yet run,
    *        which is destroyed after the future's mutex is released.
    */
   void on_done(std::move_only_function<void() noexcept> callback) pre(valid())

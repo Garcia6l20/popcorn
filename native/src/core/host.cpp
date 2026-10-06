@@ -212,6 +212,14 @@ void fail_all(std::vector<stamped> const& dropped, std::exception_ptr const& err
   }
 }
 
+void supersede_parked(member_slot& slot)
+{
+  if(auto const* const why = slot.timeline_moved(); why != nullptr)
+  {
+    fail_all(slot.take_stamps(), cancelled(why));
+  }
+}
+
 void add_stamp(slice_request& request, std::optional<vtime> stamp)
 {
   if(stamp and (not request.until_time or *stamp < *request.until_time))
@@ -1279,19 +1287,9 @@ void host::post_stamped(
     core_->notify_locked(slot);
     return;
   }
-  std::vector<detail::stamped> dropped;
-  char const*                  why = nullptr;
   if(not inline_owner)
   {
-    why = slot.timeline_moved();
-    if(why != nullptr)
-    {
-      dropped = slot.take_stamps();
-    }
-  }
-  if(not dropped.empty())
-  {
-    detail::fail_all(dropped, detail::cancelled(why));
+    detail::supersede_parked(slot);
   }
   auto const now = slot.engine->virtual_clock().time();
   if(at < now)
@@ -1392,8 +1390,9 @@ auto host::run(held_lock const& held, member_id who, run_goal goal) -> host_futu
   slot.goal             = std::move(made);
   slot.halt_requested   = false;
   slot.cancel_requested = false;
-  slot.with_host        = true;
-  slot.state            = host_state::running;
+  detail::supersede_parked(slot);
+  slot.with_host = true;
+  slot.state     = host_state::running;
   ensure_thread();
   core_->wake_locked(slot);
   return future;
@@ -1414,8 +1413,9 @@ void host::start(held_lock const& held, member_id who)
   slot.free_run         = true;
   slot.halt_requested   = false;
   slot.cancel_requested = false;
-  slot.with_host        = true;
-  slot.state            = host_state::running;
+  detail::supersede_parked(slot);
+  slot.with_host = true;
+  slot.state     = host_state::running;
   ensure_thread();
   core_->wake_locked(slot);
 }

@@ -1221,6 +1221,35 @@ TEST_CASE("a reset or a restore fails pending stamps")
   }
 }
 
+TEST_CASE("a parked reset fails no stamp posted after it once a run or a free run began")
+{
+  SUBCASE("goal")
+  {
+    hosted h{alu(0)};
+    core::access(*h.on, 0, [](core::machine& m) { m.reset(); });
+    auto const [goal, stamp] = [&h] {
+      auto held  = h.on->lock();
+      auto ran   = h.on->run(held, 0, {.budget = icount{10'000}});
+      auto taken = h.on->post(held, 0, [](core::machine&) {}, at_instruction(5000));
+      return std::pair{std::move(ran), std::move(taken)};
+    }();
+    std::ignore = goal.get();
+    CHECK(stamp.get() >= at_instruction(5000));
+  }
+  SUBCASE("free run")
+  {
+    hosted h{alu(0)};
+    core::access(*h.on, 0, [](core::machine& m) { m.reset(); });
+    auto const stamp = [&h] {
+      auto held = h.on->lock();
+      h.on->start(held, 0);
+      return h.on->post(held, 0, [](core::machine&) {}, at_instruction(5000));
+    }();
+    CHECK(stamp.get() >= at_instruction(5000));
+    std::ignore = h.on->halt(0);
+  }
+}
+
 TEST_CASE("withdraw removes a pending stamp and refuses one that ran")
 {
   hosted     h{alu(0)};
