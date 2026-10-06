@@ -1,12 +1,18 @@
 #include <popcorn/core/host.hpp>
 
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <deque>
 #include <format>
 #include <ranges>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <system_error>
 #include <tuple>
 
 namespace popcorn::core
@@ -232,6 +238,57 @@ enum class fate : std::uint8_t
   orphaned,
 };
 
+class event_fd
+{
+public:
+  event_fd() : fd_{::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)}
+  {
+    if(fd_ < 0)
+    {
+      throw std::system_error(errno, std::generic_category(), "eventfd");
+    }
+  }
+
+  event_fd(event_fd const&)                    = delete;
+  auto operator=(event_fd const&) -> event_fd& = delete;
+
+  ~event_fd()
+  {
+    ::close(fd_);
+  }
+
+  [[nodiscard]] auto get() const noexcept -> int
+  {
+    return fd_;
+  }
+
+  void signal() const noexcept
+  {
+    std::uint64_t const one = 1;
+    std::ignore             = ::write(fd_, &one, sizeof one);
+  }
+
+  void drain() const noexcept
+  {
+    std::uint64_t count{};
+    std::ignore = ::read(fd_, &count, sizeof count);
+  }
+
+private:
+  int fd_;
+};
+
+inline constexpr int poll_retry_ms = 10;
+
+struct fd_watch
+{
+  watch_id                              id;
+  member_id                             who;
+  int                                   fd;
+  std::move_only_function<bool() const> wants_write;
+  bool                                  broken = false;
+};
+
 struct host_core
 {
   host_core(std::vector<std::unique_ptr<machine>> machines, slice_bounds slices, host_hooks calls)
@@ -245,20 +302,28 @@ struct host_core
   }
 
   std::mutex                                mutex;
-  std::condition_variable_any               wake;
+  event_fd                                  wake;
   std::condition_variable                   parked_cv;
   std::vector<std::unique_ptr<member_slot>> members;
   slice_bounds                              bounds;
   host_hooks                                hooks;
-  bool                                      pending = false;
-  bool                                      closed  = false;
+  bool                                      pending   = false;
+  bool                                      closed    = false;
+  bool                                      sleeping  = false;
+  bool                                      signalled = false;
   std::atomic<fate>                         ending{fate::undecided};
+  std::mutex                                watch_mutex;
+  std::vector<fd_watch>                     watches;
+  watch_id                                  next_watch = 0;
 
   void wake_locked(member_slot& slot)
   {
     slot.woken = true;
     pending    = true;
-    wake.notify_all();
+    if(sleeping and not std::exchange(signalled, true))
+    {
+      wake.signal();
+    }
   }
 
   void notify_locked(member_slot& slot)
@@ -369,7 +434,77 @@ struct host_core
       {
         return plans;
       }
-      wake.wait(lock, stop, [this] { return pending; });
+      sleep(lock);
+    }
+  }
+
+  /**
+   * @brief Polls @p polled, the eventfd first, until one is ready.
+   * @return False when the watched descriptors could not be polled: the eventfd alone was
+   *         polled for poll_retry instead, and every watched member is to be woken so its pump
+   *         reads what arrived. Wakes are then late by up to poll_retry, never lost.
+   */
+  static auto poll_all(std::vector<pollfd>& polled) -> bool
+  {
+    while(::poll(polled.data(), polled.size(), -1) < 0)
+    {
+      if(errno == EINTR)
+      {
+        continue;
+      }
+      for(auto& entry : polled)
+      {
+        entry.revents = 0;
+      }
+      while(::poll(polled.data(), 1, poll_retry_ms) < 0 and errno == EINTR)
+      {
+      }
+      return false;
+    }
+    return true;
+  }
+
+  void sleep(std::unique_lock<std::mutex>& lock)
+  {
+    std::vector<pollfd> polled{
+        {.fd = wake.get(), .events = POLLIN, .revents = 0}
+    };
+    std::vector<watch_id> owners;
+    std::unique_lock      watching{watch_mutex};
+    for(auto& watched : watches)
+    {
+      if(watched.broken or members[watched.who]->state != host_state::idle_wait)
+      {
+        continue;
+      }
+      auto const events = watched.wants_write() ? POLLIN | POLLOUT : POLLIN;
+      polled.push_back({.fd = watched.fd, .events = static_cast<short>(events), .revents = 0});
+      owners.push_back(watched.id);
+    }
+    watching.unlock();
+    sleeping = true;
+    lock.unlock();
+    auto const failed = not poll_all(polled);
+    if(polled.front().revents != 0)
+    {
+      wake.drain();
+    }
+    lock.lock();
+    sleeping  = false;
+    signalled = false;
+    watching.lock();
+    for(auto const& [ready, id] : std::views::zip(polled | std::views::drop(1), owners))
+    {
+      auto const watched = std::ranges::find(watches, id, &fd_watch::id);
+      if((ready.revents == 0 and not failed) or watched == watches.end())
+      {
+        continue;
+      }
+      members[watched->who]->woken = true;
+      if((ready.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+      {
+        watched->broken = true;
+      }
     }
   }
 
@@ -597,6 +732,16 @@ struct host_core
     }
   }
 
+  void fail_goal(member_slot& slot, deferred& done, std::exception_ptr error)
+  {
+    std::ignore = finish_goal(slot, nullptr);
+    park(slot, done, [&error](member_slot& parked, deferred& later) {
+      later.push_back([goal = std::move(parked.goal), error = std::move(error)] mutable {
+        goal->promise.fail(std::move(error));
+      });
+    });
+  }
+
   void goal_slice(member_slot& slot, deferred& done)
   {
     accept_stamps(slot);
@@ -625,18 +770,19 @@ struct host_core
     }
     catch(...)
     {
-      std::ignore = finish_goal(slot, nullptr);
-      park(slot, done, [error = std::current_exception()](member_slot& parked, deferred& later) {
-        later.push_back([goal = std::move(parked.goal), error] mutable {
-          goal->promise.fail(std::move(error));
-        });
-      });
+      fail_goal(slot, done, std::current_exception());
       return;
     }
     after_slice(slot, request, result);
+    try
     {
       owner_scope const owning{this};
       at_boundary(slot);
+    }
+    catch(...)
+    {
+      fail_goal(slot, done, std::current_exception());
+      return;
     }
     goal.executed.value += result.executed.value;
     goal.remaining = remaining_after(goal.remaining, result.executed);
@@ -742,9 +888,15 @@ struct host_core
     }
     request.stop_when = {};
     after_slice(slot, request, result);
+    try
     {
       owner_scope const owning{this};
       at_boundary(slot);
+    }
+    catch(...)
+    {
+      end_free_run(slot, held_end{std::current_exception()}, done);
+      return;
     }
     auto const reason = result.stopped ? std::optional{result.stopped->reason} : std::nullopt;
     auto const fired =
@@ -1396,6 +1548,37 @@ void host::request_stop()
     slot->engine->interrupt();
   }
   thread_.request_stop();
+  core_->wake.signal();
+}
+
+auto host::watch(member_id who, int fd, std::move_only_function<bool() const> wants_write)
+    -> watch_id
+{
+  watch_id made{};
+  {
+    std::scoped_lock const lock{core_->watch_mutex};
+    made = core_->next_watch++;
+    core_->watches.push_back(
+        {.id = made, .who = who, .fd = fd, .wants_write = std::move(wants_write)});
+  }
+  core_->wake.signal();
+  return made;
+}
+
+void host::unwatch(watch_id id) noexcept
+{
+  std::move_only_function<bool() const> dropped;
+  {
+    std::scoped_lock const lock{core_->watch_mutex};
+    auto const             found = std::ranges::find(core_->watches, id, &detail::fd_watch::id);
+    if(found == core_->watches.end())
+    {
+      return;
+    }
+    dropped = std::move(found->wants_write);
+    core_->watches.erase(found);
+  }
+  core_->wake.signal();
 }
 
 void host::decide(detail::fate ending)

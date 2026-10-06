@@ -301,20 +301,6 @@ auto machine_handle::parked(nb::object fn) -> nb::object
   return access([&fn](core::machine&) { return fn(); });
 }
 
-void machine_handle::set_boundary_hook(std::optional<nb::object> hook)
-{
-  std::shared_ptr<detail::python_callable> made;
-  if(hook and not hook->is_none())
-  {
-    made = detail::held_bare(std::move(*hook));
-  }
-  {
-    std::scoped_lock const lock{pump_->mutex};
-    std::swap(pump_->hook, made);
-    pump_->set.store(pump_->hook != nullptr);
-  }
-}
-
 auto machine_handle::instructions() const -> std::uint64_t
 {
   return access([](core::machine& target) { return target.virtual_clock().now().value; });

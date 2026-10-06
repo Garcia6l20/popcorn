@@ -3,14 +3,6 @@ functions."""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import logging
-import os
-import threading
-import time
-import tty
-import weakref
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -23,11 +15,6 @@ from popcorn.units import VirtualDuration, VirtualTime
 if TYPE_CHECKING:
     from popcorn._refs import Pending
     from popcorn._usb import UsbHosts
-
-_LOG = logging.getLogger("popcorn")
-
-OUTGOING_LIMIT = 64 * 1024
-"""Bytes a pty keeps for the host while no tool reads it."""
 
 type Waiter = Callable[[Callable[[], bool], VirtualDuration | None], Awaitable[VirtualTime]]
 """Runs the machine until a predicate holds or a virtual duration elapses, and returns the
@@ -174,53 +161,19 @@ class UartStream:
         return f"UartStream({self.name})"
 
 
-class PtyLink(Protocol):
-    """The byte link a pty bridge moves bytes through."""
-
-    def send(self, data: bytes, /) -> None:
-        """Queue bytes towards the firmware."""
-        ...
-
-    def available(self) -> int:
-        """Bytes the firmware sent and not taken yet."""
-        ...
-
-    def drain(self, count: int, /) -> bytes:
-        """Take at most `count` of the oldest bytes the firmware sent."""
-        ...
-
-
-class UartPtyLink:
-    """A UART link as a pty bridge takes it: the low 8 bits of each frame."""
-
-    __slots__ = ("_link",)
-
-    def __init__(self, link: _core.UartLink) -> None:
-        """Wrap a native UART link."""
-        self._link = link
-
-    def send(self, data: bytes, /) -> None:
-        """Queue bytes towards the firmware, one frame each."""
-        self._link.send(data)
-
-    def available(self) -> int:
-        """Frames the firmware transmitted, not taken yet."""
-        return self._link.available()
-
-    def drain(self, count: int, /) -> bytes:
-        """Take at most `count` of the oldest frames, their low 8 bits."""
-        return bytes(f.data & 0xFF for f in self._link.drain(count))
+type PtyOpener = Callable[[str, _core.UartLink | _core.CdcLink], _core.PtyBridge]
+"""Bridges a UART or CDC link to a new host pty keyed by the name, pumped by the machine."""
 
 
 class PtyBridge:
     """A UART or a USB CDC ACM function bridged to a host pty: host tools open `path` like a
     serial port.
 
-    Host bytes enter the firmware at the next slice boundary, stamped at the virtual time of
-    that boundary: a pty is not deterministic. Bytes the firmware transmits reach the pty at
-    slice ends. When host bytes wait and no slice runs for `deadlock_warning` seconds, a warning
-    on the `popcorn` logger names the pty: the remedy is to run the machine, typically in
-    `async with m.running()`.
+    The machine's thread moves the bytes around every slice, and wakes an idle free run when
+    host bytes arrive: a sync test body that blocks on the pty keeps the machine running. Host
+    bytes enter the firmware at the next slice boundary, stamped at the virtual time of that
+    boundary: a pty is not deterministic. A parked machine leaves host input unread in the pty
+    until it runs again.
 
     Host input not yet delivered to a UART is kept across a restore. Bytes already in the
     UART's receiver return to the snapshot's state. Host input not yet taken by a USB device
@@ -228,127 +181,21 @@ class PtyBridge:
     a CDC function keeps the DTR its host set at configuration.
 
     Bytes for the host wait in a buffer while no tool reads the pty. The buffer keeps the last
-    64 KiB: older bytes are dropped, with one warning naming the pty. `Machine.restore` empties
-    it.
+    64 KiB: older bytes are dropped, with one warning naming the pty on the `popcorn` logger,
+    through the machine's log. `Machine.restore` empties it.
     """
 
-    __slots__ = (
-        "__weakref__",
-        "_finalizer",
-        "_incoming",
-        "_link",
-        "_lock",
-        "_master",
-        "_outgoing",
-        "_overflowed",
-        "_slave",
-        "_waiting_since",
-        "_wake",
-        "_watch",
-        "deadlock_warning",
-        "name",
-        "path",
-    )
+    __slots__ = ("__weakref__", "_native", "name", "path")
 
-    def __init__(
-        self,
-        name: str,
-        link: PtyLink,
-        deadlock_warning: float,
-        wake: Callable[[], None] = lambda: None,
-    ) -> None:
-        """Open a pty for `name` over `link`. `wake` makes a running machine take a slice.
-        Use `m.board.pty(name)` instead."""
-        master, slave = os.openpty()
-        tty.setraw(slave)
-        os.set_blocking(master, False)
-        self._master = master
-        self._slave = slave
-        self.path = os.ttyname(slave)
+    def __init__(self, name: str, native: _core.PtyBridge) -> None:
+        """Wrap a native bridge. Use `m.board.pty(name)` instead."""
         self.name = name
-        self._link = link
-        self.deadlock_warning = deadlock_warning
-        self._incoming = bytearray()
-        self._lock = threading.Lock()
-        self._wake = wake
-        self._outgoing = bytearray()
-        self._watch: list[asyncio.AbstractEventLoop | None] = [None]
-        self._waiting_since: float | None = None
-        self._overflowed = False
-        self._finalizer = weakref.finalize(self, _close, self._watch, self._lock, master, slave)
-        self.attach_loop()
-
-    def attach_loop(self) -> None:
-        """Watch the pty from the running event loop, once per loop."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        if loop is self._watch[0]:
-            return
-        _unwatch(self._watch, self._master)
-        self._watch[0] = loop
-        loop.add_reader(self._master, _readable, weakref.ref[PtyBridge](self))
-
-    def pump(self) -> None:
-        """At a slice boundary, on the machine's thread: host bytes to the firmware, firmware
-        bytes to the host."""
-        self.attach_loop()
-        with self._lock:
-            incoming, self._incoming = self._incoming, bytearray()
-        if incoming:
-            self._link.send(bytes(incoming))
-        self._waiting_since = None
-        self._outgoing += self._link.drain(self._link.available())
-        if len(self._outgoing) > OUTGOING_LIMIT:
-            del self._outgoing[: len(self._outgoing) - OUTGOING_LIMIT]
-            if not self._overflowed:
-                self._overflowed = True
-                _LOG.warning(
-                    "%s: no host tool reads %s, bytes beyond the last %d were dropped",
-                    self.name,
-                    self.path,
-                    OUTGOING_LIMIT,
-                )
-        if self._outgoing:
-            with self._lock, contextlib.suppress(BlockingIOError):
-                if self._finalizer.alive:
-                    written = os.write(self._master, self._outgoing)
-                    del self._outgoing[:written]
-
-    def discard(self) -> None:
-        """Drop the bytes waiting for the host, at a restore."""
-        self._outgoing.clear()
+        self._native = native
+        self.path = native.path()
 
     def close(self) -> None:
-        """Stop watching and close the pty."""
-        self._finalizer()
-
-    def on_readable(self) -> None:
-        """Take what the host wrote, from the loop's reader."""
-        try:
-            data = os.read(self._master, 4096)
-        except BlockingIOError, OSError:
-            return
-        with self._lock:
-            self._incoming += data
-        self._wake()
-        loop = self._watch[0]
-        if self._waiting_since is None and loop is not None:
-            since = self._waiting_since = time.monotonic()
-            loop.call_later(self.deadlock_warning, _deadlock, weakref.ref[PtyBridge](self), since)
-
-    def check_deadlock(self, since: float) -> None:
-        """Warn when host input still waits since `since`, from a loop timer."""
-        if self._waiting_since != since:
-            return
-        _LOG.warning(
-            "%s: host input on %s waited %.2f s with no slice run, run the machine, for "
-            "instance inside `async with m.running()`",
-            self.name,
-            self.path,
-            time.monotonic() - since,
-        )
+        """Stop pumping and close the pty."""
+        self._native.close()
 
     def __repr__(self) -> str:
         return f"PtyBridge({self.name}, {self.path})"
@@ -360,10 +207,10 @@ class UartPorts:
     __slots__ = (
         "__weakref__",
         "_aliases",
-        "_bridged",
         "_connect",
         "_dropped_base",
         "_links",
+        "_open_pty",
         "_post",
         "_streams",
         "_wait",
@@ -377,19 +224,19 @@ class UartPorts:
         aliases: Mapping[str, str],
         wait: Waiter,
         post: Poster,
-        bridged: Callable[[], None] = lambda: None,
+        open_pty: PtyOpener,
     ) -> None:
         """Connect every UART named in `uarts` through `connect` at once, so each one queues
         what the firmware transmits from power-on. `aliases` maps an alias, such as a secure
         address window, to the peripheral serving it, which shares its link. Reads run the
-        machine through `wait`, writes are posted through `post`. `bridged` is called when a
-        pty bridge is added, so the machine pumps it at slice boundaries."""
+        machine through `wait`, writes are posted through `post`, pty bridges are opened
+        through `open_pty`."""
         self._aliases = dict(aliases)
         self._dropped_base: dict[str, int] = {}
         self._connect = connect
         self._wait = wait
         self._post = post
-        self._bridged = bridged
+        self._open_pty = open_pty
         self._links: dict[str, _core.UartLink] = {name: connect(name) for name in uarts}
         self._streams: dict[str, UartStream] = {}
         self.bridges: dict[str, PtyBridge] = {}
@@ -429,30 +276,19 @@ class UartPorts:
             self._streams[name] = stream
         return stream
 
-    def pump(self) -> None:
-        """Move pty bytes at a slice boundary. The machine calls it on its thread."""
-        for bridge in list(self.bridges.values()):
-            bridge.pump()
-
-    def bridge(self, key: str, make: Callable[[Callable[[], None]], PtyBridge]) -> PtyBridge:
-        """The bridge keyed `key`, made by `make(wake)` on first use."""
+    def bridge(self, key: str, link: _core.UartLink | _core.CdcLink) -> PtyBridge:
+        """The bridge keyed `key`, bridging `link` to a new pty on first use."""
         found = self.bridges.get(key)
         if found is None:
-            found = self.bridges[key] = make(self.wake)
-            self._bridged()
+            found = self.bridges[key] = PtyBridge(key, self._open_pty(key, link))
         return found
 
-    def wake(self) -> None:
-        """Make a running machine take a slice, so host input reaches it."""
-        self._post(lambda: None)
-
     def discard(self) -> None:
-        """Drop transmitted frames not read yet and bytes waiting for ptys, at a restore."""
+        """Drop transmitted frames not read yet, at a restore. The machine drops the bytes
+        waiting for ptys itself."""
         for name, link in self._links.items():
             link.drain(link.available())
             self._dropped_base[name] = link.dropped()
-        for bridge in self.bridges.values():
-            bridge.discard()
 
 
 class Board:
@@ -486,7 +322,7 @@ class Board:
             self._devices.get(peripheral, ()),
         )
 
-    def pty(self, name: str, *, function: int = 0, deadlock_warning: float = 2.0) -> str:
+    def pty(self, name: str, *, function: int = 0) -> str:
         """Bridge UART `name`, or a CDC ACM function of the virtual USB host of controller
         `name`, to a new host pty and return its path, the same one on later calls.
 
@@ -502,8 +338,6 @@ class Board:
             name: UART instance, or USB device controller with a virtual host.
             function: The n-th CDC ACM function of the device, in interface order. 0 for a
                 UART.
-            deadlock_warning: Wall seconds host input may wait with no slice run before a
-                warning names the pty.
 
         Raises:
             ValueError: `function` is negative, above 0 for a UART, or beyond the CDC ACM
@@ -514,17 +348,11 @@ class Board:
         """
         if self._usb is not None and self._usb.serves(name):
             link = self._usb.cdc_link(name, function)
-            key = cdc_key(self._usb.host(name).name, function)
-            return self._ports.bridge(
-                key, lambda wake: PtyBridge(key, link, deadlock_warning, wake)
-            ).path
+            return self._ports.bridge(cdc_key(self._usb.host(name).name, function), link).path
         if function != 0:
             raise ValueError(f"{name}: a UART has no function {function}, only 0")
         name = self._ports.serving(name)
-        uart = UartPtyLink(self._ports.link(name))
-        return self._ports.bridge(
-            name, lambda wake: PtyBridge(name, uart, deadlock_warning, wake)
-        ).path
+        return self._ports.bridge(name, self._ports.link(name)).path
 
     @property
     def ptys(self) -> dict[str, str]:
@@ -542,48 +370,3 @@ def cdc_key(name: str, function: int) -> str:
     """The key of CDC ACM function `function` of controller `name` in `Board.ptys`: `name` for
     function 0, `<name>.<function>` for the others."""
     return name if function == 0 else f"{name}.{function}"
-
-
-def _readable(bridge: weakref.ref[PtyBridge]) -> None:
-    alive = bridge()
-    if alive is not None:
-        alive.on_readable()
-
-
-def _deadlock(bridge: weakref.ref[PtyBridge], since: float) -> None:
-    alive = bridge()
-    if alive is not None:
-        alive.check_deadlock(since)
-
-
-def _unwatch(watch: list[asyncio.AbstractEventLoop | None], fd: int) -> None:
-    loop = watch[0]
-    watch[0] = None
-    if loop is not None and not loop.is_closed():
-        loop.remove_reader(fd)
-
-
-def _close(watch: list[asyncio.AbstractEventLoop | None], lock: threading.Lock, *fds: int) -> None:
-    loop = watch[0]
-    if loop is not None and loop.is_running() and not _running_here(loop):
-        with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(_close_now, watch, lock, *fds)
-            return
-    _close_now(watch, lock, *fds)
-
-
-def _running_here(loop: asyncio.AbstractEventLoop) -> bool:
-    try:
-        return asyncio.get_running_loop() is loop
-    except RuntimeError:
-        return False
-
-
-def _close_now(
-    watch: list[asyncio.AbstractEventLoop | None], lock: threading.Lock, *fds: int
-) -> None:
-    _unwatch(watch, fds[0])
-    with lock:
-        for fd in fds:
-            with contextlib.suppress(OSError):
-                os.close(fd)

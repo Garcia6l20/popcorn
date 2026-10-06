@@ -44,6 +44,9 @@ public:
 /** @brief Index of a machine among the members of its host. */
 using member_id = std::size_t;
 
+/** @brief A descriptor watched by host::watch(). */
+using watch_id = std::uint64_t;
+
 /**
  * @brief State of a hosted machine. parked: no goal and no free run, or a free run whose end is
  *        held, callers touch the machine directly under the host mutex. running: the host thread
@@ -584,6 +587,23 @@ public:
    * @throws machine_running when the thread holds a host mutex.
    */
   void close();
+
+  /**
+   * @brief Wakes member @p who when @p fd turns readable, or writable while @p wants_write
+   *        returns true, as long as its free run sleeps idle. A parked member is not polled:
+   *        nothing reads for it. A running one is served at its next boundary anyway. Safe from
+   *        any thread, with or without a host mutex.
+   * @param who Member woken.
+   * @param fd Descriptor polled. Closing it after unwatch() returned is safe: a poll in
+   *        progress holds its own reference to the file and is woken by unwatch().
+   * @param wants_write Called on the host thread under the host mutex, so it takes no lock.
+   * @return Id for unwatch().
+   */
+  auto watch(member_id who, int fd, std::move_only_function<bool() const> wants_write) -> watch_id
+      pre(who < members()) pre(fd >= 0);
+
+  /** @brief Stops polling the descriptor of @p id, ignoring an unknown id. Safe from any thread. */
+  void unwatch(watch_id id) noexcept;
 
 private:
   friend class held_lock;

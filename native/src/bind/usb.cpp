@@ -80,6 +80,15 @@ template <typename Body> auto cdc_link::locked(Body&& body) const
   });
 }
 
+auto cdc_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return std::make_unique<detail::cdc_pty_link>(hub_, function_);
+}
+
 void cdc_link::send(reflex::py::nb::bytes const& data)
 {
   auto const bytes = std::span{static_cast<std::uint8_t const*>(data.data()), data.size()};

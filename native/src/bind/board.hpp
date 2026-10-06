@@ -3,6 +3,7 @@
 #include "alive.hpp"
 #include "gil_locks.hpp"
 #include "link_queues.hpp"
+#include "pty.hpp"
 
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
@@ -81,6 +82,12 @@ public:
    */
   [[= py::doc{"Set the most transmitted frames the queue keeps, for tests."}]] void
       set_frame_limit(std::uint64_t limit);
+
+  /**
+   * @brief The UART as a pty bridge's link, over the same queue.
+   * @throws config_error once the machine is destroyed.
+   */
+  [[= py::skip]] [[nodiscard]] auto bridged_link() const -> std::unique_ptr<detail::pty_link>;
 
 private:
   [[nodiscard]] auto port() const -> periph::stm32::uart_port&;

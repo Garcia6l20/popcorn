@@ -6,7 +6,10 @@
 #include "../support/test_arch.hpp"
 
 #include <doctest/doctest.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -1466,4 +1469,206 @@ TEST_CASE("the boundary hook runs on the host thread as the engine owner around 
   CHECK(calls >= 2 * 10);
   CHECK(owned);
   CHECK(elsewhere);
+}
+
+namespace
+{
+struct pipe_pair
+{
+  int read_end  = -1;
+  int write_end = -1;
+
+  pipe_pair()
+  {
+    int fds[2]{};
+    REQUIRE(::pipe2(fds, O_NONBLOCK | O_CLOEXEC) == 0);
+    read_end  = fds[0];
+    write_end = fds[1];
+  }
+
+  pipe_pair(pipe_pair const&)                    = delete;
+  auto operator=(pipe_pair const&) -> pipe_pair& = delete;
+
+  ~pipe_pair()
+  {
+    ::close(read_end);
+    ::close(write_end);
+  }
+
+  void put() const
+  {
+    char const byte = 'x';
+    REQUIRE(::write(write_end, &byte, 1) == 1);
+  }
+
+  void take() const
+  {
+    char chunk[256];
+    while(::read(read_end, chunk, sizeof chunk) > 0)
+    {
+    }
+  }
+
+  void fill() const
+  {
+    char const chunk[4096]{};
+    while(::write(write_end, chunk, sizeof chunk) > 0)
+    {
+    }
+  }
+};
+}
+
+TEST_CASE("a watched descriptor wakes an idle free run, and not once the member parks")
+{
+  pipe_pair              input;
+  std::atomic<int>       boundaries{0};
+  std::atomic<pthread_t> thread{};
+  hosted                 h{
+      idle_forever(),
+      {},
+      {.thread_started = [&thread] { thread = pthread_self(); },
+          .boundary =
+           [&](core::member_id) {
+             ++boundaries;
+             input.take();
+           }}
+  };
+  auto const id = h.on->watch(0, input.read_end, [] { return false; });
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const idle_spent = thread_cpu(thread);
+  std::this_thread::sleep_for(100ms);
+  auto const idle = thread_cpu(thread) - idle_spent;
+  MESSAGE("host thread CPU over 100 ms idle with a watch: " << idle.count() << " ns");
+  CHECK(idle < 5ms);
+  auto const before = boundaries.load();
+  auto const woken  = std::chrono::steady_clock::now();
+  input.put();
+  CHECK(settles([&] { return boundaries.load() > before; }, 10ms));
+  MESSAGE(
+      "wake to boundary: "
+      << std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now() - woken)
+             .count()
+      << " us");
+  CHECK(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  std::ignore = h.on->halt(0);
+  input.put();
+  auto const parked_spent = thread_cpu(thread);
+  std::this_thread::sleep_for(100ms);
+  auto const spent = thread_cpu(thread) - parked_spent;
+  MESSAGE("host thread CPU over 100 ms parked with unread input: " << spent.count() << " ns");
+  CHECK(spent < 5ms);
+  h.on->unwatch(id);
+}
+
+TEST_CASE("a watch wakes for writing while it wants to")
+{
+  pipe_pair         output;
+  std::atomic<int>  boundaries{0};
+  std::atomic<bool> wants{true};
+  hosted            h{idle_forever(), {}, {.boundary = [&](core::member_id) { ++boundaries; }}};
+  output.fill();
+  auto const id = h.on->watch(0, output.write_end, [&wants] { return wants.load(); });
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const full = boundaries.load();
+  std::this_thread::sleep_for(20ms);
+  CHECK(boundaries.load() == full);
+  wants = false;
+  output.take();
+  CHECK(settles([&] { return boundaries.load() > full; }, 10ms));
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const writable = boundaries.load();
+  std::this_thread::sleep_for(20ms);
+  CHECK(boundaries.load() == writable);
+  h.on->unwatch(id);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("an unwatched descriptor no longer wakes the host")
+{
+  pipe_pair        input;
+  std::atomic<int> boundaries{0};
+  hosted           h{idle_forever(), {}, {.boundary = [&](core::member_id) { ++boundaries; }}};
+  auto const       id = h.on->watch(0, input.read_end, [] { return false; });
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  h.on->unwatch(id);
+  h.on->unwatch(id);
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const before = boundaries.load();
+  input.put();
+  std::this_thread::sleep_for(20ms);
+  CHECK(boundaries.load() == before);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("a boundary hook throwing after a slice fails the goal or ends the free run with it")
+{
+  std::atomic<int> calls{0};
+  auto const       after_first = [&calls](core::member_id) {
+    if(++calls == 2)
+    {
+      throw test_failure{"after the slice"};
+    }
+  };
+  hosted goal_host{
+      alu(1'000'000),
+      {.max_instructions = icount{10'000}, .wall_budget = long_wall},
+      {.boundary = after_first}
+  };
+  CHECK_THROWS_AS(goal_host.run({.budget = icount{100'000}}).get(), test_failure);
+  CHECK(goal_host.on->state(0) == core::host_state::parked);
+
+  calls = 0;
+  hosted free_host{
+      alu(1'000'000),
+      {.max_instructions = icount{10'000}, .wall_budget = long_wall},
+      {.boundary = after_first}
+  };
+  free_host.start();
+  REQUIRE(settles([&] {
+    auto held = free_host.on->lock();
+    return free_host.on->parked(held, 0);
+  }));
+  auto const end = free_host.on->halt(0);
+  REQUIRE(end.has_value());
+  require_error(std::get<std::exception_ptr>(*end), [] { CHECK_THROWS_AS(throw, test_failure); });
+}
+
+TEST_CASE("watched descriptors the host cannot poll still wake an idle free run, late")
+{
+  pipe_pair                   input;
+  std::atomic<int>            boundaries{0};
+  hosted                      h{idle_forever(), {}, {.boundary = [&](core::member_id) {
+             ++boundaries;
+             input.take();
+                                }}};
+  std::vector<core::watch_id> ids;
+  for(int copy = 0; copy < 32; ++copy)
+  {
+    ids.push_back(h.on->watch(0, input.read_end, [] { return false; }));
+  }
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  rlimit saved{};
+  REQUIRE(::getrlimit(RLIMIT_NOFILE, &saved) == 0);
+  rlimit lowered   = saved;
+  lowered.rlim_cur = 16;
+  REQUIRE(::setrlimit(RLIMIT_NOFILE, &lowered) == 0);
+  ids.push_back(h.on->watch(0, input.read_end, [] { return false; }));
+  std::this_thread::sleep_for(30ms);
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const before = boundaries.load();
+  input.put();
+  auto const woken = settles([&] { return boundaries.load() > before; }, 200ms);
+  REQUIRE(::setrlimit(RLIMIT_NOFILE, &saved) == 0);
+  CHECK(woken);
+  for(auto const id : ids)
+  {
+    h.on->unwatch(id);
+  }
+  CHECK_FALSE(h.on->halt(0).has_value());
 }

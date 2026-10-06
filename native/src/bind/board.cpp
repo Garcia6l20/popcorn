@@ -81,6 +81,11 @@ void uart_link::set_frame_limit(std::uint64_t limit)
       *endpoint_, [&](core::link_guard const& held) { endpoint_->set_limit(held, limit); });
 }
 
+auto uart_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
+{
+  return std::make_unique<detail::uart_pty_link>(port(), endpoint_);
+}
+
 audio_link::audio_link(
     periph::stm32::audio_port& port,
     periph::stm32::audio_block block,

@@ -245,37 +245,20 @@ auto bounds_of(machine_config const& config) -> core::slice_bounds
 
 auto boundary_of(
     std::weak_ptr<detail::host_slot const> slot,
-    std::weak_ptr<detail::boundary_pump>   pump) -> std::move_only_function<void(core::member_id)>
+    std::weak_ptr<detail::pty_bridges>     ptys,
+    core::machine&                         engine) -> std::move_only_function<void(core::member_id)>
 {
-  return [slot = std::move(slot), pump = std::move(pump)](core::member_id) {
+  return [slot = std::move(slot), ptys = std::move(ptys), &engine](core::member_id) {
     if(auto const reached = slot.lock())
     {
       detail::run_retired(*reached);
     }
-    auto const hooked = pump.lock();
-    if(hooked == nullptr or not hooked->set.load())
+    auto const bridges = ptys.lock();
+    if(bridges == nullptr or not bridges->any.load(std::memory_order_acquire))
     {
       return;
     }
-    std::shared_ptr<detail::python_callable> hook;
-    {
-      std::scoped_lock const lock{hooked->mutex};
-      hook = hooked->hook;
-    }
-    if(hook == nullptr)
-    {
-      return;
-    }
-    detail::gil_entry const gil;
-    try
-    {
-      std::ignore = (*hook)();
-    }
-    catch(reflex::py::nb::python_error& raised)
-    {
-      raised.discard_as_unraisable("machine boundary hook");
-    }
-    hook.reset();
+    detail::pump_and_log(*bridges, engine);
   };
 }
 
@@ -301,7 +284,7 @@ void report_unclaimed(core::held_end const& ended)
 
 machine_handle::machine_handle(mcu_description const& description, machine_config const& config)
     : alive_{detail::make_alive()}, slot_{std::make_shared<detail::host_slot>()},
-      pump_{std::make_shared<detail::boundary_pump>()},
+      ptys_{std::make_shared<detail::pty_bridges>()},
       thread_live_{std::make_shared<std::atomic<bool>>(false)}
 {
   auto const             bounds = bounds_of(config);
@@ -331,7 +314,7 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(std::move(built));
   auto hooks     = detail::python_thread_hooks(thread_live_);
-  hooks.boundary = boundary_of(slot_, pump_);
+  hooks.boundary = boundary_of(slot_, ptys_, *engine_);
   host_          = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
   slot_->host    = host_;
   detail::register_host(host_);
@@ -436,8 +419,89 @@ void machine_handle::restore(snapshot_handle const& saved)
       hubs.hid->discard();
       hubs.uac2->discard();
     }
+    {
+      auto const lock = detail::lock_ptys(*ptys_);
+      for(auto const& bridge : ptys_->bridges)
+      {
+        bridge->discard();
+      }
+    }
     target.restore(saved.native());
   });
+}
+
+auto machine_handle::open_uart_pty(std::string name, uart_link const& link) -> pty_handle
+{
+  return open_pty(std::move(name), link.bridged_link());
+}
+
+auto machine_handle::open_cdc_pty(std::string name, cdc_link const& link) -> pty_handle
+{
+  return open_pty(std::move(name), link.bridged_link());
+}
+
+auto machine_handle::open_pty(std::string name, std::unique_ptr<detail::pty_link> link)
+    -> pty_handle
+{
+  auto const bridge = std::make_shared<detail::pty_bridge>(std::move(name), std::move(link));
+  {
+    auto const lock = detail::lock_ptys(*ptys_);
+    detail::add_bridge(*ptys_, lock, bridge);
+  }
+  auto const watched =
+      host_->watch(core::member_id{}, bridge->master(), [wants = bridge->wants_write_flag()] {
+        return wants->load(std::memory_order_relaxed);
+      });
+  return pty_handle{ptys_, bridge, host_, watched};
+}
+
+auto detail::lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>
+{
+  std::unique_lock held{ptys.mutex, std::try_to_lock};
+  if(held.owns_lock() or PyGILState_Check() == 0)
+  {
+    if(not held.owns_lock())
+    {
+      held.lock();
+    }
+    return held;
+  }
+  reflex::py::nb::gil_scoped_release const released;
+  held.lock();
+  return held;
+}
+
+pty_handle::pty_handle(
+    std::weak_ptr<detail::pty_bridges>         owner,
+    std::shared_ptr<detail::pty_bridge> const& bridge,
+    std::weak_ptr<core::host>                  host,
+    core::watch_id                             watched)
+    : owner_{std::move(owner)}, bridge_{bridge}, host_{std::move(host)}, watched_{watched},
+      path_{bridge->path()}
+{}
+
+auto pty_handle::path() const -> std::string
+{
+  return path_;
+}
+
+void pty_handle::close()
+{
+  if(auto const on = host_.lock())
+  {
+    on->unwatch(watched_);
+  }
+  auto const owner  = owner_.lock();
+  auto const target = bridge_.lock();
+  if(owner == nullptr or target == nullptr)
+  {
+    return;
+  }
+  std::shared_ptr<detail::pty_bridge> closing;
+  {
+    auto const lock = detail::lock_ptys(*owner);
+    closing         = detail::remove_bridge(*owner, lock, target.get());
+  }
 }
 
 void machine_handle::begin_call(arch::call_frame const& frame)

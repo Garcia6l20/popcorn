@@ -8,6 +8,7 @@
 
 #include "alive.hpp"
 #include "gil_locks.hpp"
+#include "pty.hpp"
 
 #include <reflex/py.hpp>
 
@@ -278,6 +279,12 @@ public:
   /** @brief The UART state bitmap of the last SERIAL_STATE notification. */
   [[= py::doc{"The UART state bitmap of the last SERIAL_STATE notification."}]] [[nodiscard]] auto
       serial_state() const -> std::uint16_t;
+
+  /**
+   * @brief The function as a pty bridge's link, over the same channel.
+   * @throws config_error once the machine is destroyed.
+   */
+  [[= py::skip]] [[nodiscard]] auto bridged_link() const -> std::unique_ptr<detail::pty_link>;
 
 private:
   template <typename Body> auto locked(Body&& body) const;

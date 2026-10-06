@@ -503,6 +503,13 @@ public:
   [[nodiscard]] auto add_log_sink(log_sink sink) -> hook_handle;
 
   /**
+   * @brief Sends a record to the log sinks, as a model does through machine_services::log, for
+   *        an embedder reporting on the machine's behalf. Called by the thread that runs the
+   *        machine, between slices.
+   */
+  using machine_services::log;
+
+  /**
    * @brief Starts collecting block and edge counters over code ranges. A native hook limited to
    *        the ranges counts, nothing crosses to Python. Counters already held for a range are
    *        kept, so enabling again only adds ranges.

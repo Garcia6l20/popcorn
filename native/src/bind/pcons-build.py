@@ -19,4 +19,5 @@ sources = [
     here / "devices.cpp",
     here / "observability.cpp",
     here / "host_future.cpp",
+    here / "pty.cpp",
 ]

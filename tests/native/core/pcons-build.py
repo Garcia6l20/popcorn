@@ -184,3 +184,18 @@ test_facade_support = add_doctest(
 for _, target in core_firmware.values():
     if target is not None:
         test_facade_support.depends(target)
+
+test_host_pty = add_doctest(
+    "core-host-pty",
+    [
+        here / "test_host_pty.cpp",
+        project_dir / "native" / "src" / "bind" / "pty.cpp",
+        *tsan_sources,
+    ],
+    [test_support, core],
+    env=m33_env,
+)
+test_host_pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")
+for _, target in core_firmware.values():
+    if target is not None:
+        test_host_pty.depends(target)

@@ -89,3 +89,10 @@ link_queues = add_doctest(
     "stm32-link-queues", [here / "test_link_queues.cpp", *tsan_sources], [core]
 )
 link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")
+
+pty = add_doctest(
+    "stm32-pty",
+    [here / "test_pty.cpp", project_dir / "native" / "src" / "bind" / "pty.cpp", *tsan_sources],
+    [core],
+)
+pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")

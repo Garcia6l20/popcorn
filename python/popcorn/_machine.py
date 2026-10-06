@@ -9,7 +9,6 @@ import difflib
 import functools
 import os
 import types
-import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload, runtime_checkable
@@ -72,7 +71,7 @@ from popcorn._rcc import RccOptions
 from popcorn._refs import Pending, Readout, Ref, Refs
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
-from popcorn._streams import Board, UartPorts
+from popcorn._streams import Board, PtyOpener, UartPorts
 from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
@@ -474,7 +473,7 @@ class Machine:
             {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None},
             self._wait_until,
             self._post,
-            self._bridged,
+            _pty_opener(self._handle),
         )
         sais = self._handle.audio_names()
         audio_options = _checked_audio(audio or {}, sais, aliases)
@@ -856,16 +855,6 @@ class Machine:
             result.append(body())
 
         return self._submit(run, at, lambda time: (result[0], time), cancel=cancel, follow=follow)
-
-    def _bridged(self) -> None:
-        ports = weakref.ref(self._ports)
-
-        def pump() -> None:
-            alive = ports()
-            if alive is not None:
-                alive.pump()
-
-        self._handle.set_boundary_hook(pump)
 
     @property
     def coverage(self) -> MachineCoverage:
@@ -1772,6 +1761,17 @@ class Machine:
 
     def __repr__(self) -> str:
         return f"Machine({self._description.part}, images={len(self._images)})"
+
+
+def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
+    """Open pty bridges on `handle`, holding the handle and not the `Machine`."""
+
+    def opened(name: str, link: _core.UartLink | _core.CdcLink) -> _core.PtyBridge:
+        if isinstance(link, _core.CdcLink):
+            return handle.open_cdc_pty(name, link)
+        return handle.open_uart_pty(name, link)
+
+    return opened
 
 
 def _model_makers(

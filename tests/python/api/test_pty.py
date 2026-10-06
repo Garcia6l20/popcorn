@@ -8,13 +8,12 @@ import logging
 import os
 import select
 import selectors
+import time
 from fractions import Fraction
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import popcorn
 import pytest
-from popcorn import _core
-from popcorn._streams import OUTGOING_LIMIT, PtyBridge, UartPtyLink
 from popcorn.units import ms
 
 from .conftest import BOARD_ELF, holds_pty
@@ -46,30 +45,39 @@ def test_a_host_tool_talks_to_the_firmware_through_the_pty(board: popcorn.Machin
     assert board.board.ptys == {"USART1": board.board.pty("USART1")}
 
 
-def test_host_input_with_no_run_logs_a_deadlock_warning(
-    board: popcorn.Machine, caplog: pytest.LogCaptureFixture
-) -> None:
-    async def body() -> str:
-        path = board.board.pty("USART1", deadlock_warning=0.05)
-        fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
-        try:
-            os.write(fd, b"x")
-            await asyncio.sleep(0.3)
-        finally:
-            os.close(fd)
-        return path
+def test_the_deadlock_warning_argument_is_gone(board: popcorn.Machine) -> None:
+    pty: Any = board.board.pty
+    with pytest.raises(TypeError, match="deadlock_warning"):
+        pty("USART1", deadlock_warning=0.05)
+    assert board.board.ptys == {}
 
-    with caplog.at_level(logging.WARNING, logger="popcorn"):
-        path = asyncio.run(body())
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1 and path in warnings[0] and "USART1" in warnings[0]
+
+def test_a_sync_body_blocked_on_the_pty_gets_the_echo_of_a_running_machine(
+    board: popcorn.Machine,
+) -> None:
+    path = board.board.pty("USART1")
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    board.start()
+    try:
+        echoed = b""
+        for byte in b"sync\n":
+            sent = time.monotonic()
+            os.write(fd, bytes([byte]))
+            ready, _, _ = select.select([fd], [], [], 5.0)
+            assert ready, echoed
+            echoed += os.read(fd, 64)
+            assert time.monotonic() - sent < 1.0
+    finally:
+        os.close(fd)
+        board.halt()
+    assert echoed == b"sync\n"
 
 
 def test_a_run_between_slices_moves_pty_bytes_both_ways(
     board: popcorn.Machine, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def body() -> tuple[bytes, bytes]:
-        path = board.board.pty("USART1", deadlock_warning=0.1)
+        path = board.board.pty("USART1")
         fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
         try:
             os.write(fd, b"ab")
@@ -108,7 +116,7 @@ def test_a_pty_made_inside_a_loop_is_freed_with_its_machine(
         body(), loop_factory=lambda: asyncio.SelectorEventLoop(selector)
     )
     assert not held, path
-    assert watching == before + 1
+    assert watching == before
 
 
 def test_close_removes_every_pty(board: popcorn.Machine) -> None:
@@ -116,56 +124,6 @@ def test_close_removes_every_pty(board: popcorn.Machine) -> None:
     board.board.close()
     assert board.board.ptys == {}
     assert not holds_pty(path)
-
-
-class FakeLink:
-    """A native link stand-in whose firmware transmits `pending` bytes."""
-
-    def __init__(self, pending: bytes) -> None:
-        self.pending = [_Frame(b) for b in pending]
-
-    def available(self) -> int:
-        return len(self.pending)
-
-    def drain(self, count: int) -> list[_Frame]:
-        taken, self.pending = self.pending[:count], self.pending[count:]
-        return taken
-
-    def send(self, data: bytes) -> None:
-        pass
-
-
-class _Frame:
-    def __init__(self, data: int) -> None:
-        self.data = data
-        self.at_ps = 0
-
-
-def test_unread_pty_output_keeps_the_last_64_kib(caplog: pytest.LogCaptureFixture) -> None:
-    sent = bytes(range(256)) * 1024
-    link = FakeLink(sent[: len(sent) // 2])
-    bridge = PtyBridge("USART9", UartPtyLink(cast(_core.UartLink, link)), 1.0)
-    try:
-        with caplog.at_level(logging.WARNING, logger="popcorn"):
-            bridge.pump()
-            link.pending = [_Frame(b) for b in sent[len(sent) // 2 :]]
-            bridge.pump()
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1 and bridge.path in warnings[0]
-        fd = os.open(bridge.path, os.O_RDWR | os.O_NOCTTY)
-        try:
-            received = b""
-            while select.select([fd], [], [], 0.2)[0]:
-                received += os.read(fd, 65536)
-                bridge.pump()
-        finally:
-            os.close(fd)
-        assert received[-4096:] == sent[-4096:]
-        assert OUTGOING_LIMIT <= len(received) < 2 * OUTGOING_LIMIT
-        assert received == sent[-len(received) :]
-    finally:
-        bridge.close()
-    assert not holds_pty(bridge.path)
 
 
 def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:

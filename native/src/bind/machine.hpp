@@ -6,6 +6,7 @@
 #include "host_future.hpp"
 #include "image.hpp"
 #include "observability.hpp"
+#include "pty.hpp"
 #include "snapshot.hpp"
 #include "usb.hpp"
 
@@ -126,17 +127,38 @@ struct[[= py::rename{"CallOutcome"}]] call_outcome
 
 namespace detail
 {
-/** @brief The Python hook a machine thread calls around every slice. */
-struct boundary_pump
-{
-  /** @brief Guards hook, a leaf: nothing is taken under it. */
-  std::mutex mutex{};
-  /** @brief The hook, empty for none. */
-  std::shared_ptr<python_callable> hook{};
-  /** @brief Whether hook may be set, read without the mutex. */
-  std::atomic<bool> set{false};
-};
+/** @brief Takes the mutex of @p ptys, releasing the GIL while it blocks when the thread holds it.
+ */
+[[nodiscard]] auto lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>;
 }
+
+/**
+ * @brief A host pty bridged to a UART or a CDC function, pumped by the machine's thread. Holds
+ *        its bridge weakly: the machine owns it.
+ */
+class[[= py::rename{"PtyBridge"}]] pty_handle
+{
+public:
+  /** @brief A handle on @p bridge, owned by @p owner, polled by @p host under @p watched. */
+  [[= py::skip]] pty_handle(
+      std::weak_ptr<detail::pty_bridges>         owner,
+      std::shared_ptr<detail::pty_bridge> const& bridge,
+      std::weak_ptr<core::host>                  host,
+      core::watch_id                             watched);
+
+  /** @brief Path of the pty, /dev/pts/N, also after close(). */
+  [[= py::doc{"Path of the pty, /dev/pts/N."}]] [[nodiscard]] auto path() const -> std::string;
+
+  /** @brief Stops pumping and closes both ends of the pty. Idempotent. */
+  [[= py::doc{"Stop pumping and close the pty."}]] void close();
+
+private:
+  std::weak_ptr<detail::pty_bridges> owner_;
+  std::weak_ptr<detail::pty_bridge>  bridge_;
+  std::weak_ptr<core::host>          host_;
+  core::watch_id                     watched_;
+  std::string                        path_;
+};
 
 /**
  * @brief Owner of one native machine, the object `popcorn.Machine` wraps. The machine is built
@@ -301,12 +323,23 @@ public:
       parked(reflex::py::nb::object fn) -> reflex::py::nb::object;
 
   /**
-   * @brief Calls @p hook on the machine thread before and after every slice, the GIL taken. An
-   *        exception it raises goes to sys.unraisablehook.
-   * @param hook Called with no argument, None to remove it.
+   * @brief Bridges @p link to a new host pty, pumped on the machine thread around every slice,
+   *        and polled while a free run idles. A parked machine leaves host input unread.
+   * @param name Key of the bridge in Board.ptys, named in its overflow warning.
+   * @param link The UART.
+   * @throws config_error once the machine is destroyed.
    */
-  [[= py::doc{"Call hook() on the machine thread around every slice, None to remove it."}]] void
-      set_boundary_hook(std::optional<reflex::py::nb::object> hook);
+  [[= py::doc{"Bridge a UART to a new host pty pumped by the machine thread."}]] auto
+      open_uart_pty(std::string name, uart_link const& link) -> pty_handle;
+
+  /**
+   * @brief As open_uart_pty(), for a CDC ACM function of a virtual USB host.
+   * @param name Key of the bridge in Board.ptys, named in its overflow warning.
+   * @param link The function.
+   * @throws config_error once the machine is destroyed.
+   */
+  [[= py::doc{"Bridge a CDC ACM function to a new host pty pumped by the machine thread."}]] auto
+      open_cdc_pty(std::string name, cdc_link const& link) -> pty_handle;
 
   /** @brief Whether the calling thread owns the engine: the host thread in a slice, a caller in
    * its parked section. */
@@ -700,6 +733,7 @@ private:
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
   [[nodiscard]] auto lock_for_request() const -> core::held_lock;
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;
+  auto open_pty(std::string name, std::unique_ptr<detail::pty_link> link) -> pty_handle;
 
   template <typename Body>
   auto access(Body&& body) const -> std::invoke_result_t<Body, core::machine&>
@@ -709,7 +743,7 @@ private:
 
   std::shared_ptr<std::atomic<bool>>      alive_;
   std::shared_ptr<detail::host_slot>      slot_;
-  std::shared_ptr<detail::boundary_pump>  pump_;
+  std::shared_ptr<detail::pty_bridges>    ptys_;
   std::shared_ptr<std::atomic<bool>>      thread_live_;
   std::map<std::string, detail::usb_hubs> hubs_;
   core::machine*                          engine_{};
