@@ -52,18 +52,13 @@ auto cpuid_of(core_desc const& core, profile const& found) -> std::uint32_t
   auto        revision = 0u;
   auto const  parse    = [](std::string_view digits, unsigned& out) {
     auto const [end, err] = std::from_chars(digits.data(), digits.data() + digits.size(), out);
-    return err
-        == std::errc{}
-       and end
-        == digits.data()
-         + digits.size()
+    return err == std::errc{}
+       and end == digits.data() + digits.size()
        and not digits.empty()
-       and out
-         < 16;
+       and out < 16;
   };
   if(not text.starts_with('r')
-     or p
-     == std::string::npos
+     or p == std::string::npos
      or not parse(std::string_view{text}.substr(1, p - 1), variant)
      or not parse(std::string_view{text}.substr(p + 1), revision))
   {

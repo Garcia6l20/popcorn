@@ -290,8 +290,7 @@ private:
     s_.descriptor_request = 0;
     auto const completed  = result.status == transfer_status::completed;
     if(not(completed and result.data.size() >= s_.descriptor_length)
-       and s_.attempts
-       < descriptor_attempts)
+       and s_.attempts < descriptor_attempts)
     {
       read_descriptor(ctx);
       return;
@@ -507,14 +506,9 @@ auto hid_report_descriptor_length(interface_info const& interface) -> std::optio
   }
   auto const& hid   = *found;
   auto const  count = std::size_t{hid[5]};
-  if(count
-     == 0
-     or hid.size()
-     != hid_descriptor_head
-     + class_descriptor_size
-     * count
-     or hid[6]
-     != report_descriptor_type)
+  if(count == 0
+     or hid.size() != hid_descriptor_head + class_descriptor_size * count
+     or hid[6] != report_descriptor_type)
   {
     return std::nullopt;
   }
@@ -533,10 +527,8 @@ auto hid_claim(configuration_info const&, interface_info const& interface)
       std::ranges::any_of(interface.endpoints, [](endpoint_info const& endpoint) {
         return endpoint.type == transfer_type::interrupt and endpoint.in();
       });
-  if(interface.alternate
-     != 0
-     or interface.class_code
-     != hid_class
+  if(interface.alternate != 0
+     or interface.class_code != hid_class
      or not interrupt_in
      or not hid_report_descriptor_length(interface))
   {

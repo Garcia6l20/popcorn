@@ -218,8 +218,7 @@ void machine::restore(core::snapshot const& saved)
   {
     auto const owner = pending.id.owner;
     auto const known =
-        owner
-        == arch::arch_event_owner
+        owner == arch::arch_event_owner
         or (owner < peripherals_.size() and peripherals_[owner] and peripherals_[owner]->model);
     if(not known)
     {

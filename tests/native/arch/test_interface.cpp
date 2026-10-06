@@ -166,10 +166,8 @@ public:
 
   void prepare_call(popcorn::arch::call_frame const& frame) override
   {
-    if(frame.abi
-       == popcorn::arch::float_abi::hard_single
-       or frame.args.size()
-       > current.args.size())
+    if(frame.abi == popcorn::arch::float_abi::hard_single
+       or frame.args.size() > current.args.size())
     {
       throw popcorn::config_error("toy", 0, "abi", "soft or hard_double, at most 4 arguments");
     }

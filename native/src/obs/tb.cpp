@@ -75,14 +75,12 @@ auto decode_tb(address start, code_bytes& code) -> tb_extent
     auto const rest    = bytes.subspan(std::min<std::size_t>(offset, bytes.size()));
     auto       decoded = thumb::read(at, rest);
     if(not decoded
-       and block.insns
-       == 0
-       and rest.size()
-       == 2
+       and block.insns == 0
+       and rest.size() == 2
        and thumb::size(
-           static_cast<std::uint16_t>(
-               std::to_integer<unsigned>(rest[0]) | std::to_integer<unsigned>(rest[1]) << 8))
-       == 4)
+               static_cast<std::uint16_t>(
+                   std::to_integer<unsigned>(rest[0]) | std::to_integer<unsigned>(rest[1]) << 8))
+               == 4)
     {
       decoded = thumb::read(at, code.read(at, 4));
       bytes   = {};

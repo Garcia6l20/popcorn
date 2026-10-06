@@ -120,11 +120,8 @@ auto apply(write_effect effect, std::uint32_t value, std::uint32_t written, std:
 
 auto locked(layer_state const& state, std::uint32_t word) noexcept -> bool
 {
-  return word
-       / 32
-       < state.write_locked.size()
-     and (state.write_locked[word / 32] >> (word % 32) & 1u)
-      != 0;
+  return word / 32 < state.write_locked.size()
+     and (state.write_locked[word / 32] >> (word % 32) & 1u) != 0;
 }
 }
 
@@ -142,18 +139,10 @@ register_layout::register_layout(peripheral_desc const& desc) : desc_{&desc}
   for(auto const& reg : desc.registers)
   {
     auto const shift  = 8 * (reg.offset % 4);
-    auto const inside = reg.width
-                     != 0
-                    and reg.width
-                      % 8
-                     == 0
-                    and shift
-                      + reg.width
-                     <= 32
-                    and std::uint64_t{reg.offset}
-                      + reg.width
-                      / 8
-                     <= desc.size;
+    auto const inside = reg.width != 0
+                    and reg.width % 8 == 0
+                    and shift + reg.width <= 32
+                    and std::uint64_t{reg.offset} + reg.width / 8 <= desc.size;
     if(not inside)
     {
       fail(
@@ -337,12 +326,9 @@ auto register_layout::has_write_once() const noexcept -> bool
 
 auto register_layout::footprint() const noexcept -> std::size_t
 {
-  return rule_of_word_.size()
-       * sizeof(std::uint16_t)
-       + rules_.size()
-       * sizeof(word_rules)
-       + crosses_.size()
-       * sizeof(cross_target);
+  return rule_of_word_.size() * sizeof(std::uint16_t)
+       + rules_.size() * sizeof(word_rules)
+       + crosses_.size() * sizeof(cross_target);
 }
 
 auto layer_read(

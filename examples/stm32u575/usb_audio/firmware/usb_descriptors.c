@@ -21,30 +21,22 @@ enum
 #define EPNUM_AUDIO_OUT 0x01
 #define EPNUM_AUDIO_IN  0x81
 
-#define FEATURE_CONTROLS                 \
-  (AUDIO20_CTRL_RW                       \
-   << AUDIO20_FEATURE_UNIT_CTRL_MUTE_POS \
-   | AUDIO20_CTRL_RW                     \
-   << AUDIO20_FEATURE_UNIT_CTRL_VOLUME_POS)
+#define FEATURE_CONTROLS                                 \
+  (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_MUTE_POS \
+   | AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_VOLUME_POS)
 
-#define CLOCK_CONTROLS                      \
-  (AUDIO20_CTRL_R                           \
-   << AUDIO20_CLOCK_SOURCE_CTRL_CLK_FRQ_POS \
-   | AUDIO20_CTRL_R                         \
-   << AUDIO20_CLOCK_SOURCE_CTRL_CLK_VAL_POS)
+#define CLOCK_CONTROLS                                     \
+  (AUDIO20_CTRL_R << AUDIO20_CLOCK_SOURCE_CTRL_CLK_FRQ_POS \
+   | AUDIO20_CTRL_R << AUDIO20_CLOCK_SOURCE_CTRL_CLK_VAL_POS)
 
-#define AC_UNITS_LEN                      \
-  (TUD_AUDIO20_DESC_CLK_SRC_LEN           \
-   + 2                                    \
-   * TUD_AUDIO20_DESC_INPUT_TERM_LEN      \
-   + 2                                    \
-   * TUD_AUDIO20_DESC_FEATURE_UNIT_LEN(1) \
-   + 2                                    \
-   * TUD_AUDIO20_DESC_OUTPUT_TERM_LEN)
+#define AC_UNITS_LEN                          \
+  (TUD_AUDIO20_DESC_CLK_SRC_LEN               \
+   + 2 * TUD_AUDIO20_DESC_INPUT_TERM_LEN      \
+   + 2 * TUD_AUDIO20_DESC_FEATURE_UNIT_LEN(1) \
+   + 2 * TUD_AUDIO20_DESC_OUTPUT_TERM_LEN)
 
 #define AS_STREAMING_LEN                \
-  (2                                    \
-   * TUD_AUDIO20_DESC_STD_AS_LEN        \
+  (2 * TUD_AUDIO20_DESC_STD_AS_LEN      \
    + TUD_AUDIO20_DESC_CS_AS_INT_LEN     \
    + TUD_AUDIO20_DESC_TYPE_I_FORMAT_LEN \
    + TUD_AUDIO20_DESC_STD_AS_ISO_EP_LEN \
@@ -55,8 +47,7 @@ enum
    + TUD_AUDIO20_DESC_STD_AC_LEN \
    + TUD_AUDIO20_DESC_CS_AC_LEN  \
    + AC_UNITS_LEN                \
-   + 2                           \
-   * AS_STREAMING_LEN)
+   + 2 * AS_STREAMING_LEN)
 
 #define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + AUDIO_FUNCTION_LEN)
 

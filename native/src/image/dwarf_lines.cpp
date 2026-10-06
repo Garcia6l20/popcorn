@@ -248,10 +248,8 @@ void decode_one_program(
 
   for(auto const& [ref, path] : std::views::zip(wanted, wanted_paths))
   {
-    if(ref.line_offset
-       == unit.line_offset
-       and ref.index
-       < files.size()
+    if(ref.line_offset == unit.line_offset
+       and ref.index < files.size()
        and not files[ref.index].first.empty())
     {
       path = resolve_file(ref.index);
@@ -321,11 +319,9 @@ void decode_one_program(
       switch(sub)
       {
         case dw_lne::end_sequence:
-          while(out.size()
-                > seq_start
-                && out.back().addr
-                == static_cast<popcorn::address>(addr_reg)
-                && !out.back().end_sequence)
+          while(out.size() > seq_start
+                and out.back().addr == static_cast<popcorn::address>(addr_reg)
+                and not out.back().end_sequence)
           {
             out.pop_back();
           }

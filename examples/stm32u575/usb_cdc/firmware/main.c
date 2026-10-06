@@ -188,14 +188,10 @@ uint16_t tud_hid_get_report_cb(
     memcpy(buffer, hid_feature, count);
     return count;
   }
-  if(instance
-     != HID_BUTTON
-     || report_type
-     != HID_REPORT_TYPE_INPUT
-     || report_id
-     != REPORT_ID_BUTTON
-     || reqlen
-     < 1)
+  if(instance != HID_BUTTON
+     || report_type != HID_REPORT_TYPE_INPUT
+     || report_id != REPORT_ID_BUTTON
+     || reqlen < 1)
   {
     return 0;
   }
@@ -210,14 +206,10 @@ void tud_hid_set_report_cb(
     uint8_t const*    buffer,
     uint16_t          bufsize)
 {
-  if(instance
-     == HID_BUTTON
-     && report_id
-     == REPORT_ID_LED
-     && report_type
-     == HID_REPORT_TYPE_OUTPUT
-     && bufsize
-     >= 1)
+  if(instance == HID_BUTTON
+     && report_id == REPORT_ID_LED
+     && report_type == HID_REPORT_TYPE_OUTPUT
+     && bufsize >= 1)
   {
     hid_led = buffer[0];
     ++hid_led_writes;

@@ -211,9 +211,8 @@ auto load_hex(std::filesystem::path const& file) -> image
         std::vector<std::byte> payload(data.size());
         std::ranges::transform(data, payload.begin(), [](std::uint8_t b) { return std::byte{b}; });
         if(!chunks.empty()
-           && std::uint64_t{chunks.back().addr}
-           + chunks.back().bytes.size()
-           == std::uint64_t{full_addr})
+           and std::uint64_t{chunks.back().addr} + chunks.back().bytes.size()
+                   == std::uint64_t{full_addr})
         {
           auto& back = chunks.back();
           back.bytes.insert(back.bytes.end(), payload.begin(), payload.end());

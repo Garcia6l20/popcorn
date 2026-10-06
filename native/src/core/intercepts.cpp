@@ -90,10 +90,8 @@ void machine::run_state::remove_hook(std::uint64_t id) noexcept
       return;
     }
     if(resume_past
-       and resume_past->first
-       == at
-       and static_cast<std::size_t>(index - site.entries.begin())
-       < resume_past->second)
+       and resume_past->first == at
+       and static_cast<std::size_t>(index - site.entries.begin()) < resume_past->second)
     {
       --resume_past->second;
     }

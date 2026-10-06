@@ -515,8 +515,7 @@ auto rcc::is_ready(source which) const -> bool
 
 auto rcc::is_on(source which) const -> bool
 {
-  return get(regs_, osc_[std::to_underlying(which)].on)
-      != 0
+  return get(regs_, osc_[std::to_underlying(which)].on) != 0
       or (which == source::lsi and state_.lsi_forced != 0)
       or (which == source::hsi16 and state_.hsi16_held != 0);
 }

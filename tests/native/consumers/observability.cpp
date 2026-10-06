@@ -28,10 +28,8 @@ auto full_trace(core::machine& target, std::vector<std::uint32_t>& file) -> core
         {
           file.push_back(
               std::uint32_t{std::to_underlying(record.kind)}
-              | std::uint32_t{record.flags}
-              << 8
-              | std::uint32_t{record.aux}
-              << 16);
+              | std::uint32_t{record.flags} << 8
+              | std::uint32_t{record.aux} << 16);
           file.push_back(record.dt);
           for(std::size_t word = 0; word < core::pctr_payload_words(record.kind); ++word)
           {

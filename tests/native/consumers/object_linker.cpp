@@ -82,8 +82,7 @@ TEST_CASE("object linker consumer adds its regions and stubs imports")
   popcorn::core::machine target{description, popcorn::testing::test_arch_factory(), {}};
   CHECK(
       target.description().regions.size()
-      == popcorn::testing::toy_description().regions.size()
-      + 2);
+      == popcorn::testing::toy_description().regions.size() + 2);
   CHECK_THROWS_AS(
       popcorn::consumers::object_linker::run_linked(target, popcorn::image::image{}),
       popcorn::symbol_error);

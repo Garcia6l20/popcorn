@@ -103,10 +103,8 @@ void icache::invalidate()
 void icache::interrupt()
 {
   drive(
-      line_, (get(regs_, busy_end_) & get(regs_, busy_end_irq_))
-                 != 0
-                 or (get(regs_, error_) & get(regs_, error_irq_))
-                 != 0);
+      line_, (get(regs_, busy_end_) & get(regs_, busy_end_irq_)) != 0
+                 or (get(regs_, error_) & get(regs_, error_irq_)) != 0);
 }
 
 void icache::on_event(std::uint32_t kind, std::uint64_t payload)
@@ -224,12 +222,9 @@ void dcache::invalidate()
 void dcache::interrupt()
 {
   drive(
-      line_, (get(regs_, busy_end_) & get(regs_, busy_end_irq_))
-                 != 0
-                 or (get(regs_, error_) & get(regs_, error_irq_))
-                 != 0
-                 or (get(regs_, command_end_) & get(regs_, command_end_irq_))
-                 != 0);
+      line_, (get(regs_, busy_end_) & get(regs_, busy_end_irq_)) != 0
+                 or (get(regs_, error_) & get(regs_, error_irq_)) != 0
+                 or (get(regs_, command_end_) & get(regs_, command_end_irq_)) != 0);
 }
 
 void dcache::on_event(std::uint32_t kind, std::uint64_t payload)

@@ -587,10 +587,8 @@ auto tim::canonical() const -> bool
 
 auto tim::pending() const -> bool
 {
-  if(state_.prescaler
-     != get(regs_, prescaler_)
-     or state_.reload
-     != (regs_.peek(reload_.offset) & mask_))
+  if(state_.prescaler != get(regs_, prescaler_)
+     or state_.reload != (regs_.peek(reload_.offset) & mask_))
   {
     return true;
   }
@@ -824,8 +822,7 @@ void tim::skip_groups(std::uint64_t groups)
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
     auto const value   = compare_value(ch);
-    auto const visited = value
-                      <= state_.reload
+    auto const visited = value <= state_.reload
                      and not(mode == 1 and value == state_.reload)
                      and not(mode == 2 and value == 0);
     if(output(ch) and visited)
@@ -1002,8 +999,7 @@ void tim::reschedule()
   {
     auto const period = center() ? std::uint64_t{state_.reload} : state_.reload + std::uint64_t{1};
     auto const counts = not counting_up()
-                     or state_.count
-                      < state_.reload
+                     or state_.count < state_.reload
                      or (not center() and state_.count == state_.reload);
     ticks             = to_wrap + (counts ? state_.repetition * period : 0);
   }

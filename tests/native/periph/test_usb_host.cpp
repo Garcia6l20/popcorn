@@ -794,9 +794,7 @@ TEST_CASE(
     CHECK(
         std::ranges::count_if(
             naks, [&](std::uint64_t at) { return at >= frames[n] and at < frames[n + 1]; })
-        <= ms
-        / retry_gap
-        + 1);
+        <= ms / retry_gap + 1);
     CHECK(std::ranges::count_if(r.dev.s.tokens, in_frame) <= 100);
   }
   auto crossings = 0;

@@ -474,8 +474,7 @@ auto sai::board_now() const -> std::uint64_t
 auto sai::running(std::size_t b) const -> bool
 {
   auto const& c = (*state_.clock)[b];
-  return c.hz
-      != 0
+  return c.hz != 0
       or (c.anchored and board_now() < c.anchor_ps)
       or (state_.block[b].ticking and clocked(b));
 }

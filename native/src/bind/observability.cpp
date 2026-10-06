@@ -67,8 +67,8 @@ auto kinds_of(std::vector<std::uint8_t> const& values) -> core::trace_kinds
                  std::define_static_array(std::meta::enumerators_of(^^core::trace_kind)))
     {
       selectable = selectable
-                or (value == std::to_underlying([:e:]) and
-                    [:e:] != core::trace_kind::str and [:e:] != core::trace_kind::time);
+                or (value == std::to_underlying([:e:]) and [:e:] != core::trace_kind::str and [:e:]
+                    != core::trace_kind::time);
     }
     if(not selectable)
     {

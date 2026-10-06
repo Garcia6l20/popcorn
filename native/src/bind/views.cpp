@@ -64,13 +64,8 @@ auto slot_of(
 {
   auto& file = target.peripheral(name);
   if((width != 8 and width != 16 and width != 32)
-     or offset
-     % (width / 8)
-     != 0
-     or std::uint64_t{offset}
-     + width
-     / 8
-     > file.description().size)
+     or offset % (width / 8) != 0
+     or std::uint64_t{offset} + width / 8 > file.description().size)
   {
     throw config_error(
         name, 0, std::format("{:#x}", offset),

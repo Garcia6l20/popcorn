@@ -116,12 +116,9 @@ static void MX_SAI1_DMA_Init(void)
       .DstAddress    = (uint32_t)&SAI1_Block_A->DR,
       .DataSize      = sizeof sine,
   };
-  if(HAL_DMAEx_List_BuildNode(&config, &node)
-     != HAL_OK
-     || HAL_DMAEx_List_InsertNode_Tail(&queue, &node)
-     != HAL_OK
-     || HAL_DMAEx_List_SetCircularMode(&queue)
-     != HAL_OK)
+  if(HAL_DMAEx_List_BuildNode(&config, &node) != HAL_OK
+     || HAL_DMAEx_List_InsertNode_Tail(&queue, &node) != HAL_OK
+     || HAL_DMAEx_List_SetCircularMode(&queue) != HAL_OK)
   {
     Error_Handler();
   }
@@ -133,10 +130,8 @@ static void MX_SAI1_DMA_Init(void)
       .TransferEventMode = DMA_TCEM_BLOCK_TRANSFER,
       .LinkedListMode    = DMA_LINKEDLIST_CIRCULAR,
   };
-  if(HAL_DMAEx_List_Init(&handle_GPDMA1_Channel0)
-     != HAL_OK
-     || HAL_DMAEx_List_LinkQ(&handle_GPDMA1_Channel0, &queue)
-     != HAL_OK)
+  if(HAL_DMAEx_List_Init(&handle_GPDMA1_Channel0) != HAL_OK
+     || HAL_DMAEx_List_LinkQ(&handle_GPDMA1_Channel0, &queue) != HAL_OK)
   {
     Error_Handler();
   }

@@ -78,13 +78,10 @@ auto encode(line_coding const& coding) -> std::vector<std::uint8_t>
 auto decode(std::span<std::uint8_t const> bytes) -> line_coding
 {
   return {
-      .baud = static_cast<std::uint32_t>(bytes[0])
-            | static_cast<std::uint32_t>(bytes[1])
-           << 8
-            | static_cast<std::uint32_t>(bytes[2])
-           << 16
-            | static_cast<std::uint32_t>(bytes[3])
-           << 24,
+      .baud      = static_cast<std::uint32_t>(bytes[0])
+                 | static_cast<std::uint32_t>(bytes[1]) << 8
+                 | static_cast<std::uint32_t>(bytes[2]) << 16
+                 | static_cast<std::uint32_t>(bytes[3]) << 24,
       .stop_bits = bytes[4],
       .parity    = bytes[5],
       .data_bits = bytes[6],
@@ -235,10 +232,8 @@ public:
   {
     auto const completed = result.status == transfer_status::completed;
     if(completed
-       and result.setup.request
-       == set_line_coding
-       and result.data.size()
-       >= coding_length)
+       and result.setup.request == set_line_coding
+       and result.data.size() >= coding_length)
     {
       s_.coding = channel_->coding = decode(result.data);
     }
@@ -541,12 +536,9 @@ void cdc_hub::discard()
 auto cdc_acm_claim(configuration_info const& configuration, interface_info const& interface)
     -> std::vector<std::uint8_t>
 {
-  if(interface.alternate
-     != 0
-     or interface.class_code
-     != cdc_class
-     or interface.subclass
-     != acm_subclass)
+  if(interface.alternate != 0
+     or interface.class_code != cdc_class
+     or interface.subclass != acm_subclass)
   {
     return {};
   }

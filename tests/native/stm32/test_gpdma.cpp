@@ -132,8 +132,8 @@ TEST_CASE("the half transfer flag rises when exactly half the block is left")
 TEST_CASE("a snapshot mid-copy restores to the same result, in place and serialized")
 {
   auto f = entered("mem2mem");
-  while(
-      f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0 or f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 128)
+  while(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0
+        or f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 128)
   {
     REQUIRE_FALSE(f.run({.max_instructions = icount{4}}).stopped.has_value());
   }
@@ -371,12 +371,9 @@ auto copied_bytes(stm32_fixture const& f, std::uint32_t length) -> std::vector<s
 
 auto tr1(std::uint32_t source, std::uint32_t destination, std::uint32_t pam) -> std::uint32_t
 {
-  return source
-       * bit("GPDMA_C0TR1", "SDW_LOG2")
-       | destination
-       * bit("GPDMA_C0TR1", "DDW_LOG2")
-       | pam
-       * bit("GPDMA_C0TR1", "PAM");
+  return source * bit("GPDMA_C0TR1", "SDW_LOG2")
+       | destination * bit("GPDMA_C0TR1", "DDW_LOG2")
+       | pam * bit("GPDMA_C0TR1", "PAM");
 }
 }
 

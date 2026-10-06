@@ -672,13 +672,10 @@ auto otg_fs::b_valid() const -> bool
 
 auto otg_fs::pulled_up() const -> bool
 {
-  return host_
-      != nullptr
+  return host_ != nullptr
      and b_valid()
-     and get(regs_, power_up_)
-      != 0
-     and get(regs_, soft_disconnect_)
-      == 0;
+     and get(regs_, power_up_) != 0
+     and get(regs_, soft_disconnect_) == 0;
 }
 
 auto otg_fs::on_bus(std::uint8_t address) const -> bool
@@ -750,15 +747,9 @@ auto otg_fs::is_control(std::uint32_t word) const -> bool
 {
   for(auto const base : {in_[0].enable.offset, out_[0].enable.offset})
   {
-    if(word
-       >= base
-       and word
-       < base
-       + endpoints
-       * endpoint_stride
-       and (word - base)
-       % endpoint_stride
-       == 0)
+    if(word >= base
+       and word < base + endpoints * endpoint_stride
+       and (word - base) % endpoint_stride == 0)
     {
       return true;
     }
@@ -769,15 +760,9 @@ auto otg_fs::is_control(std::uint32_t word) const -> bool
 auto otg_fs::is_fifo(std::uint32_t word) const -> bool
 {
   auto const base = fifo_window_.offset;
-  return word
-      >= base
-     and word
-       < base
-       + endpoints
-       * window_stride
-     and (word - base)
-       % window_stride
-      == 0;
+  return word >= base
+     and word < base + endpoints * window_stride
+     and (word - base) % window_stride == 0;
 }
 
 void otg_fs::link(bool report_session_end)
@@ -845,10 +830,8 @@ void otg_fs::refresh()
   auto const head = state_.rx_fifo.empty() ? 0u : state_.rx_fifo.front().status;
   regs_.poke(rx_status_peek_.offset, head);
   regs_.poke(rx_status_pop_.offset, head);
-  auto const raised = get(regs_, global_interrupt_)
-                   != 0
-                  and (regs_.peek(core_status_.offset) & regs_.peek(core_mask_.offset))
-                   != 0;
+  auto const raised = get(regs_, global_interrupt_) != 0
+                  and (regs_.peek(core_status_.offset) & regs_.peek(core_mask_.offset)) != 0;
   if(raised)
   {
     line_.raise();
@@ -1594,12 +1577,9 @@ auto otg_fs::out_isochronous(std::size_t n, std::span<std::uint8_t const> data) 
 {
   auto const& ep    = out_[n];
   auto&       state = state_.out[n];
-  if(get(regs_, ep.enable)
-     == 0
-     or state.toggle
-     != frame_parity()
-     or get(regs_, out_nak_status_)
-     != 0)
+  if(get(regs_, ep.enable) == 0
+     or state.toggle != frame_parity()
+     or get(regs_, out_nak_status_) != 0)
   {
     return usb::handshake::none;
   }
@@ -1661,14 +1641,10 @@ void otg_fs::end_periodic_frame()
 template <typename Fields>
 void otg_fs::check_iso_packets(std::string_view reg, Fields const& ep, std::size_t n)
 {
-  if(n
-     != 0
-     and get(regs_, ep.type)
-     == isochronous
-     and get(regs_, ep.enable)
-     != 0
-     and get(regs_, ep.packets)
-     > 1)
+  if(n != 0
+     and get(regs_, ep.type) == isochronous
+     and get(regs_, ep.enable) != 0
+     and get(regs_, ep.packets) > 1)
   {
     unmodelled(
         reg,

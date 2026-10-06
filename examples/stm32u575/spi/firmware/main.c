@@ -193,10 +193,8 @@ int main(void)
   SystemClock_Config();
   MX_GPIO_Init();
   MX_SPI1_Init();
-  if(xTaskCreate(flash_task, "flash", 512, NULL, 2, NULL)
-     != pdPASS
-     || xTaskCreate(ticker_task, "ticker", configMINIMAL_STACK_SIZE, NULL, 1, NULL)
-     != pdPASS)
+  if(xTaskCreate(flash_task, "flash", 512, NULL, 2, NULL) != pdPASS
+     || xTaskCreate(ticker_task, "ticker", configMINIMAL_STACK_SIZE, NULL, 1, NULL) != pdPASS)
   {
     Error_Handler();
   }

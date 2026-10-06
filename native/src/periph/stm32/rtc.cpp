@@ -429,8 +429,7 @@ auto rtc::cycle_of(std::uint64_t position) const -> std::uint64_t
 {
   auto const base = state_.seconds * sync_ticks() + state_.phase;
   return state_.start
-       + (position > base ? position - base : 0)
-       * (std::uint64_t{state_.prediv_a} + 1);
+       + (position > base ? position - base : 0) * (std::uint64_t{state_.prediv_a} + 1);
 }
 
 auto rtc::calendar(std::uint64_t seconds) const -> date_time
@@ -522,12 +521,9 @@ auto rtc::next_alarm(std::size_t which, std::uint64_t after) const -> std::optio
   auto const  hour_ok =
       get(regs_, format_) == 0
           ? a.hour_units.of(word) <= 9 and bcd(a.hour_tens.of(word), a.hour_units.of(word)) <= 23
-          : a.hour_units.of(word)
-                <= 9
-                and bcd(a.hour_tens.of(word), a.hour_units.of(word))
-                >= 1
-                and bcd(a.hour_tens.of(word), a.hour_units.of(word))
-                <= 12;
+          : a.hour_units.of(word) <= 9
+                and bcd(a.hour_tens.of(word), a.hour_units.of(word)) >= 1
+                and bcd(a.hour_tens.of(word), a.hour_units.of(word)) <= 12;
   auto const day_ok = weekday ? a.date_units.of(word) >= 1 and a.date_units.of(word) <= 7
                               : a.date_units.of(word) <= 9 and date >= 1 and date <= 31;
   auto const valid  = (any_sec or (a.second_units.of(word) <= 9 and second < 60))

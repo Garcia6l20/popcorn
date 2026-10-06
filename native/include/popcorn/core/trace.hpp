@@ -154,7 +154,7 @@ static_assert(
                       std::meta::annotations_of_with_type(e, ^^pctr_payload).front())
                       .words);
             })))
-    * sizeof(std::uint32_t)
+        * sizeof(std::uint32_t)
     == pctr_max_payload_size);
 static_assert(alignof(trace_record) == 4);
 static_assert(offsetof(trace_record, dt) == 4);

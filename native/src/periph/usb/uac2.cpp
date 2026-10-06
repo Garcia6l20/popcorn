@@ -162,12 +162,9 @@ auto output_terminals(std::span<std::uint8_t const> extra) -> std::vector<std::v
     {
       break;
     }
-    if(extra[at + 1]
-       == cs_interface
-       and length
-       >= output_length
-       and extra[at + 2]
-       == output_terminal)
+    if(extra[at + 1] == cs_interface
+       and length >= output_length
+       and extra[at + 2] == output_terminal)
     {
       found.emplace_back(
           extra.begin() + static_cast<std::ptrdiff_t>(at),
@@ -505,10 +502,8 @@ public:
     }
     auto& mic = s_.streams[direction_index(uac2_direction::mic)];
     if(mic.running
-       and ctx.queued(mic.pipe)
-       == 0
-       and ctx.submit(mic.pipe, {.length = s_.alts[mic.alt].max_packet})
-       == 0)
+       and ctx.queued(mic.pipe) == 0
+       and ctx.submit(mic.pipe, {.length = s_.alts[mic.alt].max_packet}) == 0)
     {
       halt(mic);
     }
@@ -542,10 +537,8 @@ public:
     }
     auto const& other = s_.streams[1 - direction_index(direction)];
     if(other.running
-       and s_.alts[other.alt].clock
-       == s_.alts[stream.alt].clock
-       and other.rate
-       != stream.rate)
+       and s_.alts[other.alt].clock == s_.alts[stream.alt].clock
+       and other.rate != stream.rate)
     {
       return 0;
     }
@@ -671,23 +664,17 @@ private:
   static auto candidate(interface_info const& setting, std::map<std::uint8_t, entity> const& found)
       -> std::optional<alt_state>
   {
-    if(setting.class_code
-       != audio_class
-       or setting.subclass
-       != audio_streaming
-       or setting.protocol
-       != uac2_protocol
+    if(setting.class_code != audio_class
+       or setting.subclass != audio_streaming
+       or setting.protocol != uac2_protocol
        or setting.endpoints.empty())
     {
       return std::nullopt;
     }
     auto const& endpoint = setting.endpoints.front();
-    if(endpoint.max_packet
-       == 0
-       or endpoint.type
-       != transfer_type::isochronous
-       or endpoint.interval
-       > 1)
+    if(endpoint.max_packet == 0
+       or endpoint.type != transfer_type::isochronous
+       or endpoint.interval > 1)
     {
       return std::nullopt;
     }
@@ -699,18 +686,12 @@ private:
     }
     auto const g = *general;
     auto const f = *format;
-    if(g[5]
-       != format_type_i
-       or (le32(g, 6) & pcm)
-       == 0
-       or g[10]
-       == 0
-       or f[3]
-       != format_type_i
-       or f[4]
-       == 0
-       or f[4]
-       > 4)
+    if(g[5] != format_type_i
+       or (le32(g, 6) & pcm) == 0
+       or g[10] == 0
+       or f[3] != format_type_i
+       or f[4] == 0
+       or f[4] > 4)
     {
       return std::nullopt;
     }
@@ -975,8 +956,7 @@ private:
       {
         auto const& alt = s_.alts[at.alt];
         if(not writable(alt.clock_controls, sampling_frequency)
-           or alt.current
-           == static_cast<std::uint32_t>(at.value))
+           or alt.current == static_cast<std::uint32_t>(at.value))
         {
           return std::nullopt;
         }
@@ -996,10 +976,8 @@ private:
       case step_kind::resolution_save:
       case step_kind::resolution_check:
       case step_kind::control_init:
-        if(at.kind
-           == step_kind::control_init
-           and (s_.control.cached & (std::uint64_t{1} << at.channel))
-           != 0)
+        if(at.kind == step_kind::control_init
+           and (s_.control.cached & (std::uint64_t{1} << at.channel)) != 0)
         {
           return std::nullopt;
         }
@@ -1166,8 +1144,7 @@ private:
       auto const& alt    = s_.alts[alt_index];
       if(alt.usable
          and not chosen.usable
-         and alt.interface == chosen.interface and alt_index
-         > stream.alt)
+         and alt.interface == chosen.interface and alt_index > stream.alt)
       {
         stream.alt = alt_index;
       }
@@ -1680,11 +1657,9 @@ auto bound_driver_of(host& owner, uac2_channel const& channel)
   for(std::size_t index = 0; index < drivers.size(); ++index)
   {
     auto const& bound = drivers[index];
-    if(bound.name
-       == uac2_name
+    if(bound.name == uac2_name
        and not bound.interfaces.empty()
-       and bound.interfaces.front()
-       == *channel.interface)
+       and bound.interfaces.front() == *channel.interface)
     {
       if(auto* const driver = dynamic_cast<uac2_driver*>(bound.driver.get()))
       {
@@ -1802,14 +1777,10 @@ void uac2_hub::discard()
 auto uac2_claim(configuration_info const& configuration, interface_info const& interface)
     -> std::vector<std::uint8_t>
 {
-  if(interface.alternate
-     != 0
-     or interface.class_code
-     != audio_class
-     or interface.subclass
-     != audio_control
-     or interface.protocol
-     != uac2_protocol)
+  if(interface.alternate != 0
+     or interface.class_code != audio_class
+     or interface.subclass != audio_control
+     or interface.protocol != uac2_protocol)
   {
     return {};
   }
@@ -1848,8 +1819,7 @@ auto uac2_start(host& owner, uac2_hub& hub, std::size_t function, uac2_direction
 void uac2_stop(host& owner, uac2_hub& hub, std::size_t function, uac2_direction direction)
 {
   auto&      channel = hub.channel(function);
-  auto const dropped = direction
-                    == uac2_direction::speaker
+  auto const dropped = direction == uac2_direction::speaker
                    and (channel.speaker.sending or not channel.speaker.out.empty());
   if(auto const found = bound_driver_of(owner, channel))
   {

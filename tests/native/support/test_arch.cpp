@@ -553,10 +553,8 @@ auto test_arch::wfi_size(address at) const -> std::uint32_t
   {
     return 2;
   }
-  if(first
-     == wfi_wide_first
-     and context_->services.read(at + 2, 2, initiator::debugger)
-     == wfi_wide_second)
+  if(first == wfi_wide_first
+     and context_->services.read(at + 2, 2, initiator::debugger) == wfi_wide_second)
   {
     return 4;
   }

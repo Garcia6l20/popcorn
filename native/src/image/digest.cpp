@@ -30,9 +30,8 @@ auto digest_of(std::vector<segment> const& segments) -> std::string
     address     run_start = segments[i].start;
     std::size_t j         = i;
     std::size_t run_size  = 0;
-    while(j
-          < segments.size()
-          && (j == i || segments[j].start == segments[j - 1].start + segments[j - 1].bytes.size()))
+    while(j < segments.size()
+          and (j == i or segments[j].start == segments[j - 1].start + segments[j - 1].bytes.size()))
     {
       run_size += segments[j].bytes.size();
       ++j;

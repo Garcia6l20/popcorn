@@ -36,10 +36,8 @@ struct exc_return
 constexpr auto encode_exc_return(exc_return frame) noexcept -> std::uint32_t
 {
   return 0xffff'ff80u
-       | 1u
-      << 6
-       | 1u
-      << 5
+       | 1u << 6
+       | 1u << 5
        | (frame.basic_frame ? 1u << 4 : 0u)
        | (frame.thread ? 1u << 3 : 0u)
        | (frame.process_stack ? 1u << 2 : 0u)

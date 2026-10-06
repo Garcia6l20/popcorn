@@ -80,8 +80,7 @@ auto factories(board const& b, mcu_description const& part)
     }
     for(auto const& entry : builtins)
     {
-      if(entry.ip
-         == unit.ip
+      if(entry.ip == unit.ip
          and glob_match(entry.ip_version_glob, unit.ip_version)
          and glob_match(entry.instance_glob, unit.name))
       {

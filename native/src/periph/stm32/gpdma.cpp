@@ -398,18 +398,10 @@ auto gpdma::valid(std::size_t ch) const -> bool
   auto const source  = regs_.peek(c.sar.offset) % sw == 0;
   auto const target  = regs_.peek(c.dar.offset) % dw == 0;
   auto const offsets = not c.two_d
-                    or (get(regs_, c.two_d->source_offset)
-                        % sw
-                        == 0
-                        and get(regs_, c.two_d->block_source_offset)
-                        % sw
-                        == 0
-                        and get(regs_, c.two_d->destination_offset)
-                        % dw
-                        == 0
-                        and get(regs_, c.two_d->block_destination_offset)
-                        % dw
-                        == 0);
+                    or (get(regs_, c.two_d->source_offset) % sw == 0
+                        and get(regs_, c.two_d->block_source_offset) % sw == 0
+                        and get(regs_, c.two_d->destination_offset) % dw == 0
+                        and get(regs_, c.two_d->block_destination_offset) % dw == 0);
   return widths and whole and source and target and offsets;
 }
 
@@ -486,12 +478,9 @@ void gpdma::schedule(std::size_t ch)
 void gpdma::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   auto const ch = static_cast<std::size_t>(payload >> 32);
-  if(kind
-     != burst_done
-     or ch
-     >= channels
-     or static_cast<std::uint32_t>(payload)
-     != state_.channel[ch].generation)
+  if(kind != burst_done
+     or ch >= channels
+     or static_cast<std::uint32_t>(payload) != state_.channel[ch].generation)
   {
     return;
   }

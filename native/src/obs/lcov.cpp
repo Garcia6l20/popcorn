@@ -96,11 +96,8 @@ auto executable_segment(image::image const& source, address at) -> image::segmen
 {
   auto const found = std::ranges::find_if(source.segments, [at](image::segment const& held) {
     return held.executable
-       and held.start
-        <= at
-       and std::uint64_t{at}
-         < std::uint64_t{held.start}
-         + held.memory_size;
+       and held.start <= at
+       and std::uint64_t{at} < std::uint64_t{held.start} + held.memory_size;
   });
   return found == source.segments.end() ? nullptr : &*found;
 }

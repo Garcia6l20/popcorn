@@ -151,9 +151,8 @@ auto scan_compile_units(debug_sections const& sections) -> compile_unit_scan
 
     compile_unit_ref ref;
     bool             has_stmt_list = false;
-    if(it
-       != table.end()
-       && (it->second.tag == dw_tag_compile_unit || it->second.tag == dw_tag_partial_unit))
+    if(it != table.end()
+       and (it->second.tag == dw_tag_compile_unit or it->second.tag == dw_tag_partial_unit))
     {
       std::optional<std::uint64_t> str_offsets_base;
       std::optional<std::uint64_t> comp_dir_strx;

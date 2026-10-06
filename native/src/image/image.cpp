@@ -165,11 +165,9 @@ auto image::locate(address addr) const -> location
       {
         continue;
       }
-      if(best
-         == nullptr
-         || rank_kind(sym.kind)
-         < rank_kind(best->kind)
-         || (rank_kind(sym.kind) == rank_kind(best->kind) && sym.size < best->size))
+      if(best == nullptr
+         or rank_kind(sym.kind) < rank_kind(best->kind)
+         or (rank_kind(sym.kind) == rank_kind(best->kind) and sym.size < best->size))
       {
         best = &sym;
       }

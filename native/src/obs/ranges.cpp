@@ -29,10 +29,8 @@ auto extent(image::image const& source, image::symbol const& found) -> std::uint
                          ? std::uint64_t{found.value}
                          : std::uint64_t{segment->start} + segment->memory_size;
   auto const later   = [&](image::symbol const& candidate) {
-    return candidate.kind
-        == image::symbol_kind::function
-       and candidate.value
-         > found.value
+    return candidate.kind == image::symbol_kind::function
+       and candidate.value > found.value
        and (segment == source.segments.end() or candidate.value < limit);
   };
   auto const next = std::ranges::find_if(source.symbols, later);

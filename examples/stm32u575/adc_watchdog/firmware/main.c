@@ -182,12 +182,9 @@ static void MX_ADC1_DMA_Init(void)
       .DstAddress    = (uint32_t)samples,
       .DataSize      = sizeof samples,
   };
-  if(HAL_DMAEx_List_BuildNode(&config, &node)
-     != HAL_OK
-     || HAL_DMAEx_List_InsertNode_Tail(&queue, &node)
-     != HAL_OK
-     || HAL_DMAEx_List_SetCircularMode(&queue)
-     != HAL_OK)
+  if(HAL_DMAEx_List_BuildNode(&config, &node) != HAL_OK
+     || HAL_DMAEx_List_InsertNode_Tail(&queue, &node) != HAL_OK
+     || HAL_DMAEx_List_SetCircularMode(&queue) != HAL_OK)
   {
     Error_Handler();
   }
@@ -199,10 +196,8 @@ static void MX_ADC1_DMA_Init(void)
       .TransferEventMode = DMA_TCEM_BLOCK_TRANSFER,
       .LinkedListMode    = DMA_LINKEDLIST_CIRCULAR,
   };
-  if(HAL_DMAEx_List_Init(&handle_GPDMA1_Channel0)
-     != HAL_OK
-     || HAL_DMAEx_List_LinkQ(&handle_GPDMA1_Channel0, &queue)
-     != HAL_OK)
+  if(HAL_DMAEx_List_Init(&handle_GPDMA1_Channel0) != HAL_OK
+     || HAL_DMAEx_List_LinkQ(&handle_GPDMA1_Channel0, &queue) != HAL_OK)
   {
     Error_Handler();
   }
@@ -222,10 +217,8 @@ static void MX_TIM15_Init(void)
       .MasterOutputTrigger = TIM_TRGO_UPDATE,
       .MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE,
   };
-  if(HAL_TIM_Base_Init(&htim15)
-     != HAL_OK
-     || HAL_TIMEx_MasterConfigSynchronization(&htim15, &master)
-     != HAL_OK)
+  if(HAL_TIM_Base_Init(&htim15) != HAL_OK
+     || HAL_TIMEx_MasterConfigSynchronization(&htim15, &master) != HAL_OK)
   {
     Error_Handler();
   }
@@ -239,10 +232,8 @@ int main(void)
   MX_ADC1_Init();
   MX_ADC1_DMA_Init();
   MX_TIM15_Init();
-  if(HAL_ADC_Start_DMA(&hadc1, (uint32_t const*)samples, 2u * SCAN_CHANNELS)
-     != HAL_OK
-     || HAL_TIM_Base_Start(&htim15)
-     != HAL_OK)
+  if(HAL_ADC_Start_DMA(&hadc1, (uint32_t const*)samples, 2u * SCAN_CHANNELS) != HAL_OK
+     || HAL_TIM_Base_Start(&htim15) != HAL_OK)
   {
     Error_Handler();
   }

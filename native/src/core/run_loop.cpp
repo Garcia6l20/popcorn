@@ -56,18 +56,12 @@ auto memory_op_of(uc_mem_type type) noexcept -> arch::memory_op
 
 auto refused_access(uc_err err) noexcept -> bool
 {
-  return err
-      == UC_ERR_READ_UNMAPPED
-      or err
-      == UC_ERR_WRITE_UNMAPPED
-      or err
-      == UC_ERR_FETCH_UNMAPPED
-      or err
-      == UC_ERR_READ_PROT
-      or err
-      == UC_ERR_WRITE_PROT
-      or err
-      == UC_ERR_FETCH_PROT;
+  return err == UC_ERR_READ_UNMAPPED
+      or err == UC_ERR_WRITE_UNMAPPED
+      or err == UC_ERR_FETCH_UNMAPPED
+      or err == UC_ERR_READ_PROT
+      or err == UC_ERR_WRITE_PROT
+      or err == UC_ERR_FETCH_PROT;
 }
 
 template <typename Run> class running_scope
@@ -273,10 +267,8 @@ void machine::run_state::on_block(
   auto const now = run.owner.clock_driver_.exact_now();
   run.block_pc   = static_cast<address>(addr);
   if(run.stop_flag
-     or now
-     >= run.deadline
-     or now
-     >= run.owner.scheduler_.earliest()
+     or now >= run.deadline
+     or now >= run.owner.scheduler_.earliest()
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {
@@ -501,8 +493,7 @@ void machine::run_state::update_stepping(slice_request const& request)
 {
   if(stepping
      or not request.exact_instructions
-     or left(*request.exact_instructions, executed)
-     > tcg_block_limit)
+     or left(*request.exact_instructions, executed) > tcg_block_limit)
   {
     return;
   }
@@ -584,8 +575,7 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
     {
       auto const& peripherals = owner.peripherals_;
       contract_assert(
-          due->id.owner
-          < peripherals.size()
+          due->id.owner < peripherals.size()
           and peripherals[due->id.owner]
           and peripherals[due->id.owner]->model);
       peripherals[due->id.owner]->model->on_event(due->id.kind, due->payload);

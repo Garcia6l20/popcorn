@@ -149,11 +149,9 @@ auto cdc_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t
   auto const comm    = *queues.comm_interface;
   auto const drivers = host->drivers();
   auto const found   = std::ranges::find_if(drivers, [&](usb::bound_driver const& bound) {
-    return bound.name
-        == usb::cdc_acm_name
+    return bound.name == usb::cdc_acm_name
        and not bound.interfaces.empty()
-       and bound.interfaces.front()
-        == comm;
+       and bound.interfaces.front() == comm;
   });
   if(found == drivers.end())
   {
@@ -570,12 +568,9 @@ auto uac_link::set_feature(
     std::int32_t value) -> std::uint64_t
 {
   auto* const owner = host();
-  if(owner
-     == nullptr
-     or (control
-         != std::to_underlying(usb::uac2_control::mute)
-         and control
-         != std::to_underlying(usb::uac2_control::volume)))
+  if(owner == nullptr
+     or (control != std::to_underlying(usb::uac2_control::mute)
+         and control != std::to_underlying(usb::uac2_control::volume)))
   {
     return 0;
   }

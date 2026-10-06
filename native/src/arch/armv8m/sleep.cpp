@@ -127,7 +127,7 @@ auto cortex_m::wake_event() const -> bool
   auto const best = best_pending(state_.exceptions);
   return best
      and group_priority(priority_of(state_.exceptions, *best), state_.scs.prigroup)
-       < current_priority(not wfe);
+             < current_priority(not wfe);
 }
 
 void cortex_m::note_pending(std::uint32_t number) noexcept
@@ -147,8 +147,7 @@ auto cortex_m::hint() -> bool
 {
   auto const at   = raw_pc();
   auto const here = halfword(at);
-  if((here & 0xff00u)
-     == 0xde00u
+  if((here & 0xff00u) == 0xde00u
      or ((here & 0xfff0u) == 0xf7f0u and (halfword(at + 2) & 0xf000u) == 0xa000u))
   {
     return false;
@@ -165,10 +164,8 @@ auto cortex_m::hint() -> bool
   }
   else if(
       auto const second = at >= 4 ? halfword(at - 2) : 0;
-      at
-      >= 4
-      and halfword(at - 4)
-      == hint_wide_first
+      at >= 4
+      and halfword(at - 4) == hint_wide_first
       and (second == wfe_wide_second or second == yield_wide))
   {
     insn = at - 4;
@@ -184,12 +181,9 @@ auto cortex_m::hint() -> bool
     return true;
   }
   auto const sev = (insn >= 2 and halfword(insn - 2) == sev_narrow)
-                or (insn
-                    >= 4
-                    and halfword(insn - 4)
-                    == hint_wide_first
-                    and halfword(insn - 2)
-                    == sev_wide_second);
+                or (insn >= 4
+                    and halfword(insn - 4) == hint_wide_first
+                    and halfword(insn - 2) == sev_wide_second);
   if(sev or state_.event_register)
   {
     state_.event_register = false;

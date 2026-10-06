@@ -291,7 +291,7 @@ auto decode_group(reader& in) -> coverage_group
     range.name  = in.text("a range name");
     if(not group.ranges.empty()
        and std::pair{group.ranges.back().start, group.ranges.back().size}
-       >= std::pair{range.start, range.size})
+               >= std::pair{range.start, range.size})
     {
       in.fail(at, "ranges sorted by start and size, each once");
     }

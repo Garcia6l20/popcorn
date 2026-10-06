@@ -71,13 +71,10 @@ public:
           bulk_out_ = ctx.open_pipe(endpoint);
         }
         else if(
-            endpoint.type
-            == usb::transfer_type::interrupt
+            endpoint.type == usb::transfer_type::interrupt
             and endpoint.in()
-            and setting.class_code
-            == 3
-            and report_
-            == 0)
+            and setting.class_code == 3
+            and report_ == 0)
         {
           report_ = ctx.open_pipe(endpoint);
         }

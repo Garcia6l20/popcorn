@@ -36,12 +36,9 @@ auto segment_name(elf_file const& elf, std::size_t index, Elf32_Phdr const& ph) 
     {
       continue;
     }
-    bool const within = sh.sh_offset
-                     >= ph.p_offset
-                     && std::size_t{sh.sh_offset}
-                      + sh.sh_size
-                     <= std::size_t{ph.p_offset}
-                      + ph.p_filesz;
+    bool const within =
+        sh.sh_offset >= ph.p_offset
+        and std::size_t{sh.sh_offset} + sh.sh_size <= std::size_t{ph.p_offset} + ph.p_filesz;
     if(within)
     {
       name += ' ';
@@ -72,12 +69,9 @@ auto is_mapping_symbol(std::string_view name) -> bool
 auto is_iar_label(std::string_view name, unsigned char info) -> bool
 {
   return !name.empty()
-      && name[0]
-      == '?'
-      && ELF32_ST_TYPE(info)
-      == STT_NOTYPE
-      && ELF32_ST_BIND(info)
-      == STB_LOCAL;
+     and name[0] == '?'
+     and ELF32_ST_TYPE(info) == STT_NOTYPE
+     and ELF32_ST_BIND(info) == STB_LOCAL;
 }
 
 auto load_segments(elf_file const& elf) -> std::vector<segment>

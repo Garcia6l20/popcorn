@@ -63,7 +63,7 @@ AlignConsecutiveAssignments: true
 AlignConsecutiveDeclarations: true
 AlignOperands: AlignAfterOperator
 BreakBeforeBinaryOperators: NonAssignment
-BreakBinaryOperations: OnePerLine
+BreakBinaryOperations: RespectPrecedence
 
 # specific for switch
 IndentCaseLabels: true

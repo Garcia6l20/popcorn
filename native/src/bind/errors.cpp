@@ -40,8 +40,7 @@ consteval auto untranslated_errors() -> std::size_t
     auto const type = std::meta::dealias(member);
     if(std::meta::is_complete_type(type)
        and std::meta::is_base_of_type(^^error, type)
-       and std::ranges::find(translated, type)
-       == translated.end())
+       and std::ranges::find(translated, type) == translated.end())
     {
       ++missing;
     }

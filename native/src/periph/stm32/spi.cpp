@@ -558,10 +558,8 @@ void spi::flags()
 void spi::warn_unsupported()
 {
   auto const used =
-      get(regs_, master_)
-      == 0
-      or communication()
-      == 3
+      get(regs_, master_) == 0
+      or communication() == 3
       or std::ranges::any_of(unsupported_, [&](field_ref bits) { return get(regs_, bits) != 0; });
   if(used and not std::exchange(unsupported_logged_, true))
   {

@@ -467,12 +467,8 @@ TEST_CASE("without the factory words a machine builds, converting VREFINT is a c
     if(region.content)
     {
       std::erase_if(*region.content, [&](popcorn::region_content const& piece) {
-        return region.start
-             + piece.offset
-            == 0x0BFA'07A5
-            or region.start
-             + piece.offset
-            == 0x0BFA'0710;
+        return region.start + piece.offset == 0x0BFA'07A5
+            or region.start + piece.offset == 0x0BFA'0710;
       });
     }
   }

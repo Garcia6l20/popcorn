@@ -198,11 +198,8 @@ auto machine::mapped_region::build(
       auto const& other = *candidate->desc;
       return not candidate->owned
          and not other.physical
-         and other.start
-          <= *region.physical
-         and *region.physical
-           + std::uint64_t{region.size}
-          <= region_end(other);
+         and other.start <= *region.physical
+         and *region.physical + std::uint64_t{region.size} <= region_end(other);
     });
     if(target == memory.end())
     {

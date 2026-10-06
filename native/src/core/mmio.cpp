@@ -137,11 +137,8 @@ void machine::run_state::map_peripherals()
     auto const first        = ranges.front().first;
     auto const last         = ranges.back().second;
     auto const holds_memory = std::ranges::any_of(owner.memory_, [&](auto const& region) {
-      return region->desc->start
-          <= last
-         and first
-           < std::uint64_t{region->desc->start}
-           + region->desc->size;
+      return region->desc->start <= last
+         and first < std::uint64_t{region->desc->start} + region->desc->size;
     });
     if(not holds_memory)
     {

@@ -145,12 +145,9 @@ auto load_image(core::machine& target, popcorn::image::image const& built) -> st
 
 auto policies(core::machine_options const& options) -> bool
 {
-  return options.on_reset_request
-      == core::reset_request_policy::reset_and_continue
-      or options.faults
-      == popcorn::arch::fault_policy::enter_handler
-      or options.spin_threshold
-       > 0
+  return options.on_reset_request == core::reset_request_policy::reset_and_continue
+      or options.faults == popcorn::arch::fault_policy::enter_handler
+      or options.spin_threshold > 0
       or options.strict_peripherals;
 }
 }

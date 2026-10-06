@@ -1801,12 +1801,8 @@ void check_stereo(
   for(std::uint32_t index = 0; index < stereo_halves; ++index)
   {
     auto const k = index % stereo_frames;
-    if(sent[index].slots
-       != std::vector<std::uint32_t>{k, 0x8000u | k}
-       or sent[index].at.ps
-       != t0
-       + index
-       * frame)
+    if(sent[index].slots != std::vector<std::uint32_t>{k, 0x8000u | k}
+       or sent[index].at.ps != t0 + index * frame)
     {
       wrong_frames.push_back(index);
     }
@@ -1823,10 +1819,8 @@ void check_stereo(
   {
     auto const left  = k < done or (k == done and bytes == 4) ? 1024 + k : 512 + k;
     auto const right = k < done ? 1024 + k : 512 + k;
-    if(r.halfword("rx_stereo", 0, k)
-       != (0x1000u | left)
-       or r.halfword("rx_stereo", 1, k)
-       != (0x2000u | right))
+    if(r.halfword("rx_stereo", 0, k) != (0x1000u | left)
+       or r.halfword("rx_stereo", 1, k) != (0x2000u | right))
     {
       wrong_slots.push_back(k);
     }

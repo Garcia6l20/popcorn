@@ -63,7 +63,7 @@ void refuse_other_version(std::string_view text, std::string_view source)
   }
   if(version->second.is<json::number>()
      and version->second.as<json::number>()
-     != static_cast<json::number>(description_schema_version))
+             != static_cast<json::number>(description_schema_version))
   {
     throw_version_mismatch(source, version->second.as<json::number>());
   }
@@ -168,8 +168,7 @@ template <typename T> auto schema_of(json::object& defs) -> json::value
   }
   else if constexpr(
       std::integral<T>
-      and std::numeric_limits<T>::digits
-      <= std::numeric_limits<json::number>::digits)
+      and std::numeric_limits<T>::digits <= std::numeric_limits<json::number>::digits)
   {
     return {
         {"type",    "integer"                                               },

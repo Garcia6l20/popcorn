@@ -84,10 +84,8 @@ static enum modem_reply command(char const* text, uint32_t* latency_ms)
   {
     *latency_ms = HAL_GetTick() - sent;
   }
-  if(strstr((char const*)reply, "\r\nOK\r\n")
-     != nullptr
-     || strncmp((char const*)reply, "OK\r\n", 4)
-     == 0)
+  if(strstr((char const*)reply, "\r\nOK\r\n") != nullptr
+     || strncmp((char const*)reply, "OK\r\n", 4) == 0)
   {
     return MODEM_OK;
   }

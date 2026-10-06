@@ -243,8 +243,7 @@ auto machine_handle::audio_names() const -> std::vector<std::string>
   for(auto const& unit : machine_->description().peripherals)
   {
     if(not unit.alias_of
-       and dynamic_cast<periph::stm32::audio_port*>(machine_->model(unit.name))
-       != nullptr)
+       and dynamic_cast<periph::stm32::audio_port*>(machine_->model(unit.name)) != nullptr)
     {
       names.push_back(unit.name);
     }
@@ -278,8 +277,7 @@ auto machine_handle::uart_names() const -> std::vector<std::string>
   for(auto const& unit : machine_->description().peripherals)
   {
     if(not unit.alias_of
-       and dynamic_cast<periph::stm32::uart_port*>(machine_->model(unit.name))
-       != nullptr)
+       and dynamic_cast<periph::stm32::uart_port*>(machine_->model(unit.name)) != nullptr)
     {
       names.push_back(unit.name);
     }

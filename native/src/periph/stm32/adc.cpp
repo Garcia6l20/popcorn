@@ -616,8 +616,8 @@ auto adc::after(std::uint64_t cycles) const -> std::uint64_t
 void adc::hold_until(std::uint64_t ps)
 {
   auto const samples = ratio();
-  while(
-      state_.held < samples and after(std::uint64_t{state_.held} * conversion() + sampling()) <= ps)
+  while(state_.held < samples
+        and after(std::uint64_t{state_.held} * conversion() + sampling()) <= ps)
   {
     state_.sum += code();
     ++state_.held;
@@ -721,10 +721,8 @@ auto adc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
 void adc::cr_written(std::uint32_t old, std::uint32_t now)
 {
   now |= old & set_only_;
-  auto const refused = start_.of(now)
-                    != 0
-                   and start_.of(old)
-                    == 0
+  auto const refused = start_.of(now) != 0
+                   and start_.of(old) == 0
                    and (enable_.of(old) == 0 or disable_.of(now) != 0);
   if(refused)
   {
@@ -844,12 +842,9 @@ void adc::prepare()
   {
     unmodelled(mdf_logged_, "ADC_CFGR1", "DMNGT 10: the MDF data path");
   }
-  if(get(regs_, watchdog1_)
-     != 0
-     and get(regs_, watchdog1_filter_)
-     != 0
-     and get(regs_, dma_mode_)
-     != 0)
+  if(get(regs_, watchdog1_) != 0
+     and get(regs_, watchdog1_filter_) != 0
+     and get(regs_, dma_mode_) != 0)
   {
     unmodelled(
         watchdog_filter_dma_logged_, "ADC_HTR1",
@@ -1004,8 +999,7 @@ auto adc::guarded(std::size_t watchdog, std::uint32_t channel) const -> bool
 {
   if(watchdog == 0)
   {
-    return get(regs_, watchdog1_)
-        != 0
+    return get(regs_, watchdog1_) != 0
        and (get(regs_, watchdog1_single_) == 0 or get(regs_, watchdog1_channel_) == channel);
   }
   return channel < channels and (get(regs_, watchdog_channels_[watchdog]) >> channel & 1u) != 0;
@@ -1020,10 +1014,8 @@ void adc::watch(std::uint32_t channel, std::uint32_t result)
     {
       continue;
     }
-    auto out = compared
-             < get(regs_, watchdog_low_[watchdog])
-            or compared
-             > get(regs_, watchdog_high_[watchdog]);
+    auto out = compared < get(regs_, watchdog_low_[watchdog])
+            or compared > get(regs_, watchdog_high_[watchdog]);
     if(watchdog == 0)
     {
       state_.filter_count =

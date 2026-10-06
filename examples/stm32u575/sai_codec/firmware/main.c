@@ -125,12 +125,9 @@ static void stereo_list(
     DMA_QListTypeDef*          queue,
     DMA_NodeConfTypeDef const* config)
 {
-  if(HAL_DMAEx_List_BuildNode(config, node)
-     != HAL_OK
-     || HAL_DMAEx_List_InsertNode_Tail(queue, node)
-     != HAL_OK
-     || HAL_DMAEx_List_SetCircularMode(queue)
-     != HAL_OK)
+  if(HAL_DMAEx_List_BuildNode(config, node) != HAL_OK
+     || HAL_DMAEx_List_InsertNode_Tail(queue, node) != HAL_OK
+     || HAL_DMAEx_List_SetCircularMode(queue) != HAL_OK)
   {
     Error_Handler();
   }
