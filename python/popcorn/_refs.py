@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import struct
 from collections.abc import Callable, Coroutine, Generator
@@ -128,11 +129,16 @@ class Pending[R](Coroutine[Any, Any, R]):
         future = self._future
         if future is None:
             raise RuntimeError("this command was already awaited")
+        left_in_place = False
         try:
             value = await awaited(future, self._convert, cancel=self._cancel)
+        except asyncio.CancelledError:
+            left_in_place = not self._cancel
+            raise
         finally:
-            self._future = None
-            self._finished = True
+            if not left_in_place:
+                self._future = None
+                self._finished = True
             del future
         if self._follow is not None:
             return await self._follow(value)

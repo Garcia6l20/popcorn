@@ -630,6 +630,27 @@ def test_an_output_report_written_unplugged_survives_a_restore_into_a_fresh_mach
     )
 
 
+def test_a_report_whose_await_is_cancelled_before_it_is_queued_is_not_done(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(attached=False))
+    hid = m.periph.OTG_FS.host.hid()
+    at = m.time + ms(1)
+    writing = hid.write_report(b"\x02\x55", at=at)
+
+    async def cancelled() -> None:
+        task = asyncio.create_task(writing)
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancelled())
+    assert (writing.done(), hid.queued) == (False, 0)
+    asyncio.run(m.run(for_=ms(2)))
+    assert (writing.done(), hid.queued) == (True, 1)
+
+
 def test_an_unplugged_function_keeps_its_report_descriptor_across_a_restore(
     u575: popcorn.MachineDescription,
 ) -> None:
