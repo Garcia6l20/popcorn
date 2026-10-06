@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import enum
 import weakref
 from collections.abc import Callable, Sequence
@@ -11,23 +12,25 @@ from popcorn import _core
 
 
 class CallbackTable:
-    """The Python handlers of a machine's native hooks, by key.
+    """The Python handlers of a machine's native hooks, by key, each with the context it runs in.
 
     Native code holds only a Relay, a weak reference to this table and a key, so that no
-    reference cycle runs through native code, where the garbage collector cannot see it.
+    reference cycle runs through native code, where the garbage collector cannot see it. The
+    context is a copy of the one current at `add`, kept here for the same reason.
     """
 
-    __slots__ = ("__weakref__", "_next", "_table")
+    __slots__ = ("__weakref__", "_next", "_running", "_table")
 
     def __init__(self) -> None:
         self._next = 0
-        self._table: dict[int, Callable[..., object]] = {}
+        self._table: dict[int, tuple[Callable[..., object], contextvars.Context]] = {}
+        self._running: set[int] = set()
 
     def add(self, handler: Callable[..., object]) -> int:
-        """Store a handler, returning its key."""
+        """Store a handler and a copy of the current context, returning its key."""
         key = self._next
         self._next += 1
-        self._table[key] = handler
+        self._table[key] = (handler, contextvars.copy_context())
         return key
 
     def drop(self, key: int) -> None:
@@ -38,21 +41,34 @@ class CallbackTable:
         return len(self._table)
 
     def __call__(self, key: int, *args: object) -> object:
-        return self._table[key](*args)
+        handler, context = self._table[key]
+        if key in self._running:
+            return handler(*args)
+        self._running.add(key)
+        try:
+            return context.run(handler, *args)
+        finally:
+            self._running.discard(key)
 
 
 class Relay:
-    """What native code calls: forwards to a handler of a table while the table lives."""
+    """What native code calls: forwards to a handler of a table while the table lives.
 
-    __slots__ = ("_key", "_table")
+    A quiet relay returns None once the table is gone, for a log sink that may outlive it.
+    """
 
-    def __init__(self, table: CallbackTable, key: int) -> None:
+    __slots__ = ("_key", "_quiet", "_table")
+
+    def __init__(self, table: CallbackTable, key: int, *, quiet: bool = False) -> None:
         self._table = weakref.ref(table)
         self._key = key
+        self._quiet = quiet
 
     def __call__(self, *args: object) -> object:
         table = self._table()
         if table is None:
+            if self._quiet:
+                return None
             raise ReferenceError("the machine of this hook is gone")
         return table(self._key, *args)
 

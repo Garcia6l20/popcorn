@@ -46,13 +46,13 @@ public:
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
-    nb::gil_scoped_acquire gil;
+    gil_entry const gil;
     return nb::cast<std::vector<std::string>>(call("_claims"));
   }
 
   void reset(periph::register_file&, reset_kind kind) override
   {
-    nb::gil_scoped_acquire gil;
+    gil_entry const gil;
     call("_reset", kind);
   }
 
@@ -62,8 +62,8 @@ public:
       std::uint8_t           size,
       periph::access_ctx) -> std::expected<std::uint32_t, bus_error> override
   {
-    nb::gil_scoped_acquire gil;
-    auto const             result = call("_read", offset, size);
+    gil_entry const gil;
+    auto const      result = call("_read", offset, size);
     if(result.is_none())
     {
       return std::unexpected{bus_error::denied};
@@ -84,8 +84,8 @@ public:
       std::uint32_t          value,
       periph::access_ctx) -> std::expected<void, bus_error> override
   {
-    nb::gil_scoped_acquire gil;
-    auto const             result = call("_write", offset, size, old, value);
+    gil_entry const gil;
+    auto const      result = call("_write", offset, size, old, value);
     if(result.is_none())
     {
       return {};
@@ -103,37 +103,49 @@ public:
 
   void on_event(std::uint32_t kind, std::uint64_t payload) override
   {
-    nb::gil_scoped_acquire gil;
+    gil_entry const gil;
     call("_event", kind, payload);
   }
 
   void save(std::vector<std::byte>& out) const override
   {
-    nb::gil_scoped_acquire gil;
-    auto const             bytes = nb::cast<nb::bytes>(call("_save"));
-    auto const             data  = static_cast<std::byte const*>(bytes.data());
+    gil_entry const gil;
+    auto const      bytes = nb::cast<nb::bytes>(call("_save"));
+    auto const      data  = static_cast<std::byte const*>(bytes.data());
     out.insert(out.end(), data, data + bytes.size());
   }
 
   void load(std::span<std::byte const> in) override
   {
-    nb::gil_scoped_acquire gil;
+    gil_entry const gil;
     call("_load", nb::bytes(in.data(), in.size()));
+  }
+
+  /**
+   * @brief Sets the cell whose context every call runs in.
+   * @param cell A weak reference to the cell, or None, the GIL held.
+   */
+  void run_in(nb::object cell)
+  {
+    context_ = std::move(cell);
   }
 
 private:
   template <typename... Args> auto call(char const* name, Args&&... args) const -> nb::object
   {
+    cell_entry const   entered{context_};
     nb::detail::ticket ticket(nb_trampoline, name, true);
     return nb_trampoline.base().attr(ticket.key)(std::forward<Args>(args)...);
   }
+
+  nb::object context_ = nb::none();
 };
 
-thread_local detail::alive_flag building{};
+thread_local building_state building{};
 
-auto current_alive() -> detail::alive_flag
+auto current_build() -> building_state
 {
-  if(not building)
+  if(not building.alive)
   {
     throw config_error("models", 0, "python", "a Python model built with its machine from Python");
   }
@@ -150,6 +162,10 @@ auto to_model(nb::object const& made, peripheral_desc const& desc) -> std::share
         std::format(
             "a popcorn.model.Model instance, not {}", nb::cast<std::string>(nb::repr(made))));
   }
+  if(auto* const python = dynamic_cast<python_model*>(model.get()))
+  {
+    python->run_in(building_context());
+  }
   return model;
 }
 }
@@ -164,12 +180,13 @@ void bind_model_base(nb::module_ scope)
 
 auto python_model_factory(nb::object maker) -> periph::model_factory
 {
-  return
-      [callable = held(std::move(maker))](periph::model_context& ctx, peripheral_desc const& desc) {
-        auto                   alive = current_alive();
-        nb::gil_scoped_acquire gil;
-        return to_model(callable->fn(model_context_view{ctx, std::move(alive)}), desc);
-      };
+  return [callable = held_bare(std::move(maker))](
+             periph::model_context& ctx, peripheral_desc const& desc) {
+    auto            made = current_build();
+    gil_entry const gil;
+    return to_model(
+        callable->fn(model_context_view{ctx, std::move(made.alive), std::move(made.host)}), desc);
+  };
 }
 
 auto python_object(periph::model* model) -> nb::object
@@ -182,13 +199,22 @@ auto python_object(periph::model* model) -> nb::object
   return nb::find(static_cast<periph::model*>(python));
 }
 
-building_scope::building_scope(detail::alive_flag alive) noexcept
-    : previous_{std::exchange(building, std::move(alive))}
+building_scope::building_scope(building_state state) noexcept
+    : previous_{std::exchange(building, std::move(state))}
 {}
 
 building_scope::~building_scope()
 {
   building = std::move(previous_);
+}
+
+auto building_context() -> nb::object
+{
+  if(building.context == nullptr)
+  {
+    return nb::none();
+  }
+  return nb::borrow(building.context);
 }
 }
 
@@ -199,11 +225,12 @@ void register_python_model(std::string const& ip, std::string const& version_glo
   periph::register_model(
       ip, version_glob,
       [ip, version_glob](periph::model_context& ctx, peripheral_desc const& desc) {
-        auto                               alive = detail::current_alive();
-        reflex::py::nb::gil_scoped_acquire gil;
+        auto                    made = detail::current_build();
+        detail::gil_entry const gil;
         auto const makers = reflex::py::nb::module_::import_("popcorn.model").attr("_REGISTERED");
         auto const maker  = makers[reflex::py::nb::make_tuple(ip, version_glob)];
-        return detail::to_model(maker(model_context_view{ctx, std::move(alive)}), desc);
+        return detail::to_model(
+            maker(model_context_view{ctx, std::move(made.alive), std::move(made.host)}), desc);
       });
 }
 

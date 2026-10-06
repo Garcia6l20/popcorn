@@ -2,6 +2,7 @@
 #include "devices.hpp"
 #include "errors.hpp"
 #include "models.hpp"
+#include "python_callable.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/errors.hpp>
@@ -229,25 +230,67 @@ auto options_of(
 }
 
 machine_handle::machine_handle(mcu_description const& description, machine_config const& config)
-    : alive_{detail::make_alive()}
+    : alive_{detail::make_alive()}, slot_{std::make_shared<detail::host_slot>()},
+      thread_live_{std::make_shared<std::atomic<bool>>(false)}
 {
-  detail::building_scope const building{alive_};
-  for(auto const& name : config.usb_hosts | std::views::keys)
+  reflex::py::nb::object cell;
+  if(config.models_context and not config.models_context->is_none())
   {
-    hubs_.emplace(name, detail::usb_hubs{});
+    cell = reflex::py::nb::steal(PyWeakref_NewRef(config.models_context->ptr(), nullptr));
+    if(not cell.is_valid())
+    {
+      throw reflex::py::nb::python_error();
+    }
   }
-  machine_ = std::make_unique<core::machine>(
-      description, factory_for(description), options_of(description, config, hubs_));
+  std::unique_ptr<core::machine> built;
+  {
+    detail::building_scope const building{
+        {.alive = alive_, .host = slot_, .context = cell.ptr()}
+    };
+    for(auto const& name : config.usb_hosts | std::views::keys)
+    {
+      hubs_.emplace(name, detail::usb_hubs{});
+    }
+    built = std::make_unique<core::machine>(
+        description, factory_for(description), options_of(description, config, hubs_));
+  }
+  engine_ = built.get();
+  id_     = built->id();
+  std::vector<std::unique_ptr<core::machine>> members;
+  members.push_back(std::move(built));
+  host_ = std::make_shared<core::host>(
+      std::move(members), core::slice_bounds{}, detail::python_thread_hooks(thread_live_));
+  slot_->host = host_;
+  detail::register_host(host_);
 }
 
 machine_handle::~machine_handle()
 {
   detail::clear_alive(*alive_);
+  detail::unregister_host(host_);
+  if(Py_IsFinalizing() != 0 and thread_live_->load())
+  {
+    detail::abandon(std::move(host_));
+    return;
+  }
+  if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
+  {
+    if(PyGILState_Check() != 0)
+    {
+      reflex::py::nb::gil_scoped_release const released;
+      host_->close();
+    }
+    else
+    {
+      host_->close();
+    }
+  }
+  host_.reset();
 }
 
 void machine_handle::load(image const& loaded)
 {
-  machine_->load(loaded.native());
+  access([&](core::machine& target) { target.load(loaded.native()); });
 }
 
 void machine_handle::reset(reset_kind kind)
@@ -256,19 +299,21 @@ void machine_handle::reset(reset_kind kind)
   {
     throw config_error("reset", 0, "kind", "a reset kind");
   }
-  machine_->reset(kind);
+  access([kind](core::machine& target) { target.reset(kind); });
 }
 
 auto machine_handle::image_digests() const -> std::vector<std::string>
 {
-  return machine_->loaded_images()
-       | std::views::transform(&popcorn::image::image::digest)
-       | std::ranges::to<std::vector>();
+  return access([](core::machine& target) {
+    return target.loaded_images()
+         | std::views::transform(&popcorn::image::image::digest)
+         | std::ranges::to<std::vector>();
+  });
 }
 
 auto machine_handle::locate(address pc) const -> location_info
 {
-  return owned(machine_->locate(pc));
+  return access([pc](core::machine& target) { return owned(target.locate(pc)); });
 }
 
 void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes)
@@ -279,8 +324,9 @@ void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes
         "memory", 0, std::format("{:#010x}", at),
         std::format("{} bytes within the 32-bit address space", bytes.size()));
   }
-  auto const written = machine_->mem().write_block(
-      at, std::span{static_cast<std::byte const*>(bytes.data()), bytes.size()});
+  auto const data = std::span{static_cast<std::byte const*>(bytes.data()), bytes.size()};
+  auto const written =
+      access([&](core::machine& target) { return target.mem().write_block(at, data); });
   if(not written)
   {
     throw detail::bus_access_error(
@@ -293,57 +339,66 @@ void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes
 
 auto machine_handle::snapshot() const -> snapshot_handle
 {
-  return snapshot_handle{machine_->snapshot()};
+  return access([](core::machine& target) { return snapshot_handle{target.snapshot()}; });
 }
 
 void machine_handle::restore(snapshot_handle const& saved)
 {
-  reflex::py::nb::gil_scoped_release unlocked;
-  for(auto const& hubs : hubs_ | std::views::values)
-  {
-    hubs.cdc->discard();
-    hubs.hid->discard();
-    hubs.uac2->discard();
-  }
-  machine_->restore(saved.native());
+  access([&](core::machine& target) {
+    reflex::py::nb::gil_scoped_release unlocked;
+    for(auto const& hubs : hubs_ | std::views::values)
+    {
+      hubs.cdc->discard();
+      hubs.hid->discard();
+      hubs.uac2->discard();
+    }
+    target.restore(saved.native());
+  });
 }
 
 void machine_handle::begin_call(arch::call_frame const& frame)
 {
-  machine_->begin_call(frame);
+  access([&](core::machine& target) { target.begin_call(frame); });
 }
 
 auto machine_handle::end_call() -> std::uint64_t
 {
-  if(not machine_->in_call())
-  {
-    throw config_error("call", 0, "end_call", "a call begun by begin_call");
-  }
-  return machine_->end_call();
+  return access([](core::machine& target) {
+    if(not target.in_call())
+    {
+      throw config_error("call", 0, "end_call", "a call begun by begin_call");
+    }
+    return target.end_call();
+  });
 }
 
-auto machine_handle::in_call() const noexcept -> bool
+auto machine_handle::in_call() const -> bool
 {
-  return machine_->in_call();
+  return access([](core::machine& target) { return target.in_call(); });
 }
 
 auto machine_handle::pending_events() const -> std::size_t
 {
-  return machine_->pending_events();
+  return access([](core::machine& target) { return target.pending_events(); });
 }
 
 auto machine_handle::model(std::string const& peripheral) const -> reflex::py::nb::object
 {
-  return detail::python_object(machine_->model(peripheral));
+  return detail::python_object(engine_->model(peripheral));
 }
 
 auto machine_handle::id() const noexcept -> std::uint64_t
 {
-  return machine_->id();
+  return id_;
+}
+
+auto machine_handle::owns_engine() const noexcept -> bool
+{
+  return host_->owns_engine();
 }
 
 auto machine_handle::native() const noexcept -> core::machine&
 {
-  return *machine_;
+  return *engine_;
 }
 }

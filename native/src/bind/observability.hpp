@@ -3,6 +3,8 @@
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/obs/pctr.hpp>
 
+#include "gil_locks.hpp"
+
 #include <reflex/py.hpp>
 
 #include <cstdint>
@@ -28,10 +30,21 @@ public:
    * @brief Owns a writer and the sink feeding it.
    * @param writer The file writer.
    * @param sink The machine's sink into @p writer.
+   * @param host The machine's host, through which close() removes the sink.
    */
   [[= py::skip]] trace_handle(
       std::unique_ptr<obs::pctr_writer> writer,
-      core::hook_handle                 sink) noexcept;
+      core::hook_handle                 sink,
+      detail::host_ref                  host) noexcept;
+  /** @brief Takes over @p other's writer and sink. */
+  [[= py::skip]] trace_handle(trace_handle&& other) noexcept = default;
+  /** @brief Not move-assignable: the old sink would skip retire(). */
+  auto operator=(trace_handle&&) -> trace_handle& = delete;
+  /**
+   * @brief Removes the sink and destroys the writer through detail::retire(), safe on any thread
+   *        while the machine runs: the writer lives until its sink is gone.
+   */
+  ~trace_handle();
 
   /**
    * @brief Removes the sink, then writes what is buffered and closes the file. Does nothing
@@ -52,5 +65,6 @@ public:
 private:
   std::unique_ptr<obs::pctr_writer> writer_;
   core::hook_handle                 sink_;
+  detail::host_ref                  host_;
 };
 }

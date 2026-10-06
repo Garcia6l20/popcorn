@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import sys
+import threading
 import types
 
 import popcorn
@@ -24,22 +24,30 @@ def calls_inside_slices(
 ) -> tuple[int, int]:
     """Python calls the facade made between slices, and calls made while a slice ran.
 
-    Native code has no Python frame: a call it makes into Python has the frame that called the
-    slice as its caller, stopped on the line of that call.
+    A slice runs on the machine's thread, so a call made while it runs is a call on another
+    thread than the test's. The profiler covers every thread, the machine's included, which
+    exists once the machine ran.
     """
-    lines = slice_lines()
+    asyncio.run(m.step(1))
+    assert slice_lines()
     facade = _machine.__file__
+    test_thread = threading.get_ident()
     between = 0
     inside = 0
 
     def profile(frame: types.FrameType, event: str, arg: object) -> None:
         nonlocal between, inside
-        caller = frame.f_back
-        if event != "call" or caller is None or caller.f_code.co_filename != facade:
+        if event != "call":
             return
-        if caller.f_lineno in lines:
+        if threading.get_ident() != test_thread:
             inside += 1
-        elif caller.f_code.co_name in ("_drive", "_drive_background"):
+            return
+        caller = frame.f_back
+        if (
+            caller is not None
+            and caller.f_code.co_filename == facade
+            and caller.f_code.co_name in ("_drive", "_drive_background")
+        ):
             between += 1
 
     async def in_background() -> None:
@@ -47,11 +55,11 @@ def calls_inside_slices(
             while m.busy and between < run:
                 await asyncio.sleep(0)
 
-    sys.setprofile(profile)
+    threading.setprofile_all_threads(profile)
     try:
         asyncio.run(in_background() if background else m.run(budget=run))
     finally:
-        sys.setprofile(None)
+        threading.setprofile_all_threads(None)
     return between, inside
 
 

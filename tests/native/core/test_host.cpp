@@ -1336,3 +1336,60 @@ TEST_CASE("stamps posted while running are checked when a halt parks in the same
   auto held = h.on->lock();
   CHECK_FALSE(h.on->session_open(held, 0));
 }
+
+TEST_CASE("a single-slice goal yields where one run_slice under its bounds yields")
+{
+  auto       twin     = alu(1'000'000);
+  auto const expected = twin->run_slice(
+      {.max_instructions = icount{1000}, .wall_budget = long_wall, .leave_until = true});
+  REQUIRE_FALSE(expected.stopped.has_value());
+  hosted     h{alu(1'000'000)};
+  auto const got =
+      h.run({
+                .once =
+                    core::single_slice{
+                                       .bounds      = {.max_instructions = icount{1000}, .wall_budget = long_wall},
+                                       .leave_until = true}
+  })
+          .get();
+  CHECK(got.yielded);
+  CHECK(got.executed == expected.executed);
+  CHECK(h.reg("pc") == twin->regs().pc());
+  CHECK(h.on->state(0) == core::host_state::parked);
+  auto held = h.on->lock();
+  CHECK_FALSE(h.on->busy(held, 0));
+}
+
+TEST_CASE("a single-slice goal reports a stop inside its slice and honours leave_until")
+{
+  hosted     h{alu(1'000'000)};
+  auto const stopped =
+      h.run({.budget = icount{10},
+             .once   = core::single_slice{.bounds = {.max_instructions = icount{1000}}}})
+          .get();
+  CHECK_FALSE(stopped.yielded);
+  CHECK(stopped.stopped.reason == stop_reason::budget);
+  CHECK(stopped.executed == stopped.stopped.instructions);
+  auto const at      = sym("alu", "alu_body");
+  auto const reached = h.run({.until = at}).get();
+  REQUIRE(reached.stopped.reason == stop_reason::address);
+  auto const kept = h.run({.until = at, .once = core::single_slice{.leave_until = false}}).get();
+  CHECK_FALSE(kept.yielded);
+  CHECK(kept.stopped.reason == stop_reason::address);
+  CHECK(kept.executed == icount{0});
+  auto const left = h.run({.until = at, .once = core::single_slice{.leave_until = true}}).get();
+  CHECK(left.executed.value > 0);
+}
+
+TEST_CASE("a parked section whose body accesses the same host again runs it inline")
+{
+  hosted     h{alu(10)};
+  auto const nested = core::access(*h.on, 0, [&h](core::machine& outer) {
+    return core::access(*h.on, 0, [&outer](core::machine& inner) {
+      return std::pair{&inner == &outer, std::this_thread::get_id()};
+    });
+  });
+  CHECK(nested.first);
+  CHECK(nested.second == std::this_thread::get_id());
+  CHECK_FALSE(h.on->owns_engine());
+}

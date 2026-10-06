@@ -63,8 +63,10 @@ cdc_link::cdc_link(
     periph::stm32::usb_host_port&         port,
     std::shared_ptr<periph::usb::cdc_hub> hub,
     std::size_t                           function,
-    detail::alive_flag                    alive)
-    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
+    detail::alive_flag                    alive,
+    detail::host_ref                      host)
+    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)},
+      host_{std::move(host)}
 {}
 
 template <typename Body> auto cdc_link::locked(Body&& body) const
@@ -146,7 +148,19 @@ auto cdc_link::ready() const -> bool
 auto cdc_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
     -> std::uint32_t
 {
-  usb::deferred_warnings const deferred;
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return detail::host_access(host_, [&] {
+    usb::deferred_warnings const deferred;
+    return request_locked(setup, std::move(data));
+  });
+}
+
+auto cdc_link::request_locked(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
+    -> std::uint32_t
+{
   return locked([&](usb::cdc_channel& queues) -> std::uint32_t {
     auto* const host = port_->board_host();
     if(not queues.comm_interface or host == nullptr)
@@ -240,8 +254,10 @@ hid_link::hid_link(
     periph::stm32::usb_host_port&         port,
     std::shared_ptr<periph::usb::hid_hub> hub,
     std::size_t                           function,
-    detail::alive_flag                    alive)
-    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
+    detail::alive_flag                    alive,
+    detail::host_ref                      host)
+    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)},
+      host_{std::move(host)}
 {}
 
 template <typename Body> auto hid_link::locked(Body&& body) const
@@ -350,7 +366,19 @@ auto hid_link::report_descriptor() const -> reflex::py::nb::bytes
 auto hid_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
     -> std::uint32_t
 {
-  usb::deferred_warnings const deferred;
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return detail::host_access(host_, [&] {
+    usb::deferred_warnings const deferred;
+    return request_locked(setup, std::move(data));
+  });
+}
+
+auto hid_link::request_locked(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
+    -> std::uint32_t
+{
   return locked([&](usb::hid_channel& queues) -> std::uint32_t {
     auto* const host = port_->board_host();
     if(not queues.interface or host == nullptr)
@@ -424,8 +452,10 @@ uac_link::uac_link(
     periph::stm32::usb_host_port&          port,
     std::shared_ptr<periph::usb::uac2_hub> hub,
     std::size_t                            function,
-    detail::alive_flag                     alive)
-    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
+    detail::alive_flag                     alive,
+    detail::host_ref                       host)
+    : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)},
+      host_{std::move(host)}
 {}
 
 template <typename Body> auto uac_link::locked(Body&& body) const
@@ -437,6 +467,15 @@ template <typename Body> auto uac_link::locked(Body&& body) const
   return detail::link_locked(*hub_, [&](core::link_guard const& held) {
     return std::invoke(std::forward<Body>(body), hub_->channel(held, function_));
   });
+}
+
+template <typename Body> auto uac_link::engine(Body&& body) const
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return detail::host_access(host_, std::forward<Body>(body));
 }
 
 auto uac_link::host() const -> periph::usb::host*
@@ -579,22 +618,26 @@ void uac_link::set_frame_limit(std::uint64_t limit)
 
 auto uac_link::start(bool mic) -> std::uint64_t
 {
-  auto* const owner = host();
-  if(owner == nullptr)
-  {
-    return 0;
-  }
-  return usb::uac2_start(
-      *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+  return engine([&]() -> std::uint64_t {
+    auto* const owner = host();
+    if(owner == nullptr)
+    {
+      return 0;
+    }
+    return usb::uac2_start(
+        *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+  });
 }
 
 void uac_link::stop(bool mic)
 {
-  if(auto* const owner = host())
-  {
-    usb::uac2_stop(
-        *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
-  }
+  engine([&] {
+    if(auto* const owner = host())
+    {
+      usb::uac2_stop(
+          *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+    }
+  });
 }
 
 auto uac_link::set_feature(
@@ -603,15 +646,17 @@ auto uac_link::set_feature(
     std::uint8_t control,
     std::int32_t value) -> std::uint64_t
 {
-  auto* const owner = host();
-  if(owner == nullptr
-     or (control != std::to_underlying(usb::uac2_control::mute)
-         and control != std::to_underlying(usb::uac2_control::volume)))
-  {
-    return 0;
-  }
-  return usb::uac2_set_feature(
-      *owner, *hub_, function_, unit, channel, static_cast<usb::uac2_control>(control), value);
+  return engine([&]() -> std::uint64_t {
+    auto* const owner = host();
+    if(owner == nullptr
+       or (control != std::to_underlying(usb::uac2_control::mute)
+           and control != std::to_underlying(usb::uac2_control::volume)))
+    {
+      return 0;
+    }
+    return usb::uac2_set_feature(
+        *owner, *hub_, function_, unit, channel, static_cast<usb::uac2_control>(control), value);
+  });
 }
 
 auto uac_link::take_result(std::uint64_t id) -> std::optional<periph::usb::transfer_status>
@@ -639,9 +684,16 @@ void uac_link::forget(std::uint64_t id)
 usb_link::usb_link(
     periph::stm32::usb_host_port& port,
     detail::usb_hubs              hubs,
-    detail::alive_flag            alive)
-    : port_{&port}, hubs_{std::move(hubs)}, alive_{std::move(alive)}
+    detail::alive_flag            alive,
+    detail::host_ref              host)
+    : port_{&port}, hubs_{std::move(hubs)}, alive_{std::move(alive)}, host_{std::move(host)}
 {}
+
+template <typename Body> auto usb_link::engine(Body&& body) const
+{
+  std::ignore = port();
+  return detail::host_access(host_, std::forward<Body>(body));
+}
 
 auto usb_link::port() const -> periph::stm32::usb_host_port&
 {
@@ -659,74 +711,84 @@ auto usb_link::host() const -> periph::usb::host&
 
 auto usb_link::plugged() const -> bool
 {
-  return port().plugged();
+  return engine([this] { return port().plugged(); });
 }
 
 void usb_link::plug(bool attached)
 {
-  port().plug(attached);
+  engine([this, attached] { port().plug(attached); });
 }
 
 auto usb_link::state() const -> periph::usb::device_state
 {
-  return host().state();
+  return engine([this] { return host().state(); });
 }
 
 auto usb_link::address() const -> std::uint8_t
 {
-  return host().address();
+  return engine([this] { return host().address(); });
 }
 
 auto usb_link::configuration_value() const -> std::uint8_t
 {
-  return host().configuration_value();
+  return engine([this] { return host().configuration_value(); });
 }
 
 auto usb_link::failed_step() const -> std::optional<std::string>
 {
-  auto const failed = host().failed_step();
-  if(not failed)
-  {
-    return std::nullopt;
-  }
-  return std::string{reflex::enum_value_name(*failed)};
+  return engine([&]() -> std::optional<std::string> {
+    auto const failed = host().failed_step();
+    if(not failed)
+    {
+      return std::nullopt;
+    }
+    return std::string{reflex::enum_value_name(*failed)};
+  });
 }
 
 auto usb_link::device_descriptor() const -> reflex::py::nb::bytes
 {
-  return bytes_of(host().device_bytes());
+  auto const bytes =
+      engine([this] { return host().device_bytes() | std::ranges::to<std::vector>(); });
+  return bytes_of(bytes);
 }
 
 auto usb_link::configuration_descriptor() const -> reflex::py::nb::bytes
 {
-  return bytes_of(host().configuration_bytes());
+  auto const bytes =
+      engine([this] { return host().configuration_bytes() | std::ranges::to<std::vector>(); });
+  return bytes_of(bytes);
 }
 
 auto usb_link::strings() const -> std::vector<usb_string_record>
 {
-  return host().strings()
-       | std::views::transform([](usb::string_descriptor const& string) {
-           return usb_string_record{
-               .index = string.index,
-               .bytes = string.bytes
-                      | std::views::transform(
-                            [](std::byte b) { return std::to_integer<std::uint8_t>(b); })
-                      | std::ranges::to<std::vector>(),
-           };
-         })
-       | std::ranges::to<std::vector>();
+  return engine([&]() -> std::vector<usb_string_record> {
+    return host().strings()
+         | std::views::transform([](usb::string_descriptor const& string) {
+             return usb_string_record{
+                 .index = string.index,
+                 .bytes = string.bytes
+                        | std::views::transform(
+                              [](std::byte b) { return std::to_integer<std::uint8_t>(b); })
+                        | std::ranges::to<std::vector>(),
+             };
+           })
+         | std::ranges::to<std::vector>();
+  });
 }
 
 auto usb_link::interfaces() const -> std::vector<usb_interface_record>
 {
-  auto const* const configuration = host().configuration();
-  if(configuration == nullptr)
-  {
-    return {};
-  }
-  return configuration->interfaces
-       | std::views::transform(interface_record)
-       | std::ranges::to<std::vector>();
+  return engine([&]() -> std::vector<usb_interface_record> {
+    auto const* const configuration = host().configuration();
+    if(configuration == nullptr)
+    {
+      return {};
+    }
+    return configuration->interfaces
+         | std::views::transform(interface_record)
+         | std::ranges::to<std::vector>();
+  });
 }
 
 auto usb_link::control(
@@ -745,101 +807,114 @@ auto usb_link::control(
         in ? "no data with an IN request"
            : std::format("an OUT data stage of wLength {} bytes, not {}", length, data.size()));
   }
-  auto const* const first = static_cast<std::uint8_t const*>(data.data());
-  return host().control(
-      {.request_type = request_type,
-       .request      = request,
-       .value        = value,
-       .index        = index,
-       .length       = length},
-      std::vector<std::uint8_t>(first, first + data.size()));
+  auto const* const         first = static_cast<std::uint8_t const*>(data.data());
+  std::vector<std::uint8_t> stage(first, first + data.size());
+  return engine([&] {
+    return host().control(
+        {.request_type = request_type,
+         .request      = request,
+         .value        = value,
+         .index        = index,
+         .length       = length},
+        std::move(stage));
+  });
 }
 
 auto usb_link::take_results() -> std::vector<usb_control_result>
 {
-  return host().take_results()
-       | std::views::transform([](usb::transfer_result const& result) {
-           return usb_control_result{
-               .id     = result.id,
-               .status = result.status,
-               .data   = result.data,
-               .at_ps  = result.at.ps,
-           };
-         })
-       | std::ranges::to<std::vector>();
+  return engine([&]() -> std::vector<usb_control_result> {
+    return host().take_results()
+         | std::views::transform([](usb::transfer_result const& result) {
+             return usb_control_result{
+                 .id     = result.id,
+                 .status = result.status,
+                 .data   = result.data,
+                 .at_ps  = result.at.ps,
+             };
+           })
+         | std::ranges::to<std::vector>();
+  });
 }
 
 auto usb_link::requests() const -> std::vector<usb_request_record>
 {
-  return host().log()
-       | std::views::filter(
-             [](usb::log_entry const& entry) { return entry.kind == usb::log_kind::request; })
-       | std::views::transform([](usb::log_entry const& entry) {
-           return usb_request_record{
-               .at_ps        = entry.at.ps,
-               .address      = entry.address,
-               .request_type = entry.setup.request_type,
-               .request      = entry.setup.request,
-               .value        = entry.setup.value,
-               .index        = entry.setup.index,
-               .length       = entry.setup.length,
-               .status       = entry.status,
-           };
-         })
-       | std::ranges::to<std::vector>();
+  return engine([&]() -> std::vector<usb_request_record> {
+    return host().log()
+         | std::views::filter(
+               [](usb::log_entry const& entry) { return entry.kind == usb::log_kind::request; })
+         | std::views::transform([](usb::log_entry const& entry) {
+             return usb_request_record{
+                 .at_ps        = entry.at.ps,
+                 .address      = entry.address,
+                 .request_type = entry.setup.request_type,
+                 .request      = entry.setup.request,
+                 .value        = entry.setup.value,
+                 .index        = entry.setup.index,
+                 .length       = entry.setup.length,
+                 .status       = entry.status,
+             };
+           })
+         | std::ranges::to<std::vector>();
+  });
 }
 
 auto usb_link::cdc_functions() const -> std::optional<std::uint64_t>
 {
-  auto const* const configuration = host().configuration();
-  if(configuration == nullptr)
-  {
-    return std::nullopt;
-  }
-  return usb::cdc_acm_functions(*configuration).size();
+  return engine([&]() -> std::optional<std::uint64_t> {
+    auto const* const configuration = host().configuration();
+    if(configuration == nullptr)
+    {
+      return std::nullopt;
+    }
+    return usb::cdc_acm_functions(*configuration).size();
+  });
 }
 
 auto usb_link::cdc(std::uint64_t function) const -> cdc_link
 {
-  return cdc_link{port(), hubs_.cdc, static_cast<std::size_t>(function), alive_};
+  return cdc_link{port(), hubs_.cdc, static_cast<std::size_t>(function), alive_, host_};
 }
 
 auto usb_link::hid_functions() const -> std::optional<std::uint64_t>
 {
-  auto const* const configuration = host().configuration();
-  if(configuration == nullptr)
-  {
-    return std::nullopt;
-  }
-  return usb::hid_functions(*configuration).size();
+  return engine([&]() -> std::optional<std::uint64_t> {
+    auto const* const configuration = host().configuration();
+    if(configuration == nullptr)
+    {
+      return std::nullopt;
+    }
+    return usb::hid_functions(*configuration).size();
+  });
 }
 
 auto usb_link::hid(std::uint64_t function) const -> hid_link
 {
-  return hid_link{port(), hubs_.hid, static_cast<std::size_t>(function), alive_};
+  return hid_link{port(), hubs_.hid, static_cast<std::size_t>(function), alive_, host_};
 }
 
 auto usb_link::audio_functions() const -> std::optional<std::uint64_t>
 {
-  auto const* const configuration = host().configuration();
-  if(configuration == nullptr)
-  {
-    return std::nullopt;
-  }
-  return usb::uac2_functions(*configuration).size();
+  return engine([&]() -> std::optional<std::uint64_t> {
+    auto const* const configuration = host().configuration();
+    if(configuration == nullptr)
+    {
+      return std::nullopt;
+    }
+    return usb::uac2_functions(*configuration).size();
+  });
 }
 
 auto usb_link::audio(std::uint64_t function) const -> uac_link
 {
-  return uac_link{port(), hubs_.uac2, static_cast<std::size_t>(function), alive_};
+  return uac_link{port(), hubs_.uac2, static_cast<std::size_t>(function), alive_, host_};
 }
 
 auto machine_handle::usb_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;
-  for(auto const& unit : machine_->description().peripherals)
+  for(auto const& unit : engine_->description().peripherals)
   {
-    auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(machine_->model(unit.name));
+    auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(engine_->model(unit.name));
     if(not unit.alias_of and port != nullptr and port->board_host() != nullptr)
     {
       names.push_back(unit.name);
@@ -850,12 +925,12 @@ auto machine_handle::usb_names() const -> std::vector<std::string>
 
 auto machine_handle::attach_usb(std::string const& peripheral) -> usb_link
 {
-  auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(machine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(engine_->model(peripheral));
   if(port == nullptr or port->board_host() == nullptr)
   {
     throw model_error(peripheral, "", 0);
   }
   auto const hubs = hubs_.find(peripheral);
-  return usb_link{*port, hubs != hubs_.end() ? hubs->second : detail::usb_hubs{}, alive_};
+  return usb_link{*port, hubs != hubs_.end() ? hubs->second : detail::usb_hubs{}, alive_, slot_};
 }
 }

@@ -2,6 +2,8 @@
 
 #include <popcorn/core/errors.hpp>
 
+#include <exception>
+
 namespace popcorn::bind::detail
 {
 /** @brief A guest memory access the bus refused, raised by the views as EmulationError with the
@@ -34,4 +36,11 @@ private:
  *        registered before it: nanobind keeps one translator list for every extension.
  */
 void register_error_translator();
+
+/**
+ * @brief Sets the Python error indicator from @p thrown, as the translator would raise it. A
+ *        Python error is raised again as a copy, any other exception as RuntimeError.
+ * @param thrown The exception, the GIL held.
+ */
+void set_python_error(std::exception_ptr const& thrown) noexcept;
 }

@@ -160,4 +160,35 @@ void register_error_translator()
     }
   });
 }
+
+void set_python_error(std::exception_ptr const& thrown) noexcept
+{
+  try
+  {
+    try
+    {
+      std::rethrow_exception(thrown);
+    }
+    catch(nb::python_error const& raised)
+    {
+      nb::python_error{raised}.restore();
+      return;
+    }
+    catch(...)
+    {}
+    translate(thrown);
+  }
+  catch(nb::python_error& failed)
+  {
+    failed.restore();
+  }
+  catch(std::exception const& other)
+  {
+    PyErr_SetString(PyExc_RuntimeError, other.what());
+  }
+  catch(...)
+  {
+    PyErr_SetString(PyExc_RuntimeError, "unknown native exception");
+  }
+}
 }

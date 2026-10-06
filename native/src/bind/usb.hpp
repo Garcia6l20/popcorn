@@ -7,6 +7,7 @@
 #include <popcorn/periph/usb_uac2.hpp>
 
 #include "alive.hpp"
+#include "gil_locks.hpp"
 
 #include <reflex/py.hpp>
 
@@ -167,12 +168,14 @@ public:
    * @param hub The channels of the controller's host.
    * @param function Function index.
    * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, through which requests reach the USB host.
    */
   [[= py::skip]] cdc_link(
       periph::stm32::usb_host_port&         port,
       std::shared_ptr<periph::usb::cdc_hub> hub,
       std::size_t                           function,
-      detail::alive_flag                    alive);
+      detail::alive_flag                    alive,
+      detail::host_ref                      host);
 
   /**
    * @brief Queues bytes for the device. The driver sends them from the next frame once bound.
@@ -279,11 +282,14 @@ public:
 private:
   template <typename Body> auto locked(Body&& body) const;
   auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
+  auto request_locked(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
+      -> std::uint32_t;
 
   periph::stm32::usb_host_port*         port_;
   std::shared_ptr<periph::usb::cdc_hub> hub_;
   std::size_t                           function_;
   detail::alive_flag                    alive_;
+  detail::host_ref                      host_;
 };
 
 /** @brief One input report a HID function sent. */
@@ -319,12 +325,14 @@ public:
    * @param hub The channels of the controller's host.
    * @param function Function index.
    * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, through which requests reach the USB host.
    */
   [[= py::skip]] hid_link(
       periph::stm32::usb_host_port&         port,
       std::shared_ptr<periph::usb::hid_hub> hub,
       std::size_t                           function,
-      detail::alive_flag                    alive);
+      detail::alive_flag                    alive,
+      detail::host_ref                      host);
 
   /**
    * @brief Queues an output report. The driver sends it from the next frame once the report
@@ -432,11 +440,14 @@ public:
 private:
   template <typename Body> auto locked(Body&& body) const;
   auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
+  auto request_locked(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
+      -> std::uint32_t;
 
   periph::stm32::usb_host_port*         port_;
   std::shared_ptr<periph::usb::hid_hub> hub_;
   std::size_t                           function_;
   detail::alive_flag                    alive_;
+  detail::host_ref                      host_;
 };
 
 /** @brief One audio streaming direction of an audio function, as the driver found it. */
@@ -514,12 +525,14 @@ public:
    * @param hub The channels of the controller's host.
    * @param function Function index.
    * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, through which start, stop and features reach the USB host.
    */
   [[= py::skip]] uac_link(
       periph::stm32::usb_host_port&          port,
       std::shared_ptr<periph::usb::uac2_hub> hub,
       std::size_t                            function,
-      detail::alive_flag                     alive);
+      detail::alive_flag                     alive,
+      detail::host_ref                       host);
 
   /** @brief Whether a USB Audio 2.0 driver is bound to the function. */
   [[= py::doc{"Whether a USB Audio 2.0 driver is bound to the function."}]] [[nodiscard]] auto
@@ -636,12 +649,14 @@ public:
 
 private:
   template <typename Body> auto locked(Body&& body) const;
+  template <typename Body> auto engine(Body&& body) const;
   [[nodiscard]] auto            host() const -> periph::usb::host*;
 
   periph::stm32::usb_host_port*          port_;
   std::shared_ptr<periph::usb::uac2_hub> hub_;
   std::size_t                            function_;
   detail::alive_flag                     alive_;
+  detail::host_ref                       host_;
 };
 
 /**
@@ -658,11 +673,14 @@ public:
    * @param port The controller.
    * @param hubs The channels of the host's class drivers.
    * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, through which every method but the link getters reaches the
+   *        USB host.
    */
   [[= py::skip]] usb_link(
       periph::stm32::usb_host_port& port,
       detail::usb_hubs              hubs,
-      detail::alive_flag            alive);
+      detail::alive_flag            alive,
+      detail::host_ref              host);
 
   /** @brief Whether the cable is plugged. */
   [[= py::doc{"Whether the cable is plugged."}]] [[nodiscard]] auto plugged() const -> bool;
@@ -770,11 +788,13 @@ public:
       audio(std::uint64_t function) const -> uac_link;
 
 private:
-  [[nodiscard]] auto host() const -> periph::usb::host&;
-  [[nodiscard]] auto port() const -> periph::stm32::usb_host_port&;
+  [[nodiscard]] auto            host() const -> periph::usb::host&;
+  [[nodiscard]] auto            port() const -> periph::stm32::usb_host_port&;
+  template <typename Body> auto engine(Body&& body) const;
 
   periph::stm32::usb_host_port* port_;
   detail::usb_hubs              hubs_;
   detail::alive_flag            alive_;
+  detail::host_ref              host_;
 };
 }

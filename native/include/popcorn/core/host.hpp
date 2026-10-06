@@ -68,6 +68,15 @@ struct slice_bounds
   std::chrono::nanoseconds wall_budget{std::chrono::milliseconds{1}};
 };
 
+/** @brief A goal of exactly one slice, for a driver that slices on its own. */
+struct single_slice
+{
+  /** @brief Bounds of the slice, in place of the host's. */
+  slice_bounds bounds{};
+  /** @brief slice_request::leave_until of the slice. */
+  bool leave_until{};
+};
+
 /** @brief A run to a stop, carried across slices by the host as one request. */
 struct run_goal
 {
@@ -82,15 +91,20 @@ struct run_goal
   std::optional<vtime> until_time{};
   /** @brief slice_request::stop_when of every slice, called on the host thread. */
   std::function<bool()> stop_when{};
+  /** @brief Run one slice only, the goal completing when it ends, with or without a stop. Empty
+   * for a goal over as many slices as it needs. */
+  std::optional<single_slice> once{};
 };
 
 /** @brief Outcome of a goal. */
 struct goal_result
 {
-  /** @brief The stop that ended the goal. */
+  /** @brief The stop that ended the goal, value-initialized when yielded. */
   stop stopped{};
   /** @brief Instructions the goal executed over all its slices. */
   icount executed{};
+  /** @brief Whether a run_goal::once goal ended its slice without a stop. */
+  bool yielded{};
 };
 
 /** @brief A wait on a free-running machine. */

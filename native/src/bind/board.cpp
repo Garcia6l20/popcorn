@@ -15,8 +15,12 @@
 
 namespace popcorn::bind
 {
-uart_link::uart_link(periph::stm32::uart_port& port, detail::alive_flag alive)
-    : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>()}, alive_{std::move(alive)}
+uart_link::uart_link(
+    periph::stm32::uart_port& port,
+    detail::alive_flag        alive,
+    detail::host_ref          host)
+    : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>()}, alive_{std::move(alive)},
+      host_{std::move(host)}
 {
   port.attach(endpoint_);
 }
@@ -34,12 +38,14 @@ void uart_link::send(reflex::py::nb::bytes const& data)
 {
   auto const bytes = std::span{static_cast<std::uint8_t const*>(data.data()), data.size()};
   std::vector<std::uint16_t> const frames(bytes.begin(), bytes.end());
-  port().receive(frames);
+  auto&                            uart = port();
+  detail::host_access(host_, [&] { uart.receive(frames); });
 }
 
 auto uart_link::queued() const -> std::uint64_t
 {
-  return port().queued();
+  auto& uart = port();
+  return detail::host_access(host_, [&] { return uart.queued(); });
 }
 
 auto uart_link::available() const -> std::uint64_t
@@ -81,9 +87,10 @@ audio_link::audio_link(
     std::uint32_t              decimation,
     std::uint32_t              external_frame_hz,
     bool                       clock_wired,
-    detail::alive_flag         alive)
+    detail::alive_flag         alive,
+    detail::host_ref           host)
     : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, port_{&port}, block_{block},
-      alive_{std::move(alive)}
+      alive_{std::move(alive)}, host_{std::move(host)}
 {
   port.attach(
       block, {.endpoint          = endpoint_,
@@ -112,12 +119,14 @@ auto audio_link::port() const -> periph::stm32::audio_port&
 
 void audio_link::set_external_frame_hz(std::uint32_t frame_hz)
 {
-  port().set_external_clock(block_, frame_hz);
+  auto& sai = port();
+  detail::host_access(host_, [&] { sai.set_external_clock(block_, frame_hz); });
 }
 
 auto audio_link::external_frame_hz() const -> std::uint32_t
 {
-  return port().external_clock(block_);
+  auto& sai = port();
+  return detail::host_access(host_, [&] { return sai.external_clock(block_); });
 }
 
 auto audio_link::available() const -> std::uint64_t
@@ -185,10 +194,10 @@ void audio_link::set_frame_limit(std::uint64_t limit)
 auto machine_handle::audio_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;
-  for(auto const& unit : machine_->description().peripherals)
+  for(auto const& unit : engine_->description().peripherals)
   {
     if(not unit.alias_of
-       and dynamic_cast<periph::stm32::audio_port*>(machine_->model(unit.name)) != nullptr)
+       and dynamic_cast<periph::stm32::audio_port*>(engine_->model(unit.name)) != nullptr)
     {
       names.push_back(unit.name);
     }
@@ -203,7 +212,7 @@ auto machine_handle::attach_audio(
     std::uint32_t      external_frame_hz,
     bool               clock_wired) -> audio_link
 {
-  auto* const port = dynamic_cast<periph::stm32::audio_port*>(machine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::audio_port*>(engine_->model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
@@ -213,16 +222,18 @@ auto machine_handle::attach_audio(
     throw config_error(peripheral, 0, "block", std::format("an audio block A or B, not {}", block));
   }
   auto const which = block == "A" ? periph::stm32::audio_block::a : periph::stm32::audio_block::b;
-  return audio_link{*port, which, decimation, external_frame_hz, clock_wired, alive_};
+  return access([&](core::machine&) {
+    return audio_link{*port, which, decimation, external_frame_hz, clock_wired, alive_, slot_};
+  });
 }
 
 auto machine_handle::uart_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;
-  for(auto const& unit : machine_->description().peripherals)
+  for(auto const& unit : engine_->description().peripherals)
   {
     if(not unit.alias_of
-       and dynamic_cast<periph::stm32::uart_port*>(machine_->model(unit.name)) != nullptr)
+       and dynamic_cast<periph::stm32::uart_port*>(engine_->model(unit.name)) != nullptr)
     {
       names.push_back(unit.name);
     }
@@ -232,18 +243,18 @@ auto machine_handle::uart_names() const -> std::vector<std::string>
 
 auto machine_handle::attach_uart(std::string const& peripheral) -> uart_link
 {
-  auto* const port = dynamic_cast<periph::stm32::uart_port*>(machine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::uart_port*>(engine_->model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
   }
-  return uart_link{*port, alive_};
+  return access([&](core::machine&) { return uart_link{*port, alive_, slot_}; });
 }
 
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
     -> periph::stm32::gpio_port&
 {
-  auto* const port = dynamic_cast<periph::stm32::gpio_port*>(machine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::gpio_port*>(engine_->model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
@@ -260,23 +271,26 @@ void machine_handle::gpio_drive(
     std::uint8_t        pin,
     std::optional<bool> level)
 {
-  gpio(peripheral, pin).drive(pin, level);
+  auto& port = gpio(peripheral, pin);
+  access([&](core::machine&) { port.drive(pin, level); });
 }
 
 auto machine_handle::gpio_level(std::string const& peripheral, std::uint8_t pin) const -> bool
 {
-  return gpio(peripheral, pin).level(pin);
+  auto& port = gpio(peripheral, pin);
+  return access([&](core::machine&) { return port.level(pin); });
 }
 
 auto machine_handle::gpio_mode(std::string const& peripheral, std::uint8_t pin) const
     -> periph::stm32::pin_mode
 {
-  return gpio(peripheral, pin).mode(pin);
+  auto& port = gpio(peripheral, pin);
+  return access([&](core::machine&) { return port.mode(pin); });
 }
 
 auto machine_handle::analog(std::string const& peripheral) const -> periph::stm32::analog_port&
 {
-  auto* const port = dynamic_cast<periph::stm32::analog_port*>(machine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::analog_port*>(engine_->model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
@@ -289,18 +303,21 @@ void machine_handle::adc_drive(
     std::uint8_t       channel,
     std::uint32_t      microvolts)
 {
-  analog(peripheral).drive(channel, microvolts);
+  auto& port = analog(peripheral);
+  access([&](core::machine&) { port.drive(channel, microvolts); });
 }
 
 auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t channel) const
     -> std::uint32_t
 {
-  return analog(peripheral).input(channel);
+  auto& port = analog(peripheral);
+  return access([&](core::machine&) { return port.input(channel); });
 }
 
 auto machine_handle::gpio_alternate(std::string const& peripheral, std::uint8_t pin) const
     -> std::uint8_t
 {
-  return gpio(peripheral, pin).alternate(pin);
+  auto& port = gpio(peripheral, pin);
+  return access([&](core::machine&) { return port.alternate(pin); });
 }
 }

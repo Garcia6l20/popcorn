@@ -555,17 +555,19 @@ struct host_core
   {
     accept_stamps(slot);
     apply_due(slot);
-    auto&         goal = *slot.goal;
+    auto&         goal  = *slot.goal;
+    auto const&   once  = goal.goal.once;
+    auto const    limit = once ? once->bounds : bounds;
     slice_request request{
-        .max_instructions   = bounds.max_instructions,
-        .wall_budget        = bounds.wall_budget,
+        .max_instructions   = limit.max_instructions,
+        .wall_budget        = limit.wall_budget,
         .until              = goal.goal.until,
         .budget_left        = goal.remaining,
         .exact_instructions = goal.left,
         .until_time         = goal.goal.until_time,
         .stop_when   = goal.goal.stop_when ? std::function<bool()>{std::ref(goal.goal.stop_when)}
                                            : std::function<bool()>{},
-        .leave_until = goal.executed.value == 0,
+        .leave_until = once ? once->leave_until : goal.executed.value == 0,
     };
     add_stamp(request, next_stamp(slot));
     slice_result result;
@@ -591,9 +593,13 @@ struct host_core
       goal.left =
           icount{std::max<std::uint64_t>(remaining_after(goal.left, result.executed)->value, 1)};
     }
-    if(result.stopped)
+    if(result.stopped or once)
     {
-      goal_result const outcome{.stopped = std::move(*result.stopped), .executed = goal.executed};
+      goal_result const outcome{
+          .stopped  = result.stopped ? std::move(*result.stopped) : stop{},
+          .executed = goal.executed,
+          .yielded  = not result.stopped,
+      };
       park(slot, done, [&outcome](member_slot& parked, deferred& later) {
         later.push_back([goal = std::move(parked.goal), outcome] { goal->promise.set(outcome); });
       });

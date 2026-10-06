@@ -18,4 +18,5 @@ sources = [
     here / "model_trampoline.cpp",
     here / "devices.cpp",
     here / "observability.cpp",
+    here / "host_future.cpp",
 ]

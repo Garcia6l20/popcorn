@@ -86,41 +86,48 @@ auto machine_handle::read_memory(address at, std::uint32_t size) const -> reflex
 {
   require_in_space(at, size);
   std::vector<std::byte> bytes(size);
-  if(auto const read = machine_->mem().read_block(at, bytes); not read)
-  {
-    bus_failure(read.error());
-  }
+  access([&](core::machine& target) {
+    if(auto const read = target.mem().read_block(at, bytes); not read)
+    {
+      bus_failure(read.error());
+    }
+  });
   return reflex::py::nb::bytes(bytes.data(), bytes.size());
 }
 
 auto machine_handle::register_names() const -> std::vector<std::string>
 {
-  return machine_->regs().list()
+  return engine_->regs().list()
        | std::views::transform([](arch::cpu_register const& reg) { return std::string{reg.name}; })
        | std::ranges::to<std::vector>();
 }
 
 auto machine_handle::read_register(std::uint32_t index) const -> std::uint64_t
 {
-  return machine_->regs().read(register_at(*machine_, index));
+  return access(
+      [index](core::machine& target) { return target.regs().read(register_at(target, index)); });
 }
 
 void machine_handle::write_register(std::uint32_t index, std::uint64_t value)
 {
-  auto const reg = register_at(*machine_, index);
-  if(not core::fits_register(value, reg.bits))
-  {
-    throw config_error(
-        "registers", 0, std::string{reg.name}, std::format("a {}-bit value", reg.bits));
-  }
-  machine_->regs().write(reg, value);
+  access([index, value](core::machine& target) {
+    auto const reg = register_at(target, index);
+    if(not core::fits_register(value, reg.bits))
+    {
+      throw config_error(
+          "registers", 0, std::string{reg.name}, std::format("a {}-bit value", reg.bits));
+    }
+    target.regs().write(reg, value);
+  });
 }
 
 auto machine_handle::peek(std::string const& peripheral, std::uint32_t offset, std::uint8_t width)
     -> std::uint32_t
 {
-  auto const at = slot_of(*machine_, peripheral, offset, width);
-  return (at.file->peek(at.word) >> at.shift) & at.mask;
+  return access([&](core::machine& target) {
+    auto const at = slot_of(target, peripheral, offset, width);
+    return (at.file->peek(at.word) >> at.shift) & at.mask;
+  });
 }
 
 void machine_handle::poke(
@@ -129,13 +136,15 @@ void machine_handle::poke(
     std::uint8_t       width,
     std::uint32_t      value)
 {
-  auto const at = slot_of(*machine_, peripheral, offset, width);
-  if((value & ~at.mask) != 0)
-  {
-    throw config_error(
-        peripheral, 0, std::format("{:#x}", offset), std::format("a {}-bit value", width));
-  }
-  auto const word = at.file->peek(at.word);
-  at.file->poke(at.word, (word & ~(at.mask << at.shift)) | (value << at.shift));
+  access([&](core::machine& target) {
+    auto const at = slot_of(target, peripheral, offset, width);
+    if((value & ~at.mask) != 0)
+    {
+      throw config_error(
+          peripheral, 0, std::format("{:#x}", offset), std::format("a {}-bit value", width));
+    }
+    auto const word = at.file->peek(at.word);
+    at.file->poke(at.word, (word & ~(at.mask << at.shift)) | (value << at.shift));
+  });
 }
 }

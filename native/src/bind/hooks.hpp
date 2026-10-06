@@ -3,6 +3,7 @@
 #include <popcorn/core/intercept.hpp>
 
 #include "alive.hpp"
+#include "gil_locks.hpp"
 
 #include <reflex/py.hpp>
 
@@ -22,8 +23,15 @@ public:
   /**
    * @brief Owns a native hook handle.
    * @param handle The handle.
+   * @param host The machine's host, through which remove() reaches the engine.
    */
-  [[= py::skip]] explicit hook(core::hook_handle handle) noexcept;
+  [[= py::skip]] hook(core::hook_handle handle, detail::host_ref host) noexcept;
+  /** @brief Takes over @p other's hook. */
+  [[= py::skip]] hook(hook&& other) noexcept = default;
+  /** @brief Not move-assignable: the old hook would skip retire(). */
+  auto operator=(hook&&) -> hook& = delete;
+  /** @brief Removes the hook through detail::retire(), safe on any thread while it runs. */
+  ~hook();
 
   /**
    * @brief Removes the hook, at once or at the end of the slice when called from a handler.
@@ -37,6 +45,7 @@ public:
 
 private:
   core::hook_handle handle_;
+  detail::host_ref  host_;
 };
 
 /** @brief A call arriving at an intercepted address, valid only while its handler runs. */

@@ -500,6 +500,22 @@ def _unwatch(watch: list[asyncio.AbstractEventLoop | None], fd: int) -> None:
 
 
 def _close(watch: list[asyncio.AbstractEventLoop | None], *fds: int) -> None:
+    loop = watch[0]
+    if loop is not None and loop.is_running() and not _running_here(loop):
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(_close_now, watch, *fds)
+            return
+    _close_now(watch, *fds)
+
+
+def _running_here(loop: asyncio.AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() is loop
+    except RuntimeError:
+        return False
+
+
+def _close_now(watch: list[asyncio.AbstractEventLoop | None], *fds: int) -> None:
     _unwatch(watch, fds[0])
     for fd in fds:
         with contextlib.suppress(OSError):

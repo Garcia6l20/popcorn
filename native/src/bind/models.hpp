@@ -5,6 +5,7 @@
 #include <popcorn/periph/model.hpp>
 
 #include "alive.hpp"
+#include "gil_locks.hpp"
 
 #include <reflex/py.hpp>
 
@@ -30,8 +31,12 @@ public:
    * @brief Views the context of a model.
    * @param ctx The context the machine built.
    * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, reached by the methods that touch the engine.
    */
-  [[= py::skip]] model_context_view(periph::model_context& ctx, detail::alive_flag alive) noexcept;
+  [[= py::skip]] model_context_view(
+      periph::model_context& ctx,
+      detail::alive_flag     alive,
+      detail::host_ref       host) noexcept;
 
   /** @brief Description of the peripheral. */
   [[= py::doc{"Description of the peripheral."}]] [[nodiscard]] auto description() const
@@ -127,10 +132,12 @@ public:
       peer(std::string const& peripheral) const -> reflex::py::nb::object;
 
 private:
-  [[nodiscard]] auto context() const -> periph::model_context&;
+  [[nodiscard]] auto            context() const -> periph::model_context&;
+  template <typename Body> auto engine(Body&& body) const;
 
   periph::model_context* ctx_;
   detail::alive_flag     alive_;
+  detail::host_ref       host_;
 };
 
 /**
@@ -180,17 +187,30 @@ auto python_model_factory(reflex::py::nb::object maker) -> periph::model_factory
  */
 auto python_object(periph::model* model) -> reflex::py::nb::object;
 
+/** @brief What the Python models and devices of a machine built on this thread are given. */
+struct building_state
+{
+  /** @brief Cleared when the machine is destroyed. */
+  detail::alive_flag alive{};
+  /** @brief The machine's host, set once the machine is handed over. */
+  detail::host_ref host{};
+  /** @brief Weak reference to the cell whose context the models and devices run in, borrowed for
+   * the build, null for none. */
+  PyObject* context = nullptr;
+};
+
 /**
- * @brief Marks the machine being built on this thread, so its Python models see its lifetime.
+ * @brief Marks the machine being built on this thread, so its Python models see its lifetime,
+ *        its host and the context captured for it.
  */
 class building_scope
 {
 public:
   /**
    * @brief Marks a machine as being built.
-   * @param alive Cleared when that machine is destroyed.
+   * @param state Its lifetime flag, host slot and context.
    */
-  explicit building_scope(detail::alive_flag alive) noexcept;
+  explicit building_scope(building_state state) noexcept;
   /** @brief Not copyable. */
   building_scope(building_scope const&) = delete;
   /** @brief Not copy-assignable. */
@@ -199,7 +219,13 @@ public:
   ~building_scope();
 
 private:
-  detail::alive_flag previous_;
+  building_state previous_;
 };
+
+/**
+ * @brief The weak reference to the context cell of the machine being built on this thread.
+ * @return A new reference, None outside a build or without a cell.
+ */
+auto building_context() -> reflex::py::nb::object;
 }
 }

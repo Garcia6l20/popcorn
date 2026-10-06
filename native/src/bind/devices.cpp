@@ -1,4 +1,6 @@
 #include "devices.hpp"
+#include "models.hpp"
+#include "python_callable.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/devices/at25sf.hpp>
@@ -38,8 +40,9 @@ namespace nb    = reflex::py::nb;
 namespace stm32 = periph::stm32;
 
 template <typename Trampoline, typename... Args>
-auto call(Trampoline const& self, char const* name, Args&&... args) -> nb::object
+auto call(Trampoline const& self, nb::handle cell, char const* name, Args&&... args) -> nb::object
 {
+  cell_entry const   entered{cell};
   nb::detail::ticket ticket(self, name, true);
   return self.base().attr(ticket.key)(std::forward<Args>(args)...);
 }
@@ -64,51 +67,63 @@ public:
 
   [[nodiscard]] auto address() const -> std::uint8_t override
   {
-    nb::gil_scoped_acquire gil;
-    return nb::cast<std::uint8_t>(call(nb_trampoline, "_address"));
+    gil_entry const gil;
+    return nb::cast<std::uint8_t>(call(nb_trampoline, context_, "_address"));
   }
 
   [[nodiscard]] auto start(bool read, vtime at) -> bool override
   {
-    nb::gil_scoped_acquire gil;
-    return nb::cast<bool>(call(nb_trampoline, "_start", read, at.ps));
+    gil_entry const gil;
+    return nb::cast<bool>(call(nb_trampoline, context_, "_start", read, at.ps));
   }
 
   [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> bool override
   {
-    nb::gil_scoped_acquire gil;
-    return nb::cast<bool>(call(nb_trampoline, "_write", byte, at.ps));
+    gil_entry const gil;
+    return nb::cast<bool>(call(nb_trampoline, context_, "_write", byte, at.ps));
   }
 
   [[nodiscard]] auto read(vtime at) -> std::uint8_t override
   {
-    nb::gil_scoped_acquire gil;
-    return nb::cast<std::uint8_t>(call(nb_trampoline, "_read", at.ps));
+    gil_entry const gil;
+    return nb::cast<std::uint8_t>(call(nb_trampoline, context_, "_read", at.ps));
   }
 
   void stop(vtime at) override
   {
-    nb::gil_scoped_acquire gil;
-    call(nb_trampoline, "_stop", at.ps);
+    gil_entry const gil;
+    call(nb_trampoline, context_, "_stop", at.ps);
   }
 
   void reset(reset_kind kind) override
   {
-    nb::gil_scoped_acquire gil;
-    call(nb_trampoline, "_reset", kind);
+    gil_entry const gil;
+    call(nb_trampoline, context_, "_reset", kind);
   }
 
   void save(std::vector<std::byte>& out) const override
   {
-    nb::gil_scoped_acquire gil;
-    append(call(nb_trampoline, "_save"), out);
+    gil_entry const gil;
+    append(call(nb_trampoline, context_, "_save"), out);
   }
 
   void load(std::span<std::byte const> in) override
   {
-    nb::gil_scoped_acquire gil;
-    call(nb_trampoline, "_load", nb::bytes(in.data(), in.size()));
+    gil_entry const gil;
+    call(nb_trampoline, context_, "_load", nb::bytes(in.data(), in.size()));
   }
+
+  /**
+   * @brief Sets the cell whose context every call runs in.
+   * @param cell A weak reference to the cell, or None, the GIL held.
+   */
+  void run_in(nb::object cell)
+  {
+    context_ = std::move(cell);
+  }
+
+private:
+  nb::object context_ = nb::none();
 };
 
 /**
@@ -124,34 +139,46 @@ public:
 
   void select(bool selected, vtime at) override
   {
-    nb::gil_scoped_acquire gil;
-    call(nb_trampoline, "_select", selected, at.ps);
+    gil_entry const gil;
+    call(nb_trampoline, context_, "_select", selected, at.ps);
   }
 
   [[nodiscard]] auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
       -> std::uint32_t override
   {
-    nb::gil_scoped_acquire gil;
-    return nb::cast<std::uint32_t>(call(nb_trampoline, "_exchange", out, bits, at.ps));
+    gil_entry const gil;
+    return nb::cast<std::uint32_t>(call(nb_trampoline, context_, "_exchange", out, bits, at.ps));
   }
 
   void reset(reset_kind kind) override
   {
-    nb::gil_scoped_acquire gil;
-    call(nb_trampoline, "_reset", kind);
+    gil_entry const gil;
+    call(nb_trampoline, context_, "_reset", kind);
   }
 
   void save(std::vector<std::byte>& out) const override
   {
-    nb::gil_scoped_acquire gil;
-    append(call(nb_trampoline, "_save"), out);
+    gil_entry const gil;
+    append(call(nb_trampoline, context_, "_save"), out);
   }
 
   void load(std::span<std::byte const> in) override
   {
-    nb::gil_scoped_acquire gil;
-    call(nb_trampoline, "_load", nb::bytes(in.data(), in.size()));
+    gil_entry const gil;
+    call(nb_trampoline, context_, "_load", nb::bytes(in.data(), in.size()));
   }
+
+  /**
+   * @brief Sets the cell whose context every call runs in.
+   * @param cell A weak reference to the cell, or None, the GIL held.
+   */
+  void run_in(nb::object cell)
+  {
+    context_ = std::move(cell);
+  }
+
+private:
+  nb::object context_ = nb::none();
 };
 
 auto bytes_of(std::span<std::byte const> data) -> nb::bytes
@@ -194,6 +221,10 @@ auto spi_attachment_of(std::string const& peripheral, nb::object const& object)
   if(not nb::try_cast(object, target) or not target)
   {
     throw refused(peripheral, "popcorn.board.SpiTarget instances");
+  }
+  if(auto* const python = dynamic_cast<python_spi_target*>(target.get()))
+  {
+    python->run_in(building_context());
   }
   if(not nb::hasattr(object, "_cs_port") or not nb::hasattr(object, "_cs_pin"))
   {
@@ -243,6 +274,10 @@ auto device_factories(
     {
       if(std::shared_ptr<stm32::i2c_target> target; nb::try_cast(object, target) and target)
       {
+        if(auto* const python = dynamic_cast<python_i2c_target*>(target.get()))
+        {
+          python->run_in(building_context());
+        }
         if(unit->ip != "I2C")
         {
           throw refused(peripheral, "an SPI peripheral for an SpiTarget, not an I2CTarget");

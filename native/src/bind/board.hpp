@@ -1,6 +1,7 @@
 #pragma once
 
 #include "alive.hpp"
+#include "gil_locks.hpp"
 #include "link_queues.hpp"
 
 #include <popcorn/periph/stm32/analog.hpp>
@@ -40,8 +41,12 @@ public:
    * @brief Connects a queue to a port, replacing its far end.
    * @param port The UART.
    * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, through which send() and queued() reach the UART.
    */
-  [[= py::skip]] uart_link(periph::stm32::uart_port& port, detail::alive_flag alive);
+  [[= py::skip]] uart_link(
+      periph::stm32::uart_port& port,
+      detail::alive_flag        alive,
+      detail::host_ref          host);
 
   /**
    * @brief Queues frames towards the firmware, one frame time apart.
@@ -83,6 +88,7 @@ private:
   periph::stm32::uart_port*               port_;
   std::shared_ptr<detail::queue_endpoint> endpoint_;
   detail::alive_flag                      alive_;
+  detail::host_ref                        host_;
 };
 /** @brief One frame an SAI audio block transmitted, built when Python reads it. */
 struct[[= py::rename{"AudioRecord"}]] audio_record
@@ -115,6 +121,7 @@ public:
    * @param external_frame_hz Frame rate of an external clock master, 0 for none.
    * @param clock_wired A bus device drives the external clock at run time.
    * @param alive Cleared when the machine is destroyed.
+   * @param host The machine's host, through which the clock methods reach the SAI.
    */
   [[= py::skip]] audio_link(
       periph::stm32::audio_port& port,
@@ -122,7 +129,8 @@ public:
       std::uint32_t              decimation,
       std::uint32_t              external_frame_hz,
       bool                       clock_wired,
-      detail::alive_flag         alive);
+      detail::alive_flag         alive,
+      detail::host_ref           host);
 
   /** @brief Frames transmitted and not drained yet. */
   [[= py::doc{"Frames transmitted and not drained yet."}]] [[nodiscard]] auto available() const
@@ -173,5 +181,6 @@ private:
   periph::stm32::audio_port*                    port_;
   periph::stm32::audio_block                    block_;
   detail::alive_flag                            alive_;
+  detail::host_ref                              host_;
 };
 }

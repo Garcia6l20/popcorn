@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import contextvars
 import difflib
@@ -216,6 +217,18 @@ _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
     "popcorn_handler_of", default=None
 )
 
+atexit.register(_core.shutdown_hosts)
+
+
+class _ContextCell:
+    """The context the Python models and bus devices of a machine run in, a copy of the one
+    current at `Machine()`. Native code holds it weakly, so a cycle through it is collectable."""
+
+    __slots__ = ("__weakref__", "context")
+
+    def __init__(self, context: contextvars.Context) -> None:
+        self.context = context
+
 
 def _check_duration(for_: VirtualDuration | None) -> None:
     if for_ is not None and for_.ps < 0:
@@ -340,6 +353,7 @@ class Machine:
         "_log_hook",
         "_logs",
         "_memory",
+        "_model_context",
         "_nvic",
         "_peripherals",
         "_plain_memory",
@@ -458,6 +472,8 @@ class Machine:
         config.usb_hosts = checked_usb(usb or {}, aliases)
         self._description = description
         self._config_digest = config_digest
+        self._model_context = _ContextCell(contextvars.copy_context())
+        config.models_context = self._model_context
         self._handle = _core.MachineHandle(description, config)
         self._images: list[Image] = []
         self._slice_instructions = slice_instructions
@@ -519,7 +535,9 @@ class Machine:
         self._nvic = Nvic(self._memory, description.core.num_irqs)
         self._coverage = MachineCoverage(self._handle, lambda: self._images, self._require_stopped)
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
-        self._log_hook = self._handle.add_log_sink(functools.partial(forward_log, description.part))
+        self._callback_table = CallbackTable()
+        log_key = self._callback_table.add(functools.partial(forward_log, description.part))
+        self._log_hook = self._handle.add_log_sink(Relay(self._callback_table, log_key, quiet=True))
         self._irqs = Irqs(description)
         self._arena = (
             None
@@ -530,7 +548,6 @@ class Machine:
         self._last_stop: Stop | None = None
         self._default_budget: int | None = None
         self._logs: dict[int, list[LogEntry]] = {}
-        self._callback_table = CallbackTable()
         self._installed: list[Intercept | Watch] = []
         self._sentinel = (
             self._arena.sentinel if self._arena is not None else _free_sentinel(description)
@@ -1517,7 +1534,7 @@ class Machine:
         self._audio.stream(name, block).external_frame_hz = frame_hz
 
     def _require_owner(self) -> None:
-        if self._busy and threading.get_ident() != self._thread:
+        if self._busy and threading.get_ident() != self._thread and not self._handle.owns_engine():
             raise RuntimeError(
                 "a board stimulus from another thread while the machine runs: call it from "
                 "the machine's thread"
@@ -1532,6 +1549,7 @@ class Machine:
             self._busy
             and _HANDLER_OF.get() is not self
             and threading.get_ident() != self._run_thread
+            and not self._handle.owns_engine()
         ):
             raise MachineRunning("the machine is running, read it from the run's thread")
 

@@ -1,13 +1,16 @@
 #pragma once
 
 #include "board.hpp"
+#include "gil_locks.hpp"
 #include "hooks.hpp"
+#include "host_future.hpp"
 #include "image.hpp"
 #include "observability.hpp"
 #include "snapshot.hpp"
 #include "usb.hpp"
 
 #include <popcorn/core/description.hpp>
+#include <popcorn/core/host.hpp>
 #include <popcorn/core/machine.hpp>
 
 #include <reflex/py.hpp>
@@ -19,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace popcorn::bind
@@ -65,6 +69,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief Virtual USB host per USB device controller name, served by the built-in model of
    * that controller. */
   std::map<std::string, usb_host_config> usb_hosts{};
+  /** @brief Object whose `context` attribute every Python model and bus device runs in, held
+   * weakly by them, empty to run them in the calling thread's context. */
+  std::optional<reflex::py::nb::object> models_context{};
 };
 
 /** @brief Bounds of one slice, core::slice_request without the predicate. */
@@ -125,7 +132,12 @@ struct[[= py::rename{"SliceOutcome"}]] slice_outcome
   [[= py::readonly]] std::uint64_t executed{};
 };
 
-/** @brief Owner of one native machine, the object `popcorn.Machine` wraps. */
+/**
+ * @brief Owner of one native machine, the object `popcorn.Machine` wraps. The machine is built
+ *        on the caller thread, then owned by a core::host whose thread runs every goal. Sync
+ *        methods run inline on the thread that owns the engine and directly under the host
+ *        mutex while the machine is parked, and raise MachineRunning while it runs.
+ */
 class[[= py::rename{"MachineHandle"}]] machine_handle
 {
 public:
@@ -142,7 +154,12 @@ public:
   machine_handle(machine_handle const&) = delete;
   /** @brief Not copy-assignable. */
   auto operator=(machine_handle const&) -> machine_handle& = delete;
-  /** @brief Marks the machine gone for its Python models, then destroys it. */
+  /**
+   * @brief Marks the machine gone for its views, closes and joins the host with the GIL
+   *        released, then destroys the machine. On a host thread or inside a parked section it
+   *        takes the host's orphan path. While the interpreter finalizes with the host thread
+   *        alive it leaves both alive: the thread needs the GIL to exit.
+   */
   ~machine_handle();
 
   /**
@@ -172,16 +189,72 @@ public:
       locate(address pc) const -> location_info;
 
   /**
-   * @brief Runs one slice with the GIL released.
+   * @brief Runs one slice on the host thread as a single-slice goal, waiting with the GIL
+   *        released. A KeyboardInterrupt during the wait cancels the goal, then raises.
    * @param args Bounds.
-   * @param stop_when Predicate evaluated at event boundaries and at the slice end, called with
-   *        the GIL held, empty for none.
-   * @throws machine_busy from inside a slice of this machine.
-   * @throws Any exception the predicate raised, the machine stopped at an instruction boundary.
+   * @param stop_when Predicate evaluated at event boundaries and at the slice end, on the host
+   *        thread in a copy of the caller's context, None for none.
+   * @throws machine_busy from inside a slice of this machine, or while a goal runs.
+   * @throws machine_running from a callback of another machine or a parked section.
+   * @throws Any exception the predicate or a handler raised, the machine stopped at an
+   *         instruction boundary.
    */
-  [[= py::doc{"Run one slice, the GIL released. stop_when runs at event boundaries."}]] auto
-      run_slice(slice_args const& args, std::optional<std::function<bool()>> const& stop_when)
+  [[= py::doc{"Run one slice on the machine thread. stop_when runs at event boundaries."}]] auto
+      run_slice(slice_args const& args, std::optional<reflex::py::nb::object> stop_when)
           -> slice_outcome;
+
+  /**
+   * @brief Starts a goal over as many slices as it needs and returns at once.
+   * @param until Stop before executing this address, left first when the goal starts on it.
+   * @param budget Stop with reason budget past this many instructions.
+   * @param exact Stop after exactly this many instructions.
+   * @param for_ps Stop with reason time this many picoseconds of virtual time from now.
+   * @param stop_when Predicate as for run_slice(), None for none.
+   * @return Resolves to the StopInfo.
+   * @throws machine_busy while a goal or a free run is active.
+   * @throws machine_running from a callback or a parked section.
+   */
+  [[= py::doc{"Start a goal, return a HostFuture resolving to its StopInfo."}]] auto run_goal(
+      std::optional<address>                until,
+      std::optional<std::uint64_t>          budget,
+      std::optional<std::uint64_t>          exact,
+      std::optional<std::uint64_t>          for_ps,
+      std::optional<reflex::py::nb::object> stop_when) -> host_future_handle;
+
+  /**
+   * @brief Opens a free run on the host thread, until halt().
+   * @throws machine_busy while a goal or a free run is active.
+   * @throws machine_running from a callback or a parked section.
+   */
+  [[= py::doc{"Start a free run on the machine thread, until halt()."}]] void start();
+
+  /**
+   * @brief Closes the free run, or cancels a goal, waiting with the GIL released until the
+   *        machine parks. On a host thread it only requests the end.
+   * @return None, the StopInfo that ended the free run by itself, or the exception a handler
+   *         raised in it.
+   * @throws machine_running inside a parked section.
+   */
+  [[= py::doc{"Halt the free run, return None, the StopInfo or exception that ended it."}]] auto
+      halt() -> reflex::py::nb::object;
+
+  /**
+   * @brief Waits on the free run.
+   * @param ready Predicate called on the host thread at event boundaries and slice ends, in a
+   *        copy of the caller's context, None for a deadline only.
+   * @param deadline_ps Virtual time since reset at which the wait ends with reason time.
+   * @return Resolves to the StopInfo of the boundary that ended the wait, or to the free run's
+   *         own end.
+   * @throws std::runtime_error without an open free run.
+   */
+  [[= py::doc{"Wait on the free run, return a HostFuture resolving to a StopInfo."}]] auto
+      wait(std::optional<reflex::py::nb::object> ready, std::optional<std::uint64_t> deadline_ps)
+          -> host_future_handle;
+
+  /** @brief Whether the calling thread owns the engine: the host thread in a slice, a caller in
+   * its parked section. */
+  [[= py::doc{"Whether the calling thread owns the engine: a callback of this machine."}]]
+      [[nodiscard]] auto owns_engine() const noexcept -> bool;
 
   /**
    * @brief Writes bytes into guest memory, as the debugger.
@@ -290,7 +363,7 @@ public:
 
   /** @brief Whether a call is in progress. */
   [[= py::doc{"Whether a call begun by begin_call has not been ended."}]] [[nodiscard]] auto
-      in_call() const noexcept -> bool;
+      in_call() const -> bool;
 
   /** @brief Events waiting in the machine's event queue. */
   [[= py::doc{
@@ -492,8 +565,8 @@ public:
   [[= py::doc{"Stop collecting coverage, keeping the counters."}]] void disable_coverage();
 
   /** @brief Whether coverage is being collected. */
-  [[= py::doc{"Whether coverage is being collected."}]] [[nodiscard]] auto
-      coverage_enabled() const noexcept -> bool;
+  [[= py::doc{"Whether coverage is being collected."}]] [[nodiscard]] auto coverage_enabled() const
+      -> bool;
 
   /**
    * @brief Zeroes every counter.
@@ -561,16 +634,27 @@ public:
    */
   [[= py::doc{"Address of the next instruction."}]] [[nodiscard]] auto pc() const -> address;
 
-  /** @brief The native machine. */
+  /** @brief The native machine, for its fixed data only: the host owns it. */
   [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
 
 private:
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
+  [[nodiscard]] auto lock_for_request() const -> core::held_lock;
+
+  template <typename Body>
+  auto access(Body&& body) const -> std::invoke_result_t<Body, core::machine&>
+  {
+    return detail::host_access(*host_, std::forward<Body>(body));
+  }
 
   std::shared_ptr<std::atomic<bool>>      alive_;
+  std::shared_ptr<detail::host_slot>      slot_;
+  std::shared_ptr<std::atomic<bool>>      thread_live_;
   std::map<std::string, detail::usb_hubs> hubs_;
-  std::unique_ptr<core::machine>          machine_;
+  core::machine*                          engine_{};
+  std::uint64_t                           id_{};
+  std::shared_ptr<core::host>             host_;
 };
 }

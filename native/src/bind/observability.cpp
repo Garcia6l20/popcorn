@@ -83,12 +83,28 @@ auto kinds_of(std::vector<std::uint8_t> const& values) -> core::trace_kinds
 
 trace_handle::trace_handle(
     std::unique_ptr<obs::pctr_writer> writer,
-    core::hook_handle                 sink) noexcept
-    : writer_{std::move(writer)}, sink_{std::move(sink)}
+    core::hook_handle                 sink,
+    detail::host_ref                  host) noexcept
+    : writer_{std::move(writer)}, sink_{std::move(sink)}, host_{std::move(host)}
 {}
+
+trace_handle::~trace_handle()
+{
+  if(sink_.active())
+  {
+    detail::retire(host_, [sink = std::move(sink_), writer = std::move(writer_)] mutable {
+      sink.reset();
+      writer.reset();
+    });
+  }
+}
 
 void trace_handle::close()
 {
+  if(sink_.active())
+  {
+    detail::host_access(host_, [this] { sink_.reset(); });
+  }
   nb::gil_scoped_release released;
   sink_.reset();
   writer_->close();
@@ -107,41 +123,38 @@ auto trace_handle::size() const noexcept -> std::uint64_t
 auto machine_handle::function_ranges(std::vector<std::string> const& names) const
     -> std::vector<detail::range_row>
 {
-  return obs::function_ranges(machine_->loaded_images(), names)
-       | std::views::transform([](address_range const& range) {
-           return detail::range_row{range.name, range.start, range.size};
-         })
-       | std::ranges::to<std::vector>();
+  return access([&](core::machine& target) {
+    return obs::function_ranges(target.loaded_images(), names)
+         | std::views::transform([](address_range const& range) {
+             return detail::range_row{range.name, range.start, range.size};
+           })
+         | std::ranges::to<std::vector>();
+  });
 }
 
 void machine_handle::enable_coverage(std::vector<detail::range_row> const& ranges)
 {
-  machine_->enable_coverage(native_ranges(ranges));
+  auto native = native_ranges(ranges);
+  access([&](core::machine& target) { target.enable_coverage(std::move(native)); });
 }
 
 void machine_handle::disable_coverage()
 {
-  machine_->disable_coverage();
+  access([](core::machine& target) { target.disable_coverage(); });
 }
 
-auto machine_handle::coverage_enabled() const noexcept -> bool
+auto machine_handle::coverage_enabled() const -> bool
 {
-  return machine_->coverage_enabled();
+  return access([](core::machine& target) { return target.coverage_enabled(); });
 }
 
 void machine_handle::clear_coverage()
 {
-  machine_->clear_coverage();
+  access([](core::machine& target) { target.clear_coverage(); });
 }
 
 auto machine_handle::coverage_pcov(std::vector<std::string> const& elf_paths) -> nb::bytes
 {
-  auto const loaded = machine_->loaded_images().size();
-  if(elf_paths.size() != loaded)
-  {
-    throw config_error(
-        "coverage", 0, "sources", std::format("one source per loaded image, {}", loaded));
-  }
   auto const sources =
       elf_paths
       | std::views::transform([](std::string const& path) {
@@ -149,11 +162,16 @@ auto machine_handle::coverage_pcov(std::vector<std::string> const& elf_paths) ->
               .kind = path.empty() ? obs::image_kind::raw : obs::image_kind::elf, .path = path};
         })
       | std::ranges::to<std::vector>();
-  std::vector<std::byte> bytes;
-  {
+  auto const bytes = access([&](core::machine& target) {
+    auto const loaded = target.loaded_images().size();
+    if(sources.size() != loaded)
+    {
+      throw config_error(
+          "coverage", 0, "sources", std::format("one source per loaded image, {}", loaded));
+    }
     nb::gil_scoped_release released;
-    bytes = obs::encode_pcov(obs::collect(*machine_, sources));
-  }
+    return obs::encode_pcov(obs::collect(target, sources));
+  });
   return nb::bytes(bytes.data(), bytes.size());
 }
 
@@ -164,38 +182,47 @@ auto machine_handle::open_trace(
 {
   auto const selected = kinds_of(kinds);
   auto       native   = native_ranges(ranges);
-  auto       writer   = obs::pctr_writer_for(*machine_, path);
-  auto       sink     = machine_->add_trace_sink(selected, writer->sink(), std::move(native));
-  return trace_handle{std::move(writer), std::move(sink)};
+  return access([&](core::machine& target) {
+    auto writer = obs::pctr_writer_for(target, path);
+    auto sink   = target.add_trace_sink(selected, writer->sink(), std::move(native));
+    return trace_handle{std::move(writer), std::move(sink), slot_};
+  });
 }
 
 void machine_handle::write_ring(std::string const& path) const
 {
-  auto&                    ring    = machine_->trace();
-  auto const               records = ring.records();
-  auto const               origin  = ring.origin().value;
-  auto                     writer  = obs::pctr_writer_for(*machine_, path);
-  core::trace_record const start{
-      .kind    = core::trace_kind::time,
-      .payload = {static_cast<std::uint32_t>(origin), static_cast<std::uint32_t>(origin >> 32), 0},
-  };
-  nb::gil_scoped_release released;
-  writer->write(std::span{&start, 1});
-  writer->write(records);
-  writer->close();
+  access([&](core::machine& target) {
+    auto&                    ring    = target.trace();
+    auto const               records = ring.records();
+    auto const               origin  = ring.origin().value;
+    auto                     writer  = obs::pctr_writer_for(target, path);
+    core::trace_record const start{
+        .kind = core::trace_kind::time,
+        .payload =
+            {static_cast<std::uint32_t>(origin), static_cast<std::uint32_t>(origin >> 32), 0},
+    };
+    nb::gil_scoped_release released;
+    writer->write(std::span{&start, 1});
+    writer->write(records);
+    writer->close();
+  });
 }
 
 void machine_handle::clear_ring()
 {
-  machine_->trace().clear(machine_->virtual_clock().now());
+  access([](core::machine& target) { target.trace().clear(target.virtual_clock().now()); });
 }
 
 auto machine_handle::add_log_sink(nb::object sink) -> hook
 {
-  auto callable = detail::held(std::move(sink));
-  return hook{machine_->add_log_sink([callable](core::log_record const& record) {
-    nb::gil_scoped_acquire locked;
-    callable->fn(record);
-  })};
+  auto callable = detail::held_bare(std::move(sink));
+  return access([&](core::machine& target) {
+    return hook{
+        target.add_log_sink([callable](core::log_record const& record) {
+          detail::gil_entry const locked;
+          (*callable)(record);
+        }),
+        slot_};
+  });
 }
 }

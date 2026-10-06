@@ -17,7 +17,6 @@ namespace popcorn::bind
 namespace
 {
 namespace nb = reflex::py::nb;
-using detail::held;
 
 struct view_scope
 {
@@ -33,12 +32,26 @@ struct view_scope
 };
 }
 
-hook::hook(core::hook_handle handle) noexcept : handle_{std::move(handle)}
+hook::hook(core::hook_handle handle, detail::host_ref host) noexcept
+    : handle_{std::move(handle)}, host_{std::move(host)}
 {}
+
+hook::~hook()
+{
+  if(handle_.active())
+  {
+    detail::retire(host_, [owned = std::move(handle_)] mutable { owned.reset(); });
+  }
+}
 
 void hook::remove()
 {
-  handle_.reset();
+  if(not handle_.active())
+  {
+    handle_.reset();
+    return;
+  }
+  detail::host_access(host_, [this] { handle_.reset(); });
 }
 
 auto hook::active() const noexcept -> bool
@@ -82,16 +95,18 @@ auto call_view::args(std::vector<arch::value_kind> const& kinds, std::optional<a
 
 auto machine_handle::add_intercept(address at, nb::object handler, bool once) -> hook
 {
-  auto callable = held(std::move(handler));
-  auto handle   = machine_->add_intercept(
-      at,
-      [callable](core::intercept_call const& call) {
-        nb::gil_scoped_acquire locked;
-        view_scope const       scope;
-        return nb::cast<core::intercept_result>(callable->fn(call_view{call, scope.alive}));
-      },
-      once ? core::intercept_mode::once : core::intercept_mode::every);
-  return hook{std::move(handle)};
+  auto callable = detail::held_bare(std::move(handler));
+  auto handle   = access([&](core::machine& target) {
+    return target.add_intercept(
+        at,
+        [callable](core::intercept_call const& call) {
+          detail::gil_entry const locked;
+          view_scope const        scope;
+          return nb::cast<core::intercept_result>((*callable)(call_view{call, scope.alive}));
+        },
+        once ? core::intercept_mode::once : core::intercept_mode::every);
+  });
+  return hook{std::move(handle), slot_};
 }
 
 auto machine_handle::add_return_hook(
@@ -100,20 +115,20 @@ auto machine_handle::add_return_hook(
     arch::value_kind                     returns,
     nb::object                           handler) -> hook
 {
-  auto callable = held(std::move(handler));
-  auto handle =
-      machine_->add_return_hook(at, args, returns, [callable](core::returned_call const& done) {
-        nb::gil_scoped_acquire locked;
-        callable->fn(
-            returned_record{
-                .function     = done.function,
-                .occurrence   = done.occurrence,
-                .args         = done.args,
-                .value        = done.value,
-                .instructions = done.instructions.value,
-            });
+  auto callable = detail::held_bare(std::move(handler));
+  auto handle   = access([&](core::machine& target) {
+    return target.add_return_hook(at, args, returns, [callable](core::returned_call const& done) {
+      detail::gil_entry const locked;
+      (*callable)(returned_record{
+          .function     = done.function,
+          .occurrence   = done.occurrence,
+          .args         = done.args,
+          .value        = done.value,
+          .instructions = done.instructions.value,
       });
-  return hook{std::move(handle)};
+    });
+  });
+  return hook{std::move(handle), slot_};
 }
 
 auto machine_handle::add_watch(
@@ -128,11 +143,13 @@ auto machine_handle::add_watch(
         "watch", 0, std::format("{:#010x}", at),
         std::format("a non-empty range within the 32-bit address space, not {} bytes", size));
   }
-  auto callable = held(std::move(handler));
-  auto handle   = machine_->add_watch(at, size, kind, [callable](core::watch_hit const& hit) {
-    nb::gil_scoped_acquire locked;
-    return nb::cast<core::watch_action>(callable->fn(hit));
+  auto callable = detail::held_bare(std::move(handler));
+  auto handle   = access([&](core::machine& target) {
+    return target.add_watch(at, size, kind, [callable](core::watch_hit const& hit) {
+      detail::gil_entry const locked;
+      return nb::cast<core::watch_action>((*callable)(hit));
+    });
   });
-  return hook{std::move(handle)};
+  return hook{std::move(handle), slot_};
 }
 }

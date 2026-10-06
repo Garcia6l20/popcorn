@@ -7,6 +7,7 @@ import functools
 import gc
 import itertools
 import sys
+import threading
 import traceback
 import types
 import warnings
@@ -271,11 +272,11 @@ def test_a_run_without_python_models_calls_no_model_code() -> None:
             if event == "call" and frame.f_code.co_filename == model_file:
                 seen += 1
 
-        sys.setprofile(profile)
+        threading.setprofile_all_threads(profile)
         try:
             asyncio.run(m.run(for_=us(100)))
         finally:
-            sys.setprofile(None)
+            threading.setprofile_all_threads(None)
         return seen
 
     plain = machine({})
