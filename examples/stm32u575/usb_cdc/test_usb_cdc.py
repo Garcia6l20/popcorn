@@ -235,7 +235,7 @@ async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(machine: Ma
     path = machine.board.pty("OTG_FS")
     assert machine.board.ptys == {"OTG_FS": path}
     async with machine.running():
-        assert await asyncio.to_thread(serial_client, path, b"ping") == b"PING"
+        assert serial_client(path, b"ping") == b"PING"
         (requests,) = await machine.read(machine.ref.periph.OTG_FS.host.requests)
         before = len(requests)
         await asyncio.sleep(0.1)

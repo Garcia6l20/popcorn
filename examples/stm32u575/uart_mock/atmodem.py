@@ -3,7 +3,7 @@
 No device class exists for a UART: the far end of a USART is its `port`, a byte stream in
 virtual time. The modem reads one command line at a time from it, looks its reply up in a
 script, waits its answer delay in virtual time by running the machine, and writes the reply.
-Everything runs in the test's coroutine, no host thread. A read of a stream is a
+The modem runs in the test's coroutine, no thread of its own. A read of a stream is a
 `Machine.wait_for` on a non-address event, which stops at the first event boundary or slice
 end after the event became ready, so the machine stops a little after the command's last
 frame. The modem times its reply from that frame's own time and runs to it with

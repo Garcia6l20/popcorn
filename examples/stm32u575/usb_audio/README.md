@@ -33,7 +33,7 @@ await audio.speaker.write(samples)       # interleaved ints
 frames = await audio.mic.read_frames(160, for_=ms(200))
 await audio.speaker.drain()              # every written sample went out in a packet
 audio.mic.clear()                        # drop the frames not read yet
-audio.speaker.stop()                     # sync: pipe closed now, SET_INTERFACE 0 next run
+await audio.speaker.stop()               # one command: pipe closed, SET_INTERFACE 0 queued
 await audio.set_volume(unit=2, channel=1, volume=-10 * 256)
 ```
 
@@ -65,7 +65,7 @@ uv run pytest -q examples/stm32u575/usb_audio
 ## Read first
 
 - `test_usb_audio.py`: the probe sequence compared with snd-usb-audio's, a sine looped from the
-  speaker to the microphone, silence, `drain`, `stop` from sync code with the machine stopped,
+  speaker to the microphone, silence, `drain`, `stop` running at once on a parked machine,
   `clear`, and a snapshot taken mid-stream.
 - `firmware/usb_descriptors.c`: the device, configuration and string descriptors, built from
   TinyUSB's UAC2 descriptor macros.

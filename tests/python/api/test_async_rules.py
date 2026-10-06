@@ -1,4 +1,13 @@
-"""The concurrency rules: one run at a time, no sync access while running, cancellation."""
+"""The rules of a hosted machine.
+
+Every machine runs on its own thread. One run, step, call, wait or free run at a time, a second
+one is MachineBusy. Sync reads, writes and stimuli work on a parked machine and raise
+MachineRunning while it is busy, from any thread. `m.read` and `m.write` over `m.ref` work in
+both states, one batch at one block boundary. Handlers and models run on the machine's thread
+and access it inline. Inside `running()` a free run goes on while the body awaits or blocks,
+`wait_for` waits on it, and what ended it is held: every later wait returns or raises it, and
+leaving the body raises it.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +18,12 @@ import time
 
 import popcorn
 import pytest
-from popcorn.units import VirtualTime, ms
+from popcorn.units import VirtualTime, ms, us
 
 from .conftest import Machines, run_bounded
 
 NVIC_ISPR0 = 0xE000_E200
+HANG = 10.0
 
 
 def test_a_second_concurrent_run_is_machine_busy(machines: Machines) -> None:
@@ -34,7 +44,7 @@ def test_a_second_concurrent_run_is_machine_busy(machines: Machines) -> None:
     asyncio.run(scenario())
 
 
-def test_sync_access_from_another_task_during_a_run_is_machine_running(
+def test_state_changes_from_another_task_during_a_run_are_machine_running(
     machines: Machines,
 ) -> None:
     m = machines()
@@ -71,17 +81,18 @@ def test_a_handler_reads_the_machine_but_the_core_refuses_a_reset(machines: Mach
 
 def test_cancelling_a_run_leaves_the_machine_resumable(machines: Machines) -> None:
     m = machines()
+    start = m.time
 
     async def scenario() -> int:
         task = asyncio.create_task(m.run())
-        await asyncio.sleep(0.005)
+        (reached,) = await m.read(m.ref.instructions, at=start + us(10))
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert m.instructions >= reached > 0
         return m.instructions
 
-    cancelled_at = asyncio.run(scenario())
-    assert cancelled_at > 0
+    cancelled_at = run_bounded(scenario(), HANG)
     stop = asyncio.run(m.run(budget=1000))
     assert stop.reason is popcorn.StopReason.BUDGET
     assert stop.instructions >= cancelled_at + 1000
@@ -89,52 +100,59 @@ def test_cancelling_a_run_leaves_the_machine_resumable(machines: Machines) -> No
 
 def test_the_event_loop_keeps_ticking_during_a_run(machines: Machines) -> None:
     m = machines()
-    gaps: list[float] = []
+    ticked = threading.Event()
+    ticks = 0
 
     async def ticker() -> None:
-        last = time.perf_counter()
-        while True:
+        nonlocal ticks
+        while ticks < 100:
             await asyncio.sleep(0)
-            now = time.perf_counter()
-            gaps.append(now - last)
-            last = now
+            ticks += 1
+        ticked.set()
 
-    async def scenario() -> None:
+    async def scenario() -> popcorn.Stop:
         tick = asyncio.create_task(ticker())
-        run = asyncio.create_task(m.run())
-        await asyncio.sleep(0.05)
-        run.cancel()
-        tick.cancel()
-        await asyncio.gather(run, tick, return_exceptions=True)
+        stop = await m.run(stop_when=lambda _: ticked.is_set())
+        await tick
+        return stop
 
-    asyncio.run(scenario())
-    assert len(gaps) > 5
-    assert max(gaps) < 0.020
+    stop = run_bounded(scenario(), HANG)
+    assert stop.reason is popcorn.StopReason.USER
+    assert stop.instructions > 0
 
 
 def test_running_advances_the_machine_in_the_background(machines: Machines) -> None:
     m = machines()
     before = m.instructions
+    start = m.time
 
     async def scenario() -> None:
+        reaching = m.read(at=start + us(10))
         async with m.running():
-            await asyncio.sleep(0.01)
+            reached = await reaching
+            assert reached.time >= start + us(10)
             with pytest.raises(popcorn.MachineRunning):
                 m.reset()
 
-    asyncio.run(scenario())
+    run_bounded(scenario(), HANG)
     assert m.instructions > before
     assert not m.busy
 
 
-def test_running_waits_through_idle(machines: Machines) -> None:
+def test_running_waits_through_idle_without_spending_cpu(machines: Machines) -> None:
     m = machines("idle")
+    start = m.time
 
-    async def scenario() -> None:
+    async def scenario() -> float:
+        reaching = m.read(at=start + us(10))
         async with m.running():
-            await asyncio.sleep(0.005)
+            await reaching
+            spent = time.process_time()
+            await asyncio.sleep(0.05)
+            return time.process_time() - spent
 
-    asyncio.run(scenario())
+    assert run_bounded(scenario(), HANG) < 0.01
+    assert not m.busy
 
 
 def test_a_fault_inside_running_raises_on_exit(machines: Machines) -> None:
@@ -142,10 +160,10 @@ def test_a_fault_inside_running_raises_on_exit(machines: Machines) -> None:
 
     async def scenario() -> None:
         async with m.running():
-            await asyncio.sleep(0.005)
+            await m.wait_for(Never())
 
     with pytest.raises(popcorn.EmulationError) as caught:
-        asyncio.run(scenario())
+        run_bounded(scenario(), HANG)
     assert caught.value.stop is not None
     assert caught.value.stop.reason is popcorn.StopReason.FAULT
     assert caught.value.reason is popcorn.StopReason.FAULT
@@ -163,7 +181,7 @@ def test_a_deadline_inside_running_advances_an_idle_machine(machines: Machines) 
         async with m.running():
             return await m.wait_for(popcorn.Reached("alu_mark"), for_=ms(1))
 
-    stop = asyncio.run(asyncio.wait_for(scenario(), timeout=2))
+    stop = run_bounded(scenario(), HANG)
     assert stop.reason is popcorn.StopReason.TIME
     assert stop.time >= start + ms(1)
 
@@ -173,11 +191,11 @@ def test_a_body_error_inside_running_carries_the_background_stop(machines: Machi
 
     async def scenario() -> None:
         async with m.running():
-            await asyncio.sleep(0.005)
+            await m.wait_for(Never())
             raise KeyError("body failed")
 
     with pytest.raises(KeyError) as caught:
-        asyncio.run(scenario())
+        run_bounded(scenario(), HANG)
     assert any("background run stopped: FAULT" in note for note in caught.value.__notes__)
     assert not m.busy
 
@@ -185,13 +203,16 @@ def test_a_body_error_inside_running_carries_the_background_stop(machines: Machi
 def test_a_cancelled_running_carries_the_background_stop(machines: Machines) -> None:
     m = machines("fault")
 
-    async def body() -> None:
+    async def body(faulted: asyncio.Event) -> None:
         async with m.running():
-            await asyncio.sleep(10)
+            await m.wait_for(Never())
+            faulted.set()
+            await asyncio.Event().wait()
 
     async def scenario() -> asyncio.CancelledError:
-        task = asyncio.create_task(body())
-        await asyncio.sleep(0.005)
+        faulted = asyncio.Event()
+        task = asyncio.create_task(body(faulted))
+        await faulted.wait()
         task.cancel()
         try:
             await task
@@ -199,7 +220,7 @@ def test_a_cancelled_running_carries_the_background_stop(machines: Machines) -> 
             return cancelled
         raise AssertionError("the body was not cancelled")
 
-    cancelled = asyncio.run(scenario())
+    cancelled = run_bounded(scenario(), HANG)
     assert any("background run stopped: FAULT" in note for note in cancelled.__notes__)
     assert not m.busy
 
@@ -215,7 +236,7 @@ class AfterInstructions:
         return machine.instructions >= self.count
 
 
-def test_wait_for_inside_running_awaits_the_driver(machines: Machines) -> None:
+def test_wait_for_inside_running_awaits_the_host(machines: Machines) -> None:
     m = machines(slice_instructions=10_000)
 
     async def scenario() -> tuple[popcorn.Stop, popcorn.Stop]:
@@ -224,20 +245,19 @@ def test_wait_for_inside_running_awaits_the_driver(machines: Machines) -> None:
             timed = await m.wait_for(AfterInstructions(10**12), for_=ms(1))
         return ready, timed
 
-    ready, timed = asyncio.run(scenario())
+    ready, timed = run_bounded(scenario(), HANG)
     assert ready.reason is popcorn.StopReason.USER
     assert 50_000 <= ready.instructions < 50_000 + 10_000 + 64
     assert timed.reason is popcorn.StopReason.TIME
 
 
-def test_time_reads_inside_running_at_the_point_the_run_reached(machines: Machines) -> None:
+def test_async_time_reads_inside_running_are_monotonic(machines: Machines) -> None:
     m = machines(slice_instructions=10_000)
 
     async def scenario() -> tuple[list[VirtualTime], popcorn.Stop, VirtualTime]:
         times = [m.time]
         async with m.running():
             for _ in range(50):
-                await asyncio.sleep(0)
                 times.append((await m.read()).time)
             stop = await m.wait_for(AfterInstructions(10**12), for_=ms(1))
             at_stop = (await m.read()).time
@@ -245,11 +265,10 @@ def test_time_reads_inside_running_at_the_point_the_run_reached(machines: Machin
                 await asyncio.to_thread(lambda: m.time)
         return times, stop, at_stop
 
-    times, stop, at_stop = asyncio.run(scenario())
+    times, stop, at_stop = run_bounded(scenario(), HANG)
     assert all(a <= b for a, b in itertools.pairwise(times))
-    assert times[-1] > times[0]
     assert stop.reason is popcorn.StopReason.TIME
-    assert at_stop >= stop.time
+    assert at_stop >= stop.time > times[0]
     assert m.time >= at_stop
 
 
@@ -266,31 +285,33 @@ def test_time_reads_from_another_task_during_a_run(machines: Machines) -> None:
         times.append(stop.time)
         return times
 
-    times = asyncio.run(scenario())
+    times = run_bounded(scenario(), HANG)
     assert all(a <= b for a, b in itertools.pairwise(times))
     assert m.time == times[-1]
 
 
-def test_time_from_the_building_thread_during_a_run_on_another_thread_is_machine_running(
+def test_a_sync_read_from_any_thread_during_a_run_is_machine_running(
     machines: Machines,
 ) -> None:
     m = machines(slice_instructions=1_000)
+    started = threading.Event()
     done = threading.Event()
 
+    def predicate(_: popcorn.Machine) -> bool:
+        started.set()
+        return done.is_set()
+
     async def scenario() -> popcorn.Stop:
-        run = asyncio.create_task(
-            asyncio.to_thread(asyncio.run, m.run(stop_when=lambda _: done.is_set()))
-        )
-        while not m.busy:
-            await asyncio.sleep(0.001)
+        run = asyncio.create_task(asyncio.to_thread(asyncio.run, m.run(stop_when=predicate)))
         try:
+            assert await asyncio.to_thread(started.wait, HANG)
             with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
                 _ = m.time
         finally:
             done.set()
         return await run
 
-    stop = asyncio.run(scenario())
+    stop = run_bounded(scenario(), HANG)
     assert stop.reason is popcorn.StopReason.USER
     assert m.time == stop.time
 
@@ -310,20 +331,23 @@ def test_a_handler_of_a_run_on_another_thread_reads_the_time(machines: Machines)
     assert seen[-1] <= stop.time
 
 
-def test_memory_reads_inside_running_at_the_point_the_run_reached(machines: Machines) -> None:
+def test_one_async_read_batch_inside_running_is_consistent(machines: Machines) -> None:
     m = machines(slice_instructions=10_000)
     value = m.var("alu_value")
     address = m.sym("alu_value")
 
-    async def scenario() -> tuple[list[int], list[int], int, int, int]:
+    async def scenario() -> tuple[list[int], list[int], int]:
         values: list[int] = []
         counts: list[int] = []
         async with m.running():
             for _ in range(50):
-                await asyncio.sleep(0)
                 sampled, count = await m.read(m.ref.var("alu_value"), m.ref.instructions)
                 values.append(int(sampled))
                 counts.append(count)
+            await m.wait_for(AfterInstructions(counts[-1] + 10_000))
+            sampled, count = await m.read(m.ref.var("alu_value"), m.ref.instructions)
+            values.append(int(sampled))
+            counts.append(count)
             data, word, variable, pc, reg_pc, pending, text = await m.read(
                 m.ref.mem.block(address, 4),
                 m.ref.mem.u32[address],
@@ -338,12 +362,12 @@ def test_memory_reads_inside_running_at_the_point_the_run_reached(machines: Mach
             assert pending >= 0
             assert text == data.split(b"\0")[0].decode("utf-8", errors="replace")
             assert raw == word == int(variable)
-        return values, counts, raw, word, m.instructions
+        return values, counts, m.instructions
 
-    values, counts, raw, word, after = asyncio.run(scenario())
-    assert len(set(values)) > 1
+    values, counts, after = run_bounded(scenario(), HANG)
+    assert values[-1] != values[-2]
+    assert counts[-1] >= counts[-2] + 10_000
     assert all(a <= b for a, b in itertools.pairwise(counts))
-    assert raw == word
     assert counts[-1] <= after
     assert value.value == m.var("alu_value").value
 
@@ -386,21 +410,23 @@ def test_reads_from_another_thread_during_a_run_are_machine_running(machines: Ma
                 with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
                     await asyncio.to_thread(read)
 
-    asyncio.run(scenario())
+    run_bounded(scenario(), HANG)
 
 
-def test_writes_and_bus_reads_inside_running_are_machine_running(machines: Machines) -> None:
+def test_sync_writes_and_bus_reads_inside_running_raise_and_async_ones_land(
+    machines: Machines,
+) -> None:
     m = machines(slice_instructions=1_000)
     value = m.var("alu_value")
     address = m.sym("alu_value")
     testdev = m.description.peripherals[0].base
     sram = next(r for r in m.description.regions if r.name == "SRAM")
+    spare = sram.start + sram.size // 2
 
     refused = r"await m\.read"
 
     async def scenario() -> None:
         async with m.running():
-            await asyncio.sleep(0)
             with pytest.raises(popcorn.MachineRunning, match=refused):
                 m.mem.u32[address] = 1
             with pytest.raises(popcorn.MachineRunning, match=refused):
@@ -428,16 +454,19 @@ def test_writes_and_bus_reads_inside_running_are_machine_running(machines: Machi
                 (m.ref.reg.r0, 1),
                 (m.ref.periph.TESTDEV.RW, 1),
                 (m.ref.periph.TESTDEV.RW.bus, 1),
+                (m.ref.mem.u32[spare], 0x5A5A_A5A5),
             )
             read = await m.read(
                 m.ref.mem.u32[testdev],
                 m.ref.periph.TESTDEV.RW.bus,
                 m.ref.mem.u32[NVIC_ISPR0],
                 m.ref.mem.block(sram.start + sram.size - 4, 4),
+                m.ref.mem.u32[spare],
             )
-            assert len(read) == 4 and read.time >= written.time
+            assert len(read) == 5 and read.time >= written.time
+            assert read[4] == 0x5A5A_A5A5
 
-    asyncio.run(scenario())
+    run_bounded(scenario(), HANG)
 
 
 def test_a_run_inside_running_is_machine_busy(machines: Machines) -> None:
@@ -448,7 +477,7 @@ def test_a_run_inside_running_is_machine_busy(machines: Machines) -> None:
             with pytest.raises(popcorn.MachineBusy):
                 await m.run(budget=10)
 
-    asyncio.run(scenario())
+    run_bounded(scenario(), HANG)
 
 
 def boom(_: object) -> None:
@@ -456,14 +485,22 @@ def boom(_: object) -> None:
 
 
 class Recorded:
-    """A handler raising ValueError, counting its calls."""
+    """A handler raising ValueError, telling the awaiting loop it ran."""
 
     def __init__(self) -> None:
-        self.calls = 0
+        self.ran: asyncio.Event | None = None
+        self.loop: asyncio.AbstractEventLoop | None = None
+
+    def arm(self) -> asyncio.Event:
+        """Bind to the running loop, the event set once the handler ran."""
+        self.ran = asyncio.Event()
+        self.loop = asyncio.get_running_loop()
+        return self.ran
 
     def __call__(self, _: object) -> None:
-        """Count the call and fail."""
-        self.calls += 1
+        """Signal the loop and fail."""
+        if self.loop is not None and self.ran is not None:
+            self.loop.call_soon_threadsafe(self.ran.set)
         raise ValueError("handler failed")
 
 
@@ -484,7 +521,7 @@ def test_an_on_return_error_inside_running_raises_at_the_next_wait(machines: Mac
             await m.wait_for(Never(), for_=ms(100))
 
     with pytest.raises(ValueError, match="handler failed"):
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert not m.busy
 
 
@@ -501,7 +538,7 @@ def test_an_intercept_error_inside_running_raises_at_the_next_wait(machines: Mac
             await m.wait_for(Never(), for_=ms(100))
 
     with pytest.raises(ValueError, match="handler failed"):
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert not m.busy
 
 
@@ -514,7 +551,7 @@ def test_a_watch_error_inside_running_raises_at_the_next_wait(machines: Machines
             await m.wait_for(popcorn.Reached("idle_main"), for_=ms(100))
 
     with pytest.raises(ValueError, match="handler failed"):
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert not m.busy
 
 
@@ -527,15 +564,15 @@ def test_a_handler_error_inside_running_raises_on_exit_without_a_wait(
     instructions: list[int] = []
 
     async def scenario() -> None:
+        ran = handler.arm()
         async with m.running():
-            while not handler.calls:
-                await asyncio.sleep(0.001)
+            await ran.wait()
             instructions.append((await m.read(m.ref.instructions))[0])
             await asyncio.sleep(0.01)
             instructions.append((await m.read(m.ref.instructions))[0])
 
     with pytest.raises(ValueError, match="handler failed"):
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert instructions[0] == instructions[1]
     assert not m.busy
 
@@ -558,7 +595,7 @@ def test_every_wait_after_a_handler_error_raises_it(machines: Machines) -> None:
             await m.wait_for(Never())
 
     with pytest.raises(ValueError, match="handler failed") as caught:
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert errors == [caught.value, caught.value]
     assert not m.busy
 
@@ -569,13 +606,13 @@ def test_a_body_error_inside_running_carries_the_handler_error(machines: Machine
     m.on_return("alu_mark", handler)
 
     async def scenario() -> None:
+        ran = handler.arm()
         async with m.running():
-            while not handler.calls:
-                await asyncio.sleep(0.001)
+            await ran.wait()
             raise KeyError("body failed")
 
     with pytest.raises(KeyError) as caught:
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert caught.value.__notes__ == ["background run raised: ValueError('handler failed')"]
 
 
@@ -592,22 +629,22 @@ def test_an_event_error_inside_running_fails_only_its_wait(machines: Machines) -
                 await m.wait_for(Broken())
             return await m.wait_for(AfterInstructions(50_000))
 
-    assert run_bounded(scenario()).reason is popcorn.StopReason.USER
+    assert run_bounded(scenario(), HANG).reason is popcorn.StopReason.USER
 
 
 def test_a_wait_after_the_background_run_stopped_returns_that_stop(machines: Machines) -> None:
     m = machines("fault")
+    stops: list[popcorn.Stop] = []
 
-    async def scenario() -> popcorn.Stop | None:
+    async def scenario() -> None:
         async with m.running():
-            while (await m.read(m.ref.instructions))[0] == 0:
-                await asyncio.sleep(0.001)
-            await asyncio.sleep(0.01)
-            return await m.wait_for(Never())
-        return None
+            stops.append(await m.wait_for(Never()))
+            stops.append(await m.wait_for(Never(), for_=ms(1)))
 
     with pytest.raises(popcorn.FaultError):
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
+    assert stops[0] == stops[1]
+    assert stops[0].reason is popcorn.StopReason.FAULT
     assert not m.busy
 
 
@@ -626,7 +663,7 @@ def test_a_pytest_failure_in_a_handler_inside_running_fails_the_wait(
             await m.wait_for(Never(), for_=ms(100))
 
     with pytest.raises(pytest.fail.Exception, match="checked in the handler"):
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert not m.busy
 
 
@@ -645,7 +682,7 @@ def test_a_keyboard_interrupt_in_a_handler_inside_running_reaches_the_caller(
             await m.wait_for(Never(), for_=ms(100))
 
     with pytest.raises(KeyboardInterrupt):
-        run_bounded(scenario())
+        run_bounded(scenario(), HANG)
     assert not m.busy
 
 
@@ -664,15 +701,15 @@ def test_a_machine_runs_again_after_a_handler_error_inside_running(machines: Mac
             return await m.wait_for(target, for_=ms(100))
 
     with pytest.raises(ValueError, match="handler failed"):
-        run_bounded(failing())
+        run_bounded(failing(), HANG)
     hook.remove()
-    assert run_bounded(passing()).reason is popcorn.StopReason.USER
+    assert run_bounded(passing(), HANG).reason is popcorn.StopReason.USER
 
     m.on_return("alu_mark", boom)
     m.restore(saved)
     with pytest.raises(ValueError, match="handler failed"):
-        run_bounded(failing())
+        run_bounded(failing(), HANG)
     m.remove_hooks()
     m.restore(saved)
-    assert run_bounded(passing()).reason is popcorn.StopReason.USER
+    assert run_bounded(passing(), HANG).reason is popcorn.StopReason.USER
     assert not m.busy
