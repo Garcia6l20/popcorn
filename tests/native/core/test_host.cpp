@@ -15,11 +15,14 @@
 #include <exception>
 #include <functional>
 #include <latch>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -96,6 +99,38 @@ public:
   }
 };
 
+class resetting_arch final : public popcorn::testing::test_arch
+{
+public:
+  using test_arch::test_arch;
+
+  static constexpr std::uint32_t reset_event = 8;
+
+  void on_event(std::uint32_t kind, std::uint64_t payload) override
+  {
+    if(kind == reset_event)
+    {
+      attached_services().request_reset(popcorn::reset_kind::software);
+      return;
+    }
+    test_arch::on_event(kind, payload);
+  }
+};
+
+constexpr std::uint64_t ps_per_instruction = 250'000;
+
+auto at_instruction(std::uint64_t count) -> vtime
+{
+  return vtime{count * ps_per_instruction};
+}
+
+auto sram(core::machine& m) -> std::vector<std::byte>
+{
+  std::vector<std::byte> bytes(786'432);
+  REQUIRE(m.mem().read_block(0x2000'0000, bytes).has_value());
+  return bytes;
+}
+
 auto alu_entry_fixture(std::uint32_t loops) -> popcorn::testing::machine_fixture<>
 {
   popcorn::testing::machine_fixture<> f{m33(), "alu", core::machine_options{}};
@@ -164,10 +199,11 @@ struct hosted
     return on->wait(held, 0, std::move(spec));
   }
 
-  auto post(std::move_only_function<void(core::machine&)> body) const -> core::host_future<vtime>
+  auto post(std::move_only_function<void(core::machine&)> body, std::optional<vtime> at = {}) const
+      -> core::host_future<vtime>
   {
     auto held = on->lock();
-    return on->post(held, 0, std::move(body));
+    return on->post(held, 0, std::move(body), at);
   }
 
   auto reg(std::string_view name) const -> std::uint64_t
@@ -975,4 +1011,328 @@ TEST_CASE("an idle host destroyed on another host's thread destroys its machine 
     REQUIRE(settles([&] { return destroyed.load() != std::thread::id{}; }));
     CHECK(destroyed.load() == victim_thread.load());
   }
+}
+
+TEST_CASE("no-op stamps leave a goal's results unchanged")
+{
+  core::run_goal const goal{.budget = icount{2'000'000}};
+  auto const           observe = [](hosted const& h) {
+    return core::access(*h.on, 0, [](core::machine& m) {
+      return std::tuple{alu_regs(m), sram(m), m.trace().records()};
+    });
+  };
+  hosted     plain{alu(0)};
+  auto const expected       = plain.run(goal).get();
+  auto const expected_state = observe(plain);
+
+  hosted                                h{alu(0)};
+  std::vector<core::host_future<vtime>> stamps;
+  for(std::uint64_t k = 1; k <= 10; ++k)
+  {
+    stamps.push_back(h.post([](core::machine&) {}, at_instruction(150'000 * k + 7)));
+    CHECK_FALSE(stamps.back().done());
+  }
+  auto const got = h.run(goal).get();
+  CHECK(got.stopped.reason == expected.stopped.reason);
+  CHECK(got.stopped.instructions == expected.stopped.instructions);
+  CHECK(got.stopped.time == expected.stopped.time);
+  CHECK(got.stopped.where.pc == expected.stopped.where.pc);
+  CHECK(got.executed == expected.executed);
+  auto const state = observe(h);
+  CHECK(std::get<0>(state) == std::get<0>(expected_state));
+  CHECK(std::get<1>(state) == std::get<1>(expected_state));
+  CHECK(std::get<2>(state) == std::get<2>(expected_state));
+  for(std::uint64_t k = 1; k <= 10; ++k)
+  {
+    auto const t = at_instruction(150'000 * k + 7);
+    REQUIRE(stamps[k - 1].wait_for(5s));
+    auto const at = stamps[k - 1].get();
+    CHECK(at >= t);
+    CHECK(at.ps < t.ps + 512 * ps_per_instruction);
+  }
+}
+
+TEST_CASE("a stamp on an idle core applies exactly at its time")
+{
+  hosted     h{idle_forever()};
+  auto const start = h.now();
+  auto const t     = vtime{start.ps + 1'000'000'000};
+  auto       seen  = std::make_shared<vtime>();
+  auto const stamp = h.post([seen](core::machine& m) { *seen = m.virtual_clock().time(); }, t);
+  CHECK_FALSE(stamp.done());
+  auto const got = h.run({.until_time = vtime{start.ps + 2'000'000'000}}).get();
+  CHECK(got.stopped.reason == stop_reason::time);
+  CHECK(stamp.get() == t);
+  CHECK(*seen == t);
+}
+
+TEST_CASE("a stamp posted to an idle free run applies exactly at its time")
+{
+  hosted     h{idle_forever()};
+  auto const start = h.now();
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const t     = vtime{start.ps + 1'000'000'000};
+  auto const stamp = h.post([](core::machine&) {}, t);
+  CHECK(stamp.get() == t);
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  CHECK_FALSE(h.on->halt(0).has_value());
+  CHECK(h.now() == t);
+}
+
+TEST_CASE("a stamp on a running core lands within one block of its time")
+{
+  hosted     h{alu(0)};
+  auto const t     = at_instruction(1'000'003);
+  auto       seen  = std::make_shared<vtime>();
+  auto const stamp = h.post([seen](core::machine& m) { *seen = m.virtual_clock().time(); }, t);
+  auto const goal  = h.run({.budget = icount{20'000'000}});
+  auto       best  = std::make_shared<std::atomic<std::uint64_t>>(0);
+  auto const quick = h.post([best](core::machine& m) { *best = m.virtual_clock().time().ps; });
+  std::ignore      = goal.get();
+  CHECK(stamp.get() == *seen);
+  CHECK(*seen >= t);
+  CHECK(seen->ps < t.ps + 512 * ps_per_instruction);
+  CHECK(quick.get().ps == best->load());
+}
+
+TEST_CASE("a stamped stimulus posted at a random wall time gives the same final state")
+{
+  auto const once = [](std::chrono::microseconds delay) {
+    hosted                   h{alu(0)};
+    auto const               goal = h.run({.budget = icount{40'000'000}});
+    core::host_future<vtime> stamp;
+    std::thread              poster{[&] {
+      std::this_thread::sleep_for(delay);
+      stamp = h.post(
+          [](core::machine& m) { m.regs().write(*m.regs().find("r1"), 7); },
+          at_instruction(30'000'001));
+    }};
+    poster.join();
+    auto const got = goal.get();
+    auto const at  = stamp.get();
+    return std::tuple{got.stopped.instructions, at, core::access(*h.on, 0, [](core::machine& m) {
+                        return alu_regs(m);
+                      })};
+  };
+  std::random_device                          seed;
+  std::uniform_int_distribution<std::int64_t> jitter{0, 999};
+  auto const                                  first = once(std::chrono::microseconds{jitter(seed)});
+  for(std::int64_t spread = 1; spread < 5; ++spread)
+  {
+    auto const delay = std::chrono::microseconds{spread * 1000 + jitter(seed)};
+    CHECK(once(delay) == first);
+  }
+}
+
+TEST_CASE("a past stamp throws parked and fails running, an equal stamp applies at once")
+{
+  hosted h{alu(0)};
+  std::ignore = h.run({.budget = icount{1000}}).get();
+  CHECK_THROWS_AS(std::ignore = h.post([](core::machine&) {}, vtime{0}), std::invalid_argument);
+  try
+  {
+    std::ignore = h.post([](core::machine&) {}, vtime{0});
+  }
+  catch(std::invalid_argument const& error)
+  {
+    MESSAGE(error.what());
+    CHECK(std::string_view{error.what()}.starts_with("stamp 0.000000 ms is before machine time"));
+  }
+  auto const now   = h.now();
+  auto const equal = h.post([](core::machine&) {}, now);
+  CHECK(equal.done());
+  CHECK(equal.get() == now);
+
+  auto const goal = h.run({});
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::running; }));
+  auto const late = h.post([](core::machine&) {}, vtime{0});
+  CHECK_THROWS_AS(late.get(), std::invalid_argument);
+  h.on->cancel(0);
+  CHECK_THROWS_AS(goal.get(), core::operation_cancelled);
+}
+
+TEST_CASE("stamps apply in time order, equal stamps in posting order")
+{
+  hosted                                h{alu(0)};
+  auto                                  order = std::make_shared<std::vector<int>>();
+  std::vector<core::host_future<vtime>> stamps;
+  auto const                            log = [order](int id) {
+    return [order, id](core::machine&) { order->push_back(id); };
+  };
+  stamps.push_back(h.post(log(2), at_instruction(20'000)));
+  stamps.push_back(h.post(log(1), at_instruction(10'000)));
+  stamps.push_back(h.post(log(3), at_instruction(30'000)));
+  stamps.push_back(h.post(log(4), at_instruction(30'000)));
+  for(int k = 0; k < 100; ++k)
+  {
+    stamps.push_back(h.post(log(10 + k), at_instruction(40'000)));
+  }
+  std::ignore = h.run({.budget = icount{100'000}}).get();
+  for(auto const& stamp : stamps)
+  {
+    CHECK(stamp.done());
+  }
+  std::vector<int> expected{1, 2, 3, 4};
+  for(int k = 0; k < 100; ++k)
+  {
+    expected.push_back(10 + k);
+  }
+  CHECK(*order == expected);
+}
+
+TEST_CASE("a reset or a restore fails pending stamps")
+{
+  SUBCASE("parked reset")
+  {
+    hosted h{alu(0)};
+    std::ignore      = h.run({.budget = icount{1000}}).get();
+    auto const stamp = h.post([](core::machine&) {}, at_instruction(5000));
+    core::access(*h.on, 0, [](core::machine& m) { m.reset(); });
+    std::ignore = h.run({.budget = icount{10'000}}).get();
+    CHECK_THROWS_AS(stamp.get(), core::operation_cancelled);
+  }
+  SUBCASE("parked restore")
+  {
+    hosted     h{alu(0)};
+    auto const saved = core::access(*h.on, 0, [](core::machine& m) { return m.snapshot(); });
+    auto const stamp = h.post([](core::machine&) {}, at_instruction(5000));
+    core::access(*h.on, 0, [&saved](core::machine& m) { m.restore(saved); });
+    auto const after = h.post([](core::machine&) {}, at_instruction(6000));
+    CHECK_THROWS_AS(stamp.get(), core::operation_cancelled);
+    std::ignore = h.run({.budget = icount{10'000}}).get();
+    CHECK(after.done());
+  }
+  SUBCASE("model-requested reset during a run")
+  {
+    popcorn::testing::machine_fixture<resetting_arch> f{
+        m33(), "alu",
+        core::machine_options{.on_reset_request = core::reset_request_policy::reset_and_continue}};
+    f.set("r0", 0);
+    std::ignore =
+        f.module->attached_events().schedule(icount{200'000}, resetting_arch::reset_event, 0);
+    hosted     h{std::move(f.target)};
+    auto const stamp = h.post([](core::machine&) {}, at_instruction(600'000));
+    std::ignore      = h.run({.budget = icount{1'000'000}}).get();
+    CHECK_THROWS_AS(stamp.get(), core::operation_cancelled);
+  }
+}
+
+TEST_CASE("withdraw removes a pending stamp and refuses one that ran")
+{
+  hosted     h{alu(0)};
+  auto       ran   = std::make_shared<std::atomic<int>>(0);
+  auto const stamp = h.post([ran](core::machine&) { ++*ran; }, at_instruction(5000));
+  {
+    auto held = h.on->lock();
+    CHECK(h.on->withdraw(held, 0, stamp));
+    CHECK_FALSE(h.on->withdraw(held, 0, stamp));
+  }
+  CHECK_THROWS_AS(stamp.get(), core::operation_cancelled);
+  auto const kept = h.post([ran](core::machine&) { *ran += 10; }, at_instruction(6000));
+  std::ignore     = h.run({.budget = icount{10'000}}).get();
+  CHECK(*ran == 10);
+  auto held = h.on->lock();
+  CHECK_FALSE(h.on->withdraw(held, 0, kept));
+}
+
+TEST_CASE("a stamped read on a parked machine resolves when a goal reaches it")
+{
+  auto const once = [] {
+    hosted     h{alu(0)};
+    auto       value = std::make_shared<std::uint64_t>(0);
+    auto const read  = h.post(
+        [value](core::machine& m) { *value = m.regs().read(*m.regs().find("r2")); },
+        at_instruction(500'003));
+    CHECK_FALSE(read.done());
+    std::ignore = h.run({.budget = icount{1'000'000}}).get();
+    return std::pair{read.get(), *value};
+  };
+  auto const first = once();
+  CHECK(first.second != 0);
+  CHECK(first == once());
+}
+
+TEST_CASE("stamp edge cases: at zero, never due, during exact stepping")
+{
+  hosted     fresh{alu(0)};
+  auto const zero = fresh.post([](core::machine&) {}, vtime{0});
+  CHECK(zero.done());
+  CHECK(zero.get() == vtime{0});
+  auto const never =
+      fresh.post([](core::machine&) {}, vtime{std::numeric_limits<std::uint64_t>::max()});
+  std::ignore = fresh.run({.budget = icount{1000}}).get();
+  CHECK_FALSE(never.done());
+  fresh.on->close();
+  CHECK_THROWS_AS(never.get(), core::machine_closed);
+
+  hosted     stepping{alu(0)};
+  auto const t     = at_instruction(500);
+  auto const stamp = stepping.post([](core::machine&) {}, t);
+  auto const got   = stepping.run({.exact = icount{1000}}).get();
+  CHECK(got.executed == icount{1000});
+  CHECK(stamp.get() >= t);
+  CHECK(stamp.get().ps < t.ps + 512 * ps_per_instruction);
+}
+
+TEST_CASE("stamps posted while running are checked when the goal stops in that slice")
+{
+  auto                       made = alu(1000);
+  hosted                     h;
+  std::latch                 in_hook{1};
+  std::latch                 posted{1};
+  std::atomic<std::uint64_t> hook_ps{};
+  auto* const                target = made.get();
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&](core::intercept_call const&) {
+        hook_ps = target->virtual_clock().time().ps;
+        in_hook.count_down();
+        posted.wait();
+        return core::intercept_result::stop(stop_reason::user);
+      },
+      core::intercept_mode::once));
+  h.adopt(std::move(made));
+  auto const goal = h.run({});
+  in_hook.wait();
+  auto const parks_at = vtime{hook_ps.load()};
+  auto const past     = h.post([](core::machine&) {}, vtime{0});
+  auto const equal    = h.post([](core::machine&) {}, parks_at);
+  posted.count_down();
+  auto const got = goal.get();
+  CHECK(got.stopped.reason == stop_reason::user);
+  CHECK(got.stopped.time == parks_at);
+  REQUIRE(past.wait_for(5s));
+  CHECK_THROWS_AS(past.get(), std::invalid_argument);
+  REQUIRE(equal.wait_for(5s));
+  CHECK(equal.get() == parks_at);
+}
+
+TEST_CASE("stamps posted while running are checked when a halt parks in the same turn")
+{
+  auto                     made = alu(0);
+  hosted                   h;
+  std::atomic<core::host*> self{};
+  std::latch               in_hook{1};
+  std::latch               posted{1};
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&](core::intercept_call const&) {
+        in_hook.count_down();
+        posted.wait();
+        std::ignore = self.load()->halt(0);
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  h.adopt(std::move(made));
+  self = h.on.get();
+  h.start();
+  in_hook.wait();
+  auto const past = h.post([](core::machine&) {}, vtime{0});
+  posted.count_down();
+  REQUIRE(past.wait_for(5s));
+  CHECK_THROWS_AS(past.get(), std::invalid_argument);
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::parked; }));
+  auto held = h.on->lock();
+  CHECK_FALSE(h.on->session_open(held, 0));
 }

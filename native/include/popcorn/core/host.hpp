@@ -126,6 +126,8 @@ namespace detail
 {
 struct host_core;
 struct waiter;
+struct member_slot;
+template <typename T> class host_promise;
 enum class fate : std::uint8_t;
 
 /** @brief Host mutexes the current thread holds through a held_lock. */
@@ -203,6 +205,9 @@ public:
 
   /** @brief The consumer side. */
   [[nodiscard]] auto future() const -> host_future<T>;
+
+  /** @brief Whether @p other is the consumer side of this promise. */
+  [[nodiscard]] auto feeds(host_future<T> const& other) const noexcept -> bool;
 
 private:
   std::shared_ptr<future_state<T>> state_;
@@ -290,6 +295,12 @@ private:
 template <typename T> auto detail::host_promise<T>::future() const -> host_future<T>
 {
   return host_future<T>{state_};
+}
+
+template <typename T>
+auto detail::host_promise<T>::feeds(host_future<T> const& other) const noexcept -> bool
+{
+  return other.state_ == state_;
 }
 
 /**
@@ -453,13 +464,39 @@ public:
    * @brief Runs @p body on member @p who as one command. The future resolves to the virtual time
    *        read right before the body ran, or fails with what the body threw.
    *
-   * From a thread that owns the engine, and from any thread while parked, the body runs at once
-   * on the calling thread and the future is returned done. While running, the command is queued,
-   * the slice interrupted, and the body runs on the host thread at the next boundary. A body
-   * captures native values only.
+   * Without @p at: from a thread that owns the engine, and from any thread while parked, the body
+   * runs at once on the calling thread and the future is returned done. While running, the
+   * command is queued, the slice interrupted, and the body runs on the host thread at the next
+   * boundary, best effort.
+   *
+   * With @p at, a stamp: the body runs at the first block boundary at or after @p at, exactly at
+   * @p at when the core is idle there, before a stop of that boundary is reported. Stamps run in
+   * time order, equal stamps in posting order. A stamp equal to the machine's time runs at once.
+   * A later stamp on a parked member stays pending until a goal or free run reaches it. A reset
+   * or a restore fails every pending stamp with operation_cancelled. A body captures native
+   * values only.
+   *
+   * @throws std::invalid_argument when @p at is before the machine's time, checked here unless
+   *         the member is running. While running the check happens at the next boundary and
+   *         fails the future instead.
+   * @throws machine_running for a later stamp from a thread that owns the engine through a
+   *         callback without holding @p held, outside the host thread.
    */
-  auto post(held_lock const& held, member_id who, std::move_only_function<void(machine&)> body)
-      -> host_future<vtime> pre(owns_engine() or held.holds(*this)) pre(who < members());
+  auto post(
+      held_lock const&                        held,
+      member_id                               who,
+      std::move_only_function<void(machine&)> body,
+      std::optional<vtime> at = {}) -> host_future<vtime> pre(owns_engine() or held.holds(*this))
+      pre(who < members());
+
+  /**
+   * @brief Removes a command of member @p who whose body has not run, best effort or stamped. Its
+   *        future fails with operation_cancelled.
+   * @return Whether @p pending was found and removed, false when the host already took it: its
+   *         body ran or will run.
+   */
+  auto withdraw(held_lock const& held, member_id who, host_future<vtime> const& pending)
+      -> bool pre(held.holds(*this)) pre(who < members()) pre(pending.valid());
 
   /**
    * @brief Runs member @p who to a stop over as many slices as needed. A stop_reason::idle stop
@@ -527,6 +564,12 @@ private:
 
   void ensure_thread();
   void request_stop();
+  void post_stamped(
+      held_lock const&                        held,
+      detail::member_slot&                    slot,
+      std::move_only_function<void(machine&)> body,
+      vtime                                   at,
+      detail::host_promise<vtime> const&      promise);
   void decide(detail::fate ending);
 
   std::shared_ptr<detail::host_core> core_;

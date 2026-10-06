@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <deque>
+#include <format>
 #include <ranges>
+#include <stdexcept>
 #include <stop_token>
+#include <string>
+#include <tuple>
 
 namespace popcorn::core
 {
@@ -39,12 +43,40 @@ struct goal_run
   icount                    executed{};
 };
 
+struct stamped
+{
+  vtime                                   at;
+  std::uint64_t                           seq;
+  std::move_only_function<void(machine&)> body;
+  host_promise<vtime>                     promise;
+};
+
+struct later_first
+{
+  auto operator()(stamped const& a, stamped const& b) const noexcept -> bool
+  {
+    return std::tie(a.at.ps, a.seq) > std::tie(b.at.ps, b.seq);
+  }
+};
+
+struct timeline_mark
+{
+  std::uint64_t generation{};
+  std::uint64_t resets{};
+};
+
+auto mark_of(machine const& target) -> timeline_mark
+{
+  return {.generation = target.generation(), .resets = target.resets()};
+}
+
 using deferred    = std::vector<std::move_only_function<void()>>;
 using waiter_list = std::vector<std::shared_ptr<waiter>>;
 
 struct member_slot
 {
-  explicit member_slot(std::unique_ptr<machine> made) : engine{std::move(made)}
+  explicit member_slot(std::unique_ptr<machine> made)
+      : engine{std::move(made)}, mark{mark_of(*engine)}
   {}
 
   std::unique_ptr<machine>  engine;
@@ -60,6 +92,45 @@ struct member_slot
   bool                      halt_requested   = false;
   bool                      woken            = false;
   std::uint64_t             parks            = 0;
+  std::vector<stamped>      stamps{};
+  std::vector<stamped>      incoming{};
+  std::uint64_t             next_seq = 0;
+  timeline_mark             mark;
+
+  void push_stamp(stamped made)
+  {
+    stamps.push_back(std::move(made));
+    std::ranges::push_heap(stamps, later_first{});
+  }
+
+  [[nodiscard]] auto next_stamp() const -> std::optional<vtime>
+  {
+    return stamps.empty() ? std::nullopt : std::optional{stamps.front().at};
+  }
+
+  auto take_stamps() -> std::vector<stamped>
+  {
+    auto all = std::exchange(stamps, {});
+    std::ranges::move(incoming, std::back_inserter(all));
+    incoming.clear();
+    return all;
+  }
+
+  auto timeline_moved() -> char const*
+  {
+    auto const  now = mark_of(*engine);
+    char const* why = nullptr;
+    if(now.generation != mark.generation)
+    {
+      why = "superseded by a restore";
+    }
+    else if(now.resets != mark.resets)
+    {
+      why = "superseded by a reset";
+    }
+    mark = now;
+    return why;
+  }
 };
 
 struct turn_plan
@@ -113,6 +184,34 @@ auto cancelled(char const* what) -> std::exception_ptr
 auto closed_error() -> std::exception_ptr
 {
   return std::make_exception_ptr(machine_closed("the host closed"));
+}
+
+auto in_ms(vtime at) -> std::string
+{
+  return std::format("{:.6f} ms", static_cast<double>(at.ps) / 1e9);
+}
+
+auto past_stamp(vtime at, vtime now) -> std::invalid_argument
+{
+  return std::invalid_argument(
+      std::format("stamp {} is before machine time {}", in_ms(at), in_ms(now)));
+}
+
+void fail_all(std::vector<stamped> const& dropped, std::exception_ptr const& error)
+{
+  for(auto const& pending : dropped)
+  {
+    pending.promise.fail(error);
+  }
+}
+
+void add_stamp(slice_request& request, std::optional<vtime> stamp)
+{
+  if(stamp and (not request.until_time or *stamp < *request.until_time))
+  {
+    request.until_time    = stamp;
+    request.internal_stop = true;
+  }
 }
 
 auto remaining_after(std::optional<icount> bound, icount ran) -> std::optional<icount>
@@ -303,11 +402,14 @@ struct host_core
   template <typename Transition> void park(member_slot& slot, deferred& done, Transition transition)
   {
     std::unique_lock lock{mutex};
-    while(not slot.mail.empty())
+    while(not slot.mail.empty() or not slot.incoming.empty())
     {
       auto batch = std::exchange(slot.mail, {});
+      auto fresh = std::exchange(slot.incoming, {});
       lock.unlock();
       serve_mail(slot, batch);
+      accept_incoming(slot, std::move(fresh));
+      apply_due(slot);
       lock.lock();
     }
     transition(slot, done);
@@ -331,10 +433,130 @@ struct host_core
     }
   }
 
+  void supersede_if_moved(member_slot& slot)
+  {
+    auto const* const why = slot.timeline_moved();
+    if(why == nullptr)
+    {
+      return;
+    }
+    std::vector<stamped> dropped;
+    {
+      std::scoped_lock const lock{mutex};
+      dropped = slot.take_stamps();
+    }
+    fail_all(dropped, cancelled(why));
+  }
+
+  void accept_stamps(member_slot& slot)
+  {
+    supersede_if_moved(slot);
+    std::vector<stamped> fresh;
+    {
+      std::scoped_lock const lock{mutex};
+      fresh = std::exchange(slot.incoming, {});
+    }
+    accept_incoming(slot, std::move(fresh));
+  }
+
+  void accept_incoming(member_slot& slot, std::vector<stamped> fresh)
+  {
+    if(fresh.empty())
+    {
+      return;
+    }
+    auto const           now = slot.engine->virtual_clock().time();
+    std::vector<stamped> late;
+    {
+      std::scoped_lock const lock{mutex};
+      for(auto& posted : fresh)
+      {
+        if(posted.at < now)
+        {
+          late.push_back(std::move(posted));
+        }
+        else
+        {
+          slot.push_stamp(std::move(posted));
+        }
+      }
+    }
+    for(auto const& posted : late)
+    {
+      posted.promise.fail(std::make_exception_ptr(past_stamp(posted.at, now)));
+    }
+  }
+
+  void apply_due(member_slot& slot)
+  {
+    auto const           now = slot.engine->virtual_clock().time();
+    std::vector<stamped> due;
+    {
+      std::scoped_lock const lock{mutex};
+      while(not slot.stamps.empty() and slot.stamps.front().at <= now)
+      {
+        std::ranges::pop_heap(slot.stamps, later_first{});
+        due.push_back(std::move(slot.stamps.back()));
+        slot.stamps.pop_back();
+      }
+    }
+    if(due.empty())
+    {
+      return;
+    }
+    std::vector<std::pair<host_promise<vtime>, std::expected<vtime, std::exception_ptr>>> results;
+    {
+      owner_scope const owning{this};
+      for(auto& posted : due)
+      {
+        auto const at = slot.engine->virtual_clock().time();
+        try
+        {
+          posted.body(*slot.engine);
+          results.emplace_back(posted.promise, at);
+        }
+        catch(...)
+        {
+          results.emplace_back(posted.promise, std::unexpected{std::current_exception()});
+        }
+      }
+    }
+    due.clear();
+    for(auto& [promise, outcome] : results)
+    {
+      if(outcome)
+      {
+        promise.set(*outcome);
+      }
+      else
+      {
+        promise.fail(std::move(outcome).error());
+      }
+    }
+  }
+
+  auto next_stamp(member_slot const& slot) -> std::optional<vtime>
+  {
+    std::scoped_lock const lock{mutex};
+    return slot.next_stamp();
+  }
+
+  void after_slice(member_slot& slot, slice_request const& request, slice_result& result)
+  {
+    supersede_if_moved(slot);
+    apply_due(slot);
+    if(request.internal_stop and result.stopped and result.stopped->reason == stop_reason::time)
+    {
+      result.stopped.reset();
+    }
+  }
+
   void goal_slice(member_slot& slot, deferred& done)
   {
-    auto&               goal = *slot.goal;
-    slice_request const request{
+    accept_stamps(slot);
+    apply_due(slot);
+    auto&         goal = *slot.goal;
+    slice_request request{
         .max_instructions   = bounds.max_instructions,
         .wall_budget        = bounds.wall_budget,
         .until              = goal.goal.until,
@@ -345,6 +567,7 @@ struct host_core
                                            : std::function<bool()>{},
         .leave_until = goal.executed.value == 0,
     };
+    add_stamp(request, next_stamp(slot));
     slice_result result;
     try
     {
@@ -360,6 +583,7 @@ struct host_core
       });
       return;
     }
+    after_slice(slot, request, result);
     goal.executed.value += result.executed.value;
     goal.remaining = remaining_after(goal.remaining, result.executed);
     if(goal.left)
@@ -378,6 +602,8 @@ struct host_core
 
   void free_slice(member_slot& slot, waiter_list& waiters, deferred& done)
   {
+    accept_stamps(slot);
+    apply_due(slot);
     std::erase_if(waiters, [](auto const& waiting) { return not waiting->live(); });
     std::vector<std::pair<std::shared_ptr<waiter>, stop>> resolved;
     {
@@ -425,6 +651,7 @@ struct host_core
         predicates->push_back(waiting);
       }
     }
+    add_stamp(request, next_stamp(slot));
     if(not predicates->empty())
     {
       request.stop_when = [predicates] {
@@ -462,6 +689,7 @@ struct host_core
       return;
     }
     request.stop_when = {};
+    after_slice(slot, request, result);
     auto const reason = result.stopped ? std::optional{result.stopped->reason} : std::nullopt;
     auto const fired =
         std::ranges::any_of(*predicates, [](auto const& waiting) { return waiting->fired; });
@@ -574,11 +802,13 @@ struct host_core
       {
         done.push_back([mail = std::exchange(slot->mail, {}), goal = std::move(slot->goal),
                         waiters = std::exchange(slot->waiters, {}),
-                        held    = std::exchange(slot->held, std::nullopt)] {
+                        held    = std::exchange(slot->held, std::nullopt),
+                        stamps  = slot->take_stamps()] {
           for(auto const& posted : mail)
           {
             posted.promise.fail(closed_error());
           }
+          fail_all(stamps, closed_error());
           if(goal)
           {
             goal->promise.fail(closed_error());
@@ -762,8 +992,11 @@ auto host::member_inline(member_id who) -> machine&
   return *core_->members[who]->engine;
 }
 
-auto host::post(held_lock const& held, member_id who, std::move_only_function<void(machine&)> body)
-    -> host_future<vtime>
+auto host::post(
+    held_lock const&                        held,
+    member_id                               who,
+    std::move_only_function<void(machine&)> body,
+    std::optional<vtime>                    at) -> host_future<vtime>
 {
   auto&                       slot = *core_->members[who];
   detail::host_promise<vtime> promise;
@@ -780,7 +1013,11 @@ auto host::post(held_lock const& held, member_id who, std::move_only_function<vo
       promise.fail(std::current_exception());
     }
   };
-  if(owns_engine())
+  if(at)
+  {
+    post_stamped(held, slot, std::move(body), *at, promise);
+  }
+  else if(owns_engine())
   {
     run_here();
   }
@@ -795,6 +1032,115 @@ auto host::post(held_lock const& held, member_id who, std::move_only_function<vo
     core_->notify_locked(slot);
   }
   return promise.future();
+}
+
+void host::post_stamped(
+    held_lock const&                        held,
+    detail::member_slot&                    slot,
+    std::move_only_function<void(machine&)> body,
+    vtime                                   at,
+    detail::host_promise<vtime> const&      promise)
+{
+  auto const inline_owner = owns_engine();
+  if(not inline_owner and slot.with_host)
+  {
+    slot.incoming.push_back(
+        {.at = at, .seq = slot.next_seq++, .body = std::move(body), .promise = promise});
+    core_->notify_locked(slot);
+    return;
+  }
+  std::vector<detail::stamped> dropped;
+  char const*                  why = nullptr;
+  if(not inline_owner)
+  {
+    why = slot.timeline_moved();
+    if(why != nullptr)
+    {
+      dropped = slot.take_stamps();
+    }
+  }
+  if(not dropped.empty())
+  {
+    detail::fail_all(dropped, detail::cancelled(why));
+  }
+  auto const now = slot.engine->virtual_clock().time();
+  if(at < now)
+  {
+    throw detail::past_stamp(at, now);
+  }
+  if(at == now)
+  {
+    std::optional<owner_scope> owning;
+    if(not inline_owner)
+    {
+      owning.emplace(*this, held);
+    }
+    try
+    {
+      body(*slot.engine);
+      promise.set(now);
+    }
+    catch(...)
+    {
+      promise.fail(std::current_exception());
+    }
+    return;
+  }
+  detail::stamped made{.at = at, .seq = 0, .body = std::move(body), .promise = promise};
+  if(held.holds(*this))
+  {
+    made.seq = slot.next_seq++;
+    slot.push_stamp(std::move(made));
+  }
+  else if(detail::on_host_thread and detail::host_locks_held == 0)
+  {
+    std::scoped_lock const lock{core_->mutex};
+    made.seq = slot.next_seq++;
+    slot.push_stamp(std::move(made));
+  }
+  else
+  {
+    throw machine_running("a later stamp from a callback needs the host mutex");
+  }
+  if(inline_owner and detail::on_host_thread)
+  {
+    slot.engine->interrupt();
+  }
+}
+
+auto host::withdraw(held_lock const&, member_id who, host_future<vtime> const& pending) -> bool
+{
+  auto&      slot    = *core_->members[who];
+  auto const removed = [&pending](auto& queue) -> std::optional<detail::host_promise<vtime>> {
+    auto const found = std::ranges::find_if(
+        queue, [&pending](auto const& posted) { return posted.promise.feeds(pending); });
+    if(found == queue.end())
+    {
+      return std::nullopt;
+    }
+    auto promise = found->promise;
+    queue.erase(found);
+    return promise;
+  };
+  auto promise = removed(slot.mail);
+  if(not promise)
+  {
+    promise = removed(slot.incoming);
+  }
+  if(not promise)
+  {
+    promise = removed(slot.stamps);
+    if(promise)
+    {
+      std::ranges::make_heap(slot.stamps, detail::later_first{});
+    }
+  }
+  if(not promise)
+  {
+    return false;
+  }
+  promise->fail(detail::cancelled("the command was withdrawn"));
+  return true;
 }
 
 auto host::run(held_lock const& held, member_id who, run_goal goal) -> host_future<goal_result>

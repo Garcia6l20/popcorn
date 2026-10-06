@@ -798,7 +798,7 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
   }
-  if(end.stopped)
+  if(end.stopped and not(request.internal_stop and end.stopped->reason == stop_reason::time))
   {
     auto& where = end.stopped->where;
     where       = locate(where.pc);

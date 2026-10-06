@@ -132,6 +132,11 @@ auto machine::generation() const noexcept -> std::uint64_t
   return generation_;
 }
 
+auto machine::resets() const noexcept -> std::uint64_t
+{
+  return run_->resets;
+}
+
 auto machine::running() const noexcept -> bool
 {
   return run_->running;

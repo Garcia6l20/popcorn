@@ -125,6 +125,10 @@ struct slice_request
    * it, so a run resuming from its own until address goes on to the next hit. The caller sets it
    * until the run has executed an instruction. */
   bool leave_until{};
+  /** @brief A stop_reason::time stop is the caller's bookkeeping, such as a host landing a
+   * stamped command at until_time: the stop is returned with its pc unlocated and no trace stop
+   * record. Other stops are reported as usual. */
+  bool internal_stop{};
 };
 
 /** @brief Outcome of one native slice. */
@@ -232,6 +236,10 @@ public:
 
   /** @brief Generation, bumped by every restore(), so state from before it is recognised. */
   [[nodiscard]] auto generation() const noexcept -> std::uint64_t;
+
+  /** @brief Resets done since construction, every kind, whether reset() or a firmware request
+   * under reset_request_policy::reset_and_continue, so a new timeline is recognised. */
+  [[nodiscard]] auto resets() const noexcept -> std::uint64_t;
 
   /** @brief Whether a slice is running, true inside handlers too. */
   [[nodiscard]] auto running() const noexcept -> bool;
