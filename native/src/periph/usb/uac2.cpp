@@ -414,6 +414,7 @@ public:
     {
       return;
     }
+    auto const held = hub_->lock();
     channel_->interface.reset();
     channel_->ready = false;
     if(std::exchange(channel_->speaker.sending, false))
@@ -431,12 +432,14 @@ public:
 
   void configured(host_context& ctx) override
   {
-    auto const& configuration = ctx.configuration();
-    s_.interface              = ctx.interfaces().front();
-    auto const functions      = uac2_functions(configuration);
+    deferred_warnings const deferred;
+    auto const              held          = hub_->lock();
+    auto const&             configuration = ctx.configuration();
+    s_.interface                          = ctx.interfaces().front();
+    auto const functions                  = uac2_functions(configuration);
     s_.function =
         static_cast<std::uint64_t>(std::ranges::find(functions, s_.interface) - functions.begin());
-    bind();
+    bind(held);
     auto const* const control = configuration.find(s_.interface);
     auto const        found   = entities_of(control->extra);
     for(auto const number : ctx.interfaces() | std::views::drop(1))
@@ -451,6 +454,8 @@ public:
 
   void control_done(host_context& ctx, transfer_result const& result) override
   {
+    deferred_warnings const deferred;
+    auto const              held = hub_->lock();
     if(not s_.busy or result.id != s_.request)
     {
       return;
@@ -470,8 +475,9 @@ public:
 
   void transfer_done(host_context&, pipe_id pipe, transfer_result const& result) override
   {
-    auto& speaker = s_.streams[direction_index(uac2_direction::speaker)];
-    auto& mic     = s_.streams[direction_index(uac2_direction::mic)];
+    auto const held    = hub_->lock();
+    auto&      speaker = s_.streams[direction_index(uac2_direction::speaker)];
+    auto&      mic     = s_.streams[direction_index(uac2_direction::mic)];
     if(mic.pipe != 0 and pipe == mic.pipe)
     {
       auto const& alt = s_.alts[mic.alt];
@@ -495,7 +501,9 @@ public:
 
   void frame(host_context& ctx, std::uint16_t) override
   {
-    auto& speaker = s_.streams[direction_index(uac2_direction::speaker)];
+    deferred_warnings const deferred;
+    auto const              held    = hub_->lock();
+    auto&                   speaker = s_.streams[direction_index(uac2_direction::speaker)];
     if(speaker.running and ctx.queued(speaker.pipe) == 0)
     {
       send(ctx, speaker);
@@ -511,17 +519,19 @@ public:
 
   void save(std::vector<std::byte>& out) const override
   {
-    auto saved    = s_;
-    saved.out     = samples_to_bytes(channel_->speaker.out);
-    auto const at = channel_->speaker.sent_at;
-    saved.sent_at = at ? std::optional{at->ps} : std::nullopt;
+    auto const held  = hub_->lock();
+    auto       saved = s_;
+    saved.out        = samples_to_bytes(channel_->speaker.out);
+    auto const at    = channel_->speaker.sent_at;
+    saved.sent_at    = at ? std::optional{at->ps} : std::nullopt;
     reflex::serde::bson::serializer{out}.dump(saved);
   }
 
   void load(std::span<std::byte const> in) override
   {
-    s_ = reflex::serde::bson::deserializer{in}.template load<driver_state>();
-    bind();
+    s_              = reflex::serde::bson::deserializer{in}.template load<driver_state>();
+    auto const held = hub_->lock();
+    bind(held);
     channel_->speaker.out     = bytes_to_samples(s_.out);
     channel_->speaker.sent_at = s_.sent_at ? std::optional{vtime{*s_.sent_at}} : std::nullopt;
     s_.out.clear();
@@ -620,9 +630,9 @@ public:
   }
 
 private:
-  void bind()
+  void bind(core::link_guard const& held)
   {
-    channel_            = &hub_->channel(static_cast<std::size_t>(s_.function));
+    channel_            = &hub_->channel(held, static_cast<std::size_t>(s_.function));
     channel_->interface = s_.interface;
   }
 
@@ -1729,14 +1739,15 @@ void uac2_channel::discard()
   results.clear();
 }
 
-auto uac2_hub::channel(std::size_t function) -> uac2_channel&
+auto uac2_hub::channel(core::link_guard const&, std::size_t function) -> uac2_channel&
 {
   return channels_[function];
 }
 
 void uac2_hub::save(std::vector<std::byte>& out) const
 {
-  hub_state saved;
+  auto const held = lock();
+  hub_state  saved;
   for(auto const& [function, channel] : channels_)
   {
     if(not channel.interface and not channel.speaker.out.empty())
@@ -1750,6 +1761,7 @@ void uac2_hub::save(std::vector<std::byte>& out) const
 
 void uac2_hub::load(std::span<std::byte const> in)
 {
+  auto const held = lock();
   for(auto& channel : channels_ | std::views::values)
   {
     channel.speaker.out.clear();
@@ -1761,13 +1773,14 @@ void uac2_hub::load(std::span<std::byte const> in)
   for(auto const& pending :
       reflex::serde::bson::deserializer{in}.template load<hub_state>().unbound)
   {
-    channel(static_cast<std::size_t>(pending.function)).speaker.out =
+    channel(held, static_cast<std::size_t>(pending.function)).speaker.out =
         bytes_to_samples(pending.samples);
   }
 }
 
 void uac2_hub::discard()
 {
+  auto const held = lock();
   for(auto& channel : channels_ | std::views::values)
   {
     channel.discard();
@@ -1807,7 +1820,9 @@ auto uac2_functions(configuration_info const& configuration) -> std::vector<std:
 auto uac2_start(host& owner, uac2_hub& hub, std::size_t function, uac2_direction direction)
     -> std::uint64_t
 {
-  auto const found = bound_driver_of(owner, hub.channel(function));
+  deferred_warnings const deferred;
+  auto const              held  = hub.lock();
+  auto const              found = bound_driver_of(owner, hub.channel(held, function));
   if(not found)
   {
     return 0;
@@ -1818,9 +1833,11 @@ auto uac2_start(host& owner, uac2_hub& hub, std::size_t function, uac2_direction
 
 void uac2_stop(host& owner, uac2_hub& hub, std::size_t function, uac2_direction direction)
 {
-  auto&      channel = hub.channel(function);
-  auto const dropped = direction == uac2_direction::speaker
-                   and (channel.speaker.sending or not channel.speaker.out.empty());
+  deferred_warnings const deferred;
+  auto const              held    = hub.lock();
+  auto&                   channel = hub.channel(held, function);
+  auto const              dropped = direction == uac2_direction::speaker
+                                and (channel.speaker.sending or not channel.speaker.out.empty());
   if(auto const found = bound_driver_of(owner, channel))
   {
     auto ctx = owner.context(found->second);
@@ -1842,7 +1859,9 @@ auto uac2_set_feature(
     uac2_control control,
     std::int32_t value) -> std::uint64_t
 {
-  auto const found = bound_driver_of(owner, hub.channel(function));
+  deferred_warnings const deferred;
+  auto const              held  = hub.lock();
+  auto const              found = bound_driver_of(owner, hub.channel(held, function));
   if(not found)
   {
     return 0;

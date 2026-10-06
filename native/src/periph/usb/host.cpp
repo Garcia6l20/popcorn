@@ -7,7 +7,9 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <format>
+#include <iterator>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -405,7 +407,7 @@ struct host::impl
 
   void warn(std::string const& message) const
   {
-    if(options.warn)
+    if(options.warn and not deferred_warnings::hold(options.warn, message))
     {
       options.warn(message);
     }
@@ -1388,6 +1390,56 @@ struct host::impl
     schedule();
   }
 };
+
+namespace
+{
+thread_local deferred_warnings* innermost_deferral = nullptr;
+}
+
+deferred_warnings::deferred_warnings() noexcept
+    : outer_{std::exchange(innermost_deferral, this)}, exceptions_{std::uncaught_exceptions()}
+{}
+
+deferred_warnings::~deferred_warnings() noexcept(false)
+{
+  innermost_deferral = outer_;
+  if(outer_ != nullptr)
+  {
+    outer_->held_.insert(
+        outer_->held_.end(), std::make_move_iterator(held_.begin()),
+        std::make_move_iterator(held_.end()));
+    return;
+  }
+  auto const unwinding = std::uncaught_exceptions() > exceptions_;
+  for(auto const& warning : held_)
+  {
+    if(not unwinding)
+    {
+      (*warning.sink)(warning.message);
+      continue;
+    }
+    try
+    {
+      (*warning.sink)(warning.message);
+    }
+    catch(...)
+    {
+      return;
+    }
+  }
+}
+
+auto deferred_warnings::hold(
+    std::function<void(std::string const&)> const& sink,
+    std::string const&                             message) -> bool
+{
+  if(innermost_deferral == nullptr)
+  {
+    return false;
+  }
+  innermost_deferral->held_.push_back({.sink = &sink, .message = message});
+  return true;
+}
 
 host_context::host_context(host& owner, std::size_t driver) noexcept
     : host_{&owner}, driver_{driver}

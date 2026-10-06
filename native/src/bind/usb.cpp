@@ -1,4 +1,5 @@
 #include "usb.hpp"
+#include "gil_locks.hpp"
 #include "machine.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <format>
+#include <functional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -61,61 +63,65 @@ cdc_link::cdc_link(
     periph::stm32::usb_host_port&         port,
     std::shared_ptr<periph::usb::cdc_hub> hub,
     std::size_t                           function,
-    std::shared_ptr<bool const>           alive)
+    detail::alive_flag                    alive)
     : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
 {}
 
-auto cdc_link::channel() const -> periph::usb::cdc_channel&
+template <typename Body> auto cdc_link::locked(Body&& body) const
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
   }
-  return hub_->channel(function_);
+  return detail::link_locked(*hub_, [&](core::link_guard const& held) {
+    return std::invoke(std::forward<Body>(body), hub_->channel(held, function_));
+  });
 }
 
 void cdc_link::send(reflex::py::nb::bytes const& data)
 {
   auto const bytes = std::span{static_cast<std::uint8_t const*>(data.data()), data.size()};
-  channel().out.append_range(bytes);
+  locked([&](usb::cdc_channel& queues) { queues.out.append_range(bytes); });
 }
 
 auto cdc_link::queued() const -> std::uint64_t
 {
-  auto const& queues = channel();
-  return queues.out.size() + queues.in_flight;
+  return locked(
+      [](usb::cdc_channel const& queues) { return queues.out.size() + queues.in_flight; });
 }
 
 auto cdc_link::available() const -> std::uint64_t
 {
-  return channel().in_bytes;
+  return locked([](usb::cdc_channel const& queues) { return queues.in_bytes; });
 }
 
 auto cdc_link::packets() const -> std::uint64_t
 {
-  return channel().packets();
+  return locked([](usb::cdc_channel const& queues) { return queues.packets(); });
 }
 
 auto cdc_link::drain(std::uint64_t count) -> reflex::py::nb::bytes
 {
-  std::vector<std::uint8_t> bytes;
-  for(auto const& packet : channel().take(count))
-  {
-    bytes.append_range(packet.data);
-  }
+  auto const bytes = locked([&](usb::cdc_channel& queues) {
+    std::vector<std::uint8_t> taken;
+    for(auto const& packet : queues.take(count))
+    {
+      taken.append_range(packet.data);
+    }
+    return taken;
+  });
   return bytes_of(bytes);
 }
 
 auto cdc_link::drain_packets(std::uint64_t count) -> std::vector<cdc_packet_record>
 {
-  return channel().take_packets(count)
-       | std::views::transform(packet_record)
-       | std::ranges::to<std::vector>();
+  auto const taken = locked([&](usb::cdc_channel& queues) { return queues.take_packets(count); });
+  return taken | std::views::transform(packet_record) | std::ranges::to<std::vector>();
 }
 
 auto cdc_link::dropped() const -> std::uint64_t
 {
-  return channel().dropped;
+  return locked([](usb::cdc_channel const& queues) { return queues.dropped; });
 }
 
 void cdc_link::set_byte_limit(std::uint64_t limit)
@@ -124,44 +130,46 @@ void cdc_link::set_byte_limit(std::uint64_t limit)
   {
     throw config_error("usb", 0, "limit", "a byte limit of at least 1");
   }
-  channel().set_limit(limit);
+  locked([&](usb::cdc_channel& queues) { queues.set_limit(limit); });
 }
 
 auto cdc_link::bound() const -> bool
 {
-  return channel().comm_interface.has_value();
+  return locked([](usb::cdc_channel const& queues) { return queues.comm_interface.has_value(); });
 }
 
 auto cdc_link::ready() const -> bool
 {
-  return channel().ready;
+  return locked([](usb::cdc_channel const& queues) { return queues.ready; });
 }
 
 auto cdc_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
     -> std::uint32_t
 {
-  auto&       queues = channel();
-  auto* const host   = port_->board_host();
-  if(not queues.comm_interface or host == nullptr)
-  {
-    return 0;
-  }
-  auto const comm    = *queues.comm_interface;
-  auto const drivers = host->drivers();
-  auto const found   = std::ranges::find_if(drivers, [&](usb::bound_driver const& bound) {
-    return bound.name == usb::cdc_acm_name
-       and not bound.interfaces.empty()
-       and bound.interfaces.front() == comm;
+  usb::deferred_warnings const deferred;
+  return locked([&](usb::cdc_channel& queues) -> std::uint32_t {
+    auto* const host = port_->board_host();
+    if(not queues.comm_interface or host == nullptr)
+    {
+      return 0;
+    }
+    auto const comm    = *queues.comm_interface;
+    auto const drivers = host->drivers();
+    auto const found   = std::ranges::find_if(drivers, [&](usb::bound_driver const& bound) {
+      return bound.name == usb::cdc_acm_name
+         and not bound.interfaces.empty()
+         and bound.interfaces.front() == comm;
+    });
+    if(found == drivers.end())
+    {
+      return 0;
+    }
+    setup.index   = comm;
+    auto const id = host->context(static_cast<std::size_t>(found - drivers.begin()))
+                        .control(setup, std::move(data));
+    queues.awaited.insert(id);
+    return id;
   });
-  if(found == drivers.end())
-  {
-    return 0;
-  }
-  setup.index   = comm;
-  auto const id = host->context(static_cast<std::size_t>(found - drivers.begin()))
-                      .control(setup, std::move(data));
-  queues.awaited.insert(id);
-  return id;
 }
 
 auto cdc_link::set_line_coding(
@@ -186,112 +194,122 @@ auto cdc_link::set_control_line_state(bool dtr, bool rts) -> std::uint32_t
 
 auto cdc_link::take_result(std::uint32_t id) -> std::optional<periph::usb::transfer_status>
 {
-  auto& results = channel().results;
-  auto  found   = results.find(id);
-  if(found == results.end())
-  {
-    return std::nullopt;
-  }
-  auto const status = found->second;
-  results.erase(found);
-  return status;
+  return locked([&](usb::cdc_channel& queues) -> std::optional<usb::transfer_status> {
+    auto found = queues.results.find(id);
+    if(found == queues.results.end())
+    {
+      return std::nullopt;
+    }
+    auto const status = found->second;
+    queues.results.erase(found);
+    return status;
+  });
 }
 
 void cdc_link::forget(std::uint32_t id)
 {
-  auto& queues = channel();
-  queues.awaited.erase(id);
-  queues.results.erase(id);
+  locked([&](usb::cdc_channel& queues) {
+    queues.awaited.erase(id);
+    queues.results.erase(id);
+  });
 }
 
 auto cdc_link::line_coding() const -> cdc_line_coding_record
 {
-  auto const& coding = channel().coding;
-  return {
-      .baud      = coding.baud,
-      .stop_bits = coding.stop_bits,
-      .parity    = coding.parity,
-      .data_bits = coding.data_bits,
-  };
+  return locked([](usb::cdc_channel const& queues) {
+    return cdc_line_coding_record{
+        .baud      = queues.coding.baud,
+        .stop_bits = queues.coding.stop_bits,
+        .parity    = queues.coding.parity,
+        .data_bits = queues.coding.data_bits,
+    };
+  });
 }
 
 auto cdc_link::line_state() const -> std::uint8_t
 {
-  return channel().line_state;
+  return locked([](usb::cdc_channel const& queues) { return queues.line_state; });
 }
 
 auto cdc_link::serial_state() const -> std::uint16_t
 {
-  return channel().serial_state;
+  return locked([](usb::cdc_channel const& queues) { return queues.serial_state; });
 }
 
 hid_link::hid_link(
     periph::stm32::usb_host_port&         port,
     std::shared_ptr<periph::usb::hid_hub> hub,
     std::size_t                           function,
-    std::shared_ptr<bool const>           alive)
+    detail::alive_flag                    alive)
     : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
 {}
 
-auto hid_link::channel() const -> periph::usb::hid_channel&
+template <typename Body> auto hid_link::locked(Body&& body) const
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
   }
-  return hub_->channel(function_);
+  return detail::link_locked(*hub_, [&](core::link_guard const& held) {
+    return std::invoke(std::forward<Body>(body), hub_->channel(held, function_));
+  });
 }
 
 auto hid_link::write(reflex::py::nb::bytes const& data) -> std::uint64_t
 {
-  auto&             queues = channel();
-  auto const* const bytes  = static_cast<std::uint8_t const*>(data.data());
-  auto const        stage  = data.size() == 0 ? 0 : data.size() - (bytes[0] == 0 ? 1 : 0);
-  if(data.size() < 2 or stage > 0xffff)
-  {
-    throw config_error(
-        "usb", 0, "report",
-        std::format(
-            "a report of at least 2 bytes, at most 0xffff on the bus, not {} bytes", data.size()));
-  }
-  auto const id = queues.write({bytes, bytes + data.size()});
-  queues.awaited_writes.insert(id);
-  return id;
+  return locked([&](usb::hid_channel& queues) {
+    auto const* const bytes = static_cast<std::uint8_t const*>(data.data());
+    auto const        stage = data.size() == 0 ? 0 : data.size() - (bytes[0] == 0 ? 1 : 0);
+    if(data.size() < 2 or stage > 0xffff)
+    {
+      throw config_error(
+          "usb", 0, "report",
+          std::format(
+              "a report of at least 2 bytes, at most 0xffff on the bus, not {} bytes",
+              data.size()));
+    }
+    auto const id = queues.write({bytes, bytes + data.size()});
+    queues.awaited_writes.insert(id);
+    return id;
+  });
 }
 
 auto hid_link::take_written(std::uint64_t id) -> std::optional<periph::usb::transfer_status>
 {
-  auto& written = channel().written;
-  auto  found   = written.find(id);
-  if(found == written.end())
-  {
-    return std::nullopt;
-  }
-  auto const status = found->second;
-  written.erase(found);
-  return status;
+  return locked([&](usb::hid_channel& queues) -> std::optional<usb::transfer_status> {
+    auto found = queues.written.find(id);
+    if(found == queues.written.end())
+    {
+      return std::nullopt;
+    }
+    auto const status = found->second;
+    queues.written.erase(found);
+    return status;
+  });
 }
 
 void hid_link::forget_written(std::uint64_t id)
 {
-  auto& queues = channel();
-  queues.awaited_writes.erase(id);
-  queues.written.erase(id);
+  locked([&](usb::hid_channel& queues) {
+    queues.awaited_writes.erase(id);
+    queues.written.erase(id);
+  });
 }
 
 auto hid_link::queued() const -> std::uint64_t
 {
-  return channel().queued();
+  return locked([](usb::hid_channel const& queues) { return queues.queued(); });
 }
 
 auto hid_link::available() const -> std::uint64_t
 {
-  return channel().in.size();
+  return locked([](usb::hid_channel const& queues) -> std::uint64_t { return queues.in.size(); });
 }
 
 auto hid_link::drain(std::uint64_t count) -> std::vector<hid_report_record>
 {
-  return channel().take(count)
+  auto const taken = locked([&](usb::hid_channel& queues) { return queues.take(count); });
+  return taken
        | std::views::transform([](usb::hid_report const& report) {
            return hid_report_record{.data = report.data, .at_ps = report.at.ps};
          })
@@ -300,7 +318,7 @@ auto hid_link::drain(std::uint64_t count) -> std::vector<hid_report_record>
 
 auto hid_link::dropped() const -> std::uint64_t
 {
-  return channel().dropped;
+  return locked([](usb::hid_channel const& queues) { return queues.dropped; });
 }
 
 void hid_link::set_report_limit(std::uint64_t limit)
@@ -309,47 +327,51 @@ void hid_link::set_report_limit(std::uint64_t limit)
   {
     throw config_error("usb", 0, "limit", "a report limit of at least 1");
   }
-  channel().set_limit(limit);
+  locked([&](usb::hid_channel& queues) { queues.set_limit(limit); });
 }
 
 auto hid_link::bound() const -> bool
 {
-  return channel().interface.has_value();
+  return locked([](usb::hid_channel const& queues) { return queues.interface.has_value(); });
 }
 
 auto hid_link::ready() const -> bool
 {
-  return channel().ready;
+  return locked([](usb::hid_channel const& queues) { return queues.ready; });
 }
 
 auto hid_link::report_descriptor() const -> reflex::py::nb::bytes
 {
-  return bytes_of(channel().report_descriptor);
+  auto const descriptor =
+      locked([](usb::hid_channel const& queues) { return queues.report_descriptor; });
+  return bytes_of(descriptor);
 }
 
 auto hid_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
     -> std::uint32_t
 {
-  auto&       queues = channel();
-  auto* const host   = port_->board_host();
-  if(not queues.interface or host == nullptr)
-  {
-    return 0;
-  }
-  auto const interface = *queues.interface;
-  auto const drivers   = host->drivers();
-  auto const found     = std::ranges::find_if(drivers, [&](usb::bound_driver const& bound) {
-    return bound.name == usb::hid_name and bound.interfaces == std::vector{interface};
+  usb::deferred_warnings const deferred;
+  return locked([&](usb::hid_channel& queues) -> std::uint32_t {
+    auto* const host = port_->board_host();
+    if(not queues.interface or host == nullptr)
+    {
+      return 0;
+    }
+    auto const interface = *queues.interface;
+    auto const drivers   = host->drivers();
+    auto const found     = std::ranges::find_if(drivers, [&](usb::bound_driver const& bound) {
+      return bound.name == usb::hid_name and bound.interfaces == std::vector{interface};
+    });
+    if(found == drivers.end())
+    {
+      return 0;
+    }
+    setup.index   = interface;
+    auto const id = host->context(static_cast<std::size_t>(found - drivers.begin()))
+                        .control(setup, std::move(data));
+    queues.awaited.insert(id);
+    return id;
   });
-  if(found == drivers.end())
-  {
-    return 0;
-  }
-  setup.index   = interface;
-  auto const id = host->context(static_cast<std::size_t>(found - drivers.begin()))
-                      .control(setup, std::move(data));
-  queues.awaited.insert(id);
-  return id;
 }
 
 auto hid_link::get_report(std::uint8_t type, std::uint8_t id, std::uint16_t length) -> std::uint32_t
@@ -378,44 +400,48 @@ auto hid_link::set_report(std::uint8_t type, std::uint8_t id, reflex::py::nb::by
 
 auto hid_link::take_result(std::uint32_t id) -> std::optional<hid_reply_record>
 {
-  auto& results = channel().results;
-  auto  found   = results.find(id);
-  if(found == results.end())
-  {
-    return std::nullopt;
-  }
-  hid_reply_record record{.status = found->second.status, .data = std::move(found->second.data)};
-  results.erase(found);
-  return record;
+  return locked([&](usb::hid_channel& queues) -> std::optional<hid_reply_record> {
+    auto found = queues.results.find(id);
+    if(found == queues.results.end())
+    {
+      return std::nullopt;
+    }
+    hid_reply_record record{.status = found->second.status, .data = std::move(found->second.data)};
+    queues.results.erase(found);
+    return record;
+  });
 }
 
 void hid_link::forget(std::uint32_t id)
 {
-  auto& queues = channel();
-  queues.awaited.erase(id);
-  queues.results.erase(id);
+  locked([&](usb::hid_channel& queues) {
+    queues.awaited.erase(id);
+    queues.results.erase(id);
+  });
 }
 
 uac_link::uac_link(
     periph::stm32::usb_host_port&          port,
     std::shared_ptr<periph::usb::uac2_hub> hub,
     std::size_t                            function,
-    std::shared_ptr<bool const>            alive)
+    detail::alive_flag                     alive)
     : port_{&port}, hub_{std::move(hub)}, function_{function}, alive_{std::move(alive)}
 {}
 
-auto uac_link::channel() const -> periph::usb::uac2_channel&
+template <typename Body> auto uac_link::locked(Body&& body) const
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
   }
-  return hub_->channel(function_);
+  return detail::link_locked(*hub_, [&](core::link_guard const& held) {
+    return std::invoke(std::forward<Body>(body), hub_->channel(held, function_));
+  });
 }
 
 auto uac_link::host() const -> periph::usb::host*
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
   }
@@ -424,36 +450,38 @@ auto uac_link::host() const -> periph::usb::host*
 
 auto uac_link::bound() const -> bool
 {
-  return channel().interface.has_value();
+  return locked([](usb::uac2_channel const& queues) { return queues.interface.has_value(); });
 }
 
 auto uac_link::ready() const -> bool
 {
-  return channel().ready;
+  return locked([](usb::uac2_channel const& queues) { return queues.ready; });
 }
 
 auto uac_link::stream(bool mic) const -> uac_stream_record
 {
-  auto const& found =
-      channel().stream(mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
-  if(not found.interface)
-  {
-    return {};
-  }
-  return {
-      .present    = true,
-      .interface  = *found.interface,
-      .alternate  = found.alternate,
-      .endpoint   = found.endpoint,
-      .max_packet = found.max_packet,
-      .channels   = found.format.channels,
-      .subslot    = found.format.subslot,
-      .bits       = found.format.bits,
-      .clock      = found.clock,
-      .rates      = found.rates,
-      .rate       = found.rate,
-      .running    = found.running,
-  };
+  return locked([&](usb::uac2_channel& queues) -> uac_stream_record {
+    auto const& found =
+        queues.stream(mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+    if(not found.interface)
+    {
+      return {};
+    }
+    return {
+        .present    = true,
+        .interface  = *found.interface,
+        .alternate  = found.alternate,
+        .endpoint   = found.endpoint,
+        .max_packet = found.max_packet,
+        .channels   = found.format.channels,
+        .subslot    = found.format.subslot,
+        .bits       = found.format.bits,
+        .clock      = found.clock,
+        .rates      = found.rates,
+        .rate       = found.rate,
+        .running    = found.running,
+    };
+  });
 }
 
 auto uac_link::units() const -> std::vector<uac_unit_record>
@@ -465,71 +493,79 @@ auto uac_link::units() const -> std::vector<uac_unit_record>
                   std::int32_t usb::uac2_range::* member) -> std::optional<std::int32_t> {
     return range ? std::optional{(*range).*member} : std::nullopt;
   };
-  std::vector<uac_unit_record> out;
-  for(auto const& unit : channel().units)
-  {
-    uac_unit_record record{
-        .id = unit.id, .channels = unit.channels, .controls = unit.controls, .mute = unit.mute};
-    for(std::size_t index = 0; index < unit.volume.size(); ++index)
+  return locked([&](usb::uac2_channel const& queues) {
+    std::vector<uac_unit_record> out;
+    for(auto const& unit : queues.units)
     {
-      record.volume.push_back(widen(unit.volume[index]));
-      record.volume_min.push_back(field(unit.volume_range[index], &usb::uac2_range::min));
-      record.volume_max.push_back(field(unit.volume_range[index], &usb::uac2_range::max));
-      record.volume_res.push_back(field(unit.volume_range[index], &usb::uac2_range::res));
+      uac_unit_record record{
+          .id = unit.id, .channels = unit.channels, .controls = unit.controls, .mute = unit.mute};
+      for(std::size_t index = 0; index < unit.volume.size(); ++index)
+      {
+        record.volume.push_back(widen(unit.volume[index]));
+        record.volume_min.push_back(field(unit.volume_range[index], &usb::uac2_range::min));
+        record.volume_max.push_back(field(unit.volume_range[index], &usb::uac2_range::max));
+        record.volume_res.push_back(field(unit.volume_range[index], &usb::uac2_range::res));
+      }
+      out.push_back(std::move(record));
     }
-    out.push_back(std::move(record));
-  }
-  return out;
+    return out;
+  });
 }
 
 void uac_link::write(std::vector<std::int32_t> const& samples)
 {
-  channel().speaker.out.append_range(samples);
+  locked([&](usb::uac2_channel& queues) { queues.speaker.out.append_range(samples); });
 }
 
 auto uac_link::queued() const -> std::uint64_t
 {
-  return channel().speaker.out.size();
+  return locked(
+      [](usb::uac2_channel const& queues) -> std::uint64_t { return queues.speaker.out.size(); });
 }
 
 auto uac_link::sending() const -> bool
 {
-  return channel().speaker.sending;
+  return locked([](usb::uac2_channel const& queues) { return queues.speaker.sending; });
 }
 
 auto uac_link::sent_at() const -> std::optional<std::uint64_t>
 {
-  auto const& at = channel().speaker.sent_at;
-  return at ? std::optional{at->ps} : std::nullopt;
+  return locked([](usb::uac2_channel const& queues) -> std::optional<std::uint64_t> {
+    auto const& at = queues.speaker.sent_at;
+    return at ? std::optional{at->ps} : std::nullopt;
+  });
 }
 
 auto uac_link::flushes() const -> std::uint64_t
 {
-  return channel().speaker.flushes;
+  return locked([](usb::uac2_channel const& queues) { return queues.speaker.flushes; });
 }
 
 auto uac_link::available() const -> std::uint64_t
 {
-  return channel().mic.in.size();
+  return locked(
+      [](usb::uac2_channel const& queues) -> std::uint64_t { return queues.mic.in.size(); });
 }
 
 auto uac_link::drain(std::uint64_t count) -> std::vector<uac_frame_record>
 {
-  return channel().mic.take(count)
-       | std::views::transform([](usb::uac2_frame const& frame) {
-           return uac_frame_record{.samples = frame.samples, .at_ps = frame.at.ps};
+  auto taken = locked([&](usb::uac2_channel& queues) { return queues.mic.take(count); });
+  return taken
+       | std::views::as_rvalue
+       | std::views::transform([](usb::uac2_frame&& frame) {
+           return uac_frame_record{.samples = std::move(frame.samples), .at_ps = frame.at.ps};
          })
        | std::ranges::to<std::vector>();
 }
 
 auto uac_link::dropped() const -> std::uint64_t
 {
-  return channel().mic.dropped;
+  return locked([](usb::uac2_channel const& queues) { return queues.mic.dropped; });
 }
 
 void uac_link::clear()
 {
-  channel().mic.in.clear();
+  locked([](usb::uac2_channel& queues) { queues.mic.in.clear(); });
 }
 
 void uac_link::set_frame_limit(std::uint64_t limit)
@@ -538,7 +574,7 @@ void uac_link::set_frame_limit(std::uint64_t limit)
   {
     throw config_error("usb", 0, "limit", "a frame limit of at least 1");
   }
-  channel().mic.set_limit(limit);
+  locked([&](usb::uac2_channel& queues) { queues.mic.set_limit(limit); });
 }
 
 auto uac_link::start(bool mic) -> std::uint64_t
@@ -580,34 +616,36 @@ auto uac_link::set_feature(
 
 auto uac_link::take_result(std::uint64_t id) -> std::optional<periph::usb::transfer_status>
 {
-  auto& results = channel().results;
-  auto  found   = results.find(id);
-  if(found == results.end())
-  {
-    return std::nullopt;
-  }
-  auto const status = found->second;
-  results.erase(found);
-  return status;
+  return locked([&](usb::uac2_channel& queues) -> std::optional<usb::transfer_status> {
+    auto found = queues.results.find(id);
+    if(found == queues.results.end())
+    {
+      return std::nullopt;
+    }
+    auto const status = found->second;
+    queues.results.erase(found);
+    return status;
+  });
 }
 
 void uac_link::forget(std::uint64_t id)
 {
-  auto& queues = channel();
-  queues.awaited.erase(id);
-  queues.results.erase(id);
+  locked([&](usb::uac2_channel& queues) {
+    queues.awaited.erase(id);
+    queues.results.erase(id);
+  });
 }
 
 usb_link::usb_link(
     periph::stm32::usb_host_port& port,
     detail::usb_hubs              hubs,
-    std::shared_ptr<bool const>   alive)
+    detail::alive_flag            alive)
     : port_{&port}, hubs_{std::move(hubs)}, alive_{std::move(alive)}
 {}
 
 auto usb_link::port() const -> periph::stm32::usb_host_port&
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
   }

@@ -569,7 +569,7 @@ private:
       -> periph::stm32::gpio_port&;
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
 
-  std::shared_ptr<bool>                   alive_;
+  std::shared_ptr<std::atomic<bool>>      alive_;
   std::map<std::string, detail::usb_hubs> hubs_;
   std::unique_ptr<core::machine>          machine_;
 };

@@ -26,10 +26,10 @@ struct view_scope
   auto operator=(view_scope const&) -> view_scope& = delete;
   ~view_scope()
   {
-    *alive = false;
+    detail::clear_alive(*alive);
   }
 
-  std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+  std::shared_ptr<std::atomic<bool>> alive = detail::make_alive();
 };
 }
 
@@ -46,13 +46,13 @@ auto hook::active() const noexcept -> bool
   return handle_.active();
 }
 
-call_view::call_view(core::intercept_call const& call, std::shared_ptr<bool> alive) noexcept
+call_view::call_view(core::intercept_call const& call, detail::alive_flag alive) noexcept
     : call_{&call}, alive_{std::move(alive)}
 {}
 
 auto call_view::call() const -> core::intercept_call const&
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("intercept", 0, "call", "a call read inside its handler");
   }

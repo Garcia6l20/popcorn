@@ -129,9 +129,9 @@ private:
   }
 };
 
-thread_local std::shared_ptr<bool const> building{};
+thread_local detail::alive_flag building{};
 
-auto current_alive() -> std::shared_ptr<bool const>
+auto current_alive() -> detail::alive_flag
 {
   if(not building)
   {
@@ -182,7 +182,7 @@ auto python_object(periph::model* model) -> nb::object
   return nb::find(static_cast<periph::model*>(python));
 }
 
-building_scope::building_scope(std::shared_ptr<bool const> alive) noexcept
+building_scope::building_scope(detail::alive_flag alive) noexcept
     : previous_{std::exchange(building, std::move(alive))}
 {}
 

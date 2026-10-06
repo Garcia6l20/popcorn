@@ -229,7 +229,7 @@ auto options_of(
 }
 
 machine_handle::machine_handle(mcu_description const& description, machine_config const& config)
-    : alive_{std::make_shared<bool>(true)}
+    : alive_{detail::make_alive()}
 {
   detail::building_scope const building{alive_};
   for(auto const& name : config.usb_hosts | std::views::keys)
@@ -242,7 +242,7 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
 
 machine_handle::~machine_handle()
 {
-  *alive_ = false;
+  detail::clear_alive(*alive_);
 }
 
 void machine_handle::load(image const& loaded)

@@ -27,14 +27,14 @@ auto line_at(std::span<Line> lines, std::uint32_t index, char const* kind) -> Li
 }
 
 model_context_view::model_context_view(
-    periph::model_context&      ctx,
-    std::shared_ptr<bool const> alive) noexcept
+    periph::model_context& ctx,
+    detail::alive_flag     alive) noexcept
     : ctx_{&ctx}, alive_{std::move(alive)}
 {}
 
 auto model_context_view::context() const -> periph::model_context&
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("model", 0, "machine", "a model whose machine still exists");
   }

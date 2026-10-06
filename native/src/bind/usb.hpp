@@ -6,6 +6,8 @@
 #include <popcorn/periph/usb_host.hpp>
 #include <popcorn/periph/usb_uac2.hpp>
 
+#include "alive.hpp"
+
 #include <reflex/py.hpp>
 
 #include <cstddef>
@@ -170,7 +172,7 @@ public:
       periph::stm32::usb_host_port&         port,
       std::shared_ptr<periph::usb::cdc_hub> hub,
       std::size_t                           function,
-      std::shared_ptr<bool const>           alive);
+      detail::alive_flag                    alive);
 
   /**
    * @brief Queues bytes for the device. The driver sends them from the next frame once bound.
@@ -275,13 +277,13 @@ public:
       serial_state() const -> std::uint16_t;
 
 private:
-  [[nodiscard]] auto channel() const -> periph::usb::cdc_channel&;
+  template <typename Body> auto locked(Body&& body) const;
   auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
 
   periph::stm32::usb_host_port*         port_;
   std::shared_ptr<periph::usb::cdc_hub> hub_;
   std::size_t                           function_;
-  std::shared_ptr<bool const>           alive_;
+  detail::alive_flag                    alive_;
 };
 
 /** @brief One input report a HID function sent. */
@@ -322,7 +324,7 @@ public:
       periph::stm32::usb_host_port&         port,
       std::shared_ptr<periph::usb::hid_hub> hub,
       std::size_t                           function,
-      std::shared_ptr<bool const>           alive);
+      detail::alive_flag                    alive);
 
   /**
    * @brief Queues an output report. The driver sends it from the next frame once the report
@@ -428,13 +430,13 @@ public:
       forget(std::uint32_t id);
 
 private:
-  [[nodiscard]] auto channel() const -> periph::usb::hid_channel&;
+  template <typename Body> auto locked(Body&& body) const;
   auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
 
   periph::stm32::usb_host_port*         port_;
   std::shared_ptr<periph::usb::hid_hub> hub_;
   std::size_t                           function_;
-  std::shared_ptr<bool const>           alive_;
+  detail::alive_flag                    alive_;
 };
 
 /** @brief One audio streaming direction of an audio function, as the driver found it. */
@@ -517,7 +519,7 @@ public:
       periph::stm32::usb_host_port&          port,
       std::shared_ptr<periph::usb::uac2_hub> hub,
       std::size_t                            function,
-      std::shared_ptr<bool const>            alive);
+      detail::alive_flag                     alive);
 
   /** @brief Whether a USB Audio 2.0 driver is bound to the function. */
   [[= py::doc{"Whether a USB Audio 2.0 driver is bound to the function."}]] [[nodiscard]] auto
@@ -633,13 +635,13 @@ public:
       forget(std::uint64_t id);
 
 private:
-  [[nodiscard]] auto channel() const -> periph::usb::uac2_channel&;
-  [[nodiscard]] auto host() const -> periph::usb::host*;
+  template <typename Body> auto locked(Body&& body) const;
+  [[nodiscard]] auto            host() const -> periph::usb::host*;
 
   periph::stm32::usb_host_port*          port_;
   std::shared_ptr<periph::usb::uac2_hub> hub_;
   std::size_t                            function_;
-  std::shared_ptr<bool const>            alive_;
+  detail::alive_flag                     alive_;
 };
 
 /**
@@ -660,7 +662,7 @@ public:
   [[= py::skip]] usb_link(
       periph::stm32::usb_host_port& port,
       detail::usb_hubs              hubs,
-      std::shared_ptr<bool const>   alive);
+      detail::alive_flag            alive);
 
   /** @brief Whether the cable is plugged. */
   [[= py::doc{"Whether the cable is plugged."}]] [[nodiscard]] auto plugged() const -> bool;
@@ -773,6 +775,6 @@ private:
 
   periph::stm32::usb_host_port* port_;
   detail::usb_hubs              hubs_;
-  std::shared_ptr<bool const>   alive_;
+  detail::alive_flag            alive_;
 };
 }

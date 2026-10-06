@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pcons import context
 
-from popcorn_build.config import project_dir
+from popcorn_build.config import VARIANT, project_dir
 from popcorn_build.firmware import firmware
 from popcorn_build.st_description import cached_st_description
 from popcorn_build.testing import add_doctest
@@ -83,3 +83,9 @@ for program in u575_programs:
     for _, target in firmwares.values():
         if target is not None:
             program.depends(target)
+
+tsan_sources = [project_dir / "tests" / "native" / "tsan_longjmp.cpp"] if VARIANT == "tsan" else []
+link_queues = add_doctest(
+    "stm32-link-queues", [here / "test_link_queues.cpp", *tsan_sources], [core]
+)
+link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")

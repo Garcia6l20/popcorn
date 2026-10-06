@@ -2,6 +2,8 @@
 
 #include <popcorn/core/intercept.hpp>
 
+#include "alive.hpp"
+
 #include <reflex/py.hpp>
 
 #include <cstdint>
@@ -46,7 +48,7 @@ public:
    * @param call The call.
    * @param alive Cleared when the handler returns.
    */
-  [[= py::skip]] call_view(core::intercept_call const& call, std::shared_ptr<bool> alive) noexcept;
+  [[= py::skip]] call_view(core::intercept_call const& call, detail::alive_flag alive) noexcept;
 
   /** @brief Intercepted address. */
   [[= py::doc{"Intercepted address."}]] [[nodiscard]] auto function() const -> address;
@@ -73,7 +75,7 @@ private:
   [[nodiscard]] auto call() const -> core::intercept_call const&;
 
   core::intercept_call const* call_;
-  std::shared_ptr<bool>       alive_;
+  detail::alive_flag          alive_;
 };
 
 /** @brief A call that returned, as a return hook sees it. */

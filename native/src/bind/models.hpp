@@ -4,6 +4,8 @@
 #include <popcorn/core/types.hpp>
 #include <popcorn/periph/model.hpp>
 
+#include "alive.hpp"
+
 #include <reflex/py.hpp>
 
 #include <cstdint>
@@ -29,9 +31,7 @@ public:
    * @param ctx The context the machine built.
    * @param alive Cleared when the machine is destroyed.
    */
-  [[= py::skip]] model_context_view(
-      periph::model_context&      ctx,
-      std::shared_ptr<bool const> alive) noexcept;
+  [[= py::skip]] model_context_view(periph::model_context& ctx, detail::alive_flag alive) noexcept;
 
   /** @brief Description of the peripheral. */
   [[= py::doc{"Description of the peripheral."}]] [[nodiscard]] auto description() const
@@ -129,8 +129,8 @@ public:
 private:
   [[nodiscard]] auto context() const -> periph::model_context&;
 
-  periph::model_context*      ctx_;
-  std::shared_ptr<bool const> alive_;
+  periph::model_context* ctx_;
+  detail::alive_flag     alive_;
 };
 
 /**
@@ -190,7 +190,7 @@ public:
    * @brief Marks a machine as being built.
    * @param alive Cleared when that machine is destroyed.
    */
-  explicit building_scope(std::shared_ptr<bool const> alive) noexcept;
+  explicit building_scope(detail::alive_flag alive) noexcept;
   /** @brief Not copyable. */
   building_scope(building_scope const&) = delete;
   /** @brief Not copy-assignable. */
@@ -199,7 +199,7 @@ public:
   ~building_scope();
 
 private:
-  std::shared_ptr<bool const> previous_;
+  detail::alive_flag previous_;
 };
 }
 }

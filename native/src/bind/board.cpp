@@ -1,4 +1,5 @@
 #include "board.hpp"
+#include "gil_locks.hpp"
 #include "machine.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -6,13 +7,15 @@
 #include <algorithm>
 #include <cstddef>
 #include <format>
+#include <ranges>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
 {
-uart_link::uart_link(periph::stm32::uart_port& port, std::shared_ptr<bool const> alive)
+uart_link::uart_link(periph::stm32::uart_port& port, detail::alive_flag alive)
     : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>()}, alive_{std::move(alive)}
 {
   port.attach(endpoint_);
@@ -20,7 +23,7 @@ uart_link::uart_link(periph::stm32::uart_port& port, std::shared_ptr<bool const>
 
 auto uart_link::port() const -> periph::stm32::uart_port&
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("uart", 0, "machine", "a UART whose machine still exists");
   }
@@ -39,22 +42,27 @@ auto uart_link::queued() const -> std::uint64_t
   return port().queued();
 }
 
-auto uart_link::available() const noexcept -> std::uint64_t
+auto uart_link::available() const -> std::uint64_t
 {
-  return endpoint_->frames.size();
+  return detail::link_locked(
+      *endpoint_, [&](core::link_guard const& held) { return endpoint_->available(held); });
 }
 
 auto uart_link::drain(std::uint64_t count) -> std::vector<uart_frame>
 {
-  auto const taken = static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, available()));
-  std::vector<uart_frame> out(endpoint_->frames.begin(), endpoint_->frames.begin() + taken);
-  endpoint_->frames.erase(endpoint_->frames.begin(), endpoint_->frames.begin() + taken);
-  return out;
+  auto const taken = detail::link_locked(
+      *endpoint_, [&](core::link_guard const& held) { return endpoint_->take(held, count); });
+  return taken
+       | std::views::transform([](detail::queued_uart_frame const& frame) {
+           return uart_frame{.data = frame.data, .at_ps = frame.at_ps};
+         })
+       | std::ranges::to<std::vector>();
 }
 
-auto uart_link::dropped() const noexcept -> std::uint64_t
+auto uart_link::dropped() const -> std::uint64_t
 {
-  return endpoint_->dropped;
+  return detail::link_locked(
+      *endpoint_, [&](core::link_guard const& held) { return endpoint_->dropped(held); });
 }
 
 void uart_link::set_frame_limit(std::uint64_t limit)
@@ -63,91 +71,17 @@ void uart_link::set_frame_limit(std::uint64_t limit)
   {
     throw config_error("uart", 0, "limit", "a frame limit of at least 1");
   }
-  endpoint_->limit = limit;
-  while(endpoint_->frames.size() > limit)
-  {
-    endpoint_->frames.pop_front();
-    ++endpoint_->dropped;
-  }
-}
-
-namespace detail
-{
-void audio_queue_endpoint::transmitted(
-    std::span<std::uint32_t const> slots,
-    periph::stm32::audio_format    format,
-    vtime                          at)
-{
-  while(starts.size() >= limit)
-  {
-    pop_front();
-    ++dropped;
-  }
-  auto const count = static_cast<std::uint8_t>(slots.size());
-  if(runs.empty() or runs.back().format != format or runs.back().slots != count)
-  {
-    runs.push_back({.format = format, .slots = count, .frames = 0});
-  }
-  ++runs.back().frames;
-  words.insert(words.end(), slots.begin(), slots.end());
-  starts.push_back(at.ps);
-}
-
-void audio_queue_endpoint::receive(
-    std::span<std::uint32_t> slots,
-    periph::stm32::audio_format,
-    vtime)
-{
-  for(auto& slot : slots)
-  {
-    if(pending.empty())
-    {
-      slot = 0;
-      continue;
-    }
-    slot = pending.front();
-    pending.pop_front();
-  }
-}
-
-void audio_queue_endpoint::pop_front()
-{
-  auto& run = runs.front();
-  words.erase(words.begin(), words.begin() + run.slots);
-  starts.pop_front();
-  if(--run.frames == 0)
-  {
-    runs.pop_front();
-  }
-}
-
-auto audio_queue_endpoint::take(std::uint64_t count) -> std::vector<audio_record>
-{
-  std::vector<audio_record> out;
-  out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(count, starts.size())));
-  while(out.size() < count and not starts.empty())
-  {
-    auto const& run = runs.front();
-    out.push_back({
-        .slots        = {words.begin(), words.begin() + run.slots},
-        .data_bits    = run.format.data_bits,
-        .active_slots = run.format.active_slots,
-        .mono         = run.format.mono,
-        .at_ps        = starts.front(),
-    });
-    pop_front();
-  }
-  return out;
-}
+  detail::link_locked(
+      *endpoint_, [&](core::link_guard const& held) { endpoint_->set_limit(held, limit); });
 }
 
 audio_link::audio_link(
-    periph::stm32::audio_port&  port,
-    periph::stm32::audio_block  block,
-    std::uint32_t               decimation,
-    std::uint32_t               external_frame_hz,
-    bool                        clock_wired,
-    std::shared_ptr<bool const> alive)
+    periph::stm32::audio_port& port,
+    periph::stm32::audio_block block,
+    std::uint32_t              decimation,
+    std::uint32_t              external_frame_hz,
+    bool                       clock_wired,
+    detail::alive_flag         alive)
     : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, port_{&port}, block_{block},
       alive_{std::move(alive)}
 {
@@ -160,7 +94,7 @@ audio_link::audio_link(
 
 auto audio_link::endpoint() const -> detail::audio_queue_endpoint&
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("audio", 0, "machine", "an SAI whose machine still exists");
   }
@@ -169,7 +103,7 @@ auto audio_link::endpoint() const -> detail::audio_queue_endpoint&
 
 auto audio_link::port() const -> periph::stm32::audio_port&
 {
-  if(not *alive_)
+  if(not detail::is_alive(alive_))
   {
     throw config_error("audio", 0, "machine", "an SAI whose machine still exists");
   }
@@ -188,38 +122,54 @@ auto audio_link::external_frame_hz() const -> std::uint32_t
 
 auto audio_link::available() const -> std::uint64_t
 {
-  return endpoint().starts.size();
+  auto& queue = endpoint();
+  return detail::link_locked(
+      queue, [&](core::link_guard const& held) { return queue.available(held); });
 }
 
 auto audio_link::dropped() const -> std::uint64_t
 {
-  return endpoint().dropped;
+  auto& queue = endpoint();
+  return detail::link_locked(
+      queue, [&](core::link_guard const& held) { return queue.dropped(held); });
 }
 
 auto audio_link::queued() const -> std::uint64_t
 {
-  return endpoint().pending.size();
+  auto& queue = endpoint();
+  return detail::link_locked(
+      queue, [&](core::link_guard const& held) { return queue.queued(held); });
 }
 
 auto audio_link::drain(std::uint64_t count) -> std::vector<audio_record>
 {
-  return endpoint().take(count);
+  auto& queue = endpoint();
+  auto  taken = detail::link_locked(
+      queue, [&](core::link_guard const& held) { return queue.take(held, count); });
+  return taken
+       | std::views::as_rvalue
+       | std::views::transform([](detail::queued_audio_frame&& frame) {
+           return audio_record{
+               .slots        = std::move(frame.slots),
+               .data_bits    = frame.format.data_bits,
+               .active_slots = frame.format.active_slots,
+               .mono         = frame.format.mono,
+               .at_ps        = frame.at_ps,
+           };
+         })
+       | std::ranges::to<std::vector>();
 }
 
 void audio_link::write(std::vector<std::uint32_t> const& words)
 {
   auto& queue = endpoint();
-  queue.pending.insert(queue.pending.end(), words.begin(), words.end());
+  detail::link_locked(queue, [&](core::link_guard const& held) { queue.write(held, words); });
 }
 
 void audio_link::discard()
 {
   auto& queue = endpoint();
-  queue.words.clear();
-  queue.starts.clear();
-  queue.runs.clear();
-  queue.pending.clear();
-  queue.dropped = 0;
+  detail::link_locked(queue, [&](core::link_guard const& held) { queue.discard(held); });
 }
 
 void audio_link::set_frame_limit(std::uint64_t limit)
@@ -229,12 +179,7 @@ void audio_link::set_frame_limit(std::uint64_t limit)
     throw config_error("audio", 0, "limit", "a frame limit of at least 1");
   }
   auto& queue = endpoint();
-  queue.limit = limit;
-  while(queue.starts.size() > limit)
-  {
-    queue.pop_front();
-    ++queue.dropped;
-  }
+  detail::link_locked(queue, [&](core::link_guard const& held) { queue.set_limit(held, limit); });
 }
 
 auto machine_handle::audio_names() const -> std::vector<std::string>

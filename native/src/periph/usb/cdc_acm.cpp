@@ -148,6 +148,7 @@ public:
     {
       return;
     }
+    auto const held = hub_->lock();
     channel_->comm_interface.reset();
     channel_->ready     = false;
     channel_->in_flight = 0;
@@ -160,13 +161,15 @@ public:
 
   void configured(host_context& ctx) override
   {
-    auto const& configuration = ctx.configuration();
-    auto const  claimed       = ctx.interfaces();
-    s_.comm                   = claimed.front();
-    auto const functions      = cdc_acm_functions(configuration);
+    deferred_warnings const deferred;
+    auto const              held          = hub_->lock();
+    auto const&             configuration = ctx.configuration();
+    auto const              claimed       = ctx.interfaces();
+    s_.comm                               = claimed.front();
+    auto const functions                  = cdc_acm_functions(configuration);
     s_.function =
         static_cast<std::uint64_t>(std::ranges::find(functions, s_.comm) - functions.begin());
-    bind();
+    bind(held);
     if(auto const* const comm = configuration.find(s_.comm))
     {
       for(auto const& endpoint : comm->endpoints)
@@ -230,7 +233,9 @@ public:
 
   void control_done(host_context& ctx, transfer_result const& result) override
   {
-    auto const completed = result.status == transfer_status::completed;
+    deferred_warnings const deferred;
+    auto const              held      = hub_->lock();
+    auto const              completed = result.status == transfer_status::completed;
     if(completed
        and result.setup.request == set_line_coding
        and result.data.size() >= coding_length)
@@ -270,7 +275,9 @@ public:
 
   void transfer_done(host_context& ctx, pipe_id pipe, transfer_result const& result) override
   {
-    auto const stalled = result.status == transfer_status::stalled;
+    deferred_warnings const deferred;
+    auto const              held    = hub_->lock();
+    auto const              stalled = result.status == transfer_status::stalled;
     if(pipe == s_.bulk_in)
     {
       channel_->received(result.data, result.at);
@@ -316,22 +323,26 @@ public:
 
   void frame(host_context& ctx, std::uint16_t) override
   {
+    deferred_warnings const deferred;
+    auto const              held = hub_->lock();
     send(ctx);
   }
 
   void save(std::vector<std::byte>& out) const override
   {
-    auto saved = s_;
-    saved.out  = channel_->out
-               | std::views::transform([](std::uint8_t b) { return std::byte{b}; })
-               | std::ranges::to<std::vector>();
+    auto const held  = hub_->lock();
+    auto       saved = s_;
+    saved.out        = channel_->out
+                     | std::views::transform([](std::uint8_t b) { return std::byte{b}; })
+                     | std::ranges::to<std::vector>();
     reflex::serde::bson::serializer{out}.dump(saved);
   }
 
   void load(std::span<std::byte const> in) override
   {
-    s_ = reflex::serde::bson::deserializer{in}.template load<driver_state>();
-    bind();
+    s_              = reflex::serde::bson::deserializer{in}.template load<driver_state>();
+    auto const held = hub_->lock();
+    bind(held);
     channel_->out.assign_range(s_.out | std::views::transform([](std::byte b) {
                                  return std::to_integer<std::uint8_t>(b);
                                }));
@@ -344,9 +355,9 @@ public:
   }
 
 private:
-  void bind()
+  void bind(core::link_guard const& held)
   {
-    channel_                 = &hub_->channel(static_cast<std::size_t>(s_.function));
+    channel_                 = &hub_->channel(held, static_cast<std::size_t>(s_.function));
     channel_->comm_interface = s_.comm;
   }
 
@@ -469,7 +480,7 @@ void cdc_channel::discard()
   results.clear();
 }
 
-auto cdc_hub::channel(std::size_t function) -> cdc_channel&
+auto cdc_hub::channel(core::link_guard const&, std::size_t function) -> cdc_channel&
 {
   return channels_[function];
 }
@@ -490,7 +501,8 @@ struct hub_state
 
 void cdc_hub::save(std::vector<std::byte>& out) const
 {
-  hub_state saved;
+  auto const held = lock();
+  hub_state  saved;
   for(auto const& [function, channel] : channels_)
   {
     if(not channel.comm_interface and not channel.out.empty())
@@ -507,6 +519,7 @@ void cdc_hub::save(std::vector<std::byte>& out) const
 
 void cdc_hub::load(std::span<std::byte const> in)
 {
+  auto const held = lock();
   for(auto& channel : channels_ | std::views::values)
   {
     channel.out.clear();
@@ -518,7 +531,7 @@ void cdc_hub::load(std::span<std::byte const> in)
   for(auto const& pending :
       reflex::serde::bson::deserializer{in}.template load<hub_state>().unbound)
   {
-    channel(static_cast<std::size_t>(pending.function))
+    channel(held, static_cast<std::size_t>(pending.function))
         .out.assign_range(pending.bytes | std::views::transform([](std::byte b) {
                             return std::to_integer<std::uint8_t>(b);
                           }));
@@ -527,6 +540,7 @@ void cdc_hub::load(std::span<std::byte const> in)
 
 void cdc_hub::discard()
 {
+  auto const held = lock();
   for(auto& channel : channels_ | std::views::values)
   {
     channel.discard();

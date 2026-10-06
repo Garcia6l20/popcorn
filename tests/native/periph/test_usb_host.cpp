@@ -1,3 +1,4 @@
+#include <popcorn/core/link_guard.hpp>
 #include <popcorn/periph/usb.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
 #include <popcorn/periph/usb_hid.hpp>
@@ -1778,7 +1779,7 @@ TEST_CASE("the CDC ACM driver binds through the association and sets 115200 8N1,
   CHECK(r.host->drivers()[0].interfaces == std::vector<std::uint8_t>{0, 1});
   CHECK(class_requests(r.dev.s) == std::vector{line_coding_request, line_state_request(3)});
   CHECK(r.dev.s.class_out == std::vector<std::uint8_t>{0x00, 0xc2, 0x01, 0x00, 0, 0, 8});
-  auto const& channel = hub->channel(0);
+  auto const& channel = hub->channel(hub->lock(), 0);
   CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
   CHECK(channel.line_state == 3);
   CHECK(channel.ready);
@@ -1793,8 +1794,8 @@ TEST_CASE("the CDC ACM driver leaves DTR off when its options say so")
   r.plug();
   r.run_until(t0 + second);
   CHECK(class_requests(r.dev.s) == std::vector{line_coding_request, line_state_request(2)});
-  CHECK(hub->channel(0).line_state == 2);
-  CHECK(hub->channel(0).ready);
+  CHECK(hub->channel(hub->lock(), 0).line_state == 2);
+  CHECK(hub->channel(hub->lock(), 0).ready);
 }
 
 TEST_CASE("CDC OUT bytes go in packets of 64, with a ZLP after a full last one only")
@@ -1803,7 +1804,7 @@ TEST_CASE("CDC OUT bytes go in packets of 64, with a ZLP after a full last one o
   rig        r{cdc_options_with(hub)};
   r.plug();
   r.run_until(t0 + second);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   channel.out.append_range(std::vector<std::uint8_t>(64, 'a'));
   r.run_until(t0 + second + 10 * ms);
   auto const& received = r.dev.s.received[2];
@@ -1832,7 +1833,7 @@ TEST_CASE("CDC OUT bytes go in packets of 64, with a ZLP after a full last one o
 TEST_CASE("CDC OUT bytes written before configuration wait for the control line state")
 {
   auto const hub = std::make_shared<usb::cdc_hub>();
-  hub->channel(0).out.append_range(bytes_of("early"));
+  hub->channel(hub->lock(), 0).out.append_range(bytes_of("early"));
   rig r{cdc_options_with(hub)};
   r.plug();
   r.run_until(t0 + second);
@@ -1855,7 +1856,7 @@ TEST_CASE("CDC IN packets keep their time, a read splits a packet and keeps the 
   r.run_until(t0 + second);
   r.dev.s.in_queue[2] = {bytes_of("hi"), bytes_of("!")};
   r.run_until(t0 + second + 10 * ms);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   CHECK(channel.in_bytes == 3);
   CHECK(channel.packets() == 2);
   auto const first = channel.take(1);
@@ -1887,7 +1888,7 @@ TEST_CASE("a SERIAL_STATE notification split over two packets sets the serial st
       std::vector<std::uint8_t>{0x03, 0x00}
   };
   r.run_until(t0 + second + 50 * ms);
-  CHECK(hub->channel(0).serial_state == 3);
+  CHECK(hub->channel(hub->lock(), 0).serial_state == 3);
 }
 
 TEST_CASE("a control line state request through the driver reaches the device and its result")
@@ -1896,7 +1897,7 @@ TEST_CASE("a control line state request through the driver reaches the device an
   rig        r{cdc_options_with(hub)};
   r.plug();
   r.run_until(t0 + second);
-  auto&      channel = hub->channel(0);
+  auto&      channel = hub->channel(hub->lock(), 0);
   auto const id      = r.host->context(0).control(line_state_request(0));
   channel.awaited.insert(id);
   r.run_until(t0 + second + 10 * ms);
@@ -1926,15 +1927,15 @@ TEST_CASE("two ACM functions without associations bind through their union descr
                             .request_type = 0x21, .request = 0x20, .value = 0, .index = 2, .length = 7},
           line_state_request(3, 2)
   });
-  CHECK(hub->channel(1).comm_interface == std::optional<std::uint8_t>{2});
-  hub->channel(1).out.append_range(bytes_of("xy"));
+  CHECK(hub->channel(hub->lock(), 1).comm_interface == std::optional<std::uint8_t>{2});
+  hub->channel(hub->lock(), 1).out.append_range(bytes_of("xy"));
   r.dev.s.in_queue[2] = {bytes_of("zero")};
   r.dev.s.in_queue[4] = {bytes_of("one")};
   r.run_until(t0 + second + 10 * ms);
   CHECK(r.dev.s.received[4] == packet_list{bytes_of("xy")});
   CHECK(r.dev.s.received[2].empty());
-  CHECK(hub->channel(0).take(10)[0].data == bytes_of("zero"));
-  CHECK(hub->channel(1).take(10)[0].data == bytes_of("one"));
+  CHECK(hub->channel(hub->lock(), 0).take(10)[0].data == bytes_of("zero"));
+  CHECK(hub->channel(hub->lock(), 1).take(10)[0].data == bytes_of("one"));
 }
 
 TEST_CASE("a restore sends the OUT bytes the snapshot had pending and drops later IN bytes")
@@ -1943,7 +1944,7 @@ TEST_CASE("a restore sends the OUT bytes the snapshot had pending and drops late
   rig        a{cdc_options_with(hub)};
   a.plug();
   a.run_until(t0 + second);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   channel.out.append_range(bytes_of("abc"));
   std::vector<std::byte> saved;
   a.host->save(saved);
@@ -1971,9 +1972,9 @@ TEST_CASE("a restore sends the OUT bytes the snapshot had pending and drops late
   rig        b{cdc_options_with(fresh)};
   b.dev.s = device_at_save;
   b.host->load(saved);
-  CHECK(std::ranges::equal(fresh->channel(0).out, bytes_of("abc")));
-  CHECK(fresh->channel(0).comm_interface == std::optional<std::uint8_t>{0});
-  CHECK(fresh->channel(0).ready);
+  CHECK(std::ranges::equal(fresh->channel(fresh->lock(), 0).out, bytes_of("abc")));
+  CHECK(fresh->channel(fresh->lock(), 0).comm_interface == std::optional<std::uint8_t>{0});
+  CHECK(fresh->channel(fresh->lock(), 0).ready);
   b.run_until(t0 + second + 10 * ms);
   CHECK(b.dev.s.received[2] == packet_list{bytes_of("abc")});
 }
@@ -1989,14 +1990,14 @@ TEST_CASE("a snapshot in the middle of an OUT transfer restores it in the middle
   {
     big[n] = static_cast<std::uint8_t>(n * 13);
   }
-  hub->channel(0).out.append_range(big);
+  hub->channel(hub->lock(), 0).out.append_range(big);
   auto end = t0 + second;
   while(a.dev.s.received[2].size() < 4)
   {
     end += 20 * us;
     a.run_until(end);
   }
-  CHECK(hub->channel(0).in_flight == 1000);
+  CHECK(hub->channel(hub->lock(), 0).in_flight == 1000);
   std::vector<std::byte> saved;
   a.host->save(saved);
   auto const device_at_save = a.dev.s;
@@ -2008,11 +2009,11 @@ TEST_CASE("a snapshot in the middle of an OUT transfer restores it in the middle
   b.dev.s     = device_at_save;
   b.dev.clock = end;
   b.host->load(saved);
-  CHECK(fresh->channel(0).in_flight == 1000);
-  CHECK(fresh->channel(0).out.empty());
+  CHECK(fresh->channel(fresh->lock(), 0).in_flight == 1000);
+  CHECK(fresh->channel(fresh->lock(), 0).out.empty());
   b.run_until(end + 10 * ms);
   CHECK(joined(b.dev.s.received[2]) == big);
-  CHECK(fresh->channel(0).in_flight == 0);
+  CHECK(fresh->channel(fresh->lock(), 0).in_flight == 0);
   CHECK(b.dev.s.received[2] == a.dev.s.received[2]);
 }
 
@@ -2024,7 +2025,7 @@ TEST_CASE("an unplug unbinds the CDC channel and keeps it, a replug binds the sa
   r.run_until(t0 + second);
   r.dev.s.in_queue[2] = {bytes_of("a")};
   r.run_until(t0 + second + 10 * ms);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   r.host->pull_up_changed(false, vtime{t0 + second + 10 * ms});
   CHECK(r.host->drivers().empty());
   CHECK_FALSE(channel.comm_interface.has_value());
@@ -2041,7 +2042,7 @@ TEST_CASE("an unplug unbinds the CDC channel and keeps it, a replug binds the sa
   CHECK(channel.comm_interface == std::optional<std::uint8_t>{0});
   CHECK(channel.ready);
   CHECK(r.dev.s.received[2] == packet_list{bytes_of("zz")});
-  CHECK(&hub->channel(0) == &channel);
+  CHECK(&hub->channel(hub->lock(), 0) == &channel);
 }
 
 TEST_CASE("a bulk IN STALL is cleared as Linux does and reading carries on at DATA0")
@@ -2062,7 +2063,7 @@ TEST_CASE("a bulk IN STALL is cleared as Linux does and reading carries on at DA
   REQUIRE(clear != r.dev.s.requests.end());
   r.dev.s.in_queue[2] = {bytes_of("b"), bytes_of("c")};
   r.run_until(t0 + second + 20 * ms);
-  auto const read = hub->channel(0).take(10);
+  auto const read = hub->channel(hub->lock(), 0).take(10);
   REQUIRE(read.size() == 3);
   CHECK(read[1].data == bytes_of("b"));
   CHECK(read[2].data == bytes_of("c"));
@@ -2078,7 +2079,7 @@ TEST_CASE("a bulk OUT STALL stops writing with a warning and sends no request")
   r.run_until(t0 + second);
   auto const requests = r.dev.s.requests.size();
   r.dev.s.halted      = {0x02};
-  auto& channel       = hub->channel(0);
+  auto& channel       = hub->channel(hub->lock(), 0);
   channel.out.append_range(bytes_of("lost"));
   r.run_until(t0 + second + 10 * ms);
   REQUIRE(r.warnings.size() == 1);
@@ -2108,23 +2109,23 @@ TEST_CASE("a notification cut short by a short packet is dropped, the next one p
   };
   r.run_until(t0 + second + 100 * ms);
   CHECK(r.dev.s.in_queue[1].empty());
-  CHECK(hub->channel(0).serial_state == 5);
+  CHECK(hub->channel(hub->lock(), 0).serial_state == 5);
 }
 
 TEST_CASE("OUT bytes of an unbound function are saved with the host and sent after the restore")
 {
   auto const hub = std::make_shared<usb::cdc_hub>();
   rig        a{cdc_options_with(hub)};
-  hub->channel(0).out.append_range(bytes_of("early"));
+  hub->channel(hub->lock(), 0).out.append_range(bytes_of("early"));
   std::vector<std::byte> saved;
   a.host->save(saved);
-  hub->channel(0).out.clear();
+  hub->channel(hub->lock(), 0).out.clear();
 
   auto const fresh = std::make_shared<usb::cdc_hub>();
   rig        b{cdc_options_with(fresh)};
-  fresh->channel(0).out.append_range(bytes_of("stale"));
+  fresh->channel(fresh->lock(), 0).out.append_range(bytes_of("stale"));
   b.host->load(saved);
-  CHECK(std::ranges::equal(fresh->channel(0).out, bytes_of("early")));
+  CHECK(std::ranges::equal(fresh->channel(fresh->lock(), 0).out, bytes_of("early")));
   b.plug();
   b.run_until(t0 + second);
   CHECK(b.dev.s.received[2] == packet_list{bytes_of("early")});
@@ -2132,7 +2133,7 @@ TEST_CASE("OUT bytes of an unbound function are saved with the host and sent aft
   std::vector<std::byte> empty_hub;
   rig{cdc_options_with(hub)}.host->save(empty_hub);
   b.host->load(empty_hub);
-  CHECK(fresh->channel(0).out.empty());
+  CHECK(fresh->channel(fresh->lock(), 0).out.empty());
 }
 
 namespace
@@ -2217,7 +2218,7 @@ TEST_CASE("the HID driver sends SET_IDLE 0, then reads the report descriptor, as
   CHECK(
       setups_after_configuration(r.dev.s)
       == std::vector{set_idle_request, report_descriptor_request(25)});
-  auto const& channel = hub->channel(0);
+  auto const& channel = hub->channel(hub->lock(), 0);
   CHECK(channel.interface == std::optional<std::uint8_t>{2});
   CHECK(channel.report_descriptor == report_descriptor(25));
   CHECK(channel.ready);
@@ -2246,7 +2247,7 @@ TEST_CASE(
       std::vector<std::uint8_t>{1, 8}
   };
   r.run_until(t0 + second + 30 * ms);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   CHECK(channel.queued() == 0);
   auto const reports = channel.take(5);
   REQUIRE(reports.size() == 2);
@@ -2274,7 +2275,7 @@ TEST_CASE(
       == std::vector{
           set_idle_request, report_descriptor_request(25), report_descriptor_request(25),
           report_descriptor_request(25)});
-  CHECK(hub->channel(0).report_descriptor == report_descriptor(25));
+  CHECK(hub->channel(hub->lock(), 0).report_descriptor == report_descriptor(25));
 
   auto const stalled = std::make_shared<usb::hid_hub>();
   rig        f{hid_options_with(stalled)};
@@ -2288,15 +2289,15 @@ TEST_CASE(
   REQUIRE(f.warnings.size() == 1);
   CHECK(f.warnings[0].find("ended stalled 4 times, the function stays idle") != std::string::npos);
   CHECK(in_tokens(f.dev.s, 3).empty());
-  CHECK(stalled->channel(0).interface == std::optional<std::uint8_t>{2});
-  CHECK_FALSE(stalled->channel(0).ready);
+  CHECK(stalled->channel(stalled->lock(), 0).interface == std::optional<std::uint8_t>{2});
+  CHECK_FALSE(stalled->channel(stalled->lock(), 0).ready);
 }
 
 TEST_CASE(
     "without an interrupt OUT endpoint, output reports go as SET_REPORT(Output), ID 0 not sent")
 {
   auto const hub     = std::make_shared<usb::hid_hub>();
-  auto&      channel = hub->channel(0);
+  auto&      channel = hub->channel(hub->lock(), 0);
   auto const early   = channel.write({2, 0x5a});
   channel.awaited_writes.insert(early);
   rig r{hid_options_with(hub)};
@@ -2337,7 +2338,7 @@ TEST_CASE("with an interrupt OUT endpoint, output reports go on it, a STALL reac
                             .request_type = 0x21, .request = 0x0a, .value = 0, .index = 0, .length = 0},
           report_descriptor_request(12, 0)
   });
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   for(auto const& report : {
           std::vector<std::uint8_t>{0, 'a', 'b'},
           std::vector<std::uint8_t>{3, 'x'}
@@ -2371,7 +2372,7 @@ TEST_CASE("GET_REPORT and SET_REPORT queued for the binding report their data an
   r.dev.s.class_replies[0x0301] = {1, 9, 8};
   r.plug();
   r.run_until(t0 + second);
-  auto&      channel = hub->channel(0);
+  auto&      channel = hub->channel(hub->lock(), 0);
   auto const get     = r.host->context(0).control(
       {.request_type = 0xa1, .request = 1, .value = 0x0301, .index = 2, .length = 3});
   channel.awaited.insert(get);
@@ -2412,7 +2413,7 @@ TEST_CASE("an interrupt IN STALL is cleared as usbhid does and reading carries o
       std::vector<std::uint8_t>{1, 3}
   };
   r.run_until(t0 + second + 80 * ms);
-  auto const reports = hub->channel(0).take(10);
+  auto const reports = hub->channel(hub->lock(), 0).take(10);
   REQUIRE(reports.size() == 3);
   CHECK(reports[1].data == std::vector<std::uint8_t>{1, 2});
   CHECK(reports[2].data == std::vector<std::uint8_t>{1, 3});
@@ -2428,7 +2429,7 @@ TEST_CASE(
   a.dev.s.report_descriptor = report_descriptor(25);
   a.plug();
   a.run_until(t0 + second);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   channel.write({2, 'a'});
   channel.write({2, 'b'});
   std::vector<std::byte> saved;
@@ -2459,9 +2460,9 @@ TEST_CASE(
   rig        b{hid_options_with(fresh)};
   b.dev.s = device_at_save;
   b.host->load(saved);
-  CHECK(fresh->channel(0).queued() == 2);
-  CHECK(fresh->channel(0).interface == std::optional<std::uint8_t>{2});
-  CHECK(fresh->channel(0).write({2, 'd'}) == 3);
+  CHECK(fresh->channel(fresh->lock(), 0).queued() == 2);
+  CHECK(fresh->channel(fresh->lock(), 0).interface == std::optional<std::uint8_t>{2});
+  CHECK(fresh->channel(fresh->lock(), 0).write({2, 'd'}) == 3);
   b.run_until(t0 + second + 20 * ms);
   CHECK(b.dev.s.class_out == std::vector<std::uint8_t>{2, 'a', 2, 'b', 2, 'd'});
 }
@@ -2471,17 +2472,17 @@ TEST_CASE(
 {
   auto const hub = std::make_shared<usb::hid_hub>();
   rig        a{hid_options_with(hub)};
-  hub->channel(0).write({2, 'e'});
+  hub->channel(hub->lock(), 0).write({2, 'e'});
   std::vector<std::byte> saved;
   a.host->save(saved);
 
   auto const fresh = std::make_shared<usb::hid_hub>();
   rig        b{hid_options_with(fresh)};
   b.dev.s.report_descriptor = report_descriptor(25);
-  fresh->channel(0).write({2, 's'});
+  fresh->channel(fresh->lock(), 0).write({2, 's'});
   b.host->load(saved);
-  REQUIRE(fresh->channel(0).out.size() == 1);
-  CHECK(fresh->channel(0).out.front().data == std::vector<std::uint8_t>{2, 'e'});
+  REQUIRE(fresh->channel(fresh->lock(), 0).out.size() == 1);
+  CHECK(fresh->channel(fresh->lock(), 0).out.front().data == std::vector<std::uint8_t>{2, 'e'});
   b.plug();
   b.run_until(t0 + second);
   CHECK(b.dev.s.class_out == std::vector<std::uint8_t>{2, 'e'});
@@ -2494,7 +2495,7 @@ TEST_CASE("an unplug cancels the awaited output report in flight and keeps the q
   r.dev.s.report_descriptor = report_descriptor(25);
   r.plug();
   r.run_until(t0 + second);
-  auto&      channel = hub->channel(0);
+  auto&      channel = hub->channel(hub->lock(), 0);
   auto const awaited = channel.write({2, 'q'});
   channel.awaited_writes.insert(awaited);
   channel.write({2, 'r'});
@@ -2533,8 +2534,8 @@ TEST_CASE("the CDC ACM and HID drivers bind together, each to its own interfaces
       == std::vector{
           line_coding_request, line_state_request(3), set_idle_request,
           report_descriptor_request(25)});
-  cdc->channel(0).out.append_range(bytes_of("hi"));
-  hid->channel(0).write({2, 'h'});
+  cdc->channel(cdc->lock(), 0).out.append_range(bytes_of("hi"));
+  hid->channel(hid->lock(), 0).write({2, 'h'});
   r.dev.s.in_queue[2] = {bytes_of("HI")};
   r.dev.s.in_queue[3] = {
       std::vector<std::uint8_t>{1, 4}
@@ -2542,8 +2543,8 @@ TEST_CASE("the CDC ACM and HID drivers bind together, each to its own interfaces
   r.run_until(t0 + second + 20 * ms);
   CHECK(r.dev.s.received[2] == packet_list{bytes_of("hi")});
   CHECK(r.dev.s.class_out.back() == 'h');
-  CHECK(cdc->channel(0).take(10)[0].data == bytes_of("HI"));
-  CHECK(hid->channel(0).take(10)[0].data == std::vector<std::uint8_t>{1, 4});
+  CHECK(cdc->channel(cdc->lock(), 0).take(10)[0].data == bytes_of("HI"));
+  CHECK(hid->channel(hid->lock(), 0).take(10)[0].data == std::vector<std::uint8_t>{1, 4});
   CHECK(r.warnings.empty());
 }
 
@@ -2598,7 +2599,7 @@ TEST_CASE("a binding empties the report descriptor until the new device's one is
   r.dev.s.report_descriptor = report_descriptor(25);
   r.plug();
   r.run_until(t0 + second);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   CHECK(channel.report_descriptor == report_descriptor(25));
   r.host->pull_up_changed(false, vtime{t0 + second});
   CHECK(channel.report_descriptor == report_descriptor(25));
@@ -2630,17 +2631,17 @@ TEST_CASE("the report descriptor of an unbound function is saved with the host")
 
   auto const fresh = std::make_shared<usb::hid_hub>();
   rig        b{hid_options_with(fresh)};
-  fresh->channel(0).report_descriptor = {1, 2, 3};
-  fresh->channel(1).report_descriptor = {4};
+  fresh->channel(fresh->lock(), 0).report_descriptor = {1, 2, 3};
+  fresh->channel(fresh->lock(), 1).report_descriptor = {4};
   b.host->load(saved);
-  CHECK(fresh->channel(0).report_descriptor == report_descriptor(25));
-  CHECK(fresh->channel(1).report_descriptor.empty());
-  CHECK_FALSE(fresh->channel(0).interface.has_value());
+  CHECK(fresh->channel(fresh->lock(), 0).report_descriptor == report_descriptor(25));
+  CHECK(fresh->channel(fresh->lock(), 1).report_descriptor.empty());
+  CHECK_FALSE(fresh->channel(fresh->lock(), 0).interface.has_value());
 
   std::vector<std::byte> empty_hub;
   rig{hid_options_with(std::make_shared<usb::hid_hub>())}.host->save(empty_hub);
   b.host->load(empty_hub);
-  CHECK(fresh->channel(0).report_descriptor.empty());
+  CHECK(fresh->channel(fresh->lock(), 0).report_descriptor.empty());
 }
 
 TEST_CASE("an output report above 0xffff bytes on the bus ends in error unsent, the next one goes")
@@ -2650,7 +2651,7 @@ TEST_CASE("an output report above 0xffff bytes on the bus ends in error unsent, 
   r.dev.s.report_descriptor = report_descriptor(25);
   r.plug();
   r.run_until(t0 + second);
-  auto&                     channel = hub->channel(0);
+  auto&                     channel = hub->channel(hub->lock(), 0);
   std::vector<std::uint8_t> big(0x10000, 0x55);
   big.front()     = 2;
   auto const huge = channel.write(big);
@@ -2992,7 +2993,7 @@ auto configured_audio(rig& r, std::shared_ptr<usb::uac2_hub> const& hub) -> usb:
 {
   r.plug();
   r.run_until(t0 + second);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   REQUIRE(channel.interface == std::optional<std::uint8_t>{0});
   REQUIRE(channel.ready);
   return channel;
@@ -3191,12 +3192,12 @@ TEST_CASE("UAC2 speaker samples are host state: a restore puts back the queued o
 
   auto const fresh = std::make_shared<usb::uac2_hub>();
   rig        b{audio_options_with(fresh)};
-  fresh->channel(0).speaker.out.assign(3, 9);
+  fresh->channel(fresh->lock(), 0).speaker.out.assign(3, 9);
   std::vector<std::byte> unbound;
   b.host->save(unbound);
-  fresh->channel(0).speaker.out.assign(8, 1);
+  fresh->channel(fresh->lock(), 0).speaker.out.assign(8, 1);
   b.host->load(unbound);
-  CHECK(fresh->channel(0).speaker.out == std::deque<std::int32_t>{9, 9, 9});
+  CHECK(fresh->channel(fresh->lock(), 0).speaker.out == std::deque<std::int32_t>{9, 9, 9});
 }
 
 TEST_CASE("the UAC2 claim needs an association, as Linux snd-usb-audio does for protocol 0x20")
@@ -3248,8 +3249,8 @@ TEST_CASE(
     r.dev.s.config_bytes = std::move(bytes);
     r.plug();
     r.run_until(t0 + second);
-    REQUIRE(hub->channel(0).ready);
-    return hub->channel(0).units.size();
+    REQUIRE(hub->channel(hub->lock(), 0).ready);
+    return hub->channel(hub->lock(), 0).units.size();
   };
 
   auto effect = audio_configuration({});
@@ -3296,7 +3297,7 @@ TEST_CASE("a UAC2 start is refused while the other stream runs on the same clock
   }
   r.dev.s.audio_replies[range] = other;
   r.run_until(t0 + second);
-  auto& channel = hub->channel(0);
+  auto& channel = hub->channel(hub->lock(), 0);
   REQUIRE(channel.ready);
   REQUIRE(channel.speaker.clock == channel.mic.clock);
   CHECK(channel.speaker.rate == 44'100);
@@ -3312,4 +3313,24 @@ TEST_CASE("a UAC2 start is refused while the other stream runs on the same clock
   r.run_until(t0 + second + 40 * ms);
   CHECK_FALSE(channel.mic.running);
   CHECK(r.dev.s.requests.size() == requests);
+}
+
+TEST_CASE("a driver warning reaches the sink once, after the hub lock of its event is released")
+{
+  auto const       hub     = std::make_shared<usb::cdc_hub>();
+  auto             options = cdc_options_with(hub);
+  std::vector<int> held_at_warning;
+  options.warn = [&](std::string const&) {
+    held_at_warning.push_back(popcorn::core::detail::link_locks_held);
+  };
+  rig r{};
+  r.host = std::make_shared<usb::host>(r.dev, std::move(options));
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(held_at_warning.empty());
+  r.dev.s.halted = {0x02};
+  hub->channel(hub->lock(), 0).out.append_range(bytes_of("lost"));
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(held_at_warning == std::vector<int>{0});
+  CHECK(popcorn::core::detail::link_locks_held == 0);
 }

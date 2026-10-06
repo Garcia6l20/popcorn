@@ -1,5 +1,6 @@
 #pragma once
 
+#include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
@@ -8,6 +9,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -62,7 +64,7 @@ struct hid_reply
 /**
  * @brief The queues of one HID function, outside the host state: they outlive the drivers a
  *        detach, a bus reset or a restore destroys. Touched by the driver in model events and by
- *        the binding between slices, never both at once, as a UART queue endpoint.
+ *        the binding, each under the hub's link lock.
  */
 struct hid_channel
 {
@@ -143,11 +145,26 @@ struct hid_channel
 class hid_hub
 {
 public:
+  /** @brief Takes the hub's link lock, blocking. It covers the channel map and every channel. */
+  [[nodiscard]] auto lock() const -> core::link_guard
+  {
+    return core::link_guard{mutex_};
+  }
+
+  /** @brief Takes the hub's link lock if it is free. */
+  [[nodiscard]] auto try_lock() const -> core::link_guard
+  {
+    return core::link_guard{mutex_, std::try_to_lock};
+  }
+
   /**
-   * @brief The channel of a function, created empty on first use.
+   * @brief The channel of a function, created empty on first use. The reference is valid while
+   *        the hub lives, touched only under the hub's lock.
+   * @param held The hub's lock.
    * @param function Function index.
    */
-  [[nodiscard]] auto channel(std::size_t function) -> hid_channel&;
+  [[nodiscard]] auto channel(core::link_guard const& held, std::size_t function)
+      -> hid_channel& pre(held.guards(mutex_));
 
   /**
    * @brief Appends the output reports and report descriptor of the channels no driver is
@@ -163,11 +180,12 @@ public:
    */
   void load(std::span<std::byte const> in);
 
-  /** @brief Calls hid_channel::discard() on every channel. Call it before the host loads a
-   * snapshot. */
+  /** @brief Calls hid_channel::discard() on every channel under the hub's lock. Call it before
+   * the host loads a snapshot. */
   void discard();
 
 private:
+  mutable std::mutex                 mutex_;
   std::map<std::size_t, hid_channel> channels_{};
 };
 

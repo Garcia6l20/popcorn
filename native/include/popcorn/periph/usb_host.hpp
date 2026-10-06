@@ -555,6 +555,55 @@ private:
 };
 
 /**
+ * @brief Holds back the warnings every USB host raises on the current thread while it lives,
+ *        and passes them to host_options::warn in order when it dies. Declared before a hub's
+ *        core::link_guard, it moves the warnings of a driver event out of the hub lock: a
+ *        warning sink may take the GIL, which no thread takes under a link lock. A nested one
+ *        hands its warnings to the one it nests in.
+ */
+class deferred_warnings
+{
+public:
+  /** @brief Starts holding the warnings of the current thread. */
+  deferred_warnings() noexcept;
+  /** @brief Not copyable. */
+  deferred_warnings(deferred_warnings const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(deferred_warnings const&) -> deferred_warnings& = delete;
+  /** @brief Not movable. */
+  deferred_warnings(deferred_warnings&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(deferred_warnings&&) -> deferred_warnings& = delete;
+  /**
+   * @brief Passes the held warnings on, to the enclosing deferred_warnings if any.
+   * @throws Whatever a sink throws, unless an exception is already unwinding the stack: the
+   *         warnings after it are dropped then, as a sink throwing in place would drop them.
+   */
+  ~deferred_warnings() noexcept(false);
+
+  /**
+   * @brief Holds a warning when a deferred_warnings lives on the current thread.
+   * @param sink Where it goes, host_options::warn. Must outlive this deferred_warnings: it is
+   *        referred to, not copied, so no callable state is copied under a link lock.
+   * @param message The warning.
+   * @return Whether it was held. When not, the caller passes it on itself.
+   */
+  static auto hold(std::function<void(std::string const&)> const& sink, std::string const& message)
+      -> bool;
+
+private:
+  struct held_warning
+  {
+    std::function<void(std::string const&)> const* sink;
+    std::string                                    message;
+  };
+
+  std::vector<held_warning> held_{};
+  deferred_warnings*        outer_;
+  int                       exceptions_;
+};
+
+/**
  * @brief A virtual full-speed USB host with one port, in virtual time. It sees the device's
  *        pull-up, debounces, resets the bus, enumerates, binds class drivers, then runs frames:
  *        a SOF every 1 ms, the periodic transactions of the frame, isochronous then interrupt,

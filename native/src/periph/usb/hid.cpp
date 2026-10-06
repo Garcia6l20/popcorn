@@ -136,6 +136,7 @@ public:
     {
       return;
     }
+    auto const held = hub_->lock();
     channel_->interface.reset();
     channel_->ready = false;
     if(channel_->in_flight != 0 and channel_->awaited_writes.erase(channel_->in_flight) != 0)
@@ -152,12 +153,14 @@ public:
 
   void configured(host_context& ctx) override
   {
-    auto const& configuration = ctx.configuration();
-    s_.interface              = ctx.interfaces().front();
-    auto const functions      = hid_functions(configuration);
+    deferred_warnings const deferred;
+    auto const              held          = hub_->lock();
+    auto const&             configuration = ctx.configuration();
+    s_.interface                          = ctx.interfaces().front();
+    auto const functions                  = hid_functions(configuration);
     s_.function =
         static_cast<std::uint64_t>(std::ranges::find(functions, s_.interface) - functions.begin());
-    bind();
+    bind(held);
     channel_->report_descriptor.clear();
     auto const* const setting = configuration.find(s_.interface);
     for(auto const& endpoint : setting->endpoints)
@@ -189,6 +192,8 @@ public:
 
   void control_done(host_context& ctx, transfer_result const& result) override
   {
+    deferred_warnings const deferred;
+    auto const              held = hub_->lock();
     if(channel_->awaited.erase(result.id) != 0)
     {
       channel_->results[result.id] = {.status = result.status, .data = result.data};
@@ -221,6 +226,8 @@ public:
 
   void transfer_done(host_context& ctx, pipe_id pipe, transfer_result const& result) override
   {
+    deferred_warnings const deferred;
+    auto const              held = hub_->lock();
     if(pipe == s_.in_pipe)
     {
       channel_->received(result.data, result.at);
@@ -244,20 +251,24 @@ public:
 
   void frame(host_context& ctx, std::uint16_t) override
   {
+    deferred_warnings const deferred;
+    auto const              held = hub_->lock();
     send(ctx);
   }
 
   void save(std::vector<std::byte>& out) const override
   {
-    auto saved = s_;
-    saved.out  = saved_writes(channel_->out);
+    auto const held  = hub_->lock();
+    auto       saved = s_;
+    saved.out        = saved_writes(channel_->out);
     reflex::serde::bson::serializer{out}.dump(saved);
   }
 
   void load(std::span<std::byte const> in) override
   {
-    s_ = reflex::serde::bson::deserializer{in}.template load<driver_state>();
-    bind();
+    s_              = reflex::serde::bson::deserializer{in}.template load<driver_state>();
+    auto const held = hub_->lock();
+    bind(held);
     channel_->out.clear();
     restore_writes(*channel_, s_.out);
     s_.out.clear();
@@ -268,9 +279,9 @@ public:
   }
 
 private:
-  void bind()
+  void bind(core::link_guard const& held)
   {
-    channel_            = &hub_->channel(static_cast<std::size_t>(s_.function));
+    channel_            = &hub_->channel(held, static_cast<std::size_t>(s_.function));
     channel_->interface = s_.interface;
   }
 
@@ -444,14 +455,15 @@ void hid_channel::discard()
   results.clear();
 }
 
-auto hid_hub::channel(std::size_t function) -> hid_channel&
+auto hid_hub::channel(core::link_guard const&, std::size_t function) -> hid_channel&
 {
   return channels_[function];
 }
 
 void hid_hub::save(std::vector<std::byte>& out) const
 {
-  hub_state saved;
+  auto const held = lock();
+  hub_state  saved;
   for(auto const& [function, channel] : channels_)
   {
     if(not channel.interface and (not channel.out.empty() or not channel.report_descriptor.empty()))
@@ -467,6 +479,7 @@ void hid_hub::save(std::vector<std::byte>& out) const
 
 void hid_hub::load(std::span<std::byte const> in)
 {
+  auto const held = lock();
   for(auto& channel : channels_ | std::views::values)
   {
     channel.out.clear();
@@ -479,7 +492,7 @@ void hid_hub::load(std::span<std::byte const> in)
   for(auto const& pending :
       reflex::serde::bson::deserializer{in}.template load<hub_state>().unbound)
   {
-    auto& restored = channel(static_cast<std::size_t>(pending.function));
+    auto& restored = channel(held, static_cast<std::size_t>(pending.function));
     restore_writes(restored, pending.writes);
     restored.report_descriptor = as_octets(pending.descriptor);
   }
@@ -487,6 +500,7 @@ void hid_hub::load(std::span<std::byte const> in)
 
 void hid_hub::discard()
 {
+  auto const held = lock();
   for(auto& channel : channels_ | std::views::values)
   {
     channel.discard();

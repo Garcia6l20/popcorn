@@ -1,5 +1,8 @@
 #pragma once
 
+#include "alive.hpp"
+#include "link_queues.hpp"
+
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
@@ -8,7 +11,6 @@
 #include <reflex/py.hpp>
 
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,37 +28,6 @@ struct[[= py::rename{"UartFrame"}]] uart_frame
   [[= py::readonly]] std::uint64_t at_ps{};
 };
 
-namespace detail
-{
-/** @brief Transmitted frames a UART link keeps before dropping the oldest, about 16 MiB. */
-inline constexpr std::uint64_t uart_frame_limit = std::uint64_t{1} << 20;
-
-/**
- * @brief Far end of a UART that queues transmitted frames for Python to drain, at most `limit`
- *        of them: a full queue drops its oldest frame and counts it.
- */
-class queue_endpoint final : public periph::stm32::uart_endpoint
-{
-public:
-  /** @brief Frames not drained yet, oldest first. */
-  std::deque<uart_frame> frames;
-  /** @brief Frames kept at most. */
-  std::uint64_t limit = uart_frame_limit;
-  /** @brief Frames dropped because the queue was full. */
-  std::uint64_t dropped{};
-
-  void transmitted(std::uint16_t data, vtime at) override
-  {
-    while(frames.size() >= limit)
-    {
-      frames.pop_front();
-      ++dropped;
-    }
-    frames.push_back({.data = data, .at_ps = at.ps});
-  }
-};
-}
-
 /**
  * @brief A UART of the machine connected to Python: frames the firmware transmits are queued
  *        with their time, frames Python sends enter the receiver at the configured baud. Valid
@@ -70,7 +41,7 @@ public:
    * @param port The UART.
    * @param alive Cleared when the machine is destroyed.
    */
-  [[= py::skip]] uart_link(periph::stm32::uart_port& port, std::shared_ptr<bool const> alive);
+  [[= py::skip]] uart_link(periph::stm32::uart_port& port, detail::alive_flag alive);
 
   /**
    * @brief Queues frames towards the firmware, one frame time apart.
@@ -85,7 +56,7 @@ public:
 
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto
-      available() const noexcept -> std::uint64_t;
+      available() const -> std::uint64_t;
 
   /**
    * @brief Takes the oldest transmitted frames.
@@ -96,7 +67,7 @@ public:
 
   /** @brief Transmitted frames dropped because the queue held its limit. */
   [[= py::doc{"Transmitted frames dropped because the queue was full."}]] [[nodiscard]] auto
-      dropped() const noexcept -> std::uint64_t;
+      dropped() const -> std::uint64_t;
 
   /**
    * @brief Sets the most transmitted frames the queue keeps, uart_frame_limit by default.
@@ -111,7 +82,7 @@ private:
 
   periph::stm32::uart_port*               port_;
   std::shared_ptr<detail::queue_endpoint> endpoint_;
-  std::shared_ptr<bool const>             alive_;
+  detail::alive_flag                      alive_;
 };
 /** @brief One frame an SAI audio block transmitted, built when Python reads it. */
 struct[[= py::rename{"AudioRecord"}]] audio_record
@@ -127,64 +98,6 @@ struct[[= py::rename{"AudioRecord"}]] audio_record
   /** @brief Virtual time the frame started, in picoseconds. */
   [[= py::readonly]] std::uint64_t at_ps{};
 };
-
-namespace detail
-{
-/**
- * @brief Transmitted frames an audio link keeps before dropping the oldest: 5.4 s at 48 kHz,
- *        4 MiB of 16-bit stereo, 18 MiB of 16-slot TDM, the widest frame.
- */
-inline constexpr std::uint64_t audio_frame_limit = std::uint64_t{1} << 18;
-
-/** @brief Consecutive kept frames sharing one layout. */
-struct format_run
-{
-  /** @brief Layout of the frames. */
-  periph::stm32::audio_format format{};
-  /** @brief Words per frame. */
-  std::uint8_t slots{};
-  /** @brief Frames in the run. */
-  std::uint64_t frames{};
-};
-
-/**
- * @brief Far end of an SAI audio block for Python: keeps transmitted frames flat, slot words
- *        back to back with one start time per frame and one layout per run of frames, at most
- *        `limit` frames, a full queue dropping its oldest frame and counting it. Serves words
- *        Python wrote to a receiving block in slot order, then 0.
- */
-class audio_queue_endpoint final : public periph::stm32::audio_endpoint
-{
-public:
-  /** @brief Slot words of the kept frames, oldest first. */
-  std::deque<std::uint32_t> words;
-  /** @brief Start of each kept frame in picoseconds, oldest first. */
-  std::deque<std::uint64_t> starts;
-  /** @brief Layouts of the kept frames, oldest run first. */
-  std::deque<format_run> runs;
-  /** @brief Words written and not served to the receiver yet. */
-  std::deque<std::uint32_t> pending;
-  /** @brief Frames kept at most. */
-  std::uint64_t limit = audio_frame_limit;
-  /** @brief Frames dropped because the queue was full. */
-  std::uint64_t dropped{};
-
-  void transmitted(
-      std::span<std::uint32_t const> slots,
-      periph::stm32::audio_format    format,
-      vtime                          at) override;
-  void receive(std::span<std::uint32_t> slots, periph::stm32::audio_format format, vtime at)
-      override;
-
-  /** @brief Removes the oldest kept frame. */
-  void pop_front();
-  /**
-   * @brief Takes the oldest kept frames.
-   * @param count Most frames taken.
-   */
-  auto take(std::uint64_t count) -> std::vector<audio_record>;
-};
-}
 
 /**
  * @brief An SAI audio block of the machine connected to Python: frames the block transmits are
@@ -204,12 +117,12 @@ public:
    * @param alive Cleared when the machine is destroyed.
    */
   [[= py::skip]] audio_link(
-      periph::stm32::audio_port&  port,
-      periph::stm32::audio_block  block,
-      std::uint32_t               decimation,
-      std::uint32_t               external_frame_hz,
-      bool                        clock_wired,
-      std::shared_ptr<bool const> alive);
+      periph::stm32::audio_port& port,
+      periph::stm32::audio_block block,
+      std::uint32_t              decimation,
+      std::uint32_t              external_frame_hz,
+      bool                       clock_wired,
+      detail::alive_flag         alive);
 
   /** @brief Frames transmitted and not drained yet. */
   [[= py::doc{"Frames transmitted and not drained yet."}]] [[nodiscard]] auto available() const
@@ -259,6 +172,6 @@ private:
   std::shared_ptr<detail::audio_queue_endpoint> endpoint_;
   periph::stm32::audio_port*                    port_;
   periph::stm32::audio_block                    block_;
-  std::shared_ptr<bool const>                   alive_;
+  detail::alive_flag                            alive_;
 };
 }
