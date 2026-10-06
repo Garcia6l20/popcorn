@@ -1,4 +1,5 @@
 #include "errors.hpp"
+#include "held_python_end.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
@@ -148,6 +149,10 @@ void translate(std::exception_ptr const& thrown)
     auto const type = errors_module().attr("EmulationError");
     raise(type, type(e.what()));
   }
+  catch(held_python_end const& end)
+  {
+    end.restore();
+  }
   catch(error const& e)
   {
     if(typeid(e) != typeid(error))
@@ -184,6 +189,11 @@ void set_python_error(std::exception_ptr const& thrown) noexcept
     catch(nb::python_error const& raised)
     {
       nb::python_error{raised}.restore();
+      return;
+    }
+    catch(held_python_end const& end)
+    {
+      end.restore();
       return;
     }
     catch(std::invalid_argument const& invalid)

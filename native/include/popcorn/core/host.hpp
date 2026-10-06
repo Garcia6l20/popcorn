@@ -145,6 +145,10 @@ struct host_hooks
   /** @brief Called on the host thread as the engine owner before and after every slice of a
    * goal or a free run, with the member. Empty for none. */
   std::move_only_function<void(member_id)> boundary{};
+  /** @brief Called on the host thread with no host mutex held, with the member and the
+   * exception that ends its free run, before it parks holding it. It may replace the exception
+   * with the one to hold. Must not throw. Empty for none. */
+  std::move_only_function<void(member_id, std::exception_ptr&)> held{};
 };
 
 class host;

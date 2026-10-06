@@ -1,6 +1,7 @@
 #include "machine.hpp"
 #include "devices.hpp"
 #include "errors.hpp"
+#include "held_python_end.hpp"
 #include "models.hpp"
 #include "python_callable.hpp"
 
@@ -262,6 +263,28 @@ auto boundary_of(
   };
 }
 
+auto held_in(std::shared_ptr<detail::python_cell const> cell)
+    -> std::move_only_function<void(core::member_id, std::exception_ptr&)>
+{
+  return [cell = std::move(cell),
+          next = std::uint64_t{0}](core::member_id, std::exception_ptr& error) mutable {
+    detail::gil_entry const held;
+    try
+    {
+      std::rethrow_exception(error);
+    }
+    catch(reflex::py::nb::python_error const& raised)
+    {
+      if(auto end = detail::held_python_end::keep(cell, next++, raised.value()))
+      {
+        error = std::make_exception_ptr(*std::move(end));
+      }
+    }
+    catch(...)
+    {}
+  };
+}
+
 void report_unclaimed(core::held_end const& ended)
 {
   if(auto const* const stopped = std::get_if<stop>(&ended))
@@ -315,8 +338,12 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   members.push_back(std::move(built));
   auto hooks     = detail::python_thread_hooks(thread_live_);
   hooks.boundary = boundary_of(slot_, ptys_, *engine_);
-  host_          = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
-  slot_->host    = host_;
+  if(cell.is_valid())
+  {
+    hooks.held = held_in(std::make_shared<detail::python_cell const>(cell));
+  }
+  host_       = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
+  slot_->host = host_;
   detail::register_host(host_);
 }
 

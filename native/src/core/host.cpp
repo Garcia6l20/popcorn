@@ -589,15 +589,20 @@ struct host_core
     }
   }
 
+  auto member_of(member_slot const& slot) const -> member_id
+  {
+    auto const found = std::ranges::find_if(
+        members, [&slot](auto const& member) { return member.get() == &slot; });
+    return static_cast<member_id>(found - members.begin());
+  }
+
   void at_boundary(member_slot const& slot)
   {
     if(not hooks.boundary)
     {
       return;
     }
-    auto const found = std::ranges::find_if(
-        members, [&slot](auto const& member) { return member.get() == &slot; });
-    hooks.boundary(static_cast<member_id>(found - members.begin()));
+    hooks.boundary(member_of(slot));
   }
 
   void publish_settled()
@@ -1018,6 +1023,10 @@ struct host_core
 
   void end_free_run(member_slot& slot, held_end end, deferred& done)
   {
+    if(auto* error = std::get_if<std::exception_ptr>(&end); error and hooks.held)
+    {
+      hooks.held(member_of(slot), *error);
+    }
     park(slot, done, [&end](member_slot& parked, deferred& later) {
       parked.free_run = false;
       parked.held     = end;

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import itertools
 import selectors
 import socket
 import subprocess
@@ -12,6 +13,7 @@ import sys
 import textwrap
 import threading
 import time
+import weakref
 from collections.abc import Callable, Coroutine
 
 import popcorn
@@ -253,6 +255,114 @@ def test_a_started_machine_dropped_without_halt_joins_its_thread(machines: Machi
     gc.collect()
     assert time.monotonic() - began < 1
     assert _core.host_threads() == before
+
+
+def started_and_ended_by_a_handler(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    m = machines(slice_instructions=1_000)
+
+    def failing(_: object) -> None:
+        raise ValueError(f"a handler of {m!r} failed")
+
+    m.on_return("alu_mark", failing)
+    m.start()
+    with pytest.raises(ValueError, match="a handler of"):
+        run_bounded(m.wait_for(Never()), HANG)
+    return weakref.ref(m)
+
+
+def test_a_machine_whose_free_run_a_handler_ended_is_collected(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reported: list[str] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(repr(raised.exc_value))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    gc.collect()
+    before = _core.host_threads()
+    probe = started_and_ended_by_a_handler(machines)
+    gc.collect()
+    assert probe() is None
+    assert _core.host_threads() == before
+    [unclaimed] = reported
+    assert unclaimed.startswith("EmulationError(") and "collected" in unclaimed
+
+
+class Payload:
+    """A local whose life shows whether a frame is still held."""
+
+
+def boom(_: object) -> None:
+    raise ValueError("boom")
+
+
+def caught_and_halted(m: popcorn.Machine) -> weakref.ref[Payload]:
+    payload = Payload()
+    m.start()
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(m.wait_for(Never()), HANG)
+    with pytest.raises(ValueError, match="boom"):
+        m.halt()
+    return weakref.ref(payload)
+
+
+def test_a_halted_handler_error_keeps_no_frame_alive_in_a_kept_machine(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+    m.on_return("alu_mark", boom)
+    probe = caught_and_halted(m)
+    gc.collect()
+    assert probe() is None
+    assert not m.busy
+
+
+def test_a_wait_completed_by_one_end_raises_that_end_after_a_later_one(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+    calls = itertools.count(1)
+
+    def numbered(_: object) -> None:
+        raise ValueError(f"end {next(calls)}")
+
+    m.on_return("alu_mark", numbered)
+    later: list[str] = []
+
+    def wait_on_another_thread() -> None:
+        try:
+            asyncio.run(m.wait_for(Never()))
+        except ValueError as error:
+            later.append(str(error))
+
+    async def first() -> None:
+        with pytest.raises(ValueError, match="end 1"):
+            await m.wait_for(Never())
+        with pytest.raises(ValueError, match="end 1"):
+            m.halt()
+        m.reg.r4 = 0
+        m.start()
+        waiter = threading.Thread(target=wait_on_another_thread)
+        waiter.start()
+        waiter.join(HANG)
+
+    async def other() -> str:
+        try:
+            await m.wait_for(Never())
+        except ValueError as error:
+            return str(error)
+        return "no error"
+
+    async def scenario() -> str:
+        m.start()
+        _, seen = await asyncio.gather(first(), other())
+        return seen
+
+    assert run_bounded(scenario(), HANG) == "end 1"
+    assert later == ["end 2"]
+    with pytest.raises(ValueError, match="end 2"):
+        m.halt()
 
 
 def test_an_interpreter_exits_with_a_machine_started_and_never_halted() -> None:

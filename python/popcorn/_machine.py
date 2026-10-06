@@ -223,12 +223,14 @@ atexit.register(_core.shutdown_hosts)
 
 class _ContextCell:
     """The context the Python models and bus devices of a machine run in, a copy of the one
-    current at `Machine()`. Native code holds it weakly, so a cycle through it is collectable."""
+    current at `Machine()`, and the exceptions that ended free runs, by token, each while native
+    code holds its end. Native code holds the cell weakly, so a cycle through it is collectable."""
 
-    __slots__ = ("__weakref__", "context")
+    __slots__ = ("__weakref__", "context", "held")
 
     def __init__(self, context: contextvars.Context) -> None:
         self.context = context
+        self.held: dict[int, BaseException] = {}
 
 
 def _check_duration(for_: VirtualDuration | None) -> None:
@@ -1715,7 +1717,9 @@ class Machine:
 
     def _halted(self) -> Stop | BaseException | None:
         self._refuse_on_host()
-        return self._ended(self._handle.halt())
+        ended = self._ended(self._handle.halt())
+        self._surfaced = None
+        return ended
 
     def _ended(self, ended: object) -> Stop | BaseException | None:
         if isinstance(ended, BaseException):
