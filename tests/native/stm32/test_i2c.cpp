@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -24,8 +25,11 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace
 {
@@ -155,18 +159,41 @@ public:
   }
 };
 
-auto eeprom_image() -> std::filesystem::path const&
+class image_file
 {
-  static auto const path = [] {
-    auto const    at = std::filesystem::temp_directory_path() / "popcorn-test-i2c-image.bin";
-    std::ofstream file{at, std::ios::binary | std::ios::trunc};
+public:
+  image_file()
+  {
+    std::ofstream file{path_, std::ios::binary | std::ios::trunc};
     for(int index = 0; index < 300; ++index)
     {
       file.put(static_cast<char>(index & 0xFF));
     }
-    return at;
-  }();
-  return path;
+  }
+
+  image_file(image_file const&)                    = delete;
+  auto operator=(image_file const&) -> image_file& = delete;
+
+  ~image_file()
+  {
+    std::error_code ignored;
+    std::filesystem::remove(path_, ignored);
+  }
+
+  [[nodiscard]] auto path() const noexcept -> std::filesystem::path const&
+  {
+    return path_;
+  }
+
+private:
+  std::filesystem::path path_ = std::filesystem::temp_directory_path()
+                              / std::format("popcorn-test-i2c-image-{}.bin", ::getpid());
+};
+
+auto eeprom_image() -> std::filesystem::path const&
+{
+  static image_file const image;
+  return image.path();
 }
 
 auto eeprom_options() -> devices::eeprom_24xx_options

@@ -8,9 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <initializer_list>
 #include <vector>
+
+#include <unistd.h>
 
 namespace
 {
@@ -183,7 +186,8 @@ TEST_CASE("save keeps the changed pages and the write cycle, load restores both"
 
 TEST_CASE("an image file gives the initial contents")
 {
-  auto const path = std::filesystem::temp_directory_path() / "popcorn-test-i2c-eeprom.bin";
+  auto const path = std::filesystem::temp_directory_path()
+                  / std::format("popcorn-test-i2c-eeprom-{}.bin", ::getpid());
   {
     std::ofstream file{path, std::ios::binary};
     file << "abc";
