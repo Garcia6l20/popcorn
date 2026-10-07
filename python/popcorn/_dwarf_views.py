@@ -40,9 +40,10 @@ class _Bits:
 class Var:
     """A typed location in guest memory.
 
-    A struct or union member is an attribute, an array element an index, a pointer is followed
-    with `deref()`. `value` reads and writes a scalar: an integer, a float, a bool, an enum as
-    its integer, a pointer as its address.
+    A struct or union member is an attribute, or `member(name)` when a property of `Var` has
+    its name, an array element an index, a pointer is followed with `deref()`. `value` reads
+    and writes a scalar: an integer, a float, a bool, an enum as its integer, a pointer as its
+    address.
     """
 
     __slots__ = ("_bits", "_counts", "_info", "_memory", "_name", "_type_id", "address")
@@ -135,7 +136,14 @@ class Var:
             f"{self._name} has no member {name}, members: {', '.join(self.fields)}"
         )
 
-    def __getattr__(self, name: str) -> Var:
+    def member(self, name: str) -> Var:
+        """The struct or union member `name`, also when a property of `Var` has that name:
+        `m.var("cfg").member("value")`. A member named `member` is reached this way only,
+        `.member("member")`: `var.member` is this method.
+
+        Raises:
+            AttributeError: Not a struct or union, or it has no such member.
+        """
         member = self._member(name)
         bits = None
         if member.bit_size is not None:
@@ -148,6 +156,9 @@ class Var:
             f"{self._name}.{name}",
             bits=bits,
         )
+
+    def __getattr__(self, name: str) -> Var:
+        return self.member(name)
 
     def __getitem__(self, index: int) -> Var:
         from popcorn.image.dwarf import ArrayType

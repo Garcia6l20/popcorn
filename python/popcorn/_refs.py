@@ -1222,7 +1222,8 @@ class PeripheralRefs:
 
 class VarRef[T: (int, float, bool)](MemoryRef[Any]):
     """A variable, `m.ref.var("counter")`: its value as `Var.value`, a member by name and an
-    element by index."""
+    element by index. A member is looked up in DWARF only, `member(name)` reaches one whose name
+    `VarRef` itself uses, such as `enum_name`."""
 
     __slots__ = ("_var",)
 
@@ -1266,8 +1267,47 @@ class VarRef[T: (int, float, bool)](MemoryRef[Any]):
         )
         self._var = var
 
+    def member(self, name: str) -> VarRef[Any]:
+        """The member `name` of this struct or union, also when `VarRef` or `Ref` has an
+        attribute of that name, such as `value`, `label` or `get`. A member named `member` is
+        reached this way only, `.member("member")`: `ref.member` is this method. Resolved from
+        DWARF now, read at the batch.
+
+        Raises:
+            AttributeError: Not a struct or union, or it has no such member.
+        """
+        return VarRef(self.owner, self._var.member(name))
+
     def __getattr__(self, name: str) -> VarRef[Any]:
-        return VarRef(self.owner, getattr(self._var, name))
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self.member(name)
+
+    @property
+    def enum_name(self) -> Ref[str | None]:
+        """Name of the enumerator this enum holds, None when no enumerator has its value, as
+        `Var.enum_name`. Read-only.
+
+        Raises:
+            TypeError: Not an enum, at the call.
+        """
+        from popcorn.image.dwarf import EnumType
+
+        var = self._var
+        resolved = var.type
+        if not isinstance(resolved, EnumType):
+            raise TypeError(f"{var.name} is not an enum")
+        names: dict[int | float | bool, str] = {}
+        for name, value in resolved.values.items():
+            names.setdefault(value, name)
+        handle = _handle(self.owner)
+        return Ref(
+            self.owner,
+            f"{self.label}.enum_name",
+            lambda: var.enum_name,
+            read=lambda: handle.op_read_memory(var.address, var.span()),
+            decode=lambda raw: names.get(var.decode(cast(bytes, raw))),
+        )
 
     def __getitem__(self, index: int) -> VarRef[Any]:
         return VarRef(self.owner, self._var[index])

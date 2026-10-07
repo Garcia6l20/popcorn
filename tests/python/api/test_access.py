@@ -13,9 +13,10 @@ from typing import Any
 
 import popcorn
 import pytest
-from popcorn._refs import Pending, Ref
+from popcorn._refs import Pending, Ref, VarRef
 from popcorn.arm import Reg
 from popcorn.board import AudioOptions, UsbHostOptions
+from popcorn.image.dwarf import BaseType, DebugInfo, Encoding, Member, StructType
 from popcorn.units import VirtualTime, ms, us
 
 from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, VIEWS_ELF, Machines, run_bounded
@@ -445,6 +446,7 @@ VIEWS_KINDS: dict[str, tuple[RefOf, object]] = {
     "var-bit-field": (lambda m: m.ref.var("table").mode, 3),
     "var-signed-bit-field": (lambda m: m.ref.var("wide").high, -100),
     "var-bool": (lambda m: m.ref.var("armed"), False),
+    "var-enum-name": (lambda m: m.ref.var("shadowed").kind.value.enum_name, None),
     "masked": (lambda m: m.ref.mem.i8[m.sym("table")].masked(0xF0), None),
 }
 
@@ -823,3 +825,70 @@ def test_a_run_whose_task_is_destroyed_pending_leaves_the_machine_parked() -> No
     del task
     gc.collect()
     assert m.mem.u32[SRAM] is not None
+
+
+def test_a_ref_reaches_a_member_named_value(views: popcorn.Machine) -> None:
+    shadowed = views.ref.var("shadowed")
+    kind, size, address = asyncio.run(
+        views.read(shadowed.kind.value, shadowed.size, shadowed.address)
+    )
+    assert (kind, size, address) == (7, 7, 0x1234)
+    (same,) = asyncio.run(views.read(shadowed.member("kind").member("value")))
+    assert same == 7
+
+
+def test_a_ref_member_lookup_names_the_members(views: popcorn.Machine) -> None:
+    with pytest.raises(AttributeError, match="members: size, address, kind"):
+        views.ref.var("shadowed").member("value")
+    with pytest.raises(AttributeError, match="not a struct or union"):
+        _ = views.ref.var("counter").label_text
+    with pytest.raises(AttributeError):
+        _ = views.ref.var("shadowed")._private
+
+
+def test_a_ref_reads_an_enum_name_parked_and_running(views: popcorn.Machine) -> None:
+    kind = views.ref.var("shadowed").kind.value
+    (parked,) = asyncio.run(views.read(kind.enum_name))
+    assert parked == "ROUTE_CAN"
+    with pytest.raises(TypeError, match=r"shadowed\.size is not an enum"):
+        _ = views.ref.var("shadowed").size.enum_name
+
+    async def scenario() -> str | None:
+        async with views.running():
+            (running,) = await views.read(views.ref.var("shadowed").kind.value.enum_name)
+            return running
+
+    assert run_bounded(scenario()) == "ROUTE_CAN"
+
+
+def test_building_a_var_ref_while_running_reads_no_memory(views: popcorn.Machine) -> None:
+    async def scenario() -> tuple[int, str | None]:
+        async with views.running():
+            with pytest.raises(AttributeError, match="not a struct or union"):
+                _ = views.ref.var("table").count.value
+            shadowed = views.ref.var("shadowed")
+            refs = (shadowed.kind.value, shadowed.kind.value.enum_name, shadowed.size)
+            with pytest.raises(popcorn.MachineRunning):
+                _ = views.var("shadowed").kind.member("value").value
+            kind, name, _ = await views.read(*refs)
+            return kind, name
+
+    assert run_bounded(scenario()) == (7, "ROUTE_CAN")
+
+
+def test_a_member_named_member_is_reached_through_member(views: popcorn.Machine) -> None:
+    u32 = BaseType("uint32_t", 4, Encoding.UNSIGNED)
+    members = (Member("member", 0, 1, None, None), Member("x", 4, 1, None, None))
+    info = DebugInfo(
+        by_id={1: u32, 2: StructType("s", 8, members, False, None)},
+        types={"struct s": 2},
+        variables={},
+        functions={},
+    )
+    views.mem.write(SRAM, (5).to_bytes(4, "little") + (6).to_bytes(4, "little"))
+    var = popcorn.Var(views.mem, info, 2, SRAM, "s")
+    ref: VarRef[int] = VarRef(views.ref.pc.owner, var)
+    assert callable(var.member) and callable(ref.member)
+    assert var.member("member").value == 5
+    assert var.member("member").name == "s.member"
+    assert asyncio.run(views.read(ref.member("member"), ref.x)) == (5, 6)

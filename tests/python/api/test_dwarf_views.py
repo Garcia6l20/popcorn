@@ -98,3 +98,19 @@ def test_types_and_unknown_names(views: popcorn.Machine) -> None:
         _ = views.var("table").nope
     with pytest.raises(TypeError, match="not a scalar"):
         _ = views.var("table").value
+
+
+def test_member_reaches_members_hidden_by_var_properties(views: popcorn.Machine) -> None:
+    shadowed = views.var("shadowed")
+    assert shadowed.member("size").value == 7
+    assert shadowed.member("address").value == 0x1234
+    struct = views.types["struct shadowed"]
+    assert isinstance(struct, StructType)
+    assert shadowed.size == struct.size
+    assert shadowed.address != 0x1234
+    kind = shadowed.kind.member("value")
+    assert kind.value == 7
+    assert kind.enum_name == "ROUTE_CAN"
+    assert kind.name == "shadowed.kind.value"
+    with pytest.raises(AttributeError, match="members: size, address, kind"):
+        shadowed.member("value")

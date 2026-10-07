@@ -17,7 +17,7 @@ if driver is not None:
 
 _, views = add_firmware("api", "views", [here / "views.c"])
 if views is not None:
-    kept = ("table", "matrix", "banner", "extras", "wide", "odd", "armed")
+    kept = ("table", "matrix", "banner", "extras", "wide", "odd", "armed", "shadowed")
     views.private.link_flags.extend([SECTION_BOUNDS, *(f"-Wl,--undefined={name}" for name in kept)])
 
 CALLED = (

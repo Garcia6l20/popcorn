@@ -94,6 +94,20 @@ struct odd odd = {.pad = 1, .big = 7};
 
 bool armed = true;
 
+typedef union
+{
+  route_kind value;
+} wrapped_kind;
+
+struct shadowed
+{
+  uint32_t     size;
+  uint16_t     address;
+  wrapped_kind kind;
+};
+
+struct shadowed shadowed = {.size = 7, .address = 0x1234, .kind = {.value = ROUTE_CAN}};
+
 [[noreturn]] void Reset_Handler(void)
 {
   for(uint32_t *from = _sidata, *to = _sdata; to < _edata;)
