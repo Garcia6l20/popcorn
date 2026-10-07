@@ -234,7 +234,8 @@ auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::ui
     spec.after = vtime{*for_ps};
   }
   refuse_inside(*host_);
-  auto const held = lock_releasing();
+  auto const predicate = spec.ready;
+  auto const held      = lock_releasing();
   if(not host_->session_open(held, core::member_id{}))
   {
     throw std::runtime_error("wait() needs a free run opened by start()");

@@ -4,6 +4,7 @@ waits on the machine's thread without turning the event loop, and the host's edg
 from __future__ import annotations
 
 import asyncio
+import functools
 import gc
 import itertools
 import selectors
@@ -316,6 +317,87 @@ def test_a_halted_handler_error_keeps_no_frame_alive_in_a_kept_machine(
     gc.collect()
     assert probe() is None
     assert not m.busy
+
+
+class StalledWait:
+    """A free run wait whose completion wakes its loop, then stalls the machine's thread until
+    `release` is set or `seconds` elapse."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.stalled = threading.Event()
+        self.release = threading.Event()
+        self.resumed = threading.Event()
+
+    async def wait(self, m: popcorn.Machine) -> None:
+        """Wait on the free run of `m` until it ends, the machine's thread stalled after."""
+        handle = m._handle  # pyright: ignore[reportPrivateUsage]
+        future = handle.wait(functools.partial(Never().ready, m), None)
+        loop = asyncio.get_running_loop()
+        woken = loop.create_future()
+
+        def wake_then_stall() -> None:
+            self.stalled.set()
+            loop.call_soon_threadsafe(woken.set_result, None)
+            self.release.wait(self.seconds)
+            self.resumed.set()
+
+        future.add_done_callback(wake_then_stall)
+        await woken
+        try:
+            future.result(0.0)
+        finally:
+            del future
+
+
+def ended_while_stalled(machines: Machines, stall: StalledWait) -> weakref.ref[popcorn.Machine]:
+    m = machines(slice_instructions=1_000)
+    m.on_return("alu_mark", boom)
+    m.start()
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(stall.wait(m), HANG)
+    return weakref.ref(m, lambda _: stall.release.set())
+
+
+def test_a_wait_ended_by_a_handler_holds_no_machine_once_it_completes(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reported: list[str] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(repr(raised.exc_value))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    stall = StalledWait(HANG)
+    probe = ended_while_stalled(machines, stall)
+    try:
+        assert stall.stalled.is_set()
+        gc.collect()
+        assert probe() is None
+    finally:
+        stall.release.set()
+    [unclaimed] = reported
+    assert unclaimed.startswith("EmulationError(")
+
+
+def halted_while_stalled(m: popcorn.Machine, stall: StalledWait) -> weakref.ref[Payload]:
+    payload = Payload()
+    m.start()
+    with pytest.raises(ValueError, match="boom"):
+        run_bounded(stall.wait(m), HANG)
+    with pytest.raises(ValueError, match="boom"):
+        m.halt()
+    return weakref.ref(payload)
+
+
+def test_halt_returns_once_the_machine_thread_released_the_end(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    m.on_return("alu_mark", boom)
+    stall = StalledWait(0.3)
+    probe = halted_while_stalled(m, stall)
+    assert stall.resumed.is_set()
+    gc.collect()
+    assert probe() is None
 
 
 def test_a_wait_completed_by_one_end_raises_that_end_after_a_later_one(

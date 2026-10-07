@@ -410,9 +410,9 @@ public:
   [[nodiscard]] auto future() const -> host_future<stop>;
 
   /**
-   * @brief Removes the waiter: its future fails with operation_cancelled at once, the host stops
-   *        evaluating it at the next boundary, the free run continues. Takes no host mutex, so it
-   *        is safe from a destructor on any thread.
+   * @brief Removes the waiter: its future fails with operation_cancelled at once, and the host,
+   *        woken even from an idle wait, stops evaluating it and releases its predicate. The free
+   *        run continues. Takes no host mutex, so it is safe from a destructor on any thread.
    */
   void drop() noexcept;
 
@@ -571,9 +571,10 @@ public:
 
   /**
    * @brief Closes the session of member @p who, ending its free run at the next boundary, and
-   *        waits until the member parks. Pending waiters fail with operation_cancelled. Cancels
-   *        a goal as cancel() does. On a host thread it requests the end of a running member
-   *        and returns, and closes the session of a parked one at once.
+   *        waits until the member parks and the host thread has released what it held for that
+   *        park, completed waiters included. Pending waiters fail with operation_cancelled.
+   *        Cancels a goal as cancel() does. On a host thread it requests the end of a running
+   *        member and returns, and closes the session of a parked one at once.
    * @return The held end, cleared, when the free run had ended by itself.
    * @throws machine_running when the thread holds a host mutex.
    */

@@ -1701,3 +1701,136 @@ TEST_CASE("watched descriptors the host cannot poll still wake an idle free run,
   }
   CHECK_FALSE(h.on->halt(0).has_value());
 }
+
+struct carrying_failure : std::runtime_error
+{
+  explicit carrying_failure(std::shared_ptr<int> held)
+      : std::runtime_error{"carrying"}, carried{std::move(held)}
+  {}
+
+  std::shared_ptr<int> carried;
+};
+
+void end_by_handler(hosted& h)
+{
+  auto made       = alu(1000);
+  auto throw_once = std::make_shared<std::atomic<bool>>(true);
+  h.hooks.push_back(
+      made->add_intercept(sym("alu", "alu_done"), [throw_once](core::intercept_call const&) {
+        if(throw_once->exchange(false))
+        {
+          throw test_failure{"held"};
+        }
+        return core::intercept_result::proceed();
+      }));
+  h.adopt(std::move(made));
+}
+
+auto parked_now(hosted const& h) -> bool
+{
+  auto held = h.on->lock();
+  return h.on->parked(held, 0);
+}
+
+TEST_CASE("a waiter completed at creation by a held end keeps no predicate")
+{
+  hosted h;
+  end_by_handler(h);
+  h.start();
+  REQUIRE(settles([&] { return parked_now(h); }));
+  auto                     sentinel = std::make_shared<int>();
+  std::weak_ptr<int> const watched  = sentinel;
+  auto const               handle   = h.wait({.ready = [sentinel] { return false; }});
+  sentinel.reset();
+  CHECK(handle.future().done());
+  CHECK(watched.expired());
+  CHECK(h.on->halt(0).has_value());
+}
+
+TEST_CASE("a dropped waiter wakes an idle free run, which releases its predicate")
+{
+  hosted h{idle_forever()};
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto                     sentinel = std::make_shared<int>();
+  std::weak_ptr<int> const watched  = sentinel;
+  std::atomic<int>         checks{0};
+  auto                     handle = h.wait({.ready = [sentinel, &checks] {
+    ++checks;
+    return false;
+  }});
+  sentinel.reset();
+  REQUIRE(
+      settles([&] { return checks.load() > 0 and h.on->state(0) == core::host_state::idle_wait; }));
+  auto const before = checks.load();
+  handle.drop();
+  CHECK(settles([&] { return watched.expired(); }, 500ms));
+  CHECK(h.on->state(0) == core::host_state::idle_wait);
+  CHECK(checks.load() == before);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("a predicate's error is released when the free run ends otherwise at that boundary")
+{
+  std::atomic<int> boundaries{0};
+  hosted           h{
+      alu(1'000'000),
+      {.max_instructions = icount{10'000}, .wall_budget = long_wall},
+      {.boundary = [&boundaries](core::member_id) {
+        if(++boundaries == 4)
+        {
+          throw test_failure{"after the slice"};
+        }
+      }}
+  };
+  auto                     sentinel = std::make_shared<int>();
+  std::weak_ptr<int> const watched  = sentinel;
+  int                      calls    = 0;
+  auto const               handle   = [&] {
+    auto held = h.on->lock();
+    h.on->start(held, 0);
+    return h.on->wait(held, 0, {.ready = [sentinel, &calls]() -> bool {
+                        if(++calls > 1)
+                        {
+                          throw carrying_failure{sentinel};
+                        }
+                        return false;
+                      }});
+  }();
+  sentinel.reset();
+  CHECK_THROWS_AS(handle.future().get(), test_failure);
+  REQUIRE(settles([&] { return parked_now(h); }));
+  CHECK(calls == 2);
+  CHECK(settles([&] { return watched.expired(); }, 500ms));
+  auto const end = h.on->halt(0);
+  REQUIRE(end.has_value());
+  require_error(std::get<std::exception_ptr>(*end), [] { CHECK_THROWS_AS(throw, test_failure); });
+}
+
+TEST_CASE("halt after a free run ended by itself returns once the host released that turn")
+{
+  hosted h;
+  end_by_handler(h);
+  auto                             sentinel = std::make_shared<int>();
+  std::weak_ptr<int> const         watched  = sentinel;
+  std::atomic<bool>                stalled{false};
+  std::atomic<bool>                resumed{false};
+  core::host_future<popcorn::stop> pending;
+  {
+    auto held = h.on->lock();
+    h.on->start(held, 0);
+    pending = h.on->wait(held, 0, {.ready = [sentinel] { return false; }}).future();
+    pending.on_done([&stalled, &resumed]() noexcept {
+      stalled = true;
+      std::this_thread::sleep_for(200ms);
+      resumed = true;
+    });
+  }
+  sentinel.reset();
+  REQUIRE(settles([&] { return stalled.load(); }));
+  auto const end = h.on->halt(0);
+  CHECK(resumed);
+  CHECK(watched.expired());
+  REQUIRE(end.has_value());
+  require_error(std::get<std::exception_ptr>(*end), [] { CHECK_THROWS_AS(throw, test_failure); });
+}

@@ -21,16 +21,29 @@ namespace detail
 {
 struct waiter
 {
-  waiter_spec        spec;
-  host_promise<stop> promise;
-  std::atomic<bool>  dropped{false};
-  bool               checked = false;
-  bool               fired   = false;
-  std::exception_ptr error{};
+  waiter_spec              spec;
+  host_promise<stop>       promise;
+  std::atomic<bool>        dropped{false};
+  bool                     checked = false;
+  bool                     fired   = false;
+  std::exception_ptr       error{};
+  std::weak_ptr<host_core> owner{};
 
   [[nodiscard]] auto live() const noexcept -> bool
   {
     return not dropped.load(std::memory_order_relaxed) and not promise.done();
+  }
+
+  void release() noexcept
+  {
+    spec.ready = nullptr;
+    error      = nullptr;
+  }
+
+  [[nodiscard]] auto settling() -> host_promise<stop> const&
+  {
+    release();
+    return promise;
   }
 };
 
@@ -147,6 +160,7 @@ struct turn_plan
   bool                halt   = false;
   bool                slice  = false;
   waiter_list         waiters{};
+  waiter_list         dropped{};
 };
 
 namespace
@@ -320,6 +334,7 @@ struct host_core
   bool                                      sleeping  = false;
   bool                                      signalled = false;
   std::atomic<fate>                         ending{fate::undecided};
+  std::atomic<bool>                         drops{false};
   std::mutex                                watch_mutex;
   std::vector<fd_watch>                     watches;
   watch_id                                  next_watch = 0;
@@ -332,6 +347,12 @@ struct host_core
     {
       wake.signal();
     }
+  }
+
+  void waiter_dropped() noexcept
+  {
+    drops.store(true, std::memory_order_release);
+    wake.signal();
   }
 
   void notify_locked(member_slot& slot)
@@ -349,6 +370,14 @@ struct host_core
     }
     while(auto plans = take_turn(stop))
     {
+      for(auto& plan : *plans)
+      {
+        for(auto const& gone : plan.dropped)
+        {
+          gone->release();
+        }
+        plan.dropped = {};
+      }
       deferred done;
       for(auto const& [slot, plan] : std::views::zip(members, *plans))
       {
@@ -371,12 +400,13 @@ struct host_core
               later.push_back([waiters = std::exchange(parked.waiters, {})] {
                 for(auto const& waiting : waiters)
                 {
-                  waiting->promise.fail(cancelled("the machine was halted"));
+                  waiting->settling().fail(cancelled("the machine was halted"));
                 }
               });
             }
           });
-          plan.slice = false;
+          plan.slice   = false;
+          plan.waiters = {};
         }
       }
       run_all(done);
@@ -393,7 +423,7 @@ struct host_core
         }
         else if(slot->free_run)
         {
-          free_slice(*slot, plan.waiters, done);
+          free_slice(*slot, std::exchange(plan.waiters, {}), done);
         }
         run_all(done);
         publish_settled();
@@ -417,12 +447,21 @@ struct host_core
       }
       pending = false;
       std::vector<turn_plan> plans(members.size());
-      auto                   any = false;
+      auto                   any     = false;
+      auto const             pruning = drops.exchange(false, std::memory_order_acquire);
       for(auto const& [slot, plan] : std::views::zip(members, plans))
       {
         if(not slot->with_host)
         {
           continue;
+        }
+        if(pruning)
+        {
+          auto const gone = std::ranges::partition(
+              slot->waiters, [](auto const& waiting) { return waiting->live(); });
+          plan.dropped.assign(
+              std::make_move_iterator(gone.begin()), std::make_move_iterator(gone.end()));
+          slot->waiters.erase(gone.begin(), gone.end());
         }
         plan.mail   = std::exchange(slot->mail, {});
         plan.cancel = slot->cancel_requested and slot->goal;
@@ -436,7 +475,12 @@ struct host_core
         {
           plan.waiters = slot->waiters;
         }
-        any = any or not plan.mail.empty() or plan.cancel or plan.halt or plan.slice;
+        any = any
+           or not plan.mail.empty()
+           or not plan.dropped.empty()
+           or plan.cancel
+           or plan.halt
+           or plan.slice;
       }
       if(any)
       {
@@ -827,7 +871,7 @@ struct host_core
     }
   }
 
-  void free_slice(member_slot& slot, waiter_list& waiters, deferred& done)
+  void free_slice(member_slot& slot, waiter_list waiters, deferred& done)
   {
     accept_stamps(slot);
     apply_due(slot);
@@ -978,19 +1022,23 @@ struct host_core
         slot.state = host_state::idle_wait;
       }
     }
+    for(auto const& gone : pruned)
+    {
+      gone->release();
+    }
   }
 
   static void settle(std::vector<std::pair<std::shared_ptr<waiter>, stop>>& resolved)
   {
     for(auto const& [waiting, at] : resolved)
     {
-      if(waiting->error)
+      if(auto error = std::exchange(waiting->error, {}))
       {
-        waiting->promise.fail(waiting->error);
+        waiting->settling().fail(std::move(error));
       }
       else
       {
-        waiting->promise.set(at);
+        waiting->settling().set(at);
       }
     }
     resolved.clear();
@@ -1008,7 +1056,7 @@ struct host_core
     lock.unlock();
     for(auto const& waiting : waiters)
     {
-      waiting->promise.fail(cancelled("the machine was halted"));
+      waiting->settling().fail(cancelled("the machine was halted"));
     }
     return end;
   }
@@ -1033,7 +1081,7 @@ struct host_core
       later.push_back([waiters = std::exchange(parked.waiters, {}), end] {
         for(auto const& waiting : waiters)
         {
-          complete_with(waiting->promise, end);
+          complete_with(waiting->settling(), end);
         }
       });
     });
@@ -1062,7 +1110,7 @@ struct host_core
           }
           for(auto const& waiting : waiters)
           {
-            waiting->promise.fail(closed_error());
+            waiting->settling().fail(closed_error());
           }
         });
         slot->with_host        = false;
@@ -1171,6 +1219,10 @@ void waiter_handle::drop() noexcept
   }
   catch(...)
   {}
+  if(auto const on = waiter_->owner.lock())
+  {
+    on->waiter_dropped();
+  }
 }
 
 host::host(std::vector<std::unique_ptr<machine>> members, slice_bounds bounds, host_hooks hooks)
@@ -1431,13 +1483,14 @@ void host::start(held_lock const& held, member_id who)
 
 auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_handle
 {
-  auto& slot    = *core_->members[who];
-  auto  waiting = std::make_shared<detail::waiter>();
-  waiting->spec = std::move(spec);
-  auto future   = waiting->promise.future();
+  auto& slot     = *core_->members[who];
+  auto  waiting  = std::make_shared<detail::waiter>();
+  waiting->spec  = std::move(spec);
+  waiting->owner = core_;
+  auto future    = waiting->promise.future();
   if(slot.held)
   {
-    detail::complete_with(waiting->promise, *slot.held);
+    detail::complete_with(waiting->settling(), *slot.held);
   }
   else
   {
@@ -1493,6 +1546,10 @@ auto host::halt(member_id who) -> std::optional<held_end>
     }
     auto const parks = slot.parks;
     core_->parked_cv.wait(lock, [&slot, parks] { return slot.settled > parks; });
+  }
+  else if(not detail::on_host_thread)
+  {
+    core_->parked_cv.wait(lock, [&slot] { return slot.settled == slot.parks; });
   }
   return core_->close_session(lock, slot);
 }
