@@ -45,6 +45,9 @@ env.cxx.flags.extend(
 )
 env.link.flags.append("-fcontracts")
 
+if get_var("POPCORN_ENABLE_CCACHE", False):
+    env.use_compiler_cache()
+
 if VARIANT == "asan":
     env.set_variant("debug")
     env.apply_preset("sanitize")
