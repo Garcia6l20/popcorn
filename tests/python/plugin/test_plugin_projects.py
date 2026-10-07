@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import DRIVER_ELF, FAULT_ELF, M33_JSON, write_conftest, write_project
+from .helpers import (
+    DRIVER_ELF,
+    FAULT_ELF,
+    M33_JSON,
+    write_conftest,
+    write_project,
+    write_project_conftest,
+)
 
 pytest_plugins = ["pytester"]
 
@@ -226,3 +233,94 @@ def test_the_selected_project_alone_boots_no_machine(pytester: pytest.Pytester) 
             assert popcorn_session(request.config).booted_machines() == []
         """)
     run(pytester).assert_outcomes(passed=1)
+
+
+MISSING_TESTS = """
+import asyncio
+
+
+def test_machine(machine):
+    pass
+
+
+def test_factory(machine_factory):
+    machine_factory()
+
+
+def test_factory_booted(machine_factory):
+    asyncio.run(machine_factory.booted())
+
+
+def test_factory_not_booted(machine_factory):
+    machine_factory(booted=False)
+"""
+
+
+def missing_project(pytester: pytest.Pytester, extra: str = "") -> Path:
+    absent = pytester.path / "absent.elf"
+    write_conftest(pytester)
+    pytester.makeini("[pytest]\n")
+    write_project(pytester, elf=absent, extra=extra)
+    pytester.makepyfile(test_missing=MISSING_TESTS)
+    return absent
+
+
+@pytest.mark.parametrize("cache", [(), ("-p", "no:cacheprovider")], ids=["cache", "no-cache"])
+def test_a_missing_input_skips_with_missing_skip(
+    pytester: pytest.Pytester, cache: tuple[str, ...]
+) -> None:
+    absent = missing_project(pytester, 'missing="skip",')
+    result = run(pytester, "-v", "-rs", *cache)
+    result.assert_outcomes(skipped=4)
+    assert result.ret == 0
+    names = ("machine", "factory", "factory_booted", "factory_not_booted")
+    result.stdout.fnmatch_lines_random([f"*::test_{name} SKIPPED *" for name in names])
+    reasons = [line for line in result.outlines if line.startswith("SKIPPED [")]
+    assert all(line.endswith(f": missing input: {absent}") for line in reasons)
+    assert sum(int(line[len("SKIPPED [") :].split("]")[0]) for line in reasons) == 4
+
+
+def test_a_missing_input_skips_under_workers(pytester: pytest.Pytester) -> None:
+    pytest.importorskip("xdist")
+    missing_project(pytester, 'missing="skip",')
+    result = pytester.runpytest_subprocess(*NO_ASYNCIO, "-n", "2", timeout=60)
+    result.assert_outcomes(skipped=4)
+
+
+def test_a_missing_input_fails_by_default(pytester: pytest.Pytester) -> None:
+    missing_project(pytester)
+    result = run(pytester)
+    result.assert_outcomes(failed=3, errors=1)
+    result.stdout.fnmatch_lines(["*MissingInput: images[[]0[]].path: no file at *absent.elf*"])
+
+
+DEVICES_TEST = """
+from popcorn.board import I2CTarget
+
+
+class Target(I2CTarget):
+    pass
+
+
+def test_factory_devices(machine_factory):
+    machine_factory(devices={"I2C1": [Target(0x50)]})
+"""
+
+
+def test_a_missing_description_skips_a_factory_with_devices(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    pytester.makeini("[pytest]\n")
+    absent = pytester.path / "absent.json"
+    write_project_conftest(
+        pytester.path,
+        "popcorn.Project(\n"
+        '    part="POPCORN-M33-TEST",\n'
+        f"    description=Path({str(absent)!r}),\n"
+        f"    images=[popcorn.Elf(Path({str(DRIVER_ELF)!r}))],\n"
+        '    missing="skip",\n'
+        ")",
+    )
+    pytester.makepyfile(test_devices=DEVICES_TEST)
+    result = run(pytester, "-rs")
+    result.assert_outcomes(skipped=1)
+    result.stdout.fnmatch_lines([f"SKIPPED * missing input: {absent}"])

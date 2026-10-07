@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import contextlib
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 
 import pytest
 
-from popcorn import Machine, PopcornError, Project, Snapshot
+from popcorn import Machine, MissingInput, PopcornError, Project, Snapshot
 from popcorn.pytest._options import UNSET, marker_options
 from popcorn.pytest._report import (
     TraceOnFail,
@@ -32,6 +33,9 @@ class MachineFactory:
 
     Booted machines get the test's default instruction budget, the `budget` of its marker or
     `--popcorn-budget`. Machines not booted get none: it would bound their boot too.
+
+    A project with `missing="skip"` skips the test instead of raising MissingInput, as the
+    `machine` fixture does.
 
     `devices` gives bus devices instead of the project's, as `Project.machine(devices=)`
     takes them. A device serves one machine: an instance given before, to a machine still
@@ -80,18 +84,19 @@ class MachineFactory:
                 machine, or `Project.machine` refuses `devices`.
         """
         key = self._key(config, project, strict)
-        if not booted:
-            return self._keep(self._session.build(key, devices), key)
-        if devices is not None:
-            key = self._session.device_key(key, devices)
-        try:
-            if devices is None:
-                snapshot = self._session.booted(key).decoded()
-                return self._ready(key, self._session.build(key), snapshot)
-            return self._ready(key, *self._session.booted_with(key, devices))
-        except PopcornError:
-            self._track_failed(key)
-            raise
+        with _skipping_missing(self._session.project(key)):
+            if not booted:
+                return self._keep(self._session.build(key, devices), key)
+            if devices is not None:
+                key = self._session.device_key(key, devices)
+            try:
+                if devices is None:
+                    snapshot = self._session.booted(key).decoded()
+                    return self._ready(key, self._session.build(key), snapshot)
+                return self._ready(key, *self._session.booted_with(key, devices))
+            except PopcornError:
+                self._track_failed(key)
+                raise
 
     async def booted(
         self,
@@ -103,16 +108,17 @@ class MachineFactory:
     ) -> Machine:
         """A new booted machine as `factory()` gives, booting the key on the running loop."""
         key = self._key(config, project, strict)
-        if devices is not None:
-            key = self._session.device_key(key, devices)
-        try:
-            if devices is None:
-                snapshot = (await self._session.booted_async(key)).decoded()
-                return self._ready(key, self._session.build(key), snapshot)
-            return self._ready(key, *await self._session.booted_with_async(key, devices))
-        except PopcornError:
-            self._track_failed(key)
-            raise
+        with _skipping_missing(self._session.project(key)):
+            if devices is not None:
+                key = self._session.device_key(key, devices)
+            try:
+                if devices is None:
+                    snapshot = (await self._session.booted_async(key)).decoded()
+                    return self._ready(key, self._session.build(key), snapshot)
+                return self._ready(key, *await self._session.booted_with_async(key, devices))
+            except PopcornError:
+                self._track_failed(key)
+                raise
 
     def close(self) -> None:
         """Park every machine made, collect its coverage and close its pty bridges.
@@ -249,17 +255,21 @@ def machine(
 
     Teardown parks the machine: a free run the test left started is halted and the machine is
     reused. What ended that free run by itself and never reached the test fails the teardown.
+
+    A project with `missing="skip"` skips the test when it raises MissingInput, the missing
+    path as the reason, for every test of its key.
     """
     item = _item(request)
     project = _checked(popcorn_project)
     test = settings_of(item, _popcorn_session, project)
-    try:
-        booted = _restored(_popcorn_session, test.key)
-    except PopcornError:
-        failed = _popcorn_session.failed_machine(test.key)
-        if failed is not None:
-            track(item, "machine", failed, test.key)
-        raise
+    with _skipping_missing(_popcorn_session.project(test.key)):
+        try:
+            booted = _restored(_popcorn_session, test.key)
+        except PopcornError:
+            failed = _popcorn_session.failed_machine(test.key)
+            if failed is not None:
+                track(item, "machine", failed, test.key)
+            raise
     track(item, "machine", booted.machine, test.key)
     m = booted.machine
     m.default_budget = test.budget
@@ -318,6 +328,16 @@ def _item(request: pytest.FixtureRequest) -> pytest.Item:
     item: object = getattr(request, _NODE)
     assert isinstance(item, pytest.Item)
     return item
+
+
+@contextlib.contextmanager
+def _skipping_missing(project: Project) -> Generator[None]:
+    try:
+        yield
+    except MissingInput as error:
+        if project.missing != "skip":
+            raise
+        pytest.skip(f"missing input: {error.path}")
 
 
 def _restored(session: PopcornSession, key: Key) -> Booted:

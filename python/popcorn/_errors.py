@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from popcorn._enums import FaultKind, StopReason
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from popcorn._stop import Stop
 
 
@@ -33,6 +35,37 @@ class ConfigError(PopcornError):
         self.line = line
         self.key = key
         self.expected = expected
+
+
+class MissingInput(ConfigError):
+    """A file or directory a project needs does not exist: an image, an SVD, a description, or
+    the ST install a part's description is built from.
+
+    A malformed file, an unknown part in an existing install or an image that does not fit
+    raise another error. `Project.missing` makes the pytest plugin skip on this one.
+
+    Attributes:
+        path: The path that does not exist.
+    """
+
+    def __init__(self, message: str, *, path: Path, key: str = "") -> None:
+        super().__init__(message, key=key, expected=f"an existing {path}")
+        self._missing(path)
+
+    def _missing(self, path: Path) -> None:
+        self.path = path
+
+
+def absent(path: Path) -> bool:
+    """Whether `path` does not exist, its parent directory included. False when it exists or
+    cannot be checked, such as under a directory without permission: its reader reports that."""
+    try:
+        path.stat()
+    except FileNotFoundError, NotADirectoryError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 class ImageError(PopcornError):

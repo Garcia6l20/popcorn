@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from popcorn import MissingInput
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._sources import (
     SearchPaths,
@@ -107,3 +108,57 @@ def test_find_sources_real_u575(st_svd_u575: Path, st_cubemx_db: Path) -> None:
     assert sources.cmsis_header is not None
     assert sources.cmsis_header.name == "stm32u575xx.h"
     assert len(sources.patches) == 2
+
+
+def test_find_sources_without_a_cubemx_db_is_a_missing_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    absent = tmp_path / "no-db"
+    monkeypatch.setenv("POPCORN_CUBEMX_DB", str(absent))
+    with pytest.raises(MissingInput) as caught:
+        find_sources("STM32U575QGIx")
+    assert (caught.value.path, caught.value.key) == (absent, "cubemx_db")
+    assert isinstance(caught.value, DescriptionError)
+
+
+def test_find_sources_without_svd_dirs_is_a_missing_input(st_cubemx_db: Path) -> None:
+    search = SearchPaths(svd_dirs=[], cubemx_db=st_cubemx_db, cmsis_device_dirs=None)
+    with pytest.raises(MissingInput) as caught:
+        find_sources("STM32U575QGIx", search=search)
+    assert caught.value.key == "svd_dirs"
+    assert "POPCORN_STM32_SVD_DIRS" in str(caught.value)
+
+
+def test_an_unknown_part_in_an_existing_db_is_no_missing_input(st_cubemx_db: Path) -> None:
+    with pytest.raises(DescriptionError, match="a known part") as caught:
+        find_sources("STM32U575QGI", cubemx_db=st_cubemx_db)
+    assert not isinstance(caught.value, MissingInput)
+
+
+def test_a_cubemx_db_whose_mcu_is_a_file_is_no_missing_input(tmp_path: Path) -> None:
+    (tmp_path / "mcu").write_text("")
+    search = SearchPaths(svd_dirs=[], cubemx_db=tmp_path, cmsis_device_dirs=None)
+    with pytest.raises(DescriptionError, match="a known part") as caught:
+        find_sources("STM32U575QGIx", search=search)
+    assert not isinstance(caught.value, MissingInput)
+
+
+def test_absent_svd_dirs_from_the_environment_are_a_missing_input(
+    st_cubemx_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    absent = tmp_path / "no-svd"
+    monkeypatch.setenv("POPCORN_STM32_SVD_DIRS", str(absent))
+    with pytest.raises(MissingInput) as caught:
+        find_sources("STM32U575QGIx", cubemx_db=st_cubemx_db)
+    assert (caught.value.path, caught.value.key) == (absent, "svd_dirs")
+
+
+def test_an_st_root_without_tools_names_the_tools_it_lacks(
+    st_cubemx_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "st").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("POPCORN_STM32_SVD_DIRS", raising=False)
+    with pytest.raises(MissingInput) as caught:
+        find_sources("STM32U575QGIx", cubemx_db=st_cubemx_db)
+    assert caught.value.path == tmp_path / "st" / "stm32cubeclt_*"

@@ -9,8 +9,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from popcorn._errors import absent
 from popcorn.stm32.description._cubemx import read_part, rzone_file_name
-from popcorn.stm32.description._errors import DescriptionError
+from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._patches import load_patches
 
 _PATCHES_DIR = Path(__file__).parent / "patches"
@@ -179,6 +180,32 @@ def _cmsis_header_path(refname: str, search: SearchPaths) -> Path | None:
     return None
 
 
+def _require(path: Path, file: str, key: str, expected: str) -> None:
+    if absent(path):
+        raise MissingSource(file, key, expected, path=path)
+    if not path.is_file():
+        raise DescriptionError(file, 0, key, expected)
+
+
+def _svd_dirs(svd_dirs: Sequence[Path]) -> list[Path]:
+    present = [svd_dir for svd_dir in svd_dirs if not absent(svd_dir)]
+    if present:
+        return present
+    if svd_dirs:
+        missing = svd_dirs[0]
+        source = "POPCORN_STM32_SVD_DIRS or the search paths"
+    else:
+        st_root = Path("~/st").expanduser()
+        missing = st_root if absent(st_root) else st_root / "stm32cubeclt_*"
+        source = f"an ST install under {st_root} or POPCORN_STM32_SVD_DIRS"
+    raise MissingSource(
+        "<search>",
+        "svd_dirs",
+        f"at least one existing SVD directory to search, from {source}",
+        path=missing,
+    )
+
+
 def find_sources(
     part: str,
     *,
@@ -191,20 +218,27 @@ def find_sources(
     """Sources of @p part: db files by exact db lookup, SVD by family-prefix matching across
     @p search's directories (or the spec 04 defaults, when @p search is None), CMSIS header
     optionally, every patch file in the package whose [match] selects this part and the resolved
-    SVD file name. DescriptionError naming every path searched when a required source is
-    missing."""
+    SVD file name. MissingSource, a MissingInput and a DescriptionError, naming the path when a
+    required source does not exist: no CubeMX db, no existing SVD directory, an absent db, rzone
+    or SVD file. DescriptionError for an unknown part in an existing db, or a source that exists
+    but is not a file."""
     search = search or default_search_paths()
     db_dir = cubemx_db or search.cubemx_db
+    if absent(db_dir / "mcu"):
+        raise MissingSource(
+            str(db_dir),
+            "cubemx_db",
+            f"a CubeMX db with an mcu directory at {db_dir}, set POPCORN_CUBEMX_DB",
+            path=db_dir,
+        )
     refname = resolve_part(part, db_dir)
 
     mcu_db = db_dir / "mcu" / f"{refname}.xml"
-    if not mcu_db.is_file():
-        raise DescriptionError(str(db_dir), 0, refname, f"a db file at {mcu_db}")
+    _require(mcu_db, str(db_dir), refname, f"a db file at {mcu_db}")
     db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
 
     rzone = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
-    if not rzone.is_file():
-        raise DescriptionError(str(db_dir), 0, refname, f"an rzone file at {rzone}")
+    _require(rzone, str(db_dir), refname, f"an rzone file at {rzone}")
 
     if svd is not None:
         svd_path = svd
@@ -213,14 +247,11 @@ def find_sources(
         if exception is not None:
             name, svd_dir = exception
             svd_path = svd_dir / f"{name}.svd"
-            if not svd_path.is_file():
-                raise DescriptionError(str(svd_dir), 0, refname, f"an SVD file at {svd_path}")
+            _require(svd_path, str(svd_dir), refname, f"an SVD file at {svd_path}")
         else:
-            if not search.svd_dirs:
-                raise DescriptionError(
-                    "<search>", 0, refname, "at least one SVD directory to search"
-                )
-            stem, svd_dir = resolve_svd_stem(refname, search.svd_dirs, core=core, file=str(db_dir))
+            stem, svd_dir = resolve_svd_stem(
+                refname, _svd_dirs(search.svd_dirs), core=core, file=str(db_dir)
+            )
             svd_path = svd_dir / f"{stem}.svd"
 
     cmsis_header_path = (

@@ -36,6 +36,7 @@ from popcorn import (
 )
 from popcorn._machine import AttachedDevice
 from popcorn._model_build import registered_classes
+from popcorn._project import check_inputs
 from popcorn.board import I2CTarget, SpiTarget
 from popcorn.units import VirtualTime
 
@@ -192,7 +193,11 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
     Not keyed: class attributes changed at run time, module globals or class-level containers
     the device reads, and the modules its class imports. A stale entry matters only when the
     firmware talks to the device before `boot.until`.
+
+    Raises:
+        MissingInput: An input file of `project` does not exist, as `Project.machine` raises.
     """
+    check_inputs(project)
     aliases = {
         p.name: p.alias_of
         for p in project.machine_description().peripherals
@@ -244,7 +249,11 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
     the Python installation and of site-packages are left out: the popcorn version, the
     extension digest and installed versions cover them. A module imported only by those
     modules is not covered: `--cache-clear` drops the cache.
+
+    Raises:
+        MissingInput: An input file of `project` does not exist, as `Project.machine` raises.
     """
+    check_inputs(project)
     description = project.machine_description()
     lines = [
         FORMAT,

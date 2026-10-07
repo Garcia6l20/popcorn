@@ -24,7 +24,9 @@ from popcorn._errors import (
     ConfigError,
     EmulationError,
     FaultError,
+    MissingInput,
     SymbolError,
+    absent,
 )
 from popcorn._image import Image
 from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, AttachedDevice, Machine
@@ -343,6 +345,8 @@ class Project:
         supply: Supply voltages, None for the defaults.
         board: What the board does with each peripheral, by name.
         strict: Whether an unmodelled peripheral access raises ModelError. Not in `digest`.
+        missing: What the pytest plugin does with a test whose project raises MissingInput:
+            "fail" it, or "skip" it with the missing path as the reason. Not in `digest`.
         configs: Named variants of this project, as `config` selects them. Not in `digest`.
     """
 
@@ -359,6 +363,7 @@ class Project:
     supply: SupplyOptions | None = None
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
     strict: bool = False
+    missing: Literal["fail", "skip"] = "fail"
     configs: Mapping[str, Project] = field(default_factory=_FrozenMap[str, "Project"])
 
     def __post_init__(self) -> None:
@@ -366,6 +371,8 @@ class Project:
         object.__setattr__(self, "board", _FrozenMap(self.board))
         object.__setattr__(self, "configs", _FrozenMap(self.configs))
         self._check_kinds()
+        if self.missing not in ("fail", "skip"):
+            raise _plain_error("missing", f'"fail" or "skip", not {self.missing!r}')
         if not (math.isfinite(self.cpi) and self.cpi > 0.0):
             raise _plain_error("cpi", "a finite number of cycles per instruction above 0")
         if self.core_hz is not None and self.core_hz <= 0:
@@ -463,7 +470,7 @@ class Project:
 
     @property
     def digest(self) -> str:
-        """SHA-256 of the canonical content, without `name`, `strict` and `configs`.
+        """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`.
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys. It is what snapshots record as their config digest.
@@ -521,10 +528,13 @@ class Project:
                 one peripheral, `Machine(devices=)` refuses them, `audio` is on a peripheral
                 that is not an SAI with the built-in model, or `host` on one that is not a USB
                 device controller with the built-in model.
+            MissingInput: An image, `svd` or `description` file does not exist, or the ST
+                install the description is built from.
             ImageError: An image cannot be read or does not fit the memory map.
             ModelError: A `connect` peripheral is neither a UART nor a USB device controller
                 with a `host`.
         """
+        check_inputs(self)
         description = self.machine_description()
         served = {p.name for p in description.peripherals if p.alias_of is None}
         given = _given_devices(description, devices or {})
@@ -737,6 +747,25 @@ class Project:
             raise _plain_error(key, f"arguments {cls.__qualname__} accepts: {error}") from error
 
 
+def check_inputs(project: Project) -> None:
+    """Raise for the first file of `project` that does not exist: an image, `description`, or
+    `svd` when no `description` replaces it. A file that exists but cannot be read is left to
+    its reader.
+
+    Raises:
+        MissingInput: That file, with its key.
+    """
+    paths: list[tuple[str, Path | None]] = [
+        (f"images[{i}].path", image.path) for i, image in enumerate(project.images)
+    ]
+    if project.description is None:
+        paths.append(("svd", project.svd))
+    paths.append(("description", project.description))
+    for key, path in paths:
+        if path is not None and absent(path):
+            raise MissingInput(f"{key}: no file at {path}", path=path, key=key)
+
+
 def _plain_error(key: str, expected: str) -> ConfigError:
     return ConfigError(f"{key}: expected {expected}", key=key, expected=expected)
 
@@ -804,7 +833,7 @@ def _canonical(value: object) -> object:
     if isinstance(value, type):
         return {"class": _reference(value)}
     if isinstance(value, Project):
-        skipped = {"name", "strict", "configs"}
+        skipped = {"name", "strict", "missing", "configs"}
         fields = {
             f.name: _canonical(getattr(value, f.name))
             for f in dataclasses.fields(value)

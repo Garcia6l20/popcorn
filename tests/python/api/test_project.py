@@ -692,3 +692,75 @@ def test_an_absolute_path_param_is_kept_as_given() -> None:
     project = popcorn.Project(part="X", images=[], board={"TESTDEV": popcorn.Periph(model=use)})
     model = project.board["TESTDEV"].model
     assert model is not None and model.params["data"] is linked
+
+
+def test_missing_image_raises_missing_input(tmp_path: Path) -> None:
+    absent = tmp_path / "absent.elf"
+    project = popcorn.Project(
+        part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(absent)]
+    )
+    with pytest.raises(popcorn.MissingInput) as caught:
+        project.machine()
+    assert caught.value.path == absent
+    assert caught.value.key == "images[0].path"
+    assert isinstance(caught.value, popcorn.ConfigError)
+
+
+def test_a_missing_description_raises_missing_input(tmp_path: Path) -> None:
+    absent = tmp_path / "absent.json"
+    with pytest.raises(popcorn.MissingInput) as caught:
+        minimal_project().replace(description=absent).machine()
+    assert (caught.value.path, caught.value.key) == (absent, "description")
+
+
+def test_a_missing_svd_raises_missing_input_when_it_is_used(tmp_path: Path) -> None:
+    absent = tmp_path / "absent.svd"
+    project = popcorn.Project(part="STM32U575QGIx", svd=absent, images=[popcorn.Elf(DRIVER_ELF)])
+    with pytest.raises(popcorn.MissingInput) as caught:
+        project.machine()
+    assert (caught.value.path, caught.value.key) == (absent, "svd")
+    minimal_project().replace(svd=absent).machine()
+
+
+def test_an_unreadable_image_stays_an_image_error(tmp_path: Path) -> None:
+    garbage = tmp_path / "garbage.elf"
+    garbage.write_bytes(b"not an elf")
+    project = minimal_project().replace(images=[popcorn.Elf(garbage)])
+    with pytest.raises(popcorn.ImageError) as caught:
+        project.machine()
+    assert not isinstance(caught.value, popcorn.MissingInput)
+
+
+def test_a_directory_as_input_is_no_missing_input(tmp_path: Path) -> None:
+    with pytest.raises(popcorn.ImageError):
+        minimal_project().replace(images=[popcorn.Elf(tmp_path)]).machine()
+    with pytest.raises(popcorn.ConfigError) as caught:
+        minimal_project().replace(description=tmp_path).machine()
+    assert not isinstance(caught.value, popcorn.MissingInput)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_an_image_under_a_locked_directory_is_no_missing_input(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    image = locked / "driver.elf"
+    image.write_bytes(DRIVER_ELF.read_bytes())
+    locked.chmod(0)
+    try:
+        with pytest.raises(popcorn.ImageError) as caught:
+            minimal_project().replace(images=[popcorn.Elf(image)]).machine()
+    finally:
+        locked.chmod(0o700)
+    assert not isinstance(caught.value, popcorn.MissingInput)
+
+
+def test_missing_takes_fail_or_skip_and_stays_out_of_the_digest() -> None:
+    project = minimal_project()
+    assert project.missing == "fail"
+    assert project.replace(missing="skip").digest == project.digest
+    with pytest.raises(popcorn.ConfigError) as caught:
+        project.replace(missing="maybe")
+    assert caught.value.key == "missing"
+    config = project.replace(missing="skip").with_configs(other=project).config("other")
+    assert config.missing == "fail"
+    assert project.replace(missing="skip").replace(cpi=2.0).missing == "skip"

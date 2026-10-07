@@ -40,6 +40,21 @@ def missing_description(tmp_path: Path, _: Machines) -> object:
     return popcorn.load_description(tmp_path / "absent.json")
 
 
+def missing_image(tmp_path: Path, _: Machines) -> object:
+    absent = tmp_path / "absent.elf"
+    project = popcorn.Project(
+        part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(absent)]
+    )
+    return project.machine()
+
+
+def _missing(name: str) -> Callable[[popcorn.PopcornError], bool]:
+    def check(error: popcorn.PopcornError) -> bool:
+        return isinstance(error, popcorn.MissingInput) and error.path.name == name
+
+    return check
+
+
 def bad_elf(tmp_path: Path, _: Machines) -> object:
     path = tmp_path / "bad.elf"
     path.write_bytes(b"not an elf")
@@ -169,6 +184,7 @@ def _config(key: str) -> Callable[[popcorn.PopcornError], bool]:
 
 CASES = [
     Case("missing description", missing_description, popcorn.ConfigError, lambda e: bool(e.args)),
+    Case("missing image", missing_image, popcorn.MissingInput, _missing("absent.elf")),
     Case(
         "bad ELF",
         bad_elf,
