@@ -57,7 +57,7 @@ from popcorn._project import (
     Project,
     Use,
 )
-from popcorn._refs import Condition, MemoryRef, Readout
+from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any_of
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
 from popcorn._views import (
@@ -80,6 +80,7 @@ __all__ = [
     "Call",
     "CallResult",
     "Condition",
+    "Conditions",
     "ConfigError",
     "Device",
     "Elf",
@@ -139,6 +140,8 @@ __all__ = [
     "WatchAction",
     "WatchHit",
     "WatchKind",
+    "all_of",
+    "any_of",
     "arm",
     "board",
     "coverage",

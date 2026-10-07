@@ -1038,6 +1038,52 @@ TEST_CASE("a condition waiter fires at the event a parked goal stops at, with ma
   CHECK(arch->ticks >= 50);
 }
 
+auto counter_compared(core::condition::op compare, std::uint32_t count) -> core::condition
+{
+  auto made    = counter_at_least(count);
+  made.compare = compare;
+  return made;
+}
+
+TEST_CASE("an any-set reports every member true at the event, an all-set fires when all hold")
+{
+  using enum core::condition::op;
+  auto [member, arch] = ticking();
+  hosted     h{std::move(member), huge_slices};
+  auto const handles = start_waiting(
+      h, {
+             {
+              .deadline = at_instruction(10'000'000),
+              .when =
+                     core::condition_set{
+                         .combine = core::condition_set::mode::any,
+                         .members =
+                             {counter_compared(eq, 1'000), counter_compared(ge, 30),
+                              counter_compared(gt, 29)},
+                     }, },
+             {
+              .deadline = at_instruction(10'000'000),
+              .when =
+                     core::condition_set{
+                         .combine = core::condition_set::mode::all,
+                         .members =
+                             {counter_compared(ge, 20), counter_compared(ge, 40),
+                              counter_compared(lt, 1'000)},
+                     }, },
+  });
+  auto const& any    = handles[0];
+  auto const& all    = handles[1];
+  auto const  first  = any.future().get();
+  auto const  second = all.future().get();
+  CHECK(first.reason == stop_reason::user);
+  CHECK(any.fired() == 0b110);
+  CHECK(second.reason == stop_reason::user);
+  CHECK(all.fired() == 0b111);
+  CHECK(second.instructions.value > first.instructions.value);
+  CHECK_FALSE(h.on->halt(0).has_value());
+  CHECK(arch->ticks >= 40);
+}
+
 TEST_CASE("a condition already true fires at the boundary its posting ends the slice at")
 {
   auto [member, arch] = ticking();

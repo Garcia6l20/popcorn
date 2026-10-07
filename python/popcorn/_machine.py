@@ -70,7 +70,17 @@ from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
 from popcorn._rcc import RccOptions
-from popcorn._refs import Condition, Pending, Readout, Ref, Refs, native_of, owner_of
+from popcorn._refs import (
+    Condition,
+    Conditions,
+    Pending,
+    Readout,
+    Ref,
+    Refs,
+    any_of,
+    native_set,
+    owner_of,
+)
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, PtyOpener, UartPorts
@@ -1704,18 +1714,19 @@ class Machine:
         exception a handler of it raised. Cancelling it then drops the wait only, the machine
         runs on.
 
-        A `Condition`, `m.ref.var("x").ge(3)`, is evaluated natively inside a free run, no
-        Python, after every event and at slice ends, so it keeps the boundary a parked run sees.
-        When `for_` elapses the wait returns a TIME stop without evaluating it there, as a parked
-        run does, unlike a Python event. The returned stop's `fired` holds it when it ended the
+        A `Condition`, `m.ref.var("x").ge(3)`, or a `Conditions` from `any_of` or `all_of`, is
+        evaluated natively inside a free run, no Python, after every event and at slice ends, so
+        it keeps the boundary a parked run sees. When `for_` elapses the wait returns a TIME
+        stop without evaluating it there, as a parked run does, unlike a Python event. The
+        returned stop's `fired` names the conditions that held at the boundary that ended the
         wait, empty for a stop that is not USER.
 
         Raises:
             MachineBusy: A run, step, call or wait is active outside a free run.
-            ValueError: A `Condition` of another machine.
+            ValueError: A `Condition` or `Conditions` of another machine.
         """
         _check_duration(for_)
-        if isinstance(event, Condition):
+        if isinstance(event, Condition | Conditions):
             return await self._wait_condition(event, for_)
         if self._handle.session_open():
             try:
@@ -1734,26 +1745,30 @@ class Machine:
             return await self.run(until=event.target, for_=for_)
         return await self.run(for_=for_, stop_when=event.ready)
 
-    async def _wait_condition(self, condition: Condition, for_: VirtualDuration | None) -> Stop:
-        if owner_of(condition) is not self._handle:
-            raise ValueError(f"{condition!r} reads another machine")
+    async def _wait_condition(
+        self, event: Condition | Conditions, for_: VirtualDuration | None
+    ) -> Stop:
+        if owner_of(event) is not self._handle:
+            raise ValueError(f"{event!r} reads another machine")
+        conditions = event if isinstance(event, Conditions) else any_of(event)
+        members = conditions.members
         if not self._handle.session_open():
-            stop = await self.run(for_=for_, stop_when=condition.ready)
-            held = stop.reason is StopReason.USER and condition.ready(self)
-            stop = dataclasses.replace(stop, fired=(condition,) if held else ())
+            stop = await self.run(for_=for_, stop_when=event.ready)
+            held = stop.reason is StopReason.USER and event.ready(self)
+            fired = tuple(member for member in members if member.ready(self)) if held else ()
+            stop = dataclasses.replace(stop, fired=fired)
             self._last_stop = stop
             return stop
-        conditions = _core.ConditionSet()
-        conditions.members = [native_of(condition)]
         try:
             stop, mask = await awaited(
-                self._handle.wait_when(conditions, None if for_ is None else for_.ps),
+                self._handle.wait_when(native_set(conditions), None if for_ is None else for_.ps),
                 _masked_stop,
             )
         except BaseException as error:
             self._surfaced = error
             raise
-        stop = dataclasses.replace(stop, fired=(condition,) if mask & 1 else ())
+        fired = tuple(member for index, member in enumerate(members) if mask >> index & 1)
+        stop = dataclasses.replace(stop, fired=fired)
         self._surfaced = stop
         return stop
 

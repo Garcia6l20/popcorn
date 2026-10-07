@@ -164,9 +164,18 @@ struct condition
   double real{};
 };
 
-/** @brief Conditions evaluated natively together, at most 64. */
+/** @brief Flat conditions evaluated natively together, at most 64. */
 struct condition_set
 {
+  /** @brief How the members combine. */
+  enum class mode : std::uint8_t
+  {
+    any,
+    all,
+  };
+
+  /** @brief Whether the set holds when any member holds or when every member holds. */
+  mode combine{mode::any};
   /** @brief The conditions, bit i of waiter_handle::fired() for member i. */
   std::vector<condition> members{};
 };
@@ -194,9 +203,9 @@ struct waiter_spec
   std::optional<vtime> after{};
   /** @brief Conditions evaluated on the host thread as the engine owner, with no GIL and no
    * lock, after every dispatched event and at slice ends, instead of @p ready. The waiter
-   * completes with a stop_reason::user stop of the first boundary where any member holds. At
-   * its deadline it completes with a stop_reason::time stop, the members not evaluated there, as
-   * a goal's until_time stops. */
+   * completes with a stop_reason::user stop of the first boundary where the set holds. At its
+   * deadline it completes with a stop_reason::time stop, the set not evaluated there, as a
+   * goal's until_time stops. */
   std::optional<condition_set> when{};
 };
 

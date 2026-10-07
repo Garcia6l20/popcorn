@@ -843,3 +843,123 @@ def test_a_condition_from_another_machine_is_refused(m33: popcorn.MachineDescrip
         asyncio.run(m.wait_for(condition, for_=ms(1)))
     with pytest.raises(ValueError, match="another machine"):
         waited(m, condition, ms(1))
+
+
+def test_any_of_fires_where_a_parked_predicate_does(m33: popcorn.MachineDescription) -> None:
+    parked, running = exact(m33), exact(m33)
+
+    def either(m: popcorn.Machine) -> bool:
+        return int(m.var("ticks").value) >= 100 or int(m.var("loops").value) >= 5_000
+
+    Gate(parked).opened.set()
+    want = asyncio.run(parked.run(for_=ms(200), stop_when=either))
+    ticks, loops = running.ref.var("ticks"), running.ref.var("loops")
+    conditions = popcorn.any_of(ticks.ge(100), loops.ge(5_000))
+    got = gated(running, conditions, ms(200))
+    assert want.reason is popcorn.StopReason.USER
+    assert (got.reason, got.time, got.pc) == (want.reason, want.time, want.pc)
+    expected = tuple(
+        member
+        for member, held in zip(
+            conditions.members,
+            (int(parked.var("ticks").value) >= 100, int(parked.var("loops").value) >= 5_000),
+            strict=True,
+        )
+        if held
+    )
+    assert expected
+    assert got.fired == expected
+
+
+def test_any_of_reports_both_members_true_on_one_event(m33: popcorn.MachineDescription) -> None:
+    m = exact(m33)
+    ticks = m.ref.var("ticks")
+    first, second = ticks.ge(100), ticks.gt(99)
+    stop = waited(m, popcorn.any_of(ticks.eq(1_000_000), first, second), ms(200))
+    assert stop.reason is popcorn.StopReason.USER
+    assert stop.fired == (first, second)
+
+
+def test_all_of_fires_when_every_member_holds(m33: popcorn.MachineDescription) -> None:
+    parked, running = exact(m33), exact(m33)
+
+    def both(m: popcorn.Machine) -> bool:
+        return int(m.var("ticks").value) >= 50 and int(m.var("loops").value) >= 2_000
+
+    Gate(parked).opened.set()
+    want = asyncio.run(parked.run(for_=ms(200), stop_when=both))
+    conditions = popcorn.all_of(running.ref.var("ticks").ge(50), running.ref.var("loops").ge(2_000))
+    got = gated(running, conditions, ms(200))
+    assert want.reason is popcorn.StopReason.USER
+    assert (got.reason, got.time, got.pc) == (want.reason, want.time, want.pc)
+    assert got.fired == conditions.members
+
+
+def test_conditions_time_out_with_nothing_fired(m33: popcorn.MachineDescription) -> None:
+    m = exact(m33)
+    ticks = m.ref.var("ticks")
+    conditions = popcorn.all_of(ticks.ge(10), ticks.eq(1_000_000))
+    stop = waited(m, conditions, ms(20))
+    assert stop.reason is popcorn.StopReason.TIME
+    assert stop.fired == ()
+    stop = asyncio.run(m.wait_for(conditions, for_=ms(20)))
+    assert stop.reason is popcorn.StopReason.TIME
+    assert stop.fired == ()
+
+
+def test_conditions_parked_match_running(m33: popcorn.MachineDescription) -> None:
+    parked, running = exact(m33), exact(m33)
+    sets = [
+        popcorn.any_of(m.ref.var("ticks").ge(40), m.ref.var("ticks").ge(30))
+        for m in (parked, running)
+    ]
+    Gate(parked).opened.set()
+    want = asyncio.run(parked.wait_for(sets[0], for_=ms(200)))
+    got = gated(running, sets[1], ms(200))
+    assert (got.reason, got.time, got.pc) == (want.reason, want.time, want.pc)
+    assert want.fired == (sets[0].members[1],)
+    assert got.fired == (sets[1].members[1],)
+
+
+def test_one_set_awaited_twice_reports_each_wait(m33: popcorn.MachineDescription) -> None:
+    m = exact(m33)
+    ticks = m.ref.var("ticks")
+    conditions = popcorn.any_of(ticks.ge(30), ticks.eq(1_000_000))
+    gate = Gate(m)
+
+    async def scenario() -> tuple[popcorn.Stop, popcorn.Stop]:
+        async with m.running():
+            assert await asyncio.to_thread(gate.entered.wait, HANG), "no write to ticks"
+            waits = asyncio.gather(
+                m.wait_for(conditions, for_=ms(200)), m.wait_for(conditions, for_=us(100))
+            )
+            await asyncio.sleep(0)
+            gate.opened.set()
+            return await waits
+
+    fired, timed = run_bounded(scenario(), HANG)
+    assert fired.reason is popcorn.StopReason.USER
+    assert fired.fired == (conditions.members[0],)
+    assert timed.reason is popcorn.StopReason.TIME
+    assert timed.fired == ()
+
+
+def test_conditions_refuse_nesting_empty_and_mixed_machines(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m, other = exact(m33), exact(m33)
+    condition = m.ref.var("ticks").ge(1)
+    with pytest.raises(TypeError, match="Condition members only"):
+        popcorn.any_of(popcorn.any_of(condition))  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValueError, match="1 to 64"):
+        popcorn.any_of()
+    with pytest.raises(ValueError, match="1 to 64"):
+        popcorn.all_of(*[condition] * 65)
+    with pytest.raises(ValueError, match="one machine"):
+        popcorn.any_of(condition, other.ref.var("ticks").ge(1))
+    with pytest.raises(ValueError, match="another machine"):
+        asyncio.run(other.wait_for(popcorn.all_of(condition), for_=ms(1)))
+    with pytest.raises(AttributeError, match="immutable"):
+        popcorn.any_of(condition).mode = "all"  # pyright: ignore[reportAttributeAccessIssue]
+    with pytest.raises(AttributeError, match="immutable"):
+        del popcorn.any_of(condition).members

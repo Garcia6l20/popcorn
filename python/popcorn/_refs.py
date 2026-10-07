@@ -292,9 +292,96 @@ def native_of(condition: Condition) -> _core.MemoryCondition:
     return condition._native  # pyright: ignore[reportPrivateUsage]
 
 
-def owner_of(condition: Condition) -> object:
-    """The machine handle whose memory `condition` reads."""
-    return condition._ref.owner  # pyright: ignore[reportPrivateUsage]
+def owner_of(event: Condition | Conditions) -> object:
+    """The machine handle whose memory `event` reads."""
+    first = event.members[0] if isinstance(event, Conditions) else event
+    return first._ref.owner  # pyright: ignore[reportPrivateUsage]
+
+
+def native_set(conditions: Conditions) -> _core.ConditionSet:
+    """The native form of `conditions`."""
+    native = _core.ConditionSet()
+    native.combine = (
+        _core.ConditionMode.all if conditions.mode == "all" else _core.ConditionMode.any
+    )
+    native.members = [native_of(member) for member in conditions.members]
+    return native
+
+
+class Conditions:
+    """Conditions evaluated natively together after every event of a free run, as one
+    `Machine.wait_for` event. Flat and immutable: build it with `any_of` or `all_of`.
+
+        up, failed = m.ref.var("link").up, m.ref.var("link").error
+        either = popcorn.any_of(up.eq(True), failed.ne(0))
+        async with m.running():
+            stop = await m.wait_for(either, for_=s(4))
+        assert stop.fired == (either.members[0],), stop.fired
+
+    The stop's `fired` names the members that held at the boundary that ended the wait, in the
+    order given: every member for `all_of`, each member true there for `any_of`.
+
+    Attributes:
+        mode: "any" for `any_of`, "all" for `all_of`.
+        members: The conditions, in the order given.
+    """
+
+    __slots__ = ("members", "mode")
+
+    mode: Literal["any", "all"]
+    members: tuple[Condition, ...]
+
+    def __init__(self, mode: Literal["any", "all"], members: tuple[Condition, ...]) -> None:
+        """A set. Use `any_of` or `all_of` instead."""
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "members", members)
+
+    @override
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(f"Conditions is immutable, {name} cannot be set")
+
+    @override
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"Conditions is immutable, {name} cannot be deleted")
+
+    def ready(self, machine: object) -> bool:
+        """Evaluate the members now through their sync views: the parked path."""
+        combine = all if self.mode == "all" else any
+        return combine(member.ready(machine) for member in self.members)
+
+    @override
+    def __repr__(self) -> str:
+        return f"{self.mode}_of({', '.join(member.label for member in self.members)})"
+
+
+def _combined(mode: Literal["any", "all"], conditions: tuple[object, ...]) -> Conditions:
+    for member in conditions:
+        if not isinstance(member, Condition):
+            raise TypeError(
+                f"{mode}_of takes Condition members only, not {type(member).__name__}: sets are"
+                " flat"
+            )
+    members = cast(tuple[Condition, ...], conditions)
+    if not 1 <= len(members) <= 64:
+        raise ValueError(f"{mode}_of takes 1 to 64 conditions, not {len(members)}")
+    if any(owner_of(member) is not owner_of(members[0]) for member in members):
+        raise ValueError(f"{mode}_of takes conditions of one machine")
+    return Conditions(mode, members)
+
+
+def any_of(*conditions: Condition) -> Conditions:
+    """Ready once at least one member holds.
+
+    Raises:
+        TypeError: A member is not a `Condition`, a `Conditions` included.
+        ValueError: No member, more than 64, or members of different machines.
+    """
+    return _combined("any", conditions)
+
+
+def all_of(*conditions: Condition) -> Conditions:
+    """Ready once every member holds at the same boundary. Same errors as `any_of`."""
+    return _combined("all", conditions)
 
 
 class MemoryRef[T: (int, float, bool)](Ref[T]):

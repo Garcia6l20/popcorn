@@ -88,10 +88,12 @@ template <typename T> auto compared(T left, T right, condition::op compare) noex
 
 auto holds_now(waiter& waiting, machine& target) -> bool
 {
-  auto const& members = waiting.spec.when->members;
-  auto const  any =
-      std::ranges::any_of(members, [&](auto const& c) { return condition_holds(c, target); });
-  if(any)
+  auto const& set     = *waiting.spec.when;
+  auto const& members = set.members;
+  auto const  tested  = [&](auto const& member) { return condition_holds(member, target); };
+  auto const  held = set.combine == condition_set::mode::all ? std::ranges::all_of(members, tested)
+                                                             : std::ranges::any_of(members, tested);
+  if(held)
   {
     waiting.members_fired = 0;
     for(auto const& [index, member] : std::views::enumerate(members))
@@ -102,7 +104,7 @@ auto holds_now(waiter& waiting, machine& target) -> bool
       }
     }
   }
-  return any;
+  return held;
 }
 
 struct command
