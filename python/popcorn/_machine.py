@@ -66,6 +66,7 @@ from popcorn._hooks import (
 )
 from popcorn._host import awaited, watch_logs
 from popcorn._image import Image, Location, Symbol, location_of
+from popcorn._image_view import ImageView, debug_infos, find_variable
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
@@ -1134,18 +1135,18 @@ class Machine:
         Raises:
             SymbolError: No loaded image declares the variable, with close matches.
         """
-        known: list[str] = []
-        for info in reversed(self._debug_infos()):
-            variable = info.variables.get(name)
-            if variable is not None:
-                return Var(self._memory, info, variable.type, variable.address, name)
-            known.extend(info.variables)
-        close = difflib.get_close_matches(name, known, n=5)
-        raise SymbolError(
-            f"no variable {name} in the loaded images, close matches: {', '.join(close)}",
-            name=name,
-            close_matches=close,
-        )
+        _, info, variable = find_variable(self._images, name)
+        return Var(self._memory, info, variable.type, variable.address, name)
+
+    @property
+    def image(self) -> ImageView:
+        """The loaded ELF files as the firmware starts from them: `m.image.var("gains")[2]`.
+
+        Reads the files, never the machine, so it is readable parked or running, from any
+        thread. Right for `const` data and initial values, wrong for anything the firmware
+        writes, see `ImageView`.
+        """
+        return ImageView(self._images)
 
     @property
     def types(self) -> dict[str, DebugType]:
@@ -1157,16 +1158,7 @@ class Machine:
         return merged
 
     def _debug_infos(self) -> list[DebugInfo]:
-        from popcorn.image.dwarf import DebugInfoError, load_debug_info
-
-        infos: list[DebugInfo] = []
-        for image in self._images:
-            if image.path is not None and image.path.suffix != ".hex" and image.segments:
-                try:
-                    infos.append(load_debug_info(image.path))
-                except DebugInfoError:
-                    continue
-        return infos
+        return [info for _, info in debug_infos(self._images)]
 
     @property
     def arena(self) -> Arena:

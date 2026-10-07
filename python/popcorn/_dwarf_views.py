@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
-
-from popcorn._views import Memory
+from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from popcorn.image.dwarf import DebugInfo, DebugType, Member, TypeId
+
+
+class ByteSource(Protocol):
+    """Where a `Var` reads and writes its bytes: guest memory, or an ELF file's initial bytes."""
+
+    def read(self, address: int, size: int) -> bytes:
+        """`size` bytes from `address`."""
+        ...
+
+    def write(self, address: int, data: bytes) -> None:
+        """Write `data` at `address`."""
+        ...
+
+    def write_masked(self, address: int, mask: bytes, data: bytes) -> None:
+        """Write the bits of `data` that `mask` selects at `address`."""
+        ...
 
 
 def size_of(info: DebugInfo, type_id: TypeId) -> int:
@@ -38,7 +52,7 @@ class _Bits:
 
 
 class Var:
-    """A typed location in guest memory.
+    """A typed location in guest memory, or in an ELF file for `m.image.var`.
 
     A struct or union member is an attribute, or `member(name)` when a property of `Var` has
     its name, an array element an index, a pointer is followed with `deref()`. `value` reads
@@ -50,7 +64,7 @@ class Var:
 
     def __init__(
         self,
-        memory: Memory,
+        memory: ByteSource,
         info: DebugInfo,
         type_id: TypeId,
         address: int,

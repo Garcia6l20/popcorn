@@ -1,13 +1,21 @@
-"""DWARF-typed variables over guest memory."""
+"""DWARF-typed variables over guest memory, and over the ELF files through `m.image`."""
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
+import struct
+from collections.abc import Iterator
+from pathlib import Path
 
 import popcorn
 import pytest
 from popcorn import Var
-from popcorn.image.dwarf import BaseType, DebugInfo, Encoding, StructType
+from popcorn._image_view import _ElfBytes as ElfBytes  # pyright: ignore[reportPrivateUsage]
+from popcorn.image.dwarf import ArrayType, BaseType, DebugInfo, Encoding, StructType
+
+from .conftest import VIEWS_ELF, run_bounded
 
 
 def test_struct_array_member_equals_a_raw_read(views: popcorn.Machine) -> None:
@@ -114,3 +122,96 @@ def test_member_reaches_members_hidden_by_var_properties(views: popcorn.Machine)
     assert kind.name == "shadowed.kind.value"
     with pytest.raises(AttributeError, match="members: size, address, kind"):
         shadowed.member("value")
+
+
+HEX = Path(__file__).parents[2] / "native" / "image" / "data" / "image.hex"
+GAINS = struct.pack("<4H", 100, 250, 400, 1000)
+
+
+def leaves(var: Var) -> Iterator[Var]:
+    if var.fields:
+        for name in var.fields:
+            yield from leaves(var.member(name))
+    elif isinstance(var.type, ArrayType):
+        for index in range(len(var)):
+            yield from leaves(var[index])
+    else:
+        yield var
+
+
+def test_image_view_reads_a_flash_table_while_running(views: popcorn.Machine) -> None:
+    async def scenario() -> int | float | bool:
+        async with views.running():
+            with pytest.raises(popcorn.MachineRunning):
+                _ = views.var("gains")[2].value
+            return views.image.var("gains")[2].value
+
+    assert run_bounded(scenario()) == 400
+
+
+@pytest.mark.parametrize("name", ["table", "banner", "extras", "matrix", "gains", "shadowed"])
+def test_image_view_equals_the_machine_after_load(views: popcorn.Machine, name: str) -> None:
+    initial = list(leaves(views.image.var(name)))
+    loaded = list(leaves(views.var(name)))
+    assert [leaf.name for leaf in initial] == [leaf.name for leaf in loaded]
+    assert [leaf.value for leaf in initial] == [leaf.value for leaf in loaded]
+    assert len(initial) > 1
+
+
+def test_image_view_follows_pointers_inside_the_file(views: popcorn.Machine) -> None:
+    current = views.image.var("table").current.deref()
+    assert current.address == views.var("table").entries[3].address
+    assert current.source.value == 4
+
+
+def test_image_view_reads_initial_values_not_what_the_firmware_wrote(
+    views: popcorn.Machine,
+) -> None:
+    asyncio.run(views.run(budget=1_000))
+    assert views.var("counter").value != 0
+    assert views.image.var("counter").value == 0
+    views.var("table").count.value = 9
+    assert views.image.var("table").count.value == 5
+
+
+def test_image_view_writes_raise_and_leave_the_machine_alone(views: popcorn.Machine) -> None:
+    views.var("counter").value = 3
+    with pytest.raises(TypeError, match="read-only"):
+        views.image.var("counter").value = 1
+    with pytest.raises(TypeError, match="read-only"):
+        views.image.var("table").mode.value = 3
+    assert views.var("counter").value == 3
+    assert views.var("table").mode.value == 17
+
+
+def test_image_view_of_a_hex_image_has_no_variables(m33: popcorn.MachineDescription) -> None:
+    m = popcorn.Machine(m33, image=popcorn.Image.hex(HEX))
+    with pytest.raises(popcorn.SymbolError):
+        m.image.var("gains")
+    with pytest.raises(popcorn.SymbolError):
+        m.var("gains")
+
+
+def test_image_view_reads_the_file_now(m33: popcorn.MachineDescription, tmp_path: Path) -> None:
+    elf = tmp_path / "views.elf"
+    elf.write_bytes(VIEWS_ELF.read_bytes())
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(elf))
+    assert m.image.var("gains")[2].value == 400
+    data = elf.read_bytes()
+    assert data.count(GAINS) == 1
+    elf.write_bytes(data.replace(GAINS, struct.pack("<4H", 100, 250, 401, 1000)))
+    stat = elf.stat()
+    os.utime(elf, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert m.image.var("gains")[2].value == 401
+
+
+def test_image_view_raises_outside_loadable_segments(views: popcorn.Machine) -> None:
+    elf = ElfBytes(VIEWS_ELF)
+    end = views.var("counter").address + views.var("counter").size
+    assert elf.read(end - 4, 4) == bytes(4)
+    with pytest.raises(popcorn.ImageError, match="no loadable segment") as caught:
+        elf.read(end + 0x1_0000, 4)
+    assert caught.value.address == end + 0x1_0000
+    with pytest.raises(popcorn.ImageError, match="cross the edge") as caught:
+        elf.read(end - 2, 4)
+    assert caught.value.segment.isdigit()

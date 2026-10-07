@@ -491,6 +491,7 @@ def test_a_reached_wait_in_a_free_run_holds_no_gil(m33: popcorn.MachineDescripti
     m = popcorn.Machine(m33, image=popcorn.Image.elf(VIEWS_ELF))
     m.reset()
     assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
+    assert asyncio.run(m.run(budget=1_000)).reason is popcorn.StopReason.BUDGET
     loop = m.pc
 
     async def scenario() -> popcorn.Stop:

@@ -73,7 +73,9 @@ int32_t matrix[2][3] = {
     {1, 2, 3},
     {4, 5, 6}
 };
-uint32_t counter;
+volatile uint32_t counter;
+
+static const uint16_t gains[4] = {100, 250, 400, 1000};
 
 struct wide
 {
@@ -121,7 +123,8 @@ struct shadowed shadowed = {.size = 7, .address = 0x1234, .kind = {.value = ROUT
   __asm__ volatile("bkpt #0" ::: "memory");
   for(;;)
   {
-    counter = counter + (uint32_t)banner[0];
+    uint32_t const now = counter;
+    counter            = now + (uint32_t)banner[0] + gains[now & 3U];
   }
 }
 

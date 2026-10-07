@@ -42,6 +42,7 @@ from popcorn._hooks import (
     WatchKind,
 )
 from popcorn._image import Image, Location, Segment, Symbol
+from popcorn._image_view import ImageView
 from popcorn._machine import Call, Event, Machine, Reached
 from popcorn._observe import MachineCoverage, Ring, TraceRecording
 from popcorn._project import (
@@ -94,6 +95,7 @@ __all__ = [
     "Image",
     "ImageError",
     "ImageFile",
+    "ImageView",
     "Initiator",
     "Intercept",
     "Location",
