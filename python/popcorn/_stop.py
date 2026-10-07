@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from popcorn import _core
 from popcorn._enums import FaultKind, StopReason
 from popcorn._image import Location, location_of
 from popcorn.units import VirtualTime
+
+if TYPE_CHECKING:
+    from popcorn._refs import Condition
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +49,10 @@ class Stop:
             and the primask, basepri, faultmask and control the core has, read-only. None for
             any other stop, whose registers are the machine's own. Not part of the hash or the
             repr.
+        fired: The conditions of a `wait_for` on a `Condition` that held at the boundary that
+            ended it. Empty for any other wait, for a TIME stop, and for a USER stop that did
+            not come from the conditions, such as a handler's `stop()`. Not part of the hash,
+            the equality or the repr.
     """
 
     reason: StopReason
@@ -55,6 +63,7 @@ class Stop:
     fault: Fault | None = None
     detail: str = ""
     registers: Mapping[str, int] | None = field(default=None, hash=False, repr=False)
+    fired: tuple[Condition, ...] = field(default=(), hash=False, compare=False, repr=False)
 
     def __str__(self) -> str:
         text = f"{self.reason.name} at {self.location}"

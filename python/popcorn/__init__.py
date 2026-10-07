@@ -57,7 +57,7 @@ from popcorn._project import (
     Project,
     Use,
 )
-from popcorn._refs import Readout
+from popcorn._refs import Condition, MemoryRef, Readout
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
 from popcorn._views import (
@@ -79,6 +79,7 @@ __all__ = [
     "BudgetExceeded",
     "Call",
     "CallResult",
+    "Condition",
     "ConfigError",
     "Device",
     "Elf",
@@ -103,6 +104,7 @@ __all__ = [
     "MachineRunning",
     "Memory",
     "MemoryInit",
+    "MemoryRef",
     "ModelError",
     "Param",
     "Periph",

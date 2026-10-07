@@ -5,6 +5,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cerrno>
 #include <deque>
 #include <format>
@@ -26,6 +28,7 @@ struct waiter
   std::atomic<bool>        dropped{false};
   bool                     checked = false;
   bool                     fired   = false;
+  std::uint64_t            members_fired{};
   std::optional<vtime>     since{};
   std::uint64_t            since_slice{};
   std::exception_ptr       error{};
@@ -62,6 +65,45 @@ struct waiter
     return promise;
   }
 };
+
+template <typename T> auto compared(T left, T right, condition::op compare) noexcept -> bool
+{
+  switch(compare)
+  {
+    case condition::op::eq:
+      return left == right;
+    case condition::op::ne:
+      return left != right;
+    case condition::op::lt:
+      return left < right;
+    case condition::op::le:
+      return left <= right;
+    case condition::op::gt:
+      return left > right;
+    case condition::op::ge:
+      return left >= right;
+  }
+  return false;
+}
+
+auto holds_now(waiter& waiting, machine& target) -> bool
+{
+  auto const& members = waiting.spec.when->members;
+  auto const  any =
+      std::ranges::any_of(members, [&](auto const& c) { return condition_holds(c, target); });
+  if(any)
+  {
+    waiting.members_fired = 0;
+    for(auto const& [index, member] : std::views::enumerate(members))
+    {
+      if(condition_holds(member, target))
+      {
+        waiting.members_fired |= std::uint64_t{1} << index;
+      }
+    }
+  }
+  return any;
+}
 
 struct command
 {
@@ -847,6 +889,7 @@ struct host_core
       fail_goal(slot, done, std::current_exception());
       return;
     }
+    request.stop_when = {};
     after_slice(slot, request, result);
     try
     {
@@ -907,6 +950,7 @@ struct host_core
         .max_instructions = bounds.max_instructions,
         .wall_budget      = bounds.wall_budget,
     };
+    auto conditions = std::make_shared<waiter_list>();
     for(auto const& waiting : waiters)
     {
       if(waiting->spec.deadline)
@@ -914,8 +958,27 @@ struct host_core
         request.until_time =
             std::min(request.until_time.value_or(*waiting->spec.deadline), *waiting->spec.deadline);
       }
+      if(waiting->spec.when and waiting->checked)
+      {
+        conditions->push_back(waiting);
+      }
     }
     add_stamp(request, next_stamp(slot));
+    if(not conditions->empty())
+    {
+      request.stop_when = [conditions, engine = slot.engine.get()] {
+        auto any = false;
+        for(auto const& waiting : *conditions)
+        {
+          if(not waiting->fired and not waiting->dropped.load(std::memory_order_relaxed))
+          {
+            waiting->fired = holds_now(*waiting, *engine);
+          }
+          any = any or waiting->fired;
+        }
+        return any;
+      };
+    }
     slice_result result;
     try
     {
@@ -940,8 +1003,13 @@ struct host_core
       end_free_run(slot, held_end{std::current_exception()}, done);
       return;
     }
-    auto const reason  = result.stopped ? std::optional{result.stopped->reason} : std::nullopt;
-    auto const goes_on = not reason or reason == stop_reason::time or reason == stop_reason::idle;
+    auto const reason = result.stopped ? std::optional{result.stopped->reason} : std::nullopt;
+    auto const fired =
+        std::ranges::any_of(*conditions, [](auto const& waiting) { return waiting->fired; });
+    auto const goes_on = not reason
+                      or reason == stop_reason::time
+                      or reason == stop_reason::idle
+                      or (reason == stop_reason::user and fired);
     if(not goes_on)
     {
       settle(resolved);
@@ -960,11 +1028,17 @@ struct host_core
       for(auto const& waiting : current)
       {
         waiting->register_at(now, slice + 1);
-        waiting->checked = true;
-        if(not waiting->fired
-           and waiting->spec.ready
-           and waiting->since_slice <= slice
-           and (now > *waiting->since or reason == stop_reason::idle))
+        waiting->checked   = true;
+        auto const expired = waiting->spec.deadline and now >= *waiting->spec.deadline;
+        if(not waiting->fired and waiting->spec.when and not expired)
+        {
+          waiting->fired = holds_now(*waiting, *slot.engine);
+        }
+        else if(
+            not waiting->fired
+            and waiting->spec.ready
+            and waiting->since_slice <= slice
+            and (now > *waiting->since or reason == stop_reason::idle))
         {
           try
           {
@@ -978,9 +1052,11 @@ struct host_core
         }
         if(waiting->fired)
         {
-          resolved.emplace_back(waiting, stop_here(*slot.engine, stop_reason::user));
+          resolved.emplace_back(
+              waiting, reason == stop_reason::user ? *result.stopped
+                                                   : stop_here(*slot.engine, stop_reason::user));
         }
-        else if(waiting->spec.deadline and now >= *waiting->spec.deadline)
+        else if(expired)
         {
           resolved.emplace_back(
               waiting, reason == stop_reason::time ? *result.stopped
@@ -1060,6 +1136,10 @@ struct host_core
       later.push_back([waiters = std::exchange(parked.waiters, {}), end] {
         for(auto const& waiting : waiters)
         {
+          if(not waiting->promise.done())
+          {
+            waiting->members_fired = 0;
+          }
           complete_with(waiting->settling(), end);
         }
       });
@@ -1187,6 +1267,57 @@ waiter_handle::waiter_handle(std::shared_ptr<detail::waiter> waiter, host_future
 auto waiter_handle::future() const -> host_future<stop>
 {
   return future_;
+}
+
+auto waiter_handle::fired() const noexcept -> std::uint64_t
+{
+  return waiter_->members_fired;
+}
+
+auto condition_holds(condition const& tested, machine& target) -> bool
+{
+  std::array<std::byte, 8> bytes{};
+  if(not target.mem().read_block(tested.where, std::span{bytes}.first(tested.size)))
+  {
+    return false;
+  }
+  std::uint64_t word = 0;
+  for(auto const [index, byte] : std::views::enumerate(std::span{bytes}.first(tested.size)))
+  {
+    word |= std::uint64_t{std::to_integer<std::uint8_t>(byte)} << (8 * index);
+  }
+  word >>= tested.shift;
+  if(tested.bits < 64)
+  {
+    word &= (std::uint64_t{1} << tested.bits) - 1;
+  }
+  if(tested.masked)
+  {
+    return detail::compared(word & tested.mask, tested.value, tested.compare);
+  }
+  switch(tested.encoding)
+  {
+    case condition::kind::unsigned_int:
+      return detail::compared(word, tested.value, tested.compare);
+    case condition::kind::signed_int:
+    {
+      if(tested.bits < 64 and ((word >> (tested.bits - 1)) & 1) != 0)
+      {
+        word |= ~((std::uint64_t{1} << tested.bits) - 1);
+      }
+      return detail::compared(
+          std::bit_cast<std::int64_t>(word), std::bit_cast<std::int64_t>(tested.value),
+          tested.compare);
+    }
+    case condition::kind::floating:
+    {
+      auto const real = tested.size == 4
+                          ? double{std::bit_cast<float>(static_cast<std::uint32_t>(word))}
+                          : std::bit_cast<double>(word);
+      return detail::compared(real, tested.real, tested.compare);
+    }
+  }
+  return false;
 }
 
 void waiter_handle::drop() noexcept
@@ -1467,14 +1598,15 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
   waiting->spec  = std::move(spec);
   waiting->owner = core_;
   auto future    = waiting->promise.future();
+  auto handle    = waiting;
   if(slot.held)
   {
     detail::complete_with(waiting->settling(), *slot.held);
   }
   else
   {
-    auto const ends_slice = waiting->spec.after or waiting->spec.deadline;
-    slot.waiters.push_back(waiting);
+    auto const ends_slice = waiting->spec.when or waiting->spec.after or waiting->spec.deadline;
+    slot.waiters.push_back(std::move(waiting));
     if(ends_slice)
     {
       core_->notify_locked(slot);
@@ -1484,7 +1616,7 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
       core_->wake_locked(slot);
     }
   }
-  return waiter_handle{std::move(waiting), std::move(future)};
+  return waiter_handle{std::move(handle), std::move(future)};
 }
 
 void host::cancel(member_id who)

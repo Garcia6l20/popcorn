@@ -547,7 +547,7 @@ import threading
 
 import popcorn
 
-KIND, SURFACED, NATIVE = __CASE__
+KIND, SURFACED, NATIVE, CONDITION = __CASE__
 if NATIVE:
     del popcorn.Machine.__del__
 reported = []
@@ -569,10 +569,12 @@ def handler(call):
 m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
 m.reset()
 m.intercept("alu_mark", handler)
+event = m.ref.mem.u32[0x2000_8000].eq(0xDEADBEEF) if CONDITION else Never()
 m.start()
 if SURFACED:
     try:
-        assert asyncio.run(m.wait_for(Never())).reason is popcorn.StopReason.USER
+        stop = asyncio.run(m.wait_for(event))
+        assert stop.reason is popcorn.StopReason.USER and stop.fired == (), stop
     except ValueError:
         assert KIND == "raise"
 else:
@@ -599,7 +601,22 @@ def test_a_collected_machine_reports_only_an_end_no_wait_delivered(
     kind: str, surfaced: bool, native: bool
 ) -> None:
     script = (
-        SELF_ENDED.replace("__CASE__", repr((kind, surfaced, native)))
+        SELF_ENDED.replace("__CASE__", repr((kind, surfaced, native, False)))
+        .replace("__JSON__", repr(str(M33_JSON)))
+        .replace("__ELF__", repr(str(DRIVER_ELF)))
+    )
+    child = run_child(script, timeout=CHILD_TIMEOUT)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "ok"
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["del", "destructor"])
+@pytest.mark.parametrize("kind", ["stop", "raise"])
+def test_a_collected_machine_reports_no_end_a_condition_wait_delivered(
+    kind: str, native: bool
+) -> None:
+    script = (
+        SELF_ENDED.replace("__CASE__", repr((kind, True, native, True)))
         .replace("__JSON__", repr(str(M33_JSON)))
         .replace("__ELF__", repr(str(DRIVER_ELF)))
     )

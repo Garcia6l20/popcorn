@@ -799,6 +799,12 @@ auto machine::run_state::stop_from(arch::trap_result const& result) const -> sli
 auto machine::run_state::finish(slice_request const& request, slice_end end) -> slice_result
 {
   flush_sinks();
+  if(not end.stopped
+     and request.until_time
+     and owner.clock_driver_.exact_time() >= *request.until_time)
+  {
+    end.stopped = make_stop(stop_reason::time, {}, std::nullopt);
+  }
   if(not end.stopped and request.stop_when and asks_stop(request))
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);

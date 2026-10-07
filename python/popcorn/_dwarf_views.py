@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from popcorn._views import Memory
 
@@ -265,3 +265,45 @@ class Var:
 
     def __repr__(self) -> str:
         return f"<Var {self._name} @ {self.address:#010x}>"
+
+
+@dataclass(frozen=True, slots=True)
+class ScalarLayout:
+    """Where a scalar lies in memory: `size` bytes read little-endian at `address`, shifted right
+    by `shift`, kept to `bits` bits."""
+
+    address: int
+    size: int
+    shift: int
+    bits: int
+    kind: Literal["unsigned", "signed", "float", "bool"]
+
+
+def scalar_layout(var: Var) -> ScalarLayout:
+    """The layout of the scalar `var`, a bit field included.
+
+    Raises:
+        TypeError: `var` is not a scalar.
+    """
+    from popcorn.image.dwarf import BaseType, Encoding
+
+    fmt, size = var._scalar()  # pyright: ignore[reportPrivateUsage]
+    bits = var._bits  # pyright: ignore[reportPrivateUsage]
+    signed = var._signed()  # pyright: ignore[reportPrivateUsage]
+    if bits is not None:
+        return ScalarLayout(
+            var.address,
+            (bits.offset + bits.size + 7) // 8,
+            bits.offset,
+            bits.size,
+            "signed" if signed else "unsigned",
+        )
+    resolved = var.type
+    kind: Literal["unsigned", "signed", "float", "bool"]
+    if fmt in ("<f", "<d"):
+        kind = "float"
+    elif isinstance(resolved, BaseType) and resolved.encoding is Encoding.BOOLEAN:
+        kind = "bool"
+    else:
+        kind = "signed" if signed else "unsigned"
+    return ScalarLayout(var.address, size, 0, 8 * size, kind)

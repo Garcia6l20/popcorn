@@ -324,6 +324,35 @@ public:
       wait(std::optional<reflex::py::nb::object> ready, std::optional<std::uint64_t> for_ps)
           -> host_future_handle;
 
+  /**
+   * @brief Waits on the free run for native conditions, evaluated with no GIL after every
+   *        dispatched event and at slice ends.
+   * @param when Conditions, each on plain memory, at most 64.
+   * @param for_ps Picoseconds of virtual time after the boundary that registers the wait, which
+   *        posting creates at the next block boundary, at which it ends with reason time, None
+   *        for no deadline.
+   * @return Resolves to a tuple of the StopInfo of the boundary that ended the wait and the
+   *         mask of the members that held there, bit i for member i, or to the free run's own
+   *         end.
+   * @throws std::invalid_argument for no member or more than 64.
+   * @throws std::runtime_error without an open free run.
+   */
+  [[= py::doc{
+      "Wait on the free run for conditions, return a HostFuture of (StopInfo, mask)."}]] auto
+      wait_when(core::condition_set when, std::optional<std::uint64_t> for_ps)
+          -> host_future_handle;
+
+  /**
+   * @brief Whether an access lies inside one mapped memory region, not a peripheral window.
+   *        Regions are fixed at construction, so it never locks.
+   * @param addr First byte.
+   * @param size Access size in bytes, 1 to 8.
+   * @return True for plain memory.
+   * @throws std::invalid_argument for a size outside 1 to 8.
+   */
+  [[= py::doc{"Whether [addr, addr + size) is plain memory, not a peripheral or unmapped."}]]
+      [[nodiscard]] auto is_plain_memory(address addr, std::uint8_t size) const -> bool;
+
   /** @brief Whether a goal is active or a free run is open, even one that ended by itself.
    * True on the machine thread, false inside a parked section of this machine. */
   [[= py::doc{"Whether a goal is active or a free run is open, until halt()."}]] [[nodiscard]] auto
@@ -762,6 +791,9 @@ public:
   [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
 
 private:
+  auto waiting_on(core::waiter_spec spec, std::optional<std::uint64_t> for_ps, bool masked)
+      -> host_future_handle;
+
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;

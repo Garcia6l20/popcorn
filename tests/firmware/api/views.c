@@ -75,6 +75,25 @@ int32_t matrix[2][3] = {
 };
 uint32_t counter;
 
+struct wide
+{
+  uint32_t low : 6;
+  uint32_t mid : 12;
+  int32_t  high : 14;
+};
+
+struct wide wide = {.low = 9, .mid = 0xABC, .high = -5};
+
+struct [[gnu::packed]] odd
+{
+  uint8_t  pad : 4;
+  uint64_t big : 62;
+};
+
+struct odd odd = {.pad = 1, .big = 7};
+
+bool armed = true;
+
 [[noreturn]] void Reset_Handler(void)
 {
   for(uint32_t *from = _sidata, *to = _sdata; to < _edata;)

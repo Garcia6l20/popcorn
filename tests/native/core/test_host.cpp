@@ -75,6 +75,7 @@ public:
 
   static constexpr std::uint32_t tick_event = 9;
   static constexpr std::uint64_t period     = 1'000;
+  static constexpr address       counter_at = 0x2001'0000;
 
   std::uint64_t ticks = 0;
 
@@ -88,6 +89,8 @@ public:
     if(kind == tick_event)
     {
       ++ticks;
+      std::ignore = attached_services().write(
+          counter_at, 4, static_cast<std::uint32_t>(ticks), popcorn::initiator::debugger);
       std::ignore =
           attached_events().schedule(icount{attached_clock().now().value + period}, tick_event, 0);
       return;
@@ -961,6 +964,232 @@ TEST_CASE("a free run calls a waiter's predicate once per slice, not per event")
   CHECK_FALSE(h.on->halt(0).has_value());
   CHECK(arch->ticks >= 900);
   CHECK(calls <= 12);
+}
+
+auto ticking() -> std::pair<std::unique_ptr<core::machine>, ticking_arch*>
+{
+  popcorn::testing::machine_fixture<ticking_arch> f{m33(), "alu", core::machine_options{}};
+  f.set("r0", 0);
+  f.module->arm();
+  auto* const arch = f.module;
+  return {std::move(f.target), arch};
+}
+
+auto counter_at_least(std::uint32_t count) -> core::condition
+{
+  return {
+      .where    = ticking_arch::counter_at,
+      .size     = 4,
+      .bits     = 32,
+      .encoding = core::condition::kind::unsigned_int,
+      .compare  = core::condition::op::ge,
+      .value    = count,
+  };
+}
+
+constexpr core::slice_bounds huge_slices{
+    .max_instructions = icount{1'000'000'000},
+    .wall_budget      = long_wall,
+};
+
+auto start_waiting(hosted const& h, std::vector<core::waiter_spec> specs)
+    -> std::vector<core::waiter_handle>
+{
+  auto held = h.on->lock();
+  h.on->start(held, 0);
+  std::vector<core::waiter_handle> handles;
+  for(auto& spec : specs)
+  {
+    handles.push_back(h.on->wait(held, 0, std::move(spec)));
+  }
+  return handles;
+}
+
+TEST_CASE("a condition waiter fires at the event a parked goal stops at, with mask bit 0")
+{
+  auto [reference, unused] = ticking();
+  auto* const parked       = reference.get();
+  hosted      quiet{std::move(reference), huge_slices};
+  auto const  expected =
+      quiet
+          .run(
+              {.stop_when =
+                   [parked] { return core::condition_holds(counter_at_least(50), *parked); }})
+          .get();
+  REQUIRE(expected.stopped.reason == stop_reason::user);
+
+  auto [member, arch] = ticking();
+  hosted     h{std::move(member), huge_slices};
+  auto const handles = start_waiting(
+      h,
+      {
+          {
+           .deadline = at_instruction(10'000'000),
+           .when = core::condition_set{.members = {counter_at_least(50), counter_at_least(60)}},
+           }
+  });
+  auto const& waiting = handles.front();
+  auto const  got     = waiting.future().get();
+  CHECK(got.reason == stop_reason::user);
+  CHECK(got.instructions == expected.stopped.instructions);
+  CHECK(got.where.pc == expected.stopped.where.pc);
+  CHECK(waiting.fired() == 1);
+  CHECK_FALSE(h.on->halt(0).has_value());
+  CHECK(arch->ticks >= 50);
+}
+
+TEST_CASE("a condition already true fires at the boundary its posting ends the slice at")
+{
+  auto [member, arch] = ticking();
+  hosted h{std::move(member), huge_slices};
+  h.start();
+  auto const waiting = h.wait({
+      .deadline = at_instruction(500'000'000),
+      .when     = core::condition_set{.members = {counter_at_least(0)}},
+  });
+  auto const got     = waiting.future().get();
+  CHECK(got.reason == stop_reason::user);
+  CHECK(got.instructions.value < 100'000'000);
+  CHECK(waiting.fired() == 1);
+  CHECK_FALSE(h.on->halt(0).has_value());
+  CHECK(arch->ticks < 100'000);
+}
+
+auto flag_from(core::machine* target, vtime from) -> core::host_hooks
+{
+  return {.boundary = [target, from](core::member_id) {
+    if(target->virtual_clock().time() >= from)
+    {
+      std::ignore = target->mem().write(ticking_arch::counter_at, 4, 1);
+    }
+  }};
+}
+
+TEST_CASE("a condition made true at its deadline's boundary ends with time, as a parked goal")
+{
+  auto const deadline  = at_instruction(200'000);
+  auto       reference = alu(1'000'000);
+  auto*      parked    = reference.get();
+  hosted     quiet{std::move(reference), huge_slices, flag_from(parked, deadline)};
+  auto const expected =
+      quiet
+          .run({
+              .until_time = deadline,
+              .stop_when = [parked] { return core::condition_holds(counter_at_least(1), *parked); },
+          })
+          .get();
+  REQUIRE(expected.stopped.reason == stop_reason::time);
+
+  auto       member  = alu(1'000'000);
+  auto*      running = member.get();
+  hosted     h{std::move(member), huge_slices, flag_from(running, deadline)};
+  auto const handles = start_waiting(
+      h,
+      {
+          {.deadline = deadline, .when = core::condition_set{.members = {counter_at_least(1)}}}
+  });
+  auto const& waiting = handles.front();
+  auto const  got     = waiting.future().get();
+  CHECK(got.reason == stop_reason::time);
+  CHECK(got.time == expected.stopped.time);
+  CHECK(waiting.fired() == 0);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("a free run ended after the boundary where a condition held reports no member fired")
+{
+  auto [member, arch] = ticking();
+  auto* const target  = member.get();
+  hosted      h{std::move(member), huge_slices, {.boundary = [target](core::member_id) {
+             if(core::condition_holds(counter_at_least(5), *target))
+             {
+               throw test_failure{"after the slice"};
+             }
+                }}};
+  auto const  handles = start_waiting(
+      h, {
+             {
+              .deadline = at_instruction(10'000'000),
+              .when     = core::condition_set{.members = {counter_at_least(5)}},
+              }
+  });
+  auto const& waiting = handles.front();
+  CHECK_THROWS_AS(waiting.future().get(), test_failure);
+  CHECK(waiting.fired() == 0);
+  auto const end = h.on->halt(0);
+  REQUIRE(end.has_value());
+  require_error(std::get<std::exception_ptr>(*end), [] { CHECK_THROWS_AS(throw, test_failure); });
+}
+
+struct storing
+{
+  std::unique_ptr<core::machine> target;
+  core::watch_handle             watch;
+};
+
+auto storing_until_mail(std::uint32_t mail_at) -> storing
+{
+  popcorn::testing::machine_fixture<> f{m33(), "alu", core::machine_options{}};
+  f.set("pc", sym("alu", "store_entry"));
+  f.set("r0", 1'000'000);
+  f.set("r2", ticking_arch::counter_at);
+  auto* const target = f.target.get();
+  auto        watch  = target->add_watch(
+      ticking_arch::counter_at, 4, core::watch_kind::write,
+      [target, mail_at](core::watch_hit const& hit) {
+        if(hit.value == mail_at)
+        {
+          target->interrupt();
+        }
+        return core::watch_action::resume;
+      });
+  return {std::move(f.target), std::move(watch)};
+}
+
+TEST_CASE("mail landing in a slice's last block before its deadline ends it with time")
+{
+  constexpr std::uint32_t mailed    = 1'000;
+  auto const              deadline  = at_instruction(2 + 5 * mailed);
+  auto                    parked    = storing_until_mail(mailed);
+  auto* const             reference = parked.target.get();
+  hosted                  quiet{std::move(parked.target), huge_slices};
+  auto const              expected =
+      quiet
+          .run({
+              .until_time = deadline,
+              .stop_when =
+                  [reference] {
+                    return core::condition_holds(counter_at_least(mailed), *reference);
+                  },
+          })
+          .get();
+  CHECK(expected.stopped.reason == stop_reason::time);
+
+  auto       running = storing_until_mail(mailed);
+  hosted     h{std::move(running.target), huge_slices};
+  auto const handles = start_waiting(
+      h, {
+             {.deadline = deadline,
+              .when     = core::condition_set{.members = {counter_at_least(mailed)}}}
+  });
+  auto const& waiting = handles.front();
+  auto const  got     = waiting.future().get();
+  CHECK(got.reason == stop_reason::time);
+  CHECK(got.time == expected.stopped.time);
+  CHECK(waiting.fired() == 0);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("plain memory is one mapped region, a condition elsewhere never holds")
+{
+  popcorn::testing::machine_fixture<> f{m33(), "alu", core::machine_options{}};
+  auto                                tested = counter_at_least(0);
+  tested.where                               = 0x6000'0000;
+  CHECK_FALSE(core::condition_holds(tested, *f.target));
+  CHECK_FALSE(f.target->mem().is_plain_memory(0x6000'0000, 4));
+  CHECK_FALSE(f.target->mem().is_plain_memory(0x4001'0000, 4));
+  CHECK(f.target->mem().is_plain_memory(0x2000'0000, 8));
+  CHECK_FALSE(f.target->mem().is_plain_memory(0x200b'fffc, 8));
 }
 
 TEST_CASE("halt on a parked member returns at once and fails pending waiters")

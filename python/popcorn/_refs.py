@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import operator
 import struct
 from collections.abc import Callable, Coroutine, Generator
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, Literal, cast, override
 
 from popcorn import _core
 from popcorn._enums import PinMode
@@ -15,7 +16,7 @@ from popcorn._host import awaited
 from popcorn.units import VirtualTime
 
 if TYPE_CHECKING:
-    from popcorn._dwarf_views import Var
+    from popcorn._dwarf_views import ScalarLayout, Var
     from popcorn._streams import UartStream
     from popcorn._usb import UsbHost, UsbRequest, UsbState
     from popcorn._views import (
@@ -230,6 +231,244 @@ def _packs(fmt: str) -> Callable[[object], None]:
     return check
 
 
+type Comparison = Literal["eq", "ne", "lt", "le", "gt", "ge"]
+
+_COMPARE: dict[Comparison, Callable[[Any, Any], bool]] = {
+    "eq": operator.eq,
+    "ne": operator.ne,
+    "lt": operator.lt,
+    "le": operator.le,
+    "gt": operator.gt,
+    "ge": operator.ge,
+}
+
+
+class Condition:
+    """A comparison of one plain-memory scalar against a constant, built by `MemoryRef.eq` and
+    its siblings. `Machine.wait_for` takes it as an `Event`.
+
+    Inside a free run it is evaluated natively, no Python, after every dispatched event and at
+    slice ends: a wait on it ends at the first event boundary or slice end after the value
+    changed, the boundary a parked `run(stop_when=)` sees. Parked, `wait_for` runs its `ready`
+    as a `stop_when`.
+
+        link_up = m.ref.var("link").up
+        async with m.running():
+            stop = await m.wait_for(link_up.eq(True), for_=s(4))
+        assert stop.fired, stop
+    """
+
+    __slots__ = ("_label", "_native", "_ref", "_test")
+
+    def __init__(
+        self,
+        native: _core.MemoryCondition,
+        ref: MemoryRef[Any],
+        test: Callable[[Any], bool],
+        label: str,
+    ) -> None:
+        """A condition. Use the methods of `MemoryRef` instead."""
+        self._native = native
+        self._ref = ref
+        self._test = test
+        self._label = label
+
+    @property
+    def label(self) -> str:
+        """The reference's label and the comparison, as `repr` shows them. Read-only."""
+        return self._label
+
+    def ready(self, machine: object) -> bool:
+        """Evaluate it now through the reference's sync view: the parked path."""
+        return self._test(self._ref.get())
+
+    @override
+    def __repr__(self) -> str:
+        return f"Condition({self.label})"
+
+
+def native_of(condition: Condition) -> _core.MemoryCondition:
+    """The native form of `condition`."""
+    return condition._native  # pyright: ignore[reportPrivateUsage]
+
+
+def owner_of(condition: Condition) -> object:
+    """The machine handle whose memory `condition` reads."""
+    return condition._ref.owner  # pyright: ignore[reportPrivateUsage]
+
+
+class MemoryRef[T: (int, float, bool)](Ref[T]):
+    """A reference to a scalar in plain memory, RAM, flash or backup SRAM: `m.ref.mem.u32[a]`
+    and a scalar `m.ref.var(...)`. Builds conditions for `Machine.wait_for`.
+
+    Each comparison method raises when the condition cannot be evaluated natively:
+
+    Raises:
+        TypeError: The reference is not a scalar, spans more than 8 bytes, or the constant has
+            the wrong type. A bool takes `eq` and `ne` only.
+        ValueError: The scalar is not in plain memory: a peripheral window or an unmapped
+            address. Or the constant is out of the scalar's range. Or an int constant of a
+            float scalar is not exactly a double: both paths compare in double, so
+            `f64.lt(2**53 + 1)` is refused.
+    """
+
+    __slots__ = ("_locate", "_mask")
+
+    def __init__(
+        self,
+        owner: object,
+        label: str,
+        get: Callable[[], T],
+        put: Callable[[T], None] | None,
+        check: Callable[[object], None] | None,
+        locate: Callable[[], ScalarLayout],
+        mask: int | None = None,
+    ) -> None:
+        """A memory reference. Use the tree of `Machine.ref` instead."""
+        super().__init__(owner, label, get, put, check)
+        self._locate = locate
+        self._mask = mask
+
+    def eq(self, value: T) -> Condition:
+        """The scalar equals `value`."""
+        return self._condition("eq", value)
+
+    def ne(self, value: T) -> Condition:
+        """The scalar differs from `value`."""
+        return self._condition("ne", value)
+
+    def lt(self, value: T) -> Condition:
+        """The scalar is below `value`."""
+        return self._condition("lt", value)
+
+    def le(self, value: T) -> Condition:
+        """The scalar is at most `value`."""
+        return self._condition("le", value)
+
+    def gt(self, value: T) -> Condition:
+        """The scalar is above `value`."""
+        return self._condition("gt", value)
+
+    def ge(self, value: T) -> Condition:
+        """The scalar is at least `value`."""
+        return self._condition("ge", value)
+
+    def masked(self, mask: int) -> MemoryRef[int]:
+        """The integer scalar ANDed with `mask`, compared unsigned. A signed scalar is taken as
+        its two's complement bits: an `i8` holding -1 masked with 0xFF is 255. Read-only.
+
+        Raises:
+            TypeError: The scalar is not an integer, or `mask` is not an int.
+            ValueError: `mask` is negative or wider than the scalar.
+        """
+        if type(mask) is not int:
+            raise TypeError(f"a mask is an int, not {type(mask).__name__}")
+        layout = self._layout()
+        if layout.kind not in ("unsigned", "signed"):
+            raise TypeError(f"{self.label} is not an integer, it takes no mask")
+        if mask < 0 or mask >> layout.bits:
+            raise ValueError(f"mask {mask:#x} does not fit the {layout.bits}-bit {self.label}")
+        combined = mask if self._mask is None else self._mask & mask
+        get = self._get
+        return MemoryRef[int](
+            self.owner,
+            f"{self.label}.masked({mask:#x})",
+            lambda: int(get()) & combined,
+            None,
+            None,
+            self._locate,
+            combined,
+        )
+
+    def _layout(self) -> ScalarLayout:
+        layout = self._locate()
+        if layout.size > 8:
+            raise TypeError(f"{self.label} spans {layout.size} bytes, a condition reads at most 8")
+        return layout
+
+    def _condition(self, compare: Comparison, value: object) -> Condition:
+        layout = self._layout()
+        handle = cast(_core.MachineHandle, self.owner)
+        if not handle.is_plain_memory(layout.address, layout.size):
+            raise ValueError(
+                f"{self.label} at {layout.address:#010x} is not plain memory: a condition reads"
+                " RAM, flash or backup SRAM, not a peripheral window or an unmapped address"
+            )
+        native = _core.MemoryCondition()
+        native.where = layout.address
+        native.size = layout.size
+        native.shift = layout.shift
+        native.bits = layout.bits
+        op = compare
+        if self._mask is not None:
+            self._integer(value, 0, (1 << layout.bits) - 1)
+            native.masked = True
+            native.mask = self._mask
+            native.encoding = _core.ConditionKind.unsigned_int
+            native.value = cast(int, value)
+        elif layout.kind == "bool":
+            if compare not in ("eq", "ne"):
+                raise TypeError(f"{self.label} is a bool, it takes eq and ne only")
+            if not isinstance(value, bool):
+                raise TypeError(f"{self.label} is a bool, compare it to a bool")
+            op = "ne" if (compare == "eq") == value else "eq"
+            native.encoding = _core.ConditionKind.unsigned_int
+        elif layout.kind == "float":
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                raise TypeError(f"{self.label} is a float, not {type(value).__name__}")
+            if isinstance(value, int) and not _exact_double(value):
+                raise ValueError(
+                    f"{_shortened(value)} is not exactly a double, {self.label} compares in double"
+                )
+            native.encoding = _core.ConditionKind.floating
+            native.real = float(value)
+        elif layout.kind == "signed":
+            half = 1 << (layout.bits - 1)
+            self._integer(value, -half, half - 1)
+            native.encoding = _core.ConditionKind.signed_int
+            native.value = cast(int, value) & ((1 << 64) - 1)
+        else:
+            self._integer(value, 0, (1 << layout.bits) - 1)
+            native.encoding = _core.ConditionKind.unsigned_int
+            native.value = cast(int, value)
+        native.compare = getattr(_core.ConditionOp, op)
+        test = _COMPARE[compare]
+        return Condition(
+            native, self, lambda current: test(current, value), f"{self.label}.{compare}({value!r})"
+        )
+
+    def _integer(self, value: object, low: int, high: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{self.label} is an integer, not {type(value).__name__}")
+        if not low <= value <= high:
+            raise ValueError(f"{value} is outside {self.label}, {low} to {high}")
+
+
+def _shortened(value: int) -> str:
+    text = str(value)
+    if len(text) <= 24:
+        return text
+    return f"{text[:6]}...{text[-3:]} ({len(text.lstrip('-'))} digits)"
+
+
+def _exact_double(value: int) -> bool:
+    try:
+        return float(value) == value
+    except OverflowError:
+        return False
+
+
+def _memory_layout(address: int, fmt: str) -> ScalarLayout:
+    from popcorn._dwarf_views import ScalarLayout
+
+    code = _FORMATS[fmt]
+    size = struct.calcsize(code)
+    kind: Literal["unsigned", "signed", "float"] = (
+        "float" if code in "fd" else "signed" if code.islower() else "unsigned"
+    )
+    return ScalarLayout(address, size, 0, 8 * size, kind)
+
+
 class ScalarRefs[T: (int, float)]:
     """References to little-endian scalars of one type, `m.ref.mem.u32[addr]`."""
 
@@ -241,18 +480,20 @@ class ScalarRefs[T: (int, float)]:
         self._view = view
         self._fmt = fmt
 
-    def __getitem__(self, address: int) -> Ref[T]:
+    def __getitem__(self, address: int) -> MemoryRef[T]:
         view = self._view
+        fmt = self._fmt
 
         def put(value: T) -> None:
             view[address] = value
 
-        return Ref(
+        return MemoryRef(
             self._owner,
-            f"mem.{self._fmt}[{address:#010x}]",
+            f"mem.{fmt}[{address:#010x}]",
             lambda: view[address],
             put,
-            _packs("<" + _FORMATS[self._fmt]),
+            _packs("<" + _FORMATS[fmt]),
+            lambda: _memory_layout(address, fmt),
         )
 
 
@@ -632,7 +873,7 @@ class PeripheralRefs:
         return self.__getattr__(name)
 
 
-class VarRef[T: (int, float, bool)](Ref[Any]):
+class VarRef[T: (int, float, bool)](MemoryRef[Any]):
     """A variable, `m.ref.var("counter")`: its value as `Var.value`, a member by name and an
     element by index."""
 
@@ -648,7 +889,12 @@ class VarRef[T: (int, float, bool)](Ref[Any]):
             if not isinstance(value, int | float):
                 raise TypeError(f"{var.name} takes a number, not {type(value).__name__}")
 
-        super().__init__(owner, f"var({var.name})", lambda: var.value, put, check)
+        def locate() -> ScalarLayout:
+            from popcorn._dwarf_views import scalar_layout
+
+            return scalar_layout(var)
+
+        super().__init__(owner, f"var({var.name})", lambda: var.value, put, check, locate)
         self._var = var
 
     def __getattr__(self, name: str) -> VarRef[Any]:

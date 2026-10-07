@@ -58,6 +58,10 @@ REFLEX_PY_MODULE(_core, m)
   m.bind_enum<popcorn::core::watch_action>("WatchAction");
   m.bind<popcorn::core::intercept_result>("InterceptResult");
   m.bind<popcorn::core::watch_hit>("WatchHit");
+  m.bind_enum<popcorn::core::condition::kind>("ConditionKind");
+  m.bind_enum<popcorn::core::condition::op>("ConditionOp");
+  m.bind<popcorn::core::condition>("MemoryCondition");
+  m.bind<popcorn::core::condition_set>("ConditionSet");
   m.bind_enum<popcorn::periph::stm32::pin_mode>("PinMode");
   m.bind_enum<popcorn::periph::usb::device_state>("UsbDeviceState");
   m.bind_enum<popcorn::periph::usb::transfer_status>("UsbTransferStatus");

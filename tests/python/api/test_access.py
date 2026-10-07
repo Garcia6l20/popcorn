@@ -254,3 +254,46 @@ def test_a_cancelled_call_leaves_no_call_in_progress(callee: popcorn.Machine) ->
 
     asyncio.run(scenario())
     assert not callee._handle.in_call()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_condition_evaluates_parked_as_its_sync_view(machines: Machines) -> None:
+    m = machines()
+    condition = m.ref.mem.u32[SRAM].eq(5)
+    masked = m.ref.mem.u32[SRAM].masked(0xF0).ge(0x50)
+    m.mem.u32[SRAM] = 5
+    assert condition.ready(m) is True
+    assert masked.ready(m) is False
+    m.mem.u32[SRAM] = 0x56
+    assert condition.ready(m) is False
+    assert masked.ready(m) is True
+    assert condition.label == "mem.u32[0x20008000].eq(5)"
+    with pytest.raises(AttributeError):
+        condition.label = "renamed"  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_a_condition_is_refused_where_it_cannot_run_natively(
+    machines: Machines, views: popcorn.Machine
+) -> None:
+    m = machines()
+    with pytest.raises(ValueError, match="0x40010000 is not plain memory"):
+        m.ref.mem.u32[0x4001_0000].eq(0)
+    with pytest.raises(ValueError, match=f"{UNMAPPED:#010x} is not plain memory"):
+        m.ref.mem.u32[UNMAPPED].eq(0)
+    with pytest.raises(ValueError, match="-1 is outside"):
+        m.ref.mem.u8[SRAM].gt(-1)
+    with pytest.raises(ValueError, match="256 is outside"):
+        m.ref.mem.u8[SRAM].eq(256)
+    with pytest.raises(TypeError, match="is an integer"):
+        m.ref.mem.u8[SRAM].eq(1.5)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match="takes no mask"):
+        m.ref.mem.f32[SRAM].masked(1)
+    with pytest.raises(ValueError, match="does not fit"):
+        m.ref.mem.u8[SRAM].masked(0x100)
+    with pytest.raises(AttributeError):
+        m.ref.reg.r0.eq(0)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    with pytest.raises(TypeError, match="spans 9 bytes"):
+        views.ref.var("odd").big.eq(7)
+    with pytest.raises(TypeError, match="eq and ne only"):
+        views.ref.var("armed").lt(True)
+    with pytest.raises(TypeError, match="not a scalar"):
+        views.ref.var("table").eq(0)

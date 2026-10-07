@@ -248,14 +248,30 @@ void machine_handle::mark_collected() noexcept
 auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::uint64_t> for_ps)
     -> host_future_handle
 {
-  core::waiter_spec spec{.ready = predicate_of(std::move(ready))};
+  return waiting_on({.ready = predicate_of(std::move(ready))}, for_ps, false);
+}
+
+auto machine_handle::wait_when(core::condition_set when, std::optional<std::uint64_t> for_ps)
+    -> host_future_handle
+{
+  if(when.members.empty() or when.members.size() > 64)
+  {
+    throw std::invalid_argument("a wait takes 1 to 64 conditions");
+  }
+  return waiting_on({.when = std::move(when)}, for_ps, true);
+}
+
+auto machine_handle::waiting_on(
+    core::waiter_spec            spec,
+    std::optional<std::uint64_t> for_ps,
+    bool                         masked) -> host_future_handle
+{
   if(for_ps)
   {
     spec.after = vtime{*for_ps};
   }
   refuse_inside(*host_);
-  auto const predicate = spec.ready;
-  auto const held      = lock_releasing();
+  auto const held = lock_releasing();
   if(not host_->session_open(held, core::member_id{}))
   {
     throw std::runtime_error("wait() needs a free run opened by start()");
@@ -265,14 +281,27 @@ auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::ui
   auto const made    = delivered_->generation();
   return host_future_handle{std::make_shared<detail::future_request<stop>>(
       std::move(future),
-      [delivered = delivered_, made](stop const& stopped) {
+      [delivered = delivered_, made, masked, waiting](stop const& stopped) {
         delivered->returned(made, stopped);
+        if(masked)
+        {
+          return nb::object{nb::make_tuple(record(stopped), waiting.fired())};
+        }
         return nb::cast(record(stopped));
       },
-      [waiting = std::move(waiting)] mutable { waiting.drop(); },
+      [waiting] mutable { waiting.drop(); },
       [delivered = delivered_, made](std::exception_ptr const& error) {
         delivered->raised(made, error);
       })};
+}
+
+auto machine_handle::is_plain_memory(address addr, std::uint8_t size) const -> bool
+{
+  if(size < 1 or size > 8)
+  {
+    throw std::invalid_argument("an access of 1 to 8 bytes");
+  }
+  return engine_->mem().is_plain_memory(addr, size);
 }
 
 auto machine_handle::busy() const -> bool

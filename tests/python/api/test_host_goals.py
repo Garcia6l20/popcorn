@@ -4,9 +4,11 @@ waits on the machine's thread without turning the event loop, and the host's edg
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import gc
 import itertools
+import pathlib
 import selectors
 import socket
 import subprocess
@@ -20,9 +22,9 @@ from collections.abc import Callable, Coroutine
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn.units import VirtualDuration, VirtualTime, ms, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import CALLEE_ELF, DRIVER_ELF, M33_JSON, Machines, run_bounded
+from .conftest import CALLEE_ELF, DRIVER_ELF, M33_JSON, VIEWS_ELF, Machines, run_bounded
 
 HANG = 10.0
 
@@ -669,3 +671,175 @@ def test_a_python_busy_thread_slows_a_free_run_waiter_per_slice_only(
         spinner.join()
     assert stop.reason is popcorn.StopReason.TIME
     assert spent < 0.6
+
+
+EXACT = 100_000_000
+SRAM = 0x2000_8000
+
+
+def exact(m33: popcorn.MachineDescription, elf: pathlib.Path = CALLEE_ELF) -> popcorn.Machine:
+    """A reset machine whose only slice ends are its waiters' deadlines and posted requests."""
+    m = popcorn.Machine(
+        m33, image=popcorn.Image.elf(elf), slice_instructions=EXACT, slice_wall_budget=10.0
+    )
+    m.reset()
+    return m
+
+
+def waited(m: popcorn.Machine, event: popcorn.Event, for_: VirtualDuration) -> popcorn.Stop:
+    """`wait_for(event)` inside `running()`."""
+
+    async def scenario() -> popcorn.Stop:
+        async with m.running():
+            return await m.wait_for(event, for_=for_)
+
+    return run_bounded(scenario(), HANG)
+
+
+def test_a_condition_fires_where_a_parked_predicate_does(m33: popcorn.MachineDescription) -> None:
+    parked, running = exact(m33), exact(m33)
+    Gate(parked).opened.set()
+    want = asyncio.run(parked.run(for_=ms(200), stop_when=lambda m: m.var("ticks").value >= 100))
+    condition = running.ref.var("ticks").ge(100)
+    got = gated(running, condition, ms(200))
+    assert want.reason is popcorn.StopReason.USER
+    assert got.reason is popcorn.StopReason.USER
+    assert (got.time, got.pc, got.instructions) == (want.time, want.pc, want.instructions)
+    assert got.fired == (condition,)
+
+
+def stop_on_tick(m: popcorn.Machine) -> None:
+    m.intercept("SysTick_Handler", lambda call: call.stop())
+
+
+def test_a_condition_reports_itself_in_stop_fired_parked(m33: popcorn.MachineDescription) -> None:
+    m = exact(m33)
+    fires, never = m.ref.var("ticks").ge(3), m.ref.var("ticks").gt(1_000_000)
+    fired = asyncio.run(m.wait_for(fires, for_=ms(10)))
+    assert fired.reason is popcorn.StopReason.USER
+    assert fired.fired == (fires,)
+    assert m.last_stop is not None and m.last_stop.fired == (fires,)
+    timed = asyncio.run(m.wait_for(never, for_=ms(10)))
+    assert timed.reason is popcorn.StopReason.TIME
+    assert timed.fired == ()
+    stop_on_tick(m)
+    stopped = asyncio.run(m.wait_for(never, for_=ms(10)))
+    assert stopped.reason is popcorn.StopReason.USER
+    assert stopped.fired == ()
+
+
+def test_a_condition_reports_itself_in_stop_fired_running(m33: popcorn.MachineDescription) -> None:
+    m = exact(m33)
+    fires, never = m.ref.var("ticks").ge(3), m.ref.var("ticks").gt(1_000_000)
+    fired = waited(m, fires, ms(10))
+    assert fired.reason is popcorn.StopReason.USER
+    assert fired.fired == (fires,)
+    timed = waited(m, never, ms(10))
+    assert timed.reason is popcorn.StopReason.TIME
+    assert timed.fired == ()
+    stop_on_tick(m)
+    stopped = asyncio.run(collect_stop(m, never))
+    assert stopped.reason is popcorn.StopReason.USER
+    assert stopped.fired == ()
+
+
+async def collect_stop(m: popcorn.Machine, condition: popcorn.Condition) -> popcorn.Stop:
+    """Wait on `condition` in a free run a handler's `stop()` ends, then halt quietly."""
+    m.start()
+    try:
+        return await m.wait_for(condition, for_=ms(10))
+    finally:
+        with contextlib.suppress(popcorn.EmulationError):
+            m.halt()
+
+
+def test_a_condition_already_true_fires_at_once(m33: popcorn.MachineDescription) -> None:
+    m = exact(m33)
+    condition = m.ref.var("ticks").ge(0)
+    stop = waited(m, condition, s(5))
+    assert stop.reason is popcorn.StopReason.USER
+    assert stop.fired == (condition,)
+    assert stop.instructions < EXACT // 100
+
+
+def views_machine(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    """A machine over the views firmware past its bkpt, counting in a loop."""
+    m = exact(m33, VIEWS_ELF)
+    assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
+    return m
+
+
+def holds_both_ways(m: popcorn.Machine, condition: popcorn.Condition) -> bool:
+    """Whether `condition` holds through its parked `ready` and natively, which must agree."""
+    parked = condition.ready(m)
+    running = waited(m, condition, us(10))
+    assert running.fired == ((condition,) if parked else ()), (condition, parked, running)
+    return parked
+
+
+BUILT: list[tuple[Callable[[popcorn.Machine], popcorn.Condition], bool]] = [
+    (lambda m: m.ref.var("table").delta.lt(0), True),
+    (lambda m: m.ref.var("table").delta.eq(-3), True),
+    (lambda m: m.ref.var("table").delta.lt(-3), False),
+    (lambda m: m.ref.var("table").mode.eq(17), True),
+    (lambda m: m.ref.var("wide").mid.eq(0xABC), True),
+    (lambda m: m.ref.var("wide").mid.gt(0xABC), False),
+    (lambda m: m.ref.var("wide").high.lt(0), True),
+    (lambda m: m.ref.var("wide").high.ge(-5), True),
+    (lambda m: m.ref.var("extras").low.eq(-2), True),
+    (lambda m: m.ref.var("table").offset.le(-300), True),
+    (lambda m: m.ref.var("table").scale.eq(2.25), True),
+    (lambda m: m.ref.var("table").entries[1].gain.gt(1.4), True),
+    (lambda m: m.ref.var("armed").eq(True), True),
+    (lambda m: m.ref.var("armed").ne(True), False),
+    (lambda m: m.ref.var("armed").eq(False), False),
+    (lambda m: m.ref.mem.i8[SRAM].masked(0xFF).eq(255), True),
+    (lambda m: m.ref.mem.i8[SRAM].masked(0x0F).eq(0x0F), True),
+    (lambda m: m.ref.mem.i8[SRAM].lt(0), True),
+    (lambda m: m.ref.mem.u8[SRAM].eq(255), True),
+    (lambda m: m.ref.var("wide").high.masked(0x3FFF).eq(0x3FFB), True),
+]
+
+
+@pytest.mark.parametrize(("build", "expected"), BUILT)
+def test_a_condition_on_a_bit_field_or_mask_agrees_with_the_parked_path(
+    m33: popcorn.MachineDescription,
+    build: Callable[[popcorn.Machine], popcorn.Condition],
+    expected: bool,
+) -> None:
+    m = views_machine(m33)
+    m.mem.i8[SRAM] = -1
+    assert holds_both_ways(m, build(m)) is expected
+
+
+def test_f32_condition_compares_in_double(m33: popcorn.MachineDescription) -> None:
+    m = views_machine(m33)
+    m.mem.f32[SRAM] = 0.1
+    assert not holds_both_ways(m, m.ref.mem.f32[SRAM].eq(0.1))
+    assert holds_both_ways(m, m.ref.mem.f32[SRAM].gt(0.1))
+    m.mem.f32[SRAM] = float("nan")
+    assert holds_both_ways(m, m.ref.mem.f32[SRAM].ne(0.0))
+    assert not holds_both_ways(m, m.ref.mem.f32[SRAM].eq(float("nan")))
+
+
+def test_a_float_condition_takes_only_int_constants_a_double_holds(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = views_machine(m33)
+    m.mem.f64[SRAM] = float(2**53)
+    f64 = m.ref.mem.f64[SRAM]
+    assert holds_both_ways(m, f64.eq(2**53))
+    assert holds_both_ways(m, f64.lt(2**53 + 2))
+    assert not holds_both_ways(m, f64.gt(2**53))
+    for value in (2**53 + 1, -(2**53) - 1, 10**400):
+        with pytest.raises(ValueError, match="not exactly a double"):
+            f64.lt(value)
+
+
+def test_a_condition_from_another_machine_is_refused(m33: popcorn.MachineDescription) -> None:
+    m, other = exact(m33), exact(m33)
+    condition = other.ref.var("ticks").ge(1)
+    with pytest.raises(ValueError, match="another machine"):
+        asyncio.run(m.wait_for(condition, for_=ms(1)))
+    with pytest.raises(ValueError, match="another machine"):
+        waited(m, condition, ms(1))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import contextvars
+import dataclasses
 import difflib
 import functools
 import os
@@ -69,7 +70,7 @@ from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
 from popcorn._rcc import RccOptions
-from popcorn._refs import Pending, Readout, Ref, Refs
+from popcorn._refs import Condition, Pending, Readout, Ref, Refs, native_of, owner_of
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn._streams import Board, PtyOpener, UartPorts
@@ -1703,10 +1704,19 @@ class Machine:
         exception a handler of it raised. Cancelling it then drops the wait only, the machine
         runs on.
 
+        A `Condition`, `m.ref.var("x").ge(3)`, is evaluated natively inside a free run, no
+        Python, after every event and at slice ends, so it keeps the boundary a parked run sees.
+        When `for_` elapses the wait returns a TIME stop without evaluating it there, as a parked
+        run does, unlike a Python event. The returned stop's `fired` holds it when it ended the
+        wait, empty for a stop that is not USER.
+
         Raises:
             MachineBusy: A run, step, call or wait is active outside a free run.
+            ValueError: A `Condition` of another machine.
         """
         _check_duration(for_)
+        if isinstance(event, Condition):
+            return await self._wait_condition(event, for_)
         if self._handle.session_open():
             try:
                 stop = await awaited(
@@ -1723,6 +1733,29 @@ class Machine:
         if isinstance(event, Reached):
             return await self.run(until=event.target, for_=for_)
         return await self.run(for_=for_, stop_when=event.ready)
+
+    async def _wait_condition(self, condition: Condition, for_: VirtualDuration | None) -> Stop:
+        if owner_of(condition) is not self._handle:
+            raise ValueError(f"{condition!r} reads another machine")
+        if not self._handle.session_open():
+            stop = await self.run(for_=for_, stop_when=condition.ready)
+            held = stop.reason is StopReason.USER and condition.ready(self)
+            stop = dataclasses.replace(stop, fired=(condition,) if held else ())
+            self._last_stop = stop
+            return stop
+        conditions = _core.ConditionSet()
+        conditions.members = [native_of(condition)]
+        try:
+            stop, mask = await awaited(
+                self._handle.wait_when(conditions, None if for_ is None else for_.ps),
+                _masked_stop,
+            )
+        except BaseException as error:
+            self._surfaced = error
+            raise
+        stop = dataclasses.replace(stop, fired=(condition,) if mask & 1 else ())
+        self._surfaced = stop
+        return stop
 
     def start(self) -> None:
         """Run the machine on its own thread until `halt()`, a free run.
@@ -1868,6 +1901,12 @@ class Machine:
 
     def __repr__(self) -> str:
         return f"Machine({self._description.part}, images={len(self._images)})"
+
+
+def _masked_stop(raw: object) -> tuple[Stop, int]:
+    """The stop and the member mask a native conditions wait resolves to."""
+    info, mask = cast(tuple[_core.StopInfo, int], raw)
+    return stop_of(info), mask
 
 
 def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:

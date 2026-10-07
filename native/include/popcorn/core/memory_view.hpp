@@ -84,6 +84,17 @@ public:
       -> std::expected<void, block_error> pre(fits_address_space(addr, in.size()));
 
   /**
+   * @brief Whether [@p addr, @p addr + @p size) lies inside one mapped memory region, RAM, flash
+   *        or backup SRAM, and not in a peripheral window. Regions are fixed at construction, so
+   *        it holds for the machine's life and is safe while a slice runs.
+   * @param addr First byte.
+   * @param size Access size in bytes, 1 to 8.
+   * @return True for plain memory, false for a peripheral window or an unmapped byte.
+   */
+  [[nodiscard]] auto is_plain_memory(address addr, std::uint8_t size) const noexcept
+      -> bool pre(size >= 1 and size <= 8);
+
+  /**
    * @brief Reads a little-endian scalar, as `m.mem.u32[addr]` does in Python.
    * @param addr First guest address, unaligned allowed.
    * @return The value, or the failing access.

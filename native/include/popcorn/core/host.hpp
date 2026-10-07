@@ -116,6 +116,68 @@ struct goal_result
   bool yielded{};
 };
 
+/**
+ * @brief One comparison of a scalar in plain memory against a constant. The scalar is @p size
+ *        bytes read little-endian at @p where, shifted right by @p shift, kept to its low
+ *        @p bits bits and sign-extended for kind::signed_int.
+ */
+struct condition
+{
+  /** @brief How the scalar compares. */
+  enum class kind : std::uint8_t
+  {
+    unsigned_int,
+    signed_int,
+    floating,
+  };
+
+  /** @brief The comparison, scalar on the left. */
+  enum class op : std::uint8_t
+  {
+    eq,
+    ne,
+    lt,
+    le,
+    gt,
+    ge,
+  };
+
+  /** @brief First byte, inside one mapped memory region with all @p size bytes. */
+  address where{};
+  /** @brief Bytes read, 1 to 8, 4 or 8 for kind::floating. */
+  std::uint8_t size{};
+  /** @brief Bits dropped from the low end of the word read. */
+  std::uint8_t shift{};
+  /** @brief Bits of the scalar after the shift, 1 to 64. */
+  std::uint8_t bits{64};
+  /** @brief How the scalar compares when not masked. */
+  kind encoding{};
+  /** @brief The comparison. */
+  op compare{};
+  /** @brief Whether the scalar is ANDed with @p mask and compared unsigned. */
+  bool masked{};
+  /** @brief Mask applied when @p masked. */
+  std::uint64_t mask{};
+  /** @brief Integer constant, a signed one as its two's complement bits. */
+  std::uint64_t value{};
+  /** @brief Constant of kind::floating. */
+  double real{};
+};
+
+/** @brief Conditions evaluated natively together, at most 64. */
+struct condition_set
+{
+  /** @brief The conditions, bit i of waiter_handle::fired() for member i. */
+  std::vector<condition> members{};
+};
+
+/**
+ * @brief Evaluates @p tested on @p target, which must be stopped at an instruction boundary or
+ *        inside a handler of its slice.
+ * @return Whether the comparison holds, false when the read fails.
+ */
+[[nodiscard]] auto condition_holds(condition const& tested, machine& target) -> bool;
+
 /** @brief A wait on a free-running machine. */
 struct waiter_spec
 {
@@ -130,6 +192,12 @@ struct waiter_spec
    * a stop_reason::time stop, for a caller that cannot read the running clock. Ignored when
    * deadline is set. */
   std::optional<vtime> after{};
+  /** @brief Conditions evaluated on the host thread as the engine owner, with no GIL and no
+   * lock, after every dispatched event and at slice ends, instead of @p ready. The waiter
+   * completes with a stop_reason::user stop of the first boundary where any member holds. At
+   * its deadline it completes with a stop_reason::time stop, the members not evaluated there, as
+   * a goal's until_time stops. */
+  std::optional<condition_set> when{};
 };
 
 /** @brief How a free run ended by itself: the stop, or the exception a handler threw. */
@@ -412,6 +480,14 @@ public:
   [[nodiscard]] auto future() const -> host_future<stop>;
 
   /**
+   * @brief Members of waiter_spec::when that held at the boundary that completed the waiter, bit
+   *        i for member i. Read it after future() completed, which orders the read.
+   * @return The mask, 0 for a waiter without conditions or completed otherwise, the free run's
+   *         own end included.
+   */
+  [[nodiscard]] auto fired() const noexcept -> std::uint64_t;
+
+  /**
    * @brief Removes the waiter: its future fails with operation_cancelled at once, and the host,
    *        woken even from an idle wait, stops evaluating it and releases its predicate. The free
    *        run continues. Takes no host mutex, so it is safe from a destructor on any thread.
@@ -557,9 +633,10 @@ public:
   void start(held_lock const& held, member_id who) pre(held.holds(*this)) pre(who < members());
 
   /**
-   * @brief Waits on the free run of member @p who. A waiter with a deadline ends the running
-   *        slice at its next block boundary, which registers it: waiter_spec::after counts from
-   *        there. Any other waiter registers at the next slice boundary.
+   * @brief Waits on the free run of member @p who. A waiter with conditions or a deadline ends
+   *        the running slice at its next block boundary, which registers it: conditions are first
+   *        evaluated there and waiter_spec::after counts from there. Any other waiter registers
+   *        at the next slice boundary.
    * @return The waiter, already done with the held end when there is one.
    */
   auto wait(held_lock const& held, member_id who, waiter_spec spec) -> waiter_handle

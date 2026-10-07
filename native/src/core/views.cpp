@@ -27,6 +27,11 @@ auto memory_view::read(address addr, std::uint8_t size) const
   return machine_->do_read(addr, size, initiator::debugger);
 }
 
+auto memory_view::is_plain_memory(address addr, std::uint8_t size) const noexcept -> bool
+{
+  return machine::mapped_region::find(machine_->memory_, addr, size) != nullptr;
+}
+
 auto memory_view::write(address addr, std::uint8_t size, std::uint32_t value) const
     -> std::expected<void, bus_error>
 {
