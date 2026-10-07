@@ -1,8 +1,11 @@
-"""NFR-ASYNC-1: event loop tick gaps during a long run stay within 2x the slice wall budget.
+"""NFR-ASYNC-1: the event loop stays free while the machine runs on its host thread.
+
+The loop no longer runs slices, so its tick gaps do not follow the slice wall budget. The bound
+is the host model's property: the worst gap stays under 5 ms with a 1 ms and a 10 ms budget
+alike, the gap independent of the budget.
 
 The run is bounded by an instruction budget of 1e8 rather than the spec's `run(for_=s(10))`:
-the ALU firmware never idles, so both run for a fixed stretch of work and the gaps measure the
-same slices.
+the ALU firmware never idles, so every run covers the same stretch of work.
 
 Opt-in, `POPCORN_BENCH=1`, on a quiet host.
 """
@@ -23,6 +26,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 RUN = 100_000_000
+MAX_GAP = 5e-3
 
 
 async def gaps_during(machines: Machines, budget: float) -> list[float]:
@@ -46,8 +50,10 @@ async def gaps_during(machines: Machines, budget: float) -> list[float]:
     return gaps
 
 
-@pytest.mark.parametrize("budget", [1e-3, 5e-3])
-def test_loop_gaps_stay_within_twice_the_wall_budget(machines: Machines, budget: float) -> None:
+@pytest.mark.parametrize("budget", [1e-3, 1e-2])
+def test_loop_gaps_stay_under_5_ms_whatever_the_wall_budget(
+    machines: Machines, budget: float
+) -> None:
     gaps = sorted(asyncio.run(gaps_during(machines, budget)))
     p50 = statistics.median(gaps)
     p99 = gaps[int(0.99 * (len(gaps) - 1))]
@@ -57,4 +63,4 @@ def test_loop_gaps_stay_within_twice_the_wall_budget(machines: Machines, budget:
         f"p50 {p50 * 1e3:.3f} ms, p99 {p99 * 1e3:.3f} ms, max {worst * 1e3:.3f} ms, "
         f"max/budget {worst / budget:.2f}"
     )
-    assert worst <= 2 * budget
+    assert worst < MAX_GAP
