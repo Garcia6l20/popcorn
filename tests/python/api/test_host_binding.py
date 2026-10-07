@@ -536,6 +536,45 @@ def test_an_interpreter_finalizing_with_a_live_machine_thread_exits() -> None:
     assert child.returncode == 0, child.stderr
 
 
+SELF_STOPPED = """
+import gc
+import sys
+import threading
+
+import popcorn
+
+reported = []
+sys.unraisablehook = lambda raised: reported.append(repr(raised.exc_value))
+stopping = threading.Event()
+
+
+def stop(call):
+    stopping.set()
+    return call.stop()
+
+
+m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+m.reset()
+m.intercept("alu_mark", stop)
+m.start()
+assert stopping.wait(10)
+del m
+gc.collect()
+assert len(reported) == 1, reported
+assert reported[0].startswith("EmulationError("), reported
+print("ok")
+"""
+
+
+def test_a_collected_machine_reports_the_stop_that_ended_its_free_run() -> None:
+    script = SELF_STOPPED.replace("__JSON__", repr(str(M33_JSON))).replace(
+        "__ELF__", repr(str(DRIVER_ELF))
+    )
+    child = run_child(script, timeout=CHILD_TIMEOUT)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "ok"
+
+
 def model_machine() -> popcorn.Machine:
     m = popcorn.Machine(
         popcorn.load_description(MODEL_JSON),

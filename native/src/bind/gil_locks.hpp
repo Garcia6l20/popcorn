@@ -1,5 +1,7 @@
 #pragma once
 
+#include "casters.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/link_guard.hpp>

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "casters.hpp"
+
 #include <popcorn/core/snapshot.hpp>
 
 #include <reflex/py.hpp>

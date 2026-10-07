@@ -285,23 +285,30 @@ auto held_in(std::shared_ptr<detail::python_cell const> cell)
   };
 }
 
-void report_unclaimed(core::held_end const& ended)
+void report_unclaimed(core::held_end const& ended) noexcept
 {
-  if(auto const* const stopped = std::get_if<stop>(&ended))
+  try
   {
-    auto const type   = reflex::py::nb::module_::import_("popcorn._errors").attr("EmulationError");
-    auto const raised = type(
-        std::format(
-            "a machine was destroyed with the end of its free run never raised: {} at {:#010x}",
-            stopped->detail.empty() ? "a stop" : stopped->detail, stopped->where.pc));
-    PyErr_SetRaisedException(raised.inc_ref().ptr());
+    if(auto const* const stopped = std::get_if<stop>(&ended))
+    {
+      auto const type = reflex::py::nb::module_::import_("popcorn._errors").attr("EmulationError");
+      auto const raised = type(
+          std::format(
+              "a machine was destroyed with the end of its free run never raised: {} at {:#010x}",
+              stopped->detail.empty() ? "a stop" : stopped->detail, stopped->where.pc));
+      PyErr_SetRaisedException(raised.inc_ref().ptr());
+    }
+    else
+    {
+      PyErr_SetRaisedException(
+          detail::python_exception(std::get<std::exception_ptr>(ended)).inc_ref().ptr());
+    }
+    PyErr_WriteUnraisable(nullptr);
   }
-  else
+  catch(...)
   {
-    PyErr_SetRaisedException(
-        detail::python_exception(std::get<std::exception_ptr>(ended)).inc_ref().ptr());
+    PyErr_Clear();
   }
-  PyErr_WriteUnraisable(nullptr);
 }
 }
 
