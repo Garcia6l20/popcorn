@@ -310,10 +310,12 @@ public:
 
   /**
    * @brief Waits on the free run.
-   * @param ready Predicate called on the host thread at event boundaries and slice ends, in a
-   *        copy of the caller's context, None for a deadline only.
-   * @param for_ps Picoseconds of virtual time after the first boundary that evaluates the wait,
-   *        at which it ends with reason time, None for no deadline.
+   * @param ready Predicate called on the host thread at every slice end after the boundary that
+   *        registers the wait, in a copy of the caller's context, None for a deadline only.
+   * @param for_ps Picoseconds of virtual time after the boundary that registers the wait, at
+   *        which it ends with reason time, None for no deadline. With it, posting ends the
+   *        running slice at its next block boundary, which registers the wait. Without it, the
+   *        next slice boundary registers it.
    * @return Resolves to the StopInfo of the boundary that ended the wait, or to the free run's
    *         own end.
    * @throws std::runtime_error without an open free run.

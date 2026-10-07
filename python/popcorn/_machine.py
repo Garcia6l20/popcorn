@@ -274,8 +274,9 @@ def _stop_error(stopped: Stop, during: str = "the background run") -> EmulationE
 class Event(Protocol):
     """Something `Machine.wait_for` waits for.
 
-    `ready` is sync and runs on the machine's thread at event boundaries and slice ends, never
-    per instruction. It may read the machine, which is stopped at an instruction boundary there.
+    `ready` is sync and runs on the machine's thread, never per instruction: at slice ends
+    inside a free run, `start()` or `running()`, after every event and at slice ends otherwise.
+    It may read the machine, which is stopped at an instruction boundary there.
     """
 
     def ready(self, machine: Machine) -> bool:
@@ -1692,9 +1693,15 @@ class Machine:
         the current pc continues as `run(until=)` does. Other events stop at the first event
         boundary or slice end after they became ready. Inside a free run, `start()` or
         `running()`, this waits on the free run instead of driving it, checking the event on the
-        machine's thread at event boundaries and slice ends, `for_` counted from the first one.
-        It returns the stop that ended the free run, or raises the exception a handler of it
-        raised. Cancelling it then drops the wait only, the machine runs on.
+        machine's thread at slice ends only. The wait is registered at a slice boundary after
+        the post and first checked at the end of the slice after that one, never at the boundary
+        that registered it: the stop is the end of the first slice where the event held, up to
+        one slice after it became ready, two when it was ready at the post. With `for_`, posting
+        ends the running slice at its next block boundary, which registers the wait and starts
+        `for_`, and the event is still checked at the slice end where `for_` elapses: holding
+        there, it returns USER. It returns the stop that ended the free run, or raises the
+        exception a handler of it raised. Cancelling it then drops the wait only, the machine
+        runs on.
 
         Raises:
             MachineBusy: A run, step, call or wait is active outside a free run.
@@ -1724,6 +1731,11 @@ class Machine:
         exception a handler raises, ends the free run and is held: every pending and later
         `wait_for` and stream read returns that stop or raises that exception, and `halt()`
         raises it. The machine stays busy until `halt()`.
+
+        A free run advances while the caller blocks: a sync call, a thread join, or a C call that
+        releases the GIL. Set up a peer whose connection blocks wall time, a probe or a
+        handshake on a pty, while the machine is parked, before `start()` or `running()`.
+        A `wait_for` on a Python event sees it at slice ends.
 
         Its Python models, handlers and bus devices run slowly while the test thread computes in
         Python: await, block in a C call or sleep instead, or lower `sys.setswitchinterval` in
@@ -1793,7 +1805,10 @@ class Machine:
         """Run the machine on its own thread while the body awaits other things: `start()` on
         entry, `halt()` on exit.
 
-        Inside, the machine runs whether the body awaits or blocks. Sync reads, writes and
+        Inside, the machine runs whether the body awaits or blocks. A free run advances while
+        the caller blocks: a sync call, a thread join, or a C call that releases the GIL. Set up
+        a peer whose connection blocks wall time, a probe or a handshake on a pty, while the
+        machine is parked, before `start()` or `running()`. Sync reads, writes and
         stimuli raise MachineRunning: `m.read` and `m.write` access the machine, `wait_for` and
         stream reads wait on the free run. An IDLE stop sleeps until a request wakes the core.
 

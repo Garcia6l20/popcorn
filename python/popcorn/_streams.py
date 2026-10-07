@@ -334,6 +334,10 @@ class Board:
         others. A CDC function's pty is keyed `name` in `ptys` for function 0, `name.<function>`
         for the others.
 
+        A free run advances while the caller blocks: a sync call, a thread join, or a C call that
+        releases the GIL. Open a peer whose connection blocks wall time, a probe or a handshake
+        on the pty, while the machine is parked, before `start()` or `running()`.
+
         Args:
             name: UART instance, or USB device controller with a virtual host.
             function: The n-th CDC ACM function of the device, in interface order. 0 for a

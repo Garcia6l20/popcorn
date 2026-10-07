@@ -68,6 +68,34 @@ public:
   }
 };
 
+class ticking_arch final : public popcorn::testing::test_arch
+{
+public:
+  using test_arch::test_arch;
+
+  static constexpr std::uint32_t tick_event = 9;
+  static constexpr std::uint64_t period     = 1'000;
+
+  std::uint64_t ticks = 0;
+
+  void arm()
+  {
+    std::ignore = attached_events().schedule(icount{period}, tick_event, 0);
+  }
+
+  void on_event(std::uint32_t kind, std::uint64_t payload) override
+  {
+    if(kind == tick_event)
+    {
+      ++ticks;
+      std::ignore =
+          attached_events().schedule(icount{attached_clock().now().value + period}, tick_event, 0);
+      return;
+    }
+    test_arch::on_event(kind, payload);
+  }
+};
+
 class recording_arch final : public popcorn::testing::test_arch
 {
 public:
@@ -910,6 +938,31 @@ TEST_CASE("waiters resolve on readiness and on deadlines, a throwing predicate f
   CHECK_FALSE(h.on->halt(0).has_value());
 }
 
+TEST_CASE("a free run calls a waiter's predicate once per slice, not per event")
+{
+  popcorn::testing::machine_fixture<ticking_arch> f{m33(), "alu", core::machine_options{}};
+  f.set("r0", 0);
+  f.module->arm();
+  auto* const arch = f.module;
+  hosted      h{
+      std::move(f.target), {.max_instructions = icount{100'000}, .wall_budget = long_wall}
+  };
+  int calls = 0;
+  h.start();
+  auto const waiting = h.wait({
+      .ready =
+          [&calls] {
+            ++calls;
+            return false;
+          },
+      .deadline = at_instruction(1'000'000),
+  });
+  CHECK(waiting.future().get().reason == stop_reason::time);
+  CHECK_FALSE(h.on->halt(0).has_value());
+  CHECK(arch->ticks >= 900);
+  CHECK(calls <= 12);
+}
+
 TEST_CASE("halt on a parked member returns at once and fails pending waiters")
 {
   hosted h{alu(10)};
@@ -1467,7 +1520,7 @@ TEST_CASE("a goal's finish runs on the host thread before its future completes, 
   CHECK_FALSE(h.on->busy(held, 0));
 }
 
-TEST_CASE("a waiter's after counts from the first boundary that evaluates it")
+TEST_CASE("a waiter's after counts from the boundary that registers it")
 {
   hosted     h{idle_forever()};
   auto const before = h.now();
@@ -1479,6 +1532,25 @@ TEST_CASE("a waiter's after counts from the first boundary that evaluates it")
   CHECK(fixed.reason == stop_reason::time);
   CHECK(fixed.time == ended.time);
   CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("a waiter posted inside a slice counts its after from a block after the post")
+{
+  popcorn::testing::machine_fixture<ticking_arch> f{m33(), "alu", core::machine_options{}};
+  f.set("r0", 0);
+  f.module->arm();
+  auto* const arch = f.module;
+  hosted      h{
+      std::move(f.target), {.max_instructions = icount{1'000'000'000}, .wall_budget = long_wall}
+  };
+  h.start();
+  std::this_thread::sleep_for(5ms);
+  auto const ended =
+      h.wait({.ready = [] { return false; }, .after = at_instruction(1'000)}).future().get();
+  CHECK(ended.reason == stop_reason::time);
+  CHECK(ended.instructions.value < 100'000'000);
+  CHECK_FALSE(h.on->halt(0).has_value());
+  CHECK(arch->ticks < 100'000);
 }
 
 TEST_CASE("the boundary hook runs on the host thread as the engine owner around every slice")
@@ -1704,15 +1776,6 @@ TEST_CASE("watched descriptors the host cannot poll still wake an idle free run,
   CHECK_FALSE(h.on->halt(0).has_value());
 }
 
-struct carrying_failure : std::runtime_error
-{
-  explicit carrying_failure(std::shared_ptr<int> held)
-      : std::runtime_error{"carrying"}, carried{std::move(held)}
-  {}
-
-  std::shared_ptr<int> carried;
-};
-
 void end_by_handler(hosted& h)
 {
   auto made       = alu(1000);
@@ -1772,7 +1835,7 @@ TEST_CASE("a dropped waiter wakes an idle free run, which releases its predicate
   CHECK_FALSE(h.on->halt(0).has_value());
 }
 
-TEST_CASE("a predicate's error is released when the free run ends otherwise at that boundary")
+TEST_CASE("a predicate is released when the free run ends otherwise at a slice end")
 {
   std::atomic<int> boundaries{0};
   hosted           h{
@@ -1792,17 +1855,14 @@ TEST_CASE("a predicate's error is released when the free run ends otherwise at t
     auto held = h.on->lock();
     h.on->start(held, 0);
     return h.on->wait(held, 0, {.ready = [sentinel, &calls]() -> bool {
-                        if(++calls > 1)
-                        {
-                          throw carrying_failure{sentinel};
-                        }
+                        ++calls;
                         return false;
                       }});
   }();
   sentinel.reset();
   CHECK_THROWS_AS(handle.future().get(), test_failure);
   REQUIRE(settles([&] { return parked_now(h); }));
-  CHECK(calls == 2);
+  CHECK(calls == 1);
   CHECK(settles([&] { return watched.expired(); }, 500ms));
   auto const end = h.on->halt(0);
   REQUIRE(end.has_value());

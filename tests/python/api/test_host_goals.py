@@ -20,9 +20,9 @@ from collections.abc import Callable, Coroutine
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn.units import VirtualTime, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .conftest import DRIVER_ELF, M33_JSON, Machines, run_bounded
+from .conftest import CALLEE_ELF, DRIVER_ELF, M33_JSON, Machines, run_bounded
 
 HANG = 10.0
 
@@ -508,3 +508,164 @@ def test_a_busy_python_thread_does_not_change_what_a_wait_returns(machines: Mach
     assert reached.pc == m.sym("alu_mark")
     assert marked.reason is popcorn.StopReason.USER
     assert int(m.var("alu_rounds").value) == 1
+
+
+SLICE = 20_000
+
+
+class Counting:
+    """Never ready, counting its calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def ready(self, machine: popcorn.Machine) -> bool:
+        """Count the call, return False."""
+        self.calls += 1
+        return False
+
+
+def ticking(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    """A reset machine over the callee firmware, its SysTick counting `ticks`, whose only slice
+    ends are its waiters' deadlines."""
+    m = popcorn.Machine(
+        m33,
+        image=popcorn.Image.elf(CALLEE_ELF),
+        slice_instructions=SLICE,
+        slice_wall_budget=10.0,
+    )
+    m.reset()
+    return m
+
+
+class Gate:
+    """Holds a machine's thread at its first write to `ticks`, inside a slice, until opened."""
+
+    def __init__(self, m: popcorn.Machine) -> None:
+        """Watch `ticks` on the parked `m`."""
+        self.entered = threading.Event()
+        self.opened = threading.Event()
+        m.watch("ticks", handler=self.hold)
+
+    def hold(self, hit: popcorn.WatchHit) -> None:
+        """Signal the hold, wait until opened."""
+        self.entered.set()
+        self.opened.wait(HANG)
+
+
+def gated(m: popcorn.Machine, event: popcorn.Event, for_: VirtualDuration) -> popcorn.Stop:
+    """`wait_for(event)` inside `running()`, posted while the machine's thread is held at its
+    first write to `ticks`, so the wait exists before `ticks` passes 1."""
+    gate = Gate(m)
+
+    async def scenario() -> popcorn.Stop:
+        async with m.running():
+            assert await asyncio.to_thread(gate.entered.wait, HANG), "no write to ticks"
+            waiting = asyncio.ensure_future(m.wait_for(event, for_=for_))
+            await asyncio.sleep(0)
+            gate.opened.set()
+            return await waiting
+
+    return run_bounded(scenario(), HANG)
+
+
+def test_a_python_wait_posted_inside_a_slice_counts_for_from_its_post(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(
+        m33,
+        image=popcorn.Image.elf(CALLEE_ELF),
+        slice_instructions=100_000_000,
+        slice_wall_budget=10.0,
+    )
+    m.reset()
+    stop = gated(m, Never(), ms(1))
+    assert stop.reason is popcorn.StopReason.TIME
+    assert ms(1).ps < stop.time.ps < ms(3).ps
+
+
+class Recording:
+    """Always ready, recording `m.instructions` at each check."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def ready(self, machine: popcorn.Machine) -> bool:
+        """Record the check, return True."""
+        self.calls.append(machine.instructions)
+        return True
+
+
+def test_a_python_wait_is_not_checked_at_the_boundary_a_sibling_post_creates(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(
+        m33,
+        image=popcorn.Image.elf(CALLEE_ELF),
+        slice_instructions=100_000_000,
+        slice_wall_budget=10.0,
+    )
+    m.reset()
+    gate = Gate(m)
+    event = Recording()
+
+    async def scenario() -> popcorn.Stop:
+        async with m.running():
+            assert await asyncio.to_thread(gate.entered.wait, HANG), "no write to ticks"
+            first = asyncio.ensure_future(m.wait_for(event))
+            sibling = asyncio.ensure_future(m.wait_for(Never(), for_=ms(50)))
+            await asyncio.sleep(0)
+            gate.opened.set()
+            await sibling
+            return await first
+
+    stop = run_bounded(scenario(), HANG)
+    assert stop.reason is popcorn.StopReason.USER
+    assert event.calls[0] > 1_000, event.calls
+
+
+def test_a_free_run_waiter_predicate_runs_once_per_slice(m33: popcorn.MachineDescription) -> None:
+    m = ticking(m33)
+    event = Counting()
+    before = m.instructions
+
+    async def scenario() -> popcorn.Stop:
+        async with m.running():
+            return await m.wait_for(event, for_=ms(50))
+
+    stop = run_bounded(scenario(), HANG)
+    assert stop.reason is popcorn.StopReason.TIME
+    executed = m.instructions - before
+    events = int(m.var("ticks").value)
+    assert events > 100
+    assert event.calls <= executed // SLICE + 2
+    assert event.calls < events // 10
+
+
+def test_a_python_busy_thread_slows_a_free_run_waiter_per_slice_only(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = ticking(m33)
+    done = threading.Event()
+
+    def spin() -> None:
+        count = 0
+        while not done.is_set():
+            count += 1
+
+    async def scenario() -> popcorn.Stop:
+        await m.run(budget=10)
+        async with m.running():
+            return await m.wait_for(Never(), for_=ms(100))
+
+    spinner = threading.Thread(target=spin)
+    spinner.start()
+    try:
+        started = time.monotonic()
+        stop = run_bounded(scenario(), HANG)
+        spent = time.monotonic() - started
+    finally:
+        done.set()
+        spinner.join()
+    assert stop.reason is popcorn.StopReason.TIME
+    assert spent < 0.6

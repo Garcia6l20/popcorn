@@ -119,13 +119,15 @@ struct goal_result
 /** @brief A wait on a free-running machine. */
 struct waiter_spec
 {
-  /** @brief Called on the host thread after every dispatched event and at slice ends. The waiter
-   * completes with a stop_reason::user stop of that boundary when it returns true. */
+  /** @brief Called on the host thread at the end of every slice after the boundary that
+   * registered the waiter, except one that ended where it began without idling, holding the GIL
+   * when it wraps Python. The waiter completes with a stop_reason::user stop of that slice end
+   * when it returns true. */
   std::function<bool()> ready{};
   /** @brief Virtual time at which the waiter completes with a stop_reason::time stop. */
   std::optional<vtime> deadline{};
-  /** @brief Virtual time after the first boundary that evaluates the waiter at which it completes
-   * with a stop_reason::time stop, for a caller that cannot read the running clock. Ignored when
+  /** @brief Virtual time after the boundary that registers the waiter at which it completes with
+   * a stop_reason::time stop, for a caller that cannot read the running clock. Ignored when
    * deadline is set. */
   std::optional<vtime> after{};
 };
@@ -555,7 +557,9 @@ public:
   void start(held_lock const& held, member_id who) pre(held.holds(*this)) pre(who < members());
 
   /**
-   * @brief Waits on the free run of member @p who.
+   * @brief Waits on the free run of member @p who. A waiter with a deadline ends the running
+   *        slice at its next block boundary, which registers it: waiter_spec::after counts from
+   *        there. Any other waiter registers at the next slice boundary.
    * @return The waiter, already done with the held end when there is one.
    */
   auto wait(held_lock const& held, member_id who, waiter_spec spec) -> waiter_handle

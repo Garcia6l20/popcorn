@@ -26,8 +26,24 @@ struct waiter
   std::atomic<bool>        dropped{false};
   bool                     checked = false;
   bool                     fired   = false;
+  std::optional<vtime>     since{};
+  std::uint64_t            since_slice{};
   std::exception_ptr       error{};
   std::weak_ptr<host_core> owner{};
+
+  void register_at(vtime now, std::uint64_t slice)
+  {
+    if(since)
+    {
+      return;
+    }
+    since       = now;
+    since_slice = slice;
+    if(spec.after and not spec.deadline)
+    {
+      spec.deadline = vtime{now.ps + spec.after->ps};
+    }
+  }
 
   [[nodiscard]] auto live() const noexcept -> bool
   {
@@ -112,6 +128,7 @@ struct member_slot
   bool                      woken            = false;
   std::uint64_t             parks            = 0;
   std::uint64_t             settled          = 0;
+  std::uint64_t             free_slices      = 0;
   std::vector<stamped>      stamps{};
   std::vector<stamped>      incoming{};
   std::uint64_t             next_seq = 0;
@@ -877,18 +894,15 @@ struct host_core
     apply_due(slot);
     std::erase_if(waiters, [](auto const& waiting) { return not waiting->live(); });
     std::vector<std::pair<std::shared_ptr<waiter>, stop>> resolved;
+    auto const                                            slice = ++slot.free_slices;
     {
       owner_scope const owning{this};
       auto const        now = slot.engine->virtual_clock().time();
       for(auto const& waiting : waiters)
       {
-        if(not waiting->checked and waiting->spec.after and not waiting->spec.deadline)
-        {
-          waiting->spec.deadline = vtime{now.ps + waiting->spec.after->ps};
-        }
+        waiting->register_at(now, slice);
       }
     }
-    auto          predicates = std::make_shared<waiter_list>();
     slice_request request{
         .max_instructions = bounds.max_instructions,
         .wall_budget      = bounds.wall_budget,
@@ -900,36 +914,8 @@ struct host_core
         request.until_time =
             std::min(request.until_time.value_or(*waiting->spec.deadline), *waiting->spec.deadline);
       }
-      if(waiting->spec.ready and waiting->checked)
-      {
-        predicates->push_back(waiting);
-      }
     }
     add_stamp(request, next_stamp(slot));
-    if(not predicates->empty())
-    {
-      request.stop_when = [predicates] {
-        auto any = false;
-        for(auto const& waiting : *predicates)
-        {
-          if(waiting->fired or waiting->dropped.load(std::memory_order_relaxed))
-          {
-            continue;
-          }
-          try
-          {
-            waiting->fired = waiting->spec.ready();
-          }
-          catch(...)
-          {
-            waiting->error = std::current_exception();
-            waiting->fired = true;
-          }
-          any = any or waiting->fired;
-        }
-        return any;
-      };
-    }
     slice_result result;
     try
     {
@@ -943,7 +929,6 @@ struct host_core
       end_free_run(slot, held_end{std::current_exception()}, done);
       return;
     }
-    request.stop_when = {};
     after_slice(slot, request, result);
     try
     {
@@ -955,13 +940,8 @@ struct host_core
       end_free_run(slot, held_end{std::current_exception()}, done);
       return;
     }
-    auto const reason = result.stopped ? std::optional{result.stopped->reason} : std::nullopt;
-    auto const fired =
-        std::ranges::any_of(*predicates, [](auto const& waiting) { return waiting->fired; });
-    auto const goes_on = not reason
-                      or reason == stop_reason::time
-                      or reason == stop_reason::idle
-                      or (reason == stop_reason::user and fired);
+    auto const reason  = result.stopped ? std::optional{result.stopped->reason} : std::nullopt;
+    auto const goes_on = not reason or reason == stop_reason::time or reason == stop_reason::idle;
     if(not goes_on)
     {
       settle(resolved);
@@ -979,11 +959,12 @@ struct host_core
       auto const        now = slot.engine->virtual_clock().time();
       for(auto const& waiting : current)
       {
-        if(not waiting->checked and waiting->spec.after and not waiting->spec.deadline)
-        {
-          waiting->spec.deadline = vtime{now.ps + waiting->spec.after->ps};
-        }
-        if(not std::exchange(waiting->checked, true) and waiting->spec.ready)
+        waiting->register_at(now, slice + 1);
+        waiting->checked = true;
+        if(not waiting->fired
+           and waiting->spec.ready
+           and waiting->since_slice <= slice
+           and (now > *waiting->since or reason == stop_reason::idle))
         {
           try
           {
@@ -997,9 +978,7 @@ struct host_core
         }
         if(waiting->fired)
         {
-          resolved.emplace_back(
-              waiting, reason == stop_reason::user ? *result.stopped
-                                                   : stop_here(*slot.engine, stop_reason::user));
+          resolved.emplace_back(waiting, stop_here(*slot.engine, stop_reason::user));
         }
         else if(waiting->spec.deadline and now >= *waiting->spec.deadline)
         {
@@ -1494,8 +1473,16 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
   }
   else
   {
+    auto const ends_slice = waiting->spec.after or waiting->spec.deadline;
     slot.waiters.push_back(waiting);
-    core_->wake_locked(slot);
+    if(ends_slice)
+    {
+      core_->notify_locked(slot);
+    }
+    else
+    {
+      core_->wake_locked(slot);
+    }
   }
   return waiter_handle{std::move(waiting), std::move(future)};
 }
