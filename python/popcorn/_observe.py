@@ -50,7 +50,7 @@ class MachineCoverage:
         Raises:
             SymbolError: No loaded image has a function name.
             ConfigError: A range is empty or leaves the 32-bit address space.
-            MachineRunning: A run is active.
+            MachineRunning: The machine is busy, outside its handlers.
         """
         self._check()
         rows = _rows(ranges)
@@ -165,7 +165,7 @@ class Ring:
         """Drop every kept record. The next records count their time from now.
 
         Raises:
-            MachineRunning: A run is active, handlers of it included.
+            MachineRunning: The machine is busy, from its handlers too.
         """
         self._idle()
         self._handle.clear_ring()

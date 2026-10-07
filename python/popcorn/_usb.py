@@ -1450,6 +1450,11 @@ class UsbHost:
     included, is in snapshots, so a snapshot taken once the device is configured restores a
     configured device. Results of control requests not collected yet are dropped by
     `Machine.restore`.
+
+    `attached`, `state`, `address`, `configuration`, `failed_step`, the descriptors, `strings`,
+    `interfaces`, `requests` and the first `cdc`, `hid` or `audio` call of a function read the
+    host: they raise MachineRunning while the machine is busy, outside its callbacks. The queue
+    and state properties of CDC, HID and audio streams read their link and work while it runs.
     """
 
     __slots__ = (

@@ -61,6 +61,10 @@ class Pending[R](Coroutine[Any, Any, R]):
     `asyncio.run` and `asyncio.create_task` take it. Cancelling the awaiting task withdraws a
     command not yet run. A command whose exception is never retrieved reports it to
     `sys.unraisablehook` when the Pending is collected.
+
+    A command a cancel leaves in place, `HidStream.write_report`, spends its Pending: a later
+    failure of the command is not reported to `sys.unraisablehook`, and awaiting the Pending
+    again raises RuntimeError.
     """
 
     __slots__ = ("_cancel", "_convert", "_finished", "_follow", "_future", "_inner", "_spent")

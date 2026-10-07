@@ -22,7 +22,7 @@ from popcorn.pytest._session import Booted, Devices, Key, PopcornSession, popcor
 
 
 class MachineFactory:
-    """Builds machines separate from the `machine` fixture's, closed after the test.
+    """Builds machines separate from the `machine` fixture's, parked and closed after the test.
 
     `factory()` gives a new machine restored from the boot snapshot of its key, booting the key
     first when no test did yet. From inside an async test, use `await factory.booted()` for a
@@ -248,6 +248,9 @@ def machine(
     and the trace ring are reset for each test. Host input queued on a UART and not delivered
     yet is not. Its `default_budget` is the test's, from the `popcorn` marker or
     `--popcorn-budget`.
+
+    Teardown parks the machine: a free run the test left started is halted and the machine is
+    reused. What ended that free run by itself and never reached the test fails the teardown.
     """
     item = _item(request)
     project = _checked(popcorn_project)
@@ -291,7 +294,8 @@ def machine(
 def machine_factory(
     request: pytest.FixtureRequest, _popcorn_session: PopcornSession, popcorn_project: object
 ) -> Iterator[MachineFactory]:
-    """A `MachineFactory` for this test, its machines closed after it."""
+    """A `MachineFactory` for this test, its machines parked and closed after it, as
+    `MachineFactory.close` does."""
     item = _item(request)
     project = _checked(popcorn_project)
     factory = MachineFactory(_popcorn_session, settings_of(item, _popcorn_session, project), item)

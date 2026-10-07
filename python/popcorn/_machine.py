@@ -273,8 +273,8 @@ def _stop_error(stopped: Stop, during: str = "the background run") -> EmulationE
 class Event(Protocol):
     """Something `Machine.wait_for` waits for.
 
-    `ready` is sync and runs at event boundaries and slice ends, never per instruction. It may
-    read the machine, which is stopped at an instruction boundary while it runs.
+    `ready` is sync and runs on the machine's thread at event boundaries and slice ends, never
+    per instruction. It may read the machine, which is stopped at an instruction boundary there.
     """
 
     def ready(self, machine: Machine) -> bool:
@@ -308,21 +308,34 @@ class _Ready:
 class Machine:
     """One emulated MCU: a description, the images loaded into it and its run state.
 
-    Built powered off: nothing runs until `reset()`. Emulation advances in slices on the event
-    loop thread, each bounded by `slice_instructions` and `slice_wall_budget`, yielding to the
-    loop between slices. Sync access to the machine while a run is active raises
-    MachineRunning, except from a handler of that run.
+    Built powered off: nothing runs until `reset()`. The machine runs on its own thread, started
+    by its first run and joined at interpreter exit. `run`, `step` and `call` hand that thread a
+    goal and await it, from any event loop. `wait_for` hands it a goal, or a waiter inside a free
+    run. `start()` and `halt()`, or `running()`, free-run it while the test awaits or blocks. A
+    run serves requests and checks waiters every `slice_instructions` instructions or
+    `slice_wall_budget` seconds.
 
-    Pure reads of emulated state are also allowed from the thread running the run: `time`,
-    `instructions`, `pc`, `pending_events`, core registers, `mem` reads inside memory regions,
-    `var` reads, peripheral register `value` and fields, and pin `level`, `mode` and
-    `alternate`. A `running()` body and other tasks of the run's event loop run between
-    slices, so they read the state at the last slice boundary. Python code the run calls inside
-    a slice runs on that thread too: Python models' `on_read` and `on_write`, log and trace
-    sinks, pin listeners and `stop_when`. The same reads are allowed there and return mid-slice
-    values, so a Python model can read `mem`, `var`, `reg` and `pc`. A `mem` read outside memory
-    regions is a bus read a model reacts to and stays refused outside handlers, as do all writes
-    other than board stimuli. Any other thread gets MachineRunning.
+    Parked, with nothing active and nothing started, the sync accessors run on the caller's
+    thread: `mem`, `reg`, `periph`, `var`, pins, ADC inputs, `time`, `pc`. While the machine is
+    `busy`, each of them raises MachineRunning from every thread but the machine's, reads and
+    board stimuli included. `read` and `write` over `ref` access it then: one call is one batch
+    at one block boundary, best effort or stamped with `at=`, and two calls may see two machine
+    states. `snapshot` and `restore` need it parked, and refuse handlers too.
+
+        r0, word = await m.read(m.ref.reg.r0, m.ref.mem.u32[addr])
+        await m.write((m.ref.periph.ADC1.input(5).volts, 1.5), at=deadline)
+
+    Handlers, Python models, bus devices, sinks, pin listeners and `stop_when` run on the
+    machine's thread holding the GIL and use the sync accessors, mid-slice. One that touches
+    another machine raises MachineRunning when another thread holds that machine's lock at that
+    moment, even while it is parked. Each callback runs in a copy of the context taken when its
+    hook was installed, so what it sets stays in that copy. The Python models and bus devices of
+    one machine share one copy, taken at construction.
+
+    A Python callback needs the GIL: while another thread runs Python bytecode, each crossing
+    waits up to `sys.getswitchinterval()`, 5 ms by default, see `start`. A Python model or
+    device object is owned natively: an attribute of it holding the machine keeps the machine
+    alive until exit.
     """
 
     __slots__ = (
@@ -600,7 +613,7 @@ class Machine:
 
         Raises:
             ImageError: A segment falls outside the description's memory regions.
-            MachineRunning: The machine is busy.
+            MachineRunning: The machine is busy, outside its handlers.
         """
         self._require_stopped()
         self._handle.load(image.native)
@@ -872,7 +885,7 @@ class Machine:
         stop: cancelled, or ended by an exception of a handler or predicate.
 
         Raises:
-            MachineRunning: The machine is busy.
+            MachineRunning: The machine is busy, outside its handlers.
         """
         self._require_stopped()
         return self._last_stop
@@ -899,7 +912,7 @@ class Machine:
             How many were still installed.
 
         Raises:
-            MachineRunning: A run is active, handlers of it included.
+            MachineRunning: The machine is busy, from its handlers too.
         """
         self._require_idle()
         live = [hook for hook in self._installed if hook.active]
@@ -934,7 +947,7 @@ class Machine:
             ConfigError: A kind is not selectable, or a range is invalid.
             SymbolError: No loaded image has a function name.
             FormatError: The file cannot be created, written or closed, from `popcorn._obs`.
-            MachineRunning: A run is active.
+            MachineRunning: The machine is busy, outside its handlers.
         """
         self._require_stopped()
         recording = open_trace(self._handle, kinds, path, ranges, functions)
@@ -997,8 +1010,8 @@ class Machine:
     def var(self, name: str) -> Var:
         """A module-scope variable of the loaded ELF images, typed from their DWARF.
 
-        Its reads follow `mem`: a variable in a memory region reads while a run is active, from
-        the thread running it, at the state of the last slice boundary.
+        Its reads and writes follow `mem`: parked or from a callback, and through
+        `m.ref.var(name)` while the machine is busy.
 
         Raises:
             SymbolError: No loaded image declares the variable, with close matches.
@@ -1226,7 +1239,7 @@ class Machine:
 
         Raises:
             SymbolError: `fn` names no symbol.
-            MachineRunning: A run is active, outside its handlers.
+            MachineRunning: The machine is busy, outside its handlers.
         """
         if handler is None:
             return lambda given: self._install_intercept(fn, given, once)
@@ -1460,7 +1473,7 @@ class Machine:
         """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.
 
         Raises:
-            MachineRunning: A run is active, handlers of it included.
+            MachineRunning: The machine is busy, from its handlers too.
         """
         self._require_idle()
         offset = 0 if self._arena is None else self._arena.used
@@ -1474,7 +1487,7 @@ class Machine:
             ConfigError: The snapshot was taken by another machine, or a snapshot read back from
                 a file names another description, images or configuration, keyed by the digest
                 that differs.
-            MachineRunning: A run is active, handlers of it included.
+            MachineRunning: The machine is busy, from its handlers too.
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
@@ -1513,7 +1526,7 @@ class Machine:
         Raises:
             ConfigError: The file is malformed, or names another description, images or
                 configuration than this machine's, keyed by the digest that differs.
-            MachineRunning: A run is active.
+            MachineRunning: The machine is busy, from its handlers too.
         """
         snapshot = Snapshot.load(path)
         self.restore(snapshot)
@@ -1670,6 +1683,10 @@ class Machine:
         exception a handler raises, ends the free run and is held: every pending and later
         `wait_for` and stream read returns that stop or raises that exception, and `halt()`
         raises it. The machine stays busy until `halt()`.
+
+        Its Python models, handlers and bus devices run slowly while the test thread computes in
+        Python: await, block in a C call or sleep instead, or lower `sys.setswitchinterval` in
+        the test, 100 us brings a dense callback from 0.3 to 0.7 ms to 12 us.
 
         Raises:
             MachineBusy: A run, step, call, wait or free run is active.

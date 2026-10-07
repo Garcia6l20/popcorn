@@ -178,7 +178,7 @@ def stop_report(
         collapse: Whether to collapse repeated record groups, as `Ring.dump(collapse=)`.
 
     Raises:
-        MachineRunning: A run is active.
+        MachineRunning: The machine is busy, outside its handlers.
     """
     captured: Mapping[str, int] = stop.registers or {}
 

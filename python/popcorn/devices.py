@@ -11,9 +11,10 @@ Durations are VirtualDuration values of a whole number of nanoseconds. A project
 them with `popcorn.units`, such as `us(600)`, and the register keys of `TableTarget` replies as
 integers.
 
-Call `contents()`, `snapshot()` and `restore()` only from the machine's thread while it is
-stopped. `restore()` on an attached device sets its state behind the bus model, which keeps
-its own transfer state.
+Call `contents()`, `snapshot()` and `restore()` only while the machine the device serves is
+parked, or from one of its callbacks: nothing guards them, and a call while it runs races its
+thread. `restore()` on an attached device sets its state behind the bus model, which keeps its
+own transfer state.
 """
 
 from __future__ import annotations

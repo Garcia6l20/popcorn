@@ -91,7 +91,9 @@ Async tests:
 
 A coroutine test function runs on the plugin's own event loop, one `asyncio.Runner` per session
 and process, when no other plugin claimed it first. pytest-asyncio is not needed. Tasks a test
-leaves running are cancelled after it, with a warning.
+leaves running are cancelled after it, with a warning. Machines run on their own threads, the
+loop only awaits them. Teardown parks the `machine` and `machine_factory` machines a test left
+started, not machines the test built itself.
 
 Async fixtures, coroutines or async generators of any scope, run on the same loop when no other
 plugin claimed them: a session-scoped async fixture and every test share one loop per process.

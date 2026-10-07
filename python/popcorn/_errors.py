@@ -187,8 +187,9 @@ class ModelError(PopcornError):
 
 
 class MachineRunning(PopcornError):
-    """The machine is running, state access is refused outside its handlers."""
+    """The machine is busy, a goal active or a free run started: sync access is refused outside
+    its handlers. `snapshot`, `restore`, `remove_hooks` and `Ring.clear` refuse handlers too."""
 
 
 class MachineBusy(PopcornError):
-    """The machine already runs a slice or a call."""
+    """A run, step, call, wait or free run is already active on the machine."""
