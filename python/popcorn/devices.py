@@ -11,10 +11,10 @@ Durations are VirtualDuration values of a whole number of nanoseconds. A project
 them with `popcorn.units`, such as `us(600)`, and the register keys of `TableTarget` replies as
 integers.
 
-Call `contents()`, `snapshot()` and `restore()` only while the machine the device serves is
-parked, or from one of its callbacks: nothing guards them, and a call while it runs races its
-thread. `restore()` on an attached device sets its state behind the bus model, which keeps its
-own transfer state.
+`contents()`, `snapshot()`, `restore()` and `TableTarget.writes()` need the machine the device
+serves parked, or a call from one of its callbacks: while it is busy they raise
+`MachineRunning`. A device that serves no machine has no such limit. `restore()` on an attached
+device sets its state behind the bus model, which keeps its own transfer state.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from operator import attrgetter
 
 from popcorn import _core
-from popcorn._devices import check_address, chip_select, parked
+from popcorn._devices import BusDevice, check_address, chip_select, parked
 from popcorn._errors import ConfigError
 from popcorn.units import VirtualDuration, ms, s, us
 
@@ -66,6 +66,21 @@ def _native(build: Callable[[], None], keys: Mapping[str, str]) -> None:
         build()
     except ConfigError as error:
         raise ValueError(f"{keys.get(error.key, error.key)}: {error.expected}") from error
+
+
+def _contents(device: _core.At25sfBase | _core.Eeprom24xxBase) -> bytes:
+    read: Callable[[], bytes] = attrgetter("_contents")(device)
+    return parked(device, read)
+
+
+def _snapshot(device: BusDevice) -> bytes:
+    save: Callable[[], bytes] = attrgetter("_snapshot")(device)
+    return parked(device, save)
+
+
+def _restore(device: BusDevice, data: bytes) -> None:
+    load: Callable[[bytes], None] = attrgetter("_restore")(device)
+    parked(device, lambda: load(data))
 
 
 class At25sf(_core.At25sfBase):
@@ -151,6 +166,32 @@ class At25sf(_core.At25sfBase):
         """The chip select pin, None for the hardware SS output."""
         return self._cs
 
+    def contents(self) -> bytes:
+        """The flash array.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+        """
+        return _contents(self)
+
+    def snapshot(self) -> bytes:
+        """The device state as bytes, as a machine snapshot records it.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+        """
+        return _snapshot(self)
+
+    def restore(self, data: bytes) -> None:
+        """Restore bytes `snapshot()` returned.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+            ConfigError: `data` is the state of a device of another size or initial
+                contents.
+        """
+        _restore(self, data)
+
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} on {self._cs or 'SS'}>"
 
@@ -208,6 +249,32 @@ class Eeprom24xx(_core.Eeprom24xxBase):
     def address(self) -> int:
         """The 7-bit address the EEPROM answers."""
         return self._bus_address
+
+    def contents(self) -> bytes:
+        """The EEPROM array.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+        """
+        return _contents(self)
+
+    def snapshot(self) -> bytes:
+        """The device state as bytes, as a machine snapshot records it.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+        """
+        return _snapshot(self)
+
+    def restore(self, data: bytes) -> None:
+        """Restore bytes `snapshot()` returned.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+            ConfigError: `data` is the state of a device of another size or initial
+                contents.
+        """
+        _restore(self, data)
 
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self._bus_address:#04x}>"
@@ -282,6 +349,22 @@ class TableTarget(_core.TableTargetBase):
         """
         recorded: Callable[[], list[tuple[int, bytes]]] = attrgetter("_writes")(self)
         return tuple(TableWrite(reg, data) for reg, data in parked(self, recorded))
+
+    def snapshot(self) -> bytes:
+        """The device state as bytes, as a machine snapshot records it.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+        """
+        return _snapshot(self)
+
+    def restore(self, data: bytes) -> None:
+        """Restore bytes `snapshot()` returned.
+
+        Raises:
+            MachineRunning: The machine it serves is busy, outside its callbacks.
+        """
+        _restore(self, data)
 
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self._bus_address:#04x}>"

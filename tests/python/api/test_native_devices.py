@@ -199,6 +199,52 @@ def test_a_device_snapshot_round_trips_through_a_fresh_device(
     assert blank.writes() == table.writes()
 
 
+def served(
+    u575: popcorn.MachineDescription,
+) -> list[tuple[popcorn.Machine, Eeprom24xx | At25sf | TableTarget]]:
+    device = eeprom()
+    flash = At25sf("PA4")
+    table = TableTarget(0x38, register_bytes=2)
+    return [
+        (machine(u575, I2C_ELF, "I2C1", device), device),
+        (spi_machine(u575, flash), flash),
+        (machine(u575, I2C_ELF, "I2C1", table), table),
+    ]
+
+
+def test_device_state_accessors_are_machine_running_while_its_machine_runs(
+    u575: popcorn.MachineDescription,
+) -> None:
+    async def scenario(m: popcorn.Machine, device: Eeprom24xx | At25sf | TableTarget) -> None:
+        state = device.snapshot()
+        async with m.running():
+            with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
+                device.snapshot()
+            with pytest.raises(popcorn.MachineRunning):
+                device.restore(state)
+            if not isinstance(device, TableTarget):
+                with pytest.raises(popcorn.MachineRunning):
+                    device.contents()
+
+    for m, device in served(u575):
+        enter(m, "idle")
+        asyncio.run(scenario(m, device))
+        assert not m.busy
+
+
+def test_device_state_accessors_work_on_a_parked_machine(
+    u575: popcorn.MachineDescription,
+) -> None:
+    for m, device in served(u575):
+        asyncio.run(m.run(budget=10_000))
+        assert not m.busy
+        state = device.snapshot()
+        device.restore(state)
+        assert device.snapshot() == state
+        if not isinstance(device, TableTarget):
+            assert set(device.contents()) == {0xFF}
+
+
 def test_restore_refuses_the_state_of_another_size_or_initial_contents() -> None:
     state = At25sf(size=64 << 10).snapshot()
     with pytest.raises(ConfigError):

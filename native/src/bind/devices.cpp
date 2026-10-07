@@ -362,16 +362,9 @@ void bind_native_devices(nb::module_ scope)
           nb::arg("page_program"), nb::arg("erase_4k"), nb::arg("erase_32k"), nb::arg("erase_64k"),
           nb::arg("chip_erase"), nb::arg("write_status"), nb::arg("power_down"), nb::arg("release"),
           nb::arg("reset"))
-      .def(
-          "contents", [](devices::at25sf const& self) { return bytes_of(self.contents()); },
-          "The flash array.")
-      .def(
-          "snapshot", &saved<devices::at25sf>,
-          "The device state as bytes, as a machine snapshot records it.")
-      .def(
-          "restore", &loaded<devices::at25sf>, nb::arg("data"),
-          "Restore bytes snapshot() returned. Raises ConfigError for bytes of a device of another "
-          "size or initial contents.");
+      .def("_contents", [](devices::at25sf const& self) { return bytes_of(self.contents()); })
+      .def("_snapshot", &saved<devices::at25sf>)
+      .def("_restore", &loaded<devices::at25sf>, nb::arg("data"));
 
   nb::class_<devices::eeprom_24xx, stm32::i2c_target>(
       scope, "Eeprom24xxBase",
@@ -392,16 +385,9 @@ void bind_native_devices(nb::module_ scope)
           },
           nb::arg("address"), nb::arg("size"), nb::arg("address_bytes"), nb::arg("page_size"),
           nb::arg("write_cycle"), nb::arg("image"))
-      .def(
-          "contents", [](devices::eeprom_24xx const& self) { return bytes_of(self.contents()); },
-          "The EEPROM array.")
-      .def(
-          "snapshot", &saved<devices::eeprom_24xx>,
-          "The device state as bytes, as a machine snapshot records it.")
-      .def(
-          "restore", &loaded<devices::eeprom_24xx>, nb::arg("data"),
-          "Restore bytes snapshot() returned. Raises ConfigError for bytes of a device of another "
-          "size or initial contents.");
+      .def("_contents", [](devices::eeprom_24xx const& self) { return bytes_of(self.contents()); })
+      .def("_snapshot", &saved<devices::eeprom_24xx>)
+      .def("_restore", &loaded<devices::eeprom_24xx>, nb::arg("data"));
 
   nb::class_<devices::table_target, stm32::i2c_target>(
       scope, "TableTargetBase",
@@ -429,11 +415,7 @@ void bind_native_devices(nb::module_ scope)
             }
             return out;
           })
-      .def(
-          "snapshot", &saved<devices::table_target>,
-          "The device state as bytes, as a machine snapshot records it.")
-      .def(
-          "restore", &loaded<devices::table_target>, nb::arg("data"),
-          "Restore bytes snapshot() returned.");
+      .def("_snapshot", &saved<devices::table_target>)
+      .def("_restore", &loaded<devices::table_target>, nb::arg("data"));
 }
 }
