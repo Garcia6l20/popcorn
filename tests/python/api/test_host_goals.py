@@ -258,7 +258,9 @@ def test_a_started_machine_dropped_without_halt_joins_its_thread(machines: Machi
     assert _core.host_threads() == before
 
 
-def started_and_ended_by_a_handler(machines: Machines) -> weakref.ref[popcorn.Machine]:
+def started_and_ended_by_a_handler(
+    machines: Machines, surfaced: bool
+) -> weakref.ref[popcorn.Machine]:
     m = machines(slice_instructions=1_000)
 
     def failing(_: object) -> None:
@@ -266,13 +268,20 @@ def started_and_ended_by_a_handler(machines: Machines) -> weakref.ref[popcorn.Ma
 
     m.on_return("alu_mark", failing)
     m.start()
-    with pytest.raises(ValueError, match="a handler of"):
-        run_bounded(m.wait_for(Never()), HANG)
+    if surfaced:
+        with pytest.raises(ValueError, match="a handler of"):
+            run_bounded(m.wait_for(Never()), HANG)
+    else:
+        ended = threading.Event()
+        end = m._handle.wait(None, None)  # pyright: ignore[reportPrivateUsage]
+        end.add_done_callback(ended.set)
+        assert ended.wait(HANG)
     return weakref.ref(m)
 
 
+@pytest.mark.parametrize("surfaced", [False, True], ids=["unclaimed", "surfaced"])
 def test_a_machine_whose_free_run_a_handler_ended_is_collected(
-    machines: Machines, monkeypatch: pytest.MonkeyPatch
+    machines: Machines, monkeypatch: pytest.MonkeyPatch, surfaced: bool
 ) -> None:
     reported: list[str] = []
 
@@ -282,12 +291,15 @@ def test_a_machine_whose_free_run_a_handler_ended_is_collected(
     monkeypatch.setattr(sys, "unraisablehook", report)
     gc.collect()
     before = _core.host_threads()
-    probe = started_and_ended_by_a_handler(machines)
+    probe = started_and_ended_by_a_handler(machines, surfaced)
     gc.collect()
     assert probe() is None
     assert _core.host_threads() == before
-    [unclaimed] = reported
-    assert unclaimed.startswith("EmulationError(") and "collected" in unclaimed
+    if surfaced:
+        assert reported == []
+    else:
+        [unclaimed] = reported
+        assert unclaimed.startswith("EmulationError(") and "collected" in unclaimed
 
 
 class Payload:
@@ -376,8 +388,7 @@ def test_a_wait_ended_by_a_handler_holds_no_machine_once_it_completes(
         assert probe() is None
     finally:
         stall.release.set()
-    [unclaimed] = reported
-    assert unclaimed.startswith("EmulationError(")
+    assert reported == []
 
 
 def halted_while_stalled(m: popcorn.Machine, stall: StalledWait) -> weakref.ref[Payload]:

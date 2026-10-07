@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <expected>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -38,6 +39,8 @@ auto register_name(peripheral_desc const& desc, std::uint32_t offset) -> std::st
  *        methods `_claims`, `_reset`, `_read`, `_write`, `_event`, `_save` and `_load` that
  *        `popcorn.model.Model` defines. Every call takes the GIL. A bus error crosses as a
  *        return value: None from `_read` and False from `_write` become bus_error::denied.
+ *        Once its machine's Python side is collected no method is called: the run is asked to
+ *        stop, a read returns 0, `claims` and `save` nothing, the others have no effect.
  */
 class python_model final : public periph::model
 {
@@ -47,7 +50,8 @@ public:
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
     gil_entry const gil;
-    return nb::cast<std::vector<std::string>>(call("_claims"));
+    auto const      result = call("_claims");
+    return result ? nb::cast<std::vector<std::string>>(*result) : std::vector<std::string>{};
   }
 
   void reset(periph::register_file&, reset_kind kind) override
@@ -63,7 +67,12 @@ public:
       periph::access_ctx) -> std::expected<std::uint32_t, bus_error> override
   {
     gil_entry const gil;
-    auto const      result = call("_read", offset, size);
+    auto const      called = call("_read", offset, size);
+    if(not called)
+    {
+      return 0u;
+    }
+    auto const& result = *called;
     if(result.is_none())
     {
       return std::unexpected{bus_error::denied};
@@ -85,7 +94,12 @@ public:
       periph::access_ctx) -> std::expected<void, bus_error> override
   {
     gil_entry const gil;
-    auto const      result = call("_write", offset, size, old, value);
+    auto const      called = call("_write", offset, size, old, value);
+    if(not called)
+    {
+      return {};
+    }
+    auto const& result = *called;
     if(result.is_none())
     {
       return {};
@@ -110,8 +124,13 @@ public:
   void save(std::vector<std::byte>& out) const override
   {
     gil_entry const gil;
-    auto const      bytes = nb::cast<nb::bytes>(call("_save"));
-    auto const      data  = static_cast<std::byte const*>(bytes.data());
+    auto const      result = call("_save");
+    if(not result)
+    {
+      return;
+    }
+    auto const bytes = nb::cast<nb::bytes>(*result);
+    auto const data  = static_cast<std::byte const*>(bytes.data());
     out.insert(out.end(), data, data + bytes.size());
   }
 
@@ -122,23 +141,33 @@ public:
   }
 
   /**
-   * @brief Sets the cell whose context every call runs in.
-   * @param cell A weak reference to the cell, or None, the GIL held.
+   * @brief Attaches every call to the machine whose model this is.
+   * @param cell A weak reference to the machine's cell, or None, the GIL held.
+   * @param alive The machine's lifetime flag.
+   * @param collected The machine's collected flag.
+   * @param services The machine's services.
    */
-  void run_in(nb::object cell)
+  void run_in(
+      nb::object              cell,
+      alive_flag              alive,
+      alive_flag              collected,
+      core::machine_services& services)
   {
-    context_ = std::move(cell);
+    cell_.run_in(std::move(cell), std::move(alive), std::move(collected));
+    cell_.stop_through(services);
   }
 
 private:
-  template <typename... Args> auto call(char const* name, Args&&... args) const -> nb::object
+  template <typename... Args>
+  auto call(char const* name, Args&&... args) const -> std::optional<nb::object>
   {
-    cell_entry const   entered{context_};
-    nb::detail::ticket ticket(nb_trampoline, name, true);
-    return nb_trampoline.base().attr(ticket.key)(std::forward<Args>(args)...);
+    return cell_.call([&] {
+      nb::detail::ticket ticket(nb_trampoline, name, true);
+      return nb_trampoline.base().attr(ticket.key)(std::forward<Args>(args)...);
+    });
   }
 
-  nb::object context_ = nb::none();
+  callback_cell cell_;
 };
 
 thread_local building_state building{};
@@ -152,7 +181,11 @@ auto current_build() -> building_state
   return building;
 }
 
-auto to_model(nb::object const& made, peripheral_desc const& desc) -> std::shared_ptr<periph::model>
+auto to_model(
+    nb::object const&      made,
+    periph::model_context& ctx,
+    peripheral_desc const& desc,
+    alive_flag             alive) -> std::shared_ptr<periph::model>
 {
   std::shared_ptr<periph::model> model;
   if(not nb::try_cast(made, model) or not model)
@@ -164,7 +197,7 @@ auto to_model(nb::object const& made, peripheral_desc const& desc) -> std::share
   }
   if(auto* const python = dynamic_cast<python_model*>(model.get()))
   {
-    python->run_in(building_context());
+    python->run_in(building_context(), std::move(alive), building_collected(), ctx.services);
   }
   return model;
 }
@@ -182,10 +215,12 @@ auto python_model_factory(nb::object maker) -> periph::model_factory
 {
   return [callable = held_bare(std::move(maker))](
              periph::model_context& ctx, peripheral_desc const& desc) {
-    auto            made = current_build();
+    auto            made  = current_build();
+    auto            alive = made.alive;
     gil_entry const gil;
     return to_model(
-        callable->fn(model_context_view{ctx, std::move(made.alive), std::move(made.host)}), desc);
+        callable->fn(model_context_view{ctx, std::move(made.alive), std::move(made.host)}), ctx,
+        desc, std::move(alive));
   };
 }
 
@@ -206,6 +241,16 @@ building_scope::building_scope(building_state state) noexcept
 building_scope::~building_scope()
 {
   building = std::move(previous_);
+}
+
+auto building_alive() -> alive_flag
+{
+  return building.alive;
+}
+
+auto building_collected() -> alive_flag
+{
+  return building.collected;
 }
 
 auto building_context() -> nb::object
@@ -229,8 +274,10 @@ void register_python_model(std::string const& ip, std::string const& version_glo
         detail::gil_entry const gil;
         auto const makers = reflex::py::nb::module_::import_("popcorn.model").attr("_REGISTERED");
         auto const maker  = makers[reflex::py::nb::make_tuple(ip, version_glob)];
+        auto       alive  = made.alive;
         return detail::to_model(
-            maker(model_context_view{ctx, std::move(made.alive), std::move(made.host)}), desc);
+            maker(model_context_view{ctx, std::move(made.alive), std::move(made.host)}), ctx, desc,
+            std::move(alive));
       });
 }
 

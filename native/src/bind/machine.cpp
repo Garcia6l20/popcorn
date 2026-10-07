@@ -162,9 +162,10 @@ auto usb_factories(
 }
 
 auto options_of(
-    mcu_description const& description,
-    machine_config const&  config,
-    usb_hub_map const&     hubs) -> core::machine_options
+    mcu_description const&               description,
+    machine_config const&                config,
+    usb_hub_map const&                   hubs,
+    std::vector<reflex::py::nb::handle>& python_owned) -> core::machine_options
 {
   if(not std::isfinite(config.cpi) or not(config.cpi > 0.0))
   {
@@ -196,7 +197,8 @@ auto options_of(
   auto const rcc = rcc_options_of(config);
   if(not config.python_devices.empty() or rcc)
   {
-    for(auto& [name, factory] : detail::device_factories(description, config.python_devices, rcc))
+    for(auto& [name, factory] :
+        detail::device_factories(description, config.python_devices, rcc, python_owned))
     {
       if(not options.models.emplace(name, std::move(factory)).second)
       {
@@ -285,25 +287,15 @@ auto held_in(std::shared_ptr<detail::python_cell const> cell)
   };
 }
 
-void report_unclaimed(core::held_end const& ended) noexcept
+void report_unclaimed(core::held_end const& ended, detail::delivered_end const& delivered) noexcept
 {
   try
   {
-    if(auto const* const stopped = std::get_if<stop>(&ended))
+    if(auto const raised = detail::report_of(ended, delivered); not raised.is_none())
     {
-      auto const type = reflex::py::nb::module_::import_("popcorn._errors").attr("EmulationError");
-      auto const raised = type(
-          std::format(
-              "a machine was destroyed with the end of its free run never raised: {} at {:#010x}",
-              stopped->detail.empty() ? "a stop" : stopped->detail, stopped->where.pc));
       PyErr_SetRaisedException(raised.inc_ref().ptr());
+      PyErr_WriteUnraisable(nullptr);
     }
-    else
-    {
-      PyErr_SetRaisedException(
-          detail::python_exception(std::get<std::exception_ptr>(ended)).inc_ref().ptr());
-    }
-    PyErr_WriteUnraisable(nullptr);
   }
   catch(...)
   {
@@ -312,10 +304,43 @@ void report_unclaimed(core::held_end const& ended) noexcept
 }
 }
 
+namespace detail
+{
+auto report_of(core::held_end const& end, delivered_end const& delivered) -> reflex::py::nb::object
+{
+  namespace nb = reflex::py::nb;
+  if(delivered.delivered(end))
+  {
+    return nb::none();
+  }
+  if(auto const* const stopped = std::get_if<stop>(&end))
+  {
+    if(stopped->reason == stop_reason::user and stopped->detail == collected_detail)
+    {
+      return nb::none();
+    }
+    return nb::module_::import_("popcorn._errors")
+        .attr("EmulationError")(std::format(
+            "a machine was destroyed with the stop that ended its free run never returned to "
+            "a caller: {} at {:#010x}",
+            stopped->detail.empty() ? "a stop" : stopped->detail, stopped->where.pc));
+  }
+  auto       raised = python_exception(std::get<std::exception_ptr>(end));
+  auto const gone   = nb::module_::import_("popcorn._hooks").attr("HookGone");
+  if(PyObject_IsInstance(raised.ptr(), gone.ptr()) == 1)
+  {
+    return nb::none();
+  }
+  return raised;
+}
+}
+
 machine_handle::machine_handle(mcu_description const& description, machine_config const& config)
     : alive_{detail::make_alive()}, slot_{std::make_shared<detail::host_slot>()},
       ptys_{std::make_shared<detail::pty_bridges>()},
-      thread_live_{std::make_shared<std::atomic<bool>>(false)}
+      thread_live_{std::make_shared<std::atomic<bool>>(false)},
+      delivered_{std::make_shared<detail::delivered_end>()},
+      collected_{std::make_shared<std::atomic<bool>>(false)}
 {
   auto const             bounds = bounds_of(config);
   reflex::py::nb::object cell;
@@ -330,17 +355,29 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   std::unique_ptr<core::machine> built;
   {
     detail::building_scope const building{
-        {.alive = alive_, .host = slot_, .context = cell.ptr()}
+        {.alive = alive_, .collected = collected_, .host = slot_, .context = cell.ptr()}
     };
     for(auto const& name : config.usb_hosts | std::views::keys)
     {
       hubs_.emplace(name, detail::usb_hubs{});
     }
     built = std::make_unique<core::machine>(
-        description, factory_for(description), options_of(description, config, hubs_));
+        description, factory_for(description),
+        options_of(description, config, hubs_, python_owned_));
   }
   engine_ = built.get();
-  id_     = built->id();
+  for(auto const& unit : description.peripherals)
+  {
+    if(unit.alias_of)
+    {
+      continue;
+    }
+    if(auto const python = detail::python_object(engine_->model(unit.name)); not python.is_none())
+    {
+      python_owned_.push_back(python);
+    }
+  }
+  id_ = built->id();
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(std::move(built));
   auto hooks     = detail::python_thread_hooks(thread_live_);
@@ -383,7 +420,7 @@ machine_handle::~machine_handle()
     detail::run_retired(*slot_);
     if(ended and python)
     {
-      report_unclaimed(*ended);
+      report_unclaimed(*ended, *delivered_);
     }
   }
   host_.reset();

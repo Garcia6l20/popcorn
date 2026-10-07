@@ -192,6 +192,8 @@ struct building_state
 {
   /** @brief Cleared when the machine is destroyed. */
   detail::alive_flag alive{};
+  /** @brief Set once the machine's `Machine` is found garbage. */
+  detail::alive_flag collected{};
   /** @brief The machine's host, set once the machine is handed over. */
   detail::host_ref host{};
   /** @brief Weak reference to the cell whose context the models and devices run in, borrowed for
@@ -221,6 +223,18 @@ public:
 private:
   building_state previous_;
 };
+
+/**
+ * @brief The lifetime flag of the machine being built on this thread.
+ * @return The flag, null outside a build.
+ */
+auto building_alive() -> alive_flag;
+
+/**
+ * @brief The collected flag of the machine being built on this thread.
+ * @return The flag, null outside a build.
+ */
+auto building_collected() -> alive_flag;
 
 /**
  * @brief The weak reference to the context cell of the machine being built on this thread.

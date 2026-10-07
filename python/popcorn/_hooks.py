@@ -19,9 +19,10 @@ class CallbackTable:
     context is a copy of the one current at `add`, kept here for the same reason.
     """
 
-    __slots__ = ("__weakref__", "_next", "_running", "_table")
+    __slots__ = ("__weakref__", "_next", "_running", "_table", "closed")
 
     def __init__(self) -> None:
+        self.closed = False
         self._next = 0
         self._table: dict[int, tuple[Callable[..., object], contextvars.Context]] = {}
         self._running: set[int] = set()
@@ -37,6 +38,10 @@ class CallbackTable:
         """Forget a handler."""
         self._table.pop(key, None)
 
+    def close(self) -> None:
+        """Refuse every later call through a Relay, once the machine is garbage."""
+        self.closed = True
+
     def __len__(self) -> int:
         return len(self._table)
 
@@ -51,10 +56,15 @@ class CallbackTable:
             self._running.discard(key)
 
 
+class HookGone(ReferenceError):
+    """Raised by a hook whose machine's Python side was collected."""
+
+
 class Relay:
     """What native code calls: forwards to a handler of a table while the table lives.
 
-    A quiet relay returns None once the table is gone, for a log sink that may outlive it.
+    A quiet relay returns None once the table is gone or closed, for a log sink that may outlive
+    it. Another raises HookGone then.
     """
 
     __slots__ = ("_key", "_quiet", "_table")
@@ -66,10 +76,10 @@ class Relay:
 
     def __call__(self, *args: object) -> object:
         table = self._table()
-        if table is None:
+        if table is None or table.closed:
             if self._quiet:
                 return None
-            raise ReferenceError("the machine of this hook is gone")
+            raise HookGone("the machine of this hook is gone")
         return table(self._key, *args)
 
 

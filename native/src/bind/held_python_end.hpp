@@ -2,6 +2,8 @@
 
 #include "gil_locks.hpp"
 
+#include <popcorn/core/host.hpp>
+
 #include <reflex/py.hpp>
 
 #include <nanobind/nanobind.h>
@@ -9,8 +11,10 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
+#include <variant>
 
 namespace popcorn::bind::detail
 {
@@ -157,4 +161,92 @@ private:
 
   std::shared_ptr<entry> entry_;
 };
+
+/**
+ * @brief What the waits of the current free run delivered to Python, so the end one delivered is
+ *        not reported again: the last stop a wait returned, and whether one raised the end's
+ *        exception. Each wait carries the generation of the free run it was made in, and a
+ *        result read after a later start() records nothing. Its mutex is a leaf.
+ */
+class delivered_end
+{
+public:
+  /** @brief The generation of the current free run, for a wait made now. */
+  [[nodiscard]] auto generation() const -> std::uint64_t
+  {
+    std::scoped_lock const lock{mutex_};
+    return generation_;
+  }
+
+  /** @brief Records the stop a wait of free run @p made returned. */
+  void returned(std::uint64_t made, stop const& at)
+  {
+    std::scoped_lock const lock{mutex_};
+    if(made == generation_)
+    {
+      stop_ = at;
+    }
+  }
+
+  /**
+   * @brief Records the exception a wait of free run @p made raised, the end's when it is a
+   *        held_python_end.
+   */
+  void raised(std::uint64_t made, std::exception_ptr const& error) noexcept
+  {
+    try
+    {
+      std::rethrow_exception(error);
+    }
+    catch(held_python_end const&)
+    {
+      std::scoped_lock const lock{mutex_};
+      error_ = error_ or made == generation_;
+    }
+    catch(...)
+    {}
+  }
+
+  /** @brief Forgets what was delivered and begins a generation, when a free run starts. */
+  void reset() noexcept
+  {
+    std::scoped_lock const lock{mutex_};
+    ++generation_;
+    stop_.reset();
+    error_ = false;
+  }
+
+  /** @brief Whether a wait of the current free run delivered @p end. */
+  [[nodiscard]] auto delivered(core::held_end const& end) const -> bool
+  {
+    std::scoped_lock const lock{mutex_};
+    if(auto const* const stopped = std::get_if<stop>(&end))
+    {
+      return stop_
+         and stop_->reason == stopped->reason
+         and stop_->instructions == stopped->instructions
+         and stop_->time == stopped->time
+         and stop_->where.pc == stopped->where.pc
+         and stop_->detail == stopped->detail;
+    }
+    return error_;
+  }
+
+private:
+  mutable std::mutex  mutex_;
+  std::uint64_t       generation_ = 0;
+  std::optional<stop> stop_;
+  bool                error_ = false;
+};
+
+/**
+ * @brief The exception reporting the end of a free run no caller received. The GIL held.
+ * @param end The end.
+ * @param delivered What the waits of the free run delivered.
+ * @return None when a wait delivered @p end or the machine's collection caused it, a
+ *         stop_reason::user stop with collected_detail or a `popcorn._hooks.HookGone`.
+ *         Otherwise EmulationError naming the stop, or the exception a handler raised.
+ * @throws reflex::py::nb::python_error when the exception cannot be built.
+ */
+auto report_of(core::held_end const& end, delivered_end const& delivered) -> reflex::py::nb::object;
 }

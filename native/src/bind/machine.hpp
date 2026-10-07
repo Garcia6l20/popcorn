@@ -2,6 +2,7 @@
 
 #include "board.hpp"
 #include "gil_locks.hpp"
+#include "held_python_end.hpp"
 #include "hooks.hpp"
 #include "host_future.hpp"
 #include "image.hpp"
@@ -287,6 +288,25 @@ public:
    */
   [[= py::doc{"Cancel a goal or halt the free run, return what halt() returns."}]] auto park()
       -> reflex::py::nb::object;
+
+  /**
+   * @brief Parks the machine as park() does, for a collection: returns the end to report.
+   * @return None when nothing ended the free run by itself, when a wait already returned or
+   *         raised that end, or when the collection caused it: a stop_reason::user stop with
+   *         detail::collected_detail, or `popcorn._hooks.HookGone`. Otherwise EmulationError
+   *         naming the stop, or the exception a handler raised.
+   * @throws machine_running inside a parked section.
+   */
+  [[= py::doc{"Park for a collection, return the end to report or None."}]] auto unreported_end()
+      -> reflex::py::nb::object;
+
+  /**
+   * @brief Marks the `Machine` garbage: every later call of its Python models and bus devices
+   *        is refused and stops the run with stop_reason::user and detail::collected_detail,
+   *        on a machine a finalizer resurrected too.
+   */
+  [[= py::doc{"Refuse every later model and device call, the Machine is garbage."}]] void
+      mark_collected() noexcept;
 
   /**
    * @brief Waits on the free run.
@@ -753,10 +773,21 @@ private:
     return detail::host_access(*host_, std::forward<Body>(body));
   }
 
+  [[= py::traverse]] void report_python(reflex::py::gc_visitor& visit) const noexcept
+  {
+    for(auto const owned : python_owned_)
+    {
+      visit(owned);
+    }
+  }
+
+  std::vector<reflex::py::nb::handle>     python_owned_;
   std::shared_ptr<std::atomic<bool>>      alive_;
   std::shared_ptr<detail::host_slot>      slot_;
   std::shared_ptr<detail::pty_bridges>    ptys_;
   std::shared_ptr<std::atomic<bool>>      thread_live_;
+  std::shared_ptr<detail::delivered_end>  delivered_;
+  std::shared_ptr<std::atomic<bool>>      collected_;
   std::map<std::string, detail::usb_hubs> hubs_;
   core::machine*                          engine_{};
   std::uint64_t                           id_{};

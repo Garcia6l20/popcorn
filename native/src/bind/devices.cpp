@@ -40,16 +40,29 @@ namespace nb    = reflex::py::nb;
 namespace stm32 = periph::stm32;
 
 template <typename Trampoline, typename... Args>
-auto call(Trampoline const& self, nb::handle cell, char const* name, Args&&... args) -> nb::object
+auto call(Trampoline const& self, callback_cell const& cell, char const* name, Args&&... args)
+    -> std::optional<nb::object>
 {
-  cell_entry const   entered{cell};
-  nb::detail::ticket ticket(self, name, true);
-  return self.base().attr(ticket.key)(std::forward<Args>(args)...);
+  return cell.call([&] {
+    nb::detail::ticket ticket(self, name, true);
+    return self.base().attr(ticket.key)(std::forward<Args>(args)...);
+  });
 }
 
-void append(nb::object const& result, std::vector<std::byte>& out)
+constexpr std::uint8_t no_address = 0xFF;
+
+template <typename T> auto or_value(std::optional<nb::object> const& result, T neutral) -> T
 {
-  auto const bytes = nb::cast<nb::bytes>(result);
+  return result ? nb::cast<T>(*result) : neutral;
+}
+
+void append(std::optional<nb::object> const& result, std::vector<std::byte>& out)
+{
+  if(not result)
+  {
+    return;
+  }
+  auto const bytes = nb::cast<nb::bytes>(*result);
   auto const data  = static_cast<std::byte const*>(bytes.data());
   out.insert(out.end(), data, data + bytes.size());
 }
@@ -58,7 +71,9 @@ void append(nb::object const& result, std::vector<std::byte>& out)
  * @brief nanobind trampoline letting a Python class implement stm32::i2c_target through the
  *        private methods `_address`, `_start`, `_write`, `_read`, `_stop`, `_reset`, `_save` and
  *        `_load` that `popcorn.board.I2CTarget` defines, which check the values returned. Every
- *        call takes the GIL. Times cross as picoseconds since power-on.
+ *        call takes the GIL. Times cross as picoseconds since power-on. Once its machine's
+ *        Python side is collected no method is called: the run is asked to stop, the address
+ *        matches nothing, `_start` and `_write` NACK, a read returns 0.
  */
 class python_i2c_target final : public stm32::i2c_target
 {
@@ -68,69 +83,61 @@ public:
   [[nodiscard]] auto address() const -> std::uint8_t override
   {
     gil_entry const gil;
-    return nb::cast<std::uint8_t>(call(nb_trampoline, context_, "_address"));
+    return or_value<std::uint8_t>(call(nb_trampoline, cell, "_address"), no_address);
   }
 
   [[nodiscard]] auto start(bool read, vtime at) -> bool override
   {
     gil_entry const gil;
-    return nb::cast<bool>(call(nb_trampoline, context_, "_start", read, at.ps));
+    return or_value(call(nb_trampoline, cell, "_start", read, at.ps), false);
   }
 
   [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> bool override
   {
     gil_entry const gil;
-    return nb::cast<bool>(call(nb_trampoline, context_, "_write", byte, at.ps));
+    return or_value(call(nb_trampoline, cell, "_write", byte, at.ps), false);
   }
 
   [[nodiscard]] auto read(vtime at) -> std::uint8_t override
   {
     gil_entry const gil;
-    return nb::cast<std::uint8_t>(call(nb_trampoline, context_, "_read", at.ps));
+    return or_value<std::uint8_t>(call(nb_trampoline, cell, "_read", at.ps), 0);
   }
 
   void stop(vtime at) override
   {
     gil_entry const gil;
-    call(nb_trampoline, context_, "_stop", at.ps);
+    call(nb_trampoline, cell, "_stop", at.ps);
   }
 
   void reset(reset_kind kind) override
   {
     gil_entry const gil;
-    call(nb_trampoline, context_, "_reset", kind);
+    call(nb_trampoline, cell, "_reset", kind);
   }
 
   void save(std::vector<std::byte>& out) const override
   {
     gil_entry const gil;
-    append(call(nb_trampoline, context_, "_save"), out);
+    append(call(nb_trampoline, cell, "_save"), out);
   }
 
   void load(std::span<std::byte const> in) override
   {
     gil_entry const gil;
-    call(nb_trampoline, context_, "_load", nb::bytes(in.data(), in.size()));
+    call(nb_trampoline, cell, "_load", nb::bytes(in.data(), in.size()));
   }
 
-  /**
-   * @brief Sets the cell whose context every call runs in.
-   * @param cell A weak reference to the cell, or None, the GIL held.
-   */
-  void run_in(nb::object cell)
-  {
-    context_ = std::move(cell);
-  }
-
-private:
-  nb::object context_ = nb::none();
+  /** @brief The cell its calls run in. */
+  callback_cell cell;
 };
 
 /**
  * @brief nanobind trampoline letting a Python class implement stm32::spi_target through the
  *        private methods `_select`, `_exchange`, `_reset`, `_save` and `_load` that
  *        `popcorn.board.SpiTarget` defines, which check the values returned. Every call takes
- *        the GIL. Times cross as picoseconds since power-on.
+ *        the GIL. Times cross as picoseconds since power-on. Once its machine's Python side is
+ *        collected no method is called: the run is asked to stop, an exchange returns 0.
  */
 class python_spi_target final : public stm32::spi_target
 {
@@ -140,45 +147,36 @@ public:
   void select(bool selected, vtime at) override
   {
     gil_entry const gil;
-    call(nb_trampoline, context_, "_select", selected, at.ps);
+    call(nb_trampoline, cell, "_select", selected, at.ps);
   }
 
   [[nodiscard]] auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
       -> std::uint32_t override
   {
     gil_entry const gil;
-    return nb::cast<std::uint32_t>(call(nb_trampoline, context_, "_exchange", out, bits, at.ps));
+    return or_value<std::uint32_t>(call(nb_trampoline, cell, "_exchange", out, bits, at.ps), 0);
   }
 
   void reset(reset_kind kind) override
   {
     gil_entry const gil;
-    call(nb_trampoline, context_, "_reset", kind);
+    call(nb_trampoline, cell, "_reset", kind);
   }
 
   void save(std::vector<std::byte>& out) const override
   {
     gil_entry const gil;
-    append(call(nb_trampoline, context_, "_save"), out);
+    append(call(nb_trampoline, cell, "_save"), out);
   }
 
   void load(std::span<std::byte const> in) override
   {
     gil_entry const gil;
-    call(nb_trampoline, context_, "_load", nb::bytes(in.data(), in.size()));
+    call(nb_trampoline, cell, "_load", nb::bytes(in.data(), in.size()));
   }
 
-  /**
-   * @brief Sets the cell whose context every call runs in.
-   * @param cell A weak reference to the cell, or None, the GIL held.
-   */
-  void run_in(nb::object cell)
-  {
-    context_ = std::move(cell);
-  }
-
-private:
-  nb::object context_ = nb::none();
+  /** @brief The cell its calls run in. */
+  callback_cell cell;
 };
 
 auto bytes_of(std::span<std::byte const> data) -> nb::bytes
@@ -214,18 +212,54 @@ auto refused(std::string const& peripheral, std::string expected) -> config_erro
   return config_error("devices", 0, std::format("devices.{}", peripheral), std::move(expected));
 }
 
-auto spi_attachment_of(std::string const& peripheral, nb::object const& object)
-    -> stm32::spi_attachment
+using device_cells =
+    std::map<std::string, std::vector<std::shared_ptr<callback_cell>>, std::less<>>;
+
+template <typename Python, typename Target>
+void adopt(
+    std::shared_ptr<Target> const& target,
+    nb::object const&              object,
+    std::string const&             peripheral,
+    device_cells&                  cells,
+    std::vector<nb::handle>&       python_owned)
+{
+  if(auto* const python = dynamic_cast<Python*>(target.get()))
+  {
+    python->cell.run_in(building_context(), building_alive(), building_collected());
+    cells[peripheral].push_back(std::shared_ptr<callback_cell>(target, &python->cell));
+    python_owned.push_back(object);
+  }
+}
+
+auto stopping(periph::model_factory inner, std::vector<std::shared_ptr<callback_cell>> cells)
+    -> periph::model_factory
+{
+  if(cells.empty())
+  {
+    return inner;
+  }
+  return [inner = std::move(inner),
+          cells = std::move(cells)](periph::model_context& ctx, peripheral_desc const& desc) {
+    for(auto const& cell : cells)
+    {
+      cell->stop_through(ctx.services);
+    }
+    return inner(ctx, desc);
+  };
+}
+
+auto spi_attachment_of(
+    std::string const&       peripheral,
+    nb::object const&        object,
+    device_cells&            cells,
+    std::vector<nb::handle>& python_owned) -> stm32::spi_attachment
 {
   std::shared_ptr<stm32::spi_target> target;
   if(not nb::try_cast(object, target) or not target)
   {
     throw refused(peripheral, "popcorn.board.SpiTarget instances");
   }
-  if(auto* const python = dynamic_cast<python_spi_target*>(target.get()))
-  {
-    python->run_in(building_context());
-  }
+  adopt<python_spi_target>(target, object, peripheral, cells, python_owned);
   if(not nb::hasattr(object, "_cs_port") or not nb::hasattr(object, "_cs_pin"))
   {
     throw refused(peripheral, "popcorn.board.SpiTarget or popcorn.devices.At25sf instances");
@@ -253,10 +287,12 @@ void bind_device_bases(nb::module_ scope)
 auto device_factories(
     mcu_description const&                                description,
     std::map<std::string, std::vector<nb::object>> const& devices,
-    std::optional<stm32::rcc_options> const&              rcc)
+    std::optional<stm32::rcc_options> const&              rcc,
+    std::vector<nb::handle>&                              python_owned)
     -> std::map<std::string, periph::model_factory, std::less<>>
 {
   stm32::board board;
+  device_cells cells;
   if(rcc)
   {
     board.rcc = *rcc;
@@ -274,10 +310,7 @@ auto device_factories(
     {
       if(std::shared_ptr<stm32::i2c_target> target; nb::try_cast(object, target) and target)
       {
-        if(auto* const python = dynamic_cast<python_i2c_target*>(target.get()))
-        {
-          python->run_in(building_context());
-        }
+        adopt<python_i2c_target>(target, object, peripheral, cells, python_owned);
         if(unit->ip != "I2C")
         {
           throw refused(peripheral, "an SPI peripheral for an SpiTarget, not an I2CTarget");
@@ -290,7 +323,7 @@ auto device_factories(
         {
           throw refused(peripheral, "an I2C peripheral for an I2CTarget");
         }
-        board.spi[peripheral].push_back(spi_attachment_of(peripheral, object));
+        board.spi[peripheral].push_back(spi_attachment_of(peripheral, object, cells, python_owned));
       }
     }
   }
@@ -307,7 +340,7 @@ auto device_factories(
     {
       throw refused(peripheral, "a peripheral a built-in I2C or SPI model serves");
     }
-    out.emplace(peripheral, std::move(found->second));
+    out.emplace(peripheral, stopping(std::move(found->second), std::move(cells[peripheral])));
   }
   if(rcc)
   {

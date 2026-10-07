@@ -228,7 +228,13 @@ void machine::run_state::code_changed(
 
 auto machine::run_state::payload_pending() const noexcept -> bool
 {
-  return requested or reset_requested or end_requested or failure or unmapped or trap or bus_fault;
+  return stop_requested()
+      or reset_requested
+      or end_requested
+      or failure
+      or unmapped
+      or trap
+      or bus_fault;
 }
 
 void machine::run_state::drain_stale_code()
@@ -239,9 +245,10 @@ void machine::run_state::drain_stale_code()
     remove_translated(engine, *range.buffer, range.first, range.last);
     stale_code.pop_back();
   }
-  if(not payload_pending())
+  clear_internal_stop();
+  if(payload_pending())
   {
-    clear_internal_stop();
+    raise_stop();
   }
 }
 
@@ -458,7 +465,6 @@ void machine::run_state::clear_slice() noexcept
   }
   stale_code.clear();
   remove_step_hook();
-  requested.reset();
   reset_requested.reset();
   end_requested = false;
   trap.reset();
@@ -537,10 +543,9 @@ auto machine::run_state::next_deadline(slice_request const& request) const -> ic
 auto machine::run_state::handle_requests() -> std::optional<slice_end>
 {
   auto const mail = not(trap or unmapped or bus_fault) and take_mail();
-  if(requested)
+  if(auto const asked = take_requested())
   {
-    auto const asked = *std::exchange(requested, std::nullopt);
-    return slice_end{make_stop(asked.reason, asked.detail, std::nullopt)};
+    return slice_end{make_stop(asked->reason, asked->detail, std::nullopt)};
   }
   if(reset_requested)
   {
@@ -953,9 +958,13 @@ void machine::interrupt() noexcept
 
 void machine::do_request_stop(stop_reason reason, std::string detail)
 {
-  if(not run_->requested)
   {
-    run_->requested = requested_stop{.reason = reason, .detail = std::move(detail)};
+    std::scoped_lock const lock{run_->requested_mutex};
+    if(not run_->requested)
+    {
+      run_->requested = requested_stop{.reason = reason, .detail = std::move(detail)};
+      run_->has_requested.store(true, std::memory_order_release);
+    }
   }
   run_->raise_stop();
 }

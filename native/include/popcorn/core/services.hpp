@@ -96,7 +96,8 @@ public:
   virtual ~machine_services();
 
   /**
-   * @brief Asks the run loop to stop and report @p reason. Deferred.
+   * @brief Asks the run loop to stop and report @p reason. Deferred, callable from any thread:
+   *        a request no slice took yet stops the next one.
    * @param reason Reason the run reports.
    * @param detail Human-readable detail for the stop record.
    */

@@ -62,12 +62,16 @@ public:
    * @param future The request's future.
    * @param convert Builds the Python result from the value, called with the GIL held.
    * @param cancel Cancels the request while it is not done, called with the GIL held.
+   * @param failed Sees the exception the request failed with when value() raises it, empty for
+   *        none, called with the GIL held.
    */
   future_request(
       core::host_future<T>                            future,
       std::function<reflex::py::nb::object(T const&)> convert,
-      std::move_only_function<void()>                 cancel)
-      : future_{std::move(future)}, convert_{std::move(convert)}, cancel_{std::move(cancel)}
+      std::move_only_function<void()>                 cancel,
+      std::function<void(std::exception_ptr const&)>  failed = {})
+      : future_{std::move(future)}, convert_{std::move(convert)}, cancel_{std::move(cancel)},
+        failed_{std::move(failed)}
   {}
 
   [[nodiscard]] auto done() const -> bool override
@@ -88,7 +92,13 @@ public:
     }
     catch(reflex::py::nb::python_error const& raised)
     {
+      saw(std::current_exception());
       throw reflex::py::nb::python_error(raised);
+    }
+    catch(...)
+    {
+      saw(std::current_exception());
+      throw;
     }
   }
 
@@ -112,9 +122,18 @@ public:
   }
 
 private:
+  void saw(std::exception_ptr const& error) const
+  {
+    if(failed_)
+    {
+      failed_(error);
+    }
+  }
+
   core::host_future<T>                            future_;
   std::function<reflex::py::nb::object(T const&)> convert_;
   std::move_only_function<void()>                 cancel_;
+  std::function<void(std::exception_ptr const&)>  failed_;
 };
 
 /**

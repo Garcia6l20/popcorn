@@ -191,6 +191,7 @@ void machine_handle::start()
 {
   auto const held = lock_for_request();
   host_->start(held, core::member_id{});
+  delivered_->reset();
 }
 
 auto machine_handle::halt() -> nb::object
@@ -225,6 +226,25 @@ auto machine_handle::park() -> nb::object
   return detail::python_exception(std::get<std::exception_ptr>(*ended));
 }
 
+auto machine_handle::unreported_end() -> nb::object
+{
+  std::optional<core::held_end> ended;
+  {
+    nb::gil_scoped_release const released;
+    ended = host_->halt(core::member_id{});
+  }
+  if(not ended)
+  {
+    return nb::none();
+  }
+  return detail::report_of(*ended, *delivered_);
+}
+
+void machine_handle::mark_collected() noexcept
+{
+  collected_->store(true, std::memory_order_release);
+}
+
 auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::uint64_t> for_ps)
     -> host_future_handle
 {
@@ -240,11 +260,19 @@ auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::ui
   {
     throw std::runtime_error("wait() needs a free run opened by start()");
   }
-  auto waiting = host_->wait(held, core::member_id{}, std::move(spec));
-  auto future  = waiting.future();
+  auto       waiting = host_->wait(held, core::member_id{}, std::move(spec));
+  auto       future  = waiting.future();
+  auto const made    = delivered_->generation();
   return host_future_handle{std::make_shared<detail::future_request<stop>>(
-      std::move(future), [](stop const& stopped) { return nb::cast(record(stopped)); },
-      [waiting = std::move(waiting)] mutable { waiting.drop(); })};
+      std::move(future),
+      [delivered = delivered_, made](stop const& stopped) {
+        delivered->returned(made, stopped);
+        return nb::cast(record(stopped));
+      },
+      [waiting = std::move(waiting)] mutable { waiting.drop(); },
+      [delivered = delivered_, made](std::exception_ptr const& error) {
+        delivered->raised(made, error);
+      })};
 }
 
 auto machine_handle::busy() const -> bool

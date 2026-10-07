@@ -29,6 +29,8 @@ void bind_native_devices(reflex::py::nb::module_ scope);
  * @param devices Python targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
  *        instances, an SPI target carrying its chip select as `_cs_port` and `_cs_pin`.
  * @param rcc Board clock sources of the RCC model, empty for its defaults and no RCC factory.
+ * @param python_owned Receives, borrowed, each Python device of @p devices whose reference a
+ *        factory now holds, once per reference.
  * @return One factory per named peripheral, plus one for the RCC with @p rcc.
  * @throws config_error when a named peripheral is not an I2C or SPI peripheral of @p description,
  *         a target is of the other bus kind, an object is not a target, or no built-in bus model
@@ -38,6 +40,7 @@ void bind_native_devices(reflex::py::nb::module_ scope);
 [[nodiscard]] auto device_factories(
     mcu_description const&                                            description,
     std::map<std::string, std::vector<reflex::py::nb::object>> const& devices,
-    std::optional<periph::stm32::rcc_options> const&                  rcc = std::nullopt)
+    std::optional<periph::stm32::rcc_options> const&                  rcc,
+    std::vector<reflex::py::nb::handle>&                              python_owned)
     -> std::map<std::string, periph::model_factory, std::less<>>;
 }

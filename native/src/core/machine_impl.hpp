@@ -20,6 +20,7 @@
 #include <expected>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -691,16 +692,20 @@ struct machine::run_state
   /** @brief The bits the block hook tests. */
   std::atomic<std::uint8_t> stop_bits{};
 
-  /** @brief Sets the engine thread's bit. */
+  /**
+   * @brief Sets the engine thread's bit, also from another thread through do_request_stop(): the
+   *        release pairs with clear_internal_stop(), so a clear that erases this set sees the
+   *        request made before it.
+   */
   void raise_stop() noexcept
   {
-    stop_bits.fetch_or(stop_internal, std::memory_order_relaxed);
+    stop_bits.fetch_or(stop_internal, std::memory_order_release);
   }
 
   /** @brief Clears the engine thread's bit, leaving a mail bit set. */
   void clear_internal_stop() noexcept
   {
-    stop_bits.fetch_and(static_cast<std::uint8_t>(~stop_internal), std::memory_order_relaxed);
+    stop_bits.fetch_and(static_cast<std::uint8_t>(~stop_internal), std::memory_order_acq_rel);
   }
 
   /** @brief Whether either bit is set. */
@@ -716,8 +721,26 @@ struct machine::run_state
             & stop_mail)
         != 0;
   }
-  /** @brief Stop requested through machine_services. */
+  /** @brief Stop requested through machine_services, from any thread, under requested_mutex.
+   * Kept across slices until a slice takes it. */
   std::optional<requested_stop> requested{};
+  /** @brief Whether a stop was requested. */
+  [[nodiscard]] auto stop_requested() const noexcept -> bool
+  {
+    return has_requested.load(std::memory_order_acquire);
+  }
+
+  /** @brief Takes the requested stop, under requested_mutex when there is one. */
+  auto take_requested() -> std::optional<requested_stop>
+  {
+    if(not stop_requested())
+    {
+      return std::nullopt;
+    }
+    std::scoped_lock const lock{requested_mutex};
+    has_requested.store(false, std::memory_order_relaxed);
+    return std::exchange(requested, std::nullopt);
+  }
   /** @brief Reset requested through machine_services. */
   std::optional<reset_kind> reset_requested{};
   /** @brief Slice end requested through machine_services. */
@@ -1251,6 +1274,11 @@ struct machine::run_state
       -> stop;
   [[nodiscard]] auto stop_from(arch::trap_result const& result) const -> slice_end;
   [[nodiscard]] auto finish(slice_request const& request, slice_end end) -> slice_result;
+
+  /** @brief Guards requested. A leaf: nothing is taken under it. */
+  mutable std::mutex requested_mutex;
+  /** @brief Whether requested holds a stop, read without the mutex on the engine's hot path. */
+  std::atomic<bool> has_requested{};
 };
 
 /**

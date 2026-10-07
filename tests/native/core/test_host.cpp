@@ -1,6 +1,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/trace.hpp>
 
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
@@ -22,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -1833,4 +1835,54 @@ TEST_CASE("halt after a free run ended by itself returns once the host released 
   CHECK(watched.expired());
   REQUIRE(end.has_value());
   require_error(std::get<std::exception_ptr>(*end), [] { CHECK_THROWS_AS(throw, test_failure); });
+}
+
+TEST_CASE("a stop requested from another thread ends a free run with that stop")
+{
+  for(int round = 0; round < 20; ++round)
+  {
+    popcorn::testing::machine_fixture<stop_at_arch> f{m33(), "alu", core::machine_options{}};
+    f.set("r0", 0);
+    auto* const arch = f.module;
+    hosted      h{std::move(f.target)};
+    h.start();
+    REQUIRE(settles([&] { return h.on->state(0) == core::host_state::running; }));
+    arch->attached_services().request_stop(stop_reason::user, "from another thread");
+    REQUIRE(settles([&] { return h.on->state(0) == core::host_state::parked; }));
+    auto const end = h.on->halt(0);
+    REQUIRE(end.has_value());
+    auto const* const stopped = std::get_if<popcorn::stop>(&*end);
+    REQUIRE(stopped != nullptr);
+    CHECK(stopped->reason == stop_reason::user);
+    CHECK(stopped->detail == "from another thread");
+  }
+}
+
+TEST_CASE("a stop requested from another thread after a slice's last check stops the next slice")
+{
+  popcorn::testing::machine_fixture<stop_at_arch> f{m33(), "alu", core::machine_options{}};
+  f.set("r0", 0);
+  auto* const arch  = f.module;
+  auto&       m     = *f.target;
+  auto        armed = false;
+  auto const  sink =
+      m.add_trace_sink({core::trace_kind::block}, [&](std::span<core::trace_record const>) {
+        if(std::exchange(armed, false))
+        {
+          std::thread{[arch] {
+            arch->attached_services().request_stop(stop_reason::user, "late");
+          }}.join();
+        }
+      });
+  core::slice_request const bounded{.max_instructions = icount{100}, .wall_budget = long_wall};
+  REQUIRE_FALSE(m.run_slice(bounded).stopped.has_value());
+  armed            = true;
+  auto const first = m.run_slice(bounded);
+  CHECK_FALSE(armed);
+  CHECK_FALSE(first.stopped.has_value());
+  auto const second = m.run_slice(bounded);
+  REQUIRE(second.stopped.has_value());
+  CHECK(second.stopped->reason == stop_reason::user);
+  CHECK(second.stopped->detail == "late");
+  CHECK(second.executed == icount{0});
 }

@@ -14,6 +14,7 @@
 #include <map>
 #include <ranges>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -374,7 +375,7 @@ void machine::restore(core::snapshot const& saved)
   run.instant_events = 0;
   run.return_watch   = 0;
   run.resume_past.reset();
-  run.requested.reset();
+  std::ignore = run.take_requested();
   run.reset_requested.reset();
   run.end_requested = false;
   run.clear_internal_stop();

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "alive.hpp"
 #include "gil_locks.hpp"
+
+#include <popcorn/core/services.hpp>
 
 #include <reflex/py.hpp>
 
@@ -9,11 +12,17 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace popcorn::bind::detail
 {
+/** @brief Detail of the stop a callback_cell requests once its machine is collected. */
+inline constexpr std::string_view collected_detail =
+    "a model or device of a collected Machine was called";
+
 /**
  * @brief A copy of the current `contextvars` context, PyContext_CopyCurrent(), called with the
  *        GIL held.
@@ -76,8 +85,8 @@ private:
 /**
  * @brief Enters, for a callback, the `context` attribute of a Python cell native code holds only
  *        weakly, so a cycle through the context stays visible to the cycle collector. A dead
- *        cell, after its machine's Python side was collected, leaves the current context.
- *        Called with the GIL held.
+ *        cell, after its machine's Python side was collected, enters nothing and reports dead():
+ *        the callback must not run. Called with the GIL held.
  */
 class cell_entry
 {
@@ -100,6 +109,7 @@ public:
     }
     if(cell == nullptr)
     {
+      dead_ = true;
       return;
     }
     cell_    = reflex::py::nb::steal(cell);
@@ -107,10 +117,87 @@ public:
     entered_.emplace(context_);
   }
 
+  /** @brief Whether the cell was given and is collected, its machine's Python side gone. */
+  [[nodiscard]] auto dead() const noexcept -> bool
+  {
+    return dead_;
+  }
+
 private:
+  bool                         dead_ = false;
   reflex::py::nb::object       cell_;
   reflex::py::nb::object       context_;
   std::optional<context_entry> entered_;
+};
+
+/**
+ * @brief Where a Python model or bus device runs its calls: in the context of its machine's cell,
+ *        and only while that machine's Python side lives. Once the machine is destroyed, its
+ *        lifetime flag clear, a call is refused silently: its services may be gone. Once its
+ *        `Machine` is found garbage, the collected flag set by `Machine.__del__` or the cell dead
+ *        before `__del__` runs, a call is refused and the run asked to stop with
+ *        stop_reason::user and collected_detail, on a machine a finalizer resurrected too.
+ */
+class callback_cell
+{
+public:
+  /**
+   * @brief Attaches the calls to a machine being built, whose services are not known yet.
+   * @param cell A weak reference to the machine's cell, or None, the GIL held.
+   * @param alive The machine's lifetime flag.
+   * @param collected The machine's collected flag.
+   */
+  void run_in(reflex::py::nb::object cell, alive_flag alive, alive_flag collected)
+  {
+    cell_      = std::move(cell);
+    alive_     = std::move(alive);
+    collected_ = std::move(collected);
+    services_  = nullptr;
+  }
+
+  /** @brief Sets the services of the machine run_in() attached the calls to. */
+  void stop_through(core::machine_services& services) noexcept
+  {
+    services_ = &services;
+  }
+
+  /**
+   * @brief Runs @p body in the cell's context, the GIL held.
+   * @return What @p body returns, empty when the call is refused.
+   */
+  template <typename Body> auto call(Body&& body) const -> std::optional<reflex::py::nb::object>
+  {
+    if(alive_ != nullptr and not is_alive(alive_))
+    {
+      return std::nullopt;
+    }
+    if(collected_ != nullptr and is_alive(collected_))
+    {
+      stop_collected();
+      return std::nullopt;
+    }
+    cell_entry const entered{cell_};
+    if(entered.dead())
+    {
+      stop_collected();
+      return std::nullopt;
+    }
+    return std::forward<Body>(body)();
+  }
+
+private:
+  void stop_collected() const
+  {
+    if(services_ != nullptr)
+    {
+      services_->request_stop(stop_reason::user, std::string{collected_detail});
+    }
+  }
+
+  reflex::py::nb::object  cell_      = reflex::py::nb::none();
+  alive_flag              alive_     = nullptr;
+  alive_flag              collected_ = nullptr;
+  core::machine_services* services_  = nullptr;
 };
 
 /**

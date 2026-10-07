@@ -8,6 +8,7 @@ import contextvars
 import difflib
 import functools
 import os
+import sys
 import types
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -333,9 +334,11 @@ class Machine:
     one machine share one copy, taken at construction.
 
     A Python callback needs the GIL: while another thread runs Python bytecode, each crossing
-    waits up to `sys.getswitchinterval()`, 5 ms by default, see `start`. A Python model or
-    device object is owned natively: an attribute of it holding the machine keeps the machine
-    alive until exit.
+    waits up to `sys.getswitchinterval()`, 5 ms by default, see `start`. A machine only reachable
+    through a cycle, an attribute of its Python model or device included, is collected parked,
+    running or not: the collection halts a free run and sends what ended it by itself to
+    `sys.unraisablehook`, unless a wait already returned or raised it. A model, device or hook
+    the machine calls after its `Machine` was found garbage is not run, the run stops.
     """
 
     __slots__ = (
@@ -542,6 +545,44 @@ class Machine:
         )
         for one in (image,) if isinstance(image, Image) else image:
             self.load(one)
+
+    def __del__(self) -> None:
+        """Refuse every later callback of the machine and park it before a collection clears it.
+
+        The cycle collector runs every finalizer of a garbage set before it clears any object of
+        it. From here on its Python models, bus devices and hooks are never called, so none runs
+        on a cleared object. A machine a finalizer resurrects keeps refusing them, and the first
+        refused call stops its run. What ended a free run by itself goes to
+        `sys.unraisablehook`, unless a wait already returned or raised it, or the collection
+        itself caused it. Skipped at interpreter shutdown, and the park on the machine's own
+        thread. The frame drops the machine, its handle, its hooks and the end before the report:
+        the traceback of the report would otherwise resurrect the machine, or form a cycle with
+        the end.
+        """
+        if sys.is_finalizing():
+            return
+        handle = getattr(self, "_handle", None)
+        table = getattr(self, "_callback_table", None)
+        del self
+        if table is not None:
+            table.close()
+        del table
+        if handle is None:
+            return
+        handle.mark_collected()
+        if handle.owns_engine():
+            return
+        try:
+            unclaimed = handle.unreported_end()
+        except Exception:
+            return
+        finally:
+            del handle
+        if unclaimed is not None:
+            try:
+                raise unclaimed
+            finally:
+                del unclaimed
 
     @property
     def description(self) -> MachineDescription:

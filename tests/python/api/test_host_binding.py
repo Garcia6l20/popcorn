@@ -21,14 +21,17 @@ from popcorn import _core
 from popcorn._host import awaited
 from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
+from popcorn.units import VirtualTime
 
 from .conftest import DRIVER_ELF, M33_JSON, Machines
+from .devices_example import Eeprom24
 from .projects import MODEL_ELF, MODEL_JSON
 
 VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("host_binding_value", default="unset")
 HOLDER: contextvars.ContextVar[list[object]] = contextvars.ContextVar("host_binding_holder")
 
 CHILD_TIMEOUT = 60
+COLLECTED = "a model or device of a collected Machine was called"
 
 
 def stop_info(raw: object) -> Stop:
@@ -536,39 +539,147 @@ def test_an_interpreter_finalizing_with_a_live_machine_thread_exits() -> None:
     assert child.returncode == 0, child.stderr
 
 
-SELF_STOPPED = """
+SELF_ENDED = """
+import asyncio
 import gc
 import sys
 import threading
 
 import popcorn
 
+KIND, SURFACED, NATIVE = __CASE__
+if NATIVE:
+    del popcorn.Machine.__del__
 reported = []
 sys.unraisablehook = lambda raised: reported.append(repr(raised.exc_value))
-stopping = threading.Event()
+ended = threading.Event()
 
 
-def stop(call):
-    stopping.set()
+class Never:
+    def ready(self, machine):
+        return False
+
+
+def handler(call):
+    if KIND == "raise":
+        raise ValueError("boom")
     return call.stop()
 
 
 m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
 m.reset()
-m.intercept("alu_mark", stop)
+m.intercept("alu_mark", handler)
 m.start()
-assert stopping.wait(10)
+if SURFACED:
+    try:
+        assert asyncio.run(m.wait_for(Never())).reason is popcorn.StopReason.USER
+    except ValueError:
+        assert KIND == "raise"
+else:
+    end = m._handle.wait(None, None)
+    end.add_done_callback(ended.set)
+    assert ended.wait(10)
+    del end
 del m
 gc.collect()
-assert len(reported) == 1, reported
-assert reported[0].startswith("EmulationError("), reported
+if SURFACED:
+    assert reported == [], reported
+elif KIND == "stop":
+    assert len(reported) == 1 and "never returned to a caller" in reported[0], reported
+else:
+    assert len(reported) == 1 and reported[0].startswith("EmulationError("), reported
 print("ok")
 """
 
 
-def test_a_collected_machine_reports_the_stop_that_ended_its_free_run() -> None:
-    script = SELF_STOPPED.replace("__JSON__", repr(str(M33_JSON))).replace(
-        "__ELF__", repr(str(DRIVER_ELF))
+@pytest.mark.parametrize("native", [False, True], ids=["del", "destructor"])
+@pytest.mark.parametrize("surfaced", [False, True], ids=["unclaimed", "surfaced"])
+@pytest.mark.parametrize("kind", ["stop", "raise"])
+def test_a_collected_machine_reports_only_an_end_no_wait_delivered(
+    kind: str, surfaced: bool, native: bool
+) -> None:
+    script = (
+        SELF_ENDED.replace("__CASE__", repr((kind, surfaced, native)))
+        .replace("__JSON__", repr(str(M33_JSON)))
+        .replace("__ELF__", repr(str(DRIVER_ELF)))
+    )
+    child = run_child(script, timeout=CHILD_TIMEOUT)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "ok"
+
+
+STALE_WAIT = """
+import asyncio
+import gc
+import sys
+import threading
+
+sys.path.insert(0, __API__)
+
+import popcorn
+from models_example import Timer
+
+KIND = __KIND__
+reported = []
+sys.unraisablehook = lambda raised: reported.append(repr(raised.exc_value))
+count = [0]
+
+
+def handler(call):
+    count[0] += 1
+    if KIND == "raise":
+        raise ValueError(f"boom{count[0]}")
+    return call.stop()
+
+
+def ended(m):
+    done = threading.Event()
+    future = m._handle.wait(None, None)
+    future.add_done_callback(done.set)
+    assert done.wait(10)
+    return future
+
+
+m = popcorn.Machine(
+    popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__), models=dict(TIMER=Timer)
+)
+m.reset()
+asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+asyncio.run(m.call("start_timer", 1, budget=10_000))
+m.intercept("TIMER_IRQHandler", handler)
+m.start()
+stale = ended(m)
+try:
+    m.halt()
+except Exception:
+    pass
+m.start()
+current = ended(m)
+if KIND == "stop":
+    current.result(0.0)
+del current
+try:
+    stale.result(0.0)
+except ValueError:
+    pass
+del stale, m
+gc.collect()
+expected = 1 if KIND == "raise" else 0
+assert count[0] == 2, count
+assert len(reported) == expected, reported
+if reported:
+    assert reported[0].startswith("EmulationError("), reported
+print("ok")
+"""
+
+
+@pytest.mark.parametrize("kind", ["stop", "raise"])
+def test_a_wait_of_an_earlier_free_run_delivers_nothing_of_the_next(kind: str) -> None:
+    script = (
+        STALE_WAIT.replace("__KIND__", repr(kind))
+        .replace("__API__", repr(str(pathlib.Path(__file__).parent)))
+        .replace("__JSON__", repr(str(MODEL_JSON)))
+        .replace("__ELF__", repr(str(MODEL_ELF)))
     )
     child = run_child(script, timeout=CHILD_TIMEOUT)
     assert child.returncode == 0, child.stderr
@@ -622,3 +733,364 @@ def test_a_context_holding_the_machine_does_not_keep_its_models_alive(
     gc.collect()
     assert probe() is None
     assert _core.host_threads() == before
+
+
+READS: list[str] = []
+
+
+class Counted(Recorder):
+    """A Recorder whose CNT reads also count in `READS`, which outlives it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.keeper: object = None
+
+    @on_read("CNT")
+    def _cnt(self) -> int:
+        READS.append(VALUE.get())
+        return 7
+
+
+class Holding(Eeprom24):
+    """An Eeprom24 that may hold its machine and records the value of VALUE at each start."""
+
+    def __init__(self, address: int, size: int) -> None:
+        super().__init__(address, size)
+        self.machine: popcorn.Machine | None = None
+        self.starts: list[str] = []
+
+    def on_start(self, read: bool, at: VirtualTime) -> bool:
+        self.starts.append(VALUE.get())
+        return super().on_start(read, at)
+
+
+def held_model_machine() -> tuple[popcorn.Machine, Recorder | Holding]:
+    m = model_machine()
+    model = m.model("TIMER")
+    assert isinstance(model, Recorder)
+    return m, model
+
+
+def held_device_machine() -> tuple[popcorn.Machine, Recorder | Holding]:
+    from popcorn.stm32 import mcu
+
+    from .test_devices import I2C_ELF
+
+    device = Holding(0x50, 256)
+    m = popcorn.Machine(
+        mcu("STM32U575QGIx"), image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [device]}
+    )
+    m.reset()
+    asyncio.run(m.run(budget=10_000))
+    return m, device
+
+
+@pytest.mark.parametrize(
+    "build", [held_model_machine, held_device_machine], ids=["model", "device"]
+)
+def test_a_parked_machine_held_by_its_model_is_collected(
+    build: Callable[[], tuple[popcorn.Machine, Recorder | Holding]],
+    u575: popcorn.MachineDescription,
+) -> None:
+    del u575
+    gc.collect()
+    before = _core.host_threads()
+
+    def made() -> weakref.ref[popcorn.Machine]:
+        m, held = build()
+        held.machine = m
+        assert _core.host_threads() == before + 1
+        return weakref.ref(m)
+
+    probe = made()
+    gc.collect()
+    assert probe() is None
+    assert _core.host_threads() == before
+
+
+def test_a_machine_handle_reports_its_python_models_to_the_collector() -> None:
+    m, model = held_model_machine()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    assert gc.is_tracked(handle)
+    assert gc.get_referents(handle).count(model) == 1
+
+
+def counted_machine() -> popcorn.Machine:
+    def build() -> popcorn.Machine:
+        VALUE.set("at construction")
+        m = popcorn.Machine(
+            popcorn.load_description(MODEL_JSON),
+            image=popcorn.Image.elf(MODEL_ELF),
+            models={"TIMER": Counted},
+        )
+        m.reset()
+        stop = asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+        assert stop.reason is popcorn.StopReason.ADDRESS
+        return m
+
+    return contextvars.copy_context().run(build)
+
+
+def test_a_model_of_a_machine_marked_collected_is_not_called_and_stops_the_run() -> None:
+    m = counted_machine()
+    READS.clear()
+    m._handle.mark_collected()  # pyright: ignore[reportPrivateUsage]
+    result = asyncio.run(m.call("read_timer_count_n", 100, budget=100_000))
+    assert READS == []
+    assert result.stop.reason is popcorn.StopReason.USER
+    assert result.stop.detail == COLLECTED
+
+
+class Keeper:
+    """Saves its machine into `SAVED` when collected, resurrecting the garbage it belongs to."""
+
+    def __init__(self, machine: popcorn.Machine) -> None:
+        self.machine = machine
+
+    def __del__(self) -> None:
+        SAVED.append(self.machine)
+
+
+SAVED: list[popcorn.Machine] = []
+
+
+def test_a_resurrected_machine_stops_on_its_first_model_call() -> None:
+    cells: list[object] = []
+
+    def build() -> None:
+        m = counted_machine()
+        cells.append(m._model_context)  # pyright: ignore[reportPrivateUsage]
+        model = m.model("TIMER")
+        assert isinstance(model, Counted)
+        model.keeper = Keeper(m)
+
+    build()
+    gc.collect()
+    [m] = SAVED
+    SAVED.clear()
+    assert m._model_context is cells[0]  # pyright: ignore[reportPrivateUsage]
+    READS.clear()
+    result = asyncio.run(m.call("read_timer_count_n", 100, budget=100_000))
+    assert READS == []
+    assert result.stop.reason is popcorn.StopReason.USER
+    assert result.stop.detail == COLLECTED
+
+
+class Spy:
+    """Forwards to `target`, recording in `calls` each attribute read under `label`."""
+
+    def __init__(self, target: object, label: str, calls: list[str]) -> None:
+        self._target = target
+        self._label = label
+        self._calls = calls
+
+    def __getattr__(self, name: str) -> object:
+        self._calls.append(f"{self._label}.{name}")
+        return getattr(self._target, name)
+
+
+def test_a_machine_finalizer_refuses_callbacks_before_it_parks() -> None:
+    m = counted_machine()
+    calls: list[str] = []
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    table = m._callback_table  # pyright: ignore[reportPrivateUsage]
+    m._handle = Spy(handle, "handle", calls)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+    m._callback_table = Spy(table, "table", calls)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+    popcorn.Machine.__del__(m)
+    m._handle = handle  # pyright: ignore[reportPrivateUsage]
+    m._callback_table = table  # pyright: ignore[reportPrivateUsage]
+    assert calls == [
+        "table.close",
+        "handle.mark_collected",
+        "handle.owns_engine",
+        "handle.unreported_end",
+    ]
+
+
+def test_a_hook_of_a_machine_found_garbage_raises_hook_gone() -> None:
+    m = counted_machine()
+    called: list[int] = []
+    m.intercept("read_timer_count", lambda call: called.append(1) or call.proceed())
+    m._callback_table.close()  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(ReferenceError, match="machine of this hook is gone"):
+        read_count(m)
+    assert called == []
+
+
+def test_a_model_of_a_collected_machine_is_not_called_and_stops_the_run() -> None:
+    m = counted_machine()
+    READS.clear()
+    assert read_count(m) == 7
+    assert READS == ["at construction"]
+    del m._model_context  # pyright: ignore[reportPrivateUsage]
+    result = asyncio.run(m.call("read_timer_count_n", 100, budget=100_000))
+    assert READS == ["at construction"]
+    assert result.stop.reason is popcorn.StopReason.USER
+    assert result.stop.detail == COLLECTED
+
+
+def test_a_device_of_a_collected_machine_is_not_called_and_stops_the_run(
+    u575: popcorn.MachineDescription,
+) -> None:
+    from .test_devices import I2C_ELF, enter
+
+    device = Holding(0x50, 4096)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [device]})
+    enter(m, "eeprom_rw")
+    del m._model_context  # pyright: ignore[reportPrivateUsage]
+    stop = asyncio.run(m.run(budget=100_000_000))
+    assert device.starts == []
+    assert stop.reason is popcorn.StopReason.USER
+    assert stop.detail == COLLECTED
+
+
+FREE_RUN = """
+import asyncio
+import contextvars
+import gc
+import sys
+import time
+import weakref
+
+sys.path.insert(0, __API__)
+
+import popcorn
+from popcorn import _core
+from models_example import Timer
+
+unraisable = []
+sys.unraisablehook = lambda raised: unraisable.append(repr(raised.exc_value))
+VALUE = contextvars.ContextVar("value")
+CALLS = []
+SHAPE = __SHAPE__
+
+
+class Holding(Timer):
+    keep = None
+    cell = None
+
+    def _expire(self):
+        dead = self.cell is not None and self.cell() is None
+        CALLS.append((VALUE.get("missing"), dead))
+        VALUE.get()
+        super()._expire()
+
+
+def build():
+    VALUE.set("set")
+    m = popcorn.Machine(
+        popcorn.load_description(__JSON__),
+        image=popcorn.Image.elf(__ELF__),
+        models=dict(TIMER=Holding),
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    asyncio.run(m.call("start_timer", 1, budget=10_000))
+    model = m.model("TIMER")
+    model.cell = weakref.ref(m._model_context)
+    if SHAPE == "attribute":
+        model.keep = m
+    elif SHAPE == "method":
+        model.keep = m.halt
+    elif SHAPE == "lambda":
+        model.keep = lambda: m
+    elif SHAPE == "hook":
+        model.keep = m
+        m.intercept("TIMER_IRQHandler", lambda call: call.proceed())
+    m.start()
+    return weakref.ref(m)
+
+
+for _ in range(__ROUNDS__):
+    CALLS.clear()
+    probe = build()
+    until = time.monotonic() + 10
+    while len(CALLS) < 50:
+        assert time.monotonic() < until, "the model was never called"
+        time.sleep(0.001)
+    gc.collect()
+    collected = len(CALLS)
+    assert probe() is None, "the machine leaked"
+    assert _core.host_threads() == 0, _core.host_threads()
+    assert len(CALLS) == collected, "a model ran after its machine was collected"
+    assert all(value == "set" and not dead for value, dead in CALLS), CALLS[-5:]
+    assert not unraisable, unraisable
+print("ok")
+"""
+
+
+def free_run_script(shape: str, rounds: int) -> str:
+    return (
+        FREE_RUN.replace("__API__", repr(str(pathlib.Path(__file__).parent)))
+        .replace("__SHAPE__", repr(shape))
+        .replace("__JSON__", repr(str(MODEL_JSON)))
+        .replace("__ELF__", repr(str(MODEL_ELF)))
+        .replace("__ROUNDS__", str(rounds))
+    )
+
+
+@pytest.mark.parametrize("shape", ["attribute", "method", "lambda", "hook"])
+def test_a_free_running_machine_held_by_its_model_is_collected(shape: str) -> None:
+    child = subprocess.run(
+        [sys.executable, "-X", "dev", "-c", free_run_script(shape, 5)],
+        capture_output=True,
+        text=True,
+        timeout=CHILD_TIMEOUT,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "ok"
+
+
+def test_a_collection_inside_a_handler_collects_a_free_running_cycle(
+    machines: Machines,
+) -> None:
+    gc.collect()
+    before = _core.host_threads()
+    first = machines()
+
+    def other() -> weakref.ref[popcorn.Machine]:
+        m, model = held_model_machine()
+        model.machine = m
+        asyncio.run(m.call("start_timer", 1, budget=10_000))
+        m.start()
+        return weakref.ref(m)
+
+    probe = other()
+    collected: list[int] = []
+
+    def handler(call: popcorn.Call) -> popcorn.Return:
+        collected.append(gc.collect())
+        return call.proceed()
+
+    first.intercept("alu_mark", handler)
+    asyncio.run(first.run(budget=1_000_000))
+    assert len(collected) == 1 and collected[0] > 0
+    assert probe() is None
+    assert settles(lambda: _core.host_threads() == before + 1)
+
+
+def test_an_interpreter_exits_with_a_free_running_machine_held_by_its_model() -> None:
+    child = run_child(
+        f"""
+        import asyncio
+        import popcorn
+        import sys
+
+        sys.path.insert(0, {str(pathlib.Path(__file__).parent)!r})
+        from models_example import Timer
+
+        m = popcorn.Machine(
+            popcorn.load_description({str(MODEL_JSON)!r}),
+            image=popcorn.Image.elf({str(MODEL_ELF)!r}),
+            models=dict(TIMER=Timer),
+        )
+        m.reset()
+        asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+        asyncio.run(m.call("start_timer", 1, budget=10_000))
+        m.model("TIMER").machine = m
+        m.start()
+        """,
+        timeout=10,
+    )
+    assert child.returncode == 0, child.stderr
