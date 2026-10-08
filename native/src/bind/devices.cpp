@@ -128,6 +128,17 @@ public:
     call(nb_trampoline, cell, "_load", nb::bytes(in.data(), in.size()));
   }
 
+  /**
+   * @brief Calls the Python method @p name in @p through, the cell of one attachment.
+   * @return Its result, empty when the cell refused the call.
+   */
+  template <typename... Args>
+  auto via(callback_cell const& through, char const* name, Args&&... args) const
+      -> std::optional<nb::object>
+  {
+    return call(nb_trampoline, through, name, std::forward<Args>(args)...);
+  }
+
   /** @brief The cell its calls run in. */
   callback_cell cell;
 };
@@ -175,8 +186,135 @@ public:
     call(nb_trampoline, cell, "_load", nb::bytes(in.data(), in.size()));
   }
 
+  /**
+   * @brief Calls the Python method @p name in @p through, the cell of one attachment.
+   * @return Its result, empty when the cell refused the call.
+   */
+  template <typename... Args>
+  auto via(callback_cell const& through, char const* name, Args&&... args) const
+      -> std::optional<nb::object>
+  {
+    return call(nb_trampoline, through, name, std::forward<Args>(args)...);
+  }
+
   /** @brief The cell its calls run in. */
   callback_cell cell;
+};
+
+/**
+ * @brief One machine's attachment of a Python I2C target: the machine's engine calls it, and
+ *        it calls the device in its own cell. A device reattached to another machine gets a
+ *        new attachment, so an old engine still running never calls it in the new machine's
+ *        context, and is refused once its own machine is gone.
+ */
+class attached_i2c_target final : public stm32::i2c_target
+{
+public:
+  /** @brief Attaches @p device. */
+  explicit attached_i2c_target(std::shared_ptr<python_i2c_target> device) noexcept
+      : device_{std::move(device)}
+  {}
+
+  [[nodiscard]] auto address() const -> std::uint8_t override
+  {
+    gil_entry const gil;
+    return or_value<std::uint8_t>(device_->via(cell, "_address"), no_address);
+  }
+
+  [[nodiscard]] auto start(bool read, vtime at) -> bool override
+  {
+    gil_entry const gil;
+    return or_value(device_->via(cell, "_start", read, at.ps), false);
+  }
+
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> bool override
+  {
+    gil_entry const gil;
+    return or_value(device_->via(cell, "_write", byte, at.ps), false);
+  }
+
+  [[nodiscard]] auto read(vtime at) -> std::uint8_t override
+  {
+    gil_entry const gil;
+    return or_value<std::uint8_t>(device_->via(cell, "_read", at.ps), 0);
+  }
+
+  void stop(vtime at) override
+  {
+    gil_entry const gil;
+    device_->via(cell, "_stop", at.ps);
+  }
+
+  void reset(reset_kind kind) override
+  {
+    gil_entry const gil;
+    device_->via(cell, "_reset", kind);
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    gil_entry const gil;
+    append(device_->via(cell, "_save"), out);
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    gil_entry const gil;
+    device_->via(cell, "_load", nb::bytes(in.data(), in.size()));
+  }
+
+  /** @brief The cell of this attachment. */
+  callback_cell cell;
+
+private:
+  std::shared_ptr<python_i2c_target> device_;
+};
+
+/** @brief One machine's attachment of a Python SPI target, as attached_i2c_target. */
+class attached_spi_target final : public stm32::spi_target
+{
+public:
+  /** @brief Attaches @p device. */
+  explicit attached_spi_target(std::shared_ptr<python_spi_target> device) noexcept
+      : device_{std::move(device)}
+  {}
+
+  void select(bool selected, vtime at) override
+  {
+    gil_entry const gil;
+    device_->via(cell, "_select", selected, at.ps);
+  }
+
+  [[nodiscard]] auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
+      -> std::uint32_t override
+  {
+    gil_entry const gil;
+    return or_value<std::uint32_t>(device_->via(cell, "_exchange", out, bits, at.ps), 0);
+  }
+
+  void reset(reset_kind kind) override
+  {
+    gil_entry const gil;
+    device_->via(cell, "_reset", kind);
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    gil_entry const gil;
+    append(device_->via(cell, "_save"), out);
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    gil_entry const gil;
+    device_->via(cell, "_load", nb::bytes(in.data(), in.size()));
+  }
+
+  /** @brief The cell of this attachment. */
+  callback_cell cell;
+
+private:
+  std::shared_ptr<python_spi_target> device_;
 };
 
 auto bytes_of(std::span<std::byte const> data) -> nb::bytes
@@ -215,20 +353,24 @@ auto refused(std::string const& peripheral, std::string expected) -> config_erro
 using device_cells =
     std::map<std::string, std::vector<std::shared_ptr<callback_cell>>, std::less<>>;
 
-template <typename Python, typename Target>
+template <typename Python, typename Attached, typename Target>
 void adopt(
-    std::shared_ptr<Target> const& target,
-    nb::object const&              object,
-    std::string const&             peripheral,
-    device_cells&                  cells,
-    std::vector<nb::handle>&       python_owned)
+    std::shared_ptr<Target>& target,
+    nb::object const&        object,
+    std::string const&       peripheral,
+    device_cells&            cells,
+    std::vector<nb::handle>& python_owned)
 {
-  if(auto* const python = dynamic_cast<Python*>(target.get()))
+  auto device = std::dynamic_pointer_cast<Python>(target);
+  if(not device)
   {
-    python->cell.run_in(building_context(), building_alive(), building_collected());
-    cells[peripheral].push_back(std::shared_ptr<callback_cell>(target, &python->cell));
-    python_owned.push_back(object);
+    return;
   }
+  auto attached = std::make_shared<Attached>(std::move(device));
+  attached->cell.run_in(building_context(), building_alive(), building_collected());
+  cells[peripheral].push_back(std::shared_ptr<callback_cell>(attached, &attached->cell));
+  python_owned.push_back(object);
+  target = std::move(attached);
 }
 
 auto stopping(periph::model_factory inner, std::vector<std::shared_ptr<callback_cell>> cells)
@@ -259,7 +401,7 @@ auto spi_attachment_of(
   {
     throw refused(peripheral, "popcorn.board.SpiTarget instances");
   }
-  adopt<python_spi_target>(target, object, peripheral, cells, python_owned);
+  adopt<python_spi_target, attached_spi_target>(target, object, peripheral, cells, python_owned);
   if(not nb::hasattr(object, "_cs_port") or not nb::hasattr(object, "_cs_pin"))
   {
     throw refused(peripheral, "popcorn.board.SpiTarget or popcorn.devices.At25sf instances");
@@ -310,7 +452,8 @@ auto device_factories(
     {
       if(std::shared_ptr<stm32::i2c_target> target; nb::try_cast(object, target) and target)
       {
-        adopt<python_i2c_target>(target, object, peripheral, cells, python_owned);
+        adopt<python_i2c_target, attached_i2c_target>(
+            target, object, peripheral, cells, python_owned);
         if(unit->ip != "I2C")
         {
           throw refused(peripheral, "an SPI peripheral for an SpiTarget, not an I2CTarget");

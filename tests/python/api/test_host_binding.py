@@ -2034,6 +2034,117 @@ def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -
         assert lines[0].startswith("request refused: this machine request was made before os.fork")
 
 
+REATTACHED = """
+import asyncio, contextvars, gc, os, signal, sys, threading, time
+sys.path.insert(0, __TESTS__)
+import popcorn
+from popcorn import _core
+from popcorn.stm32 import mcu
+from api.devices_example import Eeprom24
+from pathlib import Path
+
+ELF = Path(__ELF__)
+u575 = mcu("STM32U575QGIx")
+who = contextvars.ContextVar("who", default="none")
+entered = threading.Event()
+released = threading.Event()
+
+
+class Gated(Eeprom24):
+    def __init__(self):
+        super().__init__(0x50, 4096)
+        self.gate = False
+        self.seen = []
+
+    def on_start(self, read, at):
+        self.seen.append(who.get())
+        if self.gate:
+            self.gate = False
+            entered.set()
+            released.wait()
+        return super().on_start(read, at)
+
+    def on_write(self, byte, at):
+        self.seen.append(who.get())
+        return super().on_write(byte, at)
+
+    def on_read(self, at):
+        self.seen.append(who.get())
+        return super().on_read(at)
+
+    def on_stop(self, at):
+        self.seen.append(who.get())
+        return super().on_stop(at)
+
+
+device = Gated()
+who.set("A")
+a = popcorn.Machine(u575, image=popcorn.Image.elf(ELF), devices={"I2C1": [device]})
+a.reset()
+asyncio.run(a.run(until="main", budget=100_000_000))
+a.reg.pc = a.sym("eeprom_rw")
+before = _core.host_threads()
+device.gate = True
+a.start()
+assert entered.wait(10)
+waits = _core.interruptible_waits()
+
+
+def interrupt():
+    deadline = time.monotonic() + 10
+    while _core.interruptible_waits() == waits and time.monotonic() < deadline:
+        time.sleep(0.001)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+threading.Thread(target=interrupt, daemon=True).start()
+try:
+    a.halt()
+except KeyboardInterrupt:
+    pass
+else:
+    raise AssertionError("no KeyboardInterrupt")
+del a
+gc.collect()
+who.set("B")
+b = popcorn.Machine(u575, image=popcorn.Image.elf(ELF), devices={"I2C1": [device]})
+mark = len(device.seen)
+released.set()
+deadline = time.monotonic() + 10
+while _core.host_threads() >= before + 1 and time.monotonic() < deadline:
+    time.sleep(0.01)
+late = device.seen[mark:]
+b.reset()
+asyncio.run(b.run(until="main", budget=100_000_000))
+b.reg.pc = b.sym("eeprom_rw")
+asyncio.run(b.run(budget=100_000_000))
+print(late, sorted(set(device.seen[mark + len(late):])))
+"""
+
+
+def test_a_device_reattached_after_an_abandon_is_never_called_in_the_new_machines_context(
+    u575: popcorn.MachineDescription,
+) -> None:
+    """The abandoned machine's thread finishes the device call it blocked in after the device
+    is attached to a new machine. Each attachment calls the device in its own machine's
+    context, so whatever the old engine still calls runs as the old machine's, refused."""
+    script = REATTACHED.replace("__TESTS__", repr(str(pathlib.Path(__file__).parents[1]))).replace(
+        "__ELF__",
+        repr(
+            str(
+                pathlib.Path(__file__).parents[2]
+                / "firmware"
+                / "periph"
+                / "prebuilt"
+                / "i2c_ll.elf"
+            )
+        ),
+    )
+    child = run_child(script, timeout=60)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip().splitlines()[-1] == "[] ['B']"
+
+
 ABANDONED_LATE = """
 import asyncio
 import gc
