@@ -17,6 +17,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -366,6 +367,12 @@ struct python_callable
   /** @brief Drops both references with the GIL held. */
   ~python_callable()
   {
+    if(not gil_entry::available())
+    {
+      std::ignore = fn.release();
+      std::ignore = context.release();
+      return;
+    }
     gil_entry const held;
     fn.reset();
     context.reset();

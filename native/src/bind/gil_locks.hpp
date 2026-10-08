@@ -11,9 +11,13 @@
 #include <nanobind/nanobind.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -44,18 +48,111 @@ template <typename Queue, typename Body> auto link_locked(Queue const& queue, Bo
 }
 
 /**
+ * @brief The Python thread state of a host thread, created by its first gil_entry and kept for
+ *        the thread's life, and the counter of its handle that every gil_entry on the thread
+ *        increments.
+ */
+struct host_python
+{
+  /** @brief Whether the thread state exists. */
+  bool created = false;
+  /** @brief The outer PyGILState_Ensure() that created it. */
+  PyGILState_STATE outer{};
+  /** @brief The state, saved while the thread runs no Python. */
+  PyThreadState* saved = nullptr;
+  /** @brief GIL entries of the machine whose thread this is, null off host threads. */
+  std::atomic<std::uint64_t>* counter = nullptr;
+};
+
+/** @brief The host_python of the calling thread. */
+inline auto this_host_python() noexcept -> host_python&
+{
+  thread_local host_python state;
+  return state;
+}
+
+/**
  * @brief Takes the GIL on entry to a callback, refusing a thread that holds a link lock: a link
- *        lock is a leaf, its holder waits for nothing.
+ *        lock is a leaf, its holder waits for nothing. On a host thread with no Python thread
+ *        state yet, the first entry creates the persistent state with one PyGILState_Ensure()
+ *        and saves it on exit, so a host thread that runs no Python callback never takes the
+ *        GIL. Once the interpreter is finalizing such a thread blocks forever, as Python does to
+ *        any thread that takes the GIL then: see available(). The finalizing check reads
+ *        Py_IsInitialized() without the GIL and races the state's creation: the window is
+ *        `_PyGILState_Fini`, accepted. An entry nested in a transient state, nanobind's own GIL
+ *        take around a dying `python_error`, creates nothing and only releases that nesting.
  */
 class gil_entry
 {
 public:
   /** @brief Takes the GIL, nested or not. */
   gil_entry() pre(core::detail::link_locks_held == 0)
-  {}
+  {
+    if(not core::detail::on_host_thread)
+    {
+      held_.emplace();
+      return;
+    }
+    auto& state = this_host_python();
+    if(state.counter != nullptr)
+    {
+      state.counter->fetch_add(1, std::memory_order_relaxed);
+    }
+    if(state.created)
+    {
+      held_.emplace();
+      return;
+    }
+    if(Py_IsInitialized() == 0 or Py_IsFinalizing() != 0)
+    {
+      for(;;)
+      {
+        std::this_thread::sleep_for(std::chrono::hours{1});
+      }
+    }
+    auto const outer = PyGILState_Ensure();
+    if(outer == PyGILState_LOCKED)
+    {
+      nested_ = outer;
+      return;
+    }
+    state.outer   = outer;
+    state.created = true;
+    first_        = true;
+  }
+  /** @brief Not copyable. */
+  gil_entry(gil_entry const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(gil_entry const&) -> gil_entry& = delete;
+  /** @brief Releases the GIL, saving a thread state its entry created. */
+  ~gil_entry()
+  {
+    if(first_)
+    {
+      this_host_python().saved = PyEval_SaveThread();
+    }
+    else if(nested_)
+    {
+      PyGILState_Release(*nested_);
+    }
+  }
+
+  /**
+   * @brief Whether a gil_entry can take the GIL now without blocking forever: false only on a
+   *        host thread that never ran Python once the interpreter is finalizing. A destructor
+   *        that finds it false leaks its Python references instead.
+   */
+  [[nodiscard]] static auto available() noexcept -> bool
+  {
+    return not core::detail::on_host_thread
+        or this_host_python().created
+        or (Py_IsInitialized() != 0 and Py_IsFinalizing() == 0);
+  }
 
 private:
-  reflex::py::nb::gil_scoped_acquire held_;
+  bool                                              first_ = false;
+  std::optional<PyGILState_STATE>                   nested_;
+  std::optional<reflex::py::nb::gil_scoped_acquire> held_;
 };
 
 /**

@@ -178,6 +178,11 @@ for _, target in core_firmware.values():
     if target is not None:
         test_host.depends(target)
 
+test_loop_waker = add_doctest(
+    "core-loop-waker", [here / "test_loop_waker.cpp", *tsan_sources], [test_support, core]
+)
+test_loop_waker.private.include_dirs.append(project_dir / "native" / "src" / "core")
+
 test_facade_support = add_doctest(
     "core-facade-support", [here / "test_facade_support.cpp"], [test_support, core], env=m33_env
 )

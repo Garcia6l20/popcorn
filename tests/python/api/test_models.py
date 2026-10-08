@@ -6,10 +6,7 @@ import asyncio
 import functools
 import gc
 import itertools
-import sys
-import threading
 import traceback
-import types
 import warnings
 import weakref
 from collections.abc import Callable, Mapping
@@ -264,20 +261,9 @@ def test_a_model_kept_past_its_machine_refuses_machine_access() -> None:
 
 def test_a_run_without_python_models_calls_no_model_code() -> None:
     def count_model_calls(m: popcorn.Machine) -> int:
-        seen = 0
-        model_file = sys.modules["popcorn.model"].__file__
-
-        def profile(frame: types.FrameType, event: str, arg: object) -> None:
-            nonlocal seen
-            if event == "call" and frame.f_code.co_filename == model_file:
-                seen += 1
-
-        threading.setprofile_all_threads(profile)
-        try:
-            asyncio.run(m.run(for_=us(100)))
-        finally:
-            threading.setprofile_all_threads(None)
-        return seen
+        before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(m.run(for_=us(100)))
+        return m._handle.gil_entries() - before  # pyright: ignore[reportPrivateUsage]
 
     plain = machine({})
     call(plain, "start_timer", 10)

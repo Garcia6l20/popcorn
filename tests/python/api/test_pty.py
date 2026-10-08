@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 
 import popcorn
 import pytest
+from popcorn import _host
 from popcorn.units import ms
 
 from .conftest import BOARD_ELF, holds_pty
@@ -102,6 +103,7 @@ def test_a_pty_made_inside_a_loop_is_freed_with_its_machine(
     selector = selectors.DefaultSelector()
 
     async def body() -> tuple[str, bool, int, int]:
+        _host._waker_of(asyncio.get_running_loop())  # pyright: ignore[reportPrivateUsage]
         before = len(selector.get_map())
         m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
         path = m.board.pty("USART1")

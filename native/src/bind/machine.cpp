@@ -270,20 +270,30 @@ auto held_in(std::shared_ptr<detail::python_cell const> cell)
 {
   return [cell = std::move(cell),
           next = std::uint64_t{0}](core::member_id, std::exception_ptr& error) mutable {
-    detail::gil_entry const held;
+    try
+    {
+      std::rethrow_exception(error);
+    }
+    catch(reflex::py::nb::python_error const&)
+    {}
+    catch(...)
+    {
+      return;
+    }
+    detail::gil_entry const                held;
+    std::optional<detail::held_python_end> kept;
     try
     {
       std::rethrow_exception(error);
     }
     catch(reflex::py::nb::python_error const& raised)
     {
-      if(auto end = detail::held_python_end::keep(cell, next++, raised.value()))
-      {
-        error = std::make_exception_ptr(*std::move(end));
-      }
+      kept = detail::held_python_end::keep(cell, next++, raised.value());
     }
-    catch(...)
-    {}
+    if(kept)
+    {
+      error = std::make_exception_ptr(*std::move(kept));
+    }
   };
 }
 
@@ -340,7 +350,8 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
       ptys_{std::make_shared<detail::pty_bridges>()},
       thread_live_{std::make_shared<std::atomic<bool>>(false)},
       delivered_{std::make_shared<detail::delivered_end>()},
-      collected_{std::make_shared<std::atomic<bool>>(false)}
+      collected_{std::make_shared<std::atomic<bool>>(false)},
+      gil_entries_{std::make_shared<std::atomic<std::uint64_t>>(0)}
 {
   auto const             bounds = bounds_of(config);
   reflex::py::nb::object cell;
@@ -380,7 +391,7 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   id_ = built->id();
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(std::move(built));
-  auto hooks     = detail::python_thread_hooks(thread_live_);
+  auto hooks     = detail::python_thread_hooks(thread_live_, gil_entries_);
   hooks.boundary = boundary_of(slot_, ptys_, *engine_);
   if(cell.is_valid())
   {
@@ -609,6 +620,11 @@ auto machine_handle::model(std::string const& peripheral) const -> reflex::py::n
 auto machine_handle::id() const noexcept -> std::uint64_t
 {
   return id_;
+}
+
+auto machine_handle::gil_entries() const noexcept -> std::uint64_t
+{
+  return gil_entries_->load(std::memory_order_relaxed);
 }
 
 auto machine_handle::owns_engine() const noexcept -> bool

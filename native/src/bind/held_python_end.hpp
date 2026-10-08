@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <variant>
 
@@ -39,6 +40,11 @@ public:
 
   ~python_cell()
   {
+    if(not gil_entry::available())
+    {
+      std::ignore = weak_.release();
+      return;
+    }
     gil_entry const held;
     weak_.reset();
   }
@@ -143,6 +149,10 @@ private:
 
     ~entry()
     {
+      if(not gil_entry::available())
+      {
+        return;
+      }
       gil_entry const held;
       auto* const     pending = PyErr_GetRaisedException();
       try

@@ -87,6 +87,44 @@ def read_count(m: popcorn.Machine) -> int:
     return int(result.value)
 
 
+def gil_entries(m: popcorn.Machine) -> int:
+    return m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+
+
+def rounds_at_least(m: popcorn.Machine, count: int) -> popcorn.Condition:
+    return m.ref.mem.u32[m.sym("alu_rounds")].ge(count)
+
+
+def test_a_free_run_without_python_callbacks_never_takes_the_gil(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    m.start()
+    stop = asyncio.run(m.wait_for(rounds_at_least(m, 1)))
+    assert stop.reason is popcorn.StopReason.USER
+    assert m.halt() is None
+    assert m.instructions > 0
+    assert gil_entries(m) == 0
+
+
+def test_the_first_callback_creates_the_thread_state_in_its_own_gil_entry(
+    machines: Machines,
+) -> None:
+    """The cycle collector is off meanwhile: run on the machine's thread, it would finalize
+    earlier tests' garbage there, whose native destructors take the GIL too."""
+    m = machines(slice_instructions=1_000)
+    hits: list[int] = []
+    m.watch("alu_value", handler=lambda hit: hits.append(hit.address))
+    gc.collect()
+    gc.disable()
+    try:
+        m.start()
+        asyncio.run(m.wait_for(rounds_at_least(m, 1)))
+        assert m.halt() is None
+    finally:
+        gc.enable()
+    assert len(hits) > 1000
+    assert gil_entries(m) == len(hits)
+
+
 def test_a_handler_runs_on_the_machine_thread(machines: Machines) -> None:
     m = machines()
     threads: list[int] = []

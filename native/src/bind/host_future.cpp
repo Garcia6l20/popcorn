@@ -101,26 +101,26 @@ auto python_exception(std::exception_ptr const& error) -> nb::object
   return nb::steal(PyErr_GetRaisedException());
 }
 
-auto python_thread_hooks(std::shared_ptr<std::atomic<bool>> live) -> core::host_hooks
+auto python_thread_hooks(
+    std::shared_ptr<std::atomic<bool>>          live,
+    std::shared_ptr<std::atomic<std::uint64_t>> gil_entries) -> core::host_hooks
 {
-  struct held_state
-  {
-    PyGILState_STATE outer{};
-    PyThreadState*   saved = nullptr;
-  };
-  auto state = std::make_shared<held_state>();
   return {
       .thread_started =
-          [state, live] {
+          [live, gil_entries] {
             live->store(true);
             ++live_host_threads;
-            state->outer = PyGILState_Ensure();
-            state->saved = PyEval_SaveThread();
+            this_host_python().counter = gil_entries.get();
           },
       .thread_stopping =
-          [state, live] {
-            PyEval_RestoreThread(state->saved);
-            PyGILState_Release(state->outer);
+          [live, gil_entries] {
+            if(auto& state = this_host_python(); state.created)
+            {
+              PyEval_RestoreThread(state.saved);
+              PyGILState_Release(state.outer);
+              state = {};
+            }
+            this_host_python().counter = nullptr;
             live->store(false);
             --live_host_threads;
           },
@@ -190,6 +190,34 @@ void host_future_handle::add_done_callback(nb::object fn)
     {
       PyErr_SetString(PyExc_RuntimeError, "a HostFuture done callback failed");
       PyErr_WriteUnraisable(nullptr);
+    }
+  });
+}
+
+loop_waker_handle::loop_waker_handle() : waker_{std::make_shared<core::loop_waker>()}
+{}
+
+auto loop_waker_handle::fd() const -> int
+{
+  return waker_->fd();
+}
+
+auto loop_waker_handle::drain() -> std::vector<std::uint64_t>
+{
+  return waker_->drain();
+}
+
+auto loop_waker_handle::native() const -> std::weak_ptr<core::loop_waker>
+{
+  return waker_;
+}
+
+void host_future_handle::notify(loop_waker_handle const& waker, std::uint64_t token)
+{
+  request_->on_done([target = waker.native(), token]() noexcept {
+    if(auto const live = target.lock())
+    {
+      live->notify(token);
     }
   });
 }

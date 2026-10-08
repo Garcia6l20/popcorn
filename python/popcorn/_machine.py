@@ -346,7 +346,10 @@ class Machine:
     one machine share one copy, taken at construction.
 
     A Python callback needs the GIL: while another thread runs Python bytecode, each crossing
-    waits up to `sys.getswitchinterval()`, 5 ms by default, see `start`. A machine only reachable
+    waits up to `sys.getswitchinterval()`, 5 ms by default, see `start`. The machine's thread
+    gets its Python thread state at its first callback: a profile or trace function set by
+    `threading.setprofile_all_threads` or `settrace_all_threads` before then does not reach it.
+    A machine only reachable
     through a cycle, an attribute of its Python model or device included, is collected parked,
     running or not: the collection halts a free run and sends what ended it by itself to
     `sys.unraisablehook`, unless a wait already returned or raised it. A model, device or hook

@@ -769,6 +769,13 @@ public:
   [[= py::doc{"Call sink(LogRecord) for each machine log record."}]] auto
       add_log_sink(reflex::py::nb::object sink) -> hook;
 
+  /**
+   * @brief Times the machine's thread entered the GIL: the first creates its Python thread
+   *        state, each later one runs a Python callback or releases a Python reference.
+   */
+  [[= py::doc{"Times the machine thread took the GIL, for tests."}]] [[nodiscard]] auto
+      gil_entries() const noexcept -> std::uint64_t;
+
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept
       -> std::uint64_t;
@@ -815,16 +822,17 @@ private:
     }
   }
 
-  std::vector<reflex::py::nb::handle>     python_owned_;
-  std::shared_ptr<std::atomic<bool>>      alive_;
-  std::shared_ptr<detail::host_slot>      slot_;
-  std::shared_ptr<detail::pty_bridges>    ptys_;
-  std::shared_ptr<std::atomic<bool>>      thread_live_;
-  std::shared_ptr<detail::delivered_end>  delivered_;
-  std::shared_ptr<std::atomic<bool>>      collected_;
-  std::map<std::string, detail::usb_hubs> hubs_;
-  core::machine*                          engine_{};
-  std::uint64_t                           id_{};
-  std::shared_ptr<core::host>             host_;
+  std::vector<reflex::py::nb::handle>         python_owned_;
+  std::shared_ptr<std::atomic<bool>>          alive_;
+  std::shared_ptr<detail::host_slot>          slot_;
+  std::shared_ptr<detail::pty_bridges>        ptys_;
+  std::shared_ptr<std::atomic<bool>>          thread_live_;
+  std::shared_ptr<detail::delivered_end>      delivered_;
+  std::shared_ptr<std::atomic<bool>>          collected_;
+  std::shared_ptr<std::atomic<std::uint64_t>> gil_entries_;
+  std::map<std::string, detail::usb_hubs>     hubs_;
+  core::machine*                              engine_{};
+  std::uint64_t                               id_{};
+  std::shared_ptr<core::host>                 host_;
 };
 }

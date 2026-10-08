@@ -77,8 +77,12 @@ def test_an_installed_hook_is_the_only_crossing(machines: Machines) -> None:
     m = machines(slice_instructions=50_000)
     seen: list[int] = []
     m.intercept("alu_mark", lambda call: seen.append(call.function) or call.proceed())
-    inside = calls_inside_slices(m)
-    assert len(seen) == 1 and inside
+    asyncio.run(m.step(1))
+    before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+    calls_inside_slices(m)
+    assert len(seen) == 1
+    entries = m._handle.gil_entries() - before  # pyright: ignore[reportPrivateUsage]
+    assert entries == 2 * len(seen), "the intercept and the return hook logging its call"
 
 
 def test_a_background_run_makes_no_python_call_inside_its_slices(machines: Machines) -> None:
