@@ -1235,7 +1235,8 @@ TEST_CASE("cancel, halt and close on a host thread only request")
   self = h.on.get();
   CHECK_THROWS_AS(h.run({}).get(), core::operation_cancelled);
   CHECK(returned);
-  REQUIRE(settles([&] { return other.on->state(0) == core::host_state::parked; }));
+  REQUIRE(other.on->wait_settled(0, {.finish = true, .with_host = true, .parks = 0}, 60s));
+  CHECK(other.on->state(0) == core::host_state::parked);
   auto held = other.on->lock();
   CHECK_FALSE(other.on->session_open(held, 0));
 }
