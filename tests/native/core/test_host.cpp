@@ -77,7 +77,8 @@ public:
   static constexpr std::uint64_t period     = 1'000;
   static constexpr address       counter_at = 0x2001'0000;
 
-  std::uint64_t ticks = 0;
+  std::uint64_t ticks      = 0;
+  std::uint64_t request_at = 0;
 
   void arm()
   {
@@ -91,6 +92,10 @@ public:
       ++ticks;
       std::ignore = attached_services().write(
           counter_at, 4, static_cast<std::uint32_t>(ticks), popcorn::initiator::debugger);
+      if(ticks == request_at)
+      {
+        attached_services().request_stop(stop_reason::user, "requested");
+      }
       std::ignore =
           attached_events().schedule(icount{attached_clock().now().value + period}, tick_event, 0);
       return;
@@ -1043,6 +1048,88 @@ auto counter_compared(core::condition::op compare, std::uint32_t count) -> core:
   auto made    = counter_at_least(count);
   made.compare = compare;
   return made;
+}
+
+TEST_CASE("a stop requested by the event a condition fires on ends the free run with it")
+{
+  auto [member, arch] = ticking();
+  arch->request_at    = 50;
+  hosted     h{std::move(member), huge_slices};
+  auto const handles = start_waiting(
+      h, {
+             {.deadline = at_instruction(10'000'000),
+              .when     = core::condition_set{.members = {counter_at_least(50)}}},
+  });
+  auto const got = handles.front().future().get();
+  CHECK(got.reason == stop_reason::user);
+  CHECK(got.detail == "requested");
+  auto const end = h.on->halt(0);
+  REQUIRE(end.has_value());
+  auto const* const stopped = std::get_if<popcorn::stop>(&*end);
+  REQUIRE(stopped != nullptr);
+  CHECK(stopped->detail == "requested");
+  CHECK(stopped->instructions == got.instructions);
+  CHECK(arch->ticks == 50);
+}
+
+class burst_arch final : public popcorn::testing::test_arch
+{
+public:
+  using test_arch::test_arch;
+
+  static constexpr std::uint32_t burst_event = 11;
+
+  std::uint64_t burst = 256;
+
+  void arm()
+  {
+    for(std::uint64_t index = 0; index < burst; ++index)
+    {
+      std::ignore = attached_events().schedule(icount{0}, burst_event, index);
+    }
+  }
+
+  void on_event(std::uint32_t kind, std::uint64_t payload) override
+  {
+    if(kind == burst_event)
+    {
+      if(payload == burst - 1)
+      {
+        attached_services().request_stop(stop_reason::user, "last of the burst");
+      }
+      return;
+    }
+    test_arch::on_event(kind, payload);
+  }
+};
+
+TEST_CASE("a stop an event requests at a wall expiry ends that slice")
+{
+  popcorn::testing::machine_fixture<burst_arch> f{m33(), "alu", core::machine_options{}};
+  f.set("r0", 0);
+  f.module->arm();
+  auto const ended =
+      f.target->run_slice({.max_instructions = icount{1'000'000}, .wall_budget = 1ns});
+  REQUIRE(ended.stopped.has_value());
+  CHECK(ended.stopped->reason == stop_reason::user);
+  CHECK(ended.stopped->detail == "last of the burst");
+  CHECK_FALSE(ended.asked);
+}
+
+TEST_CASE("a stop an event requests as it trips the per-instant event limit ends that slice")
+{
+  popcorn::testing::machine_fixture<burst_arch> f{m33(), "alu", core::machine_options{}};
+  f.set("r0", 0);
+  f.module->burst = 65'536;
+  f.module->arm();
+  auto const ended =
+      f.target->run_slice({.max_instructions = icount{1'000'000}, .wall_budget = long_wall});
+  REQUIRE(ended.stopped.has_value());
+  CHECK(ended.stopped->reason == stop_reason::user);
+  CHECK(ended.stopped->detail == "last of the burst");
+  auto const next =
+      f.target->run_slice({.max_instructions = icount{100}, .wall_budget = long_wall});
+  CHECK_FALSE(next.stopped.has_value());
 }
 
 TEST_CASE("an any-set reports every member true at the event, an all-set fires when all hold")

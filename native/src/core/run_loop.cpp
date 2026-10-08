@@ -594,9 +594,13 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
     {
       return end;
     }
+    if(request.stop_when and stop_requested())
+    {
+      return handle_requests();
+    }
     if(request.stop_when and asks_stop(request))
     {
-      return slice_end{make_stop(stop_reason::user, {}, std::nullopt)};
+      return slice_end{.stopped = make_stop(stop_reason::user, {}, std::nullopt), .asked = true};
     }
     if(--countdown == 0)
     {
@@ -798,6 +802,13 @@ auto machine::run_state::stop_from(arch::trap_result const& result) const -> sli
 
 auto machine::run_state::finish(slice_request const& request, slice_end end) -> slice_result
 {
+  if(not end.stopped or end.stopped->reason == stop_reason::spin)
+  {
+    if(auto const asked = take_requested())
+    {
+      end.stopped = make_stop(asked->reason, asked->detail, std::nullopt);
+    }
+  }
   flush_sinks();
   if(not end.stopped
      and request.until_time
@@ -808,6 +819,7 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
   if(not end.stopped and request.stop_when and asks_stop(request))
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
+    end.asked   = true;
   }
   if(end.stopped and not(request.internal_stop and end.stopped->reason == stop_reason::time))
   {
@@ -822,7 +834,7 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
         where.pc, true);
   }
   flush_sinks();
-  return slice_result{.stopped = std::move(end.stopped), .executed = executed};
+  return slice_result{.stopped = std::move(end.stopped), .executed = executed, .asked = end.asked};
 }
 
 auto machine::run_state::run(slice_request const& request) -> slice_result

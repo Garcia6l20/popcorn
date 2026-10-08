@@ -485,6 +485,8 @@ struct slice_end
 {
   /** @brief Stop record, empty for a yield. */
   std::optional<stop> stopped{};
+  /** @brief Whether the stop is the stop_when predicate's. */
+  bool asked = false;
 };
 
 /** @brief Run state of a machine: slice bounds, deferred requests, hooks and exception slot. */

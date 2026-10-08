@@ -1011,7 +1011,7 @@ struct host_core
     auto const goes_on = not reason
                       or reason == stop_reason::time
                       or reason == stop_reason::idle
-                      or (reason == stop_reason::user and fired);
+                      or (reason == stop_reason::user and fired and result.asked);
     if(not goes_on)
     {
       settle(resolved);

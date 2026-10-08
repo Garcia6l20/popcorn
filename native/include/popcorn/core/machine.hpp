@@ -143,6 +143,9 @@ struct slice_result
    * counts its full length: deterministic, not exact. Instructions single-stepped for
    * exact_instructions count one by one. */
   icount executed{};
+  /** @brief Whether stopped is the stop_reason::user stop of the request's stop_when, not one
+   * a model or handler requested. A requested stop wins over stop_when at the same boundary. */
+  bool asked = false;
 };
 
 /** @brief Outcome of machine::call(). */

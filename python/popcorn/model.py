@@ -348,6 +348,9 @@ class Model(_core.ModelBase):
     def request_stop(self, reason: StopReason = StopReason.USER, detail: str = "") -> None:
         """Stop the run at the next block boundary with `reason`, `detail` in the stop.
 
+        A request wins at that boundary over a `stop_when`, a wait's condition, a wall budget
+        and a SPIN stop: the run ends with this stop.
+
         Raises:
             ValueError: `reason` is FAULT, which only the core raises.
         """
