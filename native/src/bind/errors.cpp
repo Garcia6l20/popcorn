@@ -153,6 +153,10 @@ void translate(std::exception_ptr const& thrown)
   {
     PyErr_SetString(PyExc_NotImplementedError, e.what());
   }
+  catch(core::machine_forked const& e)
+  {
+    raise("EmulationError", e);
+  }
   catch(core::machine_closed const&)
   {
     auto const type = errors_module().attr("EmulationError");

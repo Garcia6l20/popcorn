@@ -1,6 +1,7 @@
 #include <popcorn/core/host.hpp>
 
 #include <poll.h>
+#include <pthread.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -414,6 +415,7 @@ struct host_core
   bool                                      signalled   = false;
   bool                                      poll_warned = false;
   std::string                               name        = "a machine";
+  std::uint64_t                             generation  = host::fork_generation();
   std::atomic<fate>                         ending{fate::undecided};
   std::atomic<bool>                         drops{false};
   std::mutex                                watch_mutex;
@@ -1292,6 +1294,34 @@ auto graph() -> lock_graph&
   return shared;
 }
 
+std::atomic<std::uint64_t> forks{0};
+
+void before_fork() noexcept
+{
+  graph().leaf.lock();
+}
+
+void after_fork_in_parent() noexcept
+{
+  graph().leaf.unlock();
+}
+
+void after_fork_in_child() noexcept
+{
+  auto& on = graph();
+  on.owners.clear();
+  on.waits.clear();
+  forks.fetch_add(1, std::memory_order_relaxed);
+  on.leaf.unlock();
+}
+
+void watch_forks() noexcept
+{
+  static int const registered =
+      ::pthread_atfork(before_fork, after_fork_in_parent, after_fork_in_child);
+  std::ignore = registered;
+}
+
 void record_hold(detail::host_core const* of)
 {
   auto&                  on = graph();
@@ -1470,10 +1500,18 @@ void waiter_handle::drop() noexcept
 
 host::host(std::vector<std::unique_ptr<machine>> members, slice_bounds bounds, host_hooks hooks)
     : core_{std::make_shared<detail::host_core>(std::move(members), bounds, std::move(hooks))}
-{}
+{
+  watch_forks();
+}
 
 host::~host()
 {
+  if(forked())
+  {
+    std::ignore = std::make_unique<std::jthread>(std::move(thread_)).release();
+    std::ignore = std::make_unique<std::shared_ptr<detail::host_core>>(std::move(core_)).release();
+    return;
+  }
   if(not thread_.joinable())
   {
     return;
@@ -1490,13 +1528,36 @@ host::~host()
   close();
 }
 
+auto host::forked() const noexcept -> bool
+{
+  return core_->generation != fork_generation();
+}
+
+auto host::fork_generation() noexcept -> std::uint64_t
+{
+  return forks.load(std::memory_order_relaxed);
+}
+
+void host::refuse_forked() const
+{
+  if(forked())
+  {
+    throw machine_forked(
+        "{} was built before os.fork, in the parent process: build machines in the process "
+        "that uses them",
+        core_->name);
+  }
+}
+
 auto host::lock() -> held_lock
 {
+  refuse_forked();
   return held_lock{std::unique_lock{core_->mutex}, core_.get()};
 }
 
 auto host::try_lock() -> held_lock
 {
+  refuse_forked();
   std::unique_lock attempt{core_->mutex, std::try_to_lock};
   if(not attempt.owns_lock())
   {
@@ -1507,6 +1568,7 @@ auto host::try_lock() -> held_lock
 
 auto host::lock_for(std::chrono::nanoseconds limit) -> held_lock
 {
+  refuse_forked();
   std::unique_lock attempt{core_->mutex, limit};
   if(not attempt.owns_lock())
   {
@@ -1828,6 +1890,7 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
 
 auto host::request_cancel(member_id who) -> std::optional<std::uint64_t>
 {
+  refuse_forked();
   if(detail::host_locks_held > 0)
   {
     throw machine_running("cancel() from a thread that holds a host mutex");
@@ -1850,6 +1913,7 @@ auto host::request_cancel(member_id who) -> std::optional<std::uint64_t>
 
 auto host::request_halt(member_id who, bool refuse_goal) -> halt_ticket
 {
+  refuse_forked();
   if(detail::host_locks_held > 0)
   {
     throw machine_running("halt() from a thread that holds a host mutex");
@@ -1944,6 +2008,10 @@ auto host::abandoned() const noexcept -> bool
 
 void host::abandon_thread()
 {
+  if(forked())
+  {
+    return;
+  }
   detail::deferred done;
   {
     std::scoped_lock const joining{join_mutex_};
@@ -1992,6 +2060,7 @@ auto host::member_owner(member_id who) const -> std::shared_ptr<machine>
 
 auto host::close_for(std::chrono::nanoseconds limit) -> bool
 {
+  refuse_forked();
   if(detail::host_locks_held > 0)
   {
     throw machine_running("close() from a thread that holds a host mutex");
@@ -2038,6 +2107,7 @@ auto host::owns_engine() const noexcept -> bool
 
 void host::close()
 {
+  refuse_forked();
   if(detail::host_locks_held > 0)
   {
     throw machine_running("close() from a thread that holds a host mutex");

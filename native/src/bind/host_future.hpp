@@ -276,6 +276,7 @@ public:
 
 private:
   std::shared_ptr<core::loop_waker> waker_;
+  std::uint64_t                     generation_ = core::host::fork_generation();
 };
 
 /** @brief Result of a host request: a goal or a wait, completed on the machine's thread. */
@@ -365,7 +366,10 @@ public:
 
 private:
   std::shared_ptr<detail::pending_request> request_;
-  std::shared_ptr<detail::log_forwarding>  logs_;
+  void                                     refuse_inherited() const;
+
+  std::shared_ptr<detail::log_forwarding> logs_;
+  std::uint64_t                           generation_ = core::host::fork_generation();
 };
 
 /**

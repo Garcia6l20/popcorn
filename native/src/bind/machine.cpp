@@ -415,6 +415,11 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
 machine_handle::~machine_handle()
 {
   detail::clear_alive(*alive_);
+  if(host_->forked())
+  {
+    detail::abandon(std::move(host_));
+    return;
+  }
   detail::unregister_host(host_);
   if(Py_IsFinalizing() != 0 and thread_live_->load())
   {

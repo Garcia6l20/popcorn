@@ -43,6 +43,16 @@ public:
 };
 
 /**
+ * @brief The host was built in the parent of a forked process: the child has no host thread and
+ *        any host lock may stay held, so nothing in the child may use it.
+ */
+class machine_forked : public error
+{
+public:
+  using error::error;
+};
+
+/**
  * @brief A goal's finish failed while the goal ended by an error or a cancel: the finish error,
  *        with what the goal ended by, as Python's `__context__` chains them.
  */
@@ -825,6 +835,19 @@ public:
   [[nodiscard]] auto abandoned() const noexcept -> bool;
 
   /**
+   * @brief Whether the host was built before an `fork()` this process is the child of. Such a
+   *        host refuses every lock, request and close with machine_forked, and its destruction
+   *        leaks its thread handle and members instead of joining a thread that does not exist.
+   */
+  [[nodiscard]] auto forked() const noexcept -> bool;
+
+  /**
+   * @brief The forks this process is a child of, counted by an `atfork` handler, for state that
+   *        must tell what it inherited from the parent.
+   */
+  [[nodiscard]] static auto fork_generation() noexcept -> std::uint64_t;
+
+  /**
    * @brief The thread abandon_thread() gave up, expired once it left the engine for good: from
    *        then on no thread runs the members, and a holder of a member_owner() share may edit
    *        their hooks. Valid from the destroyed host's copy as well.
@@ -898,6 +921,7 @@ private:
       vtime                                   at,
       detail::host_promise<vtime> const&      promise);
   void decide(detail::fate ending);
+  void refuse_forked() const;
 
   std::shared_ptr<detail::host_core> core_;
   std::mutex                         join_mutex_;

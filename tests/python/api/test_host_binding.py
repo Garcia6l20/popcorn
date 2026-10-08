@@ -1947,6 +1947,93 @@ def test_a_hook_dropped_while_its_host_is_held_goes_at_the_next_parked_access(
     assert gone() is None
 
 
+FORKED = """
+import asyncio
+import gc
+import os
+import sys
+import time
+import warnings
+
+import popcorn
+from popcorn import _core
+from popcorn.units import s
+
+warnings.simplefilter("ignore", DeprecationWarning)
+MODE = __MODE__
+m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+m.reset()
+far = m.time + s(100_000)
+waker = _core.LoopWaker()
+m.start()
+pending = m.read(m.ref.reg.r0, at=far)
+time.sleep(0.05)
+pid = os.fork()
+if pid == 0:
+    if MODE == "use":
+        try:
+            m.mem.u32[0x2000_8000]
+        except popcorn.EmulationError as error:
+            print("refused:", error, flush=True)
+        else:
+            sys.exit(3)
+    elif MODE == "collect":
+        del m, pending
+        gc.collect()
+    elif MODE == "inherited":
+        assert not pending.done()
+        try:
+            pending._future.result(0.0)
+        except popcorn.EmulationError as error:
+            print("request refused:", error, flush=True)
+        else:
+            sys.exit(4)
+        assert waker.drain() == []
+        del pending
+        gc.collect()
+    else:
+        assert _core.host_threads() == 0, _core.host_threads()
+    sys.exit(0)
+began = time.monotonic()
+_, status = os.waitpid(pid, 0)
+took = time.monotonic() - began
+m.halt()
+
+
+async def withdraw():
+    task = asyncio.ensure_future(pending)
+    await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+asyncio.run(withdraw())
+print("child", os.waitstatus_to_exitcode(status), took < 5, flush=True)
+"""
+
+
+@pytest.mark.parametrize("mode", ["exit", "use", "collect", "inherited"])
+def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -> None:
+    script = (
+        FORKED.replace("__MODE__", repr(mode))
+        .replace("__JSON__", repr(str(M33_JSON)))
+        .replace("__ELF__", repr(str(DRIVER_ELF)))
+    )
+    child = run_child(script, timeout=30)
+    assert child.returncode == 0, child.stderr
+    assert child.stderr == ""
+    lines = child.stdout.strip().splitlines()
+    assert lines[-1] == "child 0 True"
+    if mode == "use":
+        assert lines[0].startswith("refused: POPCORN-M33-TEST #")
+        assert "was built before os.fork, in the parent process" in lines[0]
+    if mode == "inherited":
+        assert lines[0].startswith("request refused: this machine request was made before os.fork")
+
+
 ABANDONED_LATE = """
 import asyncio
 import gc

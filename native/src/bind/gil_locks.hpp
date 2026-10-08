@@ -270,6 +270,9 @@ struct late_failure
  */
 struct log_forwarding
 {
+  /** @brief The fork generation it was made in: a forked child never flushes what it inherited,
+   * the queue's mutex may stay held there. */
+  std::uint64_t generation = core::host::fork_generation();
   /** @brief Guards late. */
   std::mutex late_mutex{};
   /** @brief Failures queued with no GIL, reported at the next flush. */
@@ -357,7 +360,10 @@ void report_late_failures(std::span<late_failure const> failures) noexcept;
  */
 inline void flush_logs(log_forwarding& logs, log_errors errors)
 {
-  if(core::detail::on_host_thread or core::detail::host_locks_held > 0 or PyGILState_Check() == 0)
+  if(core::detail::on_host_thread
+     or core::detail::host_locks_held > 0
+     or PyGILState_Check() == 0
+     or logs.generation != core::host::fork_generation())
   {
     return;
   }

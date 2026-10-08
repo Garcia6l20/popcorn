@@ -389,6 +389,14 @@ class Machine:
     lock another thread sets only after its own access, is not seen and blocks like two
     `threading.Lock`s taken in opposite orders.
 
+    A machine does not survive `os.fork`: build machines after the fork, in the process that
+    uses them. The child has no machine thread, and the parent's locks may be held, so in the
+    child every use of a machine built before the fork raises EmulationError naming it, the
+    result of a request made before it too, such a request reads as not done, and the child's
+    exit and collections leave them alone. Python warns about a fork of a process with a
+    started machine, which has threads. An event loop that awaited a machine owns a waker
+    eventfd the child inherits and must not use.
+
     An exception a callback, or a command of `read`, `write` or a stream, raises on the machine's
     thread leaves its frames there, so one `gc.collect()` once the callback returned collects a
     dropped machine. It keeps its type, message, notes, chained exceptions and formatted
@@ -1878,7 +1886,8 @@ class Machine:
         A free run advances while the caller blocks: a sync call, a thread join, or a C call that
         releases the GIL. Set up a peer whose connection blocks wall time, a probe or a
         handshake on a pty, while the machine is parked, before `start()` or `running()`.
-        A `wait_for` on a Python event sees it at slice ends.
+        A `wait_for` on a Python event sees it at slice ends. A machine built before an
+        `os.fork` does not run in the child, see the class.
 
         Its Python models, handlers and bus devices run slowly while the test thread computes in
         Python: await, block in a C call or sleep instead, or lower `sys.setswitchinterval` in

@@ -1,5 +1,7 @@
 #include "host_future.hpp"
 
+#include <pthread.h>
+
 #include "errors.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -144,6 +146,13 @@ auto python_thread_hooks(
 
 void register_host(std::shared_ptr<core::host> const& on, host_ref const& slot, std::string part)
 {
+  static int const consistent_at_fork = ::pthread_atfork(
+      [] { registry().mutex.lock(); }, [] { registry().mutex.unlock(); },
+      [] {
+        registry().mutex.unlock();
+        live_host_threads.store(0);
+      });
+  std::ignore       = consistent_at_fork;
   auto const& hosts = registry();
   link_locked(hosts, [&](core::link_guard const&) {
     registry().hosts.push_back({.host = on, .logs = slot->logs, .part = std::move(part)});
@@ -181,13 +190,28 @@ host_future_handle::host_future_handle(
     : request_{std::move(request)}, logs_{machine == nullptr ? nullptr : machine->logs}
 {}
 
+void host_future_handle::refuse_inherited() const
+{
+  if(generation_ != core::host::fork_generation())
+  {
+    throw core::machine_forked(
+        "this machine request was made before os.fork, in the parent process: make requests in "
+        "the process that built the machine");
+  }
+}
+
 auto host_future_handle::done() const -> bool
 {
+  if(generation_ != core::host::fork_generation())
+  {
+    return false;
+  }
   return request_->done();
 }
 
 auto host_future_handle::result(std::optional<double> timeout) -> nb::object
 {
+  refuse_inherited();
   detail::wait_releasing_gil(*request_, timeout);
   nb::object value;
   try
@@ -211,6 +235,7 @@ auto host_future_handle::result(std::optional<double> timeout) -> nb::object
 
 void host_future_handle::add_done_callback(nb::object fn)
 {
+  refuse_inherited();
   auto callable = std::make_shared<detail::python_callable>(std::move(fn), nb::none());
   request_->on_done([callable = std::move(callable)]() noexcept {
     detail::gil_entry const held;
@@ -298,6 +323,10 @@ void host_future_handle::report_late_failure(
     bool        skip_closed,
     bool        skip_cancelled)
 {
+  if(generation_ != core::host::fork_generation())
+  {
+    return;
+  }
   if(request_->done())
   {
     auto [error, note] = request_->failure();
@@ -344,6 +373,10 @@ auto loop_waker_handle::fd() const -> int
 
 auto loop_waker_handle::drain() -> std::vector<std::uint64_t>
 {
+  if(generation_ != core::host::fork_generation())
+  {
+    return {};
+  }
   return waker_->drain();
 }
 
@@ -354,6 +387,7 @@ auto loop_waker_handle::native() const -> std::weak_ptr<core::loop_waker>
 
 void host_future_handle::notify(loop_waker_handle const& waker, std::uint64_t token)
 {
+  refuse_inherited();
   if(logs_ != nullptr)
   {
     logs_->queue->wake_through(waker.native(), logs_->token);
@@ -368,7 +402,7 @@ void host_future_handle::notify(loop_waker_handle const& waker, std::uint64_t to
 
 void host_future_handle::warn_later(std::string message)
 {
-  if(logs_ == nullptr)
+  if(generation_ != core::host::fork_generation() or logs_ == nullptr)
   {
     return;
   }
@@ -379,6 +413,10 @@ void host_future_handle::warn_later(std::string message)
 
 auto host_future_handle::cancel() -> bool
 {
+  if(generation_ != core::host::fork_generation())
+  {
+    return false;
+  }
   return request_->cancel();
 }
 
@@ -391,10 +429,12 @@ void shutdown_hosts()
   detail::link_locked(hosts, [&](core::link_guard const&) {
     for(auto const& entry : registry().hosts)
     {
-      if(auto on = entry.host.lock())
+      auto on = entry.host.lock();
+      if(on == nullptr or on->forked())
       {
-        live.emplace_back(std::move(on), entry.part);
+        continue;
       }
+      live.emplace_back(std::move(on), entry.part);
       if(auto forwarding = entry.logs.lock())
       {
         logs.push_back(std::move(forwarding));

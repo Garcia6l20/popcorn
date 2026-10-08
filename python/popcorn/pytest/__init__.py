@@ -61,6 +61,9 @@ interrupted session keeps the directory and writes no lcov. A crash or SIGKILL l
 directory behind. xdist workers on other hosts, `--tx ssh=...`, are not supported: they share
 the directory by path.
 
+xdist workers are spawned processes, not forks of the controller, so each worker builds its own
+machines after it starts, as a machine requires: it does not survive `os.fork`.
+
 The lcov file uses the lcov 2 function records, `FN:<start>,<end>,<name>`. `genhtml
 --branch-coverage` reads it with no ignored error but one, which the data can legitimately
 produce: `line is hit but no branches on line have been evaluated`. It names a line whose branch

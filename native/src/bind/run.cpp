@@ -371,6 +371,10 @@ void machine_handle::flush_logs_unraisable() const noexcept
 
 auto machine_handle::unreported_end() -> nb::object
 {
+  if(host_->forked())
+  {
+    return nb::none();
+  }
   std::optional<core::held_end> ended;
   {
     nb::gil_scoped_release const released;
