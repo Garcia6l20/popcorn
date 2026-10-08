@@ -464,4 +464,31 @@ auto machine_handle::op_adc_drive(
 {
   return detail::machine_op(adc_drive_body(analog(peripheral), channel, microvolts));
 }
+auto uart_link::predicate_available(std::uint64_t count) const -> native_predicate
+{
+  std::ignore = port();
+  return native_predicate{
+      [endpoint = endpoint_, alive = alive_, count] {
+        return not detail::is_alive(alive)
+            or detail::link_locked(*endpoint, [&](core::link_guard const& held) {
+                 return endpoint->available(held) >= count;
+               });
+      },
+      host_}
+      .described("UART data");
+}
+
+auto audio_link::predicate_available(std::uint64_t count) const -> native_predicate
+{
+  std::ignore = endpoint();
+  return native_predicate{
+      [endpoint = endpoint_, alive = alive_, count] {
+        return not detail::is_alive(alive)
+            or detail::link_locked(*endpoint, [&](core::link_guard const& held) {
+                 return endpoint->available(held) >= count;
+               });
+      },
+      host_}
+      .described("audio frames");
+}
 }

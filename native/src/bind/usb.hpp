@@ -263,7 +263,8 @@ public:
       take_result(std::uint32_t id) -> std::optional<periph::usb::transfer_status>;
 
   /**
-   * @brief Stops waiting for a request queued here: its result, now or later, is dropped.
+   * @brief Stops waiting for a request queued here: its result, now or later, is dropped. Does
+   *        nothing once the machine is gone, the bookkeeping goes with it.
    * @param id Its handle.
    */
   [[= py::doc{"Stop waiting for a request queued here, drop its result."}]] void
@@ -300,6 +301,19 @@ public:
    * id. */
   [[= py::doc{"Command of set_control_line_state."}]] [[nodiscard]] auto
       command_set_control_line_state(bool dtr, bool rts) const -> access_op;
+
+  /** @brief A predicate true once available() reaches @p count. */
+  [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto
+      predicate_available(std::uint64_t count) const -> native_predicate;
+  /** @brief A predicate true once packets() reaches @p count. */
+  [[= py::doc{"Predicate: packets() reaches count."}]] [[nodiscard]] auto
+      predicate_packets(std::uint64_t count) const -> native_predicate;
+  /** @brief A predicate true while the function is bound and ready. */
+  [[= py::doc{"Predicate: bound and ready."}]] [[nodiscard]] auto predicate_ready() const
+      -> native_predicate;
+  /** @brief A predicate true once the result of request @p id waits, without taking it. */
+  [[= py::doc{"Predicate: the result of a request waits."}]] [[nodiscard]] auto
+      predicate_ended(std::uint32_t id) const -> native_predicate;
 
 private:
   template <typename Body> auto locked(Body&& body) const;
@@ -381,7 +395,7 @@ public:
 
   /**
    * @brief Stops waiting for an output report queued here: its result is dropped, the report
-   *        is still sent.
+   *        is still sent. Does nothing once the machine is gone.
    * @param id Its handle.
    */
   [[= py::doc{"Stop waiting for an output report queued here, drop its result."}]] void
@@ -457,7 +471,8 @@ public:
       take_result(std::uint32_t id) -> std::optional<hid_reply_record>;
 
   /**
-   * @brief Stops waiting for a request queued here: its result, now or later, is dropped.
+   * @brief Stops waiting for a request queued here: its result, now or later, is dropped. Does
+   *        nothing once the machine is gone, the bookkeeping goes with it.
    * @param id Its handle.
    */
   [[= py::doc{"Stop waiting for a request queued here, drop its result."}]] void
@@ -476,6 +491,19 @@ public:
       std::uint8_t                 type,
       std::uint8_t                 id,
       reflex::py::nb::bytes const& data) const -> access_op;
+
+  /** @brief A predicate true once available() reaches @p count. */
+  [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto
+      predicate_available(std::uint64_t count) const -> native_predicate;
+  /** @brief A predicate true while the interface is bound and ready. */
+  [[= py::doc{"Predicate: bound and ready."}]] [[nodiscard]] auto predicate_ready() const
+      -> native_predicate;
+  /** @brief A predicate true once the reply of request @p id waits, without taking it. */
+  [[= py::doc{"Predicate: the reply of a request waits."}]] [[nodiscard]] auto
+      predicate_ended(std::uint32_t id) const -> native_predicate;
+  /** @brief A predicate true once the result of output report @p id waits, without taking it. */
+  [[= py::doc{"Predicate: the result of an output report waits."}]] [[nodiscard]] auto
+      predicate_written(std::uint64_t id) const -> native_predicate;
 
 private:
   template <typename Body> auto locked(Body&& body) const;
@@ -686,6 +714,7 @@ public:
 
   /**
    * @brief Stops waiting for an operation queued here: its result, now or later, is dropped.
+   *        Does nothing once the machine is gone, the bookkeeping goes with it.
    * @param id Its handle.
    */
   [[= py::doc{"Stop waiting for an operation queued here, drop its result."}]] void
@@ -704,6 +733,23 @@ public:
       std::uint8_t channel,
       std::uint8_t control,
       std::int32_t value) const -> access_op;
+
+  /** @brief A predicate true once available() reaches @p count. */
+  [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto
+      predicate_available(std::uint64_t count) const -> native_predicate;
+  /** @brief A predicate true while the function is bound and ready. */
+  [[= py::doc{"Predicate: bound and ready."}]] [[nodiscard]] auto predicate_ready() const
+      -> native_predicate;
+  /** @brief A predicate true once the result of operation @p id waits, without taking it. */
+  [[= py::doc{"Predicate: the result of an operation waits."}]] [[nodiscard]] auto
+      predicate_ended(std::uint64_t id) const -> native_predicate;
+  /**
+   * @brief A predicate true once the speaker sent every written sample, nothing queued and no
+   *        packet in flight, or once a stop changed flushes() from @p flushes.
+   */
+  [[= py::doc{
+      "Predicate: the speaker drained, or flushes() moved from a count."}]] [[nodiscard]] auto
+      predicate_drained(std::uint64_t flushes) const -> native_predicate;
 
 private:
   template <typename Body> auto locked(Body&& body) const;
@@ -724,6 +770,40 @@ private:
   std::size_t                            function_;
   detail::alive_flag                     alive_;
   detail::host_ref                       host_;
+};
+
+namespace detail
+{
+/** @brief What a control request knows of its transfer. Only the engine owner touches it. */
+struct control_claim
+{
+  /** @brief The transfer, once the request's command ran. */
+  std::optional<periph::usb::transfer_id> id{};
+  /** @brief The host's epoch when the command ran: a load since makes the id another's. */
+  std::uint64_t epoch = 0;
+  /** @brief Whether the request gave its result up. */
+  bool forgotten = false;
+  /** @brief Whether the request took its result. */
+  bool taken = false;
+};
+}
+
+/**
+ * @brief A control request's claim on its result, made before the request is posted, so a
+ *        cancel at any point can give the result up.
+ */
+class[[= py::rename{"UsbControlTicket"}]] usb_control_ticket
+{
+public:
+  /** @brief A fresh claim. */
+  [[= py::skip]] usb_control_ticket();
+
+  /** @brief The claim, shared by the request's command, take and forget. */
+  [[= py::skip]] [[nodiscard]] auto claim() const noexcept
+      -> std::shared_ptr<detail::control_claim> const&;
+
+private:
+  std::shared_ptr<detail::control_claim> claim_;
 };
 
 /**
@@ -867,9 +947,40 @@ public:
   /** @brief plug() as a command of MachineHandle.submit_ops(). */
   [[= py::doc{"Command of plug."}]] [[nodiscard]] auto command_plug(bool attached) const
       -> access_op;
+  /** @brief (state(), failed_step()) as an op of MachineHandle.submit_ops(), the state as its
+   * integer. */
+  [[= py::doc{"Op of (state, failed_step)."}]] [[nodiscard]] auto op_settled() const -> access_op;
+  /** @brief The result of the control transfer of @p ticket alone, None while it runs, as an op
+   * of MachineHandle.submit_ops(). */
+  [[= py::doc{
+      "Op taking the result of one control transfer, None while it runs."}]] [[nodiscard]] auto
+      op_take_result(usb_control_ticket const& ticket) const -> access_op;
+
+  /** @brief A claim for command_control(). */
+  [[= py::doc{"A claim for command_control."}]] [[nodiscard]] auto ticket() const
+      -> usb_control_ticket;
+
+  /**
+   * @brief Gives the result of the request of @p ticket up: dropped at once when it waits, when
+   *        it lands otherwise, never made when the command did not run yet. Runs as the engine
+   *        owner, at once while parked, at the next boundary while running, and neither waits
+   *        nor raises.
+   */
+  [[= py::doc{"Give a control request's result up, without waiting or raising."}]] void
+      forget(usb_control_ticket const& ticket) const noexcept;
+
+  /** @brief A predicate true once the device is configured or an enumeration step failed. */
+  [[= py::doc{"Predicate: configured, or an enumeration step failed."}]] [[nodiscard]] auto
+      predicate_settled() const -> native_predicate;
+  /** @brief A predicate true once the result of control transfer @p id waits, without taking it.
+   */
+  [[= py::doc{"Predicate: the result of a control transfer waits."}]] [[nodiscard]] auto
+      predicate_control_ended(std::uint32_t id) const -> native_predicate;
+
   /** @brief control() as a command of MachineHandle.submit_ops(), its value the id, checked
    * now. */
   [[= py::doc{"Command of control."}]] [[nodiscard]] auto command_control(
+      usb_control_ticket const&    ticket,
       std::uint8_t                 request_type,
       std::uint8_t                 request,
       std::uint16_t                value,

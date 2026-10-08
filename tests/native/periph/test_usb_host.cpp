@@ -1278,6 +1278,84 @@ TEST_CASE("user control requests queue their results, a detach cancels the ones 
   CHECK(requests_of(r.dev.s) == expected_requests());
 }
 
+TEST_CASE("a user control result is peeked and taken alone, by its id")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  auto const first     = r.host->control(descriptor(3, 0, 0, 255));
+  auto const second_id = r.host->control(descriptor(1, 0, 0, 18));
+  CHECK_FALSE(r.host->has_result(first));
+  CHECK_FALSE(r.host->take_result(first).has_value());
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(r.host->has_result(first));
+  CHECK(r.host->has_result(second_id));
+  auto const taken = r.host->take_result(second_id);
+  REQUIRE(taken.has_value());
+  CHECK(taken->id == second_id);
+  CHECK_FALSE(r.host->has_result(second_id));
+  CHECK(r.host->has_result(first));
+  auto const rest = r.host->take_results();
+  REQUIRE(rest.size() == 1);
+  CHECK(rest[0].id == first);
+  CHECK_FALSE(r.host->has_result(first));
+}
+
+TEST_CASE("a forgotten control result is dropped when it waits or when it lands")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  auto const ended = r.host->control(descriptor(1, 0, 0, 18));
+  r.run_until(t0 + second + 10 * ms);
+  REQUIRE(r.host->has_result(ended));
+  r.host->forget(ended);
+  CHECK_FALSE(r.host->has_result(ended));
+
+  auto const in_flight = r.host->control(descriptor(3, 0, 0, 255));
+  auto const kept      = r.host->control(descriptor(1, 0, 0, 18));
+  r.host->forget(in_flight);
+  r.run_until(t0 + second + 20 * ms);
+  auto const results = r.host->take_results();
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].id == kept);
+}
+
+TEST_CASE("forgetting a transfer twice leaves one mark, consumed when it lands")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  auto const in_flight = r.host->control(descriptor(3, 0, 0, 255));
+  r.host->forget(in_flight);
+  r.host->forget(in_flight);
+  CHECK(r.host->forgotten() == 1);
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(r.host->forgotten() == 0);
+  CHECK_FALSE(r.host->has_result(in_flight));
+}
+
+TEST_CASE("a load clears the forgotten transfers of the abandoned timeline")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  std::vector<std::byte> bytes;
+  r.host->save(bytes);
+  auto const device    = r.dev.s;
+  auto const abandoned = r.host->control(descriptor(3, 0, 0, 255));
+  r.host->forget(abandoned);
+
+  auto const epoch = r.host->epoch();
+  r.host->load(bytes);
+  CHECK(r.host->epoch() != epoch);
+  r.dev.s          = device;
+  auto const fresh = r.host->control(descriptor(3, 0, 0, 255));
+  CHECK(fresh == abandoned);
+  r.run_until(t0 + second + 10 * ms);
+  CHECK(r.host->has_result(fresh));
+}
+
 TEST_CASE("a restore drops the user results of the abandoned timeline")
 {
   rig r;

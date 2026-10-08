@@ -16,9 +16,9 @@ if TYPE_CHECKING:
     from popcorn._refs import Pending
     from popcorn._usb import UsbHosts
 
-type Waiter = Callable[[Callable[[], bool], VirtualDuration | None], Awaitable[VirtualTime]]
-"""Runs the machine until a predicate holds or a virtual duration elapses, and returns the
-virtual time it stopped waiting at."""
+type Waiter = Callable[[_core.Predicate, VirtualDuration | None], Awaitable[VirtualTime]]
+"""Runs the machine until a native predicate holds or a virtual duration elapses, and returns
+the virtual time it stopped waiting at. The predicate runs on the machine's thread with no GIL."""
 
 
 class Poster(Protocol):
@@ -154,7 +154,7 @@ class UartStream:
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
-            await self._wait(lambda: self._link.available() >= n, for_)
+            await self._wait(self._link.predicate_available(n), for_)
         return [Frame(f.data, VirtualTime(f.at_ps)) for f in self._link.drain(n)]
 
     def __repr__(self) -> str:

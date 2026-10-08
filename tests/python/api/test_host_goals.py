@@ -487,6 +487,21 @@ def test_a_trace_close_refused_inside_another_machine_keeps_its_sink(
     assert sum(1 for _ in read_trace(path)) > 0
 
 
+def test_a_reached_wait_in_a_free_run_holds_no_gil(m33: popcorn.MachineDescription) -> None:
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(VIEWS_ELF))
+    m.reset()
+    assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
+    loop = m.pc
+
+    async def scenario() -> popcorn.Stop:
+        async with m.running():
+            return await m.wait_for(popcorn.Reached(loop), for_=ms(1))
+
+    stop = run_bounded(scenario(), HANG)
+    assert stop.reason is popcorn.StopReason.USER and stop.pc == loop
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
+
+
 class Payload:
     """A local whose life shows whether a frame is still held."""
 

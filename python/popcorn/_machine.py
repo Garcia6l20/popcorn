@@ -311,11 +311,11 @@ class Reached:
 
 
 @dataclass(frozen=True, slots=True)
-class _Ready:
-    predicate: Callable[[], bool]
+class _Native:
+    predicate: _core.Predicate
 
     def ready(self, machine: Machine) -> bool:
-        return self.predicate()
+        return self.predicate.holds()
 
 
 class Machine:
@@ -361,14 +361,15 @@ class Machine:
     The machine queues them and the awaiting loop forwards them, or the caller at its next
     completed await, `halt`, park or parked access, in order, each flush the records queued when
     it began. A filter or handler that raises stops the flush, and the records after it wait
-    for the next one. Its error is raised from the await, `halt` or park that flushed, or, for
-    the loop's flush, from the machine's next one. A parked access already took effect, so its
-    flush sends the error to `sys.unraisablehook`. Past 4096 queued records the rest are
-    counted and one WARNING reports how many were dropped. A machine only reachable
-    through a cycle, an attribute of its Python model or device included, is collected parked,
-    running or not: the collection halts a free run and sends what ended it by itself to
-    `sys.unraisablehook`, unless a wait already returned or raised it. A model, device or hook
-    the machine calls after its `Machine` was found garbage is not run, the run stops.
+    for the next one. Its error is raised from `halt` or park, or, for an await or the loop's
+    flush, from the machine's next request, `halt` or park, so the awaited result is returned. A
+    parked access already took effect, so its flush sends the error to `sys.unraisablehook`.
+    Past 4096 queued records the rest are counted and one WARNING reports how many were
+    dropped. A machine only reachable through a cycle, an attribute of its Python model or
+    device included, is collected parked, running or not: the collection halts a free run and
+    sends what ended it by itself to `sys.unraisablehook`, unless a wait already returned or
+    raised it. A model, device or hook the machine calls after its `Machine` was found garbage
+    is not run, the run stops.
 
     An exception a callback, or a command of `read`, `write` or a stream, raises on the machine's
     thread leaves its frames there, so one `gc.collect()` once the callback returned collects a
@@ -854,6 +855,8 @@ class Machine:
             EmulationError: From the await, the batch was superseded by a reset or a restore
                 before `at`, or the machine was closed. A reset or restore of a parked machine
                 is seen at the next boundary of a run or the next stamped command.
+            Exception: The error a log filter or handler raised during an earlier flush, kept
+                for this request, see the class doc. Nothing was posted.
         """
         self._refuse_on_host()
         for index, ref in enumerate(refs):
@@ -889,6 +892,7 @@ class Machine:
                 pack or a variable value that does not fit, a ref of another machine, or `at` as
                 for `read`. Raised here, not from the await.
             EmulationError: From the await, as for `read`.
+            Exception: A kept log filter or handler error, as for `read`.
         """
         self._refuse_on_host()
         if not pairs:
@@ -1670,6 +1674,7 @@ class Machine:
 
         Raises:
             MachineBusy: Another run, step, call, wait or free run is active.
+            Exception: A kept log filter or handler error, as for `read`.
         """
         _check_duration(for_)
         target = None if until is None else self.address_of(until)
@@ -1715,13 +1720,15 @@ class Machine:
         return stop
 
     async def _wait_until(
-        self, ready: Callable[[], bool], for_: VirtualDuration | None
+        self, ready: _core.Predicate, for_: VirtualDuration | None
     ) -> VirtualTime:
-        if not self.busy and ready():
-            return self.time
-        stop = await self.wait_for(_Ready(ready), for_=for_)
+        if not self.busy:
+            with contextlib.suppress(MachineRunning):
+                if ready.holds():
+                    return self.time
+        stop = await self.wait_for(_Native(ready), for_=for_)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, "the run waiting for UART data")
+            raise _stop_error(stop, f"the run waiting for {ready.what()}")
         return stop.time
 
     async def wait_for(self, event: Event, *, for_: VirtualDuration | None = None) -> Stop:
@@ -1757,10 +1764,15 @@ class Machine:
         if isinstance(event, Condition | Conditions):
             return await self._wait_condition(event, for_)
         if self._handle.session_open():
+            if isinstance(event, Reached):
+                event = _Native(self._handle.predicate_pc_at(self.address_of(event.target)))
+            for_ps = None if for_ is None else for_.ps
             try:
                 stop = await awaited(
-                    self._handle.wait(
-                        self._handler(event.ready), None if for_ is None else for_.ps
+                    (
+                        self._handle.wait_predicate(event.predicate, for_ps)
+                        if isinstance(event, _Native)
+                        else self._handle.wait(self._handler(event.ready), for_ps)
                     ),
                     lambda raw: stop_of(cast(_core.StopInfo, raw)),
                 )
@@ -1771,7 +1783,20 @@ class Machine:
             return stop
         if isinstance(event, Reached):
             return await self.run(until=event.target, for_=for_)
+        if isinstance(event, _Native):
+            return await self._run_native(event.predicate, for_)
         return await self.run(for_=for_, stop_when=event.ready)
+
+    async def _run_native(self, ready: _core.Predicate, for_: VirtualDuration | None) -> Stop:
+        self._last_stop = None
+        stop = await awaited(
+            self._handle.run_predicate(
+                ready, self._default_budget, None if for_ is None else for_.ps
+            ),
+            lambda raw: stop_of(cast(_core.StopInfo, raw)),
+        )
+        self._last_stop = stop
+        return stop
 
     async def _wait_condition(
         self, event: Condition | Conditions, for_: VirtualDuration | None

@@ -319,10 +319,19 @@ auto cdc_link::take_result(std::uint32_t id) -> std::optional<periph::usb::trans
 
 void cdc_link::forget(std::uint32_t id)
 {
-  locked([&](usb::cdc_channel& queues) {
-    queues.awaited.erase(id);
-    queues.results.erase(id);
-  });
+  if(not detail::is_alive(alive_))
+  {
+    return;
+  }
+  try
+  {
+    locked([&](usb::cdc_channel& queues) {
+      queues.awaited.erase(id);
+      queues.results.erase(id);
+    });
+  }
+  catch(config_error const&)
+  {}
 }
 
 auto cdc_link::line_coding() const -> cdc_line_coding_record
@@ -459,10 +468,19 @@ auto hid_link::take_written(std::uint64_t id) -> std::optional<periph::usb::tran
 
 void hid_link::forget_written(std::uint64_t id)
 {
-  locked([&](usb::hid_channel& queues) {
-    queues.awaited_writes.erase(id);
-    queues.written.erase(id);
-  });
+  if(not detail::is_alive(alive_))
+  {
+    return;
+  }
+  try
+  {
+    locked([&](usb::hid_channel& queues) {
+      queues.awaited_writes.erase(id);
+      queues.written.erase(id);
+    });
+  }
+  catch(config_error const&)
+  {}
 }
 
 auto hid_link::queued() const -> std::uint64_t
@@ -584,10 +602,19 @@ auto hid_link::take_result(std::uint32_t id) -> std::optional<hid_reply_record>
 
 void hid_link::forget(std::uint32_t id)
 {
-  locked([&](usb::hid_channel& queues) {
-    queues.awaited.erase(id);
-    queues.results.erase(id);
-  });
+  if(not detail::is_alive(alive_))
+  {
+    return;
+  }
+  try
+  {
+    locked([&](usb::hid_channel& queues) {
+      queues.awaited.erase(id);
+      queues.results.erase(id);
+    });
+  }
+  catch(config_error const&)
+  {}
 }
 
 uac_link::uac_link(
@@ -881,10 +908,19 @@ auto uac_link::take_result(std::uint64_t id) -> std::optional<periph::usb::trans
 
 void uac_link::forget(std::uint64_t id)
 {
-  locked([&](usb::uac2_channel& queues) {
-    queues.awaited.erase(id);
-    queues.results.erase(id);
-  });
+  if(not detail::is_alive(alive_))
+  {
+    return;
+  }
+  try
+  {
+    locked([&](usb::uac2_channel& queues) {
+      queues.awaited.erase(id);
+      queues.results.erase(id);
+    });
+  }
+  catch(config_error const&)
+  {}
 }
 
 usb_link::usb_link(
@@ -1045,6 +1081,7 @@ auto usb_link::control(
 }
 
 auto usb_link::command_control(
+    usb_control_ticket const&    ticket,
     std::uint8_t                 request_type,
     std::uint8_t                 request,
     std::uint16_t                value,
@@ -1061,10 +1098,47 @@ auto usb_link::command_control(
       .length       = length};
   auto link = *this;
   link.host_.reset();
-  return detail::link_op(
-      [link = std::move(link), setup, stage = control_stage(request_type, length, data)] {
-        return link.host().control(setup, stage);
-      });
+  return detail::link_op([link  = std::move(link), setup,
+                          stage = control_stage(request_type, length, data),
+                          claim = ticket.claim()] {
+    auto& on     = link.host();
+    claim->id    = on.control(setup, stage);
+    claim->epoch = on.epoch();
+    if(claim->forgotten)
+    {
+      on.forget(*claim->id);
+    }
+    return *claim->id;
+  });
+}
+
+usb_control_ticket::usb_control_ticket() : claim_{std::make_shared<detail::control_claim>()}
+{}
+
+auto usb_control_ticket::claim() const noexcept -> std::shared_ptr<detail::control_claim> const&
+{
+  return claim_;
+}
+
+auto usb_link::ticket() const -> usb_control_ticket
+{
+  return {};
+}
+
+void usb_link::forget(usb_control_ticket const& ticket) const noexcept
+{
+  detail::retire(host_, [port = port_, alive = alive_, claim = ticket.claim()] {
+    claim->forgotten = true;
+    if(not claim->id or claim->taken or not detail::is_alive(alive))
+    {
+      return;
+    }
+    auto& on = *port->board_host();
+    if(on.epoch() == claim->epoch)
+    {
+      on.forget(*claim->id);
+    }
+  });
 }
 
 auto usb_link::take_results() -> std::vector<usb_control_result>
@@ -1224,5 +1298,208 @@ auto machine_handle::attach_usb(std::string const& peripheral) -> usb_link
   }
   auto const hubs = hubs_.find(peripheral);
   return usb_link{*port, hubs != hubs_.end() ? hubs->second : detail::usb_hubs{}, alive_, slot_};
+}
+namespace
+{
+template <typename Hub, typename Test>
+auto channel_predicate(
+    std::shared_ptr<Hub>      hub,
+    std::size_t               function,
+    detail::alive_flag const& alive,
+    detail::host_ref          machine,
+    Test                      test) -> native_predicate
+{
+  if(not detail::is_alive(alive))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return native_predicate{
+      [hub = std::move(hub), function, alive, test = std::move(test)] {
+        return not detail::is_alive(alive)
+            or detail::link_locked(*hub, [&](core::link_guard const& held) {
+                 return test(hub->channel(held, function));
+               });
+      },
+      std::move(machine)};
+}
+}
+
+auto cdc_link::predicate_available(std::uint64_t count) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [count](usb::cdc_channel const& queues) { return queues.in_bytes >= count; })
+      .described("CDC data");
+}
+
+auto cdc_link::predicate_packets(std::uint64_t count) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [count](usb::cdc_channel const& queues) { return queues.packets() >= count; })
+      .described("CDC packets");
+}
+
+auto cdc_link::predicate_ready() const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [](usb::cdc_channel const& queues) {
+               return queues.comm_interface.has_value() and queues.ready;
+             })
+      .described("the CDC function to be ready");
+}
+
+auto cdc_link::predicate_ended(std::uint32_t id) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [id](usb::cdc_channel const& queues) { return queues.results.contains(id); })
+      .described("a CDC request to end");
+}
+
+auto hid_link::predicate_available(std::uint64_t count) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [count](usb::hid_channel const& queues) { return queues.in.size() >= count; })
+      .described("HID input reports");
+}
+
+auto hid_link::predicate_ready() const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [](usb::hid_channel const& queues) {
+               return queues.interface.has_value() and queues.ready;
+             })
+      .described("the HID function to be ready");
+}
+
+auto hid_link::predicate_ended(std::uint32_t id) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [id](usb::hid_channel const& queues) { return queues.results.contains(id); })
+      .described("a HID request to end");
+}
+
+auto hid_link::predicate_written(std::uint64_t id) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [id](usb::hid_channel const& queues) { return queues.written.contains(id); })
+      .described("a HID output report to end");
+}
+
+auto uac_link::predicate_available(std::uint64_t count) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [count](usb::uac2_channel const& queues) { return queues.mic.in.size() >= count; })
+      .described("microphone frames");
+}
+
+auto uac_link::predicate_ready() const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [](usb::uac2_channel const& queues) {
+               return queues.interface.has_value() and queues.ready;
+             })
+      .described("the audio function to be ready");
+}
+
+auto uac_link::predicate_ended(std::uint64_t id) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [id](usb::uac2_channel const& queues) { return queues.results.contains(id); })
+      .described("an audio request to end");
+}
+
+auto uac_link::predicate_drained(std::uint64_t flushes) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [flushes](usb::uac2_channel const& queues) {
+               return (queues.speaker.out.empty() and not queues.speaker.sending)
+                   or queues.speaker.flushes != flushes;
+             })
+      .described("the speaker to drain");
+}
+
+auto usb_link::predicate_settled() const -> native_predicate
+{
+  std::ignore = port();
+  return native_predicate{
+      [port = port_, alive = alive_] {
+        if(not detail::is_alive(alive))
+        {
+          return true;
+        }
+        auto const& on = *port->board_host();
+        return on.state() == usb::device_state::configured or on.failed_step().has_value();
+      },
+      host_}
+      .described("the USB enumeration to settle");
+}
+
+auto usb_link::predicate_control_ended(std::uint32_t id) const -> native_predicate
+{
+  std::ignore = port();
+  return native_predicate{
+      [port = port_, alive = alive_, id] {
+        return not detail::is_alive(alive) or port->board_host()->has_result(id);
+      },
+      host_}
+      .described("a control transfer to end");
+}
+auto usb_link::op_settled() const -> access_op
+{
+  std::ignore = port();
+  return detail::link_op([port = port_, alive = alive_] {
+    if(not detail::is_alive(alive))
+    {
+      throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+    }
+    auto const&                on     = *port->board_host();
+    auto const                 state  = std::to_underlying(on.state());
+    auto const                 failed = on.failed_step();
+    std::optional<std::string> step;
+    if(failed)
+    {
+      step = std::string{reflex::enum_value_name(*failed)};
+    }
+    return std::function<reflex::py::nb::object()>{
+        [state, step] { return reflex::py::nb::object{reflex::py::nb::make_tuple(state, step)}; }};
+  });
+}
+
+auto usb_link::op_take_result(usb_control_ticket const& ticket) const -> access_op
+{
+  std::ignore = port();
+  return detail::link_op([port = port_, alive = alive_, claim = ticket.claim()] {
+    if(not detail::is_alive(alive))
+    {
+      throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+    }
+    std::optional<usb_control_result> found;
+    auto&                             on = *port->board_host();
+    auto const                        taken =
+        claim->id and on.epoch() == claim->epoch ? on.take_result(*claim->id) : std::nullopt;
+    if(taken)
+    {
+      claim->taken = true;
+      found        = usb_control_result{
+          .id     = taken->id,
+          .status = taken->status,
+          .data   = taken->data,
+          .at_ps  = taken->at.ps,
+      };
+    }
+    return std::function<reflex::py::nb::object()>{
+        [found = std::move(found)] { return reflex::py::nb::cast(found); }};
+  });
 }
 }

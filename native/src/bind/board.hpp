@@ -64,6 +64,10 @@ public:
   /** @brief queued() as an op of MachineHandle.submit_ops(). */
   [[= py::doc{"Op of queued."}]] [[nodiscard]] auto op_queued() const -> access_op;
 
+  /** @brief A predicate true once available() reaches @p count. */
+  [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto
+      predicate_available(std::uint64_t count) const -> native_predicate;
+
   /** @brief send() as a command of MachineHandle.submit_ops(). */
   [[= py::doc{"Command of send."}]] [[nodiscard]] auto
       command_send(reflex::py::nb::bytes const& data) const -> access_op;
@@ -195,6 +199,10 @@ public:
   /** @brief write() as a command of MachineHandle.submit_ops(). */
   [[= py::doc{"Command of write."}]] [[nodiscard]] auto
       command_write(std::vector<std::uint32_t> const& words) const -> access_op;
+
+  /** @brief A predicate true once available() reaches @p count. */
+  [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto
+      predicate_available(std::uint64_t count) const -> native_predicate;
 
   /** @brief set_external_frame_hz() as an op of MachineHandle.submit_ops(). */
   [[= py::doc{"Op of set_external_frame_hz."}]] [[nodiscard]] auto

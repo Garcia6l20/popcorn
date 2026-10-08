@@ -316,6 +316,19 @@ inline void flush_logs(log_forwarding& logs, log_errors errors)
 }
 
 /**
+ * @brief Raises the log filter or handler error a deferred flush of @p logs kept, if any, on a
+ *        thread holding the GIL.
+ * @throws reflex::py::nb::python_error the kept error.
+ */
+inline void raise_kept_log_error(log_forwarding& logs)
+{
+  if(logs.deferred and PyGILState_Check() != 0)
+  {
+    std::rethrow_exception(std::exchange(logs.deferred, nullptr));
+  }
+}
+
+/**
  * @brief Calls flush_logs() when it leaves scope, after a parked access released the host
  *        mutex. The access already took effect, so a log filter or handler error goes to
  *        sys.unraisablehook, never out of the access.

@@ -236,8 +236,10 @@ public:
   [[= py::doc{"Whether the request completed."}]] [[nodiscard]] auto done() const -> bool;
 
   /**
-   * @brief The result, waiting with the GIL released, after forwarding the machine's queued log
-   *        records.
+   * @brief The result, waiting with the GIL released, then forwards the machine's queued log
+   *        records. A log filter or handler error met forwarding is kept and raised by the
+   *        machine's next request, halt() or park(): the result, which a command may have taken
+   *        from the machine, is returned.
    * @param timeout Seconds, None for no limit.
    * @throws TimeoutError past @p timeout.
    * @throws machine_running when not done, from a callback or a parked section.

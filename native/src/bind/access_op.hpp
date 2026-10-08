@@ -1,5 +1,7 @@
 #pragma once
 
+#include "gil_locks.hpp"
+
 #include <popcorn/core/machine.hpp>
 
 #include <reflex/py.hpp>
@@ -8,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -53,6 +56,59 @@ public:
 
 private:
   body_type body_;
+};
+
+/**
+ * @brief A condition popcorn waits for, Python-free: evaluated with no GIL on the machine's
+ *        thread at the slice ends of a free run, or after every event of a parked run. Opaque in
+ *        Python.
+ */
+class[[= py::rename{"Predicate"}]] native_predicate
+{
+public:
+  /**
+   * @brief Wraps @p test.
+   * @param test Reads engine or link state as engine owner, Python-free.
+   * @param machine The machine's slot, through which holds() reaches the engine.
+   */
+  [[= py::skip]] native_predicate(std::function<bool()> test, detail::host_ref machine)
+      : test_{std::move(test)}, machine_{std::move(machine)}
+  {}
+
+  /**
+   * @brief Whether the condition holds now, evaluated on this thread with the machine parked.
+   * @throws machine_running while the machine runs.
+   */
+  [[= py::doc{"Whether it holds now, the machine parked."}]] [[nodiscard]] auto holds() const
+      -> bool
+  {
+    return detail::host_access(machine_, test_);
+  }
+
+  /** @brief The test, for a waiter or a goal. */
+  [[= py::skip]] [[nodiscard]] auto test() const -> std::function<bool()> const&
+  {
+    return test_;
+  }
+
+  /** @brief What the condition waits for, in an error message. */
+  [[= py::doc{"What the condition waits for, for error messages."}]] [[nodiscard]] auto what() const
+      -> std::string
+  {
+    return what_;
+  }
+
+  /** @brief This predicate, waiting for @p what. */
+  [[= py::skip]] [[nodiscard]] auto described(std::string what) && -> native_predicate
+  {
+    what_ = std::move(what);
+    return std::move(*this);
+  }
+
+private:
+  std::function<bool()> test_;
+  detail::host_ref      machine_;
+  std::string           what_ = "a condition";
 };
 
 namespace detail

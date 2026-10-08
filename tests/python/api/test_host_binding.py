@@ -208,7 +208,7 @@ class FailOnce(logging.Filter):
         return True
 
 
-def test_a_raising_log_filter_raises_at_the_flush_and_keeps_the_rest(
+def test_a_raising_log_filter_raises_from_the_next_halt_and_keeps_the_rest(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     m = timer_started_in_a_free_run()
@@ -218,9 +218,12 @@ def test_a_raising_log_filter_raises_at_the_flush_and_keeps_the_rest(
     try:
         with caplog.at_level(logging.WARNING, logger="popcorn"):
             m.start()
+            stop = asyncio.run(m.wait_for(never(m), for_=us(50)))
+            assert stop.reason is popcorn.StopReason.TIME
             with pytest.raises(RuntimeError, match="filter failed"):
-                asyncio.run(m.wait_for(never(m), for_=us(50)))
-            assert m.halt() is None
+                m.halt()
+            assert not m.busy
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
             logged = logged_timer(caplog)
     finally:
         logger.removeFilter(failing)

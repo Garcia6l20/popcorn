@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
+import logging
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import Any
@@ -16,10 +18,13 @@ from typing import Any
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn.board import CdcLineCoding, HidStream, UsbHost, UsbHostOptions, UsbState
+from popcorn.board import CdcLineCoding, HidStream, UsbData, UsbHost, UsbHostOptions, UsbState
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
+from .conftest import run_bounded
 from .projects import Silent
+
+HANG = 10.0
 
 pytest_plugins = ["pytester"]
 
@@ -945,7 +950,7 @@ CDC_COMMANDS: dict[str, Command] = {
         usb_link_of(hid).command_set_report(3, 0, b"\x01")
     ),
     "control": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
-        usb_link_of(host).command_control(0x80, 6, 0x0100, 0, 18, b"")
+        usb_link_of(host).command_control(usb_link_of(host).ticket(), 0x80, 6, 0x0100, 0, 18, b"")
     ),
     "detach": lambda m, host, cdc, hid: host.detach(),
     "attach": lambda m, host, cdc, hid: host.attach(),
@@ -983,3 +988,349 @@ def test_an_audio_command_runs_on_the_machine_thread_without_the_gil(
     audio = m.periph.OTG_FS.host.audio()
     asyncio.run(audio.wait_ready(for_=s(2)))
     posted_without_the_gil(m, lambda: UAC_COMMANDS[kind](m, audio))
+
+
+type UsbCall = Callable[[UsbHost, Any, Any], Coroutine[Any, Any, object]]
+
+
+async def cdc_read(host: UsbHost, cdc: Any, hid: Any) -> object:
+    await cdc.write(b"abc")
+    return await cdc.read(3, for_=ms(50))
+
+
+async def cdc_read_packets(host: UsbHost, cdc: Any, hid: Any) -> object:
+    await cdc.write(b"abc")
+    return await cdc.read_packets(1, for_=ms(50))
+
+
+USB_CALLS: dict[str, UsbCall] = {
+    "cdc-read": cdc_read,
+    "cdc-read-packets": cdc_read_packets,
+    "cdc-ready": lambda host, cdc, hid: cdc.wait_ready(for_=ms(50)),
+    "cdc-line-coding": lambda host, cdc, hid: cdc.set_line_coding(9600),
+    "cdc-control-lines": lambda host, cdc, hid: cdc.set_control_line_state(dtr=True),
+    "hid-ready": lambda host, cdc, hid: hid.wait_ready(for_=ms(50)),
+    "hid-write-report": lambda host, cdc, hid: hid.write_report(b"\x02\x11"),
+    "hid-get-feature": lambda host, cdc, hid: hid.get_feature(1, 2),
+    "hid-set-feature": lambda host, cdc, hid: hid.set_feature(b"\x01\x02"),
+    "hid-read-reports": lambda host, cdc, hid: hid.read_reports(1, for_=ms(20)),
+    "control": lambda host, cdc, hid: host.control(0x80, 6, 0x0100, 0, 18),
+    "configured": lambda host, cdc, hid: host.wait_configured(for_=ms(10)),
+    "attach": lambda host, cdc, hid: host.attach(),
+}
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+@pytest.mark.parametrize("kind", list(USB_CALLS))
+def test_a_usb_call_waits_on_the_machine_thread_without_the_gil(
+    u575: popcorn.MachineDescription, kind: str, running: bool
+) -> None:
+    m, host = configured(u575)
+    cdc, hid = host.cdc(), host.hid(0 if kind != "hid-ready" else 1)
+
+    async def scenario() -> None:
+        if running:
+            async with m.running():
+                await USB_CALLS[kind](host, cdc, hid)
+        else:
+            await USB_CALLS[kind](host, cdc, hid)
+
+    asyncio.run(scenario())
+    assert gil_entries(m) == 0
+
+
+async def speaker_drained(audio: Any) -> object:
+    await audio.speaker.start()
+    await audio.speaker.write([1, 2, 3, 4])
+    return await audio.speaker.drain(for_=ms(10))
+
+
+async def mic_read(audio: Any) -> object:
+    await audio.mic.start()
+    return await audio.mic.read_frames(2, for_=ms(20))
+
+
+UAC_CALLS: dict[str, Callable[[Any], Coroutine[Any, Any, object]]] = {
+    "ready": lambda audio: audio.wait_ready(for_=ms(10)),
+    "speaker-start-write-drain": speaker_drained,
+    "mic-start-read": mic_read,
+    "set-volume": lambda audio: audio.set_volume(2, 0, 0x100),
+}
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+@pytest.mark.parametrize("kind", list(UAC_CALLS))
+def test_an_audio_call_waits_on_the_machine_thread_without_the_gil(
+    u575: popcorn.MachineDescription, kind: str, running: bool
+) -> None:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    asyncio.run(audio.wait_ready(for_=s(2)))
+
+    async def scenario() -> None:
+        if running:
+            async with m.running():
+                await UAC_CALLS[kind](audio)
+        else:
+            await UAC_CALLS[kind](audio)
+
+    asyncio.run(scenario())
+    assert gil_entries(m) == 0
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_failed_enumeration_raises_with_its_step_without_the_gil(
+    u575: popcorn.MachineDescription, running: bool
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(timeout=ms(1)), OTG_ELF)
+    host = m.periph.OTG_FS.host
+
+    async def scenario() -> None:
+        if running:
+            async with m.running():
+                await host.wait_configured(for_=ms(300))
+        else:
+            await host.wait_configured(for_=ms(300))
+
+    with pytest.raises(popcorn.UsbTimeout, match="enumeration failed at get_device_head") as caught:
+        asyncio.run(scenario())
+    assert caught.value.status == "get_device_head"
+    assert gil_entries(m) == 0
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_concurrent_control_requests_each_take_their_own_result(
+    u575: popcorn.MachineDescription, running: bool
+) -> None:
+    """Running, the first request takes its result only once the second one's result waits
+    too, and the second one starts waiting only after that take."""
+    m, host = configured(u575)
+
+    wait, post = host._wait, host._post  # pyright: ignore[reportPrivateUsage]
+    first_taken = asyncio.Event()
+    second_posted = asyncio.Event()
+    second: list[Any] = []
+    waits = 0
+    first_waited = False
+    takes = 0
+
+    async def wait_second_after_first_took(ready: Any, for_: Any) -> VirtualTime:
+        nonlocal waits, first_waited
+        waits += 1
+        if waits == 1:
+            await wait(ready, for_)
+            await second_posted.wait()
+            done = await wait(second[0], None)
+            first_waited = True
+            return done
+        second.append(ready)
+        second_posted.set()
+        await first_taken.wait()
+        return await wait(ready, for_)
+
+    def mark_first_take(command: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal takes
+        posted = post(command, *args, **kwargs)
+        if first_waited and takes == 0:
+            takes += 1
+
+            async def taken() -> Any:
+                done = await posted
+                first_taken.set()
+                return done
+
+            return taken()
+        return posted
+
+    if running:
+        host._wait = wait_second_after_first_took  # pyright: ignore[reportPrivateUsage]
+        host._post = mark_first_take  # pyright: ignore[reportPrivateUsage]
+
+    async def both() -> tuple[UsbData, UsbData]:
+        return await asyncio.gather(
+            host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 18),
+            host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 8),
+        )
+
+    async def one_then_the_other() -> tuple[UsbData, UsbData]:
+        longer = await host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 18)
+        return longer, await host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 8)
+
+    async def scenario() -> tuple[UsbData, UsbData]:
+        if running:
+            async with m.running():
+                return await both()
+        return await one_then_the_other()
+
+    longer, shorter = run_bounded(scenario(), HANG)
+    assert (len(longer), len(shorter)) == (18, 8)
+    assert longer[:8] == shorter
+
+
+@pytest.mark.parametrize("when", ["post", "in_flight", "ended", "twice"])
+def test_a_cancelled_control_request_gives_its_result_up(
+    u575: popcorn.MachineDescription, when: str
+) -> None:
+    """Cancelled after its command ran but before the post returned, while the transfer runs,
+    once it ended, and twice while it runs: no result stays behind."""
+    m, host = configured(u575)
+    post = host._post  # pyright: ignore[reportPrivateUsage]
+    wait = host._wait  # pyright: ignore[reportPrivateUsage]
+    reached = asyncio.Event()
+
+    async def hang() -> None:
+        reached.set()
+        await asyncio.Event().wait()
+
+    def post_then_hang(command: Any, *args: Any, **kwargs: Any) -> Any:
+        posted = post(command, *args, **kwargs)
+
+        async def held() -> Any:
+            await posted
+            await hang()
+
+        return held()
+
+    async def hang_instead(ready: Any, for_: Any) -> VirtualTime:
+        await hang()
+        raise AssertionError
+
+    async def wait_then_hang(ready: Any, for_: Any) -> VirtualTime:
+        await wait(ready, for_)
+        await hang()
+        raise AssertionError
+
+    if when == "post":
+        host._post = post_then_hang  # pyright: ignore[reportPrivateUsage]
+    elif when == "ended":
+        host._wait = wait_then_hang  # pyright: ignore[reportPrivateUsage]
+    else:
+        host._wait = hang_instead  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 8))
+        await reached.wait()
+        task.cancel()
+        if when == "twice":
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        host._post = post  # pyright: ignore[reportPrivateUsage]
+        host._wait = wait  # pyright: ignore[reportPrivateUsage]
+        await m.run(for_=ms(20))
+
+    run_bounded(scenario(), HANG)
+    assert host._link.take_results() == []  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_stale_control_forget_after_a_restore_leaves_the_new_request(
+    u575: popcorn.MachineDescription,
+) -> None:
+    """The restore rewinds the transfer ids, so the new request reuses the cancelled one's id."""
+    m, host = configured(u575)
+    wait = host._wait  # pyright: ignore[reportPrivateUsage]
+    saved = m.snapshot()
+    reached = asyncio.Event()
+
+    async def hang_instead(ready: Any, for_: Any) -> VirtualTime:
+        reached.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def scenario() -> UsbData:
+        host._wait = hang_instead  # pyright: ignore[reportPrivateUsage]
+        async with m.running():
+            first = asyncio.create_task(host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 8))
+            await reached.wait()
+        m.restore(saved)
+
+        async def cancel_first_then_wait(ready: Any, for_: Any) -> VirtualTime:
+            first.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await first
+            return await wait(ready, for_)
+
+        host._wait = cancel_first_then_wait  # pyright: ignore[reportPrivateUsage]
+        return await host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 18)
+
+    assert len(run_bounded(scenario(), HANG)) == 18
+
+
+def test_a_control_wait_ended_before_its_result_gives_the_result_up(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    now = m.time
+
+    async def idle(ready: Any, for_: Any) -> VirtualTime:
+        return now
+
+    host._wait = idle  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        with pytest.raises(popcorn.EmulationError, match="the run ended before control"):
+            await host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 8)
+        await m.run(for_=ms(20))
+
+    run_bounded(scenario(), HANG)
+    assert host._link.take_results() == []  # pyright: ignore[reportPrivateUsage]
+
+
+class FailOnce(logging.Filter):
+    """Raises on the first record it sees, passes the others."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("filter failed")
+        return True
+
+
+def gpio_hole(description: popcorn.MachineDescription) -> int:
+    """A byte of GPIOA's window no register covers: a read of it logs one record."""
+    found = next(p for p in description.peripherals if p.name == "GPIOA")
+    taken = {r.offset + k for r in found.registers for k in range(4)}
+    return found.base + next(o for o in range(found.size) if o not in taken)
+
+
+def test_a_log_error_at_a_consuming_await_keeps_its_result(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    hole = gpio_hole(u575)
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+
+    async def scenario() -> int:
+        async with m.running():
+            logger.addFilter(failing)
+            (value,) = await m.read(m.ref.mem.u8[hole])
+            assert failing.failed
+            with pytest.raises(RuntimeError, match="filter failed"):
+                m.read()
+            await m.read()
+            reply = await host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 18)
+            assert len(reply) == 18
+            return value
+
+    try:
+        assert run_bounded(scenario(), HANG) == 0
+    finally:
+        logger.removeFilter(failing)
+
+
+def test_forgetting_on_the_links_of_a_dead_machine_does_nothing(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    cdc = usb_link_of(host.cdc(0))
+    hid = usb_link_of(host.hid(1))
+    del m, host
+    gc.collect()
+    cdc.forget(1)
+    hid.forget(1)
+    hid.forget_written(1)

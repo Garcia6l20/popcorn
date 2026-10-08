@@ -98,6 +98,7 @@ auto later(std::uint64_t now_ps, std::uint64_t delay_ps) -> vtime
 
 auto machine_handle::lock_for_request() const -> core::held_lock
 {
+  detail::raise_kept_log_error(*slot_->logs);
   refuse_inside(*host_);
   detail::require_host_start();
   auto held = lock_releasing();
@@ -273,6 +274,46 @@ auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::ui
   return waiting_on({.ready = predicate_of(std::move(ready))}, for_ps, false);
 }
 
+auto machine_handle::wait_predicate(
+    native_predicate const&      ready,
+    std::optional<std::uint64_t> for_ps) -> host_future_handle
+{
+  return waiting_on({.ready = ready.test()}, for_ps, false);
+}
+
+auto machine_handle::run_predicate(
+    native_predicate const&      ready,
+    std::optional<std::uint64_t> budget,
+    std::optional<std::uint64_t> for_ps) -> host_future_handle
+{
+  core::run_goal goal{.stop_when = ready.test()};
+  if(budget)
+  {
+    goal.budget = icount{*budget};
+  }
+  auto future = [&] {
+    auto const held = lock_for_request();
+    if(for_ps)
+    {
+      auto const now  = host_->member(held, core::member_id{}).virtual_clock().time();
+      goal.until_time = later(now.ps, *for_ps);
+    }
+    return host_->run(held, core::member_id{}, std::move(goal));
+  }();
+  return host_future_handle{
+      std::make_shared<detail::future_request<core::goal_result>>(
+          std::move(future),
+          [](core::goal_result const& result) { return nb::cast(record(result.stopped)); },
+          cancel_goal(host_)),
+      slot_};
+}
+
+auto machine_handle::predicate_pc_at(address at) const -> native_predicate
+{
+  return native_predicate{[engine = engine_, at] { return engine->regs().pc() == at; }, slot_}
+      .described("the core to reach an address");
+}
+
 auto machine_handle::wait_when(core::condition_set when, std::optional<std::uint64_t> for_ps)
     -> host_future_handle
 {
@@ -292,6 +333,7 @@ auto machine_handle::waiting_on(
   {
     spec.after = vtime{*for_ps};
   }
+  detail::raise_kept_log_error(*slot_->logs);
   refuse_inside(*host_);
   auto const held = lock_releasing();
   if(not host_->session_open(held, core::member_id{}))
@@ -351,6 +393,7 @@ auto machine_handle::session_open() const -> bool
 auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
     -> host_future_handle
 {
+  detail::raise_kept_log_error(*slot_->logs);
   if(core::detail::on_host_thread or core::detail::host_locks_held > 0)
   {
     throw std::runtime_error("a handler accesses the machine directly");
@@ -391,6 +434,7 @@ auto machine_handle::submit_ops(
     std::vector<std::string>     notes,
     std::optional<std::uint64_t> at_ps) -> host_future_handle
 {
+  detail::raise_kept_log_error(*slot_->logs);
   if(core::detail::on_host_thread or core::detail::host_locks_held > 0)
   {
     throw std::runtime_error("a handler accesses the machine directly");

@@ -561,3 +561,22 @@ def test_a_slave_block_nothing_clocks_logs_once_that_it_sees_no_frame(
     with caplog.at_level(logging.WARNING, logger="popcorn"):
         codec_dma_machine(u575)
     assert len(unclocked_warnings(caplog)) == 1
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_frame_read_waits_on_the_machine_thread_without_the_gil(
+    u575: popcorn.MachineDescription, running: bool
+) -> None:
+    m = sai_machine(u575)
+    run_entry(m, "tx_poll")
+    m.reg.pc = m.sym("main") & ~1
+    stream = m.periph.SAI1.audio("A")
+
+    async def scenario() -> int:
+        if running:
+            async with m.running():
+                return len(await stream.read_frames(FRAMES + 1, for_=ms(1)))
+        return len(await stream.read_frames(FRAMES + 1, for_=ms(1)))
+
+    assert asyncio.run(scenario()) >= FRAMES
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]

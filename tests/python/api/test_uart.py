@@ -276,6 +276,26 @@ def test_board_commands_run_on_the_machine_thread_without_the_gil(
     assert sum(1 for _ in read(path)) > 0
 
 
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_uart_read_waits_on_the_machine_thread_without_the_gil(
+    u575: popcorn.MachineDescription, running: bool
+) -> None:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    port = m.periph.USART1.port
+
+    async def scenario() -> bytes:
+        await port.write(b"abc")
+        if running:
+            async with m.running():
+                return await port.read(3, for_=ms(5))
+        return await port.read(3, for_=ms(5))
+
+    assert len(asyncio.run(scenario())) == 3
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
+
+
 def test_a_trace_closed_again_after_its_posted_close_closes_once(
     u575: popcorn.MachineDescription, tmp_path: Path
 ) -> None:

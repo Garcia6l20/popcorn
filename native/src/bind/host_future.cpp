@@ -181,11 +181,24 @@ auto host_future_handle::done() const -> bool
 auto host_future_handle::result(std::optional<double> timeout) -> nb::object
 {
   detail::wait_releasing_gil(*request_, timeout);
+  nb::object value;
+  try
+  {
+    value = request_->value();
+  }
+  catch(...)
+  {
+    if(logs_ != nullptr)
+    {
+      detail::flush_logs(*logs_, detail::log_errors::defer);
+    }
+    throw;
+  }
   if(logs_ != nullptr)
   {
-    detail::flush_logs(*logs_, detail::log_errors::raise);
+    detail::flush_logs(*logs_, detail::log_errors::defer);
   }
-  return request_->value();
+  return value;
 }
 
 void host_future_handle::add_done_callback(nb::object fn)

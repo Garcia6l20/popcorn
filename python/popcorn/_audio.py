@@ -153,7 +153,7 @@ class AudioStream:
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
-            await self._wait(lambda: self._link.available() >= n, for_)
+            await self._wait(self._link.predicate_available(n), for_)
         return [
             AudioFrame(
                 tuple(record.slots),

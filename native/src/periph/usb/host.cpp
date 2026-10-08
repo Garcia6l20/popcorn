@@ -399,6 +399,8 @@ struct host::impl
   std::optional<configuration_info> parsed{};
   std::vector<bound_driver>         drivers{};
   std::vector<transfer_result>      results{};
+  std::vector<transfer_id>          forgotten{};
+  std::uint64_t                     epoch = 0;
   std::vector<log_entry>            entries{};
 
   impl(host& owner, device_port& device, host_options chosen)
@@ -524,6 +526,16 @@ struct host::impl
     drivers.clear();
   }
 
+  void land(transfer_result result)
+  {
+    if(auto const found = std::ranges::find(forgotten, result.id); found != forgotten.end())
+    {
+      forgotten.erase(found);
+      return;
+    }
+    results.push_back(std::move(result));
+  }
+
   void detach(std::uint64_t at)
   {
     for(auto const& pipe : s.pipes)
@@ -532,7 +544,7 @@ struct host::impl
       {
         if(transfer.source == origin::user)
         {
-          results.push_back(
+          land(
               {.id     = transfer.id,
                .status = transfer_status::cancelled,
                .setup  = transfer.setup,
@@ -931,7 +943,7 @@ struct host::impl
     }
     if(source == origin::user)
     {
-      results.push_back(result);
+      land(result);
       return;
     }
     if(owner >= drivers.size() or not drivers[owner].driver)
@@ -1610,12 +1622,16 @@ void host::load(std::span<std::byte const> in)
   {
     impl.detach(impl.port.now().ps);
     impl.results.clear();
+    impl.forgotten.clear();
+    ++impl.epoch;
     impl.load_factories();
     return;
   }
   impl.s = reflex::serde::bson::deserializer{in}.template load<host_state>();
   impl.load_factories();
   impl.results.clear();
+  impl.forgotten.clear();
+  ++impl.epoch;
   impl.parsed.reset();
   if(auto config = parse_configuration(octets(impl.s.configuration_bytes)))
   {
@@ -1738,6 +1754,42 @@ auto host::control(setup_packet setup, std::vector<std::uint8_t> data) -> transf
 auto host::take_results() -> std::vector<transfer_result>
 {
   return std::exchange(impl_->results, {});
+}
+
+auto host::has_result(transfer_id id) const -> bool
+{
+  return std::ranges::any_of(
+      impl_->results, [id](transfer_result const& result) { return result.id == id; });
+}
+
+auto host::take_result(transfer_id id) -> std::optional<transfer_result>
+{
+  auto const found = std::ranges::find(impl_->results, id, &transfer_result::id);
+  if(found == impl_->results.end())
+  {
+    return std::nullopt;
+  }
+  auto taken = std::move(*found);
+  impl_->results.erase(found);
+  return taken;
+}
+
+void host::forget(transfer_id id)
+{
+  if(not take_result(id) and not std::ranges::contains(impl_->forgotten, id))
+  {
+    impl_->forgotten.push_back(id);
+  }
+}
+
+auto host::forgotten() const noexcept -> std::size_t
+{
+  return impl_->forgotten.size();
+}
+
+auto host::epoch() const noexcept -> std::uint64_t
+{
+  return impl_->epoch;
 }
 
 auto host::log() const -> std::span<log_entry const>

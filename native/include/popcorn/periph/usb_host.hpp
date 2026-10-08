@@ -676,6 +676,32 @@ public:
   /** @brief Takes the results of the user's control transfers, oldest first. Not saved. */
   [[nodiscard]] auto take_results() -> std::vector<transfer_result>;
 
+  /**
+   * @brief Whether the result of @p id waits in take_results().
+   * @param id A handle control() returned.
+   */
+  [[nodiscard]] auto has_result(transfer_id id) const -> bool;
+
+  /**
+   * @brief Takes the result of @p id alone, leaving the others for their callers.
+   * @param id A handle control() returned.
+   * @return The result, empty while the transfer runs.
+   */
+  [[nodiscard]] auto take_result(transfer_id id) -> std::optional<transfer_result>;
+
+  /**
+   * @brief Drops the result of @p id: at once when it waits, else when the transfer ends. A load
+   *        clears the transfers marked this way. Not saved.
+   * @param id A handle control() returned.
+   */
+  void forget(transfer_id id);
+
+  /** @brief Transfers forget() marked whose result has not landed yet. */
+  [[nodiscard]] auto forgotten() const noexcept -> std::size_t;
+
+  /** @brief Bumped by every load: a transfer id is unique within one epoch only. Not saved. */
+  [[nodiscard]] auto epoch() const noexcept -> std::uint64_t;
+
   /** @brief Bus resets and SETUPs since creation or clear_log(). Not saved. */
   [[nodiscard]] auto log() const -> std::span<log_entry const>;
 

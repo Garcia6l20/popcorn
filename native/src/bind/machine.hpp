@@ -347,6 +347,38 @@ public:
           -> host_future_handle;
 
   /**
+   * @brief Waits on the free run for a native predicate, at every slice end after the boundary
+   *        that registers the wait, as wait() does for a Python one, with no GIL.
+   * @param ready The predicate.
+   * @param for_ps As wait().
+   * @return As wait().
+   * @throws std::runtime_error without an open free run.
+   */
+  [[= py::doc{
+      "Wait on the free run for a native predicate, return a HostFuture of a StopInfo."}]] auto
+      wait_predicate(native_predicate const& ready, std::optional<std::uint64_t> for_ps)
+          -> host_future_handle;
+
+  /**
+   * @brief Starts a goal that stops when a native predicate holds, evaluated after every event
+   *        and at slice ends with no GIL, or after @p for_ps.
+   * @param ready The predicate.
+   * @param budget Stop with reason budget past this many instructions, None for none.
+   * @param for_ps Picoseconds of virtual time from now, None for none.
+   * @return Resolves to the StopInfo.
+   * @throws machine_busy while a goal or a free run is active.
+   */
+  [[= py::doc{"Run until a native predicate holds, return a HostFuture of a StopInfo."}]] auto
+      run_predicate(
+          native_predicate const&      ready,
+          std::optional<std::uint64_t> budget,
+          std::optional<std::uint64_t> for_ps) -> host_future_handle;
+
+  /** @brief A predicate true while the next instruction is at @p at. */
+  [[= py::doc{"Predicate: pc is at an address."}]] [[nodiscard]] auto
+      predicate_pc_at(address at) const -> native_predicate;
+
+  /**
    * @brief Whether an access lies inside one mapped memory region, not a peripheral window.
    *        Regions are fixed at construction, so it never locks.
    * @param addr First byte.

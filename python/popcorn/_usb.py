@@ -408,7 +408,7 @@ class CdcStream:
         """
         self._check_read(n)
         if self._link.available() < n:
-            await self._wait(lambda: self._link.available() >= n, for_)
+            await self._wait(self._link.predicate_available(n), for_)
         return self._link.drain(n)
 
     async def read_packets(self, n: int, *, for_: VirtualDuration | None = None) -> list[CdcPacket]:
@@ -416,7 +416,7 @@ class CdcStream:
         as one."""
         self._check_read(n)
         if self._link.packets() < n:
-            await self._wait(lambda: self._link.packets() >= n, for_)
+            await self._wait(self._link.predicate_packets(n), for_)
         return [
             CdcPacket(bytes(record.data), VirtualTime(record.at_ps))
             for record in self._link.drain_packets(n)
@@ -435,7 +435,7 @@ class CdcStream:
             EmulationError: The run stopped for another reason, such as a fault.
         """
         if not self.ready:
-            await self._wait(lambda: self.ready, for_)
+            await self._wait(self._link.predicate_ready(), for_)
         if not self.ready:
             status = "not_ready" if self.bound else "unbound"
             raise UsbTimeout(
@@ -527,7 +527,8 @@ class CdcStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(ended, None)
+                done_at = await self._wait(self._link.predicate_ended(transfer), None)
+                ended()
         finally:
             self._pending.discard(transfer)
             if not results:
@@ -666,7 +667,7 @@ class HidStream:
             EmulationError: The run stopped for another reason, such as a fault.
         """
         if not self.ready:
-            await self._wait(lambda: self.ready, for_)
+            await self._wait(self._link.predicate_ready(), for_)
         if not self.ready:
             status = "not_ready" if self.bound else "unbound"
             raise UsbTimeout(f"{self._where}: not ready, {status}", status=status)
@@ -684,7 +685,7 @@ class HidStream:
         if n < 0:
             raise ValueError(f"cannot read {n} reports")
         if self._link.available() < n:
-            await self._wait(lambda: self._link.available() >= n, for_)
+            await self._wait(self._link.predicate_available(n), for_)
         return [
             HidReport(bytes(record.data), VirtualTime(record.at_ps))
             for record in self._link.drain(n)
@@ -745,7 +746,8 @@ class HidStream:
 
         try:
             if not ended():
-                await self._wait(ended, None)
+                await self._wait(self._link.predicate_written(write), None)
+                ended()
         finally:
             self._writes.discard(write)
             if not results:
@@ -841,7 +843,8 @@ class HidStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(ended, None)
+                done_at = await self._wait(self._link.predicate_ended(transfer), None)
+                ended()
         finally:
             self._pending.discard(transfer)
             if not results:
@@ -1042,7 +1045,8 @@ class UacStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(ended, None)
+                done_at = await self._wait(self._link.predicate_ended(operation), None)
+                ended()
         finally:
             self._pending.discard(operation)
             if not results:
@@ -1164,7 +1168,7 @@ class UacSpeaker(UacStream):
                 status="stopped",
             )
         if self._unsent():
-            await self._wait(lambda: not self._unsent() or self._link.flushes() != flushes, for_)
+            await self._wait(self._link.predicate_drained(flushes), for_)
         if self._link.flushes() != flushes:
             raise UsbError(f"{self._where}: stopped while draining", status="stopped")
         if self._unsent():
@@ -1224,7 +1228,7 @@ class UacMic(UacStream):
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
-            await self._wait(lambda: self._link.available() >= n, for_)
+            await self._wait(self._link.predicate_available(n), for_)
         return [
             UacFrame(tuple(record.samples), VirtualTime(record.at_ps))
             for record in self._link.drain(n)
@@ -1332,7 +1336,7 @@ class UacFunction:
             EmulationError: The run stopped for another reason, such as a fault.
         """
         if not self.ready:
-            await self._wait(lambda: self.ready, for_)
+            await self._wait(self._link.predicate_ready(), for_)
         if not self.ready:
             status = "not_ready" if self.bound else "unbound"
             raise UsbTimeout(f"{self._where}: not ready, {status}", status=status)
@@ -1418,7 +1422,8 @@ class UacFunction:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(ended, None)
+                done_at = await self._wait(self._link.predicate_ended(operation), None)
+                ended()
         finally:
             self._pending.discard(operation)
             if not results:
@@ -1483,9 +1488,7 @@ class UsbHost:
         "_hid",
         "_hid_link",
         "_link",
-        "_pending",
         "_post",
-        "_results",
         "_wait",
         "name",
     )
@@ -1509,8 +1512,6 @@ class UsbHost:
         self._post = post
         self._bridges = bridges
         self._cdc_link = cdc_link
-        self._results: dict[int, _core.UsbControlResult] = {}
-        self._pending: set[int] = set()
         self._cdc: dict[int, CdcStream] = {}
         self._hid_link = hid_link
         self._hid: dict[int, HidStream] = {}
@@ -1663,7 +1664,9 @@ class UsbHost:
     async def wait_configured(self, *, for_: VirtualDuration | None = None) -> None:
         """Run the machine until the host configured the device, or `for_` elapsed.
 
-        Inside `running()`, this awaits the background run instead of driving the machine.
+        Inside `running()`, this awaits the background run instead of driving the machine. The
+        state and failed step it reports are read at the boundary after the one where the
+        device settled, so a change in between, a disconnect right after configuration, shows.
 
         Raises:
             UsbTimeout: The device is not configured when the run ends: `for_` elapsed, the
@@ -1672,16 +1675,9 @@ class UsbHost:
         """
         configured = UsbState.CONFIGURED.value
         link = self._link
-        seen: list[tuple[int, str | None]] = []
-
-        def settled() -> bool:
-            seen[:] = [(link.state().value, link.failed_step())]
-            return seen[0][0] == configured or seen[0][1] is not None
-
-        await self._wait(settled, for_)
-        if not seen:
-            settled()
-        state, failed = seen[0]
+        await self._wait(link.predicate_settled(), for_)
+        settled, _ = await self._post(link.op_settled())
+        state, failed = cast(tuple[int, str | None], settled)
         if state != configured:
             status = failed or UsbState(state).name
             reason = f"enumeration failed at {failed}" if failed else f"state {status}"
@@ -1691,6 +1687,9 @@ class UsbHost:
         self, request_type: int, request: int, value: int, index: int, data_or_length: bytes | int
     ) -> UsbData:
         """Send a control request on the default pipe and run the machine until it ends.
+
+        A call cancelled or failing at any point gives its result up: the machine drops it when
+        it waits or once it lands.
 
         Args:
             request_type: bmRequestType. Bit 7 set is IN, device to host.
@@ -1737,15 +1736,19 @@ class UsbHost:
             if length > 0xFFFF:
                 raise ValueError(f"an OUT data stage is at most 0xffff bytes, not {length}")
         link = self._link
-        transfer, _ = await self._post(
-            link.command_control(request_type, request, value, index, length, data)
-        )
-        self._pending.add(transfer)
+        ticket = link.ticket()
+        took = False
         try:
-            await self._wait(lambda: self._collected(transfer), None)
+            transfer, _ = await self._post(
+                link.command_control(ticket, request_type, request, value, index, length, data)
+            )
+            await self._wait(link.predicate_control_ended(transfer), None)
+            taken, _ = await self._post(link.op_take_result(ticket))
+            took = taken is not None
         finally:
-            self._pending.discard(transfer)
-        result = self._results.pop(transfer, None)
+            if not took:
+                link.forget(ticket)
+        result = cast(_core.UsbControlResult | None, taken)
         setup = f"{request_type:#04x} {request:#04x} {value:#06x} {index:#06x} {length}"
         if result is None:
             raise EmulationError(f"{self.name}: the run ended before control {setup} did")
@@ -1762,19 +1765,12 @@ class UsbHost:
 
     def discard(self) -> None:
         """Drop the results not collected yet, at a restore."""
-        self._results.clear()
         for stream in self._cdc.values():
             stream.discard()
         for hid in self._hid.values():
             hid.discard()
         for audio in self._audio.values():
             audio.discard()
-
-    def _collected(self, transfer: int) -> bool:
-        for result in self._link.take_results():
-            if result.id in self._pending:
-                self._results[result.id] = result
-        return transfer in self._results
 
     def __repr__(self) -> str:
         return f"UsbHost({self.name})"
