@@ -351,6 +351,17 @@ class Machine:
     running or not: the collection halts a free run and sends what ended it by itself to
     `sys.unraisablehook`, unless a wait already returned or raised it. A model, device or hook
     the machine calls after its `Machine` was found garbage is not run, the run stops.
+
+    An exception a callback, or a command of `read`, `write` or a stream, raises on the machine's
+    thread leaves its frames there, so one `gc.collect()` once the callback returned collects a
+    dropped machine. It keeps its type, message, notes, chained exceptions and formatted
+    traceback lines, `tb_lineno` and `tb_lasti`. Each `tb_frame` of it and of the exceptions
+    chained to it is a new frame with empty `f_locals`, no `f_back` and an `f_lineno` that is not
+    the raise line: `pytest -l` shows no locals there and a `__tracebackhide__` local no longer
+    hides the frame. A traceback with a frame still running, the handler of an exception it
+    chains, keeps its frames. A callback that catches the error of a nested callback, a model
+    its own access reached, gets it detached already. A machine collected with such an error
+    unclaimed reports its type and message.
     """
 
     __slots__ = (

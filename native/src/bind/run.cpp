@@ -54,7 +54,7 @@ auto predicate_of(std::optional<nb::object> callable) -> std::function<bool()>
   }
   return [held = detail::held(std::move(*callable))] {
     detail::gil_entry const gil;
-    return nb::cast<bool>((*held)());
+    return nb::cast<bool>(detail::call_python([&] { return (*held)(); }));
   };
 }
 
@@ -334,7 +334,7 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
   auto callable = detail::held(std::move(body));
   auto command  = [callable](core::machine&) {
     detail::gil_entry const gil;
-    std::ignore = (*callable)();
+    std::ignore = detail::call_python([&] { return (*callable)(); });
   };
   std::optional<vtime> at;
   if(at_ps)

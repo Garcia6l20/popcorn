@@ -590,6 +590,7 @@ elif KIND == "stop":
     assert len(reported) == 1 and "never returned to a caller" in reported[0], reported
 else:
     assert len(reported) == 1 and reported[0].startswith("EmulationError("), reported
+    assert "ValueError: boom" in reported[0], reported
 print("ok")
 """
 

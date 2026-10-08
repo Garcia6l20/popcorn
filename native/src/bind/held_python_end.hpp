@@ -10,9 +10,11 @@
 
 #include <cstdint>
 #include <exception>
+#include <format>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <utility>
 #include <variant>
 
@@ -87,8 +89,9 @@ public:
       {
         return std::nullopt;
       }
+      auto text                                      = text_of(error);
       live.attr("held")[reflex::py::nb::int_(token)] = error;
-      return held_python_end{std::make_shared<entry>(std::move(cell), token)};
+      return held_python_end{std::make_shared<entry>(std::move(cell), token, std::move(text))};
     }
     catch(reflex::py::nb::python_error const&)
     {
@@ -98,7 +101,8 @@ public:
 
   /**
    * @brief Sets the Python error indicator to the exception the cell keeps for this end, or to
-   *        EmulationError once the machine's Python side is gone. The GIL held.
+   *        EmulationError naming the exception's type and message once the machine's Python
+   *        side is gone. The GIL held.
    */
   void restore() const noexcept
   {
@@ -115,9 +119,10 @@ public:
         }
       }
       auto const gone = reflex::py::nb::module_::import_("popcorn._errors")
-                            .attr("EmulationError")(
+                            .attr("EmulationError")(std::format(
                                 "a handler exception ended the free run of a machine collected "
-                                "since, the exception with it");
+                                "since: {}",
+                                entry_->text));
       PyErr_SetRaisedException(gone.inc_ref().ptr());
     }
     catch(reflex::py::nb::python_error& failed)
@@ -129,8 +134,8 @@ public:
 private:
   struct entry
   {
-    entry(std::shared_ptr<python_cell const> held, std::uint64_t key)
-        : cell{std::move(held)}, token{key}
+    entry(std::shared_ptr<python_cell const> held, std::uint64_t key, std::string what)
+        : cell{std::move(held)}, token{key}, text{std::move(what)}
     {}
 
     entry(entry const&)                    = delete;
@@ -154,7 +159,25 @@ private:
 
     std::shared_ptr<python_cell const> cell;
     std::uint64_t                      token;
+    std::string                        text;
   };
+
+  static auto text_of(reflex::py::nb::handle error) -> std::string
+  {
+    auto const  kind = reflex::py::nb::handle{reinterpret_cast<PyObject*>(Py_TYPE(error.ptr()))};
+    std::string name;
+    try
+    {
+      name = reflex::py::nb::cast<std::string>(kind.attr("__qualname__"));
+      return std::format(
+          "{}: {}", name, reflex::py::nb::cast<std::string>(reflex::py::nb::str(error)));
+    }
+    catch(...)
+    {
+      PyErr_Clear();
+      return name.empty() ? std::string{"an exception"} : name;
+    }
+  }
 
   explicit held_python_end(std::shared_ptr<entry> kept) : entry_{std::move(kept)}
   {}

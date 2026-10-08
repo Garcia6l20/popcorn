@@ -102,7 +102,8 @@ auto machine_handle::add_intercept(address at, nb::object handler, bool once) ->
         [callable](core::intercept_call const& call) {
           detail::gil_entry const locked;
           view_scope const        scope;
-          return nb::cast<core::intercept_result>((*callable)(call_view{call, scope.alive}));
+          return nb::cast<core::intercept_result>(
+              detail::call_python([&] { return (*callable)(call_view{call, scope.alive}); }));
         },
         once ? core::intercept_mode::once : core::intercept_mode::every);
   });
@@ -119,12 +120,14 @@ auto machine_handle::add_return_hook(
   auto handle   = access([&](core::machine& target) {
     return target.add_return_hook(at, args, returns, [callable](core::returned_call const& done) {
       detail::gil_entry const locked;
-      (*callable)(returned_record{
-          .function     = done.function,
-          .occurrence   = done.occurrence,
-          .args         = done.args,
-          .value        = done.value,
-          .instructions = done.instructions.value,
+      detail::call_python([&] {
+        return (*callable)(returned_record{
+            .function     = done.function,
+            .occurrence   = done.occurrence,
+            .args         = done.args,
+            .value        = done.value,
+            .instructions = done.instructions.value,
+        });
       });
     });
   });
@@ -147,7 +150,7 @@ auto machine_handle::add_watch(
   auto handle   = access([&](core::machine& target) {
     return target.add_watch(at, size, kind, [callable](core::watch_hit const& hit) {
       detail::gil_entry const locked;
-      return nb::cast<core::watch_action>((*callable)(hit));
+      return nb::cast<core::watch_action>(detail::call_python([&] { return (*callable)(hit); }));
     });
   });
   return hook{std::move(handle), slot_};

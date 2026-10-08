@@ -220,7 +220,7 @@ auto machine_handle::add_log_sink(nb::object sink) -> hook
     return hook{
         target.add_log_sink([callable](core::log_record const& record) {
           detail::gil_entry const locked;
-          (*callable)(record);
+          detail::call_python([&] { return (*callable)(record); });
         }),
         slot_};
   });

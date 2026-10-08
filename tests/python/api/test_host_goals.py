@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import functools
 import gc
+import inspect
 import itertools
 import pathlib
 import selectors
@@ -16,8 +17,11 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
+import types
 import weakref
 from collections.abc import Callable, Coroutine
+from typing import NoReturn
 
 import popcorn
 import pytest
@@ -302,6 +306,128 @@ def test_a_machine_whose_free_run_a_handler_ended_is_collected(
     else:
         [unclaimed] = reported
         assert unclaimed.startswith("EmulationError(") and "collected" in unclaimed
+        assert "ValueError: a handler of" in unclaimed
+
+
+def raised_in_handler(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    """Start a machine whose intercept raises, return once the handler began."""
+    m = machines()
+    ended = threading.Event()
+
+    def handler(_: object) -> NoReturn:
+        ended.set()
+        raise ValueError("boom")
+
+    m.intercept("alu_mark", handler)
+    m.start()
+    assert ended.wait(HANG)
+    return weakref.ref(m)
+
+
+def test_a_single_collection_right_after_a_handler_raised_collects_its_machine(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reported: list[str] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(repr(raised.exc_value))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    interval = sys.getswitchinterval()
+    enabled = gc.isenabled()
+    began = time.monotonic()
+    sys.setswitchinterval(1.0)
+    gc.disable()
+    try:
+        for _ in range(200):
+            reported.clear()
+            probe = raised_in_handler(machines)
+            gc.collect()
+            assert probe() is None
+            assert len(reported) == 1 and "boom" in reported[0], reported
+            assert time.monotonic() - began < 6 * HANG
+    finally:
+        sys.setswitchinterval(interval)
+        if enabled:
+            gc.enable()
+
+
+def raised_by(error: BaseException, name: str) -> types.FrameType:
+    """The frame of the traceback entry of `error` running the function `name`."""
+    found = [
+        frame for frame, _ in traceback.walk_tb(error.__traceback__) if frame.f_code.co_name == name
+    ]
+    assert found, f"no frame of {name}"
+    return found[-1]
+
+
+def test_a_handler_error_keeps_its_traceback_lines_without_frame_locals(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def failing_handler(_: object) -> None:
+        payload = Payload()
+        raise ValueError(f"boom {payload!r}")
+
+    m.on_return("alu_mark", failing_handler)
+    m.start()
+    with pytest.raises(ValueError, match="boom") as raised:
+        run_bounded(m.wait_for(Never()), HANG)
+    with pytest.raises(ValueError, match="boom"):
+        m.halt()
+    text = "".join(traceback.format_exception(raised.value))
+    assert "in failing_handler" in text
+    assert 'raise ValueError(f"boom {payload!r}")' in text
+    assert dict(raised_by(raised.value, "failing_handler").f_locals) == {}
+
+
+def test_a_chained_exception_whose_frame_still_runs_keeps_its_traceback(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def helper() -> None:
+        marker = "kept"
+        raise KeyError(marker)
+
+    try:
+        helper()
+    except KeyError as caught:
+        stored = caught
+
+        def chaining(_: object) -> None:
+            raise ValueError("boom") from stored
+
+        m.on_return("alu_mark", chaining)
+        m.start()
+        with pytest.raises(ValueError, match="boom") as raised:
+            run_bounded(m.wait_for(Never()), HANG)
+        with pytest.raises(ValueError, match="boom"):
+            m.halt()
+        assert raised.value.__cause__ is stored
+        assert stored.__traceback__ is not None
+        assert stored.__traceback__.tb_frame is inspect.currentframe()
+        assert stored.__traceback__.tb_next is not None
+        assert stored.__traceback__.tb_next.tb_frame.f_locals["marker"] == "kept"
+
+
+def test_a_command_error_on_the_machine_thread_drops_its_frame_locals(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def failing_body() -> None:
+        payload = Payload()
+        raise ValueError(f"boom {payload!r}")
+
+    async def scenario() -> None:
+        async with m.running():
+            await m._post(failing_body)  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(ValueError, match="boom") as raised:
+        run_bounded(scenario(), HANG)
+    assert dict(raised_by(raised.value, "failing_body").f_locals) == {}
 
 
 class Payload:
