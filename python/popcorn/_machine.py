@@ -371,6 +371,17 @@ class Machine:
     raised it. A model, device or hook the machine calls after its `Machine` was found garbage
     is not run, the run stops.
 
+    A handler that blocks forever, on a lock the test holds or an event never set, keeps the
+    machine's thread from parking. Ctrl-C then gives the machine up: a cancelled run, step or
+    call needs a second Ctrl-C, `halt()` and `running()` exit the first. The call raises
+    KeyboardInterrupt, the machine is closed, its pending waits and commands fail at once, every
+    later access raises EmulationError, and its thread exits when the handler returns. At
+    interpreter exit such a machine is given up after 10 s, or at Ctrl-C, and named on stderr.
+    A hook removed from a machine given up, with the callable it holds, stays until the
+    machine's thread exits. If the machine is collected before that, it stays until the process
+    exits. `del m` of a live machine whose handler blocks waits for the handler: a finalizer
+    cannot raise.
+
     An exception a callback, or a command of `read`, `write` or a stream, raises on the machine's
     thread leaves its frames there, so one `gc.collect()` once the callback returned collects a
     dropped machine. It keeps its type, message, notes, chained exceptions and formatted

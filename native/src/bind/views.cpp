@@ -265,7 +265,7 @@ auto machine_handle::cstring(address at, std::uint32_t limit) const -> reflex::p
 
 auto machine_handle::register_names() const -> std::vector<std::string>
 {
-  return engine_->regs().list()
+  return engine().regs().list()
        | std::views::transform([](arch::cpu_register const& reg) { return std::string{reg.name}; })
        | std::ranges::to<std::vector>();
 }
@@ -337,12 +337,12 @@ auto machine_handle::op_cstring(address at, std::uint32_t limit) const -> access
 
 auto machine_handle::op_read_register(std::uint32_t index) const -> access_op
 {
-  return detail::machine_op(read_register_body(*engine_, index));
+  return detail::machine_op(read_register_body(engine(), index));
 }
 
 auto machine_handle::op_write_register(std::uint32_t index, std::uint64_t value) const -> access_op
 {
-  return detail::machine_op(write_register_body(*engine_, index, value));
+  return detail::machine_op(write_register_body(engine(), index, value));
 }
 
 auto machine_handle::op_peek(
@@ -350,7 +350,7 @@ auto machine_handle::op_peek(
     std::uint32_t      offset,
     std::uint8_t       width) const -> access_op
 {
-  return detail::machine_op(peek_body(*engine_, peripheral, offset, width));
+  return detail::machine_op(peek_body(engine(), peripheral, offset, width));
 }
 
 auto machine_handle::op_poke_masked(
@@ -360,7 +360,7 @@ auto machine_handle::op_poke_masked(
     std::uint32_t      mask,
     std::uint32_t      value) const -> access_op
 {
-  return detail::machine_op(poke_masked_body(*engine_, peripheral, offset, width, mask, value));
+  return detail::machine_op(poke_masked_body(engine(), peripheral, offset, width, mask, value));
 }
 
 auto machine_handle::op_pc() const -> access_op

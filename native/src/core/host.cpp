@@ -159,7 +159,7 @@ struct member_slot
       : engine{std::move(made)}, mark{mark_of(*engine)}
   {}
 
-  std::unique_ptr<machine>  engine;
+  std::shared_ptr<machine>  engine;
   std::atomic<host_state>   state{host_state::parked};
   bool                      with_host = false;
   std::unique_ptr<goal_run> goal{};
@@ -173,6 +173,7 @@ struct member_slot
   bool                      woken            = false;
   std::uint64_t             parks            = 0;
   std::uint64_t             settled          = 0;
+  std::uint64_t             sessions         = 0;
   std::uint64_t             free_slices      = 0;
   std::vector<stamped>      stamps{};
   std::vector<stamped>      incoming{};
@@ -393,6 +394,9 @@ struct host_core
   host_hooks                                hooks;
   bool                                      pending   = false;
   bool                                      closed    = false;
+  bool                                      abandoned = false;
+  bool                                      exiting   = false;
+  std::atomic<bool>                         abandoned_flag{false};
   bool                                      sleeping  = false;
   bool                                      signalled = false;
   std::atomic<fate>                         ending{fate::undecided};
@@ -1187,6 +1191,11 @@ struct host_core
     }
     run_all(done);
     publish_settled();
+    {
+      std::scoped_lock const lock{mutex};
+      exiting = true;
+    }
+    parked_cv.notify_all();
     ending.wait(fate::undecided);
     if(ending.load() == fate::orphaned)
     {
@@ -1402,6 +1411,10 @@ auto host::session_open(held_lock const&, member_id who) const -> bool
 
 auto host::member(held_lock const&, member_id who) -> machine&
 {
+  if(core_->abandoned)
+  {
+    throw machine_closed("the host was abandoned");
+  }
   return *core_->members[who]->engine;
 }
 
@@ -1418,7 +1431,12 @@ auto host::post(
 {
   auto&                       slot = *core_->members[who];
   detail::host_promise<vtime> promise;
-  auto                        run_here = [&] {
+  if(core_->abandoned)
+  {
+    promise.fail(detail::closed_error());
+    return promise.future();
+  }
+  auto run_here = [&] {
     auto&      target = *slot.engine;
     auto const at     = target.virtual_clock().time();
     try
@@ -1589,6 +1607,7 @@ void host::start(held_lock const& held, member_id who)
   {
     throw machine_busy("the machine already runs a goal or a free run");
   }
+  ++slot.sessions;
   slot.session          = true;
   slot.free_run         = true;
   slot.halt_requested   = false;
@@ -1629,7 +1648,7 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
   return waiter_handle{std::move(handle), std::move(future)};
 }
 
-void host::cancel(member_id who)
+auto host::request_cancel(member_id who) -> std::optional<std::uint64_t>
 {
   if(detail::host_locks_held > 0)
   {
@@ -1637,22 +1656,21 @@ void host::cancel(member_id who)
   }
   auto& slot = *core_->members[who];
   core_->before_block();
-  std::unique_lock lock{core_->mutex};
-  if(not slot.goal)
+  std::scoped_lock const lock{core_->mutex};
+  if(core_->abandoned or not slot.goal)
   {
-    return;
+    return std::nullopt;
   }
   slot.cancel_requested = true;
   core_->notify_locked(slot);
   if(detail::on_host_thread)
   {
-    return;
+    return std::nullopt;
   }
-  auto const parks = slot.parks;
-  core_->parked_cv.wait(lock, [&slot, parks] { return slot.settled > parks; });
+  return slot.parks;
 }
 
-auto host::halt(member_id who) -> std::optional<held_end>
+auto host::request_halt(member_id who) -> halt_ticket
 {
   if(detail::host_locks_held > 0)
   {
@@ -1660,10 +1678,10 @@ auto host::halt(member_id who) -> std::optional<held_end>
   }
   auto& slot = *core_->members[who];
   core_->before_block();
-  std::unique_lock lock{core_->mutex};
-  if(not slot.goal and not slot.session)
+  std::scoped_lock const lock{core_->mutex};
+  if(core_->abandoned or (not slot.goal and not slot.session))
   {
-    return std::nullopt;
+    return {};
   }
   if(slot.with_host)
   {
@@ -1671,16 +1689,159 @@ auto host::halt(member_id who) -> std::optional<held_end>
     core_->notify_locked(slot);
     if(detail::on_host_thread)
     {
-      return std::nullopt;
+      return {};
     }
-    auto const parks = slot.parks;
-    core_->parked_cv.wait(lock, [&slot, parks] { return slot.settled > parks; });
+    return {.finish = true, .with_host = true, .parks = slot.parks, .session = slot.sessions};
   }
-  else if(not detail::on_host_thread)
+  return {.finish = true, .with_host = false, .parks = slot.parks, .session = slot.sessions};
+}
+
+auto host::wait_settled(member_id who, halt_ticket const& ticket, std::chrono::nanoseconds limit)
+    -> bool
+{
+  if(not ticket.finish or detail::on_host_thread)
   {
-    core_->parked_cv.wait(lock, [&slot] { return slot.settled == slot.parks; });
+    return true;
+  }
+  auto&            slot = *core_->members[who];
+  std::unique_lock lock{core_->mutex};
+  return core_->parked_cv.wait_for(lock, limit, [this, &slot, &ticket] {
+    return core_->abandoned
+        or (ticket.with_host ? slot.settled > ticket.parks : slot.settled == slot.parks);
+  });
+}
+
+void host::wait_settled(member_id who, halt_ticket const& ticket)
+{
+  if(not ticket.finish or detail::on_host_thread)
+  {
+    return;
+  }
+  auto&            slot = *core_->members[who];
+  std::unique_lock lock{core_->mutex};
+  core_->parked_cv.wait(lock, [this, &slot, &ticket] {
+    return core_->abandoned
+        or (ticket.with_host ? slot.settled > ticket.parks : slot.settled == slot.parks);
+  });
+}
+
+auto host::finish_halt(member_id who, halt_ticket const& ticket) -> std::optional<held_end>
+{
+  if(not ticket.finish)
+  {
+    return std::nullopt;
+  }
+  std::unique_lock lock{core_->mutex};
+  auto&            slot = *core_->members[who];
+  if(core_->abandoned or slot.sessions != ticket.session)
+  {
+    return std::nullopt;
   }
   return core_->close_session(lock, slot);
+}
+
+void host::cancel(member_id who)
+{
+  if(auto const parks = request_cancel(who))
+  {
+    wait_settled(who, halt_ticket{.finish = true, .with_host = true, .parks = *parks});
+  }
+}
+
+auto host::halt(member_id who) -> std::optional<held_end>
+{
+  auto const ticket = request_halt(who);
+  wait_settled(who, ticket);
+  return finish_halt(who, ticket);
+}
+
+auto host::abandoned() const noexcept -> bool
+{
+  return core_->abandoned_flag.load(std::memory_order_acquire);
+}
+
+void host::abandon_thread()
+{
+  detail::deferred done;
+  {
+    std::scoped_lock const joining{join_mutex_};
+    if(core_->abandoned_flag.load() or not thread_.joinable())
+    {
+      return;
+    }
+    {
+      std::scoped_lock const lock{core_->mutex};
+      core_->closed    = true;
+      core_->abandoned = true;
+      core_->abandoned_flag.store(true, std::memory_order_release);
+      for(auto const& slot : core_->members)
+      {
+        done.push_back([mail = std::exchange(slot->mail, {}), waiters = slot->waiters,
+                        stamps = slot->take_stamps()] {
+          for(auto const& posted : mail)
+          {
+            posted.promise.fail(detail::closed_error());
+          }
+          detail::fail_all(stamps, detail::closed_error());
+          for(auto const& waiting : waiters)
+          {
+            waiting->promise.fail(detail::closed_error());
+          }
+        });
+      }
+    }
+    request_stop();
+    decide(detail::fate::orphaned);
+    thread_.detach();
+  }
+  core_->parked_cv.notify_all();
+  detail::run_all(done);
+}
+
+auto host::orphan() const -> std::weak_ptr<void const>
+{
+  return running_;
+}
+
+auto host::member_owner(member_id who) const -> std::shared_ptr<machine>
+{
+  return core_->members[who]->engine;
+}
+
+auto host::close_for(std::chrono::nanoseconds limit) -> bool
+{
+  if(detail::host_locks_held > 0)
+  {
+    throw machine_running("close() from a thread that holds a host mutex");
+  }
+  core_->before_block();
+  {
+    std::scoped_lock const lock{core_->mutex};
+    if(core_->abandoned)
+    {
+      return true;
+    }
+    core_->closed = true;
+  }
+  if(detail::on_host_thread)
+  {
+    request_stop();
+    return true;
+  }
+  {
+    std::scoped_lock const joining{join_mutex_};
+    if(thread_.joinable())
+    {
+      request_stop();
+      std::unique_lock lock{core_->mutex};
+      if(not core_->parked_cv.wait_for(lock, limit, [this] { return core_->exiting; }))
+      {
+        return false;
+      }
+    }
+  }
+  close();
+  return true;
 }
 
 auto host::state(member_id who) const noexcept -> host_state
@@ -1702,6 +1863,10 @@ void host::close()
   core_->before_block();
   {
     std::scoped_lock const lock{core_->mutex};
+    if(core_->abandoned)
+    {
+      return;
+    }
     core_->closed = true;
   }
   if(detail::on_host_thread)
@@ -1728,11 +1893,27 @@ void host::close()
   detail::fail_all(stranded, detail::closed_error());
 }
 
+namespace
+{
+/**
+ * @brief What a host thread holds. running is declared first, so it expires after core, the
+ *        thread's last share of the members, is released.
+ */
+struct serving
+{
+  std::shared_ptr<char const>        running = std::make_shared<char const>();
+  std::shared_ptr<detail::host_core> core;
+};
+}
+
 void host::ensure_thread()
 {
   if(not thread_.joinable())
   {
-    thread_ = std::jthread{[core = core_](std::stop_token const& stop) { core->serve(stop); }};
+    serving held{.core = core_};
+    running_ = held.running;
+    thread_  = std::jthread{
+        [held = std::move(held)](std::stop_token const& stop) { held.core->serve(stop); }};
   }
 }
 
@@ -1778,7 +1959,10 @@ void host::unwatch(watch_id id) noexcept
 
 void host::decide(detail::fate ending)
 {
-  core_->ending.store(ending);
-  core_->ending.notify_all();
+  auto expected = detail::fate::undecided;
+  if(core_->ending.compare_exchange_strong(expected, ending))
+  {
+    core_->ending.notify_all();
+  }
 }
 }

@@ -1478,6 +1478,317 @@ def test_an_interpreter_exits_with_a_free_running_machine_held_by_its_model() ->
     assert child.returncode == 0, child.stderr
 
 
+ABANDONED = """
+import asyncio
+import gc
+import os
+import signal
+import sys
+import threading
+import time
+
+import popcorn
+from popcorn import _core
+
+MODE = __MODE__
+released = threading.Event()
+entered = threading.Event()
+caught = threading.Event()
+
+
+def blocking(call):
+    entered.set()
+    released.wait()
+    return call.proceed()
+
+
+cancelled_first = []
+
+
+def interrupt():
+    deadline = time.monotonic() + 10
+    while not caught.is_set() and time.monotonic() < deadline:
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.2)
+        if not cancelled_first and running_task:
+            cancelled_first.append(running_task[0].cancelling() > 0 and not pending[0].done())
+
+
+m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+m.reset()
+m.intercept("alu_mark", blocking)
+before = _core.host_threads()
+pending = []
+
+
+running_task = []
+
+
+async def goal():
+    running = asyncio.create_task(m.run(budget=10_000_000))
+    running_task.append(asyncio.current_task())
+    while not entered.is_set():
+        await asyncio.sleep(0.01)
+    pending.append(m.read(m.ref.pc))
+    threading.Thread(target=interrupt, daemon=True).start()
+    await running
+
+
+def interrupt_inside(entered_before):
+    deadline = time.monotonic() + 10
+    while _core.interruptible_waits() == entered_before and time.monotonic() < deadline:
+        time.sleep(0.001)
+    interrupt()
+
+
+def waiting_on_result():
+    return future.result(None)
+
+
+try:
+    if MODE == "asyncio":
+        asyncio.run(goal())
+    elif MODE == "result":
+        future = m._handle.run_goal(None, 10_000_000, None, None, None)
+        assert entered.wait(10)
+        threading.Thread(
+            target=interrupt_inside, args=(_core.interruptible_waits(),), daemon=True
+        ).start()
+        waiting_on_result()
+    else:
+        m.start()
+        assert entered.wait(10)
+        threading.Thread(
+            target=interrupt_inside, args=(_core.interruptible_waits(),), daemon=True
+        ).start()
+        m.halt()
+except KeyboardInterrupt:
+    caught.set()
+else:
+    raise AssertionError("no KeyboardInterrupt")
+
+if MODE == "asyncio":
+    assert cancelled_first == [True], cancelled_first
+for posted in pending:
+    try:
+        asyncio.run(posted)
+    except popcorn.EmulationError as error:
+        assert "closed" in str(error), error
+    else:
+        raise AssertionError("a pending command survived the abandon")
+try:
+    m.mem.u32[0x2000_8000]
+except popcorn.EmulationError as error:
+    assert "closed" in str(error), error
+else:
+    raise AssertionError("an access after the abandon")
+assert m._park() is None
+assert m.halt() is None
+assert not m.busy
+released.set()
+deadline = time.monotonic() + 10
+while _core.host_threads() > before and time.monotonic() < deadline:
+    time.sleep(0.01)
+assert _core.host_threads() == before
+try:
+    m.mem.u32[0x2000_8000]
+except popcorn.EmulationError as error:
+    assert "closed" in str(error), error
+del m
+gc.collect()
+print("ok")
+"""
+
+
+@pytest.mark.parametrize("mode", ["asyncio", "result", "halt"])
+def test_ctrl_c_on_a_blocked_handler_abandons_its_machine(mode: str) -> None:
+    script = (
+        ABANDONED.replace("__MODE__", repr(mode))
+        .replace("__JSON__", repr(str(M33_JSON)))
+        .replace("__ELF__", repr(str(DRIVER_ELF)))
+    )
+    child = run_child(script, timeout=20)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "ok"
+
+
+BLOCKED_AT_EXIT = """
+import os
+import signal
+import threading
+import time
+
+import popcorn
+
+entered = threading.Event()
+
+
+def blocking(call):
+    entered.set()
+    threading.Event().wait()
+    return call.proceed()
+
+
+m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+m.reset()
+m.intercept("alu_mark", blocking)
+m.start()
+assert entered.wait(10)
+
+
+def interrupt_later():
+    time.sleep(1.0)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+if __SIGNAL__:
+    threading.Thread(target=interrupt_later, daemon=True).start()
+print("leaving", flush=True)
+"""
+
+
+ORPHAN_REMOVALS = """
+import gc
+import os
+import signal
+import threading
+import time
+import weakref
+
+import popcorn
+from popcorn import _core
+
+released = threading.Event()
+entered = threading.Event()
+
+
+def blocking(call):
+    entered.set()
+    released.wait()
+    return call.proceed()
+
+
+class Probe:
+    def __call__(self, view):
+        raise AssertionError("never called")
+
+
+m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+m.reset()
+m.intercept("alu_mark", blocking)
+probe = Probe()
+gone = weakref.ref(probe)
+first = m._handle.add_intercept(m.address_of("idle_main"), probe, False)
+spares = [m._handle.add_intercept(m.address_of("bkpt_main"), Probe(), False) for _ in range(50)]
+del probe
+before = _core.host_threads()
+
+
+def interrupt_inside(entered_before):
+    deadline = time.monotonic() + 10
+    while _core.interruptible_waits() == entered_before and time.monotonic() < deadline:
+        time.sleep(0.001)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+m.start()
+assert entered.wait(10)
+threading.Thread(target=interrupt_inside, args=(_core.interruptible_waits(),), daemon=True).start()
+try:
+    m.halt()
+except KeyboardInterrupt:
+    pass
+else:
+    raise AssertionError("no KeyboardInterrupt")
+del first
+gc.collect()
+assert gone() is not None, "a removal ran while the abandoned thread lives"
+released.set()
+deadline = time.monotonic() + 10
+while _core.host_threads() > before and time.monotonic() < deadline:
+    time.sleep(0.01)
+while spares and gone() is not None:
+    spares.pop()
+    gc.collect()
+    time.sleep(0.01)
+assert gone() is None, "the queued removal did not run once the thread was gone"
+print("ok")
+"""
+
+
+def test_an_abandoned_machine_runs_its_queued_removals_once_its_thread_is_gone() -> None:
+    script = ORPHAN_REMOVALS.replace("__JSON__", repr(str(M33_JSON))).replace(
+        "__ELF__", repr(str(DRIVER_ELF))
+    )
+    child = run_child(script, timeout=30)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "ok"
+
+
+DROPPED_AFTER_EXIT = """
+import atexit
+import gc
+
+kept = {}
+
+
+def drop():
+    assert kept["machine"].halt() is None
+    kept.clear()
+    gc.collect()
+
+
+atexit.register(drop)
+
+import threading
+
+import popcorn
+
+entered = threading.Event()
+
+
+def blocking(call):
+    entered.set()
+    threading.Event().wait()
+    return call.proceed()
+
+
+m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+m.reset()
+m.intercept("alu_mark", blocking)
+m.start()
+assert entered.wait(10)
+kept["machine"] = m
+kept["cycle"] = kept
+del m
+print("leaving", flush=True)
+"""
+
+
+def test_a_machine_halted_and_dropped_after_the_exit_abandon_does_not_hang() -> None:
+    script = DROPPED_AFTER_EXIT.replace("__JSON__", repr(str(M33_JSON))).replace(
+        "__ELF__", repr(str(DRIVER_ELF))
+    )
+    child = run_child(script, timeout=30)
+    assert child.stdout.strip() == "leaving"
+    assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["timeout", "signal"])
+def test_an_exit_with_a_blocked_handler_abandons_its_machine(interrupted: bool) -> None:
+    script = (
+        BLOCKED_AT_EXIT.replace("__SIGNAL__", repr(interrupted))
+        .replace("__JSON__", repr(str(M33_JSON)))
+        .replace("__ELF__", repr(str(DRIVER_ELF)))
+    )
+    began = time.monotonic()
+    child = run_child(script, timeout=30)
+    took = time.monotonic() - began
+    assert child.stdout.strip() == "leaving"
+    assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
+    assert took < (5 if interrupted else 15)
+
+
 def test_a_body_error_leaving_running_wins_over_a_kept_log_error() -> None:
     m = timer_started_in_a_free_run()
     failing = FailOnce()

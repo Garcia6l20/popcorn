@@ -1278,9 +1278,9 @@ auto usb_link::audio(std::uint64_t function) const -> uac_link
 auto machine_handle::usb_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;
-  for(auto const& unit : engine_->description().peripherals)
+  for(auto const& unit : engine().description().peripherals)
   {
-    auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(engine_->model(unit.name));
+    auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(engine().model(unit.name));
     if(not unit.alias_of and port != nullptr and port->board_host() != nullptr)
     {
       names.push_back(unit.name);
@@ -1291,7 +1291,7 @@ auto machine_handle::usb_names() const -> std::vector<std::string>
 
 auto machine_handle::attach_usb(std::string const& peripheral) -> usb_link
 {
-  auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(engine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(engine().model(peripheral));
   if(port == nullptr or port->board_host() == nullptr)
   {
     throw model_error(peripheral, "", 0);

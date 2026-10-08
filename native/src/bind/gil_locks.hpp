@@ -239,8 +239,21 @@ struct host_slot
   mutable std::vector<std::move_only_function<void()>> retired{};
   /** @brief Whether retired may hold a removal, read without the mutex. */
   mutable std::atomic<bool> retiring{false};
+  /** @brief The abandoned host's thread, set under retired_mutex before abandoned. */
+  mutable std::weak_ptr<void const> orphan{};
+  /** @brief Whether the host was abandoned: removals then wait until orphan expired. */
+  mutable std::atomic<bool> abandoned{false};
   /** @brief Where the machine's log records go, shared with its HostFutures. */
   std::shared_ptr<log_forwarding> logs = std::make_shared<log_forwarding>();
+
+  host_slot()                                    = default;
+  host_slot(host_slot const&)                    = delete;
+  auto operator=(host_slot const&) -> host_slot& = delete;
+  /**
+   * @brief Runs the removals an abandoned host left once its thread is gone, keeps them for the
+   *        rest of the process otherwise.
+   */
+  ~host_slot();
 };
 
 /**
@@ -359,6 +372,88 @@ private:
 };
 
 /**
+ * @brief Keeps @p body, a removal of engine state, alive for the rest of the process without
+ *        running it: the abandoned host's thread may still run the engine it would edit.
+ */
+inline void keep_forever(std::move_only_function<void()> body) noexcept
+{
+  std::ignore = std::make_unique<std::move_only_function<void()>>(std::move(body)).release();
+}
+
+/**
+ * @brief Queues @p body, when set, on the slot of an abandoned host, then runs every queued
+ *        removal once the host thread left the engine for good. The batch runs outside
+ *        retired_mutex, since a removal may retire more: the GIL every caller holds keeps two
+ *        batches of one slot apart. Never throws.
+ */
+inline void run_orphaned(host_slot const& slot, std::move_only_function<void()> body) noexcept
+{
+  std::vector<std::move_only_function<void()>> ready;
+  {
+    std::scoped_lock const lock{slot.retired_mutex};
+    if(body)
+    {
+      slot.retired.push_back(std::move(body));
+      slot.retiring.store(true, std::memory_order_release);
+    }
+    if(slot.orphan.expired())
+    {
+      ready = std::exchange(slot.retired, {});
+      slot.retiring.store(false, std::memory_order_release);
+    }
+  }
+  for(auto& removal : ready)
+  {
+    try
+    {
+      removal();
+    }
+    catch(...)
+    {}
+  }
+}
+
+/**
+ * @brief Marks @p slot abandoned with @p orphan, the thread abandon_thread() gave up, and runs
+ *        its queued removals if that thread is already gone. Never throws.
+ */
+inline void give_up(host_slot const& slot, std::weak_ptr<void const> orphan) noexcept
+{
+  {
+    std::scoped_lock const lock{slot.retired_mutex};
+    if(not slot.abandoned.load(std::memory_order_relaxed))
+    {
+      slot.orphan = std::move(orphan);
+      slot.abandoned.store(true, std::memory_order_release);
+    }
+  }
+  run_orphaned(slot, {});
+}
+
+inline host_slot::~host_slot()
+{
+  if(not abandoned.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  auto const gone = orphan.expired();
+  for(auto& body : std::exchange(retired, {}))
+  {
+    if(not gone)
+    {
+      keep_forever(std::move(body));
+      continue;
+    }
+    try
+    {
+      body();
+    }
+    catch(...)
+    {}
+  }
+}
+
+/**
  * @brief Runs the removals queued on @p slot, on the engine owner or after the host closed.
  *        Never throws.
  */
@@ -400,6 +495,10 @@ auto host_access(core::host& on, Body&& body) -> std::invoke_result_t<Body, core
   if(on.owns_engine())
   {
     return std::invoke(std::forward<Body>(body), on.member_inline(core::member_id{}));
+  }
+  if(on.abandoned())
+  {
+    throw core::machine_closed("the host was abandoned");
   }
   auto const held = require_owned(lock_releasing_gil(on));
   if(on.busy(held, core::member_id{}) or not on.parked(held, core::member_id{}))
@@ -459,7 +558,21 @@ inline void retire(host_ref const& ref, std::move_only_function<void()> body) no
   try
   {
     auto const on = ref->host.lock();
-    if(on == nullptr or on->owns_engine())
+    if(on != nullptr and on->owns_engine())
+    {
+      body();
+      return;
+    }
+    if(on != nullptr and on->abandoned())
+    {
+      give_up(*ref, on->orphan());
+    }
+    if(ref->abandoned.load(std::memory_order_acquire))
+    {
+      run_orphaned(*ref, std::move(body));
+      return;
+    }
+    if(on == nullptr)
     {
       body();
       return;

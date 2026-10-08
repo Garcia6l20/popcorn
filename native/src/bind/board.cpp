@@ -260,10 +260,10 @@ void audio_link::set_frame_limit(std::uint64_t limit)
 auto machine_handle::audio_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;
-  for(auto const& unit : engine_->description().peripherals)
+  for(auto const& unit : engine().description().peripherals)
   {
     if(not unit.alias_of
-       and dynamic_cast<periph::stm32::audio_port*>(engine_->model(unit.name)) != nullptr)
+       and dynamic_cast<periph::stm32::audio_port*>(engine().model(unit.name)) != nullptr)
     {
       names.push_back(unit.name);
     }
@@ -278,7 +278,7 @@ auto machine_handle::attach_audio(
     std::uint32_t      external_frame_hz,
     bool               clock_wired) -> audio_link
 {
-  auto* const port = dynamic_cast<periph::stm32::audio_port*>(engine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::audio_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
@@ -296,10 +296,10 @@ auto machine_handle::attach_audio(
 auto machine_handle::uart_names() const -> std::vector<std::string>
 {
   std::vector<std::string> names;
-  for(auto const& unit : engine_->description().peripherals)
+  for(auto const& unit : engine().description().peripherals)
   {
     if(not unit.alias_of
-       and dynamic_cast<periph::stm32::uart_port*>(engine_->model(unit.name)) != nullptr)
+       and dynamic_cast<periph::stm32::uart_port*>(engine().model(unit.name)) != nullptr)
     {
       names.push_back(unit.name);
     }
@@ -309,7 +309,7 @@ auto machine_handle::uart_names() const -> std::vector<std::string>
 
 auto machine_handle::attach_uart(std::string const& peripheral) -> uart_link
 {
-  auto* const port = dynamic_cast<periph::stm32::uart_port*>(engine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::uart_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
@@ -320,7 +320,7 @@ auto machine_handle::attach_uart(std::string const& peripheral) -> uart_link
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
     -> periph::stm32::gpio_port&
 {
-  auto* const port = dynamic_cast<periph::stm32::gpio_port*>(engine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::gpio_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
@@ -392,7 +392,7 @@ auto machine_handle::gpio_mode(std::string const& peripheral, std::uint8_t pin) 
 
 auto machine_handle::analog(std::string const& peripheral) const -> periph::stm32::analog_port&
 {
-  auto* const port = dynamic_cast<periph::stm32::analog_port*>(engine_->model(peripheral));
+  auto* const port = dynamic_cast<periph::stm32::analog_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);

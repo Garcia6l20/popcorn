@@ -168,7 +168,7 @@ auto python_thread_hooks(
 
 /** @brief Adds @p on to the registry shutdown_hosts() closes, with the slot whose log records
  * it forwards then. */
-void register_host(std::shared_ptr<core::host> const& on, host_ref const& slot);
+void register_host(std::shared_ptr<core::host> const& on, host_ref const& slot, std::string part);
 
 /** @brief Removes @p on from the registry, and every expired entry, taking no ownership. */
 void unregister_host(std::shared_ptr<core::host> const& on);
@@ -274,9 +274,24 @@ private:
   std::shared_ptr<detail::log_forwarding>  logs_;
 };
 
-/** @brief Closes and joins every live host, and refuses to start new host threads. */
+/**
+ * @brief Closes and joins every live host, and refuses to start new host threads. Waits at most
+ *        10 s in all, checking signals every 50 ms: a host whose thread did not stop by then, a
+ *        handler blocked, or at a signal, is abandoned and named on stderr.
+ */
 [[= py::doc{"Close and join every machine thread, refuse new ones. Run at interpreter exit."}]] void
     shutdown_hosts();
+
+/** @brief Interruptible waits entered so far, for a request result or a park, for tests to
+ * time a signal. */
+[[= py::doc{"Interruptible waits entered so far, for a request result or a park, for tests."}]]
+    [[nodiscard]] auto interruptible_waits() -> std::uint64_t;
+
+namespace detail
+{
+/** @brief Counts one entry into an interruptible wait, for a request result or a park. */
+void count_interruptible_wait() noexcept;
+}
 
 /** @brief Host threads running now, across every machine. */
 [[= py::doc{"Number of machine threads running now."}]] [[nodiscard]] auto host_threads()

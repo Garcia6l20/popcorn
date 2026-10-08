@@ -132,6 +132,25 @@ struct[[= py::rename{"CallOutcome"}]] call_outcome
 
 namespace detail
 {
+/**
+ * @brief Gives a machine's host up for a Python caller interrupted while a handler blocks the
+ *        host thread: the borrowed handles of the machine's Python models are dropped first, so
+ *        no collection visits a model the abandoned thread frees, the machine is marked gone for
+ *        its views and links, then core::host::abandon_thread() runs with the GIL released.
+ */
+struct host_abandon
+{
+  /** @brief The machine's borrowed Python model handles. */
+  std::shared_ptr<std::vector<reflex::py::nb::handle>> owned;
+  /** @brief The machine's lifetime flag, cleared by the abandon. */
+  std::shared_ptr<std::atomic<bool>> alive;
+  /** @brief The host. */
+  std::weak_ptr<core::host> host;
+
+  /** @brief Abandons the host, the GIL held. */
+  void operator()() const;
+};
+
 /** @brief Takes the mutex of @p ptys, releasing the GIL while it blocks when the thread holds it.
  */
 [[nodiscard]] auto lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>;
@@ -193,7 +212,9 @@ public:
    *        to sys.unraisablehook when the destructor holds the GIL, and is dropped otherwise. On
    *        a host thread or inside a parked section it takes the host's orphan path. While the
    *        interpreter finalizes with the host thread alive it leaves both alive: the thread
-   *        needs the GIL to exit.
+   *        needs the GIL to exit. An abandoned host is left to its thread, which frees the
+   *        machine when the blocked handler returns. It never checks signals: on a live host
+   *        whose handler blocks it waits for the handler.
    */
   ~machine_handle();
 
@@ -988,6 +1009,8 @@ private:
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
   [[nodiscard]] auto lock_for_request() const -> core::held_lock;
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;
+  [[nodiscard]] auto engine() const -> core::machine&;
+  [[nodiscard]] auto abandoner() const -> detail::host_abandon;
   void               flush_logs_unraisable() const noexcept;
   auto open_pty(std::string name, std::unique_ptr<detail::pty_link> link) -> pty_handle;
 
@@ -1000,13 +1023,14 @@ private:
 
   [[= py::traverse]] void report_python(reflex::py::gc_visitor& visit) const noexcept
   {
-    for(auto const owned : python_owned_)
+    for(auto const owned : *python_owned_)
     {
       visit(owned);
     }
   }
 
-  std::vector<reflex::py::nb::handle>         python_owned_;
+  std::shared_ptr<std::vector<reflex::py::nb::handle>> python_owned_ =
+      std::make_shared<std::vector<reflex::py::nb::handle>>();
   std::shared_ptr<std::atomic<bool>>          alive_;
   std::shared_ptr<detail::host_slot>          slot_;
   std::shared_ptr<detail::pty_bridges>        ptys_;
@@ -1014,6 +1038,7 @@ private:
   std::shared_ptr<detail::delivered_end>      delivered_;
   std::shared_ptr<std::atomic<bool>>          collected_;
   std::shared_ptr<std::atomic<std::uint64_t>> gil_entries_;
+  std::shared_ptr<core::machine>              engine_owner_;
   std::optional<hook>                         log_hook_;
   std::map<std::string, detail::usb_hubs>     hubs_;
   core::machine*                              engine_{};

@@ -9,6 +9,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/vector.h>
 
+#include <chrono>
 #include <concepts>
 #include <exception>
 #include <functional>
@@ -63,13 +64,51 @@ auto predicate_of(std::optional<nb::object> callable) -> std::function<bool()>
   };
 }
 
-auto cancel_goal(std::weak_ptr<core::host> host) -> std::move_only_function<void()>
+constexpr auto signal_check = std::chrono::milliseconds{50};
+
+void wait_interruptibly(
+    core::host&                 on,
+    core::halt_ticket const&    ticket,
+    detail::host_abandon const& abandon)
 {
-  return [host = std::move(host)] {
-    if(auto const on = host.lock())
+  detail::count_interruptible_wait();
+  for(;;)
+  {
+    auto settled = false;
     {
       nb::gil_scoped_release const released;
-      on->cancel(core::member_id{});
+      settled = on.wait_settled(core::member_id{}, ticket, signal_check);
+    }
+    if(settled)
+    {
+      return;
+    }
+    if(PyErr_CheckSignals() != 0)
+    {
+      nb::python_error const raised;
+      abandon();
+      throw raised;
+    }
+  }
+}
+
+auto cancel_goal(std::weak_ptr<core::host> host, detail::host_abandon abandon)
+    -> std::move_only_function<void()>
+{
+  return [host = std::move(host), abandon = std::move(abandon)] {
+    auto const on = host.lock();
+    if(on == nullptr)
+    {
+      return;
+    }
+    std::optional<std::uint64_t> parks;
+    {
+      nb::gil_scoped_release const released;
+      parks = on->request_cancel(core::member_id{});
+    }
+    if(parks)
+    {
+      wait_interruptibly(*on, {.finish = true, .with_host = true, .parks = *parks}, abandon);
     }
   };
 }
@@ -99,6 +138,10 @@ auto later(std::uint64_t now_ps, std::uint64_t delay_ps) -> vtime
 auto machine_handle::lock_for_request() const -> core::held_lock
 {
   detail::raise_kept_log_error(*slot_->logs);
+  if(host_->abandoned())
+  {
+    throw core::machine_closed("the host was abandoned");
+  }
   refuse_inside(*host_);
   detail::require_host_start();
   auto held = lock_releasing();
@@ -143,7 +186,7 @@ auto machine_handle::run_goal(
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future),
           [](core::goal_result const& result) { return nb::cast(record(result.stopped)); },
-          cancel_goal(host_)),
+          cancel_goal(host_, abandoner())),
       slot_};
 }
 
@@ -193,7 +236,7 @@ auto machine_handle::call_goal(
             outcome.stopped = record(result.stopped);
             return nb::cast(std::move(outcome));
           },
-          cancel_goal(host_)),
+          cancel_goal(host_, abandoner())),
       slot_};
 }
 
@@ -206,6 +249,10 @@ void machine_handle::start()
 
 auto machine_handle::halt() -> nb::object
 {
+  if(host_->abandoned())
+  {
+    return nb::none();
+  }
   if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
   {
     auto const held = lock_releasing();
@@ -220,10 +267,16 @@ auto machine_handle::halt() -> nb::object
 
 auto machine_handle::park() -> nb::object
 {
+  core::halt_ticket ticket;
+  {
+    nb::gil_scoped_release const released;
+    ticket = host_->request_halt(core::member_id{});
+  }
+  wait_interruptibly(*host_, ticket, abandoner());
   std::optional<core::held_end> ended;
   {
     nb::gil_scoped_release const released;
-    ended = host_->halt(core::member_id{});
+    ended = host_->finish_halt(core::member_id{}, ticket);
   }
   if(not ended)
   {
@@ -304,13 +357,13 @@ auto machine_handle::run_predicate(
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future),
           [](core::goal_result const& result) { return nb::cast(record(result.stopped)); },
-          cancel_goal(host_)),
+          cancel_goal(host_, abandoner())),
       slot_};
 }
 
 auto machine_handle::predicate_pc_at(address at) const -> native_predicate
 {
-  return native_predicate{[engine = engine_, at] { return engine->regs().pc() == at; }, slot_}
+  return native_predicate{[engine = &engine(), at] { return engine->regs().pc() == at; }, slot_}
       .described("the core to reach an address");
 }
 
@@ -332,6 +385,10 @@ auto machine_handle::waiting_on(
   if(for_ps)
   {
     spec.after = vtime{*for_ps};
+  }
+  if(host_->abandoned())
+  {
+    throw core::machine_closed("the host was abandoned");
   }
   detail::raise_kept_log_error(*slot_->logs);
   refuse_inside(*host_);
@@ -367,11 +424,15 @@ auto machine_handle::is_plain_memory(address addr, std::uint8_t size) const -> b
   {
     throw std::invalid_argument("an access of 1 to 8 bytes");
   }
-  return engine_->mem().is_plain_memory(addr, size);
+  return engine().mem().is_plain_memory(addr, size);
 }
 
 auto machine_handle::busy() const -> bool
 {
+  if(host_->abandoned())
+  {
+    return false;
+  }
   if(host_->owns_engine())
   {
     return core::detail::host_locks_held == 0;
@@ -382,6 +443,10 @@ auto machine_handle::busy() const -> bool
 
 auto machine_handle::session_open() const -> bool
 {
+  if(host_->abandoned())
+  {
+    return false;
+  }
   if(host_->owns_engine() and core::detail::host_locks_held > 0)
   {
     return false;

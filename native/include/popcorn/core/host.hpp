@@ -481,6 +481,19 @@ private:
   detail::host_core const* previous_;
 };
 
+/** @brief What host::request_halt() hands to host::wait_settled() and host::finish_halt(). */
+struct halt_ticket
+{
+  /** @brief Whether there is a park to wait for and a session to close. */
+  bool finish = false;
+  /** @brief Whether the member ran on the host thread, so the park comes from it. */
+  bool with_host = false;
+  /** @brief The park count to wait past. */
+  std::uint64_t parks = 0;
+  /** @brief The free run count at the request: finish_halt() leaves a later free run open. */
+  std::uint64_t session = 0;
+};
+
 /** @brief A wait registered by host::wait(). */
 class waiter_handle
 {
@@ -581,7 +594,8 @@ public:
   [[nodiscard]] auto session_open(held_lock const& held, member_id who) const
       -> bool pre(held.holds(*this)) pre(who < members());
 
-  /** @brief Member @p who, parked, for direct access under @p held. */
+  /** @brief Member @p who, parked, for direct access under @p held.
+   * @throws machine_closed once the host was abandoned: its thread frees the members. */
   [[nodiscard]] auto member(held_lock const& held, member_id who) -> machine& pre(held.holds(*this))
       pre(who < members()) pre(parked(held, who));
 
@@ -661,10 +675,83 @@ public:
   /**
    * @brief Ends the goal of member @p who at the next boundary, its future failing with
    *        operation_cancelled, and waits until the member parks. Returns at once without a goal.
-   *        On a host thread it requests the end and returns.
+   *        On a host thread it requests the end and returns. On an abandoned host it returns at
+   *        once.
    * @throws machine_running when the thread holds a host mutex.
    */
   void cancel(member_id who) pre(who < members());
+
+  /**
+   * @brief The first half of cancel(): requests the end of the goal of member @p who.
+   * @return The park count wait_settled() waits past, empty when there is nothing to wait for:
+   *         no goal, an abandoned host, or a host thread caller.
+   * @throws machine_running when the thread holds a host mutex.
+   */
+  auto request_cancel(member_id who) -> std::optional<std::uint64_t> pre(who < members());
+
+  /**
+   * @brief The first half of halt(): requests the end of member @p who's free run or goal.
+   * @return What wait_settled() and finish_halt() take. Inactive with nothing to halt, on an
+   *         abandoned host, or for a host thread caller of a running member.
+   * @throws machine_running when the thread holds a host mutex.
+   */
+  auto request_halt(member_id who) -> halt_ticket pre(who < members());
+
+  /**
+   * @brief Waits at most @p limit for the park @p ticket asks for, or for the host to be
+   *        abandoned.
+   * @return Whether the wait is over, true at once for an inactive ticket or on a host thread.
+   */
+  auto wait_settled(member_id who, halt_ticket const& ticket, std::chrono::nanoseconds limit)
+      -> bool pre(who < members());
+
+  /** @brief wait_settled() with no limit. */
+  void wait_settled(member_id who, halt_ticket const& ticket) pre(who < members());
+
+  /**
+   * @brief The last half of halt(): closes the session once the member parked. A free run
+   *        start() opened after request_halt() stays open: the park already closed the halted one.
+   * @return The held end, cleared, when the free run had ended by itself, empty for an inactive
+   *         ticket, an abandoned host or a free run started since the request.
+   */
+  auto finish_halt(member_id who, halt_ticket const& ticket)
+      -> std::optional<held_end> pre(who < members());
+
+  /**
+   * @brief Gives the host thread up while it is blocked in a callback: the host closes at once,
+   *        pending mail, stamps and waiters fail with machine_closed, a waiter's predicate left
+   *        to the host thread, which may be running it, cancel(), halt() and close()
+   *        return at once from then on, and the thread is detached. When the callback returns the
+   *        thread fails its goal or session, releases its share of every member and exits. The
+   *        failed requests' continuations run after join_mutex_ is released. Called without the
+   *        GIL. A no-op once abandoned or without a thread to give up, never started or joined.
+   */
+  void abandon_thread();
+
+  /**
+   * @brief A share of member @p who: the host thread of an abandoned host releases only its own
+   *        share, so a holder may keep reading the member's fixed data.
+   */
+  [[nodiscard]] auto member_owner(member_id who) const
+      -> std::shared_ptr<machine> pre(who < members());
+
+  /** @brief Whether abandon_thread() gave the host up, read without the mutex. */
+  [[nodiscard]] auto abandoned() const noexcept -> bool;
+
+  /**
+   * @brief The thread abandon_thread() gave up, expired once it left the engine for good: from
+   *        then on no thread runs the members, and a holder of a member_owner() share may edit
+   *        their hooks. Valid from the destroyed host's copy as well.
+   */
+  [[nodiscard]] auto orphan() const -> std::weak_ptr<void const> pre(abandoned());
+
+  /**
+   * @brief close(), waiting at most @p limit for the host thread to stop.
+   * @return Whether the thread stopped and was joined. False leaves the host closed with its
+   *         thread running: the caller abandons it or tries again.
+   * @throws machine_running when the thread holds a host mutex.
+   */
+  auto close_for(std::chrono::nanoseconds limit) -> bool;
 
   /**
    * @brief Closes the session of member @p who, ending its free run at the next boundary, and
@@ -725,7 +812,10 @@ private:
 
   std::shared_ptr<detail::host_core> core_;
   std::mutex                         join_mutex_;
-  std::jthread                       thread_;
+  /** @brief The thread's token, written by ensure_thread() before the thread starts and read
+   * by orphan() once abandoned() is true, never written again. */
+  std::weak_ptr<void const> running_;
+  std::jthread              thread_;
 };
 
 /**
@@ -733,6 +823,7 @@ private:
  *        the host mutex while parked. Never waits on a command.
  * @throws machine_running when the member is busy, or when the thread already holds another
  *         host's mutex and this one is taken.
+ * @throws machine_closed once the host was abandoned.
  */
 template <std::invocable<machine&> F>
 auto access(host& on, member_id who, F&& body) -> std::invoke_result_t<F, machine&>
@@ -740,6 +831,10 @@ auto access(host& on, member_id who, F&& body) -> std::invoke_result_t<F, machin
   if(on.owns_engine())
   {
     return std::invoke(std::forward<F>(body), on.member_inline(who));
+  }
+  if(on.abandoned())
+  {
+    throw machine_closed("the host was abandoned");
   }
   auto held = detail::host_locks_held == 0 ? on.lock() : on.try_lock();
   if(not held.owns_lock() or on.busy(held, who) or not on.parked(held, who))

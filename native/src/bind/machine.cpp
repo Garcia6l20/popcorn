@@ -375,7 +375,7 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
     }
     built = std::make_unique<core::machine>(
         description, factory_for(description),
-        options_of(description, config, hubs_, python_owned_));
+        options_of(description, config, hubs_, *python_owned_));
   }
   engine_ = built.get();
   for(auto const& unit : description.peripherals)
@@ -386,7 +386,7 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
     }
     if(auto const python = detail::python_object(engine_->model(unit.name)); not python.is_none())
     {
-      python_owned_.push_back(python);
+      python_owned_->push_back(python);
     }
   }
   id_                = built->id();
@@ -405,9 +405,10 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   {
     hooks.held = held_in(std::make_shared<detail::python_cell const>(cell));
   }
-  host_       = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
-  slot_->host = host_;
-  detail::register_host(host_, slot_);
+  host_         = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
+  engine_owner_ = host_->member_owner(core::member_id{});
+  slot_->host   = host_;
+  detail::register_host(host_, slot_, description.part);
 }
 
 machine_handle::~machine_handle()
@@ -417,6 +418,12 @@ machine_handle::~machine_handle()
   if(Py_IsFinalizing() != 0 and thread_live_->load())
   {
     detail::abandon(std::move(host_));
+    return;
+  }
+  if(host_->abandoned())
+  {
+    detail::give_up(*slot_, host_->orphan());
+    host_.reset();
     return;
   }
   if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
@@ -601,7 +608,32 @@ auto machine_handle::pending_events() const -> std::size_t
 
 auto machine_handle::model(std::string const& peripheral) const -> reflex::py::nb::object
 {
-  return detail::python_object(engine_->model(peripheral));
+  return detail::python_object(engine().model(peripheral));
+}
+
+void detail::host_abandon::operator()() const
+{
+  owned->clear();
+  clear_alive(*alive);
+  if(auto const on = host.lock())
+  {
+    reflex::py::nb::gil_scoped_release const released;
+    on->abandon_thread();
+  }
+}
+
+auto machine_handle::engine() const -> core::machine&
+{
+  if(host_->abandoned())
+  {
+    throw core::machine_closed("the host was abandoned");
+  }
+  return *engine_;
+}
+
+auto machine_handle::abandoner() const -> detail::host_abandon
+{
+  return {.owned = python_owned_, .alive = alive_, .host = host_};
 }
 
 auto machine_handle::id() const noexcept -> std::uint64_t

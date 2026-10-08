@@ -7,9 +7,12 @@
 #include <nanobind/nanobind.h>
 
 #include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
@@ -24,7 +27,10 @@ struct registered_host
 {
   std::weak_ptr<core::host>             host;
   std::weak_ptr<detail::log_forwarding> logs;
+  std::string                           part;
 };
+
+constexpr auto exit_wait = std::chrono::seconds{10};
 
 struct host_registry
 {
@@ -70,6 +76,7 @@ void wait_releasing_gil(pending_request& request, std::optional<double> timeout)
   {
     throw popcorn::machine_running("a callback of a machine cannot wait for a machine request");
   }
+  count_interruptible_wait();
   using clock      = std::chrono::steady_clock;
   auto const until = timeout ? clock::now()
                                    + std::chrono::duration_cast<clock::duration>(
@@ -134,11 +141,11 @@ auto python_thread_hooks(
   };
 }
 
-void register_host(std::shared_ptr<core::host> const& on, host_ref const& slot)
+void register_host(std::shared_ptr<core::host> const& on, host_ref const& slot, std::string part)
 {
   auto const& hosts = registry();
   link_locked(hosts, [&](core::link_guard const&) {
-    registry().hosts.push_back({.host = on, .logs = slot->logs});
+    registry().hosts.push_back({.host = on, .logs = slot->logs, .part = std::move(part)});
   });
 }
 
@@ -262,15 +269,15 @@ void host_future_handle::cancel()
 void shutdown_hosts()
 {
   hosts_shut_down.store(true);
-  auto const&                                          hosts = registry();
-  std::vector<std::shared_ptr<core::host>>             live;
-  std::vector<std::shared_ptr<detail::log_forwarding>> logs;
+  auto const&                                                      hosts = registry();
+  std::vector<std::pair<std::shared_ptr<core::host>, std::string>> live;
+  std::vector<std::shared_ptr<detail::log_forwarding>>             logs;
   detail::link_locked(hosts, [&](core::link_guard const&) {
     for(auto const& entry : registry().hosts)
     {
       if(auto on = entry.host.lock())
       {
-        live.push_back(std::move(on));
+        live.emplace_back(std::move(on), entry.part);
       }
       if(auto forwarding = entry.logs.lock())
       {
@@ -278,17 +285,48 @@ void shutdown_hosts()
       }
     }
   });
+  auto const until       = std::chrono::steady_clock::now() + exit_wait;
+  auto       interrupted = false;
+  while(not live.empty() and not interrupted and std::chrono::steady_clock::now() < until)
   {
-    nb::gil_scoped_release const released;
-    for(auto const& on : live)
     {
-      on->close();
+      nb::gil_scoped_release const released;
+      std::erase_if(live, [](auto const& entry) { return entry.first->close_for(signal_check); });
     }
+    if(PyErr_CheckSignals() != 0)
+    {
+      PyErr_Clear();
+      interrupted = true;
+    }
+  }
+  for(auto const& [on, part] : live)
+  {
+    PySys_WriteStderr(
+        "popcorn: the machine thread of %s did not stop at exit, a handler is blocked, the "
+        "process exits without joining it\n",
+        part.c_str());
+    nb::gil_scoped_release const released;
+    on->abandon_thread();
   }
   for(auto const& forwarding : logs)
   {
     detail::flush_logs(*forwarding, detail::log_errors::report);
   }
+}
+
+namespace
+{
+std::atomic<std::uint64_t> interruptible_entries{0};
+}
+
+void detail::count_interruptible_wait() noexcept
+{
+  interruptible_entries.fetch_add(1, std::memory_order_relaxed);
+}
+
+auto interruptible_waits() -> std::uint64_t
+{
+  return interruptible_entries.load(std::memory_order_relaxed);
 }
 
 auto host_threads() -> std::uint64_t

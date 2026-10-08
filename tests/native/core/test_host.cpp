@@ -662,6 +662,191 @@ TEST_CASE("destruction while running, while idle and with a command in flight")
   }
 }
 
+struct blocking_hook
+{
+  std::latch        entered{1};
+  std::atomic<bool> release{false};
+  std::atomic<bool> stopped{false};
+};
+
+auto blocked_host(blocking_hook& blocking) -> hosted
+{
+  auto   made = alu(0);
+  hosted h;
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&blocking](core::intercept_call const&) {
+        blocking.entered.count_down();
+        while(not blocking.release.load())
+        {
+          std::this_thread::sleep_for(1ms);
+        }
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  h.adopt(std::move(made), {}, {.thread_stopping = [&blocking] { blocking.stopped = true; }});
+  return h;
+}
+
+TEST_CASE("an abandoned host fails its requests and returns at once while a hook blocks")
+{
+  blocking_hook blocking;
+  auto          h    = blocked_host(blocking);
+  auto const    goal = h.run({});
+  blocking.entered.wait();
+  auto const queued = h.post([](core::machine&) {});
+  h.on->abandon_thread();
+  CHECK(h.on->abandoned());
+  CHECK_THROWS_AS(queued.get(), core::machine_closed);
+  CHECK_THROWS_AS(h.post([](core::machine&) {}).get(), core::machine_closed);
+  CHECK_FALSE(h.on->halt(0).has_value());
+  h.on->cancel(0);
+  h.on->close();
+  CHECK_THROWS_AS(std::ignore = h.reg("r0"), core::machine_closed);
+  CHECK_FALSE(goal.done());
+  blocking.release = true;
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  REQUIRE(settles([&] { return blocking.stopped.load(); }));
+  h.on.reset();
+}
+
+TEST_CASE("an abandon fails a waiter whose predicate the blocked thread runs, leaving it alone")
+{
+  hosted                             h{idle_forever()};
+  std::latch                         entered{1};
+  std::atomic<bool>                  release{false};
+  std::atomic<bool>                  returned{false};
+  auto                               sentinel = std::make_shared<int>();
+  std::weak_ptr<int> const           watched  = sentinel;
+  std::optional<core::waiter_handle> waiting;
+  {
+    auto held = h.on->lock();
+    h.on->start(held, 0);
+    waiting = h.on->wait(held, 0, {.ready = [sentinel, &entered, &release, &returned] {
+                           entered.count_down();
+                           while(not release.load())
+                           {
+                             std::this_thread::sleep_for(1ms);
+                           }
+                           CHECK(sentinel.use_count() >= 1);
+                           returned = true;
+                           return false;
+                         }});
+    sentinel.reset();
+  }
+  entered.wait();
+  h.on->abandon_thread();
+  CHECK_THROWS_AS(waiting->future().get(), core::machine_closed);
+  CHECK_FALSE(watched.expired());
+  release = true;
+  REQUIRE(settles([&] { return returned.load(); }));
+  waiting.reset();
+  h.on.reset();
+}
+
+TEST_CASE("a halt finished after a new free run started leaves that free run open")
+{
+  hosted h{alu(0)};
+  h.start();
+  auto const halting = h.on->request_halt(0);
+  h.on->wait_settled(0, halting);
+  h.start();
+  CHECK_FALSE(h.on->finish_halt(0, halting).has_value());
+  {
+    auto held = h.on->lock();
+    CHECK(h.on->session_open(held, 0));
+  }
+  auto const again = h.on->request_halt(0);
+  REQUIRE(again.finish);
+  REQUIRE(h.on->wait_settled(0, again, 5s));
+  std::ignore = h.on->finish_halt(0, again);
+  CHECK(h.on->state(0) == core::host_state::parked);
+  auto held = h.on->lock();
+  CHECK_FALSE(h.on->session_open(held, 0));
+}
+
+TEST_CASE("an abandon after a close_for that timed out still gives the host up")
+{
+  blocking_hook blocking;
+  auto          h    = blocked_host(blocking);
+  auto const    goal = h.run({});
+  blocking.entered.wait();
+  CHECK_FALSE(h.on->close_for(50ms));
+  CHECK_FALSE(h.on->abandoned());
+  h.on->abandon_thread();
+  CHECK(h.on->abandoned());
+  CHECK_THROWS_AS(h.post([](core::machine&) {}).get(), core::machine_closed);
+  CHECK_FALSE(h.on->halt(0).has_value());
+  blocking.release = true;
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  REQUIRE(settles([&] { return blocking.stopped.load(); }));
+  h.on.reset();
+}
+
+TEST_CASE("an abandoned thread's orphan expires once it left the engine, hooks then go")
+{
+  blocking_hook blocking;
+  auto          made = alu(0);
+  auto   other       = made->add_intercept(sym("alu", "alu_done"), [](core::intercept_call const&) {
+    return core::intercept_result::proceed();
+  });
+  hosted h;
+  h.hooks.push_back(std::move(other));
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&blocking](core::intercept_call const&) {
+        blocking.entered.count_down();
+        while(not blocking.release.load())
+        {
+          std::this_thread::sleep_for(1ms);
+        }
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  h.adopt(std::move(made));
+  auto const engine = h.on->member_owner(0);
+  auto const goal   = h.run({});
+  blocking.entered.wait();
+  h.on->abandon_thread();
+  auto const orphan = h.on->orphan();
+  h.on.reset();
+  CHECK_FALSE(orphan.expired());
+  blocking.release = true;
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  REQUIRE(settles([&] { return orphan.expired(); }));
+  h.hooks.clear();
+  CHECK(engine.use_count() == 1);
+}
+
+TEST_CASE("close_for gives up on a blocked hook, then closes once it returns")
+{
+  blocking_hook blocking;
+  auto          h    = blocked_host(blocking);
+  auto const    goal = h.run({});
+  blocking.entered.wait();
+  CHECK_FALSE(h.on->close_for(50ms));
+  blocking.release = true;
+  CHECK(h.on->close_for(5s));
+  CHECK(blocking.stopped.load());
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  CHECK_NOTHROW(std::ignore = h.reg("r0"));
+}
+
+TEST_CASE("a split halt waits in steps and a halt ticket on a parked member closes at once")
+{
+  hosted h{idle_forever()};
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const ticket = h.on->request_halt(0);
+  CHECK(ticket.finish);
+  while(not h.on->wait_settled(0, ticket, 10ms))
+  {
+  }
+  CHECK_FALSE(h.on->finish_halt(0, ticket).has_value());
+  CHECK_FALSE(h.on->request_halt(0).finish);
+  CHECK_FALSE(h.on->request_cancel(0).has_value());
+}
+
 TEST_CASE("interrupts from another thread do not move a requested stop")
 {
   auto const schedule = [](popcorn::testing::machine_fixture<stop_at_arch>& f) {
