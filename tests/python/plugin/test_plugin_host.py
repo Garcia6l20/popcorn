@@ -410,6 +410,48 @@ def test_an_end_a_report_repark_takes_is_kept_beside_the_first(
     result.stdout.fnmatch_lines(["*ERROR at teardown of test_fails*", LEFT_RUNNING])
 
 
+FINISH_RAISES = """
+
+from popcorn.pytest import _report
+
+
+_finish = _report.TraceOnFail.finish
+
+
+def _refuse(self):
+    raise OSError("the trace could not be written")
+
+
+_report.TraceOnFail.finish = _refuse
+
+
+def pytest_unconfigure(config):
+    _report.TraceOnFail.finish = _finish
+"""
+
+
+def test_a_held_end_is_warned_when_the_trace_finish_raises(pytester: pytest.Pytester) -> None:
+    conftest = pytester.path / "conftest.py"
+    conftest.write_text(conftest.read_text() + FINISH_RAISES)
+    pytester.makepyfile("""
+        from raising_watch import raising
+
+        def test_left_running(machine):
+            fired = raising(machine)
+            machine.start()
+            assert fired.wait(10)
+        """)
+    result = run(pytester, "--popcorn-trace-on-fail")
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*ERROR at teardown of test_left_running*",
+            "*OSError: the trace could not be written*",
+            LEFT_RUNNING,
+        ]
+    )
+
+
 KEPT_LOG_ERROR = """
 
 import logging

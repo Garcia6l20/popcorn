@@ -17,6 +17,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
+from typing import Any
 
 import popcorn
 import pytest
@@ -1850,6 +1851,53 @@ def test_crossed_accesses_refuse_one_wait_naming_both_machines(machines: Machine
     assert all(name in str(refused[0]) for name in names)
 
 
+class _Recorder:
+    """Forwards to `wrapped`, recording the named calls in `calls`."""
+
+    def __init__(self, wrapped: object, label: str, names: set[str], calls: list[str]) -> None:
+        self._wrapped = wrapped
+        self._label = label
+        self._names = names
+        self._calls = calls
+
+    def __getattr__(self, name: str) -> object:
+        found = getattr(self._wrapped, name)
+        if name not in self._names:
+            return found
+        calls, label = self._calls, self._label
+
+        def recorded(*args: object) -> object:
+            calls.append(f"{label}.{name}")
+            return found(*args)
+
+        return recorded
+
+
+@pytest.mark.parametrize("collected", [False, True], ids=["called", "collected"])
+def test_a_collected_machine_closes_its_callbacks_then_marks_then_parks(
+    machines: Machines, collected: bool
+) -> None:
+    m = (
+        popcorn.Machine(
+            popcorn.load_description(str(M33_JSON)), image=popcorn.Image.elf(str(DRIVER_ELF))
+        )
+        if collected
+        else machines()
+    )
+    calls: list[str] = []
+    spied: Any = m
+    table, handle = spied._callback_table, spied._handle
+    spied._callback_table = _Recorder(table, "table", {"close"}, calls)
+    spied._handle = _Recorder(handle, "handle", {"mark_collected", "unreported_end"}, calls)
+    if collected:
+        del m, spied, table, handle
+        gc.collect()
+    else:
+        m.__del__()
+        spied._callback_table, spied._handle = table, handle
+    assert calls == ["table.close", "handle.mark_collected", "handle.unreported_end"]
+
+
 class _Probe:
     def __call__(self, view: object) -> object:
         raise AssertionError("never called")
@@ -2127,6 +2175,11 @@ def test_an_exit_with_a_blocked_handler_abandons_its_machine(interrupted: bool) 
     assert child.stdout.strip() == "leaving"
     assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
     assert took < (5 if interrupted else 15)
+
+
+def test_no_binding_runs_a_slice_directly() -> None:
+    assert not hasattr(_core.MachineHandle, "run_slice")
+    assert not hasattr(_core, "SliceArgs")
 
 
 def test_a_body_error_leaving_running_wins_over_a_kept_log_error() -> None:

@@ -602,9 +602,12 @@ def halted_while_stalled(m: popcorn.Machine, stall: StalledWait) -> weakref.ref[
 
 
 def test_halt_returns_once_the_machine_thread_released_the_end(machines: Machines) -> None:
+    """The machine thread stalls 1 s while it still holds the end: a halt returning before the
+    release would find the end alive. A shorter stall could end under load before the halt even
+    started waiting, and pass without testing the wait."""
     m = machines(slice_instructions=1_000)
     m.on_return("alu_mark", boom)
-    stall = StalledWait(0.3)
+    stall = StalledWait(1.0)
     probe = halted_while_stalled(m, stall)
     assert stall.resumed.is_set()
     gc.collect()
@@ -1161,3 +1164,31 @@ def test_conditions_refuse_nesting_empty_and_mixed_machines(
         popcorn.any_of(condition).mode = "all"  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(AttributeError, match="immutable"):
         del popcorn.any_of(condition).members
+
+
+def test_halt_from_another_machines_handler_is_refused_and_its_goal_goes_on(
+    machines: Machines,
+) -> None:
+    a = machines()
+    b = machines()
+    refused: list[BaseException] = []
+
+    def halting(call: popcorn.Call) -> popcorn.Return:
+        try:
+            a.halt()
+        except RuntimeError as error:
+            refused.append(error)
+        return call.proceed()
+
+    b.intercept("alu_mark", halting, once=True)
+
+    async def scenario() -> popcorn.Stop:
+        running = asyncio.create_task(a.run(budget=2_000_000))
+        await asyncio.sleep(0)
+        assert a.busy
+        await b.run(budget=200_000)
+        return await running
+
+    stop = asyncio.run(scenario())
+    assert stop.reason is popcorn.StopReason.BUDGET
+    assert len(refused) == 1

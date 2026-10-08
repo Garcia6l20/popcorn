@@ -11,8 +11,11 @@ import asyncio
 import contextlib
 import gc
 import logging
+import os
 import sys
 import threading
+import time
+import tty
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
@@ -1323,6 +1326,44 @@ class FailOnce(logging.Filter):
             self.failed = True
             raise RuntimeError("filter failed")
         return True
+
+
+def test_a_cdc_pty_overflow_warning_reaches_a_raising_filter_off_the_machine_thread(
+    u575: popcorn.MachineDescription,
+) -> None:
+    """The firmware echoes what the pty sends and nothing reads the echo, so the bridge's output
+    passes its 64 KiB bound and warns once. Each read of the running machine flushes its log
+    records on the test thread: the raising filter runs there, and its error comes out of the
+    next read while the free run goes on."""
+    m, _ = configured(u575)
+    path = m.board.pty("OTG_FS")
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    tty.setraw(fd)
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(failing)
+    chunk = bytes(4096)
+    raised: list[RuntimeError] = []
+
+    async def scenario() -> bool:
+        deadline = time.monotonic() + HANG - 1
+        async with m.running():
+            while not raised and time.monotonic() < deadline:
+                with contextlib.suppress(BlockingIOError):
+                    os.write(fd, chunk)
+                try:
+                    await m.read(m.ref.reg.r0)
+                except RuntimeError as error:
+                    raised.append(error)
+            return m.busy
+
+    try:
+        assert run_bounded(scenario(), HANG)
+    finally:
+        logger.removeFilter(failing)
+        os.close(fd)
+    assert failing.failed
+    assert [str(error) for error in raised] == ["filter failed"]
 
 
 def gpio_hole(description: popcorn.MachineDescription) -> int:

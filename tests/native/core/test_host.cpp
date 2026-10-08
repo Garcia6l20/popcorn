@@ -2552,7 +2552,8 @@ TEST_CASE("a waiter completed at creation by a held end keeps no predicate")
 
 TEST_CASE("a dropped waiter wakes an idle free run, which releases its predicate")
 {
-  hosted h{idle_forever()};
+  std::atomic<int> boundaries{0};
+  hosted h{idle_forever(), {}, {.boundary = [&boundaries](core::member_id) { ++boundaries; }}};
   h.start();
   REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
   auto                     sentinel = std::make_shared<int>();
@@ -2566,10 +2567,12 @@ TEST_CASE("a dropped waiter wakes an idle free run, which releases its predicate
   REQUIRE(
       settles([&] { return checks.load() > 0 and h.on->state(0) == core::host_state::idle_wait; }));
   auto const before = checks.load();
+  auto const sliced = boundaries.load();
   handle.drop();
   CHECK(settles([&] { return watched.expired(); }, 500ms));
   CHECK(h.on->state(0) == core::host_state::idle_wait);
   CHECK(checks.load() == before);
+  CHECK(boundaries.load() == sliced);
   CHECK_FALSE(h.on->halt(0).has_value());
 }
 
