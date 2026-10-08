@@ -12,6 +12,7 @@
 #include <chrono>
 #include <concepts>
 #include <exception>
+#include <format>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -452,6 +453,25 @@ auto machine_handle::wait_when(core::condition_set when, std::optional<std::uint
   if(when.members.empty() or when.members.size() > 64)
   {
     throw std::invalid_argument("a wait takes 1 to 64 conditions");
+  }
+  for(auto const& member : when.members)
+  {
+    auto const floating = member.encoding == core::condition::kind::floating;
+    if(member.size < 1 or member.size > 8 or (floating and member.size != 4 and member.size != 8))
+    {
+      throw std::invalid_argument("a condition reads 1 to 8 bytes, 4 or 8 for a float");
+    }
+    if(member.bits < 1 or member.bits > 64 or member.shift + member.bits > 8 * member.size)
+    {
+      throw std::invalid_argument("a condition's shift and bits must fit the bytes it reads");
+    }
+    if(not engine().mem().is_plain_memory(member.where, member.size))
+    {
+      throw std::invalid_argument(
+          std::format(
+              "a condition reads plain memory, not {:#010x}, a peripheral window or unmapped",
+              member.where));
+    }
   }
   return waiting_on({.when = std::move(when)}, for_ps, wait_shape::fired);
 }

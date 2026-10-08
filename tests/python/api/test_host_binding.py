@@ -2434,6 +2434,36 @@ def test_no_binding_runs_a_slice_directly() -> None:
     assert not hasattr(_core, "SliceArgs")
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("size", 0, "1 to 8 bytes"),
+        ("size", 9, "1 to 8 bytes"),
+        ("bits", 0, "shift and bits"),
+        ("shift", 60, "shift and bits"),
+        ("where", 0x4000_0000, "plain memory"),
+    ],
+)
+def test_a_raw_condition_wait_validates_its_members_natively(
+    machines: Machines, field: str, value: int, match: str
+) -> None:
+    m = machines()
+    member = _core.MemoryCondition()
+    member.where = 0x2000_8000
+    member.size = 4
+    member.shift = 0
+    member.bits = 32
+    setattr(member, field, value)
+    when = _core.ConditionSet()
+    when.members = [member]
+    m.start()
+    try:
+        with pytest.raises(ValueError, match=match):
+            m._handle.wait_when(when, None)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        m.halt()
+
+
 def test_a_body_error_leaving_running_wins_over_a_kept_log_error() -> None:
     m = timer_started_in_a_free_run()
     failing = FailOnce()

@@ -629,6 +629,8 @@ class MemoryRef[T: (int, float, bool)](Ref[T]):
             native.encoding = _core.ConditionKind.signed_int
             native.value = cast(int, value) & ((1 << 64) - 1)
         else:
+            if layout.bits == 1 and isinstance(value, bool):
+                value = int(value)
             self._integer(value, 0, (1 << layout.bits) - 1)
             native.encoding = _core.ConditionKind.unsigned_int
             native.value = cast(int, value)

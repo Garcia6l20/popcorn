@@ -1192,3 +1192,23 @@ def test_halt_from_another_machines_handler_is_refused_and_its_goal_goes_on(
     stop = asyncio.run(scenario())
     assert stop.reason is popcorn.StopReason.BUDGET
     assert len(refused) == 1
+
+
+def test_a_handler_stop_while_a_condition_holds_fires_nothing_parked(
+    m33: popcorn.MachineDescription,
+) -> None:
+    """The handler makes the condition hold and stops in one callback, with no event between in
+    which the condition could fire."""
+    m = exact(m33)
+    flag = 0x2000_8000
+    m.mem.u32[flag] = 0
+
+    def set_then_stop(call: popcorn.Call) -> popcorn.Return:
+        call.machine.mem.u32[flag] = 7
+        return call.stop()
+
+    m.intercept("SysTick_Handler", set_then_stop, once=True)
+    stopped = asyncio.run(m.wait_for(m.ref.mem.u32[flag].eq(7), for_=ms(10)))
+    assert stopped.reason is popcorn.StopReason.USER
+    assert m.mem.u32[flag] == 7
+    assert stopped.fired == ()

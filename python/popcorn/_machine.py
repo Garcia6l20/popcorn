@@ -1854,8 +1854,16 @@ class Machine:
         conditions = event if isinstance(event, Conditions) else any_of(event)
         members = conditions.members
         if not self._handle.session_open():
-            stop = await self.run(for_=for_, stop_when=event.ready)
-            held = stop.reason is StopReason.USER and event.ready(self)
+            stopped: list[bool] = []
+
+            def stop_when(machine: Machine) -> bool:
+                held = event.ready(machine)
+                if held:
+                    stopped.append(True)
+                return held
+
+            stop = await self.run(for_=for_, stop_when=stop_when)
+            held = stop.reason is StopReason.USER and bool(stopped)
             fired = tuple(member for member in members if member.ready(self)) if held else ()
             stop = dataclasses.replace(stop, fired=fired)
             self._last_stop = stop
