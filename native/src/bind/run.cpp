@@ -133,10 +133,12 @@ auto machine_handle::run_goal(
     }
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
-  return host_future_handle{std::make_shared<detail::future_request<core::goal_result>>(
-      std::move(future),
-      [](core::goal_result const& result) { return nb::cast(record(result.stopped)); },
-      cancel_goal(host_))};
+  return host_future_handle{
+      std::make_shared<detail::future_request<core::goal_result>>(
+          std::move(future),
+          [](core::goal_result const& result) { return nb::cast(record(result.stopped)); },
+          cancel_goal(host_)),
+      slot_};
 }
 
 auto machine_handle::call_goal(
@@ -177,14 +179,16 @@ auto machine_handle::call_goal(
     target.begin_call(frame);
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
-  return host_future_handle{std::make_shared<detail::future_request<core::goal_result>>(
-      std::move(future),
-      [ended](core::goal_result const& result) {
-        auto outcome    = *ended;
-        outcome.stopped = record(result.stopped);
-        return nb::cast(std::move(outcome));
-      },
-      cancel_goal(host_))};
+  return host_future_handle{
+      std::make_shared<detail::future_request<core::goal_result>>(
+          std::move(future),
+          [ended](core::goal_result const& result) {
+            auto outcome    = *ended;
+            outcome.stopped = record(result.stopped);
+            return nb::cast(std::move(outcome));
+          },
+          cancel_goal(host_)),
+      slot_};
 }
 
 void machine_handle::start()
@@ -217,13 +221,25 @@ auto machine_handle::park() -> nb::object
   }
   if(not ended)
   {
+    detail::flush_logs(*slot_->logs, detail::log_errors::raise);
     return nb::none();
   }
+  flush_logs_unraisable();
   if(auto const* const stopped = std::get_if<stop>(&*ended))
   {
     return nb::cast(record(*stopped));
   }
   return detail::python_exception(std::get<std::exception_ptr>(*ended));
+}
+
+void machine_handle::flush_logs_unraisable() const noexcept
+{
+  try
+  {
+    detail::flush_logs(*slot_->logs, detail::log_errors::report);
+  }
+  catch(...)
+  {}
 }
 
 auto machine_handle::unreported_end() -> nb::object
@@ -233,6 +249,7 @@ auto machine_handle::unreported_end() -> nb::object
     nb::gil_scoped_release const released;
     ended = host_->halt(core::member_id{});
   }
+  flush_logs_unraisable();
   if(not ended)
   {
     return nb::none();
@@ -279,20 +296,22 @@ auto machine_handle::waiting_on(
   auto       waiting = host_->wait(held, core::member_id{}, std::move(spec));
   auto       future  = waiting.future();
   auto const made    = delivered_->generation();
-  return host_future_handle{std::make_shared<detail::future_request<stop>>(
-      std::move(future),
-      [delivered = delivered_, made, masked, waiting](stop const& stopped) {
-        delivered->returned(made, waiting.ended());
-        if(masked)
-        {
-          return nb::object{nb::make_tuple(record(stopped), waiting.fired())};
-        }
-        return nb::cast(record(stopped));
-      },
-      [waiting] mutable { waiting.drop(); },
-      [delivered = delivered_, made](std::exception_ptr const& error) {
-        delivered->raised(made, error);
-      })};
+  return host_future_handle{
+      std::make_shared<detail::future_request<stop>>(
+          std::move(future),
+          [delivered = delivered_, made, masked, waiting](stop const& stopped) {
+            delivered->returned(made, waiting.ended());
+            if(masked)
+            {
+              return nb::object{nb::make_tuple(record(stopped), waiting.fired())};
+            }
+            return nb::cast(record(stopped));
+          },
+          [waiting] mutable { waiting.drop(); },
+          [delivered = delivered_, made](std::exception_ptr const& error) {
+            delivered->raised(made, error);
+          }),
+      slot_};
 }
 
 auto machine_handle::is_plain_memory(address addr, std::uint8_t size) const -> bool
@@ -355,8 +374,11 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
       }
     }
   };
-  return host_future_handle{std::make_shared<detail::future_request<vtime>>(
-      std::move(future), [](vtime const& ran) { return nb::cast(ran.ps); }, std::move(withdraw))};
+  return host_future_handle{
+      std::make_shared<detail::future_request<vtime>>(
+          std::move(future), [](vtime const& ran) { return nb::cast(ran.ps); },
+          std::move(withdraw)),
+      slot_};
 }
 
 auto machine_handle::parked(nb::object fn) -> nb::object

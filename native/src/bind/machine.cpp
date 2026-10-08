@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <mutex>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -388,7 +389,14 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
       python_owned_.push_back(python);
     }
   }
-  id_ = built->id();
+  id_                = built->id();
+  slot_->logs->token = log_token_bit | id_;
+  log_hook_.emplace(
+      engine_->add_log_sink(
+          [logs = slot_->logs->queue, engine = engine_](core::log_record const& record) {
+            logs->push(record, engine->virtual_clock().time());
+          }),
+      slot_);
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(std::move(built));
   auto hooks     = detail::python_thread_hooks(thread_live_, gil_entries_);
@@ -399,7 +407,7 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   }
   host_       = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
   slot_->host = host_;
-  detail::register_host(host_);
+  detail::register_host(host_, slot_);
 }
 
 machine_handle::~machine_handle()
@@ -620,6 +628,91 @@ auto machine_handle::model(std::string const& peripheral) const -> reflex::py::n
 auto machine_handle::id() const noexcept -> std::uint64_t
 {
   return id_;
+}
+
+void machine_handle::forward_logs(reflex::py::nb::object emit)
+{
+  struct flusher
+  {
+    std::mutex                   mutex;
+    std::atomic<std::thread::id> owner{};
+  };
+  auto const forward = detail::held_bare(std::move(emit));
+  auto const state   = std::make_shared<flusher>();
+  slot_->logs->flush = [logs = slot_->logs->queue, forward, state] {
+    if(state->owner.load() == std::this_thread::get_id())
+    {
+      return;
+    }
+    std::unique_lock lock{state->mutex, std::try_to_lock};
+    if(not lock.owns_lock())
+    {
+      reflex::py::nb::gil_scoped_release const released;
+      lock.lock();
+    }
+    state->owner.store(std::this_thread::get_id());
+    auto  batch = logs->take_all();
+    vtime last{};
+    try
+    {
+      while(not batch.empty())
+      {
+        auto next = std::move(batch.front());
+        batch.pop_front();
+        last = next.time;
+        try
+        {
+          (*forward)(next.record, next.time.ps);
+        }
+        catch(reflex::py::nb::python_error const& raised)
+        {
+          if(not raised.matches(PyExc_Exception))
+          {
+            batch.push_front(std::move(next));
+          }
+          throw;
+        }
+      }
+      if(auto const dropped = logs->take_dropped(); dropped > 0)
+      {
+        try
+        {
+          (*forward)(
+              core::log_record{
+                  .kind    = core::log_kind::model_warning,
+                  .message = std::format(
+                      "{} log records were dropped, the queue holds {}", dropped, logs->bound()),
+              },
+              last.ps);
+        }
+        catch(reflex::py::nb::python_error const& raised)
+        {
+          if(not raised.matches(PyExc_Exception))
+          {
+            logs->restore_dropped(dropped);
+          }
+          throw;
+        }
+      }
+    }
+    catch(...)
+    {
+      logs->restore_front(std::move(batch));
+      state->owner.store({});
+      throw;
+    }
+    state->owner.store({});
+  };
+}
+
+void machine_handle::flush_logs()
+{
+  detail::flush_logs(*slot_->logs, detail::log_errors::defer);
+}
+
+auto machine_handle::log_token() const noexcept -> std::uint64_t
+{
+  return slot_->logs->token;
 }
 
 auto machine_handle::gil_entries() const noexcept -> std::uint64_t

@@ -29,6 +29,8 @@ from popcorn import _core
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .conftest import CALLEE_ELF, DRIVER_ELF, M33_JSON, VIEWS_ELF, Machines, run_bounded
+from .models_example import Timer
+from .projects import MODEL_ELF, MODEL_JSON
 
 HANG = 10.0
 
@@ -428,6 +430,32 @@ def test_a_command_error_on_the_machine_thread_drops_its_frame_locals(
     with pytest.raises(ValueError, match="boom") as raised:
         run_bounded(scenario(), HANG)
     assert dict(raised_by(raised.value, "failing_body").f_locals) == {}
+
+
+def test_a_machine_with_a_python_model_runs_under_a_loop_that_yields_for_real() -> None:
+    """Its model needs the GIL on the machine's thread: a loop spinning on `asyncio.sleep(0)`
+    can starve it, one sleeping 1 ms between turns lets it run."""
+    m = popcorn.Machine(
+        popcorn.load_description(MODEL_JSON),
+        image=popcorn.Image.elf(MODEL_ELF),
+        models={"TIMER": Timer},
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    asyncio.run(m.call("start_timer", 10, budget=10_000))
+    irqs = m.ref.mem.u32[m.sym("timer_irqs")].ge(3)
+
+    async def scenario() -> popcorn.Stop:
+        m.start()
+        waiting = asyncio.create_task(m.wait_for(irqs))
+        while not waiting.done():
+            await asyncio.sleep(0.001)
+        return await waiting
+
+    stop = run_bounded(scenario(), HANG)
+    assert m.halt() is None
+    assert stop.reason is popcorn.StopReason.USER
+    assert m._handle.gil_entries() > 0  # pyright: ignore[reportPrivateUsage]
 
 
 class Payload:

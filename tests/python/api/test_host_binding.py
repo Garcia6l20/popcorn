@@ -4,8 +4,11 @@ the future bridge, destruction, shutdown and the lock order."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import functools
 import gc
+import logging
 import pathlib
 import subprocess
 import sys
@@ -21,9 +24,9 @@ from popcorn import _core
 from popcorn._host import awaited
 from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
-from popcorn.units import VirtualTime
+from popcorn.units import VirtualTime, us
 
-from .conftest import DRIVER_ELF, M33_JSON, Machines
+from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines
 from .devices_example import Eeprom24
 from .projects import MODEL_ELF, MODEL_JSON
 
@@ -123,6 +126,258 @@ def test_the_first_callback_creates_the_thread_state_in_its_own_gil_entry(
         gc.enable()
     assert len(hits) > 1000
     assert gil_entries(m) == len(hits)
+
+
+def timer_started_in_a_free_run() -> popcorn.Machine:
+    """A machine of the model firmware with no Python model, parked to run `start_timer(10)`
+    then return into the reset loop: its writes of TIMER.ARR and TIMER.CR, two unmodelled
+    registers, log two records."""
+    m = popcorn.Machine(popcorn.load_description(MODEL_JSON), image=popcorn.Image.elf(MODEL_ELF))
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    m.reg.r0 = 10
+    m.reg.lr = m.sym("ready") | 1
+    m.reg.pc = m.sym("start_timer") & ~1
+    return m
+
+
+def logged_timer(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "popcorn_peripheral", None) == "TIMER"]
+
+
+def never(m: popcorn.Machine) -> popcorn.Condition:
+    return m.ref.mem.u32[m.sym("sink")].eq(0xDEAD_BEEF)
+
+
+def test_a_free_run_queues_its_log_records_for_the_next_await(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    m = timer_started_in_a_free_run()
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        m.start()
+        stop = asyncio.run(m.wait_for(never(m), for_=us(50)))
+        assert stop.reason is popcorn.StopReason.TIME
+        logged = logged_timer(caplog)
+        assert m.halt() is None
+    assert [r.popcorn_register for r in logged] == ["ARR", "CR"]  # type: ignore[attr-defined]
+    start = m.symbols["start_timer"]
+    for record in logged:
+        fields = vars(record)
+        assert start.value & ~1 <= fields["popcorn_pc"] < (start.value & ~1) + start.size
+        assert isinstance(fields["popcorn_time"], VirtualTime)
+        assert 0 < fields["popcorn_time"].ps <= stop.time.ps
+        assert record.threadName == threading.current_thread().name
+    assert gil_entries(m) == 0
+
+
+def test_records_queued_before_the_first_await_reach_logging_during_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The records land while no loop waits, before the first await registers the loop's waker:
+    that registration wakes the loop for them, so they arrive while the wait still runs."""
+    m = timer_started_in_a_free_run()
+
+    async def scenario() -> bool:
+        m.start()
+        time.sleep(0.05)
+        waiting = asyncio.create_task(m.wait_for(never(m), for_=us(5_000_000)))
+        while not logged_timer(caplog) and not waiting.done():
+            await asyncio.sleep(0.005)
+        arrived_first = not waiting.done()
+        waiting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiting
+        return arrived_first
+
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        assert asyncio.run(scenario())
+    m.halt()
+
+
+class FailOnce(logging.Filter):
+    """Raises on the first record it sees, passes the others."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("filter failed")
+        return True
+
+
+def test_a_raising_log_filter_raises_at_the_flush_and_keeps_the_rest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    m = timer_started_in_a_free_run()
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(failing)
+    try:
+        with caplog.at_level(logging.WARNING, logger="popcorn"):
+            m.start()
+            with pytest.raises(RuntimeError, match="filter failed"):
+                asyncio.run(m.wait_for(never(m), for_=us(50)))
+            assert m.halt() is None
+            logged = logged_timer(caplog)
+    finally:
+        logger.removeFilter(failing)
+    assert [r.popcorn_register for r in logged] == ["CR"]  # type: ignore[attr-defined]
+    assert m.instructions > 0
+
+
+def queued_without_a_flush(m: popcorn.Machine) -> None:
+    """Start `m` and return once its two TIMER records are queued, without forwarding them: a
+    raw wait read through a done callback flushes nothing."""
+    done = threading.Event()
+    m.start()
+    future = m._handle.wait(None, us(50).ps)  # pyright: ignore[reportPrivateUsage]
+    future.add_done_callback(done.set)
+    assert done.wait(10)
+
+
+def test_a_loop_flush_keeps_a_filter_error_for_the_next_raising_flush(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    m = timer_started_in_a_free_run()
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(failing)
+    try:
+        with caplog.at_level(logging.WARNING, logger="popcorn"):
+            queued_without_a_flush(m)
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+            assert failing.failed
+            assert logged_timer(caplog) == []
+            with pytest.raises(RuntimeError, match="filter failed"):
+                m.halt()
+            assert logged_timer(caplog) == []
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+            logged = logged_timer(caplog)
+    finally:
+        logger.removeFilter(failing)
+    assert [r.popcorn_register for r in logged] == ["CR"]  # type: ignore[attr-defined]
+
+
+def test_a_kept_log_error_is_reported_when_its_machine_is_collected(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reported: list[str] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(repr(raised.exc_value))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    m = timer_started_in_a_free_run()
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(failing)
+    try:
+        with caplog.at_level(logging.WARNING, logger="popcorn"):
+            queued_without_a_flush(m)
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+            assert failing.failed
+            probe = weakref.ref(m)
+            del m
+            gc.collect()
+            assert probe() is None
+    finally:
+        logger.removeFilter(failing)
+    assert reported == ["RuntimeError('filter failed')"]
+
+
+def gpio_holes(description: popcorn.MachineDescription, count: int) -> list[int]:
+    """Byte addresses of GPIO windows that no register covers, each logged once when read."""
+    holes: list[int] = []
+    for port in "ABCDEFGHI":
+        found = next(p for p in description.peripherals if p.name == f"GPIO{port}")
+        taken = {r.offset + k for r in found.registers for k in range(4)}
+        holes.extend(found.base + offset for offset in range(found.size) if offset not in taken)
+    assert len(holes) >= count
+    return holes[:count]
+
+
+def test_a_parked_access_sends_a_log_error_to_the_unraisable_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from popcorn.stm32 import mcu
+
+    reported: list[BaseException | None] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(raised.exc_value)
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    description = mcu("STM32U575QGIx")
+    m = popcorn.Machine(description)
+    (hole,) = gpio_holes(description, 1)
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(failing)
+    try:
+        assert m.mem.u8[hole] == 0
+    finally:
+        logger.removeFilter(failing)
+    assert len(reported) == 1 and "filter failed" in str(reported[0])
+
+
+def test_a_flush_forwards_only_the_records_queued_when_it_began(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from popcorn.stm32 import mcu
+
+    description = mcu("STM32U575QGIx")
+    m = popcorn.Machine(description)
+    holes = gpio_holes(description, 50)
+    reads = iter(holes[1:])
+
+    class Reading(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            following = next(reads, None)
+            if following is not None:
+                m.mem.u8[following]
+
+    reading = Reading()
+    logger = logging.getLogger("popcorn")
+    logger.addHandler(reading)
+    try:
+        with caplog.at_level(logging.WARNING, logger="popcorn"):
+            m._handle.parked(lambda: m.mem.u8[holes[0]])  # pyright: ignore[reportPrivateUsage]
+            first = len(caplog.records)
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+            second = len(caplog.records)
+    finally:
+        logger.removeHandler(reading)
+        m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+    assert (first, second) == (1, 2)
+
+
+def test_past_4096_queued_log_records_the_rest_are_counted_in_one_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from popcorn.stm32 import mcu
+
+    description = mcu("STM32U575QGIx")
+    m = popcorn.Machine(description)
+    holes: list[int] = []
+    for port in "ABCDEFGHI":
+        found = next(p for p in description.peripherals if p.name == f"GPIO{port}")
+        taken = {r.offset + k for r in found.registers for k in range(4)}
+        holes.extend(found.base + offset for offset in range(found.size) if offset not in taken)
+    assert len(holes) >= 5000
+
+    def touch() -> None:
+        for address in holes[:5000]:
+            m.mem.u8[address]
+
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        m._handle.parked(touch)  # pyright: ignore[reportPrivateUsage]
+    messages = [r.getMessage() for r in caplog.records if r.name == "popcorn"]
+    assert len(messages) == 4097
+    assert messages[0].endswith(f"at offset {holes[0] - 0x4202_0000:#x}, no register there")
+    assert messages[-1].endswith("904 log records were dropped, the queue holds 4096")
 
 
 def test_a_handler_runs_on_the_machine_thread(machines: Machines) -> None:
@@ -1218,3 +1473,108 @@ def test_an_interpreter_exits_with_a_free_running_machine_held_by_its_model() ->
         timeout=10,
     )
     assert child.returncode == 0, child.stderr
+
+
+def test_a_body_error_leaving_running_wins_over_a_kept_log_error() -> None:
+    m = timer_started_in_a_free_run()
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+
+    async def scenario() -> None:
+        async with m.running():
+            logger.addFilter(failing)
+            time.sleep(0.05)
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+            assert failing.failed
+            raise asyncio.CancelledError("the body")
+
+    try:
+        with pytest.raises(asyncio.CancelledError, match="the body") as caught:
+            asyncio.run(scenario())
+    finally:
+        logger.removeFilter(failing)
+    assert any("filter failed" in note for note in caught.value.__notes__)
+    assert not m.busy
+
+
+class InterruptOnce(logging.Handler):
+    """Raises KeyboardInterrupt on the first record it handles, records the others."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupted = False
+        self.seen: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt
+        self.seen.append(getattr(record, "popcorn_register", ""))
+
+
+def test_a_ctrl_c_in_a_log_handler_propagates_and_keeps_its_record() -> None:
+    m = timer_started_in_a_free_run()
+    handler = InterruptOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addHandler(handler)
+    try:
+        m.start()
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(m.wait_for(never(m), for_=us(50)))
+        assert m.halt() is None
+    finally:
+        logger.removeHandler(handler)
+    assert handler.seen == ["ARR", "CR"]
+
+
+def test_an_always_raising_filter_sees_the_dropped_count_a_bounded_number_of_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5000 records overflow the 4096 bound. Each flush the filter breaks ends there and drops
+    what it was forwarding, the dropped-count record included, so the loop settles."""
+    from popcorn.stm32 import mcu
+
+    def ignore(raised: sys.UnraisableHookArgs) -> None:
+        del raised
+
+    monkeypatch.setattr(sys, "unraisablehook", ignore)
+    description = mcu("STM32U575QGIx")
+    m = popcorn.Machine(description, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    holes = gpio_holes(description, 5000)
+    calls = {"all": 0, "dropped": 0}
+
+    class Raising(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            calls["all"] += 1
+            if "were dropped" in record.getMessage():
+                calls["dropped"] += 1
+            raise RuntimeError("filter")
+
+    def touch(machine: popcorn.Machine) -> None:
+        for hole in holes:
+            machine.mem.u8[hole]
+
+    raising = Raising()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(raising)
+
+    async def scenario(machine: popcorn.Machine) -> None:
+        with contextlib.suppress(RuntimeError):
+            await machine.run(for_=us(200))
+        settled = -1
+        while settled != calls["all"]:
+            settled = calls["all"]
+            await asyncio.sleep(0.1)
+
+    try:
+        m._handle.parked(functools.partial(touch, m))  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(asyncio.wait_for(scenario(m), 20))
+    finally:
+        logger.removeFilter(raising)
+    with contextlib.suppress(RuntimeError):
+        m.halt()
+    del m
+    gc.collect()
+    assert calls["dropped"] <= 1
+    assert calls["all"] <= 5001

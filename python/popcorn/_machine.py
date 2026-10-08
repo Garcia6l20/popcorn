@@ -64,7 +64,7 @@ from popcorn._hooks import (
     WatchHit,
     WatchKind,
 )
-from popcorn._host import awaited
+from popcorn._host import awaited, watch_logs
 from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
@@ -338,7 +338,7 @@ class Machine:
         r0, word = await m.read(m.ref.reg.r0, m.ref.mem.u32[addr])
         await m.write((m.ref.periph.ADC1.input(5).volts, 1.5), at=deadline)
 
-    Handlers, Python models, bus devices, sinks, pin listeners and `stop_when` run on the
+    Handlers, Python models, bus devices, pin listeners and `stop_when` run on the
     machine's thread holding the GIL and use the sync accessors, mid-slice. One that touches
     another machine raises MachineRunning when another thread holds that machine's lock at that
     moment, even while it is parked. Each callback runs in a copy of the context taken when its
@@ -349,7 +349,22 @@ class Machine:
     waits up to `sys.getswitchinterval()`, 5 ms by default, see `start`. The machine's thread
     gets its Python thread state at its first callback: a profile or trace function set by
     `threading.setprofile_all_threads` or `settrace_all_threads` before then does not reach it.
-    A machine only reachable
+    The machine's thread takes the GIL only to run them: a machine without Python models,
+    devices or hooks runs, waits and wakes the awaiting loop through the loop's eventfd with no
+    GIL, also under a task spinning on `asyncio.sleep(0)`. One with them needs its loop to yield
+    for real, an `await` on I/O or an `asyncio.sleep` with a positive delay: a loop spinning on
+    `asyncio.sleep(0)` starves its callbacks. A loop without `add_reader` is woken by
+    `call_soon_threadsafe`, which takes the GIL on the machine's thread.
+
+    Log records, unmodelled register accesses and model warnings among them, reach the `popcorn`
+    logger at WARNING with their virtual time in `popcorn_time`, never on the machine's thread.
+    The machine queues them and the awaiting loop forwards them, or the caller at its next
+    completed await, `halt`, park or parked access, in order, each flush the records queued when
+    it began. A filter or handler that raises stops the flush, and the records after it wait
+    for the next one. Its error is raised from the await, `halt` or park that flushed, or, for
+    the loop's flush, from the machine's next one. A parked access already took effect, so its
+    flush sends the error to `sys.unraisablehook`. Past 4096 queued records the rest are
+    counted and one WARNING reports how many were dropped. A machine only reachable
     through a cycle, an attribute of its Python model or device included, is collected parked,
     running or not: the collection halts a free run and sends what ended it by itself to
     `sys.unraisablehook`, unless a wait already returned or raised it. A model, device or hook
@@ -385,7 +400,6 @@ class Machine:
         "_installed",
         "_irqs",
         "_last_stop",
-        "_log_hook",
         "_logs",
         "_memory",
         "_model_context",
@@ -552,8 +566,8 @@ class Machine:
         self._coverage = MachineCoverage(self._handle, lambda: self._images, self._require_stopped)
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
         self._callback_table = CallbackTable()
-        log_key = self._callback_table.add(functools.partial(forward_log, description.part))
-        self._log_hook = self._handle.add_log_sink(Relay(self._callback_table, log_key, quiet=True))
+        self._handle.forward_logs(functools.partial(forward_log, description.part))
+        watch_logs(self._handle.log_token(), self)
         self._irqs = Irqs(description)
         self._arena = (
             None
@@ -1801,7 +1815,9 @@ class Machine:
 
         Its Python models, handlers and bus devices run slowly while the test thread computes in
         Python: await, block in a C call or sleep instead, or lower `sys.setswitchinterval` in
-        the test, 100 us brings a dense callback from 0.3 to 0.7 ms to 12 us.
+        the test, 100 us brings a dense callback from 0.3 to 0.7 ms to 12 us. A loop spinning
+        on `asyncio.sleep(0)` starves them, see the class: the machine itself and its waits need
+        no GIL.
 
         Raises:
             MachineBusy: A run, step, call, wait or free run is active.
@@ -1847,6 +1863,11 @@ class Machine:
             return None if ended == surfaced else _stop_error(ended)
         return ended
 
+    def _flush_logs(self) -> None:
+        """Forward the machine's queued log records to `logging`, in order, keeping a filter or
+        handler error for the next await, `halt` or park."""
+        self._handle.flush_logs()
+
     def _halted(self) -> Stop | BaseException | None:
         self._refuse_on_host()
         ended = self._ended(self._handle.halt())
@@ -1891,8 +1912,15 @@ class Machine:
         try:
             yield
         except BaseException as error:
-            ended = self._halted()
-            if isinstance(ended, Stop):
+            halting: Exception | None = None
+            ended: Stop | BaseException | None = None
+            try:
+                ended = self._halted()
+            except Exception as failed:
+                halting = failed
+            if halting is not None:
+                error.add_note(f"leaving the free run raised: {halting!r}")
+            elif isinstance(ended, Stop):
                 error.add_note(f"background run stopped: {ended}")
             elif ended is not None and ended is not error:
                 error.add_note(f"background run raised: {ended!r}")

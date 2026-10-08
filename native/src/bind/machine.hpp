@@ -33,6 +33,9 @@ namespace popcorn::bind
 {
 namespace py = reflex::py;
 
+/** @brief Bit set in every log token, so it never equals a request token. */
+inline constexpr std::uint64_t log_token_bit = std::uint64_t{1} << 63;
+
 /** @brief Machine options the facade exposes, the subset of core::machine_options Python sets. */
 struct[[= py::rename{"MachineConfig"}]] machine_config
 {
@@ -762,12 +765,33 @@ public:
   [[= py::doc{"Drop every record of the trace ring."}]] void clear_ring();
 
   /**
-   * @brief Calls a Python callable with each machine log record, the GIL taken.
-   * @param sink Called with a LogRecord.
-   * @throws machine_running while a slice runs, handlers included.
+   * @brief Forwards the machine's log records to Python. The machine's thread queues each record
+   *        with its virtual time and no GIL, at most 4096 of them, later ones counted. A thread
+   *        holding the GIL and no host mutex forwards the queue in order, through @p emit: the
+   *        loop a request of this machine was last awaited on, woken through its LoopWaker with
+   *        the log token, and every caller at its next completed request, halt, park, parked
+   *        access or parked section. Past the bound one record reports the dropped count.
+   * @param emit Called with a LogRecord and its virtual time in picoseconds. An exception it
+   *        raises leaves the flush, the records after it kept for the next one. Raised from an
+   *        await, halt() or park() with no end, sent to sys.unraisablehook after a parked access,
+   *        kept for the next raising flush by flush_logs(). Each flush forwards the records
+   *        queued when it began, a flush nested in a handler forwards nothing. Called once, at
+   *        construction.
    */
-  [[= py::doc{"Call sink(LogRecord) for each machine log record."}]] auto
-      add_log_sink(reflex::py::nb::object sink) -> hook;
+  [[= py::doc{"Forward each queued log record to emit(LogRecord, time_ps), in order."}]] void
+      forward_logs(reflex::py::nb::object emit);
+
+  /**
+   * @brief Forwards the queued log records now, as forward_logs() describes, unless the thread
+   *        is a host thread or holds a host mutex. A log filter or handler error is kept and
+   *        raised by the machine's next await, halt() or park().
+   */
+  [[= py::doc{"Forward the queued log records now, keeping an error for the next await."}]] void
+      flush_logs();
+
+  /** @brief Token the machine's log queue wakes a loop with: log_token_bit | id(). */
+  [[= py::doc{"Token the machine's log queue wakes a loop with."}]] [[nodiscard]] auto
+      log_token() const noexcept -> std::uint64_t;
 
   /**
    * @brief Times the machine's thread entered the GIL: the first creates its Python thread
@@ -806,11 +830,13 @@ private:
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
   [[nodiscard]] auto lock_for_request() const -> core::held_lock;
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;
+  void               flush_logs_unraisable() const noexcept;
   auto open_pty(std::string name, std::unique_ptr<detail::pty_link> link) -> pty_handle;
 
   template <typename Body>
   auto access(Body&& body) const -> std::invoke_result_t<Body, core::machine&>
   {
+    detail::logs_flushed const flushed{*slot_};
     return detail::host_access(*host_, std::forward<Body>(body));
   }
 
@@ -830,6 +856,7 @@ private:
   std::shared_ptr<detail::delivered_end>      delivered_;
   std::shared_ptr<std::atomic<bool>>          collected_;
   std::shared_ptr<std::atomic<std::uint64_t>> gil_entries_;
+  std::optional<hook>                         log_hook_;
   std::map<std::string, detail::usb_hubs>     hubs_;
   core::machine*                              engine_{};
   std::uint64_t                               id_{};

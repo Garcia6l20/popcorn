@@ -6,6 +6,7 @@ import asyncio
 import functools
 import gc
 import itertools
+import logging
 import traceback
 import warnings
 import weakref
@@ -239,6 +240,23 @@ def test_an_unmodelled_access_under_strict_rules_is_a_model_error() -> None:
         "DATA",
         0,
     )
+
+
+def test_a_strict_free_run_logs_its_unmodelled_access_before_the_model_error_is_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    m = machine({}, strict_peripherals=True)
+    m.reg.lr = m.sym("ready") | 1
+    m.reg.pc = m.sym("touch_unmodelled") & ~1
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        m.start()
+        with pytest.raises(popcorn.ModelError):
+            asyncio.run(m.wait_for(m.ref.mem.u32[m.sym("sink")].eq(1), for_=ms(1)))
+        logged = [r for r in caplog.records if getattr(r, "popcorn_register", None) == "DATA"]
+        assert len(logged) == 1
+        with pytest.raises(popcorn.ModelError):
+            m.halt()
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
 
 
 def test_dropping_the_machine_frees_the_model() -> None:

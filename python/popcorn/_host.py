@@ -7,6 +7,7 @@ import contextlib
 import itertools
 import weakref
 from collections.abc import Callable
+from typing import Protocol
 
 from popcorn import _core
 
@@ -25,11 +26,34 @@ class _Waker:
         )
 
     def drain(self) -> None:
-        """Resolve the futures whose tokens were queued, in completion order."""
+        """Resolve the futures whose tokens were queued, in completion order, then forward the
+        log records of the machines whose log tokens were. A log filter or handler error is
+        kept by its machine and raised from its next await, `halt` or park."""
+        logged: list[_LogOwner] = []
         for token in self.native.drain():
+            owner = _LOGGED.get(token)
+            if owner is not None:
+                logged.append(owner)
+                continue
             waiting = self.waiting.pop(token, None)
             if waiting is not None and not waiting.done():
                 waiting.set_result(None)
+        for owner in logged:
+            owner._flush_logs()  # pyright: ignore[reportPrivateUsage]
+
+
+class _LogOwner(Protocol):
+    """What forwards a machine's queued log records."""
+
+    def _flush_logs(self) -> None: ...
+
+
+_LOGGED: weakref.WeakValueDictionary[int, _LogOwner] = weakref.WeakValueDictionary()
+
+
+def watch_logs(token: int, owner: _LogOwner) -> None:
+    """Forward the log records of `owner` when a loop waker drains `token`, its log token."""
+    _LOGGED[token] = owner
 
 
 _WAKERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Waker | None] = (

@@ -20,10 +20,16 @@ namespace nb = reflex::py::nb;
 
 constexpr auto signal_check = std::chrono::milliseconds{50};
 
+struct registered_host
+{
+  std::weak_ptr<core::host>             host;
+  std::weak_ptr<detail::log_forwarding> logs;
+};
+
 struct host_registry
 {
-  mutable std::mutex                     mutex;
-  std::vector<std::weak_ptr<core::host>> hosts;
+  mutable std::mutex           mutex;
+  std::vector<registered_host> hosts;
 
   [[nodiscard]] auto lock() const -> core::link_guard
   {
@@ -128,18 +134,21 @@ auto python_thread_hooks(
   };
 }
 
-void register_host(std::shared_ptr<core::host> const& on)
+void register_host(std::shared_ptr<core::host> const& on, host_ref const& slot)
 {
   auto const& hosts = registry();
-  link_locked(hosts, [&](core::link_guard const&) { registry().hosts.push_back(on); });
+  link_locked(hosts, [&](core::link_guard const&) {
+    registry().hosts.push_back({.host = on, .logs = slot->logs});
+  });
 }
 
 void unregister_host(std::shared_ptr<core::host> const& on)
 {
   auto const& hosts = registry();
   link_locked(hosts, [&](core::link_guard const&) {
-    std::erase_if(registry().hosts, [&on](std::weak_ptr<core::host> const& entry) {
-      return entry.expired() or not(entry.owner_before(on) or on.owner_before(entry));
+    std::erase_if(registry().hosts, [&on](registered_host const& entry) {
+      return entry.host.expired()
+          or not(entry.host.owner_before(on) or on.owner_before(entry.host));
     });
   });
 }
@@ -158,8 +167,10 @@ void require_host_start()
 }
 }
 
-host_future_handle::host_future_handle(std::shared_ptr<detail::pending_request> request)
-    : request_{std::move(request)}
+host_future_handle::host_future_handle(
+    std::shared_ptr<detail::pending_request> request,
+    detail::host_ref                         machine)
+    : request_{std::move(request)}, logs_{machine == nullptr ? nullptr : machine->logs}
 {}
 
 auto host_future_handle::done() const -> bool
@@ -170,6 +181,10 @@ auto host_future_handle::done() const -> bool
 auto host_future_handle::result(std::optional<double> timeout) -> nb::object
 {
   detail::wait_releasing_gil(*request_, timeout);
+  if(logs_ != nullptr)
+  {
+    detail::flush_logs(*logs_, detail::log_errors::raise);
+  }
   return request_->value();
 }
 
@@ -214,6 +229,10 @@ auto loop_waker_handle::native() const -> std::weak_ptr<core::loop_waker>
 
 void host_future_handle::notify(loop_waker_handle const& waker, std::uint64_t token)
 {
+  if(logs_ != nullptr)
+  {
+    logs_->queue->wake_through(waker.native(), logs_->token);
+  }
   request_->on_done([target = waker.native(), token]() noexcept {
     if(auto const live = target.lock())
     {
@@ -230,17 +249,21 @@ void host_future_handle::cancel()
 void shutdown_hosts()
 {
   hosts_shut_down.store(true);
-  auto const& hosts = registry();
-  auto const  live  = detail::link_locked(hosts, [&](core::link_guard const&) {
-    std::vector<std::shared_ptr<core::host>> found;
+  auto const&                                          hosts = registry();
+  std::vector<std::shared_ptr<core::host>>             live;
+  std::vector<std::shared_ptr<detail::log_forwarding>> logs;
+  detail::link_locked(hosts, [&](core::link_guard const&) {
     for(auto const& entry : registry().hosts)
     {
-      if(auto on = entry.lock())
+      if(auto on = entry.host.lock())
       {
-        found.push_back(std::move(on));
+        live.push_back(std::move(on));
+      }
+      if(auto forwarding = entry.logs.lock())
+      {
+        logs.push_back(std::move(forwarding));
       }
     }
-    return found;
   });
   {
     nb::gil_scoped_release const released;
@@ -248,6 +271,10 @@ void shutdown_hosts()
     {
       on->close();
     }
+  }
+  for(auto const& forwarding : logs)
+  {
+    detail::flush_logs(*forwarding, detail::log_errors::report);
   }
 }
 

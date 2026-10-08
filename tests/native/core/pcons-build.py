@@ -183,6 +183,11 @@ test_loop_waker = add_doctest(
 )
 test_loop_waker.private.include_dirs.append(project_dir / "native" / "src" / "core")
 
+test_log_queue = add_doctest(
+    "core-log-queue", [here / "test_log_queue.cpp", *tsan_sources], [test_support, core]
+)
+test_log_queue.private.include_dirs.append(project_dir / "native" / "src" / "core")
+
 test_facade_support = add_doctest(
     "core-facade-support", [here / "test_facade_support.cpp"], [test_support, core], env=m33_env
 )

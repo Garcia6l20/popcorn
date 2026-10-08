@@ -212,17 +212,4 @@ void machine_handle::clear_ring()
 {
   access([](core::machine& target) { target.trace().clear(target.virtual_clock().now()); });
 }
-
-auto machine_handle::add_log_sink(nb::object sink) -> hook
-{
-  auto callable = detail::held_bare(std::move(sink));
-  return access([&](core::machine& target) {
-    return hook{
-        target.add_log_sink([callable](core::log_record const& record) {
-          detail::gil_entry const locked;
-          detail::call_python([&] { return (*callable)(record); });
-        }),
-        slot_};
-  });
-}
 }

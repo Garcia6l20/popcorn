@@ -166,8 +166,9 @@ auto python_thread_hooks(
     std::shared_ptr<std::atomic<bool>>          live,
     std::shared_ptr<std::atomic<std::uint64_t>> gil_entries) -> core::host_hooks;
 
-/** @brief Adds @p on to the registry shutdown_hosts() closes. */
-void register_host(std::shared_ptr<core::host> const& on);
+/** @brief Adds @p on to the registry shutdown_hosts() closes, with the slot whose log records
+ * it forwards then. */
+void register_host(std::shared_ptr<core::host> const& on, host_ref const& slot);
 
 /** @brief Removes @p on from the registry, and every expired entry, taking no ownership. */
 void unregister_host(std::shared_ptr<core::host> const& on);
@@ -224,14 +225,19 @@ public:
   /**
    * @brief Wraps a request.
    * @param request The request.
+   * @param machine The slot of the machine it runs on, whose log records result() forwards
+   *        first and whose log queue notify() points at the loop, null for none.
    */
-  [[= py::skip]] explicit host_future_handle(std::shared_ptr<detail::pending_request> request);
+  [[= py::skip]] explicit host_future_handle(
+      std::shared_ptr<detail::pending_request> request,
+      detail::host_ref                         machine = {});
 
   /** @brief Whether the request completed. */
   [[= py::doc{"Whether the request completed."}]] [[nodiscard]] auto done() const -> bool;
 
   /**
-   * @brief The result, waiting with the GIL released.
+   * @brief The result, waiting with the GIL released, after forwarding the machine's queued log
+   *        records.
    * @param timeout Seconds, None for no limit.
    * @throws TimeoutError past @p timeout.
    * @throws machine_running when not done, from a callback or a parked section.
@@ -250,7 +256,8 @@ public:
 
   /**
    * @brief Queues @p token on @p waker once on completion, on the completing thread without the
-   *        GIL, at once when already done. A waker destroyed meanwhile is skipped.
+   *        GIL, at once when already done. A waker destroyed meanwhile is skipped. The machine's
+   *        log queue wakes @p waker from now on, with its log token.
    * @param waker The loop's waker, held weakly.
    * @param token What its drain() returns for this request.
    */
@@ -262,6 +269,7 @@ public:
 
 private:
   std::shared_ptr<detail::pending_request> request_;
+  std::shared_ptr<detail::log_forwarding>  logs_;
 };
 
 /** @brief Closes and joins every live host, and refuses to start new host threads. */

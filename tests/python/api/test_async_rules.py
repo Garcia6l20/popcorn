@@ -99,26 +99,30 @@ def test_cancelling_a_run_leaves_the_machine_resumable(machines: Machines) -> No
 
 
 def test_the_event_loop_keeps_ticking_during_a_run(machines: Machines) -> None:
-    m = machines()
-    ticked = threading.Event()
-    ticks = 0
+    """A loop spinning on `asyncio.sleep(0)` never blocks, so a machine thread waiting for the
+    GIL would never get it. A machine without Python callbacks needs none: it runs and its wait
+    wakes the spinning loop through the loop's eventfd."""
+    m = machines(slice_instructions=1_000)
+    never = m.ref.mem.u32[m.sym("alu_value")].eq(1)
 
-    async def ticker() -> None:
-        nonlocal ticks
+    async def scenario() -> tuple[popcorn.Stop, int]:
+        m.start()
+        ticks = 0
         while ticks < 100:
             await asyncio.sleep(0)
             ticks += 1
-        ticked.set()
+        waiting = asyncio.create_task(m.wait_for(never, for_=ms(1)))
+        while not waiting.done():
+            await asyncio.sleep(0)
+            ticks += 1
+        return await waiting, ticks
 
-    async def scenario() -> popcorn.Stop:
-        tick = asyncio.create_task(ticker())
-        stop = await m.run(stop_when=lambda _: ticked.is_set())
-        await tick
-        return stop
-
-    stop = run_bounded(scenario(), HANG)
-    assert stop.reason is popcorn.StopReason.USER
+    stop, ticks = run_bounded(scenario(), HANG)
+    assert m.halt() is None
+    assert stop.reason is popcorn.StopReason.TIME
     assert stop.instructions > 0
+    assert ticks > 100
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
 
 
 def test_running_advances_the_machine_in_the_background(machines: Machines) -> None:

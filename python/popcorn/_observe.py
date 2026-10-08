@@ -12,6 +12,7 @@ from popcorn._enums import StopReason
 from popcorn._image import Image, Location
 from popcorn.coverage import Coverage
 from popcorn.trace import Block, Call, Irq, Mem, Mmio, Record, Stop, TraceKind, read
+from popcorn.units import VirtualTime
 
 _LOG = logging.getLogger("popcorn")
 
@@ -258,8 +259,9 @@ def collapsed(lines: Sequence[tuple[int, str]]) -> list[str]:
     return out
 
 
-def forward_log(part: str, record: _core.LogRecord) -> None:
-    """Send a machine log record to the `popcorn` logger at WARNING, its fields as extras."""
+def forward_log(part: str, record: _core.LogRecord, time_ps: int) -> None:
+    """Send a machine log record to the `popcorn` logger at WARNING, its fields and the virtual
+    time it was logged at as extras."""
     _LOG.warning(
         "%s: %s",
         part,
@@ -271,5 +273,6 @@ def forward_log(part: str, record: _core.LogRecord) -> None:
             "popcorn_offset": record.offset,
             "popcorn_pc": record.pc,
             "popcorn_write": record.write,
+            "popcorn_time": VirtualTime(time_ps),
         },
     )

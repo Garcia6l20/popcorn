@@ -1,6 +1,8 @@
 #pragma once
 
+#include "../core/log_queue.hpp"
 #include "casters.hpp"
+#include "frames.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
@@ -12,7 +14,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -189,6 +193,34 @@ inline auto require_owned(core::held_lock held) -> core::held_lock
   return held;
 }
 
+/** @brief What a log filter or handler error does at a flush. */
+enum class log_errors
+{
+  /** @brief Raised from the flush: an await, halt() or park() with no end. */
+  raise,
+  /** @brief Sent to sys.unraisablehook: after an access that took effect. */
+  report,
+  /** @brief Kept for the next raising flush of the machine: the loop's drain. */
+  defer,
+};
+
+/**
+ * @brief Where one machine's log records go: the queue its thread fills, the token it wakes a
+ *        loop with, the forwarder Python installs once, and an error a deferred flush kept. The
+ *        forwarder and the kept error are read and written with the GIL held.
+ */
+struct log_forwarding
+{
+  /** @brief The records, appended with no GIL by the thread that runs the machine. */
+  std::shared_ptr<core::log_queue> queue = std::make_shared<core::log_queue>();
+  /** @brief Token the queue wakes a loop with, distinct from every request token. */
+  std::uint64_t token{};
+  /** @brief Forwards one batch of records to Python in order, empty until installed. */
+  std::function<void()> flush{};
+  /** @brief The first error a deferred flush met, raised by the next raising flush. */
+  std::exception_ptr deferred{};
+};
+
 /** @brief The host of a machine, empty until its handle hands the machine over. */
 struct host_slot
 {
@@ -201,6 +233,110 @@ struct host_slot
   mutable std::vector<std::move_only_function<void()>> retired{};
   /** @brief Whether retired may hold a removal, read without the mutex. */
   mutable std::atomic<bool> retiring{false};
+  /** @brief Where the machine's log records go, shared with its HostFutures. */
+  std::shared_ptr<log_forwarding> logs = std::make_shared<log_forwarding>();
+};
+
+/**
+ * @brief Forwards the queued log records of @p logs to Python, on a thread holding the GIL and
+ *        no host mutex, never on a host thread: the records wait there for the next flush.
+ * @param logs The machine's log forwarding.
+ * @param errors What a log filter or handler error does: raised, after an error a deferred flush
+ *        kept, reported to sys.unraisablehook with a kept error before it, or kept for the next
+ *        raising flush. A kept error is detached from its frames by release_frames() first: held
+ *        natively, its frames would keep the machine they reach out of the collector's sight.
+ *        A `__context__` whose frames still run is kept as it is, so a flush made inside an
+ *        `except` block keeps that handler's frames until the error is raised or reported.
+ *        A KeyboardInterrupt or SystemExit is never kept: raised with log_errors::raise and
+ *        log_errors::defer, a KeyboardInterrupt re-armed for the next signal check with
+ *        log_errors::report, the interrupted record kept for the next flush.
+ * @throws reflex::py::nb::python_error with log_errors::raise, and a KeyboardInterrupt or
+ *         SystemExit with log_errors::defer.
+ */
+inline void flush_logs(log_forwarding& logs, log_errors errors)
+{
+  if(core::detail::on_host_thread
+     or core::detail::host_locks_held > 0
+     or PyGILState_Check() == 0
+     or not logs.flush)
+  {
+    return;
+  }
+  if(errors == log_errors::raise and logs.deferred)
+  {
+    std::rethrow_exception(std::exchange(logs.deferred, nullptr));
+  }
+  if(errors == log_errors::report and logs.deferred)
+  {
+    try
+    {
+      std::rethrow_exception(std::exchange(logs.deferred, nullptr));
+    }
+    catch(reflex::py::nb::python_error& kept)
+    {
+      kept.discard_as_unraisable("popcorn log forwarding");
+    }
+  }
+  try
+  {
+    logs.flush();
+  }
+  catch(reflex::py::nb::python_error& raised)
+  {
+    if(errors == log_errors::raise)
+    {
+      throw;
+    }
+    if(not raised.matches(PyExc_Exception))
+    {
+      if(errors == log_errors::defer)
+      {
+        throw;
+      }
+      if(raised.matches(PyExc_KeyboardInterrupt))
+      {
+        PyErr_SetInterruptEx(SIGINT);
+        return;
+      }
+    }
+    if(errors == log_errors::defer and not logs.deferred)
+    {
+      release_frames(raised.value());
+      logs.deferred = std::current_exception();
+      return;
+    }
+    raised.discard_as_unraisable("popcorn log forwarding");
+  }
+}
+
+/**
+ * @brief Calls flush_logs() when it leaves scope, after a parked access released the host
+ *        mutex. The access already took effect, so a log filter or handler error goes to
+ *        sys.unraisablehook, never out of the access.
+ */
+class logs_flushed
+{
+public:
+  /** @brief Flushes @p slot on scope exit. */
+  explicit logs_flushed(host_slot const& slot) noexcept : logs_{*slot.logs}
+  {}
+  /** @brief Not copyable. */
+  logs_flushed(logs_flushed const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(logs_flushed const&) -> logs_flushed& = delete;
+  /** @brief Flushes. */
+  ~logs_flushed()
+  {
+    try
+    {
+      flush_logs(logs_, log_errors::report);
+    }
+    catch(...)
+    {}
+  }
+
+private:
+  log_forwarding& logs_;
 };
 
 /**
@@ -279,6 +415,7 @@ auto host_access(host_ref const& ref, Body&& body) -> std::invoke_result_t<Body>
 {
   if(auto const on = ref->host.lock())
   {
+    logs_flushed const flushed{*ref};
     return host_access(*on, [&body](core::machine&) { return std::invoke(body); });
   }
   if(not host_never_set(ref))

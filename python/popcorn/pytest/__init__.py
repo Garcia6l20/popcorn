@@ -86,8 +86,10 @@ Limits:
 
 Async tests:
 
-    async def test_ticks() -> None:
-        await asyncio.sleep(0)
+    from popcorn.units import ms
+
+    async def test_ticks(machine: popcorn.Machine) -> None:
+        await machine.run(for_=ms(1))
 
 A coroutine test function runs on the plugin's own event loop, one `asyncio.Runner` per session
 and process, when no other plugin claimed it first. pytest-asyncio is not needed. Tasks a test
