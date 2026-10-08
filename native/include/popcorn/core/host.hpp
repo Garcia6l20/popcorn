@@ -255,7 +255,8 @@ struct host_hooks
 {
   /** @brief Called first on the host thread. */
   std::move_only_function<void()> thread_started{};
-  /** @brief Called last on the host thread, after everything the thread destroys. */
+  /** @brief Called last on the host thread, after everything the thread destroys, boundary and
+   * held included, which it destroys before this call. */
   std::move_only_function<void()> thread_stopping{};
   /** @brief Called on the caller of cancel(), halt() and close() before it may block. */
   std::move_only_function<void()> before_block{};
@@ -704,7 +705,9 @@ public:
    * time order, equal stamps in posting order. A stamp equal to the machine's time runs at once.
    * A later stamp on a parked member stays pending until a goal or free run reaches it. A reset
    * or a restore fails every pending stamp with operation_cancelled. A body captures native
-   * values only.
+   * values only. A later stamp from the host thread in a callback, with no host mutex held, takes
+   * this host's mutex blocking: native callers only, the binding refuses posts from a host
+   * thread.
    *
    * @throws std::invalid_argument when @p at is before the machine's time, checked here unless
    *         the member is running. While running the check happens at the next boundary and
@@ -841,6 +844,9 @@ public:
    */
   [[nodiscard]] auto forked() const noexcept -> bool;
 
+  /** @brief @throws machine_forked when forked() is true. */
+  void refuse_forked() const;
+
   /**
    * @brief The forks this process is a child of, counted by an `atfork` handler, for state that
    *        must tell what it inherited from the parent.
@@ -901,11 +907,13 @@ public:
    *        progress holds its own reference to the file and is woken by unwatch().
    * @param wants_write Called on the host thread under the host mutex, so it takes no lock.
    * @return Id for unwatch().
+   * @throws machine_forked in a process forked from the one that built the host.
    */
   auto watch(member_id who, int fd, std::move_only_function<bool() const> wants_write) -> watch_id
       pre(who < members()) pre(fd >= 0);
 
-  /** @brief Stops polling the descriptor of @p id, ignoring an unknown id. Safe from any thread. */
+  /** @brief Stops polling the descriptor of @p id, ignoring an unknown id. Safe from any thread.
+   * Does nothing in a forked process: its watch mutex may be held by a thread fork dropped. */
   void unwatch(watch_id id) noexcept;
 
 private:
@@ -921,7 +929,8 @@ private:
       vtime                                   at,
       detail::host_promise<vtime> const&      promise);
   void decide(detail::fate ending);
-  void refuse_forked() const;
+  auto stop_started() -> bool;
+  void stop_unless_joining();
 
   std::shared_ptr<detail::host_core> core_;
   std::mutex                         join_mutex_;

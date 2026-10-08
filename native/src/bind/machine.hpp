@@ -173,7 +173,8 @@ public:
   /** @brief Path of the pty, /dev/pts/N, also after close(). */
   [[= py::doc{"Path of the pty, /dev/pts/N."}]] [[nodiscard]] auto path() const -> std::string;
 
-  /** @brief Stops pumping and closes both ends of the pty. Idempotent. */
+  /** @brief Stops pumping and closes both ends of the pty. Idempotent. Does nothing in a process
+   * forked from the one that opened it. */
   [[= py::doc{"Stop pumping and close the pty."}]] void close();
 
 private:

@@ -526,6 +526,7 @@ auto machine_handle::open_cdc_pty(std::string name, cdc_link const& link) -> pty
 auto machine_handle::open_pty(std::string name, std::unique_ptr<detail::pty_link> link)
     -> pty_handle
 {
+  host_->refuse_forked();
   auto const bridge = std::make_shared<detail::pty_bridge>(std::move(name), std::move(link));
   {
     auto const lock = detail::lock_ptys(*ptys_);
@@ -572,6 +573,10 @@ void pty_handle::close()
 {
   if(auto const on = host_.lock())
   {
+    if(on->forked())
+    {
+      return;
+    }
     on->unwatch(watched_);
   }
   auto const owner  = owner_.lock();

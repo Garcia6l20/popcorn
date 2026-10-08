@@ -856,6 +856,118 @@ TEST_CASE("an abandon fails a waiter whose predicate the blocked thread runs, le
   h.on.reset();
 }
 
+TEST_CASE("a wait on an abandoned host fails at once")
+{
+  blocking_hook blocking;
+  auto          h = blocked_host(blocking);
+  h.start();
+  blocking.entered.wait();
+  h.on->abandon_thread();
+  auto const waiting = h.wait({.ready = [] { return false; }});
+  CHECK(waiting.future().wait_for(2s));
+  CHECK_THROWS_AS(std::ignore = waiting.future().get(), core::machine_closed);
+  blocking.release = true;
+  REQUIRE(settles([&] { return blocking.stopped.load(); }));
+  h.on.reset();
+}
+
+TEST_CASE("a close waiting for a blocked hook leaves close_for and abandon_thread free")
+{
+  blocking_hook blocking;
+  std::latch    closing{1};
+  auto          made = alu(0);
+  hosted        h;
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&blocking](core::intercept_call const&) {
+        blocking.entered.count_down();
+        while(not blocking.release.load())
+        {
+          std::this_thread::sleep_for(1ms);
+        }
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  std::atomic<std::thread::id> closer_id{};
+  h.adopt(
+      std::move(made), {},
+      {.thread_stopping = [&blocking] { blocking.stopped = true; },
+       .before_block =
+           [&] {
+             if(std::this_thread::get_id() == closer_id.load())
+             {
+               closing.count_down();
+             }
+           }});
+  auto const goal = h.run({});
+  blocking.entered.wait();
+  std::atomic<bool> closed{false};
+  std::jthread      closer{[&] {
+    closer_id = std::this_thread::get_id();
+    h.on->close();
+    CHECK(h.on->abandoned());
+    closed = true;
+  }};
+  closing.wait();
+  std::atomic<bool> gave_up{false};
+  std::jthread      bounded{[&] {
+    CHECK_FALSE(h.on->close_for(50ms));
+    h.on->abandon_thread();
+    gave_up = true;
+  }};
+  CHECK(settles([&] { return gave_up.load(); }, 2s));
+  CHECK(h.on->abandoned());
+  blocking.release = true;
+  REQUIRE(settles([&] { return closed.load(); }));
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  REQUIRE(settles([&] { return blocking.stopped.load(); }));
+  closer.join();
+  bounded.join();
+  h.on.reset();
+}
+
+TEST_CASE("a close from another host's thread does not wait for a join in progress")
+{
+  std::atomic<bool> other_closed{false};
+  std::latch        stopping{1};
+  hosted            joined{alu(0), {}, {.thread_stopping = [&] {
+                  stopping.count_down();
+                  std::ignore = settles([&] { return other_closed.load(); }, 2s);
+                           }}};
+  joined.start();
+  std::jthread closer{[&] { joined.on->close(); }};
+  stopping.wait();
+  auto   made = alu(10);
+  hosted other;
+  other.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&](core::intercept_call const&) {
+        joined.on->close();
+        other_closed = true;
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  other.adopt(std::move(made));
+  auto const goal = other.run({.until = sym("alu", "alu_done")});
+  CHECK(settles([&] { return other_closed.load(); }, 1s));
+  std::ignore = goal.get();
+  closer.join();
+}
+
+TEST_CASE("a halt finished after a new goal started keeps that goal's cancel request")
+{
+  hosted h{alu(0)};
+  h.start();
+  auto const halting = h.on->request_halt(0);
+  h.on->wait_settled(0, halting);
+  auto const goal  = h.run({});
+  auto const parks = h.on->request_cancel(0);
+  REQUIRE(parks.has_value());
+  std::ignore = h.on->finish_halt(0, halting);
+  CHECK(h.on->wait_settled(0, {.finish = true, .with_host = true, .parks = *parks}, 5s));
+  CHECK_THROWS_AS(std::ignore = goal.get(), core::operation_cancelled);
+}
+
 TEST_CASE("a halt finished after a new free run started leaves that free run open")
 {
   hosted h{alu(0)};
@@ -1277,6 +1389,36 @@ TEST_CASE("a host destroyed on another host's thread takes the orphan path")
   CHECK(fresh_destroyed.load() == killer_thread.load());
   REQUIRE(settles([&] { return started_destroyed.load() != std::thread::id{}; }));
   CHECK(started_destroyed.load() == victim_thread.load());
+}
+
+TEST_CASE("an orphaned host thread drops its hooks before thread_stopping")
+{
+  std::atomic<int> order{0};
+  std::atomic<int> dropped_at{0};
+  std::atomic<int> stopping_at{0};
+  auto             dropped = std::shared_ptr<void>(nullptr, [&](void*) { dropped_at = ++order; });
+  auto             victim  = std::make_shared<hosted>(
+      alu(0), core::slice_bounds{},
+      core::host_hooks{
+          .thread_stopping = [&] { stopping_at = ++order; },
+          .boundary        = [dropped](core::member_id) {}});
+  dropped.reset();
+  victim->start();
+  REQUIRE(settles([&] { return victim->on->state(0) == core::host_state::running; }));
+  auto   made = alu(1000);
+  hosted killer;
+  killer.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&](core::intercept_call const&) {
+        victim.reset();
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  killer.adopt(std::move(made));
+  CHECK(killer.run({.until = sym("alu", "alu_done")}).get().stopped.reason == stop_reason::address);
+  REQUIRE(settles([&] { return stopping_at.load() != 0; }));
+  CHECK(dropped_at.load() != 0);
+  CHECK(dropped_at.load() < stopping_at.load());
 }
 
 TEST_CASE("close from two threads at once joins once")

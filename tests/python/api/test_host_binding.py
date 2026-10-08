@@ -2034,6 +2034,60 @@ def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -
         assert lines[0].startswith("request refused: this machine request was made before os.fork")
 
 
+def test_a_stamped_write_left_queued_at_script_end_is_not_reported() -> None:
+    child = run_child(
+        f"""
+        import popcorn
+        from popcorn.units import ms
+
+        m = popcorn.Machine(
+            popcorn.load_description({str(M33_JSON)!r}),
+            image=popcorn.Image.elf({str(DRIVER_ELF)!r}),
+        )
+        m.reset()
+        p = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+        print("end of script")
+        """,
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout == "end of script\n"
+    assert child.stderr == ""
+
+
+FORKED_PTY = """
+import os
+import sys
+
+import popcorn
+from popcorn.stm32 import mcu
+
+m = popcorn.Machine(mcu("STM32U575QGIx"), image=popcorn.Image.elf(__ELF__))
+m.reset()
+m.board.pty("USART1")
+pid = os.fork()
+if pid == 0:
+    try:
+        m.board.pty("USART2")
+    except popcorn.EmulationError as error:
+        print("refused:", error, flush=True)
+    else:
+        sys.exit(3)
+    m.board._ports.bridges["USART1"].close()
+    sys.exit(0)
+_, status = os.waitpid(pid, 0)
+print("child", os.waitstatus_to_exitcode(status), flush=True)
+"""
+
+
+def test_a_forked_child_refuses_a_new_pty_and_closes_an_inherited_one_at_once() -> None:
+    child = run_child(FORKED_PTY.replace("__ELF__", repr(str(BOARD_ELF))), timeout=30)
+    assert child.returncode == 0, child.stderr
+    lines = child.stdout.strip().splitlines()
+    assert lines[-1] == "child 0"
+    assert "was built before os.fork, in the parent process" in lines[0]
+
+
 REATTACHED = """
 import asyncio, contextvars, gc, os, signal, sys, threading, time
 sys.path.insert(0, __TESTS__)

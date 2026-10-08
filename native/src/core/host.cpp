@@ -406,7 +406,6 @@ struct host_core
   std::vector<std::unique_ptr<member_slot>> members;
   slice_bounds                              bounds;
   host_hooks                                hooks;
-  bool                                      pending   = false;
   bool                                      closed    = false;
   bool                                      abandoned = false;
   bool                                      exiting   = false;
@@ -425,7 +424,6 @@ struct host_core
   void wake_locked(member_slot& slot)
   {
     slot.woken = true;
-    pending    = true;
     if(sleeping and not std::exchange(signalled, true))
     {
       wake.signal();
@@ -510,6 +508,8 @@ struct host_core
       }
     }
     shut_down();
+    std::ignore = std::exchange(hooks.boundary, {});
+    std::ignore = std::exchange(hooks.held, {});
     if(hooks.thread_stopping)
     {
       hooks.thread_stopping();
@@ -525,7 +525,6 @@ struct host_core
       {
         return std::nullopt;
       }
-      pending = false;
       std::vector<turn_plan> plans(members.size());
       auto                   any     = false;
       auto const             pruning = drops.exchange(false, std::memory_order_acquire);
@@ -1159,12 +1158,15 @@ struct host_core
   auto close_session(std::unique_lock<host_mutex>& lock, member_slot& slot)
       -> std::optional<held_end>
   {
-    slot.session          = false;
-    slot.free_run         = false;
-    slot.halt_requested   = false;
-    slot.cancel_requested = false;
-    auto end              = std::exchange(slot.held, std::nullopt);
-    auto waiters          = std::exchange(slot.waiters, {});
+    slot.session  = false;
+    slot.free_run = false;
+    if(not slot.goal)
+    {
+      slot.halt_requested   = false;
+      slot.cancel_requested = false;
+    }
+    auto end     = std::exchange(slot.held, std::nullopt);
+    auto waiters = std::exchange(slot.waiters, {});
     lock.unlock();
     for(auto const& waiting : waiters)
     {
@@ -1662,7 +1664,7 @@ auto host::post(
 {
   auto&                       slot = *core_->members[who];
   detail::host_promise<vtime> promise;
-  if(core_->abandoned)
+  if(core_->abandoned_flag.load(std::memory_order_acquire))
   {
     promise.fail(detail::closed_error());
     return promise.future();
@@ -1867,7 +1869,11 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
   waiting->owner = core_;
   auto future    = waiting->promise.future();
   auto handle    = waiting;
-  if(slot.held)
+  if(core_->closed or core_->abandoned)
+  {
+    waiting->settling().fail(detail::closed_error());
+  }
+  else if(slot.held)
   {
     waiting->ended.store(true, std::memory_order_relaxed);
     detail::complete_with(waiting->settling(), *slot.held);
@@ -2076,23 +2082,40 @@ auto host::close_for(std::chrono::nanoseconds limit) -> bool
   }
   if(detail::on_host_thread)
   {
-    request_stop();
+    stop_unless_joining();
     return true;
   }
+  if(stop_started())
   {
-    std::scoped_lock const joining{join_mutex_};
-    if(thread_.joinable())
+    std::unique_lock lock{core_->mutex};
+    if(not core_->parked_cv.wait_for(
+           lock, limit, [this] { return core_->exiting or core_->abandoned; }))
     {
-      request_stop();
-      std::unique_lock lock{core_->mutex};
-      if(not core_->parked_cv.wait_for(lock, limit, [this] { return core_->exiting; }))
-      {
-        return false;
-      }
+      return false;
     }
   }
   close();
   return true;
+}
+
+auto host::stop_started() -> bool
+{
+  std::scoped_lock const joining{join_mutex_};
+  if(core_->abandoned_flag.load() or not thread_.joinable())
+  {
+    return false;
+  }
+  request_stop();
+  return true;
+}
+
+void host::stop_unless_joining()
+{
+  std::unique_lock const joining{join_mutex_, std::try_to_lock};
+  if(joining.owns_lock() and not core_->abandoned_flag.load() and thread_.joinable())
+  {
+    request_stop();
+  }
 }
 
 auto host::state(member_id who) const noexcept -> host_state
@@ -2123,15 +2146,25 @@ void host::close()
   }
   if(detail::on_host_thread)
   {
-    request_stop();
+    stop_unless_joining();
     return;
   }
-  std::scoped_lock const joining{join_mutex_};
-  request_stop();
-  decide(detail::fate::joined);
-  if(thread_.joinable())
+  if(stop_started())
   {
-    thread_.join();
+    std::unique_lock lock{core_->mutex};
+    core_->parked_cv.wait(lock, [this] { return core_->exiting or core_->abandoned; });
+  }
+  {
+    std::scoped_lock const joining{join_mutex_};
+    if(core_->abandoned_flag.load())
+    {
+      return;
+    }
+    decide(detail::fate::joined);
+    if(thread_.joinable())
+    {
+      thread_.join();
+    }
   }
   std::vector<detail::stamped> stranded;
   {
@@ -2182,6 +2215,7 @@ void host::request_stop()
 auto host::watch(member_id who, int fd, std::move_only_function<bool() const> wants_write)
     -> watch_id
 {
+  refuse_forked();
   watch_id made{};
   {
     std::scoped_lock const lock{core_->watch_mutex};
@@ -2195,6 +2229,10 @@ auto host::watch(member_id who, int fd, std::move_only_function<bool() const> wa
 
 void host::unwatch(watch_id id) noexcept
 {
+  if(forked())
+  {
+    return;
+  }
   std::move_only_function<bool() const> dropped;
   {
     std::scoped_lock const lock{core_->watch_mutex};
