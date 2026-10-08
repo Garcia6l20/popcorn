@@ -485,3 +485,91 @@ def test_a_fault_inside_a_call_reports_the_faulting_frames(pytester: pytest.Pyte
     result.stdout.fnmatch_lines(
         [HEADER, "  stop: FAULT at *level3*", "  call stack:", "    #0 *level3*", "    #1 *level2*"]
     )
+
+
+GOAL_AFTER_PARK = """
+
+import popcorn
+
+_parked = popcorn.Machine._park
+_posted = []
+
+
+def _park_then_post(self):
+    ended = _parked(self)
+    if len(_posted) < POSTS:
+        _posted.append(self._handle.run_goal(None, 10**12, None, None, None))
+        assert self.busy
+    return ended
+
+
+popcorn.Machine._park = _park_then_post
+
+
+def pytest_unconfigure(config):
+    popcorn.Machine._park = _parked
+"""
+
+
+@pytest.mark.parametrize("posts", [1, 4], ids=["once", "every_park"])
+def test_a_goal_posted_after_the_park_is_parked_again_before_the_reads(
+    pytester: pytest.Pytester, posts: int
+) -> None:
+    """Posted after the report's park and after each of its 3 re-parks, the machine is
+    reported as kept running."""
+    write_conftest(pytester)
+    write_project(pytester)
+    conftest = pytester.path / "conftest.py"
+    conftest.write_text(conftest.read_text() + f"\nPOSTS = {posts}\n" + GOAL_AFTER_PARK)
+    pytester.makepyfile("""
+        import popcorn
+
+        async def test_budget(machine):
+            stop = await machine.run(budget=1000)
+            assert stop.reason is popcorn.StopReason.ADDRESS
+        """)
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    result.stdout.no_fnmatch_line("*popcorn report failed*")
+    if posts == 1:
+        result.stdout.fnmatch_lines([HEADER, "machine (*):", "  stop: BUDGET at *"])
+        result.stdout.no_fnmatch_line("*kept running*")
+    else:
+        result.stdout.fnmatch_lines(
+            [HEADER, "machine (*):", "  machine kept running, state not read"]
+        )
+
+
+DELIVERED_END = """
+import popcorn
+
+
+class Never:
+    def ready(self, machine):
+        return False
+
+
+async def test_reads_the_end_from_a_wait(machine):
+    if KIND == "USER":
+        machine.intercept("alu_mark", lambda call: call.stop())
+    else:
+        machine.nvic.pend(0)
+    machine.start()
+    stop = await machine.wait_for(Never())
+    assert stop.reason is getattr(popcorn.StopReason, KIND)
+"""
+
+
+@pytest.mark.parametrize("kind", ["USER", "FAULT"])
+def test_an_end_a_wait_returned_is_not_raised_again_at_teardown(
+    pytester: pytest.Pytester, kind: str
+) -> None:
+    write_conftest(pytester)
+    if kind == "FAULT":
+        write_project(pytester, until="ready", elf=FAULT_ELF)
+    else:
+        write_project(pytester)
+    pytester.makepyfile(f"KIND = {kind!r}\n" + DELIVERED_END)
+    result = run(pytester)
+    result.assert_outcomes(passed=1)
+    result.stdout.no_fnmatch_line("*ERROR at teardown*")

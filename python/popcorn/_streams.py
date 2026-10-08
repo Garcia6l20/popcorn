@@ -143,7 +143,8 @@ class UartStream:
 
         Raises:
             RuntimeError: The UART is bridged to a pty, which takes what the firmware sends.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         return bytes(f.data & 0xFF for f in await self.read_frames(n, for_=for_))
 

@@ -12,8 +12,7 @@ from popcorn import Machine, PopcornError, Project, Snapshot
 from popcorn.pytest._options import UNSET, marker_options
 from popcorn.pytest._report import (
     TraceOnFail,
-    park_ended,
-    take_held,
+    kept_ends,
     trace_directory,
     track,
     unclaimed,
@@ -126,8 +125,7 @@ class MachineFactory:
         """
         ends: list[BaseException] = []
         for number, machine in enumerate(self._machines, start=1):
-            ended = take_held(self._item, machine) or park_ended(machine)
-            if ended is not None:
+            for ended in kept_ends(self._item, machine):
                 ends.append(ended)
                 if len(ends) > 1:
                     unclaimed(f"machine_factory #{number} of {self._item.nodeid}", ended)
@@ -272,7 +270,10 @@ def machine(
         if not trace.start(m):
             trace = None
     yield m
-    held = take_held(item, m) or park_ended(m)
+    ends = kept_ends(item, m)
+    held = ends[0] if ends else None
+    for extra in ends[1:]:
+        unclaimed(item.nodeid, extra)
     closed = trace is None
     try:
         if trace is not None:

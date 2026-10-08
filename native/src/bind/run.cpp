@@ -348,6 +348,10 @@ auto machine_handle::halt_or_park(bool refuse_goal) -> nb::object
     return nb::none();
   }
   flush_logs_unraisable();
+  if(not refuse_goal and delivered_->delivered(*ended))
+  {
+    return nb::none();
+  }
   if(auto const* const stopped = std::get_if<stop>(&*ended))
   {
     return nb::cast(record(*stopped));
@@ -388,14 +392,21 @@ void machine_handle::mark_collected() noexcept
 auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::uint64_t> for_ps)
     -> host_future_handle
 {
-  return waiting_on({.ready = predicate_of(std::move(ready))}, for_ps, false);
+  return waiting_on({.ready = predicate_of(std::move(ready))}, for_ps, wait_shape::stop);
 }
 
 auto machine_handle::wait_predicate(
     native_predicate const&      ready,
     std::optional<std::uint64_t> for_ps) -> host_future_handle
 {
-  return waiting_on({.ready = ready.test()}, for_ps, false);
+  return waiting_on({.ready = ready.test()}, for_ps, wait_shape::stop);
+}
+
+auto machine_handle::wait_predicate_ended(
+    native_predicate const&      ready,
+    std::optional<std::uint64_t> for_ps) -> host_future_handle
+{
+  return waiting_on({.ready = ready.test()}, for_ps, wait_shape::ended);
 }
 
 auto machine_handle::run_predicate(
@@ -438,13 +449,13 @@ auto machine_handle::wait_when(core::condition_set when, std::optional<std::uint
   {
     throw std::invalid_argument("a wait takes 1 to 64 conditions");
   }
-  return waiting_on({.when = std::move(when)}, for_ps, true);
+  return waiting_on({.when = std::move(when)}, for_ps, wait_shape::fired);
 }
 
 auto machine_handle::waiting_on(
     core::waiter_spec            spec,
     std::optional<std::uint64_t> for_ps,
-    bool                         masked) -> host_future_handle
+    wait_shape                   shape) -> host_future_handle
 {
   if(for_ps)
   {
@@ -467,11 +478,16 @@ auto machine_handle::waiting_on(
   return host_future_handle{
       std::make_shared<detail::future_request<stop>>(
           std::move(future),
-          [delivered = delivered_, made, masked, waiting](stop const& stopped) {
+          [delivered = delivered_, made, shape, waiting](stop const& stopped) {
             delivered->returned(made, waiting.ended());
-            if(masked)
+            switch(shape)
             {
-              return nb::object{nb::make_tuple(record(stopped), waiting.fired())};
+              case wait_shape::fired:
+                return nb::object{nb::make_tuple(record(stopped), waiting.fired())};
+              case wait_shape::ended:
+                return nb::object{nb::make_tuple(record(stopped), waiting.ended())};
+              case wait_shape::stop:
+                break;
             }
             return nb::cast(record(stopped));
           },

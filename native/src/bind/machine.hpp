@@ -318,10 +318,11 @@ public:
    *        released until the machine parks. A no-op on a parked machine. On a host thread it
    *        only requests the end, as halt() does.
    * @return None, the StopInfo that ended the free run by itself, or the exception a handler
-   *         raised in it.
+   *         raised in it. None as well for an end a wait of the free run already returned or
+   *         raised.
    * @throws machine_running inside a parked section.
    */
-  [[= py::doc{"Cancel a goal or halt the free run, return what halt() returns."}]] auto park()
+  [[= py::doc{"Cancel a goal or halt the free run, return the end no wait delivered."}]] auto park()
       -> reflex::py::nb::object;
 
   /**
@@ -388,6 +389,20 @@ public:
   [[= py::doc{
       "Wait on the free run for a native predicate, return a HostFuture of a StopInfo."}]] auto
       wait_predicate(native_predicate const& ready, std::optional<std::uint64_t> for_ps)
+          -> host_future_handle;
+
+  /**
+   * @brief wait_predicate() for popcorn's own waits, such as a stream read, which must tell the
+   *        free run's end from their predicate.
+   * @param ready The predicate.
+   * @param for_ps As wait().
+   * @return A HostFuture of a (StopInfo, ended) tuple, ended true when the free run's own end
+   *         completed the wait.
+   * @throws std::runtime_error without an open free run.
+   */
+  [[= py::doc{
+      "wait_predicate() returning (StopInfo, whether the free run's end completed it)."}]] auto
+      wait_predicate_ended(native_predicate const& ready, std::optional<std::uint64_t> for_ps)
           -> host_future_handle;
 
   /**
@@ -1011,7 +1026,14 @@ public:
   [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
 
 private:
-  auto waiting_on(core::waiter_spec spec, std::optional<std::uint64_t> for_ps, bool masked)
+  enum class wait_shape : std::uint8_t
+  {
+    stop,
+    fired,
+    ended,
+  };
+
+  auto waiting_on(core::waiter_spec spec, std::optional<std::uint64_t> for_ps, wait_shape shape)
       -> host_future_handle;
 
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const

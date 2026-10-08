@@ -148,7 +148,8 @@ class AudioStream:
 
         Raises:
             ValueError: `n` is negative.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         if n < 0:
             raise ValueError(f"cannot read {n} frames")

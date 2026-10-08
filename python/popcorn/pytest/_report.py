@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from popcorn import EmulationError, Machine, Stop
+from popcorn import EmulationError, Machine, MachineRunning, Stop
 from popcorn._obs import FormatError
 from popcorn.pytest._options import SETTINGS
 from popcorn.report import stop_report
@@ -155,6 +155,14 @@ def park_ended(machine: Machine) -> BaseException | None:
     return machine._park()  # pyright: ignore[reportPrivateUsage]
 
 
+def kept_ends(item: pytest.Item, machine: Machine) -> list[BaseException]:
+    """Park `machine` and take every end its parks for `item` kept and no user's `halt()`
+    raised, oldest first, the report's park first."""
+    take_held(item, machine)
+    park_ended(machine)
+    return machine._take_parked_ends()  # pyright: ignore[reportPrivateUsage]
+
+
 def take_held(item: pytest.Item, machine: Machine) -> BaseException | None:
     """What ended the free run of `machine` when the report of `item` parked it, removed."""
     return item.stash.get(HELD, dict[int, BaseException | None]()).pop(id(machine), None)
@@ -195,26 +203,64 @@ def exception_stop(error: BaseException | None) -> Stop | None:
     return None
 
 
-def section_text(tracked: list[Tracked], error: BaseException | None, ring: int = 0) -> str:
+KEPT_RUNNING = "  machine kept running, state not read"
+PARK_TRIES = 3
+
+
+def section_text(
+    tracked: list[Tracked], error: BaseException | None, ring: int, item: pytest.Item
+) -> str:
     """The report of every tracked machine, in the order the test got them, each with the last
     `ring` lines of its collapsed trace ring, or a hint naming `--popcorn-ring` for 0.
 
     A machine whose last stop is the stop the failing error carries is marked "(raised)". A stop
-    of the error that is no machine's last stop is printed first.
+    of the error that is no machine's last stop is printed first. Each machine is read in one
+    parked section. A machine found running again, a goal another thread started after the
+    park, is parked again up to `PARK_TRIES` times, an end that park returns kept for `item`'s
+    teardown, then reported as kept running.
     """
     stop = exception_stop(error)
-    last = [entry.machine.last_stop for entry in tracked]
+    reads = [_parked_read(item, entry.machine, ring) for entry in tracked]
+    last = [read[0] for read in reads if read is not None]
     lines: list[str] = []
     if stop is not None and stop not in last:
         lines += [f"exception stop: {stop}", ""]
-    for entry, own in zip(tracked, last, strict=True):
+    for entry, read in zip(tracked, reads, strict=True):
+        if read is None:
+            lines += [f"{entry.label} ({entry.key}):", KEPT_RUNNING, ""]
+            continue
+        own, text = read
         raised = " (raised)" if stop is not None and own == stop else ""
-        lines += [
-            f"{entry.label} ({entry.key}){raised}:",
-            _machine_text(entry.machine, own, ring),
-            "",
-        ]
+        lines += [f"{entry.label} ({entry.key}){raised}:", text, ""]
     return "\n".join(lines).rstrip()
+
+
+def _parked_read(item: pytest.Item, machine: Machine, ring: int) -> tuple[Stop | None, str] | None:
+    entered = False
+
+    def read() -> tuple[Stop | None, str]:
+        nonlocal entered
+        entered = True
+        own = machine.last_stop
+        return own, _machine_text(machine, own, ring)
+
+    for attempt in range(PARK_TRIES + 1):
+        try:
+            return cast(
+                tuple[Stop | None, str],
+                machine._handle.parked(read),  # pyright: ignore[reportPrivateUsage]
+            )
+        except MachineRunning:
+            if entered:
+                raise
+        if attempt == PARK_TRIES:
+            break
+        ended = park_ended(machine)
+        if ended is not None:
+            held = item.stash.setdefault(HELD, dict[int, BaseException | None]())
+            if held.get(id(machine)) is None:
+                held[id(machine)] = ended
+    return None
 
 
 def _machine_text(machine: Machine, stop: Stop | None, ring: int) -> str:
@@ -267,7 +313,7 @@ def pytest_runtest_makereport(
         park(item)
     if report.failed and tracked:
         try:
-            text = section_text(tracked, error, item.config.stash[SETTINGS].ring)
+            text = section_text(tracked, error, item.config.stash[SETTINGS].ring, item)
         except Exception as broken:
             text = f"popcorn report failed: {type(broken).__name__}: {broken}"
         kept = item.stash.get(KEPT_TRACE, None)

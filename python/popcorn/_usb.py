@@ -406,7 +406,8 @@ class CdcStream:
             ValueError: `n` is negative.
             RuntimeError: The function is bridged to a pty, which takes what the device sends:
                 `Periph(connect="pty")` or `m.board.pty(name)`.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         self._check_read(n)
         if self._link.available() < n:
@@ -434,7 +435,8 @@ class CdcStream:
         Raises:
             UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
                 went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         if not self.ready:
             await self._wait(self._link.predicate_ready(), for_)
@@ -666,7 +668,8 @@ class HidStream:
         Raises:
             UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
                 went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         if not self.ready:
             await self._wait(self._link.predicate_ready(), for_)
@@ -682,7 +685,8 @@ class HidStream:
 
         Raises:
             ValueError: `n` is negative.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         if n < 0:
             raise ValueError(f"cannot read {n} reports")
@@ -1173,7 +1177,8 @@ class UacSpeaker(UacStream):
                 the packet not sent yet. Status `stopped`.
             UsbTimeout: Samples are still queued or in a packet not sent yet when the run ends:
                 `for_` elapsed or the core went idle. Status `queued`.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         flushes = self._link.flushes()
         if self._link.queued() and not self.running:
@@ -1237,7 +1242,8 @@ class UacMic(UacStream):
 
         Raises:
             ValueError: `n` is negative.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
@@ -1347,7 +1353,8 @@ class UacFunction:
         Raises:
             UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
                 went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         if not self.ready:
             await self._wait(self._link.predicate_ready(), for_)
@@ -1702,7 +1709,8 @@ class UsbHost:
         Raises:
             UsbTimeout: The device is not configured when the run ends: `for_` elapsed, the
                 core went idle, or the enumeration stopped on a failed step.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         configured = UsbState.CONFIGURED.value
         link = self._link
@@ -1742,7 +1750,8 @@ class UsbHost:
             UsbTimeout: The request did not end within the host's timeout, 5 s by default.
             UsbError: The request ended otherwise: no handshake three times in a row, more data
                 than wLength, or a detach.
-            EmulationError: The run stopped for another reason, such as a fault.
+            EmulationError: The run stopped for another reason, such as a fault, or, inside
+                `running()`, the free run ended by itself, a handler's USER stop included.
         """
         for label, field, top in (
             ("request_type", request_type, 0xFF),

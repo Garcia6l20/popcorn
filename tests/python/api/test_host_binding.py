@@ -2181,6 +2181,20 @@ def test_a_ctrl_c_in_a_log_handler_propagates_and_keeps_its_record() -> None:
     assert handler.seen == ["ARR", "CR"]
 
 
+def test_a_park_after_a_wait_returned_the_end_returns_none(machines: Machines) -> None:
+    m = machines()
+
+    class Never:
+        def ready(self, machine: popcorn.Machine) -> bool:
+            return False
+
+    m.intercept("alu_mark", lambda call: call.stop())
+    m.start()
+    stop = asyncio.run(m.wait_for(Never()))
+    assert stop.reason is popcorn.StopReason.USER
+    assert m._park() is None  # pyright: ignore[reportPrivateUsage]
+
+
 def test_an_always_raising_filter_sees_the_dropped_count_a_bounded_number_of_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2232,3 +2246,19 @@ def test_an_always_raising_filter_sees_the_dropped_count_a_bounded_number_of_tim
     gc.collect()
     assert calls["dropped"] <= 1
     assert calls["all"] <= 5001
+
+
+def test_an_internal_wait_raises_the_free_runs_own_end_and_delivers_it(
+    callee: popcorn.Machine,
+) -> None:
+    callee.intercept("SysTick_Handler", lambda call: call.stop())
+    never = callee._handle.predicate_pc_at(0xFFFF_FFF0)  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        callee.start()
+        await callee._wait_until(never, None)  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(popcorn.EmulationError, match="free run, while waiting") as raised:
+        asyncio.run(scenario())
+    assert raised.value.reason is popcorn.StopReason.USER
+    assert callee._park() is None  # pyright: ignore[reportPrivateUsage]

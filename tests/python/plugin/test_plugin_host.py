@@ -313,3 +313,150 @@ def _hits(lcov: Path, source: Path, line: int) -> int:
         elif current.endswith(source.name) and record.startswith(f"DA:{line},"):
             return int(record.split(",")[1])
     return 0
+
+
+@pytest.mark.parametrize("end", ["error", "stop"])
+def test_a_fixture_halt_after_a_failed_test_raises_the_end_the_report_parked(
+    pytester: pytest.Pytester, end: str
+) -> None:
+    pytester.makepyfile(f"""
+        import threading
+
+        import popcorn
+        import pytest
+        from raising_watch import Boom, raising
+
+        END = {end!r}
+
+
+        def stopping(machine):
+            fired = threading.Event()
+
+            def stop(hit):
+                fired.set()
+                return popcorn.WatchAction.STOP
+
+            machine.watch("alu_value", handler=stop)
+            return fired
+
+
+        @pytest.fixture
+        def started(machine):
+            fired = raising(machine) if END == "error" else stopping(machine)
+            machine.start()
+            assert fired.wait(10)
+            yield machine
+            expected = Boom if END == "error" else popcorn.EmulationError
+            with pytest.raises(expected):
+                machine.halt()
+            machine.halt()
+
+
+        def test_fails(started):
+            assert False, "the body"
+        """)
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    result.stdout.no_fnmatch_line("*ERROR at teardown*")
+    result.stdout.no_fnmatch_line("*was left running*")
+
+
+TWO_ENDS = """
+
+import time
+
+import popcorn
+
+_parked = popcorn.Machine._park
+_started = []
+
+
+def _park_then_end_again(self):
+    ended = _parked(self)
+    if not _started:
+        _started.append(True)
+        self.start()
+        time.sleep(0.5)
+    return ended
+
+
+popcorn.Machine._park = _park_then_end_again
+
+
+def pytest_unconfigure(config):
+    popcorn.Machine._park = _parked
+"""
+
+
+def test_an_end_a_report_repark_takes_is_kept_beside_the_first(
+    pytester: pytest.Pytester,
+) -> None:
+    """The report's park takes the handler error, a free run started after it ends by itself
+    on the same raising watch before the read, half a second of wall time, and the re-park
+    takes that second error: the teardown raises the first and warns the second."""
+    conftest = pytester.path / "conftest.py"
+    conftest.write_text(conftest.read_text() + TWO_ENDS)
+    pytester.makepyfile("""
+        from raising_watch import raising
+
+        def test_fails(machine):
+            fired = raising(machine)
+            machine.start()
+            assert fired.wait(10)
+            assert False, "the body"
+        """)
+    result = run(pytester)
+    result.assert_outcomes(failed=1, errors=1)
+    result.stdout.fnmatch_lines(["*ERROR at teardown of test_fails*", LEFT_RUNNING])
+
+
+KEPT_LOG_ERROR = """
+
+import logging
+
+
+class FailOnce(logging.Filter):
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def filter(self, record):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("filter failed")
+        return True
+
+
+_failing = FailOnce()
+logging.getLogger("popcorn").addFilter(_failing)
+
+
+def pytest_unconfigure(config):
+    logging.getLogger("popcorn").removeFilter(_failing)
+"""
+
+
+def test_a_log_error_kept_by_an_await_does_not_break_the_report_or_the_teardown(
+    pytester: pytest.Pytester,
+) -> None:
+    conftest = pytester.path / "conftest.py"
+    conftest.write_text(conftest.read_text() + KEPT_LOG_ERROR)
+    pytester.makepyfile("""
+        def unmodelled(machine):
+            found = next(p for p in machine.description.peripherals if p.name == "TESTDEV")
+            return machine.ref.mem.u32[found.base]
+
+        async def test_fails_after_a_kept_error(machine):
+            machine.intercept("alu_mark", lambda call: call.proceed())
+            await machine.read(unmodelled(machine))
+            assert False, "the body"
+
+        def test_next_is_clean(machine):
+            assert machine.intercept_log("alu_mark") == []
+            assert not machine.busy
+        """)
+    result = run(pytester)
+    result.assert_outcomes(passed=1, failed=1, errors=1)
+    result.stdout.no_fnmatch_line("*INTERNALERROR*")
+    result.stdout.fnmatch_lines(["*ERROR at teardown of test_fails_after_a_kept_error*"])
+    assert result.stdout.str().count("RuntimeError: filter failed") == 1

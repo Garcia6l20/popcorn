@@ -423,6 +423,7 @@ class Machine:
         "_memory",
         "_model_context",
         "_nvic",
+        "_parked_ends",
         "_peripherals",
         "_ports",
         "_refs",
@@ -596,6 +597,7 @@ class Machine:
         self._call_baseline: Snapshot | None = None
         self._last_stop: Stop | None = None
         self._surfaced: Stop | BaseException | None = None
+        self._parked_ends: list[BaseException] = []
         self._default_budget: int | None = None
         self._logs: dict[int, list[LogEntry]] = {}
         self._installed: list[Intercept | Watch] = []
@@ -1752,6 +1754,18 @@ class Machine:
             with contextlib.suppress(MachineRunning):
                 if ready.holds():
                     return self.time
+        if self._handle.session_open():
+            raw, ended = cast(
+                tuple[_core.StopInfo, bool],
+                await awaited(
+                    self._handle.wait_predicate_ended(ready, None if for_ is None else for_.ps),
+                    lambda got: got,
+                ),
+            )
+            stop = stop_of(raw)
+            if ended:
+                raise _stop_error(stop, f"the free run, while waiting for {ready.what()}")
+            return stop.time
         stop = await self.wait_for(_Native(ready), for_=for_)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, f"the run waiting for {ready.what()}")
@@ -1884,7 +1898,8 @@ class Machine:
     def halt(self) -> None:
         """Stop the free run `start()` started, at its next block boundary, and return once the
         machine is parked. A no-op when nothing was started. A run, step or call active
-        instead goes on.
+        instead goes on. The ends parks took and kept, such as the pytest report's park of a
+        failed test, are raised by the next `halt()` calls, oldest first, each once.
 
         Raises:
             MachineBusy: A run, step or call is active instead, cancel its task.
@@ -1898,6 +1913,8 @@ class Machine:
             raise ended
         if ended is not None:
             raise _stop_error(ended)
+        if self._parked_ends:
+            raise self._parked_ends.pop(0)
 
     def _park(self) -> BaseException | None:
         """Bring the machine to parked whatever runs: cancel a goal, halt a free run.
@@ -1905,16 +1922,32 @@ class Machine:
         Returns:
             What ended the free run by itself, as `halt()` would raise it, instead of raising
             it, None when nothing did or when a wait of this free run already returned or
-            raised it to its caller.
+            raised it to its caller. A log filter or handler error the machine kept, which
+            `halt()` would raise, is returned the same way and kept as an end.
+
+        Raises:
+            KeyboardInterrupt: Ctrl-C while the park waits.
+            RuntimeError: Called from a handler.
         """
         self._refuse_on_host()
-        ended = self._ended(self._handle.park())
+        try:
+            raw = self._handle.park()
+        except Exception as kept:
+            self._parked_ends.append(kept)
+            return kept
+        ended = self._ended(raw)
         surfaced, self._surfaced = self._surfaced, None
         if ended is None or ended is surfaced:
             return None
         if isinstance(ended, Stop):
-            return None if ended == surfaced else _stop_error(ended)
+            ended = _stop_error(ended)
+        self._parked_ends.append(ended)
         return ended
+
+    def _take_parked_ends(self) -> list[BaseException]:
+        """The ends `_park` returned and no `halt()` raised since, oldest first. Clears them."""
+        ends, self._parked_ends = self._parked_ends, []
+        return ends
 
     def _flush_logs(self) -> None:
         """Forward the machine's queued log records to `logging`, in order, keeping a filter or
