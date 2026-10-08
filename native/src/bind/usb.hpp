@@ -6,6 +6,7 @@
 #include <popcorn/periph/usb_host.hpp>
 #include <popcorn/periph/usb_uac2.hpp>
 
+#include "access_op.hpp"
 #include "alive.hpp"
 #include "gil_locks.hpp"
 #include "pty.hpp"
@@ -709,6 +710,16 @@ public:
   /** @brief bConfigurationValue set, 0 when not configured. */
   [[= py::doc{"bConfigurationValue set, 0 when not configured."}]] [[nodiscard]] auto
       configuration_value() const -> std::uint8_t;
+
+  /** @brief state() as an op of MachineHandle.submit_ops(), its value the state's integer. */
+  [[= py::doc{"Op of state, its integer value."}]] [[nodiscard]] auto op_state() const -> access_op;
+  /** @brief address() as an op of MachineHandle.submit_ops(). */
+  [[= py::doc{"Op of address."}]] [[nodiscard]] auto op_address() const -> access_op;
+  /** @brief configuration_value() as an op of MachineHandle.submit_ops(). */
+  [[= py::doc{"Op of configuration_value."}]] [[nodiscard]] auto op_configuration_value() const
+      -> access_op;
+  /** @brief requests() as an op of MachineHandle.submit_ops(). */
+  [[= py::doc{"Op of requests."}]] [[nodiscard]] auto op_requests() const -> access_op;
 
   /** @brief Name of the enumeration step that failed, empty while none did. */
   [[= py::doc{"Name of the enumeration step that failed, None while none did."}]] [[nodiscard]] auto

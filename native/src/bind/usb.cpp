@@ -6,6 +6,9 @@
 
 #include <reflex/enum.hpp>
 
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/vector.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <format>
@@ -845,25 +848,70 @@ auto usb_link::take_results() -> std::vector<usb_control_result>
   });
 }
 
+namespace
+{
+auto requests_of(usb::host const& on) -> std::vector<usb_request_record>
+{
+  return on.log()
+       | std::views::filter(
+             [](usb::log_entry const& entry) { return entry.kind == usb::log_kind::request; })
+       | std::views::transform([](usb::log_entry const& entry) {
+           return usb_request_record{
+               .at_ps        = entry.at.ps,
+               .address      = entry.address,
+               .request_type = entry.setup.request_type,
+               .request      = entry.setup.request,
+               .value        = entry.setup.value,
+               .index        = entry.setup.index,
+               .length       = entry.setup.length,
+               .status       = entry.status,
+           };
+         })
+       | std::ranges::to<std::vector>();
+}
+
+auto board_host(periph::stm32::usb_host_port* port, detail::alive_flag const& alive) -> usb::host&
+{
+  if(not detail::is_alive(alive))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  return *port->board_host();
+}
+}
+
 auto usb_link::requests() const -> std::vector<usb_request_record>
 {
-  return engine([&]() -> std::vector<usb_request_record> {
-    return host().log()
-         | std::views::filter(
-               [](usb::log_entry const& entry) { return entry.kind == usb::log_kind::request; })
-         | std::views::transform([](usb::log_entry const& entry) {
-             return usb_request_record{
-                 .at_ps        = entry.at.ps,
-                 .address      = entry.address,
-                 .request_type = entry.setup.request_type,
-                 .request      = entry.setup.request,
-                 .value        = entry.setup.value,
-                 .index        = entry.setup.index,
-                 .length       = entry.setup.length,
-                 .status       = entry.status,
-             };
-           })
-         | std::ranges::to<std::vector>();
+  return engine([&] { return requests_of(host()); });
+}
+
+auto usb_link::op_state() const -> access_op
+{
+  std::ignore = port();
+  return detail::link_op(
+      [port = port_, alive = alive_] { return board_host(port, alive).state(); });
+}
+
+auto usb_link::op_address() const -> access_op
+{
+  std::ignore = port();
+  return detail::link_op(
+      [port = port_, alive = alive_] { return board_host(port, alive).address(); });
+}
+
+auto usb_link::op_configuration_value() const -> access_op
+{
+  std::ignore = port();
+  return detail::link_op(
+      [port = port_, alive = alive_] { return board_host(port, alive).configuration_value(); });
+}
+
+auto usb_link::op_requests() const -> access_op
+{
+  std::ignore = port();
+  return detail::link_op([port = port_, alive = alive_] {
+    return std::function<reflex::py::nb::object()>{
+        [found = requests_of(board_host(port, alive))] { return reflex::py::nb::cast(found); }};
   });
 }
 

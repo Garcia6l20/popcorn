@@ -141,6 +141,23 @@ class UsbInterface:
     endpoints: tuple[UsbEndpoint, ...]
 
 
+def requests_of(records: Iterable[_core.UsbRequestRecord]) -> tuple[UsbRequest, ...]:
+    """The `UsbRequest` of each native request record, in order."""
+    return tuple(
+        UsbRequest(
+            at=VirtualTime(record.at_ps),
+            address=record.address,
+            request_type=record.request_type,
+            request=record.request,
+            value=record.value,
+            index=record.index,
+            length=record.length,
+            status=None if record.status is None else record.status.name,
+        )
+        for record in records
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class UsbHostOptions:
     """The virtual host a board wires to a USB device controller.
@@ -1587,19 +1604,7 @@ class UsbHost:
     def requests(self) -> tuple[UsbRequest, ...]:
         """Every control request the host sent since the machine was built, oldest first:
         enumeration, class drivers and `control` alike. Not part of snapshots."""
-        return tuple(
-            UsbRequest(
-                at=VirtualTime(record.at_ps),
-                address=record.address,
-                request_type=record.request_type,
-                request=record.request,
-                value=record.value,
-                index=record.index,
-                length=record.length,
-                status=None if record.status is None else record.status.name,
-            )
-            for record in self._link.requests()
-        )
+        return requests_of(self._link.requests())
 
     def cdc(self, function: int = 0) -> CdcStream:
         """The stream of a CDC ACM function of the device, the same one on later calls.

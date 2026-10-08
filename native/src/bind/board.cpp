@@ -42,10 +42,29 @@ void uart_link::send(reflex::py::nb::bytes const& data)
   detail::host_access(host_, [&] { uart.receive(frames); });
 }
 
+namespace
+{
+template <typename Port>
+auto live_port(Port* port, detail::alive_flag const& alive, char const* what) -> Port&
+{
+  if(not detail::is_alive(alive))
+  {
+    throw config_error(what, 0, "machine", "a link whose machine still exists");
+  }
+  return *port;
+}
+}
+
 auto uart_link::queued() const -> std::uint64_t
 {
   auto& uart = port();
   return detail::host_access(host_, [&] { return uart.queued(); });
+}
+
+auto uart_link::op_queued() const -> access_op
+{
+  return detail::link_op(
+      [uart = &port(), alive = alive_] { return live_port(uart, alive, "uart").queued(); });
 }
 
 auto uart_link::available() const -> std::uint64_t
@@ -132,6 +151,20 @@ auto audio_link::external_frame_hz() const -> std::uint32_t
 {
   auto& sai = port();
   return detail::host_access(host_, [&] { return sai.external_clock(block_); });
+}
+
+auto audio_link::op_external_frame_hz() const -> access_op
+{
+  return detail::link_op([sai = &port(), alive = alive_, block = block_] {
+    return live_port(sai, alive, "audio").external_clock(block);
+  });
+}
+
+auto audio_link::op_set_external_frame_hz(std::uint32_t frame_hz) const -> access_op
+{
+  return detail::link_op([sai = &port(), alive = alive_, block = block_, frame_hz] {
+    live_port(sai, alive, "audio").set_external_clock(block, frame_hz);
+  });
 }
 
 auto audio_link::available() const -> std::uint64_t
@@ -271,23 +304,62 @@ auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
   return *port;
 }
 
+namespace
+{
+auto gpio_drive_body(periph::stm32::gpio_port& port, std::uint8_t pin, std::optional<bool> level)
+{
+  return [port = &port, pin, level](core::machine&) { port->drive(pin, level); };
+}
+
+auto gpio_level_body(periph::stm32::gpio_port& port, std::uint8_t pin)
+{
+  return [port = &port, pin](core::machine&) { return port->level(pin); };
+}
+
+auto gpio_mode_body(periph::stm32::gpio_port& port, std::uint8_t pin)
+{
+  return [port = &port, pin](core::machine&) { return port->mode(pin); };
+}
+
+auto gpio_alternate_body(periph::stm32::gpio_port& port, std::uint8_t pin)
+{
+  return [port = &port, pin](core::machine&) { return port->alternate(pin); };
+}
+
+auto adc_drive_body(
+    periph::stm32::analog_port& port,
+    std::uint8_t                channel,
+    std::uint32_t               microvolts)
+{
+  return [port = &port, channel, microvolts](core::machine&) { port->drive(channel, microvolts); };
+}
+
+auto adc_input_body(periph::stm32::analog_port& port, std::uint8_t channel)
+{
+  return [port = &port, channel](core::machine&) { return port->input(channel); };
+}
+}
+
 void machine_handle::gpio_drive(
     std::string const&  peripheral,
     std::uint8_t        pin,
     std::optional<bool> level)
 {
-  access([&](core::machine&) { gpio(peripheral, pin).drive(pin, level); });
+  access(
+      [&](core::machine& target) { gpio_drive_body(gpio(peripheral, pin), pin, level)(target); });
 }
 
 auto machine_handle::gpio_level(std::string const& peripheral, std::uint8_t pin) const -> bool
 {
-  return access([&](core::machine&) { return gpio(peripheral, pin).level(pin); });
+  return access(
+      [&](core::machine& target) { return gpio_level_body(gpio(peripheral, pin), pin)(target); });
 }
 
 auto machine_handle::gpio_mode(std::string const& peripheral, std::uint8_t pin) const
     -> periph::stm32::pin_mode
 {
-  return access([&](core::machine&) { return gpio(peripheral, pin).mode(pin); });
+  return access(
+      [&](core::machine& target) { return gpio_mode_body(gpio(peripheral, pin), pin)(target); });
 }
 
 auto machine_handle::analog(std::string const& peripheral) const -> periph::stm32::analog_port&
@@ -305,18 +377,63 @@ void machine_handle::adc_drive(
     std::uint8_t       channel,
     std::uint32_t      microvolts)
 {
-  access([&](core::machine&) { analog(peripheral).drive(channel, microvolts); });
+  access([&](core::machine& target) {
+    adc_drive_body(analog(peripheral), channel, microvolts)(target);
+  });
 }
 
 auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t channel) const
     -> std::uint32_t
 {
-  return access([&](core::machine&) { return analog(peripheral).input(channel); });
+  return access(
+      [&](core::machine& target) { return adc_input_body(analog(peripheral), channel)(target); });
 }
 
 auto machine_handle::gpio_alternate(std::string const& peripheral, std::uint8_t pin) const
     -> std::uint8_t
 {
-  return access([&](core::machine&) { return gpio(peripheral, pin).alternate(pin); });
+  return access([&](core::machine& target) {
+    return gpio_alternate_body(gpio(peripheral, pin), pin)(target);
+  });
+}
+
+auto machine_handle::op_gpio_level(std::string const& peripheral, std::uint8_t pin) const
+    -> access_op
+{
+  return detail::machine_op(gpio_level_body(gpio(peripheral, pin), pin));
+}
+
+auto machine_handle::op_gpio_drive(
+    std::string const&  peripheral,
+    std::uint8_t        pin,
+    std::optional<bool> level) const -> access_op
+{
+  return detail::machine_op(gpio_drive_body(gpio(peripheral, pin), pin, level));
+}
+
+auto machine_handle::op_gpio_mode(std::string const& peripheral, std::uint8_t pin) const
+    -> access_op
+{
+  return detail::machine_op(gpio_mode_body(gpio(peripheral, pin), pin));
+}
+
+auto machine_handle::op_gpio_alternate(std::string const& peripheral, std::uint8_t pin) const
+    -> access_op
+{
+  return detail::machine_op(gpio_alternate_body(gpio(peripheral, pin), pin));
+}
+
+auto machine_handle::op_adc_input(std::string const& peripheral, std::uint8_t channel) const
+    -> access_op
+{
+  return detail::machine_op(adc_input_body(analog(peripheral), channel));
+}
+
+auto machine_handle::op_adc_drive(
+    std::string const& peripheral,
+    std::uint8_t       channel,
+    std::uint32_t      microvolts) const -> access_op
+{
+  return detail::machine_op(adc_drive_body(analog(peripheral), channel, microvolts));
 }
 }

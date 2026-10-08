@@ -1,5 +1,6 @@
 #pragma once
 
+#include "access_op.hpp"
 #include "board.hpp"
 #include "gil_locks.hpp"
 #include "held_python_end.hpp"
@@ -434,6 +435,33 @@ public:
   [[= py::doc{"Read bytes of guest memory as the debugger."}]] [[nodiscard]] auto
       read_memory(address at, std::uint32_t size) const -> reflex::py::nb::bytes;
 
+  /**
+   * @brief Writes the bits of @p value that @p mask selects into guest memory, reading and
+   *        writing in one access, as the debugger. Meant for RAM: on a peripheral the read runs
+   *        the model's read effects.
+   * @param at First guest address.
+   * @param mask Bits written, one byte per byte of memory.
+   * @param value Bytes whose masked bits are written, as long as @p mask.
+   * @throws config_error for lengths that differ or a range outside the 32-bit address space.
+   * @throws emulation_error naming the failing address on a bus error.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{"Write the masked bits of value into guest memory as the debugger."}]] void
+      write_memory_masked(
+          address                      at,
+          reflex::py::nb::bytes const& mask,
+          reflex::py::nb::bytes const& value);
+
+  /**
+   * @brief The bytes of the NUL-terminated string at @p at, without the NUL, at most @p limit
+   *        bytes, read 64-byte block by block and byte by byte where a block meets a bus error.
+   * @throws emulation_error when the bytes before a NUL meet a bus error.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{
+      "Bytes of the NUL-terminated string at an address, at most limit."}]] [[nodiscard]] auto
+      cstring(address at, std::uint32_t limit) const -> reflex::py::nb::bytes;
+
   /** @brief Names of the core registers, in the arch module's order. */
   [[= py::doc{"Names of the core registers, in the arch module's order."}]] [[nodiscard]] auto
       register_names() const -> std::vector<std::string>;
@@ -482,6 +510,104 @@ public:
       std::uint32_t      offset,
       std::uint8_t       width,
       std::uint32_t      value);
+
+  /**
+   * @brief Stores the bits of a peripheral register value that @p mask selects, without write
+   *        effects, reading and writing the stored word in one access.
+   * @param peripheral Peripheral name.
+   * @param offset Byte offset of the register.
+   * @param width Register width in bits, 8, 16 or 32.
+   * @param mask Bits stored, at most @p width bits.
+   * @param value Value whose masked bits are stored, at most @p width bits.
+   * @throws config_error as poke().
+   */
+  [[= py::doc{"Store the masked bits of a peripheral register, without write effects."}]] void
+      poke_masked(
+          std::string const& peripheral,
+          std::uint32_t      offset,
+          std::uint8_t       width,
+          std::uint32_t      mask,
+          std::uint32_t      value);
+
+  /** @brief read_memory() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of read_memory."}]] [[nodiscard]] auto
+      op_read_memory(address at, std::uint32_t size) const -> access_op;
+  /** @brief write_memory() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of write_memory."}]] [[nodiscard]] auto
+      op_write_memory(address at, reflex::py::nb::bytes const& bytes) const -> access_op;
+  /** @brief write_memory_masked() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of write_memory_masked."}]] [[nodiscard]] auto op_memory_masked(
+      address                      at,
+      reflex::py::nb::bytes const& mask,
+      reflex::py::nb::bytes const& value) const -> access_op;
+  /** @brief cstring() as an op of submit_ops(). */
+  [[= py::doc{"Op of cstring."}]] [[nodiscard]] auto
+      op_cstring(address at, std::uint32_t limit) const -> access_op;
+  /** @brief read_register() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of read_register."}]] [[nodiscard]] auto
+      op_read_register(std::uint32_t index) const -> access_op;
+  /** @brief write_register() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of write_register."}]] [[nodiscard]] auto
+      op_write_register(std::uint32_t index, std::uint64_t value) const -> access_op;
+  /** @brief peek() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of peek."}]] [[nodiscard]] auto
+      op_peek(std::string const& peripheral, std::uint32_t offset, std::uint8_t width) const
+      -> access_op;
+  /** @brief poke_masked() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of poke_masked."}]] [[nodiscard]] auto op_poke_masked(
+      std::string const& peripheral,
+      std::uint32_t      offset,
+      std::uint8_t       width,
+      std::uint32_t      mask,
+      std::uint32_t      value) const -> access_op;
+  /** @brief pc() as an op of submit_ops(). */
+  [[= py::doc{"Op of pc."}]] [[nodiscard]] auto op_pc() const -> access_op;
+  /** @brief instructions() as an op of submit_ops(). */
+  [[= py::doc{"Op of instructions."}]] [[nodiscard]] auto op_instructions() const -> access_op;
+  /** @brief pending_events() as an op of submit_ops(). */
+  [[= py::doc{"Op of pending_events."}]] [[nodiscard]] auto op_pending_events() const -> access_op;
+  /** @brief gpio_level() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of gpio_level."}]] [[nodiscard]] auto
+      op_gpio_level(std::string const& peripheral, std::uint8_t pin) const -> access_op;
+  /** @brief gpio_drive() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of gpio_drive."}]] [[nodiscard]] auto op_gpio_drive(
+      std::string const&  peripheral,
+      std::uint8_t        pin,
+      std::optional<bool> level) const -> access_op;
+  /** @brief gpio_mode() as an op of submit_ops(), its value the mode's integer, checked now. */
+  [[= py::doc{"Op of gpio_mode, its integer value."}]] [[nodiscard]] auto
+      op_gpio_mode(std::string const& peripheral, std::uint8_t pin) const -> access_op;
+  /** @brief gpio_alternate() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of gpio_alternate."}]] [[nodiscard]] auto
+      op_gpio_alternate(std::string const& peripheral, std::uint8_t pin) const -> access_op;
+  /** @brief adc_input() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of adc_input."}]] [[nodiscard]] auto
+      op_adc_input(std::string const& peripheral, std::uint8_t channel) const -> access_op;
+  /** @brief adc_drive() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of adc_drive."}]] [[nodiscard]] auto op_adc_drive(
+      std::string const& peripheral,
+      std::uint8_t       channel,
+      std::uint32_t      microvolts) const -> access_op;
+
+  /**
+   * @brief Runs @p ops in order as one command: at once on this thread while parked, at the
+   *        next block boundary on the machine thread while running, with no GIL. Stops at the
+   *        first op that fails.
+   * @param ops The ops.
+   * @param notes Note added to the error of the op at the same index.
+   * @param at_ps Virtual time since reset the command waits for, None for the next boundary.
+   * @return Resolves to (time in picoseconds, list of raw values), or fails with the error of the
+   *         failing op, its note added. Cancelling it withdraws a command not yet run.
+   * @throws std::invalid_argument for @p at_ps before the time of a parked machine, or notes
+   *         not one per op.
+   * @throws machine_running from a callback of another machine holding its lock.
+   */
+  [[= py::doc{
+      "Run ops as one command at a block boundary, return a HostFuture of (time, values)."}]] auto
+      submit_ops(
+          std::vector<access_op>       ops,
+          std::vector<std::string>     notes,
+          std::optional<std::uint64_t> at_ps) -> host_future_handle;
 
   /**
    * @brief Takes a snapshot.

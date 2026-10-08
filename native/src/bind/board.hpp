@@ -1,5 +1,6 @@
 #pragma once
 
+#include "access_op.hpp"
 #include "alive.hpp"
 #include "gil_locks.hpp"
 #include "link_queues.hpp"
@@ -59,6 +60,9 @@ public:
   /** @brief Frames sent and not yet delivered to the receiver. */
   [[= py::doc{"Frames sent and not yet delivered to the receiver."}]] [[nodiscard]] auto
       queued() const -> std::uint64_t;
+
+  /** @brief queued() as an op of MachineHandle.submit_ops(). */
+  [[= py::doc{"Op of queued."}]] [[nodiscard]] auto op_queued() const -> access_op;
 
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto
@@ -179,6 +183,14 @@ public:
   /** @brief The external frame rate set last, 0 when stopped. */
   [[= py::doc{"The block's external frame rate, 0 when stopped."}]] [[nodiscard]] auto
       external_frame_hz() const -> std::uint32_t;
+
+  /** @brief external_frame_hz() as an op of MachineHandle.submit_ops(). */
+  [[= py::doc{"Op of external_frame_hz."}]] [[nodiscard]] auto op_external_frame_hz() const
+      -> access_op;
+
+  /** @brief set_external_frame_hz() as an op of MachineHandle.submit_ops(). */
+  [[= py::doc{"Op of set_external_frame_hz."}]] [[nodiscard]] auto
+      op_set_external_frame_hz(std::uint32_t frame_hz) const -> access_op;
 
 private:
   [[nodiscard]] auto endpoint() const -> detail::audio_queue_endpoint&;

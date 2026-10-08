@@ -7,15 +7,12 @@ import json
 import keyword
 import math
 from pathlib import Path
-from typing import cast
 
 import popcorn
 import pytest
-from popcorn import _core
-from popcorn._views import ViewAccess
 from popcorn.arm import Reg
 
-from .conftest import Machines
+from .conftest import M33_JSON, Machines
 
 SRAM = 0x2000_8000
 
@@ -187,24 +184,37 @@ def test_every_profile_register_is_in_the_generated_enum(
     assert all(v.isidentifier() and not keyword.iskeyword(v) for v in names)
 
 
-class EndsAt:
-    """A stand-in handle whose memory ends at an address inside a 64-byte block."""
-
-    def __init__(self, data: bytes, end: int) -> None:
-        self.data = data
-        self.end = end
-        self.reads: list[tuple[int, int]] = []
-
-    def read_memory(self, at: int, size: int) -> bytes:
-        self.reads.append((at, size))
-        if at + size > self.end:
-            raise popcorn.EmulationError("unmapped", address=self.end)
-        return self.data[at : at + size]
+SRAM_END = 0x2000_0000 + 786432
 
 
-def test_cstring_reads_blocks_and_falls_back_to_bytes_at_a_bus_error() -> None:
-    fake = EndsAt(b"\x01" * 16 + b"abc\0", 20)
-    memory = popcorn.Memory(ViewAccess(cast(_core.MachineHandle, fake)))
-    assert memory.cstring(16) == "abc"
-    assert fake.reads[0] == (16, 48)
-    assert fake.reads[1:] == [(16, 1), (17, 1), (18, 1), (19, 1)]
+def test_cstring_reads_up_to_the_end_of_memory_and_raises_past_it(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(m33)
+    m.mem.write(SRAM_END - 4, b"abc\0")
+    assert m.mem.cstring(SRAM_END - 4) == "abc"
+    m.mem.write(SRAM_END - 4, b"abcd")
+    with pytest.raises(popcorn.EmulationError, match="bus error"):
+        m.mem.cstring(SRAM_END - 4)
+
+
+def test_a_cstring_without_a_nul_at_the_top_of_memory_raises_instead_of_wrapping(
+    tmp_path: Path,
+) -> None:
+    described = json.loads(M33_JSON.read_text())
+    described["regions"].append(
+        {
+            "name": "TOP",
+            "start": 0xFFFF_F000,
+            "size": 0x1000,
+            "kind": "ram",
+            "acc": {"read": True, "write": True, "execute": False},
+            "secure": False,
+        }
+    )
+    path = tmp_path / "top.json"
+    path.write_text(json.dumps(described))
+    m = popcorn.Machine(popcorn.load_description(path))
+    m.mem.write(0xFFFF_FFC0, b"x" * 64)
+    with pytest.raises(popcorn.ConfigError, match="32-bit address space"):
+        m.mem.cstring(0xFFFF_FFC0, limit=1000)

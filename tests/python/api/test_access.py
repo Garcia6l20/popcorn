@@ -6,12 +6,19 @@ from __future__ import annotations
 import asyncio
 import gc
 import weakref
+from collections.abc import Callable
+from typing import Any
 
 import popcorn
 import pytest
+from popcorn._refs import Ref
+from popcorn.arm import Reg
+from popcorn.board import AudioOptions, UsbHostOptions
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import Machines, run_bounded
+from .conftest import BOARD_ELF, VIEWS_ELF, Machines, run_bounded
+
+HANG = 10.0
 
 SRAM = 0x2000_8000
 UNMAPPED = 0x6000_0000
@@ -297,3 +304,172 @@ def test_a_condition_is_refused_where_it_cannot_run_natively(
         views.ref.var("armed").lt(True)
     with pytest.raises(TypeError, match="not a scalar"):
         views.ref.var("table").eq(0)
+
+
+def views_at_loop(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    """A machine over the views firmware, past its bkpt in the endless loop after it."""
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(VIEWS_ELF))
+    m.reset()
+    assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
+    return m
+
+
+def board_with_links(u575: popcorn.MachineDescription) -> popcorn.Machine:
+    """A U575 machine over the board firmware, at `ready`, with a USB host and an audio
+    block."""
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(BOARD_ELF),
+        usb={"OTG_FS": UsbHostOptions(attached=False)},
+        audio={"SAI1": {"A": AudioOptions()}},
+    )
+    m.reset()
+    assert asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000)).reason is (
+        popcorn.StopReason.ADDRESS
+    )
+    return m
+
+
+type RefOf = Callable[[popcorn.Machine], Ref[Any]]
+
+VIEWS_KINDS: dict[str, tuple[RefOf, object]] = {
+    "u8": (lambda m: m.ref.mem.u8[m.sym("table")], 0xA5),
+    "u16": (lambda m: m.ref.mem.u16[m.sym("table")], 0xBEEF),
+    "u32": (lambda m: m.ref.mem.u32[m.sym("table")], 0xDEAD_BEEF),
+    "u64": (lambda m: m.ref.mem.u64[m.sym("table")], 0x0123_4567_89AB_CDEF),
+    "i8": (lambda m: m.ref.mem.i8[m.sym("table")], -5),
+    "i16": (lambda m: m.ref.mem.i16[m.sym("table")], -300),
+    "i32": (lambda m: m.ref.mem.i32[m.sym("table")], -70_000),
+    "i64": (lambda m: m.ref.mem.i64[m.sym("table")], -(2**40)),
+    "f32": (lambda m: m.ref.mem.f32[m.sym("table")], 1.5),
+    "f64": (lambda m: m.ref.mem.f64[m.sym("table")], -2.25),
+    "block": (lambda m: m.ref.mem.block(m.sym("table"), 8), b"\x01\x02\x03\x04\x05\x06\x07\x08"),
+    "cstring": (lambda m: m.ref.mem.cstring(m.sym("banner")), None),
+    "reg-name": (lambda m: m.ref.reg.r0, 0x1234),
+    "reg-enum": (lambda m: m.ref.reg[Reg.R1], 0x5678),
+    "pc": (lambda m: m.ref.pc, None),
+    "instructions": (lambda m: m.ref.instructions, None),
+    "pending-events": (lambda m: m.ref.pending_events, None),
+    "var-member": (lambda m: m.ref.var("table").count, 9),
+    "var-element-float": (lambda m: m.ref.var("table").entries[1].gain, 6.5),
+    "var-element-int": (lambda m: m.ref.var("matrix")[1][2], -42),
+    "var-bit-field": (lambda m: m.ref.var("table").mode, 3),
+    "var-signed-bit-field": (lambda m: m.ref.var("wide").high, -100),
+    "var-bool": (lambda m: m.ref.var("armed"), False),
+    "masked": (lambda m: m.ref.mem.i8[m.sym("table")].masked(0xF0), None),
+}
+
+BOARD_KINDS: dict[str, tuple[RefOf, object]] = {
+    "register": (lambda m: m.ref.periph.GPIOB.GPIO_MODER, 0x5555_5555),
+    "register-bus": (lambda m: m.ref.periph.GPIOB.GPIO_ODR.bus, 0x0003),
+    "register-field": (lambda m: m.ref.periph.GPIOB.GPIO_MODER.MODE1, 2),
+    "pin-level": (lambda m: m.ref.periph.GPIOA.pin(0).level, True),
+    "pin-release": (lambda m: m.ref.periph.GPIOA.pin(0).level, None),
+    "pin-mode": (lambda m: m.ref.periph.GPIOA.pin(5).mode, None),
+    "pin-alternate": (lambda m: m.ref.periph.GPIOA.pin(5).alternate, None),
+    "adc-volts": (lambda m: m.ref.periph.ADC1.input(5).volts, 1.5),
+    "audio-clock": (lambda m: m.ref.periph.SAI1.audio("A").external_frame_hz, 48_000),
+    "port-queued": (lambda m: m.ref.periph.USART1.port.queued, None),
+    "host-state": (lambda m: m.ref.periph.OTG_FS.host.state, None),
+    "host-address": (lambda m: m.ref.periph.OTG_FS.host.address, None),
+    "host-configuration": (lambda m: m.ref.periph.OTG_FS.host.configuration, None),
+    "host-requests": (lambda m: m.ref.periph.OTG_FS.host.requests, None),
+}
+
+
+def equivalent(build: Callable[[], popcorn.Machine], ref_of: RefOf, value: object) -> None:
+    """A parked `m.read` returns the sync getter's value, an `m.write` leaves what the sync
+    setter leaves on a twin, and both run on the machine's thread without the GIL."""
+    m = build()
+    ref = ref_of(m)
+    (read,) = asyncio.run(m.read(ref))
+    assert read == ref.get()
+    if ref.writable:
+        twin = build()
+        twin_ref = ref_of(twin)
+        twin_ref.put(value)
+        asyncio.run(m.write((ref, value)))
+        assert ref.get() == twin_ref.get()
+
+    async def running() -> None:
+        async with m.running():
+            await m.read(ref)
+            if ref.writable:
+                await m.write((ref, value))
+
+    run_bounded(running(), HANG)
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("kind", list(VIEWS_KINDS))
+def test_a_ref_reads_and_writes_as_its_sync_view_without_the_gil(
+    m33: popcorn.MachineDescription, kind: str
+) -> None:
+    ref_of, value = VIEWS_KINDS[kind]
+    equivalent(lambda: views_at_loop(m33), ref_of, value)
+
+
+@pytest.mark.parametrize("kind", list(BOARD_KINDS))
+def test_a_board_ref_reads_and_writes_as_its_sync_view_without_the_gil(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    ref_of, value = BOARD_KINDS[kind]
+    equivalent(lambda: board_with_links(u575), ref_of, value)
+
+
+def test_a_failing_op_names_its_argument_and_stops_the_batch(machines: Machines) -> None:
+    m = machines()
+    with pytest.raises(popcorn.EmulationError) as raised:
+        asyncio.run(m.read(m.ref.pc, m.ref.mem.u32[UNMAPPED]))
+    assert f"reading argument 1, mem.u32[{UNMAPPED:#010x}]" in raised.value.__notes__
+    m.mem.u32[SRAM] = 0
+    with pytest.raises(popcorn.EmulationError) as raised:
+        asyncio.run(m.write((m.ref.mem.u32[SRAM], 7), (m.ref.mem.u32[UNMAPPED], 1)))
+    assert f"writing argument 1, mem.u32[{UNMAPPED:#010x}]" in raised.value.__notes__
+    assert m.mem.u32[SRAM] == 7
+
+
+def test_a_write_validates_at_the_call(u575: popcorn.MachineDescription) -> None:
+    m = board_with_links(u575)
+    with pytest.raises(ValueError, match="not a voltage"):
+        m.write((m.ref.periph.ADC1.input(5).volts, -1.0))
+    with pytest.raises(ValueError, match="does not fit"):
+        m.write((m.ref.mem.u8[SRAM], 256))
+
+
+def test_a_variable_write_validates_at_the_call(m33: popcorn.MachineDescription) -> None:
+    m = views_at_loop(m33)
+    with pytest.raises(ValueError, match="does not fit"):
+        m.write((m.ref.var("table").mode, 99))
+    with pytest.raises(TypeError, match="bitfield"):
+        m.write((m.ref.var("table").mode, 1.5))
+
+
+def test_a_field_write_keeps_the_siblings_written_after_its_post(
+    u575: popcorn.MachineDescription, m33: popcorn.MachineDescription
+) -> None:
+    board = board_with_links(u575)
+    moder = board.periph.GPIOB.GPIO_MODER
+    moder.value = 0
+    pending = board.write((board.ref.periph.GPIOB.GPIO_MODER.MODE1, 2), at=board.time + us(5))
+    moder.MODE0 = 1
+    asyncio.run(board.run(for_=us(10)))
+    run_bounded(pending, HANG)
+    assert (moder.MODE0, moder.MODE1) == (1, 2)
+
+    views = views_at_loop(m33)
+    wide = views.var("wide")
+    pending = views.write((views.ref.var("wide").mid, 0x123), at=views.time + us(5))
+    wide.low.value = 33
+    wide.high.value = -7
+    asyncio.run(views.run(for_=us(10)))
+    run_bounded(pending, HANG)
+    assert (wide.low.value, wide.mid.value, wide.high.value) == (33, 0x123, -7)
+
+
+def test_a_float_too_large_for_its_ref_is_a_value_error(machines: Machines) -> None:
+    m = machines()
+    with pytest.raises(ValueError, match="does not fit"):
+        m.write((m.ref.mem.f32[SRAM], 1e40))
+    with pytest.raises(ValueError, match="does not fit"):
+        m.mem.f32[SRAM] = 1e40

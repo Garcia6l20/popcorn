@@ -858,18 +858,15 @@ class Machine:
         self._refuse_on_host()
         for index, ref in enumerate(refs):
             self._own(ref, index)
-        getters = [ref.get for ref in refs]
-        values: list[object] = []
+        ops = [ref.read_op() for ref in refs]
+        notes = [f"reading argument {index}, {ref.label}" for index, ref in enumerate(refs)]
 
-        def body() -> None:
-            for index, get in enumerate(getters):
-                try:
-                    values.append(get())
-                except BaseException as error:
-                    error.add_note(f"reading argument {index}, {refs[index].label}")
-                    raise
+        def convert(raw: object) -> Readout[*tuple[Any, ...]]:
+            time_ps, values = cast(tuple[int, list[object]], raw)
+            decoded = tuple(ref.decode(value) for ref, value in zip(refs, values, strict=True))
+            return Readout(decoded, VirtualTime(time_ps))
 
-        return self._submit(body, at, lambda time: Readout(tuple(values), time))
+        return self._submit_ops(ops, notes, at, convert)
 
     def write(
         self, *pairs: tuple[Ref[Any], object], at: VirtualTime | None = None
@@ -879,35 +876,38 @@ class Machine:
 
         `await m.write((m.ref.reg.r0, 5), (m.ref.periph.GPIOA.pin(0).level, True))`. A write
         that fails stops the batch, the writes before it stay applied, and the await raises its
-        exception with a note naming the argument.
+        exception with a note naming the argument. Each value is checked and encoded at the
+        call. A register field or a variable bit field is written by reading and writing its
+        word in one access on the machine's thread, so the other bits keep what the firmware
+        wrote meanwhile.
 
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.
             TypeError: No pair, a pair that is not a (ref, value) tuple, a read-only ref, or a
                 value of the wrong type.
-            ValueError: A value out of range, a ref of another machine, or `at` as for `read`.
+            ValueError: A value out of range, an ADC voltage, a scalar that `struct` cannot
+                pack or a variable value that does not fit, a ref of another machine, or `at` as
+                for `read`. Raised here, not from the await.
             EmulationError: From the await, as for `read`.
         """
         self._refuse_on_host()
         if not pairs:
             raise TypeError("write() takes at least one (ref, value) pair")
+        ops: list[_core.AccessOp] = []
+        notes: list[str] = []
         for index, pair in enumerate(cast(tuple[object, ...], pairs)):
             if not isinstance(pair, tuple) or len(cast(tuple[object, ...], pair)) != 2:
                 raise TypeError(f"write() argument {index} is not a (ref, value) pair")
             ref, value = cast(tuple[object, object], pair)
             self._own(ref, index)
-            cast(Ref[Any], ref).checked(value)
-        writes = [(ref.put, value, ref.label) for ref, value in pairs]
+            ops.append(cast(Ref[Any], ref).write_op(value))
+            notes.append(f"writing argument {index}, {cast(Ref[Any], ref).label}")
 
-        def body() -> None:
-            for index, (put, value, label) in enumerate(writes):
-                try:
-                    put(value)
-                except BaseException as error:
-                    error.add_note(f"writing argument {index}, {label}")
-                    raise
+        def convert(raw: object) -> Readout[()]:
+            time_ps, _ = cast(tuple[int, list[object]], raw)
+            return Readout((), VirtualTime(time_ps))
 
-        return self._submit(body, at, lambda time: Readout((), time))
+        return self._submit_ops(ops, notes, at, convert)
 
     def _own(self, ref: object, index: int) -> None:
         if not isinstance(ref, Ref):
@@ -936,6 +936,15 @@ class Machine:
             cancel=cancel,
             follow=follow,
         )
+
+    def _submit_ops[R](
+        self,
+        ops: list[_core.AccessOp],
+        notes: list[str],
+        at: VirtualTime | None,
+        convert: Callable[[object], R],
+    ) -> Pending[R]:
+        return Pending(self._handle.submit_ops(ops, notes, None if at is None else at.ps), convert)
 
     def _post[T](
         self,

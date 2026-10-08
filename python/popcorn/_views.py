@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._enums import PinMode
-from popcorn._errors import ConfigError, EmulationError
+from popcorn._errors import ConfigError
 
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
@@ -57,7 +57,7 @@ class ScalarView[T: (int, float)]:
     def __setitem__(self, address: int, value: T) -> None:
         try:
             data = struct.pack(self._format, value)
-        except struct.error as error:
+        except (struct.error, OverflowError) as error:
             raise ValueError(f"{value!r} does not fit {self._format[1:]}: {error}") from error
         self._access.handle.write_memory(address, data)
 
@@ -91,6 +91,10 @@ class Memory:
         """Write `data` at `address`."""
         self._access.handle.write_memory(address, data)
 
+    def write_masked(self, address: int, mask: bytes, data: bytes) -> None:
+        """Write the bits of `data` that `mask` selects at `address`, in one access."""
+        self._access.handle.write_memory_masked(address, mask, data)
+
     def cstring(self, address: int, limit: int = 256) -> str:
         """The NUL-terminated string at `address`, at most `limit` bytes, UTF-8 with
         replacement characters.
@@ -98,29 +102,7 @@ class Memory:
         Reads up to the end of each 64-byte block at once, byte by byte where a block read
         meets a bus error, so a string ending just before unmapped memory still reads.
         """
-        data = bytearray()
-        while len(data) < limit:
-            at = address + len(data)
-            size = min(64 - at % 64, limit - len(data))
-            try:
-                chunk = self._access.handle.read_memory(at, size)
-            except EmulationError:
-                chunk = self._bytes_until_nul(at, size)
-            end = chunk.find(b"\0")
-            if end >= 0:
-                data += chunk[:end]
-                break
-            data += chunk
-        return data.decode("utf-8", errors="replace")
-
-    def _bytes_until_nul(self, address: int, size: int) -> bytes:
-        data = bytearray()
-        for at in range(address, address + size):
-            byte = self._access.handle.read_memory(at, 1)
-            data += byte
-            if byte == b"\0":
-                break
-        return bytes(data)
+        return self._access.handle.cstring(address, limit).decode("utf-8", errors="replace")
 
 
 class RegisterBank[R: enum.Enum]:
@@ -264,7 +246,9 @@ class RegisterView:
         field = self._field(name)
         if value < 0 or value >> field.width:
             raise ValueError(f"{value} does not fit the {field.width}-bit field {name}")
-        self.value = (self.value & ~field.mask) | (value << field.lsb)
+        self._access.handle.poke_masked(
+            self._peripheral, self._offset, self._width, field.mask, value << field.lsb
+        )
 
     def __repr__(self) -> str:
         return f"<{self._peripheral}.{self._name} @ {self._offset:#x}>"
@@ -436,13 +420,22 @@ class AnalogInput:
 
     @volts.setter
     def volts(self, value: float) -> None:
-        microvolts = round(value * 1e6) if math.isfinite(value) else -1
-        if not 0 <= microvolts <= 0xFFFF_FFFF:
-            raise ValueError(f"{value!r} V is not a voltage from 0 to 4294.967295 V")
-        self._access.handle.adc_drive(self.adc, self.channel, microvolts)
+        self._access.handle.adc_drive(self.adc, self.channel, microvolts_of(value))
 
     def __repr__(self) -> str:
         return f"AnalogInput({self.adc}, {self.channel})"
+
+
+def microvolts_of(volts: float) -> int:
+    """`volts` in whole microvolts.
+
+    Raises:
+        ValueError: `volts` is not a voltage from 0 to 4294.967295 V.
+    """
+    microvolts = round(volts * 1e6) if math.isfinite(volts) else -1
+    if not 0 <= microvolts <= 0xFFFF_FFFF:
+        raise ValueError(f"{volts!r} V is not a voltage from 0 to 4294.967295 V")
+    return microvolts
 
 
 class Peripherals:

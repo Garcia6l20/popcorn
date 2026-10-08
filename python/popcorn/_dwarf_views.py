@@ -215,27 +215,42 @@ class Var:
             return any(value < 0 for value in resolved.values.values())
         return isinstance(resolved, BaseType) and resolved.encoding is Encoding.SIGNED
 
-    @property
-    def value(self) -> int | float | bool:
-        """The scalar value."""
+    def span(self) -> int:
+        """Bytes the scalar occupies from `address`, its bit field included.
+
+        Raises:
+            TypeError: The location is not a scalar.
+        """
+        _, size = self._scalar()
+        if self._bits is not None:
+            return (self._bits.offset + self._bits.size + 7) // 8
+        return size
+
+    def decode(self, data: bytes) -> int | float | bool:
+        """The scalar value of the `span()` bytes read at `address`."""
         from popcorn.image.dwarf import BaseType, Encoding
 
-        fmt, size = self._scalar()
+        fmt, _ = self._scalar()
         if self._bits is not None:
-            span = (self._bits.offset + self._bits.size + 7) // 8
-            word = int.from_bytes(self._memory.read(self.address, span), "little")
+            word = int.from_bytes(data, "little")
             raw = (word >> self._bits.offset) & ((1 << self._bits.size) - 1)
             if self._signed() and raw >> (self._bits.size - 1):
                 raw -= 1 << self._bits.size
             return raw
-        value: int | float = struct.unpack(fmt, self._memory.read(self.address, size))[0]
+        value: int | float = struct.unpack(fmt, data)[0]
         resolved = self.type
         if isinstance(resolved, BaseType) and resolved.encoding is Encoding.BOOLEAN:
             return bool(value)
         return value
 
-    @value.setter
-    def value(self, value: int | float | bool) -> None:
+    def encode(self, value: int | float | bool) -> tuple[bytes, bytes | None]:
+        """The bytes written at `address` for `value`, and for a bit field the mask of the bits
+        they set, None for a whole scalar.
+
+        Raises:
+            TypeError: A bit field given a non-int.
+            ValueError: `value` does not fit.
+        """
         fmt, size = self._scalar()
         if self._bits is not None:
             if not isinstance(value, int):
@@ -250,18 +265,29 @@ class Var:
                     f"{value} does not fit the {self._bits.size}-bit field {self._name},"
                     f" {low} to {high}"
                 )
-            span = (self._bits.offset + self._bits.size + 7) // 8
+            span = self.span()
             mask = ((1 << self._bits.size) - 1) << self._bits.offset
-            word = int.from_bytes(self._memory.read(self.address, span), "little")
-            word = (word & ~mask) | ((value << self._bits.offset) & mask)
-            self._memory.write(self.address, word.to_bytes(span, "little"))
-            return
+            word = (value << self._bits.offset) & mask
+            return word.to_bytes(span, "little"), mask.to_bytes(span, "little")
         try:
             data = struct.pack(fmt, value)
-        except struct.error as error:
+        except (struct.error, OverflowError) as error:
             raise ValueError(f"{value!r} does not fit {self._name}: {error}") from error
         assert len(data) == size
-        self._memory.write(self.address, data)
+        return data, None
+
+    @property
+    def value(self) -> int | float | bool:
+        """The scalar value."""
+        return self.decode(self._memory.read(self.address, self.span()))
+
+    @value.setter
+    def value(self, value: int | float | bool) -> None:
+        data, mask = self.encode(value)
+        if mask is None:
+            self._memory.write(self.address, data)
+        else:
+            self._memory.write_masked(self.address, mask, data)
 
     def __repr__(self) -> str:
         return f"<Var {self._name} @ {self.address:#010x}>"

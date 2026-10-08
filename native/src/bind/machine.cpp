@@ -473,27 +473,6 @@ auto machine_handle::locate(address pc) const -> location_info
   return access([pc](core::machine& target) { return owned(target.locate(pc)); });
 }
 
-void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes)
-{
-  if(std::uint64_t{at} + bytes.size() > std::uint64_t{1} << 32)
-  {
-    throw config_error(
-        "memory", 0, std::format("{:#010x}", at),
-        std::format("{} bytes within the 32-bit address space", bytes.size()));
-  }
-  auto const data = std::span{static_cast<std::byte const*>(bytes.data()), bytes.size()};
-  auto const written =
-      access([&](core::machine& target) { return target.mem().write_block(at, data); });
-  if(not written)
-  {
-    throw detail::bus_access_error(
-        std::format(
-            "bus error at {:#010x}: {}", written.error().at,
-            written.error().error == bus_error::unmapped ? "unmapped" : "denied"),
-        written.error().at);
-  }
-}
-
 auto machine_handle::snapshot() const -> snapshot_handle
 {
   return access([](core::machine& target) { return snapshot_handle{target.snapshot()}; });

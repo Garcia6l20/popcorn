@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, override
 from popcorn import _core
 from popcorn._enums import PinMode
 from popcorn._host import awaited
+from popcorn._views import microvolts_of
 from popcorn.units import VirtualTime
 
 if TYPE_CHECKING:
@@ -157,11 +158,16 @@ class Pending[R](Coroutine[Any, Any, R]):
             future.result(0.0)
 
 
+def _same(raw: object) -> Any:
+    return raw
+
+
 class Ref[T]:
     """A location of one machine's state, `m.ref.reg.r0`. It never touches the machine:
-    `Machine.read` and `Machine.write` access it, as one command."""
+    `Machine.read` and `Machine.write` access it, as one command of native ops that run with no
+    GIL, the bodies the sync views run."""
 
-    __slots__ = ("_check", "_get", "_set", "label", "owner")
+    __slots__ = ("_check", "_decode", "_get", "_read", "_set", "_write", "label", "owner")
 
     def __init__(
         self,
@@ -170,6 +176,10 @@ class Ref[T]:
         get: Callable[[], T],
         put: Callable[[T], None] | None = None,
         check: Callable[[object], None] | None = None,
+        *,
+        read: Callable[[], _core.AccessOp],
+        decode: Callable[[object], T] = _same,
+        write: Callable[[T], _core.AccessOp] | None = None,
     ) -> None:
         """A reference. Use the tree of `Machine.ref` instead."""
         self.owner = owner
@@ -177,6 +187,9 @@ class Ref[T]:
         self._get = get
         self._set = put
         self._check = check
+        self._read = read
+        self._decode = decode
+        self._write = write
 
     @property
     def writable(self) -> bool:
@@ -196,15 +209,34 @@ class Ref[T]:
             self._check(value)
 
     def get(self) -> T:
-        """Read the location now, as the sync view does. `Machine.read` calls it on the
-        machine's thread."""
+        """Read the location now, as the sync view does."""
         return self._get()
 
     def put(self, value: T) -> None:
-        """Write the location now, as the sync view does. `Machine.write` calls it."""
+        """Write the location now, as the sync view does."""
         if self._set is None:
             raise TypeError(f"{self.label} is read-only")
         self._set(value)
+
+    def read_op(self) -> _core.AccessOp:
+        """The native op `Machine.read` runs, its raw value decoded by `decode`."""
+        return self._read()
+
+    def decode(self, raw: object) -> T:
+        """The value of the raw result of `read_op`."""
+        return self._decode(raw)
+
+    def write_op(self, value: T) -> _core.AccessOp:
+        """The native op `Machine.write` runs for `value`, encoded and checked now.
+
+        Raises:
+            TypeError: The reference is read-only, or `value` has the wrong type.
+            ValueError: `value` is out of range.
+        """
+        self.checked(value)
+        if self._write is None:
+            raise TypeError(f"{self.label} has no native write")
+        return self._write(value)
 
     @override
     def __repr__(self) -> str:
@@ -221,11 +253,15 @@ def _integer(bits: int, label: str) -> Callable[[object], None]:
     return check
 
 
+def _handle(owner: object) -> _core.MachineHandle:
+    return cast(_core.MachineHandle, owner)
+
+
 def _packs(fmt: str) -> Callable[[object], None]:
     def check(value: object) -> None:
         try:
             struct.pack(fmt, value)
-        except struct.error as error:
+        except (struct.error, OverflowError) as error:
             raise ValueError(f"{value!r} does not fit {fmt[1:]}: {error}") from error
 
     return check
@@ -410,9 +446,13 @@ class MemoryRef[T: (int, float, bool)](Ref[T]):
         check: Callable[[object], None] | None,
         locate: Callable[[], ScalarLayout],
         mask: int | None = None,
+        *,
+        read: Callable[[], _core.AccessOp],
+        decode: Callable[[object], T],
+        write: Callable[[T], _core.AccessOp] | None = None,
     ) -> None:
         """A memory reference. Use the tree of `Machine.ref` instead."""
-        super().__init__(owner, label, get, put, check)
+        super().__init__(owner, label, get, put, check, read=read, decode=decode, write=write)
         self._locate = locate
         self._mask = mask
 
@@ -457,6 +497,7 @@ class MemoryRef[T: (int, float, bool)](Ref[T]):
             raise ValueError(f"mask {mask:#x} does not fit the {layout.bits}-bit {self.label}")
         combined = mask if self._mask is None else self._mask & mask
         get = self._get
+        decode = self._decode
         return MemoryRef[int](
             self.owner,
             f"{self.label}.masked({mask:#x})",
@@ -465,6 +506,8 @@ class MemoryRef[T: (int, float, bool)](Ref[T]):
             None,
             self._locate,
             combined,
+            read=self._read,
+            decode=lambda raw: int(decode(raw)) & combined,
         )
 
     def _layout(self) -> ScalarLayout:
@@ -570,17 +613,27 @@ class ScalarRefs[T: (int, float)]:
     def __getitem__(self, address: int) -> MemoryRef[T]:
         view = self._view
         fmt = self._fmt
+        packing = "<" + _FORMATS[fmt]
+        size = struct.calcsize(packing)
+        handle = _handle(self._owner)
 
         def put(value: T) -> None:
             view[address] = value
+
+        def decode(raw: object) -> T:
+            value: T = struct.unpack(packing, cast(bytes, raw))[0]
+            return value
 
         return MemoryRef(
             self._owner,
             f"mem.{fmt}[{address:#010x}]",
             lambda: view[address],
             put,
-            _packs("<" + _FORMATS[fmt]),
+            _packs(packing),
             lambda: _memory_layout(address, fmt),
+            read=lambda: handle.op_read_memory(address, size),
+            decode=decode,
+            write=lambda value: handle.op_write_memory(address, struct.pack(packing, value)),
         )
 
 
@@ -644,21 +697,28 @@ class MemoryRefs:
                     f"the block at {address:#010x} takes {size} bytes, not {len(value)}"
                 )
 
+        handle = _handle(self._owner)
         return Ref(
             self._owner,
             f"mem.block({address:#010x}, {size})",
             lambda: memory.read(address, size),
             lambda data: memory.write(address, bytes(data)),
             check,
+            read=lambda: handle.op_read_memory(address, size),
+            decode=lambda raw: bytes(cast(bytes, raw)),
+            write=lambda data: handle.op_write_memory(address, bytes(data)),
         )
 
     def cstring(self, address: int, limit: int = 256) -> Ref[str]:
         """The NUL-terminated string at `address`, `Memory.cstring`. Read-only."""
         memory = self._memory
+        handle = _handle(self._owner)
         return Ref(
             self._owner,
             f"mem.cstring({address:#010x})",
             lambda: memory.cstring(address, limit),
+            read=lambda: handle.op_cstring(address, limit),
+            decode=lambda raw: cast(bytes, raw).decode("utf-8", errors="replace"),
         )
 
 
@@ -684,22 +744,34 @@ class RegisterRefs:
             value: int = getattr(bank, name)
             return value
 
-        return Ref(self._owner, f"reg.{name}", get, put, _integer(64, "register"))
+        index = bank.names().index(name)
+        return _register_ref(self._owner, f"reg.{name}", index, get, put)
 
     def __getitem__(self, register: enum.Enum) -> Ref[int]:
         bank = self._bank
-        bank._slot(register)  # pyright: ignore[reportPrivateUsage]
+        index = bank._slot(register)  # pyright: ignore[reportPrivateUsage]
 
         def put(value: int) -> None:
             bank[register] = value
 
-        return Ref(
-            self._owner,
-            f"reg[{register.value}]",
-            lambda: bank[register],
-            put,
-            _integer(64, "register"),
+        return _register_ref(
+            self._owner, f"reg[{register.value}]", index, lambda: bank[register], put
         )
+
+
+def _register_ref(
+    owner: object, label: str, index: int, get: Callable[[], int], put: Callable[[int], None]
+) -> Ref[int]:
+    handle = _handle(owner)
+    return Ref(
+        owner,
+        label,
+        get,
+        put,
+        _integer(64, "register"),
+        read=lambda: handle.op_read_register(index),
+        write=lambda value: handle.op_write_register(index, value),
+    )
 
 
 class RegisterRef(Ref[int]):
@@ -712,11 +784,23 @@ class RegisterRef(Ref[int]):
     def __init__(self, owner: object, label: str, view: RegisterView) -> None:
         """Wrap a register view. Use `m.ref.periph.<P>.<R>` instead."""
         width = view._width  # pyright: ignore[reportPrivateUsage]
+        peripheral = view._peripheral  # pyright: ignore[reportPrivateUsage]
+        offset = view._offset  # pyright: ignore[reportPrivateUsage]
+        handle = _handle(owner)
+        full = (1 << width) - 1
 
         def put(value: int) -> None:
             view.value = value
 
-        super().__init__(owner, label, lambda: view.value, put, _integer(width, "register"))
+        super().__init__(
+            owner,
+            label,
+            lambda: view.value,
+            put,
+            _integer(width, "register"),
+            read=lambda: handle.op_peek(peripheral, offset, width),
+            write=lambda value: handle.op_poke_masked(peripheral, offset, width, full, value),
+        )
         self._view = view
 
     @property
@@ -724,8 +808,18 @@ class RegisterRef(Ref[int]):
         """The register over the bus, `RegisterView.read` and `write`."""
         view = self._view
         width = view._width  # pyright: ignore[reportPrivateUsage]
+        at = view._base + view._offset  # pyright: ignore[reportPrivateUsage]
+        size = width // 8
+        handle = _handle(self.owner)
         return Ref(
-            self.owner, f"{self.label}.bus", view.read, view.write, _integer(width, "register")
+            self.owner,
+            f"{self.label}.bus",
+            view.read,
+            view.write,
+            _integer(width, "register"),
+            read=lambda: handle.op_read_memory(at, size),
+            decode=lambda raw: int.from_bytes(cast(bytes, raw), "little"),
+            write=lambda value: handle.op_write_memory(at, value.to_bytes(size, "little")),
         )
 
     def __getattr__(self, name: str) -> Ref[int]:
@@ -739,7 +833,22 @@ class RegisterRef(Ref[int]):
             value: int = getattr(view, name)
             return value
 
-        return Ref(self.owner, f"{self.label}.{name}", get, put, _integer(field.width, "field"))
+        width = view._width  # pyright: ignore[reportPrivateUsage]
+        peripheral = view._peripheral  # pyright: ignore[reportPrivateUsage]
+        offset = view._offset  # pyright: ignore[reportPrivateUsage]
+        handle = _handle(self.owner)
+        return Ref(
+            self.owner,
+            f"{self.label}.{name}",
+            get,
+            put,
+            _integer(field.width, "field"),
+            read=lambda: handle.op_peek(peripheral, offset, width),
+            decode=lambda raw: (cast(int, raw) & field.mask) >> field.lsb,
+            write=lambda value: handle.op_poke_masked(
+                peripheral, offset, width, field.mask, value << field.lsb
+            ),
+        )
 
 
 class PinRefs:
@@ -758,6 +867,7 @@ class PinRefs:
         """Level as the input data register reads it. A write drives the pin, None releases
         it."""
         pin = self._pin
+        handle = _handle(self._owner)
 
         def put(value: bool | None) -> None:
             if value is None:
@@ -765,19 +875,45 @@ class PinRefs:
             else:
                 pin.level = value
 
-        return Ref[bool](self._owner, f"{self._label}.level", lambda: pin.level, put)
+        def write(value: bool | None) -> _core.AccessOp:
+            return handle.op_gpio_drive(
+                pin.port, pin.number, None if value is None else bool(value)
+            )
+
+        return Ref[bool](
+            self._owner,
+            f"{self._label}.level",
+            lambda: pin.level,
+            put,
+            read=lambda: handle.op_gpio_level(pin.port, pin.number),
+            decode=lambda raw: bool(raw),
+            write=write,
+        )
 
     @property
     def mode(self) -> Ref[PinMode]:
         """Mode the firmware configured. Read-only."""
         pin = self._pin
-        return Ref(self._owner, f"{self._label}.mode", lambda: pin.mode)
+        handle = _handle(self._owner)
+        return Ref(
+            self._owner,
+            f"{self._label}.mode",
+            lambda: pin.mode,
+            read=lambda: handle.op_gpio_mode(pin.port, pin.number),
+            decode=lambda raw: PinMode(cast(int, raw)),
+        )
 
     @property
     def alternate(self) -> Ref[int]:
         """Alternate function number. Read-only."""
         pin = self._pin
-        return Ref(self._owner, f"{self._label}.alternate", lambda: pin.alternate)
+        handle = _handle(self._owner)
+        return Ref(
+            self._owner,
+            f"{self._label}.alternate",
+            lambda: pin.alternate,
+            read=lambda: handle.op_gpio_alternate(pin.port, pin.number),
+        )
 
 
 class AnalogRefs:
@@ -802,8 +938,21 @@ class AnalogRefs:
         def check(value: object) -> None:
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise TypeError(f"volts takes a float, not {type(value).__name__}")
+            microvolts_of(value)
 
-        return Ref(self._owner, f"{self._label}.volts", lambda: analog.volts, put, check)
+        handle = _handle(self._owner)
+        return Ref(
+            self._owner,
+            f"{self._label}.volts",
+            lambda: analog.volts,
+            put,
+            check,
+            read=lambda: handle.op_adc_input(analog.adc, analog.channel),
+            decode=lambda raw: cast(int, raw) / 1e6,
+            write=lambda value: handle.op_adc_drive(
+                analog.adc, analog.channel, microvolts_of(value)
+            ),
+        )
 
 
 class AudioRefs:
@@ -829,8 +978,15 @@ class AudioRefs:
             value: int = stream.external_frame_hz
             return value
 
+        link = stream._link  # pyright: ignore[reportPrivateUsage]
         return Ref(
-            self._owner, f"{self._label}.external_frame_hz", get, put, _integer(32, "frame rate")
+            self._owner,
+            f"{self._label}.external_frame_hz",
+            get,
+            put,
+            _integer(32, "frame rate"),
+            read=link.op_external_frame_hz,
+            write=link.op_set_external_frame_hz,
         )
 
 
@@ -849,7 +1005,12 @@ class PortRefs:
     def queued(self) -> Ref[int]:
         """Bytes written and not yet delivered to the firmware's receiver. Read-only."""
         stream = self._stream
-        return Ref(self._owner, f"{self._label}.queued", lambda: stream.queued)
+        return Ref(
+            self._owner,
+            f"{self._label}.queued",
+            lambda: stream.queued,
+            read=stream._link.op_queued,  # pyright: ignore[reportPrivateUsage]
+        )
 
 
 class HostRefs:
@@ -866,26 +1027,52 @@ class HostRefs:
     @property
     def state(self) -> Ref[UsbState]:
         """Device state as the host sees it."""
+        from popcorn._usb import UsbState
+
         host = self._host
-        return Ref(self._owner, f"{self._label}.state", lambda: host.state)
+        return Ref(
+            self._owner,
+            f"{self._label}.state",
+            lambda: host.state,
+            read=host._link.op_state,  # pyright: ignore[reportPrivateUsage]
+            decode=lambda raw: UsbState(cast(int, raw)),
+        )
 
     @property
     def address(self) -> Ref[int]:
         """Address the host gave the device."""
         host = self._host
-        return Ref(self._owner, f"{self._label}.address", lambda: host.address)
+        return Ref(
+            self._owner,
+            f"{self._label}.address",
+            lambda: host.address,
+            read=host._link.op_address,  # pyright: ignore[reportPrivateUsage]
+        )
 
     @property
     def configuration(self) -> Ref[int]:
         """bConfigurationValue the host set."""
         host = self._host
-        return Ref(self._owner, f"{self._label}.configuration", lambda: host.configuration)
+        return Ref(
+            self._owner,
+            f"{self._label}.configuration",
+            lambda: host.configuration,
+            read=host._link.op_configuration_value,  # pyright: ignore[reportPrivateUsage]
+        )
 
     @property
     def requests(self) -> Ref[tuple[UsbRequest, ...]]:
         """Every control request the host sent since the machine was built."""
+        from popcorn._usb import requests_of
+
         host = self._host
-        return Ref(self._owner, f"{self._label}.requests", lambda: host.requests)
+        return Ref(
+            self._owner,
+            f"{self._label}.requests",
+            lambda: host.requests,
+            read=host._link.op_requests,  # pyright: ignore[reportPrivateUsage]
+            decode=lambda raw: requests_of(cast(list[_core.UsbRequestRecord], raw)),
+        )
 
 
 class PeripheralRef:
@@ -981,7 +1168,29 @@ class VarRef[T: (int, float, bool)](MemoryRef[Any]):
 
             return scalar_layout(var)
 
-        super().__init__(owner, f"var({var.name})", lambda: var.value, put, check, locate)
+        handle = _handle(owner)
+
+        def read() -> _core.AccessOp:
+            size = var.span()
+            return handle.op_read_memory(var.address, size)
+
+        def write(value: int | float | bool) -> _core.AccessOp:
+            data, mask = var.encode(value)
+            if mask is None:
+                return handle.op_write_memory(var.address, data)
+            return handle.op_memory_masked(var.address, mask, data)
+
+        super().__init__(
+            owner,
+            f"var({var.name})",
+            lambda: var.value,
+            put,
+            check,
+            locate,
+            read=read,
+            decode=lambda raw: var.decode(cast(bytes, raw)),
+            write=write,
+        )
         self._var = var
 
     def __getattr__(self, name: str) -> VarRef[Any]:
@@ -1010,9 +1219,14 @@ class Refs:
         self.mem = MemoryRefs(owner, memory)
         self.reg = RegisterRefs(owner, registers)
         self.periph = PeripheralRefs(owner, peripherals)
-        self._pc = Ref(owner, "pc", scalars("pc"))
-        self._instructions = Ref(owner, "instructions", scalars("instructions"))
-        self._pending = Ref(owner, "pending_events", scalars("pending_events"))
+        handle = _handle(owner)
+        self._pc = Ref(owner, "pc", scalars("pc"), read=handle.op_pc)
+        self._instructions = Ref(
+            owner, "instructions", scalars("instructions"), read=handle.op_instructions
+        )
+        self._pending = Ref(
+            owner, "pending_events", scalars("pending_events"), read=handle.op_pending_events
+        )
         self._variable = variable
 
     @property

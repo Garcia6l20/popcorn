@@ -9,14 +9,19 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/vector.h>
 
+#include <concepts>
 #include <exception>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <ranges>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace popcorn::bind
 {
@@ -377,6 +382,110 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
   return host_future_handle{
       std::make_shared<detail::future_request<vtime>>(
           std::move(future), [](vtime const& ran) { return nb::cast(ran.ps); },
+          std::move(withdraw)),
+      slot_};
+}
+
+auto machine_handle::submit_ops(
+    std::vector<access_op>       ops,
+    std::vector<std::string>     notes,
+    std::optional<std::uint64_t> at_ps) -> host_future_handle
+{
+  if(core::detail::on_host_thread or core::detail::host_locks_held > 0)
+  {
+    throw std::runtime_error("a handler accesses the machine directly");
+  }
+  if(notes.size() != ops.size())
+  {
+    throw std::invalid_argument("submit_ops takes one note per op");
+  }
+  struct outcome
+  {
+    std::vector<op_value> values;
+    std::size_t           failed = 0;
+    std::exception_ptr    error;
+  };
+  auto ran     = std::make_shared<outcome>();
+  auto command = [ops = std::move(ops), ran](core::machine& target) {
+    for(auto const& [index, op] : std::views::enumerate(ops))
+    {
+      op_value value;
+      try
+      {
+        value = op.run(target);
+      }
+      catch(...)
+      {
+        ran->failed = static_cast<std::size_t>(index);
+        ran->error  = std::current_exception();
+        return;
+      }
+      ran->values.push_back(std::move(value));
+    }
+  };
+  std::optional<vtime> at;
+  if(at_ps)
+  {
+    at = vtime{*at_ps};
+  }
+  auto future = [&] {
+    auto const held = lock_releasing();
+    return host_->post(held, core::member_id{}, std::move(command), at);
+  }();
+  auto withdraw = [host = std::weak_ptr{host_}, future] {
+    if(auto const on = host.lock())
+    {
+      auto const held = detail::lock_releasing_gil(*on);
+      if(held.owns_lock())
+      {
+        std::ignore = on->withdraw(held, core::member_id{}, future);
+      }
+    }
+  };
+  return host_future_handle{
+      std::make_shared<detail::future_request<vtime>>(
+          std::move(future),
+          [ran, notes = std::move(notes)](vtime const& time) -> nb::object {
+            if(ran->error)
+            {
+              auto const raised = detail::python_exception(ran->error);
+              if(auto const noted = nb::steal(PyObject_CallMethod(
+                     raised.ptr(), "add_note", "s", notes[ran->failed].c_str()));
+                 not noted.is_valid())
+              {
+                PyErr_Clear();
+              }
+              PyErr_SetRaisedException(raised.inc_ref().ptr());
+              throw nb::python_error();
+            }
+            nb::list values;
+            for(auto const& value : ran->values)
+            {
+              values.append(
+                  std::visit(
+                      [](auto const& held) -> nb::object {
+                        using kind = std::remove_cvref_t<decltype(held)>;
+                        if constexpr(std::same_as<kind, std::monostate>)
+                        {
+                          return nb::none();
+                        }
+                        else if constexpr(std::same_as<kind, std::vector<std::byte>>)
+                        {
+                          return nb::bytes(held.data(), held.size());
+                        }
+                        else if constexpr(std::same_as<kind, std::function<nb::object()>>)
+                        {
+                          return held();
+                        }
+                        else
+                        {
+                          return nb::cast(held);
+                        }
+                      },
+                      value));
+            }
+            return nb::make_tuple(time.ps, values);
+          },
           std::move(withdraw)),
       slot_};
 }
