@@ -92,10 +92,100 @@ auto cdc_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
   return std::make_unique<detail::cdc_pty_link>(hub_, function_);
 }
 
+namespace
+{
+auto byte_vector(reflex::py::nb::bytes const& data) -> std::vector<std::uint8_t>
+{
+  auto const* const first = static_cast<std::uint8_t const*>(data.data());
+  return {first, first + data.size()};
+}
+
+auto line_coding_setup(
+    std::uint32_t baud,
+    std::uint8_t  stop_bits,
+    std::uint8_t  parity,
+    std::uint8_t  data_bits) -> std::pair<usb::setup_packet, std::vector<std::uint8_t>>
+{
+  return {
+      {.request_type = 0x21, .request = 0x20, .value = 0, .index = 0, .length = 7},
+      {static_cast<std::uint8_t>(baud), static_cast<std::uint8_t>(baud >> 8),
+       static_cast<std::uint8_t>(baud >> 16), static_cast<std::uint8_t>(baud >> 24), stop_bits,
+       parity, data_bits}
+  };
+}
+
+auto control_line_setup(bool dtr, bool rts) -> usb::setup_packet
+{
+  auto const lines = static_cast<std::uint16_t>((dtr ? 1u : 0u) | (rts ? 2u : 0u));
+  return {.request_type = 0x21, .request = 0x22, .value = lines, .index = 0, .length = 0};
+}
+
+auto report_setup(
+    std::uint8_t  request_type,
+    std::uint8_t  request,
+    std::uint8_t  type,
+    std::uint8_t  id,
+    std::uint16_t length) -> usb::setup_packet
+{
+  return {
+      .request_type = request_type,
+      .request      = request,
+      .value        = static_cast<std::uint16_t>(type << 8 | id),
+      .index        = 0,
+      .length       = length};
+}
+}
+
 void cdc_link::send(reflex::py::nb::bytes const& data)
 {
-  auto const bytes = std::span{static_cast<std::uint8_t const*>(data.data()), data.size()};
+  send_bytes(byte_vector(data));
+}
+
+void cdc_link::send_bytes(std::vector<std::uint8_t> const& bytes) const
+{
   locked([&](usb::cdc_channel& queues) { queues.out.append_range(bytes); });
+}
+
+auto cdc_link::command_send(reflex::py::nb::bytes const& data) const -> access_op
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op(
+      [link = std::move(link), bytes = byte_vector(data)] { link.send_bytes(bytes); });
+}
+
+auto cdc_link::request_command(usb::setup_packet setup, std::vector<std::uint8_t> data) const
+    -> access_op
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), setup, data = std::move(data)] mutable {
+    usb::deferred_warnings const deferred;
+    return link.request_locked(setup, data);
+  });
+}
+
+auto cdc_link::command_set_line_coding(
+    std::uint32_t baud,
+    std::uint8_t  stop_bits,
+    std::uint8_t  parity,
+    std::uint8_t  data_bits) const -> access_op
+{
+  auto [setup, data] = line_coding_setup(baud, stop_bits, parity, data_bits);
+  return request_command(setup, std::move(data));
+}
+
+auto cdc_link::command_set_control_line_state(bool dtr, bool rts) const -> access_op
+{
+  return request_command(control_line_setup(dtr, rts), {});
 }
 
 auto cdc_link::queued() const -> std::uint64_t
@@ -204,18 +294,13 @@ auto cdc_link::set_line_coding(
     std::uint8_t  parity,
     std::uint8_t  data_bits) -> std::uint32_t
 {
-  return request(
-      {.request_type = 0x21, .request = 0x20, .value = 0, .index = 0, .length = 7},
-      {static_cast<std::uint8_t>(baud), static_cast<std::uint8_t>(baud >> 8),
-       static_cast<std::uint8_t>(baud >> 16), static_cast<std::uint8_t>(baud >> 24), stop_bits,
-       parity, data_bits});
+  auto [setup, data] = line_coding_setup(baud, stop_bits, parity, data_bits);
+  return request(setup, std::move(data));
 }
 
 auto cdc_link::set_control_line_state(bool dtr, bool rts) -> std::uint32_t
 {
-  auto const lines = static_cast<std::uint16_t>((dtr ? 1u : 0u) | (rts ? 2u : 0u));
-  return request(
-      {.request_type = 0x21, .request = 0x22, .value = lines, .index = 0, .length = 0}, {});
+  return request(control_line_setup(dtr, rts), {});
 }
 
 auto cdc_link::take_result(std::uint32_t id) -> std::optional<periph::usb::transfer_status>
@@ -283,23 +368,79 @@ template <typename Body> auto hid_link::locked(Body&& body) const
   });
 }
 
+namespace
+{
+auto checked_report(reflex::py::nb::bytes const& data) -> std::vector<std::uint8_t>
+{
+  auto       report = byte_vector(data);
+  auto const stage  = report.empty() ? 0 : report.size() - (report[0] == 0 ? 1 : 0);
+  if(report.size() < 2 or stage > 0xffff)
+  {
+    throw config_error(
+        "usb", 0, "report",
+        std::format(
+            "a report of at least 2 bytes, at most 0xffff on the bus, not {} bytes",
+            report.size()));
+  }
+  return report;
+}
+}
+
 auto hid_link::write(reflex::py::nb::bytes const& data) -> std::uint64_t
 {
+  return write_bytes(checked_report(data));
+}
+
+auto hid_link::write_bytes(std::vector<std::uint8_t> const& bytes) const -> std::uint64_t
+{
   return locked([&](usb::hid_channel& queues) {
-    auto const* const bytes = static_cast<std::uint8_t const*>(data.data());
-    auto const        stage = data.size() == 0 ? 0 : data.size() - (bytes[0] == 0 ? 1 : 0);
-    if(data.size() < 2 or stage > 0xffff)
-    {
-      throw config_error(
-          "usb", 0, "report",
-          std::format(
-              "a report of at least 2 bytes, at most 0xffff on the bus, not {} bytes",
-              data.size()));
-    }
-    auto const id = queues.write({bytes, bytes + data.size()});
+    auto const id = queues.write(bytes);
     queues.awaited_writes.insert(id);
     return id;
   });
+}
+
+auto hid_link::command_write(reflex::py::nb::bytes const& data) const -> access_op
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op(
+      [link = std::move(link), report = checked_report(data)] { return link.write_bytes(report); });
+}
+
+auto hid_link::request_command(usb::setup_packet setup, std::vector<std::uint8_t> data) const
+    -> access_op
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), setup, data = std::move(data)] mutable {
+    usb::deferred_warnings const deferred;
+    return link.request_locked(setup, data);
+  });
+}
+
+auto hid_link::command_get_report(std::uint8_t type, std::uint8_t id, std::uint16_t length) const
+    -> access_op
+{
+  return request_command(report_setup(0xa1, 0x01, type, id, length), {});
+}
+
+auto hid_link::command_set_report(
+    std::uint8_t                 type,
+    std::uint8_t                 id,
+    reflex::py::nb::bytes const& data) const -> access_op
+{
+  auto       stage  = byte_vector(data);
+  auto const length = static_cast<std::uint16_t>(stage.size());
+  return request_command(report_setup(0x21, 0x09, type, id, length), std::move(stage));
 }
 
 auto hid_link::take_written(std::uint64_t id) -> std::optional<periph::usb::transfer_status>
@@ -416,26 +557,15 @@ auto hid_link::request_locked(periph::usb::setup_packet setup, std::vector<std::
 
 auto hid_link::get_report(std::uint8_t type, std::uint8_t id, std::uint16_t length) -> std::uint32_t
 {
-  return request(
-      {.request_type = 0xa1,
-       .request      = 0x01,
-       .value        = static_cast<std::uint16_t>(type << 8 | id),
-       .index        = 0,
-       .length       = length},
-      {});
+  return request(report_setup(0xa1, 0x01, type, id, length), {});
 }
 
 auto hid_link::set_report(std::uint8_t type, std::uint8_t id, reflex::py::nb::bytes const& data)
     -> std::uint32_t
 {
-  auto const* const first = static_cast<std::uint8_t const*>(data.data());
-  return request(
-      {.request_type = 0x21,
-       .request      = 0x09,
-       .value        = static_cast<std::uint16_t>(type << 8 | id),
-       .index        = 0,
-       .length       = static_cast<std::uint16_t>(data.size())},
-      std::vector<std::uint8_t>(first, first + data.size()));
+  auto       stage  = byte_vector(data);
+  auto const length = static_cast<std::uint16_t>(stage.size());
+  return request(report_setup(0x21, 0x09, type, id, length), std::move(stage));
 }
 
 auto hid_link::take_result(std::uint32_t id) -> std::optional<hid_reply_record>
@@ -488,6 +618,14 @@ template <typename Body> auto uac_link::engine(Body&& body) const
     throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
   }
   return detail::host_access(host_, std::forward<Body>(body));
+}
+
+void uac_link::require_alive() const
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
 }
 
 auto uac_link::host() const -> periph::usb::host*
@@ -565,7 +703,20 @@ auto uac_link::units() const -> std::vector<uac_unit_record>
 
 void uac_link::write(std::vector<std::int32_t> const& samples)
 {
+  write_samples(samples);
+}
+
+void uac_link::write_samples(std::vector<std::int32_t> const& samples) const
+{
   locked([&](usb::uac2_channel& queues) { queues.speaker.out.append_range(samples); });
+}
+
+auto uac_link::command_write(std::vector<std::int32_t> const& samples) const -> access_op
+{
+  require_alive();
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), samples] { link.write_samples(samples); });
 }
 
 auto uac_link::queued() const -> std::uint64_t
@@ -630,26 +781,48 @@ void uac_link::set_frame_limit(std::uint64_t limit)
 
 auto uac_link::start(bool mic) -> std::uint64_t
 {
-  return engine([&]() -> std::uint64_t {
-    auto* const owner = host();
-    if(owner == nullptr)
-    {
-      return 0;
-    }
-    return usb::uac2_start(
-        *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
-  });
+  return engine([&] { return start_now(mic); });
+}
+
+auto uac_link::start_now(bool mic) const -> std::uint64_t
+{
+  auto* const owner = host();
+  if(owner == nullptr)
+  {
+    return 0;
+  }
+  return usb::uac2_start(
+      *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+}
+
+auto uac_link::command_start(bool mic) const -> access_op
+{
+  require_alive();
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), mic] { return link.start_now(mic); });
 }
 
 void uac_link::stop(bool mic)
 {
-  engine([&] {
-    if(auto* const owner = host())
-    {
-      usb::uac2_stop(
-          *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
-    }
-  });
+  engine([&] { stop_now(mic); });
+}
+
+void uac_link::stop_now(bool mic) const
+{
+  if(auto* const owner = host())
+  {
+    usb::uac2_stop(
+        *owner, *hub_, function_, mic ? usb::uac2_direction::mic : usb::uac2_direction::speaker);
+  }
+}
+
+auto uac_link::command_stop(bool mic) const -> access_op
+{
+  require_alive();
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), mic] { link.stop_now(mic); });
 }
 
 auto uac_link::set_feature(
@@ -658,16 +831,37 @@ auto uac_link::set_feature(
     std::uint8_t control,
     std::int32_t value) -> std::uint64_t
 {
-  return engine([&]() -> std::uint64_t {
-    auto* const owner = host();
-    if(owner == nullptr
-       or (control != std::to_underlying(usb::uac2_control::mute)
-           and control != std::to_underlying(usb::uac2_control::volume)))
-    {
-      return 0;
-    }
-    return usb::uac2_set_feature(
-        *owner, *hub_, function_, unit, channel, static_cast<usb::uac2_control>(control), value);
+  return engine([&] { return set_feature_now(unit, channel, control, value); });
+}
+
+auto uac_link::set_feature_now(
+    std::uint8_t unit,
+    std::uint8_t channel,
+    std::uint8_t control,
+    std::int32_t value) const -> std::uint64_t
+{
+  auto* const owner = host();
+  if(owner == nullptr
+     or (control != std::to_underlying(usb::uac2_control::mute)
+         and control != std::to_underlying(usb::uac2_control::volume)))
+  {
+    return 0;
+  }
+  return usb::uac2_set_feature(
+      *owner, *hub_, function_, unit, channel, static_cast<usb::uac2_control>(control), value);
+}
+
+auto uac_link::command_set_feature(
+    std::uint8_t unit,
+    std::uint8_t channel,
+    std::uint8_t control,
+    std::int32_t value) const -> access_op
+{
+  require_alive();
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), unit, channel, control, value] {
+    return link.set_feature_now(unit, channel, control, value);
   });
 }
 
@@ -729,6 +923,14 @@ auto usb_link::plugged() const -> bool
 void usb_link::plug(bool attached)
 {
   engine([this, attached] { port().plug(attached); });
+}
+
+auto usb_link::command_plug(bool attached) const -> access_op
+{
+  std::ignore = port();
+  auto link   = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), attached] { link.port().plug(attached); });
 }
 
 auto usb_link::state() const -> periph::usb::device_state
@@ -803,13 +1005,12 @@ auto usb_link::interfaces() const -> std::vector<usb_interface_record>
   });
 }
 
-auto usb_link::control(
+namespace
+{
+auto control_stage(
     std::uint8_t                 request_type,
-    std::uint8_t                 request,
-    std::uint16_t                value,
-    std::uint16_t                index,
     std::uint16_t                length,
-    reflex::py::nb::bytes const& data) -> std::uint32_t
+    reflex::py::nb::bytes const& data) -> std::vector<std::uint8_t>
 {
   auto const in = (request_type & 0x80u) != 0;
   if(data.size() != 0 and (in or data.size() != length))
@@ -819,8 +1020,19 @@ auto usb_link::control(
         in ? "no data with an IN request"
            : std::format("an OUT data stage of wLength {} bytes, not {}", length, data.size()));
   }
-  auto const* const         first = static_cast<std::uint8_t const*>(data.data());
-  std::vector<std::uint8_t> stage(first, first + data.size());
+  return byte_vector(data);
+}
+}
+
+auto usb_link::control(
+    std::uint8_t                 request_type,
+    std::uint8_t                 request,
+    std::uint16_t                value,
+    std::uint16_t                index,
+    std::uint16_t                length,
+    reflex::py::nb::bytes const& data) -> std::uint32_t
+{
+  auto stage = control_stage(request_type, length, data);
   return engine([&] {
     return host().control(
         {.request_type = request_type,
@@ -830,6 +1042,29 @@ auto usb_link::control(
          .length       = length},
         std::move(stage));
   });
+}
+
+auto usb_link::command_control(
+    std::uint8_t                 request_type,
+    std::uint8_t                 request,
+    std::uint16_t                value,
+    std::uint16_t                index,
+    std::uint16_t                length,
+    reflex::py::nb::bytes const& data) const -> access_op
+{
+  std::ignore = port();
+  usb::setup_packet const setup{
+      .request_type = request_type,
+      .request      = request,
+      .value        = value,
+      .index        = index,
+      .length       = length};
+  auto link = *this;
+  link.host_.reset();
+  return detail::link_op(
+      [link = std::move(link), setup, stage = control_stage(request_type, length, data)] {
+        return link.host().control(setup, stage);
+      });
 }
 
 auto usb_link::take_results() -> std::vector<usb_control_result>

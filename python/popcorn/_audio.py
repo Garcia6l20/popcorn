@@ -180,7 +180,7 @@ class AudioStream:
             if isinstance(word, bool) or not 0 <= word < 1 << 32:
                 raise ValueError(f"an audio word is 0 to 2**32 - 1, not {word!r}")
         link = self._link
-        return written(self._post(lambda: link.write(values), at))
+        return written(self._post(link.command_write(values), at))
 
     def __repr__(self) -> str:
         return f"AudioStream({self.name}.{self.block})"

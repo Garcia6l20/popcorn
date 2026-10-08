@@ -26,6 +26,9 @@ from typing import NoReturn
 import popcorn
 import pytest
 from popcorn import _core
+from popcorn._host import awaited
+from popcorn.trace import TraceKind
+from popcorn.trace import read as read_trace
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .conftest import CALLEE_ELF, DRIVER_ELF, M33_JSON, VIEWS_ELF, Machines, run_bounded
@@ -425,7 +428,8 @@ def test_a_command_error_on_the_machine_thread_drops_its_frame_locals(
 
     async def scenario() -> None:
         async with m.running():
-            await m._post(failing_body)  # pyright: ignore[reportPrivateUsage]
+            posted = m._handle.submit(failing_body, None)  # pyright: ignore[reportPrivateUsage]
+            await awaited(posted, lambda raw: raw)
 
     with pytest.raises(ValueError, match="boom") as raised:
         run_bounded(scenario(), HANG)
@@ -456,6 +460,31 @@ def test_a_machine_with_a_python_model_runs_under_a_loop_that_yields_for_real() 
     assert m.halt() is None
     assert stop.reason is popcorn.StopReason.USER
     assert m._handle.gil_entries() > 0  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_trace_close_refused_inside_another_machine_keeps_its_sink(
+    machines: Machines, tmp_path: pathlib.Path
+) -> None:
+    traced, other = machines(), machines()
+    path = tmp_path / "t.pctr"
+    tracing = traced.trace([TraceKind.BLOCK], path)
+    recording = tracing.__enter__()
+    traced.start()
+
+    def leave() -> None:
+        tracing.__exit__(None, None, None)
+
+    with pytest.raises(RuntimeError, match="handler accesses the machine"):
+        other._handle.parked(leave)  # pyright: ignore[reportPrivateUsage]
+    assert traced.halt() is None
+    grew = recording.records
+    asyncio.run(traced.run(for_=us(20)))
+    assert recording.records > grew
+    recording.close()
+    closed = recording.records
+    asyncio.run(traced.run(for_=us(20)))
+    assert recording.records == closed
+    assert sum(1 for _ in read_trace(path)) > 0
 
 
 class Payload:

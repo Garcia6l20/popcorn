@@ -119,6 +119,10 @@ class TraceRecording:
         """Bytes written so far, the file size once closed."""
         return self._native.size()
 
+    def close_command(self) -> _core.AccessOp:
+        """`close` as a native command a running machine runs at a block boundary."""
+        return self._native.command_close()
+
     def close(self) -> None:
         """Stop tracing and close the file, what leaving the `with` block does.
 

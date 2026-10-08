@@ -921,22 +921,6 @@ class Machine:
                 "a handler accesses the machine directly, it cannot await a machine request"
             )
 
-    def _submit[R](
-        self,
-        body: Callable[[], None],
-        at: VirtualTime | None,
-        convert: Callable[[VirtualTime], R],
-        *,
-        cancel: bool = True,
-        follow: Callable[[R], Any] | None = None,
-    ) -> Pending[R]:
-        return Pending(
-            self._handle.submit(body, None if at is None else at.ps),
-            lambda ps: convert(VirtualTime(cast(int, ps))),
-            cancel=cancel,
-            follow=follow,
-        )
-
     def _submit_ops[R](
         self,
         ops: list[_core.AccessOp],
@@ -946,22 +930,29 @@ class Machine:
     ) -> Pending[R]:
         return Pending(self._handle.submit_ops(ops, notes, None if at is None else at.ps), convert)
 
-    def _post[T](
+    def _post(
         self,
-        body: Callable[[], T],
+        command: _core.AccessOp | None,
         at: VirtualTime | None = None,
         *,
         cancel: bool = True,
-        follow: Callable[[tuple[T, VirtualTime]], Any] | None = None,
-    ) -> Pending[tuple[T, VirtualTime]]:
-        """Run `body` as one command, from a stream or USB method: its result and its time."""
+        follow: Callable[[tuple[Any, VirtualTime]], Any] | None = None,
+    ) -> Pending[tuple[Any, VirtualTime]]:
+        """Run a native command as one command, from a stream, USB or trace method: its value
+        and its time. None runs nothing and returns the time it would have run at."""
         self._refuse_on_host()
-        result: list[T] = []
 
-        def run() -> None:
-            result.append(body())
+        def convert(raw: object) -> tuple[Any, VirtualTime]:
+            time_ps, values = cast(tuple[int, list[object]], raw)
+            return (values[0] if values else None), VirtualTime(time_ps)
 
-        return self._submit(run, at, lambda time: (result[0], time), cancel=cancel, follow=follow)
+        ops = [] if command is None else [command]
+        return Pending(
+            self._handle.submit_ops(ops, [""] * len(ops), None if at is None else at.ps),
+            convert,
+            cancel=cancel,
+            follow=follow,
+        )
 
     @property
     def coverage(self) -> MachineCoverage:
@@ -1053,7 +1044,7 @@ class Machine:
 
     def _close_trace(self, recording: TraceRecording) -> None:
         if self.busy and not self._handle.owns_engine():
-            self._post(recording.close)
+            self._post(recording.close_command())
             return
         recording.close()
 

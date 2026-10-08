@@ -22,19 +22,19 @@ virtual time it stopped waiting at."""
 
 
 class Poster(Protocol):
-    """Runs a body as one command on the machine: at once while it is parked, at a block
-    boundary on its thread while it runs. The result is the body's value and the virtual time
-    it ran at."""
+    """Runs a native command as one command on the machine, with no GIL: at once while it is
+    parked, at a block boundary on its thread while it runs. The result is the command's value
+    and the virtual time it ran at. None runs nothing and returns only the time."""
 
-    def __call__[T](
+    def __call__(
         self,
-        body: Callable[[], T],
+        command: _core.AccessOp | None,
         at: VirtualTime | None = None,
         *,
         cancel: bool = True,
-        follow: Callable[[tuple[T, VirtualTime]], Any] | None = None,
-    ) -> Pending[tuple[T, VirtualTime]]:
-        """Post `body`."""
+        follow: Callable[[tuple[Any, VirtualTime]], Any] | None = None,
+    ) -> Pending[tuple[Any, VirtualTime]]:
+        """Post `command`."""
         ...
 
 
@@ -128,7 +128,7 @@ class UartStream:
         """
         link = self._link
         data = bytes(data)
-        return written(self._post(lambda: link.send(data), at))
+        return written(self._post(link.command_send(data), at))
 
     async def read(self, n: int, *, for_: VirtualDuration | None = None) -> bytes:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them.

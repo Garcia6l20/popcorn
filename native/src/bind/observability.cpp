@@ -81,43 +81,82 @@ auto kinds_of(std::vector<std::uint8_t> const& values) -> core::trace_kinds
 }
 }
 
-trace_handle::trace_handle(
-    std::unique_ptr<obs::pctr_writer> writer,
-    core::hook_handle                 sink,
-    detail::host_ref                  host) noexcept
-    : writer_{std::move(writer)}, sink_{std::move(sink)}, host_{std::move(host)}
+trace_handle::state::state(
+    std::unique_ptr<obs::pctr_writer> written,
+    core::hook_handle                 feeding,
+    detail::host_ref                  owner) noexcept
+    : writer{std::move(written)}, sink{std::move(feeding)}, host{std::move(owner)}
 {}
 
-trace_handle::~trace_handle()
+trace_handle::state::~state()
 {
-  if(sink_.active())
+  if(sink.active())
   {
-    detail::retire(host_, [sink = std::move(sink_), writer = std::move(writer_)] mutable {
-      sink.reset();
-      writer.reset();
+    detail::retire(host, [feeding = std::move(sink), written = std::move(writer)] mutable {
+      feeding.reset();
+      written.reset();
     });
   }
 }
 
+trace_handle::trace_handle(
+    std::unique_ptr<obs::pctr_writer> writer,
+    core::hook_handle                 sink,
+    detail::host_ref                  host) noexcept
+    : state_{std::make_shared<state>(std::move(writer), std::move(sink), std::move(host))}
+{}
+
 void trace_handle::close()
 {
-  if(sink_.active())
+  contract_assert(state_ != nullptr);
+  auto& traced = *state_;
+  auto  active = false;
   {
-    detail::host_access(host_, [this] { sink_.reset(); });
+    nb::gil_scoped_release const released;
+    std::scoped_lock const       lock{traced.close_mutex};
+    if(traced.closed)
+    {
+      return;
+    }
+    active = traced.sink.active();
   }
-  nb::gil_scoped_release released;
-  sink_.reset();
-  writer_->close();
+  if(active)
+  {
+    detail::host_access(traced.host, [&traced] {
+      nb::gil_scoped_release const released;
+      std::scoped_lock const       lock{traced.close_mutex};
+      traced.sink.reset();
+    });
+  }
+  nb::gil_scoped_release const released;
+  std::scoped_lock const       lock{traced.close_mutex};
+  if(not std::exchange(traced.closed, true))
+  {
+    traced.sink.reset();
+    traced.writer->close();
+  }
+}
+
+auto trace_handle::command_close() -> access_op
+{
+  return detail::link_op([traced = state_] {
+    std::scoped_lock const lock{traced->close_mutex};
+    if(not std::exchange(traced->closed, true))
+    {
+      traced->sink.reset();
+      traced->writer->close();
+    }
+  });
 }
 
 auto trace_handle::records() const noexcept -> std::uint64_t
 {
-  return writer_->records();
+  return state_->writer->records();
 }
 
 auto trace_handle::size() const noexcept -> std::uint64_t
 {
-  return writer_->bytes();
+  return state_->writer->bytes();
 }
 
 auto machine_handle::function_ranges(std::vector<std::string> const& names) const

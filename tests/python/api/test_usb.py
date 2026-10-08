@@ -896,3 +896,90 @@ def test_a_restore_drops_mic_frames_and_keeps_the_streams_running(
     assert audio.mic.running
     frames = asyncio.run(audio.mic.read_frames(3, for_=ms(5)))
     assert len(frames) == 3
+
+
+def gil_entries(m: popcorn.Machine) -> int:
+    return m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+
+
+def posted_without_the_gil(m: popcorn.Machine, post: Callable[[], Any]) -> None:
+    """Post a command inside a free run and await it: it completes, and the machine's thread
+    never took the GIL."""
+    before = gil_entries(m)
+
+    async def scenario() -> None:
+        async with m.running():
+            posted = post()
+            if posted is not None:
+                await posted
+
+    asyncio.run(scenario())
+    assert gil_entries(m) == before
+
+
+def usb_link_of(owner: object) -> Any:
+    linked: Any = owner
+    return linked._link
+
+
+type Command = Callable[[popcorn.Machine, UsbHost, Any, Any], Any]
+
+CDC_COMMANDS: dict[str, Command] = {
+    "cdc-write": lambda m, host, cdc, hid: cdc.write(b"hi"),
+    "cdc-send": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(cdc).command_send(b"hi")
+    ),
+    "cdc-line-coding": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(cdc).command_set_line_coding(9600, 0, 0, 8)
+    ),
+    "cdc-control-lines": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(cdc).command_set_control_line_state(True, True)
+    ),
+    "hid-write": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(hid).command_write(b"\x00\x01")
+    ),
+    "hid-get-report": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(hid).command_get_report(3, 0, 8)
+    ),
+    "hid-set-report": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(hid).command_set_report(3, 0, b"\x01")
+    ),
+    "control": lambda m, host, cdc, hid: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(host).command_control(0x80, 6, 0x0100, 0, 18, b"")
+    ),
+    "detach": lambda m, host, cdc, hid: host.detach(),
+    "attach": lambda m, host, cdc, hid: host.attach(),
+    "time": lambda m, host, cdc, hid: m._post(None),  # pyright: ignore[reportPrivateUsage]
+}
+
+
+@pytest.mark.parametrize("kind", list(CDC_COMMANDS))
+def test_a_usb_command_runs_on_the_machine_thread_without_the_gil(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    m, host = configured(u575)
+    cdc, hid = host.cdc(), host.hid(0)
+    asyncio.run(host.hid(1).wait_ready(for_=ms(50)))
+    posted_without_the_gil(m, lambda: CDC_COMMANDS[kind](m, host, cdc, hid))
+
+
+UAC_COMMANDS: dict[str, Callable[[popcorn.Machine, Any], Any]] = {
+    "uac-start": lambda m, audio: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(audio).command_start(False)
+    ),
+    "uac-stop": lambda m, audio: audio.speaker.stop(),
+    "uac-write": lambda m, audio: audio.speaker.write([0, 0]),
+    "uac-set-feature": lambda m, audio: m._post(  # pyright: ignore[reportPrivateUsage]
+        usb_link_of(audio).command_set_feature(2, 0, 1, 1)
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", list(UAC_COMMANDS))
+def test_an_audio_command_runs_on_the_machine_thread_without_the_gil(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    asyncio.run(audio.wait_ready(for_=s(2)))
+    posted_without_the_gil(m, lambda: UAC_COMMANDS[kind](m, audio))

@@ -391,7 +391,7 @@ class CdcStream:
         """
         link = self._link
         data = bytes(data)
-        return written(self._post(lambda: link.send(data), at))
+        return written(self._post(link.command_send(data), at))
 
     async def read(self, n: int, *, for_: VirtualDuration | None = None) -> bytes:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them, as
@@ -457,7 +457,7 @@ class CdcStream:
             RuntimeError: Called from a handler or a model.
         """
         link = self._link
-        transfer, at = await self._post(lambda: link.set_control_line_state(dtr, rts))
+        transfer, at = await self._post(link.command_set_control_line_state(dtr, rts))
         return await self._request(
             transfer, f"SET_CONTROL_LINE_STATE dtr={int(dtr)} rts={int(rts)}", at
         )
@@ -493,7 +493,7 @@ class CdcStream:
         link = self._link
         stop_code, parity_code = STOP_BITS.index(stop_bits), PARITIES.index(parity)
         transfer, at = await self._post(
-            lambda: link.set_line_coding(baud, stop_code, parity_code, data_bits)
+            link.command_set_line_coding(baud, stop_code, parity_code, data_bits)
         )
         return await self._request(
             transfer, f"SET_LINE_CODING {baud} {data_bits}{parity}{stop_bits:g}", at
@@ -724,7 +724,7 @@ class HidStream:
         link = self._link
         report = data[0]
         posted = self._post(
-            lambda: link.write(data),
+            link.command_write(data),
             at,
             cancel=False,
             follow=lambda queued: self._taken(queued, report),
@@ -783,7 +783,7 @@ class HidStream:
             raise ValueError(f"length is 1 to 0xffff, not {length}")
         w_length = length - 1 if report_id == 0 else length
         link = self._link
-        transfer, at = await self._post(lambda: link.get_report(FEATURE, report_id, w_length))
+        transfer, at = await self._post(link.command_get_report(FEATURE, report_id, w_length))
         reply, done_at = await self._request(transfer, f"GET_REPORT feature {report_id}", at)
         return UsbData((b"\x00" if report_id == 0 else b"") + bytes(reply.data), done_at)
 
@@ -810,7 +810,7 @@ class HidStream:
         if len(stage) > 0xFFFF:
             raise ValueError(f"a data stage is at most 0xffff bytes, not {len(stage)}")
         link = self._link
-        transfer, at = await self._post(lambda: link.set_report(FEATURE, data[0], stage))
+        transfer, at = await self._post(link.command_set_report(FEATURE, data[0], stage))
         _, done_at = await self._request(transfer, f"SET_REPORT feature {data[0]}", at)
         return done_at
 
@@ -1015,10 +1015,10 @@ class UacStream:
             RuntimeError: Called from a handler or a model.
         """
         if self.running:
-            _, now = await self._post(lambda: None)
+            _, now = await self._post(None)
             return now
         link, mic = self._link, self._mic
-        operation, posted_at = await self._post(lambda: link.start(mic))
+        operation, posted_at = await self._post(link.command_start(mic))
         if operation == 0:
             if not self._link.bound():
                 status = "unbound"
@@ -1068,7 +1068,7 @@ class UacStream:
             ValueError: `at` before the time of a parked machine, from the await when running.
         """
         link, mic = self._link, self._mic
-        return written(self._post(lambda: link.stop(mic), at))
+        return written(self._post(link.command_stop(mic), at))
 
     def discard(self) -> None:
         """Forget the starts waited for, at a restore."""
@@ -1141,7 +1141,7 @@ class UacSpeaker(UacStream):
                 f"{len(values)} samples are not whole frames of {layout.channels} channels"
             )
         link = self._link
-        return written(self._post(lambda: link.write(values), at))
+        return written(self._post(link.command_write(values), at))
 
     async def drain(self, *, for_: VirtualDuration | None = None) -> None:
         """Run the machine until every sample written went out in an isochronous packet, or
@@ -1400,7 +1400,7 @@ class UacFunction:
             raise ValueError(f"{where}: the control is not writable")
         link = self._link
         operation, posted_at = await self._post(
-            lambda: link.set_feature(unit, channel, control, value)
+            link.command_set_feature(unit, channel, control, value)
         )
         if operation == 0:
             status = "refused" if self._link.bound() else "unbound"
@@ -1538,7 +1538,7 @@ class UsbHost:
             RuntimeError: Called from a handler or a model.
         """
         link = self._link
-        _, at = await self._post(lambda: link.plug(True))
+        _, at = await self._post(link.command_plug(True))
         return at
 
     def detach(self, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
@@ -1551,7 +1551,7 @@ class UsbHost:
             ValueError: `at` before the time of a parked machine, from the await when running.
         """
         link = self._link
-        return written(self._post(lambda: link.plug(False), at))
+        return written(self._post(link.command_plug(False), at))
 
     @property
     def state(self) -> UsbState:
@@ -1738,7 +1738,7 @@ class UsbHost:
                 raise ValueError(f"an OUT data stage is at most 0xffff bytes, not {length}")
         link = self._link
         transfer, _ = await self._post(
-            lambda: link.control(request_type, request, value, index, length, data)
+            link.command_control(request_type, request, value, index, length, data)
         )
         self._pending.add(transfer)
         try:

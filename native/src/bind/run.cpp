@@ -449,11 +449,14 @@ auto machine_handle::submit_ops(
             if(ran->error)
             {
               auto const raised = detail::python_exception(ran->error);
-              if(auto const noted = nb::steal(PyObject_CallMethod(
-                     raised.ptr(), "add_note", "s", notes[ran->failed].c_str()));
-                 not noted.is_valid())
+              if(auto const& note = notes[ran->failed]; not note.empty())
               {
-                PyErr_Clear();
+                if(auto const noted =
+                       nb::steal(PyObject_CallMethod(raised.ptr(), "add_note", "s", note.c_str()));
+                   not noted.is_valid())
+                {
+                  PyErr_Clear();
+                }
               }
               PyErr_SetRaisedException(raised.inc_ref().ptr());
               throw nb::python_error();

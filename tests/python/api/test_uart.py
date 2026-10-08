@@ -6,15 +6,17 @@ import asyncio
 import gc
 import itertools
 import weakref
+from pathlib import Path
 
 import popcorn
 import pytest
 from popcorn import ModelError, _core
-from popcorn.board import Frame
+from popcorn.board import AudioOptions, Frame
 from popcorn.model import Model
+from popcorn.trace import TraceKind, read
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import holds_pty, run_bounded
+from .conftest import BOARD_ELF, holds_pty, run_bounded
 
 FRAME_PS = 87_500_000
 USART1_TDR = 0x4001_3828
@@ -240,3 +242,65 @@ def test_a_read_inside_running_raises_a_handler_error(board: popcorn.Machine) ->
     with pytest.raises(ValueError, match="echo watch failed"):
         run_bounded(body())
     assert not board.busy
+
+
+def test_board_commands_run_on_the_machine_thread_without_the_gil(
+    u575: popcorn.MachineDescription, tmp_path: Path
+) -> None:
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(BOARD_ELF),
+        audio={"SAI1": {"A": AudioOptions()}},
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    port = m.periph.USART1.port
+    stream = m.periph.SAI1.audio("A")
+
+    path = tmp_path / "t.pctr"
+    tracing = m.trace([TraceKind.BLOCK], path)
+    recording = tracing.__enter__()
+
+    async def scenario() -> None:
+        async with m.running():
+            await port.write(b"x")
+            await stream.write([1, 2])
+            tracing.__exit__(None, None, None)
+
+    asyncio.run(scenario())
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
+    closed = recording.records
+    assert closed > 0 and recording.size == path.stat().st_size
+    assert asyncio.run(m.run(for_=us(100))).reason is not None
+    assert recording.records == closed
+    assert sum(1 for _ in read(path)) > 0
+
+
+def test_a_trace_closed_again_after_its_posted_close_closes_once(
+    u575: popcorn.MachineDescription, tmp_path: Path
+) -> None:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    path = tmp_path / "t.pctr"
+    tracing = m.trace([TraceKind.BLOCK], path)
+    recording = tracing.__enter__()
+
+    async def scenario() -> None:
+        async with m.running():
+            tracing.__exit__(None, None, None)
+            for _ in range(100):
+                try:
+                    recording.close()
+                    return
+                except popcorn.MachineRunning:
+                    await m.read()
+            pytest.fail("the posted close never ran")
+
+    asyncio.run(scenario())
+    closed = recording.records
+    recording.close()
+    asyncio.run(m.run(for_=us(100)))
+    assert recording.records == closed
+    assert recording.size == path.stat().st_size
+    assert all(record is not None for record in read(path))

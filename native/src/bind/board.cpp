@@ -34,12 +34,29 @@ auto uart_link::port() const -> periph::stm32::uart_port&
   return *port_;
 }
 
-void uart_link::send(reflex::py::nb::bytes const& data)
+namespace
+{
+auto frames_of(reflex::py::nb::bytes const& data) -> std::vector<std::uint16_t>
 {
   auto const bytes = std::span{static_cast<std::uint8_t const*>(data.data()), data.size()};
-  std::vector<std::uint16_t> const frames(bytes.begin(), bytes.end());
-  auto&                            uart = port();
+  return {bytes.begin(), bytes.end()};
+}
+}
+
+void uart_link::send(reflex::py::nb::bytes const& data)
+{
+  auto const frames = frames_of(data);
+  auto&      uart   = port();
   detail::host_access(host_, [&] { uart.receive(frames); });
+}
+
+auto uart_link::command_send(reflex::py::nb::bytes const& data) const -> access_op
+{
+  std::ignore = port();
+  auto link   = *this;
+  link.host_.reset();
+  return detail::link_op(
+      [link = std::move(link), frames = frames_of(data)] { link.port().receive(frames); });
 }
 
 namespace
@@ -211,6 +228,17 @@ void audio_link::write(std::vector<std::uint32_t> const& words)
 {
   auto& queue = endpoint();
   detail::link_locked(queue, [&](core::link_guard const& held) { queue.write(held, words); });
+}
+
+auto audio_link::command_write(std::vector<std::uint32_t> const& words) const -> access_op
+{
+  std::ignore = endpoint();
+  auto link   = *this;
+  link.host_.reset();
+  return detail::link_op([link = std::move(link), words] {
+    auto& queue = link.endpoint();
+    detail::link_locked(queue, [&](core::link_guard const& held) { queue.write(held, words); });
+  });
 }
 
 void audio_link::discard()

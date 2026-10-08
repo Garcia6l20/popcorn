@@ -85,8 +85,8 @@ template <typename T> auto as_op_value(T&& value) -> op_value
  */
 template <typename Body> auto machine_op(Body body) -> access_op
 {
-  return access_op{[body = std::move(body)](core::machine& target) -> op_value {
-    if constexpr(std::is_void_v<std::invoke_result_t<Body const&, core::machine&>>)
+  return access_op{[body = std::move(body)](core::machine& target) mutable -> op_value {
+    if constexpr(std::is_void_v<std::invoke_result_t<Body&, core::machine&>>)
     {
       body(target);
       return std::monostate{};
@@ -104,7 +104,7 @@ template <typename Body> auto machine_op(Body body) -> access_op
  */
 template <typename Body> auto link_op(Body body) -> access_op
 {
-  return machine_op([body = std::move(body)](core::machine&) { return body(); });
+  return machine_op([body = std::move(body)](core::machine&) mutable { return body(); });
 }
 }
 }

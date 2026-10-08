@@ -287,11 +287,29 @@ public:
    */
   [[= py::skip]] [[nodiscard]] auto bridged_link() const -> std::unique_ptr<detail::pty_link>;
 
+  /** @brief send() as a command of MachineHandle.submit_ops(). */
+  [[= py::doc{"Command of send."}]] [[nodiscard]] auto
+      command_send(reflex::py::nb::bytes const& data) const -> access_op;
+  /** @brief set_line_coding() as a command of MachineHandle.submit_ops(), its value the id. */
+  [[= py::doc{"Command of set_line_coding."}]] [[nodiscard]] auto command_set_line_coding(
+      std::uint32_t baud,
+      std::uint8_t  stop_bits,
+      std::uint8_t  parity,
+      std::uint8_t  data_bits) const -> access_op;
+  /** @brief set_control_line_state() as a command of MachineHandle.submit_ops(), its value the
+   * id. */
+  [[= py::doc{"Command of set_control_line_state."}]] [[nodiscard]] auto
+      command_set_control_line_state(bool dtr, bool rts) const -> access_op;
+
 private:
   template <typename Body> auto locked(Body&& body) const;
   auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
   auto request_locked(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
       -> std::uint32_t;
+  void send_bytes(std::vector<std::uint8_t> const& bytes) const;
+  [[nodiscard]] auto
+      request_command(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) const
+      -> access_op;
 
   periph::stm32::usb_host_port*         port_;
   std::shared_ptr<periph::usb::cdc_hub> hub_;
@@ -445,11 +463,29 @@ public:
   [[= py::doc{"Stop waiting for a request queued here, drop its result."}]] void
       forget(std::uint32_t id);
 
+  /** @brief write() as a command of MachineHandle.submit_ops(), its value the id, checked
+   * now. */
+  [[= py::doc{"Command of write."}]] [[nodiscard]] auto
+      command_write(reflex::py::nb::bytes const& data) const -> access_op;
+  /** @brief get_report() as a command of MachineHandle.submit_ops(), its value the id. */
+  [[= py::doc{"Command of get_report."}]] [[nodiscard]] auto
+      command_get_report(std::uint8_t type, std::uint8_t id, std::uint16_t length) const
+      -> access_op;
+  /** @brief set_report() as a command of MachineHandle.submit_ops(), its value the id. */
+  [[= py::doc{"Command of set_report."}]] [[nodiscard]] auto command_set_report(
+      std::uint8_t                 type,
+      std::uint8_t                 id,
+      reflex::py::nb::bytes const& data) const -> access_op;
+
 private:
   template <typename Body> auto locked(Body&& body) const;
   auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
   auto request_locked(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
       -> std::uint32_t;
+  [[nodiscard]] auto write_bytes(std::vector<std::uint8_t> const& bytes) const -> std::uint64_t;
+  [[nodiscard]] auto
+      request_command(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) const
+      -> access_op;
 
   periph::stm32::usb_host_port*         port_;
   std::shared_ptr<periph::usb::hid_hub> hub_;
@@ -655,10 +691,33 @@ public:
   [[= py::doc{"Stop waiting for an operation queued here, drop its result."}]] void
       forget(std::uint64_t id);
 
+  /** @brief start() as a command of MachineHandle.submit_ops(), its value the id. */
+  [[= py::doc{"Command of start."}]] [[nodiscard]] auto command_start(bool mic) const -> access_op;
+  /** @brief stop() as a command of MachineHandle.submit_ops(). */
+  [[= py::doc{"Command of stop."}]] [[nodiscard]] auto command_stop(bool mic) const -> access_op;
+  /** @brief write() as a command of MachineHandle.submit_ops(). */
+  [[= py::doc{"Command of write."}]] [[nodiscard]] auto
+      command_write(std::vector<std::int32_t> const& samples) const -> access_op;
+  /** @brief set_feature() as a command of MachineHandle.submit_ops(), its value the id. */
+  [[= py::doc{"Command of set_feature."}]] [[nodiscard]] auto command_set_feature(
+      std::uint8_t unit,
+      std::uint8_t channel,
+      std::uint8_t control,
+      std::int32_t value) const -> access_op;
+
 private:
   template <typename Body> auto locked(Body&& body) const;
   template <typename Body> auto engine(Body&& body) const;
   [[nodiscard]] auto            host() const -> periph::usb::host*;
+  void                          require_alive() const;
+  [[nodiscard]] auto            start_now(bool mic) const -> std::uint64_t;
+  void                          stop_now(bool mic) const;
+  void                          write_samples(std::vector<std::int32_t> const& samples) const;
+  [[nodiscard]] auto            set_feature_now(
+      std::uint8_t unit,
+      std::uint8_t channel,
+      std::uint8_t control,
+      std::int32_t value) const -> std::uint64_t;
 
   periph::stm32::usb_host_port*          port_;
   std::shared_ptr<periph::usb::uac2_hub> hub_;
@@ -804,6 +863,19 @@ public:
    */
   [[= py::doc{"Connect to the n-th USB Audio 2.0 function."}]] [[nodiscard]] auto
       audio(std::uint64_t function) const -> uac_link;
+
+  /** @brief plug() as a command of MachineHandle.submit_ops(). */
+  [[= py::doc{"Command of plug."}]] [[nodiscard]] auto command_plug(bool attached) const
+      -> access_op;
+  /** @brief control() as a command of MachineHandle.submit_ops(), its value the id, checked
+   * now. */
+  [[= py::doc{"Command of control."}]] [[nodiscard]] auto command_control(
+      std::uint8_t                 request_type,
+      std::uint8_t                 request,
+      std::uint16_t                value,
+      std::uint16_t                index,
+      std::uint16_t                length,
+      reflex::py::nb::bytes const& data) const -> access_op;
 
 private:
   [[nodiscard]] auto            host() const -> periph::usb::host&;

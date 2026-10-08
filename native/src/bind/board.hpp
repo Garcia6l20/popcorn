@@ -64,6 +64,10 @@ public:
   /** @brief queued() as an op of MachineHandle.submit_ops(). */
   [[= py::doc{"Op of queued."}]] [[nodiscard]] auto op_queued() const -> access_op;
 
+  /** @brief send() as a command of MachineHandle.submit_ops(). */
+  [[= py::doc{"Command of send."}]] [[nodiscard]] auto
+      command_send(reflex::py::nb::bytes const& data) const -> access_op;
+
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto
       available() const -> std::uint64_t;
@@ -187,6 +191,10 @@ public:
   /** @brief external_frame_hz() as an op of MachineHandle.submit_ops(). */
   [[= py::doc{"Op of external_frame_hz."}]] [[nodiscard]] auto op_external_frame_hz() const
       -> access_op;
+
+  /** @brief write() as a command of MachineHandle.submit_ops(). */
+  [[= py::doc{"Command of write."}]] [[nodiscard]] auto
+      command_write(std::vector<std::uint32_t> const& words) const -> access_op;
 
   /** @brief set_external_frame_hz() as an op of MachineHandle.submit_ops(). */
   [[= py::doc{"Op of set_external_frame_hz."}]] [[nodiscard]] auto
