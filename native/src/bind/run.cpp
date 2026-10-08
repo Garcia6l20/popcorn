@@ -204,7 +204,7 @@ auto machine_handle::lock_for_request() const -> core::held_lock
 
 auto machine_handle::lock_releasing() const -> core::held_lock
 {
-  return detail::require_owned(detail::lock_releasing_gil(*host_));
+  return detail::lock_releasing_gil(*host_);
 }
 
 auto machine_handle::run_goal(
@@ -550,7 +550,7 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
     {
       return false;
     }
-    auto const held = detail::lock_releasing_gil(*on);
+    auto const held = detail::try_lock_releasing_gil(*on);
     return held.owns_lock() and on->withdraw(held, core::member_id{}, future);
   };
   return host_future_handle{
@@ -613,7 +613,7 @@ auto machine_handle::submit_ops(
     {
       return false;
     }
-    auto const held = detail::lock_releasing_gil(*on);
+    auto const held = detail::try_lock_releasing_gil(*on);
     return held.owns_lock() and on->withdraw(held, core::member_id{}, future);
   };
   auto kept_notes = notes;

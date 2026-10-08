@@ -188,7 +188,12 @@ class ModelError(PopcornError):
 
 class MachineRunning(PopcornError):
     """The machine is busy, a goal active or a free run started: sync access is refused outside
-    its handlers. `snapshot`, `restore`, `remove_hooks` and `Ring.clear` refuse handlers too."""
+    its handlers. `snapshot`, `restore`, `remove_hooks` and `Ring.clear` refuse handlers too.
+
+    Also raised at once by a sync access from a callback of another machine when its wait
+    would close a cycle: the machine's holder waits, directly or through other holders, for a
+    machine the caller holds. A wait the user writes in such a callback, on an Event or a
+    lock, is not seen: the access then waits until the holder lets go or Ctrl-C."""
 
 
 class MachineBusy(PopcornError):

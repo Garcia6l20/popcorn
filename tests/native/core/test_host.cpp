@@ -2684,3 +2684,43 @@ TEST_CASE("a stop requested from another thread after a slice's last check stops
   CHECK(second.stopped->detail == "late");
   CHECK(second.executed == icount{0});
 }
+
+TEST_CASE("a wait that closes a cycle of host mutex holders is refused, the other one lands")
+{
+  hosted first{alu(0)};
+  hosted second{alu(0)};
+  first.on->name("first");
+  second.on->name("second");
+  std::latch   holding{1};
+  std::latch   locked{1};
+  std::latch   waiting{1};
+  std::jthread other{[&] {
+    auto held = first.on->lock();
+    holding.count_down();
+    locked.wait();
+    auto const registered = second.on->register_wait();
+    waiting.count_down();
+    core::held_lock got;
+    while(not got.owns_lock())
+    {
+      got = second.on->lock_for(10ms);
+    }
+  }};
+  holding.wait();
+  auto held = second.on->lock();
+  locked.count_down();
+  waiting.wait();
+  try
+  {
+    std::ignore = first.on->register_wait();
+    FAIL("the crossed wait was not refused");
+  }
+  catch(popcorn::machine_running const& refused)
+  {
+    std::string const said = refused.what();
+    CHECK(said.find("first") != std::string::npos);
+    CHECK(said.find("second") != std::string::npos);
+  }
+  held.unlock();
+  other.join();
+}

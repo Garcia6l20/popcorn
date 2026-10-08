@@ -1789,6 +1789,67 @@ def test_a_late_failure_after_its_loop_ended_is_reported_once(
     assert reported == ["a command its awaiter cancelled failed later"]
 
 
+@pytest.mark.parametrize("a_first", [True, False], ids=["a_first", "b_first"])
+def test_an_access_to_a_machine_held_by_another_thread_waits_for_it(
+    machines: Machines, a_first: bool
+) -> None:
+    first = machines()
+    second = machines()
+    a, b = (first, second) if a_first else (second, first)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        held.set()
+        release.wait()
+
+    holder = threading.Thread(
+        target=lambda: b._handle.parked(hold)  # pyright: ignore[reportPrivateUsage]
+    )
+    holder.start()
+    assert held.wait(10)
+    releaser = threading.Timer(0.1, release.set)
+    releaser.start()
+    began = time.monotonic()
+    read = a._handle.parked(lambda: b.mem.u32[0x2000_8000])  # pyright: ignore[reportPrivateUsage]
+    took = time.monotonic() - began
+    holder.join(10)
+    releaser.join(10)
+    assert isinstance(read, int)
+    assert took >= 0.05
+
+
+def test_crossed_accesses_refuse_one_wait_naming_both_machines(machines: Machines) -> None:
+    a = machines()
+    b = machines()
+    names = {
+        f"#{a._handle.id()}",  # pyright: ignore[reportPrivateUsage]
+        f"#{b._handle.id()}",  # pyright: ignore[reportPrivateUsage]
+    }
+    crossing = threading.Barrier(2)
+    outcomes: dict[str, object] = {}
+
+    def access(into: popcorn.Machine, key: str) -> None:
+        crossing.wait(10)
+        try:
+            outcomes[key] = into.mem.u32[0x2000_8000]
+        except popcorn.MachineRunning as refused:
+            outcomes[key] = refused
+
+    other = threading.Thread(
+        target=lambda: b._handle.parked(  # pyright: ignore[reportPrivateUsage]
+            lambda: access(a, "other")
+        )
+    )
+    other.start()
+    a._handle.parked(lambda: access(b, "main"))  # pyright: ignore[reportPrivateUsage]
+    other.join(10)
+    refused = [value for value in outcomes.values() if isinstance(value, popcorn.MachineRunning)]
+    landed = [value for value in outcomes.values() if isinstance(value, int)]
+    assert (len(refused), len(landed)) == (1, 1)
+    assert all(name in str(refused[0]) for name in names)
+
+
 class _Probe:
     def __call__(self, view: object) -> object:
         raise AssertionError("never called")

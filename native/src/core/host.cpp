@@ -17,7 +17,9 @@
 #include <stop_token>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <tuple>
+#include <unordered_map>
 
 namespace popcorn::core
 {
@@ -397,9 +399,9 @@ struct host_core
     }
   }
 
-  std::mutex                                mutex;
+  host_mutex                                mutex;
   event_fd                                  wake;
-  std::condition_variable                   parked_cv;
+  std::condition_variable_any               parked_cv;
   std::vector<std::unique_ptr<member_slot>> members;
   slice_bounds                              bounds;
   host_hooks                                hooks;
@@ -411,6 +413,7 @@ struct host_core
   bool                                      sleeping    = false;
   bool                                      signalled   = false;
   bool                                      poll_warned = false;
+  std::string                               name        = "a machine";
   std::atomic<fate>                         ending{fate::undecided};
   std::atomic<bool>                         drops{false};
   std::mutex                                watch_mutex;
@@ -616,7 +619,7 @@ struct host_core
     }
   }
 
-  void sleep(std::unique_lock<std::mutex>& lock)
+  void sleep(std::unique_lock<host_mutex>& lock)
   {
     std::vector<pollfd> polled{
         {.fd = wake.get(), .events = POLLIN, .revents = 0}
@@ -1151,7 +1154,7 @@ struct host_core
     resolved.clear();
   }
 
-  auto close_session(std::unique_lock<std::mutex>& lock, member_slot& slot)
+  auto close_session(std::unique_lock<host_mutex>& lock, member_slot& slot)
       -> std::optional<held_end>
   {
     slot.session          = false;
@@ -1272,11 +1275,44 @@ auto chained_error::what() const noexcept -> char const*
   return "a goal's finish failed while the goal ended by another error";
 }
 
-held_lock::held_lock(std::unique_lock<std::mutex> lock, detail::host_core const* of) noexcept
+namespace
+{
+struct lock_graph
+{
+  std::mutex                                                    leaf;
+  std::unordered_map<detail::host_core const*, std::thread::id> owners;
+  std::unordered_map<std::thread::id, detail::host_core const*> waits;
+};
+
+std::atomic<std::uint64_t> registered_waits{0};
+
+auto graph() -> lock_graph&
+{
+  static lock_graph shared;
+  return shared;
+}
+
+void record_hold(detail::host_core const* of)
+{
+  auto&                  on = graph();
+  std::scoped_lock const lock{on.leaf};
+  on.owners.insert_or_assign(of, std::this_thread::get_id());
+}
+
+void forget_hold(detail::host_core const* of) noexcept
+{
+  auto&                  on = graph();
+  std::scoped_lock const lock{on.leaf};
+  on.owners.erase(of);
+}
+}
+
+held_lock::held_lock(std::unique_lock<detail::host_mutex> lock, detail::host_core const* of)
     : lock_{std::move(lock)}, of_{of}
 {
   if(lock_.owns_lock())
   {
+    record_hold(of_);
     ++detail::host_locks_held;
   }
 }
@@ -1291,6 +1327,7 @@ auto held_lock::operator=(held_lock&& other) noexcept -> held_lock&
   {
     if(lock_.owns_lock())
     {
+      forget_hold(of_);
       lock_.unlock();
       --detail::host_locks_held;
     }
@@ -1304,8 +1341,16 @@ held_lock::~held_lock()
 {
   if(lock_.owns_lock())
   {
+    forget_hold(of_);
     --detail::host_locks_held;
   }
+}
+
+lock_wait::~lock_wait()
+{
+  auto&                  on = graph();
+  std::scoped_lock const lock{on.leaf};
+  on.waits.erase(std::this_thread::get_id());
 }
 
 auto held_lock::owns_lock() const noexcept -> bool
@@ -1320,6 +1365,7 @@ auto held_lock::holds(host const& on) const noexcept -> bool
 
 void held_lock::unlock()
 {
+  forget_hold(of_);
   lock_.unlock();
   --detail::host_locks_held;
 }
@@ -1457,6 +1503,58 @@ auto host::try_lock() -> held_lock
     return {};
   }
   return held_lock{std::move(attempt), core_.get()};
+}
+
+auto host::lock_for(std::chrono::nanoseconds limit) -> held_lock
+{
+  std::unique_lock attempt{core_->mutex, limit};
+  if(not attempt.owns_lock())
+  {
+    return {};
+  }
+  return held_lock{std::move(attempt), core_.get()};
+}
+
+auto host::register_wait() -> lock_wait
+{
+  auto&                  on = graph();
+  auto const             me = std::this_thread::get_id();
+  std::scoped_lock const lock{on.leaf};
+  auto const*            at = core_.get();
+  for(auto steps = on.owners.size(); steps > 0; --steps)
+  {
+    auto const owner = on.owners.find(at);
+    if(owner == on.owners.end())
+    {
+      break;
+    }
+    if(owner->second == me)
+    {
+      throw machine_running(
+          "{} is held by a thread that waits for {}, which this thread holds: the access would "
+          "deadlock",
+          core_->name, at->name);
+    }
+    auto const waiting = on.waits.find(owner->second);
+    if(waiting == on.waits.end())
+    {
+      break;
+    }
+    at = waiting->second;
+  }
+  on.waits.insert_or_assign(me, core_.get());
+  registered_waits.fetch_add(1, std::memory_order_relaxed);
+  return lock_wait{};
+}
+
+auto host::waits_registered() noexcept -> std::uint64_t
+{
+  return registered_waits.load(std::memory_order_relaxed);
+}
+
+void host::name(std::string label)
+{
+  core_->name = std::move(label);
 }
 
 auto host::members() const noexcept -> std::size_t

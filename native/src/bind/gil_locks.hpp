@@ -170,10 +170,63 @@ private:
 /**
  * @brief Takes the mutex of @p on, never blocking on it with the GIL held. Tries it first. On
  *        contention it releases the GIL, blocks, and takes the GIL back with the mutex held, the
- *        allowed order. A thread that already holds a host mutex only tries.
- * @return The lock, unowned when the thread holds another host's mutex and this one is taken.
+ *        allowed order. A thread that already holds another host's mutex first registers its
+ *        wait in the process lock graph, then blocks in 50 ms steps, checking signals between
+ *        them. Without a signal it waits as long as the mutex is held. The timed mutex queues
+ *        no waiter between steps and is not fair: a holder re-taking it in a tight loop could
+ *        starve the wait, which parked sections, paced by their user, do not do.
+ * @return The lock, owned.
+ * @throws popcorn::machine_running at once when the wait would close a cycle of host mutex
+ *         holders, naming both machines.
+ * @throws reflex::py::nb::python_error when a signal handler raised during the wait.
  */
 inline auto lock_releasing_gil(core::host& on) -> core::held_lock
+{
+  using namespace std::chrono_literals;
+  if(auto held = on.try_lock(); held.owns_lock())
+  {
+    return held;
+  }
+  auto const python = PyGILState_Check() != 0;
+  if(core::detail::host_locks_held == 0)
+  {
+    if(not python)
+    {
+      return on.lock();
+    }
+    reflex::py::nb::gil_scoped_release const released;
+    return on.lock();
+  }
+  auto const waiting = on.register_wait();
+  while(true)
+  {
+    core::held_lock held;
+    if(python)
+    {
+      reflex::py::nb::gil_scoped_release const released;
+      held = on.lock_for(50ms);
+    }
+    else
+    {
+      held = on.lock_for(50ms);
+    }
+    if(held.owns_lock())
+    {
+      return held;
+    }
+    if(python and PyErr_CheckSignals() != 0)
+    {
+      throw reflex::py::nb::python_error();
+    }
+  }
+}
+
+/**
+ * @brief lock_releasing_gil() for a removal that must never wait on another host: a thread
+ *        that already holds a host mutex only tries.
+ * @return The lock, unowned when the thread holds another host's mutex and this one is taken.
+ */
+inline auto try_lock_releasing_gil(core::host& on) -> core::held_lock
 {
   if(auto held = on.try_lock(); held.owns_lock() or core::detail::host_locks_held > 0)
   {
@@ -185,20 +238,6 @@ inline auto lock_releasing_gil(core::host& on) -> core::held_lock
   }
   reflex::py::nb::gil_scoped_release const released;
   return on.lock();
-}
-
-/**
- * @brief Passes an owned lock through.
- * @throws popcorn::machine_running when @p held owns nothing: the thread holds another host's
- * mutex.
- */
-inline auto require_owned(core::held_lock held) -> core::held_lock
-{
-  if(not held.owns_lock())
-  {
-    throw popcorn::machine_running("the machine is in use by another machine's callback");
-  }
-  return held;
 }
 
 /** @brief What a log filter or handler error does at a flush. */
@@ -562,8 +601,8 @@ private:
  *        directly under the host mutex while parked, taken with lock_releasing_gil(). A parked
  *        access first runs the removals queued on @p slot, as engine owner under the lock, and
  *        at its end fails the stamps a reset or restore inside it superseded.
- * @throws popcorn::machine_running while the member is busy, or when the thread holds another
- *         host's mutex and this one is taken.
+ * @throws popcorn::machine_running while the member is busy, or when waiting for the mutex
+ *         would deadlock, see lock_releasing_gil().
  */
 template <typename Body>
 auto host_access(core::host& on, host_slot const& slot, Body&& body)
@@ -577,7 +616,7 @@ auto host_access(core::host& on, host_slot const& slot, Body&& body)
   {
     throw core::machine_closed("the host was abandoned");
   }
-  auto const held = require_owned(lock_releasing_gil(on));
+  auto const held = lock_releasing_gil(on);
   if(on.busy(held, core::member_id{}) or not on.parked(held, core::member_id{}))
   {
     throw popcorn::machine_running(
@@ -657,7 +696,7 @@ inline void retire(host_ref const& ref, std::move_only_function<void()> body) no
       body();
       return;
     }
-    auto const held = lock_releasing_gil(*on);
+    auto const held = try_lock_releasing_gil(*on);
     if(not held.owns_lock())
     {
       std::scoped_lock const lock{ref->retired_mutex};

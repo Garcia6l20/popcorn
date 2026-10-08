@@ -408,6 +408,7 @@ machine_handle::machine_handle(mcu_description const& description, machine_confi
   host_         = std::make_shared<core::host>(std::move(members), bounds, std::move(hooks));
   engine_owner_ = host_->member_owner(core::member_id{});
   slot_->host   = host_;
+  host_->name(std::format("{} #{}", description.part, id()));
   detail::register_host(host_, slot_, description.part);
 }
 

@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -273,6 +274,8 @@ struct member_slot;
 template <typename T> class host_promise;
 enum class fate : std::uint8_t;
 
+/** @brief The mutex of a host, timed so a cross-machine wait can check signals. */
+using host_mutex = std::timed_mutex;
 /** @brief Host mutexes the current thread holds through a held_lock. */
 inline thread_local int host_locks_held = 0;
 /** @brief Host whose engine the current thread owns. */
@@ -480,10 +483,30 @@ public:
 private:
   friend class host;
 
-  held_lock(std::unique_lock<std::mutex> lock, detail::host_core const* of) noexcept;
+  held_lock(std::unique_lock<detail::host_mutex> lock, detail::host_core const* of);
 
-  std::unique_lock<std::mutex> lock_{};
-  detail::host_core const*     of_{};
+  std::unique_lock<detail::host_mutex> lock_{};
+  detail::host_core const*             of_{};
+};
+
+/**
+ * @brief A thread's wait for a host mutex while it holds others, registered in the process lock
+ *        graph until destroyed.
+ */
+class lock_wait
+{
+public:
+  /** @brief Not copyable. */
+  lock_wait(lock_wait const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(lock_wait const&) -> lock_wait& = delete;
+  /** @brief Deregisters the wait. */
+  ~lock_wait();
+
+private:
+  friend class host;
+
+  lock_wait() noexcept = default;
 };
 
 /**
@@ -606,11 +629,31 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(host&&) -> host& = delete;
 
-  /** @brief Blocks for the host mutex. A thread holds at most one host mutex. */
+  /** @brief Blocks for the host mutex, for a thread that holds no other one. */
   [[nodiscard]] auto lock() -> held_lock pre(detail::host_locks_held == 0);
 
   /** @brief Takes the host mutex if free, otherwise returns an unowned lock. */
   [[nodiscard]] auto try_lock() -> held_lock;
+
+  /** @brief Waits up to @p limit for the host mutex, an unowned lock when it stays taken. */
+  [[nodiscard]] auto lock_for(std::chrono::nanoseconds limit) -> held_lock;
+
+  /**
+   * @brief Registers the current thread, which holds other host mutexes, as waiting for this
+   *        one. Checked against the process lock graph, recorded by held_lock: a thread that
+   *        holds this mutex and waits, through other owners and waits, for a mutex this thread
+   *        holds would deadlock with it.
+   * @return The registration, kept while the thread waits.
+   * @throws machine_running naming both machines when the wait would close a cycle.
+   */
+  [[nodiscard]] auto register_wait() -> lock_wait;
+
+  /** @brief Names the host in the messages of refused waits. Written without synchronisation:
+   * call it once, before another thread can reach the host. */
+  void name(std::string label);
+
+  /** @brief Waits register_wait() registered in the process so far, for tests. */
+  [[nodiscard]] static auto waits_registered() noexcept -> std::uint64_t;
 
   /** @brief Number of members. */
   [[nodiscard]] auto members() const noexcept -> std::size_t;

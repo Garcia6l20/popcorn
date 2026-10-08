@@ -385,6 +385,11 @@ private:
  * tests of its translation. */
 [[= py::doc{"Raise a chained goal error, for tests."}]] [[noreturn]] void raise_chained_error();
 
+/** @brief Waits for a host mutex registered so far, by a thread holding another one, for tests
+ * to time a release. */
+[[= py::doc{"Cross-machine lock waits registered so far, for tests."}]] [[nodiscard]] auto
+    lock_waits() -> std::uint64_t;
+
 namespace detail
 {
 /** @brief Counts one entry into an interruptible wait, for a request result or a park. */

@@ -382,6 +382,13 @@ class Machine:
     exits. `del m` of a live machine whose handler blocks waits for the handler: a finalizer
     cannot raise.
 
+    A sync access to a parked machine, `m.mem`, `m.regs` or a view, made from a callback or a
+    model of another machine waits while a third thread holds the machine, the GIL released,
+    and Ctrl-C ends the wait. Two threads crossing such accesses would deadlock: one of them
+    raises MachineRunning at once. A wait the user writes in such a callback, on an Event or a
+    lock another thread sets only after its own access, is not seen and blocks like two
+    `threading.Lock`s taken in opposite orders.
+
     An exception a callback, or a command of `read`, `write` or a stream, raises on the machine's
     thread leaves its frames there, so one `gc.collect()` once the callback returned collects a
     dropped machine. It keeps its type, message, notes, chained exceptions and formatted
@@ -859,6 +866,9 @@ class Machine:
         Returns:
             The values in argument order, with the virtual time they were read at.
 
+        A sync read made from a callback of another machine waits for this machine as the class
+        doc says, `read` itself never holds a machine while it waits.
+
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.
             ValueError: A ref of another machine, or `at` before the time of a parked machine.
@@ -892,7 +902,8 @@ class Machine:
         exception with a note naming the argument. Each value is checked and encoded at the
         call. A register field or a variable bit field is written by reading and writing its
         word in one access on the machine's thread, so the other bits keep what the firmware
-        wrote meanwhile.
+        wrote meanwhile. A sync write made from a callback of another machine waits for this
+        machine as the class doc says, `write` itself never holds a machine while it waits.
 
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.

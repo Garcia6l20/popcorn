@@ -447,6 +447,11 @@ void raise_chained_error()
       std::make_exception_ptr(core::operation_cancelled("the goal was cancelled"))};
 }
 
+auto lock_waits() -> std::uint64_t
+{
+  return core::host::waits_registered();
+}
+
 auto interruptible_waits() -> std::uint64_t
 {
   return interruptible_entries.load(std::memory_order_relaxed);
