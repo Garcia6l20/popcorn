@@ -171,6 +171,48 @@ def test_a_stamped_write_superseded_while_parked_raises(machines: Machines, move
         asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("move", ["reset", "restore"])
+def test_a_stamped_read_superseded_inside_a_parked_section_fails_at_once(
+    machines: Machines, move: str
+) -> None:
+    m = machines()
+    saved = m.snapshot()
+    pending = m.read(m.ref.reg.r0, at=m.time + us(10))
+
+    def moved() -> None:
+        if move == "reset":
+            m.reset()
+        else:
+            m.restore(saved)
+
+    m._handle.parked(moved)  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        await pending
+
+    with pytest.raises(popcorn.EmulationError, match=f"superseded by a {move}"):
+        run_bounded(scenario(), 1)
+
+
+@pytest.mark.parametrize("move", ["reset", "restore"])
+def test_a_stamped_read_superseded_while_parked_fails_at_once(
+    machines: Machines, move: str
+) -> None:
+    m = machines()
+    saved = m.snapshot()
+    pending = m.read(m.ref.reg.r0, at=m.time + us(10))
+    if move == "reset":
+        m.reset()
+    else:
+        m.restore(saved)
+
+    async def scenario() -> None:
+        await pending
+
+    with pytest.raises(popcorn.EmulationError, match=f"superseded by a {move}"):
+        run_bounded(scenario(), 1)
+
+
 def test_a_cancelled_stamped_write_never_applies(machines: Machines) -> None:
     m = machines()
     m.mem.u32[SRAM] = 0

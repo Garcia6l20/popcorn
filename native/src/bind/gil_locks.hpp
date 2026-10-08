@@ -235,7 +235,7 @@ struct host_slot
   /** @brief Guards retired, a leaf: nothing is taken under it. */
   mutable std::mutex retired_mutex{};
   /** @brief Removals retire() could not run at once, run by the engine owner at the next
-   * boundary or once the host is closed. */
+   * boundary or parked access, or once the host is closed. */
   mutable std::vector<std::move_only_function<void()>> retired{};
   /** @brief Whether retired may hold a removal, read without the mutex. */
   mutable std::atomic<bool> retiring{false};
@@ -484,13 +484,44 @@ inline void run_retired(host_slot const& slot) noexcept
 using host_ref = std::shared_ptr<host_slot const>;
 
 /**
+ * @brief Fails the stamps a reset or restore superseded, from the destructor of a parked access,
+ *        so one made by its body or nested inside it fails as the access ends.
+ */
+class superseding
+{
+public:
+  /** @brief Supersedes on @p on, under @p held, at destruction. */
+  superseding(core::host& on, core::held_lock const& held) noexcept : on_{on}, held_{held}
+  {}
+  superseding(superseding const&)                    = delete;
+  auto operator=(superseding const&) -> superseding& = delete;
+  /** @brief Supersedes, never throws. */
+  ~superseding()
+  {
+    try
+    {
+      on_.supersede(held_, core::member_id{});
+    }
+    catch(...)
+    {}
+  }
+
+private:
+  core::host&            on_;
+  core::held_lock const& held_;
+};
+
+/**
  * @brief Runs @p body on the only member of @p on synchronously: inline for the engine owner,
- *        directly under the host mutex while parked, taken with lock_releasing_gil().
+ *        directly under the host mutex while parked, taken with lock_releasing_gil(). A parked
+ *        access first runs the removals queued on @p slot, as engine owner under the lock, and
+ *        at its end fails the stamps a reset or restore inside it superseded.
  * @throws popcorn::machine_running while the member is busy, or when the thread holds another
  *         host's mutex and this one is taken.
  */
 template <typename Body>
-auto host_access(core::host& on, Body&& body) -> std::invoke_result_t<Body, core::machine&>
+auto host_access(core::host& on, host_slot const& slot, Body&& body)
+    -> std::invoke_result_t<Body, core::machine&>
 {
   if(on.owns_engine())
   {
@@ -507,7 +538,10 @@ auto host_access(core::host& on, Body&& body) -> std::invoke_result_t<Body, core
         "the machine is running: await m.read() or m.write(), or halt() it first");
   }
   core::owner_scope const owning{on, held};
-  return std::invoke(std::forward<Body>(body), on.member(held, core::member_id{}));
+  auto&                   engine = on.member(held, core::member_id{});
+  run_retired(slot);
+  superseding const ending{on, held};
+  return std::invoke(std::forward<Body>(body), engine);
 }
 
 /**
@@ -534,7 +568,7 @@ auto host_access(host_ref const& ref, Body&& body) -> std::invoke_result_t<Body>
   if(auto const on = ref->host.lock())
   {
     logs_flushed const flushed{*ref};
-    return host_access(*on, [&body](core::machine&) { return std::invoke(body); });
+    return host_access(*on, *ref, [&body](core::machine&) { return std::invoke(body); });
   }
   if(not host_never_set(ref))
   {
@@ -548,8 +582,8 @@ auto host_access(host_ref const& ref, Body&& body) -> std::invoke_result_t<Body>
  *        feeds. Inline for the engine owner. Otherwise under the host mutex, taken with
  *        lock_releasing_gil(), as a command: at once while parked, at the next boundary on the
  *        host thread while running. When the thread holds another host's mutex and this one is
- *        taken, queued on the slot for the next boundary. Never throws, for destructors on any
- *        thread.
+ *        taken, queued on the slot for the next boundary or parked access. Never throws, for
+ *        destructors on any thread.
  * @param ref The machine's host slot.
  * @param body Destroys or releases what it captured.
  */

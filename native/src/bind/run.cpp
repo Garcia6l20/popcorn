@@ -253,24 +253,20 @@ auto machine_handle::halt() -> nb::object
   {
     return nb::none();
   }
-  if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
-  {
-    auto const held = lock_releasing();
-    if(host_->busy(held, core::member_id{}) and not host_->session_open(held, core::member_id{}))
-    {
-      throw popcorn::machine_busy(
-          "a run, step or call is active, not a free run: cancel its task instead");
-    }
-  }
-  return park();
+  return halt_or_park(true);
 }
 
 auto machine_handle::park() -> nb::object
 {
+  return halt_or_park(false);
+}
+
+auto machine_handle::halt_or_park(bool refuse_goal) -> nb::object
+{
   core::halt_ticket ticket;
   {
     nb::gil_scoped_release const released;
-    ticket = host_->request_halt(core::member_id{});
+    ticket = host_->request_halt(core::member_id{}, refuse_goal);
   }
   wait_interruptibly(*host_, ticket, abandoner());
   std::optional<core::held_end> ended;

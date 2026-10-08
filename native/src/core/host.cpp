@@ -537,7 +537,7 @@ struct host_core
           slot->state = host_state::running;
         }
         plan.slice = slot->state == host_state::running;
-        if(slot->free_run)
+        if(slot->free_run and plan.slice)
         {
           plan.waiters = slot->waiters;
         }
@@ -1292,6 +1292,11 @@ auto waiter_handle::ended() const noexcept -> bool
   return waiter_->ended.load(std::memory_order_relaxed);
 }
 
+auto waiter_handle::holders() const noexcept -> long
+{
+  return waiter_.use_count();
+}
+
 auto condition_holds(condition const& tested, machine& target) -> bool
 {
   std::array<std::byte, 8> bytes{};
@@ -1363,7 +1368,9 @@ host::~host()
   {
     return;
   }
-  if(detail::on_host_thread or detail::host_locks_held > 0)
+  if(detail::on_host_thread
+     or detail::host_locks_held > 0
+     or (core_->hooks.may_block and not core_->hooks.may_block()))
   {
     request_stop();
     decide(detail::fate::orphaned);
@@ -1534,6 +1541,15 @@ void host::post_stamped(
   }
 }
 
+void host::supersede(held_lock const&, member_id who)
+{
+  if(core_->abandoned)
+  {
+    return;
+  }
+  detail::supersede_parked(*core_->members[who]);
+}
+
 auto host::withdraw(held_lock const&, member_id who, host_future<vtime> const& pending) -> bool
 {
   auto&      slot    = *core_->members[who];
@@ -1670,7 +1686,7 @@ auto host::request_cancel(member_id who) -> std::optional<std::uint64_t>
   return slot.parks;
 }
 
-auto host::request_halt(member_id who) -> halt_ticket
+auto host::request_halt(member_id who, bool refuse_goal) -> halt_ticket
 {
   if(detail::host_locks_held > 0)
   {
@@ -1682,6 +1698,10 @@ auto host::request_halt(member_id who) -> halt_ticket
   if(core_->abandoned or (not slot.goal and not slot.session))
   {
     return {};
+  }
+  if(refuse_goal and slot.goal and not detail::on_host_thread)
+  {
+    throw machine_busy("a run, step or call is active, not a free run: cancel its task instead");
   }
   if(slot.with_host)
   {
@@ -1748,9 +1768,9 @@ void host::cancel(member_id who)
   }
 }
 
-auto host::halt(member_id who) -> std::optional<held_end>
+auto host::halt(member_id who, bool refuse_goal) -> std::optional<held_end>
 {
-  auto const ticket = request_halt(who);
+  auto const ticket = request_halt(who, refuse_goal);
   wait_settled(who, ticket);
   return finish_halt(who, ticket);
 }

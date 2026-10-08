@@ -443,7 +443,14 @@ machine_handle::~machine_handle()
     {
       halt_and_close();
     }
-    detail::run_retired(*slot_);
+    if(host_->abandoned())
+    {
+      detail::give_up(*slot_, host_->orphan());
+    }
+    else
+    {
+      detail::run_retired(*slot_);
+    }
     if(ended and python)
     {
       report_unclaimed(*ended, *delivered_);

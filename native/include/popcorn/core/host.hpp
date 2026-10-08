@@ -221,6 +221,9 @@ struct host_hooks
   std::move_only_function<void()> thread_stopping{};
   /** @brief Called on the caller of cancel(), halt() and close() before it may block. */
   std::move_only_function<void()> before_block{};
+  /** @brief Called by ~host on the thread that drops the last share of a running host: false
+   * gives the thread up as on a host thread instead of closing, which blocks. Empty for true. */
+  std::move_only_function<bool()> may_block{};
   /** @brief Called on the host thread as the engine owner before and after every slice of a
    * goal or a free run, with the member. Empty for none. */
   std::move_only_function<void(member_id)> boundary{};
@@ -380,10 +383,10 @@ public:
   /**
    * @brief Sets the callback run once on completion, on the completing thread after the value is
    *        stored, outside the future's own mutex. The host thread completes outside every host
-   *        mutex. A caller completes under the host mutex it holds: a parked stamped post, a run
-   *        or a start failing stamps a parked reset superseded. Runs it at once on this thread
-   *        when the future is done. Replaces an earlier callback not yet run,
-   *        which is destroyed after the future's mutex is released.
+   *        mutex. A caller completes under the host mutex it holds: a parked stamped post, a run,
+   *        a start or supersede() failing stamps a parked reset superseded. Runs it at once on
+   *        this thread when the future is done. Replaces an earlier callback not yet run, which
+   *        is destroyed after the future's mutex is released.
    */
   void on_done(std::move_only_function<void() noexcept> callback) pre(valid())
   {
@@ -516,6 +519,9 @@ public:
    */
   [[nodiscard]] auto ended() const noexcept -> bool;
 
+  /** @brief Owners of the waiter, this handle included: the host's bookkeeping, for tests. */
+  [[nodiscard]] auto holders() const noexcept -> long;
+
   /**
    * @brief Removes the waiter: its future fails with operation_cancelled at once, and the host,
    *        woken even from an idle wait, stops evaluating it and releases its predicate. The free
@@ -634,6 +640,13 @@ public:
       pre(who < members());
 
   /**
+   * @brief Fails the pending stamps of parked member @p who with operation_cancelled when a reset
+   *        or a restore moved its timeline since they were taken, at once, under @p held. Does
+   *        nothing once the host was abandoned: its members are gone.
+   */
+  void supersede(held_lock const& held, member_id who) pre(held.holds(*this)) pre(who < members());
+
+  /**
    * @brief Removes a command of member @p who whose body has not run, best effort or stamped. Its
    *        future fails with operation_cancelled.
    * @return Whether @p pending was found and removed, false when the host already took it: its
@@ -691,11 +704,14 @@ public:
 
   /**
    * @brief The first half of halt(): requests the end of member @p who's free run or goal.
+   * @param refuse_goal Leave a goal running and throw instead, unless on a host thread: the
+   *        caller halts free runs only, checked under the mutex.
    * @return What wait_settled() and finish_halt() take. Inactive with nothing to halt, on an
    *         abandoned host, or for a host thread caller of a running member.
    * @throws machine_running when the thread holds a host mutex.
+   * @throws machine_busy with @p refuse_goal when a goal runs.
    */
-  auto request_halt(member_id who) -> halt_ticket pre(who < members());
+  auto request_halt(member_id who, bool refuse_goal = false) -> halt_ticket pre(who < members());
 
   /**
    * @brief Waits at most @p limit for the park @p ticket asks for, or for the host to be
@@ -759,10 +775,13 @@ public:
    *        park, completed waiters included. Pending waiters fail with operation_cancelled.
    *        Cancels a goal as cancel() does. On a host thread it requests the end of a running
    *        member and returns, and closes the session of a parked one at once.
+   * @param refuse_goal As for request_halt().
    * @return The held end, cleared, when the free run had ended by itself.
    * @throws machine_running when the thread holds a host mutex.
+   * @throws machine_busy with @p refuse_goal when a goal runs.
    */
-  auto halt(member_id who) -> std::optional<held_end> pre(who < members());
+  auto halt(member_id who, bool refuse_goal = false)
+      -> std::optional<held_end> pre(who < members());
 
   /** @brief State of member @p who, read without the mutex. */
   [[nodiscard]] auto state(member_id who) const noexcept -> host_state pre(who < members());

@@ -138,6 +138,7 @@ auto python_thread_hooks(
             --live_host_threads;
           },
       .before_block = [] { contract_assert(PyGILState_Check() == 0); },
+      .may_block    = [] { return PyGILState_Check() == 0; },
   };
 }
 

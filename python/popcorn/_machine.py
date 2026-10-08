@@ -864,8 +864,7 @@ class Machine:
             ValueError: A ref of another machine, or `at` before the time of a parked machine.
                 From the await, `at` already past when a running machine takes the batch.
             EmulationError: From the await, the batch was superseded by a reset or a restore
-                before `at`, or the machine was closed. A reset or restore of a parked machine
-                is seen at the next boundary of a run or the next stamped command.
+                before `at`, or the machine was closed.
             Exception: The error a log filter or handler raised during an earlier flush, kept
                 for this request, see the class doc. Nothing was posted.
         """
@@ -1866,8 +1865,8 @@ class Machine:
 
     def halt(self) -> None:
         """Stop the free run `start()` started, at its next block boundary, and return once the
-        machine is parked. A no-op when nothing was started. One thread at a time starts and
-        halts a machine: a goal another thread starts while this call checks for one is halted.
+        machine is parked. A no-op when nothing was started. A run, step or call active
+        instead goes on.
 
         Raises:
             MachineBusy: A run, step or call is active instead, cancel its task.

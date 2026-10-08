@@ -688,6 +688,39 @@ auto blocked_host(blocking_hook& blocking) -> hosted
   return h;
 }
 
+TEST_CASE("a halt after a separate goal check halts the goal, refuse_goal leaves it running")
+{
+  {
+    blocking_hook blocking;
+    auto          h = blocked_host(blocking);
+    {
+      auto held = h.on->lock();
+      CHECK_FALSE(h.on->busy(held, 0));
+    }
+    auto const goal = h.run({.budget = icount{10'000}});
+    blocking.entered.wait();
+    auto const ticket = h.on->request_halt(0);
+    blocking.release  = true;
+    h.on->wait_settled(0, ticket);
+    std::ignore = h.on->finish_halt(0, ticket);
+    CHECK_THROWS_AS(goal.get(), core::operation_cancelled);
+  }
+  {
+    blocking_hook blocking;
+    auto          h = blocked_host(blocking);
+    {
+      auto held = h.on->lock();
+      CHECK_FALSE(h.on->busy(held, 0));
+    }
+    auto const goal = h.run({.budget = icount{10'000}});
+    blocking.entered.wait();
+    CHECK_THROWS_AS(std::ignore = h.on->halt(0, true), popcorn::machine_busy);
+    CHECK_FALSE(goal.done());
+    blocking.release = true;
+    CHECK(goal.get().stopped.reason == stop_reason::budget);
+  }
+}
+
 TEST_CASE("an abandoned host fails its requests and returns at once while a hook blocks")
 {
   blocking_hook blocking;
@@ -818,6 +851,55 @@ TEST_CASE("an abandoned thread's orphan expires once it left the engine, hooks t
   CHECK(engine.use_count() == 1);
 }
 
+TEST_CASE("a supersede on an abandoned host whose orphan left does nothing")
+{
+  blocking_hook blocking;
+  auto          h    = blocked_host(blocking);
+  auto const    goal = h.run({});
+  blocking.entered.wait();
+  h.on->abandon_thread();
+  auto const orphan = h.on->orphan();
+  blocking.release  = true;
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  REQUIRE(settles([&] { return orphan.expired(); }));
+  auto held = h.on->lock();
+  CHECK_THROWS_AS(std::ignore = h.on->member(held, 0), core::machine_closed);
+  h.on->supersede(held, 0);
+}
+
+TEST_CASE("a last share dropped where blocking is refused gives the running thread up")
+{
+  blocking_hook blocking;
+  auto          made = alu(0);
+  hosted        h;
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&blocking](core::intercept_call const&) {
+        blocking.entered.count_down();
+        while(not blocking.release.load())
+        {
+          std::this_thread::sleep_for(1ms);
+        }
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  h.adopt(
+      std::move(made), {},
+      {.thread_stopping = [&blocking] { blocking.stopped = true; },
+       .may_block       = [] { return false; }});
+  auto const goal = h.run({});
+  blocking.entered.wait();
+  std::atomic<bool> dropped{false};
+  std::jthread      dropper{[&] {
+    h.on.reset();
+    dropped = true;
+  }};
+  CHECK(settles([&] { return dropped.load(); }, 2s));
+  blocking.release = true;
+  CHECK_THROWS_AS(goal.get(), core::machine_closed);
+  REQUIRE(settles([&] { return blocking.stopped.load(); }));
+}
+
 TEST_CASE("close_for gives up on a blocked hook, then closes once it returns")
 {
   blocking_hook blocking;
@@ -910,6 +992,36 @@ TEST_CASE("two members on one host each equal the same goal on its own host")
   CHECK(ga.executed == a.executed);
   CHECK(gb.stopped.instructions == b.stopped.instructions);
   CHECK(gb.executed == b.executed);
+}
+
+TEST_CASE("a turn copies no waiters of a free-running member that does not slice")
+{
+  std::optional<core::waiter_handle> waiting;
+  std::atomic<long>                  most{0};
+  auto                               driver = alu(70'000);
+  auto const seen = driver->add_intercept(sym("alu", "alu_body"), [&](core::intercept_call const&) {
+    most = std::max(most.load(), waiting->holders());
+    return core::intercept_result::proceed();
+  });
+  std::vector<std::unique_ptr<core::machine>> members;
+  members.push_back(std::move(driver));
+  members.push_back(idle_forever());
+  core::host shared{std::move(members)};
+  {
+    auto held = shared.lock();
+    shared.start(held, 1);
+    waiting = shared.wait(held, 1, {.ready = [] { return false; }});
+  }
+  REQUIRE(settles([&] { return shared.state(1) == core::host_state::idle_wait; }));
+  core::host_future<core::goal_result> goal;
+  {
+    auto held = shared.lock();
+    goal      = shared.run(held, 0, {.until = sym("alu", "alu_done")});
+  }
+  std::ignore = goal.get();
+  CHECK(most.load() == 2);
+  waiting.reset();
+  std::ignore = shared.halt(1);
 }
 
 TEST_CASE("the host thread holds no mutex in hooks and continuations")

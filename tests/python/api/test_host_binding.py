@@ -1647,6 +1647,55 @@ print("leaving", flush=True)
 """
 
 
+class _Probe:
+    def __call__(self, view: object) -> object:
+        raise AssertionError("never called")
+
+
+@pytest.mark.parametrize("a_first", [True, False], ids=["a_first", "b_first"])
+def test_a_hook_dropped_while_its_host_is_held_goes_at_the_next_parked_access(
+    machines: Machines, a_first: bool
+) -> None:
+    if a_first:
+        a = machines()
+        b = machines()
+    else:
+        b = machines()
+        a = machines()
+    probe = _Probe()
+    gone = weakref.ref(probe)
+    hook: object = a._handle.add_intercept(  # pyright: ignore[reportPrivateUsage]
+        a.address_of("idle_main"), probe, False
+    )
+    del probe
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        held.set()
+        release.wait()
+
+    holder = threading.Thread(
+        target=lambda: a._handle.parked(hold)  # pyright: ignore[reportPrivateUsage]
+    )
+    holder.start()
+    assert held.wait(10)
+
+    def drop() -> None:
+        nonlocal hook
+        hook = None
+        gc.collect()
+
+    b._handle.parked(drop)  # pyright: ignore[reportPrivateUsage]
+    release.set()
+    holder.join(10)
+    gc.collect()
+    assert gone() is not None
+    assert a.mem.u32[0x2000_8000] is not None
+    gc.collect()
+    assert gone() is None
+
+
 ORPHAN_REMOVALS = """
 import gc
 import os

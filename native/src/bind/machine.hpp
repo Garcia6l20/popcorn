@@ -291,9 +291,8 @@ public:
 
   /**
    * @brief Closes the free run, waiting with the GIL released until the machine parks. On a
-   *        host thread it only requests the end. The check that no goal runs instead and the
-   *        halt take the host mutex separately: a goal started by another thread in between is
-   *        halted too, so one thread at a time starts and halts a machine.
+   *        host thread it only requests the end. A goal running instead is refused under the
+   *        host mutex and goes on.
    * @return None, the StopInfo that ended the free run by itself, or the exception a handler
    *         raised in it.
    * @throws machine_busy while a goal is active instead.
@@ -1018,8 +1017,10 @@ private:
   auto access(Body&& body) const -> std::invoke_result_t<Body, core::machine&>
   {
     detail::logs_flushed const flushed{*slot_};
-    return detail::host_access(*host_, std::forward<Body>(body));
+    return detail::host_access(*host_, *slot_, std::forward<Body>(body));
   }
+
+  auto halt_or_park(bool refuse_goal) -> reflex::py::nb::object;
 
   [[= py::traverse]] void report_python(reflex::py::gc_visitor& visit) const noexcept
   {
