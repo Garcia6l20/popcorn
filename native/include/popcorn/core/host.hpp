@@ -497,6 +497,13 @@ public:
   [[nodiscard]] auto fired() const noexcept -> std::uint64_t;
 
   /**
+   * @brief Whether the free run's own end completed the waiter, its stop or its exception, and
+   *        not a boundary the waiter saw. Read it after future() completed, which orders the
+   *        read. A stop equal to the end field by field still reads false when the waiter saw it.
+   */
+  [[nodiscard]] auto ended() const noexcept -> bool;
+
+  /**
    * @brief Removes the waiter: its future fails with operation_cancelled at once, and the host,
    *        woken even from an idle wait, stops evaluating it and releases its predicate. The free
    *        run continues. Takes no host mutex, so it is safe from a destructor on any thread.

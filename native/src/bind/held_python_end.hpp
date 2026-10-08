@@ -186,10 +186,11 @@ private:
 };
 
 /**
- * @brief What the waits of the current free run delivered to Python, so the end one delivered is
- *        not reported again: the last stop a wait returned, and whether one raised the end's
- *        exception. Each wait carries the generation of the free run it was made in, and a
- *        result read after a later start() records nothing. Its mutex is a leaf.
+ * @brief Whether a wait of the current free run delivered the free run's own end to Python, so
+ *        it is not reported again. Only a wait the end completed counts: a wait that saw a
+ *        boundary records nothing, even when its stop equals the end. Each wait carries the
+ *        generation of the free run it was made in, and a result read after a later start()
+ *        records nothing. Its mutex is a leaf.
  */
 class delivered_end
 {
@@ -201,14 +202,15 @@ public:
     return generation_;
   }
 
-  /** @brief Records the stop a wait of free run @p made returned. */
-  void returned(std::uint64_t made, stop const& at)
+  /**
+   * @brief Records a stop a wait of free run @p made returned.
+   * @param made The wait's generation.
+   * @param ended Whether the free run's end completed the wait, core::waiter_handle::ended().
+   */
+  void returned(std::uint64_t made, bool ended)
   {
     std::scoped_lock const lock{mutex_};
-    if(made == generation_)
-    {
-      stop_ = at;
-    }
+    stopped_ = stopped_ or (ended and made == generation_);
   }
 
   /**
@@ -235,31 +237,22 @@ public:
   {
     std::scoped_lock const lock{mutex_};
     ++generation_;
-    stop_.reset();
-    error_ = false;
+    stopped_ = false;
+    error_   = false;
   }
 
   /** @brief Whether a wait of the current free run delivered @p end. */
   [[nodiscard]] auto delivered(core::held_end const& end) const -> bool
   {
     std::scoped_lock const lock{mutex_};
-    if(auto const* const stopped = std::get_if<stop>(&end))
-    {
-      return stop_
-         and stop_->reason == stopped->reason
-         and stop_->instructions == stopped->instructions
-         and stop_->time == stopped->time
-         and stop_->where.pc == stopped->where.pc
-         and stop_->detail == stopped->detail;
-    }
-    return error_;
+    return std::holds_alternative<stop>(end) ? stopped_ : error_;
   }
 
 private:
-  mutable std::mutex  mutex_;
-  std::uint64_t       generation_ = 0;
-  std::optional<stop> stop_;
-  bool                error_ = false;
+  mutable std::mutex mutex_;
+  std::uint64_t      generation_ = 0;
+  bool               stopped_    = false;
+  bool               error_      = false;
 };
 
 /**

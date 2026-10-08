@@ -704,6 +704,74 @@ def test_a_wait_of_an_earlier_free_run_delivers_nothing_of_the_next(kind: str) -
     assert child.stdout.strip() == "ok"
 
 
+TWO_WAITS = """
+import asyncio
+import gc
+import sys
+import threading
+
+sys.path.insert(0, __API__)
+
+import popcorn
+from models_example import Timer
+
+reported = []
+sys.unraisablehook = lambda raised: reported.append(repr(raised.exc_value))
+count = [0]
+registered = threading.Event()
+
+
+def handler(call):
+    count[0] += 1
+    if count[0] == 1:
+        assert registered.wait(10)
+    if count[0] == 3:
+        return call.stop()
+    return call.proceed()
+
+
+def completed(future):
+    done = threading.Event()
+    future.add_done_callback(done.set)
+    assert done.wait(10)
+    return future
+
+
+m = popcorn.Machine(
+    popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__), models=dict(TIMER=Timer)
+)
+m.reset()
+asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+asyncio.run(m.call("start_timer", 1, budget=10_000))
+m.intercept("TIMER_IRQHandler", handler)
+m.start()
+boundary_wait = m._handle.wait(None, 1_500_000)
+end_wait = m._handle.wait(None, None)
+registered.set()
+at_boundary = completed(boundary_wait)
+at_end = completed(end_wait)
+end = at_end.result(0.0)
+seen = at_boundary.result(0.0)
+assert end.reason == popcorn._core.StopReason.user, (end.reason, end.detail)
+assert seen.reason == popcorn._core.StopReason.time, (seen.reason, seen.detail)
+del at_end, at_boundary, boundary_wait, end_wait, m
+gc.collect()
+assert reported == [], reported
+print("ok")
+"""
+
+
+def test_an_end_a_wait_delivered_is_not_reported_after_a_boundary_stop_read_later() -> None:
+    script = (
+        TWO_WAITS.replace("__API__", repr(str(pathlib.Path(__file__).parent)))
+        .replace("__JSON__", repr(str(MODEL_JSON)))
+        .replace("__ELF__", repr(str(MODEL_ELF)))
+    )
+    child = run_child(script, timeout=CHILD_TIMEOUT)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "ok"
+
+
 def model_machine() -> popcorn.Machine:
     m = popcorn.Machine(
         popcorn.load_description(MODEL_JSON),

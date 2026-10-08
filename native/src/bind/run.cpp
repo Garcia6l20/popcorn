@@ -282,7 +282,7 @@ auto machine_handle::waiting_on(
   return host_future_handle{std::make_shared<detail::future_request<stop>>(
       std::move(future),
       [delivered = delivered_, made, masked, waiting](stop const& stopped) {
-        delivered->returned(made, stopped);
+        delivered->returned(made, waiting.ended());
         if(masked)
         {
           return nb::object{nb::make_tuple(record(stopped), waiting.fired())};

@@ -29,6 +29,7 @@ struct waiter
   bool                     checked = false;
   bool                     fired   = false;
   std::uint64_t            members_fired{};
+  std::atomic<bool>        ended{false};
   std::optional<vtime>     since{};
   std::uint64_t            since_slice{};
   std::exception_ptr       error{};
@@ -1141,6 +1142,7 @@ struct host_core
           if(not waiting->promise.done())
           {
             waiting->members_fired = 0;
+            waiting->ended.store(true, std::memory_order_relaxed);
           }
           complete_with(waiting->settling(), end);
         }
@@ -1274,6 +1276,11 @@ auto waiter_handle::future() const -> host_future<stop>
 auto waiter_handle::fired() const noexcept -> std::uint64_t
 {
   return waiter_->members_fired;
+}
+
+auto waiter_handle::ended() const noexcept -> bool
+{
+  return waiter_->ended.load(std::memory_order_relaxed);
 }
 
 auto condition_holds(condition const& tested, machine& target) -> bool
@@ -1603,6 +1610,7 @@ auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_han
   auto handle    = waiting;
   if(slot.held)
   {
+    waiting->ended.store(true, std::memory_order_relaxed);
     detail::complete_with(waiting->settling(), *slot.held);
   }
   else
