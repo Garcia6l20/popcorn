@@ -90,7 +90,8 @@ async def awaited[T](
 
     A request already done returns without yielding. Cancelling the awaiting task cancels the
     request unless `cancel` is False: a goal halts at its next boundary, a wait is dropped, a
-    command not yet run is withdrawn.
+    command not yet run is withdrawn. A task destroyed while pending, its loop closed under it,
+    cancels the same way.
 
     The machine's thread wakes the loop through the loop's eventfd, without the GIL, so a loop
     that never blocks, spinning on `asyncio.sleep(0)`, still sees it. A loop without
@@ -111,7 +112,7 @@ async def awaited[T](
             else:
                 future.add_done_callback(_threadsafe_wake(woken))
             await woken
-        except asyncio.CancelledError:
+        except asyncio.CancelledError, GeneratorExit:
             if cancel:
                 future.cancel()
             raise

@@ -123,6 +123,23 @@ public:
     return std::exchange(dropped_, 0);
   }
 
+  /** @brief Wakes the waker set by wake_through(), if live, for an item queued beside the
+   * records. */
+  void poke()
+  {
+    std::weak_ptr<loop_waker> waking;
+    std::uint64_t             token = 0;
+    {
+      std::scoped_lock const lock{mutex_};
+      waking = waker_;
+      token  = token_;
+    }
+    if(auto const live = waking.lock())
+    {
+      live->notify(token);
+    }
+  }
+
   /**
    * @brief Wakes @p waker with @p token from now on when a record lands in the empty queue, and
    *        at once when records or a dropped count already wait.

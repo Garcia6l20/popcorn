@@ -5,18 +5,20 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import sys
+import threading
 import weakref
 from collections.abc import Callable
 from typing import Any
 
 import popcorn
 import pytest
-from popcorn._refs import Ref
+from popcorn._refs import Pending, Ref
 from popcorn.arm import Reg
 from popcorn.board import AudioOptions, UsbHostOptions
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import BOARD_ELF, VIEWS_ELF, Machines, run_bounded
+from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, VIEWS_ELF, Machines, run_bounded
 
 HANG = 10.0
 
@@ -211,6 +213,51 @@ def test_a_stamped_read_superseded_while_parked_fails_at_once(
 
     with pytest.raises(popcorn.EmulationError, match=f"superseded by a {move}"):
         run_bounded(scenario(), 1)
+
+
+def test_a_dropped_stamped_write_reports_its_later_failure(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines()
+    reported: list[tuple[str | None, str]] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append((raised.err_msg, str(raised.exc_value)))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + us(10))
+    del pending
+    assert reported == []
+    m.reset()
+    assert reported == [
+        ("a command whose Pending was dropped failed later", "superseded by a reset")
+    ]
+
+
+def test_a_stamped_write_cancelled_before_its_first_step_never_applies(
+    machines: Machines,
+) -> None:
+    m = machines()
+    m.mem.u32[SRAM] = 0
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(m.write((m.ref.mem.u32[SRAM], 9), at=m.time + us(5)))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await m.run(for_=us(20))
+
+    asyncio.run(scenario())
+    assert m.mem.u32[SRAM] == 0
+
+
+def test_a_pending_thrown_the_legacy_way_keeps_the_message(machines: Machines) -> None:
+    m = machines()
+    pending = m.write((m.ref.mem.u32[SRAM], 9), at=m.time + us(5))
+    with pytest.raises(ValueError, match="the message"):
+        pending.throw(ValueError, "the message")
+    asyncio.run(m.run(for_=us(20)))
+    assert m.mem.u32[SRAM] == 9
 
 
 def test_a_cancelled_stamped_write_never_applies(machines: Machines) -> None:
@@ -515,3 +562,264 @@ def test_a_float_too_large_for_its_ref_is_a_value_error(machines: Machines) -> N
         m.write((m.ref.mem.f32[SRAM], 1e40))
     with pytest.raises(ValueError, match="does not fit"):
         m.mem.f32[SRAM] = 1e40
+
+
+def test_a_dropped_stamped_write_left_queued_at_close_is_not_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported: list[str | None] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(raised.err_msg)
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    m = popcorn.Machine(
+        popcorn.load_description(str(M33_JSON)), image=popcorn.Image.elf(str(DRIVER_ELF))
+    )
+    m.reset()
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+    del pending
+    del m
+    gc.collect()
+    assert reported == []
+
+
+@pytest.mark.parametrize("started", [False, True], ids=["unstarted", "started"])
+def test_a_stamped_write_whose_await_was_thrown_into_reports_a_later_failure(
+    monkeypatch: pytest.MonkeyPatch, started: bool
+) -> None:
+    reported: list[str | None] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(raised.err_msg)
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    m = popcorn.Machine(
+        popcorn.load_description(str(M33_JSON)), image=popcorn.Image.elf(str(DRIVER_ELF))
+    )
+    m.reset()
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+
+    async def scenario(thrown: Pending[object]) -> None:
+        if started:
+            thrown.send(None)
+        with pytest.raises(ValueError, match="thrown"):
+            thrown.throw(ValueError("thrown"))
+
+    asyncio.run(scenario(pending))
+    del pending
+    del m
+    gc.collect()
+    assert reported == ["a command whose await was thrown into failed later"]
+
+
+def _reports(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str | None, str]]:
+    reported: list[tuple[str | None, str]] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append((raised.err_msg, str(raised.exc_value)))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    return reported
+
+
+def _driver_machine() -> popcorn.Machine:
+    m = popcorn.Machine(
+        popcorn.load_description(str(M33_JSON)), image=popcorn.Image.elf(str(DRIVER_ELF))
+    )
+    m.reset()
+    return m
+
+
+def test_a_stamped_write_dropped_after_its_machine_closed_is_not_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = _reports(monkeypatch)
+    m = _driver_machine()
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+    del m
+    gc.collect()
+    del pending
+    gc.collect()
+    assert reported == []
+
+
+def test_a_superseded_stamped_write_dropped_later_is_reported_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = _reports(monkeypatch)
+    m = _driver_machine()
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+    m.reset()
+    del pending
+    assert [message for message, _ in reported] == [
+        "a command whose Pending was dropped failed later"
+    ]
+    assert "superseded by a reset" in reported[0][1]
+
+
+def test_a_cancel_after_the_command_failed_reports_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = _reports(monkeypatch)
+    m = _driver_machine()
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(m.write((m.ref.reg.r0, 5), at=m.time + ms(10)))
+        await asyncio.sleep(0)
+        m.reset()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert [message for message, _ in reported] == ["a command its awaiter cancelled failed later"]
+    assert "superseded by a reset" in reported[0][1]
+
+
+class _SupersededBeforeCancel:
+    """A command's future whose cancel lands after a supersede, as a reset on another thread
+    between the cancel's done check and its withdraw."""
+
+    def __init__(self, future: Any, supersede: Callable[[], None]) -> None:
+        self._future = future
+        self._supersede = supersede
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._future, name)
+
+    def cancel(self) -> bool:
+        self._supersede()
+        return bool(self._future.cancel())
+
+
+def test_a_supersede_landing_before_a_cancel_withdraws_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = _reports(monkeypatch)
+    m = _driver_machine()
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+    slot = "_future"
+    setattr(pending, slot, _SupersededBeforeCancel(getattr(pending, slot), m.reset))
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(pending)
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert [message for message, _ in reported] == ["a command its awaiter cancelled failed later"]
+    assert "superseded by a reset" in reported[0][1]
+
+
+def test_a_cancel_before_the_first_step_that_cannot_withdraw_reports_a_later_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = _reports(monkeypatch)
+    m = _driver_machine()
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+    slot = "_future"
+    setattr(pending, slot, _SupersededBeforeCancel(getattr(pending, slot), m.reset))
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(pending)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert [message for message, _ in reported] == ["a command its awaiter cancelled failed later"]
+    assert "superseded by a reset" in reported[0][1]
+
+
+def test_a_failure_reported_by_a_collection_on_the_machine_thread_reaches_the_hook_off_it(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reported: list[tuple[str | None, int]] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append((raised.err_msg, threading.get_ident()))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    m = machines(slice_instructions=1_000)
+    held = [m.write((m.ref.reg.r0, 5), at=m.time + ms(10))]
+    m.reset()
+
+    def drop(_: object) -> bool:
+        held.clear()
+        return True
+
+    asyncio.run(m.run(stop_when=drop))
+    assert held == []
+    assert reported == [("a command whose Pending was dropped failed later", threading.get_ident())]
+
+
+def test_a_cancelled_stamped_write_that_was_withdrawn_is_not_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = _reports(monkeypatch)
+    m = _driver_machine()
+
+    async def scenario(machine: popcorn.Machine) -> None:
+        task = asyncio.ensure_future(
+            machine.write((machine.ref.reg.r0, 5), at=machine.time + ms(10))
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario(m))
+    del m
+    gc.collect()
+    assert reported == []
+
+
+def test_a_pending_driven_outside_a_loop_reports_with_the_await_failure_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reported = _reports(monkeypatch)
+    m = _driver_machine()
+    pending = m.write((m.ref.reg.r0, 5), at=m.time + ms(10))
+    with pytest.raises(RuntimeError, match="no running event loop"):
+        pending.send(None)
+    del pending
+    del m
+    gc.collect()
+    assert [message for message, _ in reported] == [
+        "a command whose await failed before its result failed later"
+    ]
+
+
+def test_a_stamped_write_whose_task_is_destroyed_pending_is_withdrawn() -> None:
+    m = _driver_machine()
+    m.mem.u32[SRAM] = 0
+    loop = asyncio.new_event_loop()
+
+    async def holder(written: Pending[object]) -> None:
+        await written
+
+    task = loop.create_task(holder(m.write((m.ref.mem.u32[SRAM], 9), at=m.time + ms(1))))
+    loop.run_until_complete(asyncio.sleep(0.01))
+    loop.close()
+    del task
+    gc.collect()
+    asyncio.run(m.run(for_=ms(2)))
+    assert m.mem.u32[SRAM] == 0
+
+
+def test_a_run_whose_task_is_destroyed_pending_leaves_the_machine_parked() -> None:
+    m = _driver_machine()
+    loop = asyncio.new_event_loop()
+
+    async def holder() -> None:
+        await m.run(for_=ms(100_000))
+
+    task = loop.create_task(holder())
+    loop.run_until_complete(asyncio.sleep(0.01))
+    loop.close()
+    del task
+    gc.collect()
+    assert m.mem.u32[SRAM] is not None

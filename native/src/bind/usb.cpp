@@ -466,21 +466,89 @@ auto hid_link::take_written(std::uint64_t id) -> std::optional<periph::usb::tran
   });
 }
 
-void hid_link::forget_written(std::uint64_t id)
+namespace
+{
+auto taken_or_forgotten(usb::hid_channel& queues, std::uint64_t id)
+    -> std::optional<usb::transfer_status>
+{
+  queues.awaited_writes.erase(id);
+  auto const found = queues.written.find(id);
+  if(found == queues.written.end())
+  {
+    return std::nullopt;
+  }
+  auto const status = found->second;
+  queues.written.erase(found);
+  return status;
+}
+}
+
+auto hid_link::release_written(std::uint64_t id) -> std::optional<periph::usb::transfer_status>
 {
   if(not detail::is_alive(alive_))
   {
-    return;
+    return std::nullopt;
   }
   try
   {
-    locked([&](usb::hid_channel& queues) {
-      queues.awaited_writes.erase(id);
-      queues.written.erase(id);
+    return locked([&](usb::hid_channel& queues) { return taken_or_forgotten(queues, id); });
+  }
+  catch(config_error const&)
+  {
+    return std::nullopt;
+  }
+}
+
+auto hid_link::write_claim() const -> hid_write_claim
+{
+  if(not detail::is_alive(alive_))
+  {
+    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
+  }
+  auto link = *this;
+  link.host_.reset();
+  return hid_write_claim{std::move(link)};
+}
+
+hid_write_claim::hid_write_claim(hid_link link)
+    : link_{std::move(link)}, state_{std::make_shared<claim_state>()}
+{}
+
+auto hid_write_claim::command_write(reflex::py::nb::bytes const& data) const -> access_op
+{
+  return detail::link_op([link = link_, claimed = state_, report = checked_report(data)] {
+    return link.locked([&](usb::hid_channel& queues) {
+      auto const id = queues.write(report);
+      if(not claimed->released)
+      {
+        queues.awaited_writes.insert(id);
+      }
+      claimed->id = id;
+      return id;
+    });
+  });
+}
+
+auto hid_write_claim::release() -> std::optional<periph::usb::transfer_status>
+{
+  if(not detail::is_alive(link_.alive_))
+  {
+    return std::nullopt;
+  }
+  try
+  {
+    return link_.locked([&](usb::hid_channel& queues) -> std::optional<usb::transfer_status> {
+      if(std::exchange(state_->released, true) or state_->id == 0)
+      {
+        return std::nullopt;
+      }
+      return taken_or_forgotten(queues, state_->id);
     });
   }
   catch(config_error const&)
-  {}
+  {
+    return std::nullopt;
+  }
 }
 
 auto hid_link::queued() const -> std::uint64_t

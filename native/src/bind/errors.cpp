@@ -75,11 +75,25 @@ void raise(char const* name, std::exception const& e, Fields&&... fields)
   raise(type, type(e.what(), std::forward<Fields>(fields)...));
 }
 
+void raise_chained(core::chained_error const& chained) noexcept
+{
+  set_python_error(chained.during());
+  auto* const during = PyErr_GetRaisedException();
+  set_python_error(chained.raised());
+  auto* const raised = PyErr_GetRaisedException();
+  PyException_SetContext(raised, during);
+  PyErr_SetRaisedException(raised);
+}
+
 void translate(std::exception_ptr const& thrown)
 {
   try
   {
     std::rethrow_exception(thrown);
+  }
+  catch(core::chained_error const& chained)
+  {
+    raise_chained(chained);
   }
   catch(config_error const& e)
   {
@@ -194,6 +208,11 @@ void set_python_error(std::exception_ptr const& thrown) noexcept
     catch(held_python_end const& end)
     {
       end.restore();
+      return;
+    }
+    catch(core::chained_error const& chained)
+    {
+      raise_chained(chained);
       return;
     }
     catch(std::invalid_argument const& invalid)

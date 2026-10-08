@@ -93,13 +93,13 @@ void wait_interruptibly(
 }
 
 auto cancel_goal(std::weak_ptr<core::host> host, detail::host_abandon abandon)
-    -> std::move_only_function<void()>
+    -> std::move_only_function<bool()>
 {
   return [host = std::move(host), abandon = std::move(abandon)] {
     auto const on = host.lock();
     if(on == nullptr)
     {
-      return;
+      return false;
     }
     std::optional<std::uint64_t> parks;
     {
@@ -110,6 +110,56 @@ auto cancel_goal(std::weak_ptr<core::host> host, detail::host_abandon abandon)
     {
       wait_interruptibly(*on, {.finish = true, .with_host = true, .parks = *parks}, abandon);
     }
+    return parks.has_value() or (core::detail::on_host_thread and not on->abandoned());
+  };
+}
+
+void report_cancelled_finish(core::host_future<core::goal_result> const& watched)
+{
+  if(not watched.done())
+  {
+    return;
+  }
+  try
+  {
+    std::ignore = watched.get();
+  }
+  catch(core::chained_error const& chained)
+  {
+    try
+    {
+      std::rethrow_exception(chained.during());
+    }
+    catch(core::operation_cancelled const&)
+    {
+      try
+      {
+        auto raised = detail::python_exception(chained.raised());
+        auto cause  = nb::module_::import_("asyncio").attr("CancelledError")();
+        PyException_SetContext(raised.ptr(), cause.release().ptr());
+        PyErr_SetRaisedException(raised.release().ptr());
+      }
+      catch(nb::python_error& failed)
+      {
+        failed.restore();
+      }
+      PyErr_WriteUnraisable(nullptr);
+    }
+    catch(...)
+    {}
+  }
+  catch(...)
+  {}
+}
+
+auto cancel_reporting_finish(
+    std::move_only_function<bool()>      cancel,
+    core::host_future<core::goal_result> watched) -> std::move_only_function<bool()>
+{
+  return [cancel = std::move(cancel), watched = std::move(watched)] mutable {
+    auto const cancelled = cancel();
+    report_cancelled_finish(watched);
+    return cancelled;
   };
 }
 
@@ -228,6 +278,7 @@ auto machine_handle::call_goal(
     target.begin_call(frame);
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
+  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()), future);
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future),
@@ -236,7 +287,24 @@ auto machine_handle::call_goal(
             outcome.stopped = record(result.stopped);
             return nb::cast(std::move(outcome));
           },
-          cancel_goal(host_, abandoner())),
+          std::move(cancel)),
+      slot_};
+}
+
+auto machine_handle::failing_finish_goal(std::uint64_t budget) -> host_future_handle
+{
+  core::run_goal goal{.budget = icount{budget}, .finish = [](core::machine&, stop const*) {
+                        throw popcorn::error("the goal's finish failed");
+                      }};
+  auto           future = [&] {
+    auto const held = lock_for_request();
+    return host_->run(held, core::member_id{}, std::move(goal));
+  }();
+  auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()), future);
+  return host_future_handle{
+      std::make_shared<detail::future_request<core::goal_result>>(
+          std::move(future), [](core::goal_result const&) { return nb::none(); },
+          std::move(cancel)),
       slot_};
 }
 
@@ -407,7 +475,10 @@ auto machine_handle::waiting_on(
             }
             return nb::cast(record(stopped));
           },
-          [waiting] mutable { waiting.drop(); },
+          [waiting] mutable {
+            waiting.drop();
+            return true;
+          },
           [delivered = delivered_, made](std::exception_ptr const& error) {
             delivered->raised(made, error);
           }),
@@ -474,14 +545,13 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
     return host_->post(held, core::member_id{}, std::move(command), at);
   }();
   auto withdraw = [host = std::weak_ptr{host_}, future] {
-    if(auto const on = host.lock())
+    auto const on = host.lock();
+    if(on == nullptr)
     {
-      auto const held = detail::lock_releasing_gil(*on);
-      if(held.owns_lock())
-      {
-        std::ignore = on->withdraw(held, core::member_id{}, future);
-      }
+      return false;
     }
+    auto const held = detail::lock_releasing_gil(*on);
+    return held.owns_lock() and on->withdraw(held, core::member_id{}, future);
   };
   return host_future_handle{
       std::make_shared<detail::future_request<vtime>>(
@@ -538,64 +608,70 @@ auto machine_handle::submit_ops(
     return host_->post(held, core::member_id{}, std::move(command), at);
   }();
   auto withdraw = [host = std::weak_ptr{host_}, future] {
-    if(auto const on = host.lock())
+    auto const on = host.lock();
+    if(on == nullptr)
     {
-      auto const held = detail::lock_releasing_gil(*on);
-      if(held.owns_lock())
-      {
-        std::ignore = on->withdraw(held, core::member_id{}, future);
-      }
+      return false;
     }
+    auto const held = detail::lock_releasing_gil(*on);
+    return held.owns_lock() and on->withdraw(held, core::member_id{}, future);
   };
-  return host_future_handle{
-      std::make_shared<detail::future_request<vtime>>(
-          std::move(future),
-          [ran, notes = std::move(notes)](vtime const& time) -> nb::object {
-            if(ran->error)
+  auto kept_notes = notes;
+  auto request    = std::make_shared<detail::future_request<vtime>>(
+      std::move(future),
+      [ran, notes = std::move(notes)](vtime const& time) -> nb::object {
+        if(ran->error)
+        {
+          auto const raised = detail::python_exception(ran->error);
+          if(auto const& note = notes[ran->failed]; not note.empty())
+          {
+            if(auto const noted =
+                   nb::steal(PyObject_CallMethod(raised.ptr(), "add_note", "s", note.c_str()));
+               not noted.is_valid())
             {
-              auto const raised = detail::python_exception(ran->error);
-              if(auto const& note = notes[ran->failed]; not note.empty())
-              {
-                if(auto const noted =
-                       nb::steal(PyObject_CallMethod(raised.ptr(), "add_note", "s", note.c_str()));
-                   not noted.is_valid())
-                {
-                  PyErr_Clear();
-                }
-              }
-              PyErr_SetRaisedException(raised.inc_ref().ptr());
-              throw nb::python_error();
+              PyErr_Clear();
             }
-            nb::list values;
-            for(auto const& value : ran->values)
-            {
-              values.append(
-                  std::visit(
-                      [](auto const& held) -> nb::object {
-                        using kind = std::remove_cvref_t<decltype(held)>;
-                        if constexpr(std::same_as<kind, std::monostate>)
-                        {
-                          return nb::none();
-                        }
-                        else if constexpr(std::same_as<kind, std::vector<std::byte>>)
-                        {
-                          return nb::bytes(held.data(), held.size());
-                        }
-                        else if constexpr(std::same_as<kind, std::function<nb::object()>>)
-                        {
-                          return held();
-                        }
-                        else
-                        {
-                          return nb::cast(held);
-                        }
-                      },
-                      value));
-            }
-            return nb::make_tuple(time.ps, values);
-          },
-          std::move(withdraw)),
-      slot_};
+          }
+          PyErr_SetRaisedException(raised.inc_ref().ptr());
+          throw nb::python_error();
+        }
+        nb::list values;
+        for(auto const& value : ran->values)
+        {
+          values.append(
+              std::visit(
+                  [](auto const& held) -> nb::object {
+                    using kind = std::remove_cvref_t<decltype(held)>;
+                    if constexpr(std::same_as<kind, std::monostate>)
+                    {
+                      return nb::none();
+                    }
+                    else if constexpr(std::same_as<kind, std::vector<std::byte>>)
+                    {
+                      return nb::bytes(held.data(), held.size());
+                    }
+                    else if constexpr(std::same_as<kind, std::function<nb::object()>>)
+                    {
+                      return held();
+                    }
+                    else
+                    {
+                      return nb::cast(held);
+                    }
+                  },
+                  value));
+        }
+        return nb::make_tuple(time.ps, values);
+      },
+      std::move(withdraw));
+  request->value_error([ran, noted = std::move(kept_notes)] {
+    if(not ran->error)
+    {
+      return std::pair<std::exception_ptr, std::string>{};
+    }
+    return std::pair{ran->error, noted[ran->failed]};
+  });
+  return host_future_handle{std::move(request), slot_};
 }
 
 auto machine_handle::parked(nb::object fn) -> nb::object

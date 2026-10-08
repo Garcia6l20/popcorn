@@ -98,7 +98,7 @@ void wait_releasing_gil(pending_request& request, std::optional<double> timeout)
     if(PyErr_CheckSignals() != 0)
     {
       nb::python_error const raised;
-      request.cancel();
+      std::ignore = request.cancel();
       throw raised;
     }
     if(clock::now() >= until)
@@ -230,6 +230,110 @@ void host_future_handle::add_done_callback(nb::object fn)
   });
 }
 
+void detail::report_late_failures(log_forwarding& logs) noexcept
+{
+  std::vector<late_failure> taken;
+  {
+    std::scoped_lock const lock{logs.late_mutex};
+    taken = std::exchange(logs.late, {});
+  }
+  report_late_failures(taken);
+}
+
+void detail::report_late_failures(std::span<late_failure const> failures) noexcept
+{
+  if(failures.empty())
+  {
+    return;
+  }
+  auto* const kept = PyErr_GetRaisedException();
+  for(auto const& failed : failures)
+  {
+    detail::set_python_error(failed.error);
+    if(not failed.note.empty())
+    {
+      auto* const raised = PyErr_GetRaisedException();
+      if(auto* const noted = PyObject_CallMethod(raised, "add_note", "s", failed.note.c_str());
+         noted != nullptr)
+      {
+        Py_DECREF(noted);
+      }
+      else
+      {
+        PyErr_Clear();
+      }
+      PyErr_SetRaisedException(raised);
+    }
+    PyErr_FormatUnraisable("%s", failed.message.c_str());
+  }
+  PyErr_SetRaisedException(kept);
+}
+
+namespace
+{
+auto skipped(std::exception_ptr const& error, bool skip_closed, bool skip_cancelled) noexcept
+    -> bool
+{
+  try
+  {
+    std::rethrow_exception(error);
+  }
+  catch(core::machine_closed const&)
+  {
+    return skip_closed;
+  }
+  catch(core::operation_cancelled const&)
+  {
+    return skip_cancelled;
+  }
+  catch(...)
+  {
+    return false;
+  }
+}
+}
+
+void host_future_handle::report_late_failure(
+    std::string message,
+    bool        skip_closed,
+    bool        skip_cancelled)
+{
+  if(request_->done())
+  {
+    auto [error, note] = request_->failure();
+    if(not error or skipped(error, skip_closed, skip_cancelled))
+    {
+      return;
+    }
+    detail::late_failure failed{
+        .error = std::move(error), .note = std::move(note), .message = std::move(message)};
+    if(core::detail::on_host_thread and logs_ != nullptr)
+    {
+      detail::queue_late_failure(*logs_, std::move(failed));
+      return;
+    }
+    detail::report_late_failures(std::span{&failed, 1});
+    return;
+  }
+  request_->on_done([request = request_, logs = logs_, message = std::move(message), skip_closed,
+                     skip_cancelled]() noexcept {
+    auto [error, note] = request->failure();
+    if(not error or skipped(error, skip_closed, skip_cancelled))
+    {
+      return;
+    }
+    detail::late_failure failed{
+        .error = std::move(error), .note = std::move(note), .message = message};
+    if(logs != nullptr)
+    {
+      detail::queue_late_failure(*logs, std::move(failed));
+      return;
+    }
+    detail::gil_entry const held;
+    detail::report_late_failures(std::span{&failed, 1});
+  });
+}
+
 loop_waker_handle::loop_waker_handle() : waker_{std::make_shared<core::loop_waker>()}
 {}
 
@@ -262,9 +366,20 @@ void host_future_handle::notify(loop_waker_handle const& waker, std::uint64_t to
   });
 }
 
-void host_future_handle::cancel()
+void host_future_handle::warn_later(std::string message)
 {
-  request_->cancel();
+  if(logs_ == nullptr)
+  {
+    return;
+  }
+  logs_->queue->push(
+      {.kind = core::log_kind::model_warning, .message = std::move(message)},
+      request_->ran_at().value_or(vtime{}));
+}
+
+auto host_future_handle::cancel() -> bool
+{
+  return request_->cancel();
 }
 
 void shutdown_hosts()
@@ -323,6 +438,13 @@ std::atomic<std::uint64_t> interruptible_entries{0};
 void detail::count_interruptible_wait() noexcept
 {
   interruptible_entries.fetch_add(1, std::memory_order_relaxed);
+}
+
+void raise_chained_error()
+{
+  throw core::chained_error{
+      std::make_exception_ptr(popcorn::error("the goal's finish failed")),
+      std::make_exception_ptr(core::operation_cancelled("the goal was cancelled"))};
 }
 
 auto interruptible_waits() -> std::uint64_t

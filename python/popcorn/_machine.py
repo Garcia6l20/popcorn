@@ -950,7 +950,8 @@ class Machine:
         at: VirtualTime | None = None,
         *,
         cancel: bool = True,
-        follow: Callable[[tuple[Any, VirtualTime]], Any] | None = None,
+        follow: Callable[[tuple[Any, VirtualTime], _core.HostFuture], Any] | None = None,
+        dropped: Callable[[_core.HostFuture], None] | None = None,
     ) -> Pending[tuple[Any, VirtualTime]]:
         """Run a native command as one command, from a stream, USB or trace method: its value
         and its time. None runs nothing and returns the time it would have run at."""
@@ -966,6 +967,7 @@ class Machine:
             convert,
             cancel=cancel,
             follow=follow,
+            dropped=dropped,
         )
 
     @property
@@ -1192,7 +1194,10 @@ class Machine:
         handler still active when the call ends is not resumed and its interrupt is not pended
         again. An exception that ends the call, a ModelError or one
         a handler raised, restores the same as a return, and the machine runs on from where it
-        was.
+        was. If the restore itself fails after such an exception, its error is raised with that
+        exception as `__context__`. After a cancel, or a Ctrl-C in a sync wait for the call, it goes
+        to `sys.unraisablehook` instead, with a CancelledError as `__context__`, and the task sees
+        CancelledError.
 
         A FAULT that ends the call carries the faulting registers in `stop.registers`, taken
         before the restore, and `popcorn.report.stop_report` shows and unwinds those. The fault
@@ -1841,7 +1846,9 @@ class Machine:
         An IDLE stop sleeps until a request or a timer wakes the core. Any other stop, or an
         exception a handler raises, ends the free run and is held: every pending and later
         `wait_for` and stream read returns that stop or raises that exception, and `halt()`
-        raises it. The machine stays busy until `halt()`.
+        raises it. The machine stays busy until `halt()`. An end no wait, `halt()` or park
+        received is reported to `sys.unraisablehook` when the machine is collected, but dropped
+        silently at interpreter exit, which closes machines without their collection.
 
         A free run advances while the caller blocks: a sync call, a thread join, or a C call that
         releases the GIL. Set up a peer whose connection blocks wall time, a probe or a

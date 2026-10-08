@@ -21,6 +21,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -210,13 +212,29 @@ enum class log_errors
   defer,
 };
 
+/** @brief A command's failure no awaiter will see, waiting to be reported. */
+struct late_failure
+{
+  /** @brief The error. */
+  std::exception_ptr error;
+  /** @brief A note the error gets in Python, empty for none. */
+  std::string note;
+  /** @brief The message of the unraisable report. */
+  std::string message;
+};
+
 /**
  * @brief Where one machine's log records go: the queue its thread fills, the token it wakes a
  *        loop with, the forwarder Python installs once, and an error a deferred flush kept. The
- *        forwarder and the kept error are read and written with the GIL held.
+ *        forwarder and the kept error are read and written with the GIL held. Late command
+ *        failures wait beside the records under their own mutex, a leaf.
  */
 struct log_forwarding
 {
+  /** @brief Guards late. */
+  std::mutex late_mutex{};
+  /** @brief Failures queued with no GIL, reported at the next flush. */
+  std::vector<late_failure> late{};
   /** @brief The records, appended with no GIL by the thread that runs the machine. */
   std::shared_ptr<core::log_queue> queue = std::make_shared<core::log_queue>();
   /** @brief Token the queue wakes a loop with, distinct from every request token. */
@@ -257,8 +275,34 @@ struct host_slot
 };
 
 /**
+ * @brief Queues @p failure on @p logs and wakes the loop the records wake. Takes no GIL, for the
+ *        thread that completes a command.
+ */
+inline void queue_late_failure(log_forwarding& logs, late_failure failure)
+{
+  {
+    std::scoped_lock const lock{logs.late_mutex};
+    logs.late.push_back(std::move(failure));
+  }
+  logs.queue->poke();
+}
+
+/**
+ * @brief Sends every late failure queued on @p logs to sys.unraisablehook, on a thread holding
+ *        the GIL, the caller's error indicator kept.
+ */
+void report_late_failures(log_forwarding& logs) noexcept;
+
+/**
+ * @brief Sends @p failures to sys.unraisablehook, on a thread holding the GIL, the caller's
+ *        error indicator kept.
+ */
+void report_late_failures(std::span<late_failure const> failures) noexcept;
+
+/**
  * @brief Forwards the queued log records of @p logs to Python, on a thread holding the GIL and
- *        no host mutex, never on a host thread: the records wait there for the next flush.
+ *        no host mutex, never on a host thread: the records wait there for the next flush. Late
+ *        command failures queued on @p logs are reported first.
  * @param logs The machine's log forwarding.
  * @param errors What a log filter or handler error does: raised, after an error a deferred flush
  *        kept, reported to sys.unraisablehook with a kept error before it, or kept for the next
@@ -274,10 +318,12 @@ struct host_slot
  */
 inline void flush_logs(log_forwarding& logs, log_errors errors)
 {
-  if(core::detail::on_host_thread
-     or core::detail::host_locks_held > 0
-     or PyGILState_Check() == 0
-     or not logs.flush)
+  if(core::detail::on_host_thread or core::detail::host_locks_held > 0 or PyGILState_Check() == 0)
+  {
+    return;
+  }
+  report_late_failures(logs);
+  if(not logs.flush)
   {
     return;
   }

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import enum
 import functools
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -61,6 +62,7 @@ PARITIES = "NOEMS"
 STOP_BITS = (1, 1.5, 2)
 DATA_BITS = (5, 6, 7, 8, 16)
 FEATURE = 3
+_log = logging.getLogger("popcorn")
 _MUTE = 1
 _VOLUME = 2
 
@@ -698,8 +700,10 @@ class HidStream:
         first one at or after `at`, as `UartStream.write`. Awaiting the result waits for the
         device and returns the time the report was queued at. It waits behind the output
         reports written before, and until the device is configured and its report descriptor
-        read. When the await raises EmulationError or is cancelled, the report stays queued and
-        is sent later, as the machine runs: only its result is dropped.
+        read. When the await raises EmulationError or is cancelled, or the result is dropped
+        unawaited, the report stays queued and is sent later, as the machine runs: a failure is
+        then logged as a popcorn warning, except a report in progress when the device detaches,
+        which is dropped silently.
 
         Args:
             data: The report as hidraw takes it: the report ID first, 0 when the device does not
@@ -722,17 +726,21 @@ class HidStream:
             raise ValueError(
                 f"an output report carries at most 0xffff bytes on the bus, not {stage}"
             )
-        link = self._link
         report = data[0]
+        claim = self._link.write_claim()
+        where = self._where
         posted = self._post(
-            link.command_write(data),
+            claim.command_write(data),
             at,
             cancel=False,
-            follow=lambda queued: self._taken(queued, report),
+            follow=lambda queued, future: self._taken(queued, report, future),
+            dropped=lambda future: _queue_untaken(future, where, report, claim.release()),
         )
         return cast("Pending[VirtualTime]", posted)
 
-    async def _taken(self, queued: tuple[int, VirtualTime], report: int) -> VirtualTime:
+    async def _taken(
+        self, queued: tuple[int, VirtualTime], report: int, future: _core.HostFuture
+    ) -> VirtualTime:
         write, at = queued
         self._writes.add(write)
         results: list[_core.UsbTransferStatus] = []
@@ -748,10 +756,16 @@ class HidStream:
             if not ended():
                 await self._wait(self._link.predicate_written(write), None)
                 ended()
+        except BaseException:
+            if not results:
+                _queue_untaken(future, self._where, report, self._link.release_written(write))
+            raise
         finally:
             self._writes.discard(write)
-            if not results:
-                self._link.forget_written(write)
+        if not results:
+            late = self._link.release_written(write)
+            if late is not None:
+                results.append(late)
         label = f"output report {report}"
         if not results:
             raise EmulationError(f"{self._where}: the run ended before {label} did")
@@ -1446,6 +1460,23 @@ def _raise_for(status: _core.UsbTransferStatus, label: str) -> None:
     if status is _core.UsbTransferStatus.timed_out:
         raise UsbTimeout(message, status=status.name)
     raise UsbError(message, status=status.name)
+
+
+def _untaken(where: str, report: int, status: _core.UsbTransferStatus | None) -> str | None:
+    """The warning of an output report whose write was given up and that had failed already,
+    None otherwise. One still running is warned of by the driver, from the machine's log
+    queue."""
+    if status is None or status is _core.UsbTransferStatus.completed:
+        return None
+    return f"{where}: output report {report} of a dropped write ended {status.name}"
+
+
+def _queue_untaken(
+    future: _core.HostFuture, where: str, report: int, status: _core.UsbTransferStatus | None
+) -> None:
+    warning = _untaken(where, report, status)
+    if warning is not None:
+        future.warn_later(warning)
 
 
 class UsbData(bytes):

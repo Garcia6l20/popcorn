@@ -32,7 +32,8 @@ class Poster(Protocol):
         at: VirtualTime | None = None,
         *,
         cancel: bool = True,
-        follow: Callable[[tuple[Any, VirtualTime]], Any] | None = None,
+        follow: Callable[[tuple[Any, VirtualTime], _core.HostFuture], Any] | None = None,
+        dropped: Callable[[_core.HostFuture], None] | None = None,
     ) -> Pending[tuple[Any, VirtualTime]]:
         """Post `command`."""
         ...

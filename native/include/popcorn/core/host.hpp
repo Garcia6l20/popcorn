@@ -41,6 +41,33 @@ public:
   using error::error;
 };
 
+/**
+ * @brief A goal's finish failed while the goal ended by an error or a cancel: the finish error,
+ *        with what the goal ended by, as Python's `__context__` chains them.
+ */
+class chained_error final : public std::exception
+{
+public:
+  /**
+   * @param raised What the goal's finish threw.
+   * @param during The error or cancel the goal ended by.
+   */
+  chained_error(std::exception_ptr raised, std::exception_ptr during) noexcept;
+
+  /** @brief What the goal's finish threw. */
+  [[nodiscard]] auto raised() const noexcept -> std::exception_ptr const&;
+
+  /** @brief The error or cancel the goal ended by. */
+  [[nodiscard]] auto during() const noexcept -> std::exception_ptr const&;
+
+  /** @brief A fixed message, the two errors carry the detail. */
+  [[nodiscard]] auto what() const noexcept -> char const* override;
+
+private:
+  std::exception_ptr raised_;
+  std::exception_ptr during_;
+};
+
 /** @brief Index of a machine among the members of its host. */
 using member_id = std::size_t;
 
@@ -100,8 +127,8 @@ struct run_goal
   /** @brief Called on the host thread as the engine owner when the goal ends, before the member
    * parks and before its future completes: with the stop, or with null when it ended without
    * one, by an error, a cancel or a yield. An exception it throws fails a goal that ended on a
-   * stop, and is dropped after an error or a cancel, which the goal fails with. Empty for
-   * none. */
+   * stop. After an error or a cancel the goal fails with chained_error of both. A close of the
+   * host fails the goal with machine_closed and skips it. Empty for none. */
   std::function<void(machine&, stop const*)> finish{};
 };
 

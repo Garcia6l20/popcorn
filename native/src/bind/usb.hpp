@@ -350,6 +350,8 @@ struct[[= py::rename{"HidReplyRecord"}]] hid_reply_record
   [[= py::readonly]] std::vector<std::uint8_t> data{};
 };
 
+class hid_write_claim;
+
 /**
  * @brief One HID function of a virtual USB host connected to Python, by function index: the
  *        n-th HID interface in interface order. Its queues outlive the drivers the host binds,
@@ -394,12 +396,19 @@ public:
       take_written(std::uint64_t id) -> std::optional<periph::usb::transfer_status>;
 
   /**
-   * @brief Stops waiting for an output report queued here: its result is dropped, the report
-   *        is still sent. Does nothing once the machine is gone.
+   * @brief Takes the result of an output report queued here when it is in, else stops waiting
+   *        for it: the report is still sent, and the driver warns of a failure. One link lock
+   *        for both, so no result lands unseen between them. Does nothing once the machine is
+   *        gone.
    * @param id Its handle.
+   * @return How it ended, empty while it runs.
    */
-  [[= py::doc{"Stop waiting for an output report queued here, drop its result."}]] void
-      forget_written(std::uint64_t id);
+  [[= py::doc{"Take how an output report queued here ended, else stop waiting for it."}]] auto
+      release_written(std::uint64_t id) -> std::optional<periph::usb::transfer_status>;
+
+  /** @brief A claim on the output report a command will queue, for hid_write_claim. */
+  [[= py::doc{"Claim the output report a command will queue."}]] [[nodiscard]] auto
+      write_claim() const -> hid_write_claim;
 
   /** @brief Output reports queued and not yet taken by the device, the one in progress
    * included. */
@@ -506,6 +515,8 @@ public:
       predicate_written(std::uint64_t id) const -> native_predicate;
 
 private:
+  friend class hid_write_claim;
+
   template <typename Body> auto locked(Body&& body) const;
   auto request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data) -> std::uint32_t;
   auto request_locked(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
@@ -520,6 +531,49 @@ private:
   std::size_t                           function_;
   detail::alive_flag                    alive_;
   detail::host_ref                      host_;
+};
+
+/**
+ * @brief The output report one command queues, for a caller that may give it up before or
+ *        after the command ran. The command and release() meet under the hub's link lock, so
+ *        giving it up needs no continuation on the machine's thread. Holds no machine.
+ */
+class[[= py::rename{"HidWriteClaim"}]] hid_write_claim
+{
+public:
+  /**
+   * @brief Claims the next report a command of @p link queues.
+   * @param link The function, its host reference dropped.
+   */
+  [[= py::skip]] explicit hid_write_claim(hid_link link);
+
+  /**
+   * @brief A command that queues an output report as HidLink.command_write, awaited until
+   *        release().
+   * @param data The report as hidraw takes it, the report ID first, 0 when unnumbered.
+   * @throws config_error as HidLink.write.
+   */
+  [[= py::doc{"A command queueing an output report, awaited until release()."}]] [[nodiscard]] auto
+      command_write(reflex::py::nb::bytes const& data) const -> access_op;
+
+  /**
+   * @brief Gives the report up. Before the command ran, the command queues it unawaited. After,
+   *        as HidLink.release_written. Either way the driver warns of a failure not taken here.
+   *        Once only, and nothing once the machine is gone.
+   * @return How it ended when it was in, empty otherwise.
+   */
+  [[= py::doc{"Give the report up: its result if in, else the driver warns of a failure."}]] auto
+      release() -> std::optional<periph::usb::transfer_status>;
+
+private:
+  struct claim_state
+  {
+    std::uint64_t id{};
+    bool          released{};
+  };
+
+  hid_link                     link_;
+  std::shared_ptr<claim_state> state_;
 };
 
 /** @brief One audio streaming direction of an audio function, as the driver found it. */

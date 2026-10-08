@@ -11,6 +11,9 @@ import asyncio
 import contextlib
 import gc
 import logging
+import sys
+import threading
+import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import Any
@@ -654,6 +657,38 @@ def test_a_report_whose_await_is_cancelled_before_it_is_queued_is_not_done(
     assert (writing.done(), hid.queued) == (False, 0)
     asyncio.run(m.run(for_=ms(2)))
     assert (writing.done(), hid.queued) == (True, 1)
+
+
+def test_a_report_command_left_by_a_cancel_reports_its_later_failure(
+    u575: popcorn.MachineDescription, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(attached=False))
+    hid = m.periph.OTG_FS.host.hid()
+    reported: list[tuple[str | None, type[object], str]] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append((raised.err_msg, type(raised.exc_value), str(raised.exc_value)))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    writing = hid.write_report(b"\x02\x55", at=m.time + ms(1))
+    gone = weakref.ref(writing)
+
+    async def cancelled(pending: Coroutine[Any, Any, VirtualTime]) -> None:
+        task = asyncio.create_task(pending)
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancelled(writing))
+    del writing
+    gc.collect()
+    assert gone() is None
+    assert reported == []
+    m.reset()
+    assert len(reported) == 1
+    assert reported[0][0] == "a command its awaiter cancelled failed later"
+    assert "superseded by a reset" in reported[0][2]
 
 
 def test_an_unplugged_function_keeps_its_report_descriptor_across_a_restore(
@@ -1333,4 +1368,111 @@ def test_forgetting_on_the_links_of_a_dead_machine_does_nothing(
     gc.collect()
     cdc.forget(1)
     hid.forget(1)
-    hid.forget_written(1)
+    assert hid.release_written(1) is None
+
+
+def test_a_dropped_report_write_leaves_no_result_behind(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    hid = host.hid()
+    asyncio.run(m.run(for_=ms(20), stop_when=lambda _: hid.report_descriptor != b""))
+    writing = hid.write_report(b"\x02\x55")
+    del writing
+    gc.collect()
+    asyncio.run(m.run(for_=ms(20)))
+    link = hid._link  # pyright: ignore[reportPrivateUsage]
+    assert [link.take_written(write) for write in range(1, 4)] == [None, None, None]
+
+
+def ready_hid(m: popcorn.Machine, host: UsbHost) -> HidStream:
+    hid = host.hid()
+    asyncio.run(m.run(for_=ms(20), stop_when=lambda _: hid.report_descriptor != b""))
+    return hid
+
+
+def test_a_dropped_stamped_report_write_leaves_its_machine_collectable(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    hid = ready_hid(m, host)
+    writing = hid.write_report(b"\x02\x55", at=m.time + s(100))
+    del writing
+    gone = weakref.ref(m)
+    del m, host, hid
+    gc.collect()
+    assert gone() is None
+
+
+def test_a_dropped_report_write_on_a_running_machine_takes_no_gil(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    hid = ready_hid(m, host)
+    at = m.time + s(5)
+    before = gil_entries(m)
+
+    async def scenario() -> None:
+        async with m.running():
+            writing = hid.write_report(b"\x02\x55", at=at)
+            del writing
+            gc.collect()
+            later = m._post(None, at + ms(10))  # pyright: ignore[reportPrivateUsage]
+            while not later.done():
+                await asyncio.sleep(0)
+            await later
+
+    run_bounded(scenario(), HANG)
+    assert gil_entries(m) == before
+    assert m.var("hid_led_writes").value == 1
+
+
+def test_a_report_write_left_by_a_cancel_warns_of_its_failure_and_keeps_no_result(
+    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(timeout=ms(20)))
+    host = m.periph.OTG_FS.host
+    asyncio.run(host.wait_configured(for_=s(2)))
+    hid = ready_hid(m, host)
+    m.periph.OTG_FS.GAHBCFG.GINTMSK = 0
+    writing = hid.write_report(b"\x02\x55", at=m.time + ms(1))
+
+    async def cancelled() -> None:
+        task = asyncio.create_task(writing)
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancelled())
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        asyncio.run(m.run(for_=ms(300)))
+    ended = [
+        record.getMessage() for record in caplog.records if "output report" in record.getMessage()
+    ]
+    assert len(ended) == 1
+    assert "timed_out" in ended[0]
+    link = usb_link_of(hid)
+    assert [link.take_written(write) for write in range(1, 4)] == [None, None, None]
+
+
+def test_a_report_write_collected_on_the_machine_thread_warns_off_it(
+    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+) -> None:
+    m = usb_machine(u575, UsbHostOptions(timeout=ms(20)))
+    host = m.periph.OTG_FS.host
+    asyncio.run(host.wait_configured(for_=s(2)))
+    hid = ready_hid(m, host)
+    m.periph.OTG_FS.GAHBCFG.GINTMSK = 0
+    held = [hid.write_report(b"\x02\x55")]
+    asyncio.run(m.run(for_=ms(300)))
+
+    def drop(_: object) -> bool:
+        held.clear()
+        return True
+
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        asyncio.run(m.run(for_=ms(1), stop_when=drop))
+    ended = [record for record in caplog.records if "output report" in record.getMessage()]
+    assert [record.thread for record in ended] == [threading.get_ident()]
+    assert "timed_out" in ended[0].getMessage()

@@ -9,11 +9,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -47,9 +49,23 @@ public:
   [[nodiscard]] virtual auto value() const -> reflex::py::nb::object = 0;
   /** @brief Runs @p callback once on completion, on the completing thread. */
   virtual void on_done(std::move_only_function<void() noexcept> callback) = 0;
-  /** @brief Cancels the request and returns once it is done. Called with the GIL held, released
-   * while it blocks. */
-  virtual void cancel() = 0;
+  /**
+   * @brief Cancels the request and returns once it is done. Called with the GIL held, released
+   *        while it blocks.
+   * @return For a command, whether this call withdrew it: false when it was done already, the
+   *         host took it, or its host mutex was contended, and it then runs. For a goal, whether
+   *         a cancel was requested, and for a wait, whether it was dropped before it was done:
+   *         either may still complete at the same boundary.
+   */
+  virtual auto cancel() -> bool = 0;
+  /** @brief The error the request failed with and its note, a null error while running or
+   * after a success. */
+  [[nodiscard]] virtual auto failure() const -> std::pair<std::exception_ptr, std::string> = 0;
+  /** @brief The virtual time a command ran at, empty for a goal, a wait, or while running. */
+  [[nodiscard]] virtual auto ran_at() const -> std::optional<vtime>
+  {
+    return std::nullopt;
+  }
 };
 
 /**
@@ -63,14 +79,15 @@ public:
    * @brief Wraps @p future.
    * @param future The request's future.
    * @param convert Builds the Python result from the value, called with the GIL held.
-   * @param cancel Cancels the request while it is not done, called with the GIL held.
+   * @param cancel Cancels the request while it is not done, called with the GIL held, and
+   *        returns what cancel() returns.
    * @param failed Sees the exception the request failed with when value() raises it, empty for
    *        none, called with the GIL held.
    */
   future_request(
       core::host_future<T>                            future,
       std::function<reflex::py::nb::object(T const&)> convert,
-      std::move_only_function<void()>                 cancel,
+      std::move_only_function<bool()>                 cancel,
       std::function<void(std::exception_ptr const&)>  failed = {})
       : future_{std::move(future)}, convert_{std::move(convert)}, cancel_{std::move(cancel)},
         failed_{std::move(failed)}
@@ -109,12 +126,54 @@ public:
     future_.on_done(std::move(callback));
   }
 
-  void cancel() override
+  auto cancel() -> bool override
   {
-    if(not future_.done() and cancel_)
+    return not future_.done() and cancel_ and cancel_();
+  }
+
+  [[nodiscard]] auto failure() const -> std::pair<std::exception_ptr, std::string> override
+  {
+    if(not future_.done())
     {
-      cancel_();
+      return {};
     }
+    try
+    {
+      std::ignore = future_.get();
+    }
+    catch(...)
+    {
+      return {std::current_exception(), {}};
+    }
+    return value_error_ ? value_error_() : std::pair<std::exception_ptr, std::string>{};
+  }
+
+  [[nodiscard]] auto ran_at() const -> std::optional<vtime> override
+  {
+    if constexpr(std::same_as<T, vtime>)
+    {
+      if(future_.done())
+      {
+        try
+        {
+          return future_.get();
+        }
+        catch(...)
+        {
+          return std::nullopt;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  /**
+   * @brief Sets how failure() finds a failure that a successful future carries in its value,
+   *        read without the GIL, such as an op batch that stopped at a failed op, with its note.
+   */
+  void value_error(std::function<std::pair<std::exception_ptr, std::string>()> probe)
+  {
+    value_error_ = std::move(probe);
   }
 
   /** @brief The wrapped future. */
@@ -132,10 +191,11 @@ private:
     }
   }
 
-  core::host_future<T>                            future_;
-  std::function<reflex::py::nb::object(T const&)> convert_;
-  std::move_only_function<void()>                 cancel_;
-  std::function<void(std::exception_ptr const&)>  failed_;
+  core::host_future<T>                                        future_;
+  std::function<reflex::py::nb::object(T const&)>             convert_;
+  std::move_only_function<bool()>                             cancel_;
+  std::function<void(std::exception_ptr const&)>              failed_;
+  std::function<std::pair<std::exception_ptr, std::string>()> value_error_;
 };
 
 /**
@@ -257,6 +317,33 @@ public:
       add_done_callback(reflex::py::nb::object fn);
 
   /**
+   * @brief Has a later failure of the request reported to sys.unraisablehook with @p message.
+   *        On completion, without the GIL, a failure is queued beside the machine's log records
+   *        and reported at its next flush: a loop's drain, a result, halt, park, a parked
+   *        access, exit or the machine's destruction. A success is silent. Holds no Python
+   *        object. Replaces a callback or notify set earlier: for the future of a command its
+   *        awaiter left, whose notify has no reader any more, and never one a user can reach.
+   *        A request already done is reported at once, the GIL held by the caller, or queued
+   *        when the caller is a machine's thread, a collection inside a handler.
+   * @param message The unraisable report's message.
+   * @param skip_closed Whether a failure because the machine closed goes unreported.
+   * @param skip_cancelled Whether a cancel's own error, a withdrawn command, goes unreported.
+   */
+  [[= py::doc{"Have a later failure reported with message at the machine's next flush."}]] void
+      report_late_failure(std::string message, bool skip_closed, bool skip_cancelled);
+
+  /**
+   * @brief Queues a warning beside the machine's log records, without the GIL, forwarded to the
+   *        popcorn logger at the next flush, at the time the command ran. For a warning that
+   *        may be raised on a machine's thread, where no log handler may run. Does nothing for
+   *        a future that has no machine log.
+   * @param message The warning.
+   */
+  [[= py::doc{
+      "Queue a warning beside the machine's log records, forwarded at the next flush."}]] void
+      warn_later(std::string message);
+
+  /**
    * @brief Queues @p token on @p waker once on completion, on the completing thread without the
    *        GIL, at once when already done. A waker destroyed meanwhile is skipped. The machine's
    *        log queue wakes @p waker from now on, with its log token.
@@ -266,8 +353,15 @@ public:
   [[= py::doc{"Queue token on waker once on completion, without the GIL."}]] void
       notify(loop_waker_handle const& waker, std::uint64_t token);
 
-  /** @brief Cancels the request: halts a goal, drops a wait. Returns when done. */
-  [[= py::doc{"Cancel: halt a goal, drop a waiter. Returns when done."}]] void cancel();
+  /**
+   * @brief Cancels the request: halts a goal, drops a wait, withdraws a command. Returns when
+   *        done.
+   * @return For a command, whether this call withdrew it, false when it was done already or
+   *         could not be withdrawn and runs. For a goal or a wait, whether it was cancelled
+   *         before it was done, which may still complete at the same boundary.
+   */
+  [[= py::doc{"Cancel: halt a goal, drop a waiter, withdraw a command. Returns when done, and "
+              "for a command whether this call withdrew it."}]] auto cancel() -> bool;
 
 private:
   std::shared_ptr<detail::pending_request> request_;
@@ -286,6 +380,10 @@ private:
  * time a signal. */
 [[= py::doc{"Interruptible waits entered so far, for a request result or a park, for tests."}]]
     [[nodiscard]] auto interruptible_waits() -> std::uint64_t;
+
+/** @brief Throws a core::chained_error of a popcorn::error during an operation_cancelled, for
+ * tests of its translation. */
+[[= py::doc{"Raise a chained goal error, for tests."}]] [[noreturn]] void raise_chained_error();
 
 namespace detail
 {

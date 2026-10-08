@@ -8,9 +8,11 @@
 #include <array>
 #include <bit>
 #include <cerrno>
+#include <cstring>
 #include <deque>
 #include <format>
 #include <ranges>
+#include <span>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
@@ -265,6 +267,15 @@ auto cancelled(char const* what) -> std::exception_ptr
   return std::make_exception_ptr(operation_cancelled("{}", what));
 }
 
+auto chained(std::exception_ptr const& finished, std::exception_ptr error) -> std::exception_ptr
+{
+  if(not finished)
+  {
+    return error;
+  }
+  return std::make_exception_ptr(chained_error{finished, std::move(error)});
+}
+
 auto closed_error() -> std::exception_ptr
 {
   return std::make_exception_ptr(machine_closed("the host closed"));
@@ -397,8 +408,9 @@ struct host_core
   bool                                      abandoned = false;
   bool                                      exiting   = false;
   std::atomic<bool>                         abandoned_flag{false};
-  bool                                      sleeping  = false;
-  bool                                      signalled = false;
+  bool                                      sleeping    = false;
+  bool                                      signalled   = false;
+  bool                                      poll_warned = false;
   std::atomic<fate>                         ending{fate::undecided};
   std::atomic<bool>                         drops{false};
   std::mutex                                watch_mutex;
@@ -453,12 +465,9 @@ struct host_core
         }
         if(plan.cancel or plan.halt)
         {
-          if(slot->goal)
-          {
-            std::ignore = finish_goal(*slot, nullptr);
-          }
-          park(*slot, done, [halt = plan.halt](member_slot& parked, deferred& later) {
-            end_goal_cancelled(parked, later);
+          auto const finished = slot->goal ? finish_goal(*slot, nullptr) : std::exception_ptr{};
+          park(*slot, done, [halt = plan.halt, &finished](member_slot& parked, deferred& later) {
+            end_goal_cancelled(parked, later, finished);
             if(halt)
             {
               parked.session  = false;
@@ -558,15 +567,16 @@ struct host_core
 
   /**
    * @brief Polls @p polled, the eventfd first, until one is ready.
-   * @return False when the watched descriptors could not be polled: the eventfd alone was
-   *         polled for poll_retry instead, and every watched member is to be woken so its pump
-   *         reads what arrived. Wakes are then late by up to poll_retry, never lost.
+   * @return 0, or the errno when the watched descriptors could not be polled: the eventfd alone
+   *         was polled for poll_retry instead, and every watched member is to be woken so its
+   *         pump reads what arrived. Wakes are then late by up to poll_retry, never lost.
    */
-  static auto poll_all(std::vector<pollfd>& polled) -> bool
+  static auto poll_all(std::vector<pollfd>& polled) -> int
   {
     while(::poll(polled.data(), polled.size(), -1) < 0)
     {
-      if(errno == EINTR)
+      auto const failure = errno;
+      if(failure == EINTR)
       {
         continue;
       }
@@ -577,9 +587,33 @@ struct host_core
       while(::poll(polled.data(), 1, poll_retry_ms) < 0 and errno == EINTR)
       {
       }
-      return false;
+      return failure;
     }
-    return true;
+    return 0;
+  }
+
+  void warn_poll_failed(int failure, std::span<member_id const> watched)
+  {
+    if(std::exchange(poll_warned, true))
+    {
+      return;
+    }
+    auto const       named = ::strerrorname_np(failure);
+    log_record const record{
+        .kind    = log_kind::model_warning,
+        .message = std::format(
+            "poll failed with {}, pty input may be late by up to {} ms",
+            named != nullptr ? named : "an unknown error", poll_retry_ms)};
+    owner_scope const owning{this};
+    for(auto const who : watched)
+    {
+      try
+      {
+        members[who]->engine->log(record);
+      }
+      catch(...)
+      {}
+    }
   }
 
   void sleep(std::unique_lock<std::mutex>& lock)
@@ -587,8 +621,9 @@ struct host_core
     std::vector<pollfd> polled{
         {.fd = wake.get(), .events = POLLIN, .revents = 0}
     };
-    std::vector<watch_id> owners;
-    std::unique_lock      watching{watch_mutex};
+    std::vector<watch_id>  owners;
+    std::vector<member_id> watchers;
+    std::unique_lock       watching{watch_mutex};
     for(auto& watched : watches)
     {
       if(watched.broken or members[watched.who]->state != host_state::idle_wait)
@@ -598,11 +633,20 @@ struct host_core
       auto const events = watched.wants_write() ? POLLIN | POLLOUT : POLLIN;
       polled.push_back({.fd = watched.fd, .events = static_cast<short>(events), .revents = 0});
       owners.push_back(watched.id);
+      if(not std::ranges::contains(watchers, watched.who))
+      {
+        watchers.push_back(watched.who);
+      }
     }
     watching.unlock();
     sleeping = true;
     lock.unlock();
-    auto const failed = not poll_all(polled);
+    auto const failure = poll_all(polled);
+    auto const failed  = failure != 0;
+    if(failed)
+    {
+      warn_poll_failed(failure, watchers);
+    }
     if(polled.front().revents != 0)
     {
       wake.drain();
@@ -727,12 +771,13 @@ struct host_core
     parked_cv.notify_all();
   }
 
-  static void end_goal_cancelled(member_slot& slot, deferred& done)
+  static void
+      end_goal_cancelled(member_slot& slot, deferred& done, std::exception_ptr const& finished = {})
   {
     if(slot.goal)
     {
-      done.push_back([goal = std::move(slot.goal)] {
-        goal->promise.fail(cancelled("the goal was cancelled"));
+      done.push_back([goal = std::move(slot.goal), finished] {
+        goal->promise.fail(chained(finished, cancelled("the goal was cancelled")));
       });
     }
   }
@@ -857,7 +902,7 @@ struct host_core
 
   void fail_goal(member_slot& slot, deferred& done, std::exception_ptr error)
   {
-    std::ignore = finish_goal(slot, nullptr);
+    error = chained(finish_goal(slot, nullptr), std::move(error));
     park(slot, done, [&error](member_slot& parked, deferred& later) {
       later.push_back([goal = std::move(parked.goal), error = std::move(error)] mutable {
         goal->promise.fail(std::move(error));
@@ -1206,6 +1251,25 @@ struct host_core
     }
   }
 };
+}
+
+chained_error::chained_error(std::exception_ptr raised, std::exception_ptr during) noexcept
+    : raised_{std::move(raised)}, during_{std::move(during)}
+{}
+
+auto chained_error::raised() const noexcept -> std::exception_ptr const&
+{
+  return raised_;
+}
+
+auto chained_error::during() const noexcept -> std::exception_ptr const&
+{
+  return during_;
+}
+
+auto chained_error::what() const noexcept -> char const*
+{
+  return "a goal's finish failed while the goal ended by another error";
 }
 
 held_lock::held_lock(std::unique_lock<std::mutex> lock, detail::host_core const* of) noexcept

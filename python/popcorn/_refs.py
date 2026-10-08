@@ -55,6 +55,12 @@ class Readout[*Ts](tuple[*Ts]):
         return f"Readout({tuple(self)!r}, time={self.time})"
 
 
+_THROWN = "a command whose await was thrown into failed later"
+_CANCELLED = "a command its awaiter cancelled failed later"
+_AWAIT_FAILED = "a command whose await failed before its result failed later"
+_DROPPED = "a command whose Pending was dropped failed later"
+
+
 class Pending[R](Coroutine[Any, Any, R]):
     """A command posted to a machine. Await it for its result.
 
@@ -62,14 +68,31 @@ class Pending[R](Coroutine[Any, Any, R]):
     stamped command waits for its time even while nothing awaits it. A coroutine, so
     `asyncio.run` and `asyncio.create_task` take it. Cancelling the awaiting task withdraws a
     command not yet run. A command whose exception is never retrieved reports it to
-    `sys.unraisablehook` when the Pending is collected.
+    `sys.unraisablehook` when the Pending is collected, or, still running then, when it fails
+    later, at the machine's next log flush, except a failure because the machine closed: a
+    stamped command left queued when a script ends is no error.
 
     A command a cancel leaves in place, `HidStream.write_report`, spends its Pending: a later
-    failure of the command is not reported to `sys.unraisablehook`, and awaiting the Pending
-    again raises RuntimeError.
+    failure of the command goes to `sys.unraisablehook` as "a command its awaiter cancelled
+    failed later" at the machine's next log flush, and awaiting the Pending again raises
+    RuntimeError. An exception other than a cancel thrown into the await, which asyncio never
+    does, leaves the command in place the same way, reported as "a command whose await was thrown
+    into failed later", or, for an error the await raised itself, "a command whose await failed
+    before its result failed later".
     """
 
-    __slots__ = ("_cancel", "_convert", "_finished", "_follow", "_future", "_inner", "_spent")
+    __slots__ = (
+        "__weakref__",
+        "_cancel",
+        "_convert",
+        "_dropped",
+        "_finished",
+        "_follow",
+        "_future",
+        "_inner",
+        "_spent",
+        "_thrown",
+    )
 
     def __init__(
         self,
@@ -77,17 +100,25 @@ class Pending[R](Coroutine[Any, Any, R]):
         convert: Callable[[object], Any],
         *,
         cancel: bool = True,
-        follow: Callable[[Any], Coroutine[Any, Any, R]] | None = None,
+        follow: Callable[[Any, _core.HostFuture], Coroutine[Any, Any, R]] | None = None,
+        dropped: Callable[[_core.HostFuture], None] | None = None,
     ) -> None:
-        """Wrap a posted command. `follow` continues from its result when first awaited,
-        `cancel` False leaves the command in place when the awaiting task is cancelled."""
+        """Wrap a posted command. `follow` continues from its result and its future when first
+        awaited, and warns through `HostFuture.warn_later` as `dropped` does. `cancel` False
+        leaves the command in place when the awaiting task is cancelled.
+        `dropped` gets the future on the caller's thread when the Pending is collected unawaited
+        or its await leaves the command in place, to release what `follow` would have. It must
+        release natively, with no continuation on the machine's thread, and warn through
+        `HostFuture.warn_later`: a collection may run it on a machine's thread."""
         self._future: _core.HostFuture | None = future
         self._convert = convert
         self._cancel = cancel
         self._follow = follow
+        self._dropped = dropped
         self._inner: Coroutine[Any, Any, R] | None = None
         self._spent = False
         self._finished = False
+        self._thrown = False
 
     def done(self) -> bool:
         """Whether the command ran, or failed."""
@@ -118,8 +149,34 @@ class Pending[R](Coroutine[Any, Any, R]):
         tb: TracebackType | None = None,
         /,
     ) -> Any:
-        error = typ if isinstance(typ, BaseException) else typ()
+        error = typ if isinstance(typ, BaseException) else typ() if val is None else typ(val)
+        self._thrown = True
+        if self._inner is None:
+            if isinstance(error, asyncio.CancelledError):
+                self._cancelled_unstarted()
+            elif self._future is not None:
+                self._leave(self._future, _THROWN)
         return self._coroutine().throw(error)
+
+    def _cancelled_unstarted(self) -> None:
+        """Withdraw or leave the command as a cancel of a started await does, for a task cancelled
+        before its first step, which throws into the await before it runs."""
+        future = self._future
+        if future is None:
+            return
+        if self._cancel:
+            self._future = None
+            self._finished = True
+            future.report_late_failure(_CANCELLED, True, future.cancel())
+        else:
+            self._leave(future, _CANCELLED)
+
+    def _leave(self, future: _core.HostFuture, message: str) -> None:
+        """Leave the command in place, its later failure reported with `message`."""
+        future.report_late_failure(message, False, False)
+        dropped, self._dropped = self._dropped, None
+        if dropped is not None:
+            dropped(future)
 
     @override
     def close(self) -> None:
@@ -137,9 +194,19 @@ class Pending[R](Coroutine[Any, Any, R]):
             raise RuntimeError("this command was already awaited")
         left_in_place = False
         try:
-            value = await awaited(future, self._convert, cancel=self._cancel)
-        except asyncio.CancelledError:
+            value = await awaited(future, self._convert, cancel=False)
+            ran = future
+        except asyncio.CancelledError, GeneratorExit:
             left_in_place = not self._cancel
+            if left_in_place:
+                self._leave(future, _CANCELLED)
+            else:
+                future.report_late_failure(_CANCELLED, True, future.cancel())
+            raise
+        except Exception:
+            left_in_place = not future.done()
+            if left_in_place:
+                self._leave(future, _THROWN if self._thrown else _AWAIT_FAILED)
             raise
         finally:
             if not left_in_place:
@@ -147,15 +214,19 @@ class Pending[R](Coroutine[Any, Any, R]):
                 self._finished = True
             del future
         if self._follow is not None:
-            return await self._follow(value)
+            return await self._follow(value, ran)
         result: R = value
         return result
 
     def __del__(self) -> None:
         future = self._future
-        if not self._spent and self._inner is None and future is not None and future.done():
-            self._future = None
-            future.result(0.0)
+        if self._spent or self._inner is not None or future is None:
+            return
+        self._future = None
+        future.report_late_failure(_DROPPED, True, False)
+        dropped, self._dropped = self._dropped, None
+        if dropped is not None:
+            dropped(future)
 
 
 def _same(raw: object) -> Any:

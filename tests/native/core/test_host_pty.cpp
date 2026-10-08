@@ -7,8 +7,10 @@
 
 #include <doctest/doctest.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -181,5 +183,59 @@ TEST_CASE("a log sink throwing on the overflow warning ends the free run or fail
     }
     REQUIRE(logged.size() == 1);
     CHECK(logged.front().starts_with("USART1|USART1: no host tool reads " + bridge->path()));
+  }
+}
+
+TEST_CASE("a failed poll logs one warning per watched member and still wakes it")
+{
+  std::array<int, 2> first{};
+  std::array<int, 2> second{};
+  REQUIRE(::pipe2(first.data(), O_CLOEXEC) == 0);
+  REQUIRE(::pipe2(second.data(), O_CLOEXEC) == 0);
+  std::mutex                 logging;
+  std::vector<std::string>   logged;
+  std::atomic<std::uint64_t> boundaries{0};
+  auto                       engine = idle_forever();
+  auto const                 sink   = engine->add_log_sink([&](core::log_record const& record) {
+    std::scoped_lock const lock{logging};
+    logged.push_back(record.message);
+  });
+  std::vector<std::unique_ptr<core::machine>> members;
+  members.push_back(std::move(engine));
+  core::host on{
+      std::move(members), {}, {.boundary = [&boundaries](core::member_id) { ++boundaries; }}};
+  {
+    auto held = on.lock();
+    on.start(held, 0);
+  }
+  REQUIRE(settles([&] { return on.state(0) == core::host_state::idle_wait; }));
+  rlimit saved{};
+  REQUIRE(::getrlimit(RLIMIT_NOFILE, &saved) == 0);
+  rlimit lowered   = saved;
+  lowered.rlim_cur = 2;
+  REQUIRE(::setrlimit(RLIMIT_NOFILE, &lowered) == 0);
+  auto const one         = on.watch(0, first[0], [] { return false; });
+  auto const two         = on.watch(0, second[0], [] { return false; });
+  auto const logged_once = settles([&] {
+    std::scoped_lock const lock{logging};
+    return not logged.empty();
+  });
+  auto const before      = boundaries.load();
+  REQUIRE(::write(first[1], "x", 1) == 1);
+  auto const woken = settles([&] { return boundaries.load() > before + 2; });
+  REQUIRE(::setrlimit(RLIMIT_NOFILE, &saved) == 0);
+  CHECK(logged_once);
+  CHECK(woken);
+  {
+    std::scoped_lock const lock{logging};
+    REQUIRE(logged.size() == 1);
+    CHECK(logged.front() == "poll failed with EINVAL, pty input may be late by up to 10 ms");
+  }
+  on.unwatch(one);
+  on.unwatch(two);
+  std::ignore = on.halt(0);
+  for(auto const fd : {first[0], first[1], second[0], second[1]})
+  {
+    ::close(fd);
   }
 }

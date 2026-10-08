@@ -519,6 +519,46 @@ TEST_CASE("a handler exception fails its goal with the same type and the next go
   CHECK(next.stopped.reason == stop_reason::address);
 }
 
+auto rethrows_as_test_failure(std::exception_ptr const& error) -> bool
+{
+  try
+  {
+    std::rethrow_exception(error);
+  }
+  catch(test_failure const&)
+  {
+    return true;
+  }
+  catch(...)
+  {
+    return false;
+  }
+}
+
+TEST_CASE("a finish that throws after a failed goal chains both errors")
+{
+  auto   made = alu(1000);
+  hosted h;
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [](core::intercept_call const&) -> core::intercept_result { throw test_failure{"run"}; }));
+  h.adopt(std::move(made));
+  auto const goal =
+      h.run({.until = sym("alu", "alu_done"), .finish = [](core::machine&, popcorn::stop const*) {
+               throw test_failure{"finish"};
+             }});
+  try
+  {
+    std::ignore = goal.get();
+    FAIL("the goal did not fail");
+  }
+  catch(core::chained_error const& chained)
+  {
+    CHECK(rethrows_as_test_failure(chained.raised()));
+    CHECK(rethrows_as_test_failure(chained.during()));
+  }
+}
+
 TEST_CASE("a free run ended by a handler holds the end until halt")
 {
   auto   made       = alu(1000);
@@ -686,6 +726,45 @@ auto blocked_host(blocking_hook& blocking) -> hosted
       core::intercept_mode::once));
   h.adopt(std::move(made), {}, {.thread_stopping = [&blocking] { blocking.stopped = true; }});
   return h;
+}
+
+TEST_CASE("a finish that throws after a cancel chains it with the cancel")
+{
+  blocking_hook blocking;
+  auto          made = alu(0);
+  hosted        h;
+  h.hooks.push_back(made->add_intercept(
+      sym("alu", "alu_body"),
+      [&blocking](core::intercept_call const&) {
+        blocking.entered.count_down();
+        while(not blocking.release.load())
+        {
+          std::this_thread::sleep_for(1ms);
+        }
+        return core::intercept_result::proceed();
+      },
+      core::intercept_mode::once));
+  h.adopt(std::move(made));
+  auto const goal =
+      h.run({.budget = icount{10'000}, .finish = [](core::machine&, popcorn::stop const*) {
+               throw test_failure{"finish"};
+             }});
+  blocking.entered.wait();
+  auto const parks = h.on->request_cancel(0);
+  REQUIRE(parks.has_value());
+  blocking.release = true;
+  h.on->wait_settled(0, {.finish = true, .with_host = true, .parks = *parks});
+  REQUIRE(goal.done());
+  try
+  {
+    std::ignore = goal.get();
+    FAIL("the goal did not fail");
+  }
+  catch(core::chained_error const& chained)
+  {
+    CHECK(rethrows_as_test_failure(chained.raised()));
+    CHECK_THROWS_AS(std::rethrow_exception(chained.during()), core::operation_cancelled);
+  }
 }
 
 TEST_CASE("a halt after a separate goal check halts the goal, refuse_goal leaves it running")

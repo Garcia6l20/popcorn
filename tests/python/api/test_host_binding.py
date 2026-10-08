@@ -22,9 +22,10 @@ import popcorn
 import pytest
 from popcorn import _core
 from popcorn._host import awaited
+from popcorn._refs import Pending
 from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
-from popcorn.units import VirtualTime, us
+from popcorn.units import VirtualTime, s, us
 
 from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines
 from .devices_example import Eeprom24
@@ -1647,6 +1648,147 @@ print("leaving", flush=True)
 """
 
 
+def test_a_chained_goal_error_raises_the_finish_error_with_the_end_as_context() -> None:
+    with pytest.raises(popcorn.PopcornError, match="finish failed") as caught:
+        _core.raise_chained_error()
+    context = caught.value.__context__
+    assert isinstance(context, popcorn.EmulationError)
+    assert "cancelled" in str(context)
+
+
+def test_a_finish_failing_after_a_handler_error_chains_both(machines: Machines) -> None:
+    m = machines()
+
+    def raising(call: popcorn.Call) -> popcorn.Return:
+        raise ValueError("the handler failed")
+
+    m.intercept("alu_mark", raising)
+    future = m._handle.failing_finish_goal(10_000_000)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(popcorn.PopcornError, match="finish failed") as caught:
+        future.result(None)
+    context = caught.value.__context__
+    assert isinstance(context, ValueError)
+    assert str(context) == "the handler failed"
+
+
+def test_a_finish_failing_after_a_cancel_is_reported_and_the_task_sees_the_cancel(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines()
+    reported: list[BaseException | None] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(raised.exc_value)
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    entered = threading.Event()
+    released = threading.Event()
+
+    def blocking(call: popcorn.Call) -> popcorn.Return:
+        entered.set()
+        released.wait()
+        return call.proceed()
+
+    m.intercept("alu_mark", blocking, once=True)
+
+    async def scenario() -> None:
+        future = m._handle.failing_finish_goal(10_000_000)  # pyright: ignore[reportPrivateUsage]
+        task = asyncio.create_task(awaited(future, lambda raw: raw))
+        while not entered.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        released.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert len(reported) == 1
+    raised = reported[0]
+    assert isinstance(raised, popcorn.PopcornError)
+    assert "finish failed" in str(raised)
+    assert isinstance(raised.__context__, asyncio.CancelledError)
+
+
+def test_a_late_command_failure_is_reported_without_the_gil_on_the_machine_thread(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read of unmapped memory fails on the machine's thread at its stamp, one virtual
+    second ahead, after the awaiting task was cancelled."""
+    m = machines()
+    at = m.time + s(1)
+    unmapped = m.ref.mem.u32[0xF000_0000].read_op()
+    reported: list[tuple[str | None, type[object], list[str]]] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        notes = getattr(raised.exc_value, "__notes__", [])
+        reported.append((raised.err_msg, type(raised.exc_value), list(notes)))
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    entries = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+    submit = m._handle.submit_ops  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        async with m.running():
+            pending: Pending[object] = Pending(
+                submit([unmapped], ["reading the probe"], at.ps), lambda raw: raw, cancel=False
+            )
+            task = asyncio.create_task(pending)
+            del pending
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            for _ in range(500):
+                if reported:
+                    break
+                await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+    assert m._handle.gil_entries() == entries  # pyright: ignore[reportPrivateUsage]
+    assert reported == [
+        (
+            "a command its awaiter cancelled failed later",
+            popcorn.EmulationError,
+            ["reading the probe"],
+        )
+    ]
+
+
+@pytest.mark.parametrize("later", ["run", "collect"])
+def test_a_late_failure_after_its_loop_ended_is_reported_once(
+    monkeypatch: pytest.MonkeyPatch, later: str
+) -> None:
+    m = popcorn.Machine(
+        popcorn.load_description(str(M33_JSON)), image=popcorn.Image.elf(str(DRIVER_ELF))
+    )
+    m.reset()
+    at = m.time + s(1)
+    unmapped = m.ref.mem.u32[0xF000_0000].read_op()
+    reported: list[str | None] = []
+
+    def report(raised: sys.UnraisableHookArgs) -> None:
+        reported.append(raised.err_msg)
+
+    monkeypatch.setattr(sys, "unraisablehook", report)
+    post = m._post  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(post(unmapped, at, cancel=False))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert reported == []
+    if later == "run":
+        asyncio.run(m.run(for_=s(2)))
+    else:
+        del m, post, scenario
+        gc.collect()
+    assert reported == ["a command its awaiter cancelled failed later"]
+
+
 class _Probe:
     def __call__(self, view: object) -> object:
         raise AssertionError("never called")
@@ -1694,6 +1836,94 @@ def test_a_hook_dropped_while_its_host_is_held_goes_at_the_next_parked_access(
     assert a.mem.u32[0x2000_8000] is not None
     gc.collect()
     assert gone() is None
+
+
+ABANDONED_LATE = """
+import asyncio
+import gc
+import os
+import signal
+import sys
+import threading
+import time
+
+import popcorn
+from popcorn import _core
+
+released = threading.Event()
+entered = threading.Event()
+
+
+def blocking(call):
+    entered.set()
+    released.wait()
+    return call.proceed()
+
+
+m = popcorn.Machine(popcorn.load_description(__JSON__), image=popcorn.Image.elf(__ELF__))
+m.reset()
+m.intercept("alu_mark", blocking)
+before = _core.host_threads()
+m.start()
+assert entered.wait(10)
+
+
+async def leave():
+    task = asyncio.create_task(m._post(None, cancel=False))
+    await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+asyncio.run(leave())
+
+
+def interrupt_inside(entered_before):
+    deadline = time.monotonic() + 10
+    while _core.interruptible_waits() == entered_before and time.monotonic() < deadline:
+        time.sleep(0.001)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+threading.Thread(target=interrupt_inside, args=(_core.interruptible_waits(),), daemon=True).start()
+try:
+    m.halt()
+except KeyboardInterrupt:
+    pass
+else:
+    raise AssertionError("no KeyboardInterrupt")
+reported = []
+sys.unraisablehook = lambda raised: reported.append(raised.err_msg)
+released.set()
+deadline = time.monotonic() + 10
+while _core.host_threads() > before and time.monotonic() < deadline:
+    time.sleep(0.01)
+assert reported == [], reported
+if __NATIVE_ONLY__:
+    popcorn.Machine.__del__ = lambda self: None
+del m
+gc.collect()
+print(reported)
+"""
+
+
+@pytest.mark.parametrize("native_only", [False, True], ids=["finalizer", "native"])
+def test_a_late_failure_of_an_abandoned_machine_is_reported_when_it_is_dropped(
+    native_only: bool,
+) -> None:
+    """The native variant skips the finalizer's flush, as at a collection on the machine's
+    own thread, so only the handle's destructor can report."""
+    script = (
+        ABANDONED_LATE.replace("__NATIVE_ONLY__", repr(native_only))
+        .replace("__JSON__", repr(str(M33_JSON)))
+        .replace("__ELF__", repr(str(DRIVER_ELF)))
+    )
+    child = run_child(script, timeout=30)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "['a command its awaiter cancelled failed later']"
 
 
 ORPHAN_REMOVALS = """

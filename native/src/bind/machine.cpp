@@ -420,28 +420,21 @@ machine_handle::~machine_handle()
     detail::abandon(std::move(host_));
     return;
   }
+  contract_assert(PyGILState_Check() != 0);
   if(host_->abandoned())
   {
     detail::give_up(*slot_, host_->orphan());
+    detail::report_late_failures(*slot_->logs);
     host_.reset();
     return;
   }
   if(not core::detail::on_host_thread and core::detail::host_locks_held == 0)
   {
     std::optional<core::held_end> ended;
-    auto const                    halt_and_close = [&] {
-      ended = host_->halt(core::member_id{});
-      host_->close();
-    };
-    auto const python = PyGILState_Check() != 0;
-    if(python)
     {
       reflex::py::nb::gil_scoped_release const released;
-      halt_and_close();
-    }
-    else
-    {
-      halt_and_close();
+      ended = host_->halt(core::member_id{});
+      host_->close();
     }
     if(host_->abandoned())
     {
@@ -451,7 +444,8 @@ machine_handle::~machine_handle()
     {
       detail::run_retired(*slot_);
     }
-    if(ended and python)
+    detail::report_late_failures(*slot_->logs);
+    if(ended)
     {
       report_unclaimed(*ended, *delivered_);
     }

@@ -209,12 +209,14 @@ public:
   /**
    * @brief Marks the machine gone for its views, halts, closes and joins the host with the GIL
    *        released, then destroys the machine. A free run's end never collected by halt() goes
-   *        to sys.unraisablehook when the destructor holds the GIL, and is dropped otherwise. On
-   *        a host thread or inside a parked section it takes the host's orphan path. While the
+   *        to sys.unraisablehook. Runs with the GIL: nanobind destroys the handle in instance
+   *        deallocation, and no native code owns one. On a host thread or inside a parked
+   *        section it takes the host's orphan path. While the
    *        interpreter finalizes with the host thread alive it leaves both alive: the thread
-   *        needs the GIL to exit. An abandoned host is left to its thread, which frees the
-   *        machine when the blocked handler returns. It never checks signals: on a live host
-   *        whose handler blocks it waits for the handler.
+   *        needs the GIL to exit, and late command failures still queued are not reported. An
+   *        abandoned host is left to its thread, which frees the machine when the blocked handler
+   *        returns. It never checks signals: on a live host whose handler blocks it waits for
+   *        the handler.
    */
   ~machine_handle();
 
@@ -288,6 +290,15 @@ public:
           arch::call_frame const&               frame,
           std::optional<std::uint64_t>          budget,
           std::optional<reflex::py::nb::object> prepare) -> host_future_handle;
+
+  /**
+   * @brief A goal whose finish throws popcorn::error, for tests of the chained end of a failed
+   *        or cancelled goal.
+   * @param budget Stop with reason budget past this many instructions.
+   * @return Resolves to None, fails with what the goal ended by.
+   */
+  [[= py::doc{"Run a goal whose finish raises, for tests."}]] auto
+      failing_finish_goal(std::uint64_t budget) -> host_future_handle;
 
   /**
    * @brief Closes the free run, waiting with the GIL released until the machine parks. On a
