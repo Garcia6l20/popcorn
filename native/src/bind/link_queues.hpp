@@ -83,6 +83,29 @@ public:
   }
 
   /**
+   * @brief Copies the low byte of each queued frame from @p start, at most @p count of them,
+   *        without taking them.
+   * @param held The guard of this queue's mutex.
+   * @param start Queued frames skipped.
+   * @param count Most bytes copied.
+   * @return The bytes, fewer when the queue holds fewer.
+   */
+  [[nodiscard]] auto
+      peek(core::link_guard const& held, std::uint64_t start, std::uint64_t count) const
+      -> std::vector<std::uint8_t> pre(held.guards(mutex_))
+  {
+    auto const                first = std::min<std::uint64_t>(start, frames_.size());
+    auto const                last = first + std::min<std::uint64_t>(count, frames_.size() - first);
+    std::vector<std::uint8_t> out;
+    out.reserve(last - first);
+    for(auto index = first; index < last; ++index)
+    {
+      out.push_back(static_cast<std::uint8_t>(frames_[index].data & 0xFFu));
+    }
+    return out;
+  }
+
+  /**
    * @brief Sets the most frames kept, dropping the oldest beyond it.
    * @param held The queue's lock.
    * @param limit Frames, at least 1.

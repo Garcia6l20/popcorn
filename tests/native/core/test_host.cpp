@@ -2870,3 +2870,40 @@ TEST_CASE("a wait that closes a cycle of host mutex holders is refused, the othe
   held.unlock();
   other.join();
 }
+
+TEST_CASE("a goal releases its stop_when before its promise resolves")
+{
+  for(bool const failing : {false, true})
+  {
+    CAPTURE(failing);
+    auto [member, unused]                      = ticking();
+    auto                                 token = std::make_shared<int>(0);
+    std::weak_ptr                        weak  = token;
+    std::atomic<bool>                    armed{false};
+    std::atomic<long>                    held_at_done{-1};
+    hosted                               h{std::move(member)};
+    core::host_future<core::goal_result> goal;
+    {
+      auto held = h.on->lock();
+      goal      = h.on->run(held, 0, {.stop_when = [token = std::move(token), &armed, failing] {
+                         if(armed.load() and failing)
+                         {
+                           throw std::runtime_error{"stop_when failed"};
+                         }
+                         return armed.load();
+                            }});
+      goal.on_done([&held_at_done, weak] noexcept { held_at_done = weak.use_count(); });
+    }
+    armed = true;
+    if(failing)
+    {
+      CHECK_THROWS(std::ignore = goal.get());
+    }
+    else
+    {
+      CHECK(goal.get().stopped.reason == stop_reason::user);
+    }
+    REQUIRE(settles([&] { return held_at_done.load() >= 0; }));
+    CHECK(held_at_done.load() == 0);
+  }
+}

@@ -198,6 +198,14 @@ public:
       -> std::uint64_t;
 
   /**
+   * @brief Copies bytes the device sent without taking them, under the link lock.
+   * @param start Bytes not read yet skipped.
+   * @param count Most bytes copied.
+   */
+  [[= py::doc{"At most count bytes the device sent from start, left queued."}]] [[nodiscard]] auto
+      peek(std::uint64_t start, std::uint64_t count) const -> reflex::py::nb::bytes;
+
+  /**
    * @brief Takes the oldest bytes the device sent.
    * @param count Most bytes taken.
    */
@@ -305,6 +313,10 @@ public:
   /** @brief A predicate true once available() reaches @p count. */
   [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto
       predicate_available(std::uint64_t count) const -> native_predicate;
+
+  /** @brief A predicate true while available() differs from @p mark. */
+  [[= py::doc{"Predicate: available() differs from the mark."}]] [[nodiscard]] auto
+      predicate_changed(count_mark const& mark) const -> native_predicate;
   /** @brief A predicate true once packets() reaches @p count. */
   [[= py::doc{"Predicate: packets() reaches count."}]] [[nodiscard]] auto
       predicate_packets(std::uint64_t count) const -> native_predicate;

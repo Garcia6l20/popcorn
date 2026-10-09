@@ -68,6 +68,10 @@ public:
   [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto
       predicate_available(std::uint64_t count) const -> native_predicate;
 
+  /** @brief A predicate true while available() differs from @p mark. */
+  [[= py::doc{"Predicate: available() differs from the mark."}]] [[nodiscard]] auto
+      predicate_changed(count_mark const& mark) const -> native_predicate;
+
   /** @brief send() as a command of MachineHandle.submit_ops(). */
   [[= py::doc{"Command of send."}]] [[nodiscard]] auto
       command_send(reflex::py::nb::bytes const& data) const -> access_op;
@@ -75,6 +79,15 @@ public:
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto
       available() const -> std::uint64_t;
+
+  /**
+   * @brief Copies the low byte of queued frames without taking them, under the link lock.
+   * @param start Queued frames skipped.
+   * @param count Most bytes copied.
+   */
+  [[= py::doc{
+      "The low bytes of at most count queued frames from start, left queued."}]] [[nodiscard]] auto
+      peek(std::uint64_t start, std::uint64_t count) const -> reflex::py::nb::bytes;
 
   /**
    * @brief Takes the oldest transmitted frames.

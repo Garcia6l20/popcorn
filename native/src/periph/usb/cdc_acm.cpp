@@ -442,6 +442,30 @@ auto cdc_channel::take(std::uint64_t bytes) -> std::vector<cdc_packet>
   return out;
 }
 
+auto cdc_channel::peek(std::uint64_t start, std::uint64_t count) const -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> out;
+  auto                      skip = taken + start;
+  for(auto const& packet : in)
+  {
+    if(out.size() == count)
+    {
+      break;
+    }
+    if(skip >= packet.data.size())
+    {
+      skip -= packet.data.size();
+      continue;
+    }
+    auto const first = packet.data.begin() + static_cast<std::ptrdiff_t>(skip);
+    auto const kept  = std::min<std::uint64_t>(
+        count - out.size(), static_cast<std::uint64_t>(packet.data.end() - first));
+    out.insert(out.end(), first, first + static_cast<std::ptrdiff_t>(kept));
+    skip = 0;
+  }
+  return out;
+}
+
 auto cdc_channel::take_packets(std::uint64_t count) -> std::vector<cdc_packet>
 {
   std::vector<cdc_packet> out;

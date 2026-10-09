@@ -909,6 +909,7 @@ struct host_core
     error = chained(finish_goal(slot, nullptr), std::move(error));
     park(slot, done, [&error](member_slot& parked, deferred& later) {
       later.push_back([goal = std::move(parked.goal), error = std::move(error)] mutable {
+        goal->goal.stop_when = nullptr;
         goal->promise.fail(std::move(error));
       });
     });
@@ -974,6 +975,7 @@ struct host_core
       auto const failed = finish_goal(slot, outcome.yielded ? nullptr : &outcome.stopped);
       park(slot, done, [&outcome, &failed](member_slot& parked, deferred& later) {
         later.push_back([goal = std::move(parked.goal), outcome, failed] {
+          goal->goal.stop_when = nullptr;
           if(failed)
           {
             goal->promise.fail(failed);

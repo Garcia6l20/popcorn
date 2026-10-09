@@ -123,6 +123,15 @@ struct cdc_channel
   [[nodiscard]] auto packets() const noexcept -> std::uint64_t;
 
   /**
+   * @brief Copies received bytes without taking them.
+   * @param start Bytes not taken yet skipped.
+   * @param count Most bytes copied.
+   * @return The bytes, fewer when fewer are held.
+   */
+  [[nodiscard]] auto peek(std::uint64_t start, std::uint64_t count) const
+      -> std::vector<std::uint8_t>;
+
+  /**
    * @brief Sets `limit`, dropping the oldest bytes beyond it.
    * @param bytes Bytes, at least 1.
    */

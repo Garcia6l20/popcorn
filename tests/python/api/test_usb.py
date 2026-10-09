@@ -12,6 +12,7 @@ import contextlib
 import gc
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -1549,6 +1550,66 @@ def test_a_take_of_a_stream_that_never_held_anything_is_empty_while_running(
             return take(), stream.available
 
     assert run_bounded(scenario(), HANG) == ([], 0)
+
+
+def test_cdc_read_until_takes_through_the_match(u575: popcorn.MachineDescription) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+
+    async def body() -> tuple[bytes, re.Match[bytes]] | None:
+        await cdc.wait_ready(for_=ms(50))
+        await cdc.write(b"abc\nrest")
+        return await cdc.read_until(re.compile(rb"\n"), for_=ms(50))
+
+    found = asyncio.run(body())
+    assert found is not None
+    assert found[0] == b"ABC\n"
+    assert found[1].end() == 4
+    asyncio.run(m.run(for_=ms(5)))
+    assert cdc.take() == b"REST"
+    m.board.pty("OTG_FS")
+    with pytest.raises(RuntimeError, match="bridged"):
+        asyncio.run(cdc.read_until(re.compile(rb"x")))
+    m.board.close()
+
+
+def test_cdc_read_until_matches_the_shortest_prefix_of_a_packet(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+
+    async def queued() -> None:
+        await cdc.wait_ready(for_=ms(50))
+        await cdc.write(b"123x")
+        await m.run(for_=ms(5))
+
+    start = m.snapshot()
+    asyncio.run(queued())
+    assert [p.data for p in cdc.take_packets()] == [b"123X"]
+    m.restore(start)
+    asyncio.run(queued())
+    found = asyncio.run(cdc.read_until(re.compile(rb"\d+"), for_=ms(1)))
+    assert found is not None
+    assert found[0] == b"1"
+    assert cdc.take() == b"23X"
+
+
+def test_cdc_read_until_reports_bytes_the_full_queue_dropped(
+    u575: popcorn.MachineDescription,
+) -> None:
+    _, host = configured(u575)
+    cdc = host.cdc()
+    cdc._link.set_byte_limit(2)  # pyright: ignore[reportPrivateUsage]
+
+    async def body() -> tuple[bytes, re.Match[bytes]] | None:
+        await cdc.wait_ready(for_=ms(50))
+        await cdc.write(b"abcd")
+        return await cdc.read_until(re.compile(rb"z"), for_=ms(20))
+
+    with pytest.raises(RuntimeError, match="dropped bytes"):
+        asyncio.run(body())
+    assert cdc.available <= 2
 
 
 def test_cdc_take_equals_a_read_of_what_is_available(u575: popcorn.MachineDescription) -> None:

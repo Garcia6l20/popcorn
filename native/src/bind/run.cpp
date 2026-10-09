@@ -62,16 +62,28 @@ auto record(stop const& stopped) -> stop_record
   return out;
 }
 
+auto held_predicate(std::shared_ptr<detail::python_callable> held) -> std::function<bool()>
+{
+  return [held = std::move(held)] {
+    detail::gil_entry const gil;
+    return nb::cast<bool>(detail::call_python([&] { return (*held)(); }));
+  };
+}
+
 auto predicate_of(std::optional<nb::object> callable) -> std::function<bool()>
 {
   if(not callable or callable->is_none())
   {
     return {};
   }
-  return [held = detail::held(std::move(*callable))] {
-    detail::gil_entry const gil;
-    return nb::cast<bool>(detail::call_python([&] { return (*held)(); }));
-  };
+  return held_predicate(detail::held(std::move(*callable)));
+}
+
+auto gated(native_predicate const& gate, std::shared_ptr<detail::python_callable> ready)
+    -> std::function<bool()>
+{
+  return
+      [gate = gate.test(), ready = held_predicate(std::move(ready))] { return gate() and ready(); };
 }
 
 constexpr auto signal_check = std::chrono::milliseconds{50};
@@ -431,14 +443,45 @@ auto machine_handle::wait_predicate_ended(
   return waiting_on({.ready = ready.test()}, for_ps, deadline_ps, wait_shape::ended);
 }
 
+auto machine_handle::wait_gated(
+    native_predicate const&      gate,
+    nb::object                   ready,
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
+{
+  auto keep = detail::held(std::move(ready));
+  return waiting_on({.ready = gated(gate, keep)}, for_ps, deadline_ps, wait_shape::stop, keep);
+}
+
 auto machine_handle::run_predicate(
     native_predicate const&      ready,
     std::optional<std::uint64_t> budget,
     std::optional<std::uint64_t> for_ps,
     std::optional<std::uint64_t> deadline_ps) -> host_future_handle
 {
+  return run_test(ready.test(), budget, for_ps, deadline_ps);
+}
+
+auto machine_handle::run_gated(
+    native_predicate const&      gate,
+    nb::object                   ready,
+    std::optional<std::uint64_t> budget,
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
+{
+  auto keep = detail::held(std::move(ready));
+  return run_test(gated(gate, keep), budget, for_ps, deadline_ps, keep);
+}
+
+auto machine_handle::run_test(
+    std::function<bool()>        test,
+    std::optional<std::uint64_t> budget,
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps,
+    std::shared_ptr<void const>  keep) -> host_future_handle
+{
   refuse_both(for_ps, deadline_ps);
-  core::run_goal goal{.stop_when = ready.test()};
+  core::run_goal goal{.stop_when = std::move(test)};
 
   if(budget)
   {
@@ -456,7 +499,9 @@ auto machine_handle::run_predicate(
   return host_future_handle{
       std::make_shared<detail::future_request<core::goal_result>>(
           std::move(future),
-          [](core::goal_result const& result) { return nb::cast(record(result.stopped)); },
+          [keep = std::move(keep)](core::goal_result const& result) {
+            return nb::cast(record(result.stopped));
+          },
           cancel_goal(host_, abandoner())),
       slot_};
 }
@@ -502,7 +547,8 @@ auto machine_handle::waiting_on(
     core::waiter_spec            spec,
     std::optional<std::uint64_t> for_ps,
     std::optional<std::uint64_t> deadline_ps,
-    wait_shape                   shape) -> host_future_handle
+    wait_shape                   shape,
+    std::shared_ptr<void const>  keep) -> host_future_handle
 {
   refuse_both(for_ps, deadline_ps);
   if(for_ps)
@@ -530,7 +576,8 @@ auto machine_handle::waiting_on(
   return host_future_handle{
       std::make_shared<detail::future_request<stop>>(
           std::move(future),
-          [delivered = delivered_, made, shape, waiting](stop const& stopped) {
+          [delivered = delivered_, made, shape, waiting,
+           keep      = std::move(keep)](stop const& stopped) {
             delivered->returned(made, waiting.ended());
             switch(shape)
             {

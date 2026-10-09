@@ -42,13 +42,22 @@ from __future__ import annotations
 import enum
 import functools
 import logging
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from popcorn import _core
 from popcorn._errors import ConfigError, EmulationError, ModelError, UsbError, UsbStall, UsbTimeout
-from popcorn._streams import Poster, PtyBridge, Waiter, cdc_key, check_wait, written
+from popcorn._streams import (
+    Poster,
+    PtyBridge,
+    Waiter,
+    cdc_key,
+    check_wait,
+    read_until_match,
+    written,
+)
 from popcorn.units import VirtualDuration, VirtualTime, ms, s
 
 if TYPE_CHECKING:
@@ -447,6 +456,44 @@ class CdcStream:
         if self._link.packets() < n:
             await self._wait(self._link.predicate_packets(n), for_, deadline)
         return _cdc_packets(self._link.drain_packets(n))
+
+    async def read_until(
+        self,
+        pattern: re.Pattern[bytes],
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+        max_bytes: int = 65536,
+    ) -> tuple[bytes, re.Match[bytes]] | None:
+        """Run the machine until the bytes the device sent hold a match of `pattern`, then take
+        every byte up to the match end, as `UartStream.read_until`, with its shortest-prefix rule.
+        Packets count as their bytes, a match may span them, and a packet holding several bytes
+        gives the same match as the bytes one by one.
+
+        Returns:
+            The bytes through `match.end()`, and the match over the searched copy. None when
+            `for_` elapsed or `deadline` passed first, the core went idle, or `max_bytes` bytes
+            are queued without a match: nothing is taken.
+
+        Raises:
+            ValueError: `pattern` matches the empty string, or `max_bytes` is not above 0.
+            TypeError: `pattern` is no compiled bytes regex, both `for_` and `deadline` given,
+                or `deadline` is no `VirtualTime`.
+            RuntimeError: The function is bridged to a pty, or, while this one waited, another
+                task took queued bytes or the queue dropped bytes at its limit.
+            EmulationError: The run stopped for another reason, such as a fault.
+        """
+        self._check_read(0)
+        link = self._link
+        return await read_until_match(
+            self._wait,
+            pattern,
+            link,
+            link.drain,
+            for_=for_,
+            deadline=deadline,
+            max_bytes=max_bytes,
+        )
 
     def take(self) -> bytes:
         """Every byte the device sent and not read yet, at once, never running the machine.

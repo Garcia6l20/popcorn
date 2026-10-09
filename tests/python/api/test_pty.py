@@ -6,6 +6,7 @@ import asyncio
 import gc
 import logging
 import os
+import re
 import select
 import selectors
 import time
@@ -136,6 +137,8 @@ def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:
         board.periph.USART1.port.take()
     with pytest.raises(RuntimeError, match="bridged"):
         board.periph.USART1.port.take_frames()
+    with pytest.raises(RuntimeError, match="bridged"):
+        asyncio.run(board.periph.USART1.port.read_until(re.compile(rb"x")))
 
 
 def test_the_project_connects_a_pty(u575: popcorn.MachineDescription) -> None:

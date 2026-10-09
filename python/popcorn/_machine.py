@@ -88,7 +88,7 @@ from popcorn._refs import (
 )
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
-from popcorn._streams import Board, PtyOpener, UartPorts, check_wait, deadline_ps
+from popcorn._streams import Board, Gated, PtyOpener, UartPorts, check_wait, deadline_ps
 from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
@@ -329,6 +329,7 @@ class Reached:
 class _Ready:
     predicate: Callable[[Machine], bool]
     fired: bool = False
+    gate: _core.Predicate | None = None
 
     def ready(self, machine: Machine) -> bool:
         held = bool(self.predicate(machine))
@@ -1926,10 +1927,12 @@ class Machine:
 
     async def _wait_until(
         self,
-        ready: _core.Predicate,
+        ready: _core.Predicate | Gated,
         for_: VirtualDuration | None,
         deadline: VirtualTime | None = None,
     ) -> VirtualTime:
+        if isinstance(ready, Gated):
+            return await self._wait_gated(ready, for_, deadline)
         if not self.busy:
             with contextlib.suppress(MachineRunning):
                 if ready.holds():
@@ -1949,6 +1952,23 @@ class Machine:
         stop = await self.wait_for(_Native(ready), for_=for_, deadline=deadline)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, f"the run waiting for {ready.what()}")
+        return stop.time
+
+    async def _wait_gated(
+        self,
+        gated: Gated,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None,
+    ) -> VirtualTime:
+        ready = gated.ready
+        event = _Ready(lambda _: ready(), gate=gated.gate)
+        if not self.busy and self._handler(event.ready)():
+            return self.time
+        stop = await self.wait_for(event, for_=for_, deadline=deadline)
+        if stop.reason is StopReason.USER and not event.fired:
+            raise _stop_error(stop, "the free run, while waiting for a Python predicate")
+        if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
+            raise _stop_error(stop, "the run waiting for a Python predicate")
         return stop.time
 
     async def wait_until(
@@ -2059,6 +2079,8 @@ class Machine:
             return await self._bounded_run(until=event.target, for_=for_, deadline=deadline)
         if isinstance(event, _Native):
             return await self._run_native(event.predicate, for_, deadline)
+        if isinstance(event, _Ready) and event.gate is not None:
+            return await self._run_gated(event.gate, event.ready, for_, deadline)
         return await self._bounded_run(for_=for_, deadline=deadline, stop_when=event.ready)
 
     async def _waited(
@@ -2085,6 +2107,10 @@ class Machine:
             return self._handle.wait(None, for_ps, deadline_ps)
         if isinstance(event, _Native):
             return self._handle.wait_predicate(event.predicate, for_ps, deadline_ps)
+        if isinstance(event, _Ready) and event.gate is not None:
+            return self._handle.wait_gated(
+                event.gate, self._handler(event.ready), for_ps, deadline_ps
+            )
         return self._handle.wait(self._handler(event.ready), for_ps, deadline_ps)
 
     async def elapse(self, duration: VirtualDuration) -> VirtualTime:
@@ -2152,6 +2178,27 @@ class Machine:
         stop = await awaited(
             self._handle.run_predicate(
                 ready, self._default_budget, _ps(for_), deadline_ps(deadline)
+            ),
+            lambda raw: stop_of(cast(_core.StopInfo, raw)),
+        )
+        self._last_stop = stop
+        return stop
+
+    async def _run_gated(
+        self,
+        gate: _core.Predicate,
+        ready: Callable[[Machine], bool],
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None,
+    ) -> Stop:
+        self._last_stop = None
+        stop = await awaited(
+            self._handle.run_gated(
+                gate,
+                self._handler(ready),
+                self._default_budget,
+                _ps(for_),
+                deadline_ps(deadline),
             ),
             lambda raw: stop_of(cast(_core.StopInfo, raw)),
         )

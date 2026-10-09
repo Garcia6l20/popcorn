@@ -90,6 +90,14 @@ auto uart_link::available() const -> std::uint64_t
       *endpoint_, [&](core::link_guard const& held) { return endpoint_->available(held); });
 }
 
+auto uart_link::peek(std::uint64_t start, std::uint64_t count) const -> reflex::py::nb::bytes
+{
+  auto const copied = detail::link_locked(*endpoint_, [&](core::link_guard const& held) {
+    return endpoint_->peek(held, start, count);
+  });
+  return reflex::py::nb::bytes(copied.data(), copied.size());
+}
+
 auto uart_link::drain(std::uint64_t count) -> std::vector<uart_frame>
 {
   auto const taken = detail::link_locked(
@@ -472,6 +480,20 @@ auto uart_link::predicate_available(std::uint64_t count) const -> native_predica
         return not detail::is_alive(alive)
             or detail::link_locked(*endpoint, [&](core::link_guard const& held) {
                  return endpoint->available(held) >= count;
+               });
+      },
+      host_}
+      .described("UART data");
+}
+
+auto uart_link::predicate_changed(count_mark const& mark) const -> native_predicate
+{
+  std::ignore = port();
+  return native_predicate{
+      [endpoint = endpoint_, alive = alive_, mark = mark.shared()] {
+        return not detail::is_alive(alive)
+            or detail::link_locked(*endpoint, [&](core::link_guard const& held) {
+                 return endpoint->available(held) != mark->load(std::memory_order_acquire);
                });
       },
       host_}

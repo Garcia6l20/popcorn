@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -240,4 +241,45 @@ TEST_CASE("a CDC hub serves one channel while another thread inserts channels in
   auto&      channel = hub.channel(held, 0);
   CHECK(taken + channel.in_bytes + channel.dropped == 3 * packets);
   CHECK(channel.out.empty());
+}
+
+TEST_CASE("a UART queue peek copies low bytes from an offset and leaves the queue as it was")
+{
+  detail::queue_endpoint queue;
+  {
+    auto const held = queue.lock();
+    CHECK(queue.peek(held, 0, 8).empty());
+  }
+  queue.transmitted(0x1A5, vtime{1});
+  queue.transmitted(0x42, vtime{2});
+  queue.transmitted(0x43, vtime{3});
+  auto const held = queue.lock();
+  CHECK(queue.peek(held, 0, 8) == std::vector<std::uint8_t>{0xA5, 0x42, 0x43});
+  CHECK(queue.peek(held, 1, 1) == std::vector<std::uint8_t>{0x42});
+  CHECK(queue.peek(held, 0, 0).empty());
+  CHECK(queue.peek(held, 3, 8).empty());
+  CHECK(queue.peek(held, 100, 8).empty());
+  CHECK(queue.available(held) == 3);
+  auto const kept = queue.take(held, 3);
+  REQUIRE(kept.size() == 3);
+  CHECK(kept[0].data == 0x1A5);
+}
+
+TEST_CASE("a CDC channel peek spans packets, skips bytes taken, and leaves the channel as it was")
+{
+  usb::cdc_channel channel;
+  CHECK(channel.peek(0, 8).empty());
+  constexpr std::array<std::uint8_t, 3> first{1, 2, 3};
+  constexpr std::array<std::uint8_t, 2> second{4, 5};
+  channel.received(first, vtime{1});
+  channel.received(second, vtime{2});
+  CHECK(channel.peek(0, 8) == std::vector<std::uint8_t>{1, 2, 3, 4, 5});
+  CHECK(channel.peek(2, 2) == std::vector<std::uint8_t>{3, 4});
+  CHECK(channel.peek(0, 0).empty());
+  CHECK(channel.peek(5, 8).empty());
+  std::ignore = channel.take(1);
+  CHECK(channel.peek(0, 8) == std::vector<std::uint8_t>{2, 3, 4, 5});
+  CHECK(channel.peek(3, 8) == std::vector<std::uint8_t>{5});
+  CHECK(channel.in_bytes == 4);
+  CHECK(channel.packets() == 2);
 }

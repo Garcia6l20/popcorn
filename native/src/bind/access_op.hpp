@@ -6,10 +6,12 @@
 
 #include <reflex/py.hpp>
 
+#include <atomic>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -109,6 +111,34 @@ private:
   std::function<bool()> test_;
   detail::host_ref      machine_;
   std::string           what_ = "a condition";
+};
+
+/**
+ * @brief A count a native predicate compares a queue's size against, set from Python and read
+ *        with no GIL on the machine's thread.
+ */
+class[[= py::rename{"CountMark"}]] count_mark
+{
+public:
+  /** @brief Starts at 0. */
+  count_mark() : count_{std::make_shared<std::atomic<std::uint64_t>>(0)}
+  {}
+
+  /** @brief Stores @p count. */
+  [[= py::doc{"Set the count."}]] void set(std::uint64_t count) noexcept
+  {
+    count_->store(count, std::memory_order_release);
+  }
+
+  /** @brief The shared count, for a predicate. */
+  [[= py::skip]] [[nodiscard]] auto shared() const
+      -> std::shared_ptr<std::atomic<std::uint64_t> const>
+  {
+    return count_;
+  }
+
+private:
+  std::shared_ptr<std::atomic<std::uint64_t>> count_;
 };
 
 namespace detail

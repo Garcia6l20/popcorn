@@ -204,6 +204,13 @@ auto cdc_link::packets() const -> std::uint64_t
   return locked([](usb::cdc_channel const& queues) { return queues.packets(); });
 }
 
+auto cdc_link::peek(std::uint64_t start, std::uint64_t count) const -> reflex::py::nb::bytes
+{
+  auto const copied =
+      locked([&](usb::cdc_channel const& queues) { return queues.peek(start, count); });
+  return bytes_of(copied);
+}
+
 auto cdc_link::drain(std::uint64_t count) -> reflex::py::nb::bytes
 {
   auto const bytes = locked([&](usb::cdc_channel& queues) {
@@ -1397,6 +1404,16 @@ auto cdc_link::predicate_available(std::uint64_t count) const -> native_predicat
   return channel_predicate(
              hub_, function_, alive_, host_,
              [count](usb::cdc_channel const& queues) { return queues.in_bytes >= count; })
+      .described("CDC data");
+}
+
+auto cdc_link::predicate_changed(count_mark const& mark) const -> native_predicate
+{
+  return channel_predicate(
+             hub_, function_, alive_, host_,
+             [mark = mark.shared()](usb::cdc_channel const& queues) {
+               return queues.in_bytes != mark->load(std::memory_order_acquire);
+             })
       .described("CDC data");
 }
 

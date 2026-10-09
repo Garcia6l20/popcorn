@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import itertools
+import re
 import weakref
 from pathlib import Path
 
@@ -467,3 +469,275 @@ def test_a_free_run_deadline_read_ends_at_its_absolute_time(board: popcorn.Machi
     assert frames
     assert start + ms(2) < frames[-1].at <= start + ms(3) + us(200)
     assert len(frames) < 40
+
+
+def test_read_until_takes_through_the_match(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[bytes, re.Match[bytes]] | None:
+        await uart.write(b"abc\nrest")
+        return await uart.read_until(re.compile(rb"\n"), for_=ms(20))
+
+    found = asyncio.run(body())
+    assert found is not None
+    taken, match = found
+    assert taken == b"abc\n"
+    assert match.end() == 4
+    asyncio.run(board.run(for_=ms(2)))
+    assert uart.take() == b"rest"
+
+
+async def chunks(m: popcorn.Machine, first: bytes, second: bytes) -> None:
+    """Write `first` now and `second` 2 ms later."""
+    uart = m.periph.USART1.port
+    await uart.write(first)
+    uart.write(second, at=m.time + ms(2))
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "pattern", "taken"),
+    [
+        (b"rea", b"dy\n", rb"ready\n", b"ready\n"),
+        (b"a", b"b", rb"(?<=a)b", b"ab"),
+        (b"12", b"3x", rb"\d+", b"1"),
+    ],
+    ids=["spanning", "lookbehind", "greedy"],
+)
+def test_read_until_matches_across_chunks_at_the_first_boundary_holding_a_match(
+    board: popcorn.Machine, first: bytes, second: bytes, pattern: bytes, taken: bytes
+) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[bytes, re.Match[bytes]] | None:
+        await chunks(board, first, second)
+        return await uart.read_until(re.compile(pattern), for_=ms(10))
+
+    found = asyncio.run(body())
+    assert found is not None
+    assert found[0] == taken
+
+
+@pytest.mark.parametrize("pattern", [rb"o", rb"o+"], ids=["fixed", "growing"])
+def test_read_until_gives_the_same_bytes_and_span_parked_and_running(
+    board: popcorn.Machine, pattern: bytes
+) -> None:
+    uart = board.periph.USART1.port
+    start = board.snapshot()
+    compiled = re.compile(pattern)
+
+    async def parked() -> tuple[bytes, re.Match[bytes]] | None:
+        await uart.write(b"xxoo")
+        return await uart.read_until(compiled, for_=ms(10))
+
+    async def running() -> tuple[bytes, re.Match[bytes]] | None:
+        async with board.running():
+            await uart.write(b"xxoo")
+            return await uart.read_until(compiled, for_=ms(10))
+
+    first = asyncio.run(parked())
+    board.restore(start)
+    second = run_bounded(running(), 10)
+    assert first is not None and second is not None
+    assert first[0] == second[0] == b"xxo"
+    assert first[1].span() == second[1].span()
+
+
+def test_a_growing_match_is_the_shortest_even_when_one_slice_saw_every_byte(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(BOARD_ELF),
+        slice_instructions=1_000_000_000,
+        slice_wall_budget=10.0,
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    uart = m.periph.USART1.port
+
+    async def running() -> tuple[tuple[bytes, re.Match[bytes]] | None, bytes]:
+        async with m.running():
+            await uart.write(b"123x")
+            found = await uart.read_until(re.compile(rb"\d+"), for_=ms(10))
+            await m.elapse(ms(1))
+            return found, uart.take()
+
+    found, rest = run_bounded(running(), 30)
+    assert found is not None
+    assert found[0] == b"1"
+    assert found[1].span() == (0, 1)
+    assert rest == b"23x"
+
+
+def test_read_until_runs_python_only_where_bytes_arrived(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def running() -> tuple[object, int]:
+        async with board.running():
+            await board.elapse(ms(1))
+            before = board._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+            found = await uart.read_until(re.compile(rb"\n"), for_=ms(5))
+            entries = board._handle.gil_entries() - before  # pyright: ignore[reportPrivateUsage]
+            return found, entries
+
+    found, entries = run_bounded(running(), 10)
+    assert found is None
+    assert entries == 0
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [re.compile("ready"), b"ready", "ready"],
+    ids=["str-regex", "bytes", "str"],
+)
+def test_read_until_refuses_a_pattern_that_is_no_bytes_regex_at_the_call(
+    board: popcorn.Machine, pattern: object
+) -> None:
+    uart = board.periph.USART1.port
+
+    async def running() -> VirtualTime:
+        async with board.running():
+            with pytest.raises(TypeError, match="compiled bytes regex"):
+                await uart.read_until(pattern)  # pyright: ignore[reportArgumentType]
+            return await board.elapse(ms(1))
+
+    assert run_bounded(running(), 10) > VirtualTime(0)
+
+
+def test_read_until_reports_bytes_the_full_queue_dropped(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    board._ports.link("USART1").set_frame_limit(2)  # pyright: ignore[reportPrivateUsage]
+
+    async def body() -> tuple[bytes, re.Match[bytes]] | None:
+        await uart.write(b"abcd")
+        return await uart.read_until(re.compile(rb"z"), for_=ms(5))
+
+    with pytest.raises(RuntimeError, match="dropped bytes"):
+        asyncio.run(body())
+    assert uart.available == 2
+
+
+def test_read_until_refuses_a_pattern_matching_nothing(board: popcorn.Machine) -> None:
+    with pytest.raises(ValueError, match="matches no bytes"):
+        asyncio.run(board.periph.USART1.port.read_until(re.compile(rb"x*"), for_=ms(1)))
+
+
+def test_read_until_takes_no_gil_parked_without_bytes(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    before = board._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+    assert asyncio.run(uart.read_until(re.compile(rb"\n"), for_=ms(5))) is None
+    assert board._handle.gil_entries() == before  # pyright: ignore[reportPrivateUsage]
+
+
+def reading_board(
+    u575: popcorn.MachineDescription, cancel: bool
+) -> tuple[weakref.ref[popcorn.Machine], weakref.ref[re.Pattern[bytes]]]:
+    """A board machine whose free run ran a read_until, cancelled or matched, then ended."""
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    uart = m.periph.USART1.port
+    pattern = re.compile(b"x" if cancel else rb"\n")
+
+    async def running() -> None:
+        async with m.running():
+            reading = asyncio.create_task(uart.read_until(pattern, for_=ms(50)))
+            if cancel:
+                await m.elapse(ms(1))
+                reading.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reading
+            else:
+                await uart.write(b"ok\n")
+                assert await reading is not None
+
+    run_bounded(running(), 10)
+    return weakref.ref(m), weakref.ref(pattern)
+
+
+@pytest.mark.parametrize("cancel", [True, False], ids=["cancelled", "matched"])
+def test_a_finished_read_until_keeps_neither_machine_nor_pattern(
+    u575: popcorn.MachineDescription, cancel: bool
+) -> None:
+    machine, pattern = reading_board(u575, cancel)
+    re.purge()
+    gc.collect()
+    assert machine() is None
+    assert pattern() is None
+
+
+def test_read_until_misses_without_taking(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[bytes, re.Match[bytes]] | None:
+        await uart.write(b"no newline")
+        return await uart.read_until(re.compile(rb"\n"), for_=ms(5))
+
+    assert asyncio.run(body()) is None
+    assert uart.available == 10
+    assert uart.take() == b"no newline"
+
+
+def test_read_until_stops_at_max_bytes_without_taking(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[bytes, re.Match[bytes]] | None:
+        await uart.write(b"x" * 20)
+        await board.run(for_=ms(5))
+        return await uart.read_until(re.compile(rb"\n"), for_=ms(5), max_bytes=8)
+
+    before = board.instructions
+    assert asyncio.run(body()) is None
+    assert uart.available == 20
+    assert board.instructions > before
+    with pytest.raises(ValueError, match="max_bytes"):
+        asyncio.run(uart.read_until(re.compile(rb"x"), max_bytes=0))
+
+
+def test_read_until_returns_a_queued_match_without_running(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def queued() -> None:
+        await uart.write(b"ok\n")
+        await board.run(for_=ms(2))
+
+    asyncio.run(queued())
+    before = board.instructions
+    found = asyncio.run(uart.read_until(re.compile(rb"ok\n")))
+    assert found is not None and found[0] == b"ok\n"
+    assert board.instructions == before
+
+
+def test_a_cancelled_read_until_takes_nothing(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> int:
+        async with board.running():
+            await uart.write(b"abc")
+            reading = asyncio.create_task(uart.read_until(re.compile(rb"\n")))
+            while uart.available < 3:
+                await board.elapse(ms(1))
+            reading.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reading
+            return uart.available
+
+    assert run_bounded(body(), 10) == 3
+
+
+def test_a_take_during_read_until_raises(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> None:
+        async with board.running():
+            await uart.write(b"abc")
+            reading = asyncio.create_task(uart.read_until(re.compile(rb"\n"), for_=ms(50)))
+            while uart.available < 3:
+                await board.elapse(ms(1))
+            await board.elapse(ms(1))
+            uart.take()
+            await uart.write(b"\n")
+            await reading
+
+    with pytest.raises(RuntimeError, match="took queued bytes"):
+        run_bounded(body(), 10)

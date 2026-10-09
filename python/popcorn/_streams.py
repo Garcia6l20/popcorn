@@ -3,6 +3,7 @@ functions."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -17,12 +18,24 @@ if TYPE_CHECKING:
     from popcorn._refs import Pending
     from popcorn._usb import UsbHosts
 
+
+@dataclass(frozen=True, slots=True)
+class Gated:
+    """A Python predicate called only at the boundaries where a native gate holds: a boundary
+    where the gate does not hold takes no GIL."""
+
+    gate: _core.Predicate
+    ready: Callable[[], bool]
+
+
 type Waiter = Callable[
-    [_core.Predicate, VirtualDuration | None, VirtualTime | None], Awaitable[VirtualTime]
+    [_core.Predicate | Gated, VirtualDuration | None, VirtualTime | None],
+    Awaitable[VirtualTime],
 ]
-"""Runs the machine until a native predicate holds, a virtual duration elapses or a deadline
-passes, and returns the virtual time it stopped waiting at. The predicate runs on the machine's
-thread with no GIL."""
+"""Runs the machine until a predicate holds, a virtual duration elapses or a deadline passes,
+and returns the virtual time it stopped waiting at. A native predicate runs on the machine's
+thread with no GIL, the Python predicate of a `Gated` on that thread holding the GIL, as
+`Machine.wait_until`'s, where its gate holds."""
 
 
 def check_wait(for_: VirtualDuration | None, deadline: object) -> None:
@@ -35,6 +48,121 @@ def check_wait(for_: VirtualDuration | None, deadline: object) -> None:
         raise TypeError("for_ and deadline are exclusive")
     if deadline is not None and not isinstance(deadline, VirtualTime):
         raise TypeError("deadline is a VirtualTime, a point in time: for a duration use for_")
+
+
+class _Matcher:
+    """What a `read_until` wait checks on the machine's thread: the queued bytes copied so far,
+    searched over each new prefix as they grow, so the first match is the one over the shortest
+    prefix that holds one, wherever the boundaries fell. `mark` holds the count already copied,
+    the gate of the wait."""
+
+    __slots__ = (
+        "_available",
+        "_max",
+        "_pattern",
+        "_peek",
+        "found",
+        "full",
+        "mark",
+        "shrunk",
+        "snapshot",
+    )
+
+    def __init__(
+        self,
+        pattern: re.Pattern[bytes],
+        peek: Callable[[int, int], bytes],
+        available: Callable[[], int],
+        max_bytes: int,
+    ) -> None:
+        self._pattern = pattern
+        self._peek = peek
+        self._available = available
+        self._max = max_bytes
+        self.mark = _core.CountMark()
+        self.snapshot = b""
+        self.found: re.Match[bytes] | None = None
+        self.full = False
+        self.shrunk = False
+
+    def __call__(self) -> bool:
+        if self.found is not None or self.full or self.shrunk:
+            return True
+        if self._available() < len(self.snapshot):
+            self.shrunk = True
+            return True
+        searched = len(self.snapshot)
+        self.snapshot += self._peek(searched, self._max - searched)
+        self.mark.set(len(self.snapshot))
+        for end in range(searched + 1, len(self.snapshot) + 1):
+            self.found = self._pattern.search(self.snapshot, 0, end)
+            if self.found is not None:
+                return True
+        self.full = len(self.snapshot) >= self._max
+        return self.full
+
+
+class QueueLink(Protocol):
+    """The queue of bytes a `read_until` searches: a UART or a CDC link."""
+
+    def peek(self, start: int, count: int, /) -> bytes:
+        """Copy at most `count` queued bytes from `start`, taking none."""
+        ...
+
+    def available(self) -> int:
+        """Queued bytes."""
+        ...
+
+    def dropped(self) -> int:
+        """Bytes dropped at the queue's limit."""
+        ...
+
+    def predicate_changed(self, mark: _core.CountMark, /) -> _core.Predicate:
+        """A predicate true while `available()` differs from `mark`."""
+        ...
+
+
+async def read_until_match(
+    wait: Waiter,
+    pattern: re.Pattern[bytes],
+    link: QueueLink,
+    take: Callable[[int], bytes],
+    *,
+    for_: VirtualDuration | None,
+    deadline: VirtualTime | None,
+    max_bytes: int,
+) -> tuple[bytes, re.Match[bytes]] | None:
+    """The body of `UartStream.read_until` and `CdcStream.read_until`, over a stream's queue.
+
+    Raises:
+        ValueError: `pattern` matches the empty string, or `max_bytes` is not above 0.
+        TypeError: `pattern` is no compiled bytes regex, both `for_` and `deadline` given, or
+            `deadline` is no `VirtualTime`.
+        RuntimeError: The queue dropped bytes, or another task took queued bytes, while this
+            one waited.
+    """
+    source: object = getattr(pattern, "pattern", None)
+    if not isinstance(cast(object, pattern), re.Pattern) or not isinstance(source, bytes):
+        raise TypeError(f"pattern is a compiled bytes regex, re.compile(rb'...'), not {pattern!r}")
+    if pattern.search(b"") is not None:
+        raise ValueError(f"{pattern!r} matches no bytes, it would take nothing")
+    check_wait(for_, deadline)
+    if max_bytes <= 0:
+        raise ValueError(f"max_bytes must be above 0, not {max_bytes}")
+    matcher = _Matcher(pattern, link.peek, link.available, max_bytes)
+    dropped = link.dropped()
+    await wait(Gated(link.predicate_changed(matcher.mark), matcher), for_, deadline)
+    if link.dropped() != dropped:
+        raise RuntimeError("the queue dropped bytes at its limit while read_until waited")
+    if matcher.shrunk:
+        raise RuntimeError("another reader took queued bytes while read_until waited")
+    found = matcher.found
+    if found is None:
+        return None
+    taken = take(found.end())
+    if taken != matcher.snapshot[: found.end()]:
+        raise RuntimeError("another reader took queued bytes while read_until waited")
+    return taken, found
 
 
 def deadline_ps(deadline: VirtualTime | None) -> int | None:
@@ -204,6 +332,61 @@ class UartStream:
         if self._link.available() < n:
             await self._wait(self._link.predicate_available(n), for_, deadline)
         return _frames(self._link.drain(n))
+
+    async def read_until(
+        self,
+        pattern: re.Pattern[bytes],
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+        max_bytes: int = 65536,
+    ) -> tuple[bytes, re.Match[bytes]] | None:
+        """Run the machine until the queued bytes hold a match of `pattern`, then take every
+        byte up to the match end. The bytes after it stay queued.
+
+            found = await port.read_until(re.compile(rb"ready\\r?\\n"), for_=ms(50))
+
+        The match is the one over the shortest prefix of the bytes that holds one, so a growing
+        pattern such as `rb"\\d+"` stops at its first digit: end it with what must follow,
+        `rb"\\d+\\r?\\n"`. The bytes and the match depend only on the bytes received, the same
+        parked and running. The time the wait ends does not: parked it is the event boundary
+        after the byte that completed the match, inside a free run the slice end after it.
+
+        The search runs on the machine's thread holding the GIL, at the event boundaries and
+        slice ends where the queued byte count changed, inside a free run at slice ends only,
+        over a copy of the first `max_bytes` queued bytes. A boundary where the count did not
+        change takes no GIL, nor does the end of the wait, except a wait cancelled inside a free
+        run, which can release the pattern on the machine's thread, one GIL entry. Each new
+        byte costs one `pattern.search` over the bytes before it, so a burst without a match
+        costs time quadratic in its length, up to `max_bytes`.
+        A slow pattern stalls the machine as a slow handler does. `deadline` stops waiting at
+        this virtual time instead, exclusive with `for_`. Already past, the wait ends at once.
+
+        Returns:
+            The bytes through `match.end()`, and the match over the searched copy. None when
+            `for_` elapsed or `deadline` passed first, the core went idle, or `max_bytes` bytes
+            are queued without a match: nothing is taken, `take()` returns what arrived.
+
+        Raises:
+            ValueError: `pattern` matches the empty string, which would take nothing, or
+                `max_bytes` is not above 0.
+            TypeError: `pattern` is no compiled bytes regex, both `for_` and `deadline` given,
+                or `deadline` is no `VirtualTime`.
+            RuntimeError: The UART is bridged to a pty, or, while this one waited, another task
+                took queued bytes or the queue dropped bytes at its limit.
+            EmulationError: The run stopped for another reason, such as a fault.
+        """
+        self._check_unbridged()
+        link = self._link
+        return await read_until_match(
+            self._wait,
+            pattern,
+            link,
+            lambda n: bytes(f.data & 0xFF for f in link.drain(n)),
+            for_=for_,
+            deadline=deadline,
+            max_bytes=max_bytes,
+        )
 
     def take(self) -> bytes:
         """Every byte the firmware transmitted and not read yet, at once, never running the

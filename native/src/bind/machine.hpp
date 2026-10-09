@@ -441,6 +441,43 @@ public:
           std::optional<std::uint64_t> for_ps,
           std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
 
+  /**
+   * @brief wait() for a Python predicate called only at the boundaries where a native gate
+   *        holds, so a boundary where it does not takes no GIL.
+   * @param gate Evaluated first, with no GIL.
+   * @param ready Called on the host thread in a copy of the caller's context when @p gate holds.
+   * @param for_ps As wait().
+   * @param deadline_ps As wait().
+   * @return As wait().
+   * @throws std::runtime_error without an open free run.
+   */
+  [[= py::doc{"wait() calling the Python predicate only where the native gate holds."}]] auto
+      wait_gated(
+          native_predicate const&      gate,
+          reflex::py::nb::object       ready,
+          std::optional<std::uint64_t> for_ps,
+          std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
+
+  /**
+   * @brief run_predicate() for a Python predicate called only where a native gate holds.
+   * @param gate Evaluated first, with no GIL.
+   * @param ready Called on the host thread in a copy of the caller's context when @p gate holds.
+   * @param budget As run_predicate().
+   * @param for_ps As run_predicate().
+   * @param deadline_ps As run_goal().
+   * @return Resolves to the StopInfo.
+   * @throws machine_busy while a goal or a free run is active.
+   * @throws std::invalid_argument for both @p for_ps and @p deadline_ps.
+   */
+  [[= py::doc{
+      "run_predicate() calling the Python predicate only where the native gate holds."}]] auto
+      run_gated(
+          native_predicate const&      gate,
+          reflex::py::nb::object       ready,
+          std::optional<std::uint64_t> budget,
+          std::optional<std::uint64_t> for_ps,
+          std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
+
   /** @brief A predicate true while the next instruction is at @p at. */
   [[= py::doc{"Predicate: pc is at an address."}]] [[nodiscard]] auto
       predicate_pc_at(address at) const -> native_predicate;
@@ -1072,11 +1109,19 @@ private:
     ended,
   };
 
+  auto run_test(
+      std::function<bool()>        test,
+      std::optional<std::uint64_t> budget,
+      std::optional<std::uint64_t> for_ps,
+      std::optional<std::uint64_t> deadline_ps,
+      std::shared_ptr<void const>  keep = {}) -> host_future_handle;
+
   auto waiting_on(
       core::waiter_spec            spec,
       std::optional<std::uint64_t> for_ps,
       std::optional<std::uint64_t> deadline_ps,
-      wait_shape                   shape) -> host_future_handle;
+      wait_shape                   shape,
+      std::shared_ptr<void const>  keep = {}) -> host_future_handle;
 
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
