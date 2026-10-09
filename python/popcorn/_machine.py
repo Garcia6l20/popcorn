@@ -1196,12 +1196,53 @@ class Machine:
         return self._peripherals
 
     def sym(self, name: str) -> int:
-        """Address of a symbol of the loaded images, the last loaded first.
+        """Address of a symbol of the loaded images, the last loaded first. A function's address
+        has bit 0 clear, `fn_ptr` gives the value a function pointer holds.
 
         Raises:
             SymbolError: No loaded image has the name, with close matches.
         """
         return self.address_of(name)
+
+    def fn_ptr(self, function: str | Symbol) -> int:
+        """The value a C function pointer to `function` holds: its address with bit 0 set, the
+        Thumb state bit every Cortex-M function pointer carries. Pass it to `call` where the
+        firmware expects a callback, or write it to a function-pointer variable.
+
+            await m.call("HAL_DMA_RegisterCallback", handle, 0, m.fn_ptr("on_done"))
+
+        Reads the loaded images only, never the machine: works parked or running, from any
+        thread. A name is looked up as `sym` does, the last loaded image first.
+
+        A routine defined in assembly without `.type name, %function` is STT_NOTYPE and raises
+        TypeError here. The loader leaves such a symbol's value as written, often already odd:
+        use `m.sym(name)` for it, with bit 0 as the assembler set it.
+
+        Raises:
+            SymbolError: No loaded image has the name, with close matches.
+            TypeError: The symbol is not a function, STT_FUNC, or `function` is an address.
+        """
+        if not isinstance(cast(object, function), str | Symbol):
+            raise TypeError(
+                f"fn_ptr takes a function name or Symbol, not {function!r}: an address carries"
+                " no symbol type"
+            )
+        symbol = function if isinstance(function, Symbol) else self._symbol(function)
+        if not symbol.function:
+            raise TypeError(
+                f"{symbol.name} is not a function symbol: for a routine without"
+                f" `.type {symbol.name}, %function` use m.sym({symbol.name!r})"
+            )
+        return symbol.value | 1
+
+    def _symbol(self, name: str) -> Symbol:
+        missing: SymbolError | None = None
+        for image in reversed(self._images):
+            try:
+                return image.lookup(name)
+            except SymbolError as error:
+                missing = missing or error
+        raise missing or SymbolError(f"no image loaded to look up {name}", name=name)
 
     @property
     def symbols(self) -> dict[str, Symbol]:
@@ -1851,13 +1892,7 @@ class Machine:
             return target
         if isinstance(target, Symbol):
             return target.value
-        missing: SymbolError | None = None
-        for image in reversed(self._images):
-            try:
-                return image.lookup(target).value
-            except SymbolError as error:
-                missing = missing or error
-        raise missing or SymbolError(f"no image loaded to look up {target}", name=target)
+        return self._symbol(target).value
 
     async def run(
         self,

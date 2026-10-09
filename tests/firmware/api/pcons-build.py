@@ -41,6 +41,7 @@ CALLED = (
     "fault",
     "wait_flag",
     "ticks_now",
+    "apply",
 )
 _, callee = add_firmware("api", "callee", [here / "callee.c"])
 if callee is not None:

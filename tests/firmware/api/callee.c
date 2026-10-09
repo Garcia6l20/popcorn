@@ -132,6 +132,11 @@ __attribute__((noipa)) uint32_t wait_flag(void)
   return ticks;
 }
 
+__attribute__((noipa)) int32_t apply(int32_t (*fn)(int32_t), int32_t x)
+{
+  return fn(x);
+}
+
 __attribute__((noipa)) uint32_t ticks_now(void)
 {
   return ticks;

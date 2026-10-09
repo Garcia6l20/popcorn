@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import cast
 
 import popcorn
 import pytest
 from popcorn.trace import Irq
 
-from .conftest import CALLEE_ELF
+from .conftest import CALLEE_ELF, run_bounded
 
 
 def call(
@@ -364,3 +365,30 @@ def test_an_svc_left_pending_by_a_call_ending_on_budget_is_dropped(
     asyncio.run(hooked.run(budget=200))
     entered = [r.number for r in hooked.ring.records() if isinstance(r, Irq)]
     assert SVCALL not in entered
+
+
+def test_a_function_pointer_argument_calls_back(callee: popcorn.Machine) -> None:
+    start = callee.snapshot()
+    assert call(callee, "apply", callee.fn_ptr("negate"), 5).value == -5
+    callee.restore(start)
+    assert call(callee, "apply", callee.sym("negate"), 5).stop.reason is popcorn.StopReason.FAULT
+    assert callee.fn_ptr("negate") == callee.sym("negate") | 1
+    assert callee.fn_ptr(callee.symbols["negate"]) == callee.sym("negate") | 1
+
+
+def test_a_function_pointer_needs_a_function_symbol(callee: popcorn.Machine) -> None:
+    with pytest.raises(TypeError, match=r"ticks is not a function symbol.*m\.sym\('ticks'\)"):
+        callee.fn_ptr("ticks")
+    with pytest.raises(TypeError, match="an address carries no symbol type"):
+        callee.fn_ptr(cast(str, 0x0800_1234))
+    with pytest.raises(popcorn.SymbolError) as missing:
+        callee.fn_ptr("negat")
+    assert "negate" in missing.value.close_matches
+
+
+def test_a_function_pointer_reads_no_machine_while_running(callee: popcorn.Machine) -> None:
+    async def scenario() -> int:
+        async with callee.running():
+            return callee.fn_ptr("negate")
+
+    assert run_bounded(scenario()) == callee.sym("negate") | 1
