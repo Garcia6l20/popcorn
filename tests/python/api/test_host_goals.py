@@ -1307,3 +1307,108 @@ def test_now_in_a_free_run_is_monotonic(machines: Machines) -> None:
     times = run_bounded(scenario(), HANG)
     assert times == sorted(times)
     assert times[-1] > times[0]
+
+
+def test_wait_until_in_a_free_run_returns_the_boundary_where_it_held(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = ticking(m33)
+    seen: list[tuple[VirtualTime, int]] = []
+
+    def five_ticks(machine: popcorn.Machine) -> bool:
+        ticks = int(machine.var("ticks").value)
+        if ticks >= 5:
+            seen.append((machine.time, ticks))
+        return ticks >= 5
+
+    async def scenario() -> tuple[VirtualTime | None, VirtualTime]:
+        async with m.running():
+            held = await m.wait_until(five_ticks, for_=s(10))
+            return held, await m.now()
+
+    held, after = run_bounded(scenario(), HANG)
+    assert held is not None
+    assert held <= after
+    assert seen[0][0] == held
+    assert seen[0][1] >= 5
+
+
+def test_wait_until_in_a_free_run_returns_none_at_the_deadline(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime | None]:
+        async with m.running():
+            before = await m.now()
+            return before, await m.wait_until(lambda _: False, for_=ms(1))
+
+    before, held = run_bounded(scenario(), HANG)
+    assert held is None
+    assert not m.busy
+    assert before < m.time
+
+
+def test_wait_until_in_a_free_run_holding_at_its_deadline_returns_the_time(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=10**9, slice_wall_budget=10.0)
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime | None]:
+        async with m.running():
+            start = await m.now()
+            return start, await m.wait_until(lambda _: True, for_=ms(1))
+
+    start, held = run_bounded(scenario(), HANG)
+    assert held is not None
+    assert held >= start + ms(1)
+
+
+def test_cancelling_a_wait_until_in_a_free_run_keeps_the_machine_running(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime]:
+        async with m.running():
+            waiting = asyncio.create_task(m.wait_until(lambda _: False))
+            await asyncio.sleep(0)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            assert m.busy
+            before = await m.now()
+            await m.elapse(ms(1))
+            return before, await m.now()
+
+    before, after = run_bounded(scenario(), HANG)
+    assert after >= before + ms(1)
+
+
+def test_wait_until_in_a_free_run_gives_the_machine(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> VirtualTime | None:
+        async with m.running():
+            return await m.wait_until(lambda machine: machine is m, for_=ms(1))
+
+    assert run_bounded(scenario(), HANG) is not None
+
+
+def failing_after_100(machine: popcorn.Machine) -> bool:
+    """A predicate that fails once some instructions ran."""
+    if machine.instructions > 100:
+        raise LookupError("predicate failed")
+    return False
+
+
+def test_a_wait_until_error_reaches_the_caller_in_a_free_run(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_until(failing_after_100, for_=ms(100))
+
+    with pytest.raises(LookupError, match="predicate failed") as caught:
+        run_bounded(scenario(), HANG)
+    frames = [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
+    assert "failing_after_100" in frames
+    assert not m.busy

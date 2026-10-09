@@ -311,6 +311,17 @@ class Reached:
         return machine.pc == machine.address_of(self.target)
 
 
+@dataclass(slots=True)
+class _Ready:
+    predicate: Callable[[Machine], bool]
+    fired: bool = False
+
+    def ready(self, machine: Machine) -> bool:
+        held = bool(self.predicate(machine))
+        self.fired = self.fired or held
+        return held
+
+
 @dataclass(frozen=True, slots=True)
 class _Native:
     predicate: _core.Predicate
@@ -1771,6 +1782,55 @@ class Machine:
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, f"the run waiting for {ready.what()}")
         return stop.time
+
+    async def wait_until(
+        self, predicate: Callable[[Machine], bool], *, for_: VirtualDuration | None = None
+    ) -> VirtualTime | None:
+        """Run until `predicate(machine)` holds, or until `for_` elapses, and return the virtual
+        time of the boundary where it was first seen to hold, None when it was not.
+
+            held = await m.wait_until(lambda m: m.var("link_up").value == 1, for_=ms(50))
+
+        `predicate` is sync, takes this machine and runs on the machine's thread holding the
+        GIL, never per instruction. It may use the sync accessors of the machine it gets,
+        `m.var`, `m.mem`, `m.time`. On the machine's thread it must not await or request
+        anything of a machine: that raises RuntimeError.
+
+        Parked, it runs at event boundaries and slice ends, as `run(stop_when=)` does, and is
+        first called once on the calling thread, where requests are not refused: keep it to
+        sync reads. The current time is returned when it already holds there. Inside a free
+        run, `start()` or `running()`, it runs at slice ends only, from the end of the slice
+        after the one that registered the wait, as `wait_for` says: the time returned is up to
+        one slice after it became true, two when it held at the call. `for_` is counted from
+        the boundary that registered the wait. Cancelling it while parked halts the run, inside
+        a free run it drops the wait only.
+
+        Returns:
+            The time of the first boundary where `predicate` was seen to return True. None when
+            `for_` elapsed first, or a parked run without `for_` stopped with IDLE before it
+            held.
+
+        Raises:
+            ValueError: `for_` is negative.
+            MachineBusy: A run, step, call or wait is active outside a free run.
+            RuntimeError: Called from a handler, a model, a predicate or a posted body.
+            EmulationError: The run stopped for another reason: FaultError for FAULT,
+                BudgetExceeded for BUDGET, EmulationError otherwise, USER included when an
+                intercept's `call.stop()` stopped a parked run. Inside a free run, the stop
+                that ended it.
+            BaseException: What `predicate` raised, or what a handler of the free run raised.
+        """
+        self._refuse_on_host()
+        _check_duration(for_)
+        event = _Ready(predicate)
+        if not self.busy and self._handler(event.ready)():
+            return self.time
+        stop = await self.wait_for(event, for_=for_)
+        if stop.reason is StopReason.USER and event.fired:
+            return stop.time
+        if stop.reason in (StopReason.TIME, StopReason.IDLE):
+            return None
+        raise _stop_error(stop, "the run waiting for the predicate")
 
     async def wait_for(self, event: Event, *, for_: VirtualDuration | None = None) -> Stop:
         """Run until `event` is ready, a USER stop, or until `for_` elapses, a TIME stop as late

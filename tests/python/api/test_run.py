@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from collections.abc import Awaitable, Callable
 
 import popcorn
 import pytest
 from popcorn.units import MHz, VirtualDuration, VirtualTime, ms
 
-from .conftest import Machines
+from .conftest import CALLEE_ELF, Machines
 
 M33_RESET_CLOCK = MHz(4)
 
@@ -301,3 +302,119 @@ def test_elapse_and_now_from_a_handler_raise_runtime_error(
     m.on_return("alu_mark", handler)
     with pytest.raises(RuntimeError, match="cannot await a machine request"):
         asyncio.run(m.run(for_=ms(10)))
+
+
+def test_wait_until_returns_none_at_the_deadline(machines: Machines) -> None:
+    m = machines()
+    assert asyncio.run(m.wait_until(lambda _: False, for_=ms(2))) is None
+    assert m.last_stop is not None
+    assert m.last_stop.reason is popcorn.StopReason.TIME
+
+
+def ticks_reach(count: int) -> Callable[[popcorn.Machine], bool]:
+    """A predicate holding once the callee firmware's SysTick counted `count` ticks."""
+    return lambda m: int(m.var("ticks").value) >= count
+
+
+def test_wait_until_parked_returns_where_stop_when_stops(m33: popcorn.MachineDescription) -> None:
+    callee = popcorn.Machine(
+        m33,
+        image=popcorn.Image.elf(CALLEE_ELF),
+        slice_instructions=10**9,
+        slice_wall_budget=10.0,
+    )
+    callee.reset()
+    snapshot = callee.snapshot()
+    held = asyncio.run(callee.wait_until(ticks_reach(3), for_=ms(100)))
+    callee.restore(snapshot)
+    stop = asyncio.run(callee.run(stop_when=ticks_reach(3), for_=ms(100)))
+    assert stop.reason is popcorn.StopReason.USER
+    assert held == stop.time
+    assert int(callee.var("ticks").value) == 3
+
+
+def test_wait_until_parked_on_an_idle_core_returns_none(machines: Machines) -> None:
+    m = machines("idle")
+    assert asyncio.run(m.wait_until(lambda _: False)) is None
+    assert m.last_stop is not None
+    assert m.last_stop.reason is popcorn.StopReason.IDLE
+
+
+def test_wait_until_raises_on_an_intercept_stop(machines: Machines) -> None:
+    m = machines()
+    m.intercept("alu_mark", lambda call: call.stop())
+    with pytest.raises(popcorn.EmulationError, match="waiting for the predicate") as caught:
+        asyncio.run(m.wait_until(lambda _: False, for_=ms(100)))
+    assert caught.value.reason is popcorn.StopReason.USER
+
+
+def test_wait_until_parked_gives_the_machine_and_holds_at_once(machines: Machines) -> None:
+    m = machines()
+    seen: list[popcorn.Machine] = []
+
+    def same(machine: popcorn.Machine) -> bool:
+        seen.append(machine)
+        return machine is m
+
+    assert asyncio.run(m.wait_until(same)) == m.time
+    assert seen == [m]
+    assert m.instructions == 0
+
+
+def test_a_wait_until_error_reaches_the_caller_parked(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    with pytest.raises(LookupError, match="predicate failed") as caught:
+        asyncio.run(m.wait_until(failing_predicate, for_=ms(100)))
+    frames = [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
+    assert "failing_predicate" in frames
+    assert not m.busy
+
+
+def test_wait_until_from_a_handler_raises_runtime_error(machines: Machines) -> None:
+    m = machines()
+
+    def handler(_: object) -> None:
+        asyncio.run(m.wait_until(lambda _: True))
+
+    m.on_return("alu_mark", handler)
+    with pytest.raises(RuntimeError, match="cannot await a machine request"):
+        asyncio.run(m.run(for_=ms(10)))
+
+
+def test_wait_until_while_a_run_is_active_raises_machine_busy(machines: Machines) -> None:
+    m = machines()
+    calls: list[popcorn.Machine] = []
+
+    def counted(machine: popcorn.Machine) -> bool:
+        calls.append(machine)
+        return True
+
+    async def scenario() -> None:
+        run = asyncio.create_task(m.run())
+        await asyncio.sleep(0)
+        with pytest.raises(popcorn.MachineBusy):
+            await m.wait_until(counted)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+    asyncio.run(scenario())
+    assert calls == []
+    assert not m.busy
+
+
+def test_the_parked_pre_check_of_wait_until_may_request(machines: Machines) -> None:
+    m = machines()
+    asyncio.run(m.run(for_=ms(1)))
+    posted: list[Awaitable[VirtualTime]] = []
+
+    def requesting(machine: popcorn.Machine) -> bool:
+        posted.append(machine.now())
+        return True
+
+    async def scenario() -> tuple[VirtualTime | None, VirtualTime]:
+        held = await m.wait_until(requesting)
+        return held, await posted[0]
+
+    held, requested = asyncio.run(scenario())
+    assert held == requested == m.time
