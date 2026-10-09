@@ -691,8 +691,9 @@ class Machine:
         time inside the slice.
 
         Raises:
-            MachineRunning: The machine is busy, read outside its callbacks: the `.time` of any
-                `m.read()` result is the time of the boundary it executed at.
+            MachineRunning: The machine is busy, read outside its callbacks: `await m.now()`
+                gives the time of the next block boundary, and the `.time` of any `m.read()`
+                result is the time of the boundary it executed at.
         """
         return VirtualTime(self._handle.time_ps())
 
@@ -1806,26 +1807,86 @@ class Machine:
         if self._handle.session_open():
             if isinstance(event, Reached):
                 event = _Native(self._handle.predicate_pc_at(self.address_of(event.target)))
-            for_ps = None if for_ is None else for_.ps
-            try:
-                stop = await awaited(
-                    (
-                        self._handle.wait_predicate(event.predicate, for_ps)
-                        if isinstance(event, _Native)
-                        else self._handle.wait(self._handler(event.ready), for_ps)
-                    ),
-                    lambda raw: stop_of(cast(_core.StopInfo, raw)),
-                )
-            except BaseException as error:
-                self._surfaced = error
-                raise
-            self._surfaced = stop
-            return stop
+            return await self._waited(event, for_)
         if isinstance(event, Reached):
             return await self.run(until=event.target, for_=for_)
         if isinstance(event, _Native):
             return await self._run_native(event.predicate, for_)
         return await self.run(for_=for_, stop_when=event.ready)
+
+    async def _waited(self, event: Event | None, for_: VirtualDuration | None) -> Stop:
+        try:
+            stop = await awaited(
+                self._wait_future(event, None if for_ is None else for_.ps),
+                lambda raw: stop_of(cast(_core.StopInfo, raw)),
+            )
+        except BaseException as error:
+            self._surfaced = error
+            raise
+        self._surfaced = stop
+        return stop
+
+    def _wait_future(self, event: Event | None, for_ps: int | None) -> _core.HostFuture:
+        if event is None:
+            return self._handle.wait(None, for_ps)
+        if isinstance(event, _Native):
+            return self._handle.wait_predicate(event.predicate, for_ps)
+        return self._handle.wait(self._handler(event.ready), for_ps)
+
+    async def elapse(self, duration: VirtualDuration) -> VirtualTime:
+        """Let `duration` of virtual time pass, parked or running, and return the time it ended
+        at.
+
+        Parked, this runs the machine as `run(for_=duration)` does, `default_budget` included.
+        Inside a free run, `start()` or `running()`, it waits on the free run without a
+        predicate, `duration` counted from the first block boundary the machine's thread reaches
+        after the call. Either way the time returned can pass the deadline by the bound `run`
+        gives for its `for_`. A zero duration on a parked machine executes nothing and returns
+        the current time. Cancelling it while parked halts the run, inside a free run it drops
+        the wait only. Inside a free run, the stop that ended it is held: leaving `running()` or
+        calling `halt()` raises it again, as after `wait_for`, also when the body caught the
+        error `elapse` raised.
+
+        Returns:
+            The virtual time of the TIME stop that ended the wait.
+
+        Raises:
+            ValueError: From the await, `duration` is negative.
+            MachineBusy: A run, step, call or wait is active outside a free run.
+            RuntimeError: From the await, called from a handler, a model, a predicate or a
+                posted body.
+            EmulationError: The run stopped before the duration passed: FaultError for FAULT,
+                BudgetExceeded for BUDGET, EmulationError for another stop. Inside a free run,
+                the stop that ended it.
+            BaseException: The exception a handler of the free run raised.
+            Exception: A kept log filter or handler error, as for `read`.
+        """
+        self._refuse_on_host()
+        _check_duration(duration)
+        if self._handle.session_open():
+            stop = await self._waited(None, duration)
+        else:
+            stop = await self.run(for_=duration)
+        if stop.reason is not StopReason.TIME:
+            raise _stop_error(stop, "the run letting time pass")
+        return stop.time
+
+    def now(self) -> Pending[VirtualTime]:
+        """The virtual time of the next block boundary, posted at the call as one command: at
+        once while the machine is parked, on its thread while it runs. Await it for the time.
+
+        Same as `(await m.read()).time`. Two calls may see two boundaries.
+
+        Raises:
+            RuntimeError: Called from a handler, a model or a posted body, of any machine: read
+                `m.time` there.
+            EmulationError: From the await, the machine was closed.
+            Exception: A kept log filter or handler error, as for `read`.
+        """
+        self._refuse_on_host()
+        return self._submit_ops(
+            [], [], None, lambda raw: VirtualTime(cast(tuple[int, Any], raw)[0])
+        )
 
     async def _run_native(self, ready: _core.Predicate, for_: VirtualDuration | None) -> Stop:
         self._last_stop = None

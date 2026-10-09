@@ -1213,3 +1213,97 @@ def test_a_handler_stop_while_a_condition_holds_fires_nothing_parked(
     assert stopped.reason is popcorn.StopReason.USER
     assert m.mem.u32[flag] == 7
     assert stopped.fired == ()
+
+
+def test_elapse_passes_the_duration_in_a_free_run(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime, VirtualTime]:
+        async with m.running():
+            before = await m.now()
+            first = await m.elapse(ms(1))
+            second = await m.elapse(ms(1))
+        return before, first, second
+
+    before, first, second = run_bounded(scenario(), HANG)
+    assert first >= before + ms(1)
+    assert second >= first + ms(1)
+    assert not m.busy
+
+
+def test_elapse_in_a_free_run_raises_a_fault_once(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    start = m.time
+
+    async def scenario() -> None:
+        moving = m.write((m.ref.reg.pc, 0x3000_0000), at=start + ms(50))
+        async with m.running():
+            elapsing = asyncio.create_task(m.elapse(ms(100)))
+            await moving
+            await elapsing
+
+    with pytest.raises(popcorn.FaultError) as caught:
+        run_bounded(scenario(), HANG)
+    assert "letting time pass" in str(caught.value)
+    assert caught.value.__notes__ == [f"background run stopped: {m.last_stop}"]
+    assert caught.value.stop is not None
+    assert start + ms(50) <= caught.value.stop.time < start + ms(100)
+    assert not m.busy
+
+
+def test_an_elapse_fault_caught_in_the_body_is_raised_again_on_leaving(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+    start = m.time
+    caught: list[popcorn.FaultError] = []
+
+    async def scenario() -> None:
+        moving = m.write((m.ref.reg.pc, 0x3000_0000), at=start + ms(50))
+        async with m.running():
+            elapsing = asyncio.create_task(m.elapse(ms(100)))
+            await moving
+            try:
+                await elapsing
+            except popcorn.FaultError as error:
+                caught.append(error)
+
+    with pytest.raises(popcorn.FaultError) as left:
+        run_bounded(scenario(), HANG)
+    assert len(caught) == 1
+    assert left.value is not caught[0]
+    assert left.value.stop == caught[0].stop
+    assert not m.busy
+
+
+def test_cancelling_an_elapse_in_a_free_run_keeps_the_machine_running(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime]:
+        async with m.running():
+            elapsing = asyncio.create_task(m.elapse(s(1_000)))
+            await asyncio.sleep(0)
+            elapsing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await elapsing
+            assert m.busy
+            before = await m.now()
+            await m.elapse(ms(1))
+            return before, await m.now()
+
+    before, after = run_bounded(scenario(), HANG)
+    assert after >= before + ms(1)
+
+
+def test_now_in_a_free_run_is_monotonic(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> list[VirtualTime]:
+        async with m.running():
+            return [await m.now() for _ in range(100)]
+
+    times = run_bounded(scenario(), HANG)
+    assert times == sorted(times)
+    assert times[-1] > times[0]

@@ -7,9 +7,11 @@ import traceback
 
 import popcorn
 import pytest
-from popcorn.units import VirtualTime, ms
+from popcorn.units import MHz, VirtualDuration, VirtualTime, ms
 
 from .conftest import Machines
+
+M33_RESET_CLOCK = MHz(4)
 
 
 def test_until_a_symbol_stops_exactly_before_it_with_its_source_line(
@@ -204,3 +206,98 @@ def test_a_run_from_its_until_address_with_nothing_to_spend_stops_at_once(
     assert (budget.reason, timed.reason) == (popcorn.StopReason.BUDGET, popcorn.StopReason.TIME)
     assert hooked.instructions == before
     assert hooked.pc == hooked.sym("writer")
+
+
+def test_elapse_parked_returns_what_run_for_returns(machines: Machines) -> None:
+    m = machines()
+    asyncio.run(m.run(for_=ms(1)))
+    start = m.time
+    snapshot = m.snapshot()
+    elapsed = asyncio.run(m.elapse(ms(5)))
+    elapsed_stop = m.last_stop
+    m.restore(snapshot)
+    ran = asyncio.run(m.run(for_=ms(5)))
+    assert elapsed == ran.time == m.time
+    assert elapsed_stop == ran
+    assert start + ms(5) <= elapsed
+    assert elapsed - (start + ms(5)) < M33_RESET_CLOCK.period * 512
+
+
+def test_elapse_of_zero_executes_nothing(machines: Machines) -> None:
+    m = machines()
+    asyncio.run(m.run(for_=ms(1)))
+    before = (m.time, m.instructions)
+    assert asyncio.run(m.elapse(VirtualDuration(0))) == before[0]
+    assert (m.time, m.instructions) == before
+
+
+def test_elapse_parked_raises_a_fault_before_the_duration(machines: Machines) -> None:
+    m = machines()
+    start = m.time
+
+    async def scenario() -> None:
+        moved = m.write((m.ref.reg.pc, 0x3000_0000), at=start + ms(2))
+        with pytest.raises(popcorn.FaultError):
+            await m.elapse(ms(5))
+        await moved
+
+    asyncio.run(scenario())
+    assert start + ms(2) <= m.time < start + ms(5)
+    assert not m.busy
+
+
+def test_elapse_parked_raises_on_its_budget(machines: Machines) -> None:
+    m = machines()
+    m.default_budget = 10
+    with pytest.raises(popcorn.BudgetExceeded):
+        asyncio.run(m.elapse(ms(5)))
+
+
+def test_cancelling_a_parked_elapse_halts_the_run(machines: Machines) -> None:
+    m = machines()
+
+    async def scenario() -> None:
+        elapsing = asyncio.create_task(m.elapse(ms(10_000)))
+        await m.read(at=m.time + ms(1))
+        elapsing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await elapsing
+        assert not m.busy
+
+    asyncio.run(scenario())
+    assert ms(1).ps <= m.time.ps < ms(10_000).ps
+
+
+def test_a_negative_elapse_is_a_value_error_and_runs_nothing(machines: Machines) -> None:
+    m = machines()
+    with pytest.raises(ValueError, match="negative"):
+        asyncio.run(m.elapse(VirtualDuration(-1)))
+    assert m.instructions == 0
+    assert not m.busy
+
+
+def test_now_parked_is_the_time(machines: Machines) -> None:
+    m = machines()
+    asyncio.run(m.run(for_=ms(1)))
+    assert asyncio.run(_now(m)) == m.time
+
+
+async def _now(m: popcorn.Machine) -> VirtualTime:
+    return await m.now()
+
+
+@pytest.mark.parametrize("request_", ["elapse", "now"])
+def test_elapse_and_now_from_a_handler_raise_runtime_error(
+    machines: Machines, request_: str
+) -> None:
+    m = machines()
+
+    def handler(_: object) -> None:
+        if request_ == "now":
+            m.now()
+        else:
+            asyncio.run(m.elapse(ms(1)))
+
+    m.on_return("alu_mark", handler)
+    with pytest.raises(RuntimeError, match="cannot await a machine request"):
+        asyncio.run(m.run(for_=ms(10)))
