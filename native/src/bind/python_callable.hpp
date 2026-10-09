@@ -168,6 +168,27 @@ private:
 class callback_cell
 {
 public:
+  callback_cell() = default;
+  /** @brief Not copyable. */
+  callback_cell(callback_cell const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(callback_cell const&) -> callback_cell& = delete;
+  /**
+   * @brief Drops the cell's reference on any thread: nested under a GIL already held, taken on
+   *        an abandoned machine's thread that destroys its attachments, leaked once the GIL is
+   *        unavailable.
+   */
+  ~callback_cell()
+  {
+    if(not gil_entry::available())
+    {
+      std::ignore = cell_.release();
+      return;
+    }
+    gil_entry const held;
+    cell_.reset();
+  }
+
   /**
    * @brief Attaches the calls to a machine being built, whose services are not known yet.
    * @param cell A weak reference to the machine's cell, or None, the GIL held.

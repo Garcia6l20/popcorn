@@ -2199,6 +2199,97 @@ def test_a_device_reattached_after_an_abandon_is_never_called_in_the_new_machine
     assert child.stdout.strip().splitlines()[-1] == "[] ['B']"
 
 
+DEVICE_DROPPED = """
+import asyncio, gc, os, signal, sys, threading, time
+sys.path.insert(0, __TESTS__)
+import popcorn
+from popcorn import _core
+from popcorn.stm32 import mcu
+from api.devices_example import Eeprom24, JedecDevice
+from pathlib import Path
+
+PREBUILT = Path(__PREBUILT__)
+KIND = __KIND__
+entered = threading.Event()
+released = threading.Event()
+
+
+def gate():
+    entered.set()
+    released.wait()
+
+
+class GatedEeprom(Eeprom24):
+    def on_start(self, read, at):
+        gate()
+        return super().on_start(read, at)
+
+
+class GatedFlash(JedecDevice):
+    def on_select(self, selected, at):
+        gate()
+        return super().on_select(selected, at)
+
+
+if KIND == "I2C1":
+    elf, entry, device = "i2c_ll.elf", "eeprom_rw", GatedEeprom(0x50, 4096)
+else:
+    elf, entry, device = "spi_ll.elf", "poll", GatedFlash("PA4")
+m = popcorn.Machine(
+    mcu("STM32U575QGIx"), image=popcorn.Image.elf(PREBUILT / elf), devices={KIND: [device]}
+)
+m.reset()
+asyncio.run(m.run(until="main", budget=100_000_000))
+m.reg.pc = m.sym(entry)
+m.start()
+assert entered.wait(10)
+running = _core.host_threads()
+waits = _core.interruptible_waits()
+
+
+def interrupt():
+    deadline = time.monotonic() + 10
+    while _core.interruptible_waits() == waits and time.monotonic() < deadline:
+        time.sleep(0.001)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+threading.Thread(target=interrupt, daemon=True).start()
+try:
+    m.halt()
+except KeyboardInterrupt:
+    pass
+else:
+    raise AssertionError("no KeyboardInterrupt")
+del m
+gc.collect()
+released.set()
+deadline = time.monotonic() + 10
+while _core.host_threads() >= running and time.monotonic() < deadline:
+    time.sleep(0.01)
+print("gone" if _core.host_threads() < running else "alive")
+"""
+
+
+@pytest.mark.parametrize("kind", ["I2C1", "SPI1"])
+def test_an_abandoned_machines_thread_drops_its_python_devices_under_the_gil(kind: str) -> None:
+    """The abandoned machine's thread is the last owner of its engine once the blocked device
+    call returns, and destroys each attachment of a Python device with it. Only a debug build
+    detects a reference dropped without the GIL: nanobind aborts. A release build drops it
+    silently, and this test passes there either way."""
+    script = (
+        DEVICE_DROPPED.replace("__TESTS__", repr(str(pathlib.Path(__file__).parents[1])))
+        .replace(
+            "__PREBUILT__",
+            repr(str(pathlib.Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt")),
+        )
+        .replace("__KIND__", repr(kind))
+    )
+    child = run_child(script, timeout=60)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip().splitlines()[-1] == "gone"
+
+
 ABANDONED_LATE = """
 import asyncio
 import gc
