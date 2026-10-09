@@ -141,6 +141,14 @@ struct run_goal
    * stop. After an error or a cancel the goal fails with chained_error of both. A close of the
    * host fails the goal with machine_closed and skips it. Empty for none. */
   std::function<void(machine&, stop const*)> finish{};
+  /** @brief Run first until the machine is machine::thread_ready(), then call then_thread on the
+   * host thread as the engine owner and go on as the rest of the goal. The budget covers both
+   * parts. A stop before thread mode ends the goal with then_thread never called. Never with
+   * once. */
+  bool until_thread{};
+  /** @brief Called once when until_thread is met, before the next slice. An exception it throws
+   * fails the goal. Empty for none. */
+  std::function<void(machine&)> then_thread{};
 };
 
 /** @brief Outcome of a goal. */

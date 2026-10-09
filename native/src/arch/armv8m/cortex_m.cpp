@@ -265,6 +265,11 @@ auto cortex_m::current_priority(bool ignore_primask) const -> int
        .faultmask = (held[2] & 1u) != 0});
 }
 
+auto cortex_m::thread_mode() const -> bool
+{
+  return (read(UC_ARM_REG_IPSR) & 0x1ffu) == 0;
+}
+
 auto cortex_m::privileged() const -> bool
 {
   return (read(UC_ARM_REG_IPSR) & 0x1ffu) != 0 or (read(UC_ARM_REG_CONTROL) & 1u) == 0;

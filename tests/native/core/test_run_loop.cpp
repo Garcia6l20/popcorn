@@ -866,3 +866,43 @@ TEST_CASE("a throwing stop_when leaves the slice's trace records delivered")
   CHECK_FALSE(seen.empty());
   CHECK_FALSE(f.target->running());
 }
+
+TEST_CASE("an until_thread slice that starts thread-ready ends with nothing executed")
+{
+  auto       f     = alu(100'000);
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}, .until_thread = true});
+  CHECK_FALSE(slice.stopped.has_value());
+  CHECK(slice.thread_ready);
+  CHECK(slice.executed.value == 0);
+}
+
+TEST_CASE("an until_thread slice takes a deliverable interrupt before it ends")
+{
+  auto f = boot_run(m33());
+  enter(f, "straight");
+  f.set("primask", 0);
+  f.module->set_irq_line(0, true);
+  REQUIRE(f.module->pending());
+  auto const slice = f.run({.wall_budget = std::chrono::seconds{60}, .until_thread = true});
+  CHECK(slice.thread_ready);
+  CHECK_FALSE(f.module->pending());
+  CHECK(f.target->regs().pc() != sym("run", "straight"));
+}
+
+TEST_CASE("an until_thread slice outside thread mode runs to its bound, the next one too")
+{
+  auto f                   = alu(100'000);
+  f.module->in_thread_mode = false;
+  auto const waiting       = f.run(
+      {.max_instructions = icount{10'000},
+       .wall_budget      = std::chrono::seconds{60},
+       .until_thread     = true});
+  CHECK_FALSE(waiting.stopped.has_value());
+  CHECK_FALSE(waiting.thread_ready);
+  CHECK(waiting.executed.value >= 10'000);
+  f.module->in_thread_mode = true;
+  auto const after =
+      f.run({.max_instructions = icount{10'000}, .wall_budget = std::chrono::seconds{60}});
+  CHECK_FALSE(after.thread_ready);
+  CHECK(after.executed.value >= 10'000);
+}

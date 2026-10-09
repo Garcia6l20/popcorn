@@ -71,6 +71,8 @@ public:
 
   /** @brief Events dispatched to the module, timer expiries excepted, in dispatch order. */
   std::vector<logged_event> event_log{};
+  /** @brief What thread_mode() returns, for a test that drives the run loop's thread check. */
+  bool in_thread_mode = true;
 
   /** @brief Enters the idle state and ends the slice, what the WFI hook does, then lets the WFI
    * halt the engine. The hook also runs for an engine exit, which Unicorn implements as a WFI: a
@@ -105,10 +107,14 @@ public:
   void               reset(address reset_vector) override;
   auto               deliver_pending() -> popcorn::arch::trap_result override;
   [[nodiscard]] auto deliverable_now() const -> bool override;
-  void               set_irq_line(std::uint32_t source, bool active) override;
-  auto               on_interrupt(std::uint32_t intno) -> popcorn::arch::trap_result override;
-  auto               on_invalid_insn() -> popcorn::arch::trap_result override;
-  auto               on_unmapped(address addr, popcorn::arch::memory_op op)
+  [[nodiscard]] auto thread_mode() const -> bool override
+  {
+    return in_thread_mode;
+  }
+  void set_irq_line(std::uint32_t source, bool active) override;
+  auto on_interrupt(std::uint32_t intno) -> popcorn::arch::trap_result override;
+  auto on_invalid_insn() -> popcorn::arch::trap_result override;
+  auto on_unmapped(address addr, popcorn::arch::memory_op op)
       -> popcorn::arch::trap_result override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto idle() const -> bool override;

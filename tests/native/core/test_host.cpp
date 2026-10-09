@@ -2907,3 +2907,33 @@ TEST_CASE("a goal releases its stop_when before its promise resolves")
     CHECK(held_at_done.load() == 0);
   }
 }
+
+TEST_CASE("a goal waiting for thread mode calls then_thread once, then runs on in its budget")
+{
+  for(bool const ready : {true, false})
+  {
+    CAPTURE(ready);
+    auto [member, arch]  = ticking();
+    arch->in_thread_mode = ready;
+    hosted         h{std::move(member)};
+    int            calls = 0;
+    core::run_goal goal{.budget = icount{5'000}};
+    goal.until_thread = true;
+    goal.then_thread  = [&calls](core::machine&) { ++calls; };
+    auto const result = h.run(std::move(goal)).get();
+    CHECK(result.stopped.reason == stop_reason::budget);
+    CHECK(result.executed.value >= 5'000);
+    CHECK(calls == (ready ? 1 : 0));
+  }
+}
+
+TEST_CASE("a then_thread that throws fails the goal and the member parks usable")
+{
+  auto [member, unused] = ticking();
+  hosted         h{std::move(member)};
+  core::run_goal goal{.budget = icount{5'000}};
+  goal.until_thread = true;
+  goal.then_thread  = [](core::machine&) { throw std::runtime_error{"then_thread failed"}; };
+  CHECK_THROWS_WITH(std::ignore = h.run(std::move(goal)).get(), doctest::Contains("then_thread"));
+  CHECK(h.run({.budget = icount{100}}).get().stopped.reason == stop_reason::budget);
+}

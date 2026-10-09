@@ -53,6 +53,16 @@ void write_registers(
       "writing the registers");
 }
 
+auto machine::thread_ready() const -> bool
+{
+  return arch_->thread_mode() and not(arch_->pending() and arch_->deliverable_now());
+}
+
+void machine::check_call(arch::call_frame const& frame) const
+{
+  arch_->check_call(frame);
+}
+
 void machine::begin_call(arch::call_frame const& frame)
 {
   require_stopped(*this);

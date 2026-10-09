@@ -317,6 +317,12 @@ public:
   [[nodiscard]] virtual auto deliverable_now() const -> bool = 0;
 
   /**
+   * @brief Whether the core executes in thread mode: Arm IPSR 0, whatever other exceptions are
+   *        still active.
+   */
+  [[nodiscard]] virtual auto thread_mode() const -> bool = 0;
+
+  /**
    * @brief Drives an interrupt source from a peripheral IRQ line. Level-sensitive: the source is
    *        pending while active, and an active level latches it pending, so a raise then lower
    *        pends it once.
@@ -419,6 +425,15 @@ public:
    *         pointer.
    */
   virtual void prepare_call(call_frame const& frame) = 0;
+
+  /**
+   * @brief Refuses a call frame for what prepare_call() checks before touching any state: the
+   *        floating-point convention and the return sentinel. The default refuses nothing.
+   * @param frame Call to check.
+   * @throws config_error when prepare_call() would refuse the frame for those.
+   */
+  virtual void check_call([[maybe_unused]] call_frame const& frame) const
+  {}
 
   /**
    * @brief Reads the return value of a call that reached its sentinel.

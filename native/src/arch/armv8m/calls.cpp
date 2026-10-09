@@ -54,9 +54,8 @@ auto floating(value_kind kind) noexcept -> bool
 }
 }
 
-void cortex_m::prepare_call(call_frame const& frame)
+void cortex_m::check_call(call_frame const& frame) const
 {
-  rethrow_failure();
   check_abi(frame.abi, core_.fpu);
   if(frame.return_sentinel >= system_region)
   {
@@ -64,6 +63,12 @@ void cortex_m::prepare_call(call_frame const& frame)
         "call", 0, "return_sentinel",
         "an address below 0xE0000000, the core's execute-never system region");
   }
+}
+
+void cortex_m::prepare_call(call_frame const& frame)
+{
+  rethrow_failure();
+  check_call(frame);
   auto* const engine  = engine_handle();
   auto&       bus     = context_->services;
   auto const  layout  = aapcs::allocate(frame.args, frame.abi == float_abi::hard_double);

@@ -86,6 +86,12 @@ auto gated(native_predicate const& gate, std::shared_ptr<detail::python_callable
       [gate = gate.test(), ready = held_predicate(std::move(ready))] { return gate() and ready(); };
 }
 
+auto exception_number(core::machine& target) -> std::uint32_t
+{
+  auto const xpsr = target.regs().find("xpsr");
+  return xpsr ? static_cast<std::uint32_t>(target.regs().read(*xpsr) & 0x1ffu) : 0;
+}
+
 constexpr auto signal_check = std::chrono::milliseconds{50};
 
 void wait_interruptibly(
@@ -268,11 +274,16 @@ auto machine_handle::run_goal(
 auto machine_handle::call_goal(
     arch::call_frame const&      frame,
     std::optional<std::uint64_t> budget,
-    std::optional<nb::object>    prepare) -> host_future_handle
+    std::optional<nb::object>    prepare,
+    bool                         from_thread) -> host_future_handle
 {
   auto           ended = std::make_shared<call_outcome>();
   core::run_goal goal{.finish = [ended](core::machine& target, stop const* stopped) {
-    if(stopped != nullptr and stopped->reason == stop_reason::fault)
+    if(not ended->began)
+    {
+      ended->ipsr = exception_number(target);
+    }
+    if(stopped != nullptr and stopped->reason == stop_reason::fault and target.in_call())
     {
       for(auto const& reg : target.regs().list())
       {
@@ -300,7 +311,21 @@ auto machine_handle::call_goal(
     {
       (*prepare)();
     }
-    target.begin_call(frame);
+    target.check_call(frame);
+    auto const begin = [ended, frame](core::machine& ready) {
+      ended->ipsr = exception_number(ready);
+      ready.begin_call(frame);
+      ended->began = true;
+    };
+    if(from_thread and not target.thread_ready())
+    {
+      goal.until_thread = true;
+      goal.then_thread  = begin;
+    }
+    else
+    {
+      begin(target);
+    }
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
   auto cancel = cancel_reporting_finish(cancel_goal(host_, abandoner()), future);

@@ -103,6 +103,11 @@ public:
     return not current.masked;
   }
 
+  [[nodiscard]] auto thread_mode() const -> bool override
+  {
+    return true;
+  }
+
   void set_irq_line(std::uint32_t source, bool active) override
   {
     if(active)

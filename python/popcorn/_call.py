@@ -56,11 +56,22 @@ class CallResult:
             double returns, 0 when the call did not return.
         value64: The raw bits of the return value.
         stop: How the call ended, RETURNED when it returned.
+        ipsr: The exception number active when the call began, 0 in thread mode. For a call
+            that never began, the one at its stop.
+        began: Whether the call began. False when a `from_thread=True` wait stopped first.
     """
 
     value: int | float
     value64: int
     stop: Stop
+    ipsr: int = 0
+    began: bool = True
+
+
+class HandlerCallWarning(UserWarning):
+    """A call began with an exception handler active, so the handler resumes after it returns,
+    which a thread-mode caller on hardware never sees. `call(from_thread=True)` waits for thread
+    mode, `from_thread=False` calls at once without this warning."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -129,6 +129,11 @@ struct slice_request
    * stamped command at until_time: the stop is returned with its pc unlocated and no trace stop
    * record. Other stops are reported as usual. */
   bool internal_stop{};
+  /** @brief End the slice, without a stop, at the first loop turn where thread_ready() holds,
+   * after any deliverable exception was entered, so a tail-chained handler runs first. A slice
+   * that starts ready ends with no instruction executed. An exception return to thread mode ends
+   * the engine run, so the check sees it. */
+  bool until_thread{};
 };
 
 /** @brief Outcome of one native slice. */
@@ -146,6 +151,8 @@ struct slice_result
   /** @brief Whether stopped is the stop_reason::user stop of the request's stop_when, not one
    * a model or handler requested. A requested stop wins over stop_when at the same boundary. */
   bool asked = false;
+  /** @brief Whether the slice ended without a stop for slice_request::until_thread. */
+  bool thread_ready = false;
 };
 
 /** @brief Outcome of machine::call(). */
@@ -346,6 +353,20 @@ public:
 
   /** @brief Whether a call begun by begin_call() has not been ended yet. */
   [[nodiscard]] auto in_call() const noexcept -> bool;
+
+  /**
+   * @brief Whether the core is in thread mode, `arch::arch::thread_mode()`, and no exception is
+   *        deliverable now, so its next instruction is a thread-mode one. A thread asleep with
+   *        nothing deliverable is ready, also after a return with sleep-on-exit.
+   */
+  [[nodiscard]] auto thread_ready() const -> bool;
+
+  /**
+   * @brief Refuses a call frame before any state changes, `arch::arch::check_call()`.
+   * @param frame Call to check.
+   * @throws config_error when the arch module refuses the frame.
+   */
+  void check_call(arch::call_frame const& frame) const;
 
   /**
    * @brief Makes a guest function call synchronously: begin_call(), slices until the call stops,

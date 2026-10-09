@@ -43,6 +43,7 @@ public:
   void               reset(address reset_vector) override;
   auto               deliver_pending() -> trap_result override;
   [[nodiscard]] auto deliverable_now() const -> bool override;
+  [[nodiscard]] auto thread_mode() const -> bool override;
   void               set_irq_line(std::uint32_t source, bool active) override;
   auto               on_interrupt(std::uint32_t intno) -> trap_result override;
   auto               on_invalid_insn() -> trap_result override;
@@ -57,6 +58,7 @@ public:
   [[nodiscard]] auto resume_address() const -> address override;
   [[nodiscard]] auto registers() const -> std::span<cpu_register const> override;
   void               prepare_call(call_frame const& frame) override;
+  void               check_call(call_frame const& frame) const override;
   [[nodiscard]] auto call_result(call_frame const& frame) const -> std::uint64_t override;
   void               read_args(call_frame& frame) const override;
   [[nodiscard]] auto return_address() const -> address override;

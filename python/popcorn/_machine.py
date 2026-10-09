@@ -11,6 +11,7 @@ import functools
 import os
 import sys
 import types
+import warnings
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload, runtime_checkable
@@ -23,6 +24,7 @@ from popcorn._call import (
     I32_SLOT,
     I64,
     CallResult,
+    HandlerCallWarning,
     Signature,
     Slot,
     Stack,
@@ -1272,6 +1274,7 @@ class Machine:
         interrupts: bool = False,
         reset: bool | Snapshot = False,
         abi: FloatAbi | None = None,
+        from_thread: bool | None = None,
     ) -> CallResult:
         """Call a guest function and return what it returned, the interrupted context restored.
 
@@ -1288,7 +1291,8 @@ class Machine:
         and ITM. Interrupts made pending during the call stay pending. A synchronous exception
         the call left pending, SVC, HardFault, MemManage, BusFault or UsageFault, is dropped. A
         handler still active when the call ends is not resumed and its interrupt is not pended
-        again. An exception that ends the call, a ModelError or one
+        again. With `from_thread=True`, that context is the one where the wait ended, not the
+        stop the caller saw before the call. An exception that ends the call, a ModelError or one
         a handler raised, restores the same as a return, and the machine runs on from where it
         was. If the restore itself fails after such an exception, its error is raised with that
         exception as `__context__`. After a cancel, or a Ctrl-C in a sync wait for the call, it goes
@@ -1315,20 +1319,39 @@ class Machine:
                 `set_call_baseline(m.snapshot())` chooses one explicitly. A Snapshot restores
                 that snapshot before the call.
             abi: Float calling convention, the one of the image holding the function when None.
+            from_thread: True runs the machine first until the core would execute a thread-mode
+                instruction: IPSR 0 and no exception about to be taken. Handlers finish,
+                tail-chained ones included, as they would before a thread-mode caller on
+                hardware. The run counts against `budget`, hits intercepts, watches and
+                breakpoints, and advances virtual time. A stop before thread mode ends the call
+                unbegun, `began` False, its stop in the result. Thread mode is IPSR 0: a return
+                to thread mode with other exceptions still active counts, and so does a thread
+                put to sleep on exit, SCR.SLEEPONEXIT. A ConfigError for a stack that does not
+                fit can come after the wait ran, the ABI and sentinel are checked before.
+                Cancelling the task during the wait parks the machine where the wait reached,
+                no call begun. False calls at once wherever the core is. None calls at once and
+                warns with `HandlerCallWarning` when a handler is active.
 
         Returns:
             The value and the stop, RETURNED when the call returned. A fault or an exhausted
-            budget is a stop, not an exception.
+            budget is a stop, not an exception. `ipsr` is the exception number when the call
+            began, `began` False when a `from_thread=True` wait stopped first.
 
         Raises:
-            TypeError: The argument count differs from DWARF's, or an argument has no kind.
+            TypeError: The argument count differs from DWARF's, an argument has no kind, or
+                `from_thread` is not a bool or None.
             ValueError: An argument is outside its parameter's C type.
             SymbolError: `fn` names no symbol.
             NotImplementedError: A parameter is a struct passed by value.
             MachineBusy: A run, step, wait or call is active.
             ModelError: A model failed during the call, or the call touched an unmodelled
                 register under strict_peripherals.
+
+        Warns:
+            HandlerCallWarning: `from_thread` is None and the call began with a handler active.
         """
+        if from_thread is not None and not isinstance(cast(object, from_thread), bool):
+            raise TypeError(f"from_thread is True, False or None, not {from_thread!r}")
         entry = self.address_of(fn)
         signature = self._signature(fn, entry)
         where = signature.name
@@ -1370,16 +1393,26 @@ class Machine:
                 frame,
                 self._default_budget if budget is None else budget,
                 prepare if reset is not False else None,
+                bool(from_thread),
             ),
             lambda raw: cast(_core.CallOutcome, raw),
         )
         stop = stop_of(outcome.stopped)
-        if stop.reason is StopReason.FAULT:
+        if stop.reason is StopReason.FAULT and outcome.began:
             stop = replace(stop, registers=self._fault_context(outcome.registers))
+        if not outcome.began and not stop.detail:
+            stop = replace(stop, detail="before thread mode")
         self._last_stop = stop
         bits = outcome.bits
         value = decode(result_slot, bits) if stop.reason is StopReason.RETURNED else 0
-        return CallResult(value, bits, stop)
+        if from_thread is None and outcome.began and outcome.ipsr != 0:
+            warnings.warn(
+                f"{where} was called with exception {outcome.ipsr} active, which resumes after"
+                " it: from_thread=True waits for thread mode, from_thread=False silences this",
+                HandlerCallWarning,
+                stacklevel=2,
+            )
+        return CallResult(value, bits, stop, ipsr=outcome.ipsr, began=outcome.began)
 
     def _fault_context(self, values: Sequence[int]) -> Mapping[str, int]:
         read = dict(zip(self._handle.register_names(), values, strict=True))

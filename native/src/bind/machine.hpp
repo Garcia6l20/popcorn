@@ -128,6 +128,11 @@ struct[[= py::rename{"CallOutcome"}]] call_outcome
   /** @brief Every core register in register_names() order at a FAULT stop, read before the
    * caller's context came back, empty for any other stop. */
   [[= py::readonly]] std::vector<std::uint64_t> registers{};
+  /** @brief The exception number active when the call began, 0 in thread mode. For a call that
+   * never began, the one at its stop. */
+  [[= py::readonly]] std::uint32_t ipsr{};
+  /** @brief Whether the call began, false when a from_thread wait stopped first. */
+  [[= py::readonly]] bool began{};
 };
 
 namespace detail
@@ -285,6 +290,9 @@ public:
    * @param budget Stop with reason budget past this many instructions.
    * @param prepare Called with no argument before begin_call, as a callback of the parked
    *        machine, None for none.
+   * @param from_thread Run first until machine::thread_ready(), then begin the call, all in the
+   *        budget. The frame's ABI and sentinel are checked before. A machine already ready
+   *        begins at once.
    * @return Resolves to the CallOutcome.
    * @throws machine_busy while a goal or a free run is active, or a call is in progress.
    * @throws machine_running from a callback or a parked section.
@@ -294,7 +302,8 @@ public:
       call_goal(
           arch::call_frame const&               frame,
           std::optional<std::uint64_t>          budget,
-          std::optional<reflex::py::nb::object> prepare) -> host_future_handle;
+          std::optional<reflex::py::nb::object> prepare,
+          bool                                  from_thread) -> host_future_handle;
 
   /**
    * @brief A goal whose finish throws popcorn::error, for tests of the chained end of a failed

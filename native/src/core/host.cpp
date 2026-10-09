@@ -929,9 +929,10 @@ struct host_core
         .budget_left        = goal.remaining,
         .exact_instructions = goal.left,
         .until_time         = goal.goal.until_time,
-        .stop_when   = goal.goal.stop_when ? std::function<bool()>{std::ref(goal.goal.stop_when)}
-                                           : std::function<bool()>{},
-        .leave_until = once ? once->leave_until : goal.executed.value == 0,
+        .stop_when    = goal.goal.stop_when ? std::function<bool()>{std::ref(goal.goal.stop_when)}
+                                            : std::function<bool()>{},
+        .leave_until  = once ? once->leave_until : goal.executed.value == 0,
+        .until_thread = goal.goal.until_thread,
     };
     add_stamp(request, next_stamp(slot));
     slice_result result;
@@ -964,6 +965,27 @@ struct host_core
     {
       goal.left =
           icount{std::max<std::uint64_t>(remaining_after(goal.left, result.executed)->value, 1)};
+    }
+    if(result.thread_ready)
+    {
+      try
+      {
+        owner_scope const owning{this};
+        auto&             target = *slot.engine;
+        if(target.thread_ready())
+        {
+          goal.goal.until_thread = false;
+          if(goal.goal.then_thread)
+          {
+            goal.goal.then_thread(target);
+          }
+        }
+      }
+      catch(...)
+      {
+        fail_goal(slot, done, std::current_exception());
+      }
+      return;
     }
     if(result.stopped or once)
     {

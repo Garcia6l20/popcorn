@@ -71,6 +71,11 @@ public:
     return true;
   }
 
+  [[nodiscard]] auto thread_mode() const -> bool override
+  {
+    return true;
+  }
+
   void set_irq_line(std::uint32_t, bool active) override
   {
     set_pending(active);

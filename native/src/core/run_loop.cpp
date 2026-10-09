@@ -355,6 +355,11 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
     if(result.resumes())
     {
       run.spin.leave();
+      if(run.until_thread and run.owner.arch_->thread_mode())
+      {
+        run.boundary_stop = true;
+        return true;
+      }
       return run.stop_on_pending();
     }
     run.trap = result;
@@ -473,6 +478,7 @@ void machine::run_state::clear_slice() noexcept
   failure = nullptr;
   clear_internal_stop();
   wall_expired = false;
+  until_thread = false;
 }
 
 void machine::run_state::set_exits(std::vector<address> list)
@@ -550,7 +556,7 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
   if(reset_requested)
   {
     auto const kind = *std::exchange(reset_requested, std::nullopt);
-    if(call or owner.options_.on_reset_request == reset_request_policy::stop)
+    if(call or until_thread or owner.options_.on_reset_request == reset_request_policy::stop)
     {
       return slice_end{make_stop(
           stop_reason::reset_request, std::string{reflex::enum_value_name(kind)}, std::nullopt)};
@@ -834,7 +840,12 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
         where.pc, true);
   }
   flush_sinks();
-  return slice_result{.stopped = std::move(end.stopped), .executed = executed, .asked = end.asked};
+  auto const thread_ready = end.thread_ready and not end.stopped;
+  return slice_result{
+      .stopped      = std::move(end.stopped),
+      .executed     = executed,
+      .asked        = end.asked,
+      .thread_ready = thread_ready};
 }
 
 auto machine::run_state::run(slice_request const& request) -> slice_result
@@ -853,6 +864,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   wall_countdown = wall_check_blocks;
   wall_expired   = false;
   wall_deadline  = std::chrono::steady_clock::now() + request.wall_budget;
+  until_thread   = request.until_thread;
   set_exits(exit_list(request));
   for(;;)
   {
@@ -879,6 +891,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     if(auto const entry = arch->deliver_pending(); not entry.resumes())
     {
       return finish(request, stop_from(entry));
+    }
+    if(until_thread and owner.thread_ready())
+    {
+      return finish(request, {.thread_ready = true});
     }
     if(coverage_on and arch->pc() != before)
     {

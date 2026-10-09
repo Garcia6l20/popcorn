@@ -487,6 +487,8 @@ struct slice_end
   std::optional<stop> stopped{};
   /** @brief Whether the stop is the stop_when predicate's. */
   bool asked = false;
+  /** @brief Whether the slice ended for slice_request::until_thread. */
+  bool thread_ready = false;
 };
 
 /** @brief Run state of a machine: slice bounds, deferred requests, hooks and exception slot. */
@@ -772,6 +774,9 @@ struct machine::run_state
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
+  /** @brief slice_request::until_thread of the running slice: an exception return to thread
+   * mode ends the engine run. Cleared with the slice. */
+  bool until_thread = false;
   /** @brief Whether an access in the engine run asked the engine to stop right after its
    * instruction, set by request_precise_exit() and taken by take_precise_exit(). */
   bool precise_exit = false;

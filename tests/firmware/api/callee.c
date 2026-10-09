@@ -132,6 +132,11 @@ __attribute__((noipa)) uint32_t wait_flag(void)
   return ticks;
 }
 
+__attribute__((noipa)) uint32_t ticks_now(void)
+{
+  return ticks;
+}
+
 __attribute__((noipa)) uint32_t tick(void)
 {
   ticks = ticks + 1u;
