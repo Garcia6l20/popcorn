@@ -580,3 +580,18 @@ def test_a_frame_read_waits_on_the_machine_thread_without_the_gil(
 
     assert asyncio.run(scenario()) >= FRAMES
     assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
+
+
+def test_take_frames_equals_a_read_of_what_is_available(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = sai_machine(u575)
+    start = m.snapshot()
+    stream = m.periph.SAI1.audio("A")
+    run_entry(m, "tx_poll")
+    taken = stream.take_frames()
+    assert len(taken) == FRAMES
+    assert (stream.available, stream.take_frames()) == (0, [])
+    m.restore(start)
+    run_entry(m, "tx_poll")
+    assert taken == asyncio.run(stream.read_frames(stream.available))

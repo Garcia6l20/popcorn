@@ -155,16 +155,15 @@ class AudioStream:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
             await self._wait(self._link.predicate_available(n), for_)
-        return [
-            AudioFrame(
-                tuple(record.slots),
-                record.data_bits,
-                record.active_slots,
-                record.mono,
-                VirtualTime(record.at_ps),
-            )
-            for record in self._link.drain(n)
-        ]
+        return _audio_frames(self._link.drain(n))
+
+    def take_frames(self) -> list[AudioFrame]:
+        """Every frame the block transmitted and not read yet, at once, never running the
+        machine. Allowed parked and running, from any thread. A frame arriving during the call
+        stays queued for the next one. A take while a `read_frames` of the same stream waits can
+        leave that read short."""
+        link = self._link
+        return _audio_frames(link.drain(link.available()))
 
     def write(self, words: Sequence[int], *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
         """Queue words for a receiving block: one per slot in slot order, inactive slots
@@ -185,6 +184,19 @@ class AudioStream:
 
     def __repr__(self) -> str:
         return f"AudioStream({self.name}.{self.block})"
+
+
+def _audio_frames(records: Iterable[_core.AudioRecord]) -> list[AudioFrame]:
+    return [
+        AudioFrame(
+            tuple(record.slots),
+            record.data_bits,
+            record.active_slots,
+            record.mono,
+            VirtualTime(record.at_ps),
+        )
+        for record in records
+    ]
 
 
 def _is_frame_rate(value: object) -> bool:

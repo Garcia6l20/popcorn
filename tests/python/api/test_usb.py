@@ -27,7 +27,7 @@ from popcorn import _core
 from popcorn.board import CdcLineCoding, HidStream, UsbData, UsbHost, UsbHostOptions, UsbState
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import run_bounded
+from .conftest import BOARD_ELF, run_bounded
 from .projects import Silent
 
 HANG = 10.0
@@ -1517,3 +1517,125 @@ def test_a_report_write_collected_on_the_machine_thread_warns_off_it(
     ended = [record for record in caplog.records if "output report" in record.getMessage()]
     assert [record.thread for record in ended] == [threading.get_ident()]
     assert "timed_out" in ended[0].getMessage()
+
+
+SAI_ELF = ROOT / "tests" / "firmware" / "periph" / "prebuilt" / "sai_ll.elf"
+
+EMPTY_TAKES: dict[str, tuple[Path, Callable[[popcorn.Machine], Any], str]] = {
+    "uart": (BOARD_ELF, lambda m: m.periph.USART1.port, "take_frames"),
+    "sai": (SAI_ELF, lambda m: m.periph.SAI1.audio("A"), "take_frames"),
+    "cdc": (USB_ELF, lambda m: m.periph.OTG_FS.host.cdc(), "take_packets"),
+    "hid": (USB_ELF, lambda m: m.periph.OTG_FS.host.hid(), "take_reports"),
+    "mic": (AUDIO_ELF, lambda m: m.periph.OTG_FS.host.audio().mic, "take_frames"),
+}
+
+
+@pytest.mark.parametrize("kind", list(EMPTY_TAKES))
+def test_a_take_of_a_stream_that_never_held_anything_is_empty_while_running(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    elf, stream_of, method = EMPTY_TAKES[kind]
+    if elf in (USB_ELF, AUDIO_ELF):
+        m = usb_machine(u575, UsbHostOptions(attached=False), elf)
+    else:
+        m = popcorn.Machine(u575, image=popcorn.Image.elf(elf))
+        m.reset()
+    stream = stream_of(m)
+    take = getattr(stream, method)
+
+    async def scenario() -> tuple[object, ...]:
+        async with m.running():
+            await m.elapse(ms(1))
+            return take(), stream.available
+
+    assert run_bounded(scenario(), HANG) == ([], 0)
+
+
+def test_cdc_take_equals_a_read_of_what_is_available(u575: popcorn.MachineDescription) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+    start = m.snapshot()
+
+    async def exchanged() -> None:
+        await cdc.write(b"abc")
+        await m.run(for_=ms(20))
+
+    asyncio.run(exchanged())
+    taken = cdc.take_packets()
+    assert (cdc.available, cdc.take(), cdc.take_packets()) == (0, b"", [])
+    m.restore(start)
+    asyncio.run(exchanged())
+    assert taken == asyncio.run(cdc.read_packets(len(taken)))
+    assert b"".join(p.data for p in taken) == b"ABC"
+    m.restore(start)
+    asyncio.run(exchanged())
+    assert cdc.take() == b"ABC"
+
+
+def test_cdc_take_inside_running_empties_the_queue(u575: popcorn.MachineDescription) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+
+    async def body() -> bytes:
+        async with m.running():
+            await cdc.write(b"abc")
+            while cdc.available < 3:
+                await m.elapse(ms(1))
+            return cdc.take()
+
+    assert run_bounded(body(), HANG) == b"ABC"
+    assert cdc.available == 0
+
+
+def test_a_bridged_cdc_function_is_not_taken_from_python(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    m.board.pty("OTG_FS")
+    with pytest.raises(RuntimeError, match="bridged"):
+        host.cdc().take()
+    with pytest.raises(RuntimeError, match="bridged"):
+        host.cdc().take_packets()
+    m.board.close()
+
+
+def test_hid_take_reports_equals_a_read_of_what_is_available(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    echo = host.hid(1)
+    asyncio.run(echo.wait_ready(for_=ms(50)))
+    start = m.snapshot()
+
+    async def exchanged() -> None:
+        await echo.write_report(b"\x00\x0f")
+        await m.run(for_=ms(20))
+
+    asyncio.run(exchanged())
+    taken = echo.take_reports()
+    assert [r.data for r in taken] == [b"\xf0"]
+    assert (echo.available, echo.take_reports()) == (0, [])
+    m.restore(start)
+    asyncio.run(exchanged())
+    assert taken == asyncio.run(echo.read_reports(echo.available))
+
+
+def test_mic_take_frames_equals_a_read_of_what_is_available(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+
+    async def started() -> None:
+        await audio.wait_ready(for_=s(2))
+        await audio.mic.start()
+
+    asyncio.run(started())
+    start = m.snapshot()
+    asyncio.run(m.run(for_=ms(5)))
+    taken = audio.mic.take_frames()
+    assert len(taken) >= 4
+    assert (audio.mic.available, audio.mic.take_frames()) == (0, [])
+    m.restore(start)
+    asyncio.run(m.run(for_=ms(5)))
+    assert taken == asyncio.run(audio.mic.read_frames(audio.mic.available))

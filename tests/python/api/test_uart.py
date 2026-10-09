@@ -324,3 +324,60 @@ def test_a_trace_closed_again_after_its_posted_close_closes_once(
     assert recording.records == closed
     assert recording.size == path.stat().st_size
     assert all(record is not None for record in read(path))
+
+
+def test_take_frames_empties_the_queue_while_running(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[int, list[Frame]]:
+        async with board.running():
+            await uart.write(b"hello")
+            while uart.available < 5:
+                await board.elapse(ms(1))
+            return uart.available, uart.take_frames()
+
+    available, frames = run_bounded(body(), 10)
+    assert available == 5
+    assert bytes(f.data for f in frames) == b"hello"
+    assert uart.available == 0
+
+
+def test_take_frames_equals_a_read_of_what_is_available(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    start = board.snapshot()
+
+    async def exchanged() -> None:
+        await uart.write(b"popcorn")
+        await board.run(for_=ms(2))
+
+    asyncio.run(exchanged())
+    taken = uart.take_frames()
+    board.restore(start)
+    asyncio.run(exchanged())
+    read = asyncio.run(uart.read_frames(uart.available))
+    assert len(taken) == 7
+    assert taken == read
+
+
+def test_take_returns_nothing_from_an_empty_queue(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    assert uart.take() == b""
+    assert uart.take_frames() == []
+
+    async def body() -> tuple[bytes, list[Frame]]:
+        async with board.running():
+            return uart.take(), uart.take_frames()
+
+    assert run_bounded(body(), 10) == (b"", [])
+
+
+def test_take_gives_the_bytes_of_the_frames(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def exchanged() -> None:
+        await uart.write(b"ab")
+        await board.run(for_=ms(2))
+
+    asyncio.run(exchanged())
+    assert uart.take() == b"ab"
+    assert uart.available == 0

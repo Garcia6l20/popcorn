@@ -8,7 +8,7 @@ import struct
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, assert_type, cast
 
 import popcorn
 import pytest
@@ -810,3 +810,46 @@ def test_an_spi_device_error_inside_running_raises_at_the_next_wait(
     with pytest.raises(RuntimeError, match="exchange broke"):
         run_bounded(scenario())
     assert not m.busy
+
+
+class Marker(I2CTarget):
+    """An I2C target that answers nothing, a second kind on a bus."""
+
+
+def test_board_device_returns_the_one_device_of_a_class_typed(
+    u575: popcorn.MachineDescription,
+) -> None:
+    eeprom = Eeprom24(0x50, 4096)
+    marker = Marker(0x51)
+    m = popcorn.Machine(u575, devices={"I2C1": [eeprom, marker]})
+    found = m.board.device("I2C1", Eeprom24)
+    assert_type(found, Eeprom24)
+    assert found is eeprom
+    assert m.board.device("I2C1", Marker) is marker
+    assert m.board.device("SEC_I2C1", Eeprom24) is eeprom
+    assert m.board.devices("SEC_I2C1") == m.board.devices("I2C1") == (eeprom, marker)
+
+
+def test_board_device_matches_a_subclass_instance(u575: popcorn.MachineDescription) -> None:
+    eeprom = Eeprom24(0x50, 4096)
+    m = popcorn.Machine(u575, devices={"I2C1": [eeprom]})
+    assert m.board.device("I2C1", I2CTarget) is eeprom
+
+
+@pytest.mark.parametrize(("peripheral", "cls"), [("I2C1", I2CTarget), ("I2C2", Eeprom24)])
+def test_board_device_refuses_none_or_several(
+    u575: popcorn.MachineDescription, peripheral: str, cls: type[I2CTarget]
+) -> None:
+    m = popcorn.Machine(u575, devices={"I2C1": [Eeprom24(0x50, 4096), Marker(0x51)]})
+    with pytest.raises(ConfigError) as raised:
+        m.board.device(peripheral, cls)
+    assert raised.value.key == f"board.{peripheral}"
+
+
+def test_board_device_names_a_peripheral_the_part_lacks(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(u575, devices={"I2C1": [Eeprom24(0x50, 4096)]})
+    with pytest.raises(ConfigError, match="a peripheral of") as raised:
+        m.board.device("I2C9", Eeprom24)
+    assert raised.value.key == "board.I2C9"

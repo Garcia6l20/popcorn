@@ -603,7 +603,13 @@ class Machine:
         for targets in attached.values():
             for target in targets:
                 attach(target, self, self._device_audio_clock)
-        self._board = Board(self._ports, attached, self._usb)
+        self._board = Board(
+            self._ports,
+            attached,
+            self._usb,
+            part=description.part,
+            peripherals=(p.name for p in description.peripherals),
+        )
         access = ViewAccess(self._handle, self._ports.stream, self._audio.stream, self._usb.host)
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())

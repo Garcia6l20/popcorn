@@ -420,10 +420,32 @@ class CdcStream:
         self._check_read(n)
         if self._link.packets() < n:
             await self._wait(self._link.predicate_packets(n), for_)
-        return [
-            CdcPacket(bytes(record.data), VirtualTime(record.at_ps))
-            for record in self._link.drain_packets(n)
-        ]
+        return _cdc_packets(self._link.drain_packets(n))
+
+    def take(self) -> bytes:
+        """Every byte the device sent and not read yet, at once, never running the machine.
+        Allowed parked and running, from any thread. Bytes arriving during the call stay
+        queued for the next one. A take while a `read` of the same stream waits can leave that
+        read short.
+
+        Raises:
+            RuntimeError: The function is bridged to a pty.
+        """
+        self._check_read(0)
+        link = self._link
+        return link.drain(link.available())
+
+    def take_packets(self) -> list[CdcPacket]:
+        """As `take`, the packets with their times. The rest of a packet a `read` split counts
+        as one. A take while a `read_packets` of the same stream waits can leave that read
+        short.
+
+        Raises:
+            RuntimeError: The function is bridged to a pty.
+        """
+        self._check_read(0)
+        link = self._link
+        return _cdc_packets(link.drain_packets(link.packets()))
 
     async def wait_ready(self, *, for_: VirtualDuration | None = None) -> None:
         """Run the machine until `ready`, or `for_` elapsed.
@@ -692,10 +714,15 @@ class HidStream:
             raise ValueError(f"cannot read {n} reports")
         if self._link.available() < n:
             await self._wait(self._link.predicate_available(n), for_)
-        return [
-            HidReport(bytes(record.data), VirtualTime(record.at_ps))
-            for record in self._link.drain(n)
-        ]
+        return _hid_reports(self._link.drain(n))
+
+    def take_reports(self) -> list[HidReport]:
+        """Every input report received and not read yet, at once, never running the machine.
+        Allowed parked and running, from any thread. A report arriving during the call stays
+        queued for the next one. A take while a `read_reports` of the same stream waits can
+        leave that read short."""
+        link = self._link
+        return _hid_reports(link.drain(link.available()))
 
     def write_report(self, data: bytes, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
         """Send an output report and run the machine until the device took it.
@@ -1249,10 +1276,15 @@ class UacMic(UacStream):
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
             await self._wait(self._link.predicate_available(n), for_)
-        return [
-            UacFrame(tuple(record.samples), VirtualTime(record.at_ps))
-            for record in self._link.drain(n)
-        ]
+        return _uac_frames(self._link.drain(n))
+
+    def take_frames(self) -> list[UacFrame]:
+        """Every frame received and not read yet, at once, never running the machine. Allowed
+        parked and running, from any thread. A frame arriving during the call stays queued for
+        the next one. Unlike `clear`, the frames are returned. A take while a `read_frames` of
+        the same stream waits can leave that read short."""
+        link = self._link
+        return _uac_frames(link.drain(link.available()))
 
     def __repr__(self) -> str:
         return f"UacMic({self.name}, {self.function})"
@@ -2008,3 +2040,15 @@ def _interface(record: _core.UsbInterfaceRecord) -> UsbInterface:
             for endpoint in record.endpoints
         ),
     )
+
+
+def _cdc_packets(records: Iterable[_core.CdcPacketRecord]) -> list[CdcPacket]:
+    return [CdcPacket(bytes(record.data), VirtualTime(record.at_ps)) for record in records]
+
+
+def _hid_reports(records: Iterable[_core.HidReportRecord]) -> list[HidReport]:
+    return [HidReport(bytes(record.data), VirtualTime(record.at_ps)) for record in records]
+
+
+def _uac_frames(records: Iterable[_core.UacFrameRecord]) -> list[UacFrame]:
+    return [UacFrame(tuple(record.samples), VirtualTime(record.at_ps)) for record in records]

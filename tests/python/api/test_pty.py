@@ -132,6 +132,10 @@ def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:
     board.board.pty("USART1")
     with pytest.raises(RuntimeError, match="bridged"):
         asyncio.run(board.periph.USART1.port.read(1))
+    with pytest.raises(RuntimeError, match="bridged"):
+        board.periph.USART1.port.take()
+    with pytest.raises(RuntimeError, match="bridged"):
+        board.periph.USART1.port.take_frames()
 
 
 def test_the_project_connects_a_pty(u575: popcorn.MachineDescription) -> None:

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from popcorn import _core
 from popcorn._devices import BusDevice, I2CTarget, SpiTarget
+from popcorn._errors import ConfigError
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.units import VirtualDuration, VirtualTime
 
@@ -150,17 +151,46 @@ class UartStream:
 
     async def read_frames(self, n: int, *, for_: VirtualDuration | None = None) -> list[Frame]:
         """As `read`, the frames with their times."""
-        bridge = self._bridges.get(self.name)
-        if bridge is not None:
-            raise RuntimeError(f"{self.name} is bridged to {bridge.path}")
+        self._check_unbridged()
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
             await self._wait(self._link.predicate_available(n), for_)
-        return [Frame(f.data, VirtualTime(f.at_ps)) for f in self._link.drain(n)]
+        return _frames(self._link.drain(n))
+
+    def take(self) -> bytes:
+        """Every byte the firmware transmitted and not read yet, at once, never running the
+        machine. Allowed parked and running, from any thread. A take while a `read` of the same
+        stream waits can leave that read short.
+
+        Raises:
+            RuntimeError: The UART is bridged to a pty.
+        """
+        return bytes(f.data & 0xFF for f in self.take_frames())
+
+    def take_frames(self) -> list[Frame]:
+        """As `take`, the frames with their times. A frame arriving during the call stays
+        queued for the next one. A take while a `read` of the same stream waits can leave that
+        read short.
+
+        Raises:
+            RuntimeError: The UART is bridged to a pty.
+        """
+        self._check_unbridged()
+        link = self._link
+        return _frames(link.drain(link.available()))
+
+    def _check_unbridged(self) -> None:
+        bridge = self._bridges.get(self.name)
+        if bridge is not None:
+            raise RuntimeError(f"{self.name} is bridged to {bridge.path}")
 
     def __repr__(self) -> str:
         return f"UartStream({self.name})"
+
+
+def _frames(records: Iterable[_core.UartFrame]) -> list[Frame]:
+    return [Frame(f.data, VirtualTime(f.at_ps)) for f in records]
 
 
 type PtyOpener = Callable[[str, _core.UartLink | _core.CdcLink], _core.PtyBridge]
@@ -301,27 +331,60 @@ class Board:
     firmware sent since power-on or the last `Machine.restore`, unless a pty bridge takes it.
     """
 
-    __slots__ = ("_devices", "_ports", "_usb")
+    __slots__ = ("_devices", "_part", "_peripherals", "_ports", "_usb")
 
     def __init__(
         self,
         ports: UartPorts,
         devices: Mapping[str, tuple[BusDevice, ...]],
         usb: UsbHosts | None = None,
+        *,
+        part: str,
+        peripherals: Iterable[str],
     ) -> None:
         """Bridge the UARTs of `ports` and the CDC functions of the hosts of `usb`, list
-        `devices`. `Machine.board` builds it."""
+        `devices` on the `peripherals` of `part`. `Machine.board` builds it."""
         self._ports = ports
         self._devices = dict(devices)
         self._usb = usb
+        self._part = part
+        self._peripherals = frozenset(peripherals)
 
     def devices(
         self, peripheral: str
     ) -> tuple[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget, ...]:
-        """The devices on bus `peripheral`, in attachment order, empty for none."""
+        """The devices on bus `peripheral`, in attachment order, empty for none. An alias, such
+        as a secure address window, names the bus it serves."""
         return cast(
             "tuple[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget, ...]",
-            self._devices.get(peripheral, ()),
+            self._devices.get(self._ports.serving(peripheral), ()),
+        )
+
+    def device[D: I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget](
+        self, peripheral: str, cls: type[D]
+    ) -> D:
+        """The one device of class `cls` on bus `peripheral`, typed. A subclass instance
+        matches. An alias, such as a secure address window, names the bus it serves.
+
+            codec = m.board.device("I2C2", Codec)
+
+        Raises:
+            ConfigError: `peripheral` is no peripheral of the part, or no device or several
+                devices of `cls` are on it, key `board.<peripheral>`.
+        """
+        bus = self._ports.serving(peripheral)
+        if bus not in self._peripherals:
+            expected = f"a peripheral of {self._part}"
+        else:
+            found = [d for d in self.devices(bus) if isinstance(d, cls)]
+            if len(found) == 1:
+                return found[0]
+            expected = f"one {cls.__name__} on {bus}, not {len(found)}"
+        raise ConfigError(
+            f"board.{peripheral}: {expected}",
+            file=self._part,
+            key=f"board.{peripheral}",
+            expected=expected,
         )
 
     def pty(self, name: str, *, function: int = 0) -> str:
