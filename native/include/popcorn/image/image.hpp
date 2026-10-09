@@ -157,4 +157,46 @@ struct image
  * @throws image_error when the file is not a loadable ELF32 for a supported machine.
  */
 auto load_elf(std::filesystem::path const& file) -> image;
+
+/** @brief One distinct macro definition and the compile units whose program ends with it. */
+struct macro_entry
+{
+  /** @brief The name, without parameters. */
+  std::string name{};
+  /** @brief The text after the name: `(a, b) body` for a function-like macro, the body after one
+   * space for an object-like one, empty for `#define X`. */
+  std::string text{};
+  /** @brief Whether the name is directly followed by `(` in the definition. */
+  bool function_like{};
+  /** @brief Indexes into macro_index::units, ascending, of the units that end with it. */
+  std::vector<std::uint32_t> units{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(macro_entry const&, macro_entry const&) -> bool = default;
+};
+
+/** @brief The macros of one file, deduplicated across its compile units. */
+struct macro_index
+{
+  /** @brief DW_AT_name of each compile unit with macros, in .debug_info order. */
+  std::vector<std::string> units{};
+  /** @brief Distinct (name, text, function_like) entries, sorted by name, text, then
+   * function_like. */
+  std::vector<macro_entry> entries{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(macro_index const&, macro_index const&) -> bool = default;
+};
+
+/**
+ * @brief Reads the `.debug_macro` section of an ELF32 file, DWARF 5 or GNU version 4: the
+ *        definitions in effect at the end of each compile unit's macro program, merged into
+ *        distinct entries. Not part of image: macros do not belong to the loaded content.
+ * @param file Path of the ELF.
+ * @return The index, empty when the file has no `.debug_macro` or no DWARF.
+ * @throws image_error when the file is not an ELF32 or its DWARF or macro program is malformed,
+ *         holds an import cycle, more than 64 nested imports, more than 2^24 operations for one
+ *         compile unit or 2^26 for the file, or an operation of a supplementary file.
+ */
+auto read_macros(std::filesystem::path const& file) -> macro_index;
 }

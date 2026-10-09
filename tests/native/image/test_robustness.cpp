@@ -1,3 +1,5 @@
+#include "dwarf_macros.hpp"
+#include "macro_sections.hpp"
 #include "synthetic_elf.hpp"
 
 #include <popcorn/arch/arch.hpp>
@@ -8,6 +10,7 @@
 
 #include <elf.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -322,4 +325,180 @@ TEST_CASE("load_elf rejects e_shstrndx >= e_shnum")
   poke<Elf32_Half>(bytes, offsetof(Elf32_Ehdr, e_shstrndx), shnum);
   auto const path = synthetic_elf::write(bytes, "r10b-shstrndx-oob.elf");
   expect_image_error(path, "header", 0, "invalid section header string table index");
+}
+
+namespace
+{
+auto macros_of(popcorn::testing::macro_section const& macros, std::uint32_t at)
+    -> popcorn::image::macro_index
+{
+  popcorn::testing::synthetic_info const info{{{.name = "a.c", .macros = at}}};
+  return popcorn::image::detail::read_macros(info.sections(), macros.bytes()).index;
+}
+
+struct chain
+{
+  popcorn::testing::macro_section macros;
+  std::uint32_t                   top{};
+};
+
+auto chained(std::size_t levels, std::size_t imports_each) -> chain
+{
+  chain built;
+  built.top = built.macros.unit();
+  built.macros.define("LEAF 1");
+  built.macros.end();
+  for(std::size_t level = 0; level < levels; ++level)
+  {
+    auto const at = built.macros.unit();
+    for(std::size_t i = 0; i < imports_each; ++i)
+    {
+      built.macros.import(built.top);
+    }
+    built.macros.end();
+    built.top = at;
+  }
+  return built;
+}
+}
+
+TEST_CASE("a hostile .debug_macro raises image_error")
+{
+  using popcorn::image_error;
+  using popcorn::testing::macro_section;
+
+  SUBCASE("truncated header")
+  {
+    macro_section macros;
+    macros.raw(5);
+    CHECK_THROWS_AS(macros_of(macros, 0), image_error);
+  }
+  SUBCASE("version 3")
+  {
+    macro_section macros;
+    auto const    at = macros.unit(3);
+    macros.end();
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+  SUBCASE("string past the end")
+  {
+    macro_section macros;
+    auto const    at = macros.unit();
+    macros.raw(0x01);
+    macros.raw(1);
+    macros.raw('X');
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+  SUBCASE("import past the end")
+  {
+    macro_section macros;
+    auto const    at = macros.unit();
+    macros.import(0x1000);
+    macros.end();
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+  SUBCASE("strp past .debug_str")
+  {
+    macro_section macros;
+    auto const    at = macros.unit();
+    macros.strp(0x1000);
+    macros.end();
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+  SUBCASE("import cycle")
+  {
+    macro_section macros;
+    auto const    at = macros.unit();
+    macros.import(at);
+    macros.end();
+    CHECK_THROWS_WITH_AS(macros_of(macros, at), doctest::Contains("cycle"), image_error);
+  }
+  SUBCASE("unknown opcode without a table entry")
+  {
+    macro_section macros;
+    auto const    at = macros.unit();
+    macros.raw(0xe5);
+    macros.end();
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+  SUBCASE("supplementary opcode")
+  {
+    macro_section macros;
+    auto const    at = macros.unit();
+    macros.raw(0x08);
+    macros.raw(1);
+    macros.raw(0);
+    macros.raw(0);
+    macros.raw(0);
+    macros.raw(0);
+    macros.end();
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+  SUBCASE("an operands table longer than the section")
+  {
+    popcorn::testing::dwarf_bytes raw;
+    raw.u16(5);
+    raw.u8(4);
+    raw.u8(1);
+    raw.u8(0xe5);
+    raw.uleb(1000);
+    raw.u8(0);
+    macro_section macros;
+    for(auto const byte : raw.bytes)
+    {
+      macros.raw(std::to_integer<std::uint8_t>(byte));
+    }
+    CHECK_THROWS_AS(macros_of(macros, 0), image_error);
+  }
+  SUBCASE("a bad form in the operands table")
+  {
+    macro_section macros;
+    auto const    at = macros.unit_with_operands(0xe5, {0xff});
+    macros.raw(0xe5);
+    macros.end();
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+  SUBCASE("a define without a name")
+  {
+    macro_section macros;
+    auto const    at = macros.unit();
+    macros.define(" 1");
+    macros.end();
+    CHECK_THROWS_AS(macros_of(macros, at), image_error);
+  }
+}
+
+TEST_CASE("units each under the operation cap raise image_error together, in under 1 s")
+{
+  auto const                                    shared = chained(22, 2);
+  std::vector<popcorn::testing::synthetic_unit> units(9);
+  for(auto& unit : units)
+  {
+    unit = {.name = "a.c", .macros = shared.top};
+  }
+  popcorn::testing::synthetic_info const info{units};
+  CHECK(macros_of(shared.macros, shared.top).entries.size() == 1);
+  auto const start = std::chrono::steady_clock::now();
+  CHECK_THROWS_WITH_AS(
+      std::ignore = popcorn::image::detail::read_macros(info.sections(), shared.macros.bytes()),
+      doctest::Contains("for one file"), popcorn::image_error);
+  CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds{1});
+}
+
+TEST_CASE("64 nested macro imports run, 65 raise image_error")
+{
+  auto const fits = chained(64, 1);
+  CHECK(macros_of(fits.macros, fits.top).entries.size() == 1);
+  auto const deep = chained(65, 1);
+  CHECK_THROWS_WITH_AS(
+      macros_of(deep.macros, deep.top), doctest::Contains("nested"), popcorn::image_error);
+}
+
+TEST_CASE("a 40-level doubling import chain raises image_error in under 1 s")
+{
+  auto const doubling = chained(40, 2);
+  auto const start    = std::chrono::steady_clock::now();
+  CHECK_THROWS_WITH_AS(
+      macros_of(doubling.macros, doubling.top), doctest::Contains("2^24"), popcorn::image_error);
+  CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds{1});
 }

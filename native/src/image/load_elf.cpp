@@ -23,6 +23,7 @@ namespace popcorn::image
 namespace
 {
 using detail::checked_span;
+using detail::debug_section_bytes;
 using detail::elf_file;
 using detail::read;
 using detail::read_ntbs;
@@ -227,20 +228,6 @@ auto load_abi(elf_file const& elf) -> arch::float_abi
 }
 
 constexpr std::uint64_t address_end = std::uint64_t{1} << 32;
-
-auto debug_section_bytes(elf_file const& elf, std::string_view name) -> std::span<std::byte const>
-{
-  auto const* sh = elf.section_header(name);
-  if(sh == nullptr)
-  {
-    return {};
-  }
-  if((sh->sh_flags & SHF_COMPRESSED) != 0)
-  {
-    throw image_error{std::string{name}, 0, "compressed debug sections are not supported"};
-  }
-  return elf.section_bytes(*sh);
-}
 
 auto debug_functions(detail::debug_sections const& sections) -> std::vector<detail::function_die>
 {

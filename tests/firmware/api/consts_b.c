@@ -1,5 +1,7 @@
 #include "consts.h"
 
+#define CONSTS_MODE 2
+
 static volatile enum
 {
   MODE_FAST = 2

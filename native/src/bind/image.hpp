@@ -8,6 +8,7 @@
 
 #include <reflex/py.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -145,4 +146,57 @@ private:
  * @throws image_error when the file is malformed.
  */
 [[= py::doc{"Load an Intel HEX file."}]] auto load_hex(std::string const& path) -> image;
+
+/** @brief One distinct macro definition of a file and the compile units that end with it. */
+struct[[= py::rename{"MacroEntry"}]] macro_entry_info
+{
+  /** @brief The name, without parameters. */
+  [[= py::readonly]] detail::lenient_text name{};
+  /** @brief The text after the name, `(a, b) body` for a function-like macro. */
+  [[= py::readonly]] detail::lenient_text text{};
+  /** @brief Whether the name is directly followed by `(`. */
+  [[= py::readonly]] bool function_like{};
+  /** @brief Indexes into MacroIndex.units() of the units that end with it, ascending. */
+  [[= py::readonly]] std::vector<std::uint32_t> units{};
+};
+
+/** @brief The macros of one file, deduplicated across its compile units, held natively. */
+class[[= py::rename{"MacroIndex"}]] macro_index_handle
+{
+public:
+  /**
+   * @brief Wraps a read index.
+   * @param index The index.
+   */
+  [[= py::skip]] explicit macro_index_handle(popcorn::image::macro_index index);
+
+  /** @brief DW_AT_name of each compile unit with macros, in .debug_info order. */
+  [[= py::doc{"DW_AT_name of each compile unit with macros."}]] [[nodiscard]] auto units() const
+      -> std::vector<detail::lenient_text>;
+
+  /** @brief Every distinct macro name, sorted. */
+  [[= py::doc{"Every distinct macro name, sorted."}]] [[nodiscard]] auto names() const
+      -> std::vector<detail::lenient_text>;
+
+  /**
+   * @brief The entries of one name, sorted by text.
+   * @param name The macro name.
+   */
+  [[= py::doc{"The entries of a name, empty when no unit defines it."}]] [[nodiscard]] auto
+      lookup(detail::lenient_text const& name) const -> std::vector<macro_entry_info>;
+
+  /** @brief The number of distinct entries. */
+  [[= py::doc{"The number of distinct entries."}]] [[nodiscard]] auto count() const -> std::size_t;
+
+private:
+  popcorn::image::macro_index index_;
+};
+
+/**
+ * @brief Reads the `.debug_macro` section of an ELF32 file, with no GIL.
+ * @param path Path of the file.
+ * @throws image_error when the file or its macro program is malformed.
+ */
+[[= py::doc{"Read the macros of an ELF32 file's .debug_macro section."}]] auto
+    read_macros(std::string const& path) -> macro_index_handle;
 }

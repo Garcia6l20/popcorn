@@ -112,4 +112,23 @@ private:
   std::vector<Elf32_Shdr> sections_;
   std::string_view        shstrtab_{};
 };
+
+/**
+ * @brief Bytes of a debug section by name, empty when absent.
+ * @throws image_error when the section is compressed.
+ */
+inline auto debug_section_bytes(elf_file const& elf, std::string_view name)
+    -> std::span<std::byte const>
+{
+  auto const* sh = elf.section_header(name);
+  if(sh == nullptr)
+  {
+    return {};
+  }
+  if((sh->sh_flags & SHF_COMPRESSED) != 0)
+  {
+    throw image_error{std::string{name}, 0, "compressed debug sections are not supported"};
+  }
+  return elf.section_bytes(*sh);
+}
 }

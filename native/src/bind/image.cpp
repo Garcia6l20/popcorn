@@ -4,6 +4,8 @@
 
 #include <nanobind/nanobind.h>
 
+#include <algorithm>
+#include <functional>
 #include <ranges>
 #include <utility>
 
@@ -109,5 +111,56 @@ auto load_bin(std::string const& path, address start) -> image
 auto load_hex(std::string const& path) -> image
 {
   return released([&] { return popcorn::image::load_hex(path); });
+}
+
+macro_index_handle::macro_index_handle(popcorn::image::macro_index index) : index_{std::move(index)}
+{}
+
+auto macro_index_handle::units() const -> std::vector<detail::lenient_text>
+{
+  return index_.units
+       | std::views::transform([](std::string const& unit) { return detail::lenient_text{unit}; })
+       | std::ranges::to<std::vector>();
+}
+
+auto macro_index_handle::names() const -> std::vector<detail::lenient_text>
+{
+  auto       names   = index_.entries
+                     | std::views::transform(&popcorn::image::macro_entry::name)
+                     | std::ranges::to<std::vector>();
+  auto const repeats = std::ranges::unique(names);
+  names.erase(repeats.begin(), repeats.end());
+  return names
+       | std::views::transform(
+             [](std::string& name) { return detail::lenient_text{std::move(name)}; })
+       | std::ranges::to<std::vector>();
+}
+
+auto macro_index_handle::lookup(detail::lenient_text const& name) const
+    -> std::vector<macro_entry_info>
+{
+  auto const found = std::ranges::equal_range(
+      index_.entries, name.bytes, std::ranges::less{}, &popcorn::image::macro_entry::name);
+  return found
+       | std::views::transform([](popcorn::image::macro_entry const& entry) {
+           return macro_entry_info{
+               .name          = {entry.name},
+               .text          = {entry.text},
+               .function_like = entry.function_like,
+               .units         = entry.units,
+           };
+         })
+       | std::ranges::to<std::vector>();
+}
+
+auto macro_index_handle::count() const -> std::size_t
+{
+  return index_.entries.size();
+}
+
+auto read_macros(std::string const& path) -> macro_index_handle
+{
+  nb::gil_scoped_release unlocked;
+  return macro_index_handle{popcorn::image::read_macros(path)};
 }
 }

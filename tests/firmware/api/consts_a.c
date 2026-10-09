@@ -1,7 +1,12 @@
 #include "consts.h"
 
+#define CONSTS_MODE 1
+#define CONSTS_GONE 5
+#undef CONSTS_GONE
+
 extern uint32_t _estack;
 
+volatile repeat_t      repeat;
 volatile channel_t     channel;
 volatile link_t        link;
 volatile link_high_t   link_high;
@@ -29,6 +34,7 @@ volatile enum opaque opaque_a;
 
 [[noreturn]] void Reset_Handler(void)
 {
+  repeat      = CONSTS_LIMIT;
   channel     = CHANNEL_MAX;
   link        = LINK_SPI;
   link_high   = LINK_HIGH;

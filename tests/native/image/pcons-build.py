@@ -28,6 +28,9 @@ env = {
     "POPCORN_IMAGE_HEX": str(here / "data" / "image.hex"),
     "POPCORN_IMAGE_DATA": str(here / "data"),
     "POPCORN_IMAGE_SCRATCH": str(scratch),
+    "POPCORN_CONSTS_ELF": str(
+        project_dir / "tests" / "firmware" / "api" / "prebuilt" / "consts.elf"
+    ),
 }
 
 test_image = add_doctest(
@@ -39,6 +42,7 @@ test_image = add_doctest(
         here / "test_load_elf.cpp",
         here / "test_load_raw.cpp",
         here / "test_lookup.cpp",
+        here / "test_macros.cpp",
         here / "test_robustness.cpp",
     ],
     [core],

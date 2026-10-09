@@ -24,8 +24,11 @@ constexpr std::uint8_t  dw_ut_compile       = 0x01;
 constexpr std::uint8_t  dw_ut_partial       = 0x03;
 
 constexpr std::uint64_t dw_at_stmt_list        = 0x10;
+constexpr std::uint64_t dw_at_name             = 0x03;
 constexpr std::uint64_t dw_at_comp_dir         = 0x1b;
 constexpr std::uint64_t dw_at_str_offsets_base = 0x72;
+constexpr std::uint64_t dw_at_macros           = 0x79;
+constexpr std::uint64_t dw_at_gnu_macros       = 0x2119;
 constexpr std::uint64_t dw_form_implicit_const = 0x21;
 
 struct attr_spec
@@ -78,34 +81,58 @@ auto parse_abbrev_table(std::span<std::byte const> abbrev, std::uint64_t start)
   return table;
 }
 
-auto resolve_strx(
-    std::uint64_t                index,
-    std::optional<std::uint64_t> str_offsets_base,
-    std::span<std::byte const>   str_offsets,
-    std::span<std::byte const>   str,
-    bool                         is64) -> std::string
+struct deferred_string
 {
-  auto const base       = static_cast<std::size_t>(str_offsets_base.value_or(is64 ? 16 : 8));
-  auto const entry_size = static_cast<std::size_t>(is64 ? 8 : 4);
-  if(index > str_offsets.size() / entry_size)
-  {
-    throw image_error{".debug_str_offsets", 0, "strx index runs past the section"};
-  }
-  auto const pos = checked_offset(
-      base, static_cast<std::uint64_t>(index) * entry_size, str_offsets.size(),
-      ".debug_str_offsets");
-  dwarf_cursor cursor{str_offsets, ".debug_str_offsets"};
-  cursor.seek(pos);
-  auto const str_off = is64 ? cursor.u64() : cursor.u32();
-  return std::string{read_cstr_at(str, str_off, ".debug_str")};
-}
-}
+  std::string                  direct{};
+  std::optional<std::uint64_t> strx{};
 
-auto scan_compile_units(debug_sections const& sections) -> compile_unit_scan
+  void read(form_value const& value)
+  {
+    if(value.is_strx)
+    {
+      strx = value.u;
+    }
+    else if(value.is_string)
+    {
+      direct = std::string{value.s};
+      strx.reset();
+    }
+  }
+
+  [[nodiscard]] auto resolved(
+      std::optional<std::uint64_t> str_offsets_base,
+      debug_sections const&        sections,
+      bool                         is64) const -> std::string
+  {
+    if(strx)
+    {
+      return std::string{
+          resolve_strx(*strx, str_offsets_base, sections.str_offsets, sections.str, is64)};
+    }
+    return direct;
+  }
+};
+
+struct first_die
 {
-  compile_unit_scan                 scan;
-  auto&                             units = scan.units;
-  std::unordered_set<std::uint64_t> seen_line_offsets;
+  std::uint64_t                tag{};
+  std::optional<std::uint64_t> stmt_list{};
+  std::string                  comp_dir{};
+  deferred_string              name{};
+  std::optional<std::uint64_t> macros{};
+  std::optional<std::uint64_t> str_offsets_base{};
+  bool                         is64{};
+};
+
+struct first_dies
+{
+  std::vector<first_die> dies;
+  std::size_t            abbrev_tables_parsed{};
+};
+
+auto read_first_dies(debug_sections const& sections) -> first_dies
+{
+  first_dies                                                                        scan;
   std::unordered_map<std::uint64_t, std::unordered_map<std::uint64_t, abbrev_decl>> abbrev_cache;
 
   dwarf_cursor cursor{sections.info, ".debug_info"};
@@ -149,59 +176,97 @@ auto scan_compile_units(debug_sections const& sections) -> compile_unit_scan
     auto const  code  = cursor.uleb();
     auto const  it    = table.find(code);
 
-    compile_unit_ref ref;
-    bool             has_stmt_list = false;
+    first_die die{.is64 = is64};
     if(it != table.end()
        and (it->second.tag == dw_tag_compile_unit or it->second.tag == dw_tag_partial_unit))
     {
-      std::optional<std::uint64_t> str_offsets_base;
-      std::optional<std::uint64_t> comp_dir_strx;
-      std::string                  comp_dir_direct;
-      bool                         comp_dir_is_direct = false;
-
+      die.tag = it->second.tag;
+      deferred_string comp_dir;
       for(auto const& spec : it->second.attrs)
       {
         auto const value = read_form(
             cursor, spec.form, sections.str, sections.line_str, is64, spec.implicit_const);
-        if(spec.attr == dw_at_stmt_list)
+        switch(spec.attr)
         {
-          ref.line_offset = value.u;
-          has_stmt_list   = true;
-        }
-        else if(spec.attr == dw_at_comp_dir)
-        {
-          if(value.is_strx)
-          {
-            comp_dir_strx = value.u;
-          }
-          else if(value.is_string)
-          {
-            comp_dir_direct    = std::string{value.s};
-            comp_dir_is_direct = true;
-          }
-        }
-        else if(spec.attr == dw_at_str_offsets_base)
-        {
-          str_offsets_base = value.u;
+          case dw_at_stmt_list:
+            die.stmt_list = value.u;
+            break;
+          case dw_at_comp_dir:
+            comp_dir.read(value);
+            break;
+          case dw_at_name:
+            die.name.read(value);
+            break;
+          case dw_at_str_offsets_base:
+            die.str_offsets_base = value.u;
+            break;
+          case dw_at_macros:
+          case dw_at_gnu_macros:
+            die.macros = value.u;
+            break;
+          default:
+            break;
         }
       }
-
-      if(comp_dir_is_direct)
-      {
-        ref.comp_dir = std::move(comp_dir_direct);
-      }
-      else if(comp_dir_strx)
-      {
-        ref.comp_dir = resolve_strx(
-            *comp_dir_strx, str_offsets_base, sections.str_offsets, sections.str, is64);
-      }
+      die.comp_dir = comp_dir.resolved(die.str_offsets_base, sections, is64);
     }
-
-    if(has_stmt_list && seen_line_offsets.insert(ref.line_offset).second)
-    {
-      units.push_back(std::move(ref));
-    }
+    scan.dies.push_back(std::move(die));
     cursor.seek(next_cu);
+  }
+  return scan;
+}
+}
+
+auto resolve_strx(
+    std::uint64_t                index,
+    std::optional<std::uint64_t> str_offsets_base,
+    std::span<std::byte const>   str_offsets,
+    std::span<std::byte const>   str,
+    bool                         is64) -> std::string_view
+{
+  auto const base       = static_cast<std::size_t>(str_offsets_base.value_or(is64 ? 16 : 8));
+  auto const entry_size = static_cast<std::size_t>(is64 ? 8 : 4);
+  if(index > str_offsets.size() / entry_size)
+  {
+    throw image_error{".debug_str_offsets", 0, "strx index runs past the section"};
+  }
+  auto const pos = checked_offset(
+      base, static_cast<std::uint64_t>(index) * entry_size, str_offsets.size(),
+      ".debug_str_offsets");
+  dwarf_cursor cursor{str_offsets, ".debug_str_offsets"};
+  cursor.seek(pos);
+  auto const str_off = is64 ? cursor.u64() : cursor.u32();
+  return read_cstr_at(str, str_off, ".debug_str");
+}
+
+auto unit_heads(debug_sections const& sections) -> std::vector<unit_head>
+{
+  std::vector<unit_head> heads;
+  for(auto& die : read_first_dies(sections).dies)
+  {
+    if(die.tag == dw_tag_compile_unit)
+    {
+      heads.push_back(
+          {.name             = die.name.resolved(die.str_offsets_base, sections, die.is64),
+           .macros           = die.macros,
+           .str_offsets_base = die.str_offsets_base,
+           .is64             = die.is64});
+    }
+  }
+  return heads;
+}
+
+auto scan_compile_units(debug_sections const& sections) -> compile_unit_scan
+{
+  auto              dies = read_first_dies(sections);
+  compile_unit_scan scan{.units = {}, .abbrev_tables_parsed = dies.abbrev_tables_parsed};
+  std::unordered_set<std::uint64_t> seen_line_offsets;
+  for(auto& die : dies.dies)
+  {
+    if(die.stmt_list and seen_line_offsets.insert(*die.stmt_list).second)
+    {
+      scan.units.push_back({.line_offset = *die.stmt_list, .comp_dir = std::move(die.comp_dir)});
+    }
   }
   return scan;
 }

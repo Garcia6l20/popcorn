@@ -96,4 +96,5 @@ if fault is not None:
 
 _, consts = add_firmware("api", "consts", [here / "consts_a.c", here / "consts_b.c"])
 if consts is not None:
+    consts.private.compile_flags.append("-g3")
     consts.private.link_flags.append("-Wl,--undefined=channel")

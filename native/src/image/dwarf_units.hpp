@@ -2,8 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace popcorn::image::detail
@@ -21,6 +23,38 @@ struct compile_unit_ref
   std::uint64_t line_offset{};
   std::string   comp_dir{};
 };
+
+/** @brief The attributes of a compile unit's first DIE that its macros need. */
+struct unit_head
+{
+  /** @brief DW_AT_name, the primary source file. */
+  std::string name{};
+  /** @brief DW_AT_macros or DW_AT_GNU_macros, a .debug_macro offset. Empty when neither. */
+  std::optional<std::uint64_t> macros{};
+  /** @brief DW_AT_str_offsets_base, empty when absent. */
+  std::optional<std::uint64_t> str_offsets_base{};
+  /** @brief Whether the unit uses the 64-bit DWARF format. */
+  bool is64{};
+};
+
+/**
+ * @brief Every DW_TAG_compile_unit's head, in .debug_info order, units without macros included.
+ *        Partial units are left out.
+ * @throws image_error on a truncated or malformed .debug_info/.debug_abbrev.
+ */
+[[nodiscard]] auto unit_heads(debug_sections const& sections) -> std::vector<unit_head>;
+
+/**
+ * @brief The string of .debug_str that entry @p index of .debug_str_offsets names, from
+ *        @p str_offsets_base, or past the section header when absent.
+ * @throws image_error when the index or the string runs past its section.
+ */
+[[nodiscard]] auto resolve_strx(
+    std::uint64_t                index,
+    std::optional<std::uint64_t> str_offsets_base,
+    std::span<std::byte const>   str_offsets,
+    std::span<std::byte const>   str,
+    bool                         is64) -> std::string_view;
 
 /** @brief Compile units found by scan_compile_units(), and how many abbrev tables it parsed. */
 struct compile_unit_scan

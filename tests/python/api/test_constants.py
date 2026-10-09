@@ -7,6 +7,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn import _core
 from popcorn.image import load_debug_info
 from popcorn.image.dwarf import EnumType
 
@@ -174,3 +175,9 @@ def test_an_enum_parametrizes_at_collection_without_a_machine(
         """)
     result = pytester.runpytest_inprocess("-q")
     result.assert_outcomes(passed=3)
+
+
+def test_the_native_macro_reader_lists_both_units() -> None:
+    index = _core.read_macros(str(CONSTS_ELF))
+    assert [Path(unit).name for unit in index.units()] == ["consts_a.c", "consts_b.c"]
+    assert [entry.text for entry in index.lookup("CONSTS_MODE")] == ["1", "2"]
