@@ -760,6 +760,21 @@ public:
           reflex::py::nb::object               handler) -> hook;
 
   /**
+   * @brief Appends each return of a function to a log, on the machine thread without the GIL.
+   * @param at Function entry.
+   * @param args Kind of each argument captured at entry.
+   * @param returns Kind of the return value.
+   * @param log The log, shared with the caller.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[= py::doc{"Append each return of the function at an address to log, with no GIL."}]] auto
+      add_return_log(
+          address                              at,
+          std::vector<arch::value_kind> const& args,
+          arch::value_kind                     returns,
+          return_log const&                    log) -> hook;
+
+  /**
    * @brief Watches accesses to an address range.
    * @param at First address.
    * @param size Bytes, at least 1.

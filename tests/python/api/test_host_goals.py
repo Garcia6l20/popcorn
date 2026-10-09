@@ -1576,3 +1576,150 @@ def test_a_slow_sample_stalls_the_machine(machines: Machines) -> None:
 
     before, after = run_bounded(scenario(), HANG)
     assert before == after
+
+
+def test_record_returns_slices_by_mark_while_running(m33: popcorn.MachineDescription) -> None:
+    m = ticking(m33)
+    recording = m.record_returns("tick", lambda r: int(r.value or 0))
+
+    def marked() -> tuple[int, VirtualTime]:
+        return recording.mark(), m.time
+
+    async def scenario() -> tuple[int, VirtualTime, int, VirtualTime]:
+        async with m.running():
+            await m.elapse(ms(1))
+            mark, begun = await m.sample(marked)
+            await m.elapse(ms(5))
+            end, ended = await m.sample(marked)
+        return mark, begun, end, ended
+
+    mark, begun, end, ended = run_bounded(scenario(), HANG)
+    entries = recording.since(mark)[: end - mark]
+    span = ended - begun
+    assert span >= ms(5)
+    assert abs(len(entries) - span.ps / us(250).ps) <= 1
+    times = [e.at for e in entries]
+    assert times == sorted(set(times))
+    assert begun <= times[0] and times[-1] <= ended
+    first = entries[0].value
+    assert [e.value for e in entries] == list(range(first, first + len(entries)))
+
+
+def copied_until(
+    mark: Callable[[], int], values_since: Callable[[int], list[int]], returns: int
+) -> int:
+    """Copy the newest entries of a recording in a loop until it recorded `returns`, each copy
+    checked consecutive from its mark, and return the copies made."""
+    copies = 0
+    end = time.monotonic() + HANG
+    while (now := mark()) < returns and time.monotonic() < end:
+        start = max(0, now - 100)
+        values = values_since(start)
+        assert values == list(range(start + 1, start + 1 + len(values)))
+        copies += 1
+    return copies
+
+
+@pytest.mark.parametrize(
+    ("native", "returns"), [(True, 20_000), (False, 2_000)], ids=["native", "convert"]
+)
+def test_a_recording_read_in_a_loop_while_running_stays_consecutive(
+    m33: popcorn.MachineDescription, native: bool, returns: int
+) -> None:
+    m = ticking(m33)
+    if native:
+        raw = m.record_returns("tick")
+        mark = raw.mark
+
+        def values_since(start: int) -> list[int]:
+            return [int(e.value.value or 0) for e in raw.since(start)]
+
+    else:
+        converted = m.record_returns("tick", lambda r: int(r.value or 0))
+        mark = converted.mark
+
+        def values_since(start: int) -> list[int]:
+            return [e.value for e in converted.since(start)]
+
+    interval = sys.getswitchinterval()
+
+    async def scenario() -> int:
+        async with m.running():
+            return await asyncio.to_thread(copied_until, mark, values_since, returns)
+
+    sys.setswitchinterval(1e-6)
+    try:
+        copies = run_bounded(scenario(), 2 * HANG)
+    finally:
+        sys.setswitchinterval(interval)
+    assert copies > 10
+    assert mark() >= returns
+
+
+def test_a_recording_removed_while_running_keeps_its_entries(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = ticking(m33)
+    recording = m.record_returns("tick")
+
+    async def scenario() -> tuple[int, int]:
+        async with m.running():
+            await m.elapse(ms(2))
+            recording.remove()
+            removed = recording.mark()
+            await m.elapse(ms(2))
+            return removed, recording.mark()
+
+    removed, later = run_bounded(scenario(), HANG)
+    assert removed > 0
+    assert later == removed
+    assert len(recording.since()) == removed
+    assert m.remove_hooks() == 0
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native", "convert"])
+def test_a_recording_without_convert_takes_no_gil_on_the_machine_thread(
+    m33: popcorn.MachineDescription, native: bool
+) -> None:
+    m = ticking(m33)
+    recording = m.record_returns("tick") if native else m.record_returns("tick", tick_value)
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.elapse(ms(5))
+
+    before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+    run_bounded(scenario(), HANG)
+    taken = m._handle.gil_entries() - before  # pyright: ignore[reportPrivateUsage]
+    assert recording.mark() >= 20
+    assert (taken == 0) is native
+
+
+def tick_value(returned: popcorn.Returned) -> int:
+    """The `ticks` count `tick` returned."""
+    return int(returned.value or 0)
+
+
+def test_a_recording_removed_by_a_handler_while_running_stops(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = ticking(m33)
+    recording = m.record_returns("tick")
+
+    def second(returned: popcorn.Returned) -> None:
+        if returned.occurrence == 1:
+            recording.remove()
+
+    m.on_return("tick", second)
+
+    async def scenario() -> tuple[int, int]:
+        async with m.running():
+            await m.elapse(ms(2))
+            stopped = recording.mark()
+            await m.elapse(ms(2))
+            return stopped, recording.mark()
+
+    stopped, later = run_bounded(scenario(), HANG)
+    assert stopped in (1, 2)
+    assert later == stopped
+    assert m.remove_hooks() == 1

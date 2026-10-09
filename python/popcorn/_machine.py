@@ -56,9 +56,12 @@ from popcorn._hooks import (
     Initiator,
     Intercept,
     LogEntry,
+    NativeReturns,
     PostedBodies,
+    Recording,
     Relay,
     Return,
+    ReturnBuffer,
     Returned,
     Watch,
     WatchAction,
@@ -220,6 +223,7 @@ type ReturnHandler = Callable[[Returned], None]
 """An on_return handler."""
 type WatchHandler = Callable[[WatchHit], WatchAction | None]
 """A watch handler: STOP, RESUME, or None for RESUME."""
+
 
 DEFAULT_ARENA_BASE = 0x6F00_0000
 """Default first address of the call arena, an FMC address STM32 parts leave unmapped."""
@@ -1473,6 +1477,51 @@ class Machine:
             return lambda given: self._install_return_hook(fn, given)
         return self._install_return_hook(fn, handler)
 
+    @overload
+    def record_returns(
+        self, fn: int | str | Symbol, convert: None = None, *, capacity: int = 65536
+    ) -> Recording[Returned]: ...
+    @overload
+    def record_returns[T](
+        self, fn: int | str | Symbol, convert: Callable[[Returned], T], *, capacity: int = 65536
+    ) -> Recording[T]: ...
+    def record_returns(
+        self,
+        fn: int | str | Symbol,
+        convert: Callable[[Returned], object] | None = None,
+        *,
+        capacity: int = 65536,
+    ) -> Recording[Any]:
+        """Record each return of `fn` with its virtual time, `convert(returned)` as the value when
+        given, from now until `remove()` or `remove_hooks()`.
+
+            ptt = m.record_returns("set_ptt", lambda r: bool(r.args[0]))
+            mark = ptt.mark()
+            await m.elapse(ms(50))
+            assert [e.value for e in ptt.since(mark)] == [True, False]
+
+        Without `convert`, the machine's thread appends each return natively, with no GIL, and
+        `since` decodes the entries it copies. With `convert`, each return takes the GIL and
+        `convert` runs on the machine's thread, as an `on_return` handler does: keep it short, a
+        slow one stalls the machine, and while another thread runs Python the machine waits for
+        the GIL at every return, see `start`. An exception it raises ends the run as a handler's
+        does.
+
+        Raises:
+            ValueError: `capacity` is not above 0.
+            TypeError: `fn` has no DWARF signature.
+            MachineRunning: The machine is busy, outside its handlers.
+        """
+        if capacity <= 0:
+            raise ValueError(f"capacity must be above 0, not {capacity}")
+        if convert is None:
+            log = _core.ReturnLog(capacity)
+            native, intercept, decoded = self._add_return_log(fn, log)
+            return Recording(NativeReturns(log, decoded), intercept, native.retire)
+        buffer = ReturnBuffer(capacity, convert)
+        native, intercept = self._add_return_hook(fn, lambda r: buffer.add(self.time, r))
+        return Recording(buffer, intercept, native.retire)
+
     def watch(
         self,
         target: int | str | Symbol,
@@ -1621,6 +1670,39 @@ class Machine:
         return self._keep(Intercept(hooks, entry, log, self._callback_table, keys))
 
     def _install_return_hook(self, fn: int | str | Symbol, handler: ReturnHandler) -> Intercept:
+        return self._add_return_hook(fn, handler)[1]
+
+    def _add_return_hook(
+        self, fn: int | str | Symbol, handler: ReturnHandler
+    ) -> tuple[_core.Hook, Intercept]:
+        entry, kinds, returns, returned_of = self._return_decoder(fn)
+
+        def native(done: _core.ReturnedCall) -> None:
+            returned = returned_of(done.occurrence, done.args, done.value, done.instructions)
+            with self._as_handler():
+                handler(returned)
+
+        keys: list[int] = []
+        hook = self._handle.add_return_hook(entry, kinds, returns, self._relay(native, keys))
+        return hook, self._keep(Intercept([hook], entry, [], self._callback_table, keys))
+
+    def _add_return_log(
+        self, fn: int | str | Symbol, log: _core.ReturnLog
+    ) -> tuple[_core.Hook, Intercept, Callable[[_core.LoggedReturn], Returned]]:
+        entry, kinds, returns, returned_of = self._return_decoder(fn)
+        hook = self._handle.add_return_log(entry, kinds, returns, log)
+
+        def decoded(logged: _core.LoggedReturn) -> Returned:
+            return returned_of(logged.occurrence, logged.args, logged.value, logged.instructions)
+
+        return hook, self._keep(Intercept([hook], entry, [], self._callback_table, [])), decoded
+
+    def _return_decoder(self, fn: int | str | Symbol) -> tuple[
+        int,
+        list[_core.ValueKind],
+        _core.ValueKind,
+        Callable[[int, Sequence[int], int, int], Returned],
+    ]:
         self._require_stopped()
         entry = self.address_of(fn)
         signature = self._signature(fn, entry)
@@ -1628,22 +1710,18 @@ class Machine:
             raise TypeError(f"{signature.name} has no DWARF signature for on_return")
         params = signature.params or ()
 
-        def native(done: _core.ReturnedCall) -> None:
-            returned = Returned(
-                done.function,
-                done.occurrence,
-                tuple(decode(p, b) for p, b in zip(params, done.args, strict=True)),
-                None if signature.void else decode(signature.returns, done.value),
-                done.instructions,
+        def returned_of(
+            occurrence: int, args: Sequence[int], value: int, instructions: int
+        ) -> Returned:
+            return Returned(
+                entry,
+                occurrence,
+                tuple(decode(p, b) for p, b in zip(params, args, strict=True)),
+                None if signature.void else decode(signature.returns, value),
+                instructions,
             )
-            with self._as_handler():
-                handler(returned)
 
-        keys: list[int] = []
-        hook = self._handle.add_return_hook(
-            entry, [p.kind for p in params], signature.returns.kind, self._relay(native, keys)
-        )
-        return self._keep(Intercept([hook], entry, [], self._callback_table, keys))
+        return entry, [p.kind for p in params], signature.returns.kind, returned_of
 
     def snapshot(self) -> Snapshot:
         """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.

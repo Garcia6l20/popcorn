@@ -10,6 +10,8 @@
 #include <nanobind/stl/vector.h>
 
 #include <format>
+#include <iterator>
+#include <stdexcept>
 #include <utility>
 
 namespace popcorn::bind
@@ -52,6 +54,14 @@ void hook::remove()
     return;
   }
   detail::host_access(host_, [this] { handle_.reset(); });
+}
+
+void hook::retire() noexcept
+{
+  if(handle_.active())
+  {
+    detail::retire(host_, [owned = std::move(handle_)] mutable { owned = core::hook_handle{}; });
+  }
 }
 
 auto hook::active() const noexcept -> bool
@@ -132,6 +142,86 @@ auto machine_handle::add_return_hook(
     });
   });
   return hook{std::move(handle), slot_};
+}
+
+auto machine_handle::add_return_log(
+    address                              at,
+    std::vector<arch::value_kind> const& args,
+    arch::value_kind                     returns,
+    return_log const&                    log) -> hook
+{
+  auto handle = access([&](core::machine& target) {
+    return target.add_return_hook(
+        at, args, returns, [log, clock = &target.virtual_clock()](core::returned_call const& done) {
+          log.append({
+              .time_ps      = clock->time().ps,
+              .occurrence   = done.occurrence,
+              .args         = done.args,
+              .value        = done.value,
+              .instructions = done.instructions.value,
+          });
+        });
+  });
+  return hook{std::move(handle), slot_};
+}
+
+return_log::return_log(std::uint64_t capacity) : state_{std::make_shared<state>()}
+{
+  if(capacity == 0)
+  {
+    throw std::invalid_argument("a return log holds at least 1 entry");
+  }
+  state_->capacity = capacity;
+}
+
+auto return_log::mark() const -> std::uint64_t
+{
+  std::scoped_lock const lock{state_->mutex};
+  return state_->total;
+}
+
+auto return_log::since(std::uint64_t mark) const -> std::vector<logged_return>
+{
+  std::scoped_lock const lock{state_->mutex};
+  auto const             first = state_->total - state_->entries.size();
+  auto const             skip  = std::min<std::uint64_t>(
+      state_->entries.size(), mark > first ? mark - first : std::uint64_t{0});
+  return {
+      std::next(state_->entries.begin(), static_cast<std::ptrdiff_t>(skip)), state_->entries.end()};
+}
+
+auto return_log::dropped() const -> std::uint64_t
+{
+  std::scoped_lock const lock{state_->mutex};
+  return state_->dropped;
+}
+
+void return_log::clear()
+{
+  std::scoped_lock const lock{state_->mutex};
+  state_->entries.clear();
+}
+
+void return_log::stop()
+{
+  std::scoped_lock const lock{state_->mutex};
+  state_->stopped = true;
+}
+
+void return_log::append(logged_return entry) const
+{
+  std::scoped_lock const lock{state_->mutex};
+  if(state_->stopped)
+  {
+    return;
+  }
+  ++state_->total;
+  if(state_->entries.size() == state_->capacity)
+  {
+    state_->entries.pop_front();
+    ++state_->dropped;
+  }
+  state_->entries.push_back(std::move(entry));
 }
 
 auto machine_handle::add_watch(

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import collections
 import contextvars
 import enum
+import itertools
 import threading
 import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from popcorn import _core
+from popcorn._errors import MachineRunning
+from popcorn.units import VirtualTime
 
 
 class CallbackTable:
@@ -239,6 +244,187 @@ class Intercept:
             self._table.drop(key)
 
     def __enter__(self) -> Intercept:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.remove()
+
+
+@dataclass(frozen=True, slots=True)
+class Recorded[T]:
+    """One recorded return.
+
+    Attributes:
+        at: Virtual time of the return.
+        value: What the recording's `convert` made of the `Returned`, the `Returned` without one.
+    """
+
+    at: VirtualTime
+    value: T
+
+
+class RecordStore[T](Protocol):
+    """Where a `Recording` keeps its entries: marks count every entry ever appended."""
+
+    def mark(self) -> int:
+        """Entries appended so far."""
+        ...
+
+    def since(self, mark: int) -> list[Recorded[T]]:
+        """A copy of the entries appended at or after `mark` and still held, oldest first."""
+        ...
+
+    def dropped(self) -> int:
+        """Entries dropped because the store was full."""
+        ...
+
+    def clear(self) -> None:
+        """Drop every entry held, marks keep counting."""
+        ...
+
+    def stop(self) -> None:
+        """Refuse every later append."""
+        ...
+
+
+class ReturnBuffer[T]:
+    """The store of a recording with `convert`: appended on the machine's thread holding the
+    GIL, under a leaf lock that no machine call, `convert` or other lock runs under."""
+
+    __slots__ = ("_convert", "_dropped", "_entries", "_lock", "_stopped", "_total")
+
+    def __init__(self, capacity: int, convert: Callable[[Returned], T]) -> None:
+        """An empty buffer of `capacity` entries."""
+        self._convert = convert
+        self._entries: collections.deque[Recorded[T]] = collections.deque(maxlen=capacity)
+        self._lock = threading.Lock()
+        self._total = 0
+        self._dropped = 0
+        self._stopped = False
+
+    def add(self, at: VirtualTime, returned: Returned) -> None:
+        """Append `convert(returned)` at `at`, unless stopped before or during `convert`."""
+        with self._lock:
+            if self._stopped:
+                return
+        entry = Recorded(at, self._convert(returned))
+        with self._lock:
+            if self._stopped:
+                return
+            self._total += 1
+            if len(self._entries) == self._entries.maxlen:
+                self._dropped += 1
+            self._entries.append(entry)
+
+    def mark(self) -> int:
+        """Entries appended so far."""
+        with self._lock:
+            return self._total
+
+    def since(self, mark: int) -> list[Recorded[T]]:
+        """A copy of the entries appended at or after `mark` and still held, oldest first."""
+        with self._lock:
+            first = self._total - len(self._entries)
+            return list(itertools.islice(self._entries, max(0, mark - first), None))
+
+    def dropped(self) -> int:
+        """Entries dropped because the buffer was full."""
+        with self._lock:
+            return self._dropped
+
+    def clear(self) -> None:
+        """Drop every entry held, marks keep counting."""
+        with self._lock:
+            self._entries.clear()
+
+    def stop(self) -> None:
+        """Refuse every later append."""
+        with self._lock:
+            self._stopped = True
+
+
+class NativeReturns:
+    """The store of a recording without `convert`: a native log the machine's thread appends to
+    with no GIL, decoded to `Returned` when read."""
+
+    __slots__ = ("_decode", "_log")
+
+    def __init__(
+        self, log: _core.ReturnLog, decode: Callable[[_core.LoggedReturn], Returned]
+    ) -> None:
+        """Read `log`, decoding each entry with `decode`."""
+        self._log = log
+        self._decode = decode
+
+    def mark(self) -> int:
+        """Entries appended so far."""
+        return self._log.mark()
+
+    def since(self, mark: int) -> list[Recorded[Returned]]:
+        """A decoded copy of the entries appended at or after `mark` and still held."""
+        copied = self._log.since(max(0, mark))
+        return [Recorded(VirtualTime(e.time_ps), self._decode(e)) for e in copied]
+
+    def dropped(self) -> int:
+        """Entries dropped because the log was full."""
+        return self._log.dropped()
+
+    def clear(self) -> None:
+        """Drop every entry held, marks keep counting."""
+        self._log.clear()
+
+    def stop(self) -> None:
+        """Refuse every later append."""
+        self._log.stop()
+
+
+class Recording[T]:
+    """Returns of one function with their times, `m.record_returns`. The machine's thread
+    appends, any thread reads. Holds the newest `capacity` entries, older ones are dropped and
+    counted in `dropped`. Marks count every entry ever recorded, so a mark stays valid after
+    drops. `remove()` stops recording and keeps the entries.
+
+    A recording removed while its machine runs keeps the machine reachable until
+    `remove_hooks()` or the machine's collection: its handler stays in the machine's callback
+    table until the hook is gone."""
+
+    __slots__ = ("_hook", "_retire", "_store")
+
+    def __init__(self, store: RecordStore[T], hook: Intercept, retire: Callable[[], None]) -> None:
+        """Read `store`, filled by `hook`, which `retire` removes from any thread.
+        `Machine.record_returns` builds it."""
+        self._store = store
+        self._hook = hook
+        self._retire = retire
+
+    def mark(self) -> int:
+        """The number of entries recorded so far, a position for `since`."""
+        return self._store.mark()
+
+    def since(self, mark: int = 0) -> list[Recorded[T]]:
+        """A copy of the entries recorded at or after `mark` and still held, oldest first."""
+        return self._store.since(mark)
+
+    @property
+    def dropped(self) -> int:
+        """Entries dropped because the recording held `capacity` of them."""
+        return self._store.dropped()
+
+    def clear(self) -> None:
+        """Drop every entry held. Marks keep counting."""
+        self._store.clear()
+
+    def remove(self) -> None:
+        """Stop recording, from any thread, and keep the entries. No return is recorded once it
+        returns. While the machine runs, the hook itself goes at the next block boundary, from a
+        handler at the end of its slice."""
+        self._store.stop()
+        try:
+            self._hook.remove()
+        except MachineRunning:
+            self._retire()
+
+    def __enter__(self) -> Recording[T]:
         return self
 
     def __exit__(self, *_: object) -> None:

@@ -9,6 +9,9 @@ import weakref
 
 import popcorn
 import pytest
+from popcorn.units import VirtualTime, ms
+
+from .conftest import CALLEE_ELF
 
 
 def call(m: popcorn.Machine, fn: str, *args: int) -> popcorn.CallResult:
@@ -206,3 +209,104 @@ def test_a_handler_error_inside_a_call_restores_the_interrupted_context(
     with pytest.raises(LookupError, match="handler failed"):
         call(hooked, "note_then_fault")
     assert {name: int(getattr(hooked.reg, name)) for name in names} == before
+
+
+def test_record_returns_keeps_the_newest_entries_and_counts_marks(
+    hooked: popcorn.Machine,
+) -> None:
+    recording = hooked.record_returns("writer", lambda r: r.args[0], capacity=4)
+    for value in range(10):
+        call(hooked, "writer", value)
+    assert [e.value for e in recording.since(0)] == [6, 7, 8, 9]
+    assert recording.dropped == 6
+    assert recording.mark() == 10
+    assert [e.value for e in recording.since(8)] == [8, 9]
+    assert recording.since(10) == []
+
+
+def test_a_parked_call_records_one_return_at_its_time(hooked: popcorn.Machine) -> None:
+    recording = hooked.record_returns("triple")
+    times: list[VirtualTime] = []
+    hooked.on_return("triple", lambda _: times.append(hooked.time))
+    call(hooked, "triple", 1, 2, 3)
+    (entry,) = recording.since()
+    assert entry.value.args == (1, 2, 3)
+    assert entry.value.value == 123
+    assert [entry.at] == times
+
+
+def test_clear_drops_the_entries_and_marks_count_on(hooked: popcorn.Machine) -> None:
+    recording = hooked.record_returns("writer", lambda r: r.args[0])
+    call(hooked, "write_three")
+    old = recording.mark()
+    recording.clear()
+    assert recording.since(0) == []
+    assert recording.since(old) == []
+    call(hooked, "writer", 7)
+    assert recording.mark() == old + 1
+    assert [e.value for e in recording.since(old)] == [7]
+    assert recording.dropped == 0
+
+
+def test_a_removed_recording_keeps_its_entries(hooked: popcorn.Machine) -> None:
+    with hooked.record_returns("writer", lambda r: r.args[0]) as recording:
+        call(hooked, "write_three")
+    call(hooked, "write_three")
+    assert [e.value for e in recording.since()] == [1, 2, 3]
+    assert recording.mark() == 3
+    assert hooked.remove_hooks() == 0
+
+
+def test_remove_hooks_stops_a_recording(hooked: popcorn.Machine) -> None:
+    recording = hooked.record_returns("writer")
+    call(hooked, "write_three")
+    assert hooked.remove_hooks() == 1
+    call(hooked, "write_three")
+    assert recording.mark() == 3
+
+
+def failing_convert(returned: popcorn.Returned) -> int:
+    raise LookupError(f"convert failed at {returned.function:#x}")
+
+
+def test_a_convert_error_ends_the_run_as_a_handler_error(hooked: popcorn.Machine) -> None:
+    recording = hooked.record_returns("writer", failing_convert)
+    with pytest.raises(LookupError, match="convert failed"):
+        call(hooked, "write_three")
+    assert recording.mark() == 0
+    assert not hooked.busy
+
+
+def test_record_returns_refuses_an_empty_capacity(hooked: popcorn.Machine) -> None:
+    with pytest.raises(ValueError, match="capacity"):
+        hooked.record_returns("writer", capacity=0)
+    assert hooked.remove_hooks() == 0
+
+
+def test_recorded_times_match_the_time_an_on_return_handler_reads(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF))
+    m.reset()
+    start = m.snapshot()
+    recording = m.record_returns("tick", lambda r: r.value)
+    asyncio.run(m.run(for_=ms(3)))
+    m.remove_hooks()
+    m.restore(start)
+    seen: list[tuple[VirtualTime, int | float | None]] = []
+    m.on_return("tick", lambda r: seen.append((m.time, r.value)))
+    asyncio.run(m.run(for_=ms(3)))
+    assert len(seen) >= 10
+    assert [(e.at, e.value) for e in recording.since()] == seen
+
+
+def test_a_recording_removed_by_a_handler_stops_at_once(hooked: popcorn.Machine) -> None:
+    recordings: list[popcorn.Recording[popcorn.Returned]] = []
+    hooked.on_return("writer", lambda _: recordings[0].remove())
+    recording = hooked.record_returns("writer")
+    recordings.append(recording)
+    call(hooked, "write_three")
+    assert recording.mark() == 1
+    assert hooked.remove_hooks() == 1
+    call(hooked, "write_three")
+    assert recording.mark() == 1

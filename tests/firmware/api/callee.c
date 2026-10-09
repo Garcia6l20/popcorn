@@ -132,10 +132,16 @@ __attribute__((noipa)) uint32_t wait_flag(void)
   return ticks;
 }
 
-void SysTick_Handler(void)
+__attribute__((noipa)) uint32_t tick(void)
 {
   ticks = ticks + 1u;
-  flag  = 1u;
+  return ticks;
+}
+
+void SysTick_Handler(void)
+{
+  tick();
+  flag = 1u;
 }
 
 [[noreturn]] void Reset_Handler(void)

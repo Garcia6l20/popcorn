@@ -8,7 +8,9 @@
 #include <reflex/py.hpp>
 
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -38,6 +40,14 @@ public:
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Remove the hook."}]] void remove();
+
+  /**
+   * @brief Removes the hook through detail::retire(), from any thread and while the machine
+   *        runs: at once while parked, at the next boundary while running, at the end of the
+   *        slice from a handler. Its handler may still be called until then. Never throws.
+   */
+  [[= py::doc{"Remove the hook at once while parked, at the next boundary while running."}]] void
+      retire() noexcept;
 
   /** @brief Whether the hook is still installed. */
   [[= py::doc{"Whether the hook is still installed."}]] [[nodiscard]] auto active() const noexcept
@@ -100,5 +110,77 @@ struct[[= py::rename{"ReturnedCall"}]] returned_record
   [[= py::readonly]] std::uint64_t value{};
   /** @brief Instructions from entry to return. */
   [[= py::readonly]] std::uint64_t instructions{};
+};
+
+/** @brief A return a ReturnLog holds, with the virtual time it returned at. */
+struct[[= py::rename{"LoggedReturn"}]] logged_return
+{
+  /** @brief Virtual time of the return in picoseconds. */
+  [[= py::readonly]] std::uint64_t time_ps{};
+  /** @brief Calls of this hook before this one. */
+  [[= py::readonly]] std::uint64_t occurrence{};
+  /** @brief Argument bits captured at entry. */
+  [[= py::readonly]] std::vector<std::uint64_t> args{};
+  /** @brief Return value bits. */
+  [[= py::readonly]] std::uint64_t value{};
+  /** @brief Instructions from entry to return. */
+  [[= py::readonly]] std::uint64_t instructions{};
+};
+
+/**
+ * @brief Returns of one function, appended by a native return hook on the machine thread without
+ *        the GIL, read from any thread. Holds the newest entries up to its capacity. Its copies
+ *        share one log. Every member takes a leaf mutex: nothing else is locked and no Python
+ *        runs under it.
+ */
+class[[= py::rename{"ReturnLog"}]] return_log
+{
+public:
+  /**
+   * @brief An empty log.
+   * @param capacity Entries held, at least 1.
+   * @throws std::invalid_argument for a capacity of 0.
+   */
+  explicit return_log(std::uint64_t capacity);
+
+  /** @brief Entries appended since the log was made, dropped and cleared ones included. */
+  [[= py::doc{"Entries appended so far, a position for since()."}]] [[nodiscard]] auto mark() const
+      -> std::uint64_t;
+
+  /**
+   * @brief Copies the entries appended at or after a mark and still held, oldest first.
+   * @param mark A value of mark().
+   */
+  [[= py::doc{"Copy of the entries appended at or after mark and still held."}]] [[nodiscard]] auto
+      since(std::uint64_t mark) const -> std::vector<logged_return>;
+
+  /** @brief Entries dropped because the log held its capacity. */
+  [[= py::doc{"Entries dropped because the log was full."}]] [[nodiscard]] auto dropped() const
+      -> std::uint64_t;
+
+  /** @brief Drops every entry held, mark() keeps counting. */
+  [[= py::doc{"Drop every entry held, marks keep counting."}]] void clear();
+
+  /** @brief Refuses every later append. */
+  [[= py::doc{"Refuse every later append."}]] void stop();
+
+  /**
+   * @brief Appends an entry unless stopped, dropping the oldest when full.
+   * @param entry The return.
+   */
+  [[= py::skip]] void append(logged_return entry) const;
+
+private:
+  struct state
+  {
+    std::mutex                mutex;
+    std::deque<logged_return> entries;
+    std::uint64_t             capacity = 1;
+    std::uint64_t             total    = 0;
+    std::uint64_t             dropped  = 0;
+    bool                      stopped  = false;
+  };
+
+  std::shared_ptr<state> state_;
 };
 }
