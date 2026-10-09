@@ -12,6 +12,7 @@ parse failure becomes a single `DebugInfoError` naming the path, never a raw exc
 
 from __future__ import annotations
 
+import bisect
 import functools
 import posixpath
 import struct
@@ -34,6 +35,10 @@ type TypeId = int
 
 class DebugInfoError(ValueError):
     """An ELF could not be opened, has no DWARF info, or is too malformed to walk."""
+
+
+class NoDebugInfo(DebugInfoError):
+    """The ELF has no .debug_info compile unit."""
 
 
 class Encoding(Enum):
@@ -180,13 +185,32 @@ class Function:
 
 
 @dataclass(frozen=True, slots=True)
+class DwarfUnit:
+    """A compile unit: its DW_AT_name and the .debug_info offsets of its DIEs, `start` to
+    `end` exclusive."""
+
+    name: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
 class DebugInfo:
-    """Every type, module-scope variable and function read from one ELF's .debug_info."""
+    """Every type, module-scope variable and function read from one ELF's .debug_info, and its
+    compile units in offset order."""
 
     by_id: Mapping[TypeId, DebugType]
     types: Mapping[str, TypeId]
     variables: Mapping[str, Variable]
     functions: Mapping[str, Function]
+    units: tuple[DwarfUnit, ...] = ()
+
+    def unit(self, type_id: TypeId) -> DwarfUnit | None:
+        """The compile unit holding the DIE at offset `type_id`, None when none does."""
+        index = bisect.bisect_right(self.units, type_id, key=lambda unit: unit.start) - 1
+        if index < 0 or type_id >= self.units[index].end:
+            return None
+        return self.units[index]
 
     def type(self, name: str) -> DebugType:
         type_id = self.types.get(name)
@@ -477,20 +501,41 @@ def _build_array_type(die: DIE) -> ArrayType:
     return ArrayType(element=element, counts=tuple(counts))
 
 
+_SIGNED_ENCODINGS = frozenset((0x05, 0x06))
+_UNSIGNED_DATA_FORMS = frozenset(
+    ("DW_FORM_data1", "DW_FORM_data2", "DW_FORM_data4", "DW_FORM_data8")
+)
+
+
+def _signed_underlying(die: DIE) -> bool:
+    """Whether the enum's DW_AT_type strips to a signed base type. False without DW_AT_type."""
+    seen: set[int] = set()
+    while "DW_AT_type" in die.attributes and die.offset not in seen:
+        seen.add(die.offset)
+        die = die.get_DIE_from_attribute("DW_AT_type")
+        if die.tag == "DW_TAG_base_type":
+            return _attr_int(die, "DW_AT_encoding") in _SIGNED_ENCODINGS
+        if die.tag != "DW_TAG_typedef" and die.tag not in _QUALIFIERS:
+            return False
+    return False
+
+
 def _build_enum_type(die: DIE) -> EnumType:
+    size = _attr_int(die, "DW_AT_byte_size") or 0
+    signed = 0 < size <= 8 and _signed_underlying(die)
     values: dict[str, int] = {}
     for child in _safe_children(die):
         if child.tag != "DW_TAG_enumerator":
             continue
         name = _attr_str(child, "DW_AT_name")
         value = _attr_int(child, "DW_AT_const_value")
-        if name is not None and value is not None:
-            values[name] = value
-    return EnumType(
-        name=_attr_str(die, "DW_AT_name"),
-        size=_attr_int(die, "DW_AT_byte_size") or 0,
-        values=values,
-    )
+        if name is None or value is None:
+            continue
+        form = child.attributes["DW_AT_const_value"].form
+        if signed and form in _UNSIGNED_DATA_FORMS and value >= 1 << (8 * size - 1):
+            value -= 1 << (8 * size)
+        values[name] = value
+    return EnumType(name=_attr_str(die, "DW_AT_name"), size=size, values=values)
 
 
 def _build_typedef(die: DIE) -> Typedef:
@@ -767,13 +812,22 @@ def _load(path: Path) -> DebugInfo:
 
             cus = list(dwarf_info.iter_CUs())
             if not cus:
-                raise DebugInfoError(f"{path}: no .debug_info compile units")
+                raise NoDebugInfo(f"{path}: no .debug_info compile units")
+            units: list[DwarfUnit] = []
             for cu in cus:
                 _walk_cu(cu, by_id, types, type_is_decl, variable_candidates, functions)
+                name = _attr_str(cu.get_top_DIE(), "DW_AT_name") or ""
+                units.append(DwarfUnit(name, cu.cu_offset, cu.cu_offset + cu.size))
             _fill_addresses_from_symtab(elf, functions)
 
             variables = _resolve_variables(variable_candidates)
-            return DebugInfo(by_id=by_id, types=types, variables=variables, functions=functions)
+            return DebugInfo(
+                by_id=by_id,
+                types=types,
+                variables=variables,
+                functions=functions,
+                units=tuple(sorted(units, key=lambda unit: unit.start)),
+            )
     except DebugInfoError:
         raise
     except OSError as exc:

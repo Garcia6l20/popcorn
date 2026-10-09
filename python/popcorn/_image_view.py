@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from popcorn._constants import Constants
 from popcorn._dwarf_views import Var
 from popcorn._errors import ImageError, SymbolError
 
@@ -146,6 +147,19 @@ class ImageView:
         image, info, variable = find_variable(self._images, name)
         assert image.path is not None
         return Var(_ElfBytes(image.path), info, variable.type, variable.address, name)
+
+    @property
+    def constants(self) -> Constants:
+        """The enumerators and enum types the DWARF of the loaded ELF images declares, read
+        from their files at each lookup, never from the machine: parked or running, from any
+        thread. See `Constants`."""
+        return Constants(
+            _files=[
+                (f"images[{i}].path", image.path)
+                for i, image in enumerate(self._images)
+                if image.is_elf and image.path is not None
+            ]
+        )
 
     def __repr__(self) -> str:
         return f"ImageView(images={len(self._images)})"

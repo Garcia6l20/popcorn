@@ -16,6 +16,7 @@ from typing import Literal, Self, cast
 
 from popcorn import _core
 from popcorn._audio import AudioOptions, Block
+from popcorn._constants import Constants
 from popcorn._description import MachineDescription, load_description
 from popcorn._devices import check_address
 from popcorn._enums import StopReason
@@ -92,6 +93,12 @@ class Elf:
     def load(self) -> Image:
         """Read the file."""
         return Image.elf(self.path)
+
+    @property
+    def constants(self) -> Constants:
+        """The enumerators and enum types this file's DWARF declares, read from the file at
+        each lookup, never from a machine: usable at pytest collection."""
+        return Constants(_files=[("path", self.path)])
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,6 +474,19 @@ class Project:
             known = ", ".join(sorted(self.configs)) or "none"
             raise _plain_error(f"configs.{name}", f"a config of the project: {known}")
         return found
+
+    @property
+    def constants(self) -> Constants:
+        """The enumerators and enum types the DWARF of the ELF images declares, the last image
+        first, read from the files at each lookup. Reads no SVD, builds no description and
+        boots nothing: usable at pytest collection. Bin and HEX images declare nothing."""
+        return Constants(
+            _files=[
+                (f"images[{i}].path", image.path)
+                for i, image in enumerate(self.images)
+                if isinstance(image, Elf)
+            ]
+        )
 
     @property
     def digest(self) -> str:

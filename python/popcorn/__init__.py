@@ -6,6 +6,7 @@ Run control and access to a running machine are asyncio, accessors of a parked m
 from popcorn import arm, board, coverage, devices, model, report, trace, units
 from popcorn._arena import Arena, ArenaBlock
 from popcorn._call import F32, I64, CallResult, Stack, f32, i64
+from popcorn._constants import Constants
 from popcorn._core import version
 from popcorn._description import (
     MachineDescription,
@@ -86,6 +87,7 @@ __all__ = [
     "Condition",
     "Conditions",
     "ConfigError",
+    "Constants",
     "Device",
     "Elf",
     "EmulationError",
