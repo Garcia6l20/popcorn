@@ -42,9 +42,8 @@ async def stream_until_the_codec_stops(machine: Machine) -> None:
     assert stop.reason is StopReason.ADDRESS, stop
 
 
-async def sent(machine: Machine) -> list[AudioFrame]:
-    stream = machine.periph.SAI1.audio("A")
-    return await stream.read_frames(stream.available)
+def sent(machine: Machine) -> list[AudioFrame]:
+    return machine.periph.SAI1.audio("A").take_frames()
 
 
 def rows(machine: Machine, name: str) -> list[list[int]]:
@@ -59,7 +58,7 @@ async def test_the_codec_frames_block_a_from_its_power_write_to_the_end_of_the_f
     await stream_until_the_codec_stops(machine)
     stop = await machine.run(for_=ms(1))
     assert stop.reason is StopReason.TIME, stop
-    frames = await sent(machine)
+    frames = sent(machine)
     started = VirtualTime(codec(machine).started_ps)
     stopped = VirtualTime(codec(machine).stopped_ps)
     assert frames[0].at == started
@@ -79,7 +78,7 @@ async def test_channel_12_interleaves_the_two_rows_of_playback_into_frames(
     await stream_until_the_codec_stops(machine)
     left, right = rows(machine, "playback")
     assert (left[1], right[1]) == (512, 0x10000 - 512)
-    frames = await sent(machine)
+    frames = sent(machine)
     assert [frame.slots for frame in frames] == [
         (left[k % FRAMES], right[k % FRAMES]) for k in range(len(frames))
     ]
@@ -91,7 +90,7 @@ async def test_channel_13_splits_each_received_frame_into_the_two_rows_of_captur
 ) -> None:
     await machine.periph.SAI1.audio("B").write(RECEIVED)
     await stream_until_the_codec_stops(machine)
-    count = len(await sent(machine))
+    count = len(sent(machine))
     last = [max(k for k in range(count) if k % FRAMES == j) for j in range(FRAMES)]
     assert rows(machine, "capture") == [[0x1000 | k for k in last], [0x2000 | k for k in last]]
 
@@ -140,11 +139,11 @@ async def test_a_snapshot_mid_stream_replays_the_same_frames_and_codec_stop(
     assert stop.reason is StopReason.USER, stop
     stop = await machine.run(for_=ms(2))
     assert stop.reason is StopReason.TIME, stop
-    await sent(machine)
+    sent(machine)
     unserved = RECEIVED[len(RECEIVED) - receiver.queued :]
     saved = machine.snapshot()
     await stream_until_the_codec_stops(machine)
-    rest = await sent(machine)
+    rest = sent(machine)
     captured = rows(machine, "capture")
     stopped = codec(machine).stopped_ps
 
@@ -152,6 +151,6 @@ async def test_a_snapshot_mid_stream_replays_the_same_frames_and_codec_stop(
     assert codec(machine).stopped_ps == 0
     await receiver.write(unserved)
     await stream_until_the_codec_stops(machine)
-    assert await sent(machine) == rest
+    assert sent(machine) == rest
     assert rows(machine, "capture") == captured
     assert codec(machine).stopped_ps == stopped
