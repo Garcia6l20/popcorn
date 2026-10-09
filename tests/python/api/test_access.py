@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import gc
 import sys
 import threading
@@ -17,9 +19,19 @@ from popcorn._refs import Pending, Ref, VarRef
 from popcorn.arm import Reg
 from popcorn.board import AudioOptions, UsbHostOptions
 from popcorn.image.dwarf import BaseType, DebugInfo, Encoding, Member, StructType
-from popcorn.units import VirtualTime, ms, us
+from popcorn.units import VirtualTime, ms, s, us
 
-from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, VIEWS_ELF, Machines, run_bounded
+from .conftest import (
+    BOARD_ELF,
+    DRIVER_ELF,
+    M33_JSON,
+    REFUSED_INSIDE,
+    REQUESTS_INSIDE,
+    VIEWS_ELF,
+    Machines,
+    requests_inside,
+    run_bounded,
+)
 
 HANG = 10.0
 
@@ -892,3 +904,184 @@ def test_a_member_named_member_is_reached_through_member(views: popcorn.Machine)
     assert var.member("member").value == 5
     assert var.member("member").name == "s.member"
     assert asyncio.run(views.read(ref.member("member"), ref.x)) == (5, 6)
+
+
+def test_sample_parked_returns_at_once_and_keeps_the_machine_parked(machines: Machines) -> None:
+    m = machines()
+    asyncio.run(m.run(for_=ms(1)))
+    before = (m.time, m.instructions)
+
+    async def scenario() -> tuple[int, VirtualTime]:
+        sampled = m.sample(lambda: (int(m.var("alu_value").value), m.time))
+        assert sampled.done()
+        return await sampled
+
+    value, at = asyncio.run(scenario())
+    assert value == int(m.var("alu_value").value)
+    assert at == before[0]
+    assert (m.time, m.instructions) == before
+    assert not m.busy
+
+
+def test_sample_at_a_later_time_runs_when_a_run_reaches_it(machines: Machines) -> None:
+    m = machines()
+    start = m.time
+
+    async def scenario() -> VirtualTime:
+        sampled = m.sample(lambda: m.time, at=start + ms(1))
+        await m.run(for_=ms(2))
+        return await sampled
+
+    assert asyncio.run(scenario()) >= start + ms(1)
+
+
+def test_sample_at_a_past_time_of_a_parked_machine_is_a_value_error(machines: Machines) -> None:
+    m = machines()
+    asyncio.run(m.run(for_=ms(1)))
+    with pytest.raises(ValueError):
+        m.sample(lambda: None, at=VirtualTime(0))
+
+
+@pytest.mark.parametrize("name", REQUESTS_INSIDE)
+def test_a_request_inside_a_parked_sample_raises(machines: Machines, name: str) -> None:
+    m = machines()
+    request, error = requests_inside(m)[name]
+
+    async def scenario() -> object:
+        return await m.sample(request)
+
+    with pytest.raises(error, match=REFUSED_INSIDE[error]) as raised:
+        asyncio.run(scenario())
+    assert type(raised.value) is error
+    assert not m.busy
+
+
+def test_a_sample_error_reaches_the_await(machines: Machines) -> None:
+    m = machines()
+
+    def failing() -> None:
+        raise KeyError("sampled")
+
+    async def scenario() -> None:
+        await m.sample(failing)
+
+    with pytest.raises(KeyError, match="sampled"):
+        asyncio.run(scenario())
+    assert not m.busy
+
+
+SAMPLED: contextvars.ContextVar[str] = contextvars.ContextVar("SAMPLED", default="unset")
+
+
+def test_sample_runs_in_the_context_of_its_call(machines: Machines) -> None:
+    m = machines()
+
+    async def scenario() -> str:
+        SAMPLED.set("caller")
+        return await m.sample(SAMPLED.get)
+
+    assert asyncio.run(scenario()) == "caller"
+
+
+def test_a_context_variable_set_inside_a_sample_stays_in_its_copy(machines: Machines) -> None:
+    m = machines()
+
+    def setting() -> str:
+        SAMPLED.set("inside")
+        return SAMPLED.get()
+
+    async def scenario() -> tuple[str, str]:
+        SAMPLED.set("caller")
+        inside = await m.sample(setting)
+        return inside, SAMPLED.get()
+
+    assert asyncio.run(scenario()) == ("inside", "caller")
+
+
+def test_a_blocking_wait_inside_a_parked_sample_raises_machine_running(
+    machines: Machines,
+) -> None:
+    m = machines()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    later = handle.submit(lambda: None, (m.time + ms(1)).ps)
+
+    async def scenario() -> object:
+        return await m.sample(lambda: later.result(5.0))
+
+    try:
+        with pytest.raises(popcorn.MachineRunning, match="cannot wait for a machine request"):
+            run_bounded(scenario(), 5)
+        assert not m.busy
+    finally:
+        later.cancel()
+
+
+def stamped_and_dropped(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    """A parked machine left with a sample stamped past its time, and a weak reference to it."""
+    m = machines()
+    m.sample(lambda: m.time, at=m.time + ms(10))
+    return weakref.ref(m)
+
+
+def test_a_stamped_sample_left_queued_keeps_no_machine_alive(machines: Machines) -> None:
+    gone = stamped_and_dropped(machines)
+    gc.collect()
+    assert gone() is None
+
+
+def failed_in_a_parked_sample(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    """A parked machine whose sample raised, the error kept by the caller's frame."""
+    m = machines()
+
+    def failing() -> None:
+        raise KeyError(m.time)
+
+    async def scenario() -> None:
+        await m.sample(failing)
+
+    with pytest.raises(KeyError):
+        asyncio.run(scenario())
+    return weakref.ref(m)
+
+
+def test_a_failed_parked_sample_keeps_no_machine_alive(machines: Machines) -> None:
+    gone = failed_in_a_parked_sample(machines)
+    gc.collect()
+    assert gone() is None
+
+
+class Captured:
+    """What a sampled callable captures, to see whether a withdrawn sample keeps it."""
+
+
+def returning(held: Captured) -> Callable[[], Captured]:
+    """A callable returning `held`."""
+    return lambda: held
+
+
+def withdrawn_samples(m: popcorn.Machine, count: int) -> weakref.ref[Captured]:
+    """Post `count` samples stamped far ahead, each withdrawn by a timed-out await, and return
+    a weak reference to what the first one captured."""
+    first = Captured()
+    gone = weakref.ref(first)
+
+    async def scenario() -> None:
+        captured: Captured | None = first
+        for _ in range(count):
+            held = captured or Captured()
+            captured = None
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(m.sample(returning(held), at=m.time + s(10)), 0)
+
+    asyncio.run(scenario())
+    return gone
+
+
+def test_withdrawn_samples_keep_a_bounded_number_of_handlers(machines: Machines) -> None:
+    m = machines()
+    table = m._callback_table  # pyright: ignore[reportPrivateUsage]
+    handlers = len(table)
+    gone = withdrawn_samples(m, 1000)
+    gc.collect()
+    assert len(table) - handlers < 16
+    assert gone() is None

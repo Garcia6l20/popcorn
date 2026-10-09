@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn.units import ms
 
 ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
@@ -174,3 +175,30 @@ def board(u575: popcorn.MachineDescription) -> popcorn.Machine:
     stop = asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
     assert stop.reason is popcorn.StopReason.ADDRESS
     return m
+
+
+REFUSED_INSIDE: dict[type[Exception], str] = {
+    RuntimeError: "a handler accesses the machine directly, it cannot await a machine request",
+    popcorn.MachineBusy: "a run from inside a callback of this machine",
+}
+"""The message of each error a request from inside a sampled callable raises."""
+
+
+def requests_inside(
+    m: popcorn.Machine,
+) -> dict[str, tuple[Callable[[], object], type[Exception]]]:
+    """Requests a sampled callable must not make, each as a call, with the error it raises."""
+    return {
+        "read": (lambda: m.read(), RuntimeError),
+        "sample": (lambda: m.sample(lambda: None), RuntimeError),
+        "wait_until": (lambda: m.wait_until(lambda _: True).send(None), RuntimeError),
+        "run": (lambda: m.run(for_=ms(1)).send(None), popcorn.MachineBusy),
+        "step": (lambda: m.step().send(None), popcorn.MachineBusy),
+        "wait_for": (
+            lambda: m.wait_for(popcorn.Reached(0), for_=ms(1)).send(None),
+            popcorn.MachineBusy,
+        ),
+    }
+
+
+REQUESTS_INSIDE = ("read", "sample", "wait_until", "run", "step", "wait_for")

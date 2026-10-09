@@ -266,9 +266,13 @@ struct python_callable
   python_callable(python_callable const&) = delete;
   /** @brief Not copy-assignable. */
   auto operator=(python_callable const&) -> python_callable& = delete;
-  /** @brief Drops both references with the GIL held. */
+  /** @brief Drops both references with the GIL held, taking it only when one is left. */
   ~python_callable()
   {
+    if(not fn.is_valid() and not context.is_valid())
+    {
+      return;
+    }
     if(not gil_entry::available())
     {
       std::ignore = fn.release();
@@ -276,6 +280,13 @@ struct python_callable
       return;
     }
     gil_entry const held;
+    fn.reset();
+    context.reset();
+  }
+
+  /** @brief Drops both references, the GIL held by the caller, so the destructor takes no GIL. */
+  void drop() noexcept
+  {
     fn.reset();
     context.reset();
   }

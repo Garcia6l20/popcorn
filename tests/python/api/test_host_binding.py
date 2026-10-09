@@ -2575,6 +2575,8 @@ def test_a_body_error_leaving_running_wins_over_a_kept_log_error() -> None:
         logger.removeFilter(failing)
     assert any("filter failed" in note for note in caught.value.__notes__)
     assert not m.busy
+    m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+    del caught
 
 
 class InterruptOnce(logging.Handler):
@@ -2594,6 +2596,7 @@ class InterruptOnce(logging.Handler):
 
 def test_a_ctrl_c_in_a_log_handler_propagates_and_keeps_its_record() -> None:
     m = timer_started_in_a_free_run()
+    gc.collect()
     handler = InterruptOnce()
     logger = logging.getLogger("popcorn")
     logger.addHandler(handler)

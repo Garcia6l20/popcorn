@@ -56,6 +56,7 @@ from popcorn._hooks import (
     Initiator,
     Intercept,
     LogEntry,
+    PostedBodies,
     Relay,
     Return,
     Returned,
@@ -446,6 +447,7 @@ class Machine:
         "_parked_ends",
         "_peripherals",
         "_ports",
+        "_posted_bodies",
         "_refs",
         "_registers",
         "_ring",
@@ -606,6 +608,7 @@ class Machine:
         self._coverage = MachineCoverage(self._handle, lambda: self._images, self._require_stopped)
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
         self._callback_table = CallbackTable()
+        self._posted_bodies = PostedBodies(self._callback_table)
         self._handle.forward_logs(functools.partial(forward_log, description.part))
         watch_logs(self._handle.log_token(), self)
         self._irqs = Irqs(description)
@@ -956,6 +959,54 @@ class Machine:
             return Readout((), VirtualTime(time_ps))
 
         return self._submit_ops(ops, notes, at, convert)
+
+    def sample[T](self, fn: Callable[[], T], *, at: VirtualTime | None = None) -> Pending[T]:
+        """Call `fn` at one block boundary and return what it returns, posted at the call as one
+        command: at once on the calling thread while the machine is parked, on the machine's
+        thread while it runs, or at the first boundary at or after `at`.
+
+            speaking = await m.sample(lambda: decode_status(m))
+            at, level = await m.sample(lambda: (m.time, m.var("level").value))
+
+        `fn` is sync and runs as a handler does: holding the GIL, with the sync accessors
+        available, `m.var`, `m.mem`, `m.periph`, `m.time`, and no instruction executes while it
+        runs. Keep it read-mostly: a write it makes lands at that boundary, unordered against
+        other best-effort commands. It runs in a copy of the context current at the call.
+
+        A slow `fn` stalls the machine for as long as it runs, as a slow handler does, and while
+        another thread runs Python it waits for the GIL first, see `start`. Requests from inside
+        it, `m.read`, `m.write`, `m.sample`, `wait_for`, stream reads and writes, raise
+        RuntimeError, or MachineBusy for `run`, `step` or `wait_for`: it cannot await.
+
+        Returns:
+            What `fn` returned.
+
+        Raises:
+            RuntimeError: Called from a handler, a model or a posted body, of any machine.
+            ValueError: `at` before the time of a parked machine. From the await, `at` already
+                past when a running machine takes the command.
+            EmulationError: From the await, as for `read`.
+            BaseException: From the await, what `fn` raised. Only this command fails: a free run
+                continues.
+            Exception: A kept log filter or handler error, as for `read`. Nothing was posted.
+        """
+        self._refuse_on_host()
+        returned: list[T] = []
+
+        def body() -> None:
+            returned.append(fn())
+
+        bodies = self._posted_bodies
+        key = bodies.add(body)
+        try:
+            future = self._handle.submit(
+                Relay(self._callback_table, key), None if at is None else at.ps
+            )
+        except BaseException:
+            bodies.drop(key)
+            raise
+        bodies.posted(key, future)
+        return Pending(future, lambda _: returned[0])
 
     def _own(self, ref: object, index: int) -> None:
         if not isinstance(ref, Ref):

@@ -570,10 +570,20 @@ auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)
   {
     throw std::runtime_error("a handler accesses the machine directly");
   }
-  auto callable = detail::held(std::move(body));
+  auto callable = detail::held_bare(std::move(body));
   auto command  = [callable](core::machine&) {
     detail::gil_entry const gil;
-    std::ignore = detail::call_python([&] { return (*callable)(); });
+    try
+    {
+      std::ignore = (*callable)();
+    }
+    catch(nb::python_error const& raised)
+    {
+      detail::release_frames(raised.value());
+      callable->drop();
+      throw;
+    }
+    callable->drop();
   };
   std::optional<vtime> at;
   if(at_ps)

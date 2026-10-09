@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import functools
 import gc
 import inspect
@@ -31,7 +32,17 @@ from popcorn.trace import TraceKind
 from popcorn.trace import read as read_trace
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import CALLEE_ELF, DRIVER_ELF, M33_JSON, VIEWS_ELF, Machines, run_bounded
+from .conftest import (
+    CALLEE_ELF,
+    DRIVER_ELF,
+    M33_JSON,
+    REFUSED_INSIDE,
+    REQUESTS_INSIDE,
+    VIEWS_ELF,
+    Machines,
+    requests_inside,
+    run_bounded,
+)
 from .models_example import Timer
 from .projects import MODEL_ELF, MODEL_JSON
 
@@ -1412,3 +1423,156 @@ def test_a_wait_until_error_reaches_the_caller_in_a_free_run(machines: Machines)
     frames = [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
     assert "failing_after_100" in frames
     assert not m.busy
+
+
+def test_sample_reads_two_values_at_one_boundary(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> list[tuple[int, int, int]]:
+        async with m.running():
+            return [
+                await m.sample(
+                    lambda: (m.instructions, int(m.var("alu_value").value), m.instructions)
+                )
+                for _ in range(20)
+            ]
+
+    sampled = run_bounded(scenario(), HANG)
+    assert all(first == last for first, _, last in sampled)
+    assert sampled[-1][0] > sampled[0][0]
+
+
+@pytest.mark.parametrize("name", REQUESTS_INSIDE)
+def test_a_request_inside_a_running_sample_raises(machines: Machines, name: str) -> None:
+    m = machines(slice_instructions=1_000)
+    request, error = requests_inside(m)[name]
+
+    async def scenario() -> None:
+        async with m.running():
+            with pytest.raises(error, match=REFUSED_INSIDE[error]) as raised:
+                await m.sample(request)
+            assert type(raised.value) is error
+            await m.elapse(ms(1))
+
+    run_bounded(scenario(), HANG)
+    assert not m.busy
+
+
+def test_a_stamped_running_sample_runs_at_or_after_its_time(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    entered: list[VirtualTime] = []
+    release = threading.Event()
+
+    def hold() -> None:
+        entered.append(m.time)
+        release.wait(HANG)
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime]:
+        async with m.running():
+            held = m.sample(hold)
+            while not entered:
+                await asyncio.sleep(0.001)
+            start = entered[0]
+            stamped = m.sample(lambda: m.time, at=start + ms(1))
+            release.set()
+            await held
+            at = await stamped
+            with pytest.raises(ValueError):
+                await m.sample(lambda: m.time, at=VirtualTime(0))
+        return start, at
+
+    start, at = run_bounded(scenario(), HANG)
+    assert at >= start + ms(1)
+    assert not m.busy
+
+
+def sampled_past_the_halt(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    """A machine whose free run ended with a sample stamped past its halt still queued."""
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> None:
+        async with m.running():
+            start = await m.now()
+            m.sample(lambda: m.time, at=start + s(10))
+            await m.elapse(ms(1))
+
+    run_bounded(scenario(), HANG)
+    return weakref.ref(m)
+
+
+def test_a_sample_stamped_past_a_free_run_keeps_no_machine_alive(machines: Machines) -> None:
+    gone = sampled_past_the_halt(machines)
+    gc.collect()
+    assert gone() is None
+
+
+def test_a_running_sample_takes_the_gil_once_and_keeps_no_handler(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    table = m._callback_table  # pyright: ignore[reportPrivateUsage]
+    handlers = len(table)
+
+    async def scenario() -> int:
+        async with m.running():
+            await m.elapse(ms(1))
+            before = handle.gil_entries()
+            for _ in range(20):
+                await m.sample(lambda: m.time)
+            return handle.gil_entries() - before
+
+    assert run_bounded(scenario(), HANG) == 20
+    assert len(table) == handlers
+
+
+def test_a_running_sample_error_reaches_the_await_and_the_machine_runs_on(
+    machines: Machines,
+) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def failing() -> None:
+        raise KeyError("sampled")
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime]:
+        async with m.running():
+            before = await m.now()
+            with pytest.raises(KeyError, match="sampled"):
+                await m.sample(failing)
+            await m.elapse(ms(1))
+            return before, await m.now()
+
+    before, after = run_bounded(scenario(), HANG)
+    assert after >= before + ms(1)
+    assert not m.busy
+
+
+RUNNING_SAMPLED: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "RUNNING_SAMPLED", default="unset"
+)
+
+
+def test_a_running_sample_runs_in_the_context_of_its_call(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> str:
+        async with m.running():
+            RUNNING_SAMPLED.set("caller")
+            return await m.sample(RUNNING_SAMPLED.get)
+
+    assert run_bounded(scenario(), HANG) == "caller"
+
+
+def test_a_slow_sample_stalls_the_machine(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    def slow() -> tuple[int, int]:
+        before = m.instructions
+        time.sleep(0.05)
+        return before, m.instructions
+
+    async def scenario() -> tuple[int, int]:
+        async with m.running():
+            return await m.sample(slow)
+
+    before, after = run_bounded(scenario(), HANG)
+    assert before == after

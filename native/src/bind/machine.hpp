@@ -448,8 +448,11 @@ public:
   /**
    * @brief Runs @p body as one command on the machine: at once on this thread while parked, at
    *        the next block boundary on the machine thread while running.
-   * @param body Called with no argument, as a callback of the machine, in a copy of the
-   *        caller's context.
+   * @param body Called with no argument, as a callback of the machine, in the context of the
+   *        thread that runs it: a body that needs the caller's context enters it itself, as a
+   *        `Relay` of the machine's callback table does, where the cycle collector sees it. An
+   *        exception it raises is detached from its frames on every thread, parked too: the
+   *        future keeps it natively, out of the collector's sight.
    * @param at_ps Virtual time since reset the command waits for, run at the first block
    *        boundary at or after it, None for the next boundary.
    * @return Resolves to the virtual time it ran at in picoseconds, or fails with what @p body
