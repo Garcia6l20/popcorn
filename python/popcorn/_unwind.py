@@ -28,6 +28,10 @@ class Via(Enum):
     """The pc stacked by an exception entry."""
     SCAN = "scan"
     """A word of the stack that looks like a return address after a call."""
+    LR = "lr"
+    """The live or stacked lr of a pc outside every function, such as a call through NULL.
+    Exact as a leaf frame's lr is: after a jump rather than a call, lr is the last call's return
+    and the line is that call's."""
 
     @property
     def exact(self) -> bool:
@@ -256,6 +260,11 @@ def _caller(address: int) -> int:
     return (address & ~1) - 2
 
 
+def _returns_into(functions: Functions, address: int) -> bool:
+    """Whether `address` is a Thumb return address whose call lies in a function."""
+    return bool(address & 1) and functions.at(_caller(address)) is not None
+
+
 def scan(read32: Read32, functions: Functions, sp: int, limit: int = SCAN_BYTES) -> list[RawFrame]:
     """Words of the stack from `sp` that are Thumb return addresses after a call inside a
     function. The call, not the return address, lies in the function: a call to a noreturn
@@ -283,7 +292,9 @@ def unwind(
 
     Follows an epilogue forward when pc stands on one, else decodes the prologue up to pc, and
     goes through exception frames recognized by an EXC_RETURN return value, until a return
-    address leaves every function. When an epilogue or prologue cannot be followed, a return
+    address leaves every function. A pc outside every function, a call through NULL or a bad
+    pointer, goes on from lr when lr still holds the return address: innermost, or right after
+    an exception frame. When an epilogue or prologue cannot be followed, a return
     address does not follow a call, or an exception frame is on the Non-secure stack or has
     additional state context, the rest is a stack scan, marked SCAN.
     """
@@ -294,10 +305,40 @@ def unwind(
     def rest() -> list[RawFrame]:
         return frames + scan(read32, functions, sp)[: MAX_FRAMES - len(frames)]
 
+    def exception_frame(ret: int) -> list[RawFrame] | bool:
+        nonlocal sp, pc, lr, lr_valid, returned
+        if _foreign_frame(ret):
+            return rest()
+        base = psp if ret & 0b100 else sp
+        stacked = [read32(base + 4 * i) for i in range(8)]
+        if any(word is None for word in stacked):
+            return False
+        words = [w or 0 for w in stacked]
+        frame = _BASIC_FRAME if ret & 0b1_0000 else _EXTENDED_FRAME
+        sp = base + frame + (4 if words[7] >> 9 & 1 else 0)
+        pc, lr, lr_valid, returned = words[6] & ~1, words[5], True, False
+        frames.append(RawFrame(pc, Via.EXCEPTION))
+        return True
+
     while len(frames) < MAX_FRAMES:
         function = functions.at(_caller(pc + 1) if returned else pc)
         if function is None:
-            break
+            if not lr_valid:
+                break
+            if _is_exc_return(lr):
+                taken = exception_frame(lr)
+                if isinstance(taken, list):
+                    return taken
+                if not taken:
+                    break
+                continue
+            if not _returns_into(functions, lr):
+                break
+            if not follows_call(read32, lr):
+                return rest()
+            pc, lr_valid, returned = lr & ~1, False, True
+            frames.append(RawFrame(pc, Via.LR))
+            continue
         ending = epilogue(read32, pc)
         if ending is None:
             return rest()
@@ -319,19 +360,13 @@ def unwind(
             return rest()
         sp += size
         if _is_exc_return(ret):
-            if _foreign_frame(ret):
-                return rest()
-            base = psp if ret & 0b100 else sp
-            stacked = [read32(base + 4 * i) for i in range(8)]
-            if any(word is None for word in stacked):
+            taken = exception_frame(ret)
+            if isinstance(taken, list):
+                return taken
+            if not taken:
                 break
-            words = [w or 0 for w in stacked]
-            frame = _BASIC_FRAME if ret & 0b1_0000 else _EXTENDED_FRAME
-            sp = base + frame + (4 if words[7] >> 9 & 1 else 0)
-            pc, lr, lr_valid, returned = words[6] & ~1, words[5], True, False
-            frames.append(RawFrame(pc, Via.EXCEPTION))
             continue
-        if not ret & 1 or functions.at(_caller(ret)) is None:
+        if not _returns_into(functions, ret):
             break
         if not follows_call(read32, ret):
             return rest()
@@ -343,7 +378,7 @@ def unwind(
 def source_address(read32: Read32, frame: RawFrame) -> int:
     """The address whose source line a frame shows: the call for a return address, the SVC
     for an exception frame that returns after one, the frame's pc otherwise."""
-    if frame.via in (Via.PROLOGUE, Via.SCAN):
+    if frame.via in (Via.PROLOGUE, Via.SCAN, Via.LR):
         return frame.pc - 2
     if frame.via is Via.EXCEPTION:
         before = _read16(read32, frame.pc - 2)

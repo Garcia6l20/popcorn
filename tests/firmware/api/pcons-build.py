@@ -89,7 +89,16 @@ _, board = add_firmware("api", "board", [here / "board.c"])
 if board is not None:
     board.private.link_flags.extend([SECTION_BOUNDS, "-Wl,--undefined=ready"])
 
-FAULTING = ("level1", "level2", "level3", "in_handler", "ready", "worker", "vt_nested")
+FAULTING = (
+    "level1",
+    "level2",
+    "level3",
+    "in_handler",
+    "ready",
+    "worker",
+    "vt_nested",
+    "null_call",
+)
 _, fault = add_firmware("api", "fault", [here / "fault.c"])
 if fault is not None:
     fault.private.link_flags.extend(

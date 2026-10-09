@@ -528,3 +528,91 @@ def test_registers_a_stop_lacks_come_from_the_machine() -> None:
     report = stop_report(m, dataclasses.replace(result.stop, registers=partial), ring=False)
     assert report.registers["pc"] == result.stop.pc
     assert report.registers["r12"] == m.reg.r12
+
+
+def test_a_call_through_null_names_the_caller() -> None:
+    m = popcorn.Machine(M33_JSON, image=popcorn.Image.elf(FAULT_ELF))
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    result = asyncio.run(m.call("null_call"))
+    assert result.stop.reason is popcorn.StopReason.FAULT
+    assert result.stop.pc == 0
+    report = stop_report(m, result.stop, ring=False)
+    assert [(f.location.pc, f.via) for f in report.frames][:1] == [(0, Via.PC)]
+    assert [f.location.symbol for f in report.frames][1:2] == ["null_call"]
+    assert report.frames[1].via is Via.LR and report.frames[1].exact
+    lines = (FAULT_ELF.parent.parent / "fault.c").read_text().splitlines()
+    assert "hook();" in lines[report.frames[1].location.line - 1]
+
+
+def calling_memory() -> tuple[Memory, Functions]:
+    """`caller` pushes lr, calls with a BL and returns with a pop. `outer` calls `caller`."""
+    memory = Memory({0x2000: 0xB500, 0x2002: 0xF7FF, 0x2004: 0xFFFE, 0x2006: 0xBD00})
+    memory.put16(0x3000, 0xF7FF)
+    memory.put16(0x3002, 0xFFFE)
+    functions = Functions([("caller", 0x2001, 0x10), ("outer", 0x3001, 0x10)])
+    return memory, functions
+
+
+def test_a_pc_outside_every_function_unwinds_from_lr_through_the_caller() -> None:
+    memory, functions = calling_memory()
+    sp = 0x2000_0000
+    memory.put32(sp, 0x3005)
+    frames = unwind(memory, functions, 0, 0x2007, sp, 0)
+    assert [(f.pc, f.via) for f in frames][:3] == [
+        (0, Via.PC),
+        (0x2006, Via.LR),
+        (0x3004, Via.PROLOGUE),
+    ]
+    assert source_address(memory, frames[1]) == 0x2004
+
+
+@pytest.mark.parametrize("lr", [0x2006, 0x9007], ids=["no-thumb-bit", "call-in-no-function"])
+def test_a_pc_outside_every_function_with_no_return_lr_is_one_frame(lr: int) -> None:
+    memory, functions = calling_memory()
+    assert [(f.pc, f.via) for f in unwind(memory, functions, 0, lr, 0x2000_0000, 0)] == [
+        (0, Via.PC)
+    ]
+
+
+def test_a_pc_outside_every_function_with_lr_after_no_call_is_scanned() -> None:
+    memory, functions = calling_memory()
+    memory.put16(0x200A, 0xBF00)
+    memory.put16(0x200C, 0xBF00)
+    sp = 0x2000_0000
+    memory.put32(sp, 0x3005)
+    frames = unwind(memory, functions, 0, 0x200F, sp, 0)
+    assert [(f.pc, f.via) for f in frames] == [(0, Via.PC), (0x3004, Via.SCAN)]
+
+
+def test_an_exception_frame_with_a_null_pc_goes_on_from_its_stacked_lr() -> None:
+    memory, functions = calling_memory()
+    memory.put16(0x1000, 0xB500)
+    functions = Functions(
+        [("handler", 0x1001, 0x10), ("caller", 0x2001, 0x10), ("outer", 0x3001, 0x10)]
+    )
+    msp = 0x2000_1000
+    memory.put32(msp, 0xFFFF_FFF9)
+    frame = msp + 4
+    for index, word in enumerate([0, 0, 0, 0, 0, 0x2007, 0, 0x0100_0000]):
+        memory.put32(frame + 4 * index, word)
+    memory.put32(frame + 32, 0x3005)
+    frames = unwind(memory, functions, 0x1002, 0xFFFF_FFF9, msp, 0)
+    assert [(f.pc, f.via) for f in frames][:4] == [
+        (0x1002, Via.PC),
+        (0, Via.EXCEPTION),
+        (0x2006, Via.LR),
+        (0x3004, Via.PROLOGUE),
+    ]
+
+
+def test_a_null_pc_with_exc_return_in_lr_walks_the_exception_frame() -> None:
+    memory, functions = calling_memory()
+    sp = 0x2000_0000
+    for index, word in enumerate([0, 0, 0, 0, 0, 0, 0x2006, 0x0100_0000]):
+        memory.put32(sp + 4 * index, word)
+    frames = unwind(memory, functions, 0, 0xFFFF_FFF9, sp, 0)
+    assert [(f.pc, f.via) for f in frames][:2] == [(0, Via.PC), (0x2006, Via.EXCEPTION)]
+    foreign = unwind(memory, functions, 0, 0xFFFF_FFB9, sp, 0)
+    assert [f.via for f in foreign][:1] == [Via.PC]
+    assert all(f.via is Via.SCAN for f in foreign[1:])

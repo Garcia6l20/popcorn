@@ -95,3 +95,11 @@ __attribute__((section(".isr_vector"), used)) const void* const vectors[17] = {
     [1]  = (const void*)Reset_Handler,
     [16] = (const void*)IRQ0_Handler,
 };
+
+void (*volatile hook)(void);
+
+__attribute__((noipa)) void null_call(void)
+{
+  hook();
+  depth = 1u;
+}
