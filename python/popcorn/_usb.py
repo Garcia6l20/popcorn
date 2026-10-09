@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, cast
 
 from popcorn import _core
 from popcorn._errors import ConfigError, EmulationError, ModelError, UsbError, UsbStall, UsbTimeout
-from popcorn._streams import Poster, PtyBridge, Waiter, cdc_key, written
+from popcorn._streams import Poster, PtyBridge, Waiter, cdc_key, check_wait, written
 from popcorn.units import VirtualDuration, VirtualTime, ms, s
 
 if TYPE_CHECKING:
@@ -395,31 +395,57 @@ class CdcStream:
         data = bytes(data)
         return written(self._post(link.command_send(data), at))
 
-    async def read(self, n: int, *, for_: VirtualDuration | None = None) -> bytes:
+    async def read(
+        self,
+        n: int,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> bytes:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them, as
         `UartStream.read`.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Returns:
-            Up to `n` bytes, fewer when `for_` elapsed or the core went idle first.
+            Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
+                idle first.
 
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
             ValueError: `n` is negative.
             RuntimeError: The function is bridged to a pty, which takes what the device sends:
                 `Periph(connect="pty")` or `m.board.pty(name)`.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         self._check_read(n)
         if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_)
+            await self._wait(self._link.predicate_available(n), for_, deadline)
         return self._link.drain(n)
 
-    async def read_packets(self, n: int, *, for_: VirtualDuration | None = None) -> list[CdcPacket]:
+    async def read_packets(
+        self,
+        n: int,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> list[CdcPacket]:
         """As `read`, `n` packets with their times. The rest of a packet a `read` split counts
-        as one."""
+        as one.
+
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
+        Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
+        """
+        check_wait(for_, deadline)
         self._check_read(n)
         if self._link.packets() < n:
-            await self._wait(self._link.predicate_packets(n), for_)
+            await self._wait(self._link.predicate_packets(n), for_, deadline)
         return _cdc_packets(self._link.drain_packets(n))
 
     def take(self) -> bytes:
@@ -447,21 +473,32 @@ class CdcStream:
         link = self._link
         return _cdc_packets(link.drain_packets(link.packets()))
 
-    async def wait_ready(self, *, for_: VirtualDuration | None = None) -> None:
+    async def wait_ready(
+        self,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> None:
         """Run the machine until `ready`, or `for_` elapsed.
 
         `UsbHost.wait_configured` returns before the driver's requests end, 3 ms before on the
         TinyUSB 0.21.0 example. Inside `running()`, this awaits the background run instead of
         driving the machine.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Raises:
-            UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
-                went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
+            UsbTimeout: The function is not ready when the run ends: `for_` elapsed,
+                `deadline` passed or the core went idle. Its status is `unbound` while no
+                driver is bound, else `not_ready`.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         if not self.ready:
-            await self._wait(self._link.predicate_ready(), for_)
+            await self._wait(self._link.predicate_ready(), for_, deadline)
         if not self.ready:
             status = "not_ready" if self.bound else "unbound"
             raise UsbTimeout(
@@ -553,7 +590,7 @@ class CdcStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(transfer), None)
+                done_at = await self._wait(self._link.predicate_ended(transfer), None, None)
                 ended()
         finally:
             self._pending.discard(transfer)
@@ -684,36 +721,59 @@ class HidStream:
         or the last `Machine.restore`."""
         return self._link.dropped()
 
-    async def wait_ready(self, *, for_: VirtualDuration | None = None) -> None:
+    async def wait_ready(
+        self,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> None:
         """Run the machine until `ready`, or `for_` elapsed, as `CdcStream.wait_ready`.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Raises:
-            UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
-                went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
+            UsbTimeout: The function is not ready when the run ends: `for_` elapsed,
+                `deadline` passed or the core went idle. Its status is `unbound` while no
+                driver is bound, else `not_ready`.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         if not self.ready:
-            await self._wait(self._link.predicate_ready(), for_)
+            await self._wait(self._link.predicate_ready(), for_, deadline)
         if not self.ready:
             status = "not_ready" if self.bound else "unbound"
             raise UsbTimeout(f"{self._where}: not ready, {status}", status=status)
 
-    async def read_reports(self, n: int, *, for_: VirtualDuration | None = None) -> list[HidReport]:
+    async def read_reports(
+        self,
+        n: int,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> list[HidReport]:
         """Run the machine until `n` input reports arrived, or `for_` elapsed, and take them.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Returns:
-            Up to `n` reports, oldest first, fewer when `for_` elapsed or the core went idle.
+            Up to `n` reports, oldest first, fewer when `for_` elapsed, `deadline` passed or
+                the core went idle.
 
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
             ValueError: `n` is negative.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} reports")
         if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_)
+            await self._wait(self._link.predicate_available(n), for_, deadline)
         return _hid_reports(self._link.drain(n))
 
     def take_reports(self) -> list[HidReport]:
@@ -785,7 +845,7 @@ class HidStream:
 
         try:
             if not ended():
-                await self._wait(self._link.predicate_written(write), None)
+                await self._wait(self._link.predicate_written(write), None, None)
                 ended()
         except BaseException:
             if not results:
@@ -888,7 +948,7 @@ class HidStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(transfer), None)
+                done_at = await self._wait(self._link.predicate_ended(transfer), None, None)
                 ended()
         finally:
             self._pending.discard(transfer)
@@ -1090,7 +1150,7 @@ class UacStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(operation), None)
+                done_at = await self._wait(self._link.predicate_ended(operation), None, None)
                 ended()
         finally:
             self._pending.discard(operation)
@@ -1192,21 +1252,31 @@ class UacSpeaker(UacStream):
         link = self._link
         return written(self._post(link.command_write(values), at))
 
-    async def drain(self, *, for_: VirtualDuration | None = None) -> None:
+    async def drain(
+        self,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> None:
         """Run the machine until every sample written went out in an isochronous packet, or
         `for_` elapsed, as `UartStream.read` runs it. `sent_at` is then the time of the packet
         that carried the last sample. The host sends the first packet of a stream two frames
         after `start` opens the pipe, so a drain right after `start` waits for it.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
             UsbError: Samples are queued and the speaker is not running, or while the call
                 waited a `stop` dropped samples, or a `stop`, an unplug or a bus reset dropped
                 the packet not sent yet. Status `stopped`.
             UsbTimeout: Samples are still queued or in a packet not sent yet when the run ends:
-                `for_` elapsed or the core went idle. Status `queued`.
+                `for_` elapsed, `deadline` passed or the core went idle. Status `queued`.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         flushes = self._link.flushes()
         if self._link.queued() and not self.running:
             raise UsbError(
@@ -1214,7 +1284,7 @@ class UacSpeaker(UacStream):
                 status="stopped",
             )
         if self._unsent():
-            await self._wait(self._link.predicate_drained(flushes), for_)
+            await self._wait(self._link.predicate_drained(flushes), for_, deadline)
         if self._link.flushes() != flushes:
             raise UsbError(f"{self._where}: stopped while draining", status="stopped")
         if self._unsent():
@@ -1260,22 +1330,34 @@ class UacMic(UacStream):
         thread, the machine running or not. The next frame read is newer than the call."""
         self._link.clear()
 
-    async def read_frames(self, n: int, *, for_: VirtualDuration | None = None) -> list[UacFrame]:
+    async def read_frames(
+        self,
+        n: int,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> list[UacFrame]:
         """Run the machine until `n` frames arrived, or `for_` elapsed, and take them, as
         `AudioStream.read_frames`.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Returns:
-            Up to `n` frames, oldest first, fewer when `for_` elapsed or the core went idle.
+            Up to `n` frames, oldest first, fewer when `for_` elapsed, `deadline` passed or
+                the core went idle.
 
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
             ValueError: `n` is negative.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_)
+            await self._wait(self._link.predicate_available(n), for_, deadline)
         return _uac_frames(self._link.drain(n))
 
     def take_frames(self) -> list[UacFrame]:
@@ -1379,17 +1461,28 @@ class UacFunction:
             for record in self._link.units()
         )
 
-    async def wait_ready(self, *, for_: VirtualDuration | None = None) -> None:
+    async def wait_ready(
+        self,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> None:
         """Run the machine until `ready`, or `for_` elapsed, as `CdcStream.wait_ready`.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Raises:
-            UsbTimeout: The function is not ready when the run ends: `for_` elapsed or the core
-                went idle. Its status is `unbound` while no driver is bound, else `not_ready`.
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
+            UsbTimeout: The function is not ready when the run ends: `for_` elapsed,
+                `deadline` passed or the core went idle. Its status is `unbound` while no
+                driver is bound, else `not_ready`.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         if not self.ready:
-            await self._wait(self._link.predicate_ready(), for_)
+            await self._wait(self._link.predicate_ready(), for_, deadline)
         if not self.ready:
             status = "not_ready" if self.bound else "unbound"
             raise UsbTimeout(f"{self._where}: not ready, {status}", status=status)
@@ -1475,7 +1568,7 @@ class UacFunction:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(operation), None)
+                done_at = await self._wait(self._link.predicate_ended(operation), None, None)
                 ended()
         finally:
             self._pending.discard(operation)
@@ -1731,22 +1824,33 @@ class UsbHost:
             )
         return found
 
-    async def wait_configured(self, *, for_: VirtualDuration | None = None) -> None:
+    async def wait_configured(
+        self,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> None:
         """Run the machine until the host configured the device, or `for_` elapsed.
 
         Inside `running()`, this awaits the background run instead of driving the machine. The
         state and failed step it reports are read at the boundary after the one where the
         device settled, so a change in between, a disconnect right after configuration, shows.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Raises:
-            UsbTimeout: The device is not configured when the run ends: `for_` elapsed, the
-                core went idle, or the enumeration stopped on a failed step.
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
+            UsbTimeout: The device is not configured when the run ends: `for_` elapsed,
+                `deadline` passed, the core went idle, or the enumeration stopped on a failed
+                step.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         configured = UsbState.CONFIGURED.value
         link = self._link
-        await self._wait(link.predicate_settled(), for_)
+        await self._wait(link.predicate_settled(), for_, deadline)
         settled, _ = await self._post(link.op_settled())
         state, failed = cast(tuple[int, str | None], settled)
         if state != configured:
@@ -1814,7 +1918,7 @@ class UsbHost:
             transfer, _ = await self._post(
                 link.command_control(ticket, request_type, request, value, index, length, data)
             )
-            await self._wait(link.predicate_control_ended(transfer), None)
+            await self._wait(link.predicate_control_ended(transfer), None, None)
             taken, _ = await self._post(link.op_take_result(ticket))
             took = taken is not None
         finally:

@@ -253,17 +253,21 @@ public:
    * @param budget Stop with reason budget past this many instructions.
    * @param exact Stop after exactly this many instructions.
    * @param for_ps Stop with reason time this many picoseconds of virtual time from now.
+   * @param deadline_ps Stop with reason time at this virtual time since reset in picoseconds, at
+   *        once when already reached. Exclusive with @p for_ps.
    * @param stop_when Predicate evaluated at event boundaries and slice ends, on the host thread
    *        in a copy of the caller's context, None for none.
    * @return Resolves to the StopInfo.
    * @throws machine_busy while a goal or a free run is active.
    * @throws machine_running from a callback or a parked section.
+   * @throws std::invalid_argument for both @p for_ps and @p deadline_ps.
    */
   [[= py::doc{"Start a goal, return a HostFuture resolving to its StopInfo."}]] auto run_goal(
       std::optional<address>                until,
       std::optional<std::uint64_t>          budget,
       std::optional<std::uint64_t>          exact,
       std::optional<std::uint64_t>          for_ps,
+      std::optional<std::uint64_t>          deadline_ps,
       std::optional<reflex::py::nb::object> stop_when) -> host_future_handle;
 
   /**
@@ -353,13 +357,17 @@ public:
    *        which it ends with reason time, None for no deadline. With it, posting ends the
    *        running slice at its next block boundary, which registers the wait. Without it, the
    *        next slice boundary registers it.
+   * @param deadline_ps Virtual time since reset in picoseconds at which it ends with reason
+   *        time, None for none. It ends the running slice as @p for_ps does. Already reached,
+   *        the wait ends at the next boundary. Exclusive with @p for_ps.
    * @return Resolves to the StopInfo of the boundary that ended the wait, or to the free run's
    *         own end.
    * @throws std::runtime_error without an open free run.
    */
-  [[= py::doc{"Wait on the free run, return a HostFuture resolving to a StopInfo."}]] auto
-      wait(std::optional<reflex::py::nb::object> ready, std::optional<std::uint64_t> for_ps)
-          -> host_future_handle;
+  [[= py::doc{"Wait on the free run, return a HostFuture resolving to a StopInfo."}]] auto wait(
+      std::optional<reflex::py::nb::object> ready,
+      std::optional<std::uint64_t>          for_ps,
+      std::optional<std::uint64_t>          deadline_ps) -> host_future_handle;
 
   /**
    * @brief Waits on the free run for native conditions, evaluated with no GIL after every
@@ -368,6 +376,7 @@ public:
    * @param for_ps Picoseconds of virtual time after the boundary that registers the wait, which
    *        posting creates at the next block boundary, at which it ends with reason time, None
    *        for no deadline.
+   * @param deadline_ps As wait().
    * @return Resolves to a tuple of the StopInfo of the boundary that ended the wait and the
    *         mask of the members that held there, bit i for member i, or to the free run's own
    *         end.
@@ -376,35 +385,43 @@ public:
    */
   [[= py::doc{
       "Wait on the free run for conditions, return a HostFuture of (StopInfo, mask)."}]] auto
-      wait_when(core::condition_set when, std::optional<std::uint64_t> for_ps)
-          -> host_future_handle;
+      wait_when(
+          core::condition_set          when,
+          std::optional<std::uint64_t> for_ps,
+          std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
 
   /**
    * @brief Waits on the free run for a native predicate, at every slice end after the boundary
    *        that registers the wait, as wait() does for a Python one, with no GIL.
    * @param ready The predicate.
    * @param for_ps As wait().
+   * @param deadline_ps As wait().
    * @return As wait().
    * @throws std::runtime_error without an open free run.
    */
   [[= py::doc{
       "Wait on the free run for a native predicate, return a HostFuture of a StopInfo."}]] auto
-      wait_predicate(native_predicate const& ready, std::optional<std::uint64_t> for_ps)
-          -> host_future_handle;
+      wait_predicate(
+          native_predicate const&      ready,
+          std::optional<std::uint64_t> for_ps,
+          std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
 
   /**
    * @brief wait_predicate() for popcorn's own waits, such as a stream read, which must tell the
    *        free run's end from their predicate.
    * @param ready The predicate.
    * @param for_ps As wait().
+   * @param deadline_ps As wait().
    * @return A HostFuture of a (StopInfo, ended) tuple, ended true when the free run's own end
    *         completed the wait.
    * @throws std::runtime_error without an open free run.
    */
   [[= py::doc{
       "wait_predicate() returning (StopInfo, whether the free run's end completed it)."}]] auto
-      wait_predicate_ended(native_predicate const& ready, std::optional<std::uint64_t> for_ps)
-          -> host_future_handle;
+      wait_predicate_ended(
+          native_predicate const&      ready,
+          std::optional<std::uint64_t> for_ps,
+          std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
 
   /**
    * @brief Starts a goal that stops when a native predicate holds, evaluated after every event
@@ -412,14 +429,17 @@ public:
    * @param ready The predicate.
    * @param budget Stop with reason budget past this many instructions, None for none.
    * @param for_ps Picoseconds of virtual time from now, None for none.
+   * @param deadline_ps As run_goal().
    * @return Resolves to the StopInfo.
    * @throws machine_busy while a goal or a free run is active.
+   * @throws std::invalid_argument for both @p for_ps and @p deadline_ps.
    */
   [[= py::doc{"Run until a native predicate holds, return a HostFuture of a StopInfo."}]] auto
       run_predicate(
           native_predicate const&      ready,
           std::optional<std::uint64_t> budget,
-          std::optional<std::uint64_t> for_ps) -> host_future_handle;
+          std::optional<std::uint64_t> for_ps,
+          std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
 
   /** @brief A predicate true while the next instruction is at @p at. */
   [[= py::doc{"Predicate: pc is at an address."}]] [[nodiscard]] auto
@@ -1052,8 +1072,11 @@ private:
     ended,
   };
 
-  auto waiting_on(core::waiter_spec spec, std::optional<std::uint64_t> for_ps, wait_shape shape)
-      -> host_future_handle;
+  auto waiting_on(
+      core::waiter_spec            spec,
+      std::optional<std::uint64_t> for_ps,
+      std::optional<std::uint64_t> deadline_ps,
+      wait_shape                   shape) -> host_future_handle;
 
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;

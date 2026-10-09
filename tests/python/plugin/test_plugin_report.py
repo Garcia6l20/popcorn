@@ -498,7 +498,7 @@ _posted = []
 def _park_then_post(self):
     ended = _parked(self)
     if len(_posted) < POSTS:
-        _posted.append(self._handle.run_goal(None, 10**12, None, None, None))
+        _posted.append(self._handle.run_goal(None, 10**12, None, None, None, None))
         assert self.busy
     return ended
 

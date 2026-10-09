@@ -22,7 +22,7 @@ import traceback
 import types
 import weakref
 from collections.abc import Callable, Coroutine
-from typing import NoReturn
+from typing import NoReturn, cast
 
 import popcorn
 import pytest
@@ -42,6 +42,7 @@ from .conftest import (
     Machines,
     requests_inside,
     run_bounded,
+    stalled,
 )
 from .models_example import Timer
 from .projects import MODEL_ELF, MODEL_JSON
@@ -295,7 +296,7 @@ def started_and_ended_by_a_handler(
             run_bounded(m.wait_for(Never()), HANG)
     else:
         ended = threading.Event()
-        end = m._handle.wait(None, None)  # pyright: ignore[reportPrivateUsage]
+        end = m._handle.wait(None, None, None)  # pyright: ignore[reportPrivateUsage]
         end.add_done_callback(ended.set)
         assert ended.wait(HANG)
     return weakref.ref(m)
@@ -556,7 +557,7 @@ class StalledWait:
     async def wait(self, m: popcorn.Machine) -> None:
         """Wait on the free run of `m` until it ends, the machine's thread stalled after."""
         handle = m._handle  # pyright: ignore[reportPrivateUsage]
-        future = handle.wait(functools.partial(Never().ready, m), None)
+        future = handle.wait(functools.partial(Never().ready, m), None, None)
         loop = asyncio.get_running_loop()
         woken = loop.create_future()
 
@@ -1723,3 +1724,129 @@ def test_a_recording_removed_by_a_handler_while_running_stops(
     assert stopped in (1, 2)
     assert later == stopped
     assert m.remove_hooks() == 1
+
+
+def test_a_deadline_wait_ends_at_its_absolute_time_while_running(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> tuple[VirtualTime, popcorn.Stop, VirtualTime, popcorn.Stop]:
+        async with m.running():
+            start = await m.now()
+            await m.elapse(ms(1))
+            by_deadline = await m.wait_for(Never(), deadline=start + ms(3))
+            later = await m.now()
+            by_duration = await m.wait_for(Never(), for_=ms(3))
+        return start, by_deadline, later, by_duration
+
+    start, by_deadline, later, by_duration = run_bounded(scenario(), HANG)
+    assert by_deadline.reason is popcorn.StopReason.TIME
+    assert by_deadline.time >= start + ms(3)
+    assert by_duration.time >= later + ms(3)
+
+
+def test_a_parked_deadline_wait_ends_at_its_absolute_time(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+    start = m.time
+    asyncio.run(m.run(for_=ms(1)))
+    stop = asyncio.run(m.wait_for(Never(), deadline=start + ms(3)))
+    assert stop.reason is popcorn.StopReason.TIME
+    assert start + ms(3) <= stop.time < start + ms(3) + us(200)
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_past_deadline_wait_returns_at_once(machines: Machines, running: bool) -> None:
+    m = machines(slice_instructions=1_000)
+    asyncio.run(m.run(for_=ms(1)))
+    before = m.instructions
+
+    async def waits() -> tuple[popcorn.Stop, VirtualTime | None]:
+        past = VirtualTime(0)
+        return (
+            await m.wait_for(Never(), deadline=past),
+            await m.wait_until(lambda _: False, deadline=past),
+        )
+
+    async def scenario() -> tuple[popcorn.Stop, VirtualTime | None]:
+        if not running:
+            return await waits()
+        async with m.running():
+            return await waits()
+
+    stop, held = run_bounded(scenario(), HANG)
+    assert stop.reason is popcorn.StopReason.TIME
+    assert held is None
+    if not running:
+        assert m.instructions == before
+        assert stop.instructions == before
+
+
+def test_a_parked_deadline_wait_equals_the_same_wait_with_for(machines: Machines) -> None:
+    m = machines()
+    start = m.snapshot()
+    by_deadline = asyncio.run(m.wait_for(AfterMarks(3), deadline=m.time + ms(5)))
+    m.restore(start)
+    by_duration = asyncio.run(m.wait_for(AfterMarks(3), for_=ms(5)))
+    assert by_deadline == by_duration
+    m.restore(start)
+    assert asyncio.run(m.wait_until(lambda _: False, deadline=m.time + ms(1))) is None
+
+
+@pytest.mark.parametrize("name", ["wait_for", "wait_until"])
+def test_a_wait_refuses_both_for_and_deadline(machines: Machines, name: str) -> None:
+    m = machines()
+    before = m.instructions
+    with pytest.raises(TypeError, match="exclusive"):
+        if name == "wait_for":
+            asyncio.run(m.wait_for(Never(), for_=ms(1), deadline=m.time))
+        else:
+            asyncio.run(m.wait_until(lambda _: False, for_=ms(1), deadline=m.time))
+    assert m.instructions == before
+
+
+def test_a_free_run_deadline_wait_ends_at_its_absolute_time(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> tuple[VirtualTime, popcorn.Stop, VirtualTime, popcorn.Stop]:
+        async with m.running():
+            start = await m.sample(lambda: m.time)
+            _, ahead = await stalled(m, lambda: m.wait_for(Never(), deadline=start + ms(3)))
+            await m.elapse(ms(2))
+            held, past = await stalled(m, lambda: m.wait_for(Never(), deadline=start + ms(1)))
+        return start, ahead, held, past
+
+    start, ahead, held, past = run_bounded(scenario(), HANG)
+    assert start + ms(3) <= ahead.time < start + ms(3) + us(200)
+    assert held >= start + ms(3)
+    assert past.reason is popcorn.StopReason.TIME
+    assert held <= past.time < held + us(200)
+
+
+def test_a_deadline_must_be_a_virtual_time(machines: Machines) -> None:
+    m = machines()
+    with pytest.raises(TypeError, match="VirtualTime"):
+        asyncio.run(m.wait_for(Never(), deadline=cast(VirtualTime, ms(1))))
+    with pytest.raises(TypeError, match="VirtualTime"):
+        asyncio.run(m.wait_until(lambda _: False, deadline=cast(VirtualTime, ms(1))))
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_negative_deadline_is_past(machines: Machines, running: bool) -> None:
+    m = machines(slice_instructions=1_000)
+    asyncio.run(m.run(for_=ms(1)))
+
+    async def wait() -> popcorn.Stop:
+        return await m.wait_for(Never(), deadline=VirtualTime(-5))
+
+    async def scenario() -> popcorn.Stop:
+        if not running:
+            return await wait()
+        async with m.running():
+            return await wait()
+
+    assert run_bounded(scenario(), HANG).reason is popcorn.StopReason.TIME
+
+
+def test_a_deadline_past_64_bits_never_comes(machines: Machines) -> None:
+    m = machines()
+    stop = asyncio.run(m.wait_for(AfterInstructions(5_000), deadline=VirtualTime(2**70)))
+    assert stop.reason is popcorn.StopReason.USER

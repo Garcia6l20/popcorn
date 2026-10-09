@@ -1152,19 +1152,19 @@ def test_concurrent_control_requests_each_take_their_own_result(
     first_waited = False
     takes = 0
 
-    async def wait_second_after_first_took(ready: Any, for_: Any) -> VirtualTime:
+    async def wait_second_after_first_took(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
         nonlocal waits, first_waited
         waits += 1
         if waits == 1:
-            await wait(ready, for_)
+            await wait(ready, for_, deadline)
             await second_posted.wait()
-            done = await wait(second[0], None)
+            done = await wait(second[0], None, None)
             first_waited = True
             return done
         second.append(ready)
         second_posted.set()
         await first_taken.wait()
-        return await wait(ready, for_)
+        return await wait(ready, for_, deadline)
 
     def mark_first_take(command: Any, *args: Any, **kwargs: Any) -> Any:
         nonlocal takes
@@ -1229,12 +1229,12 @@ def test_a_cancelled_control_request_gives_its_result_up(
 
         return held()
 
-    async def hang_instead(ready: Any, for_: Any) -> VirtualTime:
+    async def hang_instead(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
         await hang()
         raise AssertionError
 
-    async def wait_then_hang(ready: Any, for_: Any) -> VirtualTime:
-        await wait(ready, for_)
+    async def wait_then_hang(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
+        await wait(ready, for_, deadline)
         await hang()
         raise AssertionError
 
@@ -1270,7 +1270,7 @@ def test_a_stale_control_forget_after_a_restore_leaves_the_new_request(
     saved = m.snapshot()
     reached = asyncio.Event()
 
-    async def hang_instead(ready: Any, for_: Any) -> VirtualTime:
+    async def hang_instead(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
         reached.set()
         await asyncio.Event().wait()
         raise AssertionError
@@ -1282,11 +1282,11 @@ def test_a_stale_control_forget_after_a_restore_leaves_the_new_request(
             await reached.wait()
         m.restore(saved)
 
-        async def cancel_first_then_wait(ready: Any, for_: Any) -> VirtualTime:
+        async def cancel_first_then_wait(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
             first.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await first
-            return await wait(ready, for_)
+            return await wait(ready, for_, deadline)
 
         host._wait = cancel_first_then_wait  # pyright: ignore[reportPrivateUsage]
         return await host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 18)
@@ -1300,7 +1300,7 @@ def test_a_control_wait_ended_before_its_result_gives_the_result_up(
     m, host = configured(u575)
     now = m.time
 
-    async def idle(ready: Any, for_: Any) -> VirtualTime:
+    async def idle(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
         return now
 
     host._wait = idle  # pyright: ignore[reportPrivateUsage]
@@ -1639,3 +1639,90 @@ def test_mic_take_frames_equals_a_read_of_what_is_available(
     m.restore(start)
     asyncio.run(m.run(for_=ms(5)))
     assert taken == asyncio.run(audio.mic.read_frames(audio.mic.available))
+
+
+type Bounded = Callable[[Any, dict[str, Any]], Coroutine[Any, Any, object]]
+
+USB_WAITS: dict[str, tuple[Path, Callable[[UsbHost], Any], Bounded]] = {
+    "cdc-read": (USB_ELF, UsbHost.cdc, lambda cdc, bound: cdc.read(1, **bound)),
+    "cdc-read-packets": (USB_ELF, UsbHost.cdc, lambda cdc, bound: cdc.read_packets(1, **bound)),
+    "cdc-ready": (USB_ELF, UsbHost.cdc, lambda cdc, bound: cdc.wait_ready(**bound)),
+    "hid-ready": (USB_ELF, UsbHost.hid, lambda hid, bound: hid.wait_ready(**bound)),
+    "hid-read-reports": (USB_ELF, UsbHost.hid, lambda hid, bound: hid.read_reports(1, **bound)),
+    "configured": (USB_ELF, lambda host: host, lambda host, bound: host.wait_configured(**bound)),
+    "audio-ready": (AUDIO_ELF, UsbHost.audio, lambda audio, bound: audio.wait_ready(**bound)),
+    "speaker-drain": (
+        AUDIO_ELF,
+        lambda host: host.audio().speaker,
+        lambda speaker, bound: speaker.drain(**bound),
+    ),
+    "mic-read-frames": (
+        AUDIO_ELF,
+        lambda host: host.audio().mic,
+        lambda mic, bound: mic.read_frames(1, **bound),
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", list(USB_WAITS))
+def test_a_usb_wait_with_a_past_deadline_runs_nothing(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    elf, stream_of, wait = USB_WAITS[kind]
+    m = usb_machine(u575, elf=elf)
+    asyncio.run(m.run(for_=ms(1)))
+    stream = stream_of(m.periph.OTG_FS.host)
+    before = m.instructions
+    with contextlib.suppress(popcorn.UsbTimeout):
+        assert asyncio.run(wait(stream, {"deadline": VirtualTime(0)})) in (None, b"", [])
+    assert m.instructions == before
+
+
+@pytest.mark.parametrize("kind", list(USB_WAITS))
+def test_a_usb_wait_with_a_past_deadline_ends_at_once_while_running(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    elf, stream_of, wait = USB_WAITS[kind]
+    m = usb_machine(u575, UsbHostOptions(attached=False), elf)
+    stream = stream_of(m.periph.OTG_FS.host)
+
+    async def scenario() -> object:
+        async with m.running():
+            past = await m.now()
+            with contextlib.suppress(popcorn.UsbTimeout):
+                return await wait(stream, {"deadline": past})
+        return None
+
+    assert run_bounded(scenario(), HANG) in (None, b"", [])
+
+
+@pytest.mark.parametrize("kind", [kind for kind in USB_WAITS if kind != "speaker-drain"])
+def test_a_usb_wait_with_a_deadline_stops_there_while_running(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    elf, stream_of, wait = USB_WAITS[kind]
+    m = usb_machine(u575, UsbHostOptions(attached=False), elf)
+    stream = stream_of(m.periph.OTG_FS.host)
+
+    async def scenario() -> tuple[VirtualTime, VirtualTime]:
+        async with m.running():
+            start = await m.now()
+            with contextlib.suppress(popcorn.UsbTimeout):
+                await wait(stream, {"deadline": start + ms(2)})
+            return start, await m.now()
+
+    start, after = run_bounded(scenario(), HANG)
+    assert after >= start + ms(2)
+
+
+@pytest.mark.parametrize("kind", list(USB_WAITS))
+def test_a_usb_wait_refuses_both_for_and_deadline(
+    u575: popcorn.MachineDescription, kind: str
+) -> None:
+    elf, stream_of, wait = USB_WAITS[kind]
+    m = usb_machine(u575, elf=elf)
+    stream = stream_of(m.periph.OTG_FS.host)
+    before = m.instructions
+    with pytest.raises(TypeError, match="exclusive"):
+        asyncio.run(wait(stream, {"for_": ms(1), "deadline": m.time}))
+    assert m.instructions == before

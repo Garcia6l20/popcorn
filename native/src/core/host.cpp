@@ -994,9 +994,11 @@ struct host_core
     std::erase_if(waiters, [](auto const& waiting) { return not waiting->live(); });
     std::vector<std::pair<std::shared_ptr<waiter>, stop>> resolved;
     auto const                                            slice = ++slot.free_slices;
+    vtime                                                 registered{};
     {
       owner_scope const owning{this};
       auto const        now = slot.engine->virtual_clock().time();
+      registered            = now;
       for(auto const& waiting : waiters)
       {
         waiting->register_at(now, slice);
@@ -1011,8 +1013,8 @@ struct host_core
     {
       if(waiting->spec.deadline)
       {
-        request.until_time =
-            std::min(request.until_time.value_or(*waiting->spec.deadline), *waiting->spec.deadline);
+        auto const due     = std::max(*waiting->spec.deadline, registered);
+        request.until_time = std::min(request.until_time.value_or(due), due);
       }
       if(waiting->spec.when and waiting->checked)
       {

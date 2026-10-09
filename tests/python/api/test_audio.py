@@ -19,6 +19,7 @@ from popcorn import StopReason
 from popcorn.board import AudioFrame, AudioOptions, AudioStream, I2CTarget
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
+from .conftest import run_bounded
 from .projects import Silent
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
@@ -595,3 +596,31 @@ def test_take_frames_equals_a_read_of_what_is_available(
     m.restore(start)
     run_entry(m, "tx_poll")
     assert taken == asyncio.run(stream.read_frames(stream.available))
+
+
+def test_an_audio_read_with_a_deadline_stops_there(u575: popcorn.MachineDescription) -> None:
+    m = sai_machine(u575)
+    stream = m.periph.SAI1.audio("A")
+    before = m.instructions
+    assert asyncio.run(stream.read_frames(1, deadline=VirtualTime(0))) == []
+    assert m.instructions == before
+    with pytest.raises(TypeError, match="exclusive"):
+        asyncio.run(stream.read_frames(1, for_=ms(1), deadline=m.time))
+    end = m.time + ms(1)
+    assert asyncio.run(stream.read_frames(10**6, deadline=end)) is not None
+    assert m.time >= end
+
+
+def test_an_audio_read_with_a_past_deadline_ends_at_once_while_running(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = sai_machine(u575)
+    stream = m.periph.SAI1.audio("A")
+
+    async def scenario() -> list[AudioFrame]:
+        async with m.running():
+            past = await m.now()
+            return await stream.read_frames(10**6, deadline=past)
+
+    frames = run_bounded(scenario(), 10)
+    assert len(frames) < 10**6

@@ -16,7 +16,7 @@ from popcorn.model import Model
 from popcorn.trace import TraceKind, read
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import BOARD_ELF, holds_pty, run_bounded
+from .conftest import BOARD_ELF, holds_pty, run_bounded, stalled
 
 FRAME_PS = 87_500_000
 USART1_TDR = 0x4001_3828
@@ -381,3 +381,89 @@ def test_take_gives_the_bytes_of_the_frames(board: popcorn.Machine) -> None:
     asyncio.run(exchanged())
     assert uart.take() == b"ab"
     assert uart.available == 0
+
+
+def test_read_frames_with_a_deadline_while_running(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def body() -> tuple[VirtualTime, list[Frame], VirtualTime]:
+        async with board.running():
+            start = await board.now()
+            frames = await uart.read_frames(1000, deadline=start + ms(3))
+            return start, frames, await board.now()
+
+    start, frames, after = run_bounded(body(), 10)
+    assert frames == []
+    assert after >= start + ms(3)
+
+
+def test_a_deadline_read_equals_the_same_read_with_for(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+    start = board.snapshot()
+
+    async def read(deadline: bool) -> tuple[list[Frame], VirtualTime]:
+        await uart.write(b"abcdef")
+        if deadline:
+            frames = await uart.read_frames(4, deadline=board.time + us(400))
+        else:
+            frames = await uart.read_frames(4, for_=us(400))
+        return frames, board.time
+
+    with_deadline = asyncio.run(read(True))
+    board.restore(start)
+    assert asyncio.run(read(False)) == with_deadline
+    assert 0 < len(with_deadline[0]) < 4
+
+
+def test_a_past_deadline_read_returns_what_is_queued_at_once(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def exchanged() -> None:
+        await uart.write(b"ab")
+        await board.run(for_=ms(2))
+
+    asyncio.run(exchanged())
+    before = board.instructions
+    assert asyncio.run(uart.read(5, deadline=VirtualTime(0))) == b"ab"
+    assert asyncio.run(uart.read_frames(5, deadline=board.time)) == []
+    assert board.instructions == before
+
+    async def running() -> tuple[bytes, list[Frame]]:
+        async with board.running():
+            past = await board.now()
+            return await uart.read(5, deadline=past), await uart.read_frames(1, deadline=past)
+
+    assert run_bounded(running(), 10) == (b"", [])
+
+
+@pytest.mark.parametrize("frames", [False, True], ids=["read", "read_frames"])
+def test_a_uart_read_refuses_both_for_and_deadline(board: popcorn.Machine, frames: bool) -> None:
+    uart = board.periph.USART1.port
+    before = board.instructions
+    with pytest.raises(TypeError, match="exclusive"):
+        if frames:
+            asyncio.run(uart.read_frames(1, for_=ms(1), deadline=board.time))
+        else:
+            asyncio.run(uart.read(1, for_=ms(1), deadline=board.time))
+    assert board.instructions == before
+
+
+def test_a_free_run_deadline_read_ends_at_its_absolute_time(board: popcorn.Machine) -> None:
+    uart = board.periph.USART1.port
+
+    async def scenario() -> tuple[VirtualTime, list[Frame]]:
+        async with board.running():
+            await board.elapse(ms(5))
+            start = await board.sample(lambda: board.time)
+
+            async def read() -> list[Frame]:
+                uart.write(b"x" * 200)
+                return await uart.read_frames(1000, deadline=start + ms(3))
+
+            _, frames = await stalled(board, read)
+        return start, frames
+
+    start, frames = run_bounded(scenario(), 10)
+    assert frames
+    assert start + ms(2) < frames[-1].at <= start + ms(3) + us(200)
+    assert len(frames) < 40

@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import threading
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import popcorn
 import pytest
-from popcorn.units import ms
+from popcorn.units import VirtualTime, ms
 
 ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
@@ -202,3 +203,21 @@ def requests_inside(
 
 
 REQUESTS_INSIDE = ("read", "sample", "wait_until", "run", "step", "wait_for")
+
+
+async def stalled[T](
+    m: popcorn.Machine, post: Callable[[], Coroutine[object, object, T]]
+) -> tuple[VirtualTime, T]:
+    """Inside `running()`, hold the machine's thread in a sample while `post()` starts, so what
+    it posts registers at the sample's boundary. Return that boundary's time and its result."""
+    release = threading.Event()
+
+    def held() -> VirtualTime:
+        release.wait(10.0)
+        return m.time
+
+    holding = m.sample(held)
+    task = asyncio.create_task(post())
+    await asyncio.sleep(0.05)
+    release.set()
+    return await holding, await task

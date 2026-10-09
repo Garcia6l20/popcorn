@@ -9,6 +9,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <chrono>
 #include <concepts>
 #include <exception>
@@ -30,6 +31,14 @@ namespace popcorn::bind
 namespace
 {
 namespace nb = reflex::py::nb;
+
+void refuse_both(std::optional<std::uint64_t> for_ps, std::optional<std::uint64_t> deadline_ps)
+{
+  if(for_ps and deadline_ps)
+  {
+    throw std::invalid_argument("a wait takes a duration or a deadline, not both");
+  }
+}
 
 auto record(stop const& stopped) -> stop_record
 {
@@ -213,9 +222,12 @@ auto machine_handle::run_goal(
     std::optional<std::uint64_t> budget,
     std::optional<std::uint64_t> exact,
     std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps,
     std::optional<nb::object>    stop_when) -> host_future_handle
 {
+  refuse_both(for_ps, deadline_ps);
   core::run_goal goal{.until = until, .stop_when = predicate_of(std::move(stop_when))};
+
   if(budget)
   {
     goal.budget = icount{*budget};
@@ -226,10 +238,10 @@ auto machine_handle::run_goal(
   }
   auto future = [&] {
     auto const held = lock_for_request();
-    if(for_ps)
+    if(for_ps or deadline_ps)
     {
       auto const now  = host_->member(held, core::member_id{}).virtual_clock().time();
-      goal.until_time = later(now.ps, *for_ps);
+      goal.until_time = for_ps ? later(now.ps, *for_ps) : std::max(vtime{*deadline_ps}, now);
     }
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
@@ -394,42 +406,50 @@ void machine_handle::mark_collected() noexcept
   collected_->store(true, std::memory_order_release);
 }
 
-auto machine_handle::wait(std::optional<nb::object> ready, std::optional<std::uint64_t> for_ps)
-    -> host_future_handle
+auto machine_handle::wait(
+    std::optional<nb::object>    ready,
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
 {
-  return waiting_on({.ready = predicate_of(std::move(ready))}, for_ps, wait_shape::stop);
+  return waiting_on(
+      {.ready = predicate_of(std::move(ready))}, for_ps, deadline_ps, wait_shape::stop);
 }
 
 auto machine_handle::wait_predicate(
     native_predicate const&      ready,
-    std::optional<std::uint64_t> for_ps) -> host_future_handle
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
 {
-  return waiting_on({.ready = ready.test()}, for_ps, wait_shape::stop);
+  return waiting_on({.ready = ready.test()}, for_ps, deadline_ps, wait_shape::stop);
 }
 
 auto machine_handle::wait_predicate_ended(
     native_predicate const&      ready,
-    std::optional<std::uint64_t> for_ps) -> host_future_handle
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
 {
-  return waiting_on({.ready = ready.test()}, for_ps, wait_shape::ended);
+  return waiting_on({.ready = ready.test()}, for_ps, deadline_ps, wait_shape::ended);
 }
 
 auto machine_handle::run_predicate(
     native_predicate const&      ready,
     std::optional<std::uint64_t> budget,
-    std::optional<std::uint64_t> for_ps) -> host_future_handle
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
 {
+  refuse_both(for_ps, deadline_ps);
   core::run_goal goal{.stop_when = ready.test()};
+
   if(budget)
   {
     goal.budget = icount{*budget};
   }
   auto future = [&] {
     auto const held = lock_for_request();
-    if(for_ps)
+    if(for_ps or deadline_ps)
     {
       auto const now  = host_->member(held, core::member_id{}).virtual_clock().time();
-      goal.until_time = later(now.ps, *for_ps);
+      goal.until_time = for_ps ? later(now.ps, *for_ps) : std::max(vtime{*deadline_ps}, now);
     }
     return host_->run(held, core::member_id{}, std::move(goal));
   }();
@@ -447,8 +467,10 @@ auto machine_handle::predicate_pc_at(address at) const -> native_predicate
       .described("the core to reach an address");
 }
 
-auto machine_handle::wait_when(core::condition_set when, std::optional<std::uint64_t> for_ps)
-    -> host_future_handle
+auto machine_handle::wait_when(
+    core::condition_set          when,
+    std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps) -> host_future_handle
 {
   if(when.members.empty() or when.members.size() > 64)
   {
@@ -473,17 +495,23 @@ auto machine_handle::wait_when(core::condition_set when, std::optional<std::uint
               member.where));
     }
   }
-  return waiting_on({.when = std::move(when)}, for_ps, wait_shape::fired);
+  return waiting_on({.when = std::move(when)}, for_ps, deadline_ps, wait_shape::fired);
 }
 
 auto machine_handle::waiting_on(
     core::waiter_spec            spec,
     std::optional<std::uint64_t> for_ps,
+    std::optional<std::uint64_t> deadline_ps,
     wait_shape                   shape) -> host_future_handle
 {
+  refuse_both(for_ps, deadline_ps);
   if(for_ps)
   {
     spec.after = vtime{*for_ps};
+  }
+  if(deadline_ps)
+  {
+    spec.deadline = vtime{*deadline_ps};
   }
   if(host_->abandoned())
   {

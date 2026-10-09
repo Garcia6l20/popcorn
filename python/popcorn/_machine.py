@@ -88,7 +88,7 @@ from popcorn._refs import (
 )
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
-from popcorn._streams import Board, PtyOpener, UartPorts
+from popcorn._streams import Board, PtyOpener, UartPorts, check_wait, deadline_ps
 from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
@@ -254,6 +254,15 @@ class _ContextCell:
 def _check_duration(for_: VirtualDuration | None) -> None:
     if for_ is not None and for_.ps < 0:
         raise ValueError(f"for_ must not be negative, got {for_}")
+
+
+def _check_wait(for_: VirtualDuration | None, deadline: VirtualTime | None) -> None:
+    check_wait(for_, deadline)
+    _check_duration(for_)
+
+
+def _ps(value: VirtualDuration | None) -> int | None:
+    return None if value is None else value.ps
 
 
 def _stop_error(stopped: Stop, during: str = "the background run") -> EmulationError:
@@ -1861,6 +1870,23 @@ class Machine:
             exact=None,
         )
 
+    async def _bounded_run(
+        self,
+        *,
+        until: int | str | Symbol | None = None,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None,
+        stop_when: Callable[[Machine], bool] | None = None,
+    ) -> Stop:
+        return await self._goal(
+            until=None if until is None else self.address_of(until),
+            budget=self._default_budget,
+            for_=for_,
+            deadline=deadline,
+            stop_when=stop_when,
+            exact=None,
+        )
+
     async def step(self, n: int = 1) -> Stop:
         """Execute exactly `n` instructions, a BUDGET stop, or an earlier stop.
 
@@ -1869,7 +1895,9 @@ class Machine:
         """
         if n <= 0:
             raise ValueError("step count must be above 0")
-        return await self._goal(until=None, budget=None, for_=None, stop_when=None, exact=n)
+        return await self._goal(
+            until=None, budget=None, for_=None, stop_when=None, exact=n, deadline=None
+        )
 
     async def _goal(
         self,
@@ -1879,6 +1907,7 @@ class Machine:
         for_: VirtualDuration | None,
         stop_when: Callable[[Machine], bool] | None,
         exact: int | None,
+        deadline: VirtualTime | None = None,
     ) -> Stop:
         self._last_stop = None
         stop = await awaited(
@@ -1886,7 +1915,8 @@ class Machine:
                 until=until,
                 budget=budget,
                 exact=exact,
-                for_ps=None if for_ is None else for_.ps,
+                for_ps=_ps(for_),
+                deadline_ps=deadline_ps(deadline),
                 stop_when=None if stop_when is None else self._handler(stop_when),
             ),
             lambda raw: stop_of(cast(_core.StopInfo, raw)),
@@ -1895,7 +1925,10 @@ class Machine:
         return stop
 
     async def _wait_until(
-        self, ready: _core.Predicate, for_: VirtualDuration | None
+        self,
+        ready: _core.Predicate,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None = None,
     ) -> VirtualTime:
         if not self.busy:
             with contextlib.suppress(MachineRunning):
@@ -1905,7 +1938,7 @@ class Machine:
             raw, ended = cast(
                 tuple[_core.StopInfo, bool],
                 await awaited(
-                    self._handle.wait_predicate_ended(ready, None if for_ is None else for_.ps),
+                    self._handle.wait_predicate_ended(ready, _ps(for_), deadline_ps(deadline)),
                     lambda got: got,
                 ),
             )
@@ -1913,13 +1946,17 @@ class Machine:
             if ended:
                 raise _stop_error(stop, f"the free run, while waiting for {ready.what()}")
             return stop.time
-        stop = await self.wait_for(_Native(ready), for_=for_)
+        stop = await self.wait_for(_Native(ready), for_=for_, deadline=deadline)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, f"the run waiting for {ready.what()}")
         return stop.time
 
     async def wait_until(
-        self, predicate: Callable[[Machine], bool], *, for_: VirtualDuration | None = None
+        self,
+        predicate: Callable[[Machine], bool],
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
     ) -> VirtualTime | None:
         """Run until `predicate(machine)` holds, or until `for_` elapses, and return the virtual
         time of the boundary where it was first seen to hold, None when it was not.
@@ -1940,12 +1977,17 @@ class Machine:
         the boundary that registered the wait. Cancelling it while parked halts the run, inside
         a free run it drops the wait only.
 
+        `deadline` stops waiting at that virtual time instead, exclusive with `for_`. Already
+        past, it returns at once: parked after one check of `predicate`, inside a free run with
+        None, unchecked.
+
         Returns:
             The time of the first boundary where `predicate` was seen to return True. None when
-            `for_` elapsed first, or a parked run without `for_` stopped with IDLE before it
-            held.
+            `for_` elapsed or `deadline` passed first, or a parked run without either stopped
+            with IDLE before it held.
 
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
             ValueError: `for_` is negative.
             MachineBusy: A run, step, call or wait is active outside a free run.
             RuntimeError: Called from a handler, a model, a predicate or a posted body.
@@ -1956,18 +1998,24 @@ class Machine:
             BaseException: What `predicate` raised, or what a handler of the free run raised.
         """
         self._refuse_on_host()
-        _check_duration(for_)
+        _check_wait(for_, deadline)
         event = _Ready(predicate)
         if not self.busy and self._handler(event.ready)():
             return self.time
-        stop = await self.wait_for(event, for_=for_)
+        stop = await self.wait_for(event, for_=for_, deadline=deadline)
         if stop.reason is StopReason.USER and event.fired:
             return stop.time
         if stop.reason in (StopReason.TIME, StopReason.IDLE):
             return None
         raise _stop_error(stop, "the run waiting for the predicate")
 
-    async def wait_for(self, event: Event, *, for_: VirtualDuration | None = None) -> Stop:
+    async def wait_for(
+        self,
+        event: Event,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> Stop:
         """Run until `event` is ready, a USER stop, or until `for_` elapses, a TIME stop as late
         as `run(for_=)` allows.
 
@@ -1992,27 +2040,36 @@ class Machine:
         returned stop's `fired` names the conditions that held at the boundary that ended the
         wait, empty for a stop that is not USER.
 
+        `deadline` stops waiting at that virtual time instead, a TIME stop, exclusive with
+        `for_`. Already past, it returns a TIME stop at once: parked, no instruction runs.
+
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
+            ValueError: `for_` is negative, or a `Condition` or `Conditions` of another machine.
             MachineBusy: A run, step, call or wait is active outside a free run.
-            ValueError: A `Condition` or `Conditions` of another machine.
         """
-        _check_duration(for_)
+        _check_wait(for_, deadline)
         if isinstance(event, Condition | Conditions):
-            return await self._wait_condition(event, for_)
+            return await self._wait_condition(event, for_, deadline)
         if self._handle.session_open():
             if isinstance(event, Reached):
                 event = _Native(self._handle.predicate_pc_at(self.address_of(event.target)))
-            return await self._waited(event, for_)
+            return await self._waited(event, for_, deadline)
         if isinstance(event, Reached):
-            return await self.run(until=event.target, for_=for_)
+            return await self._bounded_run(until=event.target, for_=for_, deadline=deadline)
         if isinstance(event, _Native):
-            return await self._run_native(event.predicate, for_)
-        return await self.run(for_=for_, stop_when=event.ready)
+            return await self._run_native(event.predicate, for_, deadline)
+        return await self._bounded_run(for_=for_, deadline=deadline, stop_when=event.ready)
 
-    async def _waited(self, event: Event | None, for_: VirtualDuration | None) -> Stop:
+    async def _waited(
+        self,
+        event: Event | None,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None = None,
+    ) -> Stop:
         try:
             stop = await awaited(
-                self._wait_future(event, None if for_ is None else for_.ps),
+                self._wait_future(event, _ps(for_), deadline_ps(deadline)),
                 lambda raw: stop_of(cast(_core.StopInfo, raw)),
             )
         except BaseException as error:
@@ -2021,12 +2078,14 @@ class Machine:
         self._surfaced = stop
         return stop
 
-    def _wait_future(self, event: Event | None, for_ps: int | None) -> _core.HostFuture:
+    def _wait_future(
+        self, event: Event | None, for_ps: int | None, deadline_ps: int | None
+    ) -> _core.HostFuture:
         if event is None:
-            return self._handle.wait(None, for_ps)
+            return self._handle.wait(None, for_ps, deadline_ps)
         if isinstance(event, _Native):
-            return self._handle.wait_predicate(event.predicate, for_ps)
-        return self._handle.wait(self._handler(event.ready), for_ps)
+            return self._handle.wait_predicate(event.predicate, for_ps, deadline_ps)
+        return self._handle.wait(self._handler(event.ready), for_ps, deadline_ps)
 
     async def elapse(self, duration: VirtualDuration) -> VirtualTime:
         """Let `duration` of virtual time pass, parked or running, and return the time it ended
@@ -2083,11 +2142,16 @@ class Machine:
             [], [], None, lambda raw: VirtualTime(cast(tuple[int, Any], raw)[0])
         )
 
-    async def _run_native(self, ready: _core.Predicate, for_: VirtualDuration | None) -> Stop:
+    async def _run_native(
+        self,
+        ready: _core.Predicate,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None = None,
+    ) -> Stop:
         self._last_stop = None
         stop = await awaited(
             self._handle.run_predicate(
-                ready, self._default_budget, None if for_ is None else for_.ps
+                ready, self._default_budget, _ps(for_), deadline_ps(deadline)
             ),
             lambda raw: stop_of(cast(_core.StopInfo, raw)),
         )
@@ -2095,7 +2159,10 @@ class Machine:
         return stop
 
     async def _wait_condition(
-        self, event: Condition | Conditions, for_: VirtualDuration | None
+        self,
+        event: Condition | Conditions,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None = None,
     ) -> Stop:
         if owner_of(event) is not self._handle:
             raise ValueError(f"{event!r} reads another machine")
@@ -2110,7 +2177,7 @@ class Machine:
                     stopped.append(True)
                 return held
 
-            stop = await self.run(for_=for_, stop_when=stop_when)
+            stop = await self._bounded_run(for_=for_, deadline=deadline, stop_when=stop_when)
             held = stop.reason is StopReason.USER and bool(stopped)
             fired = tuple(member for member in members if member.ready(self)) if held else ()
             stop = dataclasses.replace(stop, fired=fired)
@@ -2118,7 +2185,7 @@ class Machine:
             return stop
         try:
             stop, mask = await awaited(
-                self._handle.wait_when(native_set(conditions), None if for_ is None else for_.ps),
+                self._handle.wait_when(native_set(conditions), _ps(for_), deadline_ps(deadline)),
                 _masked_stop,
             )
         except BaseException as error:

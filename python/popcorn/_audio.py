@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._errors import ConfigError, ModelError
-from popcorn._streams import Poster, Waiter, written
+from popcorn._streams import Poster, Waiter, check_wait, written
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
@@ -138,23 +138,35 @@ class AudioStream:
             raise ValueError(f"an external frame rate is 0 to 2**32 - 1 Hz, not {hz!r}")
         self._link.set_external_frame_hz(hz)
 
-    async def read_frames(self, n: int, *, for_: VirtualDuration | None = None) -> list[AudioFrame]:
+    async def read_frames(
+        self,
+        n: int,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> list[AudioFrame]:
         """Run the machine until `n` frames arrived, or `for_` elapsed, and take them.
 
         Inside `running()`, this awaits the background run instead of driving the machine.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Returns:
-            Up to `n` frames, fewer when `for_` elapsed or the core went idle first.
+            Up to `n` frames, fewer when `for_` elapsed, `deadline` passed or the core went
+                idle first.
 
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
             ValueError: `n` is negative.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
+        check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_)
+            await self._wait(self._link.predicate_available(n), for_, deadline)
         return _audio_frames(self._link.drain(n))
 
     def take_frames(self) -> list[AudioFrame]:

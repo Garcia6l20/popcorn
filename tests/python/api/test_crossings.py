@@ -48,7 +48,7 @@ def calls_inside_slices(
     async def free_run(duration: VirtualDuration) -> None:
         m.start()
         try:
-            waiter = m._handle.wait(None, duration.ps)  # pyright: ignore[reportPrivateUsage]
+            waiter = m._handle.wait(None, duration.ps, None)  # pyright: ignore[reportPrivateUsage]
             await _host.awaited(waiter, lambda raw: raw)
         finally:
             m.halt()

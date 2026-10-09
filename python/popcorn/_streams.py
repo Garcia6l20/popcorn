@@ -17,9 +17,30 @@ if TYPE_CHECKING:
     from popcorn._refs import Pending
     from popcorn._usb import UsbHosts
 
-type Waiter = Callable[[_core.Predicate, VirtualDuration | None], Awaitable[VirtualTime]]
-"""Runs the machine until a native predicate holds or a virtual duration elapses, and returns
-the virtual time it stopped waiting at. The predicate runs on the machine's thread with no GIL."""
+type Waiter = Callable[
+    [_core.Predicate, VirtualDuration | None, VirtualTime | None], Awaitable[VirtualTime]
+]
+"""Runs the machine until a native predicate holds, a virtual duration elapses or a deadline
+passes, and returns the virtual time it stopped waiting at. The predicate runs on the machine's
+thread with no GIL."""
+
+
+def check_wait(for_: VirtualDuration | None, deadline: object) -> None:
+    """Refuse a wait given both a duration and a deadline, or a deadline that is no time.
+
+    Raises:
+        TypeError: Both are given, or `deadline` is no `VirtualTime`.
+    """
+    if for_ is not None and deadline is not None:
+        raise TypeError("for_ and deadline are exclusive")
+    if deadline is not None and not isinstance(deadline, VirtualTime):
+        raise TypeError("deadline is a VirtualTime, a point in time: for a duration use for_")
+
+
+def deadline_ps(deadline: VirtualTime | None) -> int | None:
+    """The deadline in picoseconds since reset, a negative one as 0, past, and one past 64 bits
+    as the largest, never."""
+    return None if deadline is None else min(max(0, deadline.ps), 2**64 - 1)
 
 
 class Poster(Protocol):
@@ -132,30 +153,56 @@ class UartStream:
         data = bytes(data)
         return written(self._post(link.command_send(data), at))
 
-    async def read(self, n: int, *, for_: VirtualDuration | None = None) -> bytes:
+    async def read(
+        self,
+        n: int,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> bytes:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them.
 
         Inside `running()`, this awaits the background run instead of driving the machine. The
         run stops as `Machine.wait_for` does: after the last frame's own time, at the first event
         boundary or slice end, or past `for_` by the bound `Machine.run` gives for its `for_`.
 
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
         Returns:
-            Up to `n` bytes, fewer when `for_` elapsed or the core went idle first.
+            Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
+                idle first.
 
         Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
             RuntimeError: The UART is bridged to a pty, which takes what the firmware sends.
             EmulationError: The run stopped for another reason, such as a fault, or, inside
                 `running()`, the free run ended by itself, a handler's USER stop included.
         """
-        return bytes(f.data & 0xFF for f in await self.read_frames(n, for_=for_))
+        check_wait(for_, deadline)
+        return bytes(f.data & 0xFF for f in await self.read_frames(n, for_=for_, deadline=deadline))
 
-    async def read_frames(self, n: int, *, for_: VirtualDuration | None = None) -> list[Frame]:
-        """As `read`, the frames with their times."""
+    async def read_frames(
+        self,
+        n: int,
+        *,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+    ) -> list[Frame]:
+        """As `read`, the frames with their times.
+
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
+        past, the wait ends at once.
+
+        Raises:
+            TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
+        """
+        check_wait(for_, deadline)
         self._check_unbridged()
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_)
+            await self._wait(self._link.predicate_available(n), for_, deadline)
         return _frames(self._link.drain(n))
 
     def take(self) -> bytes:

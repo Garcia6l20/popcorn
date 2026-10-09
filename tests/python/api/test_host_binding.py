@@ -238,7 +238,7 @@ def queued_without_a_flush(m: popcorn.Machine) -> None:
     raw wait read through a done callback flushes nothing."""
     done = threading.Event()
     m.start()
-    future = m._handle.wait(None, us(50).ps)  # pyright: ignore[reportPrivateUsage]
+    future = m._handle.wait(None, us(50).ps, None)  # pyright: ignore[reportPrivateUsage]
     future.add_done_callback(done.set)
     assert done.wait(10)
 
@@ -454,7 +454,9 @@ def test_a_goal_future_is_awaited_from_two_loops_then_waited_without_one(
 
     def goal() -> _core.HostFuture:
         handle = m._handle  # pyright: ignore[reportPrivateUsage]
-        return handle.run_goal(until=None, budget=5_000, exact=None, for_ps=None, stop_when=None)
+        return handle.run_goal(
+            until=None, budget=5_000, exact=None, for_ps=None, deadline_ps=None, stop_when=None
+        )
 
     first = asyncio.run(awaited(goal(), stop_info))
     second = asyncio.run(awaited(goal(), stop_info))
@@ -475,7 +477,7 @@ def test_cancelling_the_awaiting_task_halts_the_goal(machines: Machines) -> None
 
     async def body() -> None:
         endless = m._handle.run_goal(  # pyright: ignore[reportPrivateUsage]
-            until=None, budget=10**15, exact=None, for_ps=None, stop_when=None
+            until=None, budget=10**15, exact=None, for_ps=None, deadline_ps=None, stop_when=None
         )
         task = asyncio.create_task(awaited(endless, stop_info))
         await asyncio.sleep(0.02)
@@ -672,7 +674,7 @@ async def session():
     try:
         await m.wait_for(Never(), for_=us(200))
         assert m._handle.session_open()
-        waiter = m._handle.wait(None, us(100).ps)
+        waiter = m._handle.wait(None, us(100).ps, None)
         waiter.result(5)
     finally:
         m.halt()
@@ -786,7 +788,9 @@ for _ in range(3):
         for _ in range(64)
     ]
     trace = handle.open_trace({trace!r}, [0], [])
-    goal = handle.run_goal(until=None, budget=10**15, exact=None, for_ps=None, stop_when=None)
+    goal = handle.run_goal(
+        until=None, budget=10**15, exact=None, for_ps=None, deadline_ps=None, stop_when=None
+    )
     time.sleep(0.02)
     del hooks, trace
     gc.collect()
@@ -876,7 +880,7 @@ if SURFACED:
     except ValueError:
         assert KIND == "raise"
 else:
-    end = m._handle.wait(None, None)
+    end = m._handle.wait(None, None, None)
     end.add_done_callback(ended.set)
     assert ended.wait(10)
     del end
@@ -950,7 +954,7 @@ def handler(call):
 
 def ended(m):
     done = threading.Event()
-    future = m._handle.wait(None, None)
+    future = m._handle.wait(None, None, None)
     future.add_done_callback(done.set)
     assert done.wait(10)
     return future
@@ -1043,8 +1047,8 @@ asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
 asyncio.run(m.call("start_timer", 1, budget=10_000))
 m.intercept("TIMER_IRQHandler", handler)
 m.start()
-boundary_wait = m._handle.wait(None, 1_500_000)
-end_wait = m._handle.wait(None, None)
+boundary_wait = m._handle.wait(None, 1_500_000, None)
+end_wait = m._handle.wait(None, None, None)
 registered.set()
 at_boundary = completed(boundary_wait)
 at_end = completed(end_wait)
@@ -1551,7 +1555,7 @@ try:
     if MODE == "asyncio":
         asyncio.run(goal())
     elif MODE == "result":
-        future = m._handle.run_goal(None, 10_000_000, None, None, None)
+        future = m._handle.run_goal(None, 10_000_000, None, None, None, None)
         assert entered.wait(10)
         threading.Thread(
             target=interrupt_inside, args=(_core.interruptible_waits(),), daemon=True
@@ -2550,7 +2554,7 @@ def test_a_raw_condition_wait_validates_its_members_natively(
     m.start()
     try:
         with pytest.raises(ValueError, match=match):
-            m._handle.wait_when(when, None)  # pyright: ignore[reportPrivateUsage]
+            m._handle.wait_when(when, None, None)  # pyright: ignore[reportPrivateUsage]
     finally:
         m.halt()
 
@@ -2691,3 +2695,32 @@ def test_an_internal_wait_raises_the_free_runs_own_end_and_delivers_it(
         asyncio.run(scenario())
     assert raised.value.reason is popcorn.StopReason.USER
     assert callee._park() is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_goal_deadline_at_or_before_now_stops_with_time_at_once(machines: Machines) -> None:
+    m = machines()
+    asyncio.run(m.run(budget=10_000))
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    for deadline in (m.time.ps, 0):
+        before = m.instructions
+        future = handle.run_goal(
+            until=None, budget=None, exact=None, for_ps=None, deadline_ps=deadline, stop_when=None
+        )
+        stop = asyncio.run(awaited(future, stop_info))
+        assert stop.reason is popcorn.StopReason.TIME
+        assert m.instructions == before
+
+
+def test_a_binding_refuses_both_a_duration_and_a_deadline(machines: Machines) -> None:
+    m = machines()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(ValueError, match="not both"):
+        handle.run_goal(
+            until=None, budget=None, exact=None, for_ps=1, deadline_ps=1, stop_when=None
+        )
+    m.start()
+    try:
+        with pytest.raises(ValueError, match="not both"):
+            handle.wait(None, 1, 1)
+    finally:
+        m.halt()
