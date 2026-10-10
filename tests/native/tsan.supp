@@ -1,2 +1,3 @@
 race:use_rt_clock
 race:std::__exception_ptr::exception_ptr::_M_release
+race:std::destroy_at<std::__exception_ptr::exception_ptr>
