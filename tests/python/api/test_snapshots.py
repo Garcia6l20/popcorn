@@ -6,6 +6,7 @@ import asyncio
 import os
 import stat
 from pathlib import Path
+from typing import cast
 
 import popcorn
 import pytest
@@ -221,3 +222,28 @@ def test_a_restore_of_a_machines_own_snapshot_adds_no_state(
         asyncio.run(m.run(for_=ms(5)))
         asyncio.run(twin.run(for_=ms(5)))
         assert without_generation(m)[1] == without_generation(twin)[1]
+
+
+def test_a_call_adds_no_state_but_the_instructions_it_ran(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usart_at(u575, ms(25))
+    twin = usart_at(u575, ms(25))
+    assert m.pending_events == 1
+    asyncio.run(m.call("HAL_GetTick"))
+    assert m.pending_events == 1
+    ran = m.instructions - twin.instructions
+    assert ran > 0
+    for _ in range(3):
+        called = bson(m.snapshot().to_bytes())
+        alone = bson(twin.snapshot().to_bytes())
+        for doc in (called, alone):
+            clock = doc["clock"]
+            assert isinstance(clock, dict)
+            now = cast(dict[str, object], clock).pop("now")
+            assert isinstance(now, dict)
+            doc["now"] = cast(dict[str, int], now)["value"]
+        assert called.pop("now") == cast(int, alone.pop("now")) + ran
+        assert called == alone
+        asyncio.run(m.run(for_=ms(5)))
+        asyncio.run(twin.run(for_=ms(5)))
