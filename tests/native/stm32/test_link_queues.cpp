@@ -283,3 +283,40 @@ TEST_CASE("a CDC channel peek spans packets, skips bytes taken, and leaves the c
   CHECK(channel.in_bytes == 4);
   CHECK(channel.packets() == 2);
 }
+
+TEST_CASE("a UART queue taken until a time stops at the first later frame and keeps the rest")
+{
+  detail::queue_endpoint queue;
+  for(std::uint64_t at = 10; at <= 50; at += 10)
+  {
+    queue.transmitted(static_cast<std::uint16_t>(at), vtime{at});
+  }
+  auto const held  = queue.lock();
+  auto const first = queue.take(held, 8, 30);
+  REQUIRE(first.size() == 3);
+  CHECK(first.back().at_ps == 30);
+  CHECK(queue.take(held, 8, 39).empty());
+  CHECK(queue.take(held, 1, 100).front().at_ps == 40);
+  CHECK(queue.available(held) == 1);
+}
+
+TEST_CASE("a CDC channel taken until a time splits only packets received by then")
+{
+  usb::cdc_channel                      channel;
+  constexpr std::array<std::uint8_t, 3> first{1, 2, 3};
+  constexpr std::array<std::uint8_t, 2> second{4, 5};
+  channel.received(first, vtime{10});
+  channel.received(second, vtime{20});
+  auto const part = channel.take(2, vtime{15});
+  REQUIRE(part.size() == 1);
+  CHECK(part.front().data == std::vector<std::uint8_t>{1, 2});
+  auto const rest = channel.take(8, vtime{15});
+  REQUIRE(rest.size() == 1);
+  CHECK(rest.front().data == std::vector<std::uint8_t>{3});
+  CHECK(channel.take(8, vtime{19}).empty());
+  CHECK(channel.take_packets(8, vtime{19}).empty());
+  CHECK(channel.in_bytes == 2);
+  auto const packets = channel.take_packets(8, vtime{20});
+  REQUIRE(packets.size() == 1);
+  CHECK(packets.front().at == vtime{20});
+}

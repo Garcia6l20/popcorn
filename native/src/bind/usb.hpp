@@ -219,6 +219,25 @@ public:
   [[= py::doc{"Take at most count of the oldest packets the device sent."}]] auto
       drain_packets(std::uint64_t count) -> std::vector<cdc_packet_record>;
 
+  /**
+   * @brief Takes the oldest bytes the device sent in packets received by @p until_ps, in one
+   *        hold of the link lock: later bytes stay queued.
+   * @param count Most bytes taken.
+   * @param until_ps Latest packet time taken, in picoseconds since reset.
+   */
+  [[= py::doc{"Take at most count of the oldest bytes of packets received by until_ps."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps) -> reflex::py::nb::bytes;
+
+  /**
+   * @brief Takes the oldest packets the device sent by @p until_ps, in one hold of the link
+   *        lock: later packets stay queued.
+   * @param count Most packets taken.
+   * @param until_ps Latest packet time taken, in picoseconds since reset.
+   */
+  [[= py::doc{"Take at most count of the oldest packets received by until_ps."}]] auto
+      drain_packets_until(std::uint64_t count, std::uint64_t until_ps)
+          -> std::vector<cdc_packet_record>;
+
   /** @brief Received bytes dropped because the queue held its limit. */
   [[= py::doc{"Received bytes dropped because the queue was full."}]] [[nodiscard]] auto
       dropped() const -> std::uint64_t;

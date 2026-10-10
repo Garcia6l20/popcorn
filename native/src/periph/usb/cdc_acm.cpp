@@ -418,10 +418,10 @@ void cdc_channel::received(std::span<std::uint8_t const> data, vtime at)
   trim(*this);
 }
 
-auto cdc_channel::take(std::uint64_t bytes) -> std::vector<cdc_packet>
+auto cdc_channel::take(std::uint64_t bytes, vtime until) -> std::vector<cdc_packet>
 {
   std::vector<cdc_packet> out;
-  while(bytes != 0 and not in.empty())
+  while(bytes != 0 and not in.empty() and in.front().at <= until)
   {
     auto const& front = in.front();
     auto const  count = std::min<std::uint64_t>(front.data.size() - taken, bytes);
@@ -466,12 +466,12 @@ auto cdc_channel::peek(std::uint64_t start, std::uint64_t count) const -> std::v
   return out;
 }
 
-auto cdc_channel::take_packets(std::uint64_t count) -> std::vector<cdc_packet>
+auto cdc_channel::take_packets(std::uint64_t count, vtime until) -> std::vector<cdc_packet>
 {
   std::vector<cdc_packet> out;
-  while(count-- != 0 and not in.empty())
+  while(count-- != 0 and not in.empty() and in.front().at <= until)
   {
-    auto packet = take(in.front().data.size() - taken);
+    auto packet = take(in.front().data.size() - taken, until);
     out.push_back(std::move(packet.front()));
   }
   return out;

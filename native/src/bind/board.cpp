@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <format>
+#include <limits>
 #include <ranges>
 #include <span>
 #include <string>
@@ -100,8 +101,14 @@ auto uart_link::peek(std::uint64_t start, std::uint64_t count) const -> reflex::
 
 auto uart_link::drain(std::uint64_t count) -> std::vector<uart_frame>
 {
-  auto const taken = detail::link_locked(
-      *endpoint_, [&](core::link_guard const& held) { return endpoint_->take(held, count); });
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+}
+
+auto uart_link::drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>
+{
+  auto const taken = detail::link_locked(*endpoint_, [&](core::link_guard const& held) {
+    return endpoint_->take(held, count, until_ps);
+  });
   return taken
        | std::views::transform([](detail::queued_uart_frame const& frame) {
            return uart_frame{.data = frame.data, .at_ps = frame.at_ps};

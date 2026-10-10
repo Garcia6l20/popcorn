@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import threading
+import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 
@@ -241,3 +242,35 @@ async def stalled_until_posted[T](
         await asyncio.sleep(0)
     release.set()
     return await holding, await task
+
+
+async def late_drained_read[T](
+    m: popcorn.Machine,
+    post: Callable[[VirtualTime], None],
+    read: Callable[[VirtualTime], Coroutine[object, object, T]],
+) -> tuple[VirtualTime, T]:
+    """Inside `running()`, hold the machine's thread at a boundary, call `post(boundary)` and
+    start `read(boundary)` there, then block the event loop in 20 ms naps until the read is
+    done, so its wait ends during a nap and the free run goes on before the read resumes."""
+    reached = threading.Event()
+    release = threading.Event()
+    boundary: list[VirtualTime] = []
+
+    def held() -> None:
+        boundary.append(m.time)
+        reached.set()
+        release.wait(10.0)
+
+    holding = m.sample(held)
+    while not reached.is_set():
+        await asyncio.sleep(0.001)
+    post(boundary[0])
+    task = asyncio.create_task(read(boundary[0]))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    release.set()
+    while not task.done():
+        time.sleep(0.02)
+        await asyncio.sleep(0)
+    await holding
+    return boundary[0], task.result()

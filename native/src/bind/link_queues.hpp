@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <vector>
@@ -62,16 +63,23 @@ public:
   }
 
   /**
-   * @brief Takes the oldest frames.
+   * @brief Takes the oldest frames, up to the first whose stop bit ended after @p until_ps.
    * @param count Most frames taken.
+   * @param until_ps Latest stop bit end taken, in picoseconds.
    * @return The frames, oldest first.
    */
-  auto take(core::link_guard const& held, std::uint64_t count)
+  auto take(
+      core::link_guard const& held,
+      std::uint64_t           count,
+      std::uint64_t           until_ps = std::numeric_limits<std::uint64_t>::max())
       -> std::vector<queued_uart_frame> pre(held.guards(mutex_))
   {
-    auto const taken = static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, frames_.size()));
-    std::vector<queued_uart_frame> out(frames_.begin(), frames_.begin() + taken);
-    frames_.erase(frames_.begin(), frames_.begin() + taken);
+    auto const first = frames_.begin();
+    auto const last  = std::find_if(
+        first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, frames_.size())),
+        [until_ps](queued_uart_frame const& frame) { return frame.at_ps > until_ps; });
+    std::vector<queued_uart_frame> out(first, last);
+    frames_.erase(first, last);
     return out;
   }
 

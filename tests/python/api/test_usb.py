@@ -25,10 +25,18 @@ from typing import Any
 import popcorn
 import pytest
 from popcorn import _core
-from popcorn.board import CdcLineCoding, HidStream, UsbData, UsbHost, UsbHostOptions, UsbState
+from popcorn.board import (
+    CdcLineCoding,
+    CdcPacket,
+    HidStream,
+    UsbData,
+    UsbHost,
+    UsbHostOptions,
+    UsbState,
+)
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import BOARD_ELF, run_bounded
+from .conftest import BOARD_ELF, late_drained_read, run_bounded
 from .projects import Silent
 
 HANG = 10.0
@@ -1646,6 +1654,47 @@ def test_cdc_take_inside_running_empties_the_queue(u575: popcorn.MachineDescript
 
     assert run_bounded(body(), HANG) == b"ABC"
     assert cdc.available == 0
+
+
+CDC_SENT = bytes(ord("a") + i % 26 for i in range(2000))
+
+
+async def cdc_bytes_read(cdc: Any, at: VirtualTime) -> tuple[bytes, bytes]:
+    first: bytes = await cdc.read(4000, deadline=at + ms(8))
+    return first, await cdc.read(4000, deadline=at + ms(60))
+
+
+async def cdc_packets_read(cdc: Any, at: VirtualTime) -> tuple[bytes, bytes]:
+    first: list[CdcPacket] = await cdc.read_packets(100, deadline=at + ms(8))
+    later: list[CdcPacket] = await cdc.read_packets(100, deadline=at + ms(60))
+    assert first[-1].at <= at + ms(8) < later[0].at
+    return b"".join(p.data for p in first), b"".join(p.data for p in later)
+
+
+@pytest.mark.parametrize("reads", [cdc_bytes_read, cdc_packets_read])
+def test_a_free_run_cdc_deadline_read_takes_what_a_parked_one_takes(
+    u575: popcorn.MachineDescription,
+    reads: Callable[[Any, VirtualTime], Coroutine[Any, Any, tuple[bytes, bytes]]],
+) -> None:
+    m, host = configured(u575)
+    cdc = host.cdc()
+    asyncio.run(cdc.wait_ready(for_=ms(50)))
+    start = m.snapshot()
+
+    def post(at: VirtualTime) -> None:
+        cdc.write(CDC_SENT, at=at + ms(1))
+
+    async def running() -> tuple[VirtualTime, tuple[bytes, bytes]]:
+        async with m.running():
+            return await late_drained_read(m, post, lambda at: reads(cdc, at))
+
+    at, (first, later) = run_bounded(running(), HANG)
+    assert first
+    assert later
+    assert first + later == CDC_SENT.upper()
+    m.restore(start)
+    post(at)
+    assert asyncio.run(reads(cdc, at)) == (first, later)
 
 
 def test_a_bridged_cdc_function_is_not_taken_from_python(

@@ -18,7 +18,7 @@ from popcorn.model import Model
 from popcorn.trace import TraceKind, read
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import BOARD_ELF, holds_pty, run_bounded, stalled
+from .conftest import BOARD_ELF, holds_pty, late_drained_read, run_bounded, stalled
 
 FRAME_PS = 87_500_000
 USART1_TDR = 0x4001_3828
@@ -469,6 +469,34 @@ def test_a_free_run_deadline_read_ends_at_its_absolute_time(board: popcorn.Machi
     assert frames
     assert start + ms(2) < frames[-1].at <= start + ms(3) + us(200)
     assert len(frames) < 40
+
+
+def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
+    board: popcorn.Machine,
+) -> None:
+    uart = board.periph.USART1.port
+    sent = bytes(range(1, 201))
+    start = board.snapshot()
+
+    def post(at: VirtualTime) -> None:
+        uart.write(sent, at=at + ms(1))
+
+    async def reads(at: VirtualTime) -> tuple[list[Frame], list[Frame]]:
+        first = await uart.read_frames(1000, deadline=at + ms(4))
+        return first, await uart.read_frames(1000, deadline=at + ms(30))
+
+    async def running() -> tuple[VirtualTime, tuple[list[Frame], list[Frame]]]:
+        async with board.running():
+            return await late_drained_read(board, post, reads)
+
+    at, (first, later) = run_bounded(running(), 20)
+    assert first
+    assert later
+    assert first[-1].at <= at + ms(4) < later[0].at
+    assert bytes(f.data for f in first + later) == sent
+    board.restore(start)
+    post(at)
+    assert asyncio.run(reads(at)) == (first, later)
 
 
 def test_read_until_takes_through_the_match(board: popcorn.Machine) -> None:

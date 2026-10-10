@@ -297,6 +297,11 @@ class UartStream:
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
         past, the wait ends at once.
 
+        A read that waits takes only the frames whose stop bit ended by the time its wait
+        stopped, in one native step: frames that end later stay queued for the next read, even
+        those a free run queued before this read resumed. So the bytes depend only on what the
+        firmware sent, the same parked and running.
+
         Returns:
             Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
                 idle first.
@@ -317,7 +322,8 @@ class UartStream:
         for_: VirtualDuration | None = None,
         deadline: VirtualTime | None = None,
     ) -> list[Frame]:
-        """As `read`, the frames with their times.
+        """As `read`, the frames with their times. A read that waits returns no frame with an
+        `at` past the time its wait stopped.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
         past, the wait ends at once.
@@ -329,9 +335,10 @@ class UartStream:
         self._check_unbridged()
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
-        if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _frames(self._link.drain(n))
+        if self._link.available() >= n:
+            return _frames(self._link.drain(n))
+        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
+        return _frames(self._link.drain_until(n, stop.ps))
 
     async def read_until(
         self,

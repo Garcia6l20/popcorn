@@ -96,6 +96,15 @@ public:
   [[= py::doc{"Take at most count of the oldest transmitted frames."}]] auto
       drain(std::uint64_t count) -> std::vector<uart_frame>;
 
+  /**
+   * @brief Takes the oldest transmitted frames whose stop bit ended by @p until_ps, in one
+   *        hold of the link lock: later frames stay queued.
+   * @param count Most frames taken.
+   * @param until_ps Latest stop bit end taken, in picoseconds since reset.
+   */
+  [[= py::doc{"Take at most count of the oldest frames whose at_ps is at most until_ps."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>;
+
   /** @brief Transmitted frames dropped because the queue held its limit. */
   [[= py::doc{"Transmitted frames dropped because the queue was full."}]] [[nodiscard]] auto
       dropped() const -> std::uint64_t;

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -106,18 +107,25 @@ struct cdc_channel
   void received(std::span<std::uint8_t const> data, vtime at);
 
   /**
-   * @brief Takes received bytes, splitting a packet when @p bytes ends inside it.
+   * @brief Takes received bytes, splitting a packet when @p bytes ends inside it, up to the
+   *        first packet received after @p until.
    * @param bytes Most bytes taken.
+   * @param until Latest packet time taken.
    * @return The packets or parts taken, oldest first.
    */
-  auto take(std::uint64_t bytes) -> std::vector<cdc_packet>;
+  auto take(std::uint64_t bytes, vtime until = vtime{std::numeric_limits<std::uint64_t>::max()})
+      -> std::vector<cdc_packet>;
 
   /**
-   * @brief Takes whole received packets, the rest of a packet partly taken counting as one.
+   * @brief Takes whole received packets, the rest of a packet partly taken counting as one, up
+   *        to the first packet received after @p until.
    * @param count Most packets taken.
+   * @param until Latest packet time taken.
    * @return The packets, oldest first.
    */
-  auto take_packets(std::uint64_t count) -> std::vector<cdc_packet>;
+  auto take_packets(
+      std::uint64_t count,
+      vtime until = vtime{std::numeric_limits<std::uint64_t>::max()}) -> std::vector<cdc_packet>;
 
   /** @brief Received packets not taken yet, a packet partly taken included. */
   [[nodiscard]] auto packets() const noexcept -> std::uint64_t;

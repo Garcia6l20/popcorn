@@ -417,6 +417,11 @@ class CdcStream:
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
         past, the wait ends at once.
 
+        A read that waits takes only the bytes of packets received by the time its wait
+        stopped, in one native step: later packets stay queued for the next read, even those a
+        free run received before this read resumed. So the bytes depend only on what the device
+        sent, the same parked and running.
+
         Returns:
             Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
                 idle first.
@@ -431,9 +436,10 @@ class CdcStream:
         """
         check_wait(for_, deadline)
         self._check_read(n)
-        if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_, deadline)
-        return self._link.drain(n)
+        if self._link.available() >= n:
+            return self._link.drain(n)
+        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
+        return self._link.drain_until(n, stop.ps)
 
     async def read_packets(
         self,
@@ -443,7 +449,7 @@ class CdcStream:
         deadline: VirtualTime | None = None,
     ) -> list[CdcPacket]:
         """As `read`, `n` packets with their times. The rest of a packet a `read` split counts
-        as one.
+        as one. A read that waits returns no packet with an `at` past the time its wait stopped.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
         past, the wait ends at once.
@@ -453,9 +459,10 @@ class CdcStream:
         """
         check_wait(for_, deadline)
         self._check_read(n)
-        if self._link.packets() < n:
-            await self._wait(self._link.predicate_packets(n), for_, deadline)
-        return _cdc_packets(self._link.drain_packets(n))
+        if self._link.packets() >= n:
+            return _cdc_packets(self._link.drain_packets(n))
+        stop = await self._wait(self._link.predicate_packets(n), for_, deadline)
+        return _cdc_packets(self._link.drain_packets_until(n, stop.ps))
 
     async def read_until(
         self,

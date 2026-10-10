@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <format>
 #include <functional>
+#include <limits>
 #include <ranges>
 #include <span>
 #include <string>
@@ -213,9 +214,14 @@ auto cdc_link::peek(std::uint64_t start, std::uint64_t count) const -> reflex::p
 
 auto cdc_link::drain(std::uint64_t count) -> reflex::py::nb::bytes
 {
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+}
+
+auto cdc_link::drain_until(std::uint64_t count, std::uint64_t until_ps) -> reflex::py::nb::bytes
+{
   auto const bytes = locked([&](usb::cdc_channel& queues) {
     std::vector<std::uint8_t> taken;
-    for(auto const& packet : queues.take(count))
+    for(auto const& packet : queues.take(count, vtime{until_ps}))
     {
       taken.append_range(packet.data);
     }
@@ -226,7 +232,14 @@ auto cdc_link::drain(std::uint64_t count) -> reflex::py::nb::bytes
 
 auto cdc_link::drain_packets(std::uint64_t count) -> std::vector<cdc_packet_record>
 {
-  auto const taken = locked([&](usb::cdc_channel& queues) { return queues.take_packets(count); });
+  return drain_packets_until(count, std::numeric_limits<std::uint64_t>::max());
+}
+
+auto cdc_link::drain_packets_until(std::uint64_t count, std::uint64_t until_ps)
+    -> std::vector<cdc_packet_record>
+{
+  auto const taken =
+      locked([&](usb::cdc_channel& queues) { return queues.take_packets(count, vtime{until_ps}); });
   return taken | std::views::transform(packet_record) | std::ranges::to<std::vector>();
 }
 
