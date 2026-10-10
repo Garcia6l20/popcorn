@@ -132,11 +132,12 @@ def test_a_trace_writes_blocks_to_a_file(tmp_path: Path) -> None:
     assert path.stat().st_size == recording.size
 
 
-def modelled() -> popcorn.Machine:
+def modelled(name: str | None = None) -> popcorn.Machine:
     m = popcorn.Machine(
         popcorn.load_description(MODEL_JSON),
         image=popcorn.Image.elf(MODEL_ELF),
         models={"TIMER": Timer},
+        name=name,
     )
     m.reset()
     asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
@@ -255,7 +256,52 @@ def test_an_unmodelled_access_is_logged_once(caplog: pytest.LogCaptureFixture) -
     assert fields["popcorn_write"] is False
     touch = m.symbols["touch_unmodelled"]
     assert touch.value & ~1 <= fields["popcorn_pc"] < (touch.value & ~1) + touch.size
-    assert "POPCORN-M33-TEST" in logged[0].getMessage()
+    assert logged[0].getMessage() == (
+        "POPCORN-M33-TEST: read of UNMODELLED.DATA at offset 0x0, no model"
+    )
+    assert fields["popcorn_machine"] == "POPCORN-M33-TEST"
+
+
+def unmodelled_records(
+    caplog: pytest.LogCaptureFixture, machines: list[popcorn.Machine]
+) -> list[logging.LogRecord]:
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        for m in machines:
+            asyncio.run(m.call("touch_unmodelled"))
+    return [r for r in caplog.records if getattr(r, "popcorn_peripheral", None) == "UNMODELLED"]
+
+
+def test_a_named_machine_logs_under_its_name(caplog: pytest.LogCaptureFixture) -> None:
+    (record,) = unmodelled_records(caplog, [modelled("node1")])
+    assert record.getMessage() == "node1: read of UNMODELLED.DATA at offset 0x0, no model"
+    assert vars(record)["popcorn_machine"] == "node1"
+
+
+def test_two_machines_of_one_part_log_apart(caplog: pytest.LogCaptureFixture) -> None:
+    records = unmodelled_records(caplog, [modelled("a"), modelled("b")])
+    assert [r.getMessage().split(":")[0] for r in records] == ["a", "b"]
+    assert [vars(r)["popcorn_machine"] for r in records] == ["a", "b"]
+
+
+def test_concurrent_machines_keep_their_records_apart(caplog: pytest.LogCaptureFixture) -> None:
+    machines = [modelled("a"), modelled("b")]
+    base = next(p.base for p in machines[0].description.peripherals if p.name == "UNMODELLED")
+    offsets = range(4, 4 + 4 * 50, 4)
+
+    async def reads(m: popcorn.Machine) -> None:
+        for offset in offsets:
+            await m.read(m.ref.mem.u32[base + offset])
+
+    async def body() -> None:
+        async with machines[0].running(), machines[1].running():
+            await asyncio.gather(*(reads(m) for m in machines))
+
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        asyncio.run(body())
+    for m in machines:
+        mine = [r for r in caplog.records if vars(r).get("popcorn_machine") == m.name]
+        assert [vars(r)["popcorn_offset"] for r in mine] == list(offsets)
+        assert all(r.getMessage().startswith(f"{m.name}: read of UNMODELLED") for r in mine)
 
 
 def test_closing_a_trace_on_a_full_disk_raises() -> None:

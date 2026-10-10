@@ -140,6 +140,31 @@ def test_machine_factory(pytester: pytest.Pytester) -> None:
     run(pytester).assert_outcomes(passed=2)
 
 
+def test_factory_names_its_machines_and_boots_once(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile("""
+        import pytest
+
+        def test_named(machine, machine_factory):
+            assert machine.name == machine.description.part
+            named = machine_factory(name="x")
+            assert named.name == "x"
+            assert named.pc == machine.pc
+            assert machine_factory(name="y", booted=False).name == "y"
+            assert machine_factory().name == machine.description.part
+            with pytest.raises(ValueError):
+                machine_factory(name="x.y")
+
+        async def test_named_async(machine_factory):
+            m = await machine_factory.booted(name="z")
+            assert m.name == "z"
+        """)
+    result = run(pytester)
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines(["popcorn: 1 key(s), 1 boot(s), 0 from cache"])
+
+
 def test_factory_boot_from_async_tests(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester)

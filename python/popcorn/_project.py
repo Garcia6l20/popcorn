@@ -30,7 +30,14 @@ from popcorn._errors import (
     absent,
 )
 from popcorn._image import Image
-from popcorn._machine import DEFAULT_ARENA_BASE, DEFAULT_ARENA_SIZE, AttachedDevice, Machine
+from popcorn._machine import (
+    DEFAULT_ARENA_BASE,
+    DEFAULT_ARENA_SIZE,
+    AttachedDevice,
+    Machine,
+    check_machine_name,
+    error_prefix,
+)
 from popcorn._rcc import RccOptions
 from popcorn._stop import Stop
 from popcorn._supply import SupplyOptions
@@ -520,6 +527,7 @@ class Project:
         *,
         strict_peripherals: bool | None = None,
         devices: Mapping[str, Sequence[AttachedDevice]] | None = None,
+        name: str | None = None,
     ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
         board models, bus devices, RCC clock sources, SAI audio blocks, USB hosts, supply
@@ -538,8 +546,11 @@ class Project:
                 `Machine(devices=)` takes them. A listed peripheral gets these devices instead
                 of its `board` devices, none for an empty list. A peripheral not listed keeps
                 the project's. Not part of `digest`.
+            name: Name of the machine in its log records and errors, as `Machine(name=)`
+                takes it, the part when None. Not part of `digest`.
 
         Raises:
+            ValueError: `name` is empty or holds whitespace or a dot.
             ConfigError: As `machine_description`, a model is not a `popcorn.model.Model` or a
                 device not a `popcorn.board.I2CTarget` or `SpiTarget`, a class refuses its
                 parameters, a model replaces no peripheral of the description, a memory_init
@@ -554,42 +565,44 @@ class Project:
             ModelError: A `connect` peripheral is neither a UART nor a USB device controller
                 with a `host`.
         """
+        check_machine_name(name)
         check_inputs(self)
         description = self.machine_description()
         served = {p.name for p in description.peripherals if p.alias_of is None}
         given = _given_devices(description, devices or {})
         self._check_board()
         models: dict[str, Callable[[], Model]] = {}
-        for name, periph in self.board.items():
+        for periph_name, periph in self.board.items():
             if periph.model is None:
                 continue
-            if name not in served:
-                raise _plain_error(f"board.{name}", f"a peripheral of {description.part}")
-            models[name] = functools.partial(_built_model, periph.model)
+            if periph_name not in served:
+                raise _plain_error(f"board.{periph_name}", f"a peripheral of {description.part}")
+            models[periph_name] = functools.partial(_built_model, periph.model)
         attached = {
-            name: self._devices(name, periph, description)
-            for name, periph in self.board.items()
-            if periph.devices and name not in given
+            periph_name: self._devices(periph_name, periph, description)
+            for periph_name, periph in self.board.items()
+            if periph.devices and periph_name not in given
         }
         attached.update(given)
         ips = {p.name: p.ip for p in description.peripherals}
         audio: dict[str, dict[Block, AudioOptions]] = {}
-        for name, periph in self.board.items():
+        for periph_name, periph in self.board.items():
             for letter, options in periph.audio.items():
-                if periph.model is not None or ips.get(name) != "SAI":
+                if periph.model is not None or ips.get(periph_name) != "SAI":
                     raise _plain_error(
-                        f"board.{name}.{letter}", "an audio block of an SAI with the built-in model"
+                        f"board.{periph_name}.{letter}",
+                        "an audio block of an SAI with the built-in model",
                     )
-                audio.setdefault(name, {})[letter] = options
+                audio.setdefault(periph_name, {})[letter] = options
         usb: dict[str, UsbHostOptions] = {}
-        for name, periph in self.board.items():
+        for periph_name, periph in self.board.items():
             if periph.host is None:
                 continue
-            if periph.model is not None or ips.get(name) != "USB_OTG_FS":
+            if periph.model is not None or ips.get(periph_name) != "USB_OTG_FS":
                 raise _plain_error(
-                    f"board.{name}.host", "a USB device controller with the built-in model"
+                    f"board.{periph_name}.host", "a USB device controller with the built-in model"
                 )
-            usb[name] = periph.host
+            usb[periph_name] = periph.host
         boot = self.boot
         m = Machine(
             description,
@@ -607,13 +620,14 @@ class Project:
             audio=audio,
             usb=usb,
             supply=self.supply,
+            name=name,
         )
-        for name, periph in self.board.items():
+        for periph_name, periph in self.board.items():
             if periph.connect is None:
                 continue
             if periph.connect != "pty":
-                raise _plain_error(f"board.{name}.connect", f'"pty", not "{periph.connect}"')
-            m.board.pty(name)
+                raise _plain_error(f"board.{periph_name}.connect", f'"pty", not "{periph.connect}"')
+            m.board.pty(periph_name)
         for index, init in enumerate(boot.memory_init):
             key = f"boot.memory_init[{index}]"
             try:
@@ -649,7 +663,7 @@ class Project:
         stop = await machine.run(until=target, budget=boot.budget)
         if stop.reason is StopReason.ADDRESS and stop.pc == target:
             return stop
-        message = f"boot did not reach {boot.until}: {stop}"
+        message = f"{error_prefix(machine)}boot did not reach {boot.until}: {stop}"
         pc, symbol = stop.pc, stop.location.symbol
         if stop.reason is StopReason.FAULT and stop.fault is not None:
             raise FaultError(

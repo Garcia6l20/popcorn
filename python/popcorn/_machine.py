@@ -267,8 +267,28 @@ def _ps(value: VirtualDuration | None) -> int | None:
     return None if value is None else value.ps
 
 
-def _stop_error(stopped: Stop, during: str = "the background run") -> EmulationError:
-    message = f"{during} stopped with {stopped.reason.name}: {stopped}"
+def check_machine_name(name: str | None) -> None:
+    """Refuse a machine name `Machine(name=)` would refuse, None passing.
+
+    Raises:
+        ValueError: `name` is empty or holds whitespace or a dot.
+    """
+    if name is None:
+        return
+    if not name or "." in name or any(c.isspace() for c in name):
+        raise ValueError(f"name {name!r} must be non-empty, without whitespace or a dot")
+
+
+def error_prefix(machine: Machine) -> str:
+    """What starts the text of an error a machine raises: `<name>: ` when the machine has a
+    name other than its part, empty otherwise."""
+    return "" if machine.name == machine.description.part else f"{machine.name}: "
+
+
+def _stop_error(
+    stopped: Stop, during: str = "the background run", prefix: str = ""
+) -> EmulationError:
+    message = f"{prefix}{during} stopped with {stopped.reason.name}: {stopped}"
     if stopped.reason is StopReason.FAULT and stopped.fault is not None:
         fault = stopped.fault
         return FaultError(
@@ -459,6 +479,7 @@ class Machine:
         "_logs",
         "_memory",
         "_model_context",
+        "_name",
         "_nvic",
         "_parked_ends",
         "_peripherals",
@@ -496,6 +517,7 @@ class Machine:
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
         usb: Mapping[str, UsbHostOptions] | None = None,
         supply: SupplyOptions | None = None,
+        name: str | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -534,6 +556,8 @@ class Machine:
                 not listed has no host: it sees no VBUS and never enumerates.
             supply: Supply voltages of the board, None for its defaults, a 3.0 V VDDA. VDDA is
                 the reference of every conversion of the built-in ADC model.
+            name: Name of the machine in its log records and errors, the description's part
+                when None. Not part of any configuration digest or snapshot.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
@@ -550,9 +574,11 @@ class Machine:
                 or a timeout not above 0, named as `usb.<NAME>`. With `supply`: a VDDA outside 1620
                 to 3600 mV.
             ImageError: An image does not fit the memory map.
+            ValueError: `name` is empty or holds whitespace or a dot.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
+        check_machine_name(name)
         if not isinstance(description, MachineDescription):
             description = load_description(description)
         config = _core.MachineConfig()
@@ -578,6 +604,7 @@ class Machine:
         config.slice_instructions = slice_instructions
         config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._description = description
+        self._name = description.part if name is None else name
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
         config.models_context = self._model_context
@@ -631,7 +658,7 @@ class Machine:
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
         self._callback_table = CallbackTable()
         self._posted_bodies = PostedBodies(self._callback_table)
-        self._handle.forward_logs(functools.partial(forward_log, description.part))
+        self._handle.forward_logs(functools.partial(forward_log, self._name))
         watch_logs(self._handle.log_token(), self)
         self._irqs = Irqs(description)
         self._arena = (
@@ -694,6 +721,14 @@ class Machine:
     def description(self) -> MachineDescription:
         """Description the machine was built from."""
         return self._description
+
+    @property
+    def name(self) -> str:
+        """Name of the machine in its log records and errors, the part unless `name=` was given.
+
+        Every log record of the machine carries it as the `popcorn_machine` extra.
+        """
+        return self._name
 
     @property
     def config_digest(self) -> str:
@@ -2030,11 +2065,13 @@ class Machine:
             )
             stop = stop_of(raw)
             if ended:
-                raise _stop_error(stop, f"the free run, while waiting for {ready.what()}")
+                raise _stop_error(
+                    stop, f"the free run, while waiting for {ready.what()}", error_prefix(self)
+                )
             return stop.time
         stop = await self.wait_for(_Native(ready), for_=for_, deadline=deadline)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, f"the run waiting for {ready.what()}")
+            raise _stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(self))
         return stop.time
 
     async def _wait_gated(
@@ -2049,9 +2086,11 @@ class Machine:
             return self.time
         stop = await self.wait_for(event, for_=for_, deadline=deadline)
         if stop.reason is StopReason.USER and not event.fired:
-            raise _stop_error(stop, "the free run, while waiting for a Python predicate")
+            raise _stop_error(
+                stop, "the free run, while waiting for a Python predicate", error_prefix(self)
+            )
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, "the run waiting for a Python predicate")
+            raise _stop_error(stop, "the run waiting for a Python predicate", error_prefix(self))
         return stop.time
 
     async def wait_until(
@@ -2110,7 +2149,7 @@ class Machine:
             return stop.time
         if stop.reason in (StopReason.TIME, StopReason.IDLE):
             return None
-        raise _stop_error(stop, "the run waiting for the predicate")
+        raise _stop_error(stop, "the run waiting for the predicate", error_prefix(self))
 
     async def wait_for(
         self,
@@ -2231,7 +2270,7 @@ class Machine:
         else:
             stop = await self.run(for_=duration)
         if stop.reason is not StopReason.TIME:
-            raise _stop_error(stop, "the run letting time pass")
+            raise _stop_error(stop, "the run letting time pass", error_prefix(self))
         return stop.time
 
     def now(self) -> Pending[VirtualTime]:
@@ -2374,7 +2413,7 @@ class Machine:
         if isinstance(ended, BaseException):
             raise ended
         if ended is not None:
-            raise _stop_error(ended)
+            raise _stop_error(ended, prefix=error_prefix(self))
         if self._parked_ends:
             raise self._parked_ends.pop(0)
 
@@ -2402,7 +2441,7 @@ class Machine:
         if ended is None or ended is surfaced:
             return None
         if isinstance(ended, Stop):
-            ended = _stop_error(ended)
+            ended = _stop_error(ended, prefix=error_prefix(self))
         self._parked_ends.append(ended)
         return ended
 
@@ -2505,7 +2544,10 @@ class Machine:
         return call
 
     def __repr__(self) -> str:
-        return f"Machine({self._description.part}, images={len(self._images)})"
+        part = self._description.part
+        if self._name == part:
+            return f"Machine({part}, images={len(self._images)})"
+        return f"Machine({self._name}, {part}, images={len(self._images)})"
 
 
 def _masked_stop(raw: object) -> tuple[Stop, int]:

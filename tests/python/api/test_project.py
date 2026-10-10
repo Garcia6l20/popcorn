@@ -101,6 +101,25 @@ def test_boot_raises_budget_exceeded_before_its_symbol() -> None:
     assert caught.value.stop is not None
 
 
+def test_a_named_machine_names_itself_in_a_boot_error() -> None:
+    project = minimal_project(budget=100)
+    texts: list[str] = []
+    for name in (None, "node1"):
+        with pytest.raises(popcorn.BudgetExceeded) as caught:
+            asyncio.run(project.boot_machine(project.machine(name=name)))
+        texts.append(str(caught.value))
+    assert texts[0].startswith("boot did not reach alu_mark: ")
+    assert texts[1] == f"node1: {texts[0]}"
+
+
+def test_a_bad_name_is_refused_before_the_images_load() -> None:
+    project = minimal_project().replace(images=[popcorn.Elf(DRIVER_ELF.with_suffix(".absent"))])
+    with pytest.raises(popcorn.MissingInput):
+        project.machine()
+    with pytest.raises(ValueError, match="name"):
+        project.machine(name="a.b")
+
+
 def test_memory_init_needs_a_known_symbol() -> None:
     project = minimal_project(memory_init=[popcorn.MemoryInit("absent", b"\x01")])
     with pytest.raises(popcorn.ConfigError) as caught:

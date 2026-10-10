@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pytest
 
 from popcorn import Machine, MissingInput, PopcornError, Project, Snapshot
+from popcorn._machine import check_machine_name
 from popcorn.pytest._options import UNSET, marker_options
 from popcorn.pytest._report import (
     TraceOnFail,
@@ -65,6 +66,7 @@ class MachineFactory:
         strict: bool | None = None,
         booted: bool = True,
         devices: Devices | None = None,
+        name: str | None = None,
     ) -> Machine:
         """A new machine of the config `config` of `project`.
 
@@ -77,23 +79,29 @@ class MachineFactory:
             booted: Whether the machine is restored from the boot snapshot of its key, or left
                 powered off and not reset.
             devices: Bus devices instead of the project's devices of their peripherals.
+            name: Name of the machine in its log records and errors, the part when None. The
+                machine that boots a key for the boot cache is another one and logs its boot
+                under the part, unless `devices` are given: then the machine returned is the
+                one that booted.
 
         Raises:
+            ValueError: `name` is empty or holds whitespace or a dot.
             RuntimeError: `booted` and the key is not booted yet while an event loop runs.
             ConfigError: The project has no config `config`, a device serves another live
                 machine, or `Project.machine` refuses `devices`.
         """
+        check_machine_name(name)
         key = self._key(config, project, strict)
         with _skipping_missing(self._session.project(key)):
             if not booted:
-                return self._keep(self._session.build(key, devices), key)
+                return self._keep(self._session.build(key, devices, name), key)
             if devices is not None:
                 key = self._session.device_key(key, devices)
             try:
                 if devices is None:
                     snapshot = self._session.booted(key).decoded()
-                    return self._ready(key, self._session.build(key), snapshot)
-                return self._ready(key, *self._session.booted_with(key, devices))
+                    return self._ready(key, self._session.build(key, name=name), snapshot)
+                return self._ready(key, *self._session.booted_with(key, devices, name))
             except PopcornError:
                 self._track_failed(key)
                 raise
@@ -105,8 +113,10 @@ class MachineFactory:
         project: Project | None = None,
         strict: bool | None = None,
         devices: Devices | None = None,
+        name: str | None = None,
     ) -> Machine:
         """A new booted machine as `factory()` gives, booting the key on the running loop."""
+        check_machine_name(name)
         key = self._key(config, project, strict)
         with _skipping_missing(self._session.project(key)):
             if devices is not None:
@@ -114,8 +124,8 @@ class MachineFactory:
             try:
                 if devices is None:
                     snapshot = (await self._session.booted_async(key)).decoded()
-                    return self._ready(key, self._session.build(key), snapshot)
-                return self._ready(key, *await self._session.booted_with_async(key, devices))
+                    return self._ready(key, self._session.build(key, name=name), snapshot)
+                return self._ready(key, *await self._session.booted_with_async(key, devices, name))
             except PopcornError:
                 self._track_failed(key)
                 raise
