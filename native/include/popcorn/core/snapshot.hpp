@@ -14,7 +14,7 @@
 namespace popcorn::core
 {
 /** @brief Version of the snapshot_data layout, stamped by the machine and checked on restore. */
-inline constexpr std::uint32_t snapshot_format_version = 4;
+inline constexpr std::uint32_t snapshot_format_version = 5;
 
 /** @brief Opaque state saved by one owner: the arch module or one peripheral model. */
 struct snapshot_part
@@ -79,13 +79,16 @@ struct peripheral_image
   friend auto operator==(peripheral_image const&, peripheral_image const&) -> bool = default;
 };
 
-/** @brief Content of the event queue: what scheduler::pending() and next_seq() return. */
+/** @brief Content of the event queue: what scheduler::pending(), next_seq() and
+ * next_lane_seq() return. */
 struct scheduler_state
 {
   /** @brief Pending events in dispatch order. */
   std::vector<event> pending{};
   /** @brief Sequence number the next schedule returns. */
   std::uint64_t next_seq{};
+  /** @brief Lane sequence numbers handed out, 0 in saves before lanes existed. */
+  std::uint64_t next_lane_seq{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(scheduler_state const&, scheduler_state const&) -> bool = default;
@@ -232,12 +235,14 @@ auto encode_snapshot(snapshot_data const& data) -> std::vector<std::byte>;
 /**
  * @brief Reads back bytes encode_snapshot() wrote.
  * @param bytes Serialized content.
- * @return The content, format snapshot_format_version. Formats 2 and 3 are also read. Format 2,
- *         the layout before virtual-time events: its events load as deadline::instructions,
- *         their meaning then. Format 3, the layout before the clock hold: its clock loads with
- *         nothing held, clock_state::held and held_time 0, as every format 3 machine ran.
+ * @return The content, format snapshot_format_version. Formats 2, 3 and 4 are also read.
+ *         Format 2, the layout before virtual-time events: its events load as
+ *         deadline::instructions, their meaning then. Format 3, the layout before the clock
+ *         hold: its clock loads with nothing held, clock_state::held and held_time 0, as every
+ *         format 3 machine ran. Format 4, the layout before event lanes: its events load in
+ *         lane 0, the only lane then, with no lane sequence number handed out.
  * @throws config_error when @p bytes is malformed or its format is not
- *         snapshot_format_version, 3 or 2.
+ *         snapshot_format_version, 4, 3 or 2.
  */
 auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data;
 }

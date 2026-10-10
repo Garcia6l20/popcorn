@@ -54,9 +54,10 @@ public:
       std::uint32_t          old,
       std::uint32_t          value,
       periph::access_ctx     ctx) -> std::expected<void, bus_error> override;
-  void on_event(std::uint32_t kind, std::uint64_t payload) override;
-  void save(std::vector<std::byte>& out) const override;
-  void load(std::span<std::byte const> in) override;
+  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void               save(std::vector<std::byte>& out) const override;
+  void               load(std::span<std::byte const> in) override;
+  [[nodiscard]] auto drives_core_clock() const noexcept -> bool override;
 
   /** @brief Context the model was created with. */
   [[nodiscard]] auto context() const noexcept -> periph::model_context&;
@@ -98,6 +99,9 @@ public:
   bool halve_rate_on_go = false;
   /** @brief Whether a `CTRL.GO` write doubles the core clock, after scheduling its event. */
   bool double_rate_on_go = false;
+  /** @brief What drives_core_clock() returns: true makes a CPU write start the epoch of a rate
+   * change at the writing instruction, not at the end of its block. */
+  bool drives_clock = false;
 
   /** @brief Instruction count at which the delayed IRQ event last fired. */
   std::optional<icount> fired_at{};

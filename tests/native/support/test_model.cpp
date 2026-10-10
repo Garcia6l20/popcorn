@@ -135,6 +135,11 @@ void test_model::on_event(std::uint32_t kind, std::uint64_t payload)
   context_.irqs.front().raise();
 }
 
+auto test_model::drives_core_clock() const noexcept -> bool
+{
+  return drives_clock;
+}
+
 void test_model::save(std::vector<std::byte>& out) const
 {
   out.push_back(std::byte{context_.irqs.front().level() ? std::uint8_t{1} : std::uint8_t{0}});

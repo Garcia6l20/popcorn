@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import lzma
 import os
 import stat
 from pathlib import Path
@@ -10,12 +11,13 @@ from typing import cast
 
 import popcorn
 import pytest
-from popcorn.units import VirtualDuration, ms
+from popcorn.units import VirtualDuration, ms, us
 
 from .conftest import DRIVER_ELF, M33_JSON, ROOT, Machines
 from .snapshot_doc import bson
 
 USART_ELF = ROOT / "examples" / "stm32u575" / "usart" / "prebuilt" / "usart_echo.elf"
+USART_RX_V4 = ROOT / "tests" / "data" / "api" / "usart_rx_v4.snap.xz"
 
 
 def state(m: popcorn.Machine) -> tuple[int, int, tuple[int, ...], bytes]:
@@ -247,3 +249,30 @@ def test_a_call_adds_no_state_but_the_instructions_it_ran(
         assert called == alone
         asyncio.run(m.run(for_=ms(5)))
         asyncio.run(twin.run(for_=ms(5)))
+
+
+def test_a_format_4_snapshot_mid_reception_restores_and_runs_on(
+    u575: popcorn.MachineDescription,
+) -> None:
+    """The fixture is the lzma snapshot a format 4 build takes after this case's first half, up to
+    the 5 ms + 40 us run. It binds the U575 description digest: regenerate it when that changes."""
+    m = usart_at(u575, ms(0))
+    port = m.periph.USART1.port
+    start = m.time
+    port.write(b"alpha\r\n", at=start + ms(5))
+    asyncio.run(m.run(for_=ms(5) + us(40)))
+    saved = lzma.decompress(USART_RX_V4.read_bytes())
+    assert bson(saved)["format"] == 4
+    assert m.time.ps == 5_341_000_000
+    asyncio.run(port.read_frames(port.available))
+    asyncio.run(m.run(for_=ms(5)))
+    sent = asyncio.run(port.read_frames(port.available))
+
+    other = usart_at(u575, ms(0))
+    other.restore(popcorn.Snapshot.from_bytes(saved))
+    asyncio.run(other.run(for_=ms(5)))
+    other_port = other.periph.USART1.port
+    got = asyncio.run(other_port.read_frames(other_port.available))
+    assert [(f.data, f.at) for f in got] == [(f.data, f.at) for f in sent]
+    assert b"echo: alpha" in bytes(f.data for f in got)
+    assert without_generation(other)[1] == without_generation(m)[1]

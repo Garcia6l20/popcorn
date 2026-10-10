@@ -119,8 +119,9 @@ auto machine::snapshot() const -> core::snapshot
   }
   auto const pending = scheduler_.pending();
   data.events        = {
-      .pending  = std::vector<event>(pending.begin(), pending.end()),
-      .next_seq = scheduler_.next_seq()};
+      .pending       = std::vector<event>(pending.begin(), pending.end()),
+      .next_seq      = scheduler_.next_seq(),
+      .next_lane_seq = scheduler_.next_lane_seq()};
   data.clock = clock_driver_.state();
   for(auto const& [id, entry] : run.intercepts)
   {
@@ -312,7 +313,7 @@ void machine::restore(core::snapshot const& saved)
   {
     write_registers(engine_.get(), registers, std::move(plan.registers));
   }
-  scheduler_.restore(data.events.pending, data.events.next_seq);
+  scheduler_.restore(data.events.pending, data.events.next_seq, data.events.next_lane_seq);
   clock_driver_.restore(data.clock);
   trace_.rebase(clock_.now());
   run.rebase_sinks(clock_.now());

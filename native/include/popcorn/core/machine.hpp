@@ -118,6 +118,11 @@ struct slice_request
   /** @brief Stop with stop_reason::time on reaching this virtual time since reset, also while
    * the core sleeps with no event pending: the clock jumps there. */
   std::optional<vtime> until_time{};
+  /** @brief Once until_time is reached, dispatch only the events due before it, whatever stop
+   * ends the slice. The others stay pending and the next slice dispatches them first, in key
+   * order with any lane event posted in between. For a bound a scheduler of several machines
+   * sets, never for a stamp bound. */
+  bool hold_from_until{};
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */
   std::function<bool()> stop_when{};

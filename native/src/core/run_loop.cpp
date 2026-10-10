@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <format>
 #include <limits>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <tuple>
@@ -26,6 +27,17 @@ auto add_sat(icount now, std::uint64_t count) noexcept -> icount
 {
   constexpr auto most = std::numeric_limits<std::uint64_t>::max();
   return icount{count > most - now.value ? most : now.value + count};
+}
+
+auto hold_limit(vtime until, clock const& time) -> std::optional<icount>
+{
+  auto const from  = vtime{std::max(until.ps, time.epoch_time().ps)};
+  auto const first = time.to_icount(from).value;
+  if(first == 0)
+  {
+    return std::nullopt;
+  }
+  return icount{first - 1};
 }
 
 auto left(icount bound, icount done) noexcept -> std::uint64_t
@@ -626,7 +638,17 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
 auto machine::run_state::dispatch_due(slice_request const& request) -> std::optional<slice_end>
 {
   std::uint32_t countdown = wall_check_blocks;
-  while(auto const due = owner.scheduler_.pop_due(owner.clock_driver_.exact_now()))
+  auto          limit     = owner.clock_driver_.exact_now();
+  if(request.hold_from_until and request.until_time)
+  {
+    auto const held = hold_limit(*request.until_time, owner.clock_);
+    if(not held)
+    {
+      return std::nullopt;
+    }
+    limit = std::min(limit, *held);
+  }
+  while(auto const due = owner.scheduler_.pop_due(limit))
   {
     if(due->id.owner == arch::arch_event_owner)
     {
