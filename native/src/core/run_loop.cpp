@@ -361,11 +361,11 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
     {
+      run.spin.leave();
       if(failed)
       {
         return true;
       }
-      run.spin.leave();
       if(run.until_thread and run.owner.arch_->thread_mode())
       {
         run.boundary_stop = true;

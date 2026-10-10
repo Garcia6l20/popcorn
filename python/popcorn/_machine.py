@@ -1567,9 +1567,9 @@ class Machine:
         before the core unstacks, so `value` holds what `fn` left in its result registers, and
         before a tail-chained handler runs. A nested exception preempting `fn` is no return of
         it: frames match on the stack pointer. An exception return that faults while unstacking
-        still counts, the branch ran. When a handler raises, the other hooked functions that
-        return at that same point, such as the ISR a raising `fn` was tail-called from, are not
-        reported: the run ends there, at the instruction the return lands on.
+        still counts, the branch ran. When a handler raises, the other return hooks completing
+        at that same point, on `fn` or on the handler a raising `fn` was tail-called from, are
+        not reported and their `occurrence` does not advance.
 
         Raises:
             TypeError: `fn` has no DWARF signature.
@@ -1602,7 +1602,7 @@ class Machine:
             assert [e.value for e in ptt.since(mark)] == [True, False]
 
         A return is what `on_return` counts, an exception handler's return through EXC_RETURN
-        included.
+        included. A return another hook raised on is not recorded.
 
         Without `convert`, the machine's thread appends each return natively, with no GIL, and
         `since` decodes the entries it copies. With `convert`, each return takes the GIL and
