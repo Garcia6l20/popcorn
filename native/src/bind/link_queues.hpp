@@ -170,10 +170,10 @@ struct queued_audio_frame
 
 /**
  * @brief Far end of an SAI audio block for Python: keeps transmitted frames flat, slot words
- *        back to back with one start time per frame and one layout per run of frames, at most
- *        `limit` frames, a full queue dropping its oldest frame and counting it. Serves words
- *        Python wrote to a receiving block in slot order, then 0. The engine and the binding
- *        touch it under its link lock.
+ *        back to back with one start and one end time per frame and one layout per run of
+ *        frames, at most `limit` frames, a full queue dropping its oldest frame and counting it.
+ *        Serves words Python wrote to a receiving block in slot order, then 0. The engine and the
+ *        binding touch it under its link lock.
  */
 class audio_queue_endpoint final : public periph::stm32::audio_endpoint
 {

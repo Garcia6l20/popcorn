@@ -739,6 +739,21 @@ def test_hid_wait_ready_runs_until_the_report_descriptor_is_read(
         asyncio.run(second.wait_ready(for_=ms(5)))
 
 
+def test_a_count_ended_hid_read_takes_the_echoed_report_by_its_ready_time(
+    u575: popcorn.MachineDescription,
+) -> None:
+    _, host = configured(u575)
+    hid = host.hid(1)
+
+    async def scenario() -> list[HidReport]:
+        await hid.wait_ready(for_=ms(50))
+        await hid.write_report(b"\x00" + bytes(range(8)))
+        return await hid.read_reports(1, for_=ms(50))
+
+    [report] = asyncio.run(scenario())
+    assert report.data == bytes(0xFF - n for n in range(8))
+
+
 def audio_machine(
     u575: popcorn.MachineDescription, options: UsbHostOptions | None = None
 ) -> popcorn.Machine:

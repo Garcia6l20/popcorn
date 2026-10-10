@@ -57,11 +57,15 @@ public:
 
   std::vector<stm32::captured_audio_frame> frames;
   std::vector<received_call>               calls;
+  std::vector<std::uint64_t>               ends;
 
-  void
-      transmitted(std::span<std::uint32_t const> slots, stm32::audio_format format, vtime at, vtime)
-          override
+  void transmitted(
+      std::span<std::uint32_t const> slots,
+      stm32::audio_format            format,
+      vtime                          at,
+      vtime                          end) override
   {
+    ends.push_back(end.ps);
     frames.push_back({
         .slots = {slots.begin(), slots.end()},
           .format = format, .at = at
@@ -390,6 +394,7 @@ TEST_CASE("a polled master transmitter sends the ramp one 64 us frame apart, twi
       {
         CHECK(frames[index].at.ps - frames[index - 1].at.ps == frame_ps);
       }
+      CHECK(r.a->ends[index] - frames[index].at.ps == frame_ps);
     }
     CHECK(r.f->field("SAI1", "ACR1", "SAIAEN") == 0);
     auto const state = core::encode_snapshot(r.f->target->snapshot().data());
