@@ -62,16 +62,17 @@ public:
 
   /**
    * @brief A hardware-requested channel completed its last transfer, its TC with LLR = 0. Called
-   *        from a controller event, never inside a requester's register callback.
+   *        from a controller event or the core hold, never inside a requester's register
+   *        callback.
    * @param request Request number of the channel, its request selection field.
    */
   virtual void transfer_completed(std::uint32_t request) = 0;
 
   /**
    * @brief A hardware-requested channel finished one burst for @p request. Called from a
-   *        controller event, never inside a requester's register callback. The requester drops
-   *        that request if the burst served it. The default ignores it, for requesters whose
-   *        request follows their own flags.
+   *        controller event or the core hold, never inside a requester's register callback. The
+   *        requester drops that request if the burst served it. The default ignores it, for
+   *        requesters whose request follows their own flags.
    * @param request Request number of the channel, its request selection field.
    */
   virtual void acknowledged(std::uint32_t request)

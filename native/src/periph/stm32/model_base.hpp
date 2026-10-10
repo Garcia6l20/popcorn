@@ -226,6 +226,7 @@ protected:
    * @brief Whether DBGMCU freezes this peripheral while the core is held: its
    *        `DBG_<instance>_STOP` field, read through the debug_freeze peer.
    * @param logged The model's flag of the warnings below, set when one is logged.
+   * @param unit What the field names, the instance by default, such as `GPDMA3` for a channel.
    * @return Whether the field is set. False when the machine has no DBGMCU model or the part no
    *         such field, the peripheral then runs on unfrozen. Without a DBGMCU model the first
    *         core_hold_listener of the machine, in description order, logs one warning for the
@@ -234,9 +235,10 @@ protected:
    *         core_hold_listener calls it at each hold, before any other test and before changing
    *         state, so a strict machine refuses the hold whatever the listener's own state.
    */
-  [[nodiscard]] auto debug_frozen(bool& logged) const -> bool
+  [[nodiscard]] auto debug_frozen(bool& logged, std::string_view unit = {}) const -> bool
   {
-    auto const   name     = std::format("DBG_{}_STOP", desc_.name);
+    auto const name =
+        std::format("DBG_{}_STOP", unit.empty() ? std::string_view{desc_.name} : unit);
     model const* listener = nullptr;
     for(auto* const peer : ctx_.peers.all())
     {

@@ -771,6 +771,10 @@ struct new_channel_state
   bool          half_reported{};
   bool          scheduled{};
   std::uint8_t  destination_beats{};
+  std::uint64_t due_ps{};
+  std::uint8_t  held{};
+  std::uint8_t  burst_held{};
+  std::uint64_t remaining_ps{};
 };
 
 struct new_gpdma_state
@@ -1844,4 +1848,246 @@ TEST_CASE("a finished hardware-requested channel tells each requester its REQSEL
   CHECK(probe(f).completed == std::vector<std::uint32_t>{paced_request});
   idle_for(f, std::chrono::microseconds{50});
   CHECK(probe(f).completed == std::vector<std::uint32_t>{paced_request});
+}
+
+namespace
+{
+constexpr std::uint64_t ps_per_ms = 1'000'000'000;
+
+auto mid_copy(bool freeze) -> stm32_fixture
+{
+  auto f = entered("mem2mem");
+  if(freeze)
+  {
+    popcorn::testing::set_debug_freeze(f, "DBG_GPDMA0_STOP", true);
+  }
+  while(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0
+        or f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 128)
+  {
+    REQUIRE_FALSE(f.run({.max_instructions = icount{4}}).stopped.has_value());
+  }
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 0);
+  return f;
+}
+
+auto later(stm32_fixture const& f, std::uint64_t ps, std::uint64_t slice = 1'000'000'000)
+    -> popcorn::stop
+{
+  auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + ps};
+  for(;;)
+  {
+    auto const result = f.run(
+        {.max_instructions = icount{slice},
+         .wall_budget      = std::chrono::seconds{60},
+         .until_time       = until});
+    if(result.stopped)
+    {
+      return *result.stopped;
+    }
+  }
+}
+
+auto to_end(stm32_fixture const& f, std::uint64_t slice = 1'000'000'000) -> std::uint64_t
+{
+  for(;;)
+  {
+    auto const result =
+        f.run({.max_instructions = icount{slice}, .wall_budget = std::chrono::seconds{60}});
+    if(result.stopped)
+    {
+      REQUIRE(result.stopped->reason == stop_reason::user);
+      return f.target->virtual_clock().time().ps;
+    }
+  }
+}
+}
+
+TEST_CASE("with DBG_GPDMA0_STOP a held copy waits and completes one held span later")
+{
+  auto const run = [](std::uint64_t slice) {
+    auto       f    = mid_copy(true);
+    auto       twin = mid_copy(true);
+    auto const left = f.field("GPDMA1", "GPDMA_C0BR1", "BNDT");
+    f.target->hold_core(true);
+    REQUIRE(later(f, ps_per_ms, slice).reason == stop_reason::time);
+    CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == left);
+    f.target->hold_core(false);
+    auto const ended = to_end(f, slice);
+    CHECK(ended == to_end(twin) + ps_per_ms);
+    CHECK(f.log() == twin.log());
+    CHECK(destination(f) == destination(twin));
+    return ended;
+  };
+  CHECK(run(997) == run(1'000'000'000));
+}
+
+TEST_CASE("without DBG_GPDMA0_STOP a held copy completes during the hold")
+{
+  auto f = mid_copy(false);
+  f.target->hold_core(true);
+  REQUIRE(later(f, ps_per_ms).reason == stop_reason::time);
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 0);
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+}
+
+TEST_CASE("a GPDMA hold released at once leaves the copy as never held")
+{
+  auto f    = mid_copy(true);
+  auto twin = mid_copy(true);
+  f.target->hold_core(true);
+  f.target->hold_core(false);
+  CHECK(to_end(f) == to_end(twin));
+  CHECK(destination(f) == destination(twin));
+}
+
+TEST_CASE("a frozen GPDMA channel restores frozen into another machine and completes alike")
+{
+  auto f = mid_copy(true);
+  f.target->hold_core(true);
+  REQUIRE(later(f, ps_per_ms / 2).reason == stop_reason::time);
+  auto const bytes = core::encode_snapshot(f.target->snapshot().data());
+  REQUIRE(later(f, ps_per_ms / 2).reason == stop_reason::time);
+  f.target->hold_core(false);
+  auto const ended = to_end(f);
+
+  auto other = entered("mem2mem");
+  other.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(other.target->core_held());
+  REQUIRE(later(other, ps_per_ms / 2).reason == stop_reason::time);
+  other.target->hold_core(false);
+  CHECK(to_end(other) == ended);
+  CHECK(destination(other) == destination(f));
+}
+
+TEST_CASE("a burst held back at a barrier when the core is held runs at the hold")
+{
+  auto       probe = mid_copy(true);
+  auto const left  = probe.field("GPDMA1", "GPDMA_C0BR1", "BNDT");
+  auto const start = probe.target->virtual_clock().time().ps;
+  auto       due   = start;
+  while(probe.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == left)
+  {
+    due += 250'000;
+    REQUIRE(probe
+                .run(
+                    {.max_instructions = icount{1'000'000'000},
+                     .wall_budget      = std::chrono::seconds{60},
+                     .until_time       = popcorn::vtime{due}})
+                .stopped.has_value());
+  }
+
+  auto f = mid_copy(true);
+  REQUIRE(f.target->virtual_clock().time().ps == start);
+  auto const held = f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = std::chrono::seconds{60},
+       .until_time       = popcorn::vtime{due},
+       .hold_from_until  = true});
+  REQUIRE(held.stopped.has_value());
+  REQUIRE(held.stopped->reason == stop_reason::time);
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == left);
+  f.target->hold_core(true);
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") < left);
+}
+
+namespace
+{
+void set_field(
+    stm32_fixture const& f,
+    std::string_view     reg,
+    std::string_view     name,
+    std::uint32_t        value)
+{
+  auto const& desc  = f.target->peripheral("GPDMA1").description();
+  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != desc.registers.end());
+  auto const field = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
+  REQUIRE(field != found->fields.end());
+  auto const at  = desc.base + found->offset;
+  auto const old = f.target->mem().read(at, 4);
+  REQUIRE(old.has_value());
+  auto const mask = (field->width >= 32 ? ~0u : ((1u << field->width) - 1u)) << field->lsb;
+  REQUIRE(
+      f.target->mem()
+          .write(at, 4, (static_cast<std::uint32_t>(*old) & ~mask) | ((value << field->lsb) & mask))
+          .has_value());
+}
+}
+
+TEST_CASE("a frozen channel suspended and resumed during the hold moves nothing until the release")
+{
+  auto       f    = mid_copy(true);
+  auto       twin = mid_copy(true);
+  auto const left = f.field("GPDMA1", "GPDMA_C0BR1", "BNDT");
+  f.target->hold_core(true);
+  set_field(f, "GPDMA_C0CR", "SUSP", 1);
+  set_field(f, "GPDMA_C0CR", "SUSP", 0);
+  REQUIRE(later(f, ps_per_ms).reason == stop_reason::time);
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == left);
+  f.target->hold_core(false);
+  CHECK(to_end(f) > to_end(twin));
+  CHECK(destination(f) == destination(twin));
+}
+
+TEST_CASE("a brown-out during a hold clears DBG_GPDMA0_STOP and a channel armed then runs")
+{
+  auto f = mid_copy(true);
+  f.target->hold_core(true);
+  f.target->reset(popcorn::reset_kind::brown_out);
+  REQUIRE_FALSE(popcorn::testing::debug_freeze_set(f, "DBG_GPDMA0_STOP"));
+  REQUIRE(f.target->core_held());
+  auto const source = sym("gpdma_ll", "source");
+  auto const target = sym("gpdma_ll", "destination") + 128;
+  set_field(f, "GPDMA_C0SAR", "SA", source);
+  set_field(f, "GPDMA_C0DAR", "DA", target);
+  set_field(f, "GPDMA_C0TR1", "SINC", 1);
+  set_field(f, "GPDMA_C0TR1", "DINC", 1);
+  set_field(f, "GPDMA_C0TR2", "SWREQ", 1);
+  set_field(f, "GPDMA_C0BR1", "BNDT", 16);
+  set_field(f, "GPDMA_C0CR", "EN", 1);
+  REQUIRE(later(f, ps_per_ms).reason == stop_reason::time);
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 0);
+}
+
+TEST_CASE("a frozen 2D channel held between two bursts of a block resumes with the next burst")
+{
+  constexpr std::uint32_t request = 36;
+  two_d_copy const        copy{
+      .tr1 = halfwords() | 3u * bit("GPDMA_C12TR1", "SBL_1"), .tcem = 0, .br1 = 20, .tr3 = 8};
+  auto f = long_source();
+  popcorn::testing::set_debug_freeze(f, "DBG_GPDMA12_STOP", true);
+  auto* const controller =
+      dynamic_cast<popcorn::periph::stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  start_two_d(f, copy);
+  put(f, 12, "CR", 0);
+  put(f, 12, "TR2", request * bit("GPDMA_C12TR2", "REQSEL"));
+  put(f, 12, "CR", bit("GPDMA_C12CR", "EN"));
+  controller->on_request(request, true);
+  for(int count = 0; count < 4000 and peek(f, 12, "DAR") == copy_to; ++count)
+  {
+    step(f);
+  }
+  auto const source = peek(f, 12, "SAR");
+  auto const target = peek(f, 12, "DAR");
+  auto const left   = f.field("GPDMA1", "GPDMA_C12BR1", "BNDT");
+  REQUIRE(target != copy_to);
+  REQUIRE(left > 0);
+  f.target->hold_core(true);
+  idle_for(f, std::chrono::microseconds{100});
+  controller->on_request(request, false);
+  controller->on_request(request, true);
+  idle_for(f, std::chrono::microseconds{100});
+  CHECK(peek(f, 12, "SAR") == source);
+  CHECK(peek(f, 12, "DAR") == target);
+  CHECK(f.field("GPDMA1", "GPDMA_C12BR1", "BNDT") == left);
+  f.target->hold_core(false);
+  for(int count = 0; count < 4000 and f.field("GPDMA1", "GPDMA_C12CR", "EN") != 0; ++count)
+  {
+    step(f);
+  }
+  REQUIRE(f.field("GPDMA1", "GPDMA_C12CR", "EN") == 0);
+  CHECK(peek(f, 12, "SAR") == copy_from + 36);
+  CHECK(peek(f, 12, "DAR") == copy_to + 20);
+  CHECK(bytes_at(f, copy_to, 20) == joined({source_bytes({0, 16}, 8), source_bytes({32}, 4)}));
 }

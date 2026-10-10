@@ -6,6 +6,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/services.hpp>
+#include <popcorn/periph/core_hold.hpp>
 
 #include <algorithm>
 #include <array>
@@ -41,6 +42,10 @@ struct channel_state
   bool          half_reported{};
   bool          scheduled{};
   std::uint8_t  destination_beats{};
+  std::uint64_t due_ps{};
+  std::uint8_t  held{};
+  std::uint8_t  burst_held{};
+  std::uint64_t remaining_ps{};
 
   friend auto operator==(channel_state const&, channel_state const&) -> bool = default;
 };
@@ -179,8 +184,15 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  *        so does every burst of a hardware-requested channel, after its beats and before its
  *        half, complete and next scheduling decisions: the requester drops the request it
  *        served. A burst ended by a data error acknowledges nothing.
+ *        While the machine holds its core, a channel whose DBGMCU `DBG_GPDMA<n>_STOP` is set
+ *        stops at a burst boundary: a burst due at the hold runs first, the next one waits for
+ *        the release with the latency it had left, and requests arriving meanwhile stay latched.
+ *        Other channels run on. The bits are read at the hold: without a DBGMCU model or field
+ *        every channel runs on, a warning logged, a model_error under strict_peripherals.
  */
-class gpdma final : public dispatch_model<gpdma, gpdma_state>, public dma_controller
+class gpdma final : public dispatch_model<gpdma, gpdma_state>,
+                    public dma_controller,
+                    public core_hold_listener
 {
 public:
   gpdma(model_context& ctx, peripheral_desc const& desc);
@@ -188,6 +200,7 @@ public:
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_request(std::uint32_t request, bool level) override;
+  void               on_core_hold(bool held) override;
   [[nodiscard]] auto request_of(std::string_view signal) const
       -> std::optional<std::uint32_t> override;
 
@@ -226,6 +239,7 @@ private:
   bool                                 stopped_clock_logged_{};
   std::vector<dma_requester*>          requesters_;
   bool                                 requesters_resolved_{};
+  bool                                 freeze_logged_{};
 };
 
 template <std::size_t... Ch>
@@ -362,6 +376,9 @@ void gpdma::reset(register_file& regs, reset_kind)
     c.packed            = 0;
     c.packed_bytes      = 0;
     c.destination_beats = 0;
+    c.held              = 0;
+    c.burst_held        = 0;
+    c.remaining_ps      = 0;
   }
   for(std::size_t ch = 0; ch < channels; ++ch)
   {
@@ -460,7 +477,7 @@ void gpdma::start(std::size_t ch)
 void gpdma::schedule(std::size_t ch)
 {
   auto& s = state_.channel[ch];
-  if(s.scheduled or not wants_burst(ch))
+  if(s.scheduled or s.held != 0 or not wants_burst(ch))
   {
     return;
   }
@@ -476,9 +493,10 @@ void gpdma::schedule(std::size_t ch)
   constexpr std::uint64_t latency_cycles = 4;
   auto const              ps             = latency_cycles * ps_per_second / hz;
   s.scheduled                            = true;
+  s.due_ps                               = ctx_.clock.time().ps + ps;
   ctx_.events.schedule_at(
-      vtime{ctx_.clock.time().ps + ps}, burst_done,
-      (static_cast<std::uint64_t>(ch) << 32) | s.generation, ctx_.clock);
+      vtime{s.due_ps}, burst_done, (static_cast<std::uint64_t>(ch) << 32) | s.generation,
+      ctx_.clock);
 }
 
 void gpdma::on_event(std::uint32_t kind, std::uint64_t payload)
@@ -876,6 +894,58 @@ auto gpdma::request_of(std::string_view signal) const -> std::optional<std::uint
     return std::nullopt;
   }
   return found->request;
+}
+
+void gpdma::on_core_hold(bool held)
+{
+  auto const now = ctx_.clock.time().ps;
+  if(held)
+  {
+    std::array<bool, channels> frozen{};
+    for(std::size_t ch = 0; ch < channels; ++ch)
+    {
+      frozen[ch] = debug_frozen(freeze_logged_, std::format("GPDMA{}", ch));
+    }
+    for(std::size_t ch = 0; ch < channels; ++ch)
+    {
+      auto& s = state_.channel[ch];
+      if(not frozen[ch] or s.held != 0)
+      {
+        continue;
+      }
+      if(s.scheduled and s.due_ps <= now)
+      {
+        on_event(burst_done, (static_cast<std::uint64_t>(ch) << 32) | s.generation);
+      }
+      s.burst_held   = s.scheduled ? 1 : 0;
+      s.remaining_ps = s.scheduled ? s.due_ps - now : 0;
+      s.scheduled    = false;
+      s.held         = 1;
+      ++s.generation;
+    }
+    return;
+  }
+  for(std::size_t ch = 0; ch < channels; ++ch)
+  {
+    auto& s = state_.channel[ch];
+    if(s.held == 0)
+    {
+      continue;
+    }
+    s.held = 0;
+    if(std::exchange(s.burst_held, 0) != 0)
+    {
+      s.scheduled = true;
+      s.due_ps    = now + std::exchange(s.remaining_ps, 0);
+      ctx_.events.schedule_at(
+          vtime{s.due_ps}, burst_done, (static_cast<std::uint64_t>(ch) << 32) | s.generation,
+          ctx_.clock);
+    }
+    else
+    {
+      schedule(ch);
+    }
+  }
 }
 
 void gpdma::on_request(std::uint32_t request, bool level)
