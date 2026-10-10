@@ -677,6 +677,30 @@ public:
           std::uint32_t      mask,
           std::uint32_t      value);
 
+  /**
+   * @brief Writes one field of a peripheral register over the bus as the debugger, so the model
+   *        and the description's write effects act. The other bits come from the stored word,
+   *        read without read effects, each sibling field set to the value its write effect
+   *        ignores: the stored value under modify, 0 under the one-to effects, all ones under
+   *        the zero-to effects, 0 for a write-only field, as a read returns. A sibling whose
+   *        every write acts, clear or set, gets its stored value, and the first such write to
+   *        the register that the machine applies logs a model warning.
+   * @param peripheral Peripheral name.
+   * @param offset Byte offset of the register.
+   * @param width Register width in bits, 8, 16 or 32.
+   * @param mask Bits of the field, at most @p width bits.
+   * @param value Value whose masked bits are written, at most @p width bits.
+   * @throws config_error as poke().
+   * @throws BusAccessError when the bus refuses the write.
+   */
+  [[= py::doc{"Write a peripheral register field over the bus, siblings left neutral."}]] void
+      write_field(
+          std::string const& peripheral,
+          std::uint32_t      offset,
+          std::uint8_t       width,
+          std::uint32_t      mask,
+          std::uint32_t      value);
+
   /** @brief read_memory() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of read_memory."}]] [[nodiscard]] auto
       op_read_memory(address at, std::uint32_t size) const -> access_op;
@@ -703,6 +727,13 @@ public:
       -> access_op;
   /** @brief poke_masked() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of poke_masked."}]] [[nodiscard]] auto op_poke_masked(
+      std::string const& peripheral,
+      std::uint32_t      offset,
+      std::uint8_t       width,
+      std::uint32_t      mask,
+      std::uint32_t      value) const -> access_op;
+  /** @brief write_field() as an op of submit_ops(), checked now. */
+  [[= py::doc{"Op of write_field."}]] [[nodiscard]] auto op_write_field(
       std::string const& peripheral,
       std::uint32_t      offset,
       std::uint8_t       width,
@@ -1174,5 +1205,7 @@ private:
   core::machine*                              engine_{};
   std::uint64_t                               id_{};
   std::shared_ptr<core::host>                 host_;
+  mutable std::map<std::pair<std::string, std::uint32_t>, std::shared_ptr<std::atomic<bool>>>
+      field_merge_logged_;
 };
 }

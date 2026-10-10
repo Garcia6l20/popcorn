@@ -154,8 +154,11 @@ class FieldBits:
 class RegisterView:
     """One peripheral register: `.value` for the whole word, a field by name as a bit slice.
 
-    `value` and fields read and write the register storage without the model's access effects.
-    `read()` and `write()` go over the bus, as `m.mem` does, so a model reacts. Every access
+    Writes go over the bus as the debugger, as `m.mem` and `write()` do, so the model and the
+    description's write effects act: `.value = v` writes the word, `.FIELD = v` writes the word
+    with the field's bits and every sibling field at the value its write effect ignores. Reads
+    are storage peeks, so `.value` and a field getter never fire a read effect such as
+    clear-on-read: `read()` is the bus read. `poke()` stores without any effect. Every access
     raises MachineRunning while the machine is busy, outside its callbacks: `m.ref` refs reach
     the register then.
     """
@@ -222,9 +225,44 @@ class RegisterView:
 
     @value.setter
     def value(self, value: int) -> None:
+        """Write the whole register over the bus as the debugger, as `write()` does.
+
+        Raises:
+            ValueError: `value` does not fit the register.
+        """
         if value < 0 or value >> self._width:
             raise ValueError(f"{value} does not fit the {self._width}-bit register {self._name}")
-        self._access.handle.poke(self._peripheral, self._offset, self._width, value)
+        self.write(value)
+
+    def poke(self, value: int | None = None, /, **fields: int) -> None:
+        """Store the register, or some of its fields, without the model or any write effect.
+
+        `poke(v)` stores the whole word, `poke(F=v, G=w)` stores the named fields in one store
+        and keeps the other bits.
+
+        Raises:
+            TypeError: Both a value and fields, or neither, are given.
+            AttributeError: A field name is not a field of the register.
+            ValueError: A value does not fit the register or its field.
+        """
+        if (value is None) == (not fields):
+            raise TypeError("poke() takes exactly one of a register value or field keywords")
+        if value is not None:
+            if value < 0 or value >> self._width:
+                raise ValueError(
+                    f"{value} does not fit the {self._width}-bit register {self._name}"
+                )
+            self._access.handle.poke(self._peripheral, self._offset, self._width, value)
+            return
+        mask = 0
+        bits = 0
+        for name, field_value in fields.items():
+            field = self._field(name)
+            if field_value < 0 or field_value >> field.width:
+                raise ValueError(f"{field_value} does not fit the {field.width}-bit field {name}")
+            mask |= field.mask
+            bits |= field_value << field.lsb
+        self._access.handle.poke_masked(self._peripheral, self._offset, self._width, mask, bits)
 
     def _field(self, name: str) -> FieldBits:
         field = self._fields.get(name)
@@ -246,7 +284,7 @@ class RegisterView:
         field = self._field(name)
         if value < 0 or value >> field.width:
             raise ValueError(f"{value} does not fit the {field.width}-bit field {name}")
-        self._access.handle.poke_masked(
+        self._access.handle.write_field(
             self._peripheral, self._offset, self._width, field.mask, value << field.lsb
         )
 

@@ -848,9 +848,10 @@ def _register_ref(
 
 
 class RegisterRef(Ref[int]):
-    """A peripheral register, `m.ref.periph.USART1.CR1`: its stored value, as
-    `RegisterView.value`. A field by name, `.UE`, and `.bus` for a bus access a model reacts
-    to."""
+    """A peripheral register, `m.ref.periph.USART1.CR1`, as `RegisterView.value`: a read is
+    the stored value, a write goes over the bus as the debugger. A field by name, `.UE`, writes
+    the field with its siblings neutral, as `RegisterView.FIELD = v`. `.bus` reads over the bus
+    too."""
 
     __slots__ = ("_view",)
 
@@ -872,7 +873,7 @@ class RegisterRef(Ref[int]):
             put,
             _integer(width, "register"),
             read=lambda: handle.op_peek(peripheral, offset, width),
-            write=lambda value: handle.op_poke_masked(peripheral, offset, width, full, value),
+            write=lambda value: handle.op_write_field(peripheral, offset, width, full, value),
         )
         self._view = view
 
@@ -918,7 +919,7 @@ class RegisterRef(Ref[int]):
             _integer(field.width, "field"),
             read=lambda: handle.op_peek(peripheral, offset, width),
             decode=lambda raw: (cast(int, raw) & field.mask) >> field.lsb,
-            write=lambda value: handle.op_poke_masked(
+            write=lambda value: handle.op_write_field(
                 peripheral, offset, width, field.mask, value << field.lsb
             ),
         )

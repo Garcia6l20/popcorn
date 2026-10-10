@@ -197,6 +197,25 @@ def test_sub_word_accesses_see_the_whole_register() -> None:
     assert m.periph.TIMER.CR.read() == 0x5600
 
 
+def test_a_register_view_write_reaches_the_python_model() -> None:
+    class Addressed(Model):
+        def __init__(self) -> None:
+            super().__init__()
+            self.written: list[tuple[int, int]] = []
+
+        @on_write("ADDR")
+        def _set_addr(self, old: int, new: int) -> None:
+            self.written.append((old, new))
+
+    m = machine({"EEPROM": Addressed})
+    model = m.model("EEPROM")
+    assert isinstance(model, Addressed)
+    m.periph.EEPROM.ADDR.value = 0x1234
+    assert model.written == [(0, 0x1234)]
+    m.periph.EEPROM.ADDR.poke(0x99)
+    assert model.written == [(0, 0x1234)]
+
+
 def test_registers_sharing_a_word_dispatch_to_their_own_handlers() -> None:
     class Halves(Model):
         lengths: int = 0
@@ -220,7 +239,7 @@ def test_registers_sharing_a_word_dispatch_to_their_own_handlers() -> None:
     m = machine({"EEPROM": Halves})
     model = m.model("EEPROM")
     assert isinstance(model, Halves)
-    m.periph.EEPROM.ADDR.value = 0x1234
+    m.periph.EEPROM.ADDR.poke(0x1234)
     assert m.mem.u32[0x4004_0008] == 0x0003_1234
     m.mem.u16[0x4004_000A] = 0x5678
     assert model.written == [(0, 0x5678)]

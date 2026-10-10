@@ -2,6 +2,7 @@
 #include "machine.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/register_view.hpp>
 #include <popcorn/periph/register_file.hpp>
 
@@ -9,10 +10,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <format>
+#include <map>
+#include <memory>
 #include <ranges>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
@@ -228,6 +234,115 @@ auto poke_masked_body(
   };
 }
 
+struct neutral_merge
+{
+  std::uint32_t stored{};
+  std::uint32_t ones{};
+  std::string   reg;
+  std::string   effectful;
+};
+
+auto neutral_of(slot const& at, std::uint32_t offset, std::uint8_t width, std::uint32_t mask)
+    -> neutral_merge
+{
+  neutral_merge merge{.stored = at.mask & ~mask, .ones = 0, .reg = {}, .effectful = {}};
+  for(auto const& described : at.file->description().registers)
+  {
+    if(described.offset != offset or described.width != width)
+    {
+      continue;
+    }
+    merge.reg = described.name;
+    for(auto const& field : described.fields)
+    {
+      auto const bits =
+          (field.width >= 32 ? 0xffff'ffffu : (1u << field.width) - 1u) << field.lsb & at.mask;
+      if((bits & mask) != 0)
+      {
+        continue;
+      }
+      if(field.acc == access::write_only or field.acc == access::write_once)
+      {
+        merge.stored &= ~bits;
+      }
+      switch(field.on_write)
+      {
+        case write_effect::one_to_clear:
+        case write_effect::one_to_set:
+        case write_effect::one_to_toggle:
+          merge.stored &= ~bits;
+          break;
+        case write_effect::zero_to_clear:
+        case write_effect::zero_to_set:
+        case write_effect::zero_to_toggle:
+          merge.stored &= ~bits;
+          merge.ones |= bits;
+          break;
+        case write_effect::clear:
+        case write_effect::set:
+          if(merge.effectful.empty())
+          {
+            merge.effectful = field.name;
+          }
+          break;
+        case write_effect::modify:
+          break;
+      }
+    }
+  }
+  return merge;
+}
+
+auto write_field_body(
+    core::machine&                                                                       engine,
+    std::string const&                                                                   peripheral,
+    std::uint32_t                                                                        offset,
+    std::uint8_t                                                                         width,
+    std::uint32_t                                                                        mask,
+    std::uint32_t                                                                        value,
+    std::map<std::pair<std::string, std::uint32_t>, std::shared_ptr<std::atomic<bool>>>& logged)
+{
+  auto const at = slot_of(engine, peripheral, offset, width);
+  if((value & ~at.mask) != 0 or (mask & ~at.mask) != 0)
+  {
+    throw config_error(
+        peripheral, 0, std::format("{:#x}", offset), std::format("a {}-bit value", width));
+  }
+  auto merge = neutral_of(at, offset, width, mask);
+  auto once  = std::shared_ptr<std::atomic<bool>>{};
+  if(not merge.effectful.empty())
+  {
+    auto& slot = logged[{peripheral, offset}];
+    if(not slot)
+    {
+      slot = std::make_shared<std::atomic<bool>>(false);
+    }
+    once = slot;
+  }
+  auto const base = at.file->description().base;
+  return [at, base, offset, width, mask, value, once = std::move(once), merge = std::move(merge),
+          peripheral](core::machine& target) {
+    auto const stored = (at.file->peek(at.word) >> at.shift) & at.mask;
+    auto const merged = (stored & merge.stored) | merge.ones | (value & mask);
+    if(auto const written = target.mem().write(base + offset, width / 8u, merged); not written)
+    {
+      bus_failure({.error = written.error(), .at = base + offset});
+    }
+    if(once and not once->exchange(true))
+    {
+      target.log(
+          {.kind       = core::log_kind::model_warning,
+           .peripheral = peripheral,
+           .reg        = merge.reg,
+           .offset     = offset,
+           .write      = true,
+           .message    = std::format(
+               "field write to {} also writes {}, whose every write has an effect", merge.reg,
+               merge.effectful)});
+    }
+  };
+}
+
 auto bytes_of(reflex::py::nb::bytes const& data) -> std::vector<std::byte>
 {
   auto const* const first = static_cast<std::byte const*>(data.data());
@@ -311,6 +426,18 @@ void machine_handle::poke_masked(
   });
 }
 
+void machine_handle::write_field(
+    std::string const& peripheral,
+    std::uint32_t      offset,
+    std::uint8_t       width,
+    std::uint32_t      mask,
+    std::uint32_t      value)
+{
+  auto body =
+      write_field_body(engine(), peripheral, offset, width, mask, value, field_merge_logged_);
+  access([&](core::machine& target) { body(target); });
+}
+
 auto machine_handle::op_read_memory(address at, std::uint32_t size) const -> access_op
 {
   return detail::machine_op(read_memory_body(at, size));
@@ -361,6 +488,17 @@ auto machine_handle::op_poke_masked(
     std::uint32_t      value) const -> access_op
 {
   return detail::machine_op(poke_masked_body(engine(), peripheral, offset, width, mask, value));
+}
+
+auto machine_handle::op_write_field(
+    std::string const& peripheral,
+    std::uint32_t      offset,
+    std::uint8_t       width,
+    std::uint32_t      mask,
+    std::uint32_t      value) const -> access_op
+{
+  return detail::machine_op(
+      write_field_body(engine(), peripheral, offset, width, mask, value, field_merge_logged_));
 }
 
 auto machine_handle::op_pc() const -> access_op

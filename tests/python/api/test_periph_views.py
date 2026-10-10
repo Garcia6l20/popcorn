@@ -71,12 +71,12 @@ def test_sub_word_registers_keep_their_neighbours(machines: Machines) -> None:
 def test_bus_reads_and_writes_apply_the_register_effects(machines: Machines) -> None:
     m = machines()
     clear = m.periph.TESTDEV.W_ONE_TO_CLEAR
-    clear.value = 0xFF
+    clear.poke(0xFF)
     clear.write(0x0F)
     assert clear.value == 0xF0
     assert m.mem.u32[TESTDEV + clear.offset] == 0xF0
     on_read = m.periph.TESTDEV.R_CLEAR
-    on_read.value = 0x55
+    on_read.poke(0x55)
     assert on_read.value == 0x55
     assert on_read.read() == 0x55
     assert on_read.value == 0

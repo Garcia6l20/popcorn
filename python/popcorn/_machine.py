@@ -1190,8 +1190,9 @@ class Machine:
     def periph(self) -> Peripherals:
         """Peripheral registers by name, `m.periph.USART1.CR1.UE`.
 
-        Reads and writes register storage without model effects; use m.mem or
-        RegisterView.read/write for bus accesses a model reacts to.
+        A write goes over the bus as the debugger, so the model and the write effects act, and a
+        field write leaves its sibling fields neutral. A read is a storage peek without read
+        effects, `RegisterView.read` is the bus read. `RegisterView.poke` stores without effects.
         """
         return self._peripherals
 
