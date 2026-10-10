@@ -22,6 +22,7 @@ void overrun(void);
 void uart4_poll(void);
 void lpuart_poll(void);
 void idle(void);
+void brr_while_enabled(void);
 void tx_fifo_irq(void);
 void tx_dma(void);
 void GPDMA1_Channel0_IRQHandler(void);
@@ -368,6 +369,31 @@ void rx_dma_list(void)
   while(rx_events < 5)
   {
   }
+  DONE();
+}
+
+static void send_text(USART_TypeDef* usart, char const* text)
+{
+  for(char const* next = text; *next != 0; ++next)
+  {
+    while(!LL_USART_IsActiveFlag_TXE_TXFNF(usart))
+    {
+    }
+    LL_USART_TransmitData8(usart, (uint8_t)*next);
+  }
+  while(!LL_USART_IsActiveFlag_TC(usart))
+  {
+  }
+}
+
+void brr_while_enabled(void)
+{
+  start_usart1();
+  enable(USART1);
+  send_text(USART1, "A");
+  USART1->BRR = 4000000u / 9600u;
+  send_text(USART1, "BC");
+  LOG(USART1->BRR);
   DONE();
 }
 

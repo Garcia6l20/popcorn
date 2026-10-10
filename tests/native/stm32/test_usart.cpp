@@ -1,16 +1,21 @@
 #include "stm32_fixture.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,6 +35,46 @@ constexpr std::uint64_t    ps_per_second  = 1'000'000'000'000;
 constexpr std::uint64_t    instruction_ps = 250'000;
 constexpr std::string_view hello          = "hello\r\n";
 
+class bus_probe final : public popcorn::periph::model
+{
+public:
+  explicit bus_probe(popcorn::periph::model_context& ctx) : context{ctx}
+  {}
+
+  popcorn::periph::model_context& context;
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
 struct rig
 {
   std::shared_ptr<stm32::capture_endpoint> usart1 = std::make_shared<stm32::capture_endpoint>();
@@ -38,14 +83,19 @@ struct rig
   stm32::board                             board{};
   std::unique_ptr<stm32_fixture>           f;
 
-  explicit rig(std::string_view entry)
+  explicit rig(std::string_view entry, bool strict = false)
   {
     board.uarts.emplace("USART1", usart1);
     board.uarts.emplace("UART4", uart4);
     board.uarts.emplace("LPUART1", lpuart);
-    auto options   = popcorn::testing::stm32_options();
-    options.models = stm32::factories(board, u575());
-    f              = std::make_unique<stm32_fixture>(u575(), "usart_ll", std::move(options));
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = strict;
+    options.models             = stm32::factories(board, u575());
+    options.models.insert_or_assign(
+        "DAC1", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+          return std::make_shared<bus_probe>(ctx);
+        });
+    f = std::make_unique<stm32_fixture>(u575(), "usart_ll", std::move(options));
     if(entry != "main")
     {
       REQUIRE(
@@ -371,11 +421,11 @@ TEST_CASE("RXFT rises at the RX FIFO threshold and queued() counts host frames n
                   {.pc = 0, .now = icount{0}})
               .has_value());
   write("CR3", 2u << 25);
+  write("BRR", 35);
   write("CR1_enabled", 0x5u | (1u << 29));
   std::vector<std::uint16_t> const five{1, 2, 3, 4, 5};
   r.port("USART1").receive(five);
   CHECK(r.port("USART1").queued() == 5);
-  write("BRR", 35);
   auto const stopped = r.f->run_to_stop({.max_instructions = icount{10'000'000}, .stop_when = [&] {
                                            return r.f->field("USART1", "ISR_enabled", "RXFT") != 0;
                                          }});
@@ -441,4 +491,165 @@ TEST_CASE("a circular GPDMA list receives USART2 into a ring with HT and TC unde
     REQUIRE(byte.has_value());
     CHECK(*byte == 0x40u + (index < 8 ? 32u + index : 16u + index));
   }
+}
+
+namespace
+{
+auto address_of(stm32_fixture const& f, std::string_view peripheral, std::string_view reg)
+    -> popcorn::address
+{
+  auto const& desc  = f.target->peripheral(peripheral).description();
+  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != desc.registers.end());
+  return desc.base + found->offset;
+}
+
+struct locked_rig
+{
+  rig                           r;
+  std::vector<core::log_record> logged;
+  core::hook_handle             sink{r.f->target->add_log_sink(
+      [this](core::log_record const& record) { logged.push_back(record); })};
+
+  explicit locked_rig(bool strict = false) : r{"idle", strict}
+  {
+    set_bit("RCC", "RCC_APB2ENR", 14);
+    set_bit("RCC", "RCC_APB3ENR", 6);
+  }
+
+  void set_bit(std::string_view peripheral, std::string_view reg, std::uint32_t bit) const
+  {
+    debugger(peripheral, reg, read(peripheral, reg) | (1u << bit));
+  }
+
+  void cpu(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
+  {
+    auto* const probe = r.f->model_of<bus_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    REQUIRE(probe->context.services
+                .write(address_of(*r.f, peripheral, reg), 4, value, popcorn::initiator::cpu)
+                .has_value());
+  }
+
+  void dma(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
+  {
+    auto* const probe = r.f->model_of<bus_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    REQUIRE(probe->context.services
+                .write(address_of(*r.f, peripheral, reg), 4, value, popcorn::initiator::dma)
+                .has_value());
+  }
+
+  void debugger(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
+  {
+    REQUIRE(r.f->target->mem().write(address_of(*r.f, peripheral, reg), 4, value).has_value());
+  }
+
+  [[nodiscard]] auto read(std::string_view peripheral, std::string_view reg) const -> std::uint32_t
+  {
+    auto const value = r.f->target->mem().read(address_of(*r.f, peripheral, reg), 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+};
+
+constexpr std::uint32_t ue = 1;
+}
+
+TEST_CASE("a BRR write with UE 1 keeps the baud rate and logs once, firmware")
+{
+  rig                           r{"brr_while_enabled"};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  CHECK(r.finish() == std::vector<std::uint32_t>{35});
+  CHECK(text(*r.usart1) == "ABC");
+  auto const frame = 10 * ps_per_second * 35 / 4'000'000;
+  REQUIRE(r.usart1->frames.size() == 3);
+  auto const gap = r.usart1->frames[2].at.ps - r.usart1->frames[1].at.ps;
+  CHECK(gap + instruction_ps >= frame);
+  CHECK(gap <= frame + instruction_ps);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].peripheral == "USART1");
+  CHECK(logged[0].reg == "BRR");
+}
+
+TEST_CASE("a BRR write with UE 1 is a model_error under strict peripherals, firmware")
+{
+  rig r{"brr_while_enabled", true};
+  CHECK_THROWS_WITH_AS(
+      static_cast<void>(r.f->run_to_stop()), doctest::Contains("USART1.BRR"), popcorn::model_error);
+}
+
+TEST_CASE("UE-locked USART1 and LPUART1 fields keep their value on CPU writes with UE 1")
+{
+  locked_rig t;
+  SUBCASE("USART1")
+  {
+    t.cpu("USART1", "CR1_enabled", ue);
+    t.cpu("USART1", "CR1_enabled", ue | (1u << 12) | (1u << 6));
+    CHECK(t.read("USART1", "CR1_enabled") == (ue | (1u << 6)));
+    t.cpu("USART1", "CR2", 2u << 12);
+    CHECK(t.read("USART1", "CR2") == 0);
+    t.cpu("USART1", "CR2", 1u << 21);
+    CHECK(t.read("USART1", "CR2") == 1u << 21);
+    t.cpu("USART1", "CR3", (1u << 0) | (1u << 12));
+    CHECK(t.read("USART1", "CR3") == 1u);
+    t.cpu("USART1", "CR3", 1u | (3u << 17));
+    CHECK(t.read("USART1", "CR3") == 1u);
+    t.cpu("USART1", "CR3", 1u);
+    t.cpu("USART1", "BRR", 416);
+    CHECK(t.read("USART1", "BRR") == 0);
+    t.dma("USART1", "BRR", 416);
+    CHECK(t.read("USART1", "BRR") == 0);
+    t.cpu("USART1", "PRESC", 3);
+    CHECK(t.read("USART1", "PRESC") == 0);
+    REQUIRE(t.logged.size() == 5);
+    CHECK(t.logged[0].reg == "CR1");
+    t.cpu("USART1", "BRR", 0);
+    CHECK(t.logged.size() == 5);
+    t.debugger("USART1", "BRR", 416);
+    CHECK(t.read("USART1", "BRR") == 416);
+    CHECK(t.logged.size() == 5);
+    t.cpu("USART1", "CR1_enabled", 0);
+    t.cpu("USART1", "BRR", 35);
+    CHECK(t.read("USART1", "BRR") == 35);
+  }
+  SUBCASE("LPUART1")
+  {
+    t.cpu("LPUART1", "CR1", ue);
+    t.cpu("LPUART1", "CR1", ue | (1u << 12) | (1u << 29));
+    CHECK(t.read("LPUART1", "CR1") == (ue | (1u << 29)));
+    t.cpu("LPUART1", "CR2", 2u << 12);
+    CHECK(t.read("LPUART1", "CR2") == 0);
+    t.cpu("LPUART1", "BRR", 0x300);
+    CHECK(t.read("LPUART1", "BRR") == 0);
+  }
+}
+
+TEST_CASE("SCARCNT takes 0 with UE 1 and keeps a non-zero write, ABRMOD is locked only with ABREN")
+{
+  locked_rig t;
+  t.cpu("USART1", "CR3", 5u << 17);
+  t.cpu("USART1", "CR1_enabled", ue);
+  t.cpu("USART1", "CR3", 3u << 17);
+  CHECK(t.read("USART1", "CR3") == 5u << 17);
+  t.cpu("USART1", "CR3", 0);
+  CHECK(t.read("USART1", "CR3") == 0);
+  t.cpu("USART1", "CR2", 1u << 21);
+  CHECK(t.read("USART1", "CR2") == 1u << 21);
+  t.cpu("USART1", "CR1_enabled", 0);
+  t.cpu("USART1", "CR2", 1u << 20);
+  t.cpu("USART1", "CR1_enabled", ue);
+  t.cpu("USART1", "CR2", (1u << 20) | (2u << 21));
+  CHECK(t.read("USART1", "CR2") == 1u << 20);
+}
+
+TEST_CASE("a CR1 write of 0 with UE 1 clears UE and the locked fields, no log, no error")
+{
+  locked_rig t{true};
+  t.cpu("USART1", "CR1_enabled", ue | (1u << 12));
+  t.cpu("USART1", "CR1_enabled", 0);
+  CHECK(t.read("USART1", "CR1_enabled") == 0);
+  CHECK(t.logged.empty());
 }

@@ -19,5 +19,6 @@ add_ll_firmware(
         "tx_fifo_irq",
         "tx_dma",
         "rx_dma_list",
+        "brr_while_enabled",
     ],
 )

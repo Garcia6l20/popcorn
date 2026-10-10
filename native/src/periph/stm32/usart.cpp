@@ -48,6 +48,37 @@ struct usart_state
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
 
+struct locked_fields
+{
+  std::string_view                  reg;
+  std::span<std::string_view const> fields;
+};
+
+constexpr std::array<std::string_view, 9>  usart_cr1{"FIFOEN", "M1",   "M0",  "DEAT", "DEDT",
+                                                     "OVER8",  "WAKE", "PCE", "PS"};
+constexpr std::array<std::string_view, 15> usart_cr2{
+    "ADD",  "MSBFIRST", "DATAINV", "TXINV", "RXINV", "SWAP",    "LINEN", "STOP",
+    "CPOL", "CPHA",     "LBCL",    "LBDL",  "ADDM7", "DIS_NSS", "SLVEN"};
+constexpr std::array<std::string_view, 14> usart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",  "DDRE",
+                                                     "OVRDIS",  "ONEBIT",  "CTSE", "RTSE", "SCEN",
+                                                     "NACK",    "HDSEL",   "IRLP", "IREN"};
+constexpr std::array<std::string_view, 7>  lpuart_cr1{"M1",   "M0",  "DEAT", "DEDT",
+                                                      "WAKE", "PCE", "PS"};
+constexpr std::array<std::string_view, 8>  lpuart_cr2{"ADD",   "ADDM7", "MSBFIRST", "DATAINV",
+                                                      "TXINV", "RXINV", "SWAP",     "STOP"};
+constexpr std::array<std::string_view, 9>  lpuart_cr3{"TXFTCFG", "RXFTCFG", "DEP",  "DEM",  "DDRE",
+                                                      "OVRDIS",  "CTSE",    "RTSE", "HDSEL"};
+constexpr std::array<std::string_view, 1>  whole_brr{"BRR"};
+constexpr std::array<std::string_view, 1>  whole_presc{"PRESCALER"};
+
+struct lock
+{
+  std::string   reg;
+  std::uint32_t offset{};
+  std::uint32_t mask{};
+  bool          logged{};
+};
+
 /**
  * @brief USART, UART and LPUART of the STM32U5, RM0456 sections 66 and 67, asynchronous mode.
  *        Frames leave and arrive one frame time apart at the baud the kernel clock, PRESC and BRR
@@ -56,7 +87,13 @@ struct usart_state
  *        arrive one frame time apart, an overrun drops the frame and sets ORE, IDLE follows one
  *        idle frame. With CR3.DMAT the `<instance>_tx_dma` request follows TXE, with CR3.DMAR the
  *        `<instance>_rx_dma` request follows RXNE, through the GPDMA peer, levels announced again
- *        in reset. Not modelled, logged once when configured: synchronous mode, smartcard,
+ *        in reset. With UE 1, a CPU or DMA write leaves the fields RM0456 66.8 and 67.7 lock
+ *        while the USART is enabled at their value: CR1, CR2 and CR3 fields per instance kind,
+ *        BRR and PRESC whole, ABRMOD while ABREN is 1, and SCARCNT unless the write is 0. The
+ *        write logs once per register, a model_error under strict peripherals. A write that
+ *        clears UE takes effect whole, which RM0456 leaves open, and debugger writes are never
+ *        locked. GTPR and AUTOCR are not served, so their locked fields are not enforced. Not
+ *        modelled, logged once when configured: synchronous mode, smartcard,
  *        IrDA, LIN, the RS485 driver enable, auto baud rate, receiver timeout, wake-up from Stop.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_port
@@ -68,6 +105,13 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
+  auto on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void               receive(std::span<std::uint16_t const> data) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
@@ -152,6 +196,10 @@ private:
   irq_line&                                    line_;
   bool                                         unsupported_logged_{};
   bool                                         no_baud_logged_{};
+  std::vector<lock>                            locks_;
+  std::optional<field_ref>                     auto_baud_;
+  std::optional<field_ref>                     auto_baud_mode_;
+  std::optional<field_ref>                     retransmissions_;
 };
 
 auto usart_writes(bool low_power) -> std::span<write_entry<usart> const>
@@ -235,6 +283,37 @@ usart::usart(
       clears_.emplace_back(field("ICR", clear.name), field(isr_, target));
     }
   }
+  auto const tables = low_power_ ? std::array<locked_fields, 5>{{{cr1_, lpuart_cr1},
+                                                                 {"CR2", lpuart_cr2},
+                                                                 {"CR3", lpuart_cr3},
+                                                                 {"BRR", whole_brr},
+                                                                 {"PRESC", whole_presc}}}
+                                 : std::array<locked_fields, 5>{{{cr1_, usart_cr1},
+                                                                 {"CR2", usart_cr2},
+                                                                 {"CR3", usart_cr3},
+                                                                 {"BRR", whole_brr},
+                                                                 {"PRESC", whole_presc}}};
+  for(auto const& [reg_name, names] : tables)
+  {
+    auto& entry  = locks_.emplace_back();
+    entry.reg    = reg_name == cr1_ ? std::string{"CR1"} : std::string{reg_name};
+    entry.offset = reg(reg_name).offset;
+    for(auto const& bits : describe(reg_name).fields)
+    {
+      if(std::ranges::contains(names, std::string_view{bits.name}))
+      {
+        entry.mask |= field(reg_name, bits.name).mask();
+      }
+    }
+  }
+  auto const optional = [&](std::string_view reg_name, std::string_view bits) {
+    return std::ranges::contains(describe(reg_name).fields, bits, &field_desc::name)
+             ? std::optional{field(reg_name, bits)}
+             : std::nullopt;
+  };
+  auto_baud_       = optional("CR2", "ABREN");
+  auto_baud_mode_  = optional("CR2", "ABRMOD");
+  retransmissions_ = optional("CR3", "SCARCNT");
   for(auto const& [reg, name] : std::array<std::pair<std::string_view, std::string_view>, 8>{
           {
            {"CR2", "CLKEN"},
@@ -253,6 +332,55 @@ usart::usart(
       unsupported_.push_back(field(reg, name));
     }
   }
+}
+
+auto usart::on_write(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     access) -> std::expected<void, bus_error>
+{
+  auto const word  = offset & ~3u;
+  auto const found = std::ranges::find(locks_, word, &lock::offset);
+  if(found == locks_.end() or access.by == initiator::debugger or not enabled())
+  {
+    return dispatch_model::on_write(regs, offset, size, old, value, access);
+  }
+  auto const stored = regs.peek(word);
+  auto const merged = merge_write(stored, offset, size, value);
+  if(word == enable_.offset and enable_.of(merged) == 0)
+  {
+    return dispatch_model::on_write(regs, offset, size, old, value, access);
+  }
+  auto mask = found->mask;
+  if(auto_baud_mode_ and word == auto_baud_mode_->offset and auto_baud_->of(stored) != 0)
+  {
+    mask |= auto_baud_mode_->mask();
+  }
+  if(retransmissions_ and word == retransmissions_->offset and retransmissions_->of(merged) != 0)
+  {
+    mask |= retransmissions_->mask();
+  }
+  auto const kept = (merged & ~mask) | (stored & mask);
+  if(kept != merged)
+  {
+    if(not std::exchange(found->logged, true))
+    {
+      warn(
+          found->reg,
+          std::format(
+              "{} written with UE 1: RM0456 lets these fields change only with UE 0, they keep "
+              "their value",
+              found->reg));
+    }
+    if(ctx_.strict_peripherals)
+    {
+      throw model_error(desc_.name, found->reg, word);
+    }
+  }
+  return dispatch_model::on_write(regs, word, 4, old, kept, access);
 }
 
 auto usart::name_of(std::string_view with_views, std::string_view plain) const -> std::string_view
