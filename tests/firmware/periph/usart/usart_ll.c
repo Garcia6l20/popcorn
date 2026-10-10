@@ -49,6 +49,7 @@ void dma_ring(void);
 void link_ping(void);
 void link_echo(void);
 void link_tx_count(void);
+void link_abort_gap(void);
 void USART2_IRQHandler(void);
 
 void idle(void)
@@ -860,6 +861,22 @@ void link_tx_count(void)
   {
     send_byte((uint8_t)index);
   }
+  wait_complete();
+  DONE();
+}
+
+void link_abort_gap(void)
+{
+  start_link();
+  send_byte('a');
+  wait_complete();
+  wait_us(60);
+  send_byte('b');
+  wait_us(10);
+  LL_USART_Disable(USART1);
+  enable(USART1);
+  wait_us(100);
+  send_byte('c');
   wait_complete();
   DONE();
 }

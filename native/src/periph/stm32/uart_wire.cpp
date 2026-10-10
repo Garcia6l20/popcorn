@@ -7,6 +7,7 @@
 #include <format>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace popcorn::periph::stm32
@@ -243,7 +244,10 @@ void uart_wire::collect(std::vector<detail::wire_post> const& posts, std::vector
     if(post.abort)
     {
       auto const lost = std::ranges::find_if(into, [&](tap_frame const& frame) {
-        return not frame.lost and frame.start < post.start and post.start < frame.end;
+        return not frame.injected
+           and not frame.lost
+           and frame.start < post.start
+           and post.start < frame.end;
       });
       if(lost != into.end())
       {
@@ -268,45 +272,256 @@ void uart_wire::collect(std::vector<detail::wire_post> const& posts, std::vector
 
 void uart_wire::emit(std::vector<tap_frame>& from, core::sys_time through)
 {
-  auto const ready =
-      std::ranges::find_if(from, [&](tap_frame const& frame) { return frame.end > through; });
-  for(auto const& frame : std::span{from.begin(), ready})
+  auto const key = [](tap_frame const& frame) {
+    return std::tuple{frame.end.ps, frame.injected, frame.index};
+  };
+  auto const ready = std::ranges::stable_partition(
+      from, [&](tap_frame const& frame) { return frame.end <= through; });
+  std::vector<tap_frame> settled(from.begin(), ready.begin());
+  from.erase(from.begin(), ready.begin());
+  std::ranges::sort(settled, {}, key);
+  auto const cursor = std::tuple{state_.tapped_end.ps, state_.tapped_injected, state_.tapped_index};
+  for(auto const& frame : settled)
   {
-    if(frame.index >= state_.tapped)
+    if(state_.tapped_any and key(frame) <= cursor)
     {
-      tap_.push(frame);
-      state_.tapped = frame.index + 1;
+      continue;
     }
+    tap_.push(frame);
+    state_.tapped_any      = true;
+    state_.tapped_end      = frame.end;
+    state_.tapped_injected = frame.injected;
+    state_.tapped_index    = frame.index;
   }
-  from.erase(from.begin(), ready);
 }
 
-auto uart_wire::drain(std::uint64_t window, core::sys_time barrier, core::time_map receiver)
-    -> std::optional<core::link_fault>
+auto uart_wire::fault_of(detail::line_span const& span) const -> core::link_fault
 {
+  auto const at     = span.injected ? span.start : span.post;
+  auto const member = span.injected ? ends_.receiver : ends_.sender;
+  return {
+      .at     = at,
+      .member = member,
+      .error  = std::make_exception_ptr(emulation_error(
+          std::format(
+              "two frames overlap on the line of {}: the {} frame {} starts at {} ps of system "
+              "time while another is on the line",
+              into_.unit, span.injected ? "injected" : "peer", span.index, span.start.ps)))};
+}
+
+auto uart_wire::overlap(detail::line_span const& span) const -> std::optional<core::link_fault>
+{
+  std::optional<core::link_fault> found;
+  for(auto const& other : state_.delivered)
+  {
+    if(other.start < span.end and span.start < other.end)
+    {
+      auto const later_is_new =
+          span.start > other.start or (span.start == other.start and span.injected);
+      found = earliest(found, fault_of(later_is_new ? span : other));
+    }
+  }
+  return found;
+}
+
+void uart_wire::deliver_injection(detail::queued_injection const& frame, core::time_map receiver)
+{
+  into_.port->receive_at(
+      {.data       = frame.data,
+       .word_bits  = declared_.word_bits,
+       .half_stops = declared_.half_stops,
+       .parity     = declared_.parity,
+       .kind       = frame_kind::data,
+       .frame_ps   = declared_.frame_ps(),
+       .start      = receiver.to_local(frame.start),
+       .end        = receiver.to_local(frame.end)},
+      lanes_.injected);
+  state_.delivered.push_back(
+      {.start    = frame.start,
+       .end      = frame.end,
+       .injected = true,
+       .post     = frame.start,
+       .index    = frame.index});
+  state_.untapped.push_back(
+      {.from     = ends_.sender,
+       .to       = ends_.receiver,
+       .index    = frame.index,
+       .data     = frame.data,
+       .start    = frame.start,
+       .end      = frame.end,
+       .arrival  = frame.end,
+       .injected = true});
+}
+
+auto uart_wire::drain(
+    std::uint64_t  window,
+    core::sys_time barrier,
+    core::sys_time next,
+    core::time_map receiver) -> std::optional<core::link_fault>
+{
+  std::erase_if(state_.delivered, [&](detail::line_span const& span) {
+    return span.end <= state_.last_barrier;
+  });
   auto&                           posts = mailbox(window);
   std::optional<core::link_fault> fault;
   for(auto const& post : posts)
   {
     if(post.abort)
     {
-      into_.port->cancel_in_flight(receiver.to_local(shifted(post.start, latency_)), lanes_.peer);
+      auto const at = shifted(post.start, latency_);
+      into_.port->cancel_in_flight(receiver.to_local(at), lanes_.peer);
+      for(auto& span : state_.delivered)
+      {
+        if(not span.injected and span.start < at and at < span.end)
+        {
+          span.end = at;
+        }
+      }
       continue;
     }
     if(post.dropped)
     {
       continue;
     }
-    fault       = earliest(fault, check_shape(post));
+    fault = earliest(fault, check_shape(post));
+    detail::line_span const span{
+        .start = shifted(post.start, latency_),
+        .end   = shifted(post.end, latency_),
+        .post  = post.start,
+        .index = post.index};
+    if(auto clash = overlap(span))
+    {
+      fault = earliest(fault, std::move(clash));
+      state_.delivered.push_back(span);
+      continue;
+    }
     auto frame  = post.frame;
-    frame.start = receiver.to_local(shifted(post.start, latency_));
-    frame.end   = receiver.to_local(shifted(post.end, latency_));
+    frame.start = receiver.to_local(span.start);
+    frame.end   = receiver.to_local(span.end);
     into_.port->receive_at(frame, lanes_.peer);
+    state_.delivered.push_back(span);
   }
   collect(posts, state_.untapped);
   posts.clear();
+  std::vector<detail::queued_injection> due;
+  {
+    core::link_guard const held{inject_mutex_};
+    auto const             later = std::ranges::stable_partition(
+        state_.injections,
+        [&](detail::queued_injection const& frame) { return frame.start < next; });
+    due.assign(state_.injections.begin(), later.begin());
+    state_.injections.erase(state_.injections.begin(), later.begin());
+    state_.drained_through = std::max(state_.drained_through, next);
+  }
+  std::ranges::sort(due, {}, [](detail::queued_injection const& frame) {
+    return std::pair{frame.start.ps, frame.index};
+  });
+  for(auto const& frame : due)
+  {
+    detail::line_span const span{
+        .start    = frame.start,
+        .end      = frame.end,
+        .injected = true,
+        .post     = frame.start,
+        .index    = frame.index};
+    if(auto clash = overlap(span))
+    {
+      fault = earliest(fault, std::move(clash));
+      state_.delivered.push_back(span);
+      continue;
+    }
+    deliver_injection(frame, receiver);
+  }
   emit(state_.untapped, barrier);
+  state_.last_barrier = barrier;
   return fault;
+}
+
+auto uart_wire::inject(
+    std::span<std::uint16_t const>  data,
+    core::sys_time                  at,
+    std::optional<stopped_receiver> stopped) -> std::expected<void, inject_refusal>
+{
+  auto const                            frame_ps = static_cast<std::int64_t>(declared_.frame_ps());
+  std::vector<detail::queued_injection> frames;
+  for(std::size_t offset = 0; offset < data.size(); ++offset)
+  {
+    auto const start = at.ps + static_cast<std::int64_t>(offset) * frame_ps;
+    frames.push_back({.data = data[offset], .start = {start}, .end = {start + frame_ps}});
+  }
+  if(not stopped)
+  {
+    core::link_guard const held{inject_mutex_};
+    if(at < state_.drained_through)
+    {
+      return std::unexpected{
+          inject_refusal{
+                         .reason = inject_refusal_reason::before_drained, .bound = state_.drained_through}
+      };
+    }
+    for(auto& frame : frames)
+    {
+      frame.index = state_.injected++;
+      state_.injections.push_back(frame);
+    }
+    return {};
+  }
+  if(at < stopped->now)
+  {
+    return std::unexpected{
+        inject_refusal{.reason = inject_refusal_reason::before_receiver, .bound = stopped->now}
+    };
+  }
+  std::vector<detail::line_span> busy = state_.delivered;
+  for(auto const* posts : {&mailbox(state_.window + 1), &mailbox(state_.window)})
+  {
+    for(auto const& post : *posts)
+    {
+      auto const start = shifted(post.start, latency_);
+      if(post.abort)
+      {
+        for(auto& span : busy)
+        {
+          if(not span.injected and span.start < start and start < span.end)
+          {
+            span.end = start;
+          }
+        }
+      }
+      else if(not post.dropped)
+      {
+        busy.push_back({.start = start, .end = shifted(post.end, latency_), .post = post.start});
+      }
+    }
+  }
+  {
+    core::link_guard const held{inject_mutex_};
+    for(auto const& queued : state_.injections)
+    {
+      busy.push_back({.start = queued.start, .end = queued.end, .injected = true});
+    }
+  }
+  for(auto const& frame : frames)
+  {
+    auto const clash = std::ranges::find_if(busy, [&](detail::line_span const& span) {
+      return span.start < frame.end and frame.start < span.end;
+    });
+    if(clash != busy.end())
+    {
+      return std::unexpected{
+          inject_refusal{.reason = inject_refusal_reason::overlaps, .bound = clash->start}
+      };
+    }
+  }
+  for(auto& frame : frames)
+  {
+    {
+      core::link_guard const held{inject_mutex_};
+      frame.index = state_.injected++;
+    }
+    deliver_injection(frame, stopped->map);
+  }
+  return {};
 }
 
 void uart_wire::finish(core::sys_time at)
@@ -325,11 +540,10 @@ void uart_wire::save(std::vector<std::byte>& out) const
 
 void uart_wire::load(std::span<std::byte const> in)
 {
+  detail::wire_state loaded;
   try
   {
-    auto loaded = reflex::serde::bson::deserializer{in}.load<detail::wire_state>();
-    core::link_guard const held{edit_mutex_};
-    state_ = std::move(loaded);
+    loaded = reflex::serde::bson::deserializer{in}.load<detail::wire_state>();
   }
   catch(std::runtime_error const& failure)
   {
@@ -337,6 +551,8 @@ void uart_wire::load(std::span<std::byte const> in)
         "uart wire state", 0, "bytes",
         std::format("a state uart_wire::save wrote: {}", failure.what()));
   }
+  core::link_guard const held{edit_mutex_};
+  state_ = std::move(loaded);
 }
 
 auto uart_wire::tap() noexcept -> tap_queue&

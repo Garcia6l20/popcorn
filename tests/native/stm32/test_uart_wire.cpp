@@ -20,12 +20,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <expected>
 #include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -201,14 +203,15 @@ struct rig
     }
   }
 
-  void drain(std::size_t member, std::uint64_t window, std::uint64_t barrier)
+  void drain(std::size_t member, std::uint64_t window, std::uint64_t barrier, std::uint64_t next)
   {
     for(auto const& wire : wires)
     {
       if(wire->receiver() == member)
       {
         auto const found = wire->drain(
-            window, core::sys_time{static_cast<std::int64_t>(barrier)}, nodes[member]->map());
+            window, core::sys_time{static_cast<std::int64_t>(barrier)},
+            core::sys_time{static_cast<std::int64_t>(next)}, nodes[member]->map());
         if(found)
         {
           nodes[member]->faults.push_back({.at = found->at.ps, .member = found->member});
@@ -278,7 +281,7 @@ struct rig
         }
         for(std::size_t member = 0; member < nodes.size(); ++member)
         {
-          drain(member, window, barrier(window));
+          drain(member, window, barrier(window), barrier(window + 1));
         }
         if(plan.after_drain)
         {
@@ -308,7 +311,7 @@ struct rig
             meet.arrive_and_wait([]() noexcept {});
             if(window + 1 < windows)
             {
-              drain(member, window, barrier(window));
+              drain(member, window, barrier(window), barrier(window + 1));
             }
           }
         });
@@ -330,7 +333,7 @@ struct rig
         nodes[0]->f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
         == stop_reason::user);
     nodes[0]->done = true;
-    drain(1, 0, end);
+    drain(1, 0, end, end + ms_ps);
     if(host)
     {
       REQUIRE(nodes[1]->advance(host->at, coarse, false) == stop_reason::time);
@@ -818,11 +821,15 @@ TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire wit
   std::vector<std::uint16_t> const edit{'E'};
   auto                             reference = one_way("link_tx", "link_rx", latency_20);
   REQUIRE(reference.wires[0]->replace(60, edit));
+  std::vector<std::uint16_t> const late{0x66};
+  REQUIRE(
+      reference.wires[0]->inject(late, core::sys_time{2'500'000'000}, std::nullopt).has_value());
   reference.run({.window = latency_20});
   auto const expected = reference.dump();
 
   auto r = one_way("link_tx", "link_rx", latency_20);
   REQUIRE(r.wires[0]->replace(60, edit));
+  REQUIRE(r.wires[0]->inject(late, core::sys_time{2'500'000'000}, std::nullopt).has_value());
   run_plan const plan{.window = latency_20};
   auto const     barrier = [](std::uint64_t k) { return (k + 1) * latency_20; };
   std::uint64_t  k       = 0;
@@ -843,6 +850,7 @@ TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire wit
       CHECK_FALSE(state.mail_even.empty());
       CHECK_FALSE(state.mail_odd.empty());
       CHECK(state.edits.size() == 1);
+      CHECK(state.injections.size() == 1);
       auto& a     = *r.nodes[0];
       auto& b     = *r.nodes[1];
       auto  fresh = std::make_shared<stm32::uart_wire>(
@@ -856,11 +864,11 @@ TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire wit
       a.port->attach(fresh);
       r.wires[0] = fresh;
       saved      = true;
-      r.drain(1, k, barrier(k));
+      r.drain(1, k, barrier(k), barrier(k + 1));
       ++k;
       r.run_window(1, k, barrier(k), plan, {});
     }
-    r.drain(1, k, barrier(k));
+    r.drain(1, k, barrier(k), barrier(k + 1));
   }
   r.run_window(0, k, barrier(k), plan, {});
   r.run_window(1, k, barrier(k), plan, {});
@@ -1079,4 +1087,240 @@ TEST_CASE("an arm racing the sender's start either applies or is refused, never 
   auto const idle = entries(r.nodes[1]->f->log());
   REQUIRE(idle.size() == 1);
   CHECK(idle[0].data == frames);
+}
+
+namespace
+{
+auto receiver_now(rig const& r) -> stm32::stopped_receiver
+{
+  auto const& b = *r.nodes[1];
+  return {.now = core::sys_time{static_cast<std::int64_t>(b.now())}, .map = b.map()};
+}
+
+auto injected_byte(
+    stm32::uart_wire&                      wire,
+    std::uint16_t                          data,
+    std::int64_t                           at,
+    std::optional<stm32::stopped_receiver> stopped) -> std::expected<void, stm32::inject_refusal>
+{
+  std::vector<std::uint16_t> const one{data};
+  return wire.inject(one, core::sys_time{at}, stopped);
+}
+
+auto earliest_fault(rig const& r) -> std::optional<fault_seen>
+{
+  std::optional<fault_seen> out;
+  for(auto const& one : r.nodes)
+  {
+    for(auto const& fault : one->faults)
+    {
+      if(not out or fault.at < out->at)
+      {
+        out = fault;
+      }
+    }
+  }
+  return out;
+}
+}
+
+TEST_CASE("an injection while stopped arrives at its time and cancels the IDLE due after it")
+{
+  auto full = one_way("link_tx", "link_rx", latency_20);
+  full.oracle(script_end_ps);
+  auto const& all  = full.taps[0];
+  auto const  gap  = all[39].arrival.ps;
+  auto const  stop = static_cast<std::uint64_t>(gap) + 5 * us_ps;
+
+  auto stopped = one_way("link_tx", "link_rx", latency_20);
+  stopped.run({.window = latency_20, .end = stop});
+  auto const now = receiver_now(stopped);
+  CHECK(now.now.ps >= static_cast<std::int64_t>(stop));
+  auto const early = injected_byte(*stopped.wires[0], 0x77, now.now.ps - 1, now);
+  REQUIRE_FALSE(early.has_value());
+  CHECK(early.error().reason == stm32::inject_refusal_reason::before_receiver);
+  CHECK(early.error().bound == now.now);
+  REQUIRE(injected_byte(*stopped.wires[0], 0x77, now.now.ps, now).has_value());
+  stopped.run({.window = latency_20, .first = stop / latency_20});
+
+  auto const bytes = bytes_of(stopped.nodes[1]->f->log());
+  REQUIRE(bytes.size() == 65);
+  CHECK(bytes[40] == 0x77u);
+  auto const seen   = entries(stopped.nodes[1]->f->log());
+  auto const byte39 = std::ranges::find_if(
+      seen, [](entry const& one) { return one.kind == link_byte and one.data == 0x20u + 39u; });
+  REQUIRE(byte39 != seen.end());
+  REQUIRE(byte39 + 1 != seen.end());
+  CHECK(byte39[1].kind == link_byte);
+  CHECK(byte39[1].data == 0x77u);
+  auto const frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  auto const injected = std::ranges::find_if(
+      stopped.taps[0], [](stm32::tap_frame const& frame) { return frame.injected; });
+  REQUIRE(injected != stopped.taps[0].end());
+  CHECK(injected->start == now.now);
+  CHECK(injected->end.ps == now.now.ps + frame_ps);
+  CHECK(injected->arrival == injected->end);
+  CHECK(injected->index == 0);
+  CHECK(std::ranges::is_sorted(stopped.taps[0], {}, [](stm32::tap_frame const& frame) {
+    return frame.end.ps;
+  }));
+
+  auto queued = one_way("link_tx", "link_rx", latency_20);
+  REQUIRE(injected_byte(*queued.wires[0], 0x77, now.now.ps, std::nullopt).has_value());
+  queued.run({.window = latency_20});
+  CHECK(queued.nodes[1]->f->log() == stopped.nodes[1]->f->log());
+  CHECK(queued.taps[0] == stopped.taps[0]);
+}
+
+TEST_CASE("an injection while stopped is refused over a frame delivered or still in a mailbox")
+{
+  auto full = one_way("link_tx", "link_rx", latency_20);
+  full.oracle(script_end_ps);
+  auto const&    all    = full.taps[0];
+  constexpr auto window = static_cast<std::int64_t>(latency_20);
+  auto const     next   = *std::ranges::find_if(std::views::iota(5, 19), [&](int index) {
+    auto const start = all[static_cast<std::size_t>(index)].start.ps;
+    return start / window == (start + static_cast<std::int64_t>(us_ps)) / window;
+  });
+  auto const&    frame  = all[static_cast<std::size_t>(next)];
+  auto const&    before = all[static_cast<std::size_t>(next) - 1];
+  auto const     stop   = static_cast<std::uint64_t>(frame.start.ps) + us_ps;
+  auto           r      = one_way("link_tx", "link_rx", latency_20);
+  r.run({.window = latency_20, .end = stop});
+  auto const now   = receiver_now(r);
+  auto const state = saved_state(*r.wires[0]);
+  auto const holds = [&](std::vector<stm32::detail::wire_post> const& posts) {
+    return std::ranges::any_of(posts, [&](stm32::detail::wire_post const& post) {
+      return not post.abort and post.index == frame.index;
+    });
+  };
+  REQUIRE((holds(state.mail_even) or holds(state.mail_odd)));
+  auto const arrival = frame.start.ps + window;
+  auto const posted  = injected_byte(*r.wires[0], 0x55, arrival, now);
+  REQUIRE_FALSE(posted.has_value());
+  CHECK(posted.error().reason == stm32::inject_refusal_reason::overlaps);
+  CHECK(posted.error().bound.ps == arrival);
+  auto const on_line = injected_byte(*r.wires[0], 0x55, now.now.ps, now);
+  REQUIRE_FALSE(on_line.has_value());
+  CHECK(on_line.error().reason == stm32::inject_refusal_reason::overlaps);
+  CHECK(on_line.error().bound.ps == before.start.ps + window);
+}
+
+TEST_CASE("an injection while running is refused before the drains' reach, else delivered")
+{
+  constexpr std::int64_t late      = 2'500 * static_cast<std::int64_t>(us_ps);
+  auto                   reference = one_way("link_tx", "link_rx", latency_20);
+  REQUIRE(injected_byte(*reference.wires[0], 0x66, late, std::nullopt).has_value());
+  reference.run({.window = latency_20});
+  auto const bytes = bytes_of(reference.nodes[1]->f->log());
+  REQUIRE(bytes.size() == 65);
+  CHECK(bytes.back() == 0x66u);
+
+  auto                                 r    = one_way("link_tx", "link_rx", latency_20);
+  auto&                                wire = *r.wires[0];
+  std::optional<stm32::inject_refusal> refused;
+  bool                                 accepted = false;
+  std::jthread                         injecting{[&] {
+    for(;;)
+    {
+      auto const early = injected_byte(wire, 0x11, -1, std::nullopt);
+      if(early.has_value())
+      {
+        return;
+      }
+      if(early.error().bound.ps > 0)
+      {
+        refused  = early.error();
+        accepted = injected_byte(wire, 0x66, late, std::nullopt).has_value();
+        return;
+      }
+      std::this_thread::yield();
+    }
+  }};
+  r.run({.window = latency_20, .threaded = true});
+  injecting = {};
+  REQUIRE(refused.has_value());
+  CHECK(refused->reason == stm32::inject_refusal_reason::before_drained);
+  CHECK(refused->bound.ps > 0);
+  CHECK(refused->bound.ps % static_cast<std::int64_t>(latency_20) == 0);
+  CHECK(accepted);
+  auto const seen = bytes_of(r.nodes[1]->f->log());
+  CHECK(seen == bytes);
+}
+
+TEST_CASE("an injection overlapping later peer frames is a system error at the earliest start")
+{
+  auto full = one_way("link_tx", "link_rx", latency_20);
+  full.oracle(script_end_ps);
+  auto const& all      = full.taps[0];
+  auto const  frame_ps = all[10].end.ps - all[10].start.ps;
+  auto const  at       = all[10].start.ps + static_cast<std::int64_t>(latency_20) - frame_ps / 2;
+  auto const  expected = fault_seen{.at = all[10].start.ps, .member = 0};
+  auto const  arm      = [&](rig& r) {
+    REQUIRE(injected_byte(*r.wires[0], 0x5a, at, std::nullopt).has_value());
+  };
+  auto reference = one_way("link_tx", "link_rx", latency_20);
+  arm(reference);
+  reference.oracle(script_end_ps);
+  CHECK(earliest_fault(reference) == expected);
+  for(auto const& plan : {
+          run_plan{.window = latency_20},
+          run_plan{.window = latency_20 / 3},
+          run_plan{.window = latency_20, .threaded = true}
+  })
+  {
+    auto r = one_way("link_tx", "link_rx", latency_20);
+    arm(r);
+    r.run(plan);
+    CHECK(earliest_fault(r) == expected);
+  }
+}
+
+TEST_CASE("an injection after an aborted frame's cut does not overlap its untransmitted rest")
+{
+  auto full = one_way("link_abort_gap", "link_rx", latency_20);
+  full.oracle(script_end_ps);
+  auto const& all = full.taps[0];
+  REQUIRE(all.size() == 3);
+  REQUIRE(all[1].lost);
+  auto const at = all[1].arrival.ps + static_cast<std::int64_t>(us_ps);
+  REQUIRE(
+      at + static_cast<std::int64_t>(declared().frame_ps())
+      < all[2].start.ps + static_cast<std::int64_t>(latency_20));
+  for(auto const window : {latency_20, latency_20 / 4})
+  {
+    auto r = one_way("link_abort_gap", "link_rx", latency_20);
+    REQUIRE(injected_byte(*r.wires[0], 0x42, at, std::nullopt).has_value());
+    r.run({.window = window});
+    CHECK_FALSE(earliest_fault(r).has_value());
+    CHECK(bytes_of(r.nodes[1]->f->log()) == std::vector<std::uint32_t>{'a', 0x42, 'c'});
+  }
+}
+
+TEST_CASE("the tap orders peer and injected frames by their settle time at any window")
+{
+  auto full = one_way("link_tx", "link_rx", latency_20);
+  full.oracle(script_end_ps);
+  auto const at   = full.taps[0][39].arrival.ps + 30 * static_cast<std::int64_t>(us_ps);
+  auto const with = [at](rig& r) {
+    REQUIRE(injected_byte(*r.wires[0], 0x3c, at, std::nullopt).has_value());
+  };
+  auto reference = one_way("link_tx", "link_rx", latency_20);
+  with(reference);
+  reference.oracle(script_end_ps);
+  auto const& tap = reference.taps[0];
+  REQUIRE(tap.size() == 65);
+  CHECK(
+      std::ranges::is_sorted(tap, {}, [](stm32::tap_frame const& frame) { return frame.end.ps; }));
+  CHECK(
+      std::ranges::count_if(tap, [](stm32::tap_frame const& frame) { return frame.injected; })
+      == 1);
+  for(auto const window : {latency_20, latency_20 / 4})
+  {
+    auto r = one_way("link_tx", "link_rx", latency_20);
+    with(r);
+    r.run({.window = window});
+    CHECK(r.taps[0] == tap);
+    CHECK(r.nodes[1]->f->log() == reference.nodes[1]->f->log());
+  }
 }

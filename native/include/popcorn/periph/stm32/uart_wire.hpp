@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -74,22 +75,29 @@ struct wire_receiver
   bool strict{};
 };
 
-/** @brief One frame of a wire, as the tap shows it. */
+/**
+ * @brief One frame of a wire, as the tap shows it. The tap orders frames by their settle time:
+ *        end for a peer frame, its sender stop-bit end, and end for an injected one, its receiver
+ *        stop-bit end. So it is not ordered by arrival: a peer frame arrives L after its end.
+ */
 struct tap_frame
 {
   /** @brief Sender member. */
   std::size_t from{};
   /** @brief Receiver member. */
   std::size_t to{};
-  /** @brief Number of the frame among the sender's frames on this wire, from 0. */
+  /** @brief Number of the frame among the sender's frames on this wire, from 0, or among the
+   * injected frames for an injected one. */
   std::uint64_t index{};
   /** @brief Data bits, 0 for a break. */
   std::uint16_t data{};
-  /** @brief Start-bit edge at the sender, system time. */
+  /** @brief Start-bit edge at the sender, system time. At the receiver for an injected frame. */
   core::sys_time start{};
-  /** @brief Stop-bit end at the sender, system time. The abort time for a lost frame. */
+  /** @brief Stop-bit end at the sender, system time. The abort time for a lost frame. At the
+   * receiver for an injected frame. */
   core::sys_time end{};
-  /** @brief end plus the wire's latency, when the receiver sees the frame end. */
+  /** @brief When the receiver sees the frame end: end plus the wire's latency, end for an
+   * injected frame. */
   core::sys_time arrival{};
   /** @brief Whether the frame is a break. */
   bool brk{};
@@ -97,6 +105,8 @@ struct tap_frame
   bool lost{};
   /** @brief Whether an armed drop kept the frame off the line: the receiver saw it idle. */
   bool dropped{};
+  /** @brief Whether the frame was injected, uart_wire::inject, rather than sent by the sender. */
+  bool injected{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(tap_frame const&, tap_frame const&) -> bool = default;
@@ -128,8 +138,60 @@ private:
   std::uint64_t         dropped_{};
 };
 
+/** @brief Why uart_wire::inject refused frames. */
+enum class[[= reflex::derive{reflex::Format}]] inject_refusal_reason
+{
+  /** @brief The first start bit lies before the stopped receiver's time. */
+  before_receiver,
+  /** @brief While the system runs, the first start bit lies before the next drain's reach. */
+  before_drained,
+  /** @brief A frame overlaps a frame already on the receiver's line, delivered or posted. */
+  overlaps,
+};
+
+/** @brief A refusal of uart_wire::inject. */
+struct inject_refusal
+{
+  /** @brief Why. */
+  inject_refusal_reason reason{};
+  /** @brief The bound missed: the earliest time accepted, or the start of the frame overlapped. */
+  core::sys_time bound{};
+};
+
+/** @brief The receiver as a stopped system shows it to uart_wire::inject. */
+struct stopped_receiver
+{
+  /** @brief The receiver's system time. */
+  core::sys_time now{};
+  /** @brief The receiver's time map. */
+  core::time_map map{};
+};
+
 namespace detail
 {
+/** @brief A frame on the receiver's line, arrival times in system time, for overlap checks. */
+struct line_span
+{
+  core::sys_time start{};
+  core::sys_time end{};
+  bool           injected{};
+  core::sys_time post{};
+  std::uint64_t  index{};
+
+  friend auto operator==(line_span const&, line_span const&) -> bool = default;
+};
+
+/** @brief Frames injected while the system runs, waiting for a drain. */
+struct queued_injection
+{
+  std::uint64_t  index{};
+  std::uint16_t  data{};
+  core::sys_time start{};
+  core::sys_time end{};
+
+  friend auto operator==(queued_injection const&, queued_injection const&) -> bool = default;
+};
+
 /** @brief A sender's post on a wire: a frame at its start bit, or an abort. */
 struct wire_post
 {
@@ -156,15 +218,23 @@ struct armed_edit
 /** @brief Everything a wire saves. */
 struct wire_state
 {
-  std::vector<wire_post>  mail_even;
-  std::vector<wire_post>  mail_odd;
-  std::uint64_t           window{};
-  core::sys_time          sender_base{};
-  std::uint64_t           started{};
-  std::vector<armed_edit> edits;
-  std::vector<tap_frame>  untapped;
-  std::uint64_t           tapped{};
-  bool                    mismatch_logged{};
+  std::vector<wire_post>        mail_even;
+  std::vector<wire_post>        mail_odd;
+  std::uint64_t                 window{};
+  core::sys_time                sender_base{};
+  std::uint64_t                 started{};
+  std::vector<armed_edit>       edits;
+  std::vector<tap_frame>        untapped;
+  bool                          tapped_any{};
+  core::sys_time                tapped_end{};
+  bool                          tapped_injected{};
+  std::uint64_t                 tapped_index{};
+  bool                          mismatch_logged{};
+  std::vector<queued_injection> injections;
+  std::uint64_t                 injected{};
+  core::sys_time                drained_through{};
+  std::vector<line_span>        delivered;
+  core::sys_time                last_barrier{};
 
   friend auto operator==(wire_state const&, wire_state const&) -> bool = default;
 };
@@ -182,9 +252,13 @@ struct wire_state
  *        off in opposite directions are about 6 percent apart and get no warning, the
  *        receiver's FE and NE still show it. Frames the sender
  *        transmits still reach the endpoint the wire replaced. Edits armed from any thread
- *        replace or drop frames by number. The tap gets each frame once its
- *        end, or its abort for a lost frame, lies at or before a drained barrier or the final
- *        stop, so its content at a barrier does not depend on how the run was cut into windows.
+ *        replace or drop frames by number. Injected frames go on the wire's injected lane. Two
+ *        frames overlapping on the receiver's line are a system error at the later one's start,
+ *        its sender start for a peer frame, its receiver start for an injected one. The tap gets
+ *        each frame once its end, or its abort for a lost frame, the receiver end for an
+ *        injected frame, lies at or before a drained barrier or the final stop, in order of
+ *        that time, so its content at a barrier does not depend on how the run was cut into
+ *        windows.
  */
 class uart_wire final : public uart_endpoint, public core::member_link
 {
@@ -217,8 +291,11 @@ public:
   [[nodiscard]] auto receiver() const noexcept -> std::size_t override;
   [[nodiscard]] auto latency() const noexcept -> core::sys_time override;
   void               enter_window(std::uint64_t window, core::time_map sender) override;
-  auto               drain(std::uint64_t window, core::sys_time barrier, core::time_map receiver)
-      -> std::optional<core::link_fault> override;
+  auto               drain(
+      std::uint64_t  window,
+      core::sys_time barrier,
+      core::sys_time next,
+      core::time_map receiver) -> std::optional<core::link_fault> override;
   void finish(core::sys_time at) override;
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
@@ -252,12 +329,35 @@ public:
   /** @brief Frames the sender has started on this wire so far, any thread. */
   [[nodiscard]] auto posted() const -> std::uint64_t;
 
+  /**
+   * @brief Puts frames on the receiver's line back to back at the declared shape, as if a
+   *        device on the line sent them, on the injected lane. With the system stopped or
+   *        paused, called with the receiver's host access: accepted when @p at is at or after
+   *        the receiver's time and no frame overlaps one delivered, posted or queued, then
+   *        delivered at once. While the system runs, any thread: accepted when @p at is at or
+   *        after the reach of the drains so far, then delivered by the drain whose reach covers
+   *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
+   *        is found at the drain, a system error.
+   * @param data Data bits, one frame each, not empty.
+   * @param at Start-bit edge of the first frame at the receiver, system time.
+   * @param stopped The receiver, when the system is stopped or paused.
+   * @return Nothing, or why the frames were refused.
+   */
+  auto inject(
+      std::span<std::uint16_t const>  data,
+      core::sys_time                  at,
+      std::optional<stopped_receiver> stopped)
+      -> std::expected<void, inject_refusal> pre(not data.empty());
+
 private:
   auto mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&;
   void collect(std::vector<detail::wire_post> const& posts, std::vector<tap_frame>& into) const;
   void emit(std::vector<tap_frame>& from, core::sys_time through);
   auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
   auto arm(detail::armed_edit edit) -> bool;
+  auto overlap(detail::line_span const& span) const -> std::optional<core::link_fault>;
+  auto fault_of(detail::line_span const& span) const -> core::link_fault;
+  void deliver_injection(detail::queued_injection const& frame, core::time_map receiver);
 
   wire_ends                      ends_;
   wire_lanes                     lanes_;
@@ -267,6 +367,7 @@ private:
   std::shared_ptr<uart_endpoint> forward_;
   tap_queue                      tap_;
   mutable std::mutex             edit_mutex_;
+  mutable std::mutex             inject_mutex_;
   detail::wire_state             state_;
 };
 }

@@ -117,10 +117,14 @@ public:
    *        after the barrier closing @p window, before the receiver runs on.
    * @param window Index of the window whose mailbox is drained.
    * @param barrier System time of that barrier.
+   * @param next System time of the barrier after it: what the link's drains reach so far.
    * @param receiver The receiver's time map.
-   * @return The earliest system error the drain found, if any.
+   * @return The earliest system error the drain found, if any. Its time may lie before
+   *         @p barrier: a fault on a peer frame is dated at the frame's sender start, up to L
+   *         before the barrier whose drain reports it. Order errors by link_fault::at, not by
+   *         the drain that found them.
    */
-  virtual auto drain(std::uint64_t window, sys_time barrier, time_map receiver)
+  virtual auto drain(std::uint64_t window, sys_time barrier, sys_time next, time_map receiver)
       -> std::optional<link_fault> = 0;
 
   /**
@@ -129,11 +133,13 @@ public:
    */
   virtual void finish(sys_time at) = 0;
 
-  /** @brief Appends the link's state to @p out, with every member stopped. */
+  /** @brief Appends the link's state to @p out, with every member stopped and no injection
+   * in flight. */
   virtual void save(std::vector<std::byte>& out) const = 0;
 
   /**
-   * @brief Restores a state save() wrote, with every member stopped.
+   * @brief Restores a state save() wrote, with every member stopped and no injection in
+   *        flight.
    * @throws config_error when @p in is not such a state.
    */
   virtual void load(std::span<std::byte const> in) = 0;

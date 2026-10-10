@@ -41,5 +41,6 @@ add_ll_firmware(
         "link_ping",
         "link_echo",
         "link_tx_count",
+        "link_abort_gap",
     ],
 )
