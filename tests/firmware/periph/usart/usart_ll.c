@@ -46,6 +46,8 @@ void link_tx_long(void);
 void link_rx_quiet(void);
 void link_tx_bursts(void);
 void dma_ring(void);
+void link_ping(void);
+void link_echo(void);
 void USART2_IRQHandler(void);
 
 void idle(void)
@@ -103,6 +105,7 @@ static void send_poll(USART_TypeDef* usart)
 
 static void link_irq(void);
 static void quiet_irq(void);
+static void echo_irq(void);
 
 void USART1_IRQHandler(void)
 {
@@ -114,6 +117,11 @@ void USART1_IRQHandler(void)
   if(received_count == 0xfffffffeu)
   {
     quiet_irq();
+    return;
+  }
+  if(received_count == 0xfffffffdu)
+  {
+    echo_irq();
     return;
   }
   if(LL_USART_IsActiveFlag_RXNE_RXFNE(USART1))
@@ -803,4 +811,41 @@ void link_rx_onebit(void)
   LL_USART_EnableOneBitSamp(USART1);
   enable(USART1);
   receive_link();
+}
+
+void link_ping(void)
+{
+  start_link();
+  received_count = 0xffffffffu;
+  LL_USART_EnableIT_RXNE_RXFNE(USART1);
+  LL_USART_EnableIT_ERROR(USART1);
+  NVIC_EnableIRQ(USART1_IRQn);
+  uint32_t volatile const* const logged = &log_len;
+  for(unsigned index = 0; index < 16; ++index)
+  {
+    uint32_t const before = *logged;
+    send_byte((uint8_t)(0x40u + index));
+    while(*logged == before)
+    {
+    }
+    wait_us(30);
+  }
+  DONE();
+}
+
+static void echo_irq(void)
+{
+  if(LL_USART_IsActiveFlag_RXNE_RXFNE(USART1))
+  {
+    LL_USART_TransmitData8(USART1, LL_USART_ReceiveData8(USART1));
+  }
+}
+
+void link_echo(void)
+{
+  start_link();
+  received_count = 0xfffffffdu;
+  LL_USART_EnableIT_RXNE_RXFNE(USART1);
+  NVIC_EnableIRQ(USART1_IRQn);
+  idle();
 }
