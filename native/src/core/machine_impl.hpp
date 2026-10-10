@@ -895,6 +895,8 @@ struct machine::run_state
   bool wall_expired = false;
   /** @brief First exception a callback raised in the slice. */
   std::exception_ptr failure{};
+  /** @brief Whether the core is held, machine::hold_core(). */
+  bool core_held = false;
   /** @brief `description_digest()` of the machine's description, computed once. */
   std::string description_digest{};
   /** @brief Code written while the engine ran, removed at the next block boundary. */
@@ -1349,6 +1351,7 @@ struct machine::run_state
    * records no cut. When it took none, a fault or a trap ended the run: coverage keeps its cut. */
   void take_precise_exit();
   void rethrow_failure();
+  void notify_core_hold(bool held);
   [[nodiscard]] auto
       make_stop(stop_reason reason, std::string detail, std::optional<fault_info> fault) const
       -> stop;

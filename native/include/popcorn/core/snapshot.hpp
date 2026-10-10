@@ -178,6 +178,9 @@ struct snapshot_data
   std::vector<intercept_state> intercepts{};
   /** @brief Return hook counters and calls in flight. */
   std::vector<return_hook_state> return_hooks{};
+  /** @brief Whether the core was held, `machine::core_held()`. Absent from saves before it
+   * existed, which load as not held. */
+  bool core_held{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(snapshot_data const&, snapshot_data const&) -> bool = default;

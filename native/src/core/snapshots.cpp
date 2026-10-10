@@ -143,6 +143,7 @@ auto machine::snapshot() const -> core::snapshot
     }
     data.return_hooks.push_back(std::move(state));
   }
+  data.core_held = run.core_held;
   return core::snapshot{
       std::move(data), std::make_shared<engine_context const>(engine_.get()), id_};
 }
@@ -370,6 +371,7 @@ void machine::restore(core::snapshot const& saved)
   }
 
   run.restore_hook_state(data.intercepts, data.return_hooks);
+  run.core_held = data.core_held;
   run.frames.clear();
   run.coverage.has_previous = false;
   run.spin.clear();

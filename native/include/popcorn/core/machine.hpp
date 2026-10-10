@@ -311,6 +311,24 @@ public:
   void reset(reset_kind kind = reset_kind::power_on) pre(is_enumerator(kind));
 
   /**
+   * @brief Holds or releases the core. While held, the run loop never executes guest code and
+   *        never delivers an exception: every slice takes the idle path, so the clock, events and
+   *        DMA keep following virtual time, and the arch and the models freeze what a core held
+   *        in Debug state freezes, see arch::arch::hold_core() and periph::core_hold_listener.
+   *        Pending exceptions and the sleep state are kept, so a released core takes them first,
+   *        as after a debugger resume. A held machine stays held across reset() and a firmware
+   *        reset, and refuses calls, see begin_call(). Not core::host::halt(), which ends a free
+   *        run. Called by the engine owner only, as reset() and restore().
+   * @param held True to hold, false to release. A request for the current state does nothing.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy while a call begun by begin_call() is in progress.
+   */
+  void hold_core(bool held);
+
+  /** @brief Whether the core is held, see hold_core(). */
+  [[nodiscard]] auto core_held() const noexcept -> bool;
+
+  /**
    * @brief Runs one native slice, synchronously: delivers a pending interrupt, runs the engine
    *        until a bound, a stop request or a trap, dispatches due events, and when the core
    *        idles moves the clock to the next event or to until_time, whichever comes first, and
@@ -341,7 +359,8 @@ public:
    *        follow run the call. Reaching `frame.return_sentinel` stops with
    *        stop_reason::returned.
    * @param frame Call to make, its entry and sentinel set.
-   * @throws machine_busy when a call is already in progress.
+   * @throws machine_busy when a call is already in progress, or the core is held, see
+   *         hold_core().
    * @throws machine_running while a slice runs, handlers included.
    * @throws config_error when the arch module refuses the frame.
    */

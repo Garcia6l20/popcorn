@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace popcorn::testing
@@ -89,6 +90,10 @@ public:
   bool fail_writes = false;
   /** @brief Whether reads throw a std::runtime_error naming their rank. */
   bool throw_reads = false;
+  /** @brief Whether DMA writes throw a std::runtime_error naming their rank. */
+  bool throw_dma_writes = false;
+  /** @brief Address and value the `CTRL.GO` event writes through DMA when it fires. */
+  std::optional<std::pair<address, std::uint32_t>> dma_on_event{};
   /** @brief Whether writes request a stop with detail "model stop". */
   bool stop_on_write = false;
   /** @brief Address a `CTRL.GO` write patches through DMA with patch_value. */

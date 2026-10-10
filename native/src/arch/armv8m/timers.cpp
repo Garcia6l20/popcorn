@@ -35,10 +35,34 @@ void take_passed_reload(systick_state& s, std::uint64_t t) noexcept
 }
 }
 
+auto cortex_m::timer_now() const -> std::uint64_t
+{
+  return state_.held_at.value_or(context_->clock.now().value);
+}
+
 auto cortex_m::systick_ticks() const -> std::uint64_t
 {
-  auto const& clock = context_->clock;
-  return systick::ticks(state_.systick, clock.now().value, clock.cpi());
+  return systick::ticks(state_.systick, timer_now(), context_->clock.cpi());
+}
+
+void cortex_m::hold_core(bool held)
+{
+  if(held == state_.held_at.has_value())
+  {
+    return;
+  }
+  auto const now = context_->clock.now().value;
+  if(held)
+  {
+    state_.held_at = now;
+    ++generation_;
+    return;
+  }
+  auto const span = now - *state_.held_at;
+  state_.held_at.reset();
+  state_.systick.anchor += span;
+  state_.cyccnt.anchor += span;
+  arm_systick();
 }
 
 auto cortex_m::read_systick(std::uint32_t offset) -> std::uint32_t
@@ -67,7 +91,7 @@ auto cortex_m::read_systick(std::uint32_t offset) -> std::uint32_t
 void cortex_m::write_systick(std::uint32_t offset, std::uint32_t value, std::uint32_t mask)
 {
   auto&      s   = state_.systick;
-  auto const now = context_->clock.now().value;
+  auto const now = timer_now();
   auto const t   = systick_ticks();
   take_passed_reload(s, t);
   auto const csr     = s.csr;
@@ -107,7 +131,7 @@ void cortex_m::write_systick(std::uint32_t offset, std::uint32_t value, std::uin
 void cortex_m::arm_systick()
 {
   auto const& s = state_.systick;
-  if(not systick::interrupting(s))
+  if(not systick::interrupting(s) or state_.held_at)
   {
     return;
   }
@@ -146,7 +170,7 @@ auto cortex_m::read_cyccnt() const -> std::uint32_t
     return c.base;
   }
   auto const& clock   = context_->clock;
-  auto const  elapsed = clock.now().value - c.anchor;
+  auto const  elapsed = timer_now() - c.anchor;
   auto const  cycles =
       clock.cpi() == 1.0
           ? elapsed
@@ -156,6 +180,6 @@ auto cortex_m::read_cyccnt() const -> std::uint32_t
 
 void cortex_m::rebase_cyccnt(std::uint32_t value)
 {
-  state_.cyccnt = {.base = value, .anchor = context_->clock.now().value};
+  state_.cyccnt = {.base = value, .anchor = timer_now()};
 }
 }

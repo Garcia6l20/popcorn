@@ -201,6 +201,9 @@ struct state
   bool event_register{};
   /** @brief Set while a call masks asynchronous exceptions. */
   bool call_masked{};
+  /** @brief Instruction count at which the core was held, set while it is: SysTick and CYCCNT
+   * read the clock as this count. */
+  std::optional<std::uint64_t> held_at{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(state const&, state const&) -> bool = default;

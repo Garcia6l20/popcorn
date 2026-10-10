@@ -1,7 +1,9 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/scheduler.hpp>
+#include <popcorn/core/snapshot.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
@@ -12,7 +14,9 @@
 #include <chrono>
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -1174,4 +1178,192 @@ TEST_CASE("a hold at count 0 holds the events at count 0")
       == std::vector<logged>{
           {.kind = logged_kind, .payload = 4, .at = icount{0}}
   });
+}
+
+namespace
+{
+auto registers_of(fixture const& f) -> std::vector<std::uint64_t>
+{
+  std::vector<std::uint64_t> values;
+  for(auto const& reg : f.target->regs().list())
+  {
+    values.push_back(f.target->regs().read(reg));
+  }
+  return values;
+}
+
+struct held_run
+{
+  std::vector<logged>        log;
+  std::vector<std::uint64_t> registers;
+  icount                     now;
+  std::uint64_t              executed;
+  std::uint64_t              engine_runs;
+};
+
+auto run_held(std::uint64_t slice_instructions) -> held_run
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  auto const start = f.target->virtual_clock().now().value;
+  for(std::uint64_t k = 1; k <= 5; ++k)
+  {
+    std::ignore = f.module->attached_events().schedule(icount{start + 333 * k}, logged_kind, k);
+  }
+  auto const before = registers_of(f);
+  f.module->event_log.clear();
+  f.target->hold_core(true);
+  CHECK(f.target->core_held());
+  auto const    runs     = core::machine_internals::counters(*f.target).engine_runs;
+  auto const    until    = vtime{f.target->virtual_clock().time().ps + 2000 * 250'000};
+  std::uint64_t executed = 0;
+  for(;;)
+  {
+    auto const slice = f.run(
+        {.max_instructions = icount{slice_instructions},
+         .wall_budget      = long_wall,
+         .until_time       = until});
+    executed += slice.executed.value;
+    if(slice.stopped)
+    {
+      CHECK(slice.stopped->reason == stop_reason::time);
+      break;
+    }
+  }
+  CHECK(registers_of(f) == before);
+  return {
+      .log         = f.module->event_log,
+      .registers   = registers_of(f),
+      .now         = f.target->virtual_clock().now(),
+      .executed    = executed,
+      .engine_runs = core::machine_internals::counters(*f.target).engine_runs - runs};
+}
+}
+
+TEST_CASE("a held core executes nothing while its events fire at their counts, at any slicing")
+{
+  auto const whole = run_held(1'000'000);
+  CHECK(whole.executed == 0);
+  CHECK(whole.engine_runs == 0);
+  REQUIRE(whole.log.size() == 5);
+  for(std::size_t k = 0; k < whole.log.size(); ++k)
+  {
+    CHECK(whole.log[k].payload == k + 1);
+    CHECK(whole.log[k].at.value == whole.log[0].at.value + 333 * k);
+  }
+  auto const sliced = run_held(997);
+  CHECK(sliced.executed == 0);
+  CHECK(sliced.engine_runs == 0);
+  CHECK(sliced.log == whole.log);
+  CHECK(sliced.registers == whole.registers);
+  CHECK(sliced.now == whole.now);
+}
+
+TEST_CASE("a held core stops idle with nothing pending and at until_time with a bound")
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  f.target->hold_core(true);
+  auto const before = f.target->virtual_clock().now();
+  CHECK(f.run_to_stop().reason == stop_reason::idle);
+  CHECK(f.target->virtual_clock().now() == before);
+  auto const until = vtime{f.target->virtual_clock().time().ps + 1'000'000'000};
+  auto const timed = f.run_to_stop({.until_time = until});
+  CHECK(timed.reason == stop_reason::time);
+  CHECK(f.target->virtual_clock().time() == until);
+  f.target->hold_core(false);
+  CHECK_FALSE(f.target->core_held());
+  CHECK(f.run_to_stop({.budget_left = icount{100}}).reason == stop_reason::budget);
+}
+
+TEST_CASE("hold_core refuses a running machine and a call in progress")
+{
+  auto                f = booted("calls");
+  std::optional<bool> refused;
+  std::ignore = f.run({.max_instructions = icount{100}, .wall_budget = long_wall, .stop_when = [&] {
+                         try
+                         {
+                           f.target->hold_core(true);
+                           refused = false;
+                         }
+                         catch(popcorn::machine_running const&)
+                         {
+                           refused = true;
+                         }
+                         return true;
+                       }});
+  CHECK(refused == true);
+  CHECK_FALSE(f.target->core_held());
+  f.target->begin_call(
+      {.entry           = sym("calls", "add"),
+       .args            = {},
+       .returns         = popcorn::arch::value_kind::i32,
+       .abi             = popcorn::arch::float_abi::soft,
+       .return_sentinel = 0x3000'0000});
+  CHECK_THROWS_AS(f.target->hold_core(true), popcorn::machine_busy);
+  std::ignore = f.target->end_call();
+  CHECK_FALSE(f.target->core_held());
+}
+
+TEST_CASE("a held core refuses a call and keeps its clock and events")
+{
+  auto f      = booted("calls");
+  std::ignore = f.module->attached_events().schedule(
+      icount{f.target->virtual_clock().now().value + 50}, logged_kind, 1);
+  f.target->hold_core(true);
+  auto const now     = f.target->virtual_clock().now();
+  auto const pending = f.target->pending_events();
+  auto const call    = popcorn::arch::call_frame{
+      .entry           = sym("calls", "add"),
+      .args            = {},
+      .returns         = popcorn::arch::value_kind::i32,
+      .abi             = popcorn::arch::float_abi::soft,
+      .return_sentinel = 0x3000'0000};
+  CHECK_THROWS_AS(f.target->begin_call(call), popcorn::machine_busy);
+  CHECK_THROWS_AS(std::ignore = f.target->call(call, icount{1000}), popcorn::machine_busy);
+  CHECK_FALSE(f.target->in_call());
+  CHECK(f.target->virtual_clock().now() == now);
+  CHECK(f.target->pending_events() == pending);
+  f.target->hold_core(false);
+  CHECK(f.target->call(call, icount{1000}).stopped.reason == stop_reason::returned);
+}
+
+TEST_CASE("a model failure while the core is held leaves the slice at once, resumable")
+{
+  core::machine_options options;
+  options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+  auto  f     = booted("calls", std::move(options));
+  auto& model = dynamic_cast<popcorn::testing::test_model&>(*f.target->model("TESTDEV"));
+  REQUIRE(f.target->mem().write(0x4001'0000 + popcorn::testing::test_model::ctrl_offset, 4, 1));
+  model.throw_dma_writes = true;
+  model.dma_on_event     = {0x4001'0000 + popcorn::testing::test_model::data_offset, 7};
+  f.target->hold_core(true);
+  auto const until = vtime{f.target->virtual_clock().time().ps + 1'000'000'000};
+  CHECK_THROWS_AS(f.run({.wall_budget = long_wall, .until_time = until}), std::runtime_error);
+  CHECK(f.target->core_held());
+  std::ignore            = f.target->snapshot();
+  model.throw_dma_writes = false;
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+}
+
+TEST_CASE("a held machine stays held across a reset and its snapshot keeps the hold")
+{
+  auto f = booted("calls");
+  f.target->hold_core(true);
+  auto const resets = f.target->resets();
+  f.target->reset();
+  CHECK(f.target->core_held());
+  CHECK(f.target->resets() == resets + 1);
+  auto const saved = f.target->snapshot();
+  CHECK(saved.data().core_held);
+  auto back = popcorn::core::decode_snapshot(popcorn::core::encode_snapshot(saved.data()));
+  CHECK(back.core_held);
+  f.target->hold_core(false);
+  f.target->restore(saved);
+  CHECK(f.target->core_held());
+  auto const before = f.target->virtual_clock().now();
+  CHECK(
+      f.run_to_stop({.until_time = vtime{f.target->virtual_clock().time().ps + 250'000'000}}).reason
+      == stop_reason::time);
+  CHECK(f.target->virtual_clock().now().value == before.value + 1000);
 }

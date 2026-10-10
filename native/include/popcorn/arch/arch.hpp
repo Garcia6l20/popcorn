@@ -456,6 +456,16 @@ public:
   {}
 
   /**
+   * @brief Holds or releases the core, see core::machine::hold_core(): freezes what stops while
+   *        a core is held in Debug state, such as core timers. Pending exceptions and the sleep
+   *        state stay as they are. The default freezes nothing.
+   * @param held True on a hold, false on the release, true again after a reset of a held
+   *        machine.
+   */
+  virtual void hold_core([[maybe_unused]] bool held)
+  {}
+
+  /**
    * @brief Reads the return value of a call that reached its sentinel.
    * @param frame Frame given to prepare_call().
    * @return Value bits of type `frame.returns`, a float as its IEEE 754 bit pattern.

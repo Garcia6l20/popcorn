@@ -160,6 +160,7 @@ TEST_CASE(
     CHECK(pending.lane == 0);
   }
   CHECK(back.format == core::snapshot_format_version);
+  CHECK_FALSE(back.core_held);
   CHECK(back == filled());
 }
 

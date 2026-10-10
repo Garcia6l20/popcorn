@@ -218,6 +218,26 @@ void machine::reset(reset_kind kind)
   run_->reset_machine(kind);
 }
 
+void machine::hold_core(bool held)
+{
+  require_stopped(*this);
+  if(in_call())
+  {
+    throw machine_busy("a call is in progress");
+  }
+  if(run_->core_held == held)
+  {
+    return;
+  }
+  run_->core_held = held;
+  run_->notify_core_hold(held);
+}
+
+auto machine::core_held() const noexcept -> bool
+{
+  return run_->core_held;
+}
+
 auto machine::mem() noexcept -> memory_view
 {
   return memory_view{*this};

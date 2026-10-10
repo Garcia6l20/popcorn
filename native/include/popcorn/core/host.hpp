@@ -947,7 +947,8 @@ public:
    *        waits until the member parks and the host thread has released what it held for that
    *        park, completed waiters included. Pending waiters fail with operation_cancelled.
    *        Cancels a goal as cancel() does. On a host thread it requests the end of a running
-   *        member and returns, and closes the session of a parked one at once.
+   *        member and returns, and closes the session of a parked one at once. Not
+   *        machine::hold_core(), which keeps a member's clock running with its core held.
    * @param refuse_goal As for request_halt().
    * @return The held end, cleared, when the free run had ended by itself.
    * @throws machine_running when the thread holds a host mutex.

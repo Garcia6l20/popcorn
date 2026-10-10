@@ -4,6 +4,7 @@
 #include "handler_scope.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/core_hold.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -223,6 +224,25 @@ void machine::run_state::reset_machine(reset_kind kind)
   owner.trace_.rebase(icount{0});
   rebase_sinks(icount{0});
   ++resets;
+  if(core_held)
+  {
+    notify_core_hold(true);
+  }
+}
+
+void machine::run_state::notify_core_hold(bool held)
+{
+  owner.arch_->hold_core(held);
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot)
+    {
+      if(auto* const listener = dynamic_cast<periph::core_hold_listener*>(slot->model.get()))
+      {
+        listener->on_core_hold(held);
+      }
+    }
+  }
 }
 
 void machine::run_state::code_changed(
@@ -963,6 +983,16 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     if(auto end = bound_reached(request))
     {
       return finish(request, std::move(*end));
+    }
+    if(core_held)
+    {
+      rethrow_failure();
+      spin.progress();
+      if(auto end = idle_jump(request))
+      {
+        return finish(request, std::move(*end));
+      }
+      continue;
     }
     auto const before      = coverage_on ? arch->pc() : address{};
     auto const spin_before = spin_on ? arch->pc() : address{};

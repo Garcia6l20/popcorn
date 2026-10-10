@@ -1157,6 +1157,64 @@ TEST_CASE("interrupts from another thread do not move a requested stop")
   CHECK(got.executed == expected.executed);
 }
 
+TEST_CASE("interrupts from another thread leave a held member's run unchanged")
+{
+  struct ended
+  {
+    std::uint64_t              expiries;
+    icount                     now;
+    std::size_t                pending;
+    std::vector<std::uint64_t> registers;
+    int                        sent;
+  };
+  auto const held_run = [](bool stress) {
+    popcorn::testing::machine_fixture<> f{m33(), "idle", core::machine_options{}};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    f.set("pc", sym("idle", "idle_entry"));
+    REQUIRE(
+        f.run_to_stop({.stop_when = [&f] { return f.module->timer_expiries == 1; }}).reason
+        == stop_reason::user);
+    f.target->hold_core(true);
+    auto const* const module = f.module;
+    auto* const       target = f.target.get();
+    auto const until = vtime{target->virtual_clock().time().ps + 2000 * ps_per_instruction * 1000};
+    hosted     h{
+        std::move(f.target), {.max_instructions = icount{1'000'000'000}, .wall_budget = long_wall}
+    };
+    auto const goal = h.run({.until_time = until});
+    int        sent = 0;
+    while(stress and sent < 10'000 and not goal.done())
+    {
+      target->interrupt();
+      ++sent;
+      std::this_thread::yield();
+    }
+    auto const got = goal.get();
+    REQUIRE(got.stopped.reason == stop_reason::time);
+    return core::access(*h.on, 0, [&](core::machine& m) {
+      std::vector<std::uint64_t> registers;
+      for(auto const& reg : m.regs().list())
+      {
+        registers.push_back(m.regs().read(reg));
+      }
+      return ended{
+          .expiries  = module->timer_expiries,
+          .now       = m.virtual_clock().now(),
+          .pending   = m.pending_events(),
+          .registers = std::move(registers),
+          .sent      = sent};
+    });
+  };
+  auto const quiet    = held_run(false);
+  auto const stressed = held_run(true);
+  MESSAGE("interrupts sent: " << stressed.sent);
+  CHECK(quiet.expiries > 1);
+  CHECK(stressed.expiries == quiet.expiries);
+  CHECK(stressed.now == quiet.now);
+  CHECK(stressed.pending == quiet.pending);
+  CHECK(stressed.registers == quiet.registers);
+}
+
 TEST_CASE("two members on one host each equal the same goal on its own host")
 {
   core::run_goal const goal{.until = sym("alu", "alu_done")};
@@ -2141,6 +2199,17 @@ TEST_CASE("a reset or a restore fails pending stamps")
     CHECK_THROWS_AS(stamp.get(), core::operation_cancelled);
     std::ignore = h.run({.budget = icount{10'000}}).get();
     CHECK(after.done());
+  }
+  SUBCASE("parked reset of a held member")
+  {
+    hosted h{alu(0)};
+    std::ignore = h.run({.budget = icount{1000}}).get();
+    core::access(*h.on, 0, [](core::machine& m) { m.hold_core(true); });
+    auto const stamp = h.post([](core::machine&) {}, at_instruction(5000));
+    core::access(*h.on, 0, [](core::machine& m) { m.reset(); });
+    std::ignore = h.run({.until_time = at_instruction(10'000)}).get();
+    CHECK_THROWS_AS(stamp.get(), core::operation_cancelled);
+    CHECK(core::access(*h.on, 0, [](core::machine& m) { return m.core_held(); }));
   }
   SUBCASE("model-requested reset during a run")
   {
