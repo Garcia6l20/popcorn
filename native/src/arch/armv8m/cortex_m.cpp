@@ -430,10 +430,10 @@ void cortex_m::load(std::span<std::byte const> in)
   auto live = state_;
   state_    = reflex::serde::bson::deserializer{in}.load<state>();
   set_context(engine_handle(), state_.special, stack_limits());
-  generation_ = std::max(generation_, state_.systick.generation_floor) + 1;
   if(in_call_)
   {
-    in_call_ = false;
+    generation_ = std::max(generation_, state_.systick.generation_floor) + 1;
+    in_call_    = false;
     for(std::uint32_t number = exc_nmi; number < exception_count(); ++number)
     {
       if(synchronous(number))
@@ -453,8 +453,12 @@ void cortex_m::load(std::span<std::byte const> in)
         put_bit(state_.exceptions.pending, number, true);
       }
     }
+    arm_systick();
   }
-  arm_systick();
+  else
+  {
+    generation_ = state_.systick.generation_floor;
+  }
   refresh_pending();
 }
 

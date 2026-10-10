@@ -9,8 +9,12 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn.units import VirtualDuration, ms
 
-from .conftest import DRIVER_ELF, M33_JSON, Machines
+from .conftest import DRIVER_ELF, M33_JSON, ROOT, Machines
+from .snapshot_doc import bson
+
+USART_ELF = ROOT / "examples" / "stm32u575" / "usart" / "prebuilt" / "usart_echo.elf"
 
 
 def state(m: popcorn.Machine) -> tuple[int, int, tuple[int, ...], bytes]:
@@ -165,3 +169,55 @@ def test_snapshot_refuses_a_running_machine_even_from_a_handler(machines: Machin
             await task
 
     asyncio.run(scenario())
+
+
+def usart_at(u575: popcorn.MachineDescription, after: VirtualDuration) -> popcorn.Machine:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(USART_ELF))
+    m.reset()
+    stop = asyncio.run(m.run(until="main", budget=1_000_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS, stop
+    asyncio.run(m.run(for_=after))
+    return m
+
+
+def without_generation(m: popcorn.Machine) -> tuple[int, dict[str, object]]:
+    doc = bson(m.snapshot().to_bytes())
+    generation = doc.pop("generation")
+    assert isinstance(generation, int)
+    return generation, doc
+
+
+def test_a_restore_after_a_reset_runs_as_a_machine_never_reset(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usart_at(u575, ms(1))
+    twin = usart_at(u575, ms(1))
+    boot = m.snapshot()
+    asyncio.run(m.run(for_=ms(25)))
+    m.reset()
+    asyncio.run(m.run(until="main", budget=1_000_000))
+    m.restore(boot)
+    assert without_generation(m)[1] == without_generation(twin)[1]
+    for _ in range(5):
+        asyncio.run(m.run(for_=ms(5)))
+        asyncio.run(twin.run(for_=ms(5)))
+        assert m.pending_events == twin.pending_events == 1
+        assert without_generation(m)[1] == without_generation(twin)[1]
+
+
+def test_a_restore_of_a_machines_own_snapshot_adds_no_state(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usart_at(u575, ms(25))
+    twin = usart_at(u575, ms(25))
+    generation, before = without_generation(m)
+    assert m.pending_events == 1
+    m.restore(m.snapshot())
+    restored_generation, after = without_generation(m)
+    assert restored_generation == generation + 1
+    assert after == before
+    assert m.pending_events == 1
+    for _ in range(3):
+        asyncio.run(m.run(for_=ms(5)))
+        asyncio.run(twin.run(for_=ms(5)))
+        assert without_generation(m)[1] == without_generation(twin)[1]

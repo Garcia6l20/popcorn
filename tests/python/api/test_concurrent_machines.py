@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import struct
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .conftest import ROOT
+from .snapshot_doc import bson
 
 EXAMPLES = ROOT / "examples" / "stm32u575"
 USART_ELF = EXAMPLES / "usart" / "prebuilt" / "usart_echo.elf"
@@ -27,7 +27,7 @@ LATE_LINE = b"delta\r\n"
 LATE_AT = ms(30)
 STEPS = 50
 TICK = "HAL_IncTick"
-RESTORE_CHANGES = (("events",), ("arch", "data"), ("generation",))
+RESTORE_CHANGES = (("generation",),)
 
 
 @dataclass(frozen=True)
@@ -40,10 +40,17 @@ class Digest:
     restorable: str
     pending_events: int
 
-    def restored(self) -> tuple[VirtualTime, int, tuple[int, ...], str, str]:
-        """The digest without what a restore of a machine's own snapshot changes today: the
-        event queue, the arch data and the generation of the snapshot."""
-        return (self.time, self.instructions, self.registers, self.ram, self.restorable)
+    def restored(self) -> tuple[VirtualTime, int, tuple[int, ...], str, str, int]:
+        """The digest without the generation of the snapshot, the only state a restore of a
+        machine's own snapshot changes."""
+        return (
+            self.time,
+            self.instructions,
+            self.registers,
+            self.ram,
+            self.restorable,
+            self.pending_events,
+        )
 
 
 @dataclass
@@ -61,49 +68,6 @@ Handler = Callable[[popcorn.Call], popcorn.Return]
 
 def proceed(call: popcorn.Call) -> popcorn.Return:
     return call.proceed()
-
-
-def bson(data: bytes, at: int = 0) -> dict[str, object]:
-    """The BSON document at `at`, with the element types snapshots use."""
-    (size,) = struct.unpack_from("<i", data, at)
-    end = at + size - 1
-    at += 4
-    found: dict[str, object] = {}
-    while at < end:
-        kind = data[at]
-        name_end = data.index(0, at + 1)
-        name = data[at + 1 : name_end].decode()
-        at = name_end + 1
-        value: object
-        if kind in (0x03, 0x04):
-            value = bson(data, at)
-            at += struct.unpack_from("<i", data, at)[0]
-        elif kind == 0x05:
-            (length,) = struct.unpack_from("<i", data, at)
-            value = data[at + 5 : at + 5 + length]
-            at += 5 + length
-        elif kind == 0x02:
-            (length,) = struct.unpack_from("<i", data, at)
-            value = data[at + 4 : at + 3 + length].decode()
-            at += 4 + length
-        elif kind == 0x01:
-            (value,) = struct.unpack_from("<d", data, at)
-            at += 8
-        elif kind in (0x09, 0x11, 0x12):
-            (value,) = struct.unpack_from("<q", data, at)
-            at += 8
-        elif kind == 0x10:
-            (value,) = struct.unpack_from("<i", data, at)
-            at += 4
-        elif kind == 0x08:
-            value = data[at] != 0
-            at += 1
-        elif kind == 0x0A:
-            value = None
-        else:
-            raise ValueError(f"BSON element type {kind:#x} at {name}")
-        found[name] = value
-    return found
 
 
 def feed(update: Callable[[bytes], object], value: object, path: tuple[str, ...] = ()) -> None:

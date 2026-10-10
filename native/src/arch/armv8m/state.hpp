@@ -141,7 +141,7 @@ struct systick_state
   bool flag{};
   /** @brief Crossings of the current anchor already dispatched, 0 for none. */
   std::uint64_t fired{};
-  /** @brief Live event generation when saved, a floor for the generation after a restore. */
+  /** @brief Live event generation when saved, the generation a restore takes back. */
   std::uint64_t generation_floor{};
 
   /** @brief Member-wise equality. */
