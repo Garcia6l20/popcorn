@@ -34,6 +34,12 @@ constexpr std::uint32_t master_reset         = 0;
 constexpr std::uint32_t master_enable        = 1;
 constexpr std::uint32_t master_update        = 2;
 constexpr std::uint32_t master_compare_pulse = 3;
+constexpr std::uint32_t burst_update         = 1;
+constexpr std::uint32_t burst_compare1       = 2;
+constexpr std::uint32_t burst_compare4       = 5;
+constexpr std::uint32_t burst_com            = 6;
+constexpr std::uint32_t burst_trigger        = 7;
+constexpr std::uint32_t max_burst            = 26;
 
 enum class slave_mode : std::uint8_t
 {
@@ -122,6 +128,7 @@ struct tim_state
   std::uint32_t                           prescaler{};
   std::uint32_t                           reload{};
   std::uint32_t                           edges{};
+  std::uint32_t                           burst_index{};
   std::array<std::uint32_t, max_channels> compare{};
   std::array<std::uint8_t, max_channels>  compare_request{};
   std::uint8_t                            update_request{};
@@ -205,8 +212,21 @@ auto lower(std::string_view name) -> std::string
  *        event, logged once per timer, where hardware would oscillate with a few clocks of
  *        resynchronisation delay per hop. Not modelled, logged once when the counter starts:
  *        SMSPE, input capture edges, dithering, CCDS, channels 1 and 2 left out in encoder
- *        modes. TDE logs once and raises no trigger DMA request. DMA burst mode is not modelled,
- * logged once when DCR selects it.
+ *        modes. TDE logs once and raises no trigger DMA request. DMA burst mode, RM0456 55.4 "DMA
+ *        burst mode" and TIMx_DCR: every CPU or DMA access to DMAR reaches the register at DBA +
+ *        index words from CR1, in the same byte lane, then advances the index, which wraps after
+ *        DBL + 1 accesses. A debugger access redirects without advancing, so a test reading DMAR
+ *        changes nothing the firmware sees next. CPU and DMA accesses share the index, so a CPU
+ *        access to DMAR during a DMA burst moves it and can stretch the burst. A target
+ *        the model serves runs its write handler. Any other described register takes the access
+ *        merged under its writable bits. A target with no register reads 0, ignores the write and
+ *        logs once. A DCR write resets the index, and so does each event of the DBSS source with
+ *        its DMA enable set, so an event mid-burst restarts the burst: both are emulation choices
+ *        RM0456 leaves open. The DBSS source, update or CC1 to CC4, keeps its request high across
+ *        the GPDMA's acknowledges until the index wraps, so a channel moves DBL + 1 transfers per
+ *        event. COM, trigger and reserved DBSS values log once and keep one request per event.
+ *        Reserved DBL values above 11010 run 26 transfers and log once. Traces name DMAR, not the
+ *        redirected register.
  */
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,
@@ -262,6 +282,13 @@ private:
   [[nodiscard]] auto internally_clocked() const -> bool;
   [[nodiscard]] auto gate_open() const -> bool;
   [[nodiscard]] auto counter_enabled() const -> bool;
+  [[nodiscard]] auto burst_source() const -> std::uint32_t;
+  [[nodiscard]] auto burst_transfers() const -> std::uint32_t;
+  [[nodiscard]] auto burst_target(std::uint32_t offset) const -> std::uint32_t;
+  [[nodiscard]] auto described(std::uint32_t word) const
+      -> std::optional<std::pair<std::uint32_t, std::uint32_t>>;
+  [[nodiscard]] auto claimed(std::uint32_t word) const -> bool;
+  [[nodiscard]] auto holds_burst(std::uint32_t source) const -> bool;
   [[nodiscard]] auto input_level(std::uint32_t smcr) const -> std::optional<bool>;
   [[nodiscard]] auto slave_of(std::uint32_t smcr) const -> std::uint32_t;
   [[nodiscard]] auto slave() const -> std::uint32_t;
@@ -305,6 +332,8 @@ private:
   void capture(std::size_t ch, std::uint64_t at);
   void request_update();
   void release(std::uint32_t request);
+  void advance_burst(access_ctx access);
+  void warn_burst_range(std::uint32_t word);
   void settle();
   void reschedule();
   void warn_unsupported();
@@ -341,6 +370,13 @@ private:
   core::clock_domain                           domain_;
   std::optional<field_ref>                     burst_length_;
   std::optional<field_ref>                     burst_base_;
+  std::optional<field_ref>                     burst_select_;
+  std::optional<std::uint32_t>                 burst_word_;
+  std::vector<std::uint32_t>                   claimed_words_;
+  std::vector<std::array<std::uint32_t, 3>>    stored_words_;
+  bool                                         burst_range_logged_{};
+  bool                                         burst_length_logged_{};
+  bool                                         burst_source_logged_{};
   std::optional<field_ref>                     master_;
   std::optional<field_ref>                     master_high_;
   std::optional<field_ref>                     master2_;
@@ -363,7 +399,6 @@ private:
   bool                                         encoder_logged_{};
   bool                                         etr_logged_{};
   bool                                         pin_logged_{};
-  bool                                         burst_logged_{};
   bool                                         master_logged_{};
 };
 
@@ -470,7 +505,9 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
       reload_{reg(name("ARR"))}, repetition_{optional_field(name("RCR"), "REP")},
       domain_{ctx.clock.domain(lower(desc.name))},
       burst_length_{optional_field(name("DCR"), "DBL")},
-      burst_base_{optional_field(name("DCR"), "DBA")}, master_{optional_field(name("CR2"), "MMS")},
+      burst_base_{optional_field(name("DCR"), "DBA")},
+      burst_select_{optional_field(name("DCR"), "DBSS")},
+      master_{optional_field(name("CR2"), "MMS")},
       master_high_{optional_field(name("CR2"), "MMS_3")},
       master2_{optional_field(name("CR2"), "MMS2")}, instance_{lower(desc.name)},
       slave_{optional_field(name("SMCR"), "SMS")}, select_{optional_field(name("SMCR"), "TS")},
@@ -621,6 +658,101 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
     {
       unsupported_.push_back(*found);
     }
+  }
+  if(has_register(name("DMAR")))
+  {
+    burst_word_ = reg(name("DMAR")).offset;
+  }
+  for(auto const& claimed : claims())
+  {
+    claimed_words_.push_back(reg(claimed).offset);
+  }
+  for(auto const& described : desc.registers)
+  {
+    auto const    at    = reg(described.name);
+    auto const    whole = field_ref{.offset = at.offset, .lsb = at.lsb, .width = at.width}.mask();
+    std::uint32_t writable = described.fields.empty() ? whole : 0;
+    std::uint32_t readable = described.fields.empty() ? whole : 0;
+    for(auto const& bits : described.fields)
+    {
+      auto const mask =
+          field_ref{
+              .offset = at.offset,
+              .lsb    = static_cast<std::uint8_t>(at.lsb + bits.lsb),
+              .width  = bits.width}
+              .mask();
+      writable |= bits.acc != access::read_only ? mask : 0;
+      readable |= bits.acc != access::write_only and bits.acc != access::write_once ? mask : 0;
+    }
+    auto const found =
+        std::ranges::find(stored_words_, at.offset, [](auto const& w) { return w[0]; });
+    if(found == stored_words_.end())
+    {
+      stored_words_.push_back({at.offset, writable, readable});
+    }
+    else
+    {
+      (*found)[1] |= writable;
+      (*found)[2] |= readable;
+    }
+  }
+}
+
+auto tim::burst_source() const -> std::uint32_t
+{
+  return burst_select_ ? get(regs_, *burst_select_) : 0u;
+}
+
+auto tim::burst_transfers() const -> std::uint32_t
+{
+  return burst_length_ ? std::min(get(regs_, *burst_length_), max_burst - 1) + 1 : 1u;
+}
+
+auto tim::burst_target(std::uint32_t offset) const -> std::uint32_t
+{
+  auto const base = burst_base_ ? get(regs_, *burst_base_) : 0u;
+  return (base + state_.burst_index) * 4 + (offset & 3u);
+}
+
+auto tim::described(std::uint32_t word) const
+    -> std::optional<std::pair<std::uint32_t, std::uint32_t>>
+{
+  auto const found = std::ranges::find(stored_words_, word, [](auto const& w) { return w[0]; });
+  if(found == stored_words_.end())
+  {
+    return std::nullopt;
+  }
+  return std::pair{(*found)[1], (*found)[2]};
+}
+
+auto tim::claimed(std::uint32_t word) const -> bool
+{
+  return std::ranges::contains(claimed_words_, word);
+}
+
+auto tim::holds_burst(std::uint32_t source) const -> bool
+{
+  return burst_source() == source and state_.burst_index != 0;
+}
+
+void tim::warn_burst_range(std::uint32_t word)
+{
+  if(not std::exchange(burst_range_logged_, true))
+  {
+    warn(
+        name("DMAR"),
+        std::format(
+            "DMA burst access at offset {:#x}: no timer register there, reads 0 and ignores the "
+            "write",
+            word));
+  }
+}
+
+void tim::advance_burst(access_ctx access)
+{
+  if(access.by != initiator::debugger)
+  {
+    state_.burst_index = (state_.burst_index + 1) % burst_transfers();
   }
 }
 
@@ -1213,6 +1345,10 @@ void tim::update_event(bool software, std::uint64_t at)
     update(regs_, update_flag_, 1);
     if(update_dma_ and get(regs_, *update_dma_) != 0)
     {
+      if(burst_source() == burst_update)
+      {
+        state_.burst_index = 0;
+      }
       request_update();
     }
   }
@@ -1232,6 +1368,10 @@ void tim::match(std::size_t ch, std::uint64_t at)
 {
   auto& c = channels_[ch];
   update(regs_, c.flag, 1);
+  if(c.dma and get(regs_, *c.dma) != 0 and burst_source() == burst_compare1 + ch)
+  {
+    state_.burst_index = 0;
+  }
   if(c.dma and get(regs_, *c.dma) != 0 and state_.compare_request[ch] == 0)
   {
     state_.compare_request[ch] = 1;
@@ -1265,13 +1405,17 @@ void tim::request_update()
 
 void tim::release(std::uint32_t request)
 {
-  auto const update = state_.update_request != 0 and update_signal_->carries(request);
+  auto const                     update = state_.update_request != 0
+                                      and update_signal_->carries(request)
+                                      and not holds_burst(burst_update);
   std::array<bool, max_channels> compare{};
   auto                           served = update;
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
-    compare[ch] = state_.compare_request[ch] != 0 and channels_[ch].signal->carries(request);
-    served      = served or compare[ch];
+    compare[ch] = state_.compare_request[ch] != 0
+              and channels_[ch].signal->carries(request)
+              and not holds_burst(burst_compare1 + static_cast<std::uint32_t>(ch));
+    served = served or compare[ch];
   }
   if(not served)
   {
@@ -1450,7 +1594,27 @@ auto tim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
 {
   catch_up(now_ps());
   settle();
-  return dispatch_model::on_read(regs, offset, size, access);
+  if(not burst_word_ or (offset & ~3u) != *burst_word_)
+  {
+    return dispatch_model::on_read(regs, offset, size, access);
+  }
+  auto const target = burst_target(offset);
+  auto const word   = target & ~3u;
+  auto       value  = std::uint32_t{};
+  if(claimed(word))
+  {
+    value = dispatch_model::on_read(regs, target, size, access).value_or(0);
+  }
+  else if(auto const masks = described(word))
+  {
+    value = read_lanes(regs.peek(word) & masks->second, target, size);
+  }
+  else
+  {
+    warn_burst_range(word);
+  }
+  advance_burst(access);
+  return value;
 }
 
 auto tim::on_write(
@@ -1461,6 +1625,27 @@ auto tim::on_write(
     std::uint32_t  value,
     access_ctx     access) -> std::expected<void, bus_error>
 {
+  auto const burst = burst_word_ and (offset & ~3u) == *burst_word_;
+  if(burst)
+  {
+    offset = burst_target(offset);
+    if(not claimed(offset & ~3u))
+    {
+      auto const word = offset & ~3u;
+      if(auto const masks = described(word))
+      {
+        auto const stored = regs.peek(word);
+        auto const merged = merge_write(stored, offset, size, value);
+        regs.poke(word, (merged & masks->first) | (stored & ~masks->first));
+      }
+      else
+      {
+        warn_burst_range(word);
+      }
+      advance_burst(access);
+      return {};
+    }
+  }
   auto const ps     = now_ps();
   auto const word   = offset & ~3u;
   auto const smcr   = slave_ and word == slave_->offset;
@@ -1492,6 +1677,10 @@ auto tim::on_write(
   if(not was and running())
   {
     start_at(ps);
+  }
+  if(burst)
+  {
+    advance_burst(access);
   }
   settle();
   return result;
@@ -1776,11 +1965,25 @@ template <std::size_t Ch> void tim::compare_written(std::uint32_t, std::uint32_t
 
 void tim::burst_written(std::uint32_t, std::uint32_t now)
 {
-  auto const used = (burst_length_ and burst_length_->of(now) != 0)
-                 or (burst_base_ and burst_base_->of(now) != 0);
-  if(used and not std::exchange(burst_logged_, true))
+  state_.burst_index = 0;
+  auto const length  = burst_length_ ? burst_length_->of(now) : 0u;
+  if(length > max_burst and not std::exchange(burst_length_logged_, true))
   {
-    warn(name("DCR"), "DMA burst mode is not modelled: DMAR is plain storage");
+    warn(
+        name("DCR"),
+        std::format("DBL {:#07b} is reserved: the burst runs {} transfers", length, max_burst));
+  }
+  auto const source = burst_select_ ? burst_select_->of(now) : 0u;
+  auto const used   = length != 0 or (burst_base_ and burst_base_->of(now) != 0) or source != 0;
+  auto const modelled_source = source >= burst_update and source <= burst_compare4;
+  if(used and not modelled_source and not std::exchange(burst_source_logged_, true))
+  {
+    warn(
+        name("DCR"), std::format(
+                         "DBSS {:#06b}: {}, the DMA requests stay one per event", source,
+                         source == burst_com       ? "COM burst requests are not modelled"
+                         : source == burst_trigger ? "trigger burst requests are not modelled"
+                                                   : "reserved burst source"));
   }
 }
 

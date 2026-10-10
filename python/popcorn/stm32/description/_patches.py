@@ -157,6 +157,14 @@ class PeripheralSizeSet:
 
 
 @dataclass(slots=True, kw_only=True)
+class ResetSet:
+    peripheral: str
+    register: str
+    reset: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    source: str
+
+
+@dataclass(slots=True, kw_only=True)
 class Patch:
     format: int = field(default=1, metadata={"const": 1})
     match: PatchMatch
@@ -171,6 +179,7 @@ class Patch:
     cross: list[CrossRuleSpec] | None = None
     peripheral_sizes: list[PeripheralSizeSet] | None = None
     registers: list[RegisterAdd] | None = None
+    resets: list[ResetSet] | None = None
     memory: PatchMemory | None = None
     signature: PatchSignature | None = None
 
@@ -196,6 +205,7 @@ class PatchReport:
     irqs_added: int = 0
     sizes_set: int = 0
     registers_added: int = 0
+    resets_set: int = 0
     core_fields_set: int = 0
     regions_added: int = 0
     controllers_set: int = 0
@@ -356,6 +366,32 @@ def _apply_peripheral_size(
         if target is peripheral or target.alias_of == peripheral.name:
             target.size = rule.size
     report.sizes_set += 1
+
+
+def _apply_reset(
+    rule: ResetSet,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    peripheral = peripherals.get(rule.peripheral)
+    if peripheral is None or peripheral.alias_of is not None:
+        raise DescriptionError(
+            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
+        )
+    register = next((r for r in peripheral.registers if r.name == rule.register), None)
+    if register is None:
+        raise DescriptionError(file, 0, f"{key}.register", f"a register of {peripheral.name}")
+    if rule.reset >> register.width:
+        raise DescriptionError(file, 0, f"{key}.reset", f"a value of {register.width} bits")
+    for target in peripherals.values():
+        if target is peripheral or target.alias_of == peripheral.name:
+            for candidate in target.registers:
+                if candidate.name == rule.register:
+                    candidate.reset = rule.reset
+    report.resets_set += 1
 
 
 def _apply_register_add(
@@ -717,11 +753,11 @@ def _apply_signature(
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
     """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
-    peripheral sizes, added registers, fields, cross rules, IRQ drops and adds, core, memory
-    regions and their controllers, the device signature. Drops come first, so a later rule naming
-    a dropped peripheral fails as naming an unknown one. A peripheral size and an added register
-    land in the named peripheral and in each of its aliases, so fields and cross rules may name
-    the register.
+    peripheral sizes, added registers, register resets, fields, cross rules, IRQ drops and adds,
+    core, memory regions and their controllers, the device signature. Drops come first, so a later
+    rule naming a dropped peripheral fails as naming an unknown one. A peripheral size, an added
+    register and a register reset land in the named peripheral and in each of its aliases, so
+    fields and cross rules may name the register.
     Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
@@ -760,6 +796,17 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     for loaded in patches:
         for j, rule in enumerate(loaded.patch.registers or []):
             _apply_register_add(rule, by_name, report, file=str(loaded.path), key=f"registers[{j}]")
+
+    resets_touched: set[tuple[str, str]] = set()
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.resets or []):
+            key = f"resets[{j}]"
+            if (rule.peripheral, rule.register) in resets_touched:
+                raise DescriptionError(
+                    str(loaded.path), 0, f"{key}.register", "a register no earlier rule resets"
+                )
+            resets_touched.add((rule.peripheral, rule.register))
+            _apply_reset(rule, by_name, report, file=str(loaded.path), key=key)
 
     fields_touched: set[tuple[str, str, str, str]] = set()
     for loaded in patches:

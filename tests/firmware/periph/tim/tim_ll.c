@@ -12,6 +12,7 @@ static uint32_t const    pattern[8] = {1u, 2u, 4u, 8u, 1u << 16, 2u << 16, 4u <<
 static uint32_t const    thirds[4]  = {11, 12, 13, 14};
 static uint32_t const    fourths[4] = {21, 22, 23, 24};
 static volatile uint32_t channel_done[3];
+static uint32_t const    nine[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
 
 void TIM16_IRQHandler(void);
 void TIM1_UP_IRQHandler(void);
@@ -35,6 +36,8 @@ void tim15_unclocked(void);
 void tim3_encoder_idle(void);
 void tim6_dma_bsrr(void);
 void tim2_two_requests(void);
+void tim5_burst_cpu(void);
+void tim5_burst_dma(void);
 
 void idle(void)
 {
@@ -464,6 +467,51 @@ void tim2_two_requests(void)
   LOG(LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_2));
   LOG(LL_TIM_OC_GetCompareCH3(TIM2));
   LOG(LL_TIM_OC_GetCompareCH4(TIM2));
+  DONE();
+}
+
+static void log_tim5_triple(void)
+{
+  LOG(LL_TIM_OC_GetCompareCH1(TIM5));
+  LOG(LL_TIM_OC_GetCompareCH2(TIM5));
+  LOG(LL_TIM_OC_GetCompareCH3(TIM5));
+}
+
+void tim5_burst_cpu(void)
+{
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM5);
+  LL_TIM_ConfigDMABurst(
+      TIM5, LL_TIM_DMABURST_BASEADDR_CCR1, LL_TIM_DMABURST_LENGTH_3TRANSFERS, LL_TIM_DMA_UPDATE);
+  TIM5->DMAR = 11;
+  TIM5->DMAR = 22;
+  TIM5->DMAR = 33;
+  log_tim5_triple();
+  DONE();
+}
+
+void tim5_burst_dma(void)
+{
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM5 | LL_APB1_GRP1_PERIPH_TIM6);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  time_base(TIM5, 3, 99);
+  time_base(TIM6, 3, 99);
+  LL_TIM_ConfigDMABurst(
+      TIM5, LL_TIM_DMABURST_BASEADDR_CCR1, LL_TIM_DMABURST_LENGTH_3TRANSFERS, LL_TIM_DMA_UPDATE);
+  word_channel(LL_DMA_CHANNEL_0, LL_GPDMA1_REQUEST_TIM5_UP, nine, 9, (uint32_t)&TIM5->DMAR);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_0);
+  LL_TIM_EnableDMAReq_UPDATE(TIM5);
+  LL_TIM_EnableCounter(TIM5);
+  while(LL_TIM_GetCounter(TIM5) < 50)
+  {
+  }
+  LL_TIM_EnableCounter(TIM6);
+  for(uint32_t update = 0; update < 3; ++update)
+  {
+    poll_updates(TIM6, 1);
+    log_tim5_triple();
+    LOG(LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_0));
+  }
+  LOG(LL_DMA_IsEnabledChannel(GPDMA1, LL_DMA_CHANNEL_0));
   DONE();
 }
 

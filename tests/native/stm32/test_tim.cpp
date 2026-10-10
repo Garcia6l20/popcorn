@@ -1545,6 +1545,7 @@ struct tim_state_fields
   std::uint32_t                repetition{};
   std::uint32_t                prescaler{};
   std::uint32_t                reload{};
+  std::uint32_t                burst_index{};
   std::uint32_t                edges{};
   std::array<std::uint32_t, 4> compare{};
   std::array<std::uint8_t, 4>  compare_request{};
@@ -1566,6 +1567,28 @@ struct tim_state_without_edges
   std::uint32_t                repetition{};
   std::uint32_t                prescaler{};
   std::uint32_t                reload{};
+  std::uint32_t                burst_index{};
+  std::array<std::uint32_t, 4> compare{};
+  std::array<std::uint8_t, 4>  compare_request{};
+  std::uint8_t                 update_request{};
+  std::uint8_t                 down{};
+  std::uint8_t                 scheduled{};
+  std::uint8_t                 gate{};
+};
+
+struct tim_state_without_burst
+{
+  std::uint64_t                anchor_ps{};
+  std::uint64_t                anchor_frac{};
+  std::uint64_t                hz{};
+  std::uint64_t                due_ps{};
+  std::uint64_t                carry{};
+  std::uint32_t                generation{};
+  std::uint32_t                count{};
+  std::uint32_t                repetition{};
+  std::uint32_t                prescaler{};
+  std::uint32_t                reload{};
+  std::uint32_t                edges{};
   std::array<std::uint32_t, 4> compare{};
   std::array<std::uint8_t, 4>  compare_request{};
   std::uint8_t                 update_request{};
@@ -1586,6 +1609,7 @@ struct tim_state_without_gate
   std::uint32_t                repetition{};
   std::uint32_t                prescaler{};
   std::uint32_t                reload{};
+  std::uint32_t                burst_index{};
   std::uint32_t                edges{};
   std::array<std::uint32_t, 4> compare{};
   std::array<std::uint8_t, 4>  compare_request{};
@@ -1898,4 +1922,255 @@ TEST_CASE("TIM3 in encoder mode logs only the encoder warning, firmware")
   static_cast<void>(finish(f));
   REQUIRE(logged.size() == 1);
   CHECK(logged[0].message.contains("encoder"));
+}
+
+TEST_CASE("CPU writes to DMAR land in CCR1 to CCR3 through DBA, firmware")
+{
+  auto f = entered("tim5_burst_cpu");
+  CHECK(finish(f) == std::vector<std::uint32_t>{11, 22, 33});
+}
+
+TEST_CASE("an update-paced channel to DMAR moves DBL + 1 words per update, firmware")
+{
+  auto f = entered("tim5_burst_dma");
+  CHECK(finish(f) == std::vector<std::uint32_t>{1, 2, 3, 24, 4, 5, 6, 12, 7, 8, 9, 0, 0});
+}
+
+namespace
+{
+constexpr std::uint32_t dbss_update = 1u << 16;
+constexpr std::uint32_t dbss_com    = 6u << 16;
+
+constexpr auto dcr(std::uint32_t base, std::uint32_t transfers, std::uint32_t source)
+    -> std::uint32_t
+{
+  return base | ((transfers - 1) << 8) | source;
+}
+
+struct burst
+{
+  direct        t{with_recorder()};
+  recorder*     dma{t.f.model_of<recorder>("GPDMA1")};
+  std::uint32_t dmar{};
+
+  burst()
+  {
+    REQUIRE(dma != nullptr);
+    t.b.set("RCC", "RCC_APB1ENR1", "TIM5EN", 1);
+    dmar = static_cast<std::uint32_t>(t.b.at("TIM5", "DMAR"));
+  }
+
+  void cpu(std::uint32_t value, std::uint8_t size = 4, std::uint32_t lane = 0) const
+  {
+    REQUIRE(
+        dma->context.services.write(dmar + lane, size, value, popcorn::initiator::cpu).has_value());
+  }
+
+  [[nodiscard]] auto cpu_read() const -> std::uint32_t
+  {
+    auto const value = dma->context.services.read(dmar, 4, popcorn::initiator::cpu);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+
+  [[nodiscard]] auto reg(std::string_view name) const -> std::uint32_t
+  {
+    return t.b.read("TIM5", name);
+  }
+};
+}
+
+TEST_CASE("a DMAR burst reprograms CCMR1 and CCMR2, which the model does not claim")
+{
+  burst b;
+  b.t.b.write("TIM5", "DCR", dcr(6, 2, dbss_update));
+  b.cpu(0x0000'6868);
+  b.cpu(0x0000'7070);
+  CHECK(b.reg("CCMR1_Output") == 0x6868);
+  CHECK(b.reg("CCMR2_Output") == 0x7070);
+}
+
+TEST_CASE("the DMAR index wraps after DBL + 1 accesses and a DCR write resets it")
+{
+  burst b;
+  b.t.b.write("TIM5", "DCR", dcr(13, 2, dbss_update));
+  for(auto const value : {1u, 2u, 3u})
+  {
+    b.cpu(value);
+  }
+  CHECK(b.reg("CCR1") == 3);
+  CHECK(b.reg("CCR2") == 2);
+  CHECK(b.reg("CCR3") == 0);
+  b.t.b.write("TIM5", "DCR", dcr(13, 2, dbss_update));
+  b.cpu(5);
+  CHECK(b.reg("CCR1") == 5);
+  CHECK(b.reg("CCR2") == 2);
+}
+
+TEST_CASE("a debugger access to DMAR redirects without advancing the index")
+{
+  burst b;
+  b.t.b.write("TIM5", "DCR", dcr(13, 3, dbss_update));
+  b.t.b.write("TIM5", "CCR2", 77);
+  b.cpu(1);
+  CHECK(b.t.b.read("TIM5", "DMAR") == 77);
+  b.t.b.write("TIM5", "DMAR", 88);
+  CHECK(b.reg("CCR2") == 88);
+  b.cpu(2);
+  CHECK(b.reg("CCR2") == 2);
+  CHECK(b.cpu_read() == 0);
+  CHECK(b.reg("CCR1") == 1);
+}
+
+TEST_CASE("a half-word DMAR write lands in its byte lane of the target")
+{
+  burst b;
+  b.t.b.write("TIM5", "DCR", dcr(13, 1, dbss_update));
+  b.t.b.write("TIM5", "CCR1", 0x1234);
+  b.cpu(0xabcd, 2, 2);
+  CHECK(b.reg("CCR1") == 0xabcd'1234);
+}
+
+TEST_CASE("a DMAR access past the timer registers reads 0, writes nothing and logs once")
+{
+  burst                         b;
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      b.t.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  b.t.b.write("TIM5", "DCR", dcr(0x11, 1, dbss_update));
+  b.cpu(0x5555);
+  CHECK(b.cpu_read() == 0);
+  b.cpu(0x5555);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].reg == "DMAR");
+  CHECK(b.t.f.target->peripheral("TIM5").peek(0x44) == 0);
+}
+
+TEST_CASE("the burst source holds its request across acknowledges until the index wraps")
+{
+  direct      t{with_recorder()};
+  auto* const dma = t.f.model_of<recorder>("GPDMA1");
+  REQUIRE(dma != nullptr);
+  auto* const requester = dynamic_cast<stm32::dma_requester*>(t.f.target->model("TIM1"));
+  REQUIRE(requester != nullptr);
+  auto const dmar   = t.b.at("TIM1", "TIM1_DMAR");
+  auto const access = [&] {
+    REQUIRE(dma->context.services.write(dmar, 4, 9, popcorn::initiator::dma).has_value());
+    requester->acknowledged(2);
+  };
+  t.b.write("TIM1", "TIM1_ARR", 9);
+  SUBCASE("update source")
+  {
+    t.b.write("TIM1", "TIM1_DCR", dcr(13, 3, dbss_update));
+    t.begin();
+    t.b.write("TIM1", "TIM1_DIER", 1u << 8);
+    t.at(10);
+    REQUIRE(
+        dma->levels
+        == std::vector<std::pair<std::uint32_t, bool>>{
+            {2, true}
+    });
+    access();
+    access();
+    CHECK(dma->levels.size() == 1);
+    access();
+    CHECK(
+        dma->levels
+        == std::vector<std::pair<std::uint32_t, bool>>{
+            {2, true },
+            {2, false}
+    });
+  }
+  SUBCASE("CC1 source")
+  {
+    t.b.write("TIM1", "TIM1_CCR1", 3);
+    t.b.write("TIM1", "TIM1_DCR", dcr(13, 2, 2u << 16));
+    t.begin();
+    t.b.write("TIM1", "TIM1_DIER", 1u << 9);
+    t.at(3);
+    REQUIRE(
+        dma->levels
+        == std::vector<std::pair<std::uint32_t, bool>>{
+            {1, true}
+    });
+    auto const cc1 = [&] {
+      REQUIRE(dma->context.services.write(dmar, 4, 9, popcorn::initiator::dma).has_value());
+      requester->acknowledged(1);
+    };
+    cc1();
+    CHECK(dma->levels.size() == 1);
+    cc1();
+    CHECK(
+        dma->levels
+        == std::vector<std::pair<std::uint32_t, bool>>{
+            {1, true },
+            {1, false}
+    });
+  }
+  SUBCASE("COM source logs once and keeps one request per event")
+  {
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        t.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    t.b.write("TIM1", "TIM1_DCR", dcr(13, 3, dbss_com));
+    t.b.write("TIM1", "TIM1_DCR", dcr(13, 2, dbss_com));
+    CHECK(logged.size() == 1);
+    t.begin();
+    t.b.write("TIM1", "TIM1_DIER", 1u << 8);
+    t.at(10);
+    access();
+    CHECK(
+        dma->levels
+        == std::vector<std::pair<std::uint32_t, bool>>{
+            {2, true },
+            {2, false}
+    });
+  }
+}
+
+TEST_CASE("a TIM state saved before the burst index loads it as 0")
+{
+  burst b;
+  b.t.b.write("TIM5", "DCR", dcr(13, 3, dbss_update));
+  b.cpu(1);
+  auto const now = saved_state(b.t.f, "TIM5");
+  CHECK(now.burst_index == 1);
+  std::vector<std::byte> old;
+  reflex::serde::bson::serializer{old}.dump(narrowed<tim_state_without_burst>(now));
+  b.t.f.target->model("TIM5")->load(old);
+  CHECK(saved_state(b.t.f, "TIM5").burst_index == 0);
+}
+
+TEST_CASE("TIM16 and TIM17 DCR and DMAR reset to 0")
+{
+  slaves t;
+  for(auto const* const bit : {"TIM16EN", "TIM17EN"})
+  {
+    t.b.set("RCC", "RCC_APB2ENR", bit, 1);
+  }
+  for(auto const* const tim : {"TIM16", "TIM17"})
+  {
+    CHECK(t.b.read(tim, "DCR") == 0);
+    CHECK(t.b.read(tim, "DMAR") == 0);
+  }
+}
+
+TEST_CASE("DBL 11010 runs 26 transfers, reserved DBL values run 26 and log once")
+{
+  for(auto const code : {26u, 31u})
+  {
+    CAPTURE(code);
+    burst                         b;
+    std::vector<core::log_record> logged;
+    auto const                    sink = b.t.f.target->add_log_sink(
+        [&](core::log_record const& record) { logged.push_back(record); });
+    b.t.b.write("TIM5", "DCR", 6u | (code << 8) | dbss_update);
+    CHECK(logged.size() == (code == 26 ? 0u : 1u));
+    for(std::uint32_t access = 0; access < 26; ++access)
+    {
+      static_cast<void>(b.cpu_read());
+    }
+    b.cpu(0x0000'4848);
+    CHECK(b.reg("CCMR1_Output") == 0x4848);
+  }
 }

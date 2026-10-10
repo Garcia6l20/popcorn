@@ -23,5 +23,7 @@ add_ll_firmware(
         "tim3_encoder_idle",
         "tim6_dma_bsrr",
         "tim2_two_requests",
+        "tim5_burst_cpu",
+        "tim5_burst_dma",
     ],
 )

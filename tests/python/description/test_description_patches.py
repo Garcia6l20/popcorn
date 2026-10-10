@@ -1253,3 +1253,121 @@ def test_a_second_signature_over_the_same_bytes_is_refused(tmp_path: Path) -> No
     with pytest.raises(DescriptionError) as excinfo:
         _signed(tmp_path, _part(), first, second)
     assert (excinfo.value.file, excinfo.value.key) == (str(second), "signature.flash_size")
+
+
+def _reset_patch(tmp_path: Path, peripheral: str, register: str, reset: str) -> Path:
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+
+[[resets]]
+peripheral = {peripheral}
+register = {register}
+reset = {reset}
+source = "probe"
+"""
+    return _write_patch(tmp_path, text)
+
+
+def test_resets_set_the_register_reset_in_the_peripheral_and_its_aliases(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    path = _reset_patch(tmp_path, '"D"', '"CR"', "0x1")
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.resets_set == 1
+    for name in ("D", "SEC_D"):
+        register = target_peripheral(target, name).registers[0]
+        assert (register.name, register.reset) == ("CR", 0x1)
+
+
+@pytest.mark.parametrize(
+    ("peripheral", "register", "reset", "key", "reason"),
+    [
+        ('"Z"', '"CR"', "0", "peripheral", "a peripheral of the description that is not an alias"),
+        (
+            '"SEC_D"',
+            '"CR"',
+            "0",
+            "peripheral",
+            "a peripheral of the description that is not an alias",
+        ),
+        ('"D"', '"NOPE"', "0", "register", "a register of D"),
+    ],
+)
+def test_resets_refuse_a_bad_rule(
+    tmp_path: Path, peripheral: str, register: str, reset: str, key: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    path = _reset_patch(tmp_path, peripheral, register, reset)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.key == f"resets[0].{key}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
+def test_resets_refuse_a_value_wider_than_the_register(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    entry = _register_entry(width="16", offset="0x08", reset="0")
+    path = _write_patch(
+        tmp_path,
+        f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+
+[[registers]]
+{entry}
+source = "probe"
+
+[[resets]]
+peripheral = "D"
+register = "NSCR"
+reset = 0x10000
+source = "probe"
+""",
+    )
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "resets[0].reset"
+    assert excinfo.value.expected == "a value of 16 bits"
+    assert target == before
+
+
+def test_resets_refuse_a_second_rule_on_one_register(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    rule = """
+[[resets]]
+peripheral = "D"
+register = "CR"
+reset = 0x1
+source = "probe"
+"""
+    path = _write_patch(
+        tmp_path,
+        f"""
+format = 1
+[match]
+parts = ["TOY*"]
+{rule}
+{rule}
+""",
+    )
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "resets[1].register"
+    assert excinfo.value.expected == "a register no earlier rule resets"
+    assert target == before
