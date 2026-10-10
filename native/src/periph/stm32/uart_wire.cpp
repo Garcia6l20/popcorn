@@ -126,6 +126,8 @@ void uart_wire::started(line_frame const& frame)
       }
     }
   }
+  state_.flight_start = post.start;
+  state_.flight_end   = post.end;
   mailbox(state_.window).push_back(post);
   if(forward_)
   {
@@ -170,6 +172,27 @@ void uart_wire::enter_window(std::uint64_t window, core::time_map sender)
 {
   state_.window      = window;
   state_.sender_base = sender.base();
+}
+
+void uart_wire::sender_reset(core::sys_time at)
+{
+  if(state_.flight_start < at and at < state_.flight_end)
+  {
+    mailbox(state_.window).push_back({.abort = true, .start = at, .end = at});
+    state_.flight_end = at;
+  }
+}
+
+void uart_wire::receiver_reset(core::sys_time at)
+{
+  state_.resets.push_back(at);
+}
+
+auto uart_wire::reset_drops(detail::line_span const& span) const -> bool
+{
+  return std::ranges::any_of(state_.resets, [&](core::sys_time reset) {
+    return reset < span.end and span.start < shifted(reset, latency_);
+  });
 }
 
 auto uart_wire::arm(detail::armed_edit edit) -> bool
@@ -324,18 +347,24 @@ auto uart_wire::overlap(detail::line_span const& span) const -> std::optional<co
   return found;
 }
 
-void uart_wire::deliver_injection(detail::queued_injection const& frame, core::time_map receiver)
+void uart_wire::deliver_injection(
+    detail::queued_injection const& frame,
+    core::time_map                  receiver,
+    bool                            dropped)
 {
-  into_.port->receive_at(
-      {.data       = frame.data,
-       .word_bits  = declared_.word_bits,
-       .half_stops = declared_.half_stops,
-       .parity     = declared_.parity,
-       .kind       = frame_kind::data,
-       .frame_ps   = declared_.frame_ps(),
-       .start      = receiver.to_local(frame.start),
-       .end        = receiver.to_local(frame.end)},
-      lanes_.injected);
+  if(not dropped)
+  {
+    into_.port->receive_at(
+        {.data       = frame.data,
+         .word_bits  = declared_.word_bits,
+         .half_stops = declared_.half_stops,
+         .parity     = declared_.parity,
+         .kind       = frame_kind::data,
+         .frame_ps   = declared_.frame_ps(),
+         .start      = receiver.to_local(frame.start),
+         .end        = receiver.to_local(frame.end)},
+        lanes_.injected);
+  }
   state_.delivered.push_back(
       {.start    = frame.start,
        .end      = frame.end,
@@ -361,6 +390,9 @@ auto uart_wire::drain(
 {
   std::erase_if(state_.delivered, [&](detail::line_span const& span) {
     return span.end <= state_.last_barrier;
+  });
+  std::erase_if(state_.resets, [&](core::sys_time reset) {
+    return shifted(reset, latency_) <= state_.last_barrier;
   });
   auto&                           posts = mailbox(window);
   std::optional<core::link_fault> fault;
@@ -395,11 +427,15 @@ auto uart_wire::drain(
       state_.delivered.push_back(span);
       continue;
     }
+    state_.delivered.push_back(span);
+    if(reset_drops(span))
+    {
+      continue;
+    }
     auto frame  = post.frame;
     frame.start = receiver.to_local(span.start);
     frame.end   = receiver.to_local(span.end);
     into_.port->receive_at(frame, lanes_.peer);
-    state_.delivered.push_back(span);
   }
   collect(posts, state_.untapped);
   posts.clear();
@@ -430,7 +466,7 @@ auto uart_wire::drain(
       state_.delivered.push_back(span);
       continue;
     }
-    deliver_injection(frame, receiver);
+    deliver_injection(frame, receiver, reset_drops(span));
   }
   emit(state_.untapped, barrier);
   state_.last_barrier = barrier;
@@ -519,7 +555,7 @@ auto uart_wire::inject(
       core::link_guard const held{inject_mutex_};
       frame.index = state_.injected++;
     }
-    deliver_injection(frame, stopped->map);
+    deliver_injection(frame, stopped->map, false);
   }
   return {};
 }

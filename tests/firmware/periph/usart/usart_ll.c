@@ -50,6 +50,7 @@ void link_ping(void);
 void link_echo(void);
 void link_tx_count(void);
 void link_abort_gap(void);
+void link_tx_reset(void);
 void link_abort_b2b(void);
 void USART2_IRQHandler(void);
 
@@ -880,6 +881,20 @@ void link_abort_gap(void)
   send_byte('c');
   wait_complete();
   DONE();
+}
+
+void link_tx_reset(void)
+{
+  start_link();
+  for(uint8_t next = 0x20; next < 0x26; ++next)
+  {
+    send_byte(next);
+  }
+  while(!LL_USART_IsActiveFlag_TXE_TXFNF(USART1))
+  {
+  }
+  wait_us(10);
+  NVIC_SystemReset();
 }
 
 void link_abort_b2b(void)

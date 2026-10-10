@@ -113,6 +113,20 @@ public:
   virtual void enter_window(std::uint64_t window, time_map sender) = 0;
 
   /**
+   * @brief The sender is about to be reset at @p at. Called on the sender's host thread before
+   *        its base moves: a frame in flight then is aborted at @p at, frames ended stay.
+   */
+  virtual void sender_reset(sys_time at) = 0;
+
+  /**
+   * @brief The receiver was reset at @p at. Called on the receiver's host thread. Frames whose
+   *        arrival is still on the line at @p at or starts before @p at plus L are dropped,
+   *        whether drained before the reset or after, so the dropped set depends on @p at and L
+   *        only.
+   */
+  virtual void receiver_reset(sys_time at) = 0;
+
+  /**
    * @brief Hands the posts of a window to the receiver. Called on the receiver's host thread
    *        after the barrier closing @p window, before the receiver runs on.
    * @param window Index of the window whose mailbox is drained.

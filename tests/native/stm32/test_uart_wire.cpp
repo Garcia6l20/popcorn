@@ -74,11 +74,13 @@ struct node
   stm32::board                             board{};
   std::unique_ptr<stm32_fixture>           f;
   std::uint64_t                            origin{};
+  std::int64_t                             base{};
   stm32::uart_port*                        port{};
   std::vector<core::log_record>            warnings;
   std::vector<fault_seen>                  faults;
   core::hook_handle                        sink;
   bool                                     done{};
+  std::int64_t                             reset_at{-1};
   bool                                     failed{};
 
   explicit node(std::string_view entry, std::uint64_t start_ps = 0)
@@ -101,6 +103,7 @@ struct node
     }
     f->set("pc", sym("usart_ll", entry));
     origin = f->target->virtual_clock().time().ps;
+    base   = -static_cast<std::int64_t>(origin);
     port   = f->model_of<stm32::uart_port>("USART1");
     REQUIRE(port != nullptr);
     sink = f->target->add_log_sink([this](core::log_record const& record) {
@@ -113,12 +116,13 @@ struct node
 
   [[nodiscard]] auto map() const -> core::time_map
   {
-    return core::time_map{core::sys_time{-static_cast<std::int64_t>(origin)}};
+    return core::time_map{core::sys_time{base}};
   }
 
   [[nodiscard]] auto now() const -> std::uint64_t
   {
-    return f->target->virtual_clock().time().ps - origin;
+    return static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(f->target->virtual_clock().time().ps) + base);
   }
 
   auto advance(std::uint64_t system_ps, std::uint64_t slice, bool hold) -> stop_reason
@@ -128,8 +132,9 @@ struct node
       auto const result = f->run(
           {.max_instructions = icount{slice},
            .wall_budget      = std::chrono::seconds{60},
-           .until_time       = vtime{origin + system_ps},
-           .hold_from_until  = hold});
+           .until_time =
+               vtime{static_cast<std::uint64_t>(static_cast<std::int64_t>(system_ps) - base)},
+           .hold_from_until = hold});
       if(result.stopped)
       {
         return result.stopped->reason;
@@ -145,6 +150,13 @@ struct host_byte
   std::uint16_t data{};
 };
 
+struct member_reset
+{
+  std::size_t      member{};
+  std::uint64_t    at{};
+  std::string_view entry{};
+};
+
 struct run_plan
 {
   std::uint64_t                      window{latency_20};
@@ -154,6 +166,7 @@ struct run_plan
   bool                               threaded{};
   std::optional<std::uint32_t>       seed{};
   std::optional<host_byte>           host{};
+  std::optional<member_reset>        reset{};
   std::function<void(std::uint64_t)> after_drain{};
 };
 
@@ -246,9 +259,71 @@ struct rig
       std::vector<std::uint16_t> const data{host->data};
       one.port->receive(data);
     }
-    auto const reason = one.advance(barrier, plan.slice, true);
-    one.done          = reason == stop_reason::user;
-    one.failed        = reason != stop_reason::user and reason != stop_reason::time;
+    if(plan.reset
+       and plan.reset->member == member
+       and plan.reset->at <= barrier
+       and plan.reset->at > barrier - std::min(barrier, plan.window))
+    {
+      reset(member, *plan.reset, plan.slice);
+      if(one.failed)
+      {
+        return;
+      }
+    }
+    auto reason = one.advance(barrier, plan.slice, true);
+    while(reason == stop_reason::reset_request and not one.failed)
+    {
+      reset_now(member, {});
+      reason = one.advance(barrier, plan.slice, true);
+    }
+    one.done   = reason == stop_reason::user;
+    one.failed = reason != stop_reason::user and reason != stop_reason::time;
+  }
+
+  void reset(std::size_t member, member_reset const& at, std::uint64_t slice)
+  {
+    auto& one = *nodes[member];
+    if(one.advance(at.at, slice, false) != stop_reason::time)
+    {
+      one.failed = true;
+      return;
+    }
+    reset_now(member, at.entry);
+  }
+
+  void reset_now(std::size_t member, std::string_view entry)
+  {
+    auto&      one    = *nodes[member];
+    auto const system = core::sys_time{static_cast<std::int64_t>(one.now())};
+    for(auto const& wire : wires)
+    {
+      if(wire->sender() == member)
+      {
+        wire->sender_reset(system);
+      }
+      if(wire->receiver() == member)
+      {
+        wire->receiver_reset(system);
+      }
+    }
+    auto const local = static_cast<std::int64_t>(one.f->target->virtual_clock().time().ps);
+    one.f->target->reset();
+    one.base += local;
+    one.reset_at = system.ps;
+    if(entry.empty())
+    {
+      return;
+    }
+    auto const booted = one.f->run(
+        {.max_instructions = icount{100'000'000},
+         .wall_budget      = std::chrono::seconds{60},
+         .until            = sym("usart_ll", "main")});
+    if(not booted.stopped or booted.stopped->reason != stop_reason::address)
+    {
+      one.failed = true;
+      return;
+    }
+    one.f->set("pc", sym("usart_ll", entry));
   }
 
   void finish(std::uint64_t at)
@@ -665,6 +740,7 @@ TEST_CASE("a sender restored mid-frame after the wire is attached never delivers
   r.add("link_rx");
   a.f->target->restore(core::snapshot{core::decode_snapshot(saved)});
   a.origin = alone.origin;
+  a.base   = alone.base;
   r.link(0, 1, latency_20);
   REQUIRE(r.nodes[1]->advance(resumed, coarse, false) == stop_reason::time);
   r.run({.window = latency_20, .first = resumed / latency_20 + 1});
@@ -1323,4 +1399,132 @@ TEST_CASE("the tap orders peer and injected frames by their settle time at any w
     CHECK(r.taps[0] == tap);
     CHECK(r.nodes[1]->f->log() == reference.nodes[1]->f->log());
   }
+}
+
+TEST_CASE("a sender reset mid-frame loses that frame, frames ended before keep their old base")
+{
+  std::vector<std::string> dumps;
+  for(auto const& plan : {
+          run_plan{.window = latency_20},
+          run_plan{.window = latency_20 / 4},
+          run_plan{.window = latency_20, .slice = fine}
+  })
+  {
+    auto r = one_way("link_tx_reset", "link_rx", latency_20);
+    r.run(plan);
+    auto const& a   = *r.nodes[0];
+    auto const& tap = r.taps[0];
+    REQUIRE(a.reset_at > 0);
+    REQUIRE(tap.size() > 6);
+    REQUIRE(a.own->frames.size() > 5);
+    for(std::size_t index = 0; index < 5; ++index)
+    {
+      CAPTURE(index);
+      CHECK(tap[index].data == 0x20u + index);
+      CHECK_FALSE(tap[index].lost);
+      CHECK(tap[index].end.ps == static_cast<std::int64_t>(a.own->frames[index].at.ps - a.origin));
+      CHECK(tap[index].arrival.ps == tap[index].end.ps + static_cast<std::int64_t>(latency_20));
+    }
+    CHECK(tap[5].data == 0x25u);
+    CHECK(tap[5].lost);
+    CHECK(tap[5].end.ps == a.reset_at);
+    CHECK(tap[5].start.ps < a.reset_at);
+    CHECK(tap[6].start.ps > a.reset_at);
+    auto const bytes = bytes_of(r.nodes[1]->f->log());
+    REQUIRE(bytes.size() >= 5);
+    CHECK(
+        std::ranges::equal(
+            std::span{bytes}.first(5), std::vector<std::uint32_t>{0x20, 0x21, 0x22, 0x23, 0x24}));
+    CHECK(std::ranges::find(bytes, 0x25u) == bytes.end());
+    dumps.push_back(r.dump());
+  }
+  CHECK(dumps[1] == dumps[0]);
+  CHECK(dumps[2] == dumps[0]);
+}
+
+TEST_CASE("a receiver reset drops the frames arriving within L after it, drained ahead or not")
+{
+  constexpr auto latency = ms_ps;
+  constexpr auto end     = 14 * ms_ps;
+  auto           full    = one_way("link_tx_long", "link_rx_quiet", latency);
+  full.oracle(end);
+  auto const& all = full.taps[0];
+  REQUIRE(all.size() == 512);
+  auto const                 at = static_cast<std::uint64_t>(all[100].arrival.ps) + 7 * us_ps;
+  std::vector<std::string>   dumps;
+  std::vector<std::uint32_t> counts;
+  for(auto const& plan : {
+          run_plan{
+                   .window = latency,
+                   .end    = end,
+                   .reset  = member_reset{.member = 1, .at = at, .entry = "link_rx_quiet"}},
+          run_plan{
+                   .window = latency / 4,
+                   .end    = end,
+                   .reset  = member_reset{.member = 1, .at = at, .entry = "link_rx_quiet"}},
+          run_plan{
+                   .window = latency,
+                   .end    = end,
+                   .slice  = fine,
+                   .reset  = member_reset{.member = 1, .at = at, .entry = "link_rx_quiet"}}
+  })
+  {
+    auto r = one_way("link_tx_long", "link_rx_quiet", latency);
+    r.run(plan);
+    auto const reset_at = r.nodes[1]->reset_at;
+    CHECK(reset_at >= static_cast<std::int64_t>(at));
+    CHECK(r.taps[0] == all);
+    auto const kept = std::ranges::count_if(all, [&](stm32::tap_frame const& frame) {
+      return frame.arrival.ps - (frame.end.ps - frame.start.ps)
+          >= reset_at + static_cast<std::int64_t>(latency);
+    });
+    auto const seen = entries(r.nodes[1]->f->log());
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0].data == kept);
+    counts.push_back(seen[0].data);
+    dumps.push_back(r.dump());
+  }
+  CHECK(dumps[1] == dumps[0]);
+  CHECK(dumps[2] == dumps[0]);
+}
+
+TEST_CASE("a receiver reset drops an injection queued within L after it at any window")
+{
+  constexpr auto latency = ms_ps;
+  constexpr auto end     = 4 * ms_ps;
+  auto           full    = one_way("link_tx", "link_rx_quiet", latency);
+  full.oracle(end);
+  auto const& all = full.taps[0];
+  REQUIRE(all.size() == 64);
+  REQUIRE(all[0].start.ps > static_cast<std::int64_t>(300 * us_ps));
+  auto const at       = static_cast<std::uint64_t>(all[0].start.ps) - 300 * us_ps;
+  auto const injected = static_cast<std::int64_t>(at + 9 * latency / 10);
+  REQUIRE(
+      injected + static_cast<std::int64_t>(declared().frame_ps())
+      < all[0].start.ps + static_cast<std::int64_t>(latency));
+  std::vector<std::string> dumps;
+  for(auto const window : {latency, latency / 4, latency / 7})
+  {
+    CAPTURE(window);
+    auto r = one_way("link_tx", "link_rx_quiet", latency);
+    REQUIRE(injected_byte(*r.wires[0], 0x99, injected, std::nullopt).has_value());
+    r.run({
+        .window = window,
+        .end    = end,
+        .reset  = member_reset{.member = 1, .at = at, .entry = "link_rx_quiet"}
+    });
+    auto const seen = entries(r.nodes[1]->f->log());
+    REQUIRE_FALSE(seen.empty());
+    auto const reset_at = r.nodes[1]->reset_at;
+    auto const kept     = std::ranges::count_if(
+        all, [&](stm32::tap_frame const& frame) { return frame.start.ps >= reset_at; });
+    CHECK(kept == 64);
+    CHECK(seen.back().data == kept);
+    auto const tapped = std::ranges::find_if(
+        r.taps[0], [](stm32::tap_frame const& frame) { return frame.injected; });
+    CHECK(tapped != r.taps[0].end());
+    dumps.push_back(r.dump());
+  }
+  CHECK(dumps[1] == dumps[0]);
+  CHECK(dumps[2] == dumps[0]);
 }

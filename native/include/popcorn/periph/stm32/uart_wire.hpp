@@ -235,6 +235,9 @@ struct wire_state
   core::sys_time                drained_through{};
   std::vector<line_span>        delivered;
   core::sys_time                last_barrier{};
+  core::sys_time                flight_start{};
+  core::sys_time                flight_end{};
+  std::vector<core::sys_time>   resets;
 
   friend auto operator==(wire_state const&, wire_state const&) -> bool = default;
 };
@@ -258,7 +261,9 @@ struct wire_state
  *        each frame once its end, or its abort for a lost frame, the receiver end for an
  *        injected frame, lies at or before a drained barrier or the final stop, in order of
  *        that time, so its content at a barrier does not depend on how the run was cut into
- *        windows.
+ *        windows. A sender reset aborts the frame in flight. After a receiver reset at r, frames
+ *        on the line at r or starting before r plus L never reach the receiver, the tap still
+ *        shows them.
  */
 class uart_wire final : public uart_endpoint, public core::member_link
 {
@@ -291,6 +296,8 @@ public:
   [[nodiscard]] auto receiver() const noexcept -> std::size_t override;
   [[nodiscard]] auto latency() const noexcept -> core::sys_time override;
   void               enter_window(std::uint64_t window, core::time_map sender) override;
+  void               sender_reset(core::sys_time at) override;
+  void               receiver_reset(core::sys_time at) override;
   auto               drain(
       std::uint64_t  window,
       core::sys_time barrier,
@@ -356,8 +363,12 @@ private:
   auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
   auto arm(detail::armed_edit edit) -> bool;
   auto overlap(detail::line_span const& span) const -> std::optional<core::link_fault>;
-  auto fault_of(detail::line_span const& span) const -> core::link_fault;
-  void deliver_injection(detail::queued_injection const& frame, core::time_map receiver);
+  [[nodiscard]] auto reset_drops(detail::line_span const& span) const -> bool;
+  auto               fault_of(detail::line_span const& span) const -> core::link_fault;
+  void               deliver_injection(
+      detail::queued_injection const& frame,
+      core::time_map                  receiver,
+      bool                            dropped);
 
   wire_ends                      ends_;
   wire_lanes                     lanes_;
