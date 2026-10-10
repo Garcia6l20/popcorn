@@ -20,5 +20,6 @@ add_ll_firmware(
         "tim4_triggers_tim5",
         "tim1_clocks_tim15",
         "tim15_unclocked",
+        "tim3_encoder_idle",
     ],
 )

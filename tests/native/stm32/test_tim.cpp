@@ -1775,3 +1775,103 @@ TEST_CASE("a CEN clear and an SMS change clear the external clock prescaler prog
     CHECK(t.count("TIM3") == 1);
   }
 }
+
+TEST_CASE("TIM3 in encoder mode with no input edges holds, firmware")
+{
+  auto f = entered("tim3_encoder_idle");
+  CHECK(finish(f) == std::vector<std::uint32_t>{0, 0});
+}
+
+TEST_CASE("every encoder SMS value and ECE 1 stop the counter, SMS 0111 on a pin input too")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  for(auto const word :
+      {smcr(0b0001, 0), smcr(0b0010, 0), smcr(0b0011, 0), smcr(0b1010, 0), smcr(0b1011, 0),
+       smcr(0b1100, 0), smcr(0b1101, 0), smcr(0b1110, 0), smcr(0b1111, 0), ece,
+       smcr(sms_external, 5)})
+  {
+    CAPTURE(word);
+    slaves t;
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", word);
+    t.enable("TIM3");
+    t.at(100);
+    CHECK(t.count("TIM3") == 0);
+  }
+}
+
+TEST_CASE("SMS back to 0000 with CEN 1 counts from the SMCR write")
+{
+  slaves t;
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(0b0011, 0));
+  t.enable("TIM3");
+  t.at(100);
+  t.write("TIM3", "SMCR", 0);
+  t.at(150);
+  CHECK(t.count("TIM3") == 50);
+}
+
+TEST_CASE("an encoder mode, ECE and a pin input each log once")
+{
+  auto const last = [](slaves const& t) {
+    REQUIRE(not t.logged.empty());
+    return t.logged.back().message;
+  };
+  SUBCASE("encoder inputs raise no input capture warning")
+  {
+    slaves t;
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "CCMR1_Input", 0x0101);
+    t.write("TIM3", "SMCR", smcr(0b0011, 0));
+    CHECK(t.warnings() == 1);
+    CHECK(last(t).contains("encoder"));
+    t.enable("TIM3");
+    t.enable("TIM3", false);
+    t.enable("TIM3");
+    CHECK(t.warnings() == 1);
+    t.enable("TIM3", false);
+    t.write("TIM3", "SMCR", 1u << 14);
+    CHECK(t.warnings() == 2);
+    CHECK(last(t).contains("ETR"));
+    t.write("TIM3", "SMCR", smcr(sms_external, 5));
+    CHECK(t.warnings() == 3);
+    CHECK(last(t).contains("timer input pin"));
+    t.write("TIM3", "CCMR1_Input", 0);
+    t.enable("TIM3");
+    CHECK(t.warnings() == 3);
+  }
+  SUBCASE("trigger mode on TI1FP1 with CEN 0 logs at the SMCR write")
+  {
+    slaves t;
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_trigger, 5));
+    CHECK(t.warnings() == 1);
+    CHECK(last(t).contains("timer input pin"));
+  }
+  SUBCASE("an encoder SMCR write with CEN 1 logs at the write")
+  {
+    slaves t;
+    t.base("TIM3", 0, 0xffff);
+    t.enable("TIM3");
+    CHECK(t.warnings() == 0);
+    t.write("TIM3", "SMCR", smcr(0b0011, 0));
+    CHECK(t.warnings() == 1);
+    CHECK(last(t).contains("encoder"));
+  }
+}
+
+TEST_CASE("TIM3 in encoder mode logs only the encoder warning, firmware")
+{
+  auto                          f = entered("tim3_encoder_idle");
+  std::vector<core::log_record> logged;
+  auto const                    sink = f.target->add_log_sink([&](core::log_record const& record) {
+    if(record.peripheral == "TIM3")
+    {
+      logged.push_back(record);
+    }
+  });
+  static_cast<void>(finish(f));
+  REQUIRE(logged.size() == 1);
+  CHECK(logged[0].message.contains("encoder"));
+}

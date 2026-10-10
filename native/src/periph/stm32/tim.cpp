@@ -78,6 +78,11 @@ constexpr std::array<std::pair<std::uint32_t, std::string_view>, 7> internal_tri
       or mode == std::to_underlying(slave_mode::gated_reset);
 }
 
+[[nodiscard]] constexpr auto pin_select(std::uint32_t select) -> bool
+{
+  return select >= 4 and select <= 7;
+}
+
 [[nodiscard]] constexpr auto encoding(std::uint32_t mode) -> bool
 {
   return (mode >= std::to_underlying(slave_mode::encoder1)
@@ -187,17 +192,20 @@ auto lower(std::string_view name) -> std::string
  *        holds and one warning is logged at its first rising edge. The gate is sampled again when
  *        the timer clock comes back. Gated + reset also reinitialises the counter when the
  *        gate closes. Every slave edge sets TIF, gate openings and closings included. ITR7,
- *        ITR8, ITR11, a timer's own ITR, the reserved codes and the timer input pins reach
- *        nothing: the slave holds and one warning is logged. Deviations: an ARR written below the
- *        count lets the counter run to its maximum and wrap with no update, a count written above
- *        ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
+ *        ITR8, ITR11, a timer's own ITR and the reserved codes reach nothing: the slave holds and
+ *        one warning is logged at the SMCR write. Timer input pins are not modelled: the encoder
+ *        modes, RM0456 55.4 "Encoder interface mode", and external clock mode 2 on ETR, ECE 1,
+ *        stop the counter, and a slave mode on a pin input, TS 4 to 7, sees no edge. Each of the
+ *        three logs once, at the SMCR write or when the counter starts. Deviations: an ARR written
+ * below the count lets the counter run to its maximum and wrap with no update, a count written
+ * above ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
  *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
  *        between timers drops the edge that would re-enter a timer still reacting to its own
  *        event, logged once per timer, where hardware would oscillate with a few clocks of
  *        resynchronisation delay per hop. Not modelled, logged once when the counter starts:
- *        encoder modes, which count on the timer clock, SMSPE, input capture edges, dithering,
- *        CCDS. TDE logs once and raises no trigger DMA request. DMA burst mode is not modelled,
- *        logged once when DCR selects it.
+ *        SMSPE, input capture edges, dithering, CCDS, channels 1 and 2 left out in encoder
+ *        modes. TDE logs once and raises no trigger DMA request. DMA burst mode is not modelled,
+ * logged once when DCR selects it.
  */
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,
@@ -296,6 +304,7 @@ private:
   void settle();
   void reschedule();
   void warn_unsupported();
+  void warn_inputs();
 
   register_file&                               regs_;
   std::string                                  prefix_;
@@ -338,6 +347,7 @@ private:
   std::optional<field_ref>                     select_;
   std::optional<field_ref>                     select_high_;
   std::optional<field_ref>                     slave_preload_;
+  std::optional<field_ref>                     external_clock2_;
   std::optional<field_ref>                     trigger_flag_;
   std::optional<field_ref>                     trigger_dma_;
   bool                                         reacting_{};
@@ -346,6 +356,9 @@ private:
   bool                                         gate_logged_{};
   bool                                         trigger_dma_logged_{};
   bool                                         unsupported_logged_{};
+  bool                                         encoder_logged_{};
+  bool                                         etr_logged_{};
+  bool                                         pin_logged_{};
   bool                                         burst_logged_{};
   bool                                         master_logged_{};
 };
@@ -458,6 +471,7 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
       master2_{optional_field(name("CR2"), "MMS2")}, instance_{lower(desc.name)},
       slave_{optional_field(name("SMCR"), "SMS")}, select_{optional_field(name("SMCR"), "TS")},
       slave_preload_{optional_field(name("SMCR"), "SMSPE")},
+      external_clock2_{optional_field(name("SMCR"), "ECE")},
       trigger_dma_{optional_field(name("DIER"), "TDE")}
 {
   if(not master_high_)
@@ -659,7 +673,9 @@ auto tim::running() const -> bool
 auto tim::internally_clocked() const -> bool
 {
   auto const mode = slave();
-  if(mode == std::to_underlying(slave_mode::external1))
+  if(encoding(mode)
+     or mode == std::to_underlying(slave_mode::external1)
+     or (external_clock2_ and get(regs_, *external_clock2_) != 0))
   {
     return false;
   }
@@ -1335,25 +1351,42 @@ void tim::reschedule()
 
 void tim::warn_unsupported()
 {
-  if(unsupported_logged_)
-  {
-    return;
-  }
-  auto used = encoding(slave()) or std::ranges::any_of(unsupported_, [&](field_ref bits) {
-                return get(regs_, bits) != 0;
-              });
-  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
+  warn_inputs();
+  auto used =
+      std::ranges::any_of(unsupported_, [&](field_ref bits) { return get(regs_, bits) != 0; });
+  auto const encoder = encoding(slave());
+  for(std::size_t ch = encoder ? 2 : 0; ch < channels_.size(); ++ch)
   {
     used = used or not output(ch);
   }
-  if(used)
+  if(used and not std::exchange(unsupported_logged_, true))
   {
-    unsupported_logged_ = true;
     warn(
         name("CR1"),
-        "the counter started with an encoder mode, SMSPE, an input capture channel, dithering or "
-        "CCDS configured: not modelled, the time base counts on the internal clock");
+        "the counter started with SMSPE, an input capture channel, dithering or CCDS configured: "
+        "not modelled, the time base counts on the internal clock");
   }
+}
+
+void tim::warn_inputs()
+{
+  auto const once = [&](bool& logged, bool used, std::string message) {
+    if(used and not std::exchange(logged, true))
+    {
+      warn(name("SMCR"), std::move(message));
+    }
+  };
+  auto const mode   = slave();
+  auto const select = slave_ ? trigger_select_of(regs_.peek(slave_->offset)) : 0u;
+  once(
+      encoder_logged_, encoding(mode),
+      "encoder mode: TI1/TI2 inputs are not modelled, the counter holds");
+  once(
+      etr_logged_, external_clock2_ and get(regs_, *external_clock2_) != 0,
+      "external clock mode 2: ETR is not modelled, the counter holds");
+  once(
+      pin_logged_, modelled(mode) and pin_select(select),
+      std::format("TS {} selects a timer input pin, not modelled", select));
 }
 
 void tim::reset(register_file& regs, reset_kind)
@@ -1631,7 +1664,10 @@ void tim::slave_settled(std::optional<std::string_view> before, std::uint32_t sm
   auto const signal = after ? std::format("{}_trgo", *after) : std::string{};
   auto const routed = after and stm32::interest_changed(ctx_.peers, signal);
   auto const mode   = slave_of(smcr);
-  if(modelled(mode) and not routed and not std::exchange(unrouted_logged_, true))
+  if(modelled(mode)
+     and not routed
+     and not pin_select(trigger_select_of(smcr))
+     and not std::exchange(unrouted_logged_, true))
   {
     warn(
         name("SMCR"),
@@ -1640,6 +1676,7 @@ void tim::slave_settled(std::optional<std::string_view> before, std::uint32_t sm
             "slave mode controller",
             mode, trigger_select_of(smcr)));
   }
+  warn_inputs();
   state_.gate = gating(mode) and input_level(smcr).value_or(false) ? 1 : 0;
 }
 

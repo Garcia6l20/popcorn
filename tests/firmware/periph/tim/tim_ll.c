@@ -12,6 +12,7 @@ static uint32_t const    reloads[4] = {999, 999, 999, 999};
 void TIM16_IRQHandler(void);
 void TIM1_UP_IRQHandler(void);
 void TIM2_IRQHandler(void);
+void TIM3_IRQHandler(void);
 void TIM6_IRQHandler(void);
 void GPDMA1_Channel0_IRQHandler(void);
 void idle(void);
@@ -25,6 +26,7 @@ void tim6_poll(void);
 void tim4_triggers_tim5(void);
 void tim1_clocks_tim15(void);
 void tim15_unclocked(void);
+void tim3_encoder_idle(void);
 
 void idle(void)
 {
@@ -101,6 +103,15 @@ void TIM2_IRQHandler(void)
     LOG(LL_TIM_GetCounter(TIM2));
     LL_TIM_ClearFlag_CC1(TIM2);
     ++matches;
+  }
+}
+
+void TIM3_IRQHandler(void)
+{
+  if(LL_TIM_IsActiveFlag_UPDATE(TIM3))
+  {
+    LL_TIM_ClearFlag_UPDATE(TIM3);
+    ++updates;
   }
 }
 
@@ -334,6 +345,25 @@ void tim15_unclocked(void)
   LL_TIM_EnableCounter(TIM6);
   poll_updates(TIM6, 1);
   LOG(LL_TIM_GetCounter(TIM15));
+  DONE();
+}
+
+void tim3_encoder_idle(void)
+{
+  clock_160mhz();
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM3 | LL_APB1_GRP1_PERIPH_TIM6);
+  time_base(TIM6, 159, 999);
+  time_base(TIM3, 0, 0xffff);
+  LL_TIM_IC_SetActiveInput(TIM3, LL_TIM_CHANNEL_CH1, LL_TIM_ACTIVEINPUT_DIRECTTI);
+  LL_TIM_IC_SetActiveInput(TIM3, LL_TIM_CHANNEL_CH2, LL_TIM_ACTIVEINPUT_DIRECTTI);
+  LL_TIM_SetEncoderMode(TIM3, LL_TIM_ENCODERMODE_X4_TI12);
+  LL_TIM_EnableIT_UPDATE(TIM3);
+  NVIC_EnableIRQ(TIM3_IRQn);
+  LL_TIM_EnableCounter(TIM3);
+  LL_TIM_EnableCounter(TIM6);
+  poll_updates(TIM6, 5);
+  LOG(updates);
+  LOG(LL_TIM_GetCounter(TIM3));
   DONE();
 }
 
