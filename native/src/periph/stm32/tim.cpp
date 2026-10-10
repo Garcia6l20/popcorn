@@ -170,8 +170,9 @@ auto lower(std::string_view name) -> std::string
  *        UDIS, URS, one-pulse mode, EGR event generation. Output compare channels 1 to 4 set
  *        their flags when the counter matches, output pins are not driven. The counter width is
  *        the sum of the description's CNT fields. With UDE or CCxDE the `<instance>_upd_dma` and
- *        `<instance>_ccx_dma` requests rise with their event, and any DMA access to the timer
- *        releases them all. The trigger output `<instance>_trgo` gives its edges to every
+ *        `<instance>_ccx_dma` requests rise with their event. Each request drops when the
+ *        GPDMA acknowledges a burst for it, whatever that burst read or wrote. A DMA access to
+ *        the timer releases nothing. The trigger output `<instance>_trgo` gives its edges to every
  *        listening trigger_sink as CR2.MMS selects. MMS 001 is the counter enable level, CEN and,
  *        in gated modes, the gate: a rising edge when it sets, a falling edge when it clears, by a
  *        write, at the one-pulse update or at a gate edge. MMS 000,
@@ -210,7 +211,8 @@ auto lower(std::string_view name) -> std::string
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,
                   public trigger_source,
-                  public trigger_sink
+                  public trigger_sink,
+                  public dma_requester
 {
 public:
   tim(model_context& ctx, peripheral_desc const& desc);
@@ -232,6 +234,8 @@ public:
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
+  void acknowledged(std::uint32_t request) override;
+  void transfer_completed(std::uint32_t request) override;
 
   void                           control_written(std::uint32_t old, std::uint32_t now);
   void                           master_written(std::uint32_t old, std::uint32_t now);
@@ -300,7 +304,7 @@ private:
   void match(std::size_t ch, std::uint64_t at);
   void capture(std::size_t ch, std::uint64_t at);
   void request_update();
-  void acknowledge();
+  void release(std::uint32_t request);
   void settle();
   void reschedule();
   void warn_unsupported();
@@ -1259,21 +1263,45 @@ void tim::request_update()
   }
 }
 
-void tim::acknowledge()
+void tim::release(std::uint32_t request)
 {
-  if(state_.update_request != 0)
+  auto const update = state_.update_request != 0 and update_signal_->carries(request);
+  std::array<bool, max_channels> compare{};
+  auto                           served = update;
+  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
+  {
+    compare[ch] = state_.compare_request[ch] != 0 and channels_[ch].signal->carries(request);
+    served      = served or compare[ch];
+  }
+  if(not served)
+  {
+    return;
+  }
+  catch_up(now_ps());
+  if(update)
   {
     state_.update_request = 0;
     update_signal_->set(false);
   }
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
-    if(state_.compare_request[ch] != 0)
+    if(compare[ch])
     {
       state_.compare_request[ch] = 0;
       channels_[ch].signal->set(false);
     }
   }
+  settle();
+}
+
+void tim::acknowledged(std::uint32_t request)
+{
+  release(request);
+}
+
+void tim::transfer_completed(std::uint32_t request)
+{
+  static_cast<void>(request);
 }
 
 void tim::settle()
@@ -1421,10 +1449,6 @@ auto tim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
     -> std::expected<std::uint32_t, bus_error>
 {
   catch_up(now_ps());
-  if(access.by == initiator::dma)
-  {
-    acknowledge();
-  }
   settle();
   return dispatch_model::on_read(regs, offset, size, access);
 }
@@ -1452,10 +1476,6 @@ auto tim::on_write(
     static_cast<void>(stm32::interest_changed(ctx_.peers, std::format("{}_trgo", *after)));
   }
   catch_up(ps);
-  if(access.by == initiator::dma)
-  {
-    acknowledge();
-  }
   auto const was     = running();
   auto const enabled = counter_enabled();
   auto       result  = std::expected<void, bus_error>{};

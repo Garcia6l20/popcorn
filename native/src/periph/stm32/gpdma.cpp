@@ -175,7 +175,10 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  *        transfer event once its first item is loaded when its TCEM before that load is 2, and
  *        no event under 0 and 1. A request level held by a requester across a machine reset is
  *        cleared: the requester announces it again on its next change. A hardware-requested channel
- *        that completes, its TC with LLR = 0, tells every `dma_requester` peer its REQSEL.
+ *        that completes, its TC with LLR = 0, tells every `dma_requester` peer its REQSEL, and
+ *        so does every burst of a hardware-requested channel, after its beats and before its
+ *        half, complete and next scheduling decisions: the requester drops the request it
+ *        served. A burst ended by a data error acknowledges nothing.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>, public dma_controller
 {
@@ -212,6 +215,7 @@ private:
   void               raise_flag(std::size_t ch, flag_index flag);
   void               interrupts(std::size_t ch);
   void               warn_once(std::size_t ch, unsupported feature);
+  auto               requesters() -> std::span<dma_requester* const>;
 
   register_file&                       regs_;
   std::array<channel_fields, channels> ch_{};
@@ -220,6 +224,8 @@ private:
   core::clock_domain                   hclk_;
   std::array<bool, 1>                  unsupported_logged_{};
   bool                                 stopped_clock_logged_{};
+  std::vector<dma_requester*>          requesters_;
+  bool                                 requesters_resolved_{};
 };
 
 template <std::size_t... Ch>
@@ -555,11 +561,12 @@ auto gpdma::convert(std::size_t ch, std::uint32_t value) -> bool
 
 void gpdma::burst(std::size_t ch)
 {
-  auto&         c     = ch_[ch];
-  auto&         s     = state_.channel[ch];
-  auto const    sw    = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
-  auto const    beats = get(regs_, c.source_burst) + 1;
-  std::uint32_t beat  = 0;
+  auto&         c       = ch_[ch];
+  auto&         s       = state_.channel[ch];
+  auto const    sw      = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
+  auto const    beats   = get(regs_, c.source_burst) + 1;
+  auto const    request = get(regs_, c.request);
+  std::uint32_t beat    = 0;
   for(; beat < beats and get(regs_, c.bytes) != 0; ++beat)
   {
     auto const source = regs_.peek(c.sar.offset);
@@ -574,6 +581,13 @@ void gpdma::burst(std::size_t ch)
       regs_.poke(c.sar.offset, source + sw);
     }
     update(regs_, c.bytes, get(regs_, c.bytes) - sw);
+  }
+  if(get(regs_, c.software) == 0)
+  {
+    for(auto* const requester : requesters())
+    {
+      requester->acknowledged(request);
+    }
   }
   if(c.two_d and beat == beats)
   {
@@ -753,13 +767,26 @@ void gpdma::finish(std::size_t ch, flag_index flag)
     return;
   }
   auto const request = get(regs_, c.request);
-  for(auto* const peer : ctx_.peers.all())
+  for(auto* const requester : requesters())
   {
-    if(auto* const requester = dynamic_cast<dma_requester*>(peer); requester != nullptr)
+    requester->transfer_completed(request);
+  }
+}
+
+auto gpdma::requesters() -> std::span<dma_requester* const>
+{
+  if(not requesters_resolved_ and not ctx_.peers.all().empty())
+  {
+    requesters_resolved_ = true;
+    for(auto* const peer : ctx_.peers.all())
     {
-      requester->transfer_completed(request);
+      if(auto* const requester = dynamic_cast<dma_requester*>(peer); requester != nullptr)
+      {
+        requesters_.push_back(requester);
+      }
     }
   }
+  return requesters_;
 }
 
 void gpdma::raise_flag(std::size_t ch, flag_index flag)

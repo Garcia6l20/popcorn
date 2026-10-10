@@ -8,6 +8,10 @@ static volatile uint32_t updates;
 static volatile uint32_t matches;
 static volatile uint32_t dma_done;
 static uint32_t const    reloads[4] = {999, 999, 999, 999};
+static uint32_t const    pattern[8] = {1u, 2u, 4u, 8u, 1u << 16, 2u << 16, 4u << 16, 8u << 16};
+static uint32_t const    thirds[4]  = {11, 12, 13, 14};
+static uint32_t const    fourths[4] = {21, 22, 23, 24};
+static volatile uint32_t channel_done[3];
 
 void TIM16_IRQHandler(void);
 void TIM1_UP_IRQHandler(void);
@@ -15,6 +19,8 @@ void TIM2_IRQHandler(void);
 void TIM3_IRQHandler(void);
 void TIM6_IRQHandler(void);
 void GPDMA1_Channel0_IRQHandler(void);
+void GPDMA1_Channel1_IRQHandler(void);
+void GPDMA1_Channel2_IRQHandler(void);
 void idle(void);
 void tim16_updates(void);
 void tim16_one_pulse(void);
@@ -27,6 +33,8 @@ void tim4_triggers_tim5(void);
 void tim1_clocks_tim15(void);
 void tim15_unclocked(void);
 void tim3_encoder_idle(void);
+void tim6_dma_bsrr(void);
+void tim2_two_requests(void);
 
 void idle(void)
 {
@@ -141,6 +149,45 @@ void GPDMA1_Channel0_IRQHandler(void)
     LOG(updates);
     dma_done = 1;
   }
+}
+
+void GPDMA1_Channel1_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_1))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_1);
+    channel_done[1] = 1;
+  }
+}
+
+void GPDMA1_Channel2_IRQHandler(void)
+{
+  if(LL_DMA_IsActiveFlag_TC(GPDMA1, LL_DMA_CHANNEL_2))
+  {
+    LL_DMA_ClearFlag_TC(GPDMA1, LL_DMA_CHANNEL_2);
+    channel_done[2] = 1;
+  }
+}
+
+static void word_channel(
+    uint32_t        channel,
+    uint32_t        request,
+    uint32_t const* source,
+    uint32_t        words,
+    uint32_t        destination)
+{
+  LL_DMA_ConfigTransfer(
+      GPDMA1, channel,
+      LL_DMA_SRC_INCREMENT
+          | LL_DMA_DEST_FIXED
+          | LL_DMA_SRC_DATAWIDTH_WORD
+          | LL_DMA_DEST_DATAWIDTH_WORD);
+  LL_DMA_SetDataTransferDirection(GPDMA1, channel, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+  LL_DMA_SetPeriphRequest(GPDMA1, channel, request);
+  LL_DMA_SetBlkDataLength(GPDMA1, channel, 4 * words);
+  LL_DMA_SetSrcAddress(GPDMA1, channel, (uint32_t)source);
+  LL_DMA_SetDestAddress(GPDMA1, channel, destination);
+  LL_DMA_EnableIT_TC(GPDMA1, channel);
 }
 
 void tim16_updates(void)
@@ -364,6 +411,59 @@ void tim3_encoder_idle(void)
   poll_updates(TIM6, 5);
   LOG(updates);
   LOG(LL_TIM_GetCounter(TIM3));
+  DONE();
+}
+
+void tim6_dma_bsrr(void)
+{
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM6);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOE);
+  time_base(TIM6, 3, 99);
+  word_channel(LL_DMA_CHANNEL_0, LL_GPDMA1_REQUEST_TIM6_UP, pattern, 8, (uint32_t)&GPIOE->BSRR);
+  NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_0);
+  LL_TIM_EnableIT_UPDATE(TIM6);
+  NVIC_EnableIRQ(TIM6_IRQn);
+  LL_TIM_EnableDMAReq_UPDATE(TIM6);
+  LL_TIM_EnableCounter(TIM6);
+  while(dma_done == 0)
+  {
+    __WFI();
+  }
+  DONE();
+}
+
+void tim2_two_requests(void)
+{
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2 | LL_APB1_GRP1_PERIPH_TIM6);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  time_base(TIM6, 3, 99);
+  time_base(TIM2, 3, 99);
+  LL_TIM_OC_SetMode(TIM2, LL_TIM_CHANNEL_CH1, LL_TIM_OCMODE_FROZEN);
+  LL_TIM_OC_SetCompareCH1(TIM2, 0);
+  word_channel(LL_DMA_CHANNEL_1, LL_GPDMA1_REQUEST_TIM2_UP, thirds, 4, (uint32_t)&TIM2->CCR3);
+  word_channel(LL_DMA_CHANNEL_2, LL_GPDMA1_REQUEST_TIM2_CH1, fourths, 4, (uint32_t)&TIM2->CCR4);
+  NVIC_EnableIRQ(GPDMA1_Channel1_IRQn);
+  NVIC_EnableIRQ(GPDMA1_Channel2_IRQn);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_1);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_2);
+  LL_TIM_EnableDMAReq_UPDATE(TIM2);
+  LL_TIM_EnableDMAReq_CC1(TIM2);
+  LL_TIM_EnableCounter(TIM2);
+  LL_TIM_EnableCounter(TIM6);
+  uint32_t ticks = 0;
+  for(; ticks < 20 && (channel_done[1] == 0 || channel_done[2] == 0); ++ticks)
+  {
+    poll_updates(TIM6, 1);
+  }
+  LOG(ticks);
+  LOG(channel_done[1]);
+  LOG(channel_done[2]);
+  LOG(LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_1));
+  LOG(LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_2));
+  LOG(LL_TIM_OC_GetCompareCH3(TIM2));
+  LOG(LL_TIM_OC_GetCompareCH4(TIM2));
   DONE();
 }
 

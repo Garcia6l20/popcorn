@@ -43,8 +43,8 @@ protected:
 };
 
 /**
- * @brief A model that issues DMA requests and must know when a channel serving it ends, found
- *        by the controller through the machine's peers.
+ * @brief A model that issues DMA requests and must know when a channel serving it finishes a
+ *        burst or ends, found by the controller through the machine's peers.
  */
 class dma_requester
 {
@@ -66,6 +66,18 @@ public:
    * @param request Request number of the channel, its request selection field.
    */
   virtual void transfer_completed(std::uint32_t request) = 0;
+
+  /**
+   * @brief A hardware-requested channel finished one burst for @p request. Called from a
+   *        controller event, never inside a requester's register callback. The requester drops
+   *        that request if the burst served it. The default ignores it, for requesters whose
+   *        request follows their own flags.
+   * @param request Request number of the channel, its request selection field.
+   */
+  virtual void acknowledged(std::uint32_t request)
+  {
+    static_cast<void>(request);
+  }
 
 protected:
   /** @brief Destroys the interface, only through its model. */

@@ -739,7 +739,7 @@ TEST_CASE("CCxG on an input channel captures the count and sets CCxOF on the sec
   CHECK(t.flag("CC1OF") == 1);
 }
 
-TEST_CASE("CCxDE and UDE raise their DMA requests, a DMA access to the timer releases them")
+TEST_CASE("CCxDE and UDE raise their DMA requests, each drops only at its own acknowledge")
 {
   direct      t{with_recorder()};
   auto* const dma = t.f.model_of<recorder>("GPDMA1");
@@ -757,22 +757,46 @@ TEST_CASE("CCxDE and UDE raise their DMA requests, a DMA access to the timer rel
           {1, true}
   });
   t.at(13);
-  CHECK(
-      dma->levels
-      == std::vector<std::pair<std::uint32_t, bool>>{
-          {1, true},
-          {2, true}
-  });
+  auto const both = std::vector<std::pair<std::uint32_t, bool>>{
+      {1, true},
+      {2, true}
+  };
+  CHECK(dma->levels == both);
   auto const at = t.b.at("TIM1", "TIM1_CCR1");
   REQUIRE(dma->context.services.read(at, 4, popcorn::initiator::dma).has_value());
+  REQUIRE(dma->context.services.write(at, 4, 3, popcorn::initiator::dma).has_value());
+  CHECK(dma->levels == both);
+  auto* const requester = dynamic_cast<stm32::dma_requester*>(t.f.target->model("TIM1"));
+  REQUIRE(requester != nullptr);
+  requester->acknowledged(1);
   CHECK(
       dma->levels
       == std::vector<std::pair<std::uint32_t, bool>>{
           {1, true },
           {2, true },
-          {2, false},
           {1, false}
   });
+  requester->acknowledged(2);
+  CHECK(
+      dma->levels
+      == std::vector<std::pair<std::uint32_t, bool>>{
+          {1, true },
+          {2, true },
+          {1, false},
+          {2, false}
+  });
+}
+
+TEST_CASE("a TIM6 update request paces a channel to GPIOE BSRR at one word per update, firmware")
+{
+  auto f = entered("tim6_dma_bsrr");
+  CHECK(finish(f) == std::vector<std::uint32_t>{8});
+}
+
+TEST_CASE("TIM2 UP and CC1 requests on two channels both complete, firmware")
+{
+  auto f = entered("tim2_two_requests");
+  CHECK(finish(f) == std::vector<std::uint32_t>{4, 1, 1, 0, 0, 14, 24});
 }
 
 TEST_CASE("selecting DMA burst mode logs once")

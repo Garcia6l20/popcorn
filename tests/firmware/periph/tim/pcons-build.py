@@ -21,5 +21,7 @@ add_ll_firmware(
         "tim1_clocks_tim15",
         "tim15_unclocked",
         "tim3_encoder_idle",
+        "tim6_dma_bsrr",
+        "tim2_two_requests",
     ],
 )
