@@ -50,6 +50,7 @@ void link_ping(void);
 void link_echo(void);
 void link_tx_count(void);
 void link_abort_gap(void);
+void link_abort_b2b(void);
 void USART2_IRQHandler(void);
 
 void idle(void)
@@ -876,6 +877,23 @@ void link_abort_gap(void)
   LL_USART_Disable(USART1);
   enable(USART1);
   wait_us(100);
+  send_byte('c');
+  wait_complete();
+  DONE();
+}
+
+void link_abort_b2b(void)
+{
+  start_link();
+  send_byte('a');
+  send_byte('b');
+  while(!LL_USART_IsActiveFlag_TXE_TXFNF(USART1))
+  {
+  }
+  wait_us(10);
+  LL_USART_Disable(USART1);
+  enable(USART1);
+  wait_us(200);
   send_byte('c');
   wait_complete();
   DONE();

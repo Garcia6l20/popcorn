@@ -125,6 +125,7 @@ struct linked_frame
 {
   line_frame    frame{};
   std::uint32_t lane{};
+  bool          cut{};
 
   friend auto operator==(linked_frame const&, linked_frame const&) -> bool = default;
 };
@@ -201,10 +202,12 @@ struct lock
  *        `uart_endpoint::started`, and a clear of UE with a frame in flight, `aborted`. Frames
  *        from another machine, `receive_at`, reach the receiver at their own stop-bit end, IDLE
  *        one receiver frame time after the last one unless the next starts before. Deviations:
- *        an aborted frame vanishes, the receiver sees the line go idle at the abort, where the
- *        chip would see a truncated frame and FE. A reset drops the frames queued from other
+ *        an aborted frame delivers nothing and holds the line until the abort, where the chip
+ *        would see a truncated frame and FE: IDLE follows one receiver frame after the abort
+ *        unless the next frame starts before, whether frames ahead of it were still queued or
+ *        not. A reset drops the frames queued from other
  *        machines, also those whose start bit would reach the line after the reset. Events a
- *        delivery from another machine arms, its data and the IDLE of an abort, go on the
+ *        delivery from another machine arms, its data and the end of an aborted frame, go on the
  *        wire's lane, so their order against local events of the same instant does not depend on
  *        when the delivery happened. BUSY does not follow frames from other machines. A frame
  *        from another machine whose bit time,
@@ -262,7 +265,7 @@ private:
   void start_frame(std::uint64_t from_ps);
   void deliver(std::uint16_t data, bool framing = false, bool noise = false);
   void schedule_linked();
-  void idle_at(std::uint64_t due_ps, std::uint32_t lane = 0);
+  void idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
   void               flags();
   void               interrupts();
@@ -874,7 +877,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     }
     auto const head = state_.linked.front();
     auto const rx   = shape();
-    if(auto const done = rx.frame_ps != 0 ? last_sample(head.frame, rx) : 0;
+    if(auto const done = rx.frame_ps != 0 and not head.cut ? last_sample(head.frame, rx) : 0;
        done > ctx_.clock.time().ps)
     {
       ++state_.linked_generation;
@@ -887,15 +890,15 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
                   and rx.frame_ps == head.frame.frame_ps
                   and rx.word_bits == head.frame.word_bits
                   and rx.half_stops == head.frame.half_stops;
-    if(head.frame.kind == frame_kind::brk)
+    if(not head.cut and head.frame.kind == frame_kind::brk)
     {
       deliver(0, true);
     }
-    else if(same or rx.frame_ps == 0)
+    else if(not head.cut and (same or rx.frame_ps == 0))
     {
       deliver(head.frame.data);
     }
-    else
+    else if(not head.cut)
     {
       auto const next = std::ranges::find(state_.linked, head.lane, &linked_frame::lane);
       auto const seen = sample(
@@ -1017,17 +1020,11 @@ void usart::schedule_linked()
       head.frame.end, linked_due, state_.linked_generation, head.lane, ctx_.clock);
 }
 
-void usart::idle_at(std::uint64_t due_ps, std::uint32_t lane)
+void usart::idle_at(std::uint64_t due_ps)
 {
   state_.idle_pending = true;
   ++state_.generation[idle_due];
-  if(lane == 0)
-  {
-    state_.idle_due_ps = schedule(idle_due, due_ps, 0);
-    return;
-  }
-  state_.idle_due_ps = due_ps;
-  ctx_.events.schedule_at(vtime{due_ps}, idle_due, state_.generation[idle_due], lane, ctx_.clock);
+  state_.idle_due_ps = schedule(idle_due, due_ps, 0);
 }
 
 void usart::receive_at(line_frame const& frame, std::uint32_t lane)
@@ -1053,22 +1050,30 @@ void usart::receive_at(line_frame const& frame, std::uint32_t lane)
 void usart::cancel_in_flight(vtime at, std::uint32_t lane)
 {
   auto const found = std::ranges::find_if(state_.linked, [&](linked_frame const& queued) {
-    return queued.lane == lane and queued.frame.start.ps < at.ps and at.ps < queued.frame.end.ps;
+    return queued.lane == lane
+       and not queued.cut
+       and queued.frame.start.ps < at.ps
+       and at.ps < queued.frame.end.ps;
   });
   if(found == state_.linked.end())
   {
     return;
   }
-  auto const head = found == state_.linked.begin();
+  auto cut      = *found;
+  auto was_head = found == state_.linked.begin();
   state_.linked.erase(found);
-  if(head)
+  cut.frame.end  = at;
+  cut.cut        = true;
+  auto const key = std::pair{at.ps, lane};
+  auto const where =
+      std::ranges::upper_bound(state_.linked, key, {}, [](linked_frame const& queued) {
+        return std::pair{queued.frame.end.ps, queued.lane};
+      });
+  auto const is_head = where == state_.linked.begin();
+  state_.linked.insert(where, cut);
+  if(was_head or is_head)
   {
     schedule_linked();
-  }
-  auto const ps = frame_ps();
-  if(ps != 0 and not linked_before(at.ps + ps))
-  {
-    idle_at(at.ps + ps, lane);
   }
 }
 

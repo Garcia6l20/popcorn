@@ -1174,7 +1174,7 @@ TEST_CASE("a frame landing on the count of a host frame orders the same whatever
   }
 }
 
-TEST_CASE("the IDLE of an aborted frame is armed on the wire's lane")
+TEST_CASE("an aborted frame ends on the wire's lane at the abort, delivering nothing")
 {
   constexpr auto latency = 20 * us_ps;
   member         a{"link_abort"};
@@ -1187,9 +1187,45 @@ TEST_CASE("the IDLE of an aborted frame is armed on the wire's lane")
   deliver(posts[1], a, b, latency);
   deliver(posts[2], a, b, latency);
   auto const pending = b.f->target->snapshot().data().events.pending;
-  auto const idle    = std::ranges::find_if(
-      pending, [](core::event const& one) { return one.id.kind == 2 and one.lane == 1; });
-  CHECK(idle != pending.end());
+  auto const cut     = std::ranges::find_if(
+      pending, [](core::event const& one) { return one.id.kind == 3 and one.lane == 1; });
+  REQUIRE(cut != pending.end());
+  CHECK(cut->due_ps == shifted(posts[2].at, a, b, latency).ps);
+  CHECK(std::ranges::none_of(pending, [](core::event const& one) { return one.id.kind == 2; }));
+}
+
+TEST_CASE("an abort behind a queued frame idles the line one frame after the abort at any window")
+{
+  constexpr auto             latency   = 20 * us_ps;
+  auto const                 reference = oracle("link_abort_b2b", latency);
+  auto const                 seen      = entries(reference.log);
+  std::vector<std::uint32_t> bytes;
+  for(auto const& one : seen)
+  {
+    if(one.kind == link_byte)
+    {
+      bytes.push_back(one.data);
+    }
+  }
+  CHECK(bytes == std::vector<std::uint32_t>{'a', 'c'});
+  auto const& posts = reference.posts;
+  REQUIRE(posts.size() == 4);
+  REQUIRE(posts[2].abort);
+  REQUIRE(seen.size() >= 3);
+  CHECK(seen[0].data == 'a');
+  CHECK(seen[1].kind == link_idle);
+  auto const after_a  = posts[2].at.ps - posts[0].frame.end.ps + posts[0].frame.frame_ps;
+  auto const expected = static_cast<std::int64_t>(after_a / 6'250);
+  auto const measured = static_cast<std::int64_t>(seen[1].cycles - seen[0].cycles);
+  CAPTURE(expected);
+  CAPTURE(measured);
+  CHECK(measured >= expected - 20);
+  CHECK(measured <= expected + 20);
+  for(auto const window : {latency, latency / 4, latency / 20})
+  {
+    CAPTURE(window);
+    CHECK(barriers("link_abort_b2b", latency, window).log == reference.log);
+  }
 }
 
 namespace
