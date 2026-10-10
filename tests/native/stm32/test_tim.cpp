@@ -8,11 +8,15 @@
 #include <popcorn/core/snapshot.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <meta>
 #include <optional>
 #include <span>
 #include <string>
@@ -1074,4 +1078,700 @@ TEST_CASE("MMS 010 pulses on UG with URS set, UDIS suppresses the UG and overflo
   t.b.write("TIM15", "EGR", 1);
   t.run_until(t.start + 2'000 * ms);
   CHECK(t.sink->pulses.size() == 2);
+}
+
+namespace
+{
+constexpr std::uint64_t tick_ps = 250'000;
+
+constexpr auto smcr(std::uint32_t mode, std::uint32_t select) -> std::uint32_t
+{
+  return (mode & 7u) | ((mode >> 3) << 16) | ((select & 7u) << 4) | ((select >> 3) << 20);
+}
+
+constexpr std::uint32_t sms_reset         = 0b0100;
+constexpr std::uint32_t sms_gated         = 0b0101;
+constexpr std::uint32_t sms_trigger       = 0b0110;
+constexpr std::uint32_t sms_external      = 0b0111;
+constexpr std::uint32_t sms_reset_trigger = 0b1000;
+constexpr std::uint32_t sms_gated_reset   = 0b1001;
+constexpr std::uint32_t ts_itr0           = 0;
+constexpr std::uint32_t ts_itr1           = 1;
+constexpr std::uint32_t ts_itr2           = 2;
+constexpr std::uint32_t ts_itr3           = 3;
+constexpr std::uint32_t ts_itr7           = 11;
+
+struct slaves
+{
+  stm32_fixture                 f;
+  bus                           b{f};
+  std::uint64_t                 start{};
+  std::vector<core::log_record> logged;
+  core::hook_handle             sink;
+
+  slaves()
+      : f{entered("idle")}, sink{f.target->add_log_sink([this](core::log_record const& record) {
+          logged.push_back(record);
+        })}
+  {
+    for(auto const* const bit : {"TIM1EN", "TIM15EN"})
+    {
+      b.set("RCC", "RCC_APB2ENR", bit, 1);
+    }
+    for(auto const* const bit : {"TIM2EN", "TIM3EN", "TIM4EN", "TIM5EN"})
+    {
+      b.set("RCC", "RCC_APB1ENR1", bit, 1);
+    }
+    start = f.target->virtual_clock().time().ps;
+  }
+
+  [[nodiscard]] static auto reg(std::string_view tim, std::string_view name) -> std::string
+  {
+    return tim == "TIM1" ? std::string{"TIM1_"} + std::string{name} : std::string{name};
+  }
+
+  void write(std::string_view tim, std::string_view name, std::uint32_t value) const
+  {
+    b.write(tim, reg(tim, name), value);
+  }
+
+  [[nodiscard]] auto read(std::string_view tim, std::string_view name) const -> std::uint32_t
+  {
+    return b.read(tim, reg(tim, name));
+  }
+
+  [[nodiscard]] auto bits(std::string_view tim, std::string_view name, std::string_view field) const
+      -> std::uint32_t
+  {
+    return b.bits(tim, reg(tim, name), field);
+  }
+
+  void base(std::string_view tim, std::uint32_t prescaler, std::uint32_t reload) const
+  {
+    write(tim, "PSC", prescaler);
+    write(tim, "ARR", reload);
+    write(tim, "EGR", 1);
+    write(tim, "SR", 0);
+  }
+
+  void master(std::string_view tim, std::uint32_t mode) const
+  {
+    write(tim, "CR2", mode << 4);
+  }
+
+  void enable(std::string_view tim, bool on = true) const
+  {
+    write(tim, "CR1", (read(tim, "CR1") & ~1u) | (on ? 1u : 0u));
+  }
+
+  [[nodiscard]] auto count(std::string_view tim) const -> std::uint32_t
+  {
+    return read(tim, "CNT");
+  }
+
+  void at(std::uint64_t ticks) const
+  {
+    auto const until = vtime{start + ticks * tick_ps};
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = until}).reason
+        == stop_reason::time);
+  }
+
+  [[nodiscard]] auto warnings() const -> std::size_t
+  {
+    return static_cast<std::size_t>(
+        std::ranges::count(logged, core::log_kind::model_warning, &core::log_record::kind));
+  }
+};
+}
+
+TEST_CASE("TIM4 update events start TIM5 in trigger mode through ITR3, firmware")
+{
+  auto       f   = entered("tim4_triggers_tim5");
+  auto const log = finish(f);
+  REQUIRE(log.size() == 3);
+  CHECK(log[0] == 1);
+  CHECK(log[1] == 1);
+  CHECK(log[2] >= 900);
+  CHECK(log[2] < 1'000);
+}
+
+TEST_CASE("TIM15 in external clock mode 1 on ITR0 counts TIM1 updates, firmware")
+{
+  auto f = entered("tim1_clocks_tim15");
+  CHECK(finish(f) == std::vector<std::uint32_t>{20});
+}
+
+TEST_CASE("TIM15 in external clock mode 1 on a stopped TIM1 holds, firmware")
+{
+  auto f = entered("tim15_unclocked");
+  CHECK(finish(f) == std::vector<std::uint32_t>{0});
+}
+
+TEST_CASE("an SMCR write with CEN 1 reaches the model: SMS 0111 stops the internal clock at once")
+{
+  slaves t;
+  t.base("TIM3", 0, 0xffff);
+  t.enable("TIM3");
+  t.at(100);
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+  t.at(200);
+  CHECK(t.count("TIM3") == 100);
+}
+
+TEST_CASE("external clock mode 1 counts one tick per PSC + 1 master updates")
+{
+  slaves t;
+  t.base("TIM1", 0, 9);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 2, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(85);
+  CHECK(t.count("TIM3") == 2);
+  CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+  t.at(95);
+  CHECK(t.count("TIM3") == 3);
+}
+
+TEST_CASE("external clock mode 1 with ARR 4 updates once per 5 master updates")
+{
+  slaves t;
+  t.base("TIM1", 0, 9);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 0, 4);
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(45);
+  CHECK(t.count("TIM3") == 4);
+  CHECK(t.bits("TIM3", "SR", "UIF") == 0);
+  t.at(75);
+  CHECK(t.count("TIM3") == 2);
+  CHECK(t.bits("TIM3", "SR", "UIF") == 1);
+}
+
+TEST_CASE("UG clears the external clock prescaler progress")
+{
+  slaves t;
+  t.base("TIM1", 0, 9);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 2, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(25);
+  t.write("TIM3", "EGR", 1);
+  t.at(35);
+  CHECK(t.count("TIM3") == 0);
+  t.at(55);
+  CHECK(t.count("TIM3") == 1);
+}
+
+TEST_CASE("an external clock slave counts only its own master, whatever is read in between")
+{
+  auto const run = [](bool reads) {
+    slaves t;
+    t.base("TIM1", 0, 9);
+    t.master("TIM1", master_update);
+    t.base("TIM4", 0, 6);
+    t.master("TIM4", master_update);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+    t.enable("TIM3");
+    t.enable("TIM4");
+    t.enable("TIM1");
+    for(std::uint64_t ticks = 3; ticks < 200; ticks += 7)
+    {
+      t.at(ticks);
+      if(reads)
+      {
+        static_cast<void>(t.count("TIM1"));
+        static_cast<void>(t.count("TIM4"));
+      }
+    }
+    t.at(205);
+    return t.count("TIM3");
+  };
+  CHECK(run(false) == 20);
+  CHECK(run(true) == 20);
+}
+
+TEST_CASE("trigger mode starts TIM5 at the master's update and counts from that time")
+{
+  slaves t;
+  t.base("TIM4", 0, 99);
+  t.master("TIM4", master_update);
+  t.base("TIM5", 0, 0xffff'ffff);
+  t.write("TIM5", "SMCR", smcr(sms_trigger, ts_itr3));
+  t.enable("TIM4");
+  t.at(150);
+  CHECK(t.bits("TIM5", "CR1", "CEN") == 1);
+  CHECK(t.bits("TIM5", "SR", "TIF") == 1);
+  CHECK(t.count("TIM5") == 50);
+}
+
+TEST_CASE("reset mode clears the count and sets TIF at the master's update")
+{
+  slaves t;
+  t.base("TIM1", 0, 99);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_reset, ts_itr0));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(130);
+  CHECK(t.count("TIM3") == 30);
+  CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+  CHECK(t.bits("TIM3", "SR", "UIF") == 1);
+}
+
+TEST_CASE("reset + trigger mode reinitialises and starts a stopped counter")
+{
+  slaves t;
+  t.base("TIM1", 0, 99);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CNT", 500);
+  t.write("TIM3", "SMCR", smcr(sms_reset_trigger, ts_itr0));
+  t.enable("TIM1");
+  t.at(130);
+  CHECK(t.bits("TIM3", "CR1", "CEN") == 1);
+  CHECK(t.count("TIM3") == 30);
+  CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+}
+
+TEST_CASE("gated mode on an MMS 001 master counts only while the master's CEN is 1")
+{
+  SUBCASE("edges")
+  {
+    slaves t;
+    t.base("TIM1", 0, 0xffff);
+    t.master("TIM1", master_enable);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+    t.enable("TIM3");
+    t.at(20);
+    CHECK(t.count("TIM3") == 0);
+    t.enable("TIM1");
+    CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+    t.write("TIM3", "SR", 0);
+    t.at(50);
+    CHECK(t.count("TIM3") == 30);
+    t.enable("TIM1", false);
+    CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+    t.at(80);
+    CHECK(t.count("TIM3") == 30);
+  }
+  SUBCASE("master already running at the SMCR write")
+  {
+    slaves t;
+    t.base("TIM1", 0, 0xffff);
+    t.master("TIM1", master_enable);
+    t.enable("TIM1");
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+    t.enable("TIM3");
+    t.at(10);
+    CHECK(t.count("TIM3") == 0);
+    t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+    t.at(40);
+    CHECK(t.count("TIM3") == 30);
+  }
+  SUBCASE("the master leaving MMS 001 closes the gate")
+  {
+    slaves t;
+    t.base("TIM1", 0, 0xffff);
+    t.master("TIM1", master_enable);
+    t.enable("TIM1");
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+    t.enable("TIM3");
+    t.at(30);
+    t.write("TIM3", "SR", 0);
+    t.master("TIM1", master_update);
+    CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+    t.at(60);
+    CHECK(t.count("TIM3") == 30);
+  }
+}
+
+TEST_CASE(
+    "gated mode entered at a one-pulse master's last update reads the level after that update")
+{
+  slaves t;
+  t.base("TIM1", 0, 99);
+  t.master("TIM1", master_enable);
+  t.write("TIM1", "CR1", 1u << 3);
+  t.enable("TIM1");
+  t.base("TIM3", 0, 0xffff);
+  t.at(100);
+  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+  t.enable("TIM3");
+  t.at(150);
+  CHECK(t.bits("TIM1", "CR1", "CEN") == 0);
+  CHECK(t.count("TIM3") == 0);
+}
+
+TEST_CASE("gated mode on an MMS 010 master holds, sets no TIF and logs once")
+{
+  slaves t;
+  t.base("TIM1", 0, 9);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(105);
+  CHECK(t.count("TIM3") == 0);
+  CHECK(t.bits("TIM3", "SR", "TIF") == 0);
+  CHECK(t.warnings() == 1);
+}
+
+TEST_CASE("gated + reset mode clears the count when the gate closes")
+{
+  slaves t;
+  t.base("TIM1", 0, 0xffff);
+  t.master("TIM1", master_enable);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_gated_reset, ts_itr0));
+  t.enable("TIM3");
+  t.at(20);
+  t.enable("TIM1");
+  t.at(50);
+  CHECK(t.count("TIM3") == 30);
+  t.enable("TIM1", false);
+  t.at(80);
+  CHECK(t.count("TIM3") == 0);
+  t.enable("TIM1");
+  t.at(90);
+  CHECK(t.count("TIM3") == 10);
+}
+
+TEST_CASE(
+    "a TIM2 and TIM3 reset mode cycle terminates, each timer logs its dropped edge once"
+    * doctest::timeout(10))
+{
+  slaves t;
+  for(auto const* const tim : {"TIM2", "TIM3"})
+  {
+    t.base(tim, 0, 99);
+    t.master(tim, master_update);
+  }
+  t.write("TIM2", "SMCR", smcr(sms_reset, ts_itr2));
+  t.write("TIM3", "SMCR", smcr(sms_reset, ts_itr1));
+  t.enable("TIM2");
+  t.at(50);
+  t.enable("TIM3");
+  t.at(1'050);
+  CHECK(t.count("TIM2") == 50);
+  CHECK(t.count("TIM3") == 50);
+  REQUIRE(t.warnings() == 2);
+  CHECK(t.logged[0].peripheral == "TIM2");
+  CHECK(t.logged[1].peripheral == "TIM3");
+}
+
+TEST_CASE("a TIM2 and TIM3 external clock cycle drops the closing edge and keeps the UG")
+{
+  slaves t;
+  for(auto const* const tim : {"TIM2", "TIM3"})
+  {
+    t.base(tim, 0, 1);
+    t.master(tim, master_update);
+    t.write(tim, "CNT", 1);
+  }
+  t.write("TIM2", "SMCR", smcr(sms_external, ts_itr2));
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr1));
+  t.enable("TIM2");
+  t.enable("TIM3");
+  t.write("TIM2", "EGR", 1);
+  CHECK(t.count("TIM2") == 0);
+  CHECK(t.count("TIM3") == 0);
+  CHECK(t.bits("TIM3", "SR", "UIF") == 1);
+  CHECK(t.warnings() == 1);
+}
+
+TEST_CASE("external clock mode 1 on ITR7, tim16_oc1, holds and logs once")
+{
+  slaves t;
+  t.base("TIM1", 0, 9);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr7));
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr7));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(100);
+  CHECK(t.count("TIM3") == 0);
+  CHECK(t.warnings() == 1);
+}
+
+namespace
+{
+struct tim_state_fields
+{
+  std::uint64_t                anchor_ps{};
+  std::uint64_t                anchor_frac{};
+  std::uint64_t                hz{};
+  std::uint64_t                due_ps{};
+  std::uint64_t                carry{};
+  std::uint32_t                generation{};
+  std::uint32_t                count{};
+  std::uint32_t                repetition{};
+  std::uint32_t                prescaler{};
+  std::uint32_t                reload{};
+  std::uint32_t                edges{};
+  std::array<std::uint32_t, 4> compare{};
+  std::array<std::uint8_t, 4>  compare_request{};
+  std::uint8_t                 update_request{};
+  std::uint8_t                 down{};
+  std::uint8_t                 scheduled{};
+  std::uint8_t                 gate{};
+};
+
+struct tim_state_without_edges
+{
+  std::uint64_t                anchor_ps{};
+  std::uint64_t                anchor_frac{};
+  std::uint64_t                hz{};
+  std::uint64_t                due_ps{};
+  std::uint64_t                carry{};
+  std::uint32_t                generation{};
+  std::uint32_t                count{};
+  std::uint32_t                repetition{};
+  std::uint32_t                prescaler{};
+  std::uint32_t                reload{};
+  std::array<std::uint32_t, 4> compare{};
+  std::array<std::uint8_t, 4>  compare_request{};
+  std::uint8_t                 update_request{};
+  std::uint8_t                 down{};
+  std::uint8_t                 scheduled{};
+  std::uint8_t                 gate{};
+};
+
+struct tim_state_without_gate
+{
+  std::uint64_t                anchor_ps{};
+  std::uint64_t                anchor_frac{};
+  std::uint64_t                hz{};
+  std::uint64_t                due_ps{};
+  std::uint64_t                carry{};
+  std::uint32_t                generation{};
+  std::uint32_t                count{};
+  std::uint32_t                repetition{};
+  std::uint32_t                prescaler{};
+  std::uint32_t                reload{};
+  std::uint32_t                edges{};
+  std::array<std::uint32_t, 4> compare{};
+  std::array<std::uint8_t, 4>  compare_request{};
+  std::uint8_t                 update_request{};
+  std::uint8_t                 down{};
+  std::uint8_t                 scheduled{};
+};
+
+template <typename To, typename From> auto narrowed(From const& from) -> To
+{
+  To             to{};
+  constexpr auto access = std::meta::access_context::unchecked();
+  template for(constexpr auto out :
+               std::define_static_array(std::meta::nonstatic_data_members_of(^^To, access)))
+  {
+    template for(constexpr auto in :
+                 std::define_static_array(std::meta::nonstatic_data_members_of(^^From, access)))
+    {
+      if constexpr(std::meta::identifier_of(out) == std::meta::identifier_of(in))
+      {
+        to.[:out:] = from.[:in:];
+      }
+    }
+  }
+  return to;
+}
+
+auto saved_state(stm32_fixture const& f, std::string_view tim) -> tim_state_fields
+{
+  std::vector<std::byte> bytes;
+  f.target->model(tim)->save(bytes);
+  return reflex::serde::bson::deserializer{std::span<std::byte const>{bytes}}
+      .load<tim_state_fields>();
+}
+}
+
+TEST_CASE("a TIM state saved before the external clock prescaler count loads it as 0")
+{
+  slaves t;
+  t.base("TIM1", 0, 9);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 2, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(25);
+  auto const now = saved_state(t.f, "TIM3");
+  CHECK(now.edges == 2);
+  std::vector<std::byte> old;
+  reflex::serde::bson::serializer{old}.dump(narrowed<tim_state_without_edges>(now));
+  t.f.target->model("TIM3")->load(old);
+  CHECK(saved_state(t.f, "TIM3").edges == 0);
+  t.at(45);
+  CHECK(t.count("TIM3") == 0);
+}
+
+TEST_CASE("a TIM state saved before the gate loads it closed")
+{
+  slaves t;
+  t.base("TIM1", 0, 0xffff);
+  t.master("TIM1", master_enable);
+  t.enable("TIM1");
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+  t.enable("TIM3");
+  t.at(10);
+  auto const now = saved_state(t.f, "TIM3");
+  CHECK(now.gate == 1);
+  std::vector<std::byte> old;
+  reflex::serde::bson::serializer{old}.dump(narrowed<tim_state_without_gate>(now));
+  t.f.target->model("TIM3")->load(old);
+  CHECK(saved_state(t.f, "TIM3").gate == 0);
+}
+
+TEST_CASE("a gated MMS 001 master gives its gate to its own gated slave")
+{
+  slaves t;
+  t.base("TIM1", 0, 0xffff);
+  t.master("TIM1", master_enable);
+  t.base("TIM2", 0, 0xffff);
+  t.write("TIM2", "SMCR", smcr(sms_gated, ts_itr0));
+  t.master("TIM2", master_enable);
+  t.enable("TIM2");
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr1));
+  t.enable("TIM3");
+  t.at(20);
+  CHECK(t.count("TIM3") == 0);
+  t.enable("TIM1");
+  t.at(50);
+  CHECK(t.count("TIM2") == 30);
+  CHECK(t.count("TIM3") == 30);
+  t.enable("TIM1", false);
+  t.at(80);
+  CHECK(t.count("TIM2") == 30);
+  CHECK(t.count("TIM3") == 30);
+}
+
+TEST_CASE("a gated slave samples its master again when its clock comes back")
+{
+  for(auto const mode : {sms_gated, sms_gated_reset})
+  {
+    CAPTURE(mode);
+    slaves t;
+    t.base("TIM1", 0, 0xffff);
+    t.master("TIM1", master_enable);
+    t.enable("TIM1");
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(mode, ts_itr0));
+    t.enable("TIM3");
+    t.at(20);
+    t.b.set("RCC", "RCC_APB1ENR1", "TIM3EN", 0);
+    t.at(30);
+    t.enable("TIM1", false);
+    t.at(40);
+    t.b.set("RCC", "RCC_APB1ENR1", "TIM3EN", 1);
+    t.at(70);
+    CHECK(t.count("TIM3") == (mode == sms_gated ? 20u : 0u));
+  }
+}
+
+TEST_CASE("a past edge starts or resets the counter at the edge's time")
+{
+  SUBCASE("trigger")
+  {
+    slaves t;
+    t.base("TIM4", 0, 99);
+    t.master("TIM4", master_update);
+    t.base("TIM5", 0, 0xffff'ffff);
+    t.write("TIM5", "SMCR", smcr(sms_trigger, ts_itr3));
+    t.at(150);
+    auto* const sink = dynamic_cast<stm32::trigger_sink*>(t.f.target->model("TIM5"));
+    REQUIRE(sink != nullptr);
+    sink->triggered("tim4_trgo", stm32::trigger_edge::rising, t.start + 100 * tick_ps);
+    CHECK(t.bits("TIM5", "CR1", "CEN") == 1);
+    CHECK(t.count("TIM5") == 50);
+  }
+  SUBCASE("reset")
+  {
+    slaves t;
+    t.base("TIM1", 0, 0xffff);
+    t.master("TIM1", master_update);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_reset, ts_itr0));
+    t.enable("TIM3");
+    t.at(150);
+    auto* const sink = dynamic_cast<stm32::trigger_sink*>(t.f.target->model("TIM3"));
+    REQUIRE(sink != nullptr);
+    sink->triggered("tim1_trgo", stm32::trigger_edge::rising, t.start + 100 * tick_ps);
+    CHECK(t.count("TIM3") == 50);
+  }
+}
+
+TEST_CASE("a gated slave with CEN 0 still follows its master, so a later CEN finds the gate shut")
+{
+  slaves t;
+  t.base("TIM1", 0, 0xffff);
+  t.master("TIM1", master_enable);
+  t.enable("TIM1");
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+  t.at(10);
+  t.enable("TIM1", false);
+  t.at(20);
+  t.enable("TIM3");
+  t.at(50);
+  CHECK(t.count("TIM3") == 0);
+}
+
+TEST_CASE("a gated slave configured before its master's MMS logs nothing and counts")
+{
+  slaves t;
+  t.base("TIM1", 0, 0xffff);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+  t.enable("TIM3");
+  t.master("TIM1", master_enable);
+  t.at(10);
+  t.enable("TIM1");
+  t.at(30);
+  CHECK(t.count("TIM3") == 20);
+  CHECK(t.warnings() == 0);
+}
+
+TEST_CASE("a CEN clear and an SMS change clear the external clock prescaler progress")
+{
+  for(auto const via_sms : {false, true})
+  {
+    CAPTURE(via_sms);
+    slaves t;
+    t.base("TIM1", 0, 9);
+    t.master("TIM1", master_update);
+    t.base("TIM3", 2, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+    t.enable("TIM3");
+    t.enable("TIM1");
+    t.at(25);
+    if(via_sms)
+    {
+      t.write("TIM3", "SMCR", 0);
+      t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+    }
+    else
+    {
+      t.enable("TIM3", false);
+      t.enable("TIM3");
+    }
+    t.at(35);
+    CHECK(t.count("TIM3") == 0);
+    t.at(55);
+    CHECK(t.count("TIM3") == 1);
+  }
 }

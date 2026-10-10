@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -91,6 +92,13 @@ public:
    * @param signal Signal name.
    */
   [[nodiscard]] virtual auto produces(std::string_view signal) const -> bool = 0;
+
+  /**
+   * @brief Level of @p signal now, for sinks that gate on it.
+   * @param signal Signal name.
+   * @return The level, empty when the signal carries pulses rather than a level.
+   */
+  [[nodiscard]] virtual auto level(std::string_view signal) const -> std::optional<bool> = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */

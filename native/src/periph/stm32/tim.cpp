@@ -5,6 +5,8 @@
 
 #include <popcorn/core/clock.hpp>
 
+#include <reflex/enum.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -33,6 +35,75 @@ constexpr std::uint32_t master_enable        = 1;
 constexpr std::uint32_t master_update        = 2;
 constexpr std::uint32_t master_compare_pulse = 3;
 
+enum class slave_mode : std::uint8_t
+{
+  disabled      = 0b0000,
+  encoder1      = 0b0001,
+  encoder2      = 0b0010,
+  encoder3      = 0b0011,
+  reset         = 0b0100,
+  gated         = 0b0101,
+  trigger       = 0b0110,
+  external1     = 0b0111,
+  reset_trigger = 0b1000,
+  gated_reset   = 0b1001,
+};
+
+constexpr std::array<std::pair<std::uint32_t, std::string_view>, 7> internal_triggers{
+    {
+     {0, "tim1"},
+     {1, "tim2"},
+     {2, "tim3"},
+     {3, "tim4"},
+     {8, "tim5"},
+     {9, "tim8"},
+     {10, "tim15"},
+     }
+};
+
+[[nodiscard]] constexpr auto modelled(std::uint32_t mode) -> bool
+{
+  using enum slave_mode;
+  return mode == std::to_underlying(reset)
+      or mode == std::to_underlying(gated)
+      or mode == std::to_underlying(trigger)
+      or mode == std::to_underlying(external1)
+      or mode == std::to_underlying(reset_trigger)
+      or mode == std::to_underlying(gated_reset);
+}
+
+[[nodiscard]] constexpr auto gating(std::uint32_t mode) -> bool
+{
+  return mode == std::to_underlying(slave_mode::gated)
+      or mode == std::to_underlying(slave_mode::gated_reset);
+}
+
+[[nodiscard]] constexpr auto encoding(std::uint32_t mode) -> bool
+{
+  return (mode >= std::to_underlying(slave_mode::encoder1)
+          and mode <= std::to_underlying(slave_mode::encoder3))
+      or mode >= 0b1010;
+}
+
+class reacting_scope
+{
+public:
+  explicit reacting_scope(bool& flag) : flag_{flag}, was_{std::exchange(flag, true)}
+  {}
+  reacting_scope(reacting_scope const&)                    = delete;
+  auto operator=(reacting_scope const&) -> reacting_scope& = delete;
+  reacting_scope(reacting_scope&&)                         = delete;
+  auto operator=(reacting_scope&&) -> reacting_scope&      = delete;
+  ~reacting_scope()
+  {
+    flag_ = was_;
+  }
+
+private:
+  bool& flag_;
+  bool  was_;
+};
+
 struct tim_state
 {
   std::uint64_t                           anchor_ps{};
@@ -45,11 +116,13 @@ struct tim_state
   std::uint32_t                           repetition{};
   std::uint32_t                           prescaler{};
   std::uint32_t                           reload{};
+  std::uint32_t                           edges{};
   std::array<std::uint32_t, max_channels> compare{};
   std::array<std::uint8_t, max_channels>  compare_request{};
   std::uint8_t                            update_request{};
   std::uint8_t                            down{};
   std::uint8_t                            scheduled{};
+  std::uint8_t                            gate{};
 
   friend auto operator==(tim_state const&, tim_state const&) -> bool = default;
 };
@@ -94,23 +167,42 @@ auto lower(std::string_view name) -> std::string
  *        the sum of the description's CNT fields. With UDE or CCxDE the `<instance>_upd_dma` and
  *        `<instance>_ccx_dma` requests rise with their event, and any DMA access to the timer
  *        releases them all. The trigger output `<instance>_trgo` gives its edges to every
- *        listening trigger_sink as CR2.MMS selects. MMS 001 is the CEN level: a rising edge when
- *        CEN sets, a falling edge when it clears, by a write or at the one-pulse update. MMS 000,
+ *        listening trigger_sink as CR2.MMS selects. MMS 001 is the counter enable level, CEN and,
+ *        in gated modes, the gate: a rising edge when it sets, a falling edge when it clears, by a
+ *        write, at the one-pulse update or at a gate edge. MMS 000,
  *        010 and 011 are positive pulses one timer kernel clock wide, rising at the event and
  *        falling one clock later: 000 at each UG write, 010 at each update event, a UG one
  *        included whatever URS, 011 at each CC1IF set by a match or a capture. Each edge carries
  *        the time of its event. While a sink listens under MMS 010 or 011,
  *        every update or CC1 match is scheduled at its own time instead of being skipped. MMS
- *        100 and above, MMS2 and TRGO2 log a warning once and pulse nothing. Deviations: an ARR
- *        written below the count lets the counter run to its maximum and wrap with no update, a
- *        count written above ARR in center-aligned mode does the same, and UIFREMAP puts UIFCPY
- *        in bit 31 only where the description names a UIFCPY field, not on the 32-bit TIM2 to
- *        TIM5. Not modelled, logged once when the counter starts: slave modes, input capture
- *        edges, dithering, CCDS. DMA burst mode is not modelled, logged once when DCR selects it.
+ *        100 and above, MMS2 and TRGO2 log a warning once and pulse nothing. The slave mode
+ *        controller, RM0456 55.4 "Slave mode" and TIMx_SMCR, listens as a trigger_sink to the
+ *        `<instance>_trgo` that TS selects among the internal triggers ITR0 TIM1, ITR1 TIM2, ITR2
+ *        TIM3, ITR3 TIM4, ITR4 TIM5, ITR5 TIM8 and ITR6 TIM15. Reset mode reinitialises the
+ *        counter and its prescaler at a rising edge, with the update event URS allows. Trigger
+ *        mode sets CEN at a rising edge and counts from the edge's time. Reset + trigger does
+ *        both. External clock mode 1 counts one tick per PSC + 1 rising edges, at the edge's time,
+ *        and never on the timer clock. Gated mode counts on the timer clock while the master's
+ *        level is high, a level only an MMS 001 master gives: under a pulsing master the counter
+ *        holds and one warning is logged at its first rising edge. The gate is sampled again when
+ *        the timer clock comes back. Gated + reset also reinitialises the counter when the
+ *        gate closes. Every slave edge sets TIF, gate openings and closings included. ITR7,
+ *        ITR8, ITR11, a timer's own ITR, the reserved codes and the timer input pins reach
+ *        nothing: the slave holds and one warning is logged. Deviations: an ARR written below the
+ *        count lets the counter run to its maximum and wrap with no update, a count written above
+ *        ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
+ *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
+ *        between timers drops the edge that would re-enter a timer still reacting to its own
+ *        event, logged once per timer, where hardware would oscillate with a few clocks of
+ *        resynchronisation delay per hop. Not modelled, logged once when the counter starts:
+ *        encoder modes, which count on the timer clock, SMSPE, input capture edges, dithering,
+ *        CCDS. TDE logs once and raises no trigger DMA request. DMA burst mode is not modelled,
+ *        logged once when DCR selects it.
  */
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,
-                  public trigger_source
+                  public trigger_source,
+                  public trigger_sink
 {
 public:
   tim(model_context& ctx, peripheral_desc const& desc);
@@ -129,9 +221,14 @@ public:
   void               on_clock_change() override;
   void               interest_changed() override;
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
+  [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
 
   void                           control_written(std::uint32_t old, std::uint32_t now);
   void                           master_written(std::uint32_t old, std::uint32_t now);
+  void                           slave_written(std::uint32_t old, std::uint32_t now);
+  void                           interrupts_written(std::uint32_t old, std::uint32_t now);
   void                           status_written(std::uint32_t old, std::uint32_t now);
   void                           event_written(std::uint32_t old, std::uint32_t now);
   void                           counter_written(std::uint32_t old, std::uint32_t now);
@@ -149,6 +246,15 @@ private:
   [[nodiscard]] auto counting_up() const -> bool;
   [[nodiscard]] auto active() const -> bool;
   [[nodiscard]] auto counting() const -> bool;
+  [[nodiscard]] auto running() const -> bool;
+  [[nodiscard]] auto internally_clocked() const -> bool;
+  [[nodiscard]] auto gate_open() const -> bool;
+  [[nodiscard]] auto counter_enabled() const -> bool;
+  [[nodiscard]] auto input_level(std::uint32_t smcr) const -> std::optional<bool>;
+  [[nodiscard]] auto slave_of(std::uint32_t smcr) const -> std::uint32_t;
+  [[nodiscard]] auto slave() const -> std::uint32_t;
+  [[nodiscard]] auto trigger_select_of(std::uint32_t smcr) const -> std::uint32_t;
+  [[nodiscard]] auto input_of(std::uint32_t smcr) const -> std::optional<std::string_view>;
   [[nodiscard]] auto flagged_when(bool up) const -> bool;
   [[nodiscard]] auto anchor() const -> wide;
   [[nodiscard]] auto tick_unit() const -> wide;
@@ -171,8 +277,14 @@ private:
   void rebase(std::uint64_t ps, std::uint64_t hz);
   void advance(std::uint64_t ticks);
   void catch_up(std::uint64_t ps);
-  void visit(std::uint64_t ticks);
-  void wrap();
+  void visit(std::uint64_t ticks, std::optional<std::uint64_t> at = std::nullopt);
+  void wrap(std::uint64_t at);
+  void external_tick(std::uint64_t at);
+  void reinitialise(std::uint64_t at);
+  void begin(std::uint64_t at);
+  void gate(std::string_view signal, trigger_edge edge, bool closing_resets, std::uint64_t at);
+  void enable_changed(bool was, std::uint64_t at);
+  void slave_settled(std::optional<std::string_view> before, std::uint32_t smcr);
   void skip_groups(std::uint64_t groups);
   void update_event(bool software, std::uint64_t at);
   void pulse_trgo(std::uint64_t at);
@@ -220,6 +332,19 @@ private:
   std::optional<field_ref>                     master_high_;
   std::optional<field_ref>                     master2_;
   std::optional<trigger_output>                trgo_;
+  std::string                                  instance_;
+  std::optional<field_ref>                     slave_;
+  std::optional<field_ref>                     slave_high_;
+  std::optional<field_ref>                     select_;
+  std::optional<field_ref>                     select_high_;
+  std::optional<field_ref>                     slave_preload_;
+  std::optional<field_ref>                     trigger_flag_;
+  std::optional<field_ref>                     trigger_dma_;
+  bool                                         reacting_{};
+  bool                                         cycle_logged_{};
+  bool                                         unrouted_logged_{};
+  bool                                         gate_logged_{};
+  bool                                         trigger_dma_logged_{};
   bool                                         unsupported_logged_{};
   bool                                         burst_logged_{};
   bool                                         master_logged_{};
@@ -238,11 +363,12 @@ auto compare_entries(std::string_view prefix, std::index_sequence<Ch...>)
 
 auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
 {
-  static constexpr std::array<write_entry<tim>, 11> plain{
+  static constexpr std::array<write_entry<tim>, 12> plain{
       {
        {"CR1", &tim::control_written},
        {"CR2", &tim::master_written},
-       {"DIER", &tim::plain_written},
+       {"SMCR", &tim::slave_written},
+       {"DIER", &tim::interrupts_written},
        {"SR", &tim::status_written},
        {"EGR", &tim::event_written},
        {"CNT", &tim::counter_written},
@@ -253,11 +379,12 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
        {"DMAR", &tim::plain_written},
        }
   };
-  static constexpr std::array<write_entry<tim>, 11> prefixed{
+  static constexpr std::array<write_entry<tim>, 12> prefixed{
       {
        {"TIM1_CR1", &tim::control_written},
        {"TIM1_CR2", &tim::master_written},
-       {"TIM1_DIER", &tim::plain_written},
+       {"TIM1_SMCR", &tim::slave_written},
+       {"TIM1_DIER", &tim::interrupts_written},
        {"TIM1_SR", &tim::status_written},
        {"TIM1_EGR", &tim::event_written},
        {"TIM1_CNT", &tim::counter_written},
@@ -276,6 +403,7 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
   for(auto const& entry : prefix.empty() ? plain : prefixed)
   {
     auto const optional = entry.reg.ends_with("CR2")
+                       or entry.reg.ends_with("SMCR")
                        or entry.reg.ends_with("RCR")
                        or entry.reg.ends_with("DCR")
                        or entry.reg.ends_with("DMAR");
@@ -327,11 +455,26 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
       burst_length_{optional_field(name("DCR"), "DBL")},
       burst_base_{optional_field(name("DCR"), "DBA")}, master_{optional_field(name("CR2"), "MMS")},
       master_high_{optional_field(name("CR2"), "MMS_3")},
-      master2_{optional_field(name("CR2"), "MMS2")}
+      master2_{optional_field(name("CR2"), "MMS2")}, instance_{lower(desc.name)},
+      slave_{optional_field(name("SMCR"), "SMS")}, select_{optional_field(name("SMCR"), "TS")},
+      slave_preload_{optional_field(name("SMCR"), "SMSPE")},
+      trigger_dma_{optional_field(name("DIER"), "TDE")}
 {
   if(not master_high_)
   {
     master_high_ = optional_field(name("CR2"), "MMS_1");
+  }
+  for(auto const bits : {"SMS_1", "SMS_bit3", "SMS_3"})
+  {
+    slave_high_ = slave_high_ ? slave_high_ : optional_field(name("SMCR"), bits);
+  }
+  for(auto const bits : {"TS_1", "TS_4_3"})
+  {
+    select_high_ = select_high_ ? select_high_ : optional_field(name("SMCR"), bits);
+  }
+  if(slave_)
+  {
+    trigger_flag_ = field(name("SR"), "TIF");
   }
   std::uint32_t top = 0;
   for(auto const& bits : describe(name("CNT")).fields)
@@ -345,8 +488,8 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
   {
     missing(std::format("{}.CNT", name("CNT")));
   }
-  mask_               = top >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << top) - 1u;
-  auto const instance = lower(desc.name);
+  mask_                = top >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << top) - 1u;
+  auto const& instance = instance_;
   if(update_dma_)
   {
     update_signal_.emplace(ctx.peers, instance + "_upd_dma");
@@ -448,10 +591,9 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
       generated_.emplace_back(field(name("EGR"), generate_name), field(name("SR"), flag_name));
     }
   }
-  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 4>{
+  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 3>{
           {
-           {"SMCR", "SMS"},
-           {"SMCR", "SMS_bit3"},
+           {"SMCR", "SMSPE"},
            {"CR1", "DITHEN"},
            {"CR2", "CCDS"},
            }
@@ -506,7 +648,85 @@ auto tim::active() const -> bool
 
 auto tim::counting() const -> bool
 {
-  return active() and state_.hz != 0;
+  return running() and state_.hz != 0;
+}
+
+auto tim::running() const -> bool
+{
+  return active() and internally_clocked();
+}
+
+auto tim::internally_clocked() const -> bool
+{
+  auto const mode = slave();
+  if(mode == std::to_underlying(slave_mode::external1))
+  {
+    return false;
+  }
+  return gate_open();
+}
+
+auto tim::gate_open() const -> bool
+{
+  return not gating(slave()) or state_.gate != 0;
+}
+
+auto tim::counter_enabled() const -> bool
+{
+  return get(regs_, enable_) != 0 and gate_open();
+}
+
+auto tim::input_level(std::uint32_t smcr) const -> std::optional<bool>
+{
+  auto const input = input_of(smcr);
+  if(not input)
+  {
+    return std::nullopt;
+  }
+  auto const  signal = std::format("{}_trgo", *input);
+  auto const* source = trigger_source_of(ctx_.peers, signal);
+  return source != nullptr ? source->level(signal) : std::nullopt;
+}
+
+auto tim::slave_of(std::uint32_t smcr) const -> std::uint32_t
+{
+  if(not slave_)
+  {
+    return 0;
+  }
+  auto const high = slave_high_ ? slave_high_->of(smcr) : 0u;
+  return slave_->of(smcr) | (high << slave_->width);
+}
+
+auto tim::slave() const -> std::uint32_t
+{
+  return slave_ ? slave_of(regs_.peek(slave_->offset)) : 0u;
+}
+
+auto tim::trigger_select_of(std::uint32_t smcr) const -> std::uint32_t
+{
+  if(not select_)
+  {
+    return 0;
+  }
+  auto const high = select_high_ ? select_high_->of(smcr) : 0u;
+  return select_->of(smcr) | (high << select_->width);
+}
+
+auto tim::input_of(std::uint32_t smcr) const -> std::optional<std::string_view>
+{
+  if(not modelled(slave_of(smcr)))
+  {
+    return std::nullopt;
+  }
+  auto const found = std::ranges::find(
+      internal_triggers, trigger_select_of(smcr),
+      &std::pair<std::uint32_t, std::string_view>::first);
+  if(found == internal_triggers.end() or found->second == instance_)
+  {
+    return std::nullopt;
+  }
+  return found->second;
 }
 
 auto tim::flagged_when(bool up) const -> bool
@@ -720,7 +940,7 @@ void tim::advance(std::uint64_t ticks)
   state_.anchor_frac = static_cast<std::uint64_t>(at % state_.hz);
 }
 
-void tim::visit(std::uint64_t ticks)
+void tim::visit(std::uint64_t ticks, std::optional<std::uint64_t> at)
 {
   if(ticks == 0)
   {
@@ -738,14 +958,14 @@ void tim::visit(std::uint64_t ticks)
       if(output(ch) and value >= low and value <= high)
       {
         auto const after = up ? value - count : count - value;
-        match(ch, at_ps(anchor() + wide{after} * tick_unit()));
+        match(ch, at ? *at : at_ps(anchor() + wide{after} * tick_unit()));
       }
     }
   }
   state_.count = static_cast<std::uint32_t>(up ? count + ticks : count - ticks);
 }
 
-void tim::wrap()
+void tim::wrap(std::uint64_t at)
 {
   auto const up    = counting_up();
   bool       event = true;
@@ -777,7 +997,7 @@ void tim::wrap()
       state_.repetition = repetition_reload();
       if(get(regs_, no_update_) == 0)
       {
-        update_event(false, at_ps(anchor()));
+        update_event(false, at);
       }
     }
     else
@@ -796,7 +1016,7 @@ void tim::wrap()
     {
       if(output(ch) and compare_value(ch) == next)
       {
-        match(ch, at_ps(anchor()));
+        match(ch, at);
       }
     }
   }
@@ -834,6 +1054,7 @@ void tim::skip_groups(std::uint64_t groups)
 
 void tim::catch_up(std::uint64_t ps)
 {
+  reacting_scope const reacting{reacting_};
   while(counting())
   {
     auto const ticks = ticks_until(ps);
@@ -869,7 +1090,93 @@ void tim::catch_up(std::uint64_t ps)
     }
     visit(to_wrap - 1);
     advance(to_wrap);
-    wrap();
+    wrap(at_ps(anchor()));
+  }
+}
+
+void tim::external_tick(std::uint64_t at)
+{
+  if(++state_.edges <= state_.prescaler)
+  {
+    return;
+  }
+  state_.edges = 0;
+  if(ticks_to_wrap() > 1)
+  {
+    visit(1, at);
+  }
+  else
+  {
+    wrap(at);
+  }
+}
+
+void tim::reinitialise(std::uint64_t at)
+{
+  if(trgo_ and master_mode() == master_reset)
+  {
+    pulse_trgo(at);
+  }
+  if(get(regs_, no_update_) == 0)
+  {
+    update_event(true, at);
+  }
+  state_.repetition = repetition_reload();
+  state_.down       = 0;
+  state_.edges      = 0;
+  state_.count      = counting_up() or center() ? 0 : state_.reload;
+  start_at(at);
+}
+
+void tim::begin(std::uint64_t at)
+{
+  if(get(regs_, enable_) != 0)
+  {
+    return;
+  }
+  auto const was = counter_enabled();
+  update(regs_, enable_, 1);
+  warn_unsupported();
+  start_at(at);
+  enable_changed(was, at);
+}
+
+void tim::gate(std::string_view signal, trigger_edge edge, bool closing_resets, std::uint64_t at)
+{
+  auto const* const source = trigger_source_of(ctx_.peers, signal);
+  auto const        level  = source != nullptr ? source->level(signal) : std::nullopt;
+  if(not level and edge == trigger_edge::rising and not std::exchange(gate_logged_, true))
+  {
+    warn(
+        name("SMCR"), std::format(
+                          "{}: gated mode needs a master in MMS 001, the counter holds",
+                          reflex::enum_value_name(static_cast<slave_mode>(slave()))));
+  }
+  auto const open = level.value_or(false);
+  if(open == (state_.gate != 0))
+  {
+    return;
+  }
+  auto const was = counter_enabled();
+  state_.gate    = open ? 1 : 0;
+  update(regs_, *trigger_flag_, 1);
+  if(open)
+  {
+    start_at(at);
+  }
+  else if(closing_resets)
+  {
+    reinitialise(at);
+  }
+  enable_changed(was, at);
+}
+
+void tim::enable_changed(bool was, std::uint64_t at)
+{
+  auto const now = counter_enabled();
+  if(now != was)
+  {
+    enable_edge(now ? trigger_edge::rising : trigger_edge::falling, at);
   }
 }
 
@@ -895,8 +1202,9 @@ void tim::update_event(bool software, std::uint64_t at)
   }
   if(get(regs_, one_pulse_) != 0 and get(regs_, enable_) != 0)
   {
+    auto const was = counter_enabled();
     update(regs_, enable_, 0);
-    enable_edge(trigger_edge::falling, at);
+    enable_changed(was, at);
   }
 }
 
@@ -1031,8 +1339,9 @@ void tim::warn_unsupported()
   {
     return;
   }
-  auto used =
-      std::ranges::any_of(unsupported_, [&](field_ref bits) { return get(regs_, bits) != 0; });
+  auto used = encoding(slave()) or std::ranges::any_of(unsupported_, [&](field_ref bits) {
+                return get(regs_, bits) != 0;
+              });
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
     used = used or not output(ch);
@@ -1042,8 +1351,8 @@ void tim::warn_unsupported()
     unsupported_logged_ = true;
     warn(
         name("CR1"),
-        "the counter started with a slave mode, an input capture channel, dithering or CCDS "
-        "configured: not modelled, the time base counts on the internal clock");
+        "the counter started with an encoder mode, SMSPE, an input capture channel, dithering or "
+        "CCDS configured: not modelled, the time base counts on the internal clock");
   }
 }
 
@@ -1095,15 +1404,39 @@ auto tim::on_write(
     std::uint32_t  value,
     access_ctx     access) -> std::expected<void, bus_error>
 {
-  auto const ps = now_ps();
+  auto const ps     = now_ps();
+  auto const word   = offset & ~3u;
+  auto const smcr   = slave_ and word == slave_->offset;
+  auto const before = smcr ? input_of(regs.peek(word)) : std::nullopt;
+  auto const after =
+      smcr ? input_of(merge_write(regs.peek(word), offset, size, value)) : std::nullopt;
+  if(before)
+  {
+    static_cast<void>(stm32::interest_changed(ctx_.peers, std::format("{}_trgo", *before)));
+  }
+  if(after and after != before)
+  {
+    static_cast<void>(stm32::interest_changed(ctx_.peers, std::format("{}_trgo", *after)));
+  }
   catch_up(ps);
   if(access.by == initiator::dma)
   {
     acknowledge();
   }
-  auto const was    = active();
-  auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
-  if(not was and active())
+  auto const was     = running();
+  auto const enabled = counter_enabled();
+  auto       result  = std::expected<void, bus_error>{};
+  {
+    reacting_scope const reacting{reacting_};
+    result = dispatch_model::on_write(regs, offset, size, old, value, access);
+  }
+  if(smcr)
+  {
+    slave_settled(before, regs.peek(word));
+    reacting_scope const reacting{reacting_};
+    enable_changed(enabled, ps);
+  }
+  if(not was and running())
   {
     start_at(ps);
   }
@@ -1129,10 +1462,30 @@ void tim::on_clock_change()
   {
     return;
   }
-  auto const ps = now_ps();
+  auto const ps    = now_ps();
+  auto const woken = state_.hz == 0 and hz != 0;
   catch_up(ps);
   rebase(ps, hz);
   state_.scheduled = 0;
+  if(woken and gating(slave()))
+  {
+    auto const was  = counter_enabled();
+    auto const open = input_level(regs_.peek(slave_->offset)).value_or(false);
+    if(open != (state_.gate != 0))
+    {
+      state_.gate = open ? 1 : 0;
+      if(open)
+      {
+        start_at(ps);
+      }
+      else if(slave() == std::to_underlying(slave_mode::gated_reset))
+      {
+        reinitialise(ps);
+      }
+    }
+    reacting_scope const reacting{reacting_};
+    enable_changed(was, ps);
+  }
   settle();
 }
 
@@ -1145,6 +1498,77 @@ void tim::interest_changed()
 auto tim::produces(std::string_view signal) const -> bool
 {
   return trgo_ and trgo_->signal() == signal;
+}
+
+auto tim::level(std::string_view signal) const -> std::optional<bool>
+{
+  if(not produces(signal) or master_mode() != master_enable)
+  {
+    return std::nullopt;
+  }
+  return counter_enabled();
+}
+
+auto tim::listens(std::string_view signal) const -> bool
+{
+  auto const input = slave_ ? input_of(regs_.peek(slave_->offset)) : std::nullopt;
+  return input and signal.starts_with(*input) and signal.substr(input->size()) == "_trgo";
+}
+
+void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps)
+{
+  if(not listens(signal) or ctx_.clock.hz(domain_) == 0)
+  {
+    return;
+  }
+  if(reacting_)
+  {
+    if(not std::exchange(cycle_logged_, true))
+    {
+      warn(name("SMCR"), std::format("trigger cycle through {}: edge dropped", desc_.name));
+    }
+    return;
+  }
+  reacting_scope const reacting{reacting_};
+  catch_up(std::min(at_ps, now_ps()));
+  auto const rising = edge == trigger_edge::rising;
+  auto const mode   = static_cast<slave_mode>(slave());
+  switch(mode)
+  {
+    case slave_mode::reset:
+    case slave_mode::reset_trigger:
+    case slave_mode::trigger:
+      if(rising)
+      {
+        if(mode != slave_mode::trigger)
+        {
+          reinitialise(at_ps);
+        }
+        if(mode != slave_mode::reset)
+        {
+          begin(at_ps);
+        }
+        update(regs_, *trigger_flag_, 1);
+      }
+      break;
+    case slave_mode::external1:
+      if(rising)
+      {
+        update(regs_, *trigger_flag_, 1);
+        if(active())
+        {
+          external_tick(at_ps);
+        }
+      }
+      break;
+    case slave_mode::gated:
+    case slave_mode::gated_reset:
+      gate(signal, edge, mode == slave_mode::gated_reset, at_ps);
+      break;
+    default:
+      break;
+  }
+  settle();
 }
 
 void tim::control_written(std::uint32_t old, std::uint32_t now)
@@ -1160,11 +1584,12 @@ void tim::control_written(std::uint32_t old, std::uint32_t now)
   if(enable_.of(old) == 0 and enable_.of(now) != 0)
   {
     warn_unsupported();
-    enable_edge(trigger_edge::rising, now_ps());
+    enable_changed(false, now_ps());
   }
   if(enable_.of(old) != 0 and enable_.of(now) == 0)
   {
-    enable_edge(trigger_edge::falling, now_ps());
+    state_.edges = 0;
+    enable_changed(gate_open(), now_ps());
   }
 }
 
@@ -1172,7 +1597,7 @@ void tim::master_written(std::uint32_t old, std::uint32_t now)
 {
   auto const mode = master_mode();
   auto const was  = master_mode_of(old);
-  if(trgo_ and get(regs_, enable_) != 0 and (was == master_enable) != (mode == master_enable))
+  if(trgo_ and counter_enabled() and (was == master_enable) != (mode == master_enable))
   {
     trgo_->edge(mode == master_enable ? trigger_edge::rising : trigger_edge::falling, now_ps());
   }
@@ -1185,6 +1610,44 @@ void tim::master_written(std::uint32_t old, std::uint32_t now)
             "MMS {:#06b}{}: master modes above 011 and TRGO2 are not modelled, no trigger "
             "pulses",
             mode, second ? " with MMS2" : ""));
+  }
+}
+
+void tim::slave_written(std::uint32_t old, std::uint32_t now)
+{
+  if(slave_of(old) != slave_of(now))
+  {
+    state_.edges = 0;
+  }
+}
+
+void tim::slave_settled(std::optional<std::string_view> before, std::uint32_t smcr)
+{
+  auto const after = input_of(smcr);
+  if(before and before != after)
+  {
+    static_cast<void>(stm32::interest_changed(ctx_.peers, std::format("{}_trgo", *before)));
+  }
+  auto const signal = after ? std::format("{}_trgo", *after) : std::string{};
+  auto const routed = after and stm32::interest_changed(ctx_.peers, signal);
+  auto const mode   = slave_of(smcr);
+  if(modelled(mode) and not routed and not std::exchange(unrouted_logged_, true))
+  {
+    warn(
+        name("SMCR"),
+        std::format(
+            "SMS {:#06b} TS {}: the trigger input is not modelled, no trigger reaches the "
+            "slave mode controller",
+            mode, trigger_select_of(smcr)));
+  }
+  state_.gate = gating(mode) and input_level(smcr).value_or(false) ? 1 : 0;
+}
+
+void tim::interrupts_written(std::uint32_t, std::uint32_t now)
+{
+  if(trigger_dma_ and trigger_dma_->of(now) != 0 and not std::exchange(trigger_dma_logged_, true))
+  {
+    warn(name("DIER"), "TDE: the trigger DMA request is not modelled");
   }
 }
 
@@ -1218,22 +1681,10 @@ void tim::event_written(std::uint32_t, std::uint32_t now)
       capture(ch, now_ps());
     }
   }
-  if(update_generate_.of(now) == 0)
+  if(update_generate_.of(now) != 0)
   {
-    return;
+    reinitialise(now_ps());
   }
-  if(trgo_ and master_mode() == master_reset)
-  {
-    pulse_trgo(now_ps());
-  }
-  if(get(regs_, no_update_) == 0)
-  {
-    update_event(true, now_ps());
-  }
-  state_.repetition = repetition_reload();
-  state_.down       = 0;
-  state_.count      = counting_up() or center() ? 0 : state_.reload;
-  start_at(now_ps());
 }
 
 void tim::counter_written(std::uint32_t, std::uint32_t now)

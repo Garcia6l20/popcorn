@@ -17,5 +17,8 @@ add_ll_firmware(
         "tim6_clock",
         "tim6_dma",
         "tim6_poll",
+        "tim4_triggers_tim5",
+        "tim1_clocks_tim15",
+        "tim15_unclocked",
     ],
 )
