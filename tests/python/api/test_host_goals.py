@@ -42,7 +42,6 @@ from .conftest import (
     Machines,
     requests_inside,
     run_bounded,
-    stalled,
 )
 from .models_example import Timer
 from .projects import MODEL_ELF, MODEL_JSON
@@ -1799,19 +1798,43 @@ def test_a_wait_refuses_both_for_and_deadline(machines: Machines, name: str) -> 
 def test_a_free_run_deadline_wait_ends_at_its_absolute_time(machines: Machines) -> None:
     m = machines(slice_instructions=1_000)
 
-    async def scenario() -> tuple[VirtualTime, popcorn.Stop, VirtualTime, popcorn.Stop]:
+    async def registered_at_the_boundary[T](
+        post: Callable[[], Coroutine[object, object, T]],
+    ) -> tuple[VirtualTime, T]:
+        release = threading.Event()
+
+        def held() -> VirtualTime:
+            release.wait(HANG)
+            return m.time
+
+        holding = m.sample(held)
+        task = asyncio.create_task(post())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        release.set()
+        return await holding, await task
+
+    async def scenario() -> (
+        tuple[VirtualTime, VirtualTime, popcorn.Stop, VirtualTime, popcorn.Stop]
+    ):
         async with m.running():
             start = await m.sample(lambda: m.time)
-            _, ahead = await stalled(m, lambda: m.wait_for(Never(), deadline=start + ms(3)))
+            await m.elapse(ms(20))
+            first, ahead = await registered_at_the_boundary(
+                lambda: m.wait_for(Never(), deadline=start + ms(25))
+            )
             await m.elapse(ms(2))
-            held, past = await stalled(m, lambda: m.wait_for(Never(), deadline=start + ms(1)))
-        return start, ahead, held, past
+            held, past = await registered_at_the_boundary(
+                lambda: m.wait_for(Never(), deadline=start + ms(1))
+            )
+        return start, first, ahead, held, past
 
-    start, ahead, held, past = run_bounded(scenario(), HANG)
-    assert ahead.time >= start + ms(3)
-    assert held >= start + ms(3)
+    start, first, ahead, held, past = run_bounded(scenario(), 6 * HANG)
+    assert first >= start + ms(20)
+    assert max(first, start + ms(25)) <= ahead.time < first + ms(20)
+    assert held >= start + ms(25)
     assert past.reason is popcorn.StopReason.TIME
-    assert past.time >= held
+    assert held <= past.time < held + us(500)
 
 
 def test_a_deadline_must_be_a_virtual_time(machines: Machines) -> None:
