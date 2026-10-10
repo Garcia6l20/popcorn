@@ -118,6 +118,41 @@ struct single_slice
   bool leave_until{};
 };
 
+/**
+ * @brief Slices a goal for a scheduler that spans several hosts, one member per host. The host
+ *        keeps serving the member's mail, stamps and boundary hook between slices.
+ */
+class member_driver
+{
+public:
+  /** @brief Reads the member's earliest pending stamp in local time, taking in the stamps
+   * posted so far. Valid during plan() only, on the host thread. Takes the host mutex briefly:
+   * call it holding no lock. */
+  using earliest_stamp = std::function_ref<std::optional<vtime>()>;
+
+  virtual ~member_driver() = default;
+
+  /**
+   * @brief Bounds of the next slice, or empty to end the goal. Called on the host thread as the
+   *        engine owner, with no host mutex held. May block, holding nothing, until abort().
+   * @param target The member, the only machine the driver may touch.
+   * @param stamp Reads the earliest pending stamp, which the slice must not pass: the host adds
+   *        no stamp bound of its own. A driver that blocks reads it after its wait, so a stamp
+   *        posted during the wait bounds the slice.
+   */
+  virtual auto plan(machine& target, earliest_stamp stamp) -> std::optional<slice_request> = 0;
+
+  /**
+   * @brief Outcome of the slice plan() returned, a stop_reason::time stop of a request with
+   *        slice_request::internal_stop already cleared. Called on the host thread as the engine
+   *        owner, with no host mutex held.
+   */
+  virtual void ran(machine& target, slice_result const& result) = 0;
+
+  /** @brief Makes a blocked or later plan() return empty soon. Any thread, takes no lock. */
+  virtual void abort() noexcept = 0;
+};
+
 /** @brief A run to a stop, carried across slices by the host as one request. */
 struct run_goal
 {
@@ -149,6 +184,23 @@ struct run_goal
   /** @brief Called once when until_thread is met, before the next slice. An exception it throws
    * fails the goal. Empty for none. */
   std::function<void(machine&)> then_thread{};
+  /** @brief Slices the goal in place of every field above, which stay empty. The goal never ends
+   * on a stop by itself: it yields when plan() returns empty. Empty for a goal the host slices. */
+  std::shared_ptr<member_driver> driver{};
+
+  /** @brief Whether no field but driver is set, as a driver goal needs. */
+  [[nodiscard]] auto driver_only() const noexcept -> bool
+  {
+    return not until
+       and not budget
+       and not exact
+       and not until_time
+       and not stop_when
+       and not once
+       and not finish
+       and not until_thread
+       and not then_thread;
+  }
 };
 
 /** @brief Outcome of a goal. */
@@ -158,7 +210,8 @@ struct goal_result
   stop stopped{};
   /** @brief Instructions the goal executed over all its slices. */
   icount executed{};
-  /** @brief Whether a run_goal::once goal ended its slice without a stop. */
+  /** @brief Whether a run_goal::once goal ended its slice without a stop, or a run_goal::driver
+   * goal ended. */
   bool yielded{};
 };
 
@@ -751,20 +804,30 @@ public:
    *        ends the goal.
    * @return Completes with the stop and the instructions executed, or fails with what a handler
    *         threw, the member parked and resumable either way.
-   * @throws machine_busy when the member is busy.
+   * @throws machine_busy when the member is busy, or linked and @p goal has no driver.
    * @throws machine_closed after close().
    */
   auto run(held_lock const& held, member_id who, run_goal goal)
-      -> host_future<goal_result> pre(held.holds(*this)) pre(who < members());
+      -> host_future<goal_result> pre(held.holds(*this)) pre(who < members())
+          pre(not goal.driver or (goal.driver_only() and members() == 1));
 
   /**
    * @brief Opens a free-run session: slices with no bound but waiter deadlines until halt(). An
    *        idle core sleeps until a request. A stop other than idle, a waiter's time or user stop,
    *        or a handler exception ends the run and is held until halt().
-   * @throws machine_busy when the member is busy.
+   * @throws machine_busy when the member is busy or linked.
    * @throws machine_closed after close().
    */
   void start(held_lock const& held, member_id who) pre(held.holds(*this)) pre(who < members());
+
+  /**
+   * @brief Marks member @p who as a member of a linked system, or no longer one. While linked,
+   *        run() without a driver and start() refuse it. Parked access, post(), withdraw() and
+   *        watch() work as before.
+   * @throws machine_busy when @p on and the member is busy.
+   */
+  void link(held_lock const& held, member_id who, bool on) pre(held.holds(*this))
+      pre(who < members());
 
   /**
    * @brief Waits on the free run of member @p who. A waiter with conditions or a deadline ends
@@ -782,6 +845,7 @@ public:
    *        On a host thread it requests the end and returns. On an abandoned host it returns at
    *        once.
    * @throws machine_running when the thread holds a host mutex.
+   * @throws machine_busy when the member runs a run_goal::driver goal.
    */
   void cancel(member_id who) pre(who < members());
 
@@ -790,6 +854,7 @@ public:
    * @return The park count wait_settled() waits past, empty when there is nothing to wait for:
    *         no goal, an abandoned host, or a host thread caller.
    * @throws machine_running when the thread holds a host mutex.
+   * @throws machine_busy when the member runs a run_goal::driver goal.
    */
   auto request_cancel(member_id who) -> std::optional<std::uint64_t> pre(who < members());
 
@@ -801,6 +866,7 @@ public:
    *         abandoned host, or for a host thread caller of a running member.
    * @throws machine_running when the thread holds a host mutex.
    * @throws machine_busy with @p refuse_goal when a goal runs.
+   * @throws machine_busy when the member runs a run_goal::driver goal.
    */
   auto request_halt(member_id who, bool refuse_goal = false) -> halt_ticket pre(who < members());
 
@@ -886,6 +952,7 @@ public:
    * @return The held end, cleared, when the free run had ended by itself.
    * @throws machine_running when the thread holds a host mutex.
    * @throws machine_busy with @p refuse_goal when a goal runs.
+   * @throws machine_busy when the member runs a run_goal::driver goal.
    */
   auto halt(member_id who, bool refuse_goal = false)
       -> std::optional<held_end> pre(who < members());
@@ -898,7 +965,8 @@ public:
 
   /**
    * @brief Stops the host thread and joins it. Pending requests fail with machine_closed. The
-   *        members stay reachable parked. Safe from several threads at once, one joins and the
+   *        members stay reachable parked. A run_goal::driver is aborted first, so a driver blocked
+   *        in member_driver::plan() returns. Safe from several threads at once, one joins and the
    *        others wait for it. On a host thread it requests the stop and returns: the host
    *        thread then waits until the host is destroyed or closed from another thread.
    * @throws machine_running when the thread holds a host mutex.
