@@ -230,7 +230,7 @@ public:
     auto const              held = hub_->lock();
     if(pipe == s_.in_pipe)
     {
-      channel_->received(result.data, result.at);
+      channel_->received(result.data, result.at, result.ready);
       if(result.status == transfer_status::stalled)
       {
         s_.clear_halt_request = ctx.control(
@@ -399,7 +399,7 @@ struct hub_state
 };
 }
 
-void hid_channel::received(std::span<std::uint8_t const> data, vtime at)
+void hid_channel::received(std::span<std::uint8_t const> data, vtime at, vtime ready)
 {
   if(data.empty())
   {
@@ -407,15 +407,15 @@ void hid_channel::received(std::span<std::uint8_t const> data, vtime at)
   }
   in.push_back({
       .data = {data.begin(), data.end()},
-        .at = at
+        .at = at, .ready = ready
   });
   trimmed(*this);
 }
 
-auto hid_channel::take(std::uint64_t count) -> std::vector<hid_report>
+auto hid_channel::take(std::uint64_t count, vtime until) -> std::vector<hid_report>
 {
   std::vector<hid_report> out;
-  while(count-- != 0 and not in.empty())
+  while(count-- != 0 and not in.empty() and in.front().ready <= until)
   {
     out.push_back(std::move(in.front()));
     in.pop_front();

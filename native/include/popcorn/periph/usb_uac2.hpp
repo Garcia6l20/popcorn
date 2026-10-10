@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -79,6 +80,8 @@ struct uac2_frame
   std::vector<std::int32_t> samples{};
   /** @brief Virtual time of its transaction, whether the device answered or not. */
   vtime at{};
+  /** @brief Virtual time the host queued it: the start of the frame of its transaction. */
+  vtime ready{};
 };
 
 /** @brief A feature unit and what the driver last read from it or wrote to it. */
@@ -149,11 +152,13 @@ struct uac2_stream
   void received(uac2_frame frame);
 
   /**
-   * @brief Takes received frames.
+   * @brief Takes received frames, up to the first queued after @p until.
    * @param count Most frames taken.
+   * @param until Latest `ready` taken.
    * @return The frames, oldest first.
    */
-  auto take(std::uint64_t count) -> std::vector<uac2_frame>;
+  auto take(std::uint64_t count, vtime until = vtime{std::numeric_limits<std::uint64_t>::max()})
+      -> std::vector<uac2_frame>;
 
   /**
    * @brief Sets `limit`, dropping the oldest frames beyond it.

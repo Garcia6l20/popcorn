@@ -252,7 +252,7 @@ private:
   void begin(std::size_t b);
   void take(std::size_t b, std::size_t slot);
   void store(std::size_t b, std::size_t slot, std::size_t source);
-  void finish(std::size_t b, std::uint64_t at_ps);
+  void finish(std::size_t b, std::uint64_t at_ps, std::uint64_t end_ps);
   void halt(std::size_t b);
   void push(std::size_t b, std::uint32_t word);
   void flags();
@@ -807,7 +807,7 @@ void sai::run(std::size_t source, std::uint32_t position)
     {
       if(members[b] and state_.block[b].active)
       {
-        finish(b, start_ps);
+        finish(b, start_ps, end_ps);
       }
     }
     for(std::size_t b = 0; b < blocks; ++b)
@@ -942,7 +942,7 @@ void sai::store(std::size_t b, std::size_t slot, std::size_t source)
   block.fifo.push_back(block.frame[slot] & mask(b));
 }
 
-void sai::finish(std::size_t b, std::uint64_t at_ps)
+void sai::finish(std::size_t b, std::uint64_t at_ps, std::uint64_t end_ps)
 {
   auto& block        = state_.block[b];
   block.active       = false;
@@ -950,7 +950,7 @@ void sai::finish(std::size_t b, std::uint64_t at_ps)
   auto const far_end = wired_[b].endpoint;
   if(not receiver(b) and far_end)
   {
-    far_end->transmitted(frame, format(b), vtime{at_ps});
+    far_end->transmitted(frame, format(b), vtime{at_ps}, vtime{end_ps});
   }
 }
 

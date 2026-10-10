@@ -222,9 +222,15 @@ auto audio_link::queued() const -> std::uint64_t
 
 auto audio_link::drain(std::uint64_t count) -> std::vector<audio_record>
 {
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+}
+
+auto audio_link::drain_until(std::uint64_t count, std::uint64_t until_ps)
+    -> std::vector<audio_record>
+{
   auto& queue = endpoint();
   auto  taken = detail::link_locked(
-      queue, [&](core::link_guard const& held) { return queue.take(held, count); });
+      queue, [&](core::link_guard const& held) { return queue.take(held, count, until_ps); });
   return taken
        | std::views::as_rvalue
        | std::views::transform([](detail::queued_audio_frame&& frame) {

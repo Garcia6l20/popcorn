@@ -457,6 +457,15 @@ public:
   [[= py::doc{"Take at most count of the oldest input reports."}]] auto drain(std::uint64_t count)
       -> std::vector<hid_report_record>;
 
+  /**
+   * @brief Takes the oldest input reports the host queued by @p until_ps, at the start of the
+   *        frame of their transaction, in one hold of the link lock: later reports stay queued.
+   * @param count Most reports taken.
+   * @param until_ps Latest queuing time taken, in picoseconds since reset.
+   */
+  [[= py::doc{"Take at most count of the oldest input reports queued by until_ps."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<hid_report_record>;
+
   /** @brief Input reports dropped because the queue held its limit. */
   [[= py::doc{"Input reports dropped because the queue was full."}]] [[nodiscard]] auto
       dropped() const -> std::uint64_t;
@@ -745,6 +754,16 @@ public:
    */
   [[= py::doc{"Take at most count of the oldest microphone frames."}]] auto
       drain(std::uint64_t count) -> std::vector<uac_frame_record>;
+
+  /**
+   * @brief Takes the oldest microphone frames the host queued by @p until_ps, at the start of
+   *        the frame of their transaction, in one hold of the link lock: later frames stay
+   *        queued.
+   * @param count Most frames taken.
+   * @param until_ps Latest queuing time taken, in picoseconds since reset.
+   */
+  [[= py::doc{"Take at most count of the oldest microphone frames queued by until_ps."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uac_frame_record>;
 
   /** @brief Microphone frames dropped because the queue held its limit. */
   [[= py::doc{"Microphone frames dropped because the queue was full."}]] [[nodiscard]] auto

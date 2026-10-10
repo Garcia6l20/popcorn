@@ -189,6 +189,14 @@ public:
   [[= py::doc{"Take at most count of the oldest transmitted frames."}]] auto
       drain(std::uint64_t count) -> std::vector<audio_record>;
   /**
+   * @brief Takes the oldest transmitted frames that ended by @p until_ps, in one hold of the
+   *        link lock: later frames stay queued.
+   * @param count Most frames taken.
+   * @param until_ps Latest frame end taken, in picoseconds since reset.
+   */
+  [[= py::doc{"Take at most count of the oldest frames that ended by until_ps."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<audio_record>;
+  /**
    * @brief Queues words for a receiving block, one per slot in slot order.
    * @param words Words, inactive slots included.
    */

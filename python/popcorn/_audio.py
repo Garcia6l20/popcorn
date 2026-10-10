@@ -152,6 +152,11 @@ class AudioStream:
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
         past, the wait ends at once.
 
+        A read that waits takes only the frames that ended by the time its wait stopped, in one
+        native step: later frames stay queued for the next read, even those a free run sent
+        before this read resumed. So the frames depend only on what the block sent, the same
+        parked and running. A frame's `at` is its start, one frame time before its end.
+
         Returns:
             Up to `n` frames, fewer when `for_` elapsed, `deadline` passed or the core went
                 idle first.
@@ -165,9 +170,10 @@ class AudioStream:
         check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
-        if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _audio_frames(self._link.drain(n))
+        if self._link.available() >= n:
+            return _audio_frames(self._link.drain(n))
+        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
+        return _audio_frames(self._link.drain_until(n, stop.ps))
 
     def take_frames(self) -> list[AudioFrame]:
         """Every frame the block transmitted and not read yet, at once, never running the

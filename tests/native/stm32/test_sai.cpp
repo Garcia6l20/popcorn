@@ -58,8 +58,9 @@ public:
   std::vector<stm32::captured_audio_frame> frames;
   std::vector<received_call>               calls;
 
-  void transmitted(std::span<std::uint32_t const> slots, stm32::audio_format format, vtime at)
-      override
+  void
+      transmitted(std::span<std::uint32_t const> slots, stm32::audio_format format, vtime at, vtime)
+          override
   {
     frames.push_back({
         .slots = {slots.begin(), slots.end()},

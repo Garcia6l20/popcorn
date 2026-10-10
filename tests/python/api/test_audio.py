@@ -19,7 +19,7 @@ from popcorn import StopReason
 from popcorn.board import AudioFrame, AudioOptions, AudioStream, I2CTarget
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .conftest import run_bounded
+from .conftest import late_drained_read, run_bounded
 from .projects import Silent
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
@@ -624,3 +624,32 @@ def test_an_audio_read_with_a_past_deadline_ends_at_once_while_running(
 
     frames = run_bounded(scenario(), 10)
     assert len(frames) < 10**6
+
+
+def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = sai_machine(u575)
+    m.reg.pc = m.sym("tx_poll") & ~1
+    asyncio.run(m.run(for_=us(500)))
+    m.reg.pc = m.sym("idle") & ~1
+    stream = m.periph.SAI1.audio("A")
+    stream.take_frames()
+    start = m.snapshot()
+
+    async def reads(at: VirtualTime) -> tuple[list[AudioFrame], list[AudioFrame]]:
+        first = await stream.read_frames(10**6, deadline=at + ms(2))
+        return first, await stream.read_frames(10)
+
+    async def running() -> tuple[VirtualTime, tuple[list[AudioFrame], list[AudioFrame]]]:
+        async with m.running():
+            return await late_drained_read(m, lambda _: None, reads)
+
+    at, (first, later) = run_bounded(running(), 10)
+    assert first
+    assert later
+    assert first[-1].at + FRAME <= at + ms(2) < later[0].at + FRAME
+    frames = first + later
+    assert all(b.at - a.at == FRAME for a, b in itertools.pairwise(frames))
+    m.restore(start)
+    assert asyncio.run(reads(at)) == (first, later)

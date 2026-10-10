@@ -28,7 +28,9 @@ from popcorn import _core
 from popcorn.board import (
     CdcLineCoding,
     CdcPacket,
+    HidReport,
     HidStream,
+    UacFrame,
     UsbData,
     UsbHost,
     UsbHostOptions,
@@ -1749,6 +1751,68 @@ def test_mic_take_frames_equals_a_read_of_what_is_available(
     m.restore(start)
     asyncio.run(m.run(for_=ms(5)))
     assert taken == asyncio.run(audio.mic.read_frames(audio.mic.available))
+
+
+def test_a_free_run_hid_deadline_read_takes_what_a_parked_one_takes(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m, host = configured(u575)
+    echo = host.hid(1)
+    asyncio.run(echo.wait_ready(for_=ms(50)))
+    start = m.snapshot()
+
+    def post(at: VirtualTime) -> None:
+        for index in range(20):
+            echo.write_report(bytes([0, index & 0x0F]), at=at + us(1000 + 1000 * index))
+
+    async def reads(at: VirtualTime) -> tuple[list[HidReport], list[HidReport]]:
+        first = await echo.read_reports(100, deadline=at + ms(8))
+        return first, await echo.read_reports(100, deadline=at + ms(60))
+
+    async def running() -> tuple[VirtualTime, tuple[list[HidReport], list[HidReport]]]:
+        async with m.running():
+            return await late_drained_read(m, post, reads)
+
+    at, (first, later) = run_bounded(running(), HANG)
+    assert first
+    assert later
+    assert first[-1].at <= at + ms(9)
+    assert at + ms(8) < later[0].at
+    assert len(first) + len(later) == 20
+    m.restore(start)
+    post(at)
+    assert asyncio.run(reads(at)) == (first, later)
+
+
+def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = audio_machine(u575)
+    mic = m.periph.OTG_FS.host.audio().mic
+
+    async def started() -> None:
+        await m.periph.OTG_FS.host.audio().wait_ready(for_=s(2))
+        await mic.start()
+
+    asyncio.run(started())
+    mic.clear()
+    start = m.snapshot()
+
+    async def reads(at: VirtualTime) -> tuple[list[UacFrame], list[UacFrame]]:
+        first = await mic.read_frames(1000, deadline=at + ms(8))
+        return first, await mic.read_frames(10)
+
+    async def running() -> tuple[VirtualTime, tuple[list[UacFrame], list[UacFrame]]]:
+        async with m.running():
+            return await late_drained_read(m, lambda _: None, reads)
+
+    at, (first, later) = run_bounded(running(), HANG)
+    assert first
+    assert later
+    assert first[-1].at <= at + ms(9)
+    assert at + ms(8) < later[0].at
+    m.restore(start)
+    assert asyncio.run(reads(at)) == (first, later)
 
 
 type Bounded = Callable[[Any, dict[str, Any]], Coroutine[Any, Any, object]]

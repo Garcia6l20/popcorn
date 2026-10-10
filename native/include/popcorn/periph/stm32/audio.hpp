@@ -63,8 +63,13 @@ public:
    * @param slots One word per slot. Inactive slots and slots sent while the FIFO underran are 0.
    * @param format Layout of the words.
    * @param at Virtual time the frame started.
+   * @param end Virtual time the frame ended, the time of the call.
    */
-  virtual void transmitted(std::span<std::uint32_t const> slots, audio_format format, vtime at) = 0;
+  virtual void transmitted(
+      std::span<std::uint32_t const> slots,
+      audio_format                   format,
+      vtime                          at,
+      vtime                          end) = 0;
 
   /**
    * @brief A receiving block takes a frame. Called when the frame's first active slot ends,
@@ -171,7 +176,8 @@ public:
   /** @brief Frames received, in order. */
   std::vector<captured_audio_frame> frames;
 
-  void transmitted(std::span<std::uint32_t const> slots, audio_format format, vtime at) override
+  void transmitted(std::span<std::uint32_t const> slots, audio_format format, vtime at, vtime)
+      override
   {
     frames.push_back({
         .slots = {slots.begin(), slots.end()},
@@ -194,7 +200,7 @@ public:
   explicit audio_source_endpoint(std::vector<std::uint32_t> words) : words_{std::move(words)}
   {}
 
-  void transmitted(std::span<std::uint32_t const>, audio_format, vtime) override
+  void transmitted(std::span<std::uint32_t const>, audio_format, vtime, vtime) override
   {}
 
   void receive(std::span<std::uint32_t> slots, audio_format, vtime) override

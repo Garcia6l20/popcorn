@@ -2,6 +2,8 @@
 
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
+#include <popcorn/periph/usb_hid.hpp>
+#include <popcorn/periph/usb_uac2.hpp>
 
 #include <doctest/doctest.h>
 
@@ -121,7 +123,7 @@ TEST_CASE("an audio queue moves frames and written words across threads without 
   for(std::uint64_t at = 0; at < frames; ++at)
   {
     std::array<std::uint32_t, 2> const slots{static_cast<std::uint32_t>(at), 0};
-    queue.transmitted(slots, stereo, vtime{at});
+    queue.transmitted(slots, stereo, vtime{at}, vtime{at + 1});
     std::array<std::uint32_t, 2> in{};
     queue.receive(in, stereo, vtime{at});
     for(auto const word : in)
@@ -165,7 +167,7 @@ TEST_CASE("an audio queue discarded and trimmed to 1 while the engine fills it s
   for(std::uint64_t at = 0; at < 200'000; ++at)
   {
     std::array<std::uint32_t, 2> const slots{1, 2};
-    queue.transmitted(slots, stereo, vtime{at});
+    queue.transmitted(slots, stereo, vtime{at}, vtime{at + 1});
   }
   done.store(true, std::memory_order_release);
   binding.join();
@@ -319,4 +321,39 @@ TEST_CASE("a CDC channel taken until a time splits only packets received by then
   auto const packets = channel.take_packets(8, vtime{20});
   REQUIRE(packets.size() == 1);
   CHECK(packets.front().at == vtime{20});
+}
+
+TEST_CASE("an audio queue taken until a time takes the frames that ended by then")
+{
+  detail::audio_queue_endpoint       queue;
+  std::array<std::uint32_t, 2> const slots{1, 2};
+  queue.transmitted(slots, stereo, vtime{0}, vtime{64});
+  queue.transmitted(slots, stereo, vtime{64}, vtime{128});
+  auto const held = queue.lock();
+  CHECK(queue.take(held, 8, 100).size() == 1);
+  CHECK(queue.take(held, 8, 127).empty());
+  auto const rest = queue.take(held, 8, 128);
+  REQUIRE(rest.size() == 1);
+  CHECK(rest.front().at_ps == 64);
+}
+
+TEST_CASE("HID reports and microphone frames are taken by the time the host queued them")
+{
+  constexpr std::array<std::uint8_t, 1> report{7};
+  usb::hid_channel                      hid;
+  hid.received(report, vtime{30}, vtime{10});
+  hid.received(report, vtime{60}, vtime{50});
+  auto const reports = hid.take(8, vtime{20});
+  REQUIRE(reports.size() == 1);
+  CHECK(reports.front().at == vtime{30});
+  CHECK(hid.take(8, vtime{49}).empty());
+  CHECK(hid.in.size() == 1);
+  usb::uac2_stream mic;
+  mic.received({.samples = {}, .at = vtime{30}, .ready = vtime{10}});
+  mic.received({.samples = {}, .at = vtime{60}, .ready = vtime{50}});
+  auto const frames = mic.take(8, vtime{20});
+  REQUIRE(frames.size() == 1);
+  CHECK(frames.front().at == vtime{30});
+  CHECK(mic.take(8, vtime{49}).empty());
+  CHECK(mic.in.size() == 1);
 }

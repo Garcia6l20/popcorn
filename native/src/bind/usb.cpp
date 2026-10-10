@@ -583,7 +583,14 @@ auto hid_link::available() const -> std::uint64_t
 
 auto hid_link::drain(std::uint64_t count) -> std::vector<hid_report_record>
 {
-  auto const taken = locked([&](usb::hid_channel& queues) { return queues.take(count); });
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+}
+
+auto hid_link::drain_until(std::uint64_t count, std::uint64_t until_ps)
+    -> std::vector<hid_report_record>
+{
+  auto const taken =
+      locked([&](usb::hid_channel& queues) { return queues.take(count, vtime{until_ps}); });
   return taken
        | std::views::transform([](usb::hid_report const& report) {
            return hid_report_record{.data = report.data, .at_ps = report.at.ps};
@@ -866,7 +873,14 @@ auto uac_link::available() const -> std::uint64_t
 
 auto uac_link::drain(std::uint64_t count) -> std::vector<uac_frame_record>
 {
-  auto taken = locked([&](usb::uac2_channel& queues) { return queues.mic.take(count); });
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+}
+
+auto uac_link::drain_until(std::uint64_t count, std::uint64_t until_ps)
+    -> std::vector<uac_frame_record>
+{
+  auto taken =
+      locked([&](usb::uac2_channel& queues) { return queues.mic.take(count, vtime{until_ps}); });
   return taken
        | std::views::as_rvalue
        | std::views::transform([](usb::uac2_frame&& frame) {

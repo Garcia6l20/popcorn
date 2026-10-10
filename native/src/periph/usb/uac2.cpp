@@ -481,7 +481,7 @@ public:
     if(mic.pipe != 0 and pipe == mic.pipe)
     {
       auto const& alt = s_.alts[mic.alt];
-      uac2_frame  frame{.samples = {}, .at = result.at};
+      uac2_frame  frame{.samples = {}, .at = result.at, .ready = result.ready};
       if(result.status == transfer_status::completed and alt.subslot != 0)
       {
         for(std::size_t at = 0; at + alt.subslot <= result.data.size(); at += alt.subslot)
@@ -1691,10 +1691,10 @@ void uac2_stream::received(uac2_frame frame)
   }
 }
 
-auto uac2_stream::take(std::uint64_t count) -> std::vector<uac2_frame>
+auto uac2_stream::take(std::uint64_t count, vtime until) -> std::vector<uac2_frame>
 {
   std::vector<uac2_frame> out;
-  while(count-- != 0 and not in.empty())
+  while(count-- != 0 and not in.empty() and in.front().ready <= until)
   {
     out.push_back(std::move(in.front()));
     in.pop_front();

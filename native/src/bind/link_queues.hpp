@@ -193,7 +193,8 @@ public:
   void transmitted(
       std::span<std::uint32_t const> slots,
       periph::stm32::audio_format    format,
-      vtime                          at) override
+      vtime                          at,
+      vtime                          end) override
   {
     auto const held = lock();
     trim(held, limit_ - 1);
@@ -205,6 +206,7 @@ public:
     ++runs_.back().frames;
     words_.insert(words_.end(), slots.begin(), slots.end());
     starts_.push_back(at.ps);
+    ends_.push_back(end.ps);
   }
 
   void receive(std::span<std::uint32_t> slots, periph::stm32::audio_format, vtime) override
@@ -244,17 +246,21 @@ public:
   }
 
   /**
-   * @brief Takes the oldest kept frames.
+   * @brief Takes the oldest kept frames, up to the first that ended after @p until_ps.
    * @param held The queue's lock.
    * @param count Most frames taken.
+   * @param until_ps Latest frame end taken, in picoseconds.
    * @return The frames, oldest first.
    */
-  auto take(core::link_guard const& held, std::uint64_t count)
+  auto take(
+      core::link_guard const& held,
+      std::uint64_t           count,
+      std::uint64_t           until_ps = std::numeric_limits<std::uint64_t>::max())
       -> std::vector<queued_audio_frame> pre(held.guards(mutex_))
   {
     std::vector<queued_audio_frame> out;
     out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(count, starts_.size())));
-    while(out.size() < count and not starts_.empty())
+    while(out.size() < count and not starts_.empty() and ends_.front() <= until_ps)
     {
       auto const& run = runs_.front();
       out.push_back({
@@ -282,6 +288,7 @@ public:
   {
     words_.clear();
     starts_.clear();
+    ends_.clear();
     runs_.clear();
     pending_.clear();
     dropped_ = 0;
@@ -304,6 +311,7 @@ private:
     auto& run = runs_.front();
     words_.erase(words_.begin(), words_.begin() + run.slots);
     starts_.pop_front();
+    ends_.pop_front();
     if(--run.frames == 0)
     {
       runs_.pop_front();
@@ -322,6 +330,7 @@ private:
   mutable std::mutex        mutex_;
   std::deque<std::uint32_t> words_;
   std::deque<std::uint64_t> starts_;
+  std::deque<std::uint64_t> ends_;
   std::deque<format_run>    runs_;
   std::deque<std::uint32_t> pending_;
   std::uint64_t             limit_ = audio_frame_limit;

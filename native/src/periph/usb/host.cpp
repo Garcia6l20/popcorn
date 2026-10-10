@@ -549,6 +549,7 @@ struct host::impl
                .status = transfer_status::cancelled,
                .setup  = transfer.setup,
                .at     = vtime{at},
+               .ready  = vtime{at},
                .frame  = frame_number()});
         }
         settle_log(transfer.id, transfer_status::cancelled);
@@ -963,6 +964,11 @@ struct host::impl
 
   void finish(pipe_id id, transfer_status status, std::uint64_t at)
   {
+    finish(id, status, at, at);
+  }
+
+  void finish(pipe_id id, transfer_status status, std::uint64_t at, std::uint64_t ready)
+  {
     auto* const pipe = find_pipe(id);
     if(pipe == nullptr or pipe->queue.empty())
     {
@@ -978,6 +984,7 @@ struct host::impl
          .setup  = transfer.setup,
          .data   = copy_octets(transfer.data),
          .at     = vtime{at},
+         .ready  = vtime{ready},
          .frame  = frame_number()});
   }
 
@@ -1351,7 +1358,7 @@ struct host::impl
                       "does not fit on this pipe",
                       id, pipe->endpoint, size));
             }
-            finish(id, transfer_status::error, cursor);
+            finish(id, transfer_status::error, cursor, at);
           }
           continue;
         }
@@ -1360,7 +1367,7 @@ struct host::impl
         auto const result = transact(*pipe, cursor);
         if(result.done)
         {
-          finish(id, *result.done, cursor);
+          finish(id, *result.done, cursor, at);
         }
         cursor += result.time;
       }
@@ -1745,6 +1752,7 @@ auto host::control(setup_packet setup, std::vector<std::uint8_t> data) -> transf
          .status = transfer_status::cancelled,
          .setup  = setup,
          .at     = vtime{impl.s.now_ps},
+         .ready  = vtime{impl.s.now_ps},
          .frame  = impl.frame_number()});
     return id;
   }

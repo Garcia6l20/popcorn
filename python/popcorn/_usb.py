@@ -813,6 +813,12 @@ class HidStream:
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
         past, the wait ends at once.
 
+        A read that waits takes only the reports the host queued by the time its wait stopped,
+        in one native step: later reports stay queued for the next read, even those a free run
+        queued before this read resumed. So the reports depend only on what the device sent,
+        the same parked and running. The host runs every transaction of a frame at the frame's
+        start, so a report taken can carry an `at` up to about 1 ms past that time.
+
         Returns:
             Up to `n` reports, oldest first, fewer when `for_` elapsed, `deadline` passed or
                 the core went idle.
@@ -826,9 +832,10 @@ class HidStream:
         check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} reports")
-        if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _hid_reports(self._link.drain(n))
+        if self._link.available() >= n:
+            return _hid_reports(self._link.drain(n))
+        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
+        return _hid_reports(self._link.drain_until(n, stop.ps))
 
     def take_reports(self) -> list[HidReport]:
         """Every input report received and not read yet, at once, never running the machine.
@@ -1397,6 +1404,10 @@ class UacMic(UacStream):
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
         past, the wait ends at once.
 
+        A read that waits takes only the frames the host queued by the time its wait stopped,
+        as `HidStream.read_reports` does: a frame taken can carry an `at` up to about 1 ms past
+        that time, and later frames stay queued for the next read.
+
         Returns:
             Up to `n` frames, oldest first, fewer when `for_` elapsed, `deadline` passed or
                 the core went idle.
@@ -1410,9 +1421,10 @@ class UacMic(UacStream):
         check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
-        if self._link.available() < n:
-            await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _uac_frames(self._link.drain(n))
+        if self._link.available() >= n:
+            return _uac_frames(self._link.drain(n))
+        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
+        return _uac_frames(self._link.drain_until(n, stop.ps))
 
     def take_frames(self) -> list[UacFrame]:
         """Every frame received and not read yet, at once, never running the machine. Allowed

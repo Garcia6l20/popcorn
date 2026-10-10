@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -40,6 +41,8 @@ struct hid_report
   std::vector<std::uint8_t> data{};
   /** @brief Virtual time of the transaction that carried it. */
   vtime at{};
+  /** @brief Virtual time the host queued it: the start of the frame of its transaction. */
+  vtime ready{};
 };
 
 /** @brief An output report waiting for the device. */
@@ -103,15 +106,18 @@ struct hid_channel
    * @brief Keeps a received input report, dropping the oldest past `limit`.
    * @param data The report, ignored when empty.
    * @param at Its time.
+   * @param ready The time the host queued it.
    */
-  void received(std::span<std::uint8_t const> data, vtime at);
+  void received(std::span<std::uint8_t const> data, vtime at, vtime ready);
 
   /**
-   * @brief Takes received input reports.
+   * @brief Takes received input reports, up to the first queued after @p until.
    * @param count Most reports taken.
+   * @param until Latest `ready` taken.
    * @return The reports, oldest first.
    */
-  auto take(std::uint64_t count) -> std::vector<hid_report>;
+  auto take(std::uint64_t count, vtime until = vtime{std::numeric_limits<std::uint64_t>::max()})
+      -> std::vector<hid_report>;
 
   /**
    * @brief Queues an output report for the device.

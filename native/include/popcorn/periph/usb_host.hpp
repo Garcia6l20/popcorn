@@ -243,6 +243,9 @@ struct transfer_result
   std::vector<std::uint8_t> data{};
   /** @brief Virtual time of its last transaction, or of the event that ended it. */
   vtime at{};
+  /** @brief Virtual time of the host event that ended it: the start of its frame for a
+   * periodic transfer, which runs every transaction of the frame at that event, else `at`. */
+  vtime ready{};
   /** @brief Frame number it ended in. */
   std::uint16_t frame{};
 };
