@@ -188,6 +188,22 @@ for _, target in core_firmware.values():
     if target is not None:
         test_host_concurrent.depends(target)
 
+add_doctest("core-window-barrier", [here / "test_window_barrier.cpp", *tsan_sources], [core])
+bench_window_barrier = project.Program(
+    "bench-window-barrier",
+    project.default_environment,
+    sources=[here / "bench_window_barrier.cpp"],
+)
+bench_window_barrier.link(test_support)
+bench_window_barrier.link(core)
+bench_window_barrier.private.defines.extend(
+    f'{variable}="{value}"' for variable, value in m33_env.items()
+)
+alias_bare_name(bench_window_barrier)
+for _, target in core_firmware.values():
+    if target is not None:
+        bench_window_barrier.depends(target)
+
 test_loop_waker = add_doctest(
     "core-loop-waker", [here / "test_loop_waker.cpp", *tsan_sources], [test_support, core]
 )

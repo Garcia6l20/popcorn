@@ -28,5 +28,6 @@ sources = [
         "symbols.cpp",
         "trace_feed.cpp",
         "views.cpp",
+        "window_barrier.cpp",
     )
 ]
