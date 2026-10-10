@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <format>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -100,12 +101,31 @@ auto uart_wire::mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&
 void uart_wire::started(line_frame const& frame)
 {
   core::time_map const map{state_.sender_base};
-  mailbox(state_.window)
-      .push_back(
-          {.index = state_.started++,
-           .frame = frame,
-           .start = map.to_system(frame.start),
-           .end   = map.to_system(frame.end)});
+  detail::wire_post    post{
+      .frame = frame, .start = map.to_system(frame.start), .end = map.to_system(frame.end)};
+  {
+    core::link_guard const held{edit_mutex_};
+    post.index        = state_.started++;
+    auto const edited = std::ranges::find_if(state_.edits, [&](detail::armed_edit const& edit) {
+      return edit.first <= post.index and post.index < edit.first + edit.count;
+    });
+    if(edited != state_.edits.end())
+    {
+      if(edited->data.empty())
+      {
+        post.dropped = true;
+      }
+      else
+      {
+        post.frame.data = edited->data[post.index - edited->first];
+      }
+      if(post.index + 1 == edited->first + edited->count)
+      {
+        state_.edits.erase(edited);
+      }
+    }
+  }
+  mailbox(state_.window).push_back(post);
   if(forward_)
   {
     forward_->started(frame);
@@ -149,6 +169,39 @@ void uart_wire::enter_window(std::uint64_t window, core::time_map sender)
 {
   state_.window      = window;
   state_.sender_base = sender.base();
+}
+
+auto uart_wire::arm(detail::armed_edit edit) -> bool
+{
+  core::link_guard const held{edit_mutex_};
+  auto const overlaps = std::ranges::any_of(state_.edits, [&](detail::armed_edit const& armed) {
+    return armed.first < edit.first + edit.count and edit.first < armed.first + armed.count;
+  });
+  auto const wraps    = edit.count > std::numeric_limits<std::uint64_t>::max() - edit.first;
+  if(wraps or edit.first < state_.started or overlaps)
+  {
+    return false;
+  }
+  state_.edits.push_back(std::move(edit));
+  return true;
+}
+
+auto uart_wire::replace(std::uint64_t index, std::span<std::uint16_t const> data) -> bool
+{
+  return arm({
+      .first = index, .count = data.size(), .data = {data.begin(), data.end()}
+  });
+}
+
+auto uart_wire::drop(std::uint64_t index, std::uint64_t count) -> bool
+{
+  return arm({.first = index, .count = count, .data = {}});
+}
+
+auto uart_wire::posted() const -> std::uint64_t
+{
+  core::link_guard const held{edit_mutex_};
+  return state_.started;
 }
 
 auto uart_wire::check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>
@@ -208,7 +261,8 @@ void uart_wire::collect(std::vector<detail::wire_post> const& posts, std::vector
          .start   = post.start,
          .end     = post.end,
          .arrival = shifted(post.end, latency_),
-         .brk     = post.frame.kind == frame_kind::brk});
+         .brk     = post.frame.kind == frame_kind::brk,
+         .dropped = post.dropped});
   }
 }
 
@@ -239,6 +293,10 @@ auto uart_wire::drain(std::uint64_t window, core::sys_time barrier, core::time_m
       into_.port->cancel_in_flight(receiver.to_local(shifted(post.start, latency_)), lanes_.peer);
       continue;
     }
+    if(post.dropped)
+    {
+      continue;
+    }
     fault       = earliest(fault, check_shape(post));
     auto frame  = post.frame;
     frame.start = receiver.to_local(shifted(post.start, latency_));
@@ -261,6 +319,7 @@ void uart_wire::finish(core::sys_time at)
 
 void uart_wire::save(std::vector<std::byte>& out) const
 {
+  core::link_guard const held{edit_mutex_};
   reflex::serde::bson::serializer{out}.dump(state_);
 }
 
@@ -268,7 +327,9 @@ void uart_wire::load(std::span<std::byte const> in)
 {
   try
   {
-    state_ = reflex::serde::bson::deserializer{in}.load<detail::wire_state>();
+    auto loaded = reflex::serde::bson::deserializer{in}.load<detail::wire_state>();
+    core::link_guard const held{edit_mutex_};
+    state_ = std::move(loaded);
   }
   catch(std::runtime_error const& failure)
   {

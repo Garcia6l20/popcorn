@@ -48,6 +48,7 @@ void link_tx_bursts(void);
 void dma_ring(void);
 void link_ping(void);
 void link_echo(void);
+void link_tx_count(void);
 void USART2_IRQHandler(void);
 
 void idle(void)
@@ -848,4 +849,17 @@ void link_echo(void)
   LL_USART_EnableIT_RXNE_RXFNE(USART1);
   NVIC_EnableIRQ(USART1_IRQn);
   idle();
+}
+
+volatile uint32_t link_count = 512u;
+
+void link_tx_count(void)
+{
+  start_link();
+  for(uint32_t index = 0; index < link_count; ++index)
+  {
+    send_byte((uint8_t)index);
+  }
+  wait_complete();
+  DONE();
 }

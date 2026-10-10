@@ -40,5 +40,6 @@ add_ll_firmware(
         "dma_ring",
         "link_ping",
         "link_echo",
+        "link_tx_count",
     ],
 )

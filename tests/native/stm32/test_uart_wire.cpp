@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -814,11 +815,14 @@ TEST_CASE("a peer frame at another baud warns once per wire, a fault at its star
 
 TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire with the same result")
 {
-  auto reference = one_way("link_tx", "link_rx", latency_20);
+  std::vector<std::uint16_t> const edit{'E'};
+  auto                             reference = one_way("link_tx", "link_rx", latency_20);
+  REQUIRE(reference.wires[0]->replace(60, edit));
   reference.run({.window = latency_20});
   auto const expected = reference.dump();
 
-  auto           r = one_way("link_tx", "link_rx", latency_20);
+  auto r = one_way("link_tx", "link_rx", latency_20);
+  REQUIRE(r.wires[0]->replace(60, edit));
   run_plan const plan{.window = latency_20};
   auto const     barrier = [](std::uint64_t k) { return (k + 1) * latency_20; };
   std::uint64_t  k       = 0;
@@ -838,6 +842,7 @@ TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire wit
               bytes}}.load<stm32::detail::wire_state>();
       CHECK_FALSE(state.mail_even.empty());
       CHECK_FALSE(state.mail_odd.empty());
+      CHECK(state.edits.size() == 1);
       auto& a     = *r.nodes[0];
       auto& b     = *r.nodes[1];
       auto  fresh = std::make_shared<stm32::uart_wire>(
@@ -910,4 +915,168 @@ TEST_CASE("a wire frame landing on the count of a host frame orders the same at 
   {
     CHECK(run_dump("link_tx", "link_rx_2stop", latency, plan) == expected);
   }
+}
+
+namespace
+{
+auto edited_run(run_plan const& plan, std::function<void(stm32::uart_wire&)> const& arm) -> rig
+{
+  auto r = one_way("link_tx", "link_rx", latency_20);
+  arm(*r.wires[0]);
+  r.run(plan);
+  return r;
+}
+
+auto saved_state(stm32::uart_wire const& wire) -> stm32::detail::wire_state
+{
+  std::vector<std::byte> bytes;
+  wire.save(bytes);
+  return reflex::serde::bson::deserializer{std::span<std::byte const>{bytes}}
+      .load<stm32::detail::wire_state>();
+}
+}
+
+TEST_CASE("an edit armed before its frame starts replaces frames by number at any window")
+{
+  auto plain = one_way("link_tx", "link_rx", latency_20);
+  plain.run({.window = latency_20});
+  std::vector<std::uint16_t> const xyz{'x', 'y', 'z'};
+  auto const arm       = [&](stm32::uart_wire& wire) { REQUIRE(wire.replace(5, xyz)); };
+  auto       reference = edited_run({.window = latency_20}, arm);
+  auto const before    = entries(plain.nodes[1]->f->log());
+  auto const after     = entries(reference.nodes[1]->f->log());
+  REQUIRE(after.size() == before.size());
+  std::vector<std::uint32_t> changed;
+  for(std::size_t index = 0; index < after.size(); ++index)
+  {
+    CHECK(after[index].kind == before[index].kind);
+    CHECK(after[index].cycles == before[index].cycles);
+    if(after[index].data != before[index].data)
+    {
+      changed.push_back(after[index].data);
+    }
+  }
+  CHECK(changed == std::vector<std::uint32_t>{'x', 'y', 'z'});
+  for(std::size_t index = 5; index < 8; ++index)
+  {
+    CHECK(reference.taps[0][index].data == xyz[index - 5]);
+  }
+  CHECK(saved_state(*reference.wires[0]).edits.empty());
+  auto const expected = reference.dump();
+  for(auto const& plan : {
+          run_plan{.window = latency_20 / 3},
+          run_plan{.window = latency_20 / 3, .threaded = true}
+  })
+  {
+    CHECK(edited_run(plan, arm).dump() == expected);
+  }
+}
+
+TEST_CASE("an edit is refused once its first frame started or over an armed edit")
+{
+  auto                             r    = one_way("link_tx", "link_rx", latency_20);
+  auto&                            wire = *r.wires[0];
+  std::vector<std::uint16_t> const one{'q'};
+  std::vector<std::uint16_t> const two{'e', 'f'};
+  REQUIRE(wire.replace(40, two));
+  CHECK_FALSE(wire.drop(41, 1));
+  CHECK_FALSE(wire.replace(39, two));
+  CHECK(wire.replace(42, one));
+  CHECK_FALSE(wire.drop(std::numeric_limits<std::uint64_t>::max(), 2));
+  bool refused = false;
+  r.run({.window = latency_20, .after_drain = [&](std::uint64_t) {
+           if(not refused and wire.posted() > 3)
+           {
+             CHECK_FALSE(wire.replace(3, one));
+             CHECK_FALSE(wire.drop(wire.posted() - 1, 1));
+             refused = true;
+           }
+         }});
+  CHECK(refused);
+  CHECK(wire.posted() == 64);
+  auto const bytes = bytes_of(r.nodes[1]->f->log());
+  REQUIRE(bytes.size() == 64);
+  CHECK(bytes[3] == 0x23u);
+  CHECK(bytes[40] == 'e');
+  CHECK(bytes[41] == 'f');
+  CHECK(bytes[42] == 'q');
+}
+
+TEST_CASE("dropped frames never reach the receiver, IDLE rises in their gap, at any window")
+{
+  auto const arm       = [](stm32::uart_wire& wire) { REQUIRE(wire.drop(5, 2)); };
+  auto       reference = edited_run({.window = latency_20}, arm);
+  auto const seen      = entries(reference.nodes[1]->f->log());
+  auto const bytes     = bytes_of(reference.nodes[1]->f->log());
+  REQUIRE(bytes.size() == 62);
+  CHECK(bytes[4] == 0x24u);
+  CHECK(bytes[5] == 0x27u);
+  REQUIRE(seen.size() > 6);
+  CHECK(seen[4].data == 0x24u);
+  CHECK(seen[5].kind == 2);
+  CHECK(seen[6].data == 0x27u);
+  auto const& tap = reference.taps[0];
+  REQUIRE(tap.size() == 64);
+  for(std::size_t index = 0; index < tap.size(); ++index)
+  {
+    CHECK(tap[index].dropped == (index == 5 or index == 6));
+  }
+  auto const expected = reference.dump();
+  for(auto const& plan : {
+          run_plan{.window = latency_20 / 3},
+          run_plan{.window = latency_20, .threaded = true}
+  })
+  {
+    CHECK(edited_run(plan, arm).dump() == expected);
+  }
+}
+
+TEST_CASE("an arm racing the sender's start either applies or is refused, never both")
+{
+#if defined(__SANITIZE_THREAD__)
+  constexpr std::uint32_t frames = 1'000;
+#else
+  constexpr std::uint32_t frames = 10'000;
+#endif
+  constexpr std::uint64_t frame_ps = 21'700 * 1'000;
+  rig                     r;
+  auto&                   a = r.add("link_tx_count");
+  r.add("link_rx_quiet");
+  REQUIRE(a.f->target->mem().write(sym("usart_ll", "link_count"), 4, frames).has_value());
+  auto&             wire = r.link(0, 1, latency_20);
+  std::vector<char> armed(frames);
+  std::atomic<bool> stop{false};
+  std::jthread      arming{[&] {
+    std::mt19937                                 rng{11};
+    std::uniform_int_distribution<std::uint32_t> late{0, 1};
+    for(std::uint32_t index = 0; index < frames and not stop.load(); ++index)
+    {
+      auto const target = index + late(rng);
+      while(wire.posted() < target and not stop.load())
+      {
+        std::this_thread::yield();
+      }
+      std::vector<std::uint16_t> const data{static_cast<std::uint16_t>((index + 0x80u) & 0xffu)};
+      armed[index] = wire.replace(index, data) ? 1 : 0;
+    }
+  }};
+  r.run({.window = latency_20, .end = frames * frame_ps + ms_ps, .threaded = true});
+  stop.store(true);
+  arming          = {};
+  auto const& tap = r.taps[0];
+  REQUIRE(tap.size() == frames);
+  std::size_t accepted = 0;
+  for(std::uint32_t index = 0; index < frames; ++index)
+  {
+    CAPTURE(index);
+    auto const original = index & 0xffu;
+    CHECK(tap[index].data == (armed[index] != 0 ? (original + 0x80u) & 0xffu : original));
+    accepted += armed[index] != 0 ? 1 : 0;
+  }
+  MESSAGE("armed ", accepted, " of ", frames);
+  CHECK(accepted > frames / 4);
+  CHECK(accepted < 3 * frames / 4);
+  auto const idle = entries(r.nodes[1]->f->log());
+  REQUIRE(idle.size() == 1);
+  CHECK(idle[0].data == frames);
 }

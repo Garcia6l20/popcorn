@@ -95,6 +95,8 @@ struct tap_frame
   bool brk{};
   /** @brief Whether the sender aborted the frame, UE cleared while it was in flight. */
   bool lost{};
+  /** @brief Whether an armed drop kept the frame off the line: the receiver saw it idle. */
+  bool dropped{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(tap_frame const&, tap_frame const&) -> bool = default;
@@ -132,6 +134,7 @@ namespace detail
 struct wire_post
 {
   bool           abort{};
+  bool           dropped{};
   std::uint64_t  index{};
   line_frame     frame{};
   core::sys_time start{};
@@ -140,17 +143,28 @@ struct wire_post
   friend auto operator==(wire_post const&, wire_post const&) -> bool = default;
 };
 
+/** @brief An edit armed for frames not started yet: new data, or a drop when data is empty. */
+struct armed_edit
+{
+  std::uint64_t              first{};
+  std::uint64_t              count{};
+  std::vector<std::uint16_t> data;
+
+  friend auto operator==(armed_edit const&, armed_edit const&) -> bool = default;
+};
+
 /** @brief Everything a wire saves. */
 struct wire_state
 {
-  std::vector<wire_post> mail_even;
-  std::vector<wire_post> mail_odd;
-  std::uint64_t          window{};
-  core::sys_time         sender_base{};
-  std::uint64_t          started{};
-  std::vector<tap_frame> untapped;
-  std::uint64_t          tapped{};
-  bool                   mismatch_logged{};
+  std::vector<wire_post>  mail_even;
+  std::vector<wire_post>  mail_odd;
+  std::uint64_t           window{};
+  core::sys_time          sender_base{};
+  std::uint64_t           started{};
+  std::vector<armed_edit> edits;
+  std::vector<tap_frame>  untapped;
+  std::uint64_t           tapped{};
+  bool                    mismatch_logged{};
 
   friend auto operator==(wire_state const&, wire_state const&) -> bool = default;
 };
@@ -167,7 +181,8 @@ struct wire_state
  *        each sender with the declaration, not with the receiver: two ends just under 3 percent
  *        off in opposite directions are about 6 percent apart and get no warning, the
  *        receiver's FE and NE still show it. Frames the sender
- *        transmits still reach the endpoint the wire replaced. The tap gets each frame once its
+ *        transmits still reach the endpoint the wire replaced. Edits armed from any thread
+ *        replace or drop frames by number. The tap gets each frame once its
  *        end, or its abort for a lost frame, lies at or before a drained barrier or the final
  *        stop, so its content at a barrier does not depend on how the run was cut into windows.
  */
@@ -211,11 +226,38 @@ public:
   /** @brief The wire's tap, any thread. */
   [[nodiscard]] auto tap() noexcept -> tap_queue&;
 
+  /**
+   * @brief Arms new data for the frames numbered @p index on, one per element, any thread. The
+   *        sender reads armed edits under the same lock as it numbers a frame, so an edit armed
+   *        before the frame starts applies and one armed after is refused. Which of the two
+   *        happens depends on wall timing while the sender runs, the effect of an accepted edit
+   *        only on the numbers.
+   * @param index Number of the first frame, see tap_frame::index.
+   * @param data Data bits for frames @p index and on, not empty.
+   * @return Whether the edit was armed: false when a frame it covers has started, or when it
+   *         overlaps an edit already armed.
+   */
+  auto replace(std::uint64_t index, std::span<std::uint16_t const> data)
+      -> bool pre(not data.empty());
+
+  /**
+   * @brief Arms a drop of @p count frames from @p index on, any thread: the sender transmits
+   *        them, the receiver sees an idle line, the tap shows them dropped. Armed as replace().
+   * @param index Number of the first frame.
+   * @param count Frames dropped, above 0.
+   * @return Whether the drop was armed, as replace().
+   */
+  auto drop(std::uint64_t index, std::uint64_t count) -> bool pre(count > 0);
+
+  /** @brief Frames the sender has started on this wire so far, any thread. */
+  [[nodiscard]] auto posted() const -> std::uint64_t;
+
 private:
   auto mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&;
   void collect(std::vector<detail::wire_post> const& posts, std::vector<tap_frame>& into) const;
   void emit(std::vector<tap_frame>& from, core::sys_time through);
   auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
+  auto arm(detail::armed_edit edit) -> bool;
 
   wire_ends                      ends_;
   wire_lanes                     lanes_;
@@ -224,6 +266,7 @@ private:
   wire_receiver                  into_;
   std::shared_ptr<uart_endpoint> forward_;
   tap_queue                      tap_;
+  mutable std::mutex             edit_mutex_;
   detail::wire_state             state_;
 };
 }
