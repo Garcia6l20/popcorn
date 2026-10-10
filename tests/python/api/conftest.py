@@ -21,6 +21,7 @@ HOOKS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "hooks.elf"
 ABI_ELF = ROOT / "tests" / "firmware" / "abi" / "prebuilt" / "abi.elf"
 CALLEE_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "callee.elf"
 VIEWS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "views.elf"
+ISR_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "isr.elf"
 
 
 def run_bounded[T](coroutine: Coroutine[object, object, T], seconds: float = 2) -> T:

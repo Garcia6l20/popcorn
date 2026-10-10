@@ -336,6 +336,20 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
   return engine_fault(intno);
 }
 
+auto cortex_m::interrupt_return_address(std::uint32_t intno) const -> std::optional<address>
+{
+  if(intno != excp_exception_exit or thread_mode())
+  {
+    return std::nullopt;
+  }
+  auto const value = read(UC_ARM_REG_PC) | 1u;
+  if(not valid_return(value))
+  {
+    return std::nullopt;
+  }
+  return value & ~address{1};
+}
+
 auto cortex_m::idle() const -> bool
 {
   rethrow_failure();

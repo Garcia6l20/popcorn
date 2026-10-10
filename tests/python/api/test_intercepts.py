@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn.units import VirtualTime, ms
 
-from .conftest import CALLEE_ELF
+from .conftest import CALLEE_ELF, ISR_ELF, run_bounded
 
 
 def call(m: popcorn.Machine, fn: str, *args: int) -> popcorn.CallResult:
@@ -310,3 +310,86 @@ def test_a_recording_removed_by_a_handler_stops_at_once(hooked: popcorn.Machine)
     assert hooked.remove_hooks() == 1
     call(hooked, "write_three")
     assert recording.mark() == 1
+
+
+ISR_ROUNDS = 25
+ISR_HANDLERS = (
+    "tail_handler",
+    "irq_exit",
+    "first_handler",
+    "second_handler",
+    "low_handler",
+    "mid_handler",
+)
+
+
+def isr_machine(m33: popcorn.MachineDescription) -> popcorn.Machine:
+    """A reset machine over the isr firmware: each round pends a handler that tail-calls
+    `irq_exit`, two handlers that tail-chain, and a low handler that a mid handler preempts,
+    itself preempted by a high one."""
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(ISR_ELF))
+    m.reset()
+    return m
+
+
+def isr_done(m: popcorn.Machine) -> bool:
+    """Whether the firmware finished its rounds and idles in thread mode."""
+    return int(m.var("done").value) == 1
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_record_returns_counts_each_exception_return_of_a_handler_or_its_tail_call(
+    m33: popcorn.MachineDescription, running: bool
+) -> None:
+    m = isr_machine(m33)
+    recordings = {name: m.record_returns(name) for name in ISR_HANDLERS}
+
+    async def scenario() -> None:
+        if running:
+            async with m.running():
+                await m.wait_until(isr_done)
+        else:
+            assert (await m.run(budget=1_000_000)).reason is popcorn.StopReason.IDLE
+
+    before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+    run_bounded(scenario(), 10)
+    if not running:
+        assert m._handle.gil_entries() == before  # pyright: ignore[reportPrivateUsage]
+    assert isr_done(m)
+    for counter in ("tail", "first", "second", "low", "mid", "high"):
+        assert int(m.var(f"{counter}_entries").value) == ISR_ROUNDS
+    for name, recording in recordings.items():
+        entries = recording.since()
+        assert len(entries) == ISR_ROUNDS, name
+        times = [e.at for e in entries]
+        assert times == sorted(set(times)), name
+    exits = [e.value for e in recordings["irq_exit"].since()]
+    assert [r.args for r in exits] == [(0,)] * ISR_ROUNDS
+    assert [r.value for r in exits] == [10 * (n + 1) for n in range(ISR_ROUNDS)]
+    assert [e.value.value for e in recordings["tail_handler"].since()] == [None] * ISR_ROUNDS
+
+
+def test_an_exception_return_counts_after_the_handler_body_and_before_a_tail_chain(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = isr_machine(m33)
+    seen: dict[str, list[tuple[int, int, int]]] = {}
+
+    def watching(name: str, leaves: str, other: str) -> None:
+        def returned(r: popcorn.Returned) -> None:
+            row = (r.occurrence, int(m.var(leaves).value), int(m.var(other).value))
+            seen.setdefault(name, []).append(row)
+
+        m.on_return(name, returned)
+
+    watching("tail_handler", "exits", "tail_entries")
+    watching("first_handler", "first_leaves", "second_entries")
+    watching("mid_handler", "mid_leaves", "high_leaves")
+    watching("low_handler", "low_leaves", "mid_leaves")
+    assert asyncio.run(m.run(budget=1_000_000)).reason is popcorn.StopReason.IDLE
+    assert isr_done(m)
+    rounds = range(ISR_ROUNDS)
+    assert seen["tail_handler"] == [(n, n + 1, n + 1) for n in rounds]
+    assert seen["first_handler"] == [(n, n + 1, n) for n in rounds]
+    assert seen["mid_handler"] == [(n, n + 1, n + 1) for n in rounds]
+    assert seen["low_handler"] == [(n, n + 1, n + 1) for n in rounds]

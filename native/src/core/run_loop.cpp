@@ -350,6 +350,13 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
   run.coverage.has_previous = false;
   run.spin.previous         = {};
   auto const stops          = run.guarded([&] {
+    if(run.return_watch != 0)
+    {
+      if(auto const to = run.arch->interrupt_return_address(intno); to == run.return_watch)
+      {
+        run.on_return_block(*to);
+      }
+    }
     auto const result = run.owner.arch_->on_interrupt(intno);
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())

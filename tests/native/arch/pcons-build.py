@@ -22,6 +22,7 @@ arch_firmware = {
 arch_firmware["abi"] = firmware("abi", "abi")
 arch_firmware["rom_store"] = firmware("core", "rom_store")
 arch_firmware["irq"] = firmware("core", "irq")
+arch_firmware["isr"] = firmware("api", "isr")
 for variant in (
     "exceptions_m4",
     "exceptions_m7",

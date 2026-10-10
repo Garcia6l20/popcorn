@@ -109,3 +109,7 @@ _, consts = add_firmware("api", "consts", [here / "consts_a.c", here / "consts_b
 if consts is not None:
     consts.private.compile_flags.append("-g3")
     consts.private.link_flags.append("-Wl,--undefined=channel")
+
+_, isr = add_firmware("api", "isr", [here / "isr.c"])
+if isr is not None:
+    isr.private.link_flags.append(SECTION_BOUNDS)

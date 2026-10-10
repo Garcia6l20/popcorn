@@ -113,6 +113,9 @@ public:
   }
   void set_irq_line(std::uint32_t source, bool active) override;
   auto on_interrupt(std::uint32_t intno) -> popcorn::arch::trap_result override;
+  /** @brief The EXC_RETURN pc holds, at an exception exit in handler mode. */
+  [[nodiscard]] auto interrupt_return_address(std::uint32_t intno) const
+      -> std::optional<address> override;
   auto on_invalid_insn() -> popcorn::arch::trap_result override;
   auto on_unmapped(address addr, popcorn::arch::memory_op op)
       -> popcorn::arch::trap_result override;

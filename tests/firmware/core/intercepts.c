@@ -172,6 +172,29 @@ __attribute__((noipa)) uint32_t resetting(void)
   }
 }
 
+volatile uint32_t isr_entries;
+volatile uint32_t isr_exits;
+
+__attribute__((noipa)) void isr_enter(void)
+{
+  isr_entries = isr_entries + 1u;
+}
+
+__attribute__((noipa)) uint32_t isr_exit(uint32_t source)
+{
+  isr_exits = isr_exits + 1u;
+  return isr_exits * 10u + source;
+}
+
+__attribute__((naked)) void isr_tail(void)
+{
+  __asm__ volatile("push {r3, lr}\n"
+                   "bl isr_enter\n"
+                   "ldmia.w sp!, {r3, lr}\n"
+                   "movs r0, #2\n"
+                   "b.w isr_exit\n");
+}
+
 __attribute__((section(".isr_vector"), used)) static const void* const vectors[34] = {
     [0]  = &_estack,
     [1]  = (const void*)Reset_Handler,

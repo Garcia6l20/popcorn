@@ -331,3 +331,45 @@ TEST_CASE("a resumed stop runs the entries after the stopping intercept once")
   CHECK(counted == 1);
   CHECK(returns == 1);
 }
+
+TEST_CASE("an exception return completes the handler and the function it tail-called")
+{
+  using popcorn::testing::test_arch;
+  auto f = booted();
+  REQUIRE(f.target->mem().write(0x0800'0000 + 4 * 16, 4, fn("isr_tail") | 1));
+  std::vector<core::returned_call> handlers;
+  std::vector<core::returned_call> exits;
+  std::vector<std::uint32_t>       exits_at_handler_return;
+  auto const                       handler_hook = f.target->add_return_hook(
+      fn("isr_tail"), {}, arch::value_kind::i32, [&](core::returned_call const& r) {
+        handlers.push_back(r);
+        exits_at_handler_return.push_back(*f.target->mem().read(fn("isr_exits"), 4));
+      });
+  auto const exit_hook = f.target->add_return_hook(
+      fn("isr_exit"), {arch::value_kind::i32}, arch::value_kind::i32,
+      [&](core::returned_call const& r) { exits.push_back(r); });
+  f.set("pc", fn("loop_nop"));
+  f.set("lr", fn("halt") | 1);
+  f.set("r4", 3000);
+  f.set("primask", 0);
+  f.module->write_system(test_arch::timer_period_offset, 300);
+  f.module->write_system(test_arch::timer_control_offset, 1);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  f.module->write_system(test_arch::timer_control_offset, 0);
+  auto const entries = f.word(fn("isr_entries"));
+  REQUIRE(entries >= 10);
+  CHECK(f.word(fn("isr_exits")) == entries);
+  REQUIRE(handlers.size() == entries);
+  REQUIRE(exits.size() == entries);
+  for(std::uint32_t index = 0; index < entries; ++index)
+  {
+    CAPTURE(index);
+    CHECK(handlers[index].occurrence == index);
+    CHECK(handlers[index].function == fn("isr_tail"));
+    CHECK(exits_at_handler_return[index] == index + 1);
+    CHECK(exits[index].occurrence == index);
+    CHECK(exits[index].args.front() == 2);
+    CHECK(exits[index].value == (index + 1) * 10 + 2);
+    CHECK(handlers[index].instructions.value > exits[index].instructions.value);
+  }
+}

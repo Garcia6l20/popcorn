@@ -291,6 +291,11 @@ auto cortex_m::enter(std::uint32_t number) -> trap_result
   return trap_result::resume();
 }
 
+auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
+{
+  return v7() ? valid_v7_exc_return(exc_return) : valid_exc_return(exc_return);
+}
+
 auto cortex_m::exception_return() -> trap_result
 {
   auto* const engine   = engine_handle();
@@ -316,7 +321,7 @@ auto cortex_m::exception_return() -> trap_result
          .cfsr_bits = cfsr::iaccviol,
          .reported  = target});
   }
-  if(not(v7() ? valid_v7_exc_return(value) : valid_exc_return(value)))
+  if(not valid_return(value))
   {
     return invalid();
   }

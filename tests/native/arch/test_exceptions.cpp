@@ -15,6 +15,8 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
+#include <map>
 #include <memory>
 #include <ranges>
 #include <string>
@@ -383,4 +385,128 @@ TEST_CASE("ICSR reports the pending vector, pending IRQs and a return to base")
   auto const seen = words_at(*f.target, fn("icsr_seen"), 2);
   CHECK(seen[0] == (33u | 34u << 12 | 1u << 22 | 1u << 11));
   CHECK(seen[1] == (35u | 34u << 12 | 1u << 22));
+}
+
+namespace
+{
+constexpr std::uint32_t isr_rounds = 25;
+
+auto isr(std::string_view name) -> address
+{
+  return sym("isr", name);
+}
+
+struct isr_return
+{
+  core::returned_call returned;
+  std::uint32_t       leaves{};
+  std::uint32_t       other{};
+};
+}
+
+TEST_CASE("a return hook counts each exception return, tail-chained too, never a preemption")
+{
+  bool hook_high = false;
+  SUBCASE("the preempting handler unhooked")
+  {}
+  SUBCASE("the preempting handler hooked")
+  {
+    hook_high = true;
+  }
+  arch_fixture                                                f{description(), "isr", {}};
+  std::map<std::string, std::vector<isr_return>, std::less<>> seen;
+  std::vector<core::hook_handle>                              hooks;
+  auto const hook = [&](std::string const& name, std::string_view leaves, std::string_view other) {
+    std::vector<popcorn::arch::value_kind> args;
+    if(name == "irq_exit")
+    {
+      args.push_back(popcorn::arch::value_kind::i32);
+    }
+    hooks.push_back(f.target->add_return_hook(
+        isr(name), std::move(args), popcorn::arch::value_kind::i32,
+        [&f, &seen, name, leaves, other](core::returned_call const& r) {
+          seen[name].push_back(
+              {.returned = r, .leaves = f.word(isr(leaves)), .other = f.word(isr(other))});
+        }));
+  };
+  hook("tail_handler", "exits", "tail_entries");
+  hook("irq_exit", "exits", "tail_entries");
+  hook("first_handler", "first_leaves", "second_entries");
+  hook("second_handler", "second_leaves", "first_leaves");
+  hook("low_handler", "low_leaves", "mid_leaves");
+  hook("mid_handler", "mid_leaves", "high_leaves");
+  if(hook_high)
+  {
+    hook("high_handler", "high_leaves", "mid_leaves");
+  }
+  CHECK(f.run_to_stop().reason == stop_reason::idle);
+  REQUIRE(f.word(isr("done")) == 1);
+  for(auto const* entries :
+      {"tail_entries", "first_entries", "second_entries", "low_entries", "mid_entries",
+       "high_entries"})
+  {
+    CAPTURE(entries);
+    CHECK(f.word(isr(entries)) == isr_rounds);
+  }
+  auto const returns = [&](std::string_view name) -> std::vector<isr_return> const& {
+    auto const found = seen.find(name);
+    REQUIRE(found != seen.end());
+    REQUIRE(found->second.size() == isr_rounds);
+    return found->second;
+  };
+  for(std::uint32_t round = 0; round < isr_rounds; ++round)
+  {
+    CAPTURE(round);
+    auto const& tail = returns("tail_handler")[round];
+    CHECK(tail.returned.occurrence == round);
+    CHECK(tail.leaves == round + 1);
+    auto const& exit = returns("irq_exit")[round];
+    CHECK(exit.returned.args.front() == 0);
+    CHECK(exit.returned.value == (round + 1) * 10);
+    CHECK(exit.leaves == round + 1);
+    auto const& first = returns("first_handler")[round];
+    CHECK(first.leaves == round + 1);
+    CHECK(first.other == round);
+    auto const& second = returns("second_handler")[round];
+    CHECK(second.leaves == round + 1);
+    CHECK(second.other == round + 1);
+    auto const& low = returns("low_handler")[round];
+    CHECK(low.leaves == round + 1);
+    CHECK(low.other == round + 1);
+    auto const& mid = returns("mid_handler")[round];
+    CHECK(mid.leaves == round + 1);
+    CHECK(mid.other == round + 1);
+    CHECK(low.returned.instructions.value > mid.returned.instructions.value);
+    if(hook_high)
+    {
+      auto const& high = returns("high_handler")[round];
+      CHECK(high.leaves == round + 1);
+      CHECK(high.other == round);
+      CHECK(mid.returned.instructions.value > high.returned.instructions.value);
+    }
+  }
+}
+
+TEST_CASE("only an exception return in handler mode through a valid EXC_RETURN is a return")
+{
+  constexpr std::uint32_t exception_exit = 8;
+  constexpr std::uint32_t svc            = 2;
+  arch_fixture            f{description(), "isr", {}};
+  auto const              stop = f.target->add_intercept(
+      isr("first_handler"),
+      [](core::intercept_call const&) { return core::intercept_result::stop(stop_reason::user); },
+      core::intercept_mode::once);
+  f.set("pc", 0xFFFF'FFF9);
+  CHECK_FALSE(f.module->interrupt_return_address(exception_exit).has_value());
+  f.target->reset();
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(f.reg("pc") == isr("first_handler"));
+  auto const exc_return = f.reg("lr");
+  CHECK(exc_return == 0xFFFF'FFF9);
+  CHECK_FALSE(f.module->interrupt_return_address(exception_exit).has_value());
+  f.set("pc", exc_return);
+  CHECK(f.module->interrupt_return_address(exception_exit) == exc_return - 1);
+  CHECK_FALSE(f.module->interrupt_return_address(svc).has_value());
+  f.set("pc", 0xFFFF'FFF5);
+  CHECK_FALSE(f.module->interrupt_return_address(exception_exit).has_value());
 }

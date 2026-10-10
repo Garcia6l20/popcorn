@@ -1560,6 +1560,13 @@ class Machine:
         return value and the instructions it took, types from DWARF. A decorator when `handler`
         is omitted.
 
+        A return is the branch to the return address `fn` got at entry. For an exception
+        handler, or a function the handler reached by a tail call, that is the exception
+        return through EXC_RETURN: `bx lr` or `pop {pc}` in handler mode. It counts before the
+        core unstacks, so `value` holds what `fn` left in its result registers, and before a
+        tail-chained handler runs. A nested exception preempting `fn` is no return of it. An
+        exception return that faults while unstacking still counts, the branch ran.
+
         Raises:
             TypeError: `fn` has no DWARF signature.
         """
@@ -1589,6 +1596,9 @@ class Machine:
             mark = ptt.mark()
             await m.elapse(ms(50))
             assert [e.value for e in ptt.since(mark)] == [True, False]
+
+        A return is what `on_return` counts, an exception handler's return through EXC_RETURN
+        included.
 
         Without `convert`, the machine's thread appends each return natively, with no GIL, and
         `since` decodes the entries it copies. With `convert`, each return takes the GIL and

@@ -468,7 +468,10 @@ public:
 
   /**
    * @brief Calls a handler when a function returns: captures the arguments at entry and the
-   *        return value at the return address, counting the instructions in between.
+   *        return value at the return address, counting the instructions in between. A return
+   *        through an exception return the arch reports with arch::interrupt_return_address(),
+   *        such as Arm EXC_RETURN from a handler or from a function it tail-called, counts
+   *        before the core unstacks.
    * @param at Function entry.
    * @param args Kind of each argument captured at entry.
    * @param returns Kind of the return value.

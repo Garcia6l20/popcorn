@@ -46,6 +46,8 @@ public:
   [[nodiscard]] auto thread_mode() const -> bool override;
   void               set_irq_line(std::uint32_t source, bool active) override;
   auto               on_interrupt(std::uint32_t intno) -> trap_result override;
+  [[nodiscard]] auto interrupt_return_address(std::uint32_t intno) const
+      -> std::optional<address> override;
   auto               on_invalid_insn() -> trap_result override;
   auto               on_unmapped(address addr, memory_op op) -> trap_result override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -145,6 +147,7 @@ private:
   auto               engine_fault(std::uint32_t intno) -> trap_result;
   auto               enter(std::uint32_t number) -> trap_result;
   auto               exception_return() -> trap_result;
+  [[nodiscard]] auto valid_return(std::uint32_t exc_return) const noexcept -> bool;
 
   [[nodiscard]] auto engine_handle() const -> uc_struct*;
   [[nodiscard]] auto read(int engine_id) const -> std::uint32_t;

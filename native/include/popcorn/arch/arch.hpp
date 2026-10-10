@@ -340,6 +340,22 @@ public:
   virtual auto on_interrupt(std::uint32_t intno) -> trap_result = 0;
 
   /**
+   * @brief Return address an engine exception completes a function return to, when
+   *        on_interrupt() would handle it as a return from an exception handler, such as Arm
+   *        EXC_RETURN in handler mode. The function whose frame is active returns there, as a
+   *        branch to return_address() would. Called before on_interrupt(), with the core
+   *        registers still as the function left them, and only while a return hook waits.
+   * @param intno Engine exception number, as on_interrupt() gets it.
+   * @return The address in the form return_address() gives, empty when @p intno is no such
+   *         return. The default reports none.
+   */
+  [[nodiscard]] virtual auto interrupt_return_address([[maybe_unused]] std::uint32_t intno) const
+      -> std::optional<address>
+  {
+    return std::nullopt;
+  }
+
+  /**
    * @brief Handles an instruction the engine cannot execute, pc at the instruction: an
    *        architectural fault entry, or an instruction the module emulates, such as Arm WFE.
    * @return Resume, or a stop. The machine tells the engine to resume when no stop is set.
