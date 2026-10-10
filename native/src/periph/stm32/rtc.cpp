@@ -3,6 +3,7 @@
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/periph/core_hold.hpp>
 
 #include <algorithm>
 #include <array>
@@ -67,6 +68,8 @@ struct rtc_state
   std::array<std::uint64_t, event_kinds> due{};
   std::array<std::uint8_t, event_kinds>  armed{};
   std::array<std::uint32_t, event_kinds> generation{};
+  std::uint8_t                           held{};
+  std::uint64_t                          held_ps{};
 
   friend auto operator==(rtc_state const&, rtc_state const&) -> bool = default;
 };
@@ -166,8 +169,18 @@ auto date_of(std::uint64_t days) -> std::chrono::year_month_day
  * such as seconds 79, never fires. Not modelled: PWR_DBPR.DBP does not gate writes. Not modelled,
  *        logged once: binary and mixed modes, subsecond alarm comparison, smooth calibration, the
  *        shift register, WUTOCLR, ALRAFCLR, ALRBFCLR, SSRUIE, timestamps and the outputs.
+ *        While the machine holds its core with DBGMCU `DBG_RTC_STOP` set, the calendar, the
+ *        prescalers, the wake-up timer, the alarms and the init and shadow timings stop at the
+ *        time of the hold and resume at the release. A reset that clears DBGMCU while the core
+ *        stays held, a brown-out, releases the RTC, and a backup domain reset keeps it frozen
+ *        while the bit is set. The bit is read at the hold: without a
+ *        DBGMCU model or field the RTC runs on, a warning logged once, a model_error under
+ *        strict_peripherals.
  */
-class rtc final : public dispatch_model<rtc, rtc_state>, public clock_listener, public backup_domain
+class rtc final : public dispatch_model<rtc, rtc_state>,
+                  public clock_listener,
+                  public backup_domain,
+                  public core_hold_listener
 {
 public:
   rtc(model_context&                          ctx,
@@ -187,6 +200,7 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void on_clock_change() override;
   void backup_reset() override;
+  void on_core_hold(bool held) override;
 
   void time_written(std::uint32_t old, std::uint32_t now);
   void date_written(std::uint32_t old, std::uint32_t now);
@@ -276,6 +290,7 @@ private:
   core::clock_domain                           domain_;
   irq_line&                                    line_;
   std::array<bool, 6>                          logged_{};
+  bool                                         freeze_logged_ = false;
 };
 
 constexpr std::array<write_entry<rtc>, 24> rtc_writes{
@@ -384,7 +399,7 @@ rtc::rtc(
 
 auto rtc::now_ps() const -> std::uint64_t
 {
-  return ctx_.clock.since_power_on().ps;
+  return state_.held != 0 ? state_.held_ps : ctx_.clock.since_power_on().ps;
 }
 
 auto rtc::anchor() const -> wide
@@ -648,7 +663,7 @@ void rtc::plan_alarm(std::size_t which)
 void rtc::schedule(event_kind kind)
 {
   auto const generation = ++state_.generation[kind];
-  if(state_.armed[kind] == 0 or state_.hz == 0)
+  if(state_.armed[kind] == 0 or state_.hz == 0 or state_.held != 0)
   {
     return;
   }
@@ -805,10 +820,16 @@ void rtc::reset(register_file& regs, reset_kind kind)
 
 void rtc::backup_reset()
 {
-  auto const ps = now_ps();
+  auto const held_ps = state_.held_ps;
+  auto const frozen  = state_.held != 0 and debug_frozen(freeze_logged_);
   clear_backup(regs_, false);
-  state_.hz        = ctx_.clock.hz(domain_);
-  state_.anchor_ps = ps;
+  state_.hz = ctx_.clock.hz(domain_);
+  if(frozen)
+  {
+    state_.held    = 1;
+    state_.held_ps = held_ps;
+  }
+  state_.anchor_ps = now_ps();
   restart_timers(state_.cycle0);
 }
 
@@ -901,6 +922,56 @@ void rtc::on_event(std::uint32_t kind, std::uint64_t payload)
       break;
   }
   settle(cycle);
+}
+
+void rtc::on_core_hold(bool held)
+{
+  if(held)
+  {
+    auto const frozen = debug_frozen(freeze_logged_);
+    if(state_.held != 0)
+    {
+      if(not frozen)
+      {
+        on_core_hold(false);
+      }
+      return;
+    }
+    if(not frozen)
+    {
+      return;
+    }
+    auto const cycle = cycle_at(now_ps());
+    for(auto fired = true; fired;)
+    {
+      fired = false;
+      for(std::uint32_t kind = 0; kind < event_kinds; ++kind)
+      {
+        if(state_.armed[kind] != 0 and state_.due[kind] <= cycle)
+        {
+          on_event(kind, state_.generation[kind]);
+          fired = true;
+        }
+      }
+    }
+    settle(cycle);
+    state_.held_ps = ctx_.clock.since_power_on().ps;
+    state_.held    = 1;
+    for(auto& value : state_.generation)
+    {
+      ++value;
+    }
+    return;
+  }
+  if(state_.held == 0)
+  {
+    return;
+  }
+  state_.anchor_ps += ctx_.clock.since_power_on().ps - state_.held_ps;
+  state_.held    = 0;
+  state_.held_ps = 0;
+  schedule_all();
+  settle(cycle_at(now_ps()));
 }
 
 void rtc::on_clock_change()

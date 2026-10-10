@@ -571,3 +571,239 @@ TEST_CASE("backup-domain registers the model only stores survive a software rese
   CHECK(read(f, "TAMP", "TAMP_CR2") == 1u << 16);
   CHECK(read(f, "RTC", "ALRABINR") == 0x55);
 }
+
+namespace
+{
+std::uint64_t rtc_slicing = 1'000'000'000;
+
+auto run_sliced(stm32_fixture const& f, vtime until, bool hold_from_until = false) -> popcorn::stop
+{
+  for(;;)
+  {
+    auto const result = f.run(
+        {.max_instructions = icount{rtc_slicing},
+         .wall_budget      = std::chrono::seconds{60},
+         .until_time       = until,
+         .hold_from_until  = hold_from_until});
+    if(result.stopped)
+    {
+      return *result.stopped;
+    }
+  }
+}
+
+void held_later(stm32_fixture const& f, std::uint64_t ps)
+{
+  REQUIRE(
+      run_sliced(f, vtime{f.target->virtual_clock().time().ps + ps}).reason == stop_reason::time);
+}
+
+auto calendar_of(stm32_fixture const& f) -> std::vector<std::uint32_t>
+{
+  return {read(f, "RTC", "SSR"), read(f, "RTC", "TR"), read(f, "RTC", "DR"), read(f, "RTC", "SR")};
+}
+
+auto frozen_rtc() -> stm32_fixture
+{
+  using namespace std::chrono;
+  auto f = booted(sys_days{year{2026} / 1 / 1} + hours{10});
+  popcorn::testing::set_debug_freeze(f, "DBG_RTC_STOP", true);
+  return f;
+}
+
+void enable_wakeup(stm32_fixture const& f)
+{
+  unlock(f);
+  write(f, "RTC", "WUTR", 99);
+  write(f, "RTC", "CR", read(f, "RTC", "CR") | (1u << 10));
+}
+}
+
+TEST_CASE("with DBG_RTC_STOP a held RTC keeps its calendar and resumes on its phase")
+{
+  auto const run = [](std::uint64_t instructions) {
+    rtc_slicing = instructions;
+    auto f      = frozen_rtc();
+    auto twin   = frozen_rtc();
+    held_later(f, 300 * ms + rtc_cycle / 3);
+    held_later(twin, 300 * ms + rtc_cycle / 3);
+    auto const at_hold = calendar_of(f);
+    f.target->hold_core(true);
+    held_later(f, 2 * second);
+    CHECK(calendar_of(f) == at_hold);
+    f.target->hold_core(false);
+    held_later(f, second + 7 * ms);
+    held_later(twin, second + 7 * ms);
+    CHECK(calendar_of(f) == calendar_of(twin));
+    rtc_slicing = 1'000'000'000;
+    return calendar_of(f);
+  };
+  CHECK(run(997) == run(1'000'000'000));
+}
+
+TEST_CASE("without DBG_RTC_STOP a held RTC counts on")
+{
+  using namespace std::chrono;
+  auto f    = booted(sys_days{year{2026} / 1 / 1} + hours{10});
+  auto twin = booted(sys_days{year{2026} / 1 / 1} + hours{10});
+  f.target->hold_core(true);
+  held_later(f, 2 * second);
+  held_later(twin, 2 * second);
+  CHECK(calendar_of(f) == calendar_of(twin));
+}
+
+TEST_CASE("a wake-up due during a frozen hold comes one held span later")
+{
+  auto f    = frozen_rtc();
+  auto twin = frozen_rtc();
+  enable_wakeup(f);
+  enable_wakeup(twin);
+  auto const enabled = f.target->virtual_clock().time().ps;
+  auto const period  = 16 * 100 * rtc_cycle;
+  run_until(f, enabled + period / 2);
+  f.target->hold_core(true);
+  run_until(f, enabled + period / 2 + second);
+  CHECK(flag(f, 2) == 0);
+  f.target->hold_core(false);
+  run_until(f, enabled + period + second - 2 * rtc_cycle);
+  CHECK(flag(f, 2) == 0);
+  run_until(f, enabled + period + second + rtc_cycle);
+  CHECK(flag(f, 2) == 1);
+  run_until(twin, enabled + period + rtc_cycle);
+  CHECK(calendar_of(twin)[0] == calendar_of(f)[0]);
+}
+
+TEST_CASE("an RTC hold released at once leaves the calendar and the wake-up as never held")
+{
+  auto const run = [](bool hold) {
+    auto f = frozen_rtc();
+    enable_wakeup(f);
+    held_later(f, 7 * ms + rtc_cycle / 3);
+    if(hold)
+    {
+      f.target->hold_core(true);
+      f.target->hold_core(false);
+    }
+    std::vector<std::uint32_t> seen;
+    for(int step = 0; step < 40; ++step)
+    {
+      held_later(f, 3 * ms + 17 * instruction);
+      auto const now = calendar_of(f);
+      seen.insert(seen.end(), now.begin(), now.end());
+    }
+    return seen;
+  };
+  CHECK(run(true) == run(false));
+}
+
+TEST_CASE("a frozen RTC restores frozen into another machine and resumes as the original")
+{
+  auto f = frozen_rtc();
+  held_later(f, 300 * ms);
+  f.target->hold_core(true);
+  held_later(f, second);
+  auto const bytes = core::encode_snapshot(f.target->snapshot().data());
+  auto const held  = calendar_of(f);
+  f.target->hold_core(false);
+  held_later(f, second);
+
+  auto other = frozen_rtc();
+  other.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(other.target->core_held());
+  CHECK(calendar_of(other) == held);
+  other.target->hold_core(false);
+  held_later(other, second);
+  CHECK(calendar_of(other) == calendar_of(f));
+}
+
+TEST_CASE("a wake-up held back at a barrier when the core is held fires at the hold")
+{
+  auto probe = frozen_rtc();
+  enable_wakeup(probe);
+  auto const enabled = probe.target->virtual_clock().time().ps;
+  auto const period  = 16 * 100 * rtc_cycle;
+  auto       due     = enabled + period - 2 * rtc_cycle;
+  run_until(probe, due);
+  while(flag(probe, 2) == 0)
+  {
+    due += instruction;
+    run_until(probe, due);
+  }
+
+  auto f = frozen_rtc();
+  enable_wakeup(f);
+  REQUIRE(f.target->virtual_clock().time().ps == enabled);
+  REQUIRE(run_sliced(f, vtime{due}, true).reason == stop_reason::time);
+  CHECK(flag(f, 2) == 0);
+  f.target->hold_core(true);
+  CHECK(flag(f, 2) == 1);
+}
+
+TEST_CASE("a wake-up timer enabled during a frozen hold starts at the release")
+{
+  auto f = frozen_rtc();
+  f.target->hold_core(true);
+  enable_wakeup(f);
+  auto const held   = f.target->virtual_clock().time().ps;
+  auto const period = 16 * 100 * rtc_cycle;
+  run_until(f, held + second);
+  CHECK(flag(f, 2) == 0);
+  f.target->hold_core(false);
+  run_until(f, held + second + period - 2 * rtc_cycle);
+  CHECK(flag(f, 2) == 0);
+  run_until(f, held + second + period + 2 * rtc_cycle);
+  CHECK(flag(f, 2) == 1);
+}
+
+TEST_CASE("a software reset of a held core keeps the RTC frozen")
+{
+  auto f    = frozen_rtc();
+  auto twin = frozen_rtc();
+  held_later(f, 300 * ms);
+  held_later(twin, 300 * ms);
+  f.target->hold_core(true);
+  held_later(f, 500 * ms);
+  f.target->reset(popcorn::reset_kind::software);
+  CHECK(popcorn::testing::debug_freeze_set(f, "DBG_RTC_STOP"));
+  held_later(f, 500 * ms);
+  f.target->hold_core(false);
+  held_later(f, second);
+  held_later(twin, second);
+  CHECK(read(f, "RTC", "TR") == read(twin, "RTC", "TR"));
+  CHECK(read(f, "RTC", "SSR") == read(twin, "RTC", "SSR"));
+}
+
+TEST_CASE("a brown-out of a held core clears DBG_RTC_STOP and the RTC runs on from it")
+{
+  auto f    = frozen_rtc();
+  auto twin = frozen_rtc();
+  held_later(f, 300 * ms);
+  held_later(twin, 300 * ms);
+  f.target->hold_core(true);
+  held_later(f, 500 * ms);
+  f.target->reset(popcorn::reset_kind::brown_out);
+  CHECK_FALSE(popcorn::testing::debug_freeze_set(f, "DBG_RTC_STOP"));
+  CHECK(f.target->core_held());
+  held_later(f, 500 * ms);
+  f.target->hold_core(false);
+  held_later(f, second);
+  held_later(twin, 1'500 * ms);
+  CHECK(read(f, "RTC", "TR") == read(twin, "RTC", "TR"));
+  CHECK(read(f, "RTC", "SSR") == read(twin, "RTC", "SSR"));
+}
+
+TEST_CASE("a backup domain reset of a frozen RTC leaves it frozen until the release")
+{
+  auto f = frozen_rtc();
+  held_later(f, 300 * ms);
+  f.target->hold_core(true);
+  auto const bdcr = read(f, "RCC", "RCC_BDCR");
+  write(f, "RCC", "RCC_BDCR", bdcr | (1u << 16));
+  write(f, "RCC", "RCC_BDCR", bdcr & ~(1u << 16));
+  auto const reset = calendar_of(f);
+  held_later(f, 2 * second);
+  CHECK(calendar_of(f) == reset);
+  f.target->hold_core(false);
+  held_later(f, 2 * second);
+  CHECK(read(f, "RTC", "TR") != reset[1]);
+}

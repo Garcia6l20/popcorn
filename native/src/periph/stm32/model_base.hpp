@@ -230,7 +230,9 @@ protected:
    *         such field, the peripheral then runs on unfrozen. Without a DBGMCU model the first
    *         core_hold_listener of the machine, in description order, logs one warning for the
    *         machine. With one but no field, each model logs its own warning once.
-   * @throws model_error under strict_peripherals when the field cannot be read.
+   * @throws model_error under strict_peripherals when the field cannot be read. Every
+   *         core_hold_listener calls it at each hold, before any other test and before changing
+   *         state, so a strict machine refuses the hold whatever the listener's own state.
    */
   [[nodiscard]] auto debug_frozen(bool& logged) const -> bool
   {

@@ -1758,7 +1758,7 @@ void tim::on_core_hold(bool held)
 {
   if(held)
   {
-    if(state_.held != 0 or not debug_frozen(freeze_logged_))
+    if(not debug_frozen(freeze_logged_) or state_.held != 0)
     {
       return;
     }
