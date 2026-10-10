@@ -13,8 +13,10 @@ public:
   /**
    * @brief Called on every hold and release, and with true again after a reset of a held
    *        machine, once every model has reset. Not called by a restore: the frozen state comes
-   *        back with the model's saved bytes.
+   *        back with the model's saved bytes. A hold may throw, only before it changed any
+   *        state. A release never throws.
    * @param held True on a hold, false on the release.
+   * @throws Any exception, on a hold only, such as model_error under strict_peripherals.
    */
   virtual void on_core_hold(bool held) = 0;
 

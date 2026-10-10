@@ -6,8 +6,11 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/services.hpp>
+#include <popcorn/periph/core_hold.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
+
+#include "debug_freeze.hpp"
 
 #include <reflex/serde/bson.hpp>
 
@@ -17,6 +20,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -216,6 +220,59 @@ protected:
          .peripheral = desc_.name,
          .reg        = std::string{reg},
          .message    = std::move(message)});
+  }
+
+  /**
+   * @brief Whether DBGMCU freezes this peripheral while the core is held: its
+   *        `DBG_<instance>_STOP` field, read through the debug_freeze peer.
+   * @param logged The model's flag of the warnings below, set when one is logged.
+   * @return Whether the field is set. False when the machine has no DBGMCU model or the part no
+   *         such field, the peripheral then runs on unfrozen. Without a DBGMCU model the first
+   *         core_hold_listener of the machine, in description order, logs one warning for the
+   *         machine. With one but no field, each model logs its own warning once.
+   * @throws model_error under strict_peripherals when the field cannot be read.
+   */
+  [[nodiscard]] auto debug_frozen(bool& logged) const -> bool
+  {
+    auto const   name     = std::format("DBG_{}_STOP", desc_.name);
+    model const* listener = nullptr;
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto const* const freeze = dynamic_cast<debug_freeze const*>(peer))
+      {
+        if(auto const set = freeze->frozen(name))
+        {
+          return *set;
+        }
+        if(not std::exchange(logged, true))
+        {
+          warn(
+              "", std::format(
+                      "the core is held and DBGMCU has no {} field to read: {} runs on, unfrozen",
+                      name, desc_.name));
+        }
+        if(ctx_.strict_peripherals)
+        {
+          throw model_error(desc_.name, name, 0);
+        }
+        return false;
+      }
+      if(listener == nullptr and dynamic_cast<core_hold_listener const*>(peer) != nullptr)
+      {
+        listener = peer;
+      }
+    }
+    if(listener == this and not std::exchange(logged, true))
+    {
+      warn(
+          "", "the core is held and the machine has no DBGMCU model: debug freezes are not "
+              "modelled, every peripheral runs on");
+    }
+    if(ctx_.strict_peripherals)
+    {
+      throw model_error("DBGMCU", "", 0);
+    }
+    return false;
   }
 
   /**

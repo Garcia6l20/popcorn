@@ -230,7 +230,16 @@ void machine::hold_core(bool held)
     return;
   }
   run_->core_held = held;
-  run_->notify_core_hold(held);
+  try
+  {
+    run_->notify_core_hold(held);
+  }
+  catch(...)
+  {
+    run_->core_held = not held;
+    run_->notify_core_hold(not held);
+    throw;
+  }
 }
 
 auto machine::core_held() const noexcept -> bool

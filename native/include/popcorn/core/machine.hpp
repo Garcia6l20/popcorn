@@ -322,6 +322,9 @@ public:
    * @param held True to hold, false to release. A request for the current state does nothing.
    * @throws machine_running while a slice runs, handlers included.
    * @throws machine_busy while a call begun by begin_call() is in progress.
+   * @throws Any exception the arch or a listener throws, such as model_error under
+   *         machine_options::strict_peripherals: the hold is undone and the machine behaves as
+   *         before the call.
    */
   void hold_core(bool held);
 
