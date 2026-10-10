@@ -1014,6 +1014,17 @@ struct machine::run_state
   /** @brief Reports every innermost return frame a block about to run at @p addr completes. */
   void on_return_block(address addr);
 
+  /** @brief Reports every innermost return frame the engine exception @p intno completes, as
+   * arch::interrupt_returns() tells, before the arch handles it. */
+  void on_exception_return(std::uint32_t intno);
+
+  /**
+   * @brief Drops the frames the stack unwound past, then reports, innermost first, each frame
+   *        at the current stack pointer whose return address @p returns accepts. When a handler
+   *        throws, drops the frames still matching without reporting them, then rethrows.
+   */
+  void complete_returns(std::function_ref<bool(address) const> returns);
+
   /** @brief Pops frames the stack has unwound past and recomputes return_watch. */
   void refresh_return_watch() noexcept;
 

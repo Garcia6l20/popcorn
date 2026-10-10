@@ -340,19 +340,23 @@ public:
   virtual auto on_interrupt(std::uint32_t intno) -> trap_result = 0;
 
   /**
-   * @brief Return address an engine exception completes a function return to, when
-   *        on_interrupt() would handle it as a return from an exception handler, such as Arm
-   *        EXC_RETURN in handler mode. The function whose frame is active returns there, as a
-   *        branch to return_address() would. Called before on_interrupt(), with the core
-   *        registers still as the function left them, and only while a return hook waits.
+   * @brief Whether an engine exception completes the return of a function entered with
+   *        @p frame_return as its return_address(), when on_interrupt() would handle it as a
+   *        return from an exception handler. On Arm: an exception exit in handler mode through
+   *        a valid EXC_RETURN, with @p frame_return a valid EXC_RETURN too, not necessarily the
+   *        same, since a handler such as an RTOS context switch may return another one. The
+   *        machine tells the frames apart by stack pointer. Called before on_interrupt(), with
+   *        the core registers still as the function left them, and only while a return hook
+   *        waits.
    * @param intno Engine exception number, as on_interrupt() gets it.
-   * @return The address in the form return_address() gives, empty when @p intno is no such
-   *         return. The default reports none.
+   * @param frame_return Return address a waiting frame got at entry.
+   * @return Whether the frame returns here. The default reports no such return.
    */
-  [[nodiscard]] virtual auto interrupt_return_address([[maybe_unused]] std::uint32_t intno) const
-      -> std::optional<address>
+  [[nodiscard]] virtual auto interrupt_returns(
+      [[maybe_unused]] std::uint32_t intno,
+      [[maybe_unused]] address       frame_return) const -> bool
   {
-    return std::nullopt;
+    return false;
   }
 
   /**

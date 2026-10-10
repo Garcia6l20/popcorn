@@ -1562,10 +1562,14 @@ class Machine:
 
         A return is the branch to the return address `fn` got at entry. For an exception
         handler, or a function the handler reached by a tail call, that is the exception
-        return through EXC_RETURN: `bx lr` or `pop {pc}` in handler mode. It counts before the
-        core unstacks, so `value` holds what `fn` left in its result registers, and before a
-        tail-chained handler runs. A nested exception preempting `fn` is no return of it. An
-        exception return that faults while unstacking still counts, the branch ran.
+        return through EXC_RETURN: `bx lr` or `pop {pc}` in handler mode, through any valid
+        EXC_RETURN, so an RTOS context switch that returns another one counts too. It counts
+        before the core unstacks, so `value` holds what `fn` left in its result registers, and
+        before a tail-chained handler runs. A nested exception preempting `fn` is no return of
+        it: frames match on the stack pointer. An exception return that faults while unstacking
+        still counts, the branch ran. When a handler raises, the other hooked functions that
+        return at that same point, such as the ISR a raising `fn` was tail-called from, are not
+        reported: the run ends there, at the instruction the return lands on.
 
         Raises:
             TypeError: `fn` has no DWARF signature.

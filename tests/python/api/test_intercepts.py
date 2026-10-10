@@ -312,7 +312,8 @@ def test_a_recording_removed_by_a_handler_stops_at_once(hooked: popcorn.Machine)
     assert recording.mark() == 1
 
 
-ISR_ROUNDS = 25
+ISR_PHASE = 25
+ISR_ROUNDS = 4 * ISR_PHASE
 ISR_HANDLERS = (
     "tail_handler",
     "irq_exit",
@@ -320,13 +321,19 @@ ISR_HANDLERS = (
     "second_handler",
     "low_handler",
     "mid_handler",
+    "fpu_handler",
+    "fpu_exit",
+    "svc_handler",
 )
 
 
 def isr_machine(m33: popcorn.MachineDescription) -> popcorn.Machine:
     """A reset machine over the isr firmware: each round pends a handler that tail-calls
-    `irq_exit`, two handlers that tail-chain, and a low handler that a mid handler preempts,
-    itself preempted by a high one."""
+    `irq_exit`, two handlers that tail-chain, a low handler that a mid handler preempts, itself
+    preempted by a high one, and a handler that tail-calls the float `fpu_exit`. Four phases of
+    `ISR_PHASE` rounds: thread on MSP, then on PSP, each with basic then extended frames. On PSP,
+    an SVC before and after each round moves the thread between stacks: `svc_handler` returns
+    another EXC_RETURN than it got."""
     m = popcorn.Machine(m33, image=popcorn.Image.elf(ISR_ELF))
     m.reset()
     return m
@@ -356,8 +363,9 @@ def test_record_returns_counts_each_exception_return_of_a_handler_or_its_tail_ca
     if not running:
         assert m._handle.gil_entries() == before  # pyright: ignore[reportPrivateUsage]
     assert isr_done(m)
-    for counter in ("tail", "first", "second", "low", "mid", "high"):
+    for counter in ("tail", "first", "second", "low", "mid", "high", "fpu"):
         assert int(m.var(f"{counter}_entries").value) == ISR_ROUNDS
+    assert int(m.var("switches").value) == ISR_ROUNDS
     for name, recording in recordings.items():
         entries = recording.since()
         assert len(entries) == ISR_ROUNDS, name
@@ -367,6 +375,8 @@ def test_record_returns_counts_each_exception_return_of_a_handler_or_its_tail_ca
     assert [r.args for r in exits] == [(0,)] * ISR_ROUNDS
     assert [r.value for r in exits] == [10 * (n + 1) for n in range(ISR_ROUNDS)]
     assert [e.value.value for e in recordings["tail_handler"].since()] == [None] * ISR_ROUNDS
+    floats = [e.value.value for e in recordings["fpu_exit"].since()]
+    assert floats == [0.5 * (n + 1) for n in range(ISR_ROUNDS)]
 
 
 def test_an_exception_return_counts_after_the_handler_body_and_before_a_tail_chain(
@@ -386,6 +396,14 @@ def test_an_exception_return_counts_after_the_handler_body_and_before_a_tail_cha
     watching("first_handler", "first_leaves", "second_entries")
     watching("mid_handler", "mid_leaves", "high_leaves")
     watching("low_handler", "low_leaves", "mid_leaves")
+    watching("svc_handler", "switches", "tail_entries")
+    entered_with: list[int] = []
+
+    @m.intercept("tail_handler")
+    def _(c: popcorn.Call) -> popcorn.Return:  # pyright: ignore[reportUnusedFunction]
+        entered_with.append(c.lr)
+        return c.proceed()
+
     assert asyncio.run(m.run(budget=1_000_000)).reason is popcorn.StopReason.IDLE
     assert isr_done(m)
     rounds = range(ISR_ROUNDS)
@@ -393,3 +411,30 @@ def test_an_exception_return_counts_after_the_handler_body_and_before_a_tail_cha
     assert seen["first_handler"] == [(n, n + 1, n) for n in rounds]
     assert seen["mid_handler"] == [(n, n + 1, n + 1) for n in rounds]
     assert seen["low_handler"] == [(n, n + 1, n + 1) for n in rounds]
+    assert [row[:2] for row in seen["svc_handler"]] == [(n, n + 1) for n in rounds]
+    phases = (0xFFFFFFF8, 0xFFFFFFFC, 0xFFFFFFE8, 0xFFFFFFEC)
+    assert entered_with == [lr for lr in phases for _ in range(ISR_PHASE)]
+
+
+def test_a_raising_handler_on_an_exception_return_leaves_the_exit_completed(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = isr_machine(m33)
+    handlers = m.record_returns("tail_handler")
+    exits = m.record_returns("irq_exit")
+    raised: list[int] = []
+
+    def first_raises(r: popcorn.Returned) -> None:
+        if not raised:
+            raised.append(r.occurrence)
+            raise ValueError("first exit")
+
+    m.on_return("irq_exit", first_raises)
+    with pytest.raises(ValueError, match="first exit"):
+        asyncio.run(m.run(budget=1_000_000))
+    stop = asyncio.run(m.run(budget=1_000_000))
+    assert stop.reason is popcorn.StopReason.IDLE
+    assert isr_done(m)
+    assert raised == [0]
+    assert [e.value.value for e in exits.since()] == [10 * (n + 1) for n in range(1, ISR_ROUNDS)]
+    assert [e.value.occurrence for e in handlers.since()] == list(range(ISR_ROUNDS - 1))

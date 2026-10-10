@@ -349,18 +349,22 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
   auto& run                 = *static_cast<run_state*>(user);
   run.coverage.has_previous = false;
   run.spin.previous         = {};
-  auto const stops          = run.guarded([&] {
-    if(run.return_watch != 0)
+  auto const failed         = run.return_watch != 0 and run.guarded([&run, intno] {
+    if(run.arch->interrupt_returns(intno, run.return_watch))
     {
-      if(auto const to = run.arch->interrupt_return_address(intno); to == run.return_watch)
-      {
-        run.on_return_block(*to);
-      }
+      run.on_exception_return(intno);
     }
+    return false;
+  });
+  auto const stops          = run.guarded([&] {
     auto const result = run.owner.arch_->on_interrupt(intno);
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
     {
+      if(failed)
+      {
+        return true;
+      }
       run.spin.leave();
       if(run.until_thread and run.owner.arch_->thread_mode())
       {

@@ -336,18 +336,12 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
   return engine_fault(intno);
 }
 
-auto cortex_m::interrupt_return_address(std::uint32_t intno) const -> std::optional<address>
+auto cortex_m::interrupt_returns(std::uint32_t intno, address frame_return) const -> bool
 {
-  if(intno != excp_exception_exit or thread_mode())
-  {
-    return std::nullopt;
-  }
-  auto const value = read(UC_ARM_REG_PC) | 1u;
-  if(not valid_return(value))
-  {
-    return std::nullopt;
-  }
-  return value & ~address{1};
+  return intno == excp_exception_exit
+     and not thread_mode()
+     and valid_return(frame_return | 1u)
+     and valid_return(read(UC_ARM_REG_PC) | 1u);
 }
 
 auto cortex_m::idle() const -> bool

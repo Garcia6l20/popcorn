@@ -13,6 +13,8 @@
 
 #include <reflex/serde/bson.hpp>
 
+#include <array>
+#include <bit>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -389,7 +391,8 @@ TEST_CASE("ICSR reports the pending vector, pending IRQs and a return to base")
 
 namespace
 {
-constexpr std::uint32_t isr_rounds = 25;
+constexpr std::uint32_t isr_phase  = 25;
+constexpr std::uint32_t isr_rounds = 4 * isr_phase;
 
 auto isr(std::string_view name) -> address
 {
@@ -402,6 +405,16 @@ struct isr_return
   std::uint32_t       leaves{};
   std::uint32_t       other{};
 };
+
+auto in_flight(arch_fixture const& f) -> std::size_t
+{
+  std::size_t count = 0;
+  for(auto const& hook : f.target->snapshot().data().return_hooks)
+  {
+    count += hook.in_flight.size();
+  }
+  return count;
+}
 }
 
 TEST_CASE("a return hook counts each exception return, tail-chained too, never a preemption")
@@ -416,14 +429,15 @@ TEST_CASE("a return hook counts each exception return, tail-chained too, never a
   arch_fixture                                                f{description(), "isr", {}};
   std::map<std::string, std::vector<isr_return>, std::less<>> seen;
   std::vector<core::hook_handle>                              hooks;
-  auto const hook = [&](std::string const& name, std::string_view leaves, std::string_view other) {
+  auto const hook = [&](std::string const& name, std::string_view leaves, std::string_view other,
+                        popcorn::arch::value_kind returns = popcorn::arch::value_kind::i32) {
     std::vector<popcorn::arch::value_kind> args;
     if(name == "irq_exit")
     {
       args.push_back(popcorn::arch::value_kind::i32);
     }
     hooks.push_back(f.target->add_return_hook(
-        isr(name), std::move(args), popcorn::arch::value_kind::i32,
+        isr(name), std::move(args), returns,
         [&f, &seen, name, leaves, other](core::returned_call const& r) {
           seen[name].push_back(
               {.returned = r, .leaves = f.word(isr(leaves)), .other = f.word(isr(other))});
@@ -435,28 +449,41 @@ TEST_CASE("a return hook counts each exception return, tail-chained too, never a
   hook("second_handler", "second_leaves", "first_leaves");
   hook("low_handler", "low_leaves", "mid_leaves");
   hook("mid_handler", "mid_leaves", "high_leaves");
+  hook("fpu_handler", "fpu_leaves", "fpu_entries");
+  hook("fpu_exit", "fpu_leaves", "fpu_entries", popcorn::arch::value_kind::f32);
+  hook("svc_handler", "switches", "tail_entries");
   if(hook_high)
   {
     hook("high_handler", "high_leaves", "mid_leaves");
   }
+  std::vector<address> tail_lr;
+  hooks.push_back(f.target->add_intercept(isr("tail_handler"), [&](core::intercept_call const& c) {
+    tail_lr.push_back(c.return_address());
+    return core::intercept_result::proceed();
+  }));
   CHECK(f.run_to_stop().reason == stop_reason::idle);
   REQUIRE(f.word(isr("done")) == 1);
+  CHECK(in_flight(f) == 0);
   for(auto const* entries :
       {"tail_entries", "first_entries", "second_entries", "low_entries", "mid_entries",
-       "high_entries"})
+       "high_entries", "fpu_entries"})
   {
     CAPTURE(entries);
     CHECK(f.word(isr(entries)) == isr_rounds);
   }
+  CHECK(f.word(isr("switches")) == isr_rounds);
+  REQUIRE(tail_lr.size() == isr_rounds);
   auto const returns = [&](std::string_view name) -> std::vector<isr_return> const& {
     auto const found = seen.find(name);
     REQUIRE(found != seen.end());
     REQUIRE(found->second.size() == isr_rounds);
     return found->second;
   };
+  std::array<address, 4> const phase_lr{0xFFFF'FFF8, 0xFFFF'FFFC, 0xFFFF'FFE8, 0xFFFF'FFEC};
   for(std::uint32_t round = 0; round < isr_rounds; ++round)
   {
     CAPTURE(round);
+    CHECK(tail_lr[round] == phase_lr[round / isr_phase]);
     auto const& tail = returns("tail_handler")[round];
     CHECK(tail.returned.occurrence == round);
     CHECK(tail.leaves == round + 1);
@@ -477,6 +504,11 @@ TEST_CASE("a return hook counts each exception return, tail-chained too, never a
     CHECK(mid.leaves == round + 1);
     CHECK(mid.other == round + 1);
     CHECK(low.returned.instructions.value > mid.returned.instructions.value);
+    auto const& fpu = returns("fpu_exit")[round];
+    CHECK(fpu.leaves == round + 1);
+    CHECK(fpu.returned.value == std::bit_cast<std::uint32_t>(0.5f * static_cast<float>(round + 1)));
+    CHECK(returns("fpu_handler")[round].leaves == round + 1);
+    CHECK(returns("svc_handler")[round].leaves == round + 1);
     if(hook_high)
     {
       auto const& high = returns("high_handler")[round];
@@ -487,7 +519,41 @@ TEST_CASE("a return hook counts each exception return, tail-chained too, never a
   }
 }
 
-TEST_CASE("only an exception return in handler mode through a valid EXC_RETURN is a return")
+TEST_CASE("a handler returning another EXC_RETURN counts once per switch and leaves no frame")
+{
+  arch_fixture                   f{description(), "isr", {}};
+  std::uint32_t                  switch_returns = 0;
+  std::uint32_t                  tail_returns   = 0;
+  std::vector<core::hook_handle> hooks;
+  hooks.push_back(f.target->add_return_hook(
+      isr("svc_handler"), {}, popcorn::arch::value_kind::i32,
+      [&](core::returned_call const&) { ++switch_returns; }));
+  hooks.push_back(f.target->add_return_hook(
+      isr("tail_handler"), {}, popcorn::arch::value_kind::i32,
+      [&](core::returned_call const&) { ++tail_returns; }));
+  hooks.push_back(f.target->add_intercept(isr("fpu_handler"), [](core::intercept_call const&) {
+    return core::intercept_result::stop(stop_reason::user);
+  }));
+  for(std::uint32_t round = 0; round < isr_rounds; ++round)
+  {
+    CAPTURE(round);
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    REQUIRE(f.reg("pc") == isr("fpu_handler"));
+    auto const phase = round / isr_phase;
+    auto const psp_rounds =
+        (phase > 1 ? isr_phase : 0) + (phase % 2 == 1 ? round % isr_phase + 1 : 0);
+    auto const expected = 2 * psp_rounds - (phase % 2 == 1 ? 1 : 0);
+    CHECK(switch_returns == expected);
+    CHECK(f.word(isr("switches")) == expected);
+    CHECK(tail_returns == round + 1);
+    CHECK(in_flight(f) == 0);
+  }
+  CHECK(f.run_to_stop().reason == stop_reason::idle);
+  CHECK(switch_returns == isr_rounds);
+  CHECK(in_flight(f) == 0);
+}
+
+TEST_CASE("only an exception exit in handler mode between valid EXC_RETURN values is a return")
 {
   constexpr std::uint32_t exception_exit = 8;
   constexpr std::uint32_t svc            = 2;
@@ -497,16 +563,19 @@ TEST_CASE("only an exception return in handler mode through a valid EXC_RETURN i
       [](core::intercept_call const&) { return core::intercept_result::stop(stop_reason::user); },
       core::intercept_mode::once);
   f.set("pc", 0xFFFF'FFF9);
-  CHECK_FALSE(f.module->interrupt_return_address(exception_exit).has_value());
+  CHECK_FALSE(f.module->interrupt_returns(exception_exit, 0xFFFF'FFF8));
   f.target->reset();
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   REQUIRE(f.reg("pc") == isr("first_handler"));
   auto const exc_return = f.reg("lr");
   CHECK(exc_return == 0xFFFF'FFF9);
-  CHECK_FALSE(f.module->interrupt_return_address(exception_exit).has_value());
+  CHECK_FALSE(f.module->interrupt_returns(exception_exit, 0xFFFF'FFF8));
   f.set("pc", exc_return);
-  CHECK(f.module->interrupt_return_address(exception_exit) == exc_return - 1);
-  CHECK_FALSE(f.module->interrupt_return_address(svc).has_value());
+  CHECK(f.module->interrupt_returns(exception_exit, 0xFFFF'FFF8));
+  CHECK(f.module->interrupt_returns(exception_exit, 0xFFFF'FFEC));
+  CHECK_FALSE(f.module->interrupt_returns(exception_exit, 0xFFFF'FFF4));
+  CHECK_FALSE(f.module->interrupt_returns(exception_exit, isr("run_rounds")));
+  CHECK_FALSE(f.module->interrupt_returns(svc, 0xFFFF'FFF8));
   f.set("pc", 0xFFFF'FFF5);
-  CHECK_FALSE(f.module->interrupt_return_address(exception_exit).has_value());
+  CHECK_FALSE(f.module->interrupt_returns(exception_exit, 0xFFFF'FFF8));
 }

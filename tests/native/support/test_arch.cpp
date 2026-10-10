@@ -234,13 +234,15 @@ auto test_arch::on_interrupt(std::uint32_t intno) -> popcorn::arch::trap_result
   }
 }
 
-auto test_arch::interrupt_return_address(std::uint32_t intno) const -> std::optional<address>
+auto test_arch::interrupt_returns(std::uint32_t intno, address frame_return) const -> bool
 {
-  if(intno != excp_exception_exit or read(UC_ARM_REG_IPSR) == 0)
-  {
-    return std::nullopt;
-  }
-  return read(UC_ARM_REG_PC) & ~1u;
+  auto const exc_return = [](std::uint32_t value) {
+    return (value & 0xff00'0000u) == 0xff00'0000u;
+  };
+  return intno == excp_exception_exit
+     and read(UC_ARM_REG_IPSR) != 0
+     and exc_return(frame_return)
+     and exc_return(read(UC_ARM_REG_PC));
 }
 
 auto test_arch::on_invalid_insn() -> popcorn::arch::trap_result

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
 #include <ranges>
 #include <string>
 
@@ -193,13 +194,26 @@ void machine::run_state::refresh_return_watch() noexcept
 
 void machine::run_state::on_return_block(address addr)
 {
-  auto const sp    = stack_pointer();
-  auto const floor = call ? call->frames : std::size_t{0};
+  complete_returns([addr](address ret) { return ret == addr; });
+}
+
+void machine::run_state::on_exception_return(std::uint32_t intno)
+{
+  complete_returns([this, intno](address ret) { return arch->interrupt_returns(intno, ret); });
+}
+
+void machine::run_state::complete_returns(std::function_ref<bool(address) const> returns)
+{
+  auto const sp       = stack_pointer();
+  auto const floor    = call ? call->frames : std::size_t{0};
+  auto const returned = [&] {
+    return frames.size() > floor and frames.back().sp == sp and returns(frames.back().ret);
+  };
   while(frames.size() > floor and frames.back().sp < sp)
   {
     frames.pop_back();
   }
-  while(frames.size() > floor and frames.back().ret == addr and frames.back().sp == sp)
+  while(returned())
   {
     auto frame = std::move(frames.back());
     frames.pop_back();
@@ -207,7 +221,7 @@ void machine::run_state::on_return_block(address addr)
     auto&                  entry = *frame.entry;
     arch::call_frame const call{
         .entry = entry.at, .returns = entry.returns, .abi = abi_at(entry.at)};
-    returned_call const returned{
+    returned_call const done{
         .function     = entry.at,
         .occurrence   = entry.calls,
         .args         = std::move(frame.args),
@@ -215,8 +229,20 @@ void machine::run_state::on_return_block(address addr)
         .instructions = icount{owner.clock_driver_.exact_now().value - frame.entered.value},
     };
     ++entry.calls;
-    handler_scope const scope{in_handler};
-    entry.handler(returned);
+    try
+    {
+      handler_scope const scope{in_handler};
+      entry.handler(done);
+    }
+    catch(...)
+    {
+      while(returned())
+      {
+        frames.pop_back();
+      }
+      refresh_return_watch();
+      throw;
+    }
   }
   refresh_return_watch();
 }
