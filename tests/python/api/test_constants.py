@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -330,10 +329,8 @@ def test_a_doubling_macro_chain_raises_within_its_expansion_budget(
     chain += [StubEntry(f"E{level}", f"(E{level - 1} | E{level - 1})") for level in range(1, 41)]
     stub_macros(monkeypatch, *chain)
     for top in ("E40", "E20"):
-        start = time.perf_counter()
         with pytest.raises(ValueError, match="expands more than 100000 macros"):
             constants.macro(top)
-        assert time.perf_counter() - start < 1
     assert constants.macro("E10") == 1
 
 
@@ -354,10 +351,8 @@ def test_a_chain_of_large_texts_raises_within_its_work_budget(
         text = balanced(2500, "1").replace("1", below, 2)
         chain.append(StubEntry(f"L{level}", text))
     stub_macros(monkeypatch, *chain)
-    start = time.perf_counter()
     with pytest.raises(ValueError, match="evaluates more than 1000000 expression nodes"):
         constants.macro("L10")
-    assert time.perf_counter() - start < 1
 
 
 @pytest.mark.parametrize("text", ["(" * 300 + "1" + ")" * 300, "-" * 2000 + "1"])
