@@ -42,6 +42,7 @@ from .conftest import (
     Machines,
     requests_inside,
     run_bounded,
+    stalled_until_posted,
 )
 from .models_example import Timer
 from .projects import MODEL_ELF, MODEL_JSON
@@ -1306,7 +1307,11 @@ def test_now_in_a_free_run_is_monotonic(machines: Machines) -> None:
 
     async def scenario() -> list[VirtualTime]:
         async with m.running():
-            return [await m.now() for _ in range(100)]
+            times: list[VirtualTime] = []
+            for _ in range(20):
+                times.append(await m.now())
+                await m.elapse(us(100))
+            return times
 
     times = run_bounded(scenario(), HANG)
     assert times == sorted(times)
@@ -1423,12 +1428,15 @@ def test_sample_reads_two_values_at_one_boundary(machines: Machines) -> None:
 
     async def scenario() -> list[tuple[int, int, int]]:
         async with m.running():
-            return [
-                await m.sample(
-                    lambda: (m.instructions, int(m.var("alu_value").value), m.instructions)
+            sampled: list[tuple[int, int, int]] = []
+            for _ in range(20):
+                sampled.append(
+                    await m.sample(
+                        lambda: (m.instructions, int(m.var("alu_value").value), m.instructions)
+                    )
                 )
-                for _ in range(20)
-            ]
+                await m.elapse(us(100))
+            return sampled
 
     sampled = run_bounded(scenario(), HANG)
     assert all(first == last for first, _, last in sampled)
@@ -1679,7 +1687,7 @@ def test_a_recording_without_convert_takes_no_gil_on_the_machine_thread(
 
     async def scenario() -> None:
         async with m.running():
-            await m.elapse(ms(5))
+            await m.elapse(ms(10))
 
     before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
     run_bounded(scenario(), HANG)
@@ -1798,34 +1806,18 @@ def test_a_wait_refuses_both_for_and_deadline(machines: Machines, name: str) -> 
 def test_a_free_run_deadline_wait_ends_at_its_absolute_time(machines: Machines) -> None:
     m = machines(slice_instructions=1_000)
 
-    async def registered_at_the_boundary[T](
-        post: Callable[[], Coroutine[object, object, T]],
-    ) -> tuple[VirtualTime, T]:
-        release = threading.Event()
-
-        def held() -> VirtualTime:
-            release.wait(HANG)
-            return m.time
-
-        holding = m.sample(held)
-        task = asyncio.create_task(post())
-        for _ in range(10):
-            await asyncio.sleep(0)
-        release.set()
-        return await holding, await task
-
     async def scenario() -> (
         tuple[VirtualTime, VirtualTime, popcorn.Stop, VirtualTime, popcorn.Stop]
     ):
         async with m.running():
             start = await m.sample(lambda: m.time)
             await m.elapse(ms(20))
-            first, ahead = await registered_at_the_boundary(
-                lambda: m.wait_for(Never(), deadline=start + ms(25))
+            first, ahead = await stalled_until_posted(
+                m, lambda: m.wait_for(Never(), deadline=start + ms(25))
             )
             await m.elapse(ms(2))
-            held, past = await registered_at_the_boundary(
-                lambda: m.wait_for(Never(), deadline=start + ms(1))
+            held, past = await stalled_until_posted(
+                m, lambda: m.wait_for(Never(), deadline=start + ms(1))
             )
         return start, first, ahead, held, past
 

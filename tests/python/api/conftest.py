@@ -222,3 +222,22 @@ async def stalled[T](
     await asyncio.sleep(0.05)
     release.set()
     return await holding, await task
+
+
+async def stalled_until_posted[T](
+    m: popcorn.Machine, post: Callable[[], Coroutine[object, object, T]]
+) -> tuple[VirtualTime, T]:
+    """As `stalled`, releasing the machine once `post()` has run ten loop turns rather than
+    after 50 ms of wall time, so the post registers at the boundary however loaded the host is."""
+    release = threading.Event()
+
+    def held() -> VirtualTime:
+        release.wait(10.0)
+        return m.time
+
+    holding = m.sample(held)
+    task = asyncio.create_task(post())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    release.set()
+    return await holding, await task
