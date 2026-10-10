@@ -1688,7 +1688,7 @@ def test_a_free_run_cdc_deadline_read_takes_what_a_parked_one_takes(
 
     async def running() -> tuple[VirtualTime, tuple[bytes, bytes]]:
         async with m.running():
-            return await late_drained_read(m, post, lambda at: reads(cdc, at))
+            return await late_drained_read(m, post, lambda at: reads(cdc, at), ms(20))
 
     at, (first, later) = run_bounded(running(), HANG)
     assert first
@@ -1771,7 +1771,7 @@ def test_a_free_run_hid_deadline_read_takes_what_a_parked_one_takes(
 
     async def running() -> tuple[VirtualTime, tuple[list[HidReport], list[HidReport]]]:
         async with m.running():
-            return await late_drained_read(m, post, reads)
+            return await late_drained_read(m, post, reads, ms(14))
 
     at, (first, later) = run_bounded(running(), HANG)
     assert first
@@ -1800,11 +1800,11 @@ def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
 
     async def reads(at: VirtualTime) -> tuple[list[UacFrame], list[UacFrame]]:
         first = await mic.read_frames(1000, deadline=at + ms(8))
-        return first, await mic.read_frames(10)
+        return first, await mic.read_frames(1000, deadline=at + ms(16))
 
     async def running() -> tuple[VirtualTime, tuple[list[UacFrame], list[UacFrame]]]:
         async with m.running():
-            return await late_drained_read(m, lambda _: None, reads)
+            return await late_drained_read(m, lambda _: None, reads, ms(12))
 
     at, (first, later) = run_bounded(running(), HANG)
     assert first

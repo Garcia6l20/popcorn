@@ -171,6 +171,13 @@ def deadline_ps(deadline: VirtualTime | None) -> int | None:
     return None if deadline is None else min(max(0, deadline.ps), 2**64 - 1)
 
 
+def cutoff(stop: VirtualTime | None, deadline: VirtualTime | None) -> int:
+    """The latest ready time a stream read takes, in picoseconds: the time its wait stopped,
+    or none without a wait, capped at `deadline`."""
+    bound = 2**64 - 1 if stop is None else stop.ps
+    return bound if deadline is None else min(bound, max(0, deadline.ps))
+
+
 class Poster(Protocol):
     """Runs a native command as one command on the machine, with no GIL: at once while it is
     parked, at a block boundary on its thread while it runs. The result is the command's value
@@ -294,13 +301,15 @@ class UartStream:
         run stops as `Machine.wait_for` does: after the last frame's own time, at the first event
         boundary or slice end, or past `for_` by the bound `Machine.run` gives for its `for_`.
 
-        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
-        past, the wait ends at once.
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
+        what the read takes: no frame past it, even one queued at the call. Already past, the
+        read ends at once with the frames ready by it.
 
         A read that waits takes only the frames whose stop bit ended by the time its wait
         stopped, in one native step: frames that end later stay queued for the next read, even
-        those a free run queued before this read resumed. So the bytes depend only on what the
-        firmware sent, the same parked and running.
+        those a free run queued before this read resumed. So with `deadline` or neither, the
+        bytes depend only on what the firmware sent, the same parked and running. Inside a free
+        run `for_` counts from the boundary where the wait registered, which wall time sets.
 
         Returns:
             Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
@@ -325,8 +334,9 @@ class UartStream:
         """As `read`, the frames with their times. A read that waits returns no frame with an
         `at` past the time its wait stopped.
 
-        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
-        past, the wait ends at once.
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
+        what the read takes: no frame past it, even one queued at the call. Already past, the
+        read ends at once with the frames ready by it.
 
         Raises:
             TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
@@ -336,9 +346,9 @@ class UartStream:
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() >= n:
-            return _frames(self._link.drain(n))
+            return _frames(self._link.drain_until(n, cutoff(None, deadline)))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _frames(self._link.drain_until(n, stop.ps))
+        return _frames(self._link.drain_until(n, cutoff(stop, deadline)))
 
     async def read_until(
         self,

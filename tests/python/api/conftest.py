@@ -6,13 +6,12 @@ import asyncio
 import contextlib
 import os
 import threading
-import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import popcorn
 import pytest
-from popcorn.units import VirtualTime, ms
+from popcorn.units import VirtualDuration, VirtualTime, ms
 
 ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
@@ -248,12 +247,14 @@ async def late_drained_read[T](
     m: popcorn.Machine,
     post: Callable[[VirtualTime], None],
     read: Callable[[VirtualTime], Coroutine[object, object, T]],
+    past: VirtualDuration,
 ) -> tuple[VirtualTime, T]:
     """Inside `running()`, hold the machine's thread at a boundary, call `post(boundary)` and
-    start `read(boundary)` there, then block the event loop in 20 ms naps until the read is
-    done, so its wait ends during a nap and the free run goes on before the read resumes."""
+    start `read(boundary)` there, then block the event loop until a sample stamped at
+    `boundary + past` ran, so the free run is past that time before the read resumes."""
     reached = threading.Event()
     release = threading.Event()
+    passed = threading.Event()
     boundary: list[VirtualTime] = []
 
     def held() -> None:
@@ -264,13 +265,15 @@ async def late_drained_read[T](
     holding = m.sample(held)
     while not reached.is_set():
         await asyncio.sleep(0.001)
-    post(boundary[0])
-    task = asyncio.create_task(read(boundary[0]))
-    for _ in range(10):
-        await asyncio.sleep(0)
-    release.set()
-    while not task.done():
-        time.sleep(0.02)
-        await asyncio.sleep(0)
+    try:
+        post(boundary[0])
+        stamped = m.sample(passed.set, at=boundary[0] + past)
+        task = asyncio.create_task(read(boundary[0]))
+        for _ in range(10):
+            await asyncio.sleep(0)
+    finally:
+        release.set()
+    passed.wait(10.0)
+    await stamped
     await holding
-    return boundary[0], task.result()
+    return boundary[0], await task

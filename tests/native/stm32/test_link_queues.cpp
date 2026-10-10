@@ -298,7 +298,9 @@ TEST_CASE("a UART queue taken until a time stops at the first later frame and ke
   REQUIRE(first.size() == 3);
   CHECK(first.back().at_ps == 30);
   CHECK(queue.take(held, 8, 39).empty());
-  CHECK(queue.take(held, 1, 100).front().at_ps == 40);
+  auto const next = queue.take(held, 1, 100);
+  REQUIRE(next.size() == 1);
+  CHECK(next.front().at_ps == 40);
   CHECK(queue.available(held) == 1);
 }
 

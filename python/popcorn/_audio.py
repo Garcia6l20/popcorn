@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._errors import ConfigError, ModelError
-from popcorn._streams import Poster, Waiter, check_wait, written
+from popcorn._streams import Poster, Waiter, check_wait, cutoff, written
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
@@ -149,13 +149,16 @@ class AudioStream:
 
         Inside `running()`, this awaits the background run instead of driving the machine.
 
-        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
-        past, the wait ends at once.
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
+        what the read takes: no frame that ended past it, even one queued at the call. Already
+        past, the read ends at once with the frames that ended by it.
 
         A read that waits takes only the frames that ended by the time its wait stopped, in one
         native step: later frames stay queued for the next read, even those a free run sent
-        before this read resumed. So the frames depend only on what the block sent, the same
-        parked and running. A frame's `at` is its start, one frame time before its end.
+        before this read resumed. So with `deadline` or neither, the frames depend only on what
+        the block sent, the same parked and running. Inside a free run `for_` counts from the
+        boundary where the wait registered, which wall time sets. A frame's `at` is its start,
+        one frame time before its end.
 
         Returns:
             Up to `n` frames, fewer when `for_` elapsed, `deadline` passed or the core went
@@ -171,9 +174,9 @@ class AudioStream:
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() >= n:
-            return _audio_frames(self._link.drain(n))
+            return _audio_frames(self._link.drain_until(n, cutoff(None, deadline)))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _audio_frames(self._link.drain_until(n, stop.ps))
+        return _audio_frames(self._link.drain_until(n, cutoff(stop, deadline)))
 
     def take_frames(self) -> list[AudioFrame]:
         """Every frame the block transmitted and not read yet, at once, never running the

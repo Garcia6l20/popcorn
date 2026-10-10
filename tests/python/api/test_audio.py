@@ -639,11 +639,11 @@ def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
 
     async def reads(at: VirtualTime) -> tuple[list[AudioFrame], list[AudioFrame]]:
         first = await stream.read_frames(10**6, deadline=at + ms(2))
-        return first, await stream.read_frames(10)
+        return first, await stream.read_frames(10**6, deadline=at + ms(4))
 
     async def running() -> tuple[VirtualTime, tuple[list[AudioFrame], list[AudioFrame]]]:
         async with m.running():
-            return await late_drained_read(m, lambda _: None, reads)
+            return await late_drained_read(m, lambda _: None, reads, ms(3))
 
     at, (first, later) = run_bounded(running(), 10)
     assert first

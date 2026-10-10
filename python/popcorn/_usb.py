@@ -55,6 +55,7 @@ from popcorn._streams import (
     Waiter,
     cdc_key,
     check_wait,
+    cutoff,
     read_until_match,
     written,
 )
@@ -414,13 +415,15 @@ class CdcStream:
         """Run the machine until `n` bytes arrived, or `for_` elapsed, and take them, as
         `UartStream.read`.
 
-        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
-        past, the wait ends at once.
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
+        what the read takes: no packet past it, even one queued at the call. Already past, the
+        read ends at once with the packets ready by it.
 
         A read that waits takes only the bytes of packets received by the time its wait
         stopped, in one native step: later packets stay queued for the next read, even those a
-        free run received before this read resumed. So the bytes depend only on what the device
-        sent, the same parked and running.
+        free run received before this read resumed. So with `deadline` or neither, the bytes
+        depend only on what the device sent, the same parked and running. Inside a free run
+        `for_` counts from the boundary where the wait registered, which wall time sets.
 
         Returns:
             Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
@@ -437,9 +440,9 @@ class CdcStream:
         check_wait(for_, deadline)
         self._check_read(n)
         if self._link.available() >= n:
-            return self._link.drain(n)
+            return self._link.drain_until(n, cutoff(None, deadline))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return self._link.drain_until(n, stop.ps)
+        return self._link.drain_until(n, cutoff(stop, deadline))
 
     async def read_packets(
         self,
@@ -451,8 +454,9 @@ class CdcStream:
         """As `read`, `n` packets with their times. The rest of a packet a `read` split counts
         as one. A read that waits returns no packet with an `at` past the time its wait stopped.
 
-        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
-        past, the wait ends at once.
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
+        what the read takes: no packet past it, even one queued at the call. Already past, the
+        read ends at once with the packets ready by it.
 
         Raises:
             TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
@@ -460,9 +464,9 @@ class CdcStream:
         check_wait(for_, deadline)
         self._check_read(n)
         if self._link.packets() >= n:
-            return _cdc_packets(self._link.drain_packets(n))
+            return _cdc_packets(self._link.drain_packets_until(n, cutoff(None, deadline)))
         stop = await self._wait(self._link.predicate_packets(n), for_, deadline)
-        return _cdc_packets(self._link.drain_packets_until(n, stop.ps))
+        return _cdc_packets(self._link.drain_packets_until(n, cutoff(stop, deadline)))
 
     async def read_until(
         self,
@@ -810,14 +814,17 @@ class HidStream:
     ) -> list[HidReport]:
         """Run the machine until `n` input reports arrived, or `for_` elapsed, and take them.
 
-        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
-        past, the wait ends at once.
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
+        what the read takes: no report the host queued past it, even one queued at the call.
+        Already past, the read ends at once with the reports queued by it.
 
         A read that waits takes only the reports the host queued by the time its wait stopped,
         in one native step: later reports stay queued for the next read, even those a free run
-        queued before this read resumed. So the reports depend only on what the device sent,
-        the same parked and running. The host runs every transaction of a frame at the frame's
-        start, so a report taken can carry an `at` up to about 1 ms past that time.
+        queued before this read resumed. So with `deadline` or neither, the reports depend only
+        on what the device sent, the same parked and running. Inside a free run `for_` counts
+        from the boundary where the wait registered, which wall time sets. The host runs every
+        transaction of a frame at the frame's start, so a report taken can carry an `at` up to
+        about 1 ms past that time.
 
         Returns:
             Up to `n` reports, oldest first, fewer when `for_` elapsed, `deadline` passed or
@@ -833,9 +840,9 @@ class HidStream:
         if n < 0:
             raise ValueError(f"cannot read {n} reports")
         if self._link.available() >= n:
-            return _hid_reports(self._link.drain(n))
+            return _hid_reports(self._link.drain_until(n, cutoff(None, deadline)))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _hid_reports(self._link.drain_until(n, stop.ps))
+        return _hid_reports(self._link.drain_until(n, cutoff(stop, deadline)))
 
     def take_reports(self) -> list[HidReport]:
         """Every input report received and not read yet, at once, never running the machine.
@@ -1401,8 +1408,9 @@ class UacMic(UacStream):
         """Run the machine until `n` frames arrived, or `for_` elapsed, and take them, as
         `AudioStream.read_frames`.
 
-        `deadline` stops waiting at this virtual time instead, exclusive with `for_`. Already
-        past, the wait ends at once.
+        `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
+        what the read takes: no frame the host queued past it, even one queued at the call.
+        Already past, the read ends at once with the frames queued by it.
 
         A read that waits takes only the frames the host queued by the time its wait stopped,
         as `HidStream.read_reports` does: a frame taken can carry an `at` up to about 1 ms past
@@ -1422,9 +1430,9 @@ class UacMic(UacStream):
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() >= n:
-            return _uac_frames(self._link.drain(n))
+            return _uac_frames(self._link.drain_until(n, cutoff(None, deadline)))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _uac_frames(self._link.drain_until(n, stop.ps))
+        return _uac_frames(self._link.drain_until(n, cutoff(stop, deadline)))
 
     def take_frames(self) -> list[UacFrame]:
         """Every frame received and not read yet, at once, never running the machine. Allowed

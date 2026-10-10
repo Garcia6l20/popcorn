@@ -417,7 +417,7 @@ def test_a_deadline_read_equals_the_same_read_with_for(board: popcorn.Machine) -
     assert 0 < len(with_deadline[0]) < 4
 
 
-def test_a_past_deadline_read_returns_what_is_queued_at_once(board: popcorn.Machine) -> None:
+def test_a_past_deadline_read_takes_what_was_ready_by_it_at_once(board: popcorn.Machine) -> None:
     uart = board.periph.USART1.port
 
     async def exchanged() -> None:
@@ -426,7 +426,8 @@ def test_a_past_deadline_read_returns_what_is_queued_at_once(board: popcorn.Mach
 
     asyncio.run(exchanged())
     before = board.instructions
-    assert asyncio.run(uart.read(5, deadline=VirtualTime(0))) == b"ab"
+    assert asyncio.run(uart.read(5, deadline=VirtualTime(0))) == b""
+    assert asyncio.run(uart.read(5, deadline=board.time)) == b"ab"
     assert asyncio.run(uart.read_frames(5, deadline=board.time)) == []
     assert board.instructions == before
 
@@ -487,7 +488,7 @@ def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
 
     async def running() -> tuple[VirtualTime, tuple[list[Frame], list[Frame]]]:
         async with board.running():
-            return await late_drained_read(board, post, reads)
+            return await late_drained_read(board, post, reads, ms(8))
 
     at, (first, later) = run_bounded(running(), 20)
     assert first
@@ -497,6 +498,42 @@ def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
     board.restore(start)
     post(at)
     assert asyncio.run(reads(at)) == (first, later)
+
+
+def test_a_read_registered_past_its_deadline_takes_only_the_frames_ready_by_it(
+    board: popcorn.Machine,
+) -> None:
+    uart = board.periph.USART1.port
+    sent = bytes(range(1, 201))
+    start = board.snapshot()
+
+    def post(at: VirtualTime) -> None:
+        uart.write(sent, at=at + ms(1))
+
+    async def reads(at: VirtualTime) -> tuple[list[Frame], list[Frame], list[Frame]]:
+        waited = await uart.read_frames(1000, deadline=at + ms(2))
+        fast = await uart.read_frames(30, deadline=at + ms(3))
+        return waited, fast, await uart.read_frames(1000, deadline=at + ms(30))
+
+    async def running() -> tuple[VirtualTime, tuple[list[Frame], list[Frame], list[Frame]]]:
+        async with board.running():
+
+            async def late(at: VirtualTime) -> tuple[list[Frame], list[Frame], list[Frame]]:
+                await board.sample(lambda: None, at=at + ms(10))
+                return await reads(at)
+
+            return await late_drained_read(board, post, late, ms(10))
+
+    at, (waited, fast, later) = run_bounded(running(), 20)
+    assert waited
+    assert waited[-1].at <= at + ms(2) < fast[0].at
+    assert 0 < len(fast) < 30
+    assert fast[-1].at <= at + ms(3) < later[0].at
+    assert bytes(f.data for f in waited + fast + later) == sent
+    board.restore(start)
+    post(at)
+    asyncio.run(board.elapse(at + ms(10) - board.time))
+    assert asyncio.run(reads(at)) == (waited, fast, later)
 
 
 def test_read_until_takes_through_the_match(board: popcorn.Machine) -> None:
