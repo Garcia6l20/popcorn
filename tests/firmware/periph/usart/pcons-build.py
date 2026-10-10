@@ -31,5 +31,12 @@ add_ll_firmware(
         "link_tx_55",
         "link_rx_over8",
         "link_rx_onebit",
+        "break_tx",
+        "break_fifo",
+        "break_gap",
+        "link_tx_long",
+        "link_rx_quiet",
+        "link_tx_bursts",
+        "dma_ring",
     ],
 )

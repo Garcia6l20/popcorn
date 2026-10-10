@@ -144,6 +144,8 @@ struct usart_state
   std::vector<linked_frame>    linked;
   std::uint64_t                idle_due_ps{};
   std::uint32_t                linked_generation{};
+  bool                         break_pending{};
+  bool                         break_shifting{};
 
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
@@ -212,7 +214,10 @@ struct lock
  *        an LPUART: a disagreement sets NE, a stop bit sampled 0 sets FE, the sampled word enters
  *        RDR. The receiver resynchronises on each sender start bit: a falling edge inside a later
  *        frame is never taken for a start bit. Parity is not modelled: PCE logs a warning once,
- *        a model_error under strict_peripherals.
+ *        a model_error under strict_peripherals. RQR.SBKRQ sets SBKF and sends a break after
+ *        the frame in flight, ahead of the TX FIFO: a frame time low, then 2 bits high before
+ *        the next frame, SBKF clearing as the low part ends. A break from another machine reads
+ *        as 0 with FE, LBDF is LIN only and not modelled.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_port
 {
@@ -317,6 +322,8 @@ private:
   field_ref                                    flush_rx_;
   field_ref                                    flush_tx_;
   field_ref                                    parity_enable_;
+  field_ref                                    break_request_;
+  field_ref                                    break_flag_;
   std::optional<field_ref>                     one_bit_;
   std::vector<std::pair<field_ref, field_ref>> clears_;
   std::vector<field_ref>                       unsupported_;
@@ -401,7 +408,8 @@ usart::usart(
       tx_threshold_ie_{field("CR3", "TXFTIE")}, rx_threshold_ie_{field("CR3", "RXFTIE")},
       tx_threshold_flag_{field(isr_, "TXFT")}, rx_threshold_flag_{field(isr_, "RXFT")},
       flush_rx_{field("RQR", "RXFRQ")}, flush_tx_{field("RQR", "TXFRQ")},
-      parity_enable_{field(cr1_, "PCE")},
+      parity_enable_{field(cr1_, "PCE")}, break_request_{field("RQR", "SBKRQ")},
+      break_flag_{field(isr_, "SBKF")},
       one_bit_{
           std::ranges::contains(
               describe("CR3").fields,
@@ -539,9 +547,11 @@ void usart::reset(register_file& regs, reset_kind)
   state_.rx_fifo.clear();
   state_.host.clear();
   state_.linked.clear();
-  state_.shifting     = false;
-  state_.receiving    = false;
-  state_.idle_pending = false;
+  state_.break_pending  = false;
+  state_.break_shifting = false;
+  state_.shifting       = false;
+  state_.receiving      = false;
+  state_.idle_pending   = false;
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
@@ -653,7 +663,8 @@ void usart::warn_unsupported()
 
 void usart::start_frame(std::uint64_t from_ps)
 {
-  if(state_.shifting or state_.tx_fifo.empty() or not enabled() or get(regs_, transmit_) == 0)
+  auto const queued = state_.break_pending or not state_.tx_fifo.empty();
+  if(state_.shifting or not queued or not enabled() or get(regs_, transmit_) == 0)
   {
     return;
   }
@@ -662,9 +673,19 @@ void usart::start_frame(std::uint64_t from_ps)
   {
     return;
   }
-  state_.shift    = state_.tx_fifo.front();
-  state_.shifting = true;
-  state_.tx_fifo.erase(state_.tx_fifo.begin());
+  auto const brk = state_.break_pending;
+  if(brk)
+  {
+    state_.shift          = 0;
+    state_.break_pending  = false;
+    state_.break_shifting = true;
+  }
+  else
+  {
+    state_.shift = state_.tx_fifo.front();
+    state_.tx_fifo.erase(state_.tx_fifo.begin());
+  }
+  state_.shifting  = true;
   state_.tx_end_ps = schedule(transmit_done, from_ps, ps);
   if(far_end_)
   {
@@ -672,6 +693,7 @@ void usart::start_frame(std::uint64_t from_ps)
         {.data       = state_.shift,
          .word_bits  = static_cast<std::uint8_t>(word_bits()),
          .half_stops = half_stop_codes[get(regs_, stop_)],
+         .kind       = brk ? frame_kind::brk : frame_kind::data,
          .frame_ps   = ps,
          .start      = vtime{state_.tx_end_ps - ps},
          .end        = vtime{state_.tx_end_ps}});
@@ -758,9 +780,12 @@ void usart::control_written(std::uint32_t, std::uint32_t)
     }
     state_.tx_fifo.clear();
     state_.rx_fifo.clear();
-    state_.shifting     = false;
-    state_.receiving    = false;
-    state_.idle_pending = false;
+    state_.shifting       = false;
+    state_.receiving      = false;
+    state_.idle_pending   = false;
+    state_.break_pending  = false;
+    state_.break_shifting = false;
+    update(regs_, break_flag_, 0);
     update(regs_, complete_, 1);
   }
   else if(get(regs_, receive_) != 0 and not state_.receiving and not state_.host.empty())
@@ -805,6 +830,12 @@ void usart::clear_written(std::uint32_t, std::uint32_t now)
 
 void usart::request_written(std::uint32_t, std::uint32_t now)
 {
+  if(break_request_.of(now) != 0 and enabled() and get(regs_, transmit_) != 0)
+  {
+    update(regs_, break_flag_, 1);
+    state_.break_pending = true;
+    start_frame(ctx_.clock.time().ps);
+  }
   if(flush_rx_.of(now) != 0)
   {
     state_.rx_fifo.clear();
@@ -852,10 +883,15 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
       return;
     }
     state_.linked.erase(state_.linked.begin());
-    auto const same = rx.frame_ps == head.frame.frame_ps
+    auto const same = head.frame.kind == frame_kind::data
+                  and rx.frame_ps == head.frame.frame_ps
                   and rx.word_bits == head.frame.word_bits
                   and rx.half_stops == head.frame.half_stops;
-    if(same or rx.frame_ps == 0)
+    if(head.frame.kind == frame_kind::brk)
+    {
+      deliver(0, true);
+    }
+    else if(same or rx.frame_ps == 0)
     {
       deliver(head.frame.data);
     }
@@ -885,11 +921,18 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     state_.shifting = false;
     auto const data = state_.shift;
+    auto const brk  = std::exchange(state_.break_shifting, false);
     if(far_end_)
     {
-      far_end_->transmitted(data, vtime{state_.tx_end_ps});
+      far_end_->transmitted(data, vtime{state_.tx_end_ps}, brk);
     }
-    start_frame(state_.tx_end_ps);
+    auto next = state_.tx_end_ps;
+    if(brk)
+    {
+      update(regs_, break_flag_, 0);
+      next += 4 * frame_ps() / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)]);
+    }
+    start_frame(next);
     if(not state_.shifting)
     {
       update(regs_, complete_, 1);

@@ -39,6 +39,14 @@ void link_tx_switch(void);
 void link_tx_55(void);
 void link_rx_over8(void);
 void link_rx_onebit(void);
+void break_tx(void);
+void break_fifo(void);
+void break_gap(void);
+void link_tx_long(void);
+void link_rx_quiet(void);
+void link_tx_bursts(void);
+void dma_ring(void);
+void USART2_IRQHandler(void);
 
 void idle(void)
 {
@@ -94,12 +102,18 @@ static void send_poll(USART_TypeDef* usart)
 }
 
 static void link_irq(void);
+static void quiet_irq(void);
 
 void USART1_IRQHandler(void)
 {
   if(received_count == 0xffffffffu)
   {
     link_irq();
+    return;
+  }
+  if(received_count == 0xfffffffeu)
+  {
+    quiet_irq();
     return;
   }
   if(LL_USART_IsActiveFlag_RXNE_RXFNE(USART1))
@@ -333,10 +347,12 @@ uint8_t                  ring[RING_BYTES];
 static uint32_t          rx_node0[6] __attribute__((aligned(4)));
 static uint32_t          rx_node1[4] __attribute__((aligned(4)));
 static volatile uint32_t rx_events;
+static volatile uint32_t ring_size = RING_BYTES;
+uint8_t                  big_ring[64];
 
 void GPDMA1_Channel3_IRQHandler(void)
 {
-  uint32_t const moved = RING_BYTES - LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_3);
+  uint32_t const moved = ring_size - LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_3);
   if(LL_DMA_IsActiveFlag_HT(GPDMA1, LL_DMA_CHANNEL_3))
   {
     LL_DMA_ClearFlag_HT(GPDMA1, LL_DMA_CHANNEL_3);
@@ -351,8 +367,9 @@ void GPDMA1_Channel3_IRQHandler(void)
   }
 }
 
-void rx_dma_list(void)
+static void start_ring(uint8_t* target, uint32_t bytes)
 {
+  ring_size = bytes;
   LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
   LL_RCC_SetUSARTClockSource(LL_RCC_USART2_CLKSOURCE_PCLK1);
   init(USART2, 115200);
@@ -364,13 +381,13 @@ void rx_dma_list(void)
   rx_node0[1]           = LL_DMA_TCEM_EACH_LLITEM_TRANSFER
                         | LL_DMA_DIRECTION_PERIPH_TO_MEMORY
                         | LL_GPDMA1_REQUEST_USART2_RX;
-  rx_node0[2]           = RING_BYTES;
+  rx_node0[2]           = bytes;
   rx_node0[3]           = source;
-  rx_node0[4]           = (uint32_t)ring;
+  rx_node0[4]           = (uint32_t)target;
   rx_node0[5]           = next;
-  rx_node1[0]           = RING_BYTES;
+  rx_node1[0]           = bytes;
   rx_node1[1]           = source;
-  rx_node1[2]           = (uint32_t)ring;
+  rx_node1[2]           = (uint32_t)target;
   rx_node1[3]           = next;
   LL_DMA_SetTransferEventMode(GPDMA1, LL_DMA_CHANNEL_3, LL_DMA_TCEM_RPT_BLK_TRANSFER);
   LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_3, 0);
@@ -383,6 +400,11 @@ void rx_dma_list(void)
   NVIC_EnableIRQ(GPDMA1_Channel3_IRQn);
   LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_3);
   LL_USART_EnableDMAReq_RX(USART2);
+}
+
+void rx_dma_list(void)
+{
+  start_ring(ring, RING_BYTES);
   __asm__ volatile("bkpt #3" ::: "memory");
   while(rx_events < 5)
   {
@@ -633,6 +655,123 @@ void link_tx_switch(void)
   }
   wait_complete();
   DONE();
+}
+
+void break_tx(void)
+{
+  start_link_at(115200u);
+  send_byte('a');
+  LL_USART_RequestBreakSending(USART1);
+  send_byte('b');
+  wait_complete();
+  DONE();
+}
+
+void break_gap(void)
+{
+  start_link_at(115200u);
+  send_byte('a');
+  wait_complete();
+  wait_us(40);
+  LL_USART_RequestBreakSending(USART1);
+  while(LL_USART_IsActiveFlag_SBK(USART1))
+  {
+  }
+  wait_us(60);
+  send_byte('b');
+  wait_complete();
+  DONE();
+}
+
+void break_fifo(void)
+{
+  start_link_at(115200u);
+  LL_USART_Disable(USART1);
+  LL_USART_EnableFIFO(USART1);
+  enable(USART1);
+  for(uint8_t next = '0'; next < '8'; ++next)
+  {
+    send_byte(next);
+  }
+  LL_USART_RequestBreakSending(USART1);
+  wait_complete();
+  DONE();
+}
+
+void link_tx_long(void)
+{
+  start_link();
+  for(unsigned index = 0; index < 512; ++index)
+  {
+    send_byte((uint8_t)index);
+  }
+  wait_complete();
+  DONE();
+}
+
+static volatile uint32_t quiet_bytes;
+
+static void quiet_irq(void)
+{
+  if(LL_USART_IsActiveFlag_RXNE_RXFNE(USART1))
+  {
+    (void)LL_USART_ReceiveData8(USART1);
+    ++quiet_bytes;
+  }
+  if(LL_USART_IsActiveFlag_IDLE(USART1))
+  {
+    LL_USART_ClearFlag_IDLE(USART1);
+    LOG((LINK_IDLE << 16) | (quiet_bytes & 0xffffu));
+    LOG(DWT->CYCCNT);
+  }
+}
+
+void link_rx_quiet(void)
+{
+  start_link();
+  received_count = 0xfffffffeu;
+  LL_USART_EnableIT_RXNE_RXFNE(USART1);
+  LL_USART_EnableIT_IDLE(USART1);
+  NVIC_EnableIRQ(USART1_IRQn);
+  idle();
+}
+
+void link_tx_bursts(void)
+{
+  start_usart1();
+  enable(USART1);
+  uint8_t  next = 0;
+  unsigned sent = 0;
+  while(sent < 200)
+  {
+    for(unsigned index = 0; index < 37 && sent < 200; ++index, ++sent)
+    {
+      send_byte(next++);
+    }
+    wait_complete();
+    for(volatile uint32_t pause = 0; pause < 200; ++pause)
+    {
+    }
+  }
+  DONE();
+}
+
+void USART2_IRQHandler(void)
+{
+  if(LL_USART_IsActiveFlag_IDLE(USART2))
+  {
+    LL_USART_ClearFlag_IDLE(USART2);
+    LOG(0x49000000u | (ring_size - LL_DMA_GetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_3)));
+  }
+}
+
+void dma_ring(void)
+{
+  start_ring(big_ring, sizeof big_ring);
+  LL_USART_EnableIT_IDLE(USART2);
+  NVIC_EnableIRQ(USART2_IRQn);
+  __asm__ volatile("bkpt #3" ::: "memory");
+  idle();
 }
 
 void link_tx_55(void)

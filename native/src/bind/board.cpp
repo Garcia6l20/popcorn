@@ -111,7 +111,7 @@ auto uart_link::drain_until(std::uint64_t count, std::uint64_t until_ps) -> std:
   });
   return taken
        | std::views::transform([](detail::queued_uart_frame const& frame) {
-           return uart_frame{.data = frame.data, .at_ps = frame.at_ps};
+           return uart_frame{.data = frame.data, .at_ps = frame.at_ps, .brk = frame.brk};
          })
        | std::ranges::to<std::vector>();
 }

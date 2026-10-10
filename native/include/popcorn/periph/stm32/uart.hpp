@@ -24,6 +24,8 @@ enum class[[= reflex::derive{reflex::Format}]] frame_kind
 {
   /** @brief A data frame. */
   data,
+  /** @brief A break: the line held low for a frame, data and stop bits 0, then 2 bits high. */
+  brk,
 };
 
 /** @brief One frame on a UART line, as its sender shaped it. */
@@ -74,10 +76,11 @@ public:
 
   /**
    * @brief A frame left the transmitter.
-   * @param data Data bits of the frame, 7 to 9 of them, right-aligned.
-   * @param at Virtual time the stop bit ended.
+   * @param data Data bits of the frame, 7 to 9 of them, right-aligned, 0 for a break.
+   * @param at Virtual time the stop bit ended, the break's last low bit for a break.
+   * @param brk Whether the frame is a break.
    */
-  virtual void transmitted(std::uint16_t data, vtime at) = 0;
+  virtual void transmitted(std::uint16_t data, vtime at, bool brk) = 0;
 
   /**
    * @brief A frame's start bit left the transmitter: its whole shape and its times are known.
@@ -129,7 +132,8 @@ public:
    * @brief Queues a frame from another machine. Its data reaches the receiver at @p frame.end,
    *        exactly, even when that time has already passed, in key order with the events of
    *        that instant, see core::scheduler. Its start bit cancels an IDLE due after it. Called
-   *        on this machine's host thread while no slice runs. Host frames of receive() and these
+   *        on this machine's host thread while no slice runs, or from its own loopback endpoint.
+   *        A break frame reads as 0 with FE. Host frames of receive() and these
    *        are not arbitrated: a linked UART takes no host frames.
    * @param frame The frame, times already in this machine's virtual time.
    * @param lane Lane of the wire it came on, 1 and up.
@@ -162,6 +166,8 @@ struct captured_frame
   std::uint16_t data{};
   /** @brief Virtual time its stop bit ended. */
   vtime at{};
+  /** @brief Whether it was a break. */
+  bool brk{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(captured_frame const&, captured_frame const&) -> bool = default;
@@ -174,13 +180,19 @@ public:
   /** @brief Frames received, in order. */
   std::vector<captured_frame> frames;
 
-  void transmitted(std::uint16_t data, vtime at) override
+  void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
-    frames.push_back({.data = data, .at = at});
+    frames.push_back({.data = data, .at = at, .brk = brk});
   }
 };
 
-/** @brief Feeds every transmitted frame back into a port's receiver. */
+/**
+ * @brief Feeds every transmitted frame back into a port's receiver: data frames through
+ *        uart_port::receive, a break through uart_port::receive_at as a break frame, lane 1. So a
+ *        data frame reaches the receiver one receiver frame time after its stop-bit end, as any
+ *        host frame, while a break reaches it at its own end: a data frame and the break right
+ *        after it land at the same count, the data frame first by lane.
+ */
 class loopback_endpoint final : public uart_endpoint
 {
 public:
@@ -191,9 +203,20 @@ public:
   explicit loopback_endpoint(uart_port& port) : port_{&port}
   {}
 
-  void transmitted(std::uint16_t data, vtime) override
+  void transmitted(std::uint16_t data, vtime, bool brk) override
   {
-    port_->receive(std::span{&data, 1});
+    if(not brk)
+    {
+      port_->receive(std::span{&data, 1});
+    }
+  }
+
+  void started(line_frame const& frame) override
+  {
+    if(frame.kind == frame_kind::brk)
+    {
+      port_->receive_at(frame, 1);
+    }
   }
 
 private:

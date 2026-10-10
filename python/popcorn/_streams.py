@@ -206,12 +206,14 @@ class Frame:
     """One frame the firmware transmitted.
 
     Attributes:
-        data: Data bits.
+        data: Data bits, 0 for a break.
         at: Virtual time its stop bit ended.
+        brk: Whether it was a break. `read` gives a break as a 0 byte.
     """
 
     data: int
     at: VirtualTime
+    brk: bool = False
 
 
 class UartStream:
@@ -437,7 +439,7 @@ class UartStream:
 
 
 def _frames(records: Iterable[_core.UartFrame]) -> list[Frame]:
-    return [Frame(f.data, VirtualTime(f.at_ps)) for f in records]
+    return [Frame(f.data, VirtualTime(f.at_ps), f.brk) for f in records]
 
 
 type PtyOpener = Callable[[str, _core.UartLink | _core.CdcLink], _core.PtyBridge]

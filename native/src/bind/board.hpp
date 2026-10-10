@@ -29,6 +29,8 @@ struct[[= py::rename{"UartFrame"}]] uart_frame
   [[= py::readonly]] std::uint16_t data{};
   /** @brief Virtual time its stop bit ended, in picoseconds. */
   [[= py::readonly]] std::uint64_t at_ps{};
+  /** @brief Whether it was a break, data 0. */
+  [[= py::readonly]] bool brk{};
 };
 
 /**

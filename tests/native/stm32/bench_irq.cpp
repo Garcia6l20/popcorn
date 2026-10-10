@@ -88,7 +88,7 @@ public:
   std::uint64_t frames{};
   fnv           hash{};
 
-  void transmitted(std::uint16_t data, vtime at) override
+  void transmitted(std::uint16_t data, vtime at, bool) override
   {
     ++frames;
     hash.mix(data);

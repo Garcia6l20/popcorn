@@ -71,7 +71,7 @@ TEST_CASE("a UART queue filled on one thread and drained on another loses and re
   }};
   for(std::uint64_t at = 0; at < sent; ++at)
   {
-    queue.transmitted(static_cast<std::uint16_t>(at & 0x1ff), vtime{at});
+    queue.transmitted(static_cast<std::uint16_t>(at & 0x1ff), vtime{at}, false);
   }
   done.store(true, std::memory_order_release);
   drainer.join();
@@ -185,7 +185,7 @@ TEST_CASE("a UART queue drains 0 frames, at most what it holds, and a limit of 1
   detail::queue_endpoint queue;
   for(std::uint16_t data = 0; data < 5; ++data)
   {
-    queue.transmitted(data, vtime{data});
+    queue.transmitted(data, vtime{data}, false);
   }
   {
     auto const held = queue.lock();
@@ -197,10 +197,10 @@ TEST_CASE("a UART queue drains 0 frames, at most what it holds, and a limit of 1
   }
   for(std::uint16_t data = 0; data < 5; ++data)
   {
-    queue.transmitted(data, vtime{data});
+    queue.transmitted(data, vtime{data}, false);
   }
   queue.set_limit(queue.lock(), 1);
-  queue.transmitted(9, vtime{9});
+  queue.transmitted(9, vtime{9}, false);
   auto const held = queue.lock();
   CHECK(queue.dropped(held) == 5);
   auto const kept = queue.take(held, 100);
@@ -252,9 +252,9 @@ TEST_CASE("a UART queue peek copies low bytes from an offset and leaves the queu
     auto const held = queue.lock();
     CHECK(queue.peek(held, 0, 8).empty());
   }
-  queue.transmitted(0x1A5, vtime{1});
-  queue.transmitted(0x42, vtime{2});
-  queue.transmitted(0x43, vtime{3});
+  queue.transmitted(0x1A5, vtime{1}, false);
+  queue.transmitted(0x42, vtime{2}, false);
+  queue.transmitted(0x43, vtime{3}, false);
   auto const held = queue.lock();
   CHECK(queue.peek(held, 0, 8) == std::vector<std::uint8_t>{0xA5, 0x42, 0x43});
   CHECK(queue.peek(held, 1, 1) == std::vector<std::uint8_t>{0x42});
@@ -291,7 +291,7 @@ TEST_CASE("a UART queue taken until a time stops at the first later frame and ke
   detail::queue_endpoint queue;
   for(std::uint64_t at = 10; at <= 50; at += 10)
   {
-    queue.transmitted(static_cast<std::uint16_t>(at), vtime{at});
+    queue.transmitted(static_cast<std::uint16_t>(at), vtime{at}, false);
   }
   auto const held  = queue.lock();
   auto const first = queue.take(held, 8, 30);

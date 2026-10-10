@@ -17,6 +17,7 @@
 #include <expected>
 #include <memory>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -674,12 +675,14 @@ struct line_post
 class mailbox final : public stm32::uart_endpoint
 {
 public:
-  std::vector<line_post> posts;
-  int                    transmissions = 0;
+  std::vector<line_post>             posts;
+  std::vector<stm32::captured_frame> sent;
+  int                                transmissions = 0;
 
-  void transmitted(std::uint16_t, vtime) override
+  void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
     ++transmissions;
+    sent.push_back({.data = data, .at = at, .brk = brk});
   }
 
   void started(stm32::line_frame const& frame) override
@@ -745,17 +748,24 @@ auto shifted(vtime at, member const& from, member const& into, std::uint64_t lat
   return vtime{at.ps - from.origin + into.origin + latency};
 }
 
-void deliver(line_post const& post, member const& from, member const& into, std::uint64_t latency)
+void deliver(
+    line_post const& post,
+    member const&    from,
+    member const&    into,
+    std::uint64_t    latency,
+    std::string_view unit = "USART1")
 {
+  auto* const port = into.f->model_of<stm32::uart_port>(unit);
+  REQUIRE(port != nullptr);
   if(post.abort)
   {
-    into.port().cancel_in_flight(shifted(post.at, from, into, latency), 1);
+    port->cancel_in_flight(shifted(post.at, from, into, latency), 1);
     return;
   }
   auto frame  = post.frame;
   frame.start = shifted(frame.start, from, into, latency);
   frame.end   = shifted(frame.end, from, into, latency);
-  into.port().receive_at(frame, 1);
+  port->receive_at(frame, 1);
 }
 
 struct link_result
@@ -1523,4 +1533,253 @@ TEST_CASE("PCE logs once, and is a model_error under strict_peripherals")
   CHECK_THROWS_AS(
       (void)strict.target->mem().write(desc.base + cr1->offset, 4, 1u << pce->lsb),
       popcorn::model_error);
+}
+
+TEST_CASE("SBKRQ sends a break after the frame in flight, SBKF set until its low part ends")
+{
+  member a{"break_tx"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  auto const& posts = a.box->posts;
+  REQUIRE(posts.size() == 3);
+  CHECK(posts[0].frame.data == 'a');
+  CHECK(posts[1].frame.kind == stm32::frame_kind::brk);
+  CHECK(posts[2].frame.data == 'b');
+  auto const frame = posts[1].frame.frame_ps;
+  CHECK(posts[1].frame.start == posts[0].frame.end);
+  CHECK(posts[2].frame.start.ps == posts[1].frame.end.ps + 4 * frame / 20);
+  REQUIRE(a.box->sent.size() == 3);
+  CHECK_FALSE(a.box->sent[0].brk);
+  CHECK(a.box->sent[1].brk);
+  CHECK(a.box->sent[1].data == 0);
+  CHECK_FALSE(a.box->sent[2].brk);
+
+  member again{"break_tx"};
+  REQUIRE(again.to(posts[1].frame.start.ps - a.origin + frame / 2) == stop_reason::time);
+  CHECK(again.f->field("USART1", "ISR_enabled", "SBKF") == 1);
+  REQUIRE(again.to(posts[1].frame.end.ps - a.origin + 1) == stop_reason::time);
+  CHECK(again.f->field("USART1", "ISR_enabled", "SBKF") == 0);
+
+  auto const received = oracle("break_tx", 20 * us_ps, "link_rx_at", {}, 115'200);
+  CHECK(bytes_of(received.log) == std::vector<std::uint32_t>{'a', 0, 'b'});
+  CHECK(errors_of(received.log) == std::vector<std::uint32_t>{1});
+  same_across_windows("break_tx", 115'200, received);
+}
+
+TEST_CASE(
+    "a break and a frame after gaps shorter than a frame cancel the IDLE pending at any window")
+{
+  auto const received = oracle("break_gap", 20 * us_ps, "link_rx_at", {}, 115'200);
+  CHECK(bytes_of(received.log) == std::vector<std::uint32_t>{'a', 0, 'b'});
+  CHECK(errors_of(received.log) == std::vector<std::uint32_t>{1});
+  CHECK(count_of(received.log, link_idle) == 1);
+  same_across_windows("break_gap", 115'200, received);
+}
+
+TEST_CASE("a break requested with the TX FIFO full goes ahead of the queued data")
+{
+  member a{"break_fifo"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  std::vector<std::uint32_t> order;
+  for(auto const& post : a.box->posts)
+  {
+    order.push_back(post.frame.kind == stm32::frame_kind::brk ? 0xbbu : post.frame.data);
+  }
+  CHECK(order == std::vector<std::uint32_t>{'0', 0xbb, '1', '2', '3', '4', '5', '6', '7'});
+}
+
+TEST_CASE("512 bytes back to back then a gap give exactly one IDLE at any window")
+{
+  constexpr auto latency   = 20 * us_ps;
+  auto const     reference = oracle("link_tx_long", latency, "link_rx_quiet");
+  auto const     seen      = entries(reference.log);
+  REQUIRE(seen.size() == 1);
+  CHECK(seen[0].kind == link_idle);
+  CHECK(seen[0].data == 512);
+  member a{"link_tx_long"};
+  member b{"link_rx_quiet"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  for(auto const& post : a.box->posts)
+  {
+    deliver(post, a, b, latency);
+  }
+  REQUIRE(b.to(horizon_of(a.box->posts, a, latency)) == stop_reason::time);
+  REQUIRE(entries(b.f->log()).size() == 1);
+  auto const brr     = b.f->field("USART1", "BRR", "BRR");
+  auto const f_rx    = 20 * ps_per_second / (2 * (160'000'000 / brr));
+  auto const idle_at = shifted(a.box->posts.back().frame.end, a, b, latency).ps + f_rx;
+  auto const now     = b.f->target->virtual_clock().time().ps;
+  auto const cyccnt  = b.f->target->mem().read(0xe000'1004, 4);
+  REQUIRE(cyccnt.has_value());
+  auto const idle_cycle = static_cast<std::uint32_t>(*cyccnt - (now - idle_at) / 6'250);
+  auto const stamp      = entries(b.f->log())[0].cycles;
+  CAPTURE(idle_cycle);
+  CHECK(stamp + 1 >= idle_cycle);
+  CHECK(stamp < idle_cycle + 200);
+  for(auto const window : {latency, latency / 3})
+  {
+    CAPTURE(window);
+    CHECK(
+        barriers("link_tx_long", latency, window, 1'000'000'000, "link_rx_quiet").log
+        == reference.log);
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t ring_half     = 0x48;
+constexpr std::uint32_t ring_complete = 0x54;
+constexpr std::uint32_t ring_idle     = 0x49;
+
+auto expected_ring_log() -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  std::uint32_t              received = 0;
+  while(received < 200)
+  {
+    for(int index = 0; index < 37 and received < 200; ++index)
+    {
+      ++received;
+      if(received % 64 == 32)
+      {
+        out.push_back(ring_half << 24 | 32);
+      }
+      if(received % 64 == 0)
+      {
+        out.push_back(ring_complete << 24 | 0);
+      }
+    }
+    out.push_back(ring_idle << 24 | received % 64);
+  }
+  return out;
+}
+
+auto big_ring(stm32_fixture const& f) -> std::vector<std::uint32_t>
+{
+  auto const                 ring = sym("usart_ll", "big_ring");
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t index = 0; index < 64; ++index)
+  {
+    auto const byte = f.target->mem().read(ring + index, 1);
+    REQUIRE(byte.has_value());
+    out.push_back(static_cast<std::uint32_t>(*byte));
+  }
+  return out;
+}
+
+auto expected_big_ring() -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out(64);
+  for(std::uint32_t index = 0; index < 200; ++index)
+  {
+    out[index % 64] = index & 0xffu;
+  }
+  return out;
+}
+}
+
+TEST_CASE("an RX DMA ring takes bursts with IDLE, HT and TC in order, BNDT as received")
+{
+  rig r{"dma_ring"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  std::uint16_t next = 0;
+  for(int sent = 0; sent < 200;)
+  {
+    std::vector<std::uint16_t> burst;
+    for(int index = 0; index < 37 and sent < 200; ++index, ++sent)
+    {
+      burst.push_back(next++);
+    }
+    r.port("USART2").receive(burst);
+    run_for(*r.f, (burst.size() + 3) * frame_115200);
+  }
+  CHECK(r.f->log() == expected_ring_log());
+  CHECK(big_ring(*r.f) == expected_big_ring());
+}
+
+TEST_CASE("BNDT read at seeded instants is the same at two slicings")
+{
+  auto const polls = [](std::uint64_t slice) {
+    rig r{"dma_ring"};
+    REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+    std::vector<std::uint16_t> stream;
+    for(std::uint16_t index = 0; index < 200; ++index)
+    {
+      stream.push_back(index);
+    }
+    r.port("USART2").receive(stream);
+    auto const                                   start = r.f->target->virtual_clock().time().ps;
+    std::mt19937                                 seed{7};
+    std::uniform_int_distribution<std::uint64_t> pick{0, 201 * frame_115200};
+    std::vector<std::uint64_t>                   instants(40);
+    for(auto& at : instants)
+    {
+      at = start + pick(seed);
+    }
+    std::ranges::sort(instants);
+    std::vector<std::uint32_t> seen;
+    for(auto const at : instants)
+    {
+      for(;;)
+      {
+        auto const result = r.f->run(
+            {.max_instructions = icount{slice},
+             .wall_budget      = std::chrono::seconds{60},
+             .until_time       = vtime{at}});
+        if(result.stopped)
+        {
+          REQUIRE(result.stopped->reason == stop_reason::time);
+          break;
+        }
+      }
+      seen.push_back(r.f->field("GPDMA1", "GPDMA_C3BR1", "BNDT"));
+    }
+    return seen;
+  };
+  auto const coarse = polls(1'000'000);
+  CHECK(coarse == polls(997));
+  CHECK(std::ranges::adjacent_find(coarse) != coarse.end());
+}
+
+TEST_CASE("the RX DMA ring fed by another machine's USART gives the host-fed log at any window")
+{
+  constexpr auto latency = 20 * us_ps;
+  auto const     run     = [latency](std::uint64_t window) {
+    member a{"link_tx_bursts"};
+    member b{"dma_ring"};
+    REQUIRE(b.to(5 * ms_ps) == stop_reason::user);
+    bool        done        = false;
+    std::size_t delivered   = 0;
+    auto const  deliver_new = [&] {
+      for(; delivered < a.box->posts.size(); ++delivered)
+      {
+        deliver(a.box->posts[delivered], a, b, latency, "USART2");
+      }
+    };
+    if(window == 0)
+    {
+      REQUIRE(
+          a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
+          == stop_reason::user);
+      deliver_new();
+    }
+    else
+    {
+      for(std::uint64_t barrier = window; not done; barrier += window)
+      {
+        done = a.to(barrier) == stop_reason::user;
+        REQUIRE(b.to(barrier, true) == stop_reason::time);
+        deliver_new();
+      }
+    }
+    REQUIRE(b.to(horizon_of(a.box->posts, a, latency)) == stop_reason::time);
+    return std::pair{b.f->log(), big_ring(*b.f)};
+  };
+  auto const reference = run(0);
+  CHECK(reference.first == expected_ring_log());
+  CHECK(reference.second == expected_big_ring());
+  CHECK(run(latency) == reference);
+  CHECK(run(7 * us_ps) == reference);
 }
