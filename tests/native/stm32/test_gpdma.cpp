@@ -77,6 +77,17 @@ TEST_CASE("a memory-to-memory copy completes once, exact, and disables its chann
   CHECK(run_log("mem2mem") == log);
 }
 
+TEST_CASE("a 2D channel on USART1 TX with BRC 0 and LLR 0 completes and disables itself")
+{
+  CHECK(run_log("two_d_hw_request") == std::vector<std::uint32_t>{0x301, 0x2'1d00, 0, 100, 1});
+}
+
+TEST_CASE("a 2D channel on SPI1 TX with BRC 1 left set runs one block and stays enabled")
+{
+  CHECK(
+      run_log("two_d_hw_request_brc1") == std::vector<std::uint32_t>{0x200, 0x2'1d01, 100, 100, 0});
+}
+
 TEST_CASE("a 64-byte block raises one half and one complete transfer")
 {
   CHECK(run_log("half") == std::vector<std::uint32_t>{1, 1, 1});

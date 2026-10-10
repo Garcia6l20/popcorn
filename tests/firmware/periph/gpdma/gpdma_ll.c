@@ -1,6 +1,9 @@
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_dma.h"
+#include "stm32u5xx_ll_rcc.h"
+#include "stm32u5xx_ll_spi.h"
+#include "stm32u5xx_ll_usart.h"
 
 #define WORD_COPY              \
   (LL_DMA_SRC_INCREMENT        \
@@ -25,6 +28,7 @@ struct lli items[2];
 static volatile uint32_t completions;
 static volatile uint32_t halves;
 static volatile uint32_t errors;
+static volatile uint32_t done;
 
 void GPDMA1_Channel0_IRQHandler(void);
 void GPDMA1_Channel1_IRQHandler(void);
@@ -33,6 +37,9 @@ void linked(void);
 void error(void);
 void suspend(void);
 void half(void);
+void two_d_hw_request(void);
+void two_d_hw_request_brc1(void);
+void GPDMA1_Channel15_IRQHandler(void);
 
 void GPDMA1_Channel0_IRQHandler(void)
 {
@@ -189,6 +196,109 @@ void linked(void)
   LOG(same(source + 64, items_out[1], 32));
   LOG(same(source + 128, items_out[2], 48));
   LOG(LL_DMA_IsActiveFlag_IDLE(GPDMA1, LL_DMA_CHANNEL_1));
+  DONE();
+}
+
+void GPDMA1_Channel15_IRQHandler(void)
+{
+  DMA_Channel_TypeDef* const channel = GPDMA1_Channel15;
+  if((channel->CSR & DMA_CSR_TCF) != 0)
+  {
+    LOG(channel->CSR);
+    LOG(channel->CCR);
+    LOG(channel->CBR1);
+    LOG(channel->CSAR - (uint32_t)source);
+    channel->CFCR = DMA_CFCR_TCF | DMA_CFCR_HTF;
+    done          = 1;
+  }
+}
+
+void two_d_hw_request(void)
+{
+  DMA_Channel_TypeDef* const channel = GPDMA1_Channel15;
+  fill();
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_PCLK2);
+  LL_USART_InitTypeDef config = {
+      .PrescalerValue      = LL_USART_PRESCALER_DIV1,
+      .BaudRate            = 115200,
+      .DataWidth           = LL_USART_DATAWIDTH_8B,
+      .StopBits            = LL_USART_STOPBITS_1,
+      .Parity              = LL_USART_PARITY_NONE,
+      .TransferDirection   = LL_USART_DIRECTION_TX,
+      .HardwareFlowControl = LL_USART_HWCONTROL_NONE,
+      .OverSampling        = LL_USART_OVERSAMPLING_16,
+  };
+  LL_USART_Init(USART1, &config);
+  LL_USART_ConfigAsyncMode(USART1);
+  LL_USART_Enable(USART1);
+  while(!LL_USART_IsActiveFlag_TEACK(USART1))
+  {
+  }
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  channel->CTR1 = DMA_CTR1_SINC;
+  channel->CTR2 = LL_DMA_TCEM_RPT_BLK_TRANSFER | DMA_CTR2_DREQ | LL_GPDMA1_REQUEST_USART1_TX;
+  channel->CBR1 = 100;
+  channel->CSAR = (uint32_t)source;
+  channel->CDAR = (uint32_t)&USART1->TDR;
+  channel->CLLR = 0;
+  NVIC_EnableIRQ(GPDMA1_Channel15_IRQn);
+  channel->CCR = DMA_CCR_LAP | DMA_CCR_USEIE | DMA_CCR_ULEIE | DMA_CCR_DTEIE | DMA_CCR_TCIE;
+  channel->CCR |= DMA_CCR_EN;
+  LL_USART_EnableDMAReq_TX(USART1);
+  while(done == 0)
+  {
+  }
+  LOG(done);
+  DONE();
+}
+
+void two_d_hw_request_brc1(void)
+{
+  DMA_Channel_TypeDef* const channel = GPDMA1_Channel15;
+  fill();
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SPI1);
+  LL_SPI_InitTypeDef config = {
+      .TransferDirection = LL_SPI_SIMPLEX_TX,
+      .Mode              = LL_SPI_MODE_MASTER,
+      .DataWidth         = LL_SPI_DATAWIDTH_8BIT,
+      .ClockPolarity     = LL_SPI_POLARITY_LOW,
+      .ClockPhase        = LL_SPI_PHASE_1EDGE,
+      .NSS               = LL_SPI_NSS_SOFT,
+      .BaudRate          = LL_SPI_BAUDRATEPRESCALER_DIV2,
+      .BitOrder          = LL_SPI_MSB_FIRST,
+      .CRCCalculation    = LL_SPI_CRCCALCULATION_DISABLE,
+      .CRCPoly           = 7,
+  };
+  LL_SPI_Init(SPI1, &config);
+  LL_SPI_SetInternalSSLevel(SPI1, LL_SPI_SS_LEVEL_HIGH);
+  LL_SPI_SetFIFOThreshold(SPI1, LL_SPI_FIFO_TH_01DATA);
+  LL_SPI_SetTransferSize(SPI1, 100);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  channel->CTR1 = DMA_CTR1_SINC;
+  channel->CTR2 = LL_DMA_TCEM_RPT_BLK_TRANSFER | DMA_CTR2_DREQ | LL_GPDMA1_REQUEST_SPI1_TX;
+  channel->CBR1 = 1u << DMA_CBR1_BRC_Pos;
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_15, 100);
+  channel->CSAR = (uint32_t)source;
+  channel->CDAR = (uint32_t)&SPI1->TXDR;
+  channel->CLLR = 0;
+  NVIC_EnableIRQ(GPDMA1_Channel15_IRQn);
+  channel->CCR = DMA_CCR_LAP | DMA_CCR_USEIE | DMA_CCR_ULEIE | DMA_CCR_DTEIE | DMA_CCR_TCIE;
+  channel->CCR |= DMA_CCR_EN;
+  LL_SPI_EnableDMAReq_TX(SPI1);
+  LL_SPI_Enable(SPI1);
+  LL_SPI_StartMasterTransfer(SPI1);
+  while(!LL_SPI_IsActiveFlag_EOT(SPI1))
+  {
+  }
+  for(volatile uint32_t left = 5000; left != 0; --left)
+  {
+  }
+  LOG(channel->CSR);
+  LOG(channel->CCR);
+  LOG(channel->CBR1);
+  LOG(channel->CSAR - (uint32_t)source);
+  LOG(done);
   DONE();
 }
 
