@@ -178,6 +178,16 @@ for _, target in core_firmware.values():
     if target is not None:
         test_host.depends(target)
 
+test_host_concurrent = add_doctest(
+    "core-host-concurrent",
+    [here / "test_host_concurrent.cpp", *tsan_sources],
+    [test_support, core],
+    env=m33_env,
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_host_concurrent.depends(target)
+
 test_loop_waker = add_doctest(
     "core-loop-waker", [here / "test_loop_waker.cpp", *tsan_sources], [test_support, core]
 )
