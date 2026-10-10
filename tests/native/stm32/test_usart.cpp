@@ -790,14 +790,24 @@ void inject(member const& b, std::optional<host_byte> const& host)
   }
 }
 
+void set_baud(member const& b, std::uint32_t baud)
+{
+  if(baud != 0)
+  {
+    REQUIRE(b.f->target->mem().write(sym("usart_ll", "link_baud"), 4, baud).has_value());
+  }
+}
+
 auto oracle(
     std::string_view         script,
     std::uint64_t            latency,
     std::string_view         receiver = "link_rx",
-    std::optional<host_byte> host     = {}) -> link_result
+    std::optional<host_byte> host     = {},
+    std::uint32_t            rx_baud  = 0) -> link_result
 {
   member a{script};
   member b{receiver};
+  set_baud(b, rx_baud);
   REQUIRE(
       a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
   for(auto const& post : a.box->posts)
@@ -819,10 +829,12 @@ auto barriers(
     std::uint64_t            window,
     std::uint64_t            slice    = 1'000'000'000,
     std::string_view         receiver = "link_rx",
-    std::optional<host_byte> host     = {}) -> link_result
+    std::optional<host_byte> host     = {},
+    std::uint32_t            rx_baud  = 0) -> link_result
 {
-  member      a{script, slice};
-  member      b{receiver, slice};
+  member a{script, slice};
+  member b{receiver, slice};
+  set_baud(b, rx_baud);
   bool        done      = false;
   std::size_t delivered = 0;
   for(std::uint64_t barrier = window; not done; barrier += window)
@@ -1118,13 +1130,13 @@ TEST_CASE("a frame landing on the count of a host frame orders the same whatever
       a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
   REQUIRE(a.box->posts.size() == 64);
   auto const& first  = a.box->posts[40];
-  auto const  before = first.frame.start.ps - a.origin - 2 * us_ps;
+  auto const  before = first.frame.start.ps - a.origin - us_ps;
 
-  member probe{"link_rx_slow"};
+  member probe{"link_rx_2stop"};
   REQUIRE(probe.to(before) == stop_reason::time);
   auto const t0   = probe.f->target->virtual_clock().time().ps;
   auto const brr  = probe.f->field("USART1", "BRR", "BRR");
-  auto const f_rx = 20 * ps_per_second / (2 * (160'000'000 / brr));
+  auto const f_rx = 22 * ps_per_second / (2 * (160'000'000 / brr));
   deliver(first, a, probe, 0);
   auto const pending = probe.f->target->snapshot().data().events.pending;
   auto const linked  = std::ranges::find(pending, std::uint32_t{1}, &core::event::lane);
@@ -1134,11 +1146,11 @@ TEST_CASE("a frame landing on the count of a host frame orders the same whatever
   CAPTURE(latency);
 
   auto const host      = host_byte{.at = before, .data = host_data};
-  auto const reference = oracle("link_tx", latency, "link_rx_slow", host);
+  auto const reference = oracle("link_tx", latency, "link_rx_2stop", host);
   auto const seen      = entries(reference.log);
-  auto const host_at   = std::ranges::find_if(
-      seen, [](entry const& one) { return one.kind == link_byte and one.data == host_data; });
-  CHECK(host_at != seen.end());
+  CHECK(std::ranges::any_of(seen, [](entry const& one) {
+    return one.kind == link_byte and one.data == host_data;
+  }));
   CHECK(std::ranges::none_of(seen, [](entry const& one) {
     return one.kind == link_byte and one.data == 0x20u + 40u;
   }));
@@ -1147,7 +1159,7 @@ TEST_CASE("a frame landing on the count of a host frame orders the same whatever
   {
     CAPTURE(window);
     CHECK(
-        barriers("link_tx", latency, window, 1'000'000'000, "link_rx_slow", host).log
+        barriers("link_tx", latency, window, 1'000'000'000, "link_rx_2stop", host).log
         == reference.log);
   }
 }
@@ -1301,4 +1313,214 @@ TEST_CASE("a linked frame ending during a host frame leaves the IDLE to the host
   REQUIRE(host != seen.end());
   REQUIRE(idle != seen.end());
   CHECK(idle->cycles - host->cycles + 100 >= frame * cycles_per_us / us_ps);
+}
+
+namespace
+{
+constexpr std::uint32_t link_error = 4;
+
+auto bytes_of(std::vector<std::uint32_t> const& log) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(auto const& one : entries(log))
+  {
+    if(one.kind == link_byte)
+    {
+      out.push_back(one.data);
+    }
+  }
+  return out;
+}
+
+auto errors_of(std::vector<std::uint32_t> const& log) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(auto const& one : entries(log))
+  {
+    if(one.kind == link_error)
+    {
+      out.push_back(one.data);
+    }
+  }
+  return out;
+}
+
+auto scripted_bytes() -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t index = 0; index < 64; ++index)
+  {
+    out.push_back(0x20u + index);
+  }
+  return out;
+}
+
+auto at_percent(int tenths_of_percent) -> std::uint32_t
+{
+  return static_cast<std::uint32_t>(460'800LL * (1000 + tenths_of_percent) / 1000);
+}
+
+void same_across_windows(
+    std::string_view   script,
+    std::uint32_t      rx_baud,
+    link_result const& reference)
+{
+  constexpr auto latency = 20 * us_ps;
+  for(auto const window : {latency, 7 * us_ps})
+  {
+    CAPTURE(window);
+    CHECK(
+        barriers(script, latency, window, 1'000'000'000, "link_rx_at", {}, rx_baud).log
+        == reference.log);
+  }
+}
+}
+
+TEST_CASE("a receiver within 2 percent of the sender's baud reads every byte, no error")
+{
+  for(auto const tenths : {-20, 20})
+  {
+    CAPTURE(tenths);
+    auto const reference = oracle("link_tx", 20 * us_ps, "link_rx_at", {}, at_percent(tenths));
+    CHECK(bytes_of(reference.log) == scripted_bytes());
+    CHECK(errors_of(reference.log).empty());
+    same_across_windows("link_tx", at_percent(tenths), reference);
+  }
+}
+
+TEST_CASE("a receiver 10 percent off samples the sender's waveform into the computed bytes")
+{
+  auto const slow = oracle("link_tx_pattern", 20 * us_ps, "link_rx_at", {}, at_percent(-100));
+  auto const fast = oracle("link_tx_pattern", 20 * us_ps, "link_rx_at", {}, at_percent(100));
+  std::vector<std::uint32_t> slow_bytes;
+  std::vector<std::uint32_t> fast_bytes;
+  std::vector<std::uint32_t> fast_errors;
+  for(int pair = 0; pair < 8; ++pair)
+  {
+    slow_bytes.insert(slow_bytes.end(), {0xad, 0xf8});
+    fast_bytes.insert(fast_bytes.end(), {0xb5, 0xf0});
+    fast_errors.insert(fast_errors.end(), {3, 2});
+  }
+  slow_bytes.push_back(0xad);
+  fast_bytes.push_back(0xb5);
+  fast_errors.push_back(3);
+  std::vector<std::uint32_t> slow_errors(15, 3);
+  slow_errors.insert(slow_errors.end(), {2, 2});
+  CHECK(bytes_of(slow.log) == slow_bytes);
+  CHECK(errors_of(slow.log) == slow_errors);
+  CHECK(bytes_of(fast.log) == fast_bytes);
+  CHECK(errors_of(fast.log) == fast_errors);
+  same_across_windows("link_tx_pattern", at_percent(-100), slow);
+  same_across_windows("link_tx_pattern", at_percent(100), fast);
+  CHECK(
+      barriers(
+          "link_tx_pattern", 20 * us_ps, us_ps, 1'000'000'000, "link_rx_at", {}, at_percent(-100))
+          .log
+      == slow.log);
+}
+
+TEST_CASE("a 115200 receiver on a 460800 sender reads the same garbage at any window")
+{
+  auto const reference = oracle("link_tx", 20 * us_ps, "link_rx_at", {}, 115'200);
+  CHECK(bytes_of(reference.log) != scripted_bytes());
+  CHECK_FALSE(errors_of(reference.log).empty());
+  same_across_windows("link_tx", 115'200, reference);
+}
+
+TEST_CASE("a sender that drops to 115200 between bursts is sampled as a static mismatch")
+{
+  auto const reference = oracle("link_tx_switch", 20 * us_ps, "link_rx_at", {}, 460'800);
+  auto const bytes     = bytes_of(reference.log);
+  REQUIRE(bytes.size() >= 5);
+  CHECK(
+      std::vector<std::uint32_t>(bytes.begin(), bytes.begin() + 4)
+      == std::vector<std::uint32_t>(4, 0x55));
+  CHECK(bytes[4] != 0x55);
+  CHECK_FALSE(errors_of(reference.log).empty());
+  same_across_windows("link_tx_switch", 460'800, reference);
+}
+
+TEST_CASE("the receiver's error-free band is recorded each side, in 0.25 percent steps")
+{
+  auto const band = [](std::string_view script, std::vector<std::uint32_t> const& expected) {
+    auto const clean = [&](int quarter_percent) {
+      auto const baud   = static_cast<std::uint32_t>(460'800LL * (400 + quarter_percent) / 400);
+      auto const result = oracle(script, 20 * us_ps, "link_rx_at", {}, baud);
+      return bytes_of(result.log) == expected and errors_of(result.log).empty();
+    };
+    int slower = 0;
+    while(clean(slower - 1))
+    {
+      --slower;
+      REQUIRE(slower > -80);
+    }
+    int faster = 0;
+    while(clean(faster + 1))
+    {
+      ++faster;
+      REQUIRE(faster < 80);
+    }
+    return std::pair{slower * 25, faster * 25};
+  };
+  auto const script = band("link_tx", scripted_bytes());
+  auto const fives  = band("link_tx_55", std::vector<std::uint32_t>(48, 0x55));
+  MESSAGE("script error-free " << script.first << " to " << script.second << " hundredths");
+  MESSAGE("0x55 error-free " << fives.first << " to " << fives.second << " hundredths");
+  CHECK(script == std::pair{-400, 500});
+  CHECK(fives == std::pair{-400, 500});
+}
+
+TEST_CASE("OVER8 and ONEBIT receivers sample 0x55 at their own offsets")
+{
+  auto const slow = at_percent(-100);
+  auto const run  = [](std::string_view receiver, std::uint32_t baud) {
+    return oracle("link_tx_55", 20 * us_ps, receiver, {}, baud);
+  };
+  auto const over8 = run("link_rx_over8", slow);
+  CHECK(bytes_of(over8.log) == std::vector<std::uint32_t>(48, 0xad));
+  std::vector<std::uint32_t> back_to_back(47, 3);
+  back_to_back.push_back(2);
+  CHECK(errors_of(over8.log) == back_to_back);
+
+  auto const onebit = run("link_rx_onebit", slow);
+  CHECK(bytes_of(onebit.log) == std::vector<std::uint32_t>(48, 0xad));
+  std::vector<std::uint32_t> framing_only(47, 1);
+  CHECK(errors_of(onebit.log) == framing_only);
+
+  auto const near = run("link_rx_over8", at_percent(-40));
+  CHECK(bytes_of(near.log) == std::vector<std::uint32_t>(48, 0x55));
+  CHECK(errors_of(near.log) == std::vector<std::uint32_t>(47, 2));
+  auto const near16 = run("link_rx_at", at_percent(-40));
+  CHECK(errors_of(near16.log).empty());
+}
+
+TEST_CASE("PCE logs once, and is a model_error under strict_peripherals")
+{
+  rig                           r{"idle"};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const& desc = r.f->target->peripheral("USART1").description();
+  auto const  cr1  = std::ranges::find(
+      desc.registers, std::string_view{"CR1_enabled"}, &popcorn::register_desc::name);
+  REQUIRE(cr1 != desc.registers.end());
+  auto const pce =
+      std::ranges::find(cr1->fields, std::string_view{"PCE"}, &popcorn::field_desc::name);
+  REQUIRE(pce != cr1->fields.end());
+  REQUIRE(r.f->target->mem().write(desc.base + cr1->offset, 4, 1u << pce->lsb).has_value());
+  REQUIRE(r.f->target->mem().write(desc.base + cr1->offset, 4, 1u << pce->lsb).has_value());
+  REQUIRE(r.f->run_to_stop({.budget_left = icount{10}}).reason != stop_reason::user);
+  auto const parity = std::ranges::count_if(logged, [](core::log_record const& record) {
+    return record.kind == core::log_kind::model_warning and record.message.contains("parity");
+  });
+  CHECK(parity == 1);
+
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  stm32::board board{};
+  options.models = stm32::factories(board, u575());
+  stm32_fixture strict{u575(), "usart_ll", std::move(options)};
+  CHECK_THROWS_AS(
+      (void)strict.target->mem().write(desc.base + cr1->offset, 4, 1u << pce->lsb),
+      popcorn::model_error);
 }

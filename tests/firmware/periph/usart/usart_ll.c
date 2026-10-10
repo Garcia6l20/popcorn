@@ -32,6 +32,13 @@ void link_tx(void);
 void link_rx(void);
 void link_abort(void);
 void link_rx_slow(void);
+void link_rx_2stop(void);
+void link_rx_at(void);
+void link_tx_pattern(void);
+void link_tx_switch(void);
+void link_tx_55(void);
+void link_rx_over8(void);
+void link_rx_onebit(void);
 
 void idle(void)
 {
@@ -417,6 +424,9 @@ int main(void)
 #define LINK_BYTE    1u
 #define LINK_IDLE    2u
 #define LINK_OVERRUN 3u
+#define LINK_ERROR   4u
+
+volatile uint32_t link_baud = 460800u;
 
 static void clock_160mhz(void)
 {
@@ -525,6 +535,15 @@ void link_abort(void)
 
 static void link_irq(void)
 {
+  uint32_t const errors =
+      (LL_USART_IsActiveFlag_FE(USART1) ? 1u : 0u) | (LL_USART_IsActiveFlag_NE(USART1) ? 2u : 0u);
+  if(errors != 0u)
+  {
+    LL_USART_ClearFlag_FE(USART1);
+    LL_USART_ClearFlag_NE(USART1);
+    LOG((LINK_ERROR << 16) | errors);
+    LOG(DWT->CYCCNT);
+  }
   if(LL_USART_IsActiveFlag_ORE(USART1))
   {
     LL_USART_ClearFlag_ORE(USART1);
@@ -549,6 +568,7 @@ static void receive_link(void)
   received_count = 0xffffffffu;
   LL_USART_EnableIT_RXNE_RXFNE(USART1);
   LL_USART_EnableIT_IDLE(USART1);
+  LL_USART_EnableIT_ERROR(USART1);
   NVIC_EnableIRQ(USART1_IRQn);
   idle();
 }
@@ -562,5 +582,86 @@ void link_rx(void)
 void link_rx_slow(void)
 {
   start_link_at(115200u);
+  receive_link();
+}
+
+void link_rx_2stop(void)
+{
+  start_link();
+  LL_USART_Disable(USART1);
+  LL_USART_SetStopBitsLength(USART1, LL_USART_STOPBITS_2);
+  enable(USART1);
+  receive_link();
+}
+
+void link_rx_at(void)
+{
+  start_link_at(link_baud);
+  receive_link();
+}
+
+void link_tx_pattern(void)
+{
+  start_link();
+  for(unsigned index = 0; index < 8; ++index)
+  {
+    send_byte(0x55);
+    send_byte(0xf0);
+  }
+  wait_complete();
+  wait_us(200);
+  send_byte(0x55);
+  wait_complete();
+  DONE();
+}
+
+void link_tx_switch(void)
+{
+  start_link();
+  for(unsigned index = 0; index < 4; ++index)
+  {
+    send_byte(0x55);
+  }
+  wait_complete();
+  wait_us(100);
+  LL_USART_Disable(USART1);
+  init(USART1, 115200u);
+  enable(USART1);
+  for(unsigned index = 0; index < 4; ++index)
+  {
+    send_byte(0x55);
+  }
+  wait_complete();
+  DONE();
+}
+
+void link_tx_55(void)
+{
+  start_link();
+  for(unsigned index = 0; index < 48; ++index)
+  {
+    send_byte(0x55);
+  }
+  wait_complete();
+  DONE();
+}
+
+void link_rx_over8(void)
+{
+  start_link_at(link_baud);
+  LL_USART_Disable(USART1);
+  LL_USART_SetOverSampling(USART1, LL_USART_OVERSAMPLING_8);
+  LL_USART_SetBaudRate(
+      USART1, 160000000u, LL_USART_PRESCALER_DIV1, LL_USART_OVERSAMPLING_8, link_baud);
+  enable(USART1);
+  receive_link();
+}
+
+void link_rx_onebit(void)
+{
+  start_link_at(link_baud);
+  LL_USART_Disable(USART1);
+  LL_USART_EnableOneBitSamp(USART1);
+  enable(USART1);
   receive_link();
 }

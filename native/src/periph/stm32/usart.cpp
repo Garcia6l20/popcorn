@@ -32,6 +32,94 @@ constexpr std::size_t   fifo_depth    = 8;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
 constexpr std::array<std::uint32_t, 12> prescalers{1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
+constexpr std::array<std::uint8_t, 4>   half_stop_codes{2, 1, 4, 3};
+
+/** @brief How a receiver samples a bit: offsets in sixteenths of its bit time. */
+struct rx_shape
+{
+  std::uint64_t                frame_ps{};
+  std::uint32_t                word_bits{};
+  std::uint32_t                half_stops{};
+  std::array<std::uint32_t, 3> offsets{};
+  std::size_t                  samples{};
+};
+
+struct sampled
+{
+  std::uint16_t data{};
+  bool          framing{};
+  bool          noise{};
+};
+
+auto half_bits(std::uint32_t word, std::uint32_t half_stops) -> std::uint64_t
+{
+  return 2 * (1 + std::uint64_t{word}) + half_stops;
+}
+
+auto sample_at(rx_shape const& rx, std::uint64_t start, std::uint32_t bit, std::uint32_t sixteenths)
+    -> std::uint64_t
+{
+  auto const halves = half_bits(rx.word_bits, rx.half_stops);
+  return start + 2 * rx.frame_ps * (16 * std::uint64_t{bit} + sixteenths) / (16 * halves);
+}
+
+auto last_sample(line_frame const& sent, rx_shape const& rx) -> std::uint64_t
+{
+  return sample_at(rx, sent.start.ps, rx.word_bits + 1, rx.offsets[rx.samples - 1]);
+}
+
+auto level(line_frame const& sent, std::optional<std::uint64_t> next_start, std::uint64_t at)
+    -> std::uint32_t
+{
+  if(at < sent.start.ps)
+  {
+    return 1;
+  }
+  if(next_start and at >= *next_start)
+  {
+    return 0;
+  }
+  auto const since = at - sent.start.ps;
+  if(since >= sent.frame_ps)
+  {
+    return 1;
+  }
+  auto const bit = since * half_bits(sent.word_bits, sent.half_stops) / (2 * sent.frame_ps);
+  if(bit == 0)
+  {
+    return 0;
+  }
+  if(bit <= sent.word_bits)
+  {
+    return (sent.data >> (bit - 1)) & 1u;
+  }
+  return 1;
+}
+
+auto sample(line_frame const& sent, std::optional<std::uint64_t> next_start, rx_shape const& rx)
+    -> sampled
+{
+  sampled out{};
+  for(std::uint32_t bit = 1; bit <= rx.word_bits + 1; ++bit)
+  {
+    std::uint32_t ones = 0;
+    for(std::size_t index = 0; index < rx.samples; ++index)
+    {
+      ones += level(sent, next_start, sample_at(rx, sent.start.ps, bit, rx.offsets[index]));
+    }
+    auto const value = 2 * ones > rx.samples ? 1u : 0u;
+    out.noise        = out.noise or (ones != 0 and ones != rx.samples);
+    if(bit <= rx.word_bits)
+    {
+      out.data = static_cast<std::uint16_t>(out.data | (value << (bit - 1)));
+    }
+    else
+    {
+      out.framing = value == 0;
+    }
+  }
+  return out;
+}
 
 struct linked_frame
 {
@@ -116,8 +204,15 @@ struct lock
  *        machines, also those whose start bit would reach the line after the reset. Events a
  *        delivery from another machine arms, its data and the IDLE of an abort, go on the
  *        wire's lane, so their order against local events of the same instant does not depend on
- *        when the delivery happened. BUSY does
- *        not follow frames from other machines.
+ *        when the delivery happened. BUSY does not follow frames from other machines. A frame
+ *        from another machine whose bit time,
+ *        word length or stop length differs from the receiver's is sampled bit by bit on the
+ *        sender's ideal waveform at the receiver's bit time, three samples per bit at 7, 8 and 9
+ *        sixteenths with OVER16, 3, 4 and 5 eighths with OVER8, the middle one with ONEBIT or on
+ *        an LPUART: a disagreement sets NE, a stop bit sampled 0 sets FE, the sampled word enters
+ *        RDR. The receiver resynchronises on each sender start bit: a falling edge inside a later
+ *        frame is never taken for a start bit. Parity is not modelled: PCE logs a warning once,
+ *        a model_error under strict_peripherals.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_port
 {
@@ -156,9 +251,11 @@ private:
   [[nodiscard]] auto frame_ps() -> std::uint64_t;
   [[nodiscard]] auto word_bits() const -> std::uint32_t;
   [[nodiscard]] auto word_mask() const -> std::uint32_t;
+  [[nodiscard]] auto shape() -> rx_shape;
+  void               warn_parity();
   auto schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
   void start_frame(std::uint64_t from_ps);
-  void deliver(std::uint16_t data);
+  void deliver(std::uint16_t data, bool framing = false, bool noise = false);
   void schedule_linked();
   void idle_at(std::uint64_t due_ps, std::uint32_t lane = 0);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
@@ -219,6 +316,8 @@ private:
   field_ref                                    rx_threshold_flag_;
   field_ref                                    flush_rx_;
   field_ref                                    flush_tx_;
+  field_ref                                    parity_enable_;
+  std::optional<field_ref>                     one_bit_;
   std::vector<std::pair<field_ref, field_ref>> clears_;
   std::vector<field_ref>                       unsupported_;
   core::clock_domain                           kernel_;
@@ -229,6 +328,7 @@ private:
   std::optional<field_ref>                     auto_baud_;
   std::optional<field_ref>                     auto_baud_mode_;
   std::optional<field_ref>                     retransmissions_;
+  bool                                         parity_logged_{};
 };
 
 auto usart_writes(bool low_power) -> std::span<write_entry<usart> const>
@@ -301,6 +401,14 @@ usart::usart(
       tx_threshold_ie_{field("CR3", "TXFTIE")}, rx_threshold_ie_{field("CR3", "RXFTIE")},
       tx_threshold_flag_{field(isr_, "TXFT")}, rx_threshold_flag_{field(isr_, "RXFT")},
       flush_rx_{field("RQR", "RXFRQ")}, flush_tx_{field("RQR", "TXFRQ")},
+      parity_enable_{field(cr1_, "PCE")},
+      one_bit_{
+          std::ranges::contains(
+              describe("CR3").fields,
+              std::string_view{"ONEBIT"},
+              &field_desc::name)
+              ? std::optional{field("CR3", "ONEBIT")}
+              : std::nullopt},
       kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")}
 {
   for(auto const& clear : describe("ICR").fields)
@@ -492,6 +600,43 @@ auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps
   return due;
 }
 
+void usart::warn_parity()
+{
+  if(get(regs_, parity_enable_) == 0)
+  {
+    return;
+  }
+  if(not std::exchange(parity_logged_, true))
+  {
+    warn(cr1_, "parity is not modelled: PCE is set, no parity bit is sent or checked");
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(desc_.name, std::string{cr1_}, parity_enable_.offset);
+  }
+}
+
+auto usart::shape() -> rx_shape
+{
+  rx_shape out{
+      .frame_ps   = frame_ps(),
+      .word_bits  = word_bits(),
+      .half_stops = half_stop_codes[get(regs_, stop_)],
+      .offsets    = {7, 8, 9},
+      .samples    = 3
+  };
+  if(oversampling_ and get(regs_, *oversampling_) != 0)
+  {
+    out.offsets = {6, 8, 10};
+  }
+  if(low_power_ or (one_bit_ and get(regs_, *one_bit_) != 0))
+  {
+    out.offsets = {8, 8, 8};
+    out.samples = 1;
+  }
+  return out;
+}
+
 void usart::warn_unsupported()
 {
   for(auto const& feature : unsupported_)
@@ -523,11 +668,10 @@ void usart::start_frame(std::uint64_t from_ps)
   state_.tx_end_ps = schedule(transmit_done, from_ps, ps);
   if(far_end_)
   {
-    constexpr std::array<std::uint8_t, 4> half_stops{2, 1, 4, 3};
     far_end_->started(
         {.data       = state_.shift,
          .word_bits  = static_cast<std::uint8_t>(word_bits()),
-         .half_stops = half_stops[get(regs_, stop_)],
+         .half_stops = half_stop_codes[get(regs_, stop_)],
          .frame_ps   = ps,
          .start      = vtime{state_.tx_end_ps - ps},
          .end        = vtime{state_.tx_end_ps}});
@@ -601,6 +745,7 @@ void usart::interrupts()
 void usart::control_written(std::uint32_t, std::uint32_t)
 {
   warn_unsupported();
+  warn_parity();
   if(not enabled())
   {
     if(state_.shifting and far_end_)
@@ -696,15 +841,38 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     {
       return;
     }
-    auto const head = state_.linked.front().frame;
+    auto const head = state_.linked.front();
+    auto const rx   = shape();
+    if(auto const done = rx.frame_ps != 0 ? last_sample(head.frame, rx) : 0;
+       done > ctx_.clock.time().ps)
+    {
+      ++state_.linked_generation;
+      ctx_.events.schedule_at(
+          vtime{done}, linked_due, state_.linked_generation, head.lane, ctx_.clock);
+      return;
+    }
     state_.linked.erase(state_.linked.begin());
-    deliver(head.data);
+    auto const same = rx.frame_ps == head.frame.frame_ps
+                  and rx.word_bits == head.frame.word_bits
+                  and rx.half_stops == head.frame.half_stops;
+    if(same or rx.frame_ps == 0)
+    {
+      deliver(head.frame.data);
+    }
+    else
+    {
+      auto const next = std::ranges::find(state_.linked, head.lane, &linked_frame::lane);
+      auto const seen = sample(
+          head.frame,
+          next != state_.linked.end() ? std::optional{next->frame.start.ps} : std::nullopt, rx);
+      deliver(static_cast<std::uint16_t>(seen.data & word_mask()), seen.framing, seen.noise);
+    }
     schedule_linked();
     auto const ps    = frame_ps();
-    auto const quiet = not linked_before(head.end.ps + ps);
+    auto const quiet = not linked_before(head.frame.end.ps + ps);
     if(ps != 0 and quiet and not state_.receiving)
     {
-      idle_at(head.end.ps + ps);
+      idle_at(head.frame.end.ps + ps);
     }
     flags();
     return;
@@ -770,11 +938,19 @@ auto usart::linked_before(std::uint64_t due_ps) const -> bool
   });
 }
 
-void usart::deliver(std::uint16_t data)
+void usart::deliver(std::uint16_t data, bool framing, bool noise)
 {
   auto const depth = fifo() ? fifo_depth : 1;
   if(enabled() and get(regs_, receive_) != 0)
   {
+    if(framing)
+    {
+      update(regs_, framing_, 1);
+    }
+    if(noise)
+    {
+      update(regs_, noise_, 1);
+    }
     if(state_.rx_fifo.size() < depth)
     {
       state_.rx_fifo.push_back(data);

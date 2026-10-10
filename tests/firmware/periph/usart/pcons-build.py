@@ -24,5 +24,12 @@ add_ll_firmware(
         "link_rx",
         "link_abort",
         "link_rx_slow",
+        "link_rx_2stop",
+        "link_rx_at",
+        "link_tx_pattern",
+        "link_tx_switch",
+        "link_tx_55",
+        "link_rx_over8",
+        "link_rx_onebit",
     ],
 )
