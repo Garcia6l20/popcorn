@@ -11,10 +11,12 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -652,4 +654,651 @@ TEST_CASE("a CR1 write of 0 with UE 1 clears UE and the locked fields, no log, n
   t.cpu("USART1", "CR1_enabled", 0);
   CHECK(t.read("USART1", "CR1_enabled") == 0);
   CHECK(t.logged.empty());
+}
+
+namespace
+{
+constexpr std::uint64_t us_ps         = 1'000'000;
+constexpr std::uint64_t ms_ps         = 1'000'000'000;
+constexpr std::uint32_t link_byte     = 1;
+constexpr std::uint32_t link_idle     = 2;
+constexpr std::uint64_t cycles_per_us = 160;
+
+struct line_post
+{
+  bool              abort{};
+  stm32::line_frame frame{};
+  vtime             at{};
+};
+
+class mailbox final : public stm32::uart_endpoint
+{
+public:
+  std::vector<line_post> posts;
+  int                    transmissions = 0;
+
+  void transmitted(std::uint16_t, vtime) override
+  {
+    ++transmissions;
+  }
+
+  void started(stm32::line_frame const& frame) override
+  {
+    posts.push_back({.frame = frame});
+  }
+
+  void aborted(vtime at) override
+  {
+    posts.push_back({.abort = true, .at = at});
+  }
+};
+
+struct member
+{
+  std::shared_ptr<mailbox>       box = std::make_shared<mailbox>();
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+  std::uint64_t                  origin{};
+  std::uint64_t                  slice{1'000'000'000};
+
+  explicit member(std::string_view entry, std::uint64_t instructions = 1'000'000'000)
+      : slice{instructions}
+  {
+    board.uarts.emplace("USART1", box);
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, u575());
+    f              = std::make_unique<stm32_fixture>(u575(), "usart_ll", std::move(options));
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("usart_ll", "main")})
+            .reason
+        == stop_reason::address);
+    f->set("pc", sym("usart_ll", entry));
+    origin = f->target->virtual_clock().time().ps;
+  }
+
+  auto port() const -> stm32::uart_port&
+  {
+    auto* const found = f->model_of<stm32::uart_port>("USART1");
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  auto to(std::uint64_t system_ps, bool hold = false) const -> stop_reason
+  {
+    for(;;)
+    {
+      auto const result = f->run(
+          {.max_instructions = icount{slice},
+           .wall_budget      = std::chrono::seconds{60},
+           .until_time       = vtime{origin + system_ps},
+           .hold_from_until  = hold});
+      if(result.stopped)
+      {
+        return result.stopped->reason;
+      }
+    }
+  }
+};
+
+auto shifted(vtime at, member const& from, member const& into, std::uint64_t latency) -> vtime
+{
+  return vtime{at.ps - from.origin + into.origin + latency};
+}
+
+void deliver(line_post const& post, member const& from, member const& into, std::uint64_t latency)
+{
+  if(post.abort)
+  {
+    into.port().cancel_in_flight(shifted(post.at, from, into, latency), 1);
+    return;
+  }
+  auto frame  = post.frame;
+  frame.start = shifted(frame.start, from, into, latency);
+  frame.end   = shifted(frame.end, from, into, latency);
+  into.port().receive_at(frame, 1);
+}
+
+struct link_result
+{
+  std::vector<std::uint32_t> log;
+  std::vector<line_post>     posts;
+};
+
+auto horizon_of(std::vector<line_post> const& posts, member const& sender, std::uint64_t latency)
+    -> std::uint64_t
+{
+  std::uint64_t last = 0;
+  for(auto const& post : posts)
+  {
+    last = std::max(last, (post.abort ? post.at.ps : post.frame.end.ps) - sender.origin);
+  }
+  return last + latency + ms_ps;
+}
+
+struct host_byte
+{
+  std::uint64_t at{};
+  std::uint16_t data{};
+};
+
+void inject(member const& b, std::optional<host_byte> const& host)
+{
+  if(host)
+  {
+    std::vector<std::uint16_t> const one{host->data};
+    b.port().receive(one);
+  }
+}
+
+auto oracle(
+    std::string_view         script,
+    std::uint64_t            latency,
+    std::string_view         receiver = "link_rx",
+    std::optional<host_byte> host     = {}) -> link_result
+{
+  member a{script};
+  member b{receiver};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  for(auto const& post : a.box->posts)
+  {
+    deliver(post, a, b, latency);
+  }
+  if(host)
+  {
+    REQUIRE(b.to(host->at) == stop_reason::time);
+    inject(b, host);
+  }
+  REQUIRE(b.to(horizon_of(a.box->posts, a, latency)) == stop_reason::time);
+  return {.log = b.f->log(), .posts = a.box->posts};
+}
+
+auto barriers(
+    std::string_view         script,
+    std::uint64_t            latency,
+    std::uint64_t            window,
+    std::uint64_t            slice    = 1'000'000'000,
+    std::string_view         receiver = "link_rx",
+    std::optional<host_byte> host     = {}) -> link_result
+{
+  member      a{script, slice};
+  member      b{receiver, slice};
+  bool        done      = false;
+  std::size_t delivered = 0;
+  for(std::uint64_t barrier = window; not done; barrier += window)
+  {
+    done = a.to(barrier) == stop_reason::user;
+    if(host and host->at <= barrier)
+    {
+      REQUIRE(b.to(host->at) == stop_reason::time);
+      inject(b, host);
+      host.reset();
+    }
+    REQUIRE(b.to(barrier, true) == stop_reason::time);
+    for(; delivered < a.box->posts.size(); ++delivered)
+    {
+      deliver(a.box->posts[delivered], a, b, latency);
+    }
+  }
+  REQUIRE(b.to(horizon_of(a.box->posts, a, latency)) == stop_reason::time);
+  return {.log = b.f->log(), .posts = a.box->posts};
+}
+
+struct entry
+{
+  std::uint32_t kind{};
+  std::uint32_t data{};
+  std::uint32_t cycles{};
+};
+
+auto entries(std::vector<std::uint32_t> const& log) -> std::vector<entry>
+{
+  std::vector<entry> out;
+  for(std::size_t index = 0; index + 1 < log.size(); index += 2)
+  {
+    out.push_back(
+        {.kind = log[index] >> 16, .data = log[index] & 0xffffu, .cycles = log[index + 1]});
+  }
+  return out;
+}
+
+auto count_of(std::vector<std::uint32_t> const& log, std::uint32_t kind) -> std::size_t
+{
+  return static_cast<std::size_t>(
+      std::ranges::count_if(entries(log), [kind](entry const& one) { return one.kind == kind; }));
+}
+}
+
+TEST_CASE("a linked receiver gets the scripted frames the same whatever the barrier window")
+{
+  constexpr auto latency   = 20 * us_ps;
+  auto const     reference = oracle("link_tx", latency);
+  REQUIRE(count_of(reference.log, link_byte) == 64);
+  CHECK(reference.posts.size() == 64);
+  for(auto const window : {20 * us_ps, 7 * us_ps, us_ps})
+  {
+    CAPTURE(window);
+    CHECK(barriers("link_tx", latency, window).log == reference.log);
+  }
+  CHECK(barriers("link_tx", latency, 20 * us_ps, 100).log == reference.log);
+}
+
+TEST_CASE("IDLE rises once per gap longer than a frame, at the last end plus L plus a frame")
+{
+  constexpr auto latency   = 20 * us_ps;
+  auto const     reference = oracle("link_tx", latency);
+  CHECK(count_of(reference.log, link_idle) == 3);
+  auto const               seen = entries(reference.log);
+  std::vector<std::size_t> idles;
+  for(std::size_t index = 0; index < seen.size(); ++index)
+  {
+    if(seen[index].kind == link_idle)
+    {
+      idles.push_back(index);
+    }
+  }
+  CHECK(idles == std::vector<std::size_t>{20, 41, 63 + 3});
+}
+
+TEST_CASE("IDLE rises in gaps between one frame and L although the next frame is queued")
+{
+  constexpr auto latency   = 100 * us_ps;
+  auto const     reference = oracle("link_tx", latency);
+  CHECK(count_of(reference.log, link_idle) == 3);
+  for(auto const window : {100 * us_ps, 30 * us_ps})
+  {
+    CAPTURE(window);
+    CHECK(barriers("link_tx", latency, window).log == reference.log);
+  }
+}
+
+TEST_CASE("a longer latency shifts every received byte by the difference, exactly")
+{
+  auto const near = entries(oracle("link_tx", 20 * us_ps).log);
+  auto const far  = entries(oracle("link_tx", 40 * us_ps).log);
+  REQUIRE(near.size() == far.size());
+  for(std::size_t index = 0; index < near.size(); ++index)
+  {
+    CAPTURE(index);
+    CHECK(far[index].kind == near[index].kind);
+    CHECK(far[index].data == near[index].data);
+    CHECK(far[index].cycles - near[index].cycles == 20 * cycles_per_us);
+  }
+}
+
+TEST_CASE("each frame reaches RDR at its sender's stop-bit end plus L, at the instruction")
+{
+  constexpr auto latency = 20 * us_ps;
+  member         a{"link_tx"};
+  member         b{"link_rx"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  auto const& first = a.box->posts.front().frame;
+  CHECK(first.end.ps - first.start.ps == first.frame_ps);
+  REQUIRE(b.to(first.start.ps - a.origin) == stop_reason::time);
+  deliver(a.box->posts.front(), a, b, latency);
+  auto const arrives = first.end.ps - a.origin + latency;
+  auto const pending = b.f->target->snapshot().data().events.pending;
+  auto const linked  = std::ranges::find(pending, std::uint32_t{1}, &core::event::lane);
+  REQUIRE(linked != pending.end());
+  CHECK(linked->due_ps == b.origin + arrives);
+  REQUIRE(b.to(arrives - 7 * us_ps / 1000) == stop_reason::time);
+  CHECK(b.f->field("USART1", "ISR_enabled", "RXFNE") == 0);
+  auto const stopped =
+      b.f->run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
+  CHECK(stopped.executed.value == 1);
+  CHECK(b.f->target->virtual_clock().time().ps >= b.origin + arrives);
+  CHECK(b.f->target->virtual_clock().time().ps < b.origin + arrives + 2 * 6'250);
+  CHECK(b.f->field("USART1", "ISR_enabled", "RXFNE") == 1);
+}
+
+TEST_CASE("an aborted frame never reaches RDR, the next one does, whatever the window")
+{
+  constexpr auto             latency   = 20 * us_ps;
+  auto const                 reference = oracle("link_abort", latency);
+  std::vector<std::uint32_t> bytes;
+  for(auto const& one : entries(reference.log))
+  {
+    if(one.kind == link_byte)
+    {
+      bytes.push_back(one.data);
+    }
+  }
+  CHECK(bytes == std::vector<std::uint32_t>{'a', 'c'});
+  CHECK(
+      std::ranges::count_if(reference.posts, [](line_post const& post) { return post.abort; })
+      == 1);
+  for(auto const window : {latency, latency / 4})
+  {
+    CAPTURE(window);
+    CHECK(barriers("link_abort", latency, window).log == reference.log);
+  }
+}
+
+TEST_CASE("a frame queued ahead of the head becomes the head, both arrive at their own ends")
+{
+  member b{"link_rx"};
+  REQUIRE(b.to(2 * ms_ps) == stop_reason::time);
+  auto const base  = b.f->target->virtual_clock().time().ps;
+  auto const frame = [&](std::uint16_t data, std::uint64_t end_us) {
+    return stm32::line_frame{
+        .data     = data,
+        .frame_ps = 21 * us_ps,
+        .start    = vtime{base + (end_us - 21) * us_ps},
+        .end      = vtime{base + end_us * us_ps}};
+  };
+  b.port().receive_at(frame('x', 200), 1);
+  b.port().receive_at(frame('y', 100), 1);
+  REQUIRE(b.to(base - b.origin + ms_ps) == stop_reason::time);
+  auto const                 seen = entries(b.f->log());
+  std::vector<std::uint32_t> bytes;
+  for(auto const& one : seen)
+  {
+    if(one.kind == link_byte)
+    {
+      bytes.push_back(one.data);
+    }
+  }
+  CHECK(bytes == std::vector<std::uint32_t>{'y', 'x'});
+}
+
+TEST_CASE("a reset of the receiver drops the frames queued from the other machine")
+{
+  member a{"link_tx"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  member b{"link_rx"};
+  REQUIRE(b.to(a.box->posts.front().frame.start.ps - a.origin) == stop_reason::time);
+  for(std::size_t index = 0; index < 3; ++index)
+  {
+    deliver(a.box->posts[index], a, b, 20 * us_ps);
+  }
+  b.f->target->reset();
+  REQUIRE(
+      b.f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("usart_ll", "main")})
+          .reason
+      == stop_reason::address);
+  b.f->set("pc", sym("usart_ll", "link_rx"));
+  b.origin = b.f->target->virtual_clock().time().ps;
+  REQUIRE(b.to(ms_ps) == stop_reason::time);
+  CHECK(count_of(b.f->log(), link_byte) == 0);
+  auto const now = b.f->target->virtual_clock().time().ps;
+  b.port().receive_at(
+      {.data     = 'z',
+       .frame_ps = 21 * us_ps,
+       .start    = vtime{now + 79 * us_ps},
+       .end      = vtime{now + 100 * us_ps}},
+      1);
+  std::uint64_t last = 0;
+  for(std::size_t index = 0; index < 3; ++index)
+  {
+    last = std::max(last, shifted(a.box->posts[index].frame.end, a, b, 20 * us_ps).ps);
+  }
+  REQUIRE(b.to(std::max(last, now + 100 * us_ps) - b.origin + ms_ps) == stop_reason::time);
+  std::vector<std::uint32_t> bytes;
+  for(auto const& one : entries(b.f->log()))
+  {
+    if(one.kind == link_byte)
+    {
+      bytes.push_back(one.data);
+    }
+  }
+  CHECK(bytes == std::vector<std::uint32_t>{'z'});
+}
+
+TEST_CASE("a receiver snapshot mid-gap and mid-frame resumes in a fresh machine as the oracle")
+{
+  constexpr auto latency   = 20 * us_ps;
+  constexpr auto window    = 7 * us_ps;
+  auto const     reference = oracle("link_tx", latency);
+  for(auto const cut : {std::size_t{21}, std::size_t{30}})
+  {
+    CAPTURE(cut);
+    member      a{"link_tx"};
+    auto        b         = std::make_unique<member>("link_rx");
+    bool        done      = false;
+    bool        saved     = false;
+    std::size_t delivered = 0;
+    for(std::uint64_t barrier = window; not done; barrier += window)
+    {
+      done = a.to(barrier) == stop_reason::user;
+      REQUIRE(b->to(barrier, true) == stop_reason::time);
+      for(; delivered < a.box->posts.size(); ++delivered)
+      {
+        deliver(a.box->posts[delivered], a, *b, latency);
+      }
+      if(not saved and count_of(b->f->log(), link_byte) >= cut)
+      {
+        auto const bytes = core::encode_snapshot(b->f->target->snapshot().data());
+        auto       fresh = std::make_unique<member>("link_rx");
+        fresh->f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+        fresh->origin = b->origin;
+        b             = std::move(fresh);
+        saved         = true;
+      }
+    }
+    REQUIRE(saved);
+    REQUIRE(b->to(horizon_of(a.box->posts, a, latency)) == stop_reason::time);
+    CHECK(b->f->log() == reference.log);
+  }
+}
+
+TEST_CASE("the sender posts each frame at its start bit, aborts once on a UE clear, not on reset")
+{
+  member a{"link_abort"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  auto const& posts = a.box->posts;
+  REQUIRE(posts.size() == 4);
+  CHECK_FALSE(posts[0].abort);
+  CHECK(posts[1].frame.data == 'b');
+  CHECK(posts[2].abort);
+  CHECK(posts[2].at.ps > posts[1].frame.start.ps);
+  CHECK(posts[2].at.ps < posts[1].frame.end.ps);
+  CHECK(posts[3].frame.data == 'c');
+  for(auto const& post : posts)
+  {
+    if(not post.abort)
+    {
+      CHECK(post.frame.end.ps - post.frame.start.ps == post.frame.frame_ps);
+      CHECK(post.frame.word_bits == 8);
+      CHECK(post.frame.half_stops == 2);
+    }
+  }
+  CHECK(a.box->transmissions == 2);
+  a.f->target->reset();
+  CHECK(posts.size() == 4);
+}
+
+TEST_CASE("a frame landing on the count of a host frame orders the same whatever the window")
+{
+  constexpr std::uint16_t host_data = 0x99;
+  member                  a{"link_tx"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  REQUIRE(a.box->posts.size() == 64);
+  auto const& first  = a.box->posts[40];
+  auto const  before = first.frame.start.ps - a.origin - 2 * us_ps;
+
+  member probe{"link_rx_slow"};
+  REQUIRE(probe.to(before) == stop_reason::time);
+  auto const t0   = probe.f->target->virtual_clock().time().ps;
+  auto const brr  = probe.f->field("USART1", "BRR", "BRR");
+  auto const f_rx = 20 * ps_per_second / (2 * (160'000'000 / brr));
+  deliver(first, a, probe, 0);
+  auto const pending = probe.f->target->snapshot().data().events.pending;
+  auto const linked  = std::ranges::find(pending, std::uint32_t{1}, &core::event::lane);
+  REQUIRE(linked != pending.end());
+  REQUIRE(t0 + f_rx > linked->due_ps);
+  auto const latency = t0 + f_rx - linked->due_ps;
+  CAPTURE(latency);
+
+  auto const host      = host_byte{.at = before, .data = host_data};
+  auto const reference = oracle("link_tx", latency, "link_rx_slow", host);
+  auto const seen      = entries(reference.log);
+  auto const host_at   = std::ranges::find_if(
+      seen, [](entry const& one) { return one.kind == link_byte and one.data == host_data; });
+  CHECK(host_at != seen.end());
+  CHECK(std::ranges::none_of(seen, [](entry const& one) {
+    return one.kind == link_byte and one.data == 0x20u + 40u;
+  }));
+  CHECK(count_of(reference.log, 3) == 1);
+  for(auto const window : {latency, latency / 3})
+  {
+    CAPTURE(window);
+    CHECK(
+        barriers("link_tx", latency, window, 1'000'000'000, "link_rx_slow", host).log
+        == reference.log);
+  }
+}
+
+TEST_CASE("the IDLE of an aborted frame is armed on the wire's lane")
+{
+  constexpr auto latency = 20 * us_ps;
+  member         a{"link_abort"};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason == stop_reason::user);
+  member      b{"link_rx"};
+  auto const& posts = a.box->posts;
+  REQUIRE(posts.size() == 4);
+  REQUIRE(b.to(posts[1].frame.start.ps - a.origin) == stop_reason::time);
+  deliver(posts[1], a, b, latency);
+  deliver(posts[2], a, b, latency);
+  auto const pending = b.f->target->snapshot().data().events.pending;
+  auto const idle    = std::ranges::find_if(
+      pending, [](core::event const& one) { return one.id.kind == 2 and one.lane == 1; });
+  CHECK(idle != pending.end());
+}
+
+namespace
+{
+auto usart_isr(stm32_fixture const& f, std::string_view unit, std::string_view name)
+    -> std::uint32_t
+{
+  return f.field(unit, "ISR_enabled", name);
+}
+
+auto ring_bytes(stm32_fixture const& f) -> std::vector<std::uint32_t>
+{
+  auto const                 ring = sym("usart_ll", "ring");
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t index = 0; index < 16; ++index)
+  {
+    auto const byte = f.target->mem().read(ring + index, 1);
+    REQUIRE(byte.has_value());
+    out.push_back(static_cast<std::uint32_t>(*byte));
+  }
+  return out;
+}
+
+void run_for(stm32_fixture const& f, std::uint64_t ps)
+{
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{1'000'000'000},
+                     .until_time       = vtime{f.target->virtual_clock().time().ps + ps}})
+          .reason
+      == stop_reason::time);
+}
+
+auto rdr_of(stm32_fixture const& f, std::string_view unit) -> std::uint32_t
+{
+  auto const value = f.target->mem().read(f.target->peripheral(unit).description().base + 0x24, 4);
+  REQUIRE(value.has_value());
+  return static_cast<std::uint32_t>(*value) & 0xffu;
+}
+
+constexpr std::uint64_t frame_115200 = 10 * ps_per_second / 115'200;
+}
+
+TEST_CASE("a held receiver's RX ring keeps filling without its GPDMA freeze bit, no overrun")
+{
+  rig r{"rx_dma_list"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  r.f->target->hold_core(true);
+  std::vector<std::uint16_t> sent;
+  for(std::uint16_t index = 0; index < 10; ++index)
+  {
+    sent.push_back(static_cast<std::uint16_t>(0x40u + index));
+  }
+  r.port("USART2").receive(sent);
+  run_for(*r.f, 12 * frame_115200);
+  auto const ring = ring_bytes(*r.f);
+  for(std::uint32_t index = 0; index < 10; ++index)
+  {
+    CHECK(ring[index] == 0x40u + index);
+  }
+  CHECK(usart_isr(*r.f, "USART2", "ORE") == 0);
+}
+
+TEST_CASE("with its GPDMA freeze bit a held receiver's ring stops and the second frame overruns")
+{
+  rig r{"rx_dma_list"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  popcorn::testing::set_debug_freeze(*r.f, "DBG_GPDMA3_STOP", true);
+  r.f->target->hold_core(true);
+  std::vector<std::uint16_t> sent;
+  for(std::uint16_t index = 0; index < 4; ++index)
+  {
+    sent.push_back(static_cast<std::uint16_t>(0x40u + index));
+  }
+  r.port("USART2").receive(sent);
+  run_for(*r.f, frame_115200 + frame_115200 / 2);
+  CHECK(usart_isr(*r.f, "USART2", "RXFNE") == 1);
+  CHECK(usart_isr(*r.f, "USART2", "ORE") == 0);
+  run_for(*r.f, frame_115200);
+  CHECK(usart_isr(*r.f, "USART2", "ORE") == 1);
+  CHECK(ring_bytes(*r.f) == std::vector<std::uint32_t>(16, 0));
+  CHECK(rdr_of(*r.f, "USART2") == 0x40u);
+}
+
+TEST_CASE("a held core without RX DMA keeps the first byte, overruns, and takes the ISR first")
+{
+  rig r{"rx_irq"};
+  REQUIRE(r.f->run_to_stop().reason == stop_reason::user);
+  r.f->target->hold_core(true);
+  std::vector<std::uint16_t> const sent{'p', 'o', 'p'};
+  r.port("USART1").receive(sent);
+  run_for(*r.f, frame_115200 + frame_115200 / 2);
+  CHECK(usart_isr(*r.f, "USART1", "ORE") == 0);
+  run_for(*r.f, 2 * frame_115200);
+  CHECK(usart_isr(*r.f, "USART1", "ORE") == 1);
+  CHECK(rdr_of(*r.f, "USART1") == 'p');
+  CHECK(r.port("USART1").queued() == 0);
+  r.f->target->hold_core(false);
+  auto const step =
+      r.f->run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
+  CHECK(step.executed.value == 1);
+  auto const handler = sym("usart_ll", "USART1_IRQHandler") & ~popcorn::address{1};
+  auto const pc_reg  = r.f->target->regs().find("pc");
+  REQUIRE(pc_reg.has_value());
+  auto const pc = r.f->target->regs().read(*pc_reg);
+  CHECK(pc >= handler);
+  CHECK(pc < handler + 16);
+}
+
+TEST_CASE("a linked frame ending during a host frame leaves the IDLE to the host frame's end")
+{
+  member     b{"link_rx"};
+  auto const start = 2 * ms_ps;
+  REQUIRE(b.to(start) == stop_reason::time);
+  auto const                       brr   = b.f->field("USART1", "BRR", "BRR");
+  auto const                       frame = 20 * ps_per_second / (2 * (160'000'000 / brr));
+  auto const                       now   = b.f->target->virtual_clock().time().ps;
+  std::vector<std::uint16_t> const one{0x99};
+  b.port().receive(one);
+  b.port().receive_at(
+      {.data     = 0x42,
+       .frame_ps = frame,
+       .start    = vtime{now + frame / 2 - frame},
+       .end      = vtime{now + frame / 2}},
+      1);
+  REQUIRE(b.to(start + 3 * frame + 5 * us_ps) == stop_reason::time);
+  auto const seen = entries(b.f->log());
+  auto const host = std::ranges::find_if(
+      seen, [](entry const& one) { return one.kind == link_byte and one.data == 0x99; });
+  auto const idle =
+      std::ranges::find_if(seen, [](entry const& one) { return one.kind == link_idle; });
+  REQUIRE(host != seen.end());
+  REQUIRE(idle != seen.end());
+  CHECK(idle->cycles - host->cycles + 100 >= frame * cycles_per_us / us_ps);
 }

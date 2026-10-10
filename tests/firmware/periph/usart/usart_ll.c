@@ -28,6 +28,10 @@ void tx_dma(void);
 void GPDMA1_Channel0_IRQHandler(void);
 void rx_dma_list(void);
 void GPDMA1_Channel3_IRQHandler(void);
+void link_tx(void);
+void link_rx(void);
+void link_abort(void);
+void link_rx_slow(void);
 
 void idle(void)
 {
@@ -82,8 +86,15 @@ static void send_poll(USART_TypeDef* usart)
   }
 }
 
+static void link_irq(void);
+
 void USART1_IRQHandler(void)
 {
+  if(received_count == 0xffffffffu)
+  {
+    link_irq();
+    return;
+  }
   if(LL_USART_IsActiveFlag_RXNE_RXFNE(USART1))
   {
     uint8_t const data = LL_USART_ReceiveData8(USART1);
@@ -400,4 +411,156 @@ void brr_while_enabled(void)
 int main(void)
 {
   tx_poll();
+}
+
+#define LINK_BAUD    460800u
+#define LINK_BYTE    1u
+#define LINK_IDLE    2u
+#define LINK_OVERRUN 3u
+
+static void clock_160mhz(void)
+{
+  LL_AHB3_GRP1_EnableClock(LL_AHB3_GRP1_PERIPH_PWR);
+  LL_PWR_SetRegulVoltageScaling(LL_PWR_REGU_VOLTAGE_SCALE1);
+  while(!LL_PWR_IsActiveFlag_VOS())
+  {
+  }
+  LL_PWR_EnableEPODBooster();
+  while(!LL_PWR_IsActiveFlag_BOOST())
+  {
+  }
+  FLASH->ACR = (FLASH->ACR & ~FLASH_ACR_LATENCY) | 4u;
+  LL_RCC_MSIS_Enable();
+  while(!LL_RCC_MSIS_IsReady())
+  {
+  }
+  LL_RCC_PLL1_ConfigDomain_SYS(LL_RCC_PLL1SOURCE_MSIS, 1, 80, 2);
+  LL_RCC_PLL1_SetVCOInputRange(LL_RCC_PLLINPUTRANGE_4_8);
+  LL_RCC_PLL1_EnableDomain_SYS();
+  LL_RCC_PLL1_Enable();
+  while(!LL_RCC_PLL1_IsReady())
+  {
+  }
+  LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
+  LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
+  LL_RCC_SetAPB2Prescaler(LL_RCC_APB2_DIV_1);
+  LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_PLL1);
+  while(LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_PLL1)
+  {
+  }
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+static void start_link_at(uint32_t baud)
+{
+  clock_160mhz();
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_PCLK2);
+  init(USART1, baud);
+  enable(USART1);
+}
+
+static void start_link(void)
+{
+  start_link_at(LINK_BAUD);
+}
+
+static void wait_us(uint32_t us)
+{
+  uint32_t const from = DWT->CYCCNT;
+  while(DWT->CYCCNT - from < us * 160u)
+  {
+  }
+}
+
+static void send_byte(uint8_t data)
+{
+  while(!LL_USART_IsActiveFlag_TXE_TXFNF(USART1))
+  {
+  }
+  LL_USART_TransmitData8(USART1, data);
+}
+
+static void wait_complete(void)
+{
+  while(!LL_USART_IsActiveFlag_TC(USART1))
+  {
+  }
+}
+
+void link_tx(void)
+{
+  static uint8_t const  runs[] = {20, 10, 10, 24};
+  static uint16_t const gaps[] = {40, 10, 200, 0};
+  start_link();
+  uint8_t next = 0x20;
+  for(unsigned run = 0; run < sizeof runs; ++run)
+  {
+    for(unsigned index = 0; index < runs[run]; ++index)
+    {
+      send_byte(next++);
+    }
+    wait_complete();
+    wait_us(gaps[run]);
+  }
+  DONE();
+}
+
+void link_abort(void)
+{
+  start_link();
+  send_byte('a');
+  wait_complete();
+  wait_us(60);
+  send_byte('b');
+  wait_us(10);
+  LL_USART_Disable(USART1);
+  enable(USART1);
+  send_byte('c');
+  wait_complete();
+  DONE();
+}
+
+static void link_irq(void)
+{
+  if(LL_USART_IsActiveFlag_ORE(USART1))
+  {
+    LL_USART_ClearFlag_ORE(USART1);
+    LOG(LINK_OVERRUN << 16);
+    LOG(DWT->CYCCNT);
+  }
+  if(LL_USART_IsActiveFlag_RXNE_RXFNE(USART1))
+  {
+    LOG((LINK_BYTE << 16) | LL_USART_ReceiveData8(USART1));
+    LOG(DWT->CYCCNT);
+  }
+  if(LL_USART_IsActiveFlag_IDLE(USART1))
+  {
+    LL_USART_ClearFlag_IDLE(USART1);
+    LOG(LINK_IDLE << 16);
+    LOG(DWT->CYCCNT);
+  }
+}
+
+static void receive_link(void)
+{
+  received_count = 0xffffffffu;
+  LL_USART_EnableIT_RXNE_RXFNE(USART1);
+  LL_USART_EnableIT_IDLE(USART1);
+  NVIC_EnableIRQ(USART1_IRQn);
+  idle();
+}
+
+void link_rx(void)
+{
+  start_link();
+  receive_link();
+}
+
+void link_rx_slow(void)
+{
+  start_link_at(115200u);
+  receive_link();
 }

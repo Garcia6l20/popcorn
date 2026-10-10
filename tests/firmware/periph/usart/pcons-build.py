@@ -20,5 +20,9 @@ add_ll_firmware(
         "tx_dma",
         "rx_dma_list",
         "brr_while_enabled",
+        "link_tx",
+        "link_rx",
+        "link_abort",
+        "link_rx_slow",
     ],
 )

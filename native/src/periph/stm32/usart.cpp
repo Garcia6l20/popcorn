@@ -27,10 +27,19 @@ namespace
 constexpr std::uint32_t transmit_done = 0;
 constexpr std::uint32_t receive_due   = 1;
 constexpr std::uint32_t idle_due      = 2;
+constexpr std::uint32_t linked_due    = 3;
 constexpr std::size_t   fifo_depth    = 8;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
 constexpr std::array<std::uint32_t, 12> prescalers{1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
+
+struct linked_frame
+{
+  line_frame    frame{};
+  std::uint32_t lane{};
+
+  friend auto operator==(linked_frame const&, linked_frame const&) -> bool = default;
+};
 
 struct usart_state
 {
@@ -44,6 +53,9 @@ struct usart_state
   bool                         shifting{};
   bool                         receiving{};
   bool                         idle_pending{};
+  std::vector<linked_frame>    linked;
+  std::uint64_t                idle_due_ps{};
+  std::uint32_t                linked_generation{};
 
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
@@ -95,6 +107,17 @@ struct lock
  *        locked. GTPR and AUTOCR are not served, so their locked fields are not enforced. Not
  *        modelled, logged once when configured: synchronous mode, smartcard,
  *        IrDA, LIN, the RS485 driver enable, auto baud rate, receiver timeout, wake-up from Stop.
+ *        For a link to another machine, the endpoint hears each frame when its start bit leaves,
+ *        `uart_endpoint::started`, and a clear of UE with a frame in flight, `aborted`. Frames
+ *        from another machine, `receive_at`, reach the receiver at their own stop-bit end, IDLE
+ *        one receiver frame time after the last one unless the next starts before. Deviations:
+ *        an aborted frame vanishes, the receiver sees the line go idle at the abort, where the
+ *        chip would see a truncated frame and FE. A reset drops the frames queued from other
+ *        machines, also those whose start bit would reach the line after the reset. Events a
+ *        delivery from another machine arms, its data and the IDLE of an abort, go on the
+ *        wire's lane, so their order against local events of the same instant does not depend on
+ *        when the delivery happened. BUSY does
+ *        not follow frames from other machines.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_port
 {
@@ -116,6 +139,8 @@ public:
   void               receive(std::span<std::uint16_t const> data) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
   void               attach(std::shared_ptr<uart_endpoint> far_end) override;
+  void               receive_at(line_frame const& frame, std::uint32_t lane) override;
+  void               cancel_in_flight(vtime at, std::uint32_t lane) override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
@@ -133,9 +158,13 @@ private:
   [[nodiscard]] auto word_mask() const -> std::uint32_t;
   auto schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
   void start_frame(std::uint64_t from_ps);
-  void flags();
-  void interrupts();
-  void warn_unsupported();
+  void deliver(std::uint16_t data);
+  void schedule_linked();
+  void idle_at(std::uint64_t due_ps, std::uint32_t lane = 0);
+  [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
+  void               flags();
+  void               interrupts();
+  void               warn_unsupported();
 
   register_file&                               regs_;
   std::shared_ptr<uart_endpoint>               far_end_;
@@ -401,6 +430,7 @@ void usart::reset(register_file& regs, reset_kind)
   state_.tx_fifo.clear();
   state_.rx_fifo.clear();
   state_.host.clear();
+  state_.linked.clear();
   state_.shifting     = false;
   state_.receiving    = false;
   state_.idle_pending = false;
@@ -491,6 +521,17 @@ void usart::start_frame(std::uint64_t from_ps)
   state_.shifting = true;
   state_.tx_fifo.erase(state_.tx_fifo.begin());
   state_.tx_end_ps = schedule(transmit_done, from_ps, ps);
+  if(far_end_)
+  {
+    constexpr std::array<std::uint8_t, 4> half_stops{2, 1, 4, 3};
+    far_end_->started(
+        {.data       = state_.shift,
+         .word_bits  = static_cast<std::uint8_t>(word_bits()),
+         .half_stops = half_stops[get(regs_, stop_)],
+         .frame_ps   = ps,
+         .start      = vtime{state_.tx_end_ps - ps},
+         .end        = vtime{state_.tx_end_ps}});
+  }
 }
 
 auto usart::word_bits() const -> std::uint32_t
@@ -562,6 +603,10 @@ void usart::control_written(std::uint32_t, std::uint32_t)
   warn_unsupported();
   if(not enabled())
   {
+    if(state_.shifting and far_end_)
+    {
+      far_end_->aborted(ctx_.clock.time());
+    }
     for(auto& generation : state_.generation)
     {
       ++generation;
@@ -645,6 +690,25 @@ auto usart::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
 
 void usart::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == linked_due)
+  {
+    if(payload != state_.linked_generation or state_.linked.empty())
+    {
+      return;
+    }
+    auto const head = state_.linked.front().frame;
+    state_.linked.erase(state_.linked.begin());
+    deliver(head.data);
+    schedule_linked();
+    auto const ps    = frame_ps();
+    auto const quiet = not linked_before(head.end.ps + ps);
+    if(ps != 0 and quiet and not state_.receiving)
+    {
+      idle_at(head.end.ps + ps);
+    }
+    flags();
+    return;
+  }
   if(kind > idle_due or payload != state_.generation[kind])
   {
     return;
@@ -683,6 +747,31 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   auto const data = state_.host.front();
   state_.host.erase(state_.host.begin());
+  deliver(data);
+  auto const ps = frame_ps();
+  if(ps != 0 and not state_.host.empty())
+  {
+    state_.receiving = true;
+    state_.rx_due_ps = schedule(receive_due, state_.rx_due_ps, ps);
+  }
+  else if(ps != 0 and not state_.idle_pending and not linked_before(state_.rx_due_ps + ps))
+  {
+    state_.idle_pending = true;
+    ++state_.generation[idle_due];
+    state_.idle_due_ps = schedule(idle_due, state_.rx_due_ps, ps);
+  }
+  flags();
+}
+
+auto usart::linked_before(std::uint64_t due_ps) const -> bool
+{
+  return std::ranges::any_of(state_.linked, [due_ps](linked_frame const& queued) {
+    return queued.frame.start.ps < due_ps;
+  });
+}
+
+void usart::deliver(std::uint16_t data)
+{
   auto const depth = fifo() ? fifo_depth : 1;
   if(enabled() and get(regs_, receive_) != 0)
   {
@@ -695,19 +784,73 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
       update(regs_, overrun_, 1);
     }
   }
-  auto const ps = frame_ps();
-  if(ps != 0 and not state_.host.empty())
+}
+
+void usart::schedule_linked()
+{
+  ++state_.linked_generation;
+  if(state_.linked.empty())
   {
-    state_.receiving = true;
-    state_.rx_due_ps = schedule(receive_due, state_.rx_due_ps, ps);
+    return;
   }
-  else if(ps != 0 and not state_.idle_pending)
+  auto const& head = state_.linked.front();
+  ctx_.events.schedule_at(
+      head.frame.end, linked_due, state_.linked_generation, head.lane, ctx_.clock);
+}
+
+void usart::idle_at(std::uint64_t due_ps, std::uint32_t lane)
+{
+  state_.idle_pending = true;
+  ++state_.generation[idle_due];
+  if(lane == 0)
   {
-    state_.idle_pending = true;
+    state_.idle_due_ps = schedule(idle_due, due_ps, 0);
+    return;
+  }
+  state_.idle_due_ps = due_ps;
+  ctx_.events.schedule_at(vtime{due_ps}, idle_due, state_.generation[idle_due], lane, ctx_.clock);
+}
+
+void usart::receive_at(line_frame const& frame, std::uint32_t lane)
+{
+  auto const key = std::pair{frame.end.ps, lane};
+  auto const where =
+      std::ranges::upper_bound(state_.linked, key, {}, [](linked_frame const& queued) {
+        return std::pair{queued.frame.end.ps, queued.lane};
+      });
+  auto const head = where == state_.linked.begin();
+  state_.linked.insert(where, {.frame = frame, .lane = lane});
+  if(state_.idle_pending and frame.start.ps < state_.idle_due_ps)
+  {
+    state_.idle_pending = false;
     ++state_.generation[idle_due];
-    schedule(idle_due, state_.rx_due_ps, ps);
   }
-  flags();
+  if(head)
+  {
+    schedule_linked();
+  }
+}
+
+void usart::cancel_in_flight(vtime at, std::uint32_t lane)
+{
+  auto const found = std::ranges::find_if(state_.linked, [&](linked_frame const& queued) {
+    return queued.lane == lane and queued.frame.start.ps < at.ps and at.ps < queued.frame.end.ps;
+  });
+  if(found == state_.linked.end())
+  {
+    return;
+  }
+  auto const head = found == state_.linked.begin();
+  state_.linked.erase(found);
+  if(head)
+  {
+    schedule_linked();
+  }
+  auto const ps = frame_ps();
+  if(ps != 0 and not linked_before(at.ps + ps))
+  {
+    idle_at(at.ps + ps, lane);
+  }
 }
 
 void usart::receive(std::span<std::uint16_t const> data)
