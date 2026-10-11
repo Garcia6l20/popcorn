@@ -244,10 +244,10 @@ auto uart_wire::check_shape(detail::wire_post const& post) -> std::optional<core
         {.kind       = core::log_kind::model_warning,
          .peripheral = into_.unit,
          .message    = std::format(
-             "frame at {} baud, {} data bits, {} half stop bits on a link declared {} baud, {} "
-             "data bits, {} half stop bits",
-             baud, post.frame.word_bits, post.frame.half_stops, declared_.baud, declared_.word_bits,
-             declared_.half_stops)});
+             "frame at {} baud, {} data bits, {} half stop bits, parity {} on a link declared {} "
+             "baud, {} data bits, {} half stop bits, parity {}",
+             baud, post.frame.word_bits, post.frame.half_stops, post.frame.parity, declared_.baud,
+             declared_.word_bits, declared_.half_stops, declared_.parity)});
   }
   if(not into_.strict)
   {

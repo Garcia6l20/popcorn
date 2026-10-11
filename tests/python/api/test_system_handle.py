@@ -13,7 +13,6 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import cast
 
 import popcorn
@@ -22,27 +21,9 @@ from popcorn import _core
 from popcorn._host import awaited
 from popcorn.units import ms, us
 
-USART_LL = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "usart_ll.elf"
+from .linked import LINK_BYTE, PING_BYTES, USART_LL, logged, member
+
 LATENCY = us(20).ps
-LINK_BYTE = 1
-PING_BYTES = 16
-
-
-def member(
-    u575: popcorn.MachineDescription, entry: str, name: str, slice_instructions: int = 1_000_000
-) -> popcorn.Machine:
-    """A usart_ll machine stopped at main with pc at `entry`."""
-    m = popcorn.Machine(
-        u575,
-        image=popcorn.Image.elf(USART_LL),
-        name=name,
-        slice_instructions=slice_instructions,
-    )
-    m.reset()
-    stop = asyncio.run(m.run(until="main", budget=1_000_000))
-    assert stop.reason is popcorn.StopReason.ADDRESS, stop
-    m.reg.pc = m.sym(entry)
-    return m
 
 
 def spec(sender: int, receiver: int, unit: str, latency_ps: int = LATENCY) -> _core.WireSpec:
@@ -99,12 +80,6 @@ def taken(box: list[_core.HostFuture]) -> object:
         return future.result(1.0)
     finally:
         del future
-
-
-def logged(m: popcorn.Machine) -> list[int]:
-    count = m.mem.u32[m.sym("log_len")]
-    base = m.sym("log_buf")
-    return [m.mem.u32[base + 4 * index] for index in range(min(count, 256))]
 
 
 def run_to(linked: Linked, until_ps: int) -> list[tuple[str, int | None, int]]:

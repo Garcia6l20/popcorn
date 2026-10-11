@@ -34,10 +34,12 @@ struct[[= py::rename{"WireSpec"}]] wire_spec
   std::int64_t latency_ps{};
   /** @brief Declared baud, above 0. */
   std::uint32_t baud{};
-  /** @brief Declared data bits: 7, 8 or 9. */
+  /** @brief Declared M bits: 7, 8 or 9, the parity bit included when there is one. */
   std::uint8_t word_bits{8};
   /** @brief Declared stop length in half bits: 1, 2, 3 or 4. */
   std::uint8_t half_stops{2};
+  /** @brief Declared parity: 0 none, 1 even, 2 odd. */
+  std::uint8_t parity{};
   /** @brief The receiver's strict_peripherals: a shape mismatch is then a model_error. */
   bool strict{};
 };
@@ -186,6 +188,11 @@ public:
 
   /** @brief core::system::finish(). */
   [[= py::doc{"Final stop at the last pause point, no resume after it."}]] void finish();
+
+  /** @brief Refuses a caller that may not drive the system, as every other call does.
+   * @throws RuntimeError from a callback of a machine. */
+  [[= py::doc{"Raise as a call that drives the system would from this thread."}]] void
+      check_caller() const;
 
   /** @brief core::system::request_pause(). */
   [[= py::doc{"Ask for a pause at the next barrier."}]] void request_pause();

@@ -12,6 +12,7 @@ import os
 import sys
 import types
 import warnings
+import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload, runtime_checkable
@@ -50,6 +51,7 @@ from popcorn._errors import (
     ConfigError,
     EmulationError,
     FaultError,
+    MachineBusy,
     MachineRunning,
     SymbolError,
 )
@@ -101,6 +103,7 @@ from popcorn.trace import TraceKind
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
+    from popcorn._system import LinkedSystem
     from popcorn.image.dwarf import DebugInfo, DebugType
 
 
@@ -489,7 +492,9 @@ class Machine:
         "_registers",
         "_ring",
         "_sentinel",
+        "_strict_peripherals",
         "_surfaced",
+        "_system",
         "_usb",
     )
 
@@ -604,6 +609,8 @@ class Machine:
         config.slice_instructions = slice_instructions
         config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._description = description
+        self._strict_peripherals = strict_peripherals
+        self._system: weakref.ref[LinkedSystem] | None = None
         self._name = description.part if name is None else name
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
@@ -818,7 +825,9 @@ class Machine:
 
         Raises:
             MachineRunning: The machine is busy, outside its handlers.
+            MachineBusy: The machine is a member of a linked system.
         """
+        self._refuse_member("reset")
         self._require_stopped()
         self._handle.reset(_core.ResetKind(kind.value))
         self._last_stop = None
@@ -1868,7 +1877,9 @@ class Machine:
 
         Raises:
             MachineRunning: The machine is busy, from its handlers too.
+            MachineBusy: The machine is a member of a linked system.
         """
+        self._refuse_member("snapshot")
         self._require_idle()
         offset = 0 if self._arena is None else self._arena.used
         return Snapshot(self._handle.snapshot(), offset)
@@ -1882,6 +1893,7 @@ class Machine:
                 a file names another description, images or configuration, keyed by the digest
                 that differs.
             MachineRunning: The machine is busy, from its handlers too.
+            MachineBusy: The machine is a member of a linked system.
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
@@ -1896,6 +1908,7 @@ class Machine:
         function drops the microphone frames not read yet and gets back the speaker samples not
         yet sent, and its streams run or not as the snapshot had them.
         """
+        self._refuse_member("restore")
         self._require_idle()
         machine_id = snapshot.machine_id
         if machine_id not in (0, self._handle.id()):
@@ -2513,6 +2526,11 @@ class Machine:
                 error.add_note(f"background run raised: {ended!r}")
             raise
         self.halt()
+
+    def _refuse_member(self, what: str) -> None:
+        owner = self._system
+        if owner is not None and owner() is not None:
+            raise MachineBusy(f"{self._name} is a member of a linked system: no {what} of a member")
 
     def _require_idle(self) -> None:
         if self.busy:

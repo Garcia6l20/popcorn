@@ -258,6 +258,7 @@ private:
   [[nodiscard]] auto fifo() const -> bool;
   [[nodiscard]] auto frame_ps() -> std::uint64_t;
   [[nodiscard]] auto word_bits() const -> std::uint32_t;
+  [[nodiscard]] auto parity() const -> line_parity;
   [[nodiscard]] auto word_mask() const -> std::uint32_t;
   [[nodiscard]] auto shape() -> rx_shape;
   void               warn_parity();
@@ -325,6 +326,7 @@ private:
   field_ref                                    flush_rx_;
   field_ref                                    flush_tx_;
   field_ref                                    parity_enable_;
+  field_ref                                    parity_odd_;
   field_ref                                    break_request_;
   field_ref                                    break_flag_;
   std::optional<field_ref>                     one_bit_;
@@ -411,8 +413,8 @@ usart::usart(
       tx_threshold_ie_{field("CR3", "TXFTIE")}, rx_threshold_ie_{field("CR3", "RXFTIE")},
       tx_threshold_flag_{field(isr_, "TXFT")}, rx_threshold_flag_{field(isr_, "RXFT")},
       flush_rx_{field("RQR", "RXFRQ")}, flush_tx_{field("RQR", "TXFRQ")},
-      parity_enable_{field(cr1_, "PCE")}, break_request_{field("RQR", "SBKRQ")},
-      break_flag_{field(isr_, "SBKF")},
+      parity_enable_{field(cr1_, "PCE")}, parity_odd_{field(cr1_, "PS")},
+      break_request_{field("RQR", "SBKRQ")}, break_flag_{field(isr_, "SBKF")},
       one_bit_{
           std::ranges::contains(
               describe("CR3").fields,
@@ -696,11 +698,21 @@ void usart::start_frame(std::uint64_t from_ps)
         {.data       = state_.shift,
          .word_bits  = static_cast<std::uint8_t>(word_bits()),
          .half_stops = half_stop_codes[get(regs_, stop_)],
+         .parity     = parity(),
          .kind       = brk ? frame_kind::brk : frame_kind::data,
          .frame_ps   = ps,
          .start      = vtime{state_.tx_end_ps - ps},
          .end        = vtime{state_.tx_end_ps}});
   }
+}
+
+auto usart::parity() const -> line_parity
+{
+  if(get(regs_, parity_enable_) == 0)
+  {
+    return line_parity::none;
+  }
+  return get(regs_, parity_odd_) == 0 ? line_parity::even : line_parity::odd;
 }
 
 auto usart::word_bits() const -> std::uint32_t

@@ -17,6 +17,10 @@ enum class[[= reflex::derive{reflex::Format}]] line_parity
 {
   /** @brief No parity bit. */
   none,
+  /** @brief An even parity bit, the frame's last M bit. */
+  even,
+  /** @brief An odd parity bit, the frame's last M bit. */
+  odd,
 };
 
 /** @brief What a UART frame carries. */

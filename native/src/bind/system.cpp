@@ -344,6 +344,10 @@ void check_shape(wire_spec const& spec, std::size_t members)
   {
     throw std::invalid_argument("a wire's stop length must be 1 to 4 half bits");
   }
+  if(spec.parity > 2)
+  {
+    throw std::invalid_argument("a wire's parity must be 0, 1 or 2");
+  }
 }
 }
 
@@ -419,7 +423,10 @@ auto system_handle::add_wire(
       periph::stm32::wire_lanes{.peer = lane, .injected = lane + 1},
       core::sys_time{spec.latency_ps},
       periph::stm32::line_shape{
-          .baud = spec.baud, .word_bits = spec.word_bits, .half_stops = spec.half_stops},
+          .baud       = spec.baud,
+          .word_bits  = spec.word_bits,
+          .half_stops = spec.half_stops,
+          .parity     = static_cast<periph::stm32::line_parity>(spec.parity)},
       periph::stm32::wire_receiver{
           .port   = &receiver.native_port(),
           .unit   = spec.receiver_unit,
@@ -496,6 +503,11 @@ auto system_handle::system() const -> std::shared_ptr<core::system>
   }
   refuse_caller(*system_);
   return system_;
+}
+
+void system_handle::check_caller() const
+{
+  system_ref const ref{system()};
 }
 
 auto system_handle::member_index(std::size_t member) const -> std::size_t
