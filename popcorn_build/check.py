@@ -51,22 +51,43 @@ def _examples() -> list[Stage]:
 GATE_VARIABLES = ("POPCORN_BUILD_TESTS=ON", "POPCORN_BUILD_EXAMPLES=ON")
 
 
-def stages(asan: bool) -> list[Stage]:
+EXAMPLE_WORKERS = 4
+
+
+def _pcons_jobs(jobs: int | None) -> list[str]:
+    return [] if jobs is None else ["-j", str(jobs)]
+
+
+def _xdist(jobs: int | None, cap: int | None = None) -> list[str]:
+    if jobs is not None and jobs <= 1:
+        return ["-n", "0"]
+    if cap is not None:
+        return ["-n", str(cap if jobs is None else min(jobs, cap))]
+    return ["-n", "auto" if jobs is None else str(jobs)]
+
+
+def stages(asan: bool, jobs: int | None = None) -> list[Stage]:
     """The gate, in order. With @p asan, the native suite in build-asan only.
 
     The build stages set the test and example switches ON: a package build persists them OFF in
-    the same build directory."""
+    the same build directory. @p jobs caps every parallel stage, None leaves each at its default."""
     if asan:
         return [
-            ("build", _pcons("-B", "build-asan", "--variant=asan", *GATE_VARIABLES)),
-            ("test", _pcons("-B", "build-asan", "test")),
+            (
+                "build",
+                _pcons("-B", "build-asan", "--variant=asan", *_pcons_jobs(jobs), *GATE_VARIABLES),
+            ),
+            ("test", _pcons("-B", "build-asan", "test", *_pcons_jobs(jobs))),
         ]
     return [
-        ("build", _pcons("-B", "build", *GATE_VARIABLES)),
-        ("test", _pcons("-B", "build", "test")),
-        ("pytest", _python_tool("pytest", "-q", "tests/python")),
+        ("build", _pcons("-B", "build", *_pcons_jobs(jobs), *GATE_VARIABLES)),
+        ("test", _pcons("-B", "build", "test", *_pcons_jobs(jobs))),
+        ("pytest", _python_tool("pytest", "-q", *_xdist(jobs), "tests/python")),
         *_examples(),
-        ("examples", _python_tool("pytest", "-q", "-n", "4", "examples")),
+        (
+            "examples",
+            _python_tool("pytest", "-q", *_xdist(jobs, EXAMPLE_WORKERS), "examples"),
+        ),
         ("pyright", _python_tool("pyright")),
         ("ruff", _python_tool("ruff", "check", ".")),
         ("black", _python_tool("black", "--check", "-q", ".")),
@@ -74,10 +95,10 @@ def stages(asan: bool) -> list[Stage]:
     ]
 
 
-def run(asan: bool) -> int:
+def run(asan: bool, jobs: int | None = None) -> int:
     summary: list[str] = []
     status = 0
-    for name, command in stages(asan):
+    for name, command in stages(asan, jobs):
         start = time.monotonic()
         code = subprocess.run(command, cwd=project_dir, check=False).returncode
         summary.append(
@@ -95,8 +116,15 @@ def register() -> None:
     @click.option(
         "--asan", is_flag=True, help="Run the native suite in the asan variant, build-asan."
     )
-    def check(asan: bool) -> None:
+    @click.option(
+        "-j",
+        "--jobs",
+        type=click.IntRange(min=1),
+        help="Cap the build and every test stage at this many jobs, 1 runs the tests serially. "
+        "Default: all cores, examples at 4 workers.",
+    )
+    def check(asan: bool, jobs: int | None) -> None:
         """Build, test, type check and lint. Stops at the first failing stage."""
-        status = run(asan)
+        status = run(asan, jobs)
         if status != 0:
             raise SystemExit(status)
