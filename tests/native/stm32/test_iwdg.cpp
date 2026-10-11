@@ -22,6 +22,8 @@ using popcorn::address;
 using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
+using popcorn::testing::debug_freeze_set;
+using popcorn::testing::set_debug_freeze;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::u575;
@@ -526,41 +528,6 @@ namespace
 {
 constexpr std::uint64_t bite_after = std::uint64_t{0xFFF} * 4 * lsi_cycle;
 
-void set_freeze(stm32_fixture const& f, std::string_view name, bool on)
-{
-  auto const& desc = f.target->peripheral("DBGMCU").description();
-  for(auto const& reg : desc.registers)
-  {
-    auto const field = std::ranges::find(reg.fields, name, &popcorn::field_desc::name);
-    if(field != reg.fields.end())
-    {
-      auto const at  = desc.base + reg.offset;
-      auto const old = f.target->mem().read(at, 4);
-      REQUIRE(old.has_value());
-      auto const bit = std::uint32_t{1} << field->lsb;
-      REQUIRE(f.target->mem().write(at, 4, on ? (*old | bit) : (*old & ~bit)).has_value());
-      return;
-    }
-  }
-  FAIL("no field " << name);
-}
-
-auto freeze_set(stm32_fixture const& f, std::string_view name) -> bool
-{
-  auto const& desc = f.target->peripheral("DBGMCU").description();
-  for(auto const& reg : desc.registers)
-  {
-    auto const field = std::ranges::find(reg.fields, name, &popcorn::field_desc::name);
-    if(field != reg.fields.end())
-    {
-      auto const value = f.target->mem().read(desc.base + reg.offset, 4);
-      REQUIRE(value.has_value());
-      return (*value >> field->lsb & 1u) != 0;
-    }
-  }
-  return false;
-}
-
 auto started_idle(core::machine_options options = popcorn::testing::stm32_options())
     -> stm32_fixture
 {
@@ -602,7 +569,7 @@ TEST_CASE("with DBG_IWDG_STOP the watchdog counts running time only")
   auto const by = [](std::uint64_t instructions) {
     sliced const scope{instructions};
     auto         f = started_idle();
-    set_freeze(f, "DBG_IWDG_STOP", true);
+    set_debug_freeze(f, "DBG_IWDG_STOP", true);
     REQUIRE(run_for(f, 100 * ms).reason == stop_reason::time);
     f.target->hold_core(true);
     REQUIRE(run_for(f, 1'000 * ms).reason == stop_reason::time);
@@ -611,12 +578,12 @@ TEST_CASE("with DBG_IWDG_STOP the watchdog counts running time only")
   };
   CHECK(by(997) == by(1'000'000'000));
   auto twin = started_idle();
-  set_freeze(twin, "DBG_IWDG_STOP", true);
+  set_debug_freeze(twin, "DBG_IWDG_STOP", true);
   REQUIRE(run_for(twin, 100 * ms).reason == stop_reason::time);
   auto const reference = bite_time(twin);
 
   auto f = started_idle();
-  set_freeze(f, "DBG_IWDG_STOP", true);
+  set_debug_freeze(f, "DBG_IWDG_STOP", true);
   REQUIRE(run_for(f, 100 * ms).reason == stop_reason::time);
   f.target->hold_core(true);
   REQUIRE(run_for(f, 1'000 * ms).reason == stop_reason::time);
@@ -627,12 +594,12 @@ TEST_CASE("with DBG_IWDG_STOP the watchdog counts running time only")
 TEST_CASE("a hold released at once leaves the watchdog to the picosecond")
 {
   auto twin = started_idle();
-  set_freeze(twin, "DBG_IWDG_STOP", true);
+  set_debug_freeze(twin, "DBG_IWDG_STOP", true);
   REQUIRE(run_for(twin, 100 * ms + lsi_cycle / 3).reason == stop_reason::time);
   auto const reference = bite_time(twin);
 
   auto f = started_idle();
-  set_freeze(f, "DBG_IWDG_STOP", true);
+  set_debug_freeze(f, "DBG_IWDG_STOP", true);
   REQUIRE(run_for(f, 100 * ms + lsi_cycle / 3).reason == stop_reason::time);
   f.target->hold_core(true);
   f.target->hold_core(false);
@@ -644,13 +611,13 @@ TEST_CASE("clock changes during a frozen hold shift the bite by the held span on
   SUBCASE("core clock")
   {
     auto twin = started_idle();
-    set_freeze(twin, "DBG_IWDG_STOP", true);
+    set_debug_freeze(twin, "DBG_IWDG_STOP", true);
     REQUIRE(run_for(twin, ms).reason == stop_reason::time);
     auto const reference = bite_time(twin);
 
     auto f = started_idle();
     bus  b{f};
-    set_freeze(f, "DBG_IWDG_STOP", true);
+    set_debug_freeze(f, "DBG_IWDG_STOP", true);
     REQUIRE(run_for(f, ms).reason == stop_reason::time);
     f.target->hold_core(true);
     auto const icscr1 = b.read("RCC", "RCC_ICSCR1") & ~(0xFu << 28);
@@ -669,7 +636,7 @@ TEST_CASE("clock changes during a frozen hold shift the bite by the held span on
     auto                    f    = started_idle();
     bus                     b{f};
     auto const              started = f.target->virtual_clock().time().ps;
-    set_freeze(f, "DBG_IWDG_STOP", true);
+    set_debug_freeze(f, "DBG_IWDG_STOP", true);
     REQUIRE(run_for(f, 100 * us + 3202 * lsi_cycle + lsi_cycle / 2).reason == stop_reason::time);
     auto const changed = f.target->virtual_clock().time().ps;
     REQUIRE((changed - started - 100 * us) / lsi_cycle == 3202);
@@ -688,7 +655,7 @@ TEST_CASE("clock changes during a frozen hold shift the bite by the held span on
 TEST_CASE("a frozen watchdog restores frozen and bites as the original")
 {
   auto f = started_idle();
-  set_freeze(f, "DBG_IWDG_STOP", true);
+  set_debug_freeze(f, "DBG_IWDG_STOP", true);
   REQUIRE(run_for(f, 100 * ms).reason == stop_reason::time);
   f.target->hold_core(true);
   REQUIRE(run_for(f, 300 * ms).reason == stop_reason::time);
@@ -708,13 +675,13 @@ TEST_CASE("a frozen watchdog restores frozen and bites as the original")
 TEST_CASE("DBG_IWDG_STOP survives a watchdog reset of a held core and clears on power-on")
 {
   auto f = started_idle();
-  set_freeze(f, "DBG_IWDG_STOP", true);
+  set_debug_freeze(f, "DBG_IWDG_STOP", true);
   f.target->hold_core(true);
   f.target->reset(popcorn::reset_kind::watchdog);
-  CHECK(freeze_set(f, "DBG_IWDG_STOP"));
+  CHECK(debug_freeze_set(f, "DBG_IWDG_STOP"));
   CHECK(f.target->core_held());
   f.target->reset(popcorn::reset_kind::power_on);
-  CHECK_FALSE(freeze_set(f, "DBG_IWDG_STOP"));
+  CHECK_FALSE(debug_freeze_set(f, "DBG_IWDG_STOP"));
   CHECK(f.target->core_held());
 }
 
@@ -723,7 +690,7 @@ TEST_CASE("a prescaler update in flight at the hold completes after the release"
   auto const run = [](bool hold) {
     auto f = started_idle();
     bus  b{f};
-    set_freeze(f, "DBG_IWDG_STOP", true);
+    set_debug_freeze(f, "DBG_IWDG_STOP", true);
     REQUIRE(run_for(f, ms).reason == stop_reason::time);
     b.write("IWDG", "KR", 0x5555);
     b.write("IWDG", "PR", 3);
@@ -747,7 +714,7 @@ TEST_CASE("a watchdog started while the core is held starts counting at the rele
     sliced const scope{instructions};
     auto         f = entered("idle");
     bus          b{f};
-    set_freeze(f, "DBG_IWDG_STOP", true);
+    set_debug_freeze(f, "DBG_IWDG_STOP", true);
     REQUIRE(run_for(f, ms).reason == stop_reason::time);
     f.target->hold_core(true);
     b.write("IWDG", "KR", 0xCCCC);
@@ -759,7 +726,7 @@ TEST_CASE("a watchdog started while the core is held starts counting at the rele
   auto const run = [](bool hold) {
     auto f = entered("idle");
     bus  b{f};
-    set_freeze(f, "DBG_IWDG_STOP", true);
+    set_debug_freeze(f, "DBG_IWDG_STOP", true);
     REQUIRE(run_for(f, ms).reason == stop_reason::time);
     if(hold)
     {

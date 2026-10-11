@@ -136,4 +136,51 @@ private:
     return static_cast<std::uint32_t>(*value);
   }
 };
+
+/**
+ * @brief Sets or clears a DBGMCU freeze field, found by its SVD name in any DBGMCU register.
+ * @param f Machine to write.
+ * @param name Field name, such as `DBG_IWDG_STOP`.
+ * @param on Value of the bit.
+ */
+inline void set_debug_freeze(stm32_fixture const& f, std::string_view name, bool on)
+{
+  auto const& desc = f.target->peripheral("DBGMCU").description();
+  for(auto const& reg : desc.registers)
+  {
+    auto const field = std::ranges::find(reg.fields, name, &field_desc::name);
+    if(field != reg.fields.end())
+    {
+      auto const at  = desc.base + reg.offset;
+      auto const old = f.target->mem().read(at, 4);
+      REQUIRE(old.has_value());
+      auto const bit = std::uint32_t{1} << field->lsb;
+      REQUIRE(f.target->mem().write(at, 4, on ? (*old | bit) : (*old & ~bit)).has_value());
+      return;
+    }
+  }
+  FAIL("no DBGMCU field " << name);
+}
+
+/**
+ * @brief Whether a DBGMCU freeze field is set.
+ * @param f Machine to read.
+ * @param name Field name, such as `DBG_IWDG_STOP`.
+ */
+inline auto debug_freeze_set(stm32_fixture const& f, std::string_view name) -> bool
+{
+  auto const& desc = f.target->peripheral("DBGMCU").description();
+  for(auto const& reg : desc.registers)
+  {
+    auto const field = std::ranges::find(reg.fields, name, &field_desc::name);
+    if(field != reg.fields.end())
+    {
+      auto const value = f.target->mem().read(desc.base + reg.offset, 4);
+      REQUIRE(value.has_value());
+      return (*value >> field->lsb & 1u) != 0;
+    }
+  }
+  FAIL("no DBGMCU field " << name);
+  return false;
+}
 }

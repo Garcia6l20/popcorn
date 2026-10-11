@@ -4,6 +4,7 @@
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/periph/core_hold.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -135,6 +136,8 @@ struct tim_state
   std::uint8_t                            down{};
   std::uint8_t                            scheduled{};
   std::uint8_t                            gate{};
+  std::uint8_t                            held{};
+  std::uint64_t                           held_ps{};
 
   friend auto operator==(tim_state const&, tim_state const&) -> bool = default;
 };
@@ -227,12 +230,24 @@ auto lower(std::string_view name) -> std::string
  *        event. COM, trigger and reserved DBSS values log once and keep one request per event.
  *        Reserved DBL values above 11010 run 26 transfers and log once. Traces name DMAR, not the
  *        redirected register.
+ *        While the machine holds its core with DBGMCU `DBG_<instance>_STOP` set, the counter,
+ *        its prescaler phase and its events stop at the time of the hold and resume at the
+ *        release. Updates and matches due up to the hold apply at the hold, before any other
+ *        event still pending at that instant, lane events included: deterministic, not in
+ *        event key order. The bit is read at the hold: without a DBGMCU model or field the
+ *        timer runs on, a warning logged, a model_error under strict_peripherals. A slave edge
+ *        that reaches a frozen timer applies at the time of the hold: a reset, a trigger, an
+ *        external clock tick or a gate change made during the hold acts as if it came at the
+ *        hold, and the counter resumes from that state at the release. A frozen timer dates the
+ *        TRGO edges it gives during the hold at the current time, never at the hold, so a sink
+ *        that runs on sees no edge in its past. A frozen sink clamps it to its own hold.
  */
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,
                   public trigger_source,
                   public trigger_sink,
-                  public dma_requester
+                  public dma_requester,
+                  public core_hold_listener
 {
 public:
   tim(model_context& ctx, peripheral_desc const& desc);
@@ -249,6 +264,7 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void               on_clock_change() override;
+  void               on_core_hold(bool held) override;
   void               interest_changed() override;
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
@@ -271,6 +287,7 @@ public:
 
 private:
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
+  [[nodiscard]] auto output_time(std::uint64_t at) const -> std::uint64_t;
   [[nodiscard]] auto name(std::string_view reg) const -> std::string;
   [[nodiscard]] auto optional_field(std::string_view reg, std::string_view name) const
       -> std::optional<field_ref>;
@@ -399,6 +416,7 @@ private:
   bool                                         encoder_logged_{};
   bool                                         etr_logged_{};
   bool                                         pin_logged_{};
+  bool                                         freeze_logged_{};
   bool                                         master_logged_{};
 };
 
@@ -774,7 +792,7 @@ auto tim::optional_field(std::string_view reg, std::string_view bits) const
 
 auto tim::now_ps() const -> std::uint64_t
 {
-  return ctx_.clock.time().ps;
+  return state_.held != 0 ? state_.held_ps : ctx_.clock.time().ps;
 }
 
 auto tim::center() const -> bool
@@ -1031,17 +1049,22 @@ auto tim::master_mode_of(std::uint32_t cr2) const -> std::uint32_t
   return master_->of(cr2) | (high << master_->width);
 }
 
+auto tim::output_time(std::uint64_t at) const -> std::uint64_t
+{
+  return state_.held != 0 ? ctx_.clock.time().ps : at;
+}
+
 void tim::pulse_trgo(std::uint64_t at)
 {
   auto const hz = ctx_.clock.hz(domain_);
-  trgo_->pulse(at, hz == 0 ? 0 : (ps_per_second + hz - 1) / hz);
+  trgo_->pulse(output_time(at), hz == 0 ? 0 : (ps_per_second + hz - 1) / hz);
 }
 
 void tim::enable_edge(trigger_edge edge, std::uint64_t at)
 {
   if(trgo_ and master_mode() == master_enable)
   {
-    trgo_->edge(edge, at);
+    trgo_->edge(edge, output_time(at));
   }
 }
 
@@ -1484,7 +1507,7 @@ void tim::settle()
 
 void tim::reschedule()
 {
-  if(not counting())
+  if(not counting() or state_.held != 0)
   {
     state_.scheduled = 0;
     return;
@@ -1731,6 +1754,32 @@ void tim::on_clock_change()
   settle();
 }
 
+void tim::on_core_hold(bool held)
+{
+  if(held)
+  {
+    if(state_.held != 0 or not debug_frozen(freeze_logged_))
+    {
+      return;
+    }
+    catch_up(now_ps());
+    settle();
+    state_.held_ps   = ctx_.clock.time().ps;
+    state_.held      = 1;
+    state_.scheduled = 0;
+    ++state_.generation;
+    return;
+  }
+  if(state_.held == 0)
+  {
+    return;
+  }
+  state_.anchor_ps += ctx_.clock.time().ps - state_.held_ps;
+  state_.held    = 0;
+  state_.held_ps = 0;
+  settle();
+}
+
 void tim::interest_changed()
 {
   catch_up(now_ps());
@@ -1772,7 +1821,8 @@ void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
     return;
   }
   reacting_scope const reacting{reacting_};
-  catch_up(std::min(at_ps, now_ps()));
+  auto const           at = state_.held != 0 ? std::min(at_ps, state_.held_ps) : at_ps;
+  catch_up(std::min(at, now_ps()));
   auto const rising = edge == trigger_edge::rising;
   auto const mode   = static_cast<slave_mode>(slave());
   switch(mode)
@@ -1784,11 +1834,11 @@ void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
       {
         if(mode != slave_mode::trigger)
         {
-          reinitialise(at_ps);
+          reinitialise(at);
         }
         if(mode != slave_mode::reset)
         {
-          begin(at_ps);
+          begin(at);
         }
         update(regs_, *trigger_flag_, 1);
       }
@@ -1799,13 +1849,13 @@ void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
         update(regs_, *trigger_flag_, 1);
         if(active())
         {
-          external_tick(at_ps);
+          external_tick(at);
         }
       }
       break;
     case slave_mode::gated:
     case slave_mode::gated_reset:
-      gate(signal, edge, mode == slave_mode::gated_reset, at_ps);
+      gate(signal, edge, mode == slave_mode::gated_reset, at);
       break;
     default:
       break;
@@ -1841,7 +1891,9 @@ void tim::master_written(std::uint32_t old, std::uint32_t now)
   auto const was  = master_mode_of(old);
   if(trgo_ and counter_enabled() and (was == master_enable) != (mode == master_enable))
   {
-    trgo_->edge(mode == master_enable ? trigger_edge::rising : trigger_edge::falling, now_ps());
+    trgo_->edge(
+        mode == master_enable ? trigger_edge::rising : trigger_edge::falling,
+        output_time(now_ps()));
   }
   auto const second = master2_ and master2_->of(now) != 0;
   if((mode > master_compare_pulse or second) and not std::exchange(master_logged_, true))
