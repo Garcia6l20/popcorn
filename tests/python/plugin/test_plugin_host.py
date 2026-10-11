@@ -44,7 +44,10 @@ LEFT_RUNNING = "*popcorn: * was left running and its free run ended with Boom(*"
 
 
 @pytest.fixture(autouse=True)
-def _project(pytester: pytest.Pytester) -> None:
+def _project(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The count asserts below also match pytest's short summary line, which shows
+    # the exception message only when the terminal is wide enough. Pin the width.
+    monkeypatch.setenv("COLUMNS", "80")
     write_conftest(pytester)
     write_project(pytester)
     pytester.makepyfile(raising_watch=RAISING_WATCH)
