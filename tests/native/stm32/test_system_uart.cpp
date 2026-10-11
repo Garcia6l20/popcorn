@@ -1141,3 +1141,171 @@ TEST_CASE("a state saved at one quantum continues under another as the run never
   CHECK(restored_run(third, whole, at) == expected);
   CHECK(restored_run(whole, third, at) == expected);
 }
+
+namespace
+{
+void freeze_field(core::machine& m, std::string_view name)
+{
+  auto const& desc = m.peripheral("DBGMCU").description();
+  for(auto const& reg : desc.registers)
+  {
+    auto const field = std::ranges::find(reg.fields, name, &popcorn::field_desc::name);
+    if(field != reg.fields.end())
+    {
+      auto const at  = desc.base + reg.offset;
+      auto const old = m.mem().read(at, 4);
+      REQUIRE(old.has_value());
+      REQUIRE(m.mem().write(at, 4, *old | (std::uint32_t{1} << field->lsb)).has_value());
+      return;
+    }
+  }
+  FAIL("no DBGMCU field " << name);
+}
+
+auto ring_of(core::machine& m) -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> out;
+  auto const                base = sym("usart_ll", "big_ring");
+  for(std::uint32_t index = 0; index < 64; ++index)
+  {
+    auto const value = m.mem().read(base + index, 1);
+    REQUIRE(value.has_value());
+    out.push_back(static_cast<std::uint8_t>(*value));
+  }
+  return out;
+}
+}
+
+TEST_CASE("a halted receiver's RX DMA ring fills, or stops with its GPDMA channel frozen")
+{
+  std::optional<std::vector<std::uint8_t>> running_ring;
+  for(auto const frozen : {false, true})
+  {
+    std::optional<std::pair<std::vector<std::uint8_t>, std::string>> reference;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+    {
+      CAPTURE(frozen);
+      CAPTURE(how.name);
+      world w;
+      w.add("link_tx");
+      w.add("link_rx_dma");
+      w.link(0, 1, latency_20);
+      w.host(how);
+      if(frozen)
+      {
+        core::access(
+            *w.members[1].on, 0, [](core::machine& m) { freeze_field(m, "DBG_GPDMA3_STOP"); });
+      }
+      core::host_future<core::goal_reached> listening;
+      {
+        auto const held = w.sys->lock();
+        listening       = w.sys->post_goal(held, 1, {.until_time = core::sys_time{400 * us_ps}});
+      }
+      REQUIRE(w.resume(script_end).reason == core::pause_reason::delivered);
+      {
+        auto const held = w.sys->lock();
+        w.sys->release(held, 1);
+      }
+      REQUIRE(w.run_to(script_end).reason == core::pause_reason::system_time);
+      auto const ring =
+          core::access(*w.members[1].on, 0, [](core::machine& m) { return ring_of(m); });
+      std::pair seen{ring, w.dump()};
+      if(reference)
+      {
+        CHECK(seen == *reference);
+      }
+      reference = seen;
+    }
+    if(not frozen)
+    {
+      running_ring = reference->first;
+      for(std::size_t index = 0; index < 64; ++index)
+      {
+        CHECK(reference->first[index] == 0x20 + index);
+      }
+    }
+    else
+    {
+      CHECK(reference->first != *running_ring);
+    }
+  }
+}
+
+TEST_CASE("a sender bitten by its watchdog mid-burst loses the frame in flight, its base moves")
+{
+  std::optional<std::string> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_iwdg");
+    w.add("link_rx");
+    w.link(0, 1, latency_20);
+    w.host(how);
+    REQUIRE(w.run_to(8 * ms_ps).reason == core::pause_reason::system_time);
+    auto const lost = std::ranges::find_if(w.taps[0], &stm32::tap_frame::lost);
+    REQUIRE(lost != w.taps[0].end());
+    CHECK(std::ranges::count_if(w.taps[0], &stm32::tap_frame::lost) == 1);
+    {
+      auto const held = w.sys->lock();
+      CHECK(w.sys->time_of(held, 0).ps >= 8 * ms_ps);
+    }
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a halted sender's watchdog bites unless DBG_IWDG_STOP freezes it")
+{
+  for(auto const frozen : {false, true})
+  {
+    std::optional<std::string> reference;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    {
+      CAPTURE(frozen);
+      CAPTURE(how.name);
+      world w;
+      w.add("link_iwdg");
+      w.add("link_rx");
+      w.link(0, 1, latency_20);
+      w.host(how);
+      if(frozen)
+      {
+        core::access(
+            *w.members[0].on, 0, [](core::machine& m) { freeze_field(m, "DBG_IWDG_STOP"); });
+      }
+      core::host_future<core::goal_reached> sending;
+      {
+        auto const held = w.sys->lock();
+        sending         = w.sys->post_goal(held, 0, {.until_time = core::sys_time{ms_ps}});
+      }
+      REQUIRE(w.resume(script_end).reason == core::pause_reason::delivered);
+      auto const resets =
+          core::access(*w.members[0].on, 0, [](core::machine& m) { return m.resets(); });
+      {
+        auto const held = w.sys->lock();
+        w.sys->release(held, 0);
+      }
+      REQUIRE(w.run_to(10 * ms_ps).reason == core::pause_reason::system_time);
+      auto const after =
+          core::access(*w.members[0].on, 0, [](core::machine& m) { return m.resets(); });
+      CHECK(after == resets + (frozen ? 0 : 1));
+      CHECK(
+          std::ranges::count_if(
+              w.nodes[0]->warnings,
+              [](core::log_record const& one) { return one.message.contains("while halted"); })
+          == (frozen ? 0 : 1));
+      auto const seen = w.dump();
+      if(reference)
+      {
+        CHECK(seen == *reference);
+      }
+      reference = seen;
+    }
+  }
+}

@@ -1,6 +1,7 @@
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_dma.h"
+#include "stm32u5xx_ll_iwdg.h"
 #include "stm32u5xx_ll_lpuart.h"
 #include "stm32u5xx_ll_pwr.h"
 #include "stm32u5xx_ll_rcc.h"
@@ -54,6 +55,8 @@ void link_tx_reset(void);
 void link_abort_b2b(void);
 void link_tx_mid_switch(void);
 void link_tx_fifo_stop(void);
+void link_rx_dma(void);
+void link_iwdg(void);
 void USART2_IRQHandler(void);
 
 void idle(void)
@@ -958,4 +961,51 @@ void link_tx_fifo_stop(void)
     send_byte(next);
   }
   DONE();
+}
+
+void link_rx_dma(void)
+{
+  start_link();
+  ring_size = sizeof big_ring;
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1);
+  uint32_t const source = (uint32_t)&USART1->RDR;
+  uint32_t const next   = LIST_UPDATE | ((uint32_t)rx_node1 & 0xfffcu);
+  rx_node0[0]           = LL_DMA_SRC_FIXED | LL_DMA_DEST_INCREMENT;
+  rx_node0[1]           = LL_DMA_TCEM_EACH_LLITEM_TRANSFER
+                        | LL_DMA_DIRECTION_PERIPH_TO_MEMORY
+                        | LL_GPDMA1_REQUEST_USART1_RX;
+  rx_node0[2]           = sizeof big_ring;
+  rx_node0[3]           = source;
+  rx_node0[4]           = (uint32_t)big_ring;
+  rx_node0[5]           = next;
+  rx_node1[0]           = sizeof big_ring;
+  rx_node1[1]           = source;
+  rx_node1[2]           = (uint32_t)big_ring;
+  rx_node1[3]           = next;
+  LL_DMA_SetTransferEventMode(GPDMA1, LL_DMA_CHANNEL_3, LL_DMA_TCEM_RPT_BLK_TRANSFER);
+  LL_DMA_SetBlkDataLength(GPDMA1, LL_DMA_CHANNEL_3, 0);
+  LL_DMA_SetLinkedListBaseAddr(GPDMA1, LL_DMA_CHANNEL_3, (uint32_t)rx_node0 & 0xffff0000u);
+  LL_DMA_ConfigLinkUpdate(
+      GPDMA1, LL_DMA_CHANNEL_3, LL_DMA_UPDATE_CTR1 | LL_DMA_UPDATE_CTR2 | LIST_UPDATE,
+      (uint32_t)rx_node0);
+  LL_DMA_EnableChannel(GPDMA1, LL_DMA_CHANNEL_3);
+  LL_USART_EnableDMAReq_RX(USART1);
+  idle();
+}
+
+void link_iwdg(void)
+{
+  start_link();
+  LL_IWDG_Enable(IWDG);
+  LL_IWDG_EnableWriteAccess(IWDG);
+  LL_IWDG_SetPrescaler(IWDG, LL_IWDG_PRESCALER_4);
+  LL_IWDG_SetReloadCounter(IWDG, 40);
+  while(!LL_IWDG_IsReady(IWDG))
+  {
+  }
+  LL_IWDG_ReloadCounter(IWDG);
+  for(uint8_t next = 0;; ++next)
+  {
+    send_byte(next);
+  }
 }

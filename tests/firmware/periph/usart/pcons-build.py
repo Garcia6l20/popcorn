@@ -46,5 +46,7 @@ add_ll_firmware(
         "link_abort_b2b",
         "link_tx_mid_switch",
         "link_tx_fifo_stop",
+        "link_rx_dma",
+        "link_iwdg",
     ],
 )
