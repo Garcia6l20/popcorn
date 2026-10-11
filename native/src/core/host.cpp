@@ -935,7 +935,8 @@ struct host_core
     }
     catch(...)
     {
-      fail_goal(slot, done, std::current_exception());
+      owner_scope const owning{this};
+      driver.failed(*slot.engine, std::current_exception());
       return;
     }
     if(not planned)
@@ -956,7 +957,8 @@ struct host_core
     }
     catch(...)
     {
-      fail_goal(slot, done, std::current_exception());
+      owner_scope const owning{this};
+      driver.failed(*slot.engine, std::current_exception());
       return;
     }
     request.stop_when = {};
@@ -970,7 +972,8 @@ struct host_core
     }
     catch(...)
     {
-      fail_goal(slot, done, std::current_exception());
+      owner_scope const owning{this};
+      driver.failed(*slot.engine, std::current_exception());
     }
   }
 

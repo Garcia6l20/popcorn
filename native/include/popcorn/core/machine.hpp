@@ -273,6 +273,10 @@ public:
    */
   [[nodiscard]] auto pending_events() const -> std::size_t;
 
+  /** @brief Instruction count of the earliest pending event, empty when none is pending. An event
+   * a model superseded without cancelling it counts until it is dispatched. */
+  [[nodiscard]] auto next_event() const -> std::optional<icount>;
+
   /** @brief Virtual clock, for reading instruction count, time and domain rates. */
   [[nodiscard]] auto virtual_clock() const noexcept -> core::clock const&;
 

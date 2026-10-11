@@ -52,6 +52,8 @@ void link_tx_count(void);
 void link_abort_gap(void);
 void link_tx_reset(void);
 void link_abort_b2b(void);
+void link_tx_mid_switch(void);
+void link_tx_fifo_stop(void);
 void USART2_IRQHandler(void);
 
 void idle(void)
@@ -911,5 +913,49 @@ void link_abort_b2b(void)
   wait_us(200);
   send_byte('c');
   wait_complete();
+  DONE();
+}
+
+static void halve_hclk_mid_block(void)
+{
+  uint32_t const fast = RCC->CFGR2 & ~RCC_CFGR2_HPRE;
+  uint32_t const slow = fast | LL_RCC_SYSCLK_DIV_2;
+  __asm__ volatile(".rept 40\n\tnop\n\t.endr\n\t"
+                   "str %1, [%0]\n\t"
+                   ".rept 40\n\tnop\n\t.endr\n\t"
+                   "str %2, [%0]\n\t"
+                   ".rept 40\n\tnop\n\t.endr"
+                   :
+                   : "r"(&RCC->CFGR2), "r"(slow), "r"(fast)
+                   : "memory");
+}
+
+void link_tx_mid_switch(void)
+{
+  clock_160mhz();
+  halve_hclk_mid_block();
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_PCLK2);
+  init(USART1, LINK_BAUD);
+  enable(USART1);
+  for(uint8_t next = 0x20; next < 0x60; ++next)
+  {
+    send_byte(next);
+  }
+  wait_complete();
+  DONE();
+}
+
+void link_tx_fifo_stop(void)
+{
+  start_link();
+  LL_USART_Disable(USART1);
+  LL_USART_EnableFIFO(USART1);
+  enable(USART1);
+  wait_us(400);
+  for(uint8_t next = 0x40; next < 0x49; ++next)
+  {
+    send_byte(next);
+  }
   DONE();
 }

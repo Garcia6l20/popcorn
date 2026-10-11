@@ -149,6 +149,15 @@ public:
    */
   virtual void ran(machine& target, slice_result const& result) = 0;
 
+  /**
+   * @brief What plan(), the slice or ran() threw, in place of failing the goal: a scheduler
+   *        that spans several hosts keeps every member in step. The goal goes on with the next
+   *        plan(), which runs no further slice of a member its driver counts as failed. The
+   *        error's time is the member's clock when this is called. Called on the host thread as
+   *        the engine owner, with no host mutex held.
+   */
+  virtual void failed(machine& target, std::exception_ptr error) noexcept = 0;
+
   /** @brief Makes a blocked or later plan() return empty soon. Any thread, takes no lock. */
   virtual void abort() noexcept = 0;
 };
@@ -185,7 +194,9 @@ struct run_goal
    * fails the goal. Empty for none. */
   std::function<void(machine&)> then_thread{};
   /** @brief Slices the goal in place of every field above, which stay empty. The goal never ends
-   * on a stop by itself: it yields when plan() returns empty. Empty for a goal the host slices. */
+   * on a stop by itself: it yields when plan() returns empty, and never fails by a throw of a
+   * slice, plan() or ran(), which goes to member_driver::failed(). Empty for a goal the host
+   * slices. */
   std::shared_ptr<member_driver> driver{};
 
   /** @brief Whether no field but driver is set, as a driver goal needs. */

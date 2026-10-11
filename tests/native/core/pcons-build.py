@@ -190,6 +190,15 @@ for _, target in core_firmware.values():
         test_host_concurrent.depends(target)
 
 add_doctest("core-window-barrier", [here / "test_window_barrier.cpp", *tsan_sources], [core])
+test_system = add_doctest(
+    "core-system",
+    [here / "test_system.cpp", *tsan_sources],
+    [test_support, core],
+    env=m33_env,
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_system.depends(target)
 bench_window_barrier = project.Program(
     "bench-window-barrier",
     project.default_environment,

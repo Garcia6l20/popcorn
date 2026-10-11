@@ -3042,6 +3042,11 @@ public:
     }
   }
 
+  void failed(core::machine&, std::exception_ptr error) noexcept override
+  {
+    failures.push_back(std::move(error));
+  }
+
   void abort() noexcept override
   {
     aborted.store(true);
@@ -3075,6 +3080,7 @@ public:
   std::atomic<int>                                               plans{0};
   std::uint64_t                                                  executed = 0;
   int                                                            stops    = 0;
+  std::vector<std::exception_ptr>                                failures{};
 
 private:
   planner how_;
@@ -3382,27 +3388,40 @@ TEST_CASE("cancel and halt refuse a member that runs a driver goal")
   CHECK(goal.get().yielded);
 }
 
-TEST_CASE("a throw from ran or plan fails the driver goal and the member resumes")
+TEST_CASE("a throw from plan, the slice or ran goes to failed and the driver goal goes on")
 {
-  for(auto const in_plan : {false, true})
+  for(auto const where : {"plan", "slice", "ran"})
   {
-    CAPTURE(in_plan);
-    auto driver = std::make_shared<test_driver>(
-        [in_plan](test_driver& self, core::machine&, core::member_driver::earliest_stamp)
+    CAPTURE(where);
+    std::string_view const at{where};
+    auto                   driver = std::make_shared<test_driver>(
+        [at](test_driver& self, core::machine&, core::member_driver::earliest_stamp)
             -> std::optional<core::slice_request> {
-          if(in_plan and self.plans == 2)
+          if(not self.failures.empty())
+          {
+            return std::nullopt;
+          }
+          if(at == "plan" and self.plans == 2)
           {
             throw test_failure("plan");
           }
-          return core::slice_request{.max_instructions = icount{1000}, .wall_budget = long_wall};
+          core::slice_request request{.max_instructions = icount{1000}, .wall_budget = long_wall};
+          if(at == "slice")
+          {
+            request.stop_when = []() -> bool { throw test_failure("slice"); };
+          }
+          return request;
         });
-    if(not in_plan)
+    if(at == "ran")
     {
       driver->on_ran = [](core::machine&, core::slice_result const&) { throw test_failure("ran"); };
     }
     hosted     h{alu(0)};
     auto const goal = h.run(driven(driver));
-    CHECK_THROWS_AS(std::ignore = goal.get(), test_failure);
+    auto const done = goal.get();
+    CHECK(done.yielded);
+    REQUIRE(driver->failures.size() == 1);
+    CHECK_THROWS_WITH_AS(std::rethrow_exception(driver->failures[0]), where, test_failure);
     CHECK(h.on->state(0) == core::host_state::parked);
     CHECK(h.run({.budget = icount{10}}).get().stopped.reason == stop_reason::budget);
   }

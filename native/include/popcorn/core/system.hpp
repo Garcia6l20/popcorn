@@ -1,0 +1,213 @@
+#pragma once
+
+#include <popcorn/core/host.hpp>
+#include <popcorn/core/machine.hpp>
+#include <popcorn/core/member_link.hpp>
+#include <popcorn/core/types.hpp>
+#include <popcorn/core/window_barrier.hpp>
+
+#include <reflex/enum.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace popcorn::core
+{
+/**
+ * @brief A member of a linked system: a host of exactly one machine. The machine runs with
+ *        machine_options::on_reset_request at reset_request_policy::stop, so every firmware or
+ *        watchdog reset ends a slice and reaches the system, which applies on_reset.
+ */
+struct member_ref
+{
+  /** @brief The member's host, one member, not shared with another system. */
+  std::shared_ptr<host> on;
+  /** @brief Name of the member in errors. */
+  std::string name;
+  /** @brief What a reset request of the firmware does to a member that runs its core:
+   * reset_and_continue resets it and runs on, stop ends its goal with the request. A member
+   * whose core is held is always reset and runs on. */
+  reset_request_policy on_reset{reset_request_policy::reset_and_continue};
+};
+
+/** @brief Why a linked system paused. */
+enum class[[= reflex::derive{reflex::Format}]] pause_reason : std::uint8_t
+{
+  delivered,
+  system_time,
+  idle,
+  error,
+  requested,
+  closed,
+};
+
+/** @brief Outcome of one system::resume(). */
+struct pause
+{
+  /** @brief Why the system paused. */
+  pause_reason reason{};
+  /** @brief Member whose entry was delivered, empty for a requested or closed pause. */
+  std::optional<std::size_t> member{};
+  /** @brief System time of the delivered entry, of the pending barrier for a requested pause. */
+  sys_time at{};
+  /** @brief The member's stop for pause_reason::delivered. */
+  stop stopped{};
+  /** @brief The error for pause_reason::error. */
+  std::exception_ptr error{};
+  /** @brief Windows exchanged since the resume, bookkeeping that depends on the quantum. */
+  std::uint64_t windows{};
+  /** @brief Slices run since the resume over every member, bookkeeping. */
+  std::uint64_t slices{};
+};
+
+class system;
+
+/** @brief The system mutex, held by the current thread. Never moved to another thread. */
+class held_system
+{
+public:
+  /** @brief Whether this holds the mutex of @p of. */
+  [[nodiscard]] auto holds(system const& of) const noexcept -> bool;
+
+private:
+  friend class system;
+
+  held_system(system const* of, std::unique_lock<std::mutex> lock);
+
+  system const*                owner_;
+  std::unique_lock<std::mutex> lock_;
+};
+
+/**
+ * @brief Several members on one virtual clock, each run by its own host thread, linked by
+ *        member_link wires. Members meet at a window_barrier every quantum Q, the smallest link
+ *        latency, at system times k Q from system start. After each barrier every receiver drains
+ *        its inbound wires of the window on its own thread, senders in member index order, then
+ *        link order. A member whose core runs is held at each barrier with
+ *        slice_request::hold_from_until, so every post reaches its receiver at its exact time
+ *        whatever Q, the slicing or the thread timing. A member with no goal is halted: its core
+ *        is held and it advances to the system's decision after each barrier.
+ *
+ *        Lock order: the system mutex first, taken only by threads that are not host threads,
+ *        then at most one host mutex at a time. Host threads never take it.
+ */
+class system
+{
+public:
+  /**
+   * @brief Links the members' hosts, one host mutex at a time. Each wire's sender half must be
+   *        attached to its sender's port by whoever built it.
+   * @param members One-member hosts, parked, member index order.
+   * @param links Wires between members, at least one.
+   * @param wait How members wait at the barrier.
+   * @param bounds Bounds of every slice a member runs.
+   * @param before_arrival Called on a member's host thread before each of its barrier
+   *        arrivals with its index, holding nothing, for tests that perturb thread timing.
+   * @throws machine_busy when a member is busy.
+   */
+  system(
+      std::vector<member_ref>                   members,
+      std::vector<std::shared_ptr<member_link>> links,
+      wait_policy                               wait,
+      slice_bounds                              bounds         = {},
+      std::function<void(std::size_t)>          before_arrival = {}) pre(not members.empty())
+      pre(not links.empty());
+
+  /** @brief Closes, waits for every member to park, then unlinks the hosts. Not on a host
+   * thread, holding no host mutex. */
+  ~system();
+  /** @brief Not copyable. */
+  system(system const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(system const&) -> system& = delete;
+  /** @brief Not movable. */
+  system(system&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(system&&) -> system& = delete;
+
+  /** @brief Blocks for the system mutex. Not on a host thread, holding no host mutex. */
+  [[nodiscard]] auto lock() -> held_system pre(not detail::on_host_thread)
+      pre(detail::host_locks_held == 0);
+
+  /** @brief Takes the system mutex if free, otherwise an unowned held_system. */
+  [[nodiscard]] auto try_lock() -> held_system pre(not detail::on_host_thread)
+      pre(detail::host_locks_held == 0);
+
+  /**
+   * @brief Fixes each member's system time base: member X's local time now is system time
+   *        @p offsets[X].
+   */
+  void start(held_system const& held, std::span<sys_time const> offsets) pre(held.holds(*this))
+      pre(offsets.size() == members());
+
+  /**
+   * @brief Runs the system until the next pause, every member on its own host. Without
+   *        @p system_until the members are halted. With it every member runs its core to that
+   *        system time, and the pause comes when the last one reached it, at the latest stop
+   *        point, unless an earlier entry comes first: a member stop or an error. A member whose
+   *        stop was delivered stays halted from that stop on. Every pause drains the wires up to
+   *        its point before it is decided, so an error a wire dates before the delivered entry
+   *        comes first.
+   * @return Completes once every member parked, from the last host thread to park.
+   * @throws std::logic_error before start(), while a resume is in flight, or after an error
+   *         pause stopped the system.
+   * @throws emulation_error when a member was reset behind the system's back since the last
+   *         pause.
+   * @throws machine_closed after close(), or once a member's host refused a goal, which ends
+   *         the system: the members already started park and the pause completes closed.
+   */
+  auto resume(held_system const& held, std::optional<sys_time> system_until = {})
+      -> host_future<pause> pre(held.holds(*this));
+
+  /** @brief Asks for a pause at the next barrier. Any thread, takes no lock. A request no
+   * resume consumed before it paused is dropped by the next resume(). */
+  void request_pause() noexcept;
+
+  /**
+   * @brief Resets member @p member while paused: aborts its frame in flight, drops arrivals
+   *        within L after the reset, resets the machine, and moves its base by its local time.
+   * @throws std::logic_error while a resume is in flight.
+   */
+  void reset(held_system const& held, std::size_t member, reset_kind kind) pre(held.holds(*this))
+      pre(member < members());
+
+  /** @brief Ends the system: every member parks at its next barrier or slice end and the pause
+   * in flight completes as pause_reason::closed. Any thread, takes no lock. */
+  void close() noexcept;
+
+  /** @brief Number of members. */
+  [[nodiscard]] auto members() const noexcept -> std::size_t;
+
+  /** @brief The members' hosts, member index order, fixed at construction. Any thread. */
+  [[nodiscard]] auto hosts() const -> std::vector<std::shared_ptr<host>>;
+
+  /** @brief The quantum Q, the smallest link latency. */
+  [[nodiscard]] auto quantum() const noexcept -> sys_time;
+
+  /**
+   * @brief The first barrier whose exchange has not happened, bookkeeping while paused.
+   * @throws machine_running while a resume is in flight.
+   */
+  [[nodiscard]] auto pending_barrier(held_system const& held) const -> sys_time
+      pre(held.holds(*this));
+
+  /**
+   * @brief System time of member @p member, parked.
+   * @throws machine_running while a resume is in flight.
+   */
+  [[nodiscard]] auto time_of(held_system const& held, std::size_t member) const -> sys_time
+      pre(held.holds(*this)) pre(member < members());
+
+private:
+  struct impl;
+  std::indirect<impl> impl_;
+};
+}

@@ -147,6 +147,11 @@ auto machine::pending_events() const -> std::size_t
   return scheduler_.pending().size();
 }
 
+auto machine::next_event() const -> std::optional<icount>
+{
+  return scheduler_.next_deadline();
+}
+
 auto machine::virtual_clock() const noexcept -> core::clock const&
 {
   return clock_;

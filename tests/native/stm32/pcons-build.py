@@ -126,3 +126,15 @@ uart_wire.private.include_dirs.append(private_dir)
 for _, target in firmwares.values():
     if target is not None:
         uart_wire.depends(target)
+
+system_uart = add_doctest(
+    "stm32-system",
+    [here / "test_system_uart.cpp", *tsan_sources],
+    [core],
+    env=u575_env,
+    register=u575 is not None,
+)
+system_uart.private.include_dirs.append(private_dir)
+for _, target in firmwares.values():
+    if target is not None:
+        system_uart.depends(target)

@@ -44,5 +44,7 @@ add_ll_firmware(
         "link_abort_gap",
         "link_tx_reset",
         "link_abort_b2b",
+        "link_tx_mid_switch",
+        "link_tx_fifo_stop",
     ],
 )
