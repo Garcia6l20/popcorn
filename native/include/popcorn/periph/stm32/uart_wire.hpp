@@ -303,9 +303,10 @@ public:
       core::sys_time barrier,
       core::sys_time next,
       core::time_map receiver) -> std::optional<core::link_fault> override;
-  void finish(core::sys_time at) override;
-  void save(std::vector<std::byte>& out) const override;
-  void load(std::span<std::byte const> in) override;
+  [[nodiscard]] auto quiet() const -> bool override;
+  void               finish(core::sys_time at) override;
+  void               save(std::vector<std::byte>& out) const override;
+  void               load(std::span<std::byte const> in) override;
 
   /** @brief The wire's tap, any thread. */
   [[nodiscard]] auto tap() noexcept -> tap_queue&;

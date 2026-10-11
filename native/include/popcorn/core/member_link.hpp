@@ -142,6 +142,13 @@ public:
       -> std::optional<link_fault> = 0;
 
   /**
+   * @brief Whether the link holds nothing for its receiver: no post in either mailbox and no
+   *        injection queued. Called on the receiver's host thread after its drain, with every
+   *        sender stopped at a barrier.
+   */
+  [[nodiscard]] virtual auto quiet() const -> bool = 0;
+
+  /**
    * @brief Settles what an observer sees at the system's final stop @p at, called on the
    *        receiver's host thread with every member stopped.
    */

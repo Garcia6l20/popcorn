@@ -187,6 +187,7 @@ struct member_slot
   timeline_mark             mark;
   bool                      linked = false;
   driver_cell               driver{};
+  bool                      stamps_held = false;
 
   void push_stamp(stamped made)
   {
@@ -846,6 +847,10 @@ struct host_core
 
   void apply_due(member_slot& slot)
   {
+    if(slot.stamps_held)
+    {
+      return;
+    }
     auto const           now = slot.engine->virtual_clock().time();
     std::vector<stamped> due;
     {
@@ -901,6 +906,16 @@ struct host_core
   void after_slice(member_slot& slot, slice_request const& request, slice_result& result)
   {
     supersede_if_moved(slot);
+    if(request.hold_from_until
+       and request.until_time
+       and slot.engine->virtual_clock().time() >= *request.until_time)
+    {
+      slot.stamps_held = true;
+    }
+    else if(result.dispatched)
+    {
+      slot.stamps_held = false;
+    }
     apply_due(slot);
     if(request.internal_stop and result.stopped and result.stopped->reason == stop_reason::time)
     {

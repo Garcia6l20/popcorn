@@ -779,7 +779,9 @@ public:
    * or a restore fails every pending stamp with operation_cancelled. A body captures native
    * values only. A later stamp from the host thread in a callback, with no host mutex held, takes
    * this host's mutex blocking: native callers only, the binding refuses posts from a host
-   * thread.
+   * thread. After a slice that reached its until_time with slice_request::hold_from_until,
+   * due stamps wait for the next slice that dispatches without a hold, so a body never runs
+   * before the events held at its boundary.
    *
    * @throws std::invalid_argument when @p at is before the machine's time, checked here unless
    *         the member is running. While running the check happens at the next boundary and

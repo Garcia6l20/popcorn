@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <expected>
 #include <format>
 #include <limits>
 #include <ranges>
@@ -21,6 +22,7 @@ enum class entry_kind : std::uint8_t
   stopped,
   error,
   system_time,
+  idle,
 };
 
 struct entry
@@ -42,6 +44,15 @@ auto earlier_of(sys_time a, sys_time b) noexcept -> sys_time
   return b < a ? b : a;
 }
 
+auto left(std::optional<icount> total, std::uint64_t done) -> std::optional<icount>
+{
+  if(not total)
+  {
+    return std::nullopt;
+  }
+  return icount{total->value - std::min(total->value, done)};
+}
+
 enum class phase : std::uint8_t
 {
   begin,
@@ -49,6 +60,7 @@ enum class phase : std::uint8_t
   halted,
   arrive_b,
   after_b,
+  idle_to,
 };
 
 struct report
@@ -57,6 +69,8 @@ struct report
   bool               done{};
   bool               quiescent{};
   bool               has_work{};
+  bool               clean{};
+  bool               quiet{};
   std::vector<entry> found{};
 };
 
@@ -64,6 +78,8 @@ struct decision
 {
   bool                 pause{};
   bool                 need_b{};
+  bool                 idle{};
+  bool                 exchange{};
   sys_time             target{};
   std::optional<entry> head{};
   sys_time             confirm{};
@@ -71,6 +87,17 @@ struct decision
   sys_time             barrier{};
   sys_time             next{};
 };
+
+struct goal_run
+{
+  member_goal                        goal;
+  detail::host_promise<goal_reached> promise{};
+  sys_time                           start{};
+  std::uint64_t                      executed{};
+  bool                               system{};
+};
+
+using settled = std::expected<goal_reached, std::exception_ptr>;
 }
 
 struct system::impl
@@ -79,21 +106,28 @@ struct system::impl
 
   struct slot
   {
-    member_ref                    ref;
-    machine*                      target{};
-    std::shared_ptr<impl::runner> driver{};
-    time_map                      map{};
-    std::uint64_t                 resets{};
-    std::vector<member_link*>     outbound{};
-    std::vector<member_link*>     inbound{};
-    bool                          runs_core{};
-    bool                          released{};
-    std::optional<sys_time>       held_to{};
-    bool                          resolved{};
-    bool                          failed{};
-    bool                          warned_reset{};
-    report                        rep{};
-    std::uint64_t                 slices{};
+    member_ref                                                            ref;
+    machine*                                                              target{};
+    std::shared_ptr<impl::runner>                                         driver{};
+    time_map                                                              map{};
+    std::uint64_t                                                         resets{};
+    std::vector<member_link*>                                             outbound{};
+    std::vector<member_link*>                                             inbound{};
+    std::optional<goal_run>                                               goal{};
+    bool                                                                  undecided{};
+    bool                                                                  released{};
+    std::optional<sys_time>                                               held_to{};
+    bool                                                                  resolved{};
+    bool                                                                  failed{};
+    bool                                                                  warned_reset{};
+    report                                                                rep{};
+    std::uint64_t                                                         slices{};
+    std::optional<std::pair<detail::host_promise<goal_reached>, settled>> outcome{};
+
+    [[nodiscard]] auto running() const noexcept -> bool
+    {
+      return goal and not resolved and not failed;
+    }
   };
 
   struct completion
@@ -117,14 +151,18 @@ struct system::impl
 
   [[nodiscard]] auto deliverable(entry const& head) const noexcept -> bool;
   [[nodiscard]] auto best_entry() const -> std::optional<entry>;
+  [[nodiscard]] auto idle_entry() const -> std::optional<entry>;
   void               merge_found() noexcept;
   void               set_pause(entry const& head) noexcept;
+  void               reconsider() noexcept;
   void               settle_confirm() noexcept;
   void               complete_a() noexcept;
   void               complete_b() noexcept;
   void               complete_c() noexcept;
+  void               deliver(entry const& head) noexcept;
   void               finish_pause() noexcept;
   void               reset_member(slot& one, machine& target, reset_kind kind);
+  void               require_paused() const;
   [[nodiscard]] auto in_flight() const noexcept -> bool;
 
   system const*                             owner;
@@ -141,11 +179,12 @@ struct system::impl
   std::vector<entry>                        held{};
   decision                                  chosen{};
   pause                                     result{};
+  std::optional<sys_time>                   last_point{};
   std::atomic<bool>                         pause_requested{false};
   std::atomic<bool>                         closed{false};
   bool                                      started{};
   bool                                      stopped{};
-  std::exception_ptr                        stopped_by{};
+  bool                                      finished{};
   detail::host_promise<pause>               promise{};
   host_future<pause>                        future{};
   std::atomic<std::size_t>                  outstanding{0};
@@ -166,7 +205,7 @@ public:
     phase_ = phase::begin;
   }
 
-  auto plan(machine& target, earliest_stamp) -> std::optional<slice_request> override
+  auto plan(machine& target, earliest_stamp stamp) -> std::optional<slice_request> override
   {
     auto& one = sys_.slots[index_];
     for(;;)
@@ -179,31 +218,32 @@ public:
       {
         case phase::begin:
           phase_ = phase::run;
-          if(target.core_held() == one.runs_core)
+          if(target.core_held() == one.goal.has_value())
           {
-            target.hold_core(not one.runs_core);
+            target.hold_core(not one.goal);
           }
           continue;
         case phase::run:
-          if(auto request = running(target))
+          if(auto request = running(target, stamp))
           {
             return request;
           }
-          if(not arrive(target, sys_.on_a))
+          resolve_time(target);
+          if(not arrive(target, stamp, sys_.on_a))
           {
             return std::nullopt;
           }
           phase_ = sys_.chosen.need_b ? phase::halted : phase::after_b;
           continue;
         case phase::halted:
-          if(auto request = halted(target))
+          if(auto request = halted(target, stamp))
           {
             return request;
           }
           phase_ = phase::arrive_b;
           continue;
         case phase::arrive_b:
-          if(not arrive(target, sys_.on_b))
+          if(not arrive(target, stamp, sys_.on_b))
           {
             return std::nullopt;
           }
@@ -218,10 +258,37 @@ public:
             continue;
           }
           drain(sys_.chosen.window, sys_.chosen.confirm, sys_.chosen.confirm);
-          if(not arrive(target, sys_.on_c))
+          one.rep.quiet = std::ranges::all_of(
+                              one.inbound, [](member_link const* link) { return link->quiet(); })
+                      and target.pending_events() == 0
+                      and not stamp();
+          if(not arrive(target, stamp, sys_.on_c))
           {
             return std::nullopt;
           }
+          if(not sys_.chosen.pause)
+          {
+            if(sys_.chosen.exchange)
+            {
+              drain(sys_.chosen.window, sys_.chosen.barrier, sys_.chosen.next);
+            }
+            one.rep.quiescent = false;
+            phase_            = phase::run;
+            continue;
+          }
+          phase_ = sys_.chosen.idle ? phase::idle_to : phase::begin;
+          if(phase_ == phase::begin)
+          {
+            return std::nullopt;
+          }
+          continue;
+        case phase::idle_to:
+          if(position(target) < sys_.chosen.target)
+          {
+            window_ = sys_.window;
+            return request_to(sys_.chosen.target, false, false);
+          }
+          settle_idle(target);
           phase_ = phase::begin;
           return std::nullopt;
       }
@@ -232,6 +299,10 @@ public:
   {
     auto& one = sys_.slots[index_];
     ++one.slices;
+    if(one.goal)
+    {
+      one.goal->executed += result.executed.value;
+    }
     if(target.resets() != one.resets)
     {
       fail(
@@ -252,9 +323,9 @@ public:
     if(stopped.reason == stop_reason::reset_request)
     {
       auto const kind = reflex::to_enum_value<reset_kind>(stopped.detail);
-      if(not one.runs_core or one.ref.on_reset == reset_request_policy::reset_and_continue)
+      if(not one.goal or one.ref.on_reset == reset_request_policy::reset_and_continue)
       {
-        if(not one.runs_core and not one.warned_reset)
+        if(not one.goal and not one.warned_reset)
         {
           one.warned_reset = true;
           target.log(
@@ -267,12 +338,22 @@ public:
         return;
       }
     }
-    one.resolved = true;
-    one.rep.found.push_back(
-        {.at      = position(target),
-         .member  = index_,
-         .kind    = entry_kind::stopped,
-         .stopped = stopped});
+    if((stopped.reason == stop_reason::address or stopped.reason == stop_reason::budget)
+       and held_last_
+       and stopped.time >= until_last_)
+    {
+      return;
+    }
+    if(not one.goal)
+    {
+      fail(
+          target, std::make_exception_ptr(emulation_error(
+                      std::format(
+                          "member {} stopped while halted: {}", one.ref.name,
+                          reflex::enum_value_name(stopped.reason)))));
+      return;
+    }
+    resolve(target, stopped);
   }
 
   void failed(machine& target, std::exception_ptr error) noexcept override
@@ -295,86 +376,236 @@ private:
         {.at = position(target), .member = index_, .kind = entry_kind::error, .error = error});
   }
 
+  void resolve(machine& target, popcorn::stop stopped)
+  {
+    auto& one    = sys_.slots[index_];
+    one.resolved = true;
+    one.rep.found.push_back(
+        {.at      = position(target),
+         .member  = index_,
+         .kind    = entry_kind::stopped,
+         .stopped = std::move(stopped)});
+  }
+
+  [[nodiscard]] static auto stop_here(machine& target, stop_reason reason, std::string detail)
+      -> popcorn::stop
+  {
+    return popcorn::stop{
+        .reason       = reason,
+        .where        = target.locate(target.regs().pc()),
+        .instructions = target.virtual_clock().now(),
+        .time         = target.virtual_clock().time(),
+        .detail       = std::move(detail),
+    };
+  }
+
+  [[nodiscard]] auto time_bound() const -> std::optional<std::pair<sys_time, bool>>
+  {
+    auto const& one = sys_.slots[index_];
+    if(not one.goal or one.goal->system)
+    {
+      return std::nullopt;
+    }
+    std::optional<std::pair<sys_time, bool>> bound;
+    if(one.goal->goal.until_time)
+    {
+      bound = std::pair{*one.goal->goal.until_time, false};
+    }
+    if(one.goal->goal.cap)
+    {
+      auto const capped = sys_time{one.goal->start.ps + one.goal->goal.cap->ps};
+      if(not bound or capped < bound->first)
+      {
+        bound = std::pair{capped, true};
+      }
+    }
+    return bound;
+  }
+
+  void resolve_time(machine& target)
+  {
+    auto const& one = sys_.slots[index_];
+    if(not one.running())
+    {
+      return;
+    }
+    auto const bound = time_bound();
+    if(bound and position(target) >= bound->first and one.held_to and *one.held_to >= bound->first)
+    {
+      resolve(target, stop_here(target, stop_reason::time, bound->second ? "goal cap" : ""));
+    }
+  }
+
+  void settle_idle(machine& target)
+  {
+    auto& one = sys_.slots[index_];
+    if(not one.running() or one.goal->goal.open)
+    {
+      return;
+    }
+    one.outcome.emplace(
+        one.goal->promise,
+        settled{
+            goal_reached{
+                         .stopped = stop_here(target, stop_reason::idle, {}), .at = position(target)}
+    });
+    one.goal.reset();
+    one.undecided = true;
+  }
+
   [[nodiscard]] auto position(machine const& target) const noexcept -> sys_time
   {
     return sys_.slots[index_].map.to_system(target.virtual_clock().time());
   }
 
-  void enter_windows(std::uint64_t window)
+  [[nodiscard]] auto stamp_of(earliest_stamp const& stamp) const -> std::optional<sys_time>
+  {
+    auto const local = stamp();
+    if(not local)
+    {
+      return std::nullopt;
+    }
+    return sys_.slots[index_].map.to_system(*local);
+  }
+
+  void enter_windows()
   {
     auto& one = sys_.slots[index_];
     for(auto* link : one.outbound)
     {
-      link->enter_window(window, one.map);
+      link->enter_window(window_, one.map);
     }
   }
 
-  auto request_to(sys_time bound, bool quiescent, std::uint64_t window) -> slice_request
+  auto request_to(sys_time bound, bool quiescent, bool hold) -> slice_request
   {
     auto& one = sys_.slots[index_];
-    enter_windows(window);
+    enter_windows();
     one.held_to = bound;
-    return slice_request{
+    held_last_  = hold;
+    until_last_ = one.map.to_local(bound);
+    slice_request request{
         .max_instructions      = sys_.bounds.max_instructions,
         .wall_budget           = sys_.bounds.wall_budget,
-        .until_time            = one.map.to_local(bound),
-        .hold_from_until       = true,
+        .until_time            = until_last_,
+        .hold_from_until       = hold,
         .internal_stop         = true,
         .stop_quiescent        = quiescent,
         .stop_when_events_only = true,
     };
+    if(one.running())
+    {
+      auto const& goal           = one.goal->goal;
+      request.until              = goal.until;
+      request.budget_left        = left(goal.budget, one.goal->executed);
+      request.exact_instructions = left(goal.exact, one.goal->executed);
+      request.leave_until        = one.goal->executed == 0;
+      if(goal.stop_when)
+      {
+        request.stop_when = std::function<bool()>{std::ref(one.goal->goal.stop_when)};
+      }
+    }
+    return request;
   }
 
-  auto running(machine const& target) -> std::optional<slice_request>
+  auto due_stamp(machine const& target, std::optional<sys_time> const& at)
+      -> std::optional<std::optional<slice_request>>
   {
-    auto& one = sys_.slots[index_];
-    if(not one.runs_core or one.resolved or one.failed or one.rep.quiescent)
+    if(not at or *at > position(target))
     {
       return std::nullopt;
     }
-    auto bound = sys_.pending;
-    if(sys_.until)
+    if(position(target) >= sys_.pending)
     {
-      bound = earlier_of(bound, *sys_.until);
+      return std::optional<slice_request>{};
     }
+    return std::optional{request_to(position(target), false, false)};
+  }
+
+  auto running(machine const& target, earliest_stamp const& stamp) -> std::optional<slice_request>
+  {
+    auto& one = sys_.slots[index_];
+    window_   = sys_.window;
+    if(not one.running() or one.rep.quiescent)
+    {
+      return std::nullopt;
+    }
+    auto const at = stamp_of(stamp);
+    if(auto due = due_stamp(target, at))
+    {
+      return *due;
+    }
+    auto bound = sys_.pending;
     if(not sys_.held.empty())
     {
       bound = earlier_of(bound, sys_.held.front().at);
     }
-    return toward(target, bound, false, sys_.window);
+    if(sys_.until)
+    {
+      bound = earlier_of(bound, *sys_.until);
+    }
+    auto const timed = time_bound();
+    if(timed)
+    {
+      bound = earlier_of(bound, timed->first);
+    }
+    auto const quiescent =
+        bound == sys_.pending and not timed and not sys_.until and not(at and *at <= bound);
+    if(at)
+    {
+      bound = earlier_of(bound, *at);
+    }
+    return toward(target, bound, quiescent);
   }
 
-  auto toward(machine const& target, sys_time bound, bool quiescent, std::uint64_t window)
-      -> std::optional<slice_request>
+  auto toward(machine const& target, sys_time bound, bool quiescent) -> std::optional<slice_request>
   {
     auto const& one = sys_.slots[index_];
     if(position(target) < bound or (one.held_to and *one.held_to < bound))
     {
-      return request_to(bound, quiescent and position(target) < bound, window);
+      return request_to(bound, quiescent and position(target) < bound, true);
     }
     return std::nullopt;
   }
 
-  auto halted(machine const& target) -> std::optional<slice_request>
+  auto halted(machine const& target, earliest_stamp const& stamp) -> std::optional<slice_request>
   {
     auto& one = sys_.slots[index_];
-    if(one.runs_core or one.failed or one.rep.quiescent)
+    window_   = sys_.chosen.window;
+    if(one.goal or one.failed or one.rep.quiescent)
     {
       return std::nullopt;
     }
-    return toward(target, sys_.chosen.target, not sys_.chosen.pause, sys_.chosen.window);
+    auto const at = stamp_of(stamp);
+    if(auto due = due_stamp(target, at))
+    {
+      return *due;
+    }
+    auto       bound     = sys_.chosen.target;
+    auto const quiescent = not sys_.chosen.pause and not(at and *at <= bound);
+    if(at)
+    {
+      bound = earlier_of(bound, *at);
+    }
+    return toward(target, bound, quiescent);
   }
 
-  auto arrive(machine const& target, system::impl::completion const& complete) -> bool
+  auto arrive(
+      machine const&                  target,
+      earliest_stamp const&           stamp,
+      system::impl::completion const& complete) -> bool
   {
-    auto& one        = sys_.slots[index_];
-    one.rep.position = position(target);
-    one.rep.done     = sys_.until and one.rep.position >= *sys_.until;
-    auto const next  = target.next_event();
-    one.rep.has_work = not one.runs_core
-                   and next
-                   and one.rep.position < sys_.pending
-                   and *next <= target.virtual_clock().to_icount(one.map.to_local(sys_.pending));
+    auto& one          = sys_.slots[index_];
+    one.rep.position   = position(target);
+    one.rep.done       = sys_.until and one.rep.position >= *sys_.until;
+    auto const next    = target.next_event();
+    auto const stamped = stamp_of(stamp);
+    auto const due_by  = [&](sys_time bound) {
+      return (next and *next <= target.virtual_clock().to_icount(one.map.to_local(bound)))
+          or (stamped and *stamped <= bound);
+    };
+    one.rep.has_work = not one.goal and one.rep.position < sys_.pending and due_by(sys_.pending);
+    one.rep.clean    = target.pending_events() == 0 and not stamped;
     if(sys_.before_arrival)
     {
       sys_.before_arrival(index_);
@@ -401,6 +632,9 @@ private:
   system::impl&     sys_;
   std::size_t       index_;
   phase             phase_{phase::begin};
+  bool              held_last_{};
+  std::uint64_t     window_{};
+  vtime             until_last_{};
   std::atomic<bool> aborted_{false};
 };
 
@@ -470,14 +704,22 @@ auto system::impl::in_flight() const noexcept -> bool
   return future.valid() and not future.done();
 }
 
+void system::impl::require_paused() const
+{
+  if(in_flight())
+  {
+    throw std::logic_error("the system is running");
+  }
+  if(finished)
+  {
+    throw std::logic_error("the system was finished");
+  }
+}
+
 auto system::impl::deliverable(entry const& head) const noexcept -> bool
 {
   return std::ranges::all_of(slots, [&head](slot const& one) {
-    return not one.runs_core
-        or one.resolved
-        or one.failed
-        or one.rep.quiescent
-        or one.rep.position >= head.at;
+    return not one.running() or one.rep.quiescent or one.rep.position >= head.at;
   });
 }
 
@@ -490,12 +732,20 @@ auto system::impl::best_entry() const -> std::optional<entry>
   }
   if(until)
   {
-    auto const running = [](slot const& one) {
-      return one.runs_core and not one.resolved and not one.failed;
-    };
+    auto const running = [](slot const& one) { return one.running(); };
     if(std::ranges::none_of(slots, running))
     {
-      entry const reached{.at = *until, .kind = entry_kind::system_time};
+      entry reached{
+          .at     = *until,
+          .member = std::numeric_limits<std::size_t>::max(),
+          .kind   = entry_kind::system_time};
+      for(auto const& one : slots)
+      {
+        if(reached.at < one.rep.position)
+        {
+          reached.at = one.rep.position;
+        }
+      }
       if(not best or earlier(reached, *best))
       {
         best = reached;
@@ -523,6 +773,34 @@ auto system::impl::best_entry() const -> std::optional<entry>
   return best;
 }
 
+auto system::impl::idle_entry() const -> std::optional<entry>
+{
+  if(until or not held.empty())
+  {
+    return std::nullopt;
+  }
+  auto const idle = std::ranges::all_of(slots, [](slot const& one) {
+    return not one.failed
+       and not one.resolved
+       and one.rep.clean
+       and (not one.goal or one.rep.quiescent);
+  });
+  if(not idle)
+  {
+    return std::nullopt;
+  }
+  entry last{.at = sys_time{std::numeric_limits<std::int64_t>::min()}, .kind = entry_kind::idle};
+  for(std::size_t index = 0; index < slots.size(); ++index)
+  {
+    if(last.at < slots[index].rep.position)
+    {
+      last.at     = slots[index].rep.position;
+      last.member = index;
+    }
+  }
+  return last;
+}
+
 void system::impl::merge_found() noexcept
 {
   for(auto& one : slots)
@@ -540,6 +818,25 @@ void system::impl::set_pause(entry const& head) noexcept
   chosen.pause  = true;
   chosen.head   = head;
   chosen.target = head.at;
+  chosen.idle   = head.kind == entry_kind::idle;
+}
+
+void system::impl::reconsider() noexcept
+{
+  auto const head = best_entry();
+  if(not head or (chosen.head and not chosen.idle and not earlier(*head, *chosen.head)))
+  {
+    return;
+  }
+  if(not chosen.pause)
+  {
+    --window;
+    pending = chosen.barrier;
+    --result.windows;
+  }
+  auto const target = chosen.target;
+  set_pause(*head);
+  chosen.target = target;
 }
 
 void system::impl::settle_confirm() noexcept
@@ -569,12 +866,16 @@ void system::impl::complete_a() noexcept
     chosen.pause  = true;
     chosen.target = pending;
   }
+  else if(auto const idle = idle_entry())
+  {
+    set_pause(*idle);
+  }
   else
   {
     chosen.target = pending;
   }
   chosen.need_b = std::ranges::any_of(slots, [this](slot const& one) {
-    return not one.runs_core and not one.failed and (chosen.pause or one.rep.has_work);
+    return not one.goal and not one.failed and (chosen.pause or one.rep.has_work);
   });
   if(not chosen.pause)
   {
@@ -588,27 +889,24 @@ void system::impl::complete_a() noexcept
 void system::impl::complete_b() noexcept
 {
   merge_found();
-  if(auto const head = best_entry(); head and (not chosen.head or earlier(*head, *chosen.head)))
-  {
-    if(not chosen.pause)
-    {
-      --window;
-      pending = chosen.barrier;
-      --result.windows;
-    }
-    auto const target = chosen.target;
-    set_pause(*head);
-    chosen.target = target;
-  }
+  reconsider();
   settle_confirm();
 }
 
 void system::impl::complete_c() noexcept
 {
   merge_found();
-  if(auto const head = best_entry(); head and (not chosen.head or earlier(*head, *chosen.head)))
+  reconsider();
+  if(chosen.idle and not std::ranges::all_of(slots, [](slot const& one) { return one.rep.quiet; }))
   {
-    chosen.head = *head;
+    chosen.pause    = false;
+    chosen.idle     = false;
+    chosen.exchange = true;
+    chosen.head.reset();
+    ++window;
+    pending = chosen.next;
+    ++result.windows;
+    return;
   }
   result.slices = 0;
   for(auto const& one : slots)
@@ -619,33 +917,67 @@ void system::impl::complete_c() noexcept
   {
     result.reason = pause_reason::requested;
     result.at     = chosen.target;
+    last_point    = result.at;
     return;
   }
-  auto const head = *chosen.head;
+  deliver(*chosen.head);
+}
+
+void system::impl::deliver(entry const& head) noexcept
+{
   if(auto const found = std::ranges::find_if(
          held,
-         [&head](entry const& one) { return one.at == head.at and one.member == head.member; });
-     found != held.end() and head.kind != entry_kind::system_time)
+         [&head](entry const& one) {
+           return one.at == head.at and one.member == head.member and one.kind == head.kind;
+         });
+     found != held.end())
   {
     held.erase(found);
   }
-  result.member = head.member;
-  result.at     = head.at;
+  if(head.member != std::numeric_limits<std::size_t>::max())
+  {
+    result.member = head.member;
+  }
+  result.at  = head.at;
+  last_point = head.at;
   switch(head.kind)
   {
     case entry_kind::stopped:
-      result.reason               = pause_reason::delivered;
-      result.stopped              = head.stopped;
-      slots[head.member].released = true;
+    {
+      result.reason  = pause_reason::delivered;
+      result.stopped = head.stopped;
+      auto& one      = slots[head.member];
+      if(one.goal and not one.goal->system)
+      {
+        one.outcome.emplace(
+            one.goal->promise, settled{
+                                   goal_reached{.stopped = head.stopped, .at = head.at}
+        });
+      }
+      one.goal.reset();
+      one.resolved  = false;
+      one.undecided = true;
       break;
+    }
     case entry_kind::error:
       result.reason = pause_reason::error;
       result.error  = head.error;
       stopped       = true;
-      stopped_by    = head.error;
+      for(auto& one : slots)
+      {
+        if(one.goal and not one.goal->system)
+        {
+          one.outcome.emplace(one.goal->promise, std::unexpected{head.error});
+        }
+        one.goal.reset();
+      }
+      held.clear();
       break;
     case entry_kind::system_time:
       result.reason = pause_reason::system_time;
+      break;
+    case entry_kind::idle:
+      result.reason = pause_reason::idle;
       break;
   }
 }
@@ -654,10 +986,44 @@ void system::impl::finish_pause() noexcept
 {
   auto const completing = promise;
   auto       ended      = result;
-  if(closed.load() or host_closed.load())
+  auto const was_closed = closed.load() or host_closed.load();
+  if(was_closed)
   {
     ended.reason = pause_reason::closed;
     ended.member.reset();
+  }
+  std::vector<std::pair<detail::host_promise<goal_reached>, settled>> outcomes;
+  for(auto& one : slots)
+  {
+    if(one.outcome)
+    {
+      outcomes.push_back(*std::exchange(one.outcome, std::nullopt));
+    }
+    if(was_closed and one.goal)
+    {
+      if(not one.goal->system)
+      {
+        outcomes.emplace_back(
+            one.goal->promise,
+            std::unexpected{std::make_exception_ptr(machine_closed("the system was closed"))});
+      }
+      one.goal.reset();
+    }
+    if(one.goal and one.goal->system)
+    {
+      one.goal.reset();
+    }
+  }
+  for(auto& [settling, outcome] : outcomes)
+  {
+    if(outcome)
+    {
+      std::ignore = settling.set(*outcome);
+    }
+    else
+    {
+      std::ignore = settling.fail(outcome.error());
+    }
   }
   std::ignore = completing.set(std::move(ended));
 }
@@ -708,6 +1074,11 @@ system::~system()
   }
   for(auto& one : impl_->slots)
   {
+    if(one.goal and not one.goal->system)
+    {
+      std::ignore =
+          one.goal->promise.fail(std::make_exception_ptr(machine_closed("the system was closed")));
+    }
     try
     {
       auto held_host = one.ref.on->lock();
@@ -734,10 +1105,7 @@ auto system::try_lock() -> held_system
 
 void system::start(held_system const&, std::span<sys_time const> offsets)
 {
-  if(impl_->in_flight())
-  {
-    throw std::logic_error("the system is running");
-  }
+  impl_->require_paused();
   for(auto&& [one, offset] : std::views::zip(impl_->slots, offsets))
   {
     auto const held_host = one.ref.on->lock();
@@ -746,6 +1114,102 @@ void system::start(held_system const&, std::span<sys_time const> offsets)
     one.held_to          = offset;
   }
   impl_->started = true;
+}
+
+auto system::post_goal(held_system const&, std::size_t member, member_goal goal)
+    -> host_future<goal_reached>
+{
+  auto& self = *impl_;
+  self.require_paused();
+  if(self.stopped)
+  {
+    throw std::logic_error("the system stopped on an error");
+  }
+  auto& one = self.slots[member];
+  if(one.goal)
+  {
+    throw std::logic_error(std::format("member {} has a goal pending", one.ref.name));
+  }
+  auto const held_host = one.ref.on->lock();
+  auto const at        = one.map.to_system(one.ref.on->member(held_host, 0).virtual_clock().time());
+  one.goal.emplace(goal_run{.goal = std::move(goal), .start = at});
+  one.undecided = false;
+  one.released  = false;
+  return one.goal->promise.future();
+}
+
+void system::withdraw(held_system const&, std::size_t member)
+{
+  auto& self = *impl_;
+  self.require_paused();
+  auto& one = self.slots[member];
+  if(not one.goal or one.goal->system)
+  {
+    throw std::logic_error(std::format("member {} has no goal pending", one.ref.name));
+  }
+  std::erase_if(self.held, [member](entry const& found) {
+    return found.member == member and found.kind == entry_kind::stopped;
+  });
+  auto const withdrawn = std::move(one.goal->promise);
+  one.goal.reset();
+  one.resolved = false;
+  std::ignore =
+      withdrawn.fail(std::make_exception_ptr(operation_cancelled("the goal was withdrawn")));
+}
+
+void system::release(held_system const&, std::size_t member)
+{
+  auto& self = *impl_;
+  self.require_paused();
+  auto& one = self.slots[member];
+  if(not one.undecided)
+  {
+    throw std::logic_error(std::format("member {} is not undecided", one.ref.name));
+  }
+  one.undecided = false;
+  one.released  = true;
+}
+
+auto system::undecided(held_system const&) const -> std::vector<std::size_t>
+{
+  std::vector<std::size_t> out;
+  for(std::size_t index = 0; index < impl_->slots.size(); ++index)
+  {
+    if(impl_->slots[index].undecided)
+    {
+      out.push_back(index);
+    }
+  }
+  return out;
+}
+
+void system::finish(held_system const&)
+{
+  auto& self = *impl_;
+  self.require_paused();
+  auto const at = self.last_point.value_or(self.pending);
+  for(auto& one : self.slots)
+  {
+    if(one.goal and not one.goal->system)
+    {
+      auto const cancelled = std::move(one.goal->promise);
+      one.goal.reset();
+      std::ignore =
+          cancelled.fail(std::make_exception_ptr(operation_cancelled("the system was finished")));
+    }
+    one.goal.reset();
+    auto const held_host = one.ref.on->lock();
+    auto&      target    = one.ref.on->member(held_host, 0);
+    if(target.core_held())
+    {
+      target.hold_core(false);
+    }
+  }
+  for(auto const& link : self.links)
+  {
+    link->finish(at);
+  }
+  self.finished = true;
 }
 
 auto system::resume(held_system const&, std::optional<sys_time> system_until) -> host_future<pause>
@@ -759,13 +1223,18 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
   {
     throw std::logic_error("the system was not started");
   }
-  if(self.in_flight())
-  {
-    throw std::logic_error("a resume is in flight");
-  }
+  self.require_paused();
   if(self.stopped)
   {
     throw std::logic_error("the system stopped on an error");
+  }
+  for(auto const& one : self.slots)
+  {
+    if(one.undecided)
+    {
+      throw std::logic_error(
+          std::format("member {} is undecided: re-issue or release it first", one.ref.name));
+    }
   }
   for(auto& one : self.slots)
   {
@@ -784,13 +1253,18 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
   self.outstanding.store(self.slots.size());
   for(auto& one : self.slots)
   {
+    if(system_until and not one.goal and not one.released)
+    {
+      auto const held_host = one.ref.on->lock();
+      auto const at = one.map.to_system(one.ref.on->member(held_host, 0).virtual_clock().time());
+      one.goal.emplace(goal_run{.goal = {}, .start = at, .system = true});
+    }
     auto const index  = static_cast<std::size_t>(&one - self.slots.data());
     auto const queued = [&self, index](entry_kind kind) {
       return std::ranges::any_of(self.held, [index, kind](entry const& found) {
         return found.member == index and found.kind == kind;
       });
     };
-    one.runs_core     = system_until.has_value() and not one.released;
     one.resolved      = queued(entry_kind::stopped);
     one.failed        = queued(entry_kind::error);
     one.slices        = 0;
@@ -848,10 +1322,7 @@ void system::request_pause() noexcept
 void system::reset(held_system const&, std::size_t member, reset_kind kind)
 {
   auto& self = *impl_;
-  if(self.in_flight())
-  {
-    throw std::logic_error("the system is running");
-  }
+  self.require_paused();
   auto&      one       = self.slots[member];
   auto const held_host = one.ref.on->lock();
   self.reset_member(one, one.ref.on->member(held_host, 0), kind);

@@ -38,6 +38,36 @@ struct member_ref
   reset_request_policy on_reset{reset_request_policy::reset_and_continue};
 };
 
+/** @brief What one member runs to, the bounds of a lone machine's run. */
+struct member_goal
+{
+  /** @brief Stop with stop_reason::address before executing this address. */
+  std::optional<address> until{};
+  /** @brief Instructions the goal may execute, halted time excluded. */
+  std::optional<icount> budget{};
+  /** @brief Stop with stop_reason::time at this system time. */
+  std::optional<sys_time> until_time{};
+  /** @brief Stop with stop_reason::budget after exactly this many instructions. */
+  std::optional<icount> exact{};
+  /** @brief Stop predicate, asked on the member's host thread after each dispatched event,
+   * never at a barrier or a slice end. */
+  std::function<bool()> stop_when{};
+  /** @brief A goal a system IDLE does not resolve. */
+  bool open{};
+  /** @brief Virtual time the goal may run from its start: a stop_reason::time stop with detail
+   * `goal cap` when it is reached first. */
+  std::optional<sys_time> cap{};
+};
+
+/** @brief A goal reached: the member's stop and its system time. */
+struct goal_reached
+{
+  /** @brief The stop that resolved the goal. */
+  stop stopped{};
+  /** @brief System time of the stop. */
+  sys_time at{};
+};
+
 /** @brief Why a linked system paused. */
 enum class[[= reflex::derive{reflex::Format}]] pause_reason : std::uint8_t
 {
@@ -152,13 +182,17 @@ public:
    * @brief Runs the system until the next pause, every member on its own host. Without
    *        @p system_until the members are halted. With it every member runs its core to that
    *        system time, and the pause comes when the last one reached it, at the latest stop
-   *        point, unless an earlier entry comes first: a member stop or an error. A member whose
-   *        stop was delivered stays halted from that stop on. Every pause drains the wires up to
-   *        its point before it is decided, so an error a wire dates before the delivered entry
-   *        comes first.
+   *        point, unless an earlier entry comes first: a goal's stop or an error. Members with a
+   *        goal run it, the others are halted, or with @p system_until run their core as a system
+   *        TIME goal unless released. When every member sleeps with nothing due, the system
+   *        pauses as pause_reason::idle at the latest quiescent point and every goal that is not
+   *        open resolves there with stop_reason::idle. Every pause drains the wires up to its
+   *        point before it is decided, so an error a wire dates before the delivered entry
+   *        comes first. A member stop delivered without a member goal leaves it undecided as a
+   *        goal's stop does.
    * @return Completes once every member parked, from the last host thread to park.
-   * @throws std::logic_error before start(), while a resume is in flight, or after an error
-   *         pause stopped the system.
+   * @throws std::logic_error before start(), while a resume is in flight, with an undecided
+   *         member, after finish(), or after an error pause stopped the system.
    * @throws emulation_error when a member was reset behind the system's back since the last
    *         pause.
    * @throws machine_closed after close(), or once a member's host refused a goal, which ends
@@ -166,6 +200,50 @@ public:
    */
   auto resume(held_system const& held, std::optional<sys_time> system_until = {})
       -> host_future<pause> pre(held.holds(*this));
+
+  /**
+   * @brief Gives member @p member a goal while paused. It starts at the member's position: a
+   *        member undecided at a delivered point is re-issued there, a halted member starts where
+   *        the last decision left it. A goal posted at the last delivered point runs first on the
+   *        next resume, up to the next known entry, so the next delivery is the smallest point
+   *        over everything known whatever the quantum.
+   * @return Completes after the pause that delivers the goal's stop, once every member parked.
+   *         Fails with the error of an error pause, operation_cancelled on withdraw() or
+   *         finish(), machine_closed on close().
+   * @throws std::logic_error while a resume is in flight, after finish(), or when the member
+   *         has a goal pending.
+   */
+  auto post_goal(held_system const& held, std::size_t member, member_goal goal)
+      -> host_future<goal_reached> pre(held.holds(*this)) pre(member < members());
+
+  /**
+   * @brief Withdraws the pending goal of member @p member while paused: its future fails with
+   *        operation_cancelled and the member is halted from where it stands, a position that
+   *        depends on the quantum when it ran past the last delivered point.
+   * @throws std::logic_error while a resume is in flight or when the member has no pending goal.
+   */
+  void withdraw(held_system const& held, std::size_t member) pre(held.holds(*this))
+      pre(member < members());
+
+  /**
+   * @brief Releases member @p member, undecided after its goal was delivered: it is halted from
+   *        its stop on, and runs no system TIME goal until it gets a goal again.
+   * @throws std::logic_error while a resume is in flight or when the member is not undecided.
+   */
+  void release(held_system const& held, std::size_t member) pre(held.holds(*this))
+      pre(member < members());
+
+  /** @brief Members whose goal was delivered and which are neither re-issued nor released. */
+  [[nodiscard]] auto undecided(held_system const& held) const
+      -> std::vector<std::size_t> pre(held.holds(*this));
+
+  /**
+   * @brief Final stop at the last pause point S: every pending goal fails with
+   *        operation_cancelled, every member's core hold is cleared with no time elapsed, and
+   *        every wire settles its tap up to S. No resume after it.
+   * @throws std::logic_error while a resume is in flight.
+   */
+  void finish(held_system const& held) pre(held.holds(*this));
 
   /** @brief Asks for a pause at the next barrier. Any thread, takes no lock. A request no
    * resume consumed before it paused is dropped by the next resume(). */

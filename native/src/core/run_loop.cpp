@@ -959,7 +959,8 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
       .stopped      = std::move(end.stopped),
       .executed     = executed,
       .asked        = end.asked,
-      .thread_ready = thread_ready};
+      .thread_ready = thread_ready,
+      .dispatched   = dispatched};
 }
 
 auto machine::run_state::run(slice_request const& request) -> slice_result
@@ -977,6 +978,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   jumped         = {};
   wall_countdown = wall_check_blocks;
   wall_expired   = false;
+  dispatched     = false;
   wall_deadline  = std::chrono::steady_clock::now() + request.wall_budget;
   until_thread   = request.until_thread;
   set_exits(exit_list(request));
@@ -991,6 +993,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, std::move(*end));
     }
+    dispatched = true;
     if(auto end = handle_requests())
     {
       return finish(request, std::move(*end));

@@ -304,6 +304,8 @@ struct world
         collect();
         return stopped;
       }
+      auto const held = sys->lock();
+      sys->release(held, *stopped.member);
     }
   }
 
@@ -713,29 +715,43 @@ TEST_CASE("a pause's drain leaves an injection at the pending barrier accepted")
   }
 }
 
-TEST_CASE("halted members follow system time with their peripherals and pause on request")
+TEST_CASE("halted members follow system time until nothing is due, then pause as IDLE")
 {
-  world w;
-  w.add("link_tx");
-  w.add("link_rx");
-  w.link(0, 1, latency_20);
-  w.host(variants()[0]);
-  REQUIRE(w.resume(200 * us_ps).reason == core::pause_reason::system_time);
-  auto const                     frames = w.nodes[0]->own->frames.size();
-  core::host_future<core::pause> pending;
+  std::optional<std::pair<std::string, core::pause>> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
   {
+    CAPTURE(how.name);
+    world w;
+    w.add("link_tx");
+    w.add("link_rx");
+    w.link(0, 1, latency_20);
+    w.host(how);
+    REQUIRE(w.resume(500 * us_ps).reason == core::pause_reason::system_time);
+    auto const frames = w.nodes[0]->own->frames.size();
+    REQUIRE(frames > 0);
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    auto const stopped = pending.get();
+    CHECK(stopped.reason == core::pause_reason::idle);
     auto const held = w.sys->lock();
-    pending         = w.sys->resume(held);
+    CHECK(w.sys->time_of(held, 0) == stopped.at);
+    CHECK(w.sys->time_of(held, 1) == stopped.at);
+    CHECK(w.nodes[0]->own->frames.size() > frames);
+    CHECK(w.nodes[0]->own->frames.size() <= frames + 2);
+    if(reference)
+    {
+      CHECK(w.dump() == reference->first);
+      CHECK(stopped.at == reference->second.at);
+      CHECK(stopped.member == reference->second.member);
+    }
+    else
+    {
+      reference = std::pair{w.dump(), stopped};
+    }
   }
-  std::this_thread::sleep_for(std::chrono::milliseconds{20});
-  w.sys->request_pause();
-  auto const stopped = pending.get();
-  CHECK(stopped.reason == core::pause_reason::requested);
-  auto const held = w.sys->lock();
-  CHECK(w.sys->time_of(held, 0) == stopped.at);
-  CHECK(w.sys->time_of(held, 1) == stopped.at);
-  CHECK(w.nodes[0]->own->frames.size() >= frames);
-  CHECK(w.nodes[0]->own->frames.size() <= frames + 1);
 }
 
 namespace
@@ -826,5 +842,150 @@ TEST_CASE("frames a halted sender's FIFO still shifts arrive at their end plus L
       CAPTURE(how.name);
       CHECK(system_dump("link_tx_fifo_stop", "link_rx", latency, how).first == expected);
     }
+  }
+}
+
+TEST_CASE(
+    "a stamped write on a halted sender transmits at its time, the frame arrives at end plus L")
+{
+  constexpr std::int64_t     stamp_at = 700 * us_ps;
+  std::optional<std::string> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.add("link_rx");
+    w.add("link_rx");
+    w.link(0, 1, latency_20);
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    core::host_future<core::goal_reached> step;
+    {
+      auto const held = w.sys->lock();
+      step            = w.sys->post_goal(held, 0, {.until_time = core::sys_time{610 * us_ps}});
+    }
+    auto const stepped = w.resume(650 * us_ps);
+    REQUIRE(stepped.reason == core::pause_reason::delivered);
+    std::int64_t local = 0;
+    {
+      auto const held = w.sys->lock();
+      w.sys->release(held, 0);
+      local = stamp_at
+            - w.sys->time_of(held, 0).ps
+            + static_cast<std::int64_t>(core::access(
+                *w.members[0].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+    }
+    core::host_future<vtime> written;
+    {
+      auto const held_host = w.members[0].on->lock();
+      written              = w.members[0].on->post(
+          held_host, 0,
+          [](core::machine& m) {
+            auto&      usart = m.peripheral("USART1");
+            auto const found = std::ranges::find(
+                usart.description().registers, std::string_view{"TDR"},
+                &popcorn::register_desc::name);
+            REQUIRE(found != usart.description().registers.end());
+            REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+          },
+          vtime{static_cast<std::uint64_t>(local)});
+    }
+    REQUIRE(w.run_to(900 * us_ps).reason == core::pause_reason::system_time);
+    CHECK(written.get().ps == static_cast<std::uint64_t>(local));
+    auto const got = entries(w.nodes[1]->log());
+    CHECK(
+        std::ranges::count_if(
+            got, [](entry const& one) { return one.kind == link_byte and one.data == 0x5a; })
+        == 1);
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a halted receiver's USART overruns while its core is held, the same in every variant")
+{
+  std::optional<std::string> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_tx");
+    w.add("link_rx");
+    w.link(0, 1, latency_20);
+    w.host(how);
+    core::host_future<core::goal_reached> first;
+    {
+      auto const held = w.sys->lock();
+      first           = w.sys->post_goal(held, 1, {.until_time = core::sys_time{700 * us_ps}});
+    }
+    REQUIRE(w.resume(script_end).reason == core::pause_reason::delivered);
+    auto const before = entries(w.nodes[1]->log()).size();
+    {
+      auto const held = w.sys->lock();
+      w.sys->release(held, 1);
+    }
+    REQUIRE(w.resume(1200 * us_ps).reason == core::pause_reason::system_time);
+    CHECK(entries(w.nodes[1]->log()).size() == before);
+    core::host_future<core::goal_reached> again;
+    {
+      auto const held = w.sys->lock();
+      again           = w.sys->post_goal(held, 1, {.until_time = core::sys_time{1300 * us_ps}});
+    }
+    REQUIRE(w.run_to(script_end).reason == core::pause_reason::system_time);
+    auto const got = entries(w.nodes[1]->log());
+    CHECK(std::ranges::count(got, 3u, &entry::kind) >= 1);
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("an injection queued while every member sleeps is received, then the system pauses IDLE")
+{
+  std::optional<std::string> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.add("link_rx");
+    w.add("link_rx");
+    w.link(0, 1, latency_20);
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    core::host_future<core::goal_reached> listening;
+    {
+      auto const held = w.sys->lock();
+      listening       = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}});
+      auto const at   = core::sys_time{w.sys->pending_barrier(held).ps + 20 * us_ps};
+      std::vector<std::uint16_t> const data{0x7e};
+      REQUIRE(w.wires[0]->inject(data, at, std::nullopt).has_value());
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    auto const stopped = pending.get();
+    CHECK(stopped.reason == core::pause_reason::idle);
+    CHECK(listening.get().stopped.reason == stop_reason::idle);
+    auto const got = entries(w.nodes[1]->log());
+    CHECK(
+        std::ranges::count_if(
+            got, [](entry const& one) { return one.kind == link_byte and one.data == 0x7e; })
+        == 1);
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
   }
 }

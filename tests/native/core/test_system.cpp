@@ -132,8 +132,15 @@ public:
     return std::nullopt;
   }
 
-  void finish(core::sys_time) override
-  {}
+  auto quiet() const -> bool override
+  {
+    return not busy;
+  }
+
+  void finish(core::sys_time at) override
+  {
+    finished.push_back(at.ps);
+  }
 
   void save(std::vector<std::byte>&) const override
   {}
@@ -147,6 +154,8 @@ public:
   std::vector<std::int64_t>         receiver_resets;
   std::optional<std::int64_t>       fault_at{};
   std::function<void(std::int64_t)> on_drain{};
+  bool                              busy{};
+  std::vector<std::int64_t>         finished{};
   bool                              reported{};
 
 private:
@@ -284,6 +293,18 @@ struct rig
       pending = sys->resume(held, until ? std::optional{core::sys_time{*until}} : std::nullopt);
     }
     return pending.get();
+  }
+
+  auto goal(std::size_t member, core::member_goal wanted) -> core::host_future<core::goal_reached>
+  {
+    auto const held = sys->lock();
+    return sys->post_goal(held, member, std::move(wanted));
+  }
+
+  void release(std::size_t member)
+  {
+    auto const held = sys->lock();
+    sys->release(held, member);
   }
 
   [[nodiscard]] auto now_of(std::size_t member) const -> std::int64_t
@@ -540,6 +561,7 @@ TEST_CASE("halted members advance with their events and pause at the barrier on 
 {
   rig r{.members = sleeper_and_runner()};
   r.build(variants()[0]);
+  REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
   auto const                     before = r.dump();
   core::host_future<core::pause> pending;
   {
@@ -715,6 +737,626 @@ TEST_CASE("a TIME run whose T lies in a block past several barriers dispatches u
   }
 }
 
+namespace
+{
+auto alu_counting(std::uint32_t loops) -> core::member_ref
+{
+  return member<popcorn::testing::test_arch>(
+      "alu", "alu_entry", [loops](popcorn::testing::machine_fixture<>& f) { f.set("r0", loops); });
+}
+
+struct delivery
+{
+  int          reason{};
+  std::size_t  member{};
+  std::int64_t at{};
+
+  friend auto operator==(delivery const&, delivery const&) -> bool = default;
+};
+
+auto delivered(core::pause const& one) -> delivery
+{
+  return {
+      .reason = static_cast<int>(one.reason), .member = one.member.value_or(99), .at = one.at.ps};
+}
+}
+
+TEST_CASE("goals to two addresses deliver each at its point, the released one halted after")
+{
+  std::optional<std::pair<std::vector<std::uint64_t>, std::vector<delivery>>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{
+        .members = {alu_counting(2000), alu_counting(6000)}
+    };
+    r.build(how);
+    auto const            done = sym("alu", "alu_done");
+    auto                  a    = r.goal(0, {.until = done});
+    auto                  b    = r.goal(1, {.until = done});
+    std::vector<delivery> order;
+    auto const            first = r.run({});
+    order.push_back(delivered(first));
+    REQUIRE(first.reason == core::pause_reason::delivered);
+    CHECK(first.member == 0);
+    REQUIRE(a.done());
+    CHECK(a.get().stopped.reason == stop_reason::address);
+    CHECK(a.get().at == first.at);
+    CHECK_FALSE(b.done());
+    {
+      auto const held = r.sys->lock();
+      CHECK(r.sys->undecided(held) == std::vector<std::size_t>{0});
+      CHECK_THROWS_AS(std::ignore = r.sys->resume(held), std::logic_error);
+    }
+    r.release(0);
+    auto const second = r.run({});
+    order.push_back(delivered(second));
+    REQUIRE(second.member == 1);
+    CHECK(b.get().stopped.reason == stop_reason::address);
+    CHECK(r.now_of(0) == second.at.ps);
+    r.release(1);
+    {
+      auto const held = r.sys->lock();
+      r.sys->finish(held);
+      CHECK_THROWS_AS(std::ignore = r.sys->resume(held), std::logic_error);
+    }
+    core::access(*r.members[0].on, 0, [](core::machine& m) { CHECK_FALSE(m.core_held()); });
+    std::pair seen{r.dump(), order};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("two goals resolved in one window deliver by time, then by member index")
+{
+  for(auto const& how : {variants()[0], variants()[1], variants()[4]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    auto       a     = r.goal(0, {.budget = icount{150}});
+    auto       b     = r.goal(1, {.budget = icount{100}});
+    auto const first = r.run({});
+    CHECK(first.member == 1);
+    r.release(1);
+    auto const second = r.run({});
+    CHECK(second.member == 0);
+    CHECK(first.at < second.at);
+
+    rig tie{
+        .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+    };
+    tie.build(how);
+    auto       c     = tie.goal(0, {.budget = icount{100}});
+    auto       d     = tie.goal(1, {.budget = icount{100}});
+    auto const lower = tie.run({});
+    CHECK(lower.member == 0);
+    tie.release(0);
+    auto const upper = tie.run({});
+    CHECK(upper.member == 1);
+    CHECK(upper.at == lower.at);
+  }
+}
+
+TEST_CASE("a goal re-issued at its delivered point resolves before a later entry already found")
+{
+  std::optional<std::vector<delivery>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{
+        .members = {
+                    member("alu", "alu_entry"), member("alu", "alu_entry"), member("alu", "alu_entry")}
+    };
+    r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps / (how.lowered == 0 ? 1 : 3)));
+    r.sys = std::make_unique<core::system>(
+        r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
+        core::default_wait_policy(3), how.bounds);
+    {
+      auto const                  held = r.sys->lock();
+      std::vector<core::sys_time> offsets(3);
+      r.sys->start(held, offsets);
+    }
+    auto                  a = r.goal(0, {.budget = icount{100}});
+    auto                  b = r.goal(1, {.budget = icount{150}});
+    auto                  c = r.goal(2, {.budget = icount{400}});
+    std::vector<delivery> order;
+    order.push_back(delivered(r.run({})));
+    auto const executed = core::access(
+        *r.members[0].on, 0, [](core::machine& m) { return m.virtual_clock().now().value; });
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    auto again = r.goal(0, {.budget = icount{20}});
+    order.push_back(delivered(r.run({})));
+    CHECK(
+        core::access(
+            *r.members[0].on, 0, [](core::machine& m) { return m.virtual_clock().now().value; })
+        >= executed + 20);
+    r.release(0);
+    order.push_back(delivered(r.run({})));
+    r.release(1);
+    order.push_back(delivered(r.run({})));
+    REQUIRE(order.size() == 4);
+    CHECK(order[0].member == 0);
+    CHECK(order[1].member == 0);
+    CHECK(order[2].member == 1);
+    CHECK(order[3].member == 2);
+    CHECK(order[0].at < order[1].at);
+    CHECK(order[1].at < order[2].at);
+    if(reference)
+    {
+      CHECK(order == *reference);
+    }
+    reference = order;
+  }
+}
+
+TEST_CASE("a goal posted to a halted member while paused starts at the delivered point")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    auto       a     = r.goal(0, {.budget = icount{777}});
+    auto const first = r.run({});
+    REQUIRE(first.member == 0);
+    CHECK(r.now_of(1) == first.at.ps);
+    auto const before = core::access(
+        *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().now().value; });
+    auto c = r.goal(1, {.budget = icount{10}});
+    r.release(0);
+    auto const second = r.run({});
+    REQUIRE(second.member == 1);
+    CHECK(c.get().stopped.reason == stop_reason::budget);
+    CHECK(
+        core::access(
+            *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().now().value; })
+            - before
+        < 20);
+  }
+}
+
+TEST_CASE("goal stops past a barrier dispatch the lane event before them at any quantum")
+{
+  struct shape
+  {
+    std::string_view  name;
+    core::member_goal goal;
+    stop_reason       reason;
+  };
+  std::vector<shape> const shapes{
+      {"budget",  {.budget = icount{300}},                    stop_reason::budget },
+      {"address", {.until = scratch_code + 2 * 400},          stop_reason::address},
+      {"time",    {.until_time = core::sys_time{60 * us_ps}}, stop_reason::time   },
+  };
+  constexpr std::int64_t arrival = 200 * 250'000;
+  for(auto const& [name, wanted, reason] : shapes)
+  {
+    std::optional<std::vector<std::uint64_t>> reference;
+    for(auto const latency : {20 * us_ps, 200 * us_ps})
+    {
+      for(auto const& how : {variants()[0], variants()[1]})
+      {
+        CAPTURE(name);
+        CAPTURE(latency);
+        CAPTURE(how.name);
+        long_block made;
+        rig        r{
+            .members = {member("alu", "alu_entry"), long_block_member(made)}
+        };
+        r.build(how, latency);
+        r.links[0]->on_drain = [&made, posted = false](std::int64_t barrier) mutable {
+          if(posted or barrier <= arrival - 20 * us_ps)
+          {
+            return;
+          }
+          posted      = true;
+          std::ignore = made.module->attached_events().schedule_at(
+              vtime{made.start.ps + static_cast<std::uint64_t>(arrival)}, logged_kind, 50, 1,
+              made.target->virtual_clock());
+        };
+        if(latency > 20 * us_ps)
+        {
+          std::ignore          = core::access(*r.members[1].on, 0, [&](core::machine&) {
+            return made.module->attached_events().schedule_at(
+                vtime{made.start.ps + static_cast<std::uint64_t>(arrival)}, logged_kind, 50, 1,
+                made.target->virtual_clock());
+          });
+          r.links[0]->on_drain = {};
+        }
+        auto       goal    = r.goal(1, wanted);
+        auto const stopped = r.run({});
+        REQUIRE(stopped.member == 1);
+        CHECK(goal.get().stopped.reason == reason);
+        std::vector<std::uint64_t> order;
+        core::access(*r.members[1].on, 0, [&](core::machine&) {
+          for(auto const& one : made.module->event_log)
+          {
+            order.push_back(one.payload);
+          }
+        });
+        order.push_back(static_cast<std::uint64_t>(stopped.at.ps));
+        if(reference)
+        {
+          CHECK(order == *reference);
+        }
+        reference = order;
+      }
+    }
+  }
+}
+
+TEST_CASE("a stamped write on a halted member lands exactly at its time during a peer's goal")
+{
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{
+        .members = {member("alu", "alu_entry"), member("idle", "idle_budget")}
+    };
+    r.build(how);
+    auto       goal  = r.goal(0, {.budget = icount{4000}});
+    auto const local = core::access(
+        *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; });
+    auto const               at = vtime{local + 333 * us_ps + 250'000};
+    core::host_future<vtime> landed;
+    {
+      auto const held_host = r.members[1].on->lock();
+      landed               = r.members[1].on->post(held_host, 0, [](core::machine&) {}, at);
+    }
+    REQUIRE(r.run({}).member == 0);
+    CHECK(landed.get() == at);
+  }
+}
+
+TEST_CASE("a stamped write on a sleeping goal member lands at its time, not at the barrier")
+{
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {member("alu", "alu_entry"), member("idle", "idle_forever")}
+    };
+    r.build(how);
+    auto       peer  = r.goal(0, {.budget = icount{4000}});
+    auto       sleep = r.goal(1, {.until = popcorn::address{0x0800'0001}});
+    auto const local = core::access(
+        *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; });
+    auto const               at = vtime{local + 333 * us_ps + 250'000};
+    core::host_future<vtime> landed;
+    {
+      auto const held_host = r.members[1].on->lock();
+      landed               = r.members[1].on->post(held_host, 0, [](core::machine&) {}, at);
+    }
+    REQUIRE(r.run({}).member == 0);
+    CHECK(landed.get() == at);
+  }
+}
+
+TEST_CASE("a stamp overshot by a block past the barrier sees every event up to that block's end")
+{
+  std::optional<std::vector<std::uint64_t>> reference;
+  for(auto const stamp_at : {std::int64_t{19 * us_ps}, std::int64_t{30 * us_ps}})
+  {
+    for(auto const latency : {20 * us_ps, 400 * us_ps})
+    {
+      for(auto const& how : {variants()[0], variants()[1]})
+      {
+        CAPTURE(stamp_at);
+        CAPTURE(latency);
+        CAPTURE(how.name);
+        long_block made;
+        rig        r{
+            .members = {member("alu", "alu_entry"), long_block_member(made)}
+        };
+        r.build(how, latency);
+        std::vector<std::uint64_t> seen;
+        core::host_future<vtime>   landed;
+        {
+          auto const held_host = r.members[1].on->lock();
+          landed               = r.members[1].on->post(
+              held_host, 0,
+              [&](core::machine&) {
+                for(auto const& one : made.module->event_log)
+                {
+                  seen.push_back(one.payload);
+                }
+              },
+              vtime{made.start.ps + static_cast<std::uint64_t>(stamp_at)});
+        }
+        REQUIRE(r.run(150 * us_ps).reason == core::pause_reason::system_time);
+        CHECK(landed.get().ps >= made.start.ps + 100 * us_ps);
+        CHECK(seen == std::vector<std::uint64_t>{1, 3});
+        if(reference)
+        {
+          CHECK(seen == *reference);
+        }
+        reference = seen;
+      }
+    }
+  }
+}
+
+TEST_CASE("a pause right after a held slice leaves a stamp to a plain run, after the held events")
+{
+  long_block made;
+  rig        r{
+      .members = {member("alu", "alu_entry"), long_block_member(made)}
+  };
+  r.build(variants()[0]);
+  std::vector<std::uint64_t> seen;
+  core::host_future<vtime>   landed;
+  {
+    auto const held_host = r.members[1].on->lock();
+    landed               = r.members[1].on->post(
+        held_host, 0,
+        [&](core::machine& m) {
+          MESSAGE(
+              "body at ", m.virtual_clock().time().ps - made.start.ps, " pending ",
+              m.pending_events(), " log ", made.module->event_log.size());
+          for(auto const& one : made.module->event_log)
+          {
+            seen.push_back(one.payload);
+          }
+        },
+        vtime{made.start.ps + 30 * us_ps});
+  }
+  REQUIRE(r.run(20 * us_ps).reason == core::pause_reason::system_time);
+  CHECK_FALSE(landed.done());
+  {
+    auto const held = r.sys->lock();
+    r.sys->finish(held);
+  }
+  r.sys.reset();
+  core::host_future<core::goal_result> plain;
+  {
+    auto const held_host = r.members[1].on->lock();
+    plain                = r.members[1].on->run(held_host, 0, {.budget = icount{1}});
+  }
+  std::ignore = plain.get();
+  CHECK(landed.get().ps >= made.start.ps + 100 * us_ps);
+  CHECK(seen == std::vector<std::uint64_t>{1, 3});
+}
+
+namespace
+{
+auto sleeper_with_event(std::uint64_t after) -> core::member_ref
+{
+  return member<popcorn::testing::test_arch>(
+      "idle", "idle_forever", [after](popcorn::testing::machine_fixture<>& f) {
+        auto const now = f.target->virtual_clock().now().value;
+        std::ignore    = f.module->attached_events().schedule(icount{now + after}, logged_kind, 7);
+      });
+}
+}
+
+TEST_CASE("members asleep with nothing due pause as IDLE at the latest quiescent point")
+{
+  std::optional<std::vector<std::uint64_t>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{
+        .members = {sleeper_with_event(400), sleeper_with_event(9000)}
+    };
+    r.build(how);
+    auto       a       = r.goal(0, {.until = popcorn::address{0x0800'0001}});
+    auto       b       = r.goal(1, {.until = popcorn::address{0x0800'0001}});
+    auto const stopped = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::idle);
+    CHECK(stopped.member == 1);
+    CHECK(r.now_of(0) == stopped.at.ps);
+    CHECK(r.now_of(1) == stopped.at.ps);
+    CHECK(a.get().stopped.reason == stop_reason::idle);
+    CHECK(b.get().stopped.reason == stop_reason::idle);
+    CHECK(a.get().at == stopped.at);
+    auto const start = core::access(
+        *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; });
+    CHECK(start == static_cast<std::uint64_t>(stopped.at.ps));
+    {
+      auto const held = r.sys->lock();
+      CHECK(r.sys->undecided(held) == std::vector<std::size_t>{0, 1});
+    }
+    auto dump = r.dump();
+    dump.push_back(static_cast<std::uint64_t>(stopped.at.ps));
+    if(reference)
+    {
+      CHECK(dump == *reference);
+    }
+    reference = dump;
+  }
+}
+
+TEST_CASE("a member waiting on a timer past the barrier is not idle")
+{
+  rig r{
+      .members = {member("idle", "idle_entry"), sleeper_with_event(100)}
+  };
+  r.build(variants()[0]);
+  REQUIRE(r.run(100 * us_ps).reason == core::pause_reason::system_time);
+  auto                           timed = r.goal(0, {.until = popcorn::address{0x0800'0001}});
+  auto                           other = r.goal(1, {.until = popcorn::address{0x0800'0001}});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds{20});
+  r.sys->request_pause();
+  auto const stopped = pending.get();
+  CHECK(stopped.reason == core::pause_reason::requested);
+  CHECK(stopped.windows > 10);
+  CHECK_FALSE(timed.done());
+  CHECK_FALSE(other.done());
+  auto const held = r.sys->lock();
+  r.sys->withdraw(held, 0);
+  CHECK_THROWS_AS(std::ignore = timed.get(), core::operation_cancelled);
+  CHECK_THROWS_AS(r.sys->withdraw(held, 0), std::logic_error);
+  CHECK(r.sys->undecided(held).empty());
+}
+
+TEST_CASE("an IDLE pause resolves goals that are not open and keeps the open ones")
+{
+  rig r{
+      .members = {sleeper_with_event(400), sleeper_with_event(900)}
+  };
+  r.build(variants()[0]);
+  auto       closed_goal = r.goal(0, {.until = popcorn::address{0x0800'0001}});
+  auto       open        = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  auto const stopped     = r.run({});
+  REQUIRE(stopped.reason == core::pause_reason::idle);
+  CHECK(closed_goal.get().stopped.reason == stop_reason::idle);
+  CHECK_FALSE(open.done());
+  auto const held = r.sys->lock();
+  CHECK(r.sys->undecided(held) == std::vector<std::size_t>{0});
+}
+
+TEST_CASE("an error in a halted member before a resolution found later in its window comes first")
+{
+  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {
+                    member("alu", "alu_entry"),
+                    member<throwing_arch>(
+                "idle", "idle_forever", [](popcorn::testing::machine_fixture<throwing_arch>& f) {
+                  auto const now = f.target->virtual_clock().now().value;
+                  std::ignore    = f.module->attached_events().schedule(
+                      icount{now + 50}, throwing_arch::throw_event, 0);
+                })}
+    };
+    r.build(how);
+    auto       goal    = r.goal(0, {.budget = icount{70}});
+    auto const stopped = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::error);
+    CHECK(stopped.member == 1);
+    CHECK(stopped.at.ps == 50 * 250'000);
+    CHECK_THROWS_AS(std::ignore = goal.get(), test_failure);
+  }
+}
+
+TEST_CASE("a goal cap stops the goal at its start plus the cap as a TIME stop")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {member("alu", "alu_entry"), member("idle", "idle_forever")}
+    };
+    r.build(how);
+    auto capped =
+        r.goal(1, {.until = popcorn::address{0x0800'0001}, .cap = core::sys_time{77 * us_ps}});
+    auto const stopped = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    auto const reached = capped.get();
+    CHECK(reached.stopped.reason == stop_reason::time);
+    CHECK(reached.stopped.detail == "goal cap");
+    CHECK(reached.at.ps == 77 * us_ps);
+  }
+}
+
+TEST_CASE("a reset request under the stop policy resolves the goal, reset_and_continue reboots")
+{
+  for(auto const policy :
+      {popcorn::core::reset_request_policy::stop,
+       popcorn::core::reset_request_policy::reset_and_continue})
+  {
+    CAPTURE(policy);
+    auto resetting     = member("calls", "reset_now");
+    resetting.on_reset = policy;
+    rig r{
+        .members = {member("alu", "alu_entry"), resetting}
+    };
+    r.build(variants()[0]);
+    auto       goal    = r.goal(1, {.budget = icount{5000}});
+    auto const stopped = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    if(policy == popcorn::core::reset_request_policy::stop)
+    {
+      CHECK(goal.get().stopped.reason == stop_reason::reset_request);
+    }
+    else
+    {
+      CHECK(goal.get().stopped.reason == stop_reason::budget);
+      CHECK(r.links[0]->receiver_resets.size() == 1);
+    }
+  }
+}
+
+TEST_CASE("close fails every pending goal with machine_closed")
+{
+  rig r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  };
+  r.build(variants()[0]);
+  auto                           a = r.goal(0, {.budget = icount{1'000'000'000}});
+  auto                           b = r.goal(1, {.budget = icount{1'000'000'000}});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds{5});
+  r.sys->close();
+  CHECK(pending.get().reason == core::pause_reason::closed);
+  CHECK_THROWS_AS(std::ignore = a.get(), core::machine_closed);
+  CHECK_THROWS_AS(std::ignore = b.get(), core::machine_closed);
+}
+
+TEST_CASE("finish clears every hold and settles every link at the last pause point")
+{
+  rig r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  };
+  r.build(variants()[0]);
+  auto       a       = r.goal(0, {.budget = icount{300}});
+  auto const stopped = r.run({});
+  REQUIRE(stopped.member == 0);
+  r.release(0);
+  auto const held = r.sys->lock();
+  r.sys->finish(held);
+  CHECK(r.links[0]->finished == std::vector{stopped.at.ps});
+  for(auto const& one : r.members)
+  {
+    core::access(*one.on, 0, [](core::machine& m) { CHECK_FALSE(m.core_held()); });
+  }
+  CHECK_THROWS_AS(std::ignore = r.sys->post_goal(held, 0, {}), std::logic_error);
+}
+
+TEST_CASE("a link with something left to deliver keeps the system from IDLE")
+{
+  rig r{
+      .members = {sleeper_with_event(400), sleeper_with_event(900)}
+  };
+  r.build(variants()[0]);
+  r.links[0]->busy                 = true;
+  auto                           a = r.goal(0, {.until = popcorn::address{0x0800'0001}});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds{5});
+  r.sys->request_pause();
+  CHECK(pending.get().reason == core::pause_reason::requested);
+  CHECK_FALSE(a.done());
+  r.links[0]->busy = false;
+  CHECK(r.run({}).reason == core::pause_reason::idle);
+  CHECK(a.get().stopped.reason == stop_reason::idle);
+}
+
 TEST_CASE("two stops in one window and in two windows give the same pause sequence")
 {
   auto const counting = [](std::uint32_t loops) {
@@ -755,6 +1397,7 @@ TEST_CASE("two stops in one window and in two windows give the same pause sequen
       {
         break;
       }
+      r.release(*stopped.member);
       CHECK(stopped.stopped.reason == stop_reason::user);
     }
     REQUIRE(order.size() == 3);
@@ -816,4 +1459,100 @@ TEST_CASE("a halted member whose next event lies past the barrier runs no slice 
     ++pauses;
   }
   CHECK((slices - 4 * pauses) * 10 < windows);
+}
+
+TEST_CASE("a TIME run with every member released pauses at T or past it, naming no member")
+{
+  rig r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  };
+  r.build(variants()[0]);
+  for(std::size_t index = 0; index < 2; ++index)
+  {
+    auto goal = r.goal(index, {.budget = icount{100 + 50 * index}});
+    REQUIRE(r.run({}).member == index);
+    r.release(index);
+  }
+  auto const furthest = std::max(r.now_of(0), r.now_of(1));
+  auto const behind   = r.run(us_ps);
+  CHECK(behind.reason == core::pause_reason::system_time);
+  CHECK_FALSE(behind.member.has_value());
+  CHECK(behind.at.ps == furthest);
+  auto const ahead = r.run(500 * us_ps);
+  CHECK(ahead.reason == core::pause_reason::system_time);
+  CHECK_FALSE(ahead.member.has_value());
+  CHECK(ahead.at.ps == 500 * us_ps);
+  CHECK(r.now_of(0) == 500 * us_ps);
+  CHECK(r.now_of(1) == 500 * us_ps);
+}
+
+TEST_CASE("a tie found rounds apart is delivered by member index at any quantum")
+{
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {
+                    member("idle", "idle_forever"), member("idle", "idle_forever"),
+                    member("alu", "alu_entry")}
+    };
+    r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
+    if(how.lowered != 0)
+    {
+      r.links.push_back(std::make_shared<fake_link>(1, 0, 20 * us_ps / how.lowered));
+    }
+    std::vector<std::shared_ptr<core::member_link>> wires{r.links.begin(), r.links.end()};
+    r.sys = std::make_unique<core::system>(
+        r.members, std::move(wires), core::default_wait_policy(3), how.bounds);
+    {
+      auto const                        held = r.sys->lock();
+      std::vector<core::sys_time> const offsets(3);
+      r.sys->start(held, offsets);
+    }
+    constexpr std::int64_t tie    = 15 * us_ps;
+    auto                   first  = r.goal(0, {.until_time = core::sys_time{5 * us_ps}});
+    auto                   other  = r.goal(1, {.until_time = core::sys_time{tie}});
+    auto                   middle = r.goal(2, {.budget = icount{40}});
+    std::vector<std::pair<std::size_t, std::int64_t>> order;
+    auto const                                        f = r.run({});
+    order.emplace_back(*f.member, f.at.ps);
+    auto       again = r.goal(0, {.until_time = core::sys_time{tie}});
+    auto const h     = r.run({});
+    order.emplace_back(*h.member, h.at.ps);
+    r.release(2);
+    auto const t0 = r.run({});
+    order.emplace_back(*t0.member, t0.at.ps);
+    r.release(*t0.member);
+    auto const t1 = r.run({});
+    order.emplace_back(*t1.member, t1.at.ps);
+    CHECK(
+        order
+        == std::vector<std::pair<std::size_t, std::int64_t>>{
+            {0, 5 * us_ps},
+            {2, h.at.ps  },
+            {0, tie      },
+            {1, tie      }
+    });
+    CHECK(h.at.ps > 5 * us_ps);
+    CHECK(h.at.ps < tie);
+  }
+}
+
+TEST_CASE("finish fails a goal still pending with operation_cancelled")
+{
+  rig r{
+      .members = {member("alu", "alu_entry"), member("idle", "idle_forever")}
+  };
+  r.build(variants()[0]);
+  auto       a       = r.goal(0, {.budget = icount{300}});
+  auto       pending = r.goal(1, {.until = popcorn::address{0x0800'0001}});
+  auto const stopped = r.run({});
+  REQUIRE(stopped.member == 0);
+  r.release(0);
+  {
+    auto const held = r.sys->lock();
+    r.sys->finish(held);
+  }
+  REQUIRE(pending.done());
+  CHECK_THROWS_AS(std::ignore = pending.get(), core::operation_cancelled);
 }

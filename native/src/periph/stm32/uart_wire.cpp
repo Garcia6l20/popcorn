@@ -382,6 +382,12 @@ void uart_wire::deliver_injection(
        .injected = true});
 }
 
+auto uart_wire::quiet() const -> bool
+{
+  core::link_guard const held{inject_mutex_};
+  return state_.mail_even.empty() and state_.mail_odd.empty() and state_.injections.empty();
+}
+
 auto uart_wire::drain(
     std::uint64_t  window,
     core::sys_time barrier,
