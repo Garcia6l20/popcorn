@@ -223,7 +223,8 @@ void machine::run_state::code_changed(
     raise_stop();
     return;
   }
-  remove_translated(engine, buffer, first, last);
+  ++counters.removes_direct;
+  counters.remove_calls_direct += remove_translated(engine, buffer, first, last);
 }
 
 auto machine::run_state::payload_pending() const noexcept -> bool
@@ -242,7 +243,9 @@ void machine::run_state::drain_stale_code()
   while(not stale_code.empty())
   {
     auto const& range = stale_code.back();
-    remove_translated(engine, *range.buffer, range.first, range.last);
+    ++counters.removes_in_engine;
+    counters.remove_calls_in_engine +=
+        remove_translated(engine, *range.buffer, range.first, range.last);
     stale_code.pop_back();
   }
   clear_internal_stop();
@@ -257,6 +260,23 @@ auto machine::run_state::wall_expired_now() noexcept -> bool
   wall_countdown = wall_check_blocks;
   wall_expired   = std::chrono::steady_clock::now() >= wall_deadline;
   return wall_expired;
+}
+
+auto machine::run_state::boundary_cause(icount now) const noexcept -> engine_end
+{
+  if(failure)
+  {
+    return engine_end::other;
+  }
+  if(stop_pending())
+  {
+    return stale_code.empty() ? engine_end::request : engine_end::store;
+  }
+  if(now >= deadline or now >= owner.scheduler_.earliest())
+  {
+    return engine_end::event;
+  }
+  return wall_expired ? engine_end::wall : engine_end::interrupt;
 }
 
 auto machine::run_state::deliverable() noexcept -> bool
@@ -279,6 +299,7 @@ void machine::run_state::on_block(
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {
+    run.end_cause           = run.boundary_cause(now);
     run.boundary_stop       = true;
     run.coverage.open_insns = 0;
     uc_emu_stop(engine);
@@ -338,6 +359,10 @@ void machine::run_state::on_step(
   auto const now = run.owner.clock_driver_.exact_now();
   if(run.stop_pending() or now >= run.deadline or now >= run.owner.scheduler_.earliest())
   {
+    run.end_cause = run.failure            ? engine_end::other
+                  : not run.stop_pending() ? engine_end::event
+                  : run.stale_code.empty() ? engine_end::request
+                                           : engine_end::store;
     uc_emu_stop(engine);
     return;
   }
@@ -379,6 +404,10 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
   });
   if(stops)
   {
+    if(run.end_cause == engine_end::exit)
+    {
+      run.end_cause = engine_end::other;
+    }
     uc_emu_stop(engine);
   }
 }
@@ -413,6 +442,7 @@ auto machine::run_state::stop_on_pending() -> bool
     return false;
   }
   boundary_stop = true;
+  end_cause     = engine_end::interrupt;
   return true;
 }
 
@@ -460,6 +490,7 @@ void machine::run_state::on_guest_store(
 {
   auto& watched = *static_cast<guest_window*>(user);
   auto& run     = *watched.run;
+  ++run.counters.guest_stores_hooked;
   run.guarded([&] {
     auto const first =
         watched.window.offset + static_cast<std::size_t>(addr - watched.window.start);
@@ -474,7 +505,9 @@ void machine::run_state::clear_slice() noexcept
   {
     try
     {
-      remove_translated(engine, *range.buffer, range.first, range.last);
+      ++counters.removes_in_engine;
+      counters.remove_calls_in_engine +=
+          remove_translated(engine, *range.buffer, range.first, range.last);
     }
     catch(emulation_error const&)
     {}
@@ -786,7 +819,19 @@ auto machine::run_state::trap_after(uc_err err) -> std::optional<slice_end>
 auto machine::run_state::engine_run() -> uc_err
 {
   engine_scope const scope{in_engine};
-  return uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  ++counters.engine_runs;
+  end_cause      = engine_end::exit;
+  auto const err = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  if(err != UC_ERR_OK)
+  {
+    end_cause = engine_end::other;
+  }
+  else if(precise_exit)
+  {
+    end_cause = engine_end::precise;
+  }
+  ++counters.ends[std::to_underlying(end_cause)];
+  return err;
 }
 
 void machine::run_state::rethrow_failure()

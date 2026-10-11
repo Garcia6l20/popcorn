@@ -12,6 +12,7 @@
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -20,6 +21,7 @@
 #include <expected>
 #include <functional>
 #include <map>
+#include <meta>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -438,6 +440,61 @@ struct stale_range
   std::size_t first{};
   /** @brief Buffer offset past the last written byte. */
   std::size_t last{};
+};
+
+/** @brief Why an engine run ended, as the hook that stopped it saw it. */
+enum class engine_end : std::uint8_t
+{
+  /** @brief No hook stopped it: an exit address, or the engine returned on its own. */
+  exit,
+  /** @brief The block or step hook reached the deadline or the earliest event. */
+  event,
+  /** @brief A pending exception became deliverable, at a block or after a trap hook. */
+  interrupt,
+  /** @brief A write inside the engine into an executable buffer left stale code to remove: a
+   * guest store, or a model's write from an engine callback. */
+  store,
+  /** @brief The stop bits, set by a request, a model or another thread, without stale code. */
+  request,
+  /** @brief The wall budget ran out. */
+  wall,
+  /** @brief A model asked for a precise exit after the access instruction. */
+  precise,
+  /** @brief An engine error, a trap, a stopping intercept, until_thread, or a callback that
+   * threw, whichever hook then stopped the engine. */
+  other,
+};
+
+/** @brief Number of engine_end values. */
+inline constexpr std::size_t engine_end_count = std::meta::enumerators_of(^^engine_end).size();
+
+/** @brief Engine work counters of a machine, plain counts kept on the machine's own thread,
+ * never saved in snapshots. */
+struct run_counters
+{
+  /** @brief Exception entries, counted from the arch's entry trace record. */
+  std::uint64_t entries{};
+  /** @brief `uc_emu_start` calls. */
+  std::uint64_t engine_runs{};
+  /** @brief Guest stores the store hook of a multiply mapped executable buffer saw. */
+  std::uint64_t guest_stores_hooked{};
+  /** @brief Code ranges written inside the engine, removed later by a drain. */
+  std::uint64_t removes_in_engine{};
+  /** @brief Code ranges written between engine runs, removed at once. Restores are not
+   * counted. */
+  std::uint64_t removes_direct{};
+  /** @brief `uc_ctl_remove_cache` calls of removes_in_engine. */
+  std::uint64_t remove_calls_in_engine{};
+  /** @brief `uc_ctl_remove_cache` calls of removes_direct. */
+  std::uint64_t remove_calls_direct{};
+  /** @brief Engine runs by engine_end. */
+  std::array<std::uint64_t, engine_end_count> ends{};
+
+  /** @brief Engine runs that ended as @p why. */
+  [[nodiscard]] auto ended(engine_end why) const noexcept -> std::uint64_t
+  {
+    return ends[std::to_underlying(why)];
+  }
 };
 
 /** @brief Stop request recorded by machine_services::request_stop. */
@@ -1222,6 +1279,10 @@ struct machine::run_state
     }
   }
 
+  /** @brief Why the block hook stops the engine at clock @p now, in the order its condition
+   * tests, only once a stop is due. */
+  [[nodiscard]] auto boundary_cause(icount now) const noexcept -> engine_end;
+
   /** @brief Reads the wall clock and restarts the countdown, off the block hook's hot path. */
   [[gnu::noinline]] auto wall_expired_now() noexcept -> bool;
 
@@ -1297,6 +1358,20 @@ struct machine::run_state
   mutable std::mutex requested_mutex;
   /** @brief Whether requested holds a stop, read without the mutex on the engine's hot path. */
   std::atomic<bool> has_requested{};
+  /** @brief Why the engine run in progress was stopped, set by the hook that stopped it. */
+  engine_end end_cause = engine_end::exit;
+  /** @brief Engine work counters, last so they do not split the block hook's fields. */
+  run_counters counters{};
+};
+
+/** @brief Read access to a machine's run state for native tests and benches. */
+struct machine_internals
+{
+  /** @brief The engine work counters of @p target. */
+  [[nodiscard]] static auto counters(machine const& target) noexcept -> run_counters const&
+  {
+    return target.run_->counters;
+  }
 };
 
 /**

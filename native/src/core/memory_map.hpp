@@ -131,11 +131,12 @@ struct machine::mapped_region
 /**
  * @brief Removes translated code over buffer bytes [@p first, @p last) at every window mapping
  *        them.
+ * @return The engine removal calls made, one per window overlapping the range.
  * @throws emulation_error when the engine refuses the removal.
  */
-void remove_translated(
+auto remove_translated(
     uc_struct*         engine,
     host_buffer const& buffer,
     std::size_t        first,
-    std::size_t        last);
+    std::size_t        last) -> std::size_t;
 }

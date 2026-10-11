@@ -612,6 +612,7 @@ private:
   friend class memory_view;
   friend class register_view;
   friend class intercept_call;
+  friend struct machine_internals;
 
   std::uint64_t                                 id_;
   mcu_description                               description_;

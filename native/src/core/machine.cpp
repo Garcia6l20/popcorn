@@ -243,6 +243,10 @@ void machine::do_end_after_instruction()
 
 void machine::do_trace(trace_record const& record)
 {
+  if(record.kind == trace_kind::irq and record.flags == 1)
+  {
+    ++run_->counters.entries;
+  }
   run_->emit(record, arch_->pc(), true);
 }
 

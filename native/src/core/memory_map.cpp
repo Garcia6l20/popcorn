@@ -273,12 +273,13 @@ auto machine::mapped_region::host(address addr) const noexcept -> std::byte*
   return buffer->bytes.get() + offset + (addr - desc->start);
 }
 
-void remove_translated(
+auto remove_translated(
     uc_struct*         engine,
     host_buffer const& buffer,
     std::size_t        first,
-    std::size_t        last)
+    std::size_t        last) -> std::size_t
 {
+  std::size_t calls = 0;
   for(auto const& window : buffer.mappings)
   {
     auto const from = std::max(first, window.offset);
@@ -286,12 +287,14 @@ void remove_translated(
     if(from < to)
     {
       auto const guest = std::uint64_t{window.start} - window.offset;
+      ++calls;
       if(auto const err = uc_ctl_remove_cache(engine, guest + from, guest + to); err != UC_ERR_OK)
       {
         check(err, std::format("removing translated code at {:#010x}", guest + from));
       }
     }
   }
+  return calls;
 }
 
 void machine::mapped_region::host_wrote(run_state& run, address addr, std::size_t size) const
