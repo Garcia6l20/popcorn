@@ -613,6 +613,56 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   CHECK(r.sys->pending_barrier(held) == stopped.at);
 }
 
+TEST_CASE("work timing counts every barrier round while measured and stays zero otherwise")
+{
+  rig r{.members = sleeper_and_runner()};
+  r.build(variants()[0]);
+  auto const plain = r.run(200 * us_ps);
+  REQUIRE(plain.reason == core::pause_reason::system_time);
+  CHECK(plain.work.rounds == 0);
+  CHECK(plain.work.serial.count() == 0);
+  CHECK(plain.work.drains.count() == 0);
+  {
+    auto const held = r.sys->lock();
+    r.sys->measure_work(held, true);
+  }
+  auto const timed = r.run(1 * ms_ps);
+  REQUIRE(timed.reason == core::pause_reason::system_time);
+  CHECK(timed.phase_b == 0);
+  CHECK(timed.work.rounds == timed.windows + 2);
+  CHECK(timed.work.ideal.count() > 0);
+  CHECK(timed.work.serial > timed.work.ideal);
+  CHECK(timed.work.serial <= 2 * timed.work.ideal);
+  CHECK(timed.work.drains.count() > 0);
+  CHECK(timed.work.drains < timed.work.serial);
+
+  std::uint64_t phase_b = 0;
+  for(int attempt = 0; attempt < 1000 and phase_b == 0; ++attempt)
+  {
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    r.sys->request_pause();
+    auto const halted = pending.get();
+    REQUIRE(halted.reason == core::pause_reason::requested);
+    CHECK(halted.work.rounds == halted.windows + halted.phase_b + 2);
+    phase_b = halted.phase_b;
+  }
+  CHECK(phase_b > 0);
+  {
+    auto const held = r.sys->lock();
+    r.sys->measure_work(held, false);
+  }
+  auto const after = r.run(2 * ms_ps);
+  REQUIRE(after.reason == core::pause_reason::system_time);
+  CHECK(after.work.rounds == 0);
+  CHECK(after.work.ideal.count() == 0);
+  CHECK(after.work.drains.count() == 0);
+}
+
 TEST_CASE("close while members run and wait parks every member and ends the pause as closed")
 {
   for(int round = 0; round < 50; ++round)

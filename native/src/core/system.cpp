@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <expected>
 #include <format>
 #include <limits>
@@ -142,6 +143,8 @@ struct system::impl
     bool                                                                  warned_reset{};
     report                                                                rep{};
     std::uint64_t                                                         slices{};
+    std::chrono::nanoseconds                                              busy{};
+    std::chrono::nanoseconds                                              drained{};
     std::optional<std::pair<detail::host_promise<goal_reached>, settled>> outcome{};
 
     [[nodiscard]] auto running() const noexcept -> bool
@@ -174,6 +177,7 @@ struct system::impl
   [[nodiscard]] auto best_entry() const -> std::optional<entry>;
   [[nodiscard]] auto idle_entry() const -> std::optional<entry>;
   void               merge_found() noexcept;
+  void               account() noexcept;
   void               set_pause(entry const& head) noexcept;
   void               reconsider() noexcept;
   void               settle_confirm() noexcept;
@@ -214,6 +218,7 @@ struct system::impl
   std::atomic<std::size_t>                  outstanding{0};
   std::atomic<bool>                         host_closed{false};
   std::atomic<bool>                         woke{false};
+  bool                                      measuring{};
   completion                                on_a{this, &impl::complete_a};
   completion                                on_b{this, &impl::complete_b};
   completion                                on_c{this, &impl::complete_c};
@@ -228,6 +233,10 @@ public:
   void restart() noexcept
   {
     phase_ = phase::begin;
+    if(sys_.measuring)
+    {
+      left_ = std::chrono::steady_clock::now();
+    }
   }
 
   auto plan(machine& target, earliest_stamp stamp) -> std::optional<slice_request> override
@@ -319,6 +328,10 @@ public:
           continue;
         case phase::sleeping:
           sleeping_ = false;
+          if(sys_.measuring)
+          {
+            left_ = std::chrono::steady_clock::now();
+          }
           if(not sys_.woke.exchange(true))
           {
             sys_.wake_all(index_);
@@ -655,16 +668,37 @@ private:
     };
     one.rep.has_work = not one.goal and one.rep.position < sys_.pending and due_by(sys_.pending);
     one.rep.clean    = target.pending_events() == 0 and not stamped;
+    if(sys_.measuring)
+    {
+      one.busy = std::chrono::steady_clock::now() - left_;
+    }
     if(sys_.before_arrival)
     {
       sys_.before_arrival(index_);
     }
-    return sys_.barrier.arrive_and_wait(complete);
+    auto const passed = sys_.barrier.arrive_and_wait(complete);
+    if(sys_.measuring)
+    {
+      left_ = std::chrono::steady_clock::now();
+    }
+    return passed;
   }
 
   void drain(std::uint64_t window, sys_time barrier, sys_time next)
   {
     auto& one = sys_.slots[index_];
+    if(not sys_.measuring)
+    {
+      drain_inbound(one, window, barrier, next);
+      return;
+    }
+    auto const from = std::chrono::steady_clock::now();
+    drain_inbound(one, window, barrier, next);
+    one.drained += std::chrono::steady_clock::now() - from;
+  }
+
+  void drain_inbound(slot& one, std::uint64_t window, sys_time barrier, sys_time next)
+  {
     for(auto* link : one.inbound)
     {
       if(auto fault = link->drain(window, barrier, next, one.map))
@@ -686,6 +720,8 @@ private:
   std::uint64_t     window_{};
   vtime             until_last_{};
   std::atomic<bool> aborted_{false};
+
+  std::chrono::steady_clock::time_point left_{};
 };
 
 system::impl::impl(
@@ -937,8 +973,26 @@ void system::impl::settle_confirm() noexcept
   chosen.confirm = at;
 }
 
+void system::impl::account() noexcept
+{
+  if(not measuring)
+  {
+    return;
+  }
+  auto&                    work = result.work;
+  std::chrono::nanoseconds slowest{};
+  ++work.rounds;
+  for(auto const& one : slots)
+  {
+    work.serial += one.busy;
+    slowest = std::max(slowest, one.busy);
+  }
+  work.ideal += slowest;
+}
+
 void system::impl::complete_a() noexcept
 {
+  account();
   woke.store(false);
   merge_found();
   chosen = decision{.window = window, .barrier = pending, .next = {pending.ps + q.ps}};
@@ -973,6 +1027,8 @@ void system::impl::complete_a() noexcept
 
 void system::impl::complete_b() noexcept
 {
+  account();
+  ++result.phase_b;
   merge_found();
   reconsider();
   settle_confirm();
@@ -980,6 +1036,7 @@ void system::impl::complete_b() noexcept
 
 void system::impl::complete_c() noexcept
 {
+  account();
   merge_found();
   reconsider();
   if(chosen.idle and not std::ranges::all_of(slots, [](slot const& one) { return one.rep.quiet; }))
@@ -1004,10 +1061,12 @@ void system::impl::complete_c() noexcept
     chosen.head.reset();
     return;
   }
-  result.slices = 0;
+  result.slices      = 0;
+  result.work.drains = {};
   for(auto const& one : slots)
   {
     result.slices += one.slices;
+    result.work.drains += one.drained;
   }
   if(not chosen.head)
   {
@@ -1365,6 +1424,7 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
     one.resolved      = queued(entry_kind::stopped);
     one.failed        = queued(entry_kind::error);
     one.slices        = 0;
+    one.drained       = {};
     one.rep.quiescent = false;
     one.driver->restart();
   }
@@ -1522,6 +1582,13 @@ void system::wake() noexcept
 auto system::members() const noexcept -> std::size_t
 {
   return impl_->slots.size();
+}
+
+void system::measure_work(held_system const&, bool on)
+{
+  auto& self = *impl_;
+  self.require_paused();
+  self.measuring = on;
 }
 
 auto system::quantum() const noexcept -> sys_time

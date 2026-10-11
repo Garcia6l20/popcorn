@@ -48,5 +48,7 @@ add_ll_firmware(
         "link_tx_fifo_stop",
         "link_rx_dma",
         "link_iwdg",
+        "link_audio",
+        "link_audio_peer",
     ],
 )

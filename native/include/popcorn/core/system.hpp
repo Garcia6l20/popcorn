@@ -8,6 +8,7 @@
 
 #include <reflex/enum.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -79,6 +80,23 @@ enum class[[= reflex::derive{reflex::Format}]] pause_reason : std::uint8_t
   closed,
 };
 
+/**
+ * @brief Wall time of the members' work between barrier rounds, measured while
+ *        system::measure_work() is on. A member's work in a round runs from its departure from
+ *        the previous barrier, or from the resume, to its arrival: slices, drains and planning.
+ */
+struct work_timing
+{
+  /** @brief Barrier rounds measured, phase A, B and C arrivals alike. */
+  std::uint64_t rounds{};
+  /** @brief Sum over rounds of the work of every member, the cost of one thread doing it all. */
+  std::chrono::nanoseconds serial{};
+  /** @brief Sum over rounds of the work of the slowest member, the cost with no barrier wait. */
+  std::chrono::nanoseconds ideal{};
+  /** @brief Wall time every member spent draining its inbound wires. */
+  std::chrono::nanoseconds drains{};
+};
+
 /** @brief Outcome of one system::resume(). */
 struct pause
 {
@@ -96,6 +114,10 @@ struct pause
   std::uint64_t windows{};
   /** @brief Slices run since the resume over every member, bookkeeping. */
   std::uint64_t slices{};
+  /** @brief Phase B rounds since the resume, halted members moved before a decision. */
+  std::uint64_t phase_b{};
+  /** @brief Work timing since the resume, zero unless system::measure_work() is on. */
+  work_timing work{};
 };
 
 class system;
@@ -298,6 +320,13 @@ public:
    * in flight completes as pause_reason::closed. Any thread holding no host mutex, takes each
    * host's mutex briefly to wake a sleeping member. */
   void close() noexcept;
+
+  /**
+   * @brief Turns pause::work timing on or off for the next resumes, for benches. Off by default:
+   *        each member then reads no clock at its barrier arrivals or drains.
+   * @throws std::logic_error while a resume is in flight.
+   */
+  void measure_work(held_system const& held, bool on) pre(held.holds(*this));
 
   /** @brief Number of members. */
   [[nodiscard]] auto members() const noexcept -> std::size_t;

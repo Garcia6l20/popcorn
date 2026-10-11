@@ -57,7 +57,10 @@ void link_tx_mid_switch(void);
 void link_tx_fifo_stop(void);
 void link_rx_dma(void);
 void link_iwdg(void);
+void link_audio(void);
+void link_audio_peer(void);
 void USART2_IRQHandler(void);
+void SysTick_Handler(void);
 
 void idle(void)
 {
@@ -115,9 +118,17 @@ static void send_poll(USART_TypeDef* usart)
 static void link_irq(void);
 static void quiet_irq(void);
 static void echo_irq(void);
+static void audio_irq(uint32_t port);
+
+static volatile uint32_t audio_on;
 
 void USART1_IRQHandler(void)
 {
+  if(audio_on != 0u)
+  {
+    audio_irq(0);
+    return;
+  }
   if(received_count == 0xffffffffu)
   {
     link_irq();
@@ -775,6 +786,11 @@ void link_tx_bursts(void)
 
 void USART2_IRQHandler(void)
 {
+  if(audio_on != 0u)
+  {
+    audio_irq(1);
+    return;
+  }
   if(LL_USART_IsActiveFlag_IDLE(USART2))
   {
     LL_USART_ClearFlag_IDLE(USART2);
@@ -1008,4 +1024,113 @@ void link_iwdg(void)
   {
     send_byte(next);
   }
+}
+
+#define AUDIO_BLOCK     512u
+#define AUDIO_PERIOD_MS 16u
+
+typedef struct
+{
+  uint32_t rx_bytes;
+  uint32_t rx_hash;
+  uint32_t tx_bytes;
+  uint32_t tx_left;
+  uint32_t blocks;
+  uint32_t errors;
+  uint32_t respond;
+} audio_port;
+
+audio_port               audio_ports[2];
+static volatile uint32_t audio_ticks;
+
+void SysTick_Handler(void)
+{
+  ++audio_ticks;
+}
+
+static USART_TypeDef* audio_usart(uint32_t port)
+{
+  return port == 0u ? USART1 : USART2;
+}
+
+static void audio_block(uint32_t port)
+{
+  audio_ports[port].tx_left = AUDIO_BLOCK;
+  LL_USART_EnableIT_TXE_TXFNF(audio_usart(port));
+}
+
+static void audio_irq(uint32_t port)
+{
+  USART_TypeDef* const usart = audio_usart(port);
+  audio_port* const    state = &audio_ports[port];
+  if(LL_USART_IsActiveFlag_ORE(usart)
+     || LL_USART_IsActiveFlag_FE(usart)
+     || LL_USART_IsActiveFlag_NE(usart))
+  {
+    LL_USART_ClearFlag_ORE(usart);
+    LL_USART_ClearFlag_FE(usart);
+    LL_USART_ClearFlag_NE(usart);
+    ++state->errors;
+  }
+  if(LL_USART_IsActiveFlag_RXNE_RXFNE(usart))
+  {
+    uint8_t const data = LL_USART_ReceiveData8(usart);
+    state->rx_hash     = (state->rx_hash ^ data) * 16777619u;
+    if(state->rx_bytes++ % AUDIO_BLOCK == 0u && state->respond != 0u && state->tx_left == 0u)
+    {
+      audio_block(port);
+    }
+  }
+  if(LL_USART_IsEnabledIT_TXE_TXFNF(usart) && LL_USART_IsActiveFlag_TXE_TXFNF(usart))
+  {
+    LL_USART_TransmitData8(usart, (uint8_t)(state->tx_bytes++ * 7u + port));
+    if(--state->tx_left == 0u)
+    {
+      LL_USART_DisableIT_TXE_TXFNF(usart);
+      ++state->blocks;
+    }
+  }
+}
+
+static void audio_start(USART_TypeDef* usart, IRQn_Type irq)
+{
+  init(usart, LINK_BAUD);
+  enable(usart);
+  LL_USART_EnableIT_RXNE_RXFNE(usart);
+  LL_USART_EnableIT_ERROR(usart);
+  NVIC_EnableIRQ(irq);
+}
+
+void link_audio(void)
+{
+  clock_160mhz();
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_PCLK2);
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART2_CLKSOURCE_PCLK1);
+  audio_on = 1u;
+  audio_start(USART1, USART1_IRQn);
+  audio_start(USART2, USART2_IRQn);
+  SysTick_Config(160000u);
+  uint32_t next = 0u;
+  for(;;)
+  {
+    while(audio_ticks < next)
+    {
+    }
+    audio_block(0);
+    audio_block(1);
+    next += AUDIO_PERIOD_MS;
+  }
+}
+
+void link_audio_peer(void)
+{
+  clock_160mhz();
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_PCLK2);
+  audio_on               = 1u;
+  audio_ports[0].respond = 1u;
+  audio_start(USART1, USART1_IRQn);
+  idle();
 }
