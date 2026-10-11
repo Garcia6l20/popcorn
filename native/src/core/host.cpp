@@ -954,6 +954,15 @@ struct host_core
       driver.failed(*slot.engine, std::current_exception());
       return;
     }
+    if(not planned and driver.sleep_requested())
+    {
+      std::scoped_lock const lock{mutex};
+      if(not std::exchange(slot.woken, false))
+      {
+        slot.state = host_state::idle_wait;
+      }
+      return;
+    }
     if(not planned)
     {
       goal_result const outcome{.stopped = {}, .executed = goal.executed, .yielded = true};
@@ -2262,6 +2271,12 @@ auto host::state(member_id who) const noexcept -> host_state
 auto host::owns_engine() const noexcept -> bool
 {
   return detail::engine_owner == core_.get();
+}
+
+void host::wake(member_id who)
+{
+  std::scoped_lock const lock{core_->mutex};
+  core_->wake_locked(*core_->members[who]);
 }
 
 void host::close()

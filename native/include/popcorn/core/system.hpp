@@ -141,6 +141,9 @@ public:
    * @param bounds Bounds of every slice a member runs.
    * @param before_arrival Called on a member's host thread before each of its barrier
    *        arrivals with its index, holding nothing, for tests that perturb thread timing.
+   * @param before_sleep Called on a member's host thread with its index right before it asks
+   *        its host to sleep on IDLE inside open goals, holding nothing, for tests that wake it
+   *        in that window.
    * @throws machine_busy when a member is busy.
    */
   system(
@@ -148,7 +151,8 @@ public:
       std::vector<std::shared_ptr<member_link>> links,
       wait_policy                               wait,
       slice_bounds                              bounds         = {},
-      std::function<void(std::size_t)>          before_arrival = {}) pre(not members.empty())
+      std::function<void(std::size_t)>          before_arrival = {},
+      std::function<void(std::size_t)>          before_sleep   = {}) pre(not members.empty())
       pre(not links.empty());
 
   /** @brief Closes, waits for every member to park, then unlinks the hosts. Not on a host
@@ -186,7 +190,10 @@ public:
    *        goal run it, the others are halted, or with @p system_until run their core as a system
    *        TIME goal unless released. When every member sleeps with nothing due, the system
    *        pauses as pause_reason::idle at the latest quiescent point and every goal that is not
-   *        open resolves there with stop_reason::idle. Every pause drains the wires up to its
+   *        open resolves there with stop_reason::idle. When every goal left is open, the system
+   *        sleeps instead: each host waits as an idle free run does, and the first member woken,
+   *        by a command, a stamp, a watched descriptor or wake(), wakes the others. Where the
+   *        run resumes then depends on wall time. Every pause drains the wires up to its
    *        point before it is decided, so an error a wire dates before the delivered entry
    *        comes first. A member stop delivered without a member goal leaves it undecided as a
    *        goal's stop does.
@@ -245,9 +252,18 @@ public:
    */
   void finish(held_system const& held) pre(held.holds(*this));
 
-  /** @brief Asks for a pause at the next barrier. Any thread, takes no lock. A request no
-   * resume consumed before it paused is dropped by the next resume(). */
+  /** @brief Asks for a pause at the next barrier, waking a system asleep on IDLE. Any thread
+   * holding no host mutex, takes each host's mutex briefly. A request no resume consumed before
+   * it paused is dropped by the next resume(). */
   void request_pause() noexcept;
+
+  /**
+   * @brief Wakes a system asleep on IDLE inside open goals: every member resumes from its
+   *        quiescent point. For a caller that changed what a member will do without a command
+   *        its host sees, such as an injection queued on a wire. Any thread holding no host
+   *        mutex, takes each host's mutex briefly.
+   */
+  void wake() noexcept;
 
   /**
    * @brief Resets member @p member while paused: aborts its frame in flight, drops arrivals
@@ -258,7 +274,8 @@ public:
       pre(member < members());
 
   /** @brief Ends the system: every member parks at its next barrier or slice end and the pause
-   * in flight completes as pause_reason::closed. Any thread, takes no lock. */
+   * in flight completes as pause_reason::closed. Any thread holding no host mutex, takes each
+   * host's mutex briefly to wake a sleeping member. */
   void close() noexcept;
 
   /** @brief Number of members. */

@@ -61,6 +61,7 @@ enum class phase : std::uint8_t
   arrive_b,
   after_b,
   idle_to,
+  sleeping,
 };
 
 struct report
@@ -80,6 +81,7 @@ struct decision
   bool                 need_b{};
   bool                 idle{};
   bool                 exchange{};
+  bool                 sleep{};
   sys_time             target{};
   std::optional<entry> head{};
   sys_time             confirm{};
@@ -147,7 +149,8 @@ struct system::impl
       std::vector<std::shared_ptr<member_link>> wires,
       wait_policy                               wait,
       slice_bounds                              slicing,
-      std::function<void(std::size_t)>          hook);
+      std::function<void(std::size_t)>          hook,
+      std::function<void(std::size_t)>          sleep_hook);
 
   [[nodiscard]] auto deliverable(entry const& head) const noexcept -> bool;
   [[nodiscard]] auto best_entry() const -> std::optional<entry>;
@@ -163,6 +166,7 @@ struct system::impl
   void               finish_pause() noexcept;
   void               reset_member(slot& one, machine& target, reset_kind kind);
   void               require_paused() const;
+  void               wake_all(std::optional<std::size_t> except = {}) noexcept;
   [[nodiscard]] auto in_flight() const noexcept -> bool;
 
   system const*                             owner;
@@ -172,6 +176,7 @@ struct system::impl
   window_barrier                            barrier;
   slice_bounds                              bounds;
   std::function<void(std::size_t)>          before_arrival;
+  std::function<void(std::size_t)>          before_sleep;
   std::mutex                                mutex;
   std::uint64_t                             window{};
   sys_time                                  pending{};
@@ -189,6 +194,7 @@ struct system::impl
   host_future<pause>                        future{};
   std::atomic<std::size_t>                  outstanding{0};
   std::atomic<bool>                         host_closed{false};
+  std::atomic<bool>                         woke{false};
   completion                                on_a{this, &impl::complete_a};
   completion                                on_b{this, &impl::complete_b};
   completion                                on_c{this, &impl::complete_c};
@@ -266,6 +272,16 @@ public:
           {
             return std::nullopt;
           }
+          if(sys_.chosen.sleep)
+          {
+            phase_    = phase::sleeping;
+            sleeping_ = true;
+            if(sys_.before_sleep)
+            {
+              sys_.before_sleep(index_);
+            }
+            return std::nullopt;
+          }
           if(not sys_.chosen.pause)
           {
             if(sys_.chosen.exchange)
@@ -281,6 +297,15 @@ public:
           {
             return std::nullopt;
           }
+          continue;
+        case phase::sleeping:
+          sleeping_ = false;
+          if(not sys_.woke.exchange(true))
+          {
+            sys_.wake_all(index_);
+          }
+          one.rep.quiescent = false;
+          phase_            = phase::run;
           continue;
         case phase::idle_to:
           if(position(target) < sys_.chosen.target)
@@ -365,6 +390,11 @@ public:
   {
     aborted_.store(true, std::memory_order_release);
     sys_.barrier.abort();
+  }
+
+  auto sleep_requested() noexcept -> bool override
+  {
+    return sleeping_ and not aborted_.load(std::memory_order_acquire);
   }
 
 private:
@@ -633,6 +663,7 @@ private:
   std::size_t       index_;
   phase             phase_{phase::begin};
   bool              held_last_{};
+  bool              sleeping_{};
   std::uint64_t     window_{};
   vtime             until_last_{};
   std::atomic<bool> aborted_{false};
@@ -644,9 +675,10 @@ system::impl::impl(
     std::vector<std::shared_ptr<member_link>> wires,
     wait_policy                               wait,
     slice_bounds                              slicing,
-    std::function<void(std::size_t)>          hook)
+    std::function<void(std::size_t)>          hook,
+    std::function<void(std::size_t)>          sleep_hook)
     : owner{owner}, links{std::move(wires)}, barrier{members.size(), wait}, bounds{slicing},
-      before_arrival{std::move(hook)}
+      before_arrival{std::move(hook)}, before_sleep{std::move(sleep_hook)}
 {
   q = sys_time{std::numeric_limits<std::int64_t>::max()};
   for(auto const& link : links)
@@ -702,6 +734,25 @@ system::impl::impl(
 auto system::impl::in_flight() const noexcept -> bool
 {
   return future.valid() and not future.done();
+}
+
+void system::impl::wake_all(std::optional<std::size_t> except) noexcept
+{
+  for(std::size_t index = 0; index < slots.size(); ++index)
+  {
+    if(except == index)
+    {
+      continue;
+    }
+    try
+    {
+      slots[index].ref.on->wake(0);
+    }
+    catch(...)
+    {
+      continue;
+    }
+  }
 }
 
 void system::impl::require_paused() const
@@ -855,6 +906,7 @@ void system::impl::settle_confirm() noexcept
 
 void system::impl::complete_a() noexcept
 {
+  woke.store(false);
   merge_found();
   chosen = decision{.window = window, .barrier = pending, .next = {pending.ps + q.ps}};
   if(auto const head = best_entry())
@@ -906,6 +958,17 @@ void system::impl::complete_c() noexcept
     ++window;
     pending = chosen.next;
     ++result.windows;
+    return;
+  }
+  if(chosen.idle
+     and std::ranges::any_of(slots, [](slot const& one) { return one.running(); })
+     and std::ranges::all_of(
+         slots, [](slot const& one) { return not one.running() or one.goal->goal.open; }))
+  {
+    chosen.pause = false;
+    chosen.idle  = false;
+    chosen.sleep = true;
+    chosen.head.reset();
     return;
   }
   result.slices = 0;
@@ -1060,9 +1123,10 @@ system::system(
     std::vector<std::shared_ptr<member_link>> links,
     wait_policy                               wait,
     slice_bounds                              bounds,
-    std::function<void(std::size_t)>          before_arrival)
-    : impl_{std::in_place, this,   std::move(members),       std::move(links),
-            wait,          bounds, std::move(before_arrival)}
+    std::function<void(std::size_t)>          before_arrival,
+    std::function<void(std::size_t)>          before_sleep)
+    : impl_{std::in_place, this,   std::move(members),        std::move(links),
+            wait,          bounds, std::move(before_arrival), std::move(before_sleep)}
 {}
 
 system::~system()
@@ -1317,6 +1381,7 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
 void system::request_pause() noexcept
 {
   impl_->pause_requested.store(true);
+  impl_->wake_all();
 }
 
 void system::reset(held_system const&, std::size_t member, reset_kind kind)
@@ -1341,6 +1406,12 @@ void system::close() noexcept
       one.target->interrupt();
     }
   }
+  self.wake_all();
+}
+
+void system::wake() noexcept
+{
+  impl_->wake_all();
 }
 
 auto system::members() const noexcept -> std::size_t

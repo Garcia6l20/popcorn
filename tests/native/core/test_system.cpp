@@ -1350,7 +1350,9 @@ TEST_CASE("a link with something left to deliver keeps the system from IDLE")
   }
   std::this_thread::sleep_for(std::chrono::milliseconds{5});
   r.sys->request_pause();
-  CHECK(pending.get().reason == core::pause_reason::requested);
+  auto const refused = pending.get();
+  CHECK(refused.reason == core::pause_reason::requested);
+  CHECK(refused.windows > 0);
   CHECK_FALSE(a.done());
   r.links[0]->busy = false;
   CHECK(r.run({}).reason == core::pause_reason::idle);
@@ -1555,4 +1557,161 @@ TEST_CASE("finish fails a goal still pending with operation_cancelled")
   }
   REQUIRE(pending.done());
   CHECK_THROWS_AS(std::ignore = pending.get(), core::operation_cancelled);
+}
+
+namespace
+{
+auto tracked_sleeper(std::uint64_t after, popcorn::testing::test_arch*& module) -> core::member_ref
+{
+  return member<popcorn::testing::test_arch>(
+      "idle", "idle_forever", [after, &module](popcorn::testing::machine_fixture<>& f) {
+        auto const now = f.target->virtual_clock().now().value;
+        std::ignore    = f.module->attached_events().schedule(icount{now + after}, logged_kind, 7);
+        module         = f.module;
+      });
+}
+
+auto both_asleep(rig const& r, core::host_future<core::pause> const& pending) -> bool
+{
+  for(;;)
+  {
+    if(pending.done())
+    {
+      return false;
+    }
+    if(std::ranges::all_of(r.members, [](core::member_ref const& one) {
+         return one.on->state(0) == core::host_state::idle_wait;
+       }))
+    {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+}
+}
+
+TEST_CASE("open goals asleep on IDLE wait until a stamp wakes one member, then all resume")
+{
+  std::optional<std::vector<std::uint64_t>> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[6]})
+  {
+    CAPTURE(how.name);
+    pinned const                 pin{how.one_cpu};
+    popcorn::testing::test_arch* module = nullptr;
+    rig                          r{
+        .members = {sleeper_with_event(400), tracked_sleeper(900, module)}
+    };
+    r.build(how);
+    auto       a     = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       b     = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto const start = core::access(
+        *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().now().value; });
+    auto const local = core::access(
+        *r.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; });
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    REQUIRE(both_asleep(r, pending));
+    core::host_future<vtime> landed;
+    {
+      auto const held_host = r.members[1].on->lock();
+      landed               = r.members[1].on->post(
+          held_host, 0,
+          [module](core::machine& m) {
+            std::ignore = module->attached_events().schedule(
+                icount{m.virtual_clock().now().value + 100}, logged_kind, 8);
+          },
+          vtime{local + 900 * 250'000 + 50 * us_ps});
+    }
+    std::ignore = landed.get();
+    REQUIRE(both_asleep(r, pending));
+    r.sys->request_pause();
+    auto const stopped = pending.get();
+    CHECK(stopped.reason == core::pause_reason::requested);
+    CHECK_FALSE(a.done());
+    CHECK_FALSE(b.done());
+    auto const logged = core::access(*r.members[1].on, 0, [&](core::machine&) {
+      return module->event_log.back().at.value - start;
+    });
+    CHECK(logged == 900 + 200 + 100);
+    auto dump = r.dump();
+    dump.push_back(landed.get().ps);
+    dump.push_back(logged);
+    if(reference)
+    {
+      CHECK(dump == *reference);
+    }
+    reference = dump;
+  }
+}
+
+TEST_CASE("close and wake reach a system asleep on IDLE inside open goals")
+{
+  rig r{
+      .members = {sleeper_with_event(400), sleeper_with_event(900)}
+  };
+  r.build(variants()[0]);
+  auto a = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+  auto b = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  REQUIRE(both_asleep(r, pending));
+  r.sys->wake();
+  REQUIRE(both_asleep(r, pending));
+  r.sys->close();
+  CHECK(pending.get().reason == core::pause_reason::closed);
+  CHECK_THROWS_AS(std::ignore = a.get(), core::machine_closed);
+  CHECK(parked(r.members[0]));
+  CHECK(parked(r.members[1]));
+}
+
+TEST_CASE("a wake that lands between the sleep decision and the host's wait is not lost")
+{
+  auto const slices = [](bool hooked) {
+    rig r{
+        .members = {sleeper_with_event(400), sleeper_with_event(900)}
+    };
+    r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
+    std::atomic<bool>                woken{false};
+    core::system*                    owner = nullptr;
+    std::function<void(std::size_t)> hook;
+    if(hooked)
+    {
+      hook = [&woken, &owner](std::size_t) {
+        if(not woken.exchange(true))
+        {
+          owner->wake();
+        }
+      };
+    }
+    r.sys = std::make_unique<core::system>(
+        r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
+        core::default_wait_policy(2), core::slice_bounds{}, std::function<void(std::size_t)>{},
+        hook);
+    owner = r.sys.get();
+    {
+      auto const                  held = r.sys->lock();
+      std::vector<core::sys_time> offsets(2);
+      r.sys->start(held, offsets);
+    }
+    auto a = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto b = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    REQUIRE(both_asleep(r, pending));
+    r.sys->request_pause();
+    auto const stopped = pending.get();
+    REQUIRE(stopped.reason == core::pause_reason::requested);
+    return stopped.slices;
+  };
+  auto const quiet = slices(false);
+  CHECK(slices(true) > quiet);
 }

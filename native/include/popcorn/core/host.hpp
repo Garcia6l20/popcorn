@@ -160,6 +160,17 @@ public:
 
   /** @brief Makes a blocked or later plan() return empty soon. Any thread, takes no lock. */
   virtual void abort() noexcept = 0;
+
+  /**
+   * @brief Asked when plan() returned empty: true keeps the goal and puts the member in
+   *        host_state::idle_wait, as an idle free run, until a command, a stamp, a watched
+   *        descriptor or host::wake() wakes it, then plan() is called again. False ends the goal.
+   *        Called on the host thread with no host mutex held.
+   */
+  virtual auto sleep_requested() noexcept -> bool
+  {
+    return false;
+  }
 };
 
 /** @brief A run to a stop, carried across slices by the host as one request. */
@@ -976,6 +987,13 @@ public:
 
   /** @brief Whether the current thread owns this host's engine. */
   [[nodiscard]] auto owns_engine() const noexcept -> bool;
+
+  /**
+   * @brief Wakes member @p who from host_state::idle_wait, or makes its next wait return at once,
+   *        with no command. Any thread holding no other host mutex, takes this host's mutex
+   *        briefly.
+   */
+  void wake(member_id who) pre(who < members());
 
   /**
    * @brief Stops the host thread and joins it. Pending requests fail with machine_closed. The
