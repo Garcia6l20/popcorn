@@ -139,6 +139,14 @@ struct slice_request
    * that starts ready ends with no instruction executed. An exception return to thread mode ends
    * the engine run, so the check sees it. */
   bool until_thread{};
+  /** @brief A core asleep with nothing deliverable and no event due before until_time stops where
+   * it is with stop_reason::idle, instead of the clock jumping to until_time. With internal_stop
+   * that stop is the caller's bookkeeping too: pc unlocated, no trace stop record. For a scheduler
+   * of several machines that keeps a quiescent member where it fell asleep. */
+  bool stop_quiescent{};
+  /** @brief Evaluate stop_when only after a dispatched event, never at the slice end, so a slice
+   * end set by max_instructions, the wall budget or a bound never decides the user stop. */
+  bool stop_when_events_only{};
 };
 
 /** @brief Outcome of one native slice. */

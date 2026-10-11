@@ -41,6 +41,13 @@ auto hold_limit(vtime until, clock const& time) -> std::optional<icount>
   return icount{first - 1};
 }
 
+auto internal_end(slice_request const& request, stop const& stopped) noexcept -> bool
+{
+  return request.internal_stop
+     and (stopped.reason == stop_reason::time
+          or (request.stop_quiescent and stopped.reason == stop_reason::idle));
+}
+
 auto left(icount bound, icount done) noexcept -> std::uint64_t
 {
   return bound.value - std::min(bound.value, done.value);
@@ -742,6 +749,11 @@ auto machine::run_state::idle_jump(slice_request const& request) -> std::optiona
   {
     return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
   }
+  if(request.stop_quiescent
+     and (not next or (request.until_time and *next >= owner.clock_.to_icount(*request.until_time))))
+  {
+    return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
+  }
   auto const now = owner.clock_driver_.exact_now();
   auto target = add_sat(now, left(request.max_instructions, icount{executed.value + jumped.value}));
   if(next)
@@ -921,12 +933,15 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
   {
     end.stopped = make_stop(stop_reason::time, {}, std::nullopt);
   }
-  if(not end.stopped and request.stop_when and asks_stop(request))
+  if(not end.stopped
+     and request.stop_when
+     and not request.stop_when_events_only
+     and asks_stop(request))
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
     end.asked   = true;
   }
-  if(end.stopped and not(request.internal_stop and end.stopped->reason == stop_reason::time))
+  if(end.stopped and not internal_end(request, *end.stopped))
   {
     auto& where = end.stopped->where;
     where       = locate(where.pc);

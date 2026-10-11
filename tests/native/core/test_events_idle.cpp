@@ -1367,3 +1367,171 @@ TEST_CASE("a held machine stays held across a reset and its snapshot keeps the h
       == stop_reason::time);
   CHECK(f.target->virtual_clock().now().value == before.value + 1000);
 }
+
+TEST_CASE("a quiescent slice stops where the core fell asleep instead of jumping to until_time")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock = f.target->virtual_clock();
+  auto const  start = clock.time();
+  auto const  until = vtime{start.ps + ps_per_second / 1000};
+  std::size_t stops = 0;
+  auto const  sink  = f.target->add_trace_sink(
+      {core::trace_kind::stop},
+      [&stops](std::span<core::trace_record const> records) { stops += records.size(); });
+  auto const quiet = f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = long_wall,
+       .until_time       = until,
+       .internal_stop    = true,
+       .stop_quiescent   = true});
+  REQUIRE(quiet.stopped.has_value());
+  CHECK(quiet.stopped->reason == stop_reason::idle);
+  CHECK(quiet.stopped->time == start);
+  CHECK(quiet.stopped->where.symbol.empty());
+  CHECK(quiet.executed == icount{0});
+  CHECK(clock.time() == start);
+  CHECK(stops == 0);
+  auto const reported = f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = long_wall,
+       .until_time       = until,
+       .stop_quiescent   = true});
+  REQUIRE(reported.stopped.has_value());
+  CHECK(reported.stopped->reason == stop_reason::idle);
+  CHECK(reported.stopped->where.symbol == "idle_forever");
+  CHECK(stops == 1);
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+  CHECK(clock.time() == until);
+}
+
+TEST_CASE("a quiescent slice dispatches the events due before until_time and stops at the last")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock  = f.target->virtual_clock();
+  auto const  now    = clock.now().value;
+  auto const  until  = vtime{clock.time().ps + ps_per_second / 1000};
+  auto const  bound  = clock.to_icount(until);
+  auto&       events = f.module->attached_events();
+  std::ignore        = events.schedule(icount{now + 100}, 1, 1);
+  std::ignore        = events.schedule(icount{now + 300}, 1, 2);
+  std::ignore        = events.schedule(bound, 1, 3);
+  f.module->event_log.clear();
+  auto const stop = f.run_to_stop({.until_time = until, .stop_quiescent = true});
+  CHECK(stop.reason == stop_reason::idle);
+  CHECK(clock.now() == icount{now + 300});
+  CHECK(
+      f.module->event_log
+      == std::vector<logged>{
+          {.kind = 1, .payload = 1, .at = icount{now + 100}},
+          {.kind = 1, .payload = 2, .at = icount{now + 300}}
+  });
+  CHECK(f.target->pending_events() == 1);
+  CHECK(f.run_to_stop({.until_time = until, .stop_quiescent = true}).reason == stop_reason::idle);
+  CHECK(clock.now() == icount{now + 300});
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+  CHECK(f.module->event_log.size() == 3);
+}
+
+TEST_CASE("a quiescent slice in small slices stops at the same event as in one slice")
+{
+  auto const run = [](std::uint64_t slice) {
+    auto f = booted("idle");
+    f.set("pc", sym("idle", "idle_forever"));
+    REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+    auto const& clock = f.target->virtual_clock();
+    auto const  now   = clock.now().value;
+    std::ignore       = f.module->attached_events().schedule(icount{now + 500}, 1, 1);
+    auto const until  = vtime{clock.time().ps + ps_per_second / 1000};
+    for(;;)
+    {
+      auto const result = f.run(
+          {.max_instructions = icount{slice},
+           .wall_budget      = long_wall,
+           .until_time       = until,
+           .stop_quiescent   = true});
+      if(result.stopped)
+      {
+        CHECK(result.stopped->reason == stop_reason::idle);
+        return clock.now().value - now;
+      }
+    }
+  };
+  CHECK(run(1'000'000'000) == 500);
+  CHECK(run(7) == 500);
+}
+
+TEST_CASE("a held core in a quiescent slice stops at once with nothing due")
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  f.target->hold_core(true);
+  auto const before = f.target->virtual_clock().time();
+  auto const until  = vtime{before.ps + 1'000'000'000};
+  CHECK(f.run_to_stop({.until_time = until, .stop_quiescent = true}).reason == stop_reason::idle);
+  CHECK(f.target->virtual_clock().time() == before);
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+}
+
+TEST_CASE("stop_when_events_only asks stop_when after events, never at the slice end")
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  auto       asked  = 0;
+  auto const always = [&asked] {
+    ++asked;
+    return true;
+  };
+  auto const quiet = f.run(
+      {.max_instructions      = icount{100},
+       .wall_budget           = long_wall,
+       .stop_when             = always,
+       .stop_when_events_only = true});
+  CHECK_FALSE(quiet.stopped.has_value());
+  CHECK(asked == 0);
+  auto const ended =
+      f.run({.max_instructions = icount{100}, .wall_budget = long_wall, .stop_when = always});
+  REQUIRE(ended.stopped.has_value());
+  CHECK(ended.stopped->reason == stop_reason::user);
+  CHECK(asked == 1);
+
+  auto g = booted("idle");
+  g.set("pc", sym("idle", "idle_entry"));
+  auto const stop = g.run_to_stop(
+      {.stop_when = [&g] { return g.module->timer_expiries == 3; }, .stop_when_events_only = true});
+  CHECK(stop.reason == stop_reason::user);
+  CHECK(g.module->timer_expiries == 3);
+}
+
+TEST_CASE("a predicate made true by executed code stops at the next event at any slicing")
+{
+  auto const run = [](std::uint64_t slice) {
+    auto        f      = booted("calls");
+    auto const& clock  = f.target->virtual_clock();
+    auto const  start  = clock.now().value;
+    auto&       events = f.module->attached_events();
+    std::ignore        = events.schedule(icount{start + 1200}, 1, 1);
+    std::ignore        = events.schedule(icount{start + 2000}, 1, 2);
+    for(;;)
+    {
+      auto const result = f.run(
+          {.max_instructions      = icount{slice},
+           .wall_budget           = long_wall,
+           .stop_when             = [&clock, start] { return clock.now().value >= start + 1000; },
+           .stop_when_events_only = true});
+      if(result.stopped)
+      {
+        CHECK(result.stopped->reason == stop_reason::user);
+        return std::pair{result.stopped->instructions.value - start, f.module->event_log.size()};
+      }
+    }
+  };
+  auto const whole = run(1'000'000'000);
+  CHECK(whole.first >= 1200);
+  CHECK(whole.second == 1);
+  CHECK(run(7) == whole);
+  CHECK(run(301) == whole);
+}
