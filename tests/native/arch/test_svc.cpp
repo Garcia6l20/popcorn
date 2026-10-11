@@ -1,16 +1,19 @@
 #include "arch_fixture.hpp"
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "cortex_m.hpp"
 
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 
 #include <doctest/doctest.h>
+#include <unicorn/unicorn.h>
 
 #include <cstdint>
 #include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -149,6 +152,52 @@ TEST_CASE("SVC from unprivileged Thread on PSP keeps CONTROL and every register"
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   auto const top = psp_frame(f);
   CHECK(log_of(f) == std::vector<std::uint32_t>{0x80A, 0xFFFFFFFD, 1, top, 0x8FE, 3});
+}
+
+TEST_CASE("SVC entry and return from unprivileged Thread on PSP match the recorded registers")
+{
+  auto f      = booted();
+  auto engine = core::machine_internals::engine(*f.target);
+  auto limit  = [&](uc_arm_reg id) {
+    std::uint32_t value = 0;
+    REQUIRE(uc_reg_read(engine, id, &value) == UC_ERR_OK);
+    return std::uint64_t{value};
+  };
+  auto const specials = [&] {
+    std::vector<std::uint64_t> out;
+    for(auto const* name :
+        {"control", "msp", "psp", "primask", "basepri", "faultmask", "xpsr", "sp", "lr"})
+    {
+      out.push_back(f.reg(name));
+    }
+    out.push_back(limit(UC_ARM_REG_MSPLIM));
+    out.push_back(limit(UC_ARM_REG_PSPLIM));
+    return out;
+  };
+  REQUIRE(start(f, "svc_unpriv").reason == stop_reason::user);
+  f.set("basepri", 0xe0);
+  for(auto const& [id, value] : {
+          std::pair{UC_ARM_REG_MSPLIM, 0x2000'0400u},
+          std::pair{UC_ARM_REG_PSPLIM, 0x2000'0800u}
+  })
+  {
+    REQUIRE(uc_reg_write(engine, id, &value) == UC_ERR_OK);
+  }
+  auto const msp     = f.reg("msp");
+  auto const top     = f.word(fn("svc_psp_top"));
+  auto const entered = f.run_to_stop({.until = code("svc_entry")});
+  REQUIRE(entered.reason == stop_reason::address);
+  auto const in_handler = specials();
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  auto const returned = specials();
+  CHECK(
+      in_handler
+      == std::vector<std::uint64_t>{
+          1, msp, top - 0x20, 0, 0xe0, 0, 0x2100'000b, msp, 0xffff'fffd, 0x2000'0400, 0x2000'0800});
+  CHECK(
+      returned
+      == std::vector<std::uint64_t>{
+          3, msp, top, 0, 0xe0, 0, 0x2100'0000, top, 0xffff'ffff, 0x2000'0400, 0x2000'0800});
 }
 
 TEST_CASE("an SVC that cannot preempt escalates to HardFault and returns past the svc")
