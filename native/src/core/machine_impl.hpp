@@ -1372,6 +1372,12 @@ struct machine_internals
   {
     return target.run_->counters;
   }
+
+  /** @brief The engine of @p target. */
+  [[nodiscard]] static auto engine(machine const& target) noexcept -> uc_struct*
+  {
+    return target.engine_.get();
+  }
 };
 
 /**

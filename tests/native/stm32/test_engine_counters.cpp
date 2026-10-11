@@ -3,12 +3,14 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <numeric>
 #include <optional>
 #include <string_view>
 #include <tuple>
+#include <vector>
 
 namespace
 {
@@ -283,4 +285,40 @@ TEST_CASE("a stopping intercept and an engine fault end the run as other")
   CHECK(unmapped.reason == stop_reason::fault);
   CHECK(behind.engine_runs - ahead.engine_runs == 1);
   CHECK(ended(ahead, behind, engine_end::other) == 1);
+}
+
+TEST_CASE("the spin loop's SRAM loads take the TLB fast path while a clock hook exists")
+{
+  irq_machine m{"irq_rate", 0, 0};
+  m.run_to(2 * ms_ps);
+  auto* const engine = machine_internals::engine(*m.target);
+  REQUIRE(uc_ctl_slow_path_count_reset(engine) == UC_ERR_OK);
+  m.run_to(2 * ms_ps + ms_ps / 10);
+  std::uint64_t slow = ~std::uint64_t{};
+  REQUIRE(uc_ctl_slow_path_count(engine, &slow) == UC_ERR_OK);
+  CHECK(slow == 0);
+}
+
+TEST_CASE("a read watch added while parked sees the next loads of translated code, at their pc")
+{
+  irq_machine m{"irq_rate", 0, 0};
+  m.run_to(2 * ms_ps);
+  auto const                            done = m.at("done");
+  std::vector<popcorn::core::watch_hit> hits;
+  auto const                            watch = m.target->add_watch(
+      done, 4, popcorn::core::watch_kind::read, [&hits](popcorn::core::watch_hit const& hit) {
+        hits.push_back(hit);
+        return popcorn::core::watch_action::resume;
+      });
+  auto* const engine = machine_internals::engine(*m.target);
+  REQUIRE(uc_ctl_slow_path_count_reset(engine) == UC_ERR_OK);
+  m.run_to(2 * ms_ps + ms_ps / 100);
+  std::uint64_t slow{};
+  REQUIRE(uc_ctl_slow_path_count(engine, &slow) == UC_ERR_OK);
+  REQUIRE(hits.size() >= 100);
+  CHECK(slow == hits.size());
+  auto const pc = hits.front().pc;
+  CHECK(std::ranges::all_of(hits, [&](auto const& hit) {
+    return hit.pc == pc and hit.addr == done and hit.size == 4 and not hit.write;
+  }));
 }

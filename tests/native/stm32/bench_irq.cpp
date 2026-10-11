@@ -3,6 +3,7 @@
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/image/image.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
@@ -115,10 +116,11 @@ struct options
 
 struct sample
 {
-  double             wall{};
-  double             virtual_s{};
-  core::run_counters counters{};
-  std::string        dump;
+  double                 wall{};
+  double                 virtual_s{};
+  core::run_counters     counters{};
+  std::string            dump;
+  std::vector<std::byte> snapshot;
 };
 
 auto rows() -> std::vector<row>
@@ -283,7 +285,9 @@ auto measure(options const& how, row const& r) -> sample
       .wall      = wall,
       .virtual_s = static_cast<double>(span) / 1e12,
       .counters  = difference(after, before),
-      .dump      = m.dump()};
+      .dump      = m.dump(),
+      .snapshot  = how.dump_dir ? core::encode_snapshot(m.target->snapshot().data())
+                                : std::vector<std::byte>{}};
 }
 
 auto parse_number(std::string_view text) -> std::int64_t
@@ -546,6 +550,10 @@ auto bench(options const& how) -> int
         std::ranges::replace(file, '/', '-');
         std::ofstream{std::format("{}/{}-{}.bin", *how.dump_dir, file, run), std::ios::binary}
             << out.dump;
+        std::ofstream{std::format("{}/{}-{}.snap", *how.dump_dir, file, run), std::ios::binary}
+            .write(
+                reinterpret_cast<char const*>(out.snapshot.data()),
+                static_cast<std::streamsize>(out.snapshot.size()));
       }
       fnv hash;
       for(auto const c : out.dump)
