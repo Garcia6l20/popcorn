@@ -166,9 +166,6 @@ struct slice_result
   bool asked = false;
   /** @brief Whether the slice ended without a stop for slice_request::until_thread. */
   bool thread_ready = false;
-  /** @brief Whether the slice got past its first dispatch of due events. False when it ended
-   * before, for an interrupt pending at its start or a stop request. */
-  bool dispatched = false;
 };
 
 /** @brief Outcome of machine::call(). */
@@ -279,6 +276,14 @@ public:
   /** @brief Instruction count of the earliest pending event, empty when none is pending. An event
    * a model superseded without cancelling it counts until it is dispatched. */
   [[nodiscard]] auto next_event() const -> std::optional<icount>;
+
+  /**
+   * @brief Count up to which the last slice_request::hold_from_until slice that reached its
+   *        until_time left due events held, empty once a slice dispatched without a hold. A
+   *        host defers stamped commands while an event at or before it is pending. Saved in
+   *        snapshots.
+   */
+  [[nodiscard]] auto held_through() const noexcept -> std::optional<icount>;
 
   /** @brief Virtual clock, for reading instruction count, time and domain rates. */
   [[nodiscard]] auto virtual_clock() const noexcept -> core::clock const&;

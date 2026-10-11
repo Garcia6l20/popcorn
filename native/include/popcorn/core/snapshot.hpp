@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -181,6 +182,8 @@ struct snapshot_data
   /** @brief Whether the core was held, `machine::core_held()`. Absent from saves before it
    * existed, which load as not held. */
   bool core_held{};
+  /** @brief machine::held_through(), absent from saves before it existed, which load as none. */
+  std::optional<icount> held_through{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(snapshot_data const&, snapshot_data const&) -> bool = default;

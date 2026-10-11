@@ -893,12 +893,13 @@ struct machine::run_state
   std::chrono::steady_clock::time_point wall_deadline{};
   /** @brief Whether the wall budget ended the engine run. */
   bool wall_expired = false;
-  /** @brief Whether the current slice reached its first dispatch of due events. */
-  bool dispatched = false;
   /** @brief First exception a callback raised in the slice. */
   std::exception_ptr failure{};
   /** @brief Whether the core is held, machine::hold_core(). */
   bool core_held = false;
+  /** @brief Count up to which a hold_from_until slice left events held, machine::held_through().
+   */
+  std::optional<icount> held_through{};
   /** @brief `description_digest()` of the machine's description, computed once. */
   std::string description_digest{};
   /** @brief Code written while the engine ran, removed at the next block boundary. */

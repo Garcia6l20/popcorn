@@ -152,6 +152,11 @@ auto machine::next_event() const -> std::optional<icount>
   return scheduler_.next_deadline();
 }
 
+auto machine::held_through() const noexcept -> std::optional<icount>
+{
+  return run_->held_through;
+}
+
 auto machine::virtual_clock() const noexcept -> core::clock const&
 {
   return clock_;

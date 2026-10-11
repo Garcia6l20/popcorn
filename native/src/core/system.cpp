@@ -3,6 +3,7 @@
 #include <popcorn/core/system.hpp>
 
 #include <reflex/enum.hpp>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -100,6 +101,23 @@ struct goal_run
 };
 
 using settled = std::expected<goal_reached, std::exception_ptr>;
+
+struct saved_member
+{
+  sys_time                base{};
+  std::optional<sys_time> held_to{};
+  bool                    released{};
+};
+
+struct saved_system
+{
+  std::uint32_t                       format{1};
+  std::uint64_t                       window{};
+  sys_time                            pending{};
+  std::optional<sys_time>             last_point{};
+  std::vector<saved_member>           members{};
+  std::vector<std::vector<std::byte>> links{};
+};
 }
 
 struct system::impl
@@ -166,6 +184,7 @@ struct system::impl
   void               finish_pause() noexcept;
   void               reset_member(slot& one, machine& target, reset_kind kind);
   void               require_paused() const;
+  void               require_savable() const;
   void               wake_all(std::optional<std::size_t> except = {}) noexcept;
   [[nodiscard]] auto in_flight() const noexcept -> bool;
 
@@ -752,6 +771,20 @@ void system::impl::wake_all(std::optional<std::size_t> except) noexcept
     {
       continue;
     }
+  }
+}
+
+void system::impl::require_savable() const
+{
+  require_paused();
+  if(not started or stopped)
+  {
+    throw std::logic_error("the system is not started or stopped on an error");
+  }
+  if(not held.empty()
+     or std::ranges::any_of(slots, [](slot const& one) { return one.goal or one.undecided; }))
+  {
+    throw std::logic_error("a goal, an undecided member or an entry is pending");
   }
 }
 
@@ -1376,6 +1409,78 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
     });
   }
   return future;
+}
+
+void system::save(held_system const&, std::vector<std::byte>& out) const
+{
+  auto const& self = *impl_;
+  self.require_savable();
+  saved_system state{.window = self.window, .pending = self.pending, .last_point = self.last_point};
+  for(auto const& one : self.slots)
+  {
+    state.members.push_back(
+        {.base = one.map.base(), .held_to = one.held_to, .released = one.released});
+  }
+  for(auto const& link : self.links)
+  {
+    link->save(state.links.emplace_back());
+  }
+  reflex::serde::bson::serializer{out}.dump(state);
+}
+
+void system::load(held_system const&, std::span<std::byte const> in)
+{
+  auto& self = *impl_;
+  self.require_savable();
+  saved_system state;
+  try
+  {
+    state = reflex::serde::bson::deserializer{in}.load<saved_system>();
+  }
+  catch(std::runtime_error const& failure)
+  {
+    throw config_error(
+        "system state", 0, "bytes", std::format("a state system::save wrote: {}", failure.what()));
+  }
+  if(state.format != 1
+     or state.members.size() != self.slots.size()
+     or state.links.size() != self.links.size())
+  {
+    throw config_error(
+        "system state", 0, "bytes", "a state saved by a system of the same members and links");
+  }
+  std::vector<std::vector<std::byte>> before(self.links.size());
+  for(auto&& [link, kept] : std::views::zip(self.links, before))
+  {
+    link->save(kept);
+  }
+  std::size_t loaded = 0;
+  try
+  {
+    for(; loaded < self.links.size(); ++loaded)
+    {
+      self.links[loaded]->load(state.links[loaded]);
+    }
+  }
+  catch(...)
+  {
+    for(std::size_t index = 0; index < loaded; ++index)
+    {
+      self.links[index]->load(before[index]);
+    }
+    throw;
+  }
+  for(auto&& [one, saved] : std::views::zip(self.slots, state.members))
+  {
+    auto const held_host = one.ref.on->lock();
+    one.map              = time_map{saved.base};
+    one.held_to          = saved.held_to;
+    one.released         = saved.released;
+    one.resets           = one.ref.on->member(held_host, 0).resets();
+  }
+  self.window     = state.window;
+  self.pending    = state.pending;
+  self.last_point = state.last_point;
 }
 
 void system::request_pause() noexcept

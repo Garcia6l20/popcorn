@@ -5,6 +5,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/member_link.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/core/system.hpp>
 #include <popcorn/core/window_barrier.hpp>
 #include <popcorn/periph/stm32/board.hpp>
@@ -988,4 +989,155 @@ TEST_CASE("an injection queued while every member sleeps is received, then the s
     }
     reference = seen;
   }
+}
+
+TEST_CASE("a system saved with its members mid-burst and loaded again runs on the same")
+{
+  for(auto const& [sender, at] : {
+          std::pair{std::string_view{"link_tx"},       1500 * us_ps},
+          std::pair{std::string_view{"link_tx_reset"}, 400 * us_ps }
+  })
+  {
+    std::optional<std::string> runs;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    {
+      CAPTURE(how.name);
+      CAPTURE(sender);
+      world w;
+      w.add(sender);
+      w.add("link_rx");
+      w.link(0, 1, latency_20);
+      w.host(how);
+      REQUIRE(w.resume(at).reason == core::pause_reason::system_time);
+      w.collect();
+      for(auto& tap : w.taps)
+      {
+        tap.clear();
+      }
+      std::vector<core::snapshot> saved;
+      std::vector<std::byte>      state;
+      for(auto const& one : w.members)
+      {
+        saved.push_back(core::access(*one.on, 0, [](core::machine& m) { return m.snapshot(); }));
+      }
+      {
+        auto const held = w.sys->lock();
+        w.sys->save(held, state);
+      }
+      auto const frames   = w.nodes[0]->own->frames.size();
+      auto const warnings = std::pair{w.nodes[0]->warnings.size(), w.nodes[1]->warnings.size()};
+      REQUIRE(w.run_to(script_end).reason == core::pause_reason::system_time);
+      auto const first = w.dump();
+      if(runs)
+      {
+        CHECK(first == *runs);
+      }
+      runs = first;
+      for(std::size_t index = 0; index < w.members.size(); ++index)
+      {
+        core::access(*w.members[index].on, 0, [&](core::machine& m) { m.restore(saved[index]); });
+      }
+      {
+        auto const held = w.sys->lock();
+        w.sys->load(held, state);
+      }
+      w.nodes[0]->own->frames.resize(frames);
+      w.nodes[0]->warnings.resize(warnings.first);
+      w.nodes[1]->warnings.resize(warnings.second);
+      for(auto& tap : w.taps)
+      {
+        tap.clear();
+      }
+      REQUIRE(w.run_to(script_end).reason == core::pause_reason::system_time);
+      CHECK(w.dump() == first);
+      {
+        auto const                   held = w.sys->lock();
+        std::vector<std::byte> const junk{std::byte{1}, std::byte{2}};
+        CHECK_THROWS_AS(w.sys->load(held, junk), popcorn::config_error);
+      }
+    }
+  }
+}
+
+namespace
+{
+struct after_point
+{
+  std::vector<std::uint32_t>    rx;
+  std::vector<std::uint32_t>    tx;
+  std::vector<stm32::tap_frame> tap;
+  std::vector<std::uint64_t>    own{};
+
+  friend auto operator==(after_point const&, after_point const&) -> bool = default;
+};
+
+auto observed_after(world& w, std::size_t own_from) -> after_point
+{
+  after_point out{.rx = w.nodes[1]->log(), .tx = w.nodes[0]->log(), .tap = w.taps[0]};
+  for(std::size_t index = own_from; index < w.nodes[0]->own->frames.size(); ++index)
+  {
+    auto const& frame = w.nodes[0]->own->frames[index];
+    out.own.push_back(frame.at.ps - static_cast<std::uint64_t>(w.nodes[0]->origin));
+    out.own.push_back(frame.data);
+  }
+  return out;
+}
+
+auto restored_run(variant const& saving, variant const& loading, std::int64_t at) -> after_point
+{
+  world first;
+  first.add("link_tx");
+  first.add("link_rx");
+  first.link(0, 1, latency_20);
+  first.host(saving);
+  REQUIRE(first.resume(at).reason == core::pause_reason::system_time);
+  std::vector<core::snapshot_data> saved;
+  for(auto const& one : first.members)
+  {
+    saved.push_back(core::access(*one.on, 0, [](core::machine& m) { return m.snapshot().data(); }));
+  }
+  std::vector<std::byte> state;
+  {
+    auto const held = first.sys->lock();
+    first.sys->save(held, state);
+  }
+  world second;
+  second.add("link_tx");
+  second.add("link_rx");
+  second.link(0, 1, latency_20);
+  second.host(loading);
+  for(std::size_t index = 0; index < second.members.size(); ++index)
+  {
+    core::access(*second.members[index].on, 0, [&](core::machine& m) {
+      m.restore(core::snapshot{saved[index]});
+    });
+  }
+  {
+    auto const held = second.sys->lock();
+    second.sys->load(held, state);
+  }
+  REQUIRE(second.run_to(script_end).reason == core::pause_reason::system_time);
+  return observed_after(second, 0);
+}
+}
+
+TEST_CASE("a state saved at one quantum continues under another as the run never saved")
+{
+  variant const          third{.name = "q=l/3", .lowered = 3};
+  variant const          whole{.name = "q=l with a spare", .lowered = 1};
+  constexpr std::int64_t at = 1500 * us_ps;
+  world                  plain;
+  plain.add("link_tx");
+  plain.add("link_rx");
+  plain.link(0, 1, latency_20);
+  plain.host(whole);
+  REQUIRE(plain.resume(at).reason == core::pause_reason::system_time);
+  plain.collect();
+  plain.taps[0].clear();
+  auto const own_from = plain.nodes[0]->own->frames.size();
+  REQUIRE(plain.run_to(script_end).reason == core::pause_reason::system_time);
+  auto const expected = observed_after(plain, own_from);
+  REQUIRE_FALSE(expected.tap.empty());
+  CHECK(restored_run(third, whole, at) == expected);
+  CHECK(restored_run(whole, third, at) == expected);
 }

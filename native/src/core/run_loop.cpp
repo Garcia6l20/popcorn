@@ -181,6 +181,7 @@ void machine::run_state::install_hooks()
 void machine::run_state::reset_machine(reset_kind kind)
 {
   owner.scheduler_.restore({}, 0);
+  held_through.reset();
   auto fresh            = owner.clock_driver_.state();
   fresh.before_reset_ps = kind == reset_kind::power_on ? 0 : owner.clock_.since_power_on().ps;
   fresh.now             = {};
@@ -666,6 +667,7 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
 {
   std::uint32_t countdown = wall_check_blocks;
   auto          limit     = owner.clock_driver_.exact_now();
+  auto          holding   = false;
   if(request.hold_from_until and request.until_time)
   {
     auto const held = hold_limit(*request.until_time, owner.clock_);
@@ -673,7 +675,8 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
     {
       return std::nullopt;
     }
-    limit = std::min(limit, *held);
+    holding = *held < limit;
+    limit   = std::min(limit, *held);
   }
   while(auto const due = owner.scheduler_.pop_due(limit))
   {
@@ -710,6 +713,10 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
         return slice_end{};
       }
     }
+  }
+  if(not holding)
+  {
+    held_through.reset();
   }
   return std::nullopt;
 }
@@ -941,6 +948,12 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
     end.asked   = true;
   }
+  if(request.hold_from_until
+     and request.until_time
+     and owner.clock_driver_.exact_time() >= *request.until_time)
+  {
+    held_through = owner.clock_driver_.exact_now();
+  }
   if(end.stopped and not internal_end(request, *end.stopped))
   {
     auto& where = end.stopped->where;
@@ -959,8 +972,7 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
       .stopped      = std::move(end.stopped),
       .executed     = executed,
       .asked        = end.asked,
-      .thread_ready = thread_ready,
-      .dispatched   = dispatched};
+      .thread_ready = thread_ready};
 }
 
 auto machine::run_state::run(slice_request const& request) -> slice_result
@@ -978,7 +990,6 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   jumped         = {};
   wall_countdown = wall_check_blocks;
   wall_expired   = false;
-  dispatched     = false;
   wall_deadline  = std::chrono::steady_clock::now() + request.wall_budget;
   until_thread   = request.until_thread;
   set_exits(exit_list(request));
@@ -993,7 +1004,6 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, std::move(*end));
     }
-    dispatched = true;
     if(auto end = handle_requests())
     {
       return finish(request, std::move(*end));

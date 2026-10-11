@@ -785,14 +785,18 @@ public:
    *
    * With @p at, a stamp: the body runs at the first block boundary at or after @p at, exactly at
    * @p at when the core is idle there, before a stop of that boundary is reported. Stamps run in
-   * time order, equal stamps in posting order. A stamp equal to the machine's time runs at once.
+   * time order, equal stamps in posting order. A stamp equal to the machine's time runs at once,
+   * unless an earlier or equal stamp is pending, or an event a held slice left due, see
+   * machine::held_through(), is still pending: it then runs after the next slice dispatched
+   * it.
    * A later stamp on a parked member stays pending until a goal or free run reaches it. A reset
    * or a restore fails every pending stamp with operation_cancelled. A body captures native
    * values only. A later stamp from the host thread in a callback, with no host mutex held, takes
    * this host's mutex blocking: native callers only, the binding refuses posts from a host
-   * thread. After a slice that reached its until_time with slice_request::hold_from_until,
-   * due stamps wait for the next slice that dispatches without a hold, so a body never runs
-   * before the events held at its boundary.
+   * thread. While an event a slice_request::hold_from_until slice left held is pending, up to
+   * machine::held_through(), due stamps wait for the next slice to dispatch it, so a body never
+   * runs before the events due at its point. The mark is machine state, so a snapshot restore
+   * and an unlinked member keep it.
    *
    * @throws std::invalid_argument when @p at is before the machine's time, checked here unless
    *         the member is running. While running the check happens at the next boundary and

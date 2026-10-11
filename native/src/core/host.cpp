@@ -187,7 +187,6 @@ struct member_slot
   timeline_mark             mark;
   bool                      linked = false;
   driver_cell               driver{};
-  bool                      stamps_held = false;
 
   void push_stamp(stamped made)
   {
@@ -224,6 +223,13 @@ struct member_slot
     return why;
   }
 };
+
+auto event_due(member_slot const& slot) -> bool
+{
+  auto const next   = slot.engine->next_event();
+  auto const marked = slot.engine->held_through();
+  return next and marked and *next <= *marked;
+}
 
 struct turn_plan
 {
@@ -847,7 +853,7 @@ struct host_core
 
   void apply_due(member_slot& slot)
   {
-    if(slot.stamps_held)
+    if(detail::event_due(slot))
     {
       return;
     }
@@ -906,16 +912,6 @@ struct host_core
   void after_slice(member_slot& slot, slice_request const& request, slice_result& result)
   {
     supersede_if_moved(slot);
-    if(request.hold_from_until
-       and request.until_time
-       and slot.engine->virtual_clock().time() >= *request.until_time)
-    {
-      slot.stamps_held = true;
-    }
-    else if(result.dispatched)
-    {
-      slot.stamps_held = false;
-    }
     apply_due(slot);
     if(request.internal_stop and result.stopped and result.stopped->reason == stop_reason::time)
     {
@@ -1845,7 +1841,9 @@ void host::post_stamped(
   {
     throw detail::past_stamp(at, now);
   }
-  if(at == now)
+  if(at == now
+     and not detail::event_due(slot)
+     and not(slot.next_stamp() and *slot.next_stamp() <= at))
   {
     std::optional<owner_scope> owning;
     if(not inline_owner)

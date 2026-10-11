@@ -252,6 +252,27 @@ public:
    */
   void finish(held_system const& held) pre(held.holds(*this));
 
+  /**
+   * @brief Appends the system's own state to @p out: the window, the pending barrier, each
+   *        member's base and every link's state. Member machines are saved apart, with
+   *        machine::snapshot(). Only with no goal pending, no member undecided and nothing
+   *        found but not delivered, so a save never holds a goal or an error.
+   * @throws std::logic_error before start(), while a resume is in flight, after an error or
+   *         finish(), or with a goal, an undecided member or an entry pending.
+   */
+  void save(held_system const& held, std::vector<std::byte>& out) const pre(held.holds(*this));
+
+  /**
+   * @brief Restores a state save() wrote, after the member machines were restored from
+   *        snapshots taken with it. Every member's reset count is taken as the system's own. The
+   *        saving system's quantum need not match: its pending barrier stays, the barriers after
+   *        it follow this system's quantum. A load that throws leaves the system as before.
+   * @throws config_error when @p in is not such a state or does not match the members and
+   *         links.
+   * @throws std::logic_error as save().
+   */
+  void load(held_system const& held, std::span<std::byte const> in) pre(held.holds(*this));
+
   /** @brief Asks for a pause at the next barrier, waking a system asleep on IDLE. Any thread
    * holding no host mutex, takes each host's mutex briefly. A request no resume consumed before
    * it paused is dropped by the next resume(). */

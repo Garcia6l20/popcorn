@@ -2,6 +2,7 @@
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/member_link.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/core/system.hpp>
 #include <popcorn/core/window_barrier.hpp>
 
@@ -142,11 +143,19 @@ public:
     finished.push_back(at.ps);
   }
 
-  void save(std::vector<std::byte>&) const override
-  {}
+  void save(std::vector<std::byte>& out) const override
+  {
+    out.push_back(state);
+  }
 
-  void load(std::span<std::byte const>) override
-  {}
+  void load(std::span<std::byte const> in) override
+  {
+    if(fail_load or in.size() != 1)
+    {
+      throw popcorn::config_error("fake link", 0, "bytes", "one state byte");
+    }
+    state = in[0];
+  }
 
   std::uint64_t                     entered{};
   std::vector<drained>              drains;
@@ -155,6 +164,8 @@ public:
   std::optional<std::int64_t>       fault_at{};
   std::function<void(std::int64_t)> on_drain{};
   bool                              busy{};
+  std::byte                         state{};
+  bool                              fail_load{};
   std::vector<std::int64_t>         finished{};
   bool                              reported{};
 
@@ -1714,4 +1725,322 @@ TEST_CASE("a wake that lands between the sleep decision and the host's wait is n
   };
   auto const quiet = slices(false);
   CHECK(slices(true) > quiet);
+}
+
+TEST_CASE("save refuses a pending goal and an undecided member")
+{
+  rig r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  };
+  r.build(variants()[0]);
+  std::vector<std::byte> out;
+  auto                   goal = r.goal(0, {.budget = icount{100}});
+  {
+    auto const held = r.sys->lock();
+    CHECK_THROWS_AS(r.sys->save(held, out), std::logic_error);
+  }
+  REQUIRE(r.run({}).member == 0);
+  {
+    auto const held = r.sys->lock();
+    CHECK_THROWS_AS(r.sys->save(held, out), std::logic_error);
+  }
+  r.release(0);
+  auto const held = r.sys->lock();
+  r.sys->save(held, out);
+  CHECK_FALSE(out.empty());
+}
+
+TEST_CASE("a load that fails on its second link leaves the system as it was")
+{
+  rig r{.members = sleeper_and_runner()};
+  r.build(variants()[1]);
+  REQUIRE(r.run(100 * us_ps).reason == core::pause_reason::system_time);
+  r.links[0]->state = std::byte{1};
+  r.links[1]->state = std::byte{2};
+  std::vector<std::byte> saved;
+  {
+    auto const held = r.sys->lock();
+    r.sys->save(held, saved);
+  }
+  REQUIRE(r.run(300 * us_ps).reason == core::pause_reason::system_time);
+  r.links[0]->state     = std::byte{5};
+  r.links[1]->fail_load = true;
+  auto const held       = r.sys->lock();
+  auto const barrier    = r.sys->pending_barrier(held);
+  CHECK_THROWS_AS(r.sys->load(held, saved), popcorn::config_error);
+  CHECK(r.links[0]->state == std::byte{5});
+  CHECK(r.sys->pending_barrier(held) == barrier);
+}
+
+namespace
+{
+struct stamp_seen
+{
+  std::vector<std::uint64_t> log;
+  std::int64_t               at{};
+};
+
+auto stamp_after_pause(bool reload) -> stamp_seen
+{
+  popcorn::testing::test_arch* module = nullptr;
+  auto                         make   = [&module] {
+    return member<popcorn::testing::test_arch>(
+        "idle", "idle_forever", [&module](popcorn::testing::machine_fixture<>& f) {
+          auto const now = f.target->virtual_clock().now().value;
+          std::ignore    = f.module->attached_events().schedule(icount{now + 103}, logged_kind, 7);
+          module         = f.module;
+        });
+  };
+  rig r{
+      .members = {member("alu", "alu_entry"), make()}
+  };
+  r.build(variants()[0]);
+  auto       goal    = r.goal(0, {.budget = icount{100}});
+  auto const stopped = r.run({});
+  REQUIRE(stopped.member == 0);
+  r.release(0);
+  REQUIRE(r.now_of(1) == stopped.at.ps);
+  if(reload)
+  {
+    std::vector<core::snapshot> saved;
+    std::vector<std::byte>      state;
+    for(auto const& one : r.members)
+    {
+      saved.push_back(core::access(*one.on, 0, [](core::machine& m) { return m.snapshot(); }));
+    }
+    {
+      auto const held = r.sys->lock();
+      r.sys->save(held, state);
+    }
+    rig fresh{
+        .members = {member("alu", "alu_entry"), make()}
+    };
+    fresh.build(variants()[0]);
+    for(std::size_t index = 0; index < 2; ++index)
+    {
+      core::access(*fresh.members[index].on, 0, [&](core::machine& m) {
+        m.restore(core::snapshot{saved[index].data()});
+      });
+    }
+    {
+      auto const held = fresh.sys->lock();
+      fresh.sys->load(held, state);
+    }
+    r = std::move(fresh);
+  }
+  auto*                      log = &module->event_log;
+  std::vector<std::uint64_t> seen;
+  core::host_future<vtime>   landed;
+  {
+    auto const held_host = r.members[1].on->lock();
+    auto const now       = r.members[1].on->member(held_host, 0).virtual_clock().time();
+    landed               = r.members[1].on->post(
+        held_host, 0,
+        [&seen, log](core::machine&) {
+          for(auto const& one : *log)
+          {
+            seen.push_back(one.payload);
+          }
+        },
+        vtime{now.ps});
+  }
+  if(not landed.done())
+  {
+    REQUIRE(r.run({}).reason == core::pause_reason::idle);
+  }
+  return {.log = seen, .at = static_cast<std::int64_t>(landed.get().ps)};
+}
+}
+
+TEST_CASE("a stamp at a pause point with an event held there runs after it, through save and load")
+{
+  auto const plain    = stamp_after_pause(false);
+  auto const reloaded = stamp_after_pause(true);
+  CHECK(plain.log == std::vector<std::uint64_t>{7});
+  CHECK(reloaded.log == plain.log);
+  CHECK(reloaded.at == plain.at);
+}
+
+TEST_CASE("a lone machine stopped between two same-count events runs a stamp at its time at once")
+{
+  popcorn::testing::test_arch* module = nullptr;
+  auto                         lone   = member<popcorn::testing::test_arch>(
+      "idle", "idle_forever", [&module](popcorn::testing::machine_fixture<>& f) {
+        auto const now = f.target->virtual_clock().now().value;
+        std::ignore    = f.module->attached_events().schedule(icount{now + 50}, logged_kind, 1);
+        std::ignore    = f.module->attached_events().schedule(icount{now + 50}, logged_kind, 2);
+        module         = f.module;
+      });
+  core::host_future<core::goal_result> stopped;
+  {
+    auto const held = lone.on->lock();
+    stopped =
+        lone.on->run(held, 0, {.stop_when = [&module] { return not module->event_log.empty(); }});
+  }
+  REQUIRE(stopped.get().stopped.reason == stop_reason::user);
+  auto const held = lone.on->lock();
+  auto&      m    = lone.on->member(held, 0);
+  REQUIRE(m.next_event());
+  REQUIRE(*m.next_event() <= m.virtual_clock().now());
+  auto const landed = lone.on->post(held, 0, [](core::machine&) {}, m.virtual_clock().time());
+  CHECK(landed.done());
+}
+
+TEST_CASE("equal stamps on a linked member keep their order when the due event is cancelled")
+{
+  popcorn::testing::test_arch* module = nullptr;
+  std::uint64_t                due_id = 0;
+  auto                         make   = [&module, &due_id] {
+    return member<popcorn::testing::test_arch>(
+        "idle", "idle_forever", [&module, &due_id](popcorn::testing::machine_fixture<>& f) {
+          auto const now = f.target->virtual_clock().now().value;
+          due_id         = f.module->attached_events().schedule(icount{now + 103}, logged_kind, 7);
+          module         = f.module;
+        });
+  };
+  rig r{
+      .members = {member("alu", "alu_entry"), make()}
+  };
+  r.build(variants()[0]);
+  auto goal = r.goal(0, {.budget = icount{100}});
+  REQUIRE(r.run({}).member == 0);
+  r.release(0);
+  std::vector<int>         order;
+  core::host_future<vtime> first;
+  core::host_future<vtime> second;
+  {
+    auto const held_host = r.members[1].on->lock();
+    auto&      m         = r.members[1].on->member(held_host, 0);
+    auto const now       = m.virtual_clock().time();
+    first =
+        r.members[1].on->post(held_host, 0, [&order](core::machine&) { order.push_back(1); }, now);
+    CHECK_FALSE(first.done());
+    module->attached_events().cancel(due_id);
+    second =
+        r.members[1].on->post(held_host, 0, [&order](core::machine&) { order.push_back(2); }, now);
+  }
+  CHECK_FALSE(second.done());
+  REQUIRE(r.run({}).reason == core::pause_reason::idle);
+  std::ignore = first.get();
+  std::ignore = second.get();
+  CHECK(order == std::vector<int>{1, 2});
+}
+
+namespace
+{
+auto lone_stamp_after(bool through_snapshot) -> std::vector<std::uint64_t>
+{
+  popcorn::testing::test_arch* module = nullptr;
+  auto                         make   = [&module] {
+    return member<popcorn::testing::test_arch>(
+        "idle", "idle_forever", [&module](popcorn::testing::machine_fixture<>& f) {
+          auto const now = f.target->virtual_clock().now().value;
+          std::ignore    = f.module->attached_events().schedule(icount{now + 103}, logged_kind, 7);
+          module         = f.module;
+        });
+  };
+  rig r{
+      .members = {member("alu", "alu_entry"), make()}
+  };
+  r.build(variants()[0]);
+  auto goal = r.goal(0, {.budget = icount{100}});
+  REQUIRE(r.run({}).member == 0);
+  r.release(0);
+  auto lone = r.members[1];
+  if(through_snapshot)
+  {
+    auto const saved =
+        core::access(*lone.on, 0, [](core::machine& m) { return m.snapshot().data(); });
+    r.sys.reset();
+    lone = make();
+    core::access(*lone.on, 0, [&saved](core::machine& m) { m.restore(core::snapshot{saved}); });
+  }
+  else
+  {
+    r.sys.reset();
+  }
+  auto*                      log = &module->event_log;
+  std::vector<std::uint64_t> seen;
+  core::host_future<vtime>   landed;
+  vtime                      at{};
+  {
+    auto const held = lone.on->lock();
+    at              = lone.on->member(held, 0).virtual_clock().time();
+    landed          = lone.on->post(
+        held, 0,
+        [&seen, log](core::machine&) {
+          for(auto const& one : *log)
+          {
+            seen.push_back(one.payload);
+          }
+        },
+        at);
+  }
+  core::host_future<core::goal_result> plain;
+  {
+    auto const held = lone.on->lock();
+    plain           = lone.on->run(held, 0, {.until_time = vtime{at.ps + us_ps}});
+  }
+  std::ignore = plain.get();
+  CHECK(landed.get() == at);
+  return seen;
+}
+}
+
+TEST_CASE("a stamp at a held point runs after the held event on a member left alone, saved or not")
+{
+  CHECK(lone_stamp_after(false) == std::vector<std::uint64_t>{7});
+  CHECK(lone_stamp_after(true) == std::vector<std::uint64_t>{7});
+}
+
+TEST_CASE("a dispatch cut short after one held event keeps a stamp behind the next one")
+{
+  popcorn::testing::test_arch* module = nullptr;
+  std::uint64_t                due    = 0;
+  auto                         lone   = member<popcorn::testing::test_arch>(
+      "idle", "idle_forever", [&module, &due](popcorn::testing::machine_fixture<>& f) {
+        due         = f.target->virtual_clock().now().value + 50;
+        std::ignore = f.module->attached_events().schedule(icount{due}, logged_kind, 1);
+        std::ignore = f.module->attached_events().schedule(icount{due}, logged_kind, 2);
+        module      = f.module;
+      });
+  std::vector<std::uint64_t> seen;
+  core::host_future<vtime>   landed;
+  {
+    auto const held  = lone.on->lock();
+    auto&      m     = lone.on->member(held, 0);
+    auto const until = vtime{m.virtual_clock().time().ps + 50 * 250'000};
+    REQUIRE(m.run_slice({.max_instructions = icount{1'000'000},
+                         .until_time       = until,
+                         .hold_from_until  = true,
+                         .internal_stop    = true})
+                .stopped);
+    REQUIRE(m.virtual_clock().now().value == due);
+    REQUIRE(module->event_log.empty());
+    auto const cut = m.run_slice(
+        {.max_instructions = icount{1'000'000}, .until_time = until, .stop_when = [&module] {
+           return not module->event_log.empty();
+         }});
+    REQUIRE(cut.stopped);
+    REQUIRE(cut.stopped->reason == stop_reason::user);
+    REQUIRE(module->event_log.size() == 1);
+    landed = lone.on->post(
+        held, 0,
+        [&seen, &module](core::machine&) {
+          for(auto const& one : module->event_log)
+          {
+            seen.push_back(one.payload);
+          }
+        },
+        m.virtual_clock().time());
+    CHECK_FALSE(landed.done());
+  }
+  core::host_future<core::goal_result> plain;
+  {
+    auto const held = lone.on->lock();
+    plain           = lone.on->run(held, 0, {.budget = icount{1}});
+  }
+  std::ignore = plain.get();
+  std::ignore = landed.get();
+  CHECK(seen == std::vector<std::uint64_t>{1, 2});
 }
