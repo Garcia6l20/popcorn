@@ -540,14 +540,7 @@ void cortex_m::write(int engine_id, std::uint32_t value) const
 
 void cortex_m::refresh_pending() noexcept
 {
-  auto any = false;
-  for(std::uint32_t number = 2; number < exception_count() and not any; ++number)
-  {
-    any = is_pending(number)
-      and is_enabled(number)
-      and (not state_.call_masked or synchronous(number));
-  }
-  set_pending(any);
+  set_pending(any_pending(state_.exceptions, exception_count(), state_.call_masked));
 }
 
 void cortex_m::rethrow_failure() const

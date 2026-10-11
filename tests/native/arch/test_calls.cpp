@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -575,9 +576,16 @@ TEST_CASE("an IRQ line raised during a masked call is taken after end_call")
   REQUIRE(model != nullptr);
   model->go_delay = 1000;
   REQUIRE(f.target->mem().write(0x4001'005C, 4, 1));
-  REQUIRE(
-      call(f, frame("spin_forever", {}), icount{100'000}).stopped.reason == stop_reason::budget);
+  f.target->begin_call(frame("spin_forever", {}));
+  auto const spun =
+      f.run({.wall_budget = std::chrono::seconds{60}, .budget_left = icount{100'000}});
+  REQUIRE(spun.stopped.has_value());
+  REQUIRE(spun.stopped->reason == stop_reason::budget);
+  CHECK(f.module->is_pending(16 + 3));
+  CHECK_FALSE(f.module->pending());
+  std::ignore = f.target->end_call();
   CHECK(f.word(fn("irq3_count")) == 0);
+  CHECK(f.module->pending());
   run_for(f, 10 * period);
   CHECK(f.word(fn("irq3_count")) == 1);
 }

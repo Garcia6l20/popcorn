@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <format>
 #include <ranges>
 #include <span>
@@ -147,25 +148,82 @@ auto execution_priority(
   return priority;
 }
 
+namespace
+{
+constexpr std::uint32_t system_enabled = 0x0000'fffcu;
+
+constexpr std::uint32_t synchronous_bits = [] consteval {
+  std::uint32_t out = 0;
+  for(std::uint32_t number = 0; number < 32; ++number)
+  {
+    out |= synchronous(number) ? 1u << number : 0u;
+  }
+  return out;
+}();
+
+auto candidates(
+    exception_state const& exceptions,
+    std::size_t            word,
+    std::uint32_t          count,
+    bool                   synchronous_only) noexcept -> std::uint32_t
+{
+  auto const enabled = word < exceptions.enabled.size() ? exceptions.enabled[word] : 0u;
+  auto       bits =
+      exceptions.pending[word] & (word == 0 ? (enabled & ~0xffffu) | system_enabled : enabled);
+  if(synchronous_only)
+  {
+    bits &= word == 0 ? synchronous_bits : 0u;
+  }
+  if(auto const first = static_cast<std::uint64_t>(word) * 32; count - first < 32)
+  {
+    bits &= (1u << (count - first)) - 1u;
+  }
+  return bits;
+}
+
+auto scanned_words(exception_state const& exceptions, std::uint32_t count) noexcept -> std::size_t
+{
+  return std::min<std::size_t>(exceptions.pending.size(), (std::size_t{count} + 31) / 32);
+}
+}
+
 auto best_pending(exception_state const& exceptions, bool synchronous_only) noexcept
     -> std::optional<std::uint32_t>
 {
+  auto const                   count = static_cast<std::uint32_t>(exceptions.priority.size());
   std::optional<std::uint32_t> best;
-  for(std::uint32_t number = exc_nmi; number < exceptions.priority.size(); ++number)
+  auto                         best_priority = 0;
+  for(std::size_t word = 0; word < scanned_words(exceptions, count); ++word)
   {
-    auto const enabled = number < exc_irq0 or test_bit(exceptions.enabled, number);
-    if(not enabled
-       or not test_bit(exceptions.pending, number)
-       or (synchronous_only and not synchronous(number)))
+    for(auto bits = candidates(exceptions, word, count, synchronous_only); bits != 0;
+        bits &= bits - 1)
     {
-      continue;
-    }
-    if(not best or priority_of(exceptions, number) < priority_of(exceptions, *best))
-    {
-      best = number;
+      auto const number   = static_cast<std::uint32_t>(word * 32)
+                          + static_cast<std::uint32_t>(std::countr_zero(bits));
+      auto const priority = priority_of(exceptions, number);
+      if(not best or priority < best_priority)
+      {
+        best          = number;
+        best_priority = priority;
+      }
     }
   }
   return best;
+}
+
+auto any_pending(
+    exception_state const& exceptions,
+    std::uint32_t          count,
+    bool                   synchronous_only) noexcept -> bool
+{
+  for(std::size_t word = 0; word < scanned_words(exceptions, count); ++word)
+  {
+    if(candidates(exceptions, word, count, synchronous_only) != 0)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 void set_context(uc_struct* engine, special_registers const& target, bool stack_limits)

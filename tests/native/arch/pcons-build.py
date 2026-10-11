@@ -53,6 +53,7 @@ arch_tests = [
         ("arch-rtos", "test_rtos.cpp"),
         ("arch-store-controller", "test_store_controller.cpp"),
         ("arch-scs-exit", "test_scs_exit.cpp"),
+        ("arch-pending-scan", "test_pending_scan.cpp"),
     )
 ]
 for test in arch_tests:
