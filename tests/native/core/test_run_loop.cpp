@@ -4,6 +4,7 @@
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/trace.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -649,6 +650,76 @@ TEST_CASE("a guest store through one rwx window reaches code running at the othe
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   CHECK(f.word(sym("run", "ram_results")) == 1);
   CHECK(f.word(sym("run", "ram_results") + 4) == 9);
+}
+
+TEST_CASE("guest stores through an execute-never window keep reaching retranslated code")
+{
+  auto desc = m33();
+  desc.regions.push_back({
+      .name       = "SRAM_DEVICE",
+      .start      = 0xa000'0000,
+      .size       = 768 * 1024,
+      .kind       = popcorn::region_kind::ram,
+      .acc        = {.read = true, .write = true, .execute = false},
+      .secure     = false,
+      .physical   = 0x2000'0000,
+      .controller = std::nullopt,
+      .content    = std::nullopt,
+  });
+  constexpr address                             code_at = 0x2001'0000;
+  constexpr std::array<std::uint16_t, 14> const code{
+      0xf000, 0xf80a, 0x4605, 0x800a, 0xf000, 0xf806, 0x4606,
+      0x800b, 0xf000, 0xf802, 0x4607, 0xbe00, 0x2001, 0x4770,
+  };
+  auto f = boot_run(desc);
+  for(std::size_t index = 0; index < code.size(); ++index)
+  {
+    REQUIRE(f.target->mem().write(code_at + 2 * index, 2, code[index]));
+  }
+  f.set("pc", code_at);
+  f.set("r1", code_at + 0x18 - 0x2000'0000 + 0xa000'0000);
+  f.set("r2", 0x2002);
+  f.set("r3", 0x2003);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.reg("r5") == 1);
+  CHECK(f.reg("r6") == 2);
+  CHECK(f.reg("r7") == 3);
+}
+
+TEST_CASE("a guest store through a partial window reaches code at the other through its hook")
+{
+  auto desc = m33();
+  desc.regions.push_back({
+      .name       = "SRAM_ALIAS",
+      .start      = 0x1000'0000,
+      .size       = 64 * 1024,
+      .kind       = popcorn::region_kind::ram,
+      .acc        = {.read = true, .write = true, .execute = true},
+      .secure     = false,
+      .physical   = 0x2000'0000,
+      .controller = std::nullopt,
+      .content    = std::nullopt,
+  });
+  auto const ram_fn   = sym("run", "ram_fn");
+  auto const aliased  = ram_fn - 0x2000'0000 + 0x1000'0000;
+  address    run_at   = ram_fn;
+  address    store_at = aliased;
+  SUBCASE("code at the target, store through the alias")
+  {}
+  SUBCASE("code at the alias, store through the target")
+  {
+    std::swap(run_at, store_at);
+  }
+  auto       f      = boot_run(desc);
+  auto const hooked = core::machine_internals::counters(*f.target).guest_stores_hooked;
+  enter(f, "guest_patch");
+  f.set("r0", run_at | 1);
+  f.set("r1", store_at);
+  f.set("r2", 0x2009);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(f.word(sym("run", "ram_results")) == 1);
+  CHECK(f.word(sym("run", "ram_results") + 4) == 9);
+  CHECK(core::machine_internals::counters(*f.target).guest_stores_hooked > hooked);
 }
 
 TEST_CASE("a stop requested from a handler is taken at the next block with its detail")

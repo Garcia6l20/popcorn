@@ -13,7 +13,7 @@ Python extension links Unicorn statically, so an installed popcorn extension is
 a combined work subject to GPL-2.0-only.
 
 Unicorn CPU emulator, popcorn fork at commit
-1b3acbd5f5b271dc3964a9b0f5bc82206a12d3bf, submodule third_party/unicorn
+04ecd22c178bf72f6ef207fa4836f4d3496b7513, submodule third_party/unicorn
   https://github.com/Garcia6l20/unicorn, branch popcorn
   Upstream: https://github.com/unicorn-engine/unicorn, commit
   938efd13aeab73155f31cf707a2094c6ccaa36dd, modified as follows.
@@ -72,11 +72,23 @@ Unicorn CPU emulator, popcorn fork at commit
     sends every guest load and store to the slow path whenever any of these
     hooks exists, and a hook added after a block was translated misses that
     block's accesses.
+  - include/unicorn/unicorn.h, include/uc_priv.h, uc.c, symbols.sh,
+    qemu/softmmu/memory.c, qemu/include/exec/memory.h, qemu/unicorn_common.h,
+    the per-architecture symbol headers in qemu/, qemu/accel/tcg/cputlb.c:
+    added uc_mem_map_alias(), a second window over a whole mapped region that
+    shares its storage and RAMBlock with its own permissions, so a store
+    through any window invalidates code translated through any other, also
+    through a window the guest maps execute-never. Partial
+    aliases, protection changes and memory snapshots over aliased memory are
+    refused. Upstream has no alias mapping, and code translated through one
+    uc_mem_map_ptr window survives a store through another over the same host
+    memory.
   - include/unicorn/unicorn.h, include/uc_priv.h, uc.c,
     qemu/accel/tcg/cputlb.c: added UC_CTL_UC_SLOW_PATH_COUNT, a count of data
     accesses that reached the slow path on a RAM page, for tests.
   - tests/unit/test_mem.c: added test_mem_write_hook_flush_tlb, the
-    test_mem_hook tests and the test_mem_slow_path tests.
+    test_mem_hook tests, the test_mem_alias tests and the test_mem_slow_path
+    tests.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.0, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.

@@ -554,9 +554,10 @@ struct machine::run_state
   /** @brief Blocks between two wall clock reads, reading it every block costs 20 ns. */
   static constexpr std::uint32_t wall_check_blocks = 256;
 
-  /** @brief Writable window of an executable buffer mapped more than once, watched for guest
-   * stores: Unicorn invalidates translated code on a store only through the window its RAM block
-   * lookup attributes the code to. */
+  /** @brief Writable window of an executable buffer with two or more windows of their own engine
+   * memory, watched for guest stores: Unicorn invalidates translated code on a store only through
+   * the engine memory the code was translated from. Windows mapped with `uc_mem_map_alias` share
+   * their owner's, so a buffer whose other windows are all such aliases is not watched. */
   struct guest_window
   {
     /** @brief Run state recording the stores. */

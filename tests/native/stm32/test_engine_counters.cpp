@@ -105,7 +105,7 @@ TEST_CASE("every TIM6 interrupt entry is counted once")
   CHECK(entries == 100);
   CHECK(after.entries - before.entries == entries);
   CHECK(after.removes_direct - before.removes_direct == entries);
-  CHECK(after.remove_calls_direct - before.remove_calls_direct == 4 * entries);
+  CHECK(after.remove_calls_direct - before.remove_calls_direct == entries);
   CHECK(ended(before, after, engine_end::exit) == entries);
   CHECK(ends_sum(after) == after.engine_runs);
 }
@@ -125,23 +125,21 @@ TEST_CASE("a spin that only loads hooks no store and stops the engine only for i
   CHECK(ends_sum(after) == after.engine_runs);
 }
 
-TEST_CASE("each hooked SRAM store in a spin stops the engine and is removed by a drain")
+TEST_CASE("SRAM stores in a spin are not hooked and never stop the engine")
 {
   irq_machine m{"spin_store", 0, 0};
   m.run_to(2 * ms_ps);
   auto const before     = m.counters();
   auto const spins_from = m.word("spins");
-  m.run_to(2 * ms_ps + ms_ps / 10);
-  auto const after        = m.counters();
-  auto const spins        = m.word("spins") - spins_from;
-  auto const stores       = after.guest_stores_hooked - before.guest_stores_hooked;
-  auto const removes      = after.removes_in_engine - before.removes_in_engine;
-  auto const remove_calls = after.remove_calls_in_engine - before.remove_calls_in_engine;
-  CHECK(spins >= 1000);
-  CHECK(stores == spins);
-  CHECK(removes == spins);
-  CHECK(remove_calls == 4 * removes);
-  CHECK(ended(before, after, engine_end::store) == spins);
+  m.run_to(6 * ms_ps);
+  auto const after = m.counters();
+  auto const spins = m.word("spins") - spins_from;
+  CHECK(spins >= 100'000);
+  CHECK(after.guest_stores_hooked == before.guest_stores_hooked);
+  CHECK(after.removes_in_engine == before.removes_in_engine);
+  CHECK(after.remove_calls_in_engine == before.remove_calls_in_engine);
+  CHECK(ended(before, after, engine_end::store) == 0);
+  CHECK(after.engine_runs - before.engine_runs == 1);
   CHECK(ends_sum(after) == after.engine_runs);
 }
 

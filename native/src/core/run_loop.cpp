@@ -132,7 +132,8 @@ void machine::run_state::install_hooks()
   for(auto const& region : owner.memory_)
   {
     auto const& buffer = *region->buffer;
-    if(not buffer.executable or buffer.mappings.size() < 2)
+    if(not buffer.executable
+       or std::ranges::count_if(buffer.mappings, &buffer_window::separate) < 2)
     {
       continue;
     }
