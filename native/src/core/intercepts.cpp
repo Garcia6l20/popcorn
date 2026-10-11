@@ -322,6 +322,7 @@ void machine::run_state::on_code_site(
   });
   if(stops)
   {
+    run.end_cause = engine_end::other;
     uc_emu_stop(engine);
   }
 }

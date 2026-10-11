@@ -36,9 +36,19 @@ struct buffer_window
   std::size_t size{};
   /** @brief Whether guest stores may go through the window. */
   bool writable{};
+  /** @brief Whether the window is mapped with `uc_mem_map_alias` onto the buffer's owner, sharing
+   * its engine memory, so code translated through it is code of the owner's window. */
+  bool alias{};
+
+  /** @brief Whether the window has engine memory of its own, `uc_mem_map_ptr`. */
+  [[nodiscard]] auto separate() const noexcept -> bool
+  {
+    return not alias;
+  }
 };
 
-/** @brief Host memory behind one region and every alias of it, mapped with `uc_mem_map_ptr`. */
+/** @brief Host memory behind one region and every alias of it. The region and each partial alias
+ * are mapped with `uc_mem_map_ptr`, an alias over the whole region with `uc_mem_map_alias`. */
 struct host_buffer
 {
   /** @brief Bytes, aligned to 4096. */
@@ -69,7 +79,9 @@ struct machine::mapped_region
   /**
    * @brief Allocates a host buffer per region without `physical`, maps every region in the
    *        engine, aliases onto their target's buffer, then the scratch region as RAM,
-   *        read-write, not executable.
+   *        read-write, not executable. An alias over the whole of its target is mapped with
+   *        `uc_mem_map_alias`, after every other region, so it shares the target's engine
+   *        memory.
    * @param engine Engine to map into.
    * @param description Description whose regions are mapped, which must outlive the result.
    * @param scratch `machine_options::scratch`.
@@ -129,13 +141,14 @@ struct machine::mapped_region
 };
 
 /**
- * @brief Removes translated code over buffer bytes [@p first, @p last) at every window mapping
- *        them.
+ * @brief Removes translated code over buffer bytes [@p first, @p last) at every window with
+ *        engine memory of its own mapping them. An alias window shares its owner's.
+ * @return The engine removal calls made, one per such window overlapping the range.
  * @throws emulation_error when the engine refuses the removal.
  */
-void remove_translated(
+auto remove_translated(
     uc_struct*         engine,
     host_buffer const& buffer,
     std::size_t        first,
-    std::size_t        last);
+    std::size_t        last) -> std::size_t;
 }

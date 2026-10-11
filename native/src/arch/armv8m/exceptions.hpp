@@ -162,6 +162,18 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
     -> std::optional<std::uint32_t>;
 
 /**
+ * @brief Whether any exception from 2 below @p count is pending and enabled, as best_pending
+ *        counts them.
+ * @param exceptions Exception state.
+ * @param count Exception count, 16 + IRQ count.
+ * @param synchronous_only Whether asynchronous exceptions are left out, as in a masked call.
+ */
+[[nodiscard]] auto any_pending(
+    exception_state const& exceptions,
+    std::uint32_t          count,
+    bool                   synchronous_only = false) noexcept -> bool;
+
+/**
  * @brief Writes the special registers in the one order the engine accepts from any privilege:
  *        Handler mode, nPRIV cleared, privileged Thread, target SPSEL and FPCA, both stack
  *        pointers and the masks, target IPSR, target CONTROL with nPRIV last, then GE.

@@ -217,29 +217,54 @@ auto machine::mapped_region::build(
     mapped->offset = *region.physical - (*target)->desc->start;
   }
 
-  std::size_t mapped_count = 0;
+  auto const owner_of = [&](mapped_region const& window) -> mapped_region const* {
+    if(not window.desc->physical or window.offset != 0 or window.desc->size != window.buffer->size)
+    {
+      return nullptr;
+    }
+    auto const owner = std::ranges::find_if(memory, [&](auto const& candidate) {
+      return candidate->buffer == window.buffer
+         and not candidate->desc->physical
+         and candidate->offset == 0
+         and candidate->desc->size == window.buffer->size;
+    });
+    return owner == memory.end() ? nullptr : owner->get();
+  };
+
+  std::vector<mapped_region const*> mapped_order;
   try
   {
-    for(auto const& mapped : memory)
+    for(bool const aliases : {false, true})
     {
-      auto const& region = *mapped->desc;
-      check(
-          uc_mem_map_ptr(
-              engine, region.start, region.size, protection(region),
-              mapped->buffer->bytes.get() + mapped->offset),
-          std::format("mapping region {}", region.name));
-      ++mapped_count;
-      mapped->buffer->executable = mapped->buffer->executable or region.acc.execute;
-      mapped->buffer->mappings.push_back(
-          {.start    = region.start,
-           .offset   = mapped->offset,
-           .size     = region.size,
-           .writable = (protection(region) & UC_PROT_WRITE) != 0});
+      for(auto const& mapped : memory)
+      {
+        auto const* const owner = owner_of(*mapped);
+        if((owner != nullptr) != aliases)
+        {
+          continue;
+        }
+        auto const& region = *mapped->desc;
+        check(
+            aliases ? uc_mem_map_alias(
+                          engine, region.start, region.size, protection(region), owner->desc->start)
+                    : uc_mem_map_ptr(
+                          engine, region.start, region.size, protection(region),
+                          mapped->buffer->bytes.get() + mapped->offset),
+            std::format("mapping region {}", region.name));
+        mapped_order.push_back(mapped.get());
+        mapped->buffer->executable = mapped->buffer->executable or region.acc.execute;
+        mapped->buffer->mappings.push_back(
+            {.start    = region.start,
+             .offset   = mapped->offset,
+             .size     = region.size,
+             .writable = (protection(region) & UC_PROT_WRITE) != 0,
+             .alias    = aliases});
+      }
     }
   }
   catch(...)
   {
-    for(auto const& mapped : memory | std::views::take(mapped_count))
+    for(auto const* mapped : mapped_order | std::views::reverse)
     {
       std::ignore = uc_mem_unmap(engine, mapped->desc->start, mapped->desc->size);
     }
@@ -273,25 +298,28 @@ auto machine::mapped_region::host(address addr) const noexcept -> std::byte*
   return buffer->bytes.get() + offset + (addr - desc->start);
 }
 
-void remove_translated(
+auto remove_translated(
     uc_struct*         engine,
     host_buffer const& buffer,
     std::size_t        first,
-    std::size_t        last)
+    std::size_t        last) -> std::size_t
 {
-  for(auto const& window : buffer.mappings)
+  std::size_t calls = 0;
+  for(auto const& window : buffer.mappings | std::views::filter(&buffer_window::separate))
   {
     auto const from = std::max(first, window.offset);
     auto const to   = std::min(last, window.offset + window.size);
     if(from < to)
     {
       auto const guest = std::uint64_t{window.start} - window.offset;
+      ++calls;
       if(auto const err = uc_ctl_remove_cache(engine, guest + from, guest + to); err != UC_ERR_OK)
       {
         check(err, std::format("removing translated code at {:#010x}", guest + from));
       }
     }
   }
+  return calls;
 }
 
 void machine::mapped_region::host_wrote(run_state& run, address addr, std::size_t size) const

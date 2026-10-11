@@ -5,7 +5,7 @@ from pcons import context
 from popcorn_build.config import VARIANT, project_dir
 from popcorn_build.firmware import firmware
 from popcorn_build.st_description import cached_st_description
-from popcorn_build.testing import add_doctest
+from popcorn_build.testing import add_doctest, alias_bare_name
 
 here = Path(__file__).resolve().parent
 project = context.current_project
@@ -31,6 +31,7 @@ firmwares = {
         "spi_ll",
         "i2c_ll",
         "sai_ll",
+        "irq_ll",
     )
 }
 u575_env = {
@@ -76,6 +77,8 @@ u575_programs = [
         ("stm32-adc", "test_adc.cpp"),
         ("stm32-dbgmcu", "test_dbgmcu.cpp"),
         ("stm32-crc", "test_crc.cpp"),
+        ("stm32-smc", "test_smc.cpp"),
+        ("stm32-engine-counters", "test_engine_counters.cpp"),
     )
 ]
 for program in u575_programs:
@@ -96,3 +99,18 @@ pty = add_doctest(
     [core],
 )
 pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")
+
+if u575 is not None:
+    bench_irq = project.Program(
+        "bench-irq", project.default_environment, sources=[here / "bench_irq.cpp"]
+    )
+    bench_irq.link(core)
+    bench_irq.private.defines.extend(
+        f'{variable}="{value}"' for variable, value in u575_env.items()
+    )
+    lto = int(any(str(flag).startswith("-flto") for flag in core.public.link_flags))
+    bench_irq.private.defines.append(f'POPCORN_BENCH_BUILD="variant={VARIANT} lto={lto}"')
+    alias_bare_name(bench_irq)
+    for _, target in firmwares.values():
+        if target is not None:
+            bench_irq.depends(target)
