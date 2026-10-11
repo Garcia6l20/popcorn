@@ -74,7 +74,13 @@ core.private.defines.extend(
 )
 core.link(package("unicorn"))
 core.link(package("reflex-serde"))
-if VARIANT not in ("asan", "tsan"):
+
+building_wheel = get_var("PCONS_BUILD_WHEEL", False)
+
+if get_var("POPCORN_ENABLE_LTO", building_wheel) and VARIANT not in (
+    "asan",
+    "tsan",
+):
     core.private.compile_flags.append("-flto=auto")
     core.public.link_flags.extend(["-flto=2", "-Werror=lto-type-mismatch", "-Werror=odr"])
 
@@ -129,7 +135,7 @@ if VARIANT not in ("asan", "tsan"):
     obs_python = obs.add_python([*staged_sources, regs, ext])
     stub = add_stub(ext, "popcorn", "_core", after=[*staged_sources, regs, obs_python[0]])
 
-    if get_var("PCONS_BUILD_WHEEL", False):
+    if building_wheel:
         project.Alias(
             "wheel",
             project.Install("popcorn", [ext, stub, *obs_python], name="install"),
