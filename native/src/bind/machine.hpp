@@ -159,6 +159,9 @@ struct host_abandon
 /** @brief Takes the mutex of @p ptys, releasing the GIL while it blocks when the thread holds it.
  */
 [[nodiscard]] auto lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>;
+
+/** @brief The StopInfo of @p stopped, owning its text. */
+[[nodiscard]] auto stop_info(stop const& stopped) -> stop_record;
 }
 
 /**
@@ -1140,6 +1143,12 @@ public:
 
   /** @brief The native machine, for its fixed data only: the host owns it. */
   [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
+
+  /** @brief The host that runs the machine. */
+  [[= py::skip]] [[nodiscard]] auto host() const noexcept -> std::shared_ptr<core::host> const&;
+
+  /** @brief The slot its views and links reach the host through. */
+  [[= py::skip]] [[nodiscard]] auto slot() const noexcept -> detail::host_ref;
 
 private:
   enum class wait_shape : std::uint8_t

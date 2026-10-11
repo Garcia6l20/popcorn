@@ -9,10 +9,14 @@
 #include <nanobind/nanobind.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -32,7 +36,20 @@ struct registered_host
   std::string                           part;
 };
 
-constexpr auto exit_wait = std::chrono::seconds{10};
+auto exit_wait() -> std::chrono::milliseconds
+{
+  if(auto const* given = std::getenv("POPCORN_TEST_EXIT_WAIT_MS"); given != nullptr)
+  {
+    std::int64_t value{};
+    auto const   text = std::string_view{given};
+    if(auto const [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+       error == std::errc{} and end == text.data() + text.size() and value >= 0)
+    {
+      return std::chrono::milliseconds{value};
+    }
+  }
+  return std::chrono::seconds{10};
+}
 
 struct host_registry
 {
@@ -441,8 +458,9 @@ void shutdown_hosts()
       }
     }
   });
-  auto const until       = std::chrono::steady_clock::now() + exit_wait;
-  auto       interrupted = false;
+  auto const until = std::chrono::steady_clock::now() + exit_wait();
+  detail::settle_closers(until);
+  auto interrupted = false;
   while(not live.empty() and not interrupted and std::chrono::steady_clock::now() < until)
   {
     {

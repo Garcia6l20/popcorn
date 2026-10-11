@@ -850,11 +850,28 @@ public:
 
   /**
    * @brief Marks member @p who as a member of a linked system, or no longer one. While linked,
-   *        run() without a driver and start() refuse it. Parked access, post(), withdraw() and
-   *        watch() work as before.
+   *        run() without a driver and start() refuse it, until @p released holds when given:
+   *        the system sets it once it has ended for good, before it reports that end. The
+   *        closing system may still interrupt the member once after that, which ends one of its
+   *        slices early. Parked access, post(), withdraw() and watch() work as before.
    * @throws machine_busy when @p on and the member is busy.
    */
-  void link(held_lock const& held, member_id who, bool on) pre(held.holds(*this))
+  void link(
+      held_lock const&         held,
+      member_id                who,
+      bool                     on,
+      std::atomic<bool> const* released = nullptr) pre(held.holds(*this)) pre(who < members());
+
+  /**
+   * @brief Gives member @p who its core back when a linked system held it and has released
+   *        it, as the first slice of the member's next goal or free run does. For a call begun
+   *        under @p held, which runs before any slice. A no-op while the member is linked,
+   *        busy or not parked, and on a machine no system linked since its last give-back.
+   *        A hold set through the machine after the release and before that give-back is
+   *        taken for the system's and dropped.
+   * @throws What machine::hold_core() throws.
+   */
+  void give_back_core(held_lock const& held, member_id who) pre(held.holds(*this))
       pre(who < members());
 
   /**

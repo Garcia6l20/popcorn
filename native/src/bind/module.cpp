@@ -8,6 +8,7 @@
 #include "image.hpp"
 #include "machine.hpp"
 #include "models.hpp"
+#include "system.hpp"
 
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/description.hpp>
@@ -67,6 +68,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind_enum<popcorn::periph::usb::device_state>("UsbDeviceState");
   m.bind_enum<popcorn::periph::usb::transfer_status>("UsbTransferStatus");
   m.bind_enum<popcorn::core::log_kind>("LogKind");
+  m.bind_enum<popcorn::core::pause_reason>("PauseReason");
   m.bind<popcorn::core::log_record>("LogRecord");
   m.bind_enum<popcorn::access>("Access");
   m.bind_enum<popcorn::write_effect>("WriteEffect");

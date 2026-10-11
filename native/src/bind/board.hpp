@@ -125,6 +125,16 @@ public:
    */
   [[= py::skip]] [[nodiscard]] auto bridged_link() const -> std::unique_ptr<detail::pty_link>;
 
+  /**
+   * @brief The UART, for a linked system that attaches a wire to it.
+   * @throws config_error once the machine is destroyed.
+   */
+  [[= py::skip]] [[nodiscard]] auto native_port() const -> periph::stm32::uart_port&;
+
+  /** @brief The queue endpoint attached to the UART, which a wire forwards to. */
+  [[= py::skip]] [[nodiscard]] auto endpoint() const noexcept
+      -> std::shared_ptr<detail::queue_endpoint> const&;
+
 private:
   [[nodiscard]] auto port() const -> periph::stm32::uart_port&;
 

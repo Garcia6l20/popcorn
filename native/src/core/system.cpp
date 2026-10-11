@@ -217,6 +217,7 @@ struct system::impl
   host_future<pause>                        future{};
   std::atomic<std::size_t>                  outstanding{0};
   std::atomic<bool>                         host_closed{false};
+  std::atomic<bool>                         members_released{false};
   std::atomic<bool>                         woke{false};
   bool                                      measuring{};
   completion                                on_a{this, &impl::complete_a};
@@ -761,11 +762,16 @@ system::impl::impl(
   std::size_t linked = 0;
   try
   {
-    for(; linked < slots.size(); ++linked)
+    for(std::size_t index = 0; index < slots.size(); ++index)
     {
-      auto& one       = slots[linked];
-      auto  held_host = one.ref.on->lock();
-      one.ref.on->link(held_host, 0, true);
+      slots[index].driver = std::make_shared<runner>(*this, index);
+      slots[index].rep.found.reserve(slots[index].inbound.size() + 2);
+    }
+    for(auto& one : slots)
+    {
+      auto const held_host = one.ref.on->lock();
+      one.ref.on->link(held_host, 0, true, &members_released);
+      ++linked;
       one.target = &one.ref.on->member(held_host, 0);
       one.resets = one.target->resets();
     }
@@ -774,15 +780,10 @@ system::impl::impl(
   {
     for(std::size_t index = 0; index < linked; ++index)
     {
-      auto held_host = slots[index].ref.on->lock();
+      auto const held_host = slots[index].ref.on->lock();
       slots[index].ref.on->link(held_host, 0, false);
     }
     throw;
-  }
-  for(std::size_t index = 0; index < slots.size(); ++index)
-  {
-    slots[index].driver = std::make_shared<runner>(*this, index);
-    slots[index].rep.found.reserve(slots[index].inbound.size() + 2);
   }
 }
 
@@ -1146,6 +1147,7 @@ void system::impl::finish_pause() noexcept
   {
     ended.reason = pause_reason::closed;
     ended.member.reset();
+    members_released.store(true, std::memory_order_release);
   }
   std::vector<std::pair<detail::host_promise<goal_reached>, settled>> outcomes;
   for(auto& one : slots)
@@ -1228,6 +1230,7 @@ system::~system()
   {
     std::ignore = impl_->future.wait_for(std::chrono::hours{24 * 365});
   }
+  impl_->members_released.store(true, std::memory_order_release);
   for(auto& one : impl_->slots)
   {
     if(one.goal and not one.goal->system)

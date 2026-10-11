@@ -305,6 +305,9 @@ struct host_slot
   mutable std::atomic<bool> abandoned{false};
   /** @brief Where the machine's log records go, shared with its HostFutures. */
   std::shared_ptr<log_forwarding> logs = std::make_shared<log_forwarding>();
+  /** @brief Whether a parked access is refused: a member of a linked system with a pending
+   * goal, whose position at a pause depends on the quantum. */
+  mutable std::atomic<bool> refused{false};
 
   host_slot()                                    = default;
   host_slot(host_slot const&)                    = delete;
@@ -627,6 +630,11 @@ auto host_access(core::host& on, host_slot const& slot, Body&& body)
   {
     throw popcorn::machine_running(
         "the machine is running: await m.read() or m.write(), or halt() it first");
+  }
+  if(slot.refused.load(std::memory_order_acquire))
+  {
+    throw popcorn::machine_running(
+        "the member has a pending goal in its linked system: await m.read() or m.write()");
   }
   core::owner_scope const owning{on, held};
   auto&                   engine = on.member(held, core::member_id{});

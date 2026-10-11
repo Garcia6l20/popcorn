@@ -20,4 +20,5 @@ sources = [
     here / "observability.cpp",
     here / "host_future.cpp",
     here / "pty.cpp",
+    here / "system.cpp",
 ]

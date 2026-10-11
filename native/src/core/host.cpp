@@ -186,6 +186,8 @@ struct member_slot
   std::uint64_t             next_seq = 0;
   timeline_mark             mark;
   bool                      linked = false;
+  std::atomic<bool> const*  link_released{};
+  bool                      system_held = false;
   driver_cell               driver{};
 
   void push_stamp(stamped made)
@@ -237,8 +239,12 @@ struct turn_plan
   bool                cancel = false;
   bool                halt   = false;
   bool                slice  = false;
-  waiter_list         waiters{};
-  waiter_list         dropped{};
+  /** @brief Whether the slice first gives back the core a system held and has released. Decided
+   * under the host mutex, as the closer unlinks the member under it, and acted on before any
+   * instruction of the member's lone goal or free run. */
+  bool        unhold = false;
+  waiter_list waiters{};
+  waiter_list dropped{};
 };
 
 namespace
@@ -310,6 +316,20 @@ void fail_all(std::vector<stamped> const& dropped, std::exception_ptr const& err
   for(auto const& pending : dropped)
   {
     pending.promise.fail(error);
+  }
+}
+
+auto linked(member_slot const& slot) noexcept -> bool
+{
+  return slot.linked
+     and (slot.link_released == nullptr or not slot.link_released->load(std::memory_order_acquire));
+}
+
+void give_back(machine& engine)
+{
+  if(engine.core_held() and not engine.in_call())
+  {
+    engine.hold_core(false);
   }
 }
 
@@ -507,11 +527,11 @@ struct host_core
         }
         if(slot->goal)
         {
-          goal_slice(*slot, done);
+          goal_slice(*slot, plan.unhold, done);
         }
         else if(slot->free_run)
         {
-          free_slice(*slot, std::exchange(plan.waiters, {}), done);
+          free_slice(*slot, std::exchange(plan.waiters, {}), plan.unhold, done);
         }
         run_all(done);
         publish_settled();
@@ -564,6 +584,12 @@ struct host_core
         {
           plan.waiters = slot->waiters;
         }
+        plan.unhold = plan.slice
+                  and not plan.cancel
+                  and not plan.halt
+                  and (slot->goal ? not slot->goal->goal.driver : slot->free_run)
+                  and not linked(*slot)
+                  and std::exchange(slot->system_held, false);
         any = any
            or not plan.mail.empty()
            or not plan.dropped.empty()
@@ -997,7 +1023,7 @@ struct host_core
     }
   }
 
-  void goal_slice(member_slot& slot, deferred& done)
+  void goal_slice(member_slot& slot, bool unhold, deferred& done)
   {
     accept_stamps(slot);
     apply_due(slot);
@@ -1026,6 +1052,10 @@ struct host_core
     try
     {
       owner_scope const owning{this};
+      if(unhold)
+      {
+        give_back(*slot.engine);
+      }
       at_boundary(slot);
       result = slot.engine->run_slice(request);
     }
@@ -1098,7 +1128,7 @@ struct host_core
     }
   }
 
-  void free_slice(member_slot& slot, waiter_list waiters, deferred& done)
+  void free_slice(member_slot& slot, waiter_list waiters, bool unhold, deferred& done)
   {
     accept_stamps(slot);
     apply_due(slot);
@@ -1152,6 +1182,10 @@ struct host_core
     try
     {
       owner_scope const owning{this};
+      if(unhold)
+      {
+        give_back(*slot.engine);
+      }
       at_boundary(slot);
       result = slot.engine->run_slice(request);
     }
@@ -1938,7 +1972,7 @@ auto host::run(held_lock const& held, member_id who, run_goal goal) -> host_futu
   {
     throw machine_busy("the machine already runs a goal or a free run");
   }
-  if(slot.linked and not goal.driver)
+  if(detail::linked(slot) and not goal.driver)
   {
     throw machine_busy("the machine is a member of a linked system");
   }
@@ -1971,7 +2005,7 @@ void host::start(held_lock const& held, member_id who)
   {
     throw machine_busy("the machine already runs a goal or a free run");
   }
-  if(slot.linked)
+  if(detail::linked(slot))
   {
     throw machine_busy("the machine is a member of a linked system");
   }
@@ -1987,13 +2021,33 @@ void host::start(held_lock const& held, member_id who)
   core_->wake_locked(slot);
 }
 
-void host::link(held_lock const& held, member_id who, bool on)
+void host::link(held_lock const& held, member_id who, bool on, std::atomic<bool> const* released)
 {
   if(on and busy(held, who))
   {
     throw machine_busy("the machine runs a goal or a free run");
   }
-  core_->members[who]->linked = on;
+  core_->members[who]->linked        = on;
+  core_->members[who]->link_released = on ? released : nullptr;
+  if(on)
+  {
+    core_->members[who]->system_held = true;
+  }
+}
+
+void host::give_back_core(held_lock const& held, member_id who)
+{
+  auto& slot = *core_->members[who];
+  if(core_->abandoned
+     or busy(held, who)
+     or not parked(held, who)
+     or detail::linked(slot)
+     or not std::exchange(slot.system_held, false))
+  {
+    return;
+  }
+  owner_scope const owning{*this, held};
+  detail::give_back(*slot.engine);
 }
 
 auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_handle

@@ -137,6 +137,16 @@ auto uart_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
   return std::make_unique<detail::uart_pty_link>(port(), endpoint_);
 }
 
+auto uart_link::native_port() const -> periph::stm32::uart_port&
+{
+  return port();
+}
+
+auto uart_link::endpoint() const noexcept -> std::shared_ptr<detail::queue_endpoint> const&
+{
+  return endpoint_;
+}
+
 audio_link::audio_link(
     periph::stm32::audio_port& port,
     periph::stm32::audio_block block,

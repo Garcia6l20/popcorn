@@ -1,3 +1,4 @@
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/machine.hpp>
@@ -262,6 +263,7 @@ struct rig
   std::vector<core::member_ref>           members;
   std::vector<std::shared_ptr<fake_link>> links{};
   std::unique_ptr<core::system>           sys{};
+  std::function<void(std::size_t)>        arrival{};
 
   void build(variant const& how, std::int64_t latency = 20 * us_ps)
   {
@@ -287,6 +289,10 @@ struct rig
         std::uniform_int_distribution<int> pause{0, 50};
         std::this_thread::sleep_for(std::chrono::microseconds{pause((*engines)[index])});
       };
+    }
+    if(not hook)
+    {
+      hook = arrival;
     }
     auto const wait = how.one_cpu ? core::wait_policy{.spin = std::chrono::nanoseconds{0}}
                                   : core::default_wait_policy(members.size());
@@ -956,6 +962,130 @@ TEST_CASE("a goal re-issued at its delivered point resolves before a later entry
     }
     reference = order;
   }
+}
+
+TEST_CASE("a system that fails to link a member leaves the members it linked free")
+{
+  rig r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  };
+  core::host_future<core::goal_result> busy;
+  {
+    auto const held_host = r.members[1].on->lock();
+    busy = r.members[1].on->run(held_host, 0, core::run_goal{.budget = icount{1'000'000'000'000}});
+  }
+  CHECK_THROWS_AS(r.build(variants()[0]), popcorn::machine_busy);
+  r.members[1].on->cancel(0);
+  CHECK_THROWS_AS(std::ignore = busy.get(), core::operation_cancelled);
+  core::host_future<core::goal_result> own;
+  {
+    auto const held_host = r.members[0].on->lock();
+    own                  = r.members[0].on->run(held_host, 0, core::run_goal{.budget = icount{10}});
+  }
+  CHECK(own.get().stopped.reason == stop_reason::budget);
+}
+
+auto holding_rig(std::atomic<bool>& held) -> rig
+{
+  return rig{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")},
+      .arrival =
+          [&held](std::size_t index) {
+            if(index == 1)
+            {
+              held.store(true);
+              held.notify_all();
+            }
+                  },
+  };
+}
+
+auto close_holding(rig& r, std::atomic<bool> const& held) -> core::host_future<core::goal_reached>
+{
+  r.build(variants()[0]);
+  auto                           endless = r.goal(0, {.budget = icount{1'000'000'000'000}});
+  core::host_future<core::pause> pending;
+  {
+    auto const held_system = r.sys->lock();
+    pending                = r.sys->resume(held_system, std::nullopt);
+  }
+  held.wait(false);
+  r.sys->close();
+  REQUIRE(pending.get().reason == core::pause_reason::closed);
+  return endless;
+}
+
+TEST_CASE("a closed system releases its members before its closed pause is out")
+{
+  std::atomic<bool>                    held{};
+  auto                                 r       = holding_rig(held);
+  auto const                           endless = close_holding(r, held);
+  core::host_future<core::goal_result> own;
+  {
+    auto const held_host = r.members[1].on->lock();
+    own                  = r.members[1].on->run(held_host, 0, core::run_goal{.budget = icount{10}});
+  }
+  CHECK(own.get().stopped.reason == stop_reason::budget);
+  core::access(*r.members[1].on, 0, [](core::machine& m) { CHECK_FALSE(m.core_held()); });
+}
+
+TEST_CASE("a member its closed system held takes a call before any run")
+{
+  std::atomic<bool>               held{};
+  auto                            r         = holding_rig(held);
+  auto const                      endless   = close_holding(r, held);
+  auto&                           on        = *r.members[1].on;
+  auto const                      held_host = on.lock();
+  core::owner_scope const         owning{on, held_host};
+  auto&                           target = on.member(held_host, 0);
+  popcorn::arch::call_frame const frame{
+      .entry           = sym("alu", "alu_entry"),
+      .returns         = popcorn::arch::value_kind::i32,
+      .abi             = popcorn::arch::float_abi::soft,
+      .return_sentinel = 0x3000'0000};
+  REQUIRE(target.core_held());
+  CHECK_THROWS_AS(target.begin_call(frame), popcorn::machine_busy);
+  on.give_back_core(held_host, 0);
+  CHECK_FALSE(target.core_held());
+  target.begin_call(frame);
+  CHECK(target.in_call());
+  std::ignore = target.end_call();
+  CHECK_FALSE(target.core_held());
+}
+
+TEST_CASE("a lone goal posted while its closed system is destroyed reads no link unlocked")
+{
+  std::atomic<bool>                    held{};
+  auto                                 r       = holding_rig(held);
+  auto const                           endless = close_holding(r, held);
+  auto&                                on      = *r.members[1].on;
+  std::atomic<bool>                    inside{};
+  std::atomic<bool>                    destroyed{};
+  core::host_future<core::goal_result> own;
+  std::jthread                         poster{[&] {
+    auto const held_host = on.lock();
+    own                  = on.run(
+        held_host, 0, core::run_goal{.budget = icount{1'000'000'000'000}, .stop_when = [&] {
+                                       if(not inside.exchange(true, std::memory_order_relaxed))
+                                       {
+                                         while(not destroyed.load(std::memory_order_relaxed))
+                                         {
+                                           std::this_thread::yield();
+                                         }
+                                       }
+                                       return false;
+                                     }});
+  }};
+  while(not inside.load(std::memory_order_relaxed))
+  {
+    std::this_thread::yield();
+  }
+  r.sys.reset();
+  destroyed.store(true, std::memory_order_relaxed);
+  poster.join();
+  on.cancel(0);
+  CHECK_THROWS_AS(std::ignore = own.get(), core::operation_cancelled);
+  core::access(on, 0, [](core::machine& m) { CHECK_FALSE(m.core_held()); });
 }
 
 TEST_CASE("a goal posted to a halted member while paused starts at the delivered point")
