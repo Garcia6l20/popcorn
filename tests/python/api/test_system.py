@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import itertools
 import logging
 import threading
 import weakref
@@ -252,9 +253,7 @@ def test_construction_checks(u575: popcorn.MachineDescription) -> None:
 def test_a_member_runs_and_saves_only_through_its_system(ping: Build) -> None:
     system = ping()
     a = system.members["a"]
-    with pytest.raises(popcorn.MachineBusy):
-        asyncio.run(a.run(for_=us(10)))
-    with pytest.raises(popcorn.MachineBusy):
+    with pytest.raises(popcorn.MachineBusy, match="running"):
         a.start()
     with pytest.raises(popcorn.MachineBusy, match="member of a linked system"):
         a.snapshot()
@@ -428,7 +427,7 @@ def test_a_cancel_while_waiting_for_the_last_pause_reaches_the_caller(ping: Buil
         return False
 
     handle = system._handle  # pyright: ignore[reportPrivateUsage]
-    goal = handle.post_goal(1, None, None, None, s(100).ps, held, False, None)
+    goal = handle.post_goal(1, None, None, None, s(100).ps, held, None, False, None)
 
     async def body() -> None:
         first = asyncio.create_task(system.run(for_=s(100)))
@@ -453,6 +452,9 @@ def test_a_cancel_while_waiting_for_the_last_pause_reaches_the_caller(ping: Buil
     del goal
 
 
+PARITY_CALLS = itertools.count()
+
+
 def parity_warnings(
     u575: popcorn.MachineDescription,
     caplog: pytest.LogCaptureFixture,
@@ -460,13 +462,24 @@ def parity_warnings(
     odd: tuple[bool, bool] | None,
 ) -> list[str]:
     """The link shape warnings of a USART2 link declared with `declared` parity, each end
-    sending one frame with PCE set and PS = `odd[i]`, or without parity for None."""
-    a = member(u575, "idle", "a")
-    b = member(u575, "idle", "b")
+    sending one frame with PCE set and PS = `odd[i]`, or without parity for None. Members get
+    names of their own, so warnings another system forwards late are not counted."""
+    call = next(PARITY_CALLS)
+    names = (f"pa{call}", f"pb{call}")
+    a = member(u575, "idle", names[0])
+    b = member(u575, "idle", names[1])
     caplog.clear()
     with LinkedSystem(
-        {"a": a, "b": b},
-        [UartLink("a.USART2", "b.USART2", latency=L, baud=115_200, parity=declared)],
+        {names[0]: a, names[1]: b},
+        [
+            UartLink(
+                f"{names[0]}.USART2",
+                f"{names[1]}.USART2",
+                latency=L,
+                baud=115_200,
+                parity=declared,
+            )
+        ],
     ) as system:
         for index, m in enumerate((a, b)):
             m.periph.RCC.RCC_APB1ENR1.USART2EN = 1
@@ -477,7 +490,12 @@ def parity_warnings(
             uart.TDR.value = 0x41
         with caplog.at_level(logging.WARNING, logger="popcorn"):
             assert asyncio.run(system.run(for_=ms(1))).reason is StopReason.TIME
-    return [r.getMessage() for r in caplog.records if "on a link declared" in r.getMessage()]
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith(tuple(f"{name}:" for name in names))
+        and "on a link declared" in r.getMessage()
+    ]
 
 
 def test_a_link_s_parity_reaches_both_directions(

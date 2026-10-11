@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from popcorn import _core
 from popcorn._enums import StopReason
 from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
-from popcorn._host import awaited
+from popcorn._host import awaited, watch_awaits
 from popcorn._stop import Stop, stop_of
 from popcorn.units import VirtualDuration, VirtualTime
 
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
 
 _STOP_BITS = {0.5: 1, 1.0: 2, 1.5: 3, 2.0: 4}
 _PARITY = {"none": 0, "even": 1, "odd": 2}
+_WATCHDOG = 5.0
+_LOG = logging.getLogger("popcorn")
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,60 @@ class _Pause:
         return _Pause(reason, member, at, stop_of(info), error, windows, slices)
 
 
+@dataclass(eq=False)
+class _Wait:
+    until: int | None
+    for_ps: int | None
+    deadline_ps: int | None
+    gate: _core.Predicate | None
+    stop_when: Callable[[], bool] | None
+    future: asyncio.Future[Stop]
+    until_ps: int | None = None
+    from_executed: int | None = None
+
+
+@dataclass(eq=False)
+class _Goal:
+    future: _core.HostFuture
+    task: asyncio.Task[object] | None
+    releases: bool = False
+    withdrawn: bool = False
+    waits: tuple[_Wait, ...] = ()
+
+    def done(self) -> bool:
+        return self.future.done()
+
+
+def _reached_waits(waits: Sequence[_Wait], stop: Stop, at: int, held: int) -> list[_Wait]:
+    """The waits a run goal serving `waits` reached with `stop` at system time `at`, `held`
+    the mask of waits whose predicate stopped it: none for a member stop."""
+    if stop.reason is StopReason.TIME and stop.detail == "goal cap":
+        return []
+    reached: list[_Wait] = []
+    for bit, wait in enumerate(waits):
+        if stop.reason is StopReason.USER:
+            own = bool(held >> bit & 1)
+        elif stop.reason is StopReason.TIME:
+            own = wait.until_ps is not None and wait.until_ps <= at
+        elif stop.reason is StopReason.ADDRESS:
+            own = wait.until == stop.pc
+        else:
+            own = False
+        if own:
+            reached.append(wait)
+    return reached
+
+
+def _held_of(raw: object) -> tuple[Stop, int, int]:
+    info, at, held = cast(tuple[_core.StopInfo, int, int], raw)
+    return stop_of(info), at, held
+
+
+def _reached_of(raw: object) -> tuple[Stop, int]:
+    info, at = cast(tuple[_core.StopInfo, int], raw)
+    return stop_of(info), at
+
+
 class LinkedSystem:
     """Several machines, its members, on one virtual clock, their UARTs linked by `UartLink`s.
 
@@ -124,27 +181,80 @@ class LinkedSystem:
     local time plus its base, fixed at construction by `offsets` and moved by a reset of the
     member, so system time runs on unchanged across it.
 
-    A member while the system exists: `run`, `start`, `snapshot`, `restore` and `reset` of the
-    member raise MachineBusy, sync accessors raise MachineRunning while the system runs and are
-    allowed while it is stopped. The system owns the members' UARTs named in links: frames each
-    transmits still reach its own `port`.
+    Member goals: a member's `run`, `step`, `wait_for`, stream reads and `running()` become goals
+    on the system's clock, one per member. Goals posted in one turn of the event loop start
+    together, each at its member's position:
+
+        a_stop, b_stop = await asyncio.gather(a.run(until="f_a"), b.run(until="f_b"))
+
+    A member whose goal stops waits exactly at its stop, parked, and the system waits with it.
+    The task that posted the goal holds it. `gather`, `TaskGroup`, `shield` and `ensure_future`
+    post from a child task of their own, which releases the member as soon as it ends. The
+    member is released, halted from its stop on, when its holder finishes, or awaits a popcorn
+    future of another machine, or calls `member.halt()`. A new goal on it
+    before that starts exactly at its stop, also after unrelated awaits such as
+    `asyncio.sleep`. Members without a goal are halted: their cores execute nothing, their clocks,
+    peripherals and DMA follow system time, their DBGMCU freeze bits apply. A task that keeps a
+    member parked while it awaits something only a peer's goal can complete waits forever, and
+    so does one that awaits its own member's future that needs time to pass, such as a write at
+    a later time: nothing runs while the member is parked. After 5 s a warning names the member
+    and the task, `member.halt()` releases it. Cancelling a goal's
+    task withdraws the goal at the next pause, where the member then stands, a point that
+    depends on wall timing. A goal posted while other goals run is admitted at the next pause,
+    also wall-dependent. An error a member raises, from a handler or a model, stops the system:
+    every pending goal fails with that error, noted with the member and its system time, and a
+    goal stopped before it keeps its stop.
+
+    Inside a member's own `running()`, its `wait_for`, stream reads and `elapse` wait as on a
+    lone machine's free run, several at once: the run's goal stops for any of them, each
+    resolves at its own stop, and the run goes on exactly from that stop for the others. A
+    member stop, a breakpoint, FAULT or a handler's `stop()`, ends the run instead: every wait
+    returns it, later waits return it, and leaving `running()` raises it. Where a wait starts
+    depends on wall timing, as on a lone machine, except for waits called before the body's
+    first await. Cancelling a wait lets the member run on. `Reached` waits for several addresses
+    each stop at their own address, ADDRESS. A new wait whose member stands at its address leaves
+    it first, as `run(until=)` does. Once the member executed an instruction after the wait
+    began, standing at the address is its stop, also where the run's goal is re-posted for
+    another wait. That depends on instruction counts only. `run` and `step` inside it raise
+    MachineBusy, as on a lone machine's free run, and no budget applies.
+
+    A member while the system exists: sync reads and writes raise MachineRunning while the system
+    runs, and while the member has a pending goal, since its position at a pause depends on the
+    quantum. They are allowed on a halted member while the system is stopped. `start`,
+    `snapshot`, `restore` and `reset` of a member raise MachineBusy, and `halt` releases it. Its
+    Python callbacks run on its own thread, concurrently with other members' callbacks: Python
+    state they share sees an order that depends on thread timing, so keep callback state per
+    member and couple members through links. The system owns the members' UARTs named in links:
+    frames each transmits still reach its own `port`.
 
     The system holds its members until `close()`, also run by `with`.
     """
 
     __slots__ = (
         "__weakref__",
+        "_admitting",
         "_closed",
         "_failed",
         "_flight",
+        "_goal_cap",
+        "_goals",
         "_handle",
         "_index",
+        "_kicking",
         "_machines",
         "_names",
+        "_opens",
         "_origin",
-        "_ownerless",
         "_pausing",
+        "_rebuilds",
+        "_run_ends",
+        "_system_run",
         "_target",
+        "_tokens",
+        "_undecided",
+        "_waits",
+        "_warned",
+        "_withdrawals",
     )
 
     def __init__(
@@ -154,6 +264,7 @@ class LinkedSystem:
         *,
         offsets: Mapping[str, VirtualDuration] | None = None,
         on_member_reset: Literal["reset", "stop"] = "reset",
+        goal_cap: VirtualDuration | None = None,
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
     ) -> None:
@@ -169,6 +280,9 @@ class LinkedSystem:
                 system times, `Stop.time` is the member's own.
             on_member_reset: What a firmware or watchdog reset of a member that runs its core
                 does: "reset" resets it and runs on, "stop" ends the run with RESET_REQUEST.
+            goal_cap: Virtual time a member goal may run from its start, None for no cap: a goal
+                whose member sleeps while its peers keep scheduling events stops with TIME,
+                detail `goal cap`, once its start plus the cap is reached.
             slice_instructions: Instructions after which a member's slice serves its machine's
                 requests, above 0.
             slice_wall_budget: Wall seconds after which it does, above 0.
@@ -180,10 +294,18 @@ class LinkedSystem:
                 a value out of range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits`
                 or `.parity`, or an offset of no member or below 0, `offsets.<name>`.
             MachineBusy: A member is busy.
-            ValueError: `slice_instructions` or `slice_wall_budget` not above 0.
+            ValueError: `slice_instructions`, `slice_wall_budget` or `goal_cap` not above 0.
+            TypeError: `goal_cap` is no VirtualDuration.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
+        if goal_cap is not None:
+            if not isinstance(cast(object, goal_cap), VirtualDuration):
+                raise TypeError(
+                    f"goal_cap must be a VirtualDuration, not {type(goal_cap).__name__}"
+                )
+            if goal_cap.ps <= 0:
+                raise ValueError("goal_cap must be above 0")
         if on_member_reset not in ("reset", "stop"):
             raise ConfigError(
                 f"on_member_reset: {on_member_reset!r} is neither 'reset' nor 'stop'",
@@ -215,9 +337,25 @@ class LinkedSystem:
         self._flight: asyncio.Future[_Pause] | None = None
         self._pausing = False
         self._target: int | None = None
-        self._ownerless: set[int] = set()
+        self._goal_cap = None if goal_cap is None else goal_cap.ps
+        self._goals: dict[int, _Goal] = {}
+        self._opens: dict[int, _Goal] = {}
+        self._waits: dict[int, list[_Wait]] = {}
+        self._rebuilds: set[int] = set()
+        self._run_ends: dict[int, Stop] = {}
+        self._undecided: dict[int, asyncio.Task[object] | None] = {}
+        self._withdrawals: set[int] = set()
+        self._warned: set[tuple[int, int]] = set()
+        self._system_run = False
+        self._kicking = False
+        self._admitting = 0
+        self._tokens = [
+            self._machines[name]._handle.log_token()  # pyright: ignore[reportPrivateUsage]
+            for name in self._names
+        ]
         for machine in self._machines.values():
             machine._system = cast(Any, weakref.ref(self))  # pyright: ignore[reportPrivateUsage]
+        watch_awaits(self)
 
     def _add_link(self, index: int, link: UartLink, used: set[tuple[str, str]]) -> None:
         latency = cast(object, link.latency)
@@ -317,6 +455,64 @@ class LinkedSystem:
         self._require_stopped()
         return VirtualTime(self._handle.pending_barrier_ps())
 
+    def to_local(self, member: str | Machine, time: VirtualTime) -> VirtualTime:
+        """The local time of `member`, its `Machine.time` frame, at system time `time`: what a
+        member's `at=` takes, which counts in its own local time.
+
+            await c.write((c.ref.mem.u32[x], 5), at=system.to_local("c", t))
+
+        The member's base, its system time minus its local time, is fixed at construction and
+        moved by a reset of the member. Allowed while the system runs, from any thread, a
+        member's callbacks included, such as an intercept converting its own `Machine.time`.
+        A reset under `on_member_reset="reset"` moves the base mid-run, so a call during it
+        may use the base before or after the reset.
+
+        Raises:
+            KeyError: `member` is no member of this system.
+            TypeError: `time` is no VirtualTime.
+            ValueError: `time` lies before the member's local time 0, its last reset.
+            EmulationError: The system was closed.
+        """
+        base = self._base_of(member, time)
+        local = time.ps - base
+        if local < 0:
+            raise ValueError(f"{time} is before the last reset of {self._name_of(member)}")
+        return VirtualTime(local)
+
+    def to_system(self, member: str | Machine, time: VirtualTime) -> VirtualTime:
+        """The system time at local time `time` of `member`: the inverse of `to_local`, for a
+        member's `Machine.time`, `Stop.time`, `Readout.time` or a stream frame's `at`.
+
+        Raises:
+            KeyError: `member` is no member of this system.
+            TypeError: `time` is no VirtualTime.
+            ValueError: The result lies before system time 0.
+            EmulationError: The system was closed.
+        """
+        base = self._base_of(member, time)
+        system_ps = time.ps + base
+        if system_ps < 0:
+            raise ValueError(
+                f"local time {time} of {self._name_of(member)} is before system time 0"
+            )
+        return VirtualTime(system_ps)
+
+    def _name_of(self, member: str | Machine) -> str:
+        name = member if isinstance(member, str) else member.name
+        if name not in self._index or (
+            not isinstance(member, str) and self._machines[name] is not member
+        ):
+            raise KeyError(f"{member!r} is no member of {self!r}")
+        return name
+
+    def _base_of(self, member: str | Machine, time: VirtualTime) -> int:
+        index = self._index[self._name_of(member)]
+        if not isinstance(cast(object, time), VirtualTime):
+            raise TypeError(f"time must be a VirtualTime, not {type(time).__name__}")
+        if self._closed:
+            raise EmulationError("the linked system was closed")
+        return self._handle.base_of_ps(index)
+
     def time_of(self, member: str) -> VirtualTime:
         """System time of `member`, its local time plus its base.
 
@@ -358,11 +554,18 @@ class LinkedSystem:
         await self._settled()
         if self._flight is not None:
             raise MachineBusy("the linked system runs")
+        if self._goals:
+            name = self._names[min(self._goals)]
+            raise MachineBusy(f"a goal of {name} is pending: await it, or cancel its task")
         target = self._target_of(for_, until)
-        for index in sorted(self._ownerless):
+        for index in sorted(self._undecided):
             self._handle.release(index)
-        self._ownerless.clear()
-        pause = await self._resume(target)
+        self._undecided.clear()
+        self._system_run = True
+        try:
+            pause = await self._resume(target)
+        finally:
+            self._system_run = False
         return self._system_stop(pause, target)
 
     def _target_of(self, for_: VirtualDuration | None, until: VirtualTime | None) -> int:
@@ -381,10 +584,15 @@ class LinkedSystem:
         with contextlib.suppress(Exception):
             await asyncio.shield(flight)
 
-    async def _resume(self, until_ps: int | None) -> _Pause:
+    def _launch(self, until_ps: int | None) -> asyncio.Future[_Pause]:
         future = self._handle.resume(until_ps)
         flight = asyncio.ensure_future(self._flown(future, until_ps))
-        self._flight = flight
+        if not flight.done():
+            self._flight = flight
+        return flight
+
+    async def _resume(self, until_ps: int | None) -> _Pause:
+        flight = self._launch(until_ps)
         try:
             return await asyncio.shield(flight)
         except asyncio.CancelledError:
@@ -397,7 +605,8 @@ class LinkedSystem:
         try:
             pause = await awaited(future, _Pause.of, cancel=False)
         except asyncio.CancelledError:
-            self._handle.request_pause()
+            with contextlib.suppress(EmulationError):
+                self._handle.request_pause()
             pause = _Pause.of(future.result(None))
         finally:
             self._flight = None
@@ -409,7 +618,13 @@ class LinkedSystem:
         if pause.reason is _core.PauseReason.system_time and until_ps is not None:
             self._target = until_ps
         elif pause.reason is _core.PauseReason.delivered and pause.member is not None:
-            self._ownerless.add(pause.member)
+            ended = self._goals.get(pause.member)
+            if ended is not None and self._opens.get(pause.member) is ended:
+                self._run_stopped(pause.member, ended)
+            elif ended is not None and (ended.releases or ended.withdrawn):
+                self._handle.release(pause.member)
+            elif ended is None:
+                self._undecided.setdefault(pause.member, None)
         elif pause.reason is _core.PauseReason.error:
             self._failed = pause.error
             if pause.error is not None and pause.member is not None:
@@ -418,6 +633,452 @@ class LinkedSystem:
                     f"{VirtualTime(pause.at)}"
                 )
                 pause.error.add_note(note)
+        self._goals = {index: goal for index, goal in self._goals.items() if not goal.done()}
+        if self._failed is None and not self._closed:
+            for index in sorted(self._withdrawals):
+                if index in self._goals:
+                    self._handle.withdraw(index)
+                    del self._goals[index]
+            for index in sorted(self._rebuilds):
+                self._repost(index)
+        else:
+            for index in sorted(self._waits):
+                self._fail_waits(index)
+        self._withdrawals.clear()
+        self._rebuilds.clear()
+        self._schedule_kick()
+
+    def _run_stopped(self, index: int, goal: _Goal) -> None:
+        """The goal of member `index`'s run stopped, at a delivery. Each wait whose own bounds
+        or predicate it reached resolves with the stop, and the run goes on from there exactly
+        for the others. Any other stop is a member stop: it ends the run, every wait resolves
+        with it, and the member is released at it."""
+        raw = goal.future.result(0.0)
+        stop, at, held = _held_of(raw) if goal.waits else (*_reached_of(raw), 0)
+        reached = _reached_waits(goal.waits, stop, at, held)
+        waits = self._waits.get(index, [])
+        if not reached:
+            self._run_ends[index] = stop
+            reached = waits
+            waits = []
+            self._handle.release(index)
+        for wait in reached:
+            if not wait.future.done():
+                wait.future.set_result(stop)
+        self._waits[index] = [wait for wait in waits if wait not in reached]
+        if index not in self._run_ends:
+            self._rebuilds.add(index)
+            goal.withdrawn = True
+
+    def _fail_waits(self, index: int) -> None:
+        name = self._names[index]
+        for wait in self._waits.pop(index, []):
+            if not wait.future.done():
+                wait.future.set_exception(EmulationError(f"{name}: the run this wait was in ended"))
+
+    def _repost(self, index: int) -> None:
+        """Give member `index`'s run a goal serving its current waits, or a plain open goal for
+        none, from where it stands: withdraw a goal still running, re-issue at a delivered stop."""
+        current = self._opens.get(index)
+        if current is None or index in self._run_ends:
+            return
+        if self._goals.get(index) is current:
+            del self._goals[index]
+            if not current.done():
+                self._handle.withdraw(index)
+        waits = tuple(self._waits.get(index, ()))
+        executed = self._handle.executed_of(index) if waits else 0
+        for wait in waits:
+            if wait.from_executed is None:
+                wait.from_executed = executed
+            if wait.until_ps is None and wait.for_ps is not None:
+                wait.until_ps = self._handle.time_of_ps(index) + wait.for_ps
+            elif wait.until_ps is None and wait.deadline_ps is not None:
+                machine = self._machines[self._names[index]]
+                base = self._handle.time_of_ps(index) - machine.time.ps
+                wait.until_ps = base + wait.deadline_ps
+        if waits:
+            untils = list(dict.fromkeys(w.until for w in waits if w.until is not None))
+            future = self._handle.post_waits(
+                index,
+                untils,
+                [
+                    until
+                    for until in untils
+                    if any(w.until == until and w.from_executed != executed for w in waits)
+                ],
+                min((w.until_ps for w in waits if w.until_ps is not None), default=None),
+                [wait.gate for wait in waits],
+                [wait.stop_when for wait in waits],
+                self._goal_cap,
+            )
+            goal = _Goal(future, None, waits=waits)
+        else:
+            future = self._handle.post_goal(
+                index, None, None, None, None, None, None, True, self._goal_cap
+            )
+            goal = _Goal(future, None, releases=True)
+        self._undecided.pop(index, None)
+        self._opens[index] = goal
+        self._goals[index] = goal
+
+    def _rebuild(self, index: int) -> None:
+        """Re-post member `index`'s run goal for its current waits: at once while paused, else
+        at the pause requested now."""
+        if self._flight is None:
+            self._repost(index)
+            self._schedule_kick()
+            return
+        current = self._opens.get(index)
+        if current is not None:
+            current.withdrawn = True
+        self._rebuilds.add(index)
+        self._pausing = True
+        self._handle.request_pause()
+
+    def _schedule_kick(self) -> None:
+        """Kick at the loop's next turn, once: goals posted in the same turn start together."""
+        if not self._kicking:
+            self._kicking = True
+            asyncio.get_running_loop().call_soon(self._kicked)
+
+    def _kicked(self) -> None:
+        self._kicking = False
+        self._kick()
+
+    def _kick(self) -> None:
+        """Resume the system for the pending goals once every delivered member is decided and
+        no goal waits to be admitted."""
+        if self._closed or self._failed is not None or self._flight is not None:
+            return
+        if self._admitting:
+            return
+        if not self._goals or self._handle.undecided():
+            return
+        self._launch(None)
+
+    async def _goal(
+        self,
+        machine: Machine,
+        *,
+        until: int | None = None,
+        budget: int | None = None,
+        exact: int | None = None,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+        stop_when: Callable[[], bool] | None = None,
+        gate: _core.Predicate | None = None,
+        run: bool = False,
+    ) -> Stop:
+        """Run a goal of member `machine`, parked at its stop once delivered: see the class.
+        Inside the member's own `running()` it joins the run instead, `_join`, except a `run`,
+        refused there as on a lone machine's free run."""
+        index = self._index[machine.name]
+        if index in self._opens:
+            if run:
+                raise MachineBusy(f"{machine.name} runs in its running(): no run inside it")
+            return await self._join(
+                index,
+                machine,
+                until=until,
+                exact=exact,
+                for_=for_,
+                deadline=deadline,
+                stop_when=stop_when,
+                gate=gate,
+            )
+        return await self._reached(
+            index,
+            await self._post(
+                index,
+                machine,
+                until=until,
+                budget=budget,
+                exact=exact,
+                for_=for_,
+                deadline=deadline,
+                stop_when=stop_when,
+                gate=gate,
+                open_=False,
+            ),
+        )
+
+    async def _post(
+        self,
+        index: int,
+        machine: Machine,
+        *,
+        until: int | None,
+        budget: int | None,
+        exact: int | None,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None,
+        stop_when: Callable[[], bool] | None,
+        gate: _core.Predicate | None,
+        open_: bool,
+        releases: bool = False,
+    ) -> _Goal:
+        self._admitting += 1
+        try:
+            return await self._admit(
+                index,
+                machine,
+                until=until,
+                budget=budget,
+                exact=exact,
+                for_=for_,
+                deadline=deadline,
+                stop_when=stop_when,
+                gate=gate,
+                open_=open_,
+                releases=releases,
+            )
+        finally:
+            self._admitting -= 1
+            self._schedule_kick()
+
+    async def _admit(
+        self,
+        index: int,
+        machine: Machine,
+        *,
+        until: int | None,
+        budget: int | None,
+        exact: int | None,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None,
+        stop_when: Callable[[], bool] | None,
+        gate: _core.Predicate | None,
+        open_: bool,
+        releases: bool,
+    ) -> _Goal:
+        self._require_usable()
+        if index not in self._withdrawals:
+            self._refuse_goal(index)
+        while (flight := self._flight) is not None:
+            self._pausing = True
+            self._handle.request_pause()
+            with contextlib.suppress(Exception):
+                await asyncio.shield(flight)
+            self._require_usable()
+            self._refuse_goal(index)
+        task = asyncio.current_task()
+        until_ps: int | None = None
+        if for_ is not None:
+            until_ps = self._handle.time_of_ps(index) + for_.ps
+        elif deadline is not None:
+            base = self._handle.time_of_ps(index) - machine.time.ps
+            until_ps = base + deadline.ps
+        future = self._handle.post_goal(
+            index, until, budget, exact, until_ps, stop_when, gate, open_, self._goal_cap
+        )
+        self._undecided.pop(index, None)
+        goal = _Goal(future, task, releases)
+        self._goals[index] = goal
+        self._schedule_kick()
+        return goal
+
+    async def _open_goal(self, machine: Machine) -> None:
+        """Start an open goal on member `machine`, for its `running()`, kept by the system so no
+        frame of the body holds its future."""
+        index = self._index[machine.name]
+        self._opens[index] = await self._post(
+            index,
+            machine,
+            until=None,
+            budget=None,
+            exact=None,
+            for_=None,
+            deadline=None,
+            stop_when=None,
+            gate=None,
+            open_=True,
+            releases=True,
+        )
+
+    async def _join(
+        self,
+        index: int,
+        machine: Machine,
+        *,
+        until: int | None,
+        exact: int | None,
+        for_: VirtualDuration | None,
+        deadline: VirtualTime | None,
+        stop_when: Callable[[], bool] | None,
+        gate: _core.Predicate | None,
+    ) -> Stop:
+        """A wait of a member inside its own run, `running()`: it joins the run's goal, which
+        stops for any of its waits, each resolving at its own stop as a lone machine's free run
+        waiters do, while the run goes on exactly from each stop for the others. A member stop
+        ends the run and every wait with it, and later waits return it. Where a wait starts
+        depends on wall timing, as on a lone machine, unless the run's goal has not started yet.
+        Budgets do not apply inside a run, as on a lone machine's free run."""
+        self._require_usable()
+        ended = self._run_ends.get(index)
+        if ended is not None:
+            return ended
+        if exact is not None:
+            raise MachineBusy(f"{machine.name} runs in its running(): no step inside it")
+        waits = self._waits.setdefault(index, [])
+        wait = _Wait(
+            until,
+            None if for_ is None else for_.ps,
+            None if deadline is None else deadline.ps,
+            gate,
+            stop_when,
+            asyncio.get_running_loop().create_future(),
+        )
+        waits.append(wait)
+        self._rebuild(index)
+        future = wait.future
+        del wait
+        try:
+            return await future
+        except asyncio.CancelledError:
+            if not future.done() or future.cancelled():
+                kept = self._waits.get(index)
+                if kept is not None and self._opens.get(index) is not None:
+                    self._waits[index] = [w for w in kept if w.future is not future]
+                    self._rebuild(index)
+            raise
+        finally:
+            del future
+
+    async def _close_open(self, machine: Machine) -> Stop | None:
+        """End the run of member `machine`: its pending waits raise EmulationError, its goal is
+        withdrawn at the next pause, and the member stop that ended the run, if one did, is
+        returned, the member released at it."""
+        index = self._index[machine.name]
+        goal = self._opens.pop(index)
+        self._fail_waits(index)
+        ended = self._run_ends.pop(index, None)
+        if ended is not None:
+            return ended
+        if not goal.done():
+            self._withdraw(index, goal)
+        future, waits = goal.future, goal.waits
+        if self._goals.get(index) is goal and goal.done():
+            del self._goals[index]
+        del goal
+        try:
+            raw = await awaited(future, lambda raw: raw, cancel=False)
+        except Exception:
+            del future
+            await self._landed()
+            if self._failed is not None or self._closed:
+                raise
+            return None
+        del future
+        await self._landed()
+        stop, at, held = _held_of(raw) if waits else (*_reached_of(raw), 0)
+        return None if _reached_waits(waits, stop, at, held) else stop
+
+    def _refuse_goal(self, index: int) -> None:
+        if self._system_run:
+            raise MachineBusy("the linked system runs a system run: await it first")
+        if index in self._goals:
+            raise MachineBusy(f"{self._names[index]} has a goal pending: one goal per member")
+
+    async def _reached(self, index: int, goal: _Goal) -> Stop:
+        future, task = goal.future, goal.task
+        try:
+            stop, _ = await awaited(future, _reached_of, cancel=False)
+            await self._landed()
+        except asyncio.CancelledError:
+            self._withdraw(index, goal)
+            del goal, future
+            raise
+        except BaseException:
+            del goal, future
+            await self._landed()
+            raise
+        del future
+        if self._goals.get(index) is goal:
+            del self._goals[index]
+        del goal
+        self._undecided[index] = task
+        if task is not None:
+            task.add_done_callback(lambda _: self._release(index, task))
+            asyncio.get_running_loop().call_later(_WATCHDOG, self._watchdog, index, task, stop)
+        return stop
+
+    async def _landed(self) -> None:
+        """Wait for the flight whose pause delivered a goal, so its bookkeeping is done."""
+        flight = self._flight
+        if flight is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(flight)
+
+    def _withdraw(self, index: int, goal: _Goal) -> None:
+        """Withdraw `goal` of member `index`, its task cancelled. A goal already delivered is
+        released instead, at once while paused, else by the pause that delivers it."""
+        goal.withdrawn = True
+        if self._closed or self._failed is not None:
+            return
+        if self._flight is not None:
+            if self._goals.get(index) is goal and not goal.done():
+                self._withdrawals.add(index)
+                self._pausing = True
+                self._handle.request_pause()
+            return
+        if self._goals.get(index) is goal:
+            del self._goals[index]
+            if not goal.done():
+                self._handle.withdraw(index)
+        if goal.done() and index not in self._undecided and index in self._handle.undecided():
+            self._handle.release(index)
+        self._schedule_kick()
+
+    def _release(self, index: int, owner: asyncio.Task[object] | None) -> None:
+        """Release member `index`, parked at its goal's stop, when `owner` still holds it, None
+        for any holder."""
+        if index not in self._undecided:
+            return
+        if owner is not None and self._undecided[index] is not owner:
+            return
+        del self._undecided[index]
+        if self._closed or self._failed is not None:
+            return
+        if index in self._handle.undecided():
+            self._handle.release(index)
+        self._schedule_kick()
+
+    def _before_await(self, future: _core.HostFuture) -> None:
+        if not self._undecided:
+            return
+        task = asyncio.current_task()
+        if task is None:
+            return
+        owner = future.owner()
+        for index, holder in list(self._undecided.items()):
+            if holder is task and owner != self._tokens[index]:
+                self._release(index, task)
+
+    def _halt_member(self, machine: Machine) -> None:
+        """`Machine.halt()` on a member: release it from its goal's stop."""
+        index = self._index[machine.name]
+        if index in self._goals:
+            raise MachineBusy(f"{machine.name} has a goal pending: cancel its task")
+        if index in self._undecided:
+            self._release(index, self._undecided[index])
+
+    def _watchdog(self, index: int, task: asyncio.Task[object], stop: Stop) -> None:
+        if self._closed or self._undecided.get(index) is not task:
+            return
+        key = (index, id(task))
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        _LOG.warning(
+            "%s waits at its goal's stop %s for %.0f s: the system waits for task %s to finish,"
+            " await a popcorn future of another machine or call %s.halt()",
+            self._names[index],
+            stop,
+            _WATCHDOG,
+            task.get_name(),
+            self._names[index],
+        )
 
     def _system_stop(self, pause: _Pause, target: int) -> SystemStop:
         reason = pause.reason

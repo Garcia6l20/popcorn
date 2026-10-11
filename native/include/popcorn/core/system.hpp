@@ -42,8 +42,14 @@ struct member_ref
 /** @brief What one member runs to, the bounds of a lone machine's run. */
 struct member_goal
 {
-  /** @brief Stop with stop_reason::address before executing this address. */
+  /** @brief Stop with stop_reason::address before executing this address. A goal that starts
+   * there executes an instruction first, unless the address is in arrive_at. */
   std::optional<address> until{};
+  /** @brief Further addresses that stop the goal as until does. */
+  std::vector<address> until_also{};
+  /** @brief Addresses of until and until_also the goal stops at when it starts there, 0
+   * instructions executed: a wait the member was already running to. */
+  std::vector<address> arrive_at{};
   /** @brief Instructions the goal may execute, halted time excluded. */
   std::optional<icount> budget{};
   /** @brief Stop with stop_reason::time at this system time. */
@@ -349,6 +355,23 @@ public:
    * @throws machine_running while a resume is in flight.
    */
   [[nodiscard]] auto time_of(held_system const& held, std::size_t member) const -> sys_time
+      pre(held.holds(*this)) pre(member < members());
+
+  /**
+   * @brief Member @p member's base: its system time is its local time plus the base. Any
+   *        thread, no lock, no wait, also while the system runs. Set by start(), moved by a
+   *        reset of the member to the reset's system time, restored by load(). While the
+   *        system runs, a reset under the reset policy moves it mid-run, so a read then may
+   *        precede or follow that reset.
+   */
+  [[nodiscard]] auto base_of(std::size_t member) const noexcept -> sys_time pre(member < members());
+
+  /**
+   * @brief Instructions member @p member executed since the system started, parked.
+   *        Sleep and halted time count none.
+   * @throws machine_running while a resume is in flight.
+   */
+  [[nodiscard]] auto executed_of(held_system const& held, std::size_t member) const -> icount
       pre(held.holds(*this)) pre(member < members());
 
 private:

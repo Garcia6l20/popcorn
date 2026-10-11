@@ -143,9 +143,18 @@ struct system::impl
     bool                                                                  warned_reset{};
     report                                                                rep{};
     std::uint64_t                                                         slices{};
+    icount                                                                executed{};
     std::chrono::nanoseconds                                              busy{};
     std::chrono::nanoseconds                                              drained{};
     std::optional<std::pair<detail::host_promise<goal_reached>, settled>> outcome{};
+    std::unique_ptr<std::atomic<std::int64_t>>                            base_ps =
+        std::make_unique<std::atomic<std::int64_t>>();
+
+    void rebase(time_map moved) noexcept
+    {
+      map = moved;
+      base_ps->store(moved.base().ps, std::memory_order_release);
+    }
 
     [[nodiscard]] auto running() const noexcept -> bool
     {
@@ -357,6 +366,7 @@ public:
   {
     auto& one = sys_.slots[index_];
     ++one.slices;
+    one.executed.value += result.executed.value;
     if(one.goal)
     {
       one.goal->executed += result.executed.value;
@@ -560,6 +570,8 @@ private:
     {
       auto const& goal           = one.goal->goal;
       request.until              = goal.until;
+      request.until_also         = goal.until_also;
+      request.arrive_at          = goal.arrive_at;
       request.budget_left        = left(goal.budget, one.goal->executed);
       request.exact_instructions = left(goal.exact, one.goal->executed);
       request.leave_until        = one.goal->executed == 0;
@@ -1198,7 +1210,7 @@ void system::impl::reset_member(slot& one, machine& target, reset_kind kind)
     link->receiver_reset(at);
   }
   target.reset(kind);
-  one.map     = time_map{at};
+  one.rebase(time_map{at});
   one.held_to = at;
   one.resets  = target.resets();
 }
@@ -1269,8 +1281,8 @@ void system::start(held_system const&, std::span<sys_time const> offsets)
   {
     auto const held_host = one.ref.on->lock();
     auto const local     = one.ref.on->member(held_host, 0).virtual_clock().time();
-    one.map              = time_map{sys_time{offset.ps - static_cast<std::int64_t>(local.ps)}};
-    one.held_to          = offset;
+    one.rebase(time_map{sys_time{offset.ps - static_cast<std::int64_t>(local.ps)}});
+    one.held_to = offset;
   }
   impl_->started = true;
 }
@@ -1536,10 +1548,10 @@ void system::load(held_system const&, std::span<std::byte const> in)
   for(auto&& [one, saved] : std::views::zip(self.slots, state.members))
   {
     auto const held_host = one.ref.on->lock();
-    one.map              = time_map{saved.base};
-    one.held_to          = saved.held_to;
-    one.released         = saved.released;
-    one.resets           = one.ref.on->member(held_host, 0).resets();
+    one.rebase(time_map{saved.base});
+    one.held_to  = saved.held_to;
+    one.released = saved.released;
+    one.resets   = one.ref.on->member(held_host, 0).resets();
   }
   self.window     = state.window;
   self.pending    = state.pending;
@@ -1616,6 +1628,20 @@ auto system::pending_barrier(held_system const&) const -> sys_time
     throw machine_running("the linked system is running");
   }
   return impl_->pending;
+}
+
+auto system::executed_of(held_system const&, std::size_t member) const -> icount
+{
+  if(impl_->in_flight())
+  {
+    throw machine_running("the linked system is running");
+  }
+  return impl_->slots[member].executed;
+}
+
+auto system::base_of(std::size_t member) const noexcept -> sys_time
+{
+  return sys_time{impl_->slots[member].base_ps->load(std::memory_order_acquire)};
 }
 
 auto system::time_of(held_system const&, std::size_t member) const -> sys_time

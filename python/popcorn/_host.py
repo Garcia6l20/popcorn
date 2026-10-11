@@ -56,6 +56,21 @@ def watch_logs(token: int, owner: _LogOwner) -> None:
     _LOGGED[token] = owner
 
 
+class _AwaitWatcher(Protocol):
+    """What sees every popcorn future a task is about to await."""
+
+    def _before_await(self, future: _core.HostFuture) -> None: ...
+
+
+_WATCHERS: weakref.WeakSet[_AwaitWatcher] = weakref.WeakSet()
+
+
+def watch_awaits(watcher: _AwaitWatcher) -> None:
+    """Call `watcher._before_await(future)` before each `awaited` on any loop, for as long as
+    `watcher` lives."""
+    _WATCHERS.add(watcher)
+
+
 _WAKERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Waker | None] = (
     weakref.WeakKeyDictionary()
 )
@@ -93,6 +108,9 @@ async def awaited[T](
     command not yet run is withdrawn. A task destroyed while pending, its loop closed under it,
     cancels the same way.
 
+    Each linked system sees the future first: a member parked at a goal's stop whose awaiting
+    task now awaits a future of another machine is released, `LinkedSystem`.
+
     The machine's thread wakes the loop through the loop's eventfd, without the GIL, so a loop
     that never blocks, spinning on `asyncio.sleep(0)`, still sees it. A loop without
     `add_reader` is woken by `call_soon_threadsafe` from the machine's thread, which needs the
@@ -100,6 +118,8 @@ async def awaited[T](
     error is also held natively by the future, out of the cycle collector's sight, so a
     traceback frame holding the future would keep both alive.
     """
+    for watcher in list(_WATCHERS):
+        watcher._before_await(future)  # pyright: ignore[reportPrivateUsage]
     if not future.done():
         loop = asyncio.get_running_loop()
         woken: asyncio.Future[None] = loop.create_future()

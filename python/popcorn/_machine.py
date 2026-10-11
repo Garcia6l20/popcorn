@@ -370,6 +370,30 @@ class _Native:
         return self.predicate.holds()
 
 
+class _Linked(Protocol):
+    """What a member hands its runs to: its `LinkedSystem`."""
+
+    async def _goal(
+        self,
+        machine: Machine,
+        *,
+        until: int | None = None,
+        budget: int | None = None,
+        exact: int | None = None,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+        stop_when: Callable[[], bool] | None = None,
+        gate: _core.Predicate | None = None,
+        run: bool = False,
+    ) -> Stop: ...
+
+    def _halt_member(self, machine: Machine) -> None: ...
+
+    async def _open_goal(self, machine: Machine) -> None: ...
+
+    async def _close_open(self, machine: Machine) -> Stop | None: ...
+
+
 class Machine:
     """One emulated MCU: a description, the images loaded into it and its run state.
 
@@ -961,6 +985,12 @@ class Machine:
         A sync read made from a callback of another machine waits for this machine as the class
         doc says, `read` itself never holds a machine while it waits.
 
+        On a member of a `LinkedSystem` whose goal is pending, a batch posted while the system
+        is paused runs at once at the member's position there, which depends on the system's
+        quantum, as do the values read. With `at`, whether the member already stands past `at`,
+        and the batch is refused, depends on the quantum too. For an exact position read a
+        member that is halted, after its goal's stop or with the goal withdrawn.
+
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.
             ValueError: A ref of another machine, or `at` before the time of a parked machine.
@@ -996,6 +1026,12 @@ class Machine:
         word in one access on the machine's thread, so the other bits keep what the firmware
         wrote meanwhile. A sync write made from a callback of another machine waits for this
         machine as the class doc says, `write` itself never holds a machine while it waits.
+
+        On a member of a `LinkedSystem` whose goal is pending, writes posted while the system is
+        paused land at the member's position there, which depends on the system's quantum, and
+        so does everything the member does after them. With `at`, whether the member already
+        stands past `at`, and the writes are refused, depends on the quantum too. Write a halted
+        member for an exact point: after its goal's stop, or with the goal withdrawn.
 
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.
@@ -1989,7 +2025,8 @@ class Machine:
         Cancelling the awaiting task halts the run at the next block boundary.
 
         Raises:
-            MachineBusy: Another run, step, call, wait or free run is active.
+            MachineBusy: Another run, step, call, wait or free run is active, the member's own
+                `running()` of a linked system included.
             Exception: A kept log filter or handler error, as for `read`.
         """
         _check_duration(for_)
@@ -2000,6 +2037,7 @@ class Machine:
             for_=for_,
             stop_when=stop_when,
             exact=None,
+            run=True,
         )
 
     async def _bounded_run(
@@ -2040,8 +2078,23 @@ class Machine:
         stop_when: Callable[[Machine], bool] | None,
         exact: int | None,
         deadline: VirtualTime | None = None,
+        run: bool = False,
     ) -> Stop:
         self._last_stop = None
+        system = self._linked()
+        if system is not None:
+            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
+                self,
+                until=until,
+                budget=budget,
+                exact=exact,
+                for_=for_,
+                deadline=deadline,
+                stop_when=None if stop_when is None else self._handler(stop_when),
+                run=run,
+            )
+            self._last_stop = stop
+            return stop
         stop = await awaited(
             self._handle.run_goal(
                 until=until,
@@ -2281,7 +2334,13 @@ class Machine:
         if self._handle.session_open():
             stop = await self._waited(None, duration)
         else:
-            stop = await self.run(for_=duration)
+            stop = await self._goal(
+                until=None,
+                budget=self._default_budget,
+                for_=duration,
+                stop_when=None,
+                exact=None,
+            )
         if stop.reason is not StopReason.TIME:
             raise _stop_error(stop, "the run letting time pass", error_prefix(self))
         return stop.time
@@ -2310,6 +2369,13 @@ class Machine:
         deadline: VirtualTime | None = None,
     ) -> Stop:
         self._last_stop = None
+        system = self._linked()
+        if system is not None:
+            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
+                self, budget=self._default_budget, for_=for_, deadline=deadline, gate=ready
+            )
+            self._last_stop = stop
+            return stop
         stop = await awaited(
             self._handle.run_predicate(
                 ready, self._default_budget, _ps(for_), deadline_ps(deadline)
@@ -2327,6 +2393,18 @@ class Machine:
         deadline: VirtualTime | None,
     ) -> Stop:
         self._last_stop = None
+        system = self._linked()
+        if system is not None:
+            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
+                self,
+                budget=self._default_budget,
+                for_=for_,
+                deadline=deadline,
+                stop_when=self._handler(ready),
+                gate=gate,
+            )
+            self._last_stop = stop
+            return stop
         stop = await awaited(
             self._handle.run_gated(
                 gate,
@@ -2351,17 +2429,17 @@ class Machine:
         conditions = event if isinstance(event, Conditions) else any_of(event)
         members = conditions.members
         if not self._handle.session_open():
-            stopped: list[bool] = []
+            stopped: list[tuple[Condition, ...]] = []
 
             def stop_when(machine: Machine) -> bool:
                 held = event.ready(machine)
                 if held:
-                    stopped.append(True)
+                    stopped.append(tuple(member for member in members if member.ready(machine)))
                 return held
 
             stop = await self._bounded_run(for_=for_, deadline=deadline, stop_when=stop_when)
             held = stop.reason is StopReason.USER and bool(stopped)
-            fired = tuple(member for member in members if member.ready(self)) if held else ()
+            fired = stopped[-1] if held else ()
             stop = dataclasses.replace(stop, fired=fired)
             self._last_stop = stop
             return stop
@@ -2405,6 +2483,10 @@ class Machine:
             RuntimeError: Called from a handler, which runs on a machine's thread.
         """
         self._refuse_on_host()
+        if self._linked() is not None:
+            raise MachineBusy(
+                f"{self._name} is a member of a linked system: use the member's running()"
+            )
         self._handle.start()
         self._last_stop = None
         self._surfaced = None
@@ -2422,6 +2504,11 @@ class Machine:
                 BudgetExceeded for BUDGET, EmulationError otherwise, carrying the stop.
             BaseException: The exception a handler raised during the free run.
         """
+        system = self._linked()
+        if system is not None:
+            self._refuse_on_host()
+            system._halt_member(self)  # pyright: ignore[reportPrivateUsage]
+            return
         ended = self._halted()
         if isinstance(ended, BaseException):
             raise ended
@@ -2508,6 +2595,25 @@ class Machine:
             EmulationError: The free run stopped for a reason other than IDLE.
             BaseException: The exception a handler of the free run raised.
         """
+        system = self._linked()
+        if system is not None:
+            await system._open_goal(self)  # pyright: ignore[reportPrivateUsage]
+            ending = system._close_open  # pyright: ignore[reportPrivateUsage]
+            try:
+                yield
+            except BaseException as error:
+                try:
+                    stopped = await ending(self)
+                except Exception as failed:
+                    error.add_note(f"leaving the member's run raised: {failed!r}")
+                    raise error from None
+                if stopped is not None:
+                    error.add_note(f"member run stopped: {stopped}")
+                raise
+            stopped = await ending(self)
+            if stopped is not None:
+                raise _stop_error(stopped, "the member's run", error_prefix(self))
+            return
         self.start()
         try:
             yield
@@ -2526,6 +2632,10 @@ class Machine:
                 error.add_note(f"background run raised: {ended!r}")
             raise
         self.halt()
+
+    def _linked(self) -> _Linked | None:
+        owner = self._system
+        return None if owner is None else cast(_Linked | None, owner())
 
     def _refuse_member(self, what: str) -> None:
         owner = self._system

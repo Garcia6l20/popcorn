@@ -22,6 +22,7 @@ def member(
     slice_instructions: int = 1_000_000,
     *,
     strict: bool = False,
+    slice_wall_budget: float = 1e-3,
     models: Mapping[str, Callable[[], popcorn.model.Model]] | None = None,
 ) -> popcorn.Machine:
     """A usart_ll machine named `name`, stopped at main with pc at `entry`."""
@@ -31,6 +32,7 @@ def member(
         name=name,
         slice_instructions=slice_instructions,
         strict_peripherals=strict,
+        slice_wall_budget=slice_wall_budget,
         models=models,
     )
     m.reset()

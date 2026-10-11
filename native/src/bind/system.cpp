@@ -14,6 +14,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
@@ -23,6 +24,7 @@
 #include <exception>
 #include <expected>
 #include <format>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <span>
@@ -550,14 +552,15 @@ auto system_handle::resume(std::optional<std::int64_t> until_ps) -> host_future_
 }
 
 auto system_handle::post_goal(
-    std::size_t                  member,
-    std::optional<address>       until,
-    std::optional<std::uint64_t> budget,
-    std::optional<std::uint64_t> exact,
-    std::optional<std::int64_t>  until_ps,
-    std::optional<nb::object>    stop_when,
-    bool                         open,
-    std::optional<std::int64_t>  cap_ps) -> host_future_handle
+    std::size_t                     member,
+    std::optional<address>          until,
+    std::optional<std::uint64_t>    budget,
+    std::optional<std::uint64_t>    exact,
+    std::optional<std::int64_t>     until_ps,
+    std::optional<nb::object>       stop_when,
+    std::optional<native_predicate> gate,
+    bool                            open,
+    std::optional<std::int64_t>     cap_ps) -> host_future_handle
 {
   system_ref const ref{system()};
   auto&            sys = *ref;
@@ -588,6 +591,12 @@ auto system_handle::post_goal(
       return nb::cast<bool>(detail::call_python([&] { return (*predicate)(); }));
     };
   }
+  if(gate)
+  {
+    goal.stop_when = [test = gate->test(), then = std::move(goal.stop_when)] {
+      return test() and (not then or then());
+    };
+  }
   auto const& slot   = members_[member].slot;
   auto        future = locked(sys, [&](core::held_system const& held) {
     auto posted = sys.post_goal(held, member, std::move(goal));
@@ -599,6 +608,104 @@ auto system_handle::post_goal(
           std::move(future),
           [kept](core::goal_reached const& reached) {
             return nb::make_tuple(detail::stop_info(reached.stopped), reached.at.ps);
+          },
+          request_pause_of(system_), std::weak_ptr<detail::host_slot const>{slot}),
+      slot};
+}
+
+auto system_handle::post_waits(
+    std::size_t                                  member,
+    std::vector<address>                         untils,
+    std::vector<address>                         arrive_at,
+    std::optional<std::int64_t>                  until_ps,
+    std::vector<std::optional<native_predicate>> gates,
+    std::vector<std::optional<nb::object>>       stop_whens,
+    std::optional<std::int64_t>                  cap_ps) -> host_future_handle
+{
+  if(gates.size() != stop_whens.size() or gates.size() > 64)
+  {
+    throw nb::value_error("post_waits takes at most 64 waits, as many gates as stop_whens");
+  }
+  system_ref const ref{system()};
+  auto&            sys = *ref;
+  std::ignore          = member_index(member);
+  core::member_goal goal{.arrive_at = std::move(arrive_at), .open = true};
+  if(not untils.empty())
+  {
+    goal.until = untils.front();
+    goal.until_also.assign(std::next(untils.begin()), untils.end());
+  }
+  if(until_ps)
+  {
+    goal.until_time = core::sys_time{*until_ps};
+  }
+  if(cap_ps)
+  {
+    goal.cap = core::sys_time{*cap_ps};
+  }
+  struct wait_test
+  {
+    std::function<bool()>                    gate;
+    std::shared_ptr<detail::python_callable> python;
+  };
+  auto tests  = std::make_shared<std::vector<wait_test>>();
+  auto asking = false;
+  for(std::size_t index = 0; index < gates.size(); ++index)
+  {
+    auto& test = tests->emplace_back();
+    if(gates[index])
+    {
+      test.gate = gates[index]->test();
+    }
+    if(stop_whens[index] and not stop_whens[index]->is_none())
+    {
+      test.python = detail::held(std::move(*stop_whens[index]));
+    }
+    asking = asking or test.gate or test.python;
+  }
+  auto held = std::make_shared<std::atomic<std::uint64_t>>(0);
+  if(asking)
+  {
+    goal.stop_when = [tests, held] {
+      std::uint64_t mask = 0;
+      for(std::size_t index = 0; index < tests->size(); ++index)
+      {
+        auto const& test = (*tests)[index];
+        if(not test.gate and not test.python)
+        {
+          continue;
+        }
+        if(test.gate and not test.gate())
+        {
+          continue;
+        }
+        if(test.python)
+        {
+          detail::gil_entry const gil;
+          if(not nb::cast<bool>(detail::call_python([&] { return (*test.python)(); })))
+          {
+            continue;
+          }
+        }
+        mask |= std::uint64_t{1} << index;
+      }
+      held->store(mask, std::memory_order_relaxed);
+      return mask != 0;
+    };
+  }
+  auto const& slot   = members_[member].slot;
+  auto        future = locked(sys, [&](core::held_system const& held_system) {
+    auto posted = sys.post_goal(held_system, member, std::move(goal));
+    slot->refused.store(true, std::memory_order_release);
+    return posted;
+  });
+  return host_future_handle{
+      std::make_shared<goal_request>(
+          std::move(future),
+          [tests, held](core::goal_reached const& reached) {
+            return nb::make_tuple(
+                detail::stop_info(reached.stopped), reached.at.ps,
+                held->load(std::memory_order_relaxed));
           },
           request_pause_of(system_), std::weak_ptr<detail::host_slot const>{slot}),
       slot};
@@ -741,6 +848,29 @@ auto system_handle::time_of_ps(std::size_t member) -> std::int64_t
   auto&            sys = *ref;
   std::ignore          = member_index(member);
   return locked(sys, [&](core::held_system const& held) { return sys.time_of(held, member).ps; });
+}
+
+auto system_handle::base_of_ps(std::size_t member) -> std::int64_t
+{
+  if(closed_)
+  {
+    throw core::machine_closed("the linked system was closed");
+  }
+  if(system_ == nullptr)
+  {
+    throw std::logic_error("the linked system is not started");
+  }
+  std::ignore = member_index(member);
+  return system_->base_of(member).ps;
+}
+
+auto system_handle::executed_of(std::size_t member) -> std::uint64_t
+{
+  system_ref const ref{system()};
+  auto&            sys = *ref;
+  std::ignore          = member_index(member);
+  return locked(
+      sys, [&](core::held_system const& held) { return sys.executed_of(held, member).value; });
 }
 
 auto system_handle::tap_take(std::size_t index) -> std::vector<tap_record>

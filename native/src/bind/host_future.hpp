@@ -371,6 +371,10 @@ public:
   [[= py::doc{"Cancel: halt a goal, drop a waiter, withdraw a command. Returns when done, and "
               "for a command whether this call withdrew it."}]] auto cancel() -> bool;
 
+  /** @brief The log token of the machine the request runs on, its owner, 0 for none. */
+  [[= py::doc{"Log token of the machine the request runs on, 0 for none."}]] [[nodiscard]] auto
+      owner() const noexcept -> std::uint64_t;
+
 private:
   std::shared_ptr<detail::pending_request> request_;
   void                                     refuse_inherited() const;

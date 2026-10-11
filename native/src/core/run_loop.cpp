@@ -786,6 +786,7 @@ auto machine::run_state::exit_list(slice_request const& request) const -> std::v
   {
     list.push_back(*request.until);
   }
+  list.append_range(request.until_also);
   if(call)
   {
     list.push_back(call->frame.return_sentinel);
@@ -793,15 +794,27 @@ auto machine::run_state::exit_list(slice_request const& request) const -> std::v
   return list;
 }
 
+auto machine::run_state::at_until(slice_request const& request, address pc) -> bool
+{
+  return request.until == pc or std::ranges::contains(request.until_also, pc);
+}
+
 auto machine::run_state::leaving_until(slice_request const& request) const -> bool
 {
-  return request.leave_until and executed.value == 0;
+  if(not request.leave_until
+     or executed.value != 0
+     or (not request.until and request.until_also.empty()))
+  {
+    return false;
+  }
+  auto const pc = arch->pc();
+  return at_until(request, pc) and not std::ranges::contains(request.arrive_at, pc);
 }
 
 void machine::run_state::step_off_until(slice_request const& request)
 {
   auto list = exit_list(request);
-  list.erase(std::ranges::find(list, *request.until));
+  list.erase(std::ranges::find(list, arch->pc()));
   set_exits(std::move(list));
   deadline = std::min(deadline, add_sat(owner.clock_driver_.exact_now(), 1));
 }
@@ -829,7 +842,9 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
   {
     return slice_end{make_stop(stop_reason::time, {}, std::nullopt)};
   }
-  if(request.until and owner.arch_->pc() == *request.until and not leaving_until(request))
+  if((request.until or not request.until_also.empty())
+     and at_until(request, owner.arch_->pc())
+     and not leaving_until(request))
   {
     return slice_end{make_stop(stop_reason::address, {}, std::nullopt)};
   }
@@ -1068,7 +1083,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       spin.previous         = {};
     }
     boundary_stop      = false;
-    auto const leaving = leaving_until(request) and request.until and arch->pc() == *request.until;
+    auto const leaving = leaving_until(request);
     if(leaving)
     {
       step_off_until(request);

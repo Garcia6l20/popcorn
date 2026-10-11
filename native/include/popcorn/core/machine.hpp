@@ -107,6 +107,11 @@ struct slice_request
   /** @brief Stop with stop_reason::address before executing this address. A slice that starts at
    * this address stops at once, 0 instructions executed, unless leave_until is set. */
   std::optional<address> until{};
+  /** @brief Further addresses that stop the slice as until does, leave_until included. */
+  std::vector<address> until_also{};
+  /** @brief Addresses of until and until_also that stop a slice starting at them although
+   * leave_until is set: the run arrives there, it does not leave. */
+  std::vector<address> arrive_at{};
   /** @brief Instructions left in the run's budget, stop with stop_reason::budget at the first
    * block boundary at or past them. The caller subtracts `slice_result::executed` between
    * slices. */
@@ -126,9 +131,10 @@ struct slice_request
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */
   std::function<bool()> stop_when{};
-  /** @brief A slice that starts at until executes at least one instruction before until may stop
-   * it, so a run resuming from its own until address goes on to the next hit. The caller sets it
-   * until the run has executed an instruction. */
+  /** @brief A slice that starts at until, or at an address of until_also, executes at least one
+   * instruction before that address may stop it, so a run resuming from its own until address
+   * goes on to the next hit, unless the address is in arrive_at. The caller sets it until the run
+   * has executed an instruction. */
   bool leave_until{};
   /** @brief A stop_reason::time stop is the caller's bookkeeping, such as a host landing a
    * stamped command at until_time: the stop is returned with its pc unlocated and no trace stop

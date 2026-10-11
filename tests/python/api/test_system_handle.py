@@ -160,7 +160,7 @@ def test_a_goal_stops_at_its_point_whatever_the_slicing_or_quantum(
     ]:
         linked = ping(slice_instructions, third)
         target = linked.a.sym("USART1_IRQHandler")
-        future = linked.handle.post_goal(0, target, None, None, None, None, False, None)
+        future = linked.handle.post_goal(0, target, None, None, None, None, None, False, None)
         pause = resume(linked.handle, ms(3).ps)
         assert cast(_core.PauseReason, pause[0]) is _core.PauseReason.delivered
         stop, at_ps = cast(tuple[_core.StopInfo, int], future.result(5.0))
@@ -176,7 +176,7 @@ def test_a_member_with_a_pending_goal_refuses_sync_access_while_paused(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
     linked = ping(1_000_000, None)
-    future = linked.handle.post_goal(0, None, None, None, ms(5).ps, None, False, None)
+    future = linked.handle.post_goal(0, None, None, None, ms(5).ps, None, None, False, None)
     with pytest.raises(popcorn.MachineRunning, match="pending goal"):
         _ = linked.a.pc
     with pytest.raises(popcorn.MachineRunning, match="pending goal"):
@@ -186,7 +186,7 @@ def test_a_member_with_a_pending_goal_refuses_sync_access_while_paused(
     assert linked.a.pc == linked.a.sym("link_ping")
     del future
     target = linked.a.sym("USART1_IRQHandler")
-    future = linked.handle.post_goal(0, target, None, None, None, None, False, None)
+    future = linked.handle.post_goal(0, target, None, None, None, None, None, False, None)
     with pytest.raises(popcorn.MachineRunning, match="pending goal"):
         _ = linked.a.pc
     assert (
@@ -202,7 +202,7 @@ def test_a_finish_clears_the_access_refusal_of_a_pending_goal(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
     linked = ping(1_000_000, None)
-    future = linked.handle.post_goal(1, None, None, None, ms(5).ps, None, False, None)
+    future = linked.handle.post_goal(1, None, None, None, ms(5).ps, None, None, False, None)
     with pytest.raises(popcorn.MachineRunning, match="pending goal"):
         _ = linked.b.pc
     linked.handle.finish()
@@ -215,7 +215,7 @@ def test_member_indices_are_checked_before_anything_is_posted(
 ) -> None:
     linked = ping(1_000_000, None)
     calls: list[Callable[[], object]] = [
-        lambda: linked.handle.post_goal(9, None, None, None, None, None, False, None),
+        lambda: linked.handle.post_goal(9, None, None, None, None, None, None, False, None),
         lambda: linked.handle.withdraw(9),
         lambda: linked.handle.release(9),
         lambda: linked.handle.reset(9, _core.ResetKind.power_on),
@@ -299,7 +299,7 @@ def test_a_completion_callback_re_entering_the_system_raises_instead_of_deadlock
     ping: Callable[[int, int | None], Linked], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     linked = ping(1_000_000, None)
-    future = linked.handle.post_goal(0, None, None, None, ms(5).ps, None, False, None)
+    future = linked.handle.post_goal(0, None, None, None, ms(5).ps, None, None, False, None)
     raised: list[BaseException | None] = []
 
     def report(args: sys.UnraisableHookArgs) -> None:
@@ -335,7 +335,7 @@ def test_a_stop_when_calling_the_system_fails_the_goal(
         linked.handle.request_pause()
         return False
 
-    future = linked.handle.post_goal(0, None, None, None, ms(1).ps, ask, False, None)
+    future = linked.handle.post_goal(0, None, None, None, ms(1).ps, ask, None, False, None)
     pause = resume(linked.handle, None)
     assert calls
     assert cast(_core.PauseReason, pause[0]) is _core.PauseReason.error
@@ -361,7 +361,7 @@ def test_a_stop_when_goal_takes_the_gil_only_for_its_calls(
     b_handle = linked.b._handle  # pyright: ignore[reportPrivateUsage]
     before = a_handle.gil_entries()
     b_before = b_handle.gil_entries()
-    future = linked.handle.post_goal(0, None, None, None, ms(2).ps, never, False, None)
+    future = linked.handle.post_goal(0, None, None, None, ms(2).ps, never, None, False, None)
     pause = resume(linked.handle, None)
     assert cast(_core.PauseReason, pause[0]) is _core.PauseReason.delivered
     future.result(1.0)
@@ -571,7 +571,7 @@ def test_a_running_system_collected_in_a_member_s_callback_closes_off_that_threa
             collected.append(gc.collect())
         return False
 
-    goal = box[0].handle.post_goal(0, None, None, None, ms(50).ps, ask, False, None)
+    goal = box[0].handle.post_goal(0, None, None, None, ms(50).ps, ask, None, False, None)
     pending = box[0].handle.resume(ms(100).ps)
     pause = cast(tuple[object, ...], pending.result(30.0))
     assert collected and collected[0] > 0
@@ -643,8 +643,8 @@ def slow():
     return False
 
 
-goal = box[0].handle.post_goal(0, None, None, None, 50_000_000_000, ask, False, None)
-other = box[0].handle.post_goal(1, None, None, None, 50_000_000_000, slow, False, None)
+goal = box[0].handle.post_goal(0, None, None, None, 50_000_000_000, ask, None, False, None)
+other = box[0].handle.post_goal(1, None, None, None, 50_000_000_000, slow, None, False, None)
 pending = box[0].handle.resume(100_000_000_000)
 while not collected:
     time.sleep(0.001)
@@ -680,8 +680,8 @@ def stuck():
     return False
 
 
-goal = box[0].handle.post_goal(0, None, None, None, 50_000_000_000, ask, False, None)
-other = box[0].handle.post_goal(1, None, None, None, 50_000_000_000, stuck, False, None)
+goal = box[0].handle.post_goal(0, None, None, None, 50_000_000_000, ask, None, False, None)
+other = box[0].handle.post_goal(1, None, None, None, 50_000_000_000, stuck, None, False, None)
 pending = box[0].handle.resume(100_000_000_000)
 while not collected:
     time.sleep(0.001)

@@ -14,6 +14,7 @@
 
 #include <sched.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -447,7 +448,7 @@ TEST_CASE("every receiver drains each window once, in order, at its barrier")
   CHECK(r.sys->pending_barrier(held).ps == static_cast<std::int64_t>(stopped.windows + 1) * q);
 }
 
-TEST_CASE("offsets set each member's system time and a reset while paused keeps it")
+TEST_CASE("offsets set each member's system time and base, and a reset while paused keeps the time")
 {
   rig r{.members = sleeper_and_runner()};
   r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
@@ -459,12 +460,15 @@ TEST_CASE("offsets set each member's system time and a reset while paused keeps 
     std::vector<core::sys_time> const offsets{core::sys_time{0}, core::sys_time{37 * us_ps}};
     r.sys->start(held, offsets);
     CHECK(r.sys->time_of(held, 1).ps == 37 * us_ps);
+    CHECK(r.sys->base_of(1).ps == 37 * us_ps);
   }
   REQUIRE(r.run(500 * us_ps).reason == core::pause_reason::system_time);
   auto const held   = r.sys->lock();
   auto const before = r.sys->time_of(held, 0);
+  CHECK(r.sys->base_of(0).ps == 0);
   r.sys->reset(held, 0, popcorn::reset_kind::software);
   CHECK(r.sys->time_of(held, 0) == before);
+  CHECK(r.sys->base_of(0) == before);
   CHECK(r.links[0]->sender_resets == std::vector{before.ps});
   CHECK(r.links[0]->receiver_resets.empty());
 }
@@ -611,6 +615,8 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
     CHECK_THROWS_AS(std::ignore = r.sys->time_of(held, 0), popcorn::machine_running);
     CHECK_THROWS_AS(std::ignore = r.sys->pending_barrier(held), popcorn::machine_running);
   }
+  CHECK(r.sys->base_of(0).ps == 0);
+  CHECK(r.sys->base_of(1).ps == 0);
   r.sys->request_pause();
   auto const stopped = pending.get();
   CHECK(stopped.reason == core::pause_reason::requested);
@@ -1088,6 +1094,77 @@ TEST_CASE("a lone goal posted while its closed system is destroyed reads no link
   core::access(on, 0, [](core::machine& m) { CHECK_FALSE(m.core_held()); });
 }
 
+TEST_CASE("a member goal arriving at its until address stops there with nothing executed")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    for(auto const arrive : {false, true})
+    {
+      CAPTURE(how.name);
+      CAPTURE(arrive);
+      long_block made;
+      rig        r{
+          .members = {member("alu", "alu_entry"), long_block_member(made)}
+      };
+      r.build(how);
+      core::member_goal wanted{.until = scratch_code, .until_time = core::sys_time{50 * us_ps}};
+      if(arrive)
+      {
+        wanted.arrive_at = {scratch_code};
+      }
+      auto goal = r.goal(1, std::move(wanted));
+      REQUIRE(r.run({}).member == 1);
+      auto const reached  = goal.get();
+      auto const executed = [&] {
+        auto const held = r.sys->lock();
+        return r.sys->executed_of(held, 1).value;
+      }();
+      if(arrive)
+      {
+        CHECK(reached.stopped.reason == stop_reason::address);
+        CHECK(executed == 0);
+      }
+      else
+      {
+        CHECK(reached.stopped.reason == stop_reason::time);
+        CHECK(executed > 0);
+      }
+    }
+  }
+}
+
+TEST_CASE("a member goal with several until addresses stops at the first one reached")
+{
+  constexpr popcorn::address near  = scratch_code + 2 * 100;
+  constexpr popcorn::address far   = scratch_code + 2 * 300;
+  auto const                 pc_of = [](rig& r) {
+    return core::access(*r.members[1].on, 0, [](core::machine& m) {
+      return static_cast<popcorn::address>(m.regs().read(*m.regs().find("pc")));
+    });
+  };
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    long_block made;
+    rig        r{
+        .members = {member("alu", "alu_entry"), long_block_member(made)}
+    };
+    r.build(how);
+    core::member_goal const both{
+        .until = far, .until_also = {near}, .until_time = core::sys_time{1 * ms_ps}};
+    auto first = r.goal(1, both);
+    REQUIRE(r.run({}).member == 1);
+    CHECK(first.get().stopped.reason == stop_reason::address);
+    CHECK(pc_of(r) == near);
+    auto second = r.goal(1, both);
+    REQUIRE(r.run({}).member == 1);
+    CHECK(second.get().stopped.reason == stop_reason::address);
+    CHECK(pc_of(r) == far);
+    auto const held = r.sys->lock();
+    CHECK(r.sys->executed_of(held, 1).value == 300);
+  }
+}
+
 TEST_CASE("a goal posted to a halted member while paused starts at the delivered point")
 {
   for(auto const& how : {variants()[0], variants()[1]})
@@ -1484,6 +1561,54 @@ TEST_CASE("a reset request under the stop policy resolves the goal, reset_and_co
       CHECK(r.links[0]->receiver_resets.size() == 1);
     }
   }
+}
+
+TEST_CASE("base_of is read from another thread while a member resets mid-run")
+{
+  auto resetting     = member("calls", "reset_now");
+  resetting.on_reset = popcorn::core::reset_request_policy::reset_and_continue;
+  rig r{
+      .members = {member("alu", "alu_entry"), resetting}
+  };
+  r.build(variants()[0]);
+  auto const                 first  = r.sys->base_of(0).ps;
+  auto const                 before = r.sys->base_of(1).ps;
+  std::atomic<bool>          done{};
+  std::vector<std::int64_t>  firsts{first};
+  std::vector<std::int64_t>  seconds{before};
+  std::atomic<std::uint64_t> reads{};
+  std::jthread               reader{[&] {
+    while(not done.load(std::memory_order_acquire))
+    {
+      reads.fetch_add(1, std::memory_order_release);
+      if(auto const one = r.sys->base_of(0).ps; one != firsts.back())
+      {
+        firsts.push_back(one);
+      }
+      if(auto const one = r.sys->base_of(1).ps; one != seconds.back())
+      {
+        seconds.push_back(one);
+      }
+    }
+  }};
+  while(reads.load(std::memory_order_acquire) == 0)
+  {
+    std::this_thread::yield();
+  }
+  auto       goal    = r.goal(1, {.budget = icount{5000}});
+  auto const stopped = r.run({});
+  REQUIRE(stopped.reason == core::pause_reason::delivered);
+  CHECK(goal.get().stopped.reason == stop_reason::budget);
+  done.store(true, std::memory_order_release);
+  reader.join();
+  auto const after = r.sys->base_of(1).ps;
+  CHECK(after != before);
+  CHECK(r.links[0]->receiver_resets.size() == 1);
+  CHECK(std::ranges::all_of(firsts, [&](std::int64_t one) { return one == first; }));
+  CHECK(std::ranges::all_of(seconds, [&](std::int64_t one) {
+    return one == before or one == after;
+  }));
+  r.sys->close();
 }
 
 TEST_CASE("close fails every pending goal with machine_closed")

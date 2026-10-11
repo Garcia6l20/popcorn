@@ -157,6 +157,8 @@ public:
    * @param until_ps Stop at this system time.
    * @param stop_when Predicate asked on the member's host thread after each dispatched event,
    *        in a copy of the caller's context.
+   * @param gate Native predicate asked first, with no GIL: @p stop_when is asked only while it
+   *        holds, and without @p stop_when the goal stops when it holds.
    * @param open Whether a system IDLE leaves the goal open.
    * @param cap_ps Virtual time the goal may run from its start.
    * @return Resolves to a tuple (StopInfo, at_ps). Cancelling it requests a pause only: the
@@ -172,8 +174,35 @@ public:
           std::optional<std::uint64_t>          exact,
           std::optional<std::int64_t>           until_ps,
           std::optional<reflex::py::nb::object> stop_when,
+          std::optional<native_predicate>       gate,
           bool                                  open,
           std::optional<std::int64_t>           cap_ps) -> host_future_handle;
+
+  /**
+   * @brief core::system::post_goal() of an open goal that serves several waits at once.
+   * @param member Member index.
+   * @param untils Stop before executing any of these addresses.
+   * @param arrive_at Addresses of @p untils the goal stops at when it starts there.
+   * @param until_ps Stop at this system time.
+   * @param gates Each wait's native predicate, None for none.
+   * @param stop_whens Each wait's Python predicate, None for none, asked only while that wait's
+   *        gate holds. A wait with neither never holds.
+   * @param cap_ps Virtual time the goal may run from its start.
+   * @return Resolves to a tuple (StopInfo, at_ps, held): bit i of held is set when wait i held
+   *         at the check that stopped the goal, 0 for a stop no wait asked for. Otherwise as
+   *         post_goal().
+   * @throws ValueError for more than 64 waits or lists of different lengths.
+   */
+  [[= py::doc{"Post an open goal serving several waits, return a HostFuture of (StopInfo, at_ps, "
+              "held)."}]] auto
+      post_waits(
+          std::size_t                                        member,
+          std::vector<address>                               untils,
+          std::vector<address>                               arrive_at,
+          std::optional<std::int64_t>                        until_ps,
+          std::vector<std::optional<native_predicate>>       gates,
+          std::vector<std::optional<reflex::py::nb::object>> stop_whens,
+          std::optional<std::int64_t>                        cap_ps) -> host_future_handle;
 
   /** @brief core::system::withdraw().
    * @throws IndexError for no such member. */
@@ -229,6 +258,17 @@ public:
   /** @brief core::system::time_of() in picoseconds. */
   [[= py::doc{"System time of a parked member, in picoseconds."}]] auto
       time_of_ps(std::size_t member) -> std::int64_t;
+
+  /** @brief core::system::base_of() in picoseconds, any thread, a machine's callbacks
+   * included, no lock: it reads `system_` under the GIL, so it never takes or drops a
+   * reference to the system.
+   * @throws IndexError for no such member. */
+  [[= py::doc{"A member's base in picoseconds: its system time minus its local time."}]] auto
+      base_of_ps(std::size_t member) -> std::int64_t;
+
+  /** @brief core::system::executed_of(). */
+  [[= py::doc{"Instructions a parked member executed since the system started."}]] auto
+      executed_of(std::size_t member) -> std::uint64_t;
 
   /** @brief Takes every frame the tap of wire @p wire holds, oldest first. */
   [[= py::doc{"Take the frames a wire's tap holds."}]] auto tap_take(std::size_t wire)

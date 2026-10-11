@@ -437,6 +437,11 @@ auto host_future_handle::cancel() -> bool
   return request_->cancel();
 }
 
+auto host_future_handle::owner() const noexcept -> std::uint64_t
+{
+  return logs_ == nullptr ? 0 : logs_->token;
+}
+
 void shutdown_hosts()
 {
   hosts_shut_down.store(true);
