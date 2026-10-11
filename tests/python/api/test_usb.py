@@ -25,6 +25,7 @@ from typing import Any
 import popcorn
 import pytest
 from popcorn import _core
+from popcorn._refs import Pending
 from popcorn.board import (
     CdcLineCoding,
     CdcPacket,
@@ -38,7 +39,7 @@ from popcorn.board import (
 )
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
-from .conftest import BOARD_ELF, late_drained_read, run_bounded
+from .conftest import BOARD_ELF, late_drained_read, run_bounded, stalled
 from .projects import Silent
 
 HANG = 10.0
@@ -852,16 +853,27 @@ def test_a_stop_during_drain_raises_stopped(u575: popcorn.MachineDescription) ->
     m = audio_machine(u575)
     speaker = m.periph.OTG_FS.host.audio().speaker
 
+    async def drained(_: VirtualTime) -> str:
+        with pytest.raises(popcorn.UsbError) as caught:
+            await speaker.drain()
+        return caught.value.status
+
+    async def queued(
+        at: VirtualTime,
+    ) -> tuple[Pending[VirtualTime], Pending[VirtualTime], asyncio.Task[tuple[VirtualTime, str]]]:
+        written = speaker.write([1] * 1600)
+        stopped = speaker.stop(at=at + ms(10))
+        return written, stopped, asyncio.create_task(stalled(m, drained, at=at + ms(1)))
+
     async def body() -> str:
         await m.periph.OTG_FS.host.audio().wait_ready(for_=s(2))
         await speaker.start()
-        await speaker.write([1] * 1600)
-        stopped = speaker.stop(at=m.time + ms(10))
         async with m.running():
-            with pytest.raises(popcorn.UsbError) as caught:
-                await speaker.drain()
-        await stopped
-        return caught.value.status
+            _, (written, stopped, draining) = await stalled(m, queued)
+            await written
+            _, status = await draining
+            await stopped
+        return status
 
     assert asyncio.run(body()) == "stopped"
     assert speaker.queued == 0
@@ -1476,21 +1488,24 @@ def test_a_dropped_report_write_on_a_running_machine_takes_no_gil(
 ) -> None:
     m, host = configured(u575)
     hid = ready_hid(m, host)
-    at = m.time + s(5)
     before = gil_entries(m)
+
+    async def posted(boundary: VirtualTime) -> Pending[tuple[Any, VirtualTime]]:
+        at = boundary + s(5)
+        writing = hid.write_report(b"\x02\x55", at=at)
+        del writing
+        gc.collect()
+        return m._post(None, at + ms(10))  # pyright: ignore[reportPrivateUsage]
 
     async def scenario() -> None:
         async with m.running():
-            writing = hid.write_report(b"\x02\x55", at=at)
-            del writing
-            gc.collect()
-            later = m._post(None, at + ms(10))  # pyright: ignore[reportPrivateUsage]
+            _, later = await stalled(m, posted)
             while not later.done():
                 await asyncio.sleep(0)
             await later
 
     run_bounded(scenario(), HANG)
-    assert gil_entries(m) == before
+    assert gil_entries(m) == before + 1
     assert m.var("hid_led_writes").value == 1
 
 
@@ -1810,7 +1825,6 @@ def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
         await mic.start()
 
     asyncio.run(started())
-    mic.clear()
     start = m.snapshot()
 
     async def reads(at: VirtualTime) -> tuple[list[UacFrame], list[UacFrame]]:
@@ -1819,14 +1833,18 @@ def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
 
     async def running() -> tuple[VirtualTime, tuple[list[UacFrame], list[UacFrame]]]:
         async with m.running():
-            return await late_drained_read(m, lambda _: None, reads, ms(12))
+            return await late_drained_read(m, lambda _: mic.clear(), reads, ms(12))
 
     at, (first, later) = run_bounded(running(), HANG)
     assert first
     assert later
+    assert at < first[0].at
     assert first[-1].at <= at + ms(9)
     assert at + ms(8) < later[0].at
     m.restore(start)
+    asyncio.run(m.run(for_=at - m.time))
+    assert m.time == at
+    mic.clear()
     assert asyncio.run(reads(at)) == (first, later)
 
 

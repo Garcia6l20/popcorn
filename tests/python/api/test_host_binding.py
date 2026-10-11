@@ -28,7 +28,7 @@ from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
 from popcorn.units import VirtualTime, s, us
 
-from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines
+from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, stalled
 from .devices_example import Eeprom24
 from .projects import MODEL_ELF, MODEL_JSON
 
@@ -1720,7 +1720,6 @@ def test_a_late_command_failure_is_reported_without_the_gil_on_the_machine_threa
     """The read of unmapped memory fails on the machine's thread at its stamp, one virtual
     second ahead, after the awaiting task was cancelled."""
     m = machines()
-    at = m.time + s(1)
     unmapped = m.ref.mem.u32[0xF000_0000].read_op()
     reported: list[tuple[str | None, type[object], list[str]]] = []
 
@@ -1732,24 +1731,29 @@ def test_a_late_command_failure_is_reported_without_the_gil_on_the_machine_threa
     entries = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
     submit = m._handle.submit_ops  # pyright: ignore[reportPrivateUsage]
 
+    async def cancelled(boundary: VirtualTime) -> None:
+        pending: Pending[object] = Pending(
+            submit([unmapped], ["reading the probe"], (boundary + s(1)).ps),
+            lambda raw: raw,
+            cancel=False,
+        )
+        task = asyncio.create_task(pending)
+        del pending
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
     async def scenario() -> None:
         async with m.running():
-            pending: Pending[object] = Pending(
-                submit([unmapped], ["reading the probe"], at.ps), lambda raw: raw, cancel=False
-            )
-            task = asyncio.create_task(pending)
-            del pending
-            await asyncio.sleep(0)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            await stalled(m, cancelled)
             for _ in range(500):
                 if reported:
                     break
                 await asyncio.sleep(0.01)
 
     asyncio.run(scenario())
-    assert m._handle.gil_entries() == entries  # pyright: ignore[reportPrivateUsage]
+    assert m._handle.gil_entries() == entries + 1  # pyright: ignore[reportPrivateUsage]
     assert reported == [
         (
             "a command its awaiter cancelled failed later",
