@@ -246,8 +246,10 @@ TEST_CASE("window barrier: the policy blocks when the parties outnumber the usab
 {
   auto const cpus = core::usable_cpus();
   REQUIRE(cpus >= 1);
-  CHECK(core::default_wait_policy(cpus).spin == 3us);
-  CHECK(core::default_wait_policy(cpus + 1).spin == 0ns);
+  CHECK(core::wait_policy{}.spin == 0ns);
+  CHECK(core::default_wait_policy(cpus).spin == core::wait_policy{}.spin);
+  CHECK(core::default_wait_policy(cpus, {.spin = 3us}).spin == 3us);
+  CHECK(core::default_wait_policy(cpus + 1, {.spin = 3us}).spin == 0ns);
   core::window_barrier gate{4, core::wait_policy{.spin = 7us}};
   CHECK(gate.parties() == 4);
   CHECK(gate.policy().spin == 7us);

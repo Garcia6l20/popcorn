@@ -12,18 +12,23 @@ namespace popcorn::core
 /** @brief How a party of a window_barrier waits for the others. */
 struct wait_policy
 {
-  /** @brief Wall time spent spinning before sleeping on the futex, 0 to sleep at once. */
-  std::chrono::nanoseconds spin{std::chrono::microseconds{3}};
+  /** @brief Wall time spent spinning before sleeping on the futex, 0, the default, to sleep at
+   * once. Spinning gained nothing measurable on a three-member linked system with free cores and
+   * lost up to 2.6x under load or with fewer cores than members. */
+  std::chrono::nanoseconds spin{0};
 };
 
 /** @brief CPUs the calling thread may run on, from its affinity mask, at least 1. */
 [[nodiscard]] auto usable_cpus() noexcept -> std::size_t;
 
 /**
- * @brief The wait policy for @p parties threads: the default spin, or 0 when the parties
+ * @brief The wait policy for @p parties threads: @p base, or a spin of 0 when the parties
  *        outnumber usable_cpus(), since a spinning waiter then keeps a late party off a core.
+ * @param parties Threads that arrive each round.
+ * @param base Policy used while every party can have its own CPU.
  */
-[[nodiscard]] auto default_wait_policy(std::size_t parties) noexcept -> wait_policy;
+[[nodiscard]] auto default_wait_policy(std::size_t parties, wait_policy base = {}) noexcept
+    -> wait_policy;
 
 /**
  * @brief Reusable barrier for a fixed number of threads. The last party to arrive runs the

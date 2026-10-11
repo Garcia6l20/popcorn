@@ -55,13 +55,13 @@ auto usable_cpus() noexcept -> std::size_t
   return std::max(1, CPU_COUNT(&allowed));
 }
 
-auto default_wait_policy(std::size_t parties) noexcept -> wait_policy
+auto default_wait_policy(std::size_t parties, wait_policy base) noexcept -> wait_policy
 {
   if(parties > usable_cpus())
   {
     return wait_policy{.spin = std::chrono::nanoseconds{0}};
   }
-  return wait_policy{};
+  return base;
 }
 
 window_barrier::window_barrier(std::size_t parties, wait_policy policy)
