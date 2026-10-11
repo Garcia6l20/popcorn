@@ -207,21 +207,30 @@ REQUESTS_INSIDE = ("read", "sample", "wait_until", "run", "step", "wait_for")
 
 
 async def stalled[T](
-    m: popcorn.Machine, post: Callable[[], Coroutine[object, object, T]]
+    m: popcorn.Machine, post: Callable[[VirtualTime], Coroutine[object, object, T]]
 ) -> tuple[VirtualTime, T]:
-    """Inside `running()`, hold the machine's thread in a sample while `post()` starts, so what
-    it posts registers at the sample's boundary. Return that boundary's time and its result."""
+    """Inside `running()`, hold the machine's thread in a sample, start `post(boundary)` with
+    the sample's boundary time, and release the machine once `post` has run ten loop turns.
+    What it posts registers at that boundary, and times it derives from the boundary hold
+    however loaded the host is. Return the boundary and the result of `post`."""
+    reached = threading.Event()
     release = threading.Event()
+    boundary: list[VirtualTime] = []
 
-    def held() -> VirtualTime:
+    def held() -> None:
+        boundary.append(m.time)
+        reached.set()
         release.wait(10.0)
-        return m.time
 
     holding = m.sample(held)
-    task = asyncio.create_task(post())
-    await asyncio.sleep(0.05)
+    while not reached.is_set():
+        await asyncio.sleep(0.001)
+    task = asyncio.create_task(post(boundary[0]))
+    for _ in range(10):
+        await asyncio.sleep(0)
     release.set()
-    return await holding, await task
+    await holding
+    return boundary[0], await task
 
 
 async def stalled_until_posted[T](

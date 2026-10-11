@@ -457,14 +457,12 @@ def test_a_free_run_deadline_read_ends_at_its_absolute_time(board: popcorn.Machi
     async def scenario() -> tuple[VirtualTime, list[Frame]]:
         async with board.running():
             await board.elapse(ms(5))
-            start = await board.sample(lambda: board.time)
 
-            async def read() -> list[Frame]:
+            async def read(start: VirtualTime) -> list[Frame]:
                 uart.write(b"x" * 200)
                 return await uart.read_frames(1000, deadline=start + ms(3))
 
-            _, frames = await stalled(board, read)
-        return start, frames
+            return await stalled(board, read)
 
     start, frames = run_bounded(scenario(), 10)
     assert frames
