@@ -53,12 +53,14 @@ struct node
 {
   std::shared_ptr<stm32::capture_endpoint> own   = std::make_shared<stm32::capture_endpoint>();
   std::shared_ptr<stm32::capture_endpoint> spare = std::make_shared<stm32::capture_endpoint>();
+  std::shared_ptr<stm32::capture_endpoint> third = std::make_shared<stm32::capture_endpoint>();
   stm32::board                             board{};
   std::unique_ptr<stm32_fixture>           f;
   core::machine*                           target{};
   std::int64_t                             origin{};
   stm32::uart_port*                        port{};
   stm32::uart_port*                        spare_port{};
+  stm32::uart_port*                        third_port{};
   std::vector<core::log_record>            warnings;
   core::hook_handle                        sink;
 
@@ -66,6 +68,7 @@ struct node
   {
     board.uarts.emplace("USART1", own);
     board.uarts.emplace("USART2", spare);
+    board.uarts.emplace("USART3", third);
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories(board, u575());
     options.strict_peripherals = strict;
@@ -88,14 +91,27 @@ struct node
     origin     = static_cast<std::int64_t>(target->virtual_clock().time().ps);
     port       = f->model_of<stm32::uart_port>("USART1");
     spare_port = f->model_of<stm32::uart_port>("USART2");
+    third_port = f->model_of<stm32::uart_port>("USART3");
     REQUIRE(port != nullptr);
     REQUIRE(spare_port != nullptr);
+    REQUIRE(third_port != nullptr);
     sink = target->add_log_sink([this](core::log_record const& record) {
       if(record.kind == core::log_kind::model_warning)
       {
         warnings.push_back(record);
       }
     });
+  }
+
+  [[nodiscard]] auto port_of(std::string_view unit) const -> stm32::uart_port*
+  {
+    return unit == "USART1" ? port : unit == "USART2" ? spare_port : third_port;
+  }
+
+  [[nodiscard]] auto endpoint_of(std::string_view unit) const
+      -> std::shared_ptr<stm32::capture_endpoint>
+  {
+    return unit == "USART1" ? own : unit == "USART2" ? spare : third;
   }
 
   [[nodiscard]] auto log() const -> std::vector<std::uint32_t>
@@ -222,22 +238,32 @@ struct world
   auto link(std::size_t from, std::size_t to, std::int64_t latency, bool spare = false)
       -> stm32::uart_wire&
   {
+    std::string_view const unit = spare ? "USART2" : "USART1";
+    return connect(from, unit, to, unit, latency);
+  }
+
+  auto connect(
+      std::size_t      from,
+      std::string_view out,
+      std::size_t      to,
+      std::string_view in,
+      std::int64_t     latency) -> stm32::uart_wire&
+  {
     auto&      sender   = *nodes[from];
     auto&      receiver = *nodes[to];
     auto const lane     = static_cast<std::uint32_t>(2 * wires.size() + 1);
     auto*      machine  = receiver.target;
-    auto*      into     = spare ? receiver.spare_port : receiver.port;
     auto       wire     = std::make_shared<stm32::uart_wire>(
         stm32::wire_ends{.sender = from, .receiver = to},
         stm32::wire_lanes{.peer = lane, .injected = lane + 1}, core::sys_time{latency},
         stm32::line_shape{.baud = 460'800},
         stm32::wire_receiver{
-            .port   = into,
-            .unit   = spare ? "USART2" : "USART1",
+            .port   = receiver.port_of(in),
+            .unit   = std::string{in},
             .log    = [machine](core::log_record record) { machine->log(std::move(record)); },
             .strict = strict},
-        spare ? sender.spare : sender.own);
-    (spare ? sender.spare_port : sender.port)->attach(wire);
+        sender.endpoint_of(out));
+    sender.port_of(out)->attach(wire);
     wires.push_back(wire);
     taps.emplace_back();
     return *wire;
@@ -485,6 +511,42 @@ TEST_CASE("an echo over two wires gives the same result in every variant")
     {
       CHECK(w.taps[1][index].start.ps >= w.taps[0][index].arrival.ps);
       CHECK(w.taps[1][index].start.ps <= w.taps[0][index].arrival.ps + 2 * us_ps);
+    }
+    std::pair seen{w.dump(), w.pause_dump()};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a link between two UARTs of one member delivers at its end plus L in every variant")
+{
+  std::optional<std::pair<std::string, std::string>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_self");
+    w.add("idle");
+    w.connect(0, "USART1", 0, "USART3", latency_20);
+    w.connect(0, "USART3", 0, "USART1", latency_20);
+    w.host(how);
+    CHECK(w.run_to(script_end).reason == core::pause_reason::system_time);
+    REQUIRE(w.taps[0].size() == 16);
+    REQUIRE(w.taps[1].size() == 16);
+    for(std::size_t index = 0; index < 16; ++index)
+    {
+      auto const& sent   = w.taps[0][index];
+      auto const& echoed = w.taps[1][index];
+      CHECK(sent.data == 0x40 + index);
+      CHECK(echoed.data == sent.data);
+      CHECK(sent.arrival.ps == sent.end.ps + latency_20);
+      CHECK(echoed.arrival.ps == echoed.end.ps + latency_20);
+      CHECK(echoed.start.ps >= sent.arrival.ps);
+      CHECK(echoed.start.ps <= sent.arrival.ps + 2 * us_ps);
     }
     std::pair seen{w.dump(), w.pause_dump()};
     if(reference)

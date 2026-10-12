@@ -67,6 +67,7 @@ from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
 from popcorn._system import (
     LinkedSystem,
+    System,
     SystemSnapshot,
     SystemStop,
     TapFrame,
@@ -149,6 +150,7 @@ __all__ = [
     "StopReason",
     "Symbol",
     "SymbolError",
+    "System",
     "SystemSnapshot",
     "SystemStop",
     "TapFrame",

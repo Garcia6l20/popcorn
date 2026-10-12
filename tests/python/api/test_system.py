@@ -511,3 +511,43 @@ def test_a_link_s_parity_reaches_both_directions(
     plain = parity_warnings(u575, caplog, "even", None)
     assert len(plain) == 2
     assert all("8 data bits" in one and "9 data bits" in one for one in plain)
+
+
+def _self_linked(
+    u575: popcorn.MachineDescription, slice_instructions: int, third: VirtualDuration | None
+) -> tuple[object, ...]:
+    a = member(u575, "link_self", "a", slice_instructions)
+    b = member(u575, "idle", "b", slice_instructions)
+    made = [
+        UartLink("a.USART1", "a.USART3", latency=L, baud=460_800),
+        UartLink("b.USART1", "a.USART2", latency=L, baud=460_800),
+    ]
+    if third is not None:
+        made.append(UartLink("b.USART2", "a.UART4", latency=third, baud=460_800))
+    with LinkedSystem({"a": a, "b": b}, made, slice_instructions=slice_instructions) as system:
+        stop = asyncio.run(system.run(for_=ms(3)))
+        assert (stop.reason, stop.member) == (StopReason.USER, "a")
+        frames = system.tap("a.USART1").frames()
+        assert received(a) == [0x40 + index for index in range(PING_BYTES)]
+        assert [frame.towards for frame in frames[:4]] == ["a.USART3", "a.USART1"] * 2
+        for frame in frames:
+            assert frame.arrival.ps == frame.end.ps + L.ps
+        sent = [frame.data for frame in frames if frame.towards == "a.USART3"]
+        echoed = [frame.data for frame in frames if frame.towards == "a.USART1"]
+        assert sent == echoed == received(a)
+        return (tuple(logged(a)), a.pc, a.instructions, a.time, stop.time, tuple(frames))
+
+
+def test_a_link_between_two_uarts_of_one_member_runs_as_any_link(
+    u575: popcorn.MachineDescription,
+) -> None:
+    results = [
+        _self_linked(u575, slice_instructions, third)
+        for slice_instructions, third in (
+            (1_000_000, None),
+            (997, None),
+            (1_000_000, us(3)),
+            (997, us(3)),
+        )
+    ]
+    assert results[1:] == results[:-1]

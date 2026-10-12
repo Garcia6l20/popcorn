@@ -18,6 +18,7 @@ from popcorn import _core
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
 from popcorn._host import awaited, watch_awaits
+from popcorn._project import Project, _FrozenMap  # pyright: ignore[reportPrivateUsage]
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn.units import VirtualDuration, VirtualTime
@@ -36,7 +37,8 @@ _UNDELIVERED = "a member stop the last run found is not delivered yet: run the s
 
 @dataclass(frozen=True)
 class UartLink:
-    """A UART link between two members of a `LinkedSystem`, both directions.
+    """A UART link of a `LinkedSystem`, both directions, between two members or between two
+    UARTs of one member.
 
     A frame whose stop bit ends at the sender's system time t ends at the receiver at exactly
     t + `latency`, whatever the slicing, the thread timing or the system's quantum.
@@ -64,6 +66,194 @@ class UartLink:
     data_bits: int = 8
     stop_bits: float = 1.0
     parity: Literal["none", "even", "odd"] = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class System:
+    """Members and links of a linked system, as data: what `LinkedSystem` runs.
+
+    A value, as `Project` is: frozen, hashable, equal by content, holding projects and never a
+    machine. Declaring one reads no file, so a conftest imports it before the firmware exists.
+    `machines`, `boot` and `link` build the runtime. The pytest plugin's `system` fixture boots
+    each member from its own project's boot cache.
+
+        SYSTEM = popcorn.System(
+            members={"ctl": CONTROLLER, "r1": RESPONDER, "r2": RESPONDER},
+            links=[
+                popcorn.UartLink("ctl.UART4", "r1.USART3", latency=us(20), baud=460_800),
+                popcorn.UartLink("ctl.USART3", "r2.USART3", latency=us(20), baud=460_800),
+            ],
+        )
+
+    Attributes:
+        members: Each member's project, by member name, in member order. A name is a
+            `Machine` name: not empty, no whitespace, no dot. Members may share a project: each
+            is its own machine. A member's config and strictness are part of its project,
+            `CONTROLLER.config("audio")`, `RESPONDER.replace(strict=True)`.
+        links: The links, at least one. Their order is part of the system: it fixes the order
+            of frames arriving at one receiver at the same instant on several links.
+        offsets: System time of each member's local time at the start, 0 for an absent one.
+        goal_cap: Virtual time a member goal may run from its start, None for no cap, as
+            `LinkedSystem(goal_cap=)`.
+        on_member_reset: What a firmware or watchdog reset of a running member does, as
+            `LinkedSystem(on_member_reset=)`.
+
+    Raises:
+        ConfigError: A check fails, its key naming the field: `members` empty, `members.<name>`
+            a bad name or no Project, `links` empty, `links[i].a` or `.b` naming no member's
+            peripheral as `"<member>.<UART>"`, or a UART in two links, `links[i].latency`,
+            `.baud`, `.data_bits`, `.stop_bits` or `.parity` out of range, `offsets.<name>`
+            naming no member or below 0, `goal_cap` not above 0, or `on_member_reset` neither
+            "reset" nor "stop". Whether a link end is a UART of the member's part is checked by
+            `link`, which has the description.
+    """
+
+    members: Mapping[str, Project]
+    links: Sequence[UartLink]
+    offsets: Mapping[str, VirtualDuration] = field(default_factory=_FrozenMap[str, VirtualDuration])
+    goal_cap: VirtualDuration | None = None
+    on_member_reset: Literal["reset", "stop"] = "reset"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "members", _FrozenMap(self.members))
+        object.__setattr__(self, "links", tuple(self.links))
+        object.__setattr__(self, "offsets", _FrozenMap(self.offsets))
+        if not self.members:
+            raise ConfigError(
+                "members: a system needs a member", key="members", expected="a member"
+            )
+        for name, project in cast(Mapping[object, object], self.members).items():
+            key = f"members.{name}"
+            if not isinstance(name, str) or not _is_machine_name(name):
+                raise ConfigError(
+                    f"{key}: {name!r} is no machine name",
+                    key=key,
+                    expected="a name, not empty, without whitespace or a dot",
+                )
+            if not isinstance(project, Project):
+                raise ConfigError(
+                    f"{key}: a {type(project).__qualname__}, not a Project",
+                    key=key,
+                    expected="a popcorn.Project",
+                )
+        if not self.links:
+            raise ConfigError("a linked system needs a link", key="links", expected="a link")
+        used: set[str] = set()
+        for index, link in enumerate(cast(tuple[object, ...], self.links)):
+            if not isinstance(link, UartLink):
+                raise ConfigError(
+                    f"links[{index}]: a {type(link).__qualname__}, not a UartLink",
+                    key=f"links[{index}]",
+                    expected="a popcorn.UartLink",
+                )
+            _check_line(index, link)
+            for side in ("a", "b"):
+                self._check_end(index, side, used)
+        _offsets(list(self.members), self.offsets)
+        cap = cast(object, self.goal_cap)
+        if cap is not None and (not isinstance(cap, VirtualDuration) or cap.ps <= 0):
+            raise ConfigError(
+                f"goal_cap: {cap!r} is no duration above 0",
+                key="goal_cap",
+                expected="None or a VirtualDuration above 0",
+            )
+        if self.on_member_reset not in ("reset", "stop"):
+            raise ConfigError(
+                f"on_member_reset: {self.on_member_reset!r} is neither 'reset' nor 'stop'",
+                key="on_member_reset",
+                expected="'reset' or 'stop'",
+            )
+
+    def _check_end(self, index: int, side: str, used: set[str]) -> None:
+        """Check end `side` of `links[index]` and mark it used."""
+        key = f"links[{index}].{side}"
+        end = cast(object, getattr(self.links[index], side))
+        if not isinstance(end, str):
+            raise ConfigError(
+                f"{key}: a {type(end).__qualname__}, not a str",
+                key=key,
+                expected="'<member>.<UART>'",
+            )
+        name, dot, unit = end.partition(".")
+        if not dot or not unit or name not in self.members:
+            raise ConfigError(
+                f"{key}: {end!r} names no member UART", key=key, expected="'<member>.<UART>'"
+            )
+        if end in used:
+            raise ConfigError(f"{key}: {end} is in two links", key=key, expected="a free UART")
+        used.add(end)
+
+    @property
+    def quantum(self) -> VirtualDuration:
+        """The quantum Q, the smallest link latency: members meet every Q of system time."""
+        return min(link.latency for link in self.links)
+
+    def replace(self, **changes: object) -> System:
+        """A copy with `changes` applied, as `dataclasses.replace`, checked again."""
+        return replace(self, **changes)
+
+    def machines(self) -> dict[str, Machine]:
+        """A new machine per member, `Project.machine(name=<member>)`, not reset.
+
+        Raises:
+            Exception: As `Project.machine`.
+        """
+        return {name: project.machine(name=name) for name, project in self.members.items()}
+
+    async def boot(self) -> LinkedSystem:
+        """Build `machines`, boot each from reset as `Project.boot_machine` does, or only reset
+        it when its project has no `boot.until`, one after the other, then `link` them. For
+        scripts: the pytest plugin's `system` fixture boots from the boot cache instead.
+
+        Raises:
+            Exception: As `machines`, `Project.boot_machine` and `link`.
+        """
+        machines = self.machines()
+        for name, machine in machines.items():
+            project = self.members[name]
+            if project.boot.until is None:
+                machine.reset()
+            else:
+                await project.boot_machine(machine)
+        return self.link(machines)
+
+    def link(
+        self,
+        machines: Mapping[str, Machine],
+        *,
+        slice_instructions: int = 1_000_000,
+        slice_wall_budget: float = 1e-3,
+    ) -> LinkedSystem:
+        """The `LinkedSystem` of this system over `machines`, booted any way, each standing
+        where its system time starts: `offsets` gives that time.
+
+        Args:
+            machines: A parked machine per member, by member name, named as the member.
+            slice_instructions: As `LinkedSystem(slice_instructions=)`.
+            slice_wall_budget: As `LinkedSystem(slice_wall_budget=)`.
+
+        Raises:
+            ConfigError: `machines` misses a member or names another, at `members.<name>`, or
+                as `LinkedSystem`.
+            Exception: As `LinkedSystem`.
+        """
+        unmatched = sorted(set(self.members).symmetric_difference(machines))
+        if unmatched:
+            name = unmatched[0]
+            raise ConfigError(
+                f"members.{name}: a machine of no member, or a member with no machine",
+                key=f"members.{name}",
+                expected="one machine per member",
+            )
+        return LinkedSystem(
+            {name: machines[name] for name in self.members},
+            self.links,
+            offsets=self.offsets,
+            on_member_reset=self.on_member_reset,
+            goal_cap=self.goal_cap,
+            slice_instructions=slice_instructions,
+            slice_wall_budget=slice_wall_budget,
+        )
 
 
 @dataclass(frozen=True)
@@ -455,32 +645,7 @@ class LinkedSystem:
         watch_awaits(self)
 
     def _add_link(self, index: int, link: UartLink, used: set[tuple[str, str]]) -> None:
-        latency = cast(object, link.latency)
-        if not isinstance(latency, VirtualDuration) or latency.ps <= 0:
-            raise ConfigError(
-                f"links[{index}].latency: {link.latency!r} is no duration above 0",
-                key=f"links[{index}].latency",
-                expected="a VirtualDuration above 0",
-            )
-        parity = cast(object, link.parity)
-        word_bits = link.data_bits + (0 if parity == "none" else 1)
-        for name, refused, expected in (
-            ("baud", link.baud <= 0, "a baud above 0"),
-            ("parity", parity not in _PARITY, "'none', 'even' or 'odd'"),
-            (
-                "data_bits",
-                word_bits not in (7, 8, 9),
-                "7 to 9 data bits, the parity bit included",
-            ),
-            ("stop_bits", link.stop_bits not in _STOP_BITS, "0.5, 1, 1.5 or 2 stop bits"),
-        ):
-            if refused:
-                key = f"links[{index}].{name}"
-                raise ConfigError(
-                    f"{key}: {getattr(link, name)!r} is no UART line value",
-                    key=key,
-                    expected=expected,
-                )
+        word_bits = _check_line(index, link)
         ends = [self._end(index, side, end, used) for side, end in (("a", link.a), ("b", link.b))]
         wires: list[int] = []
         for (sender, sender_link, _), (receiver, receiver_link, unit) in (
@@ -2088,3 +2253,52 @@ def _offsets(names: Sequence[str], offsets: Mapping[str, VirtualDuration]) -> li
                 expected="a VirtualDuration of at least 0",
             )
     return [offsets[name].ps if name in offsets else 0 for name in names]
+
+
+def _check_line(index: int, link: UartLink) -> int:
+    """Check the line values of `links[index]`, return its word bits, parity bit included."""
+    latency = cast(object, link.latency)
+    if not isinstance(latency, VirtualDuration) or latency.ps <= 0:
+        raise ConfigError(
+            f"links[{index}].latency: {link.latency!r} is no duration above 0",
+            key=f"links[{index}].latency",
+            expected="a VirtualDuration above 0",
+        )
+    baud, data_bits, parity, stop_bits = cast(
+        tuple[object, object, object, object],
+        (link.baud, link.data_bits, link.parity, link.stop_bits),
+    )
+    integral = isinstance(data_bits, int) and not isinstance(data_bits, bool)
+    word_bits = cast(int, data_bits) + (0 if parity == "none" else 1) if integral else 0
+    for name, refused, expected in (
+        (
+            "baud",
+            not isinstance(baud, int) or isinstance(baud, bool) or baud <= 0,
+            "a baud above 0",
+        ),
+        ("parity", not isinstance(parity, str) or parity not in _PARITY, "'none', 'even' or 'odd'"),
+        ("data_bits", word_bits not in (7, 8, 9), "7 to 9 data bits, the parity bit included"),
+        (
+            "stop_bits",
+            not isinstance(stop_bits, int | float)
+            or isinstance(stop_bits, bool)
+            or stop_bits not in _STOP_BITS,
+            "0.5, 1, 1.5 or 2 stop bits",
+        ),
+    ):
+        if refused:
+            key = f"links[{index}].{name}"
+            raise ConfigError(
+                f"{key}: {getattr(link, name)!r} is no UART line value", key=key, expected=expected
+            )
+    return word_bits
+
+
+def _is_machine_name(name: str) -> bool:
+    from popcorn._machine import check_machine_name
+
+    try:
+        check_machine_name(name)
+    except ValueError:
+        return False
+    return True

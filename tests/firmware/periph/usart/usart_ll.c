@@ -60,6 +60,8 @@ void link_iwdg(void);
 void link_audio(void);
 void link_audio_peer(void);
 void link_audio_tim6(void);
+void link_self(void);
+void USART3_IRQHandler(void);
 void USART2_IRQHandler(void);
 void SysTick_Handler(void);
 
@@ -874,6 +876,40 @@ void link_echo(void)
   LL_USART_EnableIT_RXNE_RXFNE(USART1);
   NVIC_EnableIRQ(USART1_IRQn);
   idle();
+}
+
+void USART3_IRQHandler(void)
+{
+  if(LL_USART_IsActiveFlag_RXNE_RXFNE(USART3))
+  {
+    LL_USART_TransmitData8(USART3, LL_USART_ReceiveData8(USART3));
+  }
+}
+
+void link_self(void)
+{
+  start_link();
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART3);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART3_CLKSOURCE_PCLK1);
+  init(USART3, LINK_BAUD);
+  enable(USART3);
+  LL_USART_EnableIT_RXNE_RXFNE(USART3);
+  NVIC_EnableIRQ(USART3_IRQn);
+  received_count = 0xffffffffu;
+  LL_USART_EnableIT_RXNE_RXFNE(USART1);
+  LL_USART_EnableIT_ERROR(USART1);
+  NVIC_EnableIRQ(USART1_IRQn);
+  uint32_t volatile const* const logged = &log_len;
+  for(unsigned index = 0; index < 16; ++index)
+  {
+    uint32_t const before = *logged;
+    send_byte((uint8_t)(0x40u + index));
+    while(*logged == before)
+    {
+    }
+    wait_us(30);
+  }
+  DONE();
 }
 
 volatile uint32_t link_count = 512u;

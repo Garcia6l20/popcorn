@@ -448,6 +448,40 @@ TEST_CASE("every receiver drains each window once, in order, at its barrier")
   CHECK(r.sys->pending_barrier(held).ps == static_cast<std::int64_t>(stopped.windows + 1) * q);
 }
 
+TEST_CASE("a member linked to itself drains its own wire each window, at its barrier")
+{
+  rig r{.members = sleeper_and_runner()};
+  r.links.push_back(std::make_shared<fake_link>(1, 1, 20 * us_ps));
+  r.links.push_back(std::make_shared<fake_link>(0, 1, 50 * us_ps));
+  r.sys = std::make_unique<core::system>(
+      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0], r.links[1]},
+      core::default_wait_policy(2));
+  {
+    auto const                        held = r.sys->lock();
+    std::vector<core::sys_time> const offsets(2);
+    r.sys->start(held, offsets);
+  }
+  auto const stopped = r.run(1 * ms_ps);
+  REQUIRE(stopped.reason == core::pause_reason::system_time);
+  auto const q = r.sys->quantum().ps;
+  CHECK(q == 20 * us_ps);
+  for(auto const& link : r.links)
+  {
+    CAPTURE(link->sender());
+    REQUIRE(link->drains.size() == stopped.windows + 1);
+    for(std::uint64_t window = 0; window < stopped.windows; ++window)
+    {
+      CHECK(
+          link->drains[window]
+          == drained{
+              .window  = window,
+              .barrier = static_cast<std::int64_t>(window + 1) * q,
+              .next    = static_cast<std::int64_t>(window + 2) * q});
+    }
+    CHECK(link->drains.back().barrier == 1 * ms_ps);
+  }
+}
+
 TEST_CASE("offsets set each member's system time and base, and a reset while paused keeps the time")
 {
   rig r{.members = sleeper_and_runner()};
