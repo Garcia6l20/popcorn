@@ -24,7 +24,7 @@ from typing import Any
 
 import popcorn
 import pytest
-from popcorn import _core
+from popcorn import StopReason, _core
 from popcorn._refs import Pending
 from popcorn.board import (
     CdcLineCoding,
@@ -1814,6 +1814,26 @@ def test_a_free_run_hid_deadline_read_takes_what_a_parked_one_takes(
     assert asyncio.run(reads(at)) == (first, later)
 
 
+async def parked_to(m: popcorn.Machine, at: VirtualTime) -> None:
+    """Run a parked machine to the instruction boundary `at`, which a free run held at.
+
+    `run(for_=)` stops at the end of the block running at its deadline, past `at` when the free
+    run's boundary fell inside a block, by under 512 instruction times, 128 us at the 4 MHz this
+    firmware runs at. So run to 200 us before `at`, then step single instructions. A step past
+    `at` or stopping IDLE started in WFI: undo it and sleep to `at`, where an idle core stops
+    exactly. Any other step stops with BUDGET, so a step that makes no progress fails."""
+    if at - m.time > us(200):
+        await m.run(for_=at - m.time - us(200))
+    while m.time < at:
+        before = m.snapshot()
+        stop = await m.step()
+        if m.time > at or stop.reason is StopReason.IDLE:
+            m.restore(before)
+            await m.run(for_=at - m.time)
+        else:
+            assert stop.reason is StopReason.BUDGET, stop
+
+
 def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
     u575: popcorn.MachineDescription,
 ) -> None:
@@ -1842,7 +1862,7 @@ def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
     assert first[-1].at <= at + ms(9)
     assert at + ms(8) < later[0].at
     m.restore(start)
-    asyncio.run(m.run(for_=at - m.time))
+    asyncio.run(parked_to(m, at))
     assert m.time == at
     mic.clear()
     assert asyncio.run(reads(at)) == (first, later)
