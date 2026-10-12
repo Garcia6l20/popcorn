@@ -247,6 +247,10 @@ public:
   [[= py::doc{"Restore the system's own state after the members were restored."}]] void
       load(reflex::py::nb::bytes const& state);
 
+  /** @brief core::system::check_state(). */
+  [[= py::doc{"Check that load() would accept a state, changing nothing."}]] void
+      check_state(reflex::py::nb::bytes const& state);
+
   /** @brief The quantum Q in picoseconds. */
   [[= py::doc{"The quantum, the smallest link latency, in picoseconds."}]] [[nodiscard]] auto
       quantum_ps() const -> std::int64_t;

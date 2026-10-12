@@ -294,12 +294,22 @@ public:
    * @brief Restores a state save() wrote, after the member machines were restored from
    *        snapshots taken with it. Every member's reset count is taken as the system's own. The
    *        saving system's quantum need not match: its pending barrier stays, the barriers after
-   *        it follow this system's quantum. A load that throws leaves the system as before.
+   *        it follow this system's quantum. After an error pause it clears the error, which
+   *        ends the stop, and a resume runs again. A load that throws leaves the system as
+   *        before.
    * @throws config_error when @p in is not such a state or does not match the members and
    *         links.
-   * @throws std::logic_error as save().
+   * @throws std::logic_error as save(), except after an error pause.
    */
   void load(held_system const& held, std::span<std::byte const> in) pre(held.holds(*this));
+
+  /**
+   * @brief Checks that load() would accept @p in, changing nothing: the same refusals, the
+   *        document, its members and links, and every link's state, each loaded and put back.
+   *        For a caller that restores the member machines before load() and must know first.
+   * @throws config_error, std::logic_error as load().
+   */
+  void check_state(held_system const& held, std::span<std::byte const> in) pre(held.holds(*this));
 
   /** @brief Asks for a pause at the next barrier, waking a system asleep on IDLE. Any thread
    * holding no host mutex, takes each host's mutex briefly. A request no resume consumed before
@@ -317,6 +327,9 @@ public:
   /**
    * @brief Resets member @p member while paused: aborts its frame in flight, drops arrivals
    *        within L after the reset, resets the machine, and moves its base by its local time.
+   *        The member is decided: a stop of it delivered or found and not delivered yet is
+   *        dropped, and it runs its core on the next resume with a system time, as a member
+   *        that never stopped.
    * @throws std::logic_error while a resume is in flight.
    */
   void reset(held_system const& held, std::size_t member, reset_kind kind) pre(held.holds(*this))

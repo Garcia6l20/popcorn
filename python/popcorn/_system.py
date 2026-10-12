@@ -15,9 +15,10 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from popcorn import _core
-from popcorn._enums import StopReason
+from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
 from popcorn._host import awaited, watch_awaits
+from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn.units import VirtualDuration, VirtualTime
 
@@ -30,6 +31,7 @@ _PARITY = {"none": 0, "even": 1, "odd": 2}
 _WATCHDOG = 5.0
 _TAP_KEEP = 1 << 20
 _LOG = logging.getLogger("popcorn")
+_UNDELIVERED = "a member stop the last run found is not delivered yet: run the system on first"
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,24 @@ class SystemStop:
     stop: Stop | None
     time: VirtualTime
     stops: Mapping[str, Stop] = field(default_factory=dict[str, Stop])
+
+
+@dataclass(frozen=True)
+class SystemSnapshot:
+    """A `LinkedSystem`'s whole state at a stop, `LinkedSystem.snapshot`, restorable into it
+    any number of times with `LinkedSystem.restore`. In memory only.
+
+    Attributes:
+        members: Each member's own snapshot, keyed by name.
+        state: The system's own state: the window, the pending barrier, each member's base and
+            halt, and every link's frames in flight, armed edits and injections.
+        target: The last TIME target, the base `run(for_=)` and `wait_for` count from, None
+            before the first one.
+    """
+
+    members: Mapping[str, Snapshot]
+    state: bytes
+    target: VirtualTime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,7 +295,9 @@ class LinkedSystem:
     A member while the system exists: sync reads and writes raise MachineRunning while the system
     runs, and while the member has a pending goal, since its position at a pause depends on the
     quantum. They are allowed on a halted member while the system is stopped. `start`,
-    `snapshot`, `restore` and `reset` of a member raise MachineBusy, and `halt` releases it. Its
+    `snapshot` and `restore` of a member raise MachineBusy, `halt` releases it, and `reset` goes
+    through `LinkedSystem.reset`. `snapshot` and `restore` take and give back the whole
+    system's state, every member included, while it is stopped. Its
     Python callbacks run on its own thread, concurrently with other members' callbacks: Python
     state they share sees an order that depends on thread timing, so keep callback state per
     member and couple members through links. The system owns the members' UARTs named in links:
@@ -683,9 +705,7 @@ class LinkedSystem:
             self._system_run = False
 
     async def _run_to(self, target: int) -> SystemStop:
-        for index in sorted(self._undecided):
-            self._handle.release(index)
-        self._undecided.clear()
+        self._release_undecided()
         return self._system_stop(await self._resume(target), target)
 
     async def wait_for(
@@ -770,9 +790,7 @@ class LinkedSystem:
         if self._opens:
             name = self._names[min(self._opens)]
             raise MachineBusy(f"{name} runs in its own running(): leave it first")
-        for index in sorted(self._undecided):
-            self._handle.release(index)
-        self._undecided.clear()
+        self._release_undecided()
         try:
             for index in range(len(self._names)):
                 goal = _Goal(
@@ -959,6 +977,155 @@ class LinkedSystem:
         for other, more in ends[1:]:
             raised.add_note(f"{self._names[other]} also stopped: {more}")
         raise raised
+
+    def reset(self, member: str, kind: ResetKind = ResetKind.POWER_ON) -> None:
+        """Reset member `member` while the system is stopped, or paused at a member goal's
+        stop, as `Machine.reset` resets a lone machine: memory is kept. Its frame in flight is
+        lost, frames reaching it within a link's latency after the reset are dropped, and its
+        base moves to the reset's system time, so its system time runs on unchanged while its
+        local time restarts at 0. It is no longer held at a stop: a member stop or its goal's
+        stop that left it there, or a stop of it the last run found and did not deliver yet,
+        is dropped, and it runs its core on the next `run`, as a lone machine runs on after
+        its reset. Without a goal it stays halted while other members' goals run.
+        `member.reset()` does the same.
+
+        Raises:
+            KeyError: No such member.
+            TypeError: `kind` is no ResetKind.
+            MachineRunning: The system runs, runs freely, or the member has a goal pending.
+            EmulationError: The system was closed, or stopped on an error before.
+            RuntimeError: Called from a callback of a machine.
+        """
+        index = self._index[member]
+        if not isinstance(cast(object, kind), ResetKind):
+            raise TypeError(f"kind must be a ResetKind, not {type(kind).__name__}")
+        self._require_usable()
+        self._require_halted("reset")
+        if index in self._goals:
+            raise MachineRunning(f"{member} has a goal pending: no reset before it ends")
+        self._handle.reset(index, _core.ResetKind(kind.value))
+        self._undecided.pop(index, None)
+        self._machines[member]._last_stop = None  # pyright: ignore[reportPrivateUsage]
+
+    def snapshot(self) -> SystemSnapshot:
+        """The whole system's state while it is stopped: every member's snapshot and the
+        system's own state, links included, frames in flight too.
+
+        A member still held at its goal's stop is released first, halted from that stop on,
+        as the next `run` does: a goal posted on it then starts at the same point.
+
+        Raises:
+            MachineRunning: The system runs, runs freely, a member has a goal pending or runs in
+                its own `running()`, or a member stop the last run found is not delivered yet:
+                `run` delivers it.
+            EmulationError: The system was closed, or stopped on an error before.
+            RuntimeError: Called from a callback of a machine.
+        """
+        self._require_quiet("snapshot")
+        self._handle.check_caller()
+        self._release_undecided()
+        try:
+            state = self._handle.save()
+        except RuntimeError as error:
+            raise MachineRunning(_UNDELIVERED) from error
+        members = {
+            name: machine._snapshot()  # pyright: ignore[reportPrivateUsage]
+            for name, machine in self._machines.items()
+        }
+        target = None if self._target is None else VirtualTime(self._target)
+        return SystemSnapshot(members, state, target)
+
+    def restore(self, snapshot: SystemSnapshot) -> None:
+        """Restore a snapshot this system took, while it is stopped: the members, their bases
+        and halts, the links with their frames in flight, armed edits and injections, and the
+        last TIME target. A run after it equals the run that followed the snapshot. Frames
+        every tap holds and members' UART frames not read yet are dropped, as
+        `Machine.restore` drops them, and `UartTap.dropped` restarts at 0, as a lone
+        `port.dropped` does. `snapshot.state` is checked before any member is touched. When
+        restoring a member or the state still fails, every member gets its state from before
+        the call back, and the first error doing so is raised from the original one. After an
+        error stopped the system it clears the error, as a lone machine restores after an
+        error, and the system runs again.
+
+        Raises:
+            TypeError: `snapshot` is no SystemSnapshot.
+            ValueError: `snapshot` holds other members.
+            ConfigError: A member's snapshot was taken by another machine, or `snapshot.state`
+                is not a state this system's members and links load. Nothing was touched.
+            MachineRunning: As `snapshot`, or inside `wait_for`'s predicate.
+            EmulationError: The system was closed.
+            RuntimeError: Called from a callback of a machine.
+        """
+        if not isinstance(cast(object, snapshot), SystemSnapshot):
+            raise TypeError(f"snapshot must be a SystemSnapshot, not {type(snapshot).__name__}")
+        failed = self._failed is not None
+        self._require_quiet("restore", failed_ok=True)
+        if self._system_run:
+            raise MachineRunning("the linked system runs a wait_for: no restore inside it")
+        if sorted(snapshot.members) != sorted(self._names):
+            raise ValueError(
+                f"the snapshot holds members {sorted(snapshot.members)}, not {sorted(self._names)}"
+            )
+        for name, machine in self._machines.items():
+            machine._check_snapshot(snapshot.members[name])  # pyright: ignore[reportPrivateUsage]
+        self._handle.check_caller()
+        if not failed:
+            self._release_undecided()
+            try:
+                self._handle.save()
+            except RuntimeError as error:
+                raise MachineRunning(_UNDELIVERED) from error
+        self._handle.check_state(snapshot.state)
+        kept = {
+            name: machine._snapshot()  # pyright: ignore[reportPrivateUsage]
+            for name, machine in self._machines.items()
+        }
+        try:
+            for name, machine in self._machines.items():
+                machine._restore(snapshot.members[name])  # pyright: ignore[reportPrivateUsage]
+            self._handle.load(snapshot.state)
+        except BaseException as error:
+            unrestored: BaseException | None = None
+            for name, machine in self._machines.items():
+                try:
+                    machine._restore(kept[name])  # pyright: ignore[reportPrivateUsage]
+                except BaseException as failed:
+                    unrestored = unrestored or failed
+            if unrestored is not None:
+                raise unrestored from error
+            raise
+        self._failed = None
+        self._undecided.clear()
+        self._target = None if snapshot.target is None else snapshot.target.ps
+        for index, wired in enumerate(self._links):
+            tap = self._taps.get(index)
+            if tap is not None:
+                tap._discard()  # pyright: ignore[reportPrivateUsage]
+            else:
+                for wire in wired.wires:
+                    self._handle.tap_take(wire)
+
+    def _require_halted(self, what: str) -> None:
+        if self._flight is not None or self._free or self._halting:
+            raise MachineRunning(f"the linked system runs: no {what} while it runs")
+
+    def _require_quiet(self, what: str, *, failed_ok: bool = False) -> None:
+        if failed_ok and self._closed:
+            raise EmulationError("the linked system was closed")
+        if not failed_ok:
+            self._require_usable()
+        self._require_halted(what)
+        if self._opens:
+            name = self._names[min(self._opens)]
+            raise MachineRunning(f"{name} runs in its own running(): no {what} inside it")
+        if self._goals:
+            name = self._names[min(self._goals)]
+            raise MachineRunning(f"a goal of {name} is pending: no {what} before it ends")
+
+    def _release_undecided(self) -> None:
+        for index in sorted(self._undecided):
+            self._handle.release(index)
+        self._undecided.clear()
 
     def _refuse_run(self) -> None:
         if self._free or self._halting:
@@ -1610,7 +1777,16 @@ class UartTap:
     `towards` names the receiving end of a direction, `"<member>.<UART>"`.
     """
 
-    __slots__ = ("__weakref__", "_buffers", "_ends", "_lock", "_overflow", "_system", "_wires")
+    __slots__ = (
+        "__weakref__",
+        "_buffers",
+        "_dropped_base",
+        "_ends",
+        "_lock",
+        "_overflow",
+        "_system",
+        "_wires",
+    )
 
     def __init__(self, system: LinkedSystem, wired: _LinkWires) -> None:
         """Wrap a link of `system`. Use `LinkedSystem.tap` instead."""
@@ -1619,6 +1795,7 @@ class UartTap:
         self._wires = wired.wires
         self._buffers = (deque[TapFrame](maxlen=_TAP_KEEP), deque[TapFrame](maxlen=_TAP_KEEP))
         self._overflow = 0
+        self._dropped_base = 0
         self._lock = threading.Lock()
 
     @property
@@ -1635,7 +1812,11 @@ class UartTap:
 
     @property
     def dropped(self) -> int:
-        """Frames the tap dropped, both directions, because it held its limit."""
+        """Frames the tap dropped, both directions, because it held its limit, since system
+        start or the last `LinkedSystem.restore`."""
+        return self._dropped_total() - self._dropped_base
+
+    def _dropped_total(self) -> int:
         handle = self._system._handle  # pyright: ignore[reportPrivateUsage]
         return self._overflow + sum(handle.tap_dropped(wire) for wire in self._wires)
 
@@ -1775,6 +1956,15 @@ class UartTap:
         raise ValueError(
             f"frames {index} to {index + n - 1} towards {towards} overlap an edit armed before"
         )
+
+    def _discard(self) -> None:
+        """Drop every frame held, native and buffered, for a restore."""
+        with self._lock:
+            for wire in self._wires:
+                self._native.tap_take(wire)
+            for buffer in self._buffers:
+                buffer.clear()
+            self._dropped_base = self._dropped_total()
 
     def _direction(self, towards: str) -> int:
         if not isinstance(cast(object, towards), str):

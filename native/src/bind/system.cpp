@@ -829,6 +829,15 @@ void system_handle::load(nb::bytes const& state)
   locked(sys, [&](core::held_system const& held) { sys.load(held, copy); });
 }
 
+void system_handle::check_state(nb::bytes const& state)
+{
+  system_ref const ref{system()};
+  auto&            sys   = *ref;
+  auto const       bytes = std::span{static_cast<std::byte const*>(state.data()), state.size()};
+  std::vector<std::byte> const copy{bytes.begin(), bytes.end()};
+  locked(sys, [&](core::held_system const& held) { sys.check_state(held, copy); });
+}
+
 auto system_handle::quantum_ps() const -> std::int64_t
 {
   system_ref const ref{system()};

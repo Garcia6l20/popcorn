@@ -393,6 +393,8 @@ class _Linked(Protocol):
 
     async def _close_open(self, machine: Machine) -> Stop | None: ...
 
+    def reset(self, member: str, kind: ResetKind = ResetKind.POWER_ON) -> None: ...
+
 
 class Machine:
     """One emulated MCU: a description, the images loaded into it and its run state.
@@ -845,13 +847,18 @@ class Machine:
     def reset(self, kind: ResetKind = ResetKind.POWER_ON) -> None:
         """Reset: clock to 0, core from its vector table, peripherals to reset values.
 
-        Memory is kept.
+        Memory is kept. A member of a linked system resets through `LinkedSystem.reset`, its
+        system time running on unchanged.
 
         Raises:
-            MachineRunning: The machine is busy, outside its handlers.
-            MachineBusy: The machine is a member of a linked system.
+            MachineRunning: The machine is busy, outside its handlers. For a member: the system
+                runs, or the member has a goal pending.
+            RuntimeError: For a member, called from a callback of a machine.
         """
-        self._refuse_member("reset")
+        system = self._linked()
+        if system is not None:
+            system.reset(self._name, kind)
+            return
         self._require_stopped()
         self._handle.reset(_core.ResetKind(kind.value))
         self._last_stop = None
@@ -1913,9 +1920,13 @@ class Machine:
 
         Raises:
             MachineRunning: The machine is busy, from its handlers too.
-            MachineBusy: The machine is a member of a linked system.
+            MachineBusy: The machine is a member of a linked system: its state is taken with
+                the others, `LinkedSystem.snapshot`.
         """
         self._refuse_member("snapshot")
+        return self._snapshot()
+
+    def _snapshot(self) -> Snapshot:
         self._require_idle()
         offset = 0 if self._arena is None else self._arena.used
         return Snapshot(self._handle.snapshot(), offset)
@@ -1929,7 +1940,8 @@ class Machine:
                 a file names another description, images or configuration, keyed by the digest
                 that differs.
             MachineRunning: The machine is busy, from its handlers too.
-            MachineBusy: The machine is a member of a linked system.
+            MachineBusy: The machine is a member of a linked system: restore it with the
+                others, `LinkedSystem.restore`.
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
@@ -1945,6 +1957,10 @@ class Machine:
         yet sent, and its streams run or not as the snapshot had them.
         """
         self._refuse_member("restore")
+        self._check_snapshot(snapshot)
+        self._restore(snapshot)
+
+    def _check_snapshot(self, snapshot: Snapshot) -> None:
         self._require_idle()
         machine_id = snapshot.machine_id
         if machine_id not in (0, self._handle.id()):
@@ -1955,6 +1971,9 @@ class Machine:
                 key="machine",
                 expected="restore into the machine that took it, or load its saved form",
             )
+
+    def _restore(self, snapshot: Snapshot) -> None:
+        self._require_idle()
         self._handle.restore(snapshot.native)
         self._last_stop = None
         self._ports.discard()
@@ -2640,7 +2659,10 @@ class Machine:
     def _refuse_member(self, what: str) -> None:
         owner = self._system
         if owner is not None and owner() is not None:
-            raise MachineBusy(f"{self._name} is a member of a linked system: no {what} of a member")
+            raise MachineBusy(
+                f"{self._name} is a member of a linked system: no {what} of a member, use the"
+                f" system's {what}()"
+            )
 
     def _require_idle(self) -> None:
         if self.busy:

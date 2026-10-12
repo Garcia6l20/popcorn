@@ -257,8 +257,8 @@ def test_a_member_runs_and_saves_only_through_its_system(ping: Build) -> None:
         a.start()
     with pytest.raises(popcorn.MachineBusy, match="member of a linked system"):
         a.snapshot()
-    with pytest.raises(popcorn.MachineBusy, match="member of a linked system"):
-        a.reset()
+    with pytest.raises(popcorn.MachineBusy, match="use the system's restore"):
+        a.restore(cast(Any, None))
     system.close()
     system.close()
     with pytest.raises(popcorn.EmulationError, match="closed"):

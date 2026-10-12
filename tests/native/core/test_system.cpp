@@ -2055,6 +2055,105 @@ TEST_CASE("save refuses a pending goal and an undecided member")
   CHECK_FALSE(out.empty());
 }
 
+TEST_CASE("a reset decides a member held at its stop, which runs on the next system time resume")
+{
+  for(bool const released : {false, true})
+  {
+    CAPTURE(released);
+    rig r{
+        .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+    };
+    r.build(variants()[0]);
+    auto goal = r.goal(0, {.budget = icount{100}});
+    REQUIRE(r.run({}).member == 0);
+    if(released)
+    {
+      r.release(0);
+    }
+    std::vector<std::byte> out;
+    {
+      auto const held = r.sys->lock();
+      r.sys->reset(held, 0, popcorn::reset_kind::software);
+      CHECK(r.sys->undecided(held).empty());
+      r.sys->save(held, out);
+    }
+    auto const before = [&r] {
+      auto const held = r.sys->lock();
+      return r.sys->executed_of(held, 0).value;
+    }();
+    REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
+    auto const held = r.sys->lock();
+    CHECK(r.sys->executed_of(held, 0).value > before);
+  }
+}
+
+TEST_CASE("a load after an error pause clears the error and the system resumes")
+{
+  rig r{
+      .members = {
+                  member("alu", "alu_entry"),
+                  member<throwing_arch>(
+              "idle", "idle_budget", [](popcorn::testing::machine_fixture<throwing_arch>& f) {
+                std::ignore = f.module->attached_events().schedule(
+                    icount{1777}, throwing_arch::throw_event, 0);
+              })}
+  };
+  r.build(variants()[0]);
+  REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
+  std::vector<core::snapshot> saved;
+  std::vector<std::byte>      state;
+  for(auto const& one : r.members)
+  {
+    saved.push_back(core::access(*one.on, 0, [](core::machine& m) { return m.snapshot(); }));
+  }
+  {
+    auto const held = r.sys->lock();
+    r.sys->save(held, state);
+  }
+  auto const first = r.run(2 * ms_ps);
+  REQUIRE(first.reason == core::pause_reason::error);
+  {
+    auto const held = r.sys->lock();
+    CHECK_THROWS_AS(std::ignore = r.sys->resume(held, core::sys_time{3 * ms_ps}), std::logic_error);
+    for(std::size_t index = 0; index < 2; ++index)
+    {
+      core::access(*r.members[index].on, 0, [&](core::machine& m) {
+        m.restore(core::snapshot{saved[index].data()});
+      });
+    }
+    r.sys->load(held, state);
+    CHECK(r.sys->time_of(held, 1).ps == 200 * us_ps);
+  }
+  auto const again = r.run(2 * ms_ps);
+  REQUIRE(again.reason == core::pause_reason::error);
+  CHECK(again.at == first.at);
+  CHECK(again.member == first.member);
+}
+
+TEST_CASE("a state check accepts what load accepts and changes nothing")
+{
+  rig r{.members = sleeper_and_runner()};
+  r.build(variants()[0]);
+  REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
+  r.links[0]->state = std::byte{7};
+  std::vector<std::byte> earlier;
+  {
+    auto const held = r.sys->lock();
+    r.sys->save(held, earlier);
+  }
+  REQUIRE(r.run(1 * ms_ps).reason == core::pause_reason::system_time);
+  r.links[0]->state           = std::byte{9};
+  auto const             held = r.sys->lock();
+  std::vector<std::byte> now;
+  r.sys->save(held, now);
+  r.sys->check_state(held, earlier);
+  std::vector<std::byte> after;
+  r.sys->save(held, after);
+  CHECK(after == now);
+  std::vector<std::byte> const junk{std::byte{1}, std::byte{2}};
+  CHECK_THROWS_AS(r.sys->check_state(held, junk), popcorn::config_error);
+}
+
 TEST_CASE("a load that fails on its second link leaves the system as it was")
 {
   rig r{.members = sleeper_and_runner()};

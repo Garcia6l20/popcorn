@@ -198,6 +198,7 @@ struct system::impl
   void               reset_member(slot& one, machine& target, reset_kind kind);
   void               require_paused() const;
   void               require_savable() const;
+  auto               load_links(std::span<std::byte const> in, bool keep) -> saved_system;
   void               wake_all(std::optional<std::size_t> except = {}) noexcept;
   [[nodiscard]] auto in_flight() const noexcept -> bool;
 
@@ -1503,10 +1504,13 @@ void system::save(held_system const&, std::vector<std::byte>& out) const
   reflex::serde::bson::serializer{out}.dump(state);
 }
 
-void system::load(held_system const&, std::span<std::byte const> in)
+auto system::impl::load_links(std::span<std::byte const> in, bool keep) -> saved_system
 {
-  auto& self = *impl_;
-  self.require_savable();
+  if(not stopped)
+  {
+    require_savable();
+  }
+  require_paused();
   saved_system state;
   try
   {
@@ -1518,33 +1522,52 @@ void system::load(held_system const&, std::span<std::byte const> in)
         "system state", 0, "bytes", std::format("a state system::save wrote: {}", failure.what()));
   }
   if(state.format != 1
-     or state.members.size() != self.slots.size()
-     or state.links.size() != self.links.size())
+     or state.members.size() != slots.size()
+     or state.links.size() != links.size())
   {
     throw config_error(
         "system state", 0, "bytes", "a state saved by a system of the same members and links");
   }
-  std::vector<std::vector<std::byte>> before(self.links.size());
-  for(auto&& [link, kept] : std::views::zip(self.links, before))
+  std::vector<std::vector<std::byte>> before(links.size());
+  for(auto&& [link, kept] : std::views::zip(links, before))
   {
     link->save(kept);
   }
   std::size_t loaded = 0;
   try
   {
-    for(; loaded < self.links.size(); ++loaded)
+    for(; loaded < links.size(); ++loaded)
     {
-      self.links[loaded]->load(state.links[loaded]);
+      links[loaded]->load(state.links[loaded]);
     }
   }
   catch(...)
   {
     for(std::size_t index = 0; index < loaded; ++index)
     {
-      self.links[index]->load(before[index]);
+      links[index]->load(before[index]);
     }
     throw;
   }
+  if(not keep)
+  {
+    for(auto&& [link, kept] : std::views::zip(links, before))
+    {
+      link->load(kept);
+    }
+  }
+  return state;
+}
+
+void system::check_state(held_system const&, std::span<std::byte const> in)
+{
+  std::ignore = impl_->load_links(in, false);
+}
+
+void system::load(held_system const&, std::span<std::byte const> in)
+{
+  auto&      self  = *impl_;
+  auto const state = self.load_links(in, true);
   for(auto&& [one, saved] : std::views::zip(self.slots, state.members))
   {
     auto const held_host = one.ref.on->lock();
@@ -1553,6 +1576,12 @@ void system::load(held_system const&, std::span<std::byte const> in)
     one.released = saved.released;
     one.resets   = one.ref.on->member(held_host, 0).resets();
   }
+  for(auto& one : self.slots)
+  {
+    one.undecided = false;
+  }
+  self.held.clear();
+  self.stopped    = false;
   self.window     = state.window;
   self.pending    = state.pending;
   self.last_point = state.last_point;
@@ -1571,6 +1600,11 @@ void system::reset(held_system const&, std::size_t member, reset_kind kind)
   auto&      one       = self.slots[member];
   auto const held_host = one.ref.on->lock();
   self.reset_member(one, one.ref.on->member(held_host, 0), kind);
+  std::erase_if(self.held, [member](entry const& found) {
+    return found.member == member and found.kind == entry_kind::stopped;
+  });
+  one.undecided = false;
+  one.released  = false;
 }
 
 void system::close() noexcept
