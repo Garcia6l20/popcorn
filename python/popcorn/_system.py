@@ -1901,6 +1901,17 @@ class LinkedSystem:
         for machine in self._machines.values():
             machine._system = None  # pyright: ignore[reportPrivateUsage]
 
+    async def _teardown(self) -> None:
+        """Halt a free run, raising what `halt()` raises, then close and wait for the last
+        flight to take the closed pause, so nothing on the loop holds the system after."""
+        try:
+            await self._halt_free()
+        finally:
+            self.close()
+            while (flight := self._flight) is not None and not flight.done():
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(flight)
+
     def __enter__(self) -> LinkedSystem:
         return self
 

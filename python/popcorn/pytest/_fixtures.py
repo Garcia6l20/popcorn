@@ -1,15 +1,15 @@
-"""The plugin's fixtures: `popcorn_project`, `popcorn_selected_project`, `machine` and
-`machine_factory`."""
+"""The plugin's fixtures: `popcorn_project`, `popcorn_selected_project`, `machine`,
+`machine_factory`, `popcorn_system` and `system`."""
 
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Generator, Iterator
+from collections.abc import AsyncIterator, Generator, Iterator
 from dataclasses import dataclass
 
 import pytest
 
-from popcorn import Machine, MissingInput, PopcornError, Project, Snapshot
+from popcorn import LinkedSystem, Machine, MissingInput, PopcornError, Project, Snapshot, System
 from popcorn._machine import check_machine_name
 from popcorn.pytest._options import UNSET, marker_options
 from popcorn.pytest._report import (
@@ -17,12 +17,60 @@ from popcorn.pytest._report import (
     kept_ends,
     trace_directory,
     track,
+    track_system,
     unclaimed,
 )
 from popcorn.pytest._session import Booted, Devices, Key, PopcornSession, popcorn_session
 
 
-class MachineFactory:
+class _Factory:
+    """Machines a fixture made for one test, parked and closed after it."""
+
+    def __init__(self, session: PopcornSession, item: pytest.Item, budget: int | None) -> None:
+        self._session = session
+        self._item = item
+        self._budget = budget
+        self._machines: list[tuple[str, Machine]] = []
+
+    def close(self) -> None:
+        """Park every machine made, collect its coverage and close its pty bridges.
+
+        What ended a free run by itself and never reached the test is raised, the first one,
+        after every machine is closed. The others are warned as unraisable.
+
+        Raises:
+            BaseException: What ended the first such free run.
+        """
+        ends: list[BaseException] = []
+        for label, machine in self._machines:
+            for ended in kept_ends(self._item, machine):
+                ends.append(ended)
+                if len(ends) > 1:
+                    unclaimed(f"{label} of {self._item.nodeid}", ended)
+            self._session.collect(machine)
+            machine.board.close()
+        self._machines.clear()
+        if ends:
+            raise ends[0]
+
+    def _ready(self, key: Key, machine: Machine, snapshot: Snapshot, label: str) -> Machine:
+        self._keep(machine, key, label)
+        machine.restore(snapshot)
+        machine.default_budget = self._budget
+        return machine
+
+    def _track_failed(self, key: Key, label: str) -> None:
+        failed = self._session.failed_machine(key)
+        if failed is not None:
+            track(self._item, label, failed, key)
+
+    def _keep(self, machine: Machine, key: Key, label: str) -> Machine:
+        self._machines.append((label, machine))
+        track(self._item, label, machine, key)
+        return machine
+
+
+class MachineFactory(_Factory):
     """Builds machines separate from the `machine` fixture's, parked and closed after the test.
 
     `factory()` gives a new machine restored from the boot snapshot of its key, booting the key
@@ -51,12 +99,9 @@ class MachineFactory:
 
     def __init__(self, session: PopcornSession, test: ItemSettings, item: pytest.Item) -> None:
         """Make machines for the test `item` with `test` settings."""
-        self._session = session
-        self._item = item
+        super().__init__(session, item, test.budget)
         self._project = test.project
         self._default = test.key
-        self._budget = test.budget
-        self._machines: list[Machine] = []
 
     def __call__(
         self,
@@ -94,16 +139,20 @@ class MachineFactory:
         key = self._key(config, project, strict)
         with _skipping_missing(self._session.project(key)):
             if not booted:
-                return self._keep(self._session.build(key, devices, name), key)
+                return self._keep(self._session.build(key, devices, name), key, self._label())
             if devices is not None:
                 key = self._session.device_key(key, devices)
             try:
                 if devices is None:
                     snapshot = self._session.booted(key).decoded()
-                    return self._ready(key, self._session.build(key, name=name), snapshot)
-                return self._ready(key, *self._session.booted_with(key, devices, name))
+                    return self._ready(
+                        key, self._session.build(key, name=name), snapshot, self._label()
+                    )
+                return self._ready(
+                    key, *self._session.booted_with(key, devices, name), self._label()
+                )
             except PopcornError:
-                self._track_failed(key)
+                self._track_failed(key, f"machine_factory boot of {key}")
                 raise
 
     async def booted(
@@ -124,32 +173,15 @@ class MachineFactory:
             try:
                 if devices is None:
                     snapshot = (await self._session.booted_async(key)).decoded()
-                    return self._ready(key, self._session.build(key, name=name), snapshot)
-                return self._ready(key, *await self._session.booted_with_async(key, devices, name))
+                    return self._ready(
+                        key, self._session.build(key, name=name), snapshot, self._label()
+                    )
+                return self._ready(
+                    key, *await self._session.booted_with_async(key, devices, name), self._label()
+                )
             except PopcornError:
-                self._track_failed(key)
+                self._track_failed(key, f"machine_factory boot of {key}")
                 raise
-
-    def close(self) -> None:
-        """Park every machine made, collect its coverage and close its pty bridges.
-
-        What ended a free run by itself and never reached the test is raised, the first one,
-        after every machine is closed. The others are warned as unraisable.
-
-        Raises:
-            BaseException: What ended the first such free run.
-        """
-        ends: list[BaseException] = []
-        for number, machine in enumerate(self._machines, start=1):
-            for ended in kept_ends(self._item, machine):
-                ends.append(ended)
-                if len(ends) > 1:
-                    unclaimed(f"machine_factory #{number} of {self._item.nodeid}", ended)
-            self._session.collect(machine)
-            machine.board.close()
-        self._machines.clear()
-        if ends:
-            raise ends[0]
 
     def _key(self, config: str | None, project: Project | None, strict: bool | None) -> Key:
         if project is not None:
@@ -159,21 +191,44 @@ class MachineFactory:
             strict = self._default.strict
         return self._session.key(self._project, config, strict)
 
-    def _ready(self, key: Key, machine: Machine, snapshot: Snapshot) -> Machine:
-        self._keep(machine, key)
-        machine.restore(snapshot)
-        machine.default_budget = self._budget
-        return machine
+    def _label(self) -> str:
+        return f"machine_factory #{len(self._machines) + 1}"
 
-    def _track_failed(self, key: Key) -> None:
-        failed = self._session.failed_machine(key)
-        if failed is not None:
-            track(self._item, f"machine_factory boot of {key}", failed, key)
 
-    def _keep(self, machine: Machine, key: Key) -> Machine:
-        self._machines.append(machine)
-        track(self._item, f"machine_factory #{len(self._machines)}", machine, key)
-        return machine
+class SystemFactory(_Factory):
+    """Boots the members of a `popcorn.System` for one test, each a new machine restored from
+    the boot snapshot of its own project's key, parked and closed after the test."""
+
+    def __init__(self, session: PopcornSession, item: pytest.Item) -> None:
+        """Make members for the system test `item`, with its marker and command-line settings.
+
+        Raises:
+            pytest.fail.Exception: The marker is malformed or names a config.
+        """
+        options = marker_options(item)
+        if options.config is not UNSET:
+            pytest.fail(
+                "@pytest.mark.popcorn config does not apply to the system fixture: a member's "
+                "config is part of its project, System(members={name: project.config(...)})",
+                pytrace=False,
+            )
+        settings = session.settings
+        super().__init__(
+            session, item, settings.budget if options.budget is UNSET else options.budget
+        )
+        self._strict = True if options.strict is None and settings.strict else options.strict
+
+    async def member(self, name: str, project: Project) -> Machine:
+        """A new machine named `name` of the base config of `project`, booted from its key."""
+        key = self._session.key(project, None, self._strict)
+        label = f"system member {name}"
+        with _skipping_missing(self._session.project(key)):
+            try:
+                snapshot = (await self._session.booted_async(key)).decoded()
+                return self._ready(key, self._session.build(key, name=name), snapshot, label)
+            except PopcornError:
+                self._track_failed(key, f"{label} boot")
+                raise
 
 
 _NODE = "node"
@@ -364,3 +419,99 @@ def _restored(session: PopcornSession, key: Key) -> Booted:
 
 def _spoiled(machine: Machine, booted: Booted) -> bool:
     return len(machine.images) != booted.image_count or machine.board.ptys != booted.ptys
+
+
+MISSING_SYSTEM = (
+    "define a `popcorn_system` fixture returning a `popcorn.System` in a conftest.py above this "
+    "test"
+)
+
+
+@pytest.fixture(scope="session")
+def popcorn_system() -> System:
+    """The linked system of the tests below a conftest.py, overridden there by the user.
+
+    The nearest override wins, as for any pytest fixture. Without one, the tests using `system`
+    fail, naming the fix.
+    """
+    pytest.fail(MISSING_SYSTEM, pytrace=False)
+
+
+@pytest.fixture
+async def system(
+    request: pytest.FixtureRequest, _popcorn_session: PopcornSession, popcorn_system: object
+) -> AsyncIterator[LinkedSystem]:
+    """The `popcorn_system` booted and linked for this test.
+
+    Each member is a new machine named as the member, restored from the boot snapshot of its
+    own project's key, booted once per key and process as for `machine`: two members of one
+    project are two machines of one boot. Never the `machine` fixture's object. Each stands at
+    its boot stop, its system time from `System.offsets`.
+
+    Per member, from the `popcorn` marker over the command line over the member's project:
+    `strict`, and `budget` as its `default_budget`, which bounds its run, wait_for and call goals.
+    `system.run` is bounded by its `for_` or `until` only. A marker naming a `config` fails the
+    test, `--popcorn-config` does not apply to members. With `--popcorn-trace-on-fail`, each
+    member is traced to `<test>.<member>.pctr`. With `--popcorn-cov`, each member counts.
+
+    Teardown halts a free run the test left started, closes the system, then parks and closes
+    the members. What ended a free run by itself and never reached the test fails the teardown.
+    """
+    item = _item(request)
+    spec = _checked_system(popcorn_system)
+    factory = SystemFactory(_popcorn_session, item)
+    settings = _popcorn_session.settings
+    traces: list[TraceOnFail] = []
+    try:
+        machines = {name: await factory.member(name, p) for name, p in spec.members.items()}
+        if settings.trace_on_fail:
+            directory = trace_directory(request.config, settings.trace_dir)
+            for name, m in machines.items():
+                trace = TraceOnFail(item, directory, name)
+                if trace.start(m):
+                    traces.append(trace)
+        linked = spec.link(machines)
+    except BaseException:
+        _end_traces(traces)
+        factory.close()
+        raise
+    track_system(item, linked)
+    yield linked
+    held: BaseException | None = None
+    try:
+        try:
+            await linked._teardown()  # pyright: ignore[reportPrivateUsage]
+        except Exception as ended:
+            held = ended
+        finally:
+            _end_traces(traces)
+    finally:
+        try:
+            factory.close()
+        except BaseException as ended:
+            if held is None:
+                raise
+            unclaimed(item.nodeid, ended)
+    if held is not None:
+        raise held
+
+
+def _end_traces(traces: list[TraceOnFail]) -> None:
+    errors: list[BaseException] = []
+    for trace in traces:
+        try:
+            trace.finish()
+        except Exception as error:
+            errors.append(error)
+    if errors:
+        raise errors[0]
+
+
+def _checked_system(spec: object) -> System:
+    if not isinstance(spec, System):
+        pytest.fail(
+            f"popcorn_system returned {type(spec).__name__}, not a popcorn.System: "
+            f"{MISSING_SYSTEM}",
+            pytrace=False,
+        )
+    return spec
