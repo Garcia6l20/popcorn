@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import logging
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -218,6 +219,12 @@ class LinkedSystem:
     another wait. That depends on instruction counts only. `run` and `step` inside it raise
     MachineBusy, as on a lone machine's free run, and no budget applies.
 
+    The system's own free run, `running()` or `start()` and `halt()`, runs every member's core
+    as inside its own `running()`, all at once, until halted:
+
+        async with system.running():
+            stop = await controller.wait_for(controller.ref.var("done").eq(1))
+
     A member while the system exists: sync reads and writes raise MachineRunning while the system
     runs, and while the member has a pending goal, since its position at a pause depends on the
     quantum. They are allowed on a halted member while the system is stopped. `start`,
@@ -234,15 +241,22 @@ class LinkedSystem:
         "__weakref__",
         "_admitting",
         "_closed",
+        "_ends",
         "_failed",
         "_flight",
+        "_free",
+        "_free_error",
         "_goal_cap",
         "_goals",
+        "_halt_task",
+        "_halting",
         "_handle",
         "_index",
         "_kicking",
+        "_loop",
         "_machines",
         "_names",
+        "_native",
         "_opens",
         "_origin",
         "_pausing",
@@ -335,6 +349,13 @@ class LinkedSystem:
         self._closed = False
         self._failed: BaseException | None = None
         self._flight: asyncio.Future[_Pause] | None = None
+        self._native: _core.HostFuture | None = None
+        self._free = False
+        self._halting = False
+        self._halt_task: asyncio.Future[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._ends: list[tuple[int, Stop]] = []
+        self._free_error: BaseException | None = None
         self._pausing = False
         self._target: int | None = None
         self._goal_cap = None if goal_cap is None else goal_cap.ps
@@ -552,11 +573,7 @@ class LinkedSystem:
         _check_target(for_, until)
         self._require_usable()
         await self._settled()
-        if self._flight is not None:
-            raise MachineBusy("the linked system runs")
-        if self._goals:
-            name = self._names[min(self._goals)]
-            raise MachineBusy(f"a goal of {name} is pending: await it, or cancel its task")
+        self._refuse_run()
         target = self._target_of(for_, until)
         for index in sorted(self._undecided):
             self._handle.release(index)
@@ -567,6 +584,233 @@ class LinkedSystem:
         finally:
             self._system_run = False
         return self._system_stop(pause, target)
+
+    def start(self) -> None:
+        """Run every member's core until `halt()`, a free run of the system.
+
+        Every member runs as inside its own `running()`, all started together at their
+        positions, on the system's clock. A member stop, FAULT, a breakpoint or a reset under
+        `on_member_reset="stop"`, ends that member's run: it is halted from its stop on, the
+        others go on, and `halt()` raises it. When every member sleeps with nothing due the
+        system sleeps until a command, a stamp, an injection or a pty byte wakes a member.
+        Inside, a member's `wait_for`, stream reads and `elapse` wait on the free run as inside
+        its own `running()`, and return the stop that ended its run once it ended. A member's
+        own `running()`, `system.run` and `system.start` raise MachineBusy.
+
+        The members start at the event loop's next turn: a member wait called before the
+        caller's next await starts exactly at the free run's start, a later one at a point
+        that depends on wall timing. Call it from a coroutine: the system follows its pauses on
+        the running event loop.
+
+        Raises:
+            MachineBusy: The system runs, runs freely, or a member has a goal pending.
+            EmulationError: The system was closed, or stopped on an error before.
+            RuntimeError: No running event loop.
+        """
+        self._require_usable()
+        loop = asyncio.get_running_loop()
+        self._refuse_run()
+        if self._opens:
+            name = self._names[min(self._opens)]
+            raise MachineBusy(f"{name} runs in its own running(): leave it first")
+        for index in sorted(self._undecided):
+            self._handle.release(index)
+        self._undecided.clear()
+        try:
+            for index in range(len(self._names)):
+                goal = _Goal(
+                    self._handle.post_goal(
+                        index, None, None, None, None, None, None, True, self._goal_cap
+                    ),
+                    None,
+                    releases=True,
+                )
+                self._goals[index] = goal
+                self._opens[index] = goal
+        except BaseException:
+            for index in sorted(self._opens):
+                self._handle.withdraw(index)
+            self._goals.clear()
+            self._opens.clear()
+            raise
+        self._free = True
+        self._loop = loop
+        self._ends = []
+        self._free_error = None
+        self._schedule_kick()
+
+    def halt(self) -> None:
+        """End the free run `start()` started. The system pauses at its next barrier, every
+        member is halted where it stands, and this returns once every member parked, waiting
+        with the GIL released. Where the members stand depends on wall timing and the quantum,
+        as a lone machine's `halt()` lands at a wall-dependent boundary, and so do the member
+        stops it reports: a stop at or before that pause is raised, a later one never happens. A
+        wait of a member still pending raises EmulationError. A no-op when no free run is
+        active.
+
+        From a thread other than the one running the event loop that started the free run, the
+        halt runs on that loop, `call_soon_threadsafe`, and this waits for it with the GIL
+        released: a loop blocked on this thread deadlocks, and so does a loop stopped and never
+        run or closed again. When that loop or the system closes before the halt began there,
+        the halt runs here. On an open system a callback of a machine is refused first, free
+        run or not, so a refused halt keeps what it would raise for the next one.
+
+        Raises:
+            EmulationError: A member's run ended on a stop during the free run: FaultError for
+                FAULT, BudgetExceeded for BUDGET, EmulationError otherwise, carrying the first
+                such stop by system time, the others named in its notes. Raised once.
+            BaseException: The error that stopped the system during the free run, raised once.
+            RuntimeError: Called from a callback of a machine, the system open.
+            MachineRunning: Called inside a parked section of a machine, the system open.
+        """
+        if not self._closed:
+            self._handle.check_caller()
+        loop = self._loop
+        if (
+            self._free
+            and loop is not None
+            and not _on_loop(loop)
+            and not loop.is_closed()
+            and self._halt_from(loop)
+        ):
+            return
+        if self._free:
+            halting = self._halting
+            self._halting = True
+            try:
+                native = self._native
+                if native is not None:
+                    self._pausing = True
+                    self._handle.request_pause()
+                    pause = _Pause.of(native.result(None))
+                    if self._took(native):
+                        self._paused(pause, None)
+                self._end_free()
+            finally:
+                self._halting = halting
+        self._raise_ends()
+
+    def _halt_from(self, loop: asyncio.AbstractEventLoop) -> bool:
+        """Run `halt()` on `loop` and wait for it with the GIL released: True once it ran
+        there, False when `loop` or the system closed before it began, the halt then the
+        caller's."""
+        done: concurrent.futures.Future[None] = concurrent.futures.Future()
+
+        def forwarded() -> None:
+            if not done.set_running_or_notify_cancel():
+                return
+            try:
+                self.halt()
+            except BaseException as error:
+                done.set_exception(error)
+            else:
+                done.set_result(None)
+
+        try:
+            loop.call_soon_threadsafe(forwarded)
+        except RuntimeError:
+            return False
+        while not concurrent.futures.wait([done], timeout=0.05).done:
+            if (loop.is_closed() or self._closed) and done.cancel():
+                return False
+        done.result()
+        return True
+
+    @contextlib.asynccontextmanager
+    async def running(self) -> AsyncGenerator[None]:
+        """Run the system freely while the body awaits other things: `start()` on entry,
+        `halt()` on exit, without blocking the event loop.
+
+        Leaving the body raises what `halt()` raises. When the body itself raises, a
+        cancellation included, the body's exception wins, with a note naming what leaving the
+        free run raised.
+
+        Raises:
+            MachineBusy: As `start()`.
+            EmulationError: A member's run ended on a stop, as `halt()`.
+            BaseException: The error that stopped the system during the free run.
+        """
+        self.start()
+        try:
+            yield
+        except BaseException as error:
+            try:
+                await self._halt_free()
+            except Exception as failed:
+                error.add_note(f"leaving the system's free run raised: {failed!r}")
+            raise
+        await self._halt_free()
+
+    async def _halt_free(self) -> None:
+        if self._free:
+            task = self._halt_task
+            if task is None:
+                self._halting = True
+                task = asyncio.ensure_future(self._halting_free())
+                if not task.done():
+                    self._halt_task = task
+            await asyncio.shield(task)
+        self._raise_ends()
+
+    async def _halting_free(self) -> None:
+        try:
+            while (flight := self._flight) is not None:
+                self._pausing = True
+                self._handle.request_pause()
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(flight)
+            self._end_free()
+        finally:
+            self._halting = False
+            self._halt_task = None
+
+    def _end_free(self) -> None:
+        """Withdraw the free run's open goals and release the members its waiters left parked."""
+        self._free = False
+        opens, self._opens = self._opens, {}
+        self._run_ends.clear()
+        self._rebuilds.clear()
+        for index in sorted(self._waits):
+            self._fail_waits(index)
+        for index, goal in sorted(opens.items()):
+            if self._goals.get(index) is goal:
+                del self._goals[index]
+                goal.withdrawn = True
+                if not goal.done() and not self._closed and self._failed is None:
+                    self._handle.withdraw(index)
+        if self._closed or self._failed is not None:
+            return
+        for index in self._handle.undecided():
+            if index not in self._undecided:
+                self._handle.release(index)
+
+    def _raise_ends(self) -> None:
+        error, self._free_error = self._free_error, None
+        ends, self._ends = self._ends, []
+        if error is not None:
+            raise error
+        if not ends:
+            return
+        from popcorn import _machine
+
+        index, stop = ends[0]
+        name = self._names[index]
+        prefix = _machine.error_prefix(self._machines[name])
+        raised = _machine._stop_error(  # pyright: ignore[reportPrivateUsage]
+            stop, "its run in the system's free run", prefix
+        )
+        for other, more in ends[1:]:
+            raised.add_note(f"{self._names[other]} also stopped: {more}")
+        raise raised
+
+    def _refuse_run(self) -> None:
+        if self._free or self._halting:
+            raise MachineBusy("the linked system runs freely: halt() it first")
+        if self._flight is not None:
+            raise MachineBusy("the linked system runs")
+        if self._goals:
+            name = self._names[min(self._goals)]
+            raise MachineBusy(f"a goal of {name} is pending: await it, or cancel its task")
 
     def _target_of(self, for_: VirtualDuration | None, until: VirtualTime | None) -> int:
         if for_ is not None:
@@ -586,6 +830,7 @@ class LinkedSystem:
 
     def _launch(self, until_ps: int | None) -> asyncio.Future[_Pause]:
         future = self._handle.resume(until_ps)
+        self._native = future
         flight = asyncio.ensure_future(self._flown(future, until_ps))
         if not flight.done():
             self._flight = flight
@@ -602,17 +847,28 @@ class LinkedSystem:
             raise
 
     async def _flown(self, future: _core.HostFuture, until_ps: int | None) -> _Pause:
+        taken = False
         try:
-            pause = await awaited(future, _Pause.of, cancel=False)
-        except asyncio.CancelledError:
-            with contextlib.suppress(EmulationError):
-                self._handle.request_pause()
-            pause = _Pause.of(future.result(None))
+            try:
+                pause = await awaited(future, _Pause.of, cancel=False)
+            except asyncio.CancelledError:
+                with contextlib.suppress(EmulationError):
+                    self._handle.request_pause()
+                pause = _Pause.of(future.result(None))
         finally:
-            self._flight = None
-            self._pausing = False
-        self._paused(pause, until_ps)
+            taken = self._took(future)
+        if taken:
+            self._paused(pause, until_ps)
         return pause
+
+    def _took(self, future: _core.HostFuture) -> bool:
+        """End the flight of resume `future`, False when `halt()` already did."""
+        if self._native is not future:
+            return False
+        self._flight = None
+        self._native = None
+        self._pausing = False
+        return True
 
     def _paused(self, pause: _Pause, until_ps: int | None) -> None:
         if pause.reason is _core.PauseReason.system_time and until_ps is not None:
@@ -633,6 +889,8 @@ class LinkedSystem:
                     f"{VirtualTime(pause.at)}"
                 )
                 pause.error.add_note(note)
+            if self._free:
+                self._free_error = pause.error
         self._goals = {index: goal for index, goal in self._goals.items() if not goal.done()}
         if self._failed is None and not self._closed:
             for index in sorted(self._withdrawals):
@@ -662,6 +920,8 @@ class LinkedSystem:
             reached = waits
             waits = []
             self._handle.release(index)
+            if self._free:
+                self._ends.append((index, stop))
         for wait in reached:
             if not wait.future.done():
                 wait.future.set_result(stop)
@@ -738,9 +998,14 @@ class LinkedSystem:
 
     def _schedule_kick(self) -> None:
         """Kick at the loop's next turn, once: goals posted in the same turn start together."""
-        if not self._kicking:
-            self._kicking = True
-            asyncio.get_running_loop().call_soon(self._kicked)
+        if self._kicking:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._kicking = True
+        loop.call_soon(self._kicked)
 
     def _kicked(self) -> None:
         self._kicking = False
@@ -751,7 +1016,7 @@ class LinkedSystem:
         no goal waits to be admitted."""
         if self._closed or self._failed is not None or self._flight is not None:
             return
-        if self._admitting:
+        if self._admitting or self._halting:
             return
         if not self._goals or self._handle.undecided():
             return
@@ -881,6 +1146,10 @@ class LinkedSystem:
     async def _open_goal(self, machine: Machine) -> None:
         """Start an open goal on member `machine`, for its `running()`, kept by the system so no
         frame of the body holds its future."""
+        if self._free:
+            raise MachineBusy(
+                f"the linked system runs freely: {machine.name} runs in the system's running()"
+            )
         index = self._index[machine.name]
         self._opens[index] = await self._post(
             index,
@@ -918,6 +1187,8 @@ class LinkedSystem:
         ended = self._run_ends.get(index)
         if ended is not None:
             return ended
+        if self._halting:
+            raise EmulationError(f"{machine.name}: the run this wait was in ended")
         if exact is not None:
             raise MachineBusy(f"{machine.name} runs in its running(): no step inside it")
         waits = self._waits.setdefault(index, [])
@@ -977,6 +1248,8 @@ class LinkedSystem:
     def _refuse_goal(self, index: int) -> None:
         if self._system_run:
             raise MachineBusy("the linked system runs a system run: await it first")
+        if self._halting:
+            raise MachineBusy("the linked system's free run is halting")
         if index in self._goals:
             raise MachineBusy(f"{self._names[index]} has a goal pending: one goal per member")
 
@@ -1058,6 +1331,8 @@ class LinkedSystem:
     def _halt_member(self, machine: Machine) -> None:
         """`Machine.halt()` on a member: release it from its goal's stop."""
         index = self._index[machine.name]
+        if self._free:
+            raise MachineBusy(f"the linked system runs freely: halt the system, not {machine.name}")
         if index in self._goals:
             raise MachineBusy(f"{machine.name} has a goal pending: cancel its task")
         if index in self._undecided:
@@ -1128,6 +1403,7 @@ class LinkedSystem:
             return
         self._handle.check_caller()
         self._closed = True
+        self._free = False
         if self._flight is None and self._failed is None:
             with contextlib.suppress(RuntimeError):
                 self._handle.finish()
@@ -1160,6 +1436,13 @@ class LinkedSystem:
 
     def __repr__(self) -> str:
         return f"LinkedSystem({', '.join(self._names)})"
+
+
+def _on_loop(loop: asyncio.AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() is loop
+    except RuntimeError:
+        return False
 
 
 def _check_member(name: str, machine: Machine) -> None:
