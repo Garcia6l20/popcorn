@@ -13,6 +13,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/i2c](stm32u575/i2c) | LL | a 24xx EEPROM page write with acknowledge polling, configs swapping the device, a scripted TableTarget |
 | [stm32u575/i2c_mock](stm32u575/i2c_mock) | LL | a temperature sensor written in Python as an `I2CTarget`: scripted readings, the configuration word the firmware wrote, NACK injection and recovery |
 | [stm32u575/iwdg](stm32u575/iwdg) | HAL | IWDG refresh, a watchdog reset request 500 ms after the last refresh, IWDGRSTF after the reset |
+| [stm32u575/linked_uart](stm32u575/linked_uart) | HAL DMA | a `popcorn.System` of a controller and two responders, each its own firmware and machine, on one virtual clock: UART links with a latency, receive-to-idle on a circular GPDMA ring, the `system` fixture, the link tap, an injected and a replaced frame, a watchdog reset of one member, a system snapshot, the same run at any slicing, quantum or CPU count |
 | [stm32u575/pwr_flash](stm32u575/pwr_flash) | LL | voltage range 1 and 4 wait states before 160 MHz, a page erase and a quad-word program read back through `machine.mem`, PGSERR from a store without PG, a too low wait-state count failing a strict run |
 | [stm32u575/python_model](stm32u575/python_model) | HAL IT | the RNG, which popcorn does not model, served by a `popcorn.model.Model` written in Python: register handlers, a scheduled DRDY, the interrupt line, a seed from the project |
 | [stm32u575/rcc](stm32u575/rcc) | LL | HSE bypass to a 160 MHz PLL1, voltage range, flash latency, SysTick period in virtual time |
@@ -33,6 +34,10 @@ Every example has the same layout:
 - `conftest.py` the `popcorn_project` fixture: chip, image, boot, board devices
 - `test_*.py` the tests. pytest loads the `popcorn.pytest` plugin by its entry point
 - `pytest.ini` makes the example directory the pytest rootdir, so a copied example stands alone
+
+`linked_uart` runs two firmware images on three machines. It keeps its projects in
+`linked_projects.py` and has one test folder per image plus `system/` for the linked system. Its
+README shows the layout.
 
 ## Declaring a project
 

@@ -781,7 +781,8 @@ class Machine:
 
     @property
     def instructions(self) -> int:
-        """Instructions executed since reset.
+        """Instructions executed since reset. A sleeping core's time counts one per core clock
+        cycle, and so does a linked member's halted time.
 
         Raises:
             MachineRunning: The machine is busy, read outside its callbacks: use

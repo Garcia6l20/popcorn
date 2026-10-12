@@ -77,6 +77,11 @@ class System:
     `machines`, `boot` and `link` build the runtime. The pytest plugin's `system` fixture boots
     each member from its own project's boot cache.
 
+    Each member runs on its own host thread. The members meet at a barrier every `quantum` of
+    system time, and after it each receiver's thread drains the frames sent to it, senders in
+    member order, then links in `links` order. The Python callbacks of different members run
+    at once, each on its member's thread.
+
         SYSTEM = popcorn.System(
             members={"ctl": CONTROLLER, "r1": RESPONDER, "r2": RESPONDER},
             links=[
