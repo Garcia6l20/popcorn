@@ -59,6 +59,7 @@ void link_rx_dma(void);
 void link_iwdg(void);
 void link_audio(void);
 void link_audio_peer(void);
+void link_audio_tim6(void);
 void USART2_IRQHandler(void);
 void SysTick_Handler(void);
 
@@ -1133,4 +1134,35 @@ void link_audio_peer(void)
   audio_ports[0].respond = 1u;
   audio_start(USART1, USART1_IRQn);
   idle();
+}
+
+void link_audio_tim6(void)
+{
+  clock_160mhz();
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_PCLK2);
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART2_CLKSOURCE_PCLK1);
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM6);
+  audio_on = 1u;
+  audio_start(USART1, USART1_IRQn);
+  audio_start(USART2, USART2_IRQn);
+  SysTick_Config(160000u);
+  uint32_t next    = 0u;
+  uint32_t written = 0u;
+  for(;;)
+  {
+    while(audio_ticks < next)
+    {
+      uint32_t const now = audio_ticks;
+      if(now != written)
+      {
+        written   = now;
+        TIM6->ARR = now;
+      }
+    }
+    audio_block(0);
+    audio_block(1);
+    next += AUDIO_PERIOD_MS;
+  }
 }

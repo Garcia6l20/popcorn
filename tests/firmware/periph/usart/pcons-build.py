@@ -50,5 +50,6 @@ add_ll_firmware(
         "link_iwdg",
         "link_audio",
         "link_audio_peer",
+        "link_audio_tim6",
     ],
 )

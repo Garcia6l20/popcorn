@@ -9,6 +9,7 @@
 
 #include <reflex/py.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -310,6 +311,12 @@ public:
   [[= py::doc{"Frames the sender started on a wire so far."}]] auto posted(std::size_t wire)
       -> std::uint64_t;
 
+  /** @brief How many times a member asked to sleep on IDLE inside open goals, the
+   * core::system before_sleep hook. Any thread, no lock, for tests. */
+  [[= py::doc{
+      "Times a member went to sleep on IDLE inside open goals, for tests."}]] [[nodiscard]] auto
+      sleeps() const noexcept -> std::uint64_t;
+
   /** @brief Sets the most frames the tap of each wire added later keeps, for tests. */
   [[= py::doc{"Frames the taps of wires added from now on keep, for tests."}]] void
       set_tap_capacity(std::size_t capacity);
@@ -352,12 +359,14 @@ private:
   [[nodiscard]] auto wire(std::size_t index) const -> periph::stm32::uart_wire&;
   void               give_back() noexcept;
 
-  core::slice_bounds                  bounds_;
-  std::size_t                         tap_capacity_ = std::size_t{1} << 20;
-  std::vector<member_entry>           members_;
-  std::vector<wire_entry>             wires_;
-  std::vector<reflex::py::nb::object> handles_;
-  std::shared_ptr<core::system>       system_;
-  bool                                closed_{};
+  core::slice_bounds                          bounds_;
+  std::size_t                                 tap_capacity_ = std::size_t{1} << 20;
+  std::vector<member_entry>                   members_;
+  std::vector<wire_entry>                     wires_;
+  std::vector<reflex::py::nb::object>         handles_;
+  std::shared_ptr<core::system>               system_;
+  std::shared_ptr<std::atomic<std::uint64_t>> sleeps_ =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
+  bool closed_{};
 };
 }

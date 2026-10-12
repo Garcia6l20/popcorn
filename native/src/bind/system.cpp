@@ -477,7 +477,11 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
     system_ = [&] {
       nb::gil_scoped_release const released;
       return std::make_shared<core::system>(
-          std::move(refs), std::move(links), core::default_wait_policy(members_.size()), bounds_);
+          std::move(refs), std::move(links), core::default_wait_policy(members_.size()), bounds_,
+          std::function<void(std::size_t)>{},
+          std::function<void(std::size_t)>{[sleeps = sleeps_](std::size_t) {
+            sleeps->fetch_add(1, std::memory_order_relaxed);
+          }});
     }();
   }
   catch(...)
@@ -880,6 +884,11 @@ auto system_handle::executed_of(std::size_t member) -> std::uint64_t
   std::ignore          = member_index(member);
   return locked(
       sys, [&](core::held_system const& held) { return sys.executed_of(held, member).value; });
+}
+
+auto system_handle::sleeps() const noexcept -> std::uint64_t
+{
+  return sleeps_->load(std::memory_order_relaxed);
 }
 
 auto system_handle::tap_take(std::size_t index) -> std::vector<tap_record>
