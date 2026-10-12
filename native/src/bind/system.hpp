@@ -127,7 +127,7 @@ public:
    *         shape outside the UART's.
    */
   [[= py::doc{"Add a wire before start(), return its index."}]] auto
-      add_wire(wire_spec const& spec, uart_link const& sender, uart_link const& receiver)
+      add_wire(wire_spec const& spec, uart_queue const& sender, uart_queue const& receiver)
           -> std::size_t;
 
   /**

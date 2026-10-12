@@ -250,7 +250,7 @@ class UartStream:
     def __init__(
         self,
         name: str,
-        link: _core.UartLink,
+        link: _core.UartQueue,
         wait: Waiter,
         bridges: dict[str, PtyBridge],
         post: Poster,
@@ -459,7 +459,7 @@ def _frames(records: Iterable[_core.UartFrame]) -> list[Frame]:
     return [Frame(f.data, VirtualTime(f.at_ps), f.brk) for f in records]
 
 
-type PtyOpener = Callable[[str, _core.UartLink | _core.CdcLink], _core.PtyBridge]
+type PtyOpener = Callable[[str, _core.UartQueue | _core.CdcLink], _core.PtyBridge]
 """Bridges a UART or CDC link to a new host pty keyed by the name, pumped by the machine."""
 
 
@@ -518,7 +518,7 @@ class UartPorts:
 
     def __init__(
         self,
-        connect: Callable[[str], _core.UartLink],
+        connect: Callable[[str], _core.UartQueue],
         uarts: Iterable[str],
         aliases: Mapping[str, str],
         wait: Waiter,
@@ -536,7 +536,7 @@ class UartPorts:
         self._wait = wait
         self._post = post
         self._open_pty = open_pty
-        self._links: dict[str, _core.UartLink] = {name: connect(name) for name in uarts}
+        self._links: dict[str, _core.UartQueue] = {name: connect(name) for name in uarts}
         self._streams: dict[str, UartStream] = {}
         self.bridges: dict[str, PtyBridge] = {}
         self.linked: set[str] = set()
@@ -545,7 +545,7 @@ class UartPorts:
         """The peripheral that serves `name`, `name` itself unless it is an alias."""
         return self._aliases.get(name, name)
 
-    def link(self, name: str) -> _core.UartLink:
+    def link(self, name: str) -> _core.UartQueue:
         """The native link of UART `name` or of the UART its alias names, connected at machine
         build for a built-in UART."""
         name = self.serving(name)
@@ -577,7 +577,7 @@ class UartPorts:
             self._streams[name] = stream
         return stream
 
-    def bridge(self, key: str, link: _core.UartLink | _core.CdcLink) -> PtyBridge:
+    def bridge(self, key: str, link: _core.UartQueue | _core.CdcLink) -> PtyBridge:
         """The bridge keyed `key`, bridging `link` to a new pty on first use."""
         found = self.bridges.get(key)
         if found is None:

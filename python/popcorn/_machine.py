@@ -2709,7 +2709,7 @@ def _masked_stop(raw: object) -> tuple[Stop, int]:
 def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
     """Open pty bridges on `handle`, holding the handle and not the `Machine`."""
 
-    def opened(name: str, link: _core.UartLink | _core.CdcLink) -> _core.PtyBridge:
+    def opened(name: str, link: _core.UartQueue | _core.CdcLink) -> _core.PtyBridge:
         if isinstance(link, _core.CdcLink):
             return handle.open_cdc_pty(name, link)
         return handle.open_uart_pty(name, link)

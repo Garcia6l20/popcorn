@@ -38,7 +38,7 @@ struct[[= py::rename{"UartFrame"}]] uart_frame
  *        with their time, frames Python sends enter the receiver at the configured baud. Valid
  *        while the machine lives, every method raises ConfigError after.
  */
-class[[= py::rename{"UartLink"}]] uart_link
+class[[= py::rename{"UartQueue"}]] uart_queue
 {
 public:
   /**
@@ -47,7 +47,7 @@ public:
    * @param alive Cleared when the machine is destroyed.
    * @param host The machine's host, through which send() and queued() reach the UART.
    */
-  [[= py::skip]] uart_link(
+  [[= py::skip]] uart_queue(
       periph::stm32::uart_port& port,
       detail::alive_flag        alive,
       detail::host_ref          host);

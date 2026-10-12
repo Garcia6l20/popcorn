@@ -407,9 +407,9 @@ auto system_handle::add_member(machine_handle& member, std::string name, bool st
 }
 
 auto system_handle::add_wire(
-    wire_spec const& spec,
-    uart_link const& sender,
-    uart_link const& receiver) -> std::size_t
+    wire_spec const&  spec,
+    uart_queue const& sender,
+    uart_queue const& receiver) -> std::size_t
 {
   if(system_ != nullptr or closed_)
   {

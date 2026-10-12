@@ -524,7 +524,7 @@ class LinkedSystem:
 
     def _end(
         self, index: int, side: str, end: str, used: set[tuple[str, str]]
-    ) -> tuple[int, _core.UartLink, str]:
+    ) -> tuple[int, _core.UartQueue, str]:
         key = f"links[{index}].{side}"
         name, dot, unit = end.partition(".")
         machine = self._machines.get(name)

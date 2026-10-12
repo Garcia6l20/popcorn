@@ -548,7 +548,7 @@ public:
    * @throws config_error once the machine is destroyed.
    */
   [[= py::doc{"Bridge a UART to a new host pty pumped by the machine thread."}]] auto
-      open_uart_pty(std::string name, uart_link const& link) -> pty_handle;
+      open_uart_pty(std::string name, uart_queue const& link) -> pty_handle;
 
   /**
    * @brief As open_uart_pty(), for a CDC ACM function of a virtual USB host.
@@ -911,7 +911,7 @@ public:
    * @throws model_error when the peripheral's model is not a UART.
    */
   [[= py::doc{"Connect a UART to Python, replacing its far end."}]] [[nodiscard]] auto
-      attach_uart(std::string const& peripheral) -> uart_link;
+      attach_uart(std::string const& peripheral) -> uart_queue;
 
   /**
    * @brief Names of the peripherals whose model is a built-in SAI, in description order.
