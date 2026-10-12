@@ -8,7 +8,7 @@ import contextlib
 import logging
 import weakref
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -224,6 +224,9 @@ class LinkedSystem:
 
         async with system.running():
             stop = await controller.wait_for(controller.ref.var("done").eq(1))
+
+    `wait_for` waits on the whole system instead, a predicate asked at fixed check points of
+    system time, each a TIME stop: exact, and refused inside the free run.
 
     A member while the system exists: sync reads and writes raise MachineRunning while the system
     runs, and while the member has a pending goal, since its position at a pause depends on the
@@ -575,15 +578,71 @@ class LinkedSystem:
         await self._settled()
         self._refuse_run()
         target = self._target_of(for_, until)
+        self._system_run = True
+        try:
+            return await self._run_to(target)
+        finally:
+            self._system_run = False
+
+    async def _run_to(self, target: int) -> SystemStop:
         for index in sorted(self._undecided):
             self._handle.release(index)
         self._undecided.clear()
+        return self._system_stop(await self._resume(target), target)
+
+    async def wait_for(
+        self,
+        predicate: Callable[[LinkedSystem], bool],
+        *,
+        every: VirtualDuration,
+        for_: VirtualDuration | None = None,
+    ) -> SystemStop:
+        """Run every member's core until `predicate(system)` holds at a check point.
+
+        The check points are system times `base + k * every`, k from 1, where `base` is the
+        target of the previous TIME stop, else the largest offset, as for `run(for_=)`. At each
+        one the system makes a TIME stop, every member parked at it, and `predicate` runs on
+        the caller's thread with sync access to every member. The stop is the first check point
+        where it holds, whatever the quantum, the slicing or the wall timing: the predicate is
+        never asked between check points. Each check point is a TIME target, so a later
+        `run(for_=)` or `wait_for` counts from the stop.
+
+        With `for_`, the wait ends at `base + for_` with a TIME stop if `predicate` held at no
+        check point before it, and is not asked there. A member stop or an IDLE pause on the way
+        ends the wait as it ends `run`.
+
+        Raises:
+            TypeError: `every` or `for_` is no VirtualDuration.
+            ValueError: `every` not above 0, or `for_` negative.
+            MachineBusy: The system runs, runs freely, its `running()` included, or a member has
+                a goal pending.
+            EmulationError: The system was closed, or stopped on an error before.
+            BaseException: What `predicate` raised, or the error that stopped the system.
+
+        Returns:
+            USER at the check point where `predicate` held, each member's stop a TIME stop
+            there. TIME at `base + for_`. A member stop or IDLE as `run` returns them.
+        """
+        _check_every(every, for_)
+        self._require_usable()
+        await self._settled()
+        self._refuse_run()
+        base = self._origin if self._target is None else self._target
+        deadline = None if for_ is None else base + for_.ps
         self._system_run = True
         try:
-            pause = await self._resume(target)
+            point = base
+            while True:
+                point += every.ps
+                if deadline is not None and point >= deadline:
+                    return await self._run_to(deadline)
+                stop = await self._run_to(point)
+                if stop.reason is not StopReason.TIME or stop.member is not None:
+                    return stop
+                if predicate(self):
+                    return replace(stop, reason=StopReason.USER)
         finally:
             self._system_run = False
-        return self._system_stop(pause, target)
 
     def start(self) -> None:
         """Run every member's core until `halt()`, a free run of the system.
@@ -806,7 +865,7 @@ class LinkedSystem:
     def _refuse_run(self) -> None:
         if self._free or self._halting:
             raise MachineBusy("the linked system runs freely: halt() it first")
-        if self._flight is not None:
+        if self._flight is not None or self._system_run:
             raise MachineBusy("the linked system runs")
         if self._goals:
             name = self._names[min(self._goals)]
@@ -1473,6 +1532,16 @@ def _check_target(for_: VirtualDuration | None, until: VirtualTime | None) -> No
             raise ValueError("for_ must not be negative")
     elif not isinstance(cast(object, until), VirtualTime):
         raise TypeError(f"until must be a VirtualTime, not {type(until).__name__}")
+
+
+def _check_every(every: VirtualDuration, for_: VirtualDuration | None) -> None:
+    for name, given in (("every", every), ("for_", for_)):
+        if given is not None and not isinstance(cast(object, given), VirtualDuration):
+            raise TypeError(f"{name} must be a VirtualDuration, not {type(given).__name__}")
+    if every.ps <= 0:
+        raise ValueError("every must be above 0")
+    if for_ is not None and for_.ps < 0:
+        raise ValueError("for_ must not be negative")
 
 
 def _offsets(names: Sequence[str], offsets: Mapping[str, VirtualDuration]) -> list[int]:

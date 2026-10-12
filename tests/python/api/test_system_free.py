@@ -1,5 +1,5 @@
 """A `LinkedSystem`'s free run: `start()`, `halt()` and `running()`, every member's core running
-until halted, member waits on it."""
+until halted, member waits on it, and the system's `wait_for` at fixed check points."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import popcorn
 import pytest
 from popcorn import LinkedSystem, Stop, StopReason, UartLink
 from popcorn._errors import MachineBusy
-from popcorn.units import VirtualDuration, ms, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import member
 
@@ -335,6 +335,89 @@ def test_a_free_run_frees_what_it_held(u575: popcorn.MachineDescription, path: s
     refs = free_path(u575, path)
     gc.collect()
     assert [one() for one in refs] == [None, None, None]
+
+
+def echoes(system: LinkedSystem) -> int:
+    """Log words of member a, two per echo it received."""
+    return int(system.members["a"].var("log_len").value)
+
+
+def test_a_system_wait_stops_at_the_first_check_point_where_it_holds(ping: Build) -> None:
+    every = us(50)
+
+    async def body(system: LinkedSystem) -> object:
+        seen: list[int] = []
+
+        def echoed(s: LinkedSystem) -> bool:
+            seen.append(echoes(s))
+            return seen[-1] >= 8
+
+        stop = await system.wait_for(echoed, every=every)
+        assert stop.reason is StopReason.USER and stop.member is None
+        assert stop.time == VirtualTime(len(seen) * every.ps)
+        assert seen[-1] >= 8 and all(one < 8 for one in seen[:-1])
+        later = await system.run(for_=us(10))
+        assert later.time == VirtualTime(stop.time.ps + us(10).ps)
+        return stop.time, seen, {name: point(one) for name, one in stop.stops.items()}
+
+    across(ping, body)
+
+
+def test_a_system_wait_ends_at_for_without_asking_there(ping: Build) -> None:
+    system = ping()
+    asked: list[VirtualTime] = []
+
+    def never(s: LinkedSystem) -> bool:
+        asked.append(s.time_of("b"))
+        return False
+
+    stop = asyncio.run(system.wait_for(never, every=us(300), for_=us(900)))
+    assert stop.reason is StopReason.TIME
+    assert stop.time == VirtualTime(us(900).ps)
+    assert asked == [VirtualTime(us(300).ps), VirtualTime(us(600).ps)]
+    asked.clear()
+    stop = asyncio.run(system.wait_for(never, every=us(40), for_=us(100)))
+    assert stop.time == VirtualTime(us(1000).ps)
+    assert asked == [VirtualTime(us(940).ps), VirtualTime(us(980).ps)]
+
+
+def test_a_member_stop_ends_a_system_wait(ping: Build) -> None:
+    async def body(system: LinkedSystem) -> object:
+        stop = await system.wait_for(lambda _: False, every=us(100))
+        assert stop.member == "a" and stop.reason is StopReason.USER
+        assert stop.stop is not None
+        return point(stop.stop), stop.time
+
+    across(ping, body)
+
+
+def test_system_wait_refusals(ping: Build) -> None:
+    system = ping()
+
+    def nested(s: LinkedSystem) -> bool:
+        with pytest.raises(MachineBusy):
+            s.start()
+        return True
+
+    def raising(_: LinkedSystem) -> bool:
+        raise KeyError("asked")
+
+    async def body() -> None:
+        with pytest.raises(TypeError):
+            await system.wait_for(lambda _: True, every=50)  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ValueError):
+            await system.wait_for(lambda _: True, every=us(0))
+        with pytest.raises(ValueError):
+            await system.wait_for(lambda _: True, every=us(1), for_=VirtualDuration(-1))
+        with pytest.raises(KeyError):
+            await system.wait_for(raising, every=us(10))
+        assert (await system.wait_for(nested, every=us(10))).time == VirtualTime(us(20).ps)
+        assert (await system.run(for_=us(10))).time == VirtualTime(us(30).ps)
+        async with system.running():
+            with pytest.raises(MachineBusy):
+                await system.wait_for(lambda _: True, every=us(10))
+
+    asyncio.run(body())
 
 
 def test_a_halt_from_another_thread_runs_on_the_free_run_s_loop(ping: Build) -> None:
