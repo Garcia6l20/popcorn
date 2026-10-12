@@ -6,7 +6,9 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
+import threading
 import weakref
+from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import TracebackType
@@ -21,10 +23,12 @@ from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
     from popcorn._machine import Machine
+    from popcorn._streams import UartPorts
 
 _STOP_BITS = {0.5: 1, 1.0: 2, 1.5: 3, 2.0: 4}
 _PARITY = {"none": 0, "even": 1, "odd": 2}
 _WATCHDOG = 5.0
+_TAP_KEEP = 1 << 20
 _LOG = logging.getLogger("popcorn")
 
 
@@ -83,6 +87,46 @@ class SystemStop:
     stop: Stop | None
     time: VirtualTime
     stops: Mapping[str, Stop] = field(default_factory=dict[str, Stop])
+
+
+@dataclass(frozen=True, slots=True)
+class TapFrame:
+    """One frame on one direction of a link, as `UartTap` shows it. Times are system times.
+
+    Attributes:
+        data: Data bits, 0 for a break.
+        index: Number of the frame among its sender's frames in this direction, from 0 at
+            system start, or among the frames injected in this direction for an injected one:
+            the index `UartTap.replace` and `drop` take for a sender's frame.
+        start: Start-bit edge at the sender, at the receiver for an injected frame.
+        end: Stop-bit end at the sender, the abort time for a lost frame, at the receiver for an
+            injected frame.
+        arrival: When the receiver sees the frame end: `end` plus the link's latency, `end` for
+            an injected frame.
+        towards: The receiving end, `"<member>.<UART>"`.
+        injected: Whether `UartTap.inject` put it on the line.
+        brk: Whether it is a break.
+        lost: Whether the sender aborted it, its UART disabled mid-frame.
+        dropped: Whether an armed `UartTap.drop` kept it off the line: the receiver saw an idle
+            line.
+    """
+
+    data: int
+    index: int
+    start: VirtualTime
+    end: VirtualTime
+    arrival: VirtualTime
+    towards: str
+    injected: bool
+    brk: bool
+    lost: bool
+    dropped: bool
+
+
+@dataclass(frozen=True)
+class _LinkWires:
+    ends: tuple[str, str]
+    wires: tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -235,7 +279,8 @@ class LinkedSystem:
     Python callbacks run on its own thread, concurrently with other members' callbacks: Python
     state they share sees an order that depends on thread timing, so keep callback state per
     member and couple members through links. The system owns the members' UARTs named in links:
-    frames each transmits still reach its own `port`.
+    frames each transmits still reach its own `port`, whose `write` raises RuntimeError until
+    `close()`. `tap` shows the frames on a link and injects, replaces or drops frames.
 
     The system holds its members until `close()`, also run by `with`.
     """
@@ -256,6 +301,7 @@ class LinkedSystem:
         "_handle",
         "_index",
         "_kicking",
+        "_links",
         "_loop",
         "_machines",
         "_names",
@@ -266,9 +312,11 @@ class LinkedSystem:
         "_rebuilds",
         "_run_ends",
         "_system_run",
+        "_taps",
         "_target",
         "_tokens",
         "_undecided",
+        "_unlink",
         "_waits",
         "_warned",
         "_withdrawals",
@@ -338,6 +386,8 @@ class LinkedSystem:
         if not links:
             raise ConfigError("a linked system needs a link", key="links", expected="a link")
         offset_ps = _offsets(self._names, offsets or {})
+        self._links: list[_LinkWires] = []
+        self._taps: dict[int, UartTap] = {}
         self._handle = _core.SystemHandle(
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
         )
@@ -348,6 +398,7 @@ class LinkedSystem:
         for index, link in enumerate(links):
             self._add_link(index, link, used)
         self._handle.start(offset_ps)
+        self._unlink = weakref.finalize(self, _unmark, self._mark_linked())
         self._origin = max(offset_ps)
         self._closed = False
         self._failed: BaseException | None = None
@@ -409,6 +460,7 @@ class LinkedSystem:
                     expected=expected,
                 )
         ends = [self._end(index, side, end, used) for side, end in (("a", link.a), ("b", link.b))]
+        wires: list[int] = []
         for (sender, sender_link, _), (receiver, receiver_link, unit) in (
             (ends[0], ends[1]),
             (ends[1], ends[0]),
@@ -425,7 +477,28 @@ class LinkedSystem:
             spec.strict = self._machines[
                 self._names[receiver]
             ]._strict_peripherals  # pyright: ignore[reportPrivateUsage]
-            self._handle.add_wire(spec, sender_link, receiver_link)
+            wires.append(self._handle.add_wire(spec, sender_link, receiver_link))
+        self._links.append(
+            _LinkWires(
+                (
+                    f"{self._names[ends[0][0]]}.{ends[0][2]}",
+                    f"{self._names[ends[1][0]]}.{ends[1][2]}",
+                ),
+                (wires[0], wires[1]),
+            )
+        )
+
+    def _mark_linked(self) -> list[tuple[UartPorts, str]]:
+        """Mark each linked UART on its member's ports, so its stream and pty refuse, and
+        return the marks for `_unmark`."""
+        marked: list[tuple[UartPorts, str]] = []
+        for wired in self._links:
+            for end in wired.ends:
+                name, _, unit = end.partition(".")
+                ports = self._machines[name]._ports  # pyright: ignore[reportPrivateUsage]
+                ports.linked.add(unit)
+                marked.append((ports, unit))
+        return marked
 
     def _end(
         self, index: int, side: str, end: str, used: set[tuple[str, str]]
@@ -547,6 +620,31 @@ class LinkedSystem:
         index = self._index[member]
         self._require_stopped()
         return VirtualTime(self._handle.time_of_ps(index))
+
+    def tap(self, end: str) -> UartTap:
+        """The tap of the link with end `end`, `"<member>.<UART>"`, either end or an alias of
+        its UART: the same `UartTap` for both ends. It stays readable after `close()`.
+
+        Raises:
+            ValueError: No link has the end `end`.
+        """
+        named = self._end_name(end)
+        for index, wired in enumerate(self._links):
+            if named in wired.ends:
+                tap = self._taps.get(index)
+                if tap is None:
+                    tap = self._taps[index] = UartTap(self, wired)
+                return tap
+        raise ValueError(f"{end!r} is no end of a link of {self!r}")
+
+    def _end_name(self, end: object) -> str | None:
+        if not isinstance(end, str):
+            return None
+        name, _, unit = end.partition(".")
+        machine = self._machines.get(name)
+        if machine is None or not unit:
+            return None
+        return f"{name}.{machine._ports.serving(unit)}"  # pyright: ignore[reportPrivateUsage]
 
     async def run(
         self, *, for_: VirtualDuration | None = None, until: VirtualTime | None = None
@@ -1467,6 +1565,7 @@ class LinkedSystem:
             with contextlib.suppress(RuntimeError):
                 self._handle.finish()
         self._handle.close()
+        self._unlink()
         for machine in self._machines.values():
             machine._system = None  # pyright: ignore[reportPrivateUsage]
 
@@ -1495,6 +1594,247 @@ class LinkedSystem:
 
     def __repr__(self) -> str:
         return f"LinkedSystem({', '.join(self._names)})"
+
+
+class UartTap:
+    """Both directions of one link of a `LinkedSystem`, `system.tap("a.USART1")`: every frame
+    on the line with its system times, and frames injected, replaced or dropped by number.
+
+    The tap gets a frame once it ended, its stop-bit end at or before a point where the system
+    paused, so the frames it holds at a pause, `end` at or before that pause's point, do not
+    depend on the quantum, the slicing or the wall timing. After `close()` it holds every frame
+    that ended by the last pause. It keeps up to 1 Mi frames per direction not read yet, about
+    380 bytes each, the oldest dropped and counted in `dropped`: take them with `frames()`.
+    Reading never changes what the receiver gets.
+
+    `towards` names the receiving end of a direction, `"<member>.<UART>"`.
+    """
+
+    __slots__ = ("__weakref__", "_buffers", "_ends", "_lock", "_overflow", "_system", "_wires")
+
+    def __init__(self, system: LinkedSystem, wired: _LinkWires) -> None:
+        """Wrap a link of `system`. Use `LinkedSystem.tap` instead."""
+        self._system = system
+        self._ends = wired.ends
+        self._wires = wired.wires
+        self._buffers = (deque[TapFrame](maxlen=_TAP_KEEP), deque[TapFrame](maxlen=_TAP_KEEP))
+        self._overflow = 0
+        self._lock = threading.Lock()
+
+    @property
+    def ends(self) -> tuple[str, str]:
+        """The link's two ends, `"<member>.<UART>"`, each named by the UART serving it."""
+        return self._ends
+
+    @property
+    def available(self) -> int:
+        """Frames the tap holds, both directions, not read yet."""
+        with self._lock:
+            self._pull()
+            return len(self._buffers[0]) + len(self._buffers[1])
+
+    @property
+    def dropped(self) -> int:
+        """Frames the tap dropped, both directions, because it held its limit."""
+        handle = self._system._handle  # pyright: ignore[reportPrivateUsage]
+        return self._overflow + sum(handle.tap_dropped(wire) for wire in self._wires)
+
+    def frames(self, *, towards: str | None = None) -> list[TapFrame]:
+        """Take every frame the tap holds, towards `towards` only when given, oldest first.
+        Never runs the system, allowed stopped and running, from any thread.
+
+        At a pause, or after `close()`, it takes exactly the frames ended by that point and
+        not taken yet, whatever the quantum, the slicing or the wall timing. While the system
+        runs, the tap fills at each barrier, so how many frames a call takes depends on wall
+        timing. Each frame's content never does.
+
+        Returns:
+            The frames, ordered by `end`, then direction: towards the link's second end first.
+
+        Raises:
+            TypeError: `towards` is no str.
+            ValueError: `towards` is no end of this link.
+        """
+        directions = (0, 1) if towards is None else (self._direction(towards),)
+        taken: list[TapFrame] = []
+        with self._lock:
+            self._pull()
+            for direction in directions:
+                buffer = self._buffers[direction]
+                taken.extend(buffer)
+                buffer.clear()
+        if towards is None:
+            taken.sort(key=lambda frame: (frame.end.ps, frame.towards != self._ends[1]))
+        return taken
+
+    def inject(self, data: bytes, *, at: VirtualTime, towards: str) -> None:
+        """Put frames on the line towards `towards`, back to back at the link's declared baud
+        and shape, as if a device on the line sent them. `at` is the start-bit edge of the first
+        frame at the receiver, system time. Delivered at exactly their times, whatever the
+        quantum, the slicing or the wall timing.
+
+        Stopped or paused, they are checked at the call: `at` must be at or after the
+        receiver's system time, and no frame may overlap one already on the receiver's line.
+        While the system runs, from a `running()` body or another thread, `at` must be at or
+        after the reach of the deliveries done so far, which depends on wall timing, and an
+        overlap is found later: the system stops with an error at the later frame's start,
+        a time fixed by the frames.
+
+        Raises:
+            TypeError: `data` is no bytes, `at` no VirtualTime or `towards` no str.
+            ValueError: `data` empty, `towards` no end of this link, `at` too early, or, stopped
+                or paused, an overlap. The message names the bound.
+            EmulationError: The system was closed, or stopped on an error before.
+            RuntimeError: Called from a callback of a machine.
+        """
+        frames = _data_frames(data)
+        if not isinstance(cast(object, at), VirtualTime):
+            raise TypeError(f"at must be a VirtualTime, not {type(at).__name__}")
+        direction = self._direction(towards)
+        system = self._system
+        system._require_usable()  # pyright: ignore[reportPrivateUsage]
+        wire = self._wires[direction]
+        paused = system._flight is None  # pyright: ignore[reportPrivateUsage]
+        try:
+            refused = self._native.inject(wire, frames, at.ps, paused)
+        except MachineRunning:
+            if not paused:
+                raise
+            refused = self._native.inject(wire, frames, at.ps, False)
+        if refused is None:
+            return
+        reason, bound_ps = refused
+        bound = VirtualTime(bound_ps)
+        receiver = self._ends[1 - direction]
+        if reason == "before_receiver":
+            raise ValueError(f"inject at {at}: before {receiver}'s system time {bound}")
+        if reason == "before_drained":
+            raise ValueError(
+                f"inject at {at}: before {bound}, the earliest time the running system can"
+                " still deliver"
+            )
+        raise ValueError(
+            f"inject at {at}: overlaps the frame starting at {bound} on {receiver}'s line"
+        )
+
+    def replace(self, index: int, data: bytes, *, towards: str) -> None:
+        """Give the sender's frames numbered `index` on, one per byte, new data before they
+        start: the receiver and the tap see the new data at the frames' own times. Armed at
+        any time, from a `running()` body too: while the sender runs, whether the edit comes
+        before the frame starts depends on wall timing, its effect does not.
+
+        Raises:
+            TypeError: `index` is no int, `data` no bytes, or `towards` no str.
+            ValueError: `index` negative, `data` empty, `towards` no end of this link, a frame
+                it covers started already, `posted`, or it overlaps an edit armed before.
+            EmulationError: The system was closed, or stopped on an error before.
+        """
+        frames = _data_frames(data)
+        self._edit(
+            index, len(frames), towards, lambda wire: self._native.replace(wire, index, frames)
+        )
+
+    def drop(self, index: int, n: int = 1, *, towards: str) -> None:
+        """Keep the sender's `n` frames numbered `index` on off the line: the sender sends
+        them, the receiver sees an idle line, the tap shows them `dropped`. Armed as `replace`.
+
+        Raises:
+            TypeError: `index` or `n` is no int, or `towards` no str.
+            ValueError: `index` negative, `n` not above 0, `towards` no end of this link, or as
+                `replace`.
+            EmulationError: The system was closed, or stopped on an error before.
+        """
+        _check_count("n", n, 1)
+        self._edit(index, n, towards, lambda wire: self._native.drop(wire, index, n))
+
+    def posted(self, *, towards: str) -> int:
+        """Frames the sender started towards `towards` since system start: the lowest index
+        `replace` and `drop` still accept. While the sender runs it depends on wall timing.
+
+        Raises:
+            ValueError: `towards` is no end of this link.
+        """
+        return self._native.posted(self._wires[self._direction(towards)])
+
+    @property
+    def _native(self) -> _core.SystemHandle:
+        return self._system._handle  # pyright: ignore[reportPrivateUsage]
+
+    def _edit(self, index: int, n: int, towards: str, arm: Callable[[int], bool]) -> None:
+        _check_count("index", index, 0)
+        direction = self._direction(towards)
+        self._system._require_usable()  # pyright: ignore[reportPrivateUsage]
+        wire = self._wires[direction]
+        if arm(wire):
+            return
+        started = self._native.posted(wire)
+        if index < started:
+            raise ValueError(
+                f"frame {index} towards {towards} started already: {started} frames started"
+            )
+        raise ValueError(
+            f"frames {index} to {index + n - 1} towards {towards} overlap an edit armed before"
+        )
+
+    def _direction(self, towards: str) -> int:
+        if not isinstance(cast(object, towards), str):
+            raise TypeError(f"towards must be a str, not {type(towards).__name__}")
+        named = self._system._end_name(towards)  # pyright: ignore[reportPrivateUsage]
+        if named == self._ends[1]:
+            return 0
+        if named == self._ends[0]:
+            return 1
+        raise ValueError(f"towards {towards!r} is neither {self._ends[0]} nor {self._ends[1]}")
+
+    def _pull(self) -> None:
+        """Move the native taps' frames into the buffers, with `_lock` held: two pulls at once
+        would append one direction's frames out of order."""
+        handle = self._native
+        for direction, wire in enumerate(self._wires):
+            towards = self._ends[1 - direction]
+            buffer = self._buffers[direction]
+            records = handle.tap_take(wire)
+            self._overflow += max(0, len(buffer) + len(records) - _TAP_KEEP)
+            buffer.extend(
+                TapFrame(
+                    data=record.data,
+                    index=record.index,
+                    start=VirtualTime(record.start_ps),
+                    end=VirtualTime(record.end_ps),
+                    arrival=VirtualTime(record.arrival_ps),
+                    towards=towards,
+                    injected=record.injected,
+                    brk=record.brk,
+                    lost=record.lost,
+                    dropped=record.dropped,
+                )
+                for record in records
+            )
+
+    def __repr__(self) -> str:
+        return f"UartTap({self._ends[0]} <-> {self._ends[1]})"
+
+
+def _data_frames(data: bytes) -> list[int]:
+    if not isinstance(cast(object, data), bytes | bytearray | memoryview):
+        raise TypeError(f"data must be bytes, not {type(data).__name__}")
+    frames = list(bytes(data))
+    if not frames:
+        raise ValueError("data must hold at least one byte")
+    return frames
+
+
+def _check_count(name: str, value: int, least: int) -> None:
+    if isinstance(cast(object, value), bool) or not isinstance(cast(object, value), int):
+        raise TypeError(f"{name} must be an int, not {type(value).__name__}")
+    if value < least:
+        raise ValueError(f"{name} must be at least {least}, not {value}")
+
+
+def _unmark(marked: list[tuple[UartPorts, str]]) -> None:
+    """Give a closed or collected system's UARTs back to their streams and ptys."""
+    for ports, unit in marked:
+        ports.linked.discard(unit)
 
 
 def _on_loop(loop: asyncio.AbstractEventLoop) -> bool:
