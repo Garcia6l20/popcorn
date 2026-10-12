@@ -114,3 +114,42 @@ if u575 is not None:
     for _, target in firmwares.values():
         if target is not None:
             bench_irq.depends(target)
+
+uart_wire = add_doctest(
+    "stm32-uart-wire",
+    [here / "test_uart_wire.cpp", *tsan_sources],
+    [core],
+    env=u575_env,
+    register=u575 is not None,
+)
+uart_wire.private.include_dirs.append(private_dir)
+for _, target in firmwares.values():
+    if target is not None:
+        uart_wire.depends(target)
+
+system_uart = add_doctest(
+    "stm32-system",
+    [here / "test_system_uart.cpp", *tsan_sources],
+    [core],
+    env=u575_env,
+    register=u575 is not None,
+)
+system_uart.private.include_dirs.append(private_dir)
+for _, target in firmwares.values():
+    if target is not None:
+        system_uart.depends(target)
+
+if u575 is not None:
+    bench_system = project.Program(
+        "bench-system", project.default_environment, sources=[here / "bench_system.cpp"]
+    )
+    bench_system.link(core)
+    bench_system.private.defines.extend(
+        f'{variable}="{value}"' for variable, value in u575_env.items()
+    )
+    lto = int("-flto=2" in core.public.link_flags)
+    bench_system.private.defines.append(f'POPCORN_BENCH_BUILD="variant={VARIANT} lto={lto}"')
+    alias_bare_name(bench_system)
+    for _, target in firmwares.values():
+        if target is not None:
+            bench_system.depends(target)

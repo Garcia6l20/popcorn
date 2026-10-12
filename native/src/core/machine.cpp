@@ -147,6 +147,16 @@ auto machine::pending_events() const -> std::size_t
   return scheduler_.pending().size();
 }
 
+auto machine::next_event() const -> std::optional<icount>
+{
+  return scheduler_.next_deadline();
+}
+
+auto machine::held_through() const noexcept -> std::optional<icount>
+{
+  return run_->held_through;
+}
+
 auto machine::virtual_clock() const noexcept -> core::clock const&
 {
   return clock_;
@@ -216,6 +226,35 @@ void machine::reset(reset_kind kind)
     throw machine_busy("a reset would lose the frame of the call in progress");
   }
   run_->reset_machine(kind);
+}
+
+void machine::hold_core(bool held)
+{
+  require_stopped(*this);
+  if(in_call())
+  {
+    throw machine_busy("a call is in progress");
+  }
+  if(run_->core_held == held)
+  {
+    return;
+  }
+  run_->core_held = held;
+  try
+  {
+    run_->notify_core_hold(held);
+  }
+  catch(...)
+  {
+    run_->core_held = not held;
+    run_->notify_core_hold(not held);
+    throw;
+  }
+}
+
+auto machine::core_held() const noexcept -> bool
+{
+  return run_->core_held;
 }
 
 auto machine::mem() noexcept -> memory_view

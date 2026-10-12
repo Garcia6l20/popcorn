@@ -206,12 +206,14 @@ class Frame:
     """One frame the firmware transmitted.
 
     Attributes:
-        data: Data bits.
+        data: Data bits, 0 for a break.
         at: Virtual time its stop bit ended.
+        brk: Whether it was a break. `read` gives a break as a 0 byte.
     """
 
     data: int
     at: VirtualTime
+    brk: bool = False
 
 
 class UartStream:
@@ -234,16 +236,26 @@ class UartStream:
     model's state and return to what the snapshot holds.
     """
 
-    __slots__ = ("__weakref__", "_bridges", "_dropped", "_link", "_post", "_wait", "name")
+    __slots__ = (
+        "__weakref__",
+        "_bridges",
+        "_dropped",
+        "_link",
+        "_linked",
+        "_post",
+        "_wait",
+        "name",
+    )
 
     def __init__(
         self,
         name: str,
-        link: _core.UartLink,
+        link: _core.UartQueue,
         wait: Waiter,
         bridges: dict[str, PtyBridge],
         post: Poster,
         dropped: Callable[[], int],
+        linked: set[str] | None = None,
     ) -> None:
         """Wrap a native link. Use `m.periph.<NAME>.port` instead."""
         self.name = name
@@ -252,6 +264,7 @@ class UartStream:
         self._wait = wait
         self._bridges = bridges
         self._post = post
+        self._linked = set[str]() if linked is None else linked
 
     @property
     def available(self) -> int:
@@ -281,9 +294,15 @@ class UartStream:
         for the virtual time the bytes were queued at.
 
         Raises:
-            RuntimeError: Called from a handler or a model.
+            RuntimeError: Called from a handler or a model, or the UART is linked to another
+                member of a `LinkedSystem`: its receiver hears the link only, inject through
+                `LinkedSystem.tap`.
             ValueError: `at` before the time of a parked machine, from the await when running.
         """
+        if self.name in self._linked:
+            raise RuntimeError(
+                f"{self.name} is linked in a LinkedSystem: inject through the system's tap"
+            )
         link = self._link
         data = bytes(data)
         return written(self._post(link.command_send(data), at))
@@ -437,10 +456,10 @@ class UartStream:
 
 
 def _frames(records: Iterable[_core.UartFrame]) -> list[Frame]:
-    return [Frame(f.data, VirtualTime(f.at_ps)) for f in records]
+    return [Frame(f.data, VirtualTime(f.at_ps), f.brk) for f in records]
 
 
-type PtyOpener = Callable[[str, _core.UartLink | _core.CdcLink], _core.PtyBridge]
+type PtyOpener = Callable[[str, _core.UartQueue | _core.CdcLink], _core.PtyBridge]
 """Bridges a UART or CDC link to a new host pty keyed by the name, pumped by the machine."""
 
 
@@ -494,11 +513,12 @@ class UartPorts:
         "_streams",
         "_wait",
         "bridges",
+        "linked",
     )
 
     def __init__(
         self,
-        connect: Callable[[str], _core.UartLink],
+        connect: Callable[[str], _core.UartQueue],
         uarts: Iterable[str],
         aliases: Mapping[str, str],
         wait: Waiter,
@@ -516,15 +536,16 @@ class UartPorts:
         self._wait = wait
         self._post = post
         self._open_pty = open_pty
-        self._links: dict[str, _core.UartLink] = {name: connect(name) for name in uarts}
+        self._links: dict[str, _core.UartQueue] = {name: connect(name) for name in uarts}
         self._streams: dict[str, UartStream] = {}
         self.bridges: dict[str, PtyBridge] = {}
+        self.linked: set[str] = set()
 
     def serving(self, name: str) -> str:
         """The peripheral that serves `name`, `name` itself unless it is an alias."""
         return self._aliases.get(name, name)
 
-    def link(self, name: str) -> _core.UartLink:
+    def link(self, name: str) -> _core.UartQueue:
         """The native link of UART `name` or of the UART its alias names, connected at machine
         build for a built-in UART."""
         name = self.serving(name)
@@ -551,11 +572,12 @@ class UartPorts:
                 self.bridges,
                 self._post,
                 lambda: link.dropped() - self._dropped_base.get(name, 0),
+                self.linked,
             )
             self._streams[name] = stream
         return stream
 
-    def bridge(self, key: str, link: _core.UartLink | _core.CdcLink) -> PtyBridge:
+    def bridge(self, key: str, link: _core.UartQueue | _core.CdcLink) -> PtyBridge:
         """The bridge keyed `key`, bridging `link` to a new pty on first use."""
         found = self.bridges.get(key)
         if found is None:
@@ -658,6 +680,7 @@ class Board:
         Raises:
             ValueError: `function` is negative, above 0 for a UART, or beyond the CDC ACM
                 functions of a configuration already read.
+            RuntimeError: The UART is linked by a `LinkedSystem`, until its `close()`.
             ModelError: The peripheral's model is neither a UART nor a USB device controller
                 with a virtual host.
             ConfigError: The description has no such peripheral.
@@ -668,6 +691,8 @@ class Board:
         if function != 0:
             raise ValueError(f"{name}: a UART has no function {function}, only 0")
         name = self._ports.serving(name)
+        if name in self._ports.linked:
+            raise RuntimeError(f"{name} is linked in a LinkedSystem, which owns its line")
         return self._ports.bridge(name, self._ports.link(name)).path
 
     @property

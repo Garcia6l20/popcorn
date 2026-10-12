@@ -119,8 +119,9 @@ auto machine::snapshot() const -> core::snapshot
   }
   auto const pending = scheduler_.pending();
   data.events        = {
-      .pending  = std::vector<event>(pending.begin(), pending.end()),
-      .next_seq = scheduler_.next_seq()};
+      .pending       = std::vector<event>(pending.begin(), pending.end()),
+      .next_seq      = scheduler_.next_seq(),
+      .next_lane_seq = scheduler_.next_lane_seq()};
   data.clock = clock_driver_.state();
   for(auto const& [id, entry] : run.intercepts)
   {
@@ -142,6 +143,8 @@ auto machine::snapshot() const -> core::snapshot
     }
     data.return_hooks.push_back(std::move(state));
   }
+  data.core_held    = run.core_held;
+  data.held_through = run.held_through;
   return core::snapshot{
       std::move(data), std::make_shared<engine_context const>(engine_.get()), id_};
 }
@@ -312,7 +315,7 @@ void machine::restore(core::snapshot const& saved)
   {
     write_registers(engine_.get(), registers, std::move(plan.registers));
   }
-  scheduler_.restore(data.events.pending, data.events.next_seq);
+  scheduler_.restore(data.events.pending, data.events.next_seq, data.events.next_lane_seq);
   clock_driver_.restore(data.clock);
   trace_.rebase(clock_.now());
   run.rebase_sinks(clock_.now());
@@ -369,6 +372,8 @@ void machine::restore(core::snapshot const& saved)
   }
 
   run.restore_hook_state(data.intercepts, data.return_hooks);
+  run.core_held    = data.core_held;
+  run.held_through = data.held_through;
   run.frames.clear();
   run.coverage.has_previous = false;
   run.spin.clear();

@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import gc
 import itertools
+import os
 import re
+import select
 import weakref
 from pathlib import Path
 
@@ -804,3 +806,51 @@ def test_a_take_during_read_until_raises(board: popcorn.Machine) -> None:
 
     with pytest.raises(RuntimeError, match="took queued bytes"):
         run_bounded(body(), 10)
+
+
+PERIPH_USART_ELF = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "usart_ll.elf"
+
+
+def break_sender(u575: popcorn.MachineDescription) -> popcorn.Machine:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(PERIPH_USART_ELF))
+    m.reset()
+    stop = asyncio.run(m.run(until="main", budget=1_000_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS, stop
+    m.reg.pc = m.sym("break_tx")
+    return m
+
+
+def test_a_break_reads_as_a_marked_frame_and_a_zero_byte(
+    u575: popcorn.MachineDescription,
+) -> None:
+    marked = break_sender(u575)
+    stop = asyncio.run(marked.run(budget=100_000_000))
+    assert stop.reason is popcorn.StopReason.USER, stop
+    frames = marked.periph.USART1.port.take_frames()
+    assert [(f.data, f.brk) for f in frames] == [(ord("a"), False), (0, True), (ord("b"), False)]
+
+    plain = break_sender(u575)
+    assert asyncio.run(plain.periph.USART1.port.read(3, for_=ms(50))) == b"a\x00b"
+
+    built = Frame(1, VirtualTime(5))
+    assert built.brk is False
+    assert Frame(0, VirtualTime(5), True).brk is True
+
+
+def test_a_break_reaches_a_pty_as_a_zero_byte(u575: popcorn.MachineDescription) -> None:
+    m = break_sender(u575)
+    path = m.board.pty("USART1")
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        stop = asyncio.run(m.run(budget=100_000_000))
+        assert stop.reason is popcorn.StopReason.USER, stop
+        got = b""
+        deadline = 50
+        while len(got) < 3 and deadline > 0:
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                got += os.read(fd, 16)
+            deadline -= 1
+        assert got == b"a\x00b"
+    finally:
+        os.close(fd)

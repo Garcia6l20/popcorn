@@ -107,6 +107,11 @@ struct slice_request
   /** @brief Stop with stop_reason::address before executing this address. A slice that starts at
    * this address stops at once, 0 instructions executed, unless leave_until is set. */
   std::optional<address> until{};
+  /** @brief Further addresses that stop the slice as until does, leave_until included. */
+  std::vector<address> until_also{};
+  /** @brief Addresses of until and until_also that stop a slice starting at them although
+   * leave_until is set: the run arrives there, it does not leave. */
+  std::vector<address> arrive_at{};
   /** @brief Instructions left in the run's budget, stop with stop_reason::budget at the first
    * block boundary at or past them. The caller subtracts `slice_result::executed` between
    * slices. */
@@ -118,12 +123,18 @@ struct slice_request
   /** @brief Stop with stop_reason::time on reaching this virtual time since reset, also while
    * the core sleeps with no event pending: the clock jumps there. */
   std::optional<vtime> until_time{};
+  /** @brief Once until_time is reached, dispatch only the events due before it, whatever stop
+   * ends the slice. The others stay pending and the next slice dispatches them first, in key
+   * order with any lane event posted in between. For a bound a scheduler of several machines
+   * sets, never for a stamp bound. */
+  bool hold_from_until{};
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */
   std::function<bool()> stop_when{};
-  /** @brief A slice that starts at until executes at least one instruction before until may stop
-   * it, so a run resuming from its own until address goes on to the next hit. The caller sets it
-   * until the run has executed an instruction. */
+  /** @brief A slice that starts at until, or at an address of until_also, executes at least one
+   * instruction before that address may stop it, so a run resuming from its own until address
+   * goes on to the next hit, unless the address is in arrive_at. The caller sets it until the run
+   * has executed an instruction. */
   bool leave_until{};
   /** @brief A stop_reason::time stop is the caller's bookkeeping, such as a host landing a
    * stamped command at until_time: the stop is returned with its pc unlocated and no trace stop
@@ -134,6 +145,14 @@ struct slice_request
    * that starts ready ends with no instruction executed. An exception return to thread mode ends
    * the engine run, so the check sees it. */
   bool until_thread{};
+  /** @brief A core asleep with nothing deliverable and no event due before until_time stops where
+   * it is with stop_reason::idle, instead of the clock jumping to until_time. With internal_stop
+   * that stop is the caller's bookkeeping too: pc unlocated, no trace stop record. For a scheduler
+   * of several machines that keeps a quiescent member where it fell asleep. */
+  bool stop_quiescent{};
+  /** @brief Evaluate stop_when only after a dispatched event, never at the slice end, so a slice
+   * end set by max_instructions, the wall budget or a bound never decides the user stop. */
+  bool stop_when_events_only{};
 };
 
 /** @brief Outcome of one native slice. */
@@ -260,6 +279,18 @@ public:
    */
   [[nodiscard]] auto pending_events() const -> std::size_t;
 
+  /** @brief Instruction count of the earliest pending event, empty when none is pending. An event
+   * a model superseded without cancelling it counts until it is dispatched. */
+  [[nodiscard]] auto next_event() const -> std::optional<icount>;
+
+  /**
+   * @brief Count up to which the last slice_request::hold_from_until slice that reached its
+   *        until_time left due events held, empty once a slice dispatched without a hold. A
+   *        host defers stamped commands while an event at or before it is pending. Saved in
+   *        snapshots.
+   */
+  [[nodiscard]] auto held_through() const noexcept -> std::optional<icount>;
+
   /** @brief Virtual clock, for reading instruction count, time and domain rates. */
   [[nodiscard]] auto virtual_clock() const noexcept -> core::clock const&;
 
@@ -306,6 +337,27 @@ public:
   void reset(reset_kind kind = reset_kind::power_on) pre(is_enumerator(kind));
 
   /**
+   * @brief Holds or releases the core. While held, the run loop never executes guest code and
+   *        never delivers an exception: every slice takes the idle path, so the clock, events and
+   *        DMA keep following virtual time, and the arch and the models freeze what a core held
+   *        in Debug state freezes, see arch::arch::hold_core() and periph::core_hold_listener.
+   *        Pending exceptions and the sleep state are kept, so a released core takes them first,
+   *        as after a debugger resume. A held machine stays held across reset() and a firmware
+   *        reset, and refuses calls, see begin_call(). Not core::host::halt(), which ends a free
+   *        run. Called by the engine owner only, as reset() and restore().
+   * @param held True to hold, false to release. A request for the current state does nothing.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy while a call begun by begin_call() is in progress.
+   * @throws Any exception the arch or a listener throws, such as model_error under
+   *         machine_options::strict_peripherals: the hold is undone and the machine behaves as
+   *         before the call.
+   */
+  void hold_core(bool held);
+
+  /** @brief Whether the core is held, see hold_core(). */
+  [[nodiscard]] auto core_held() const noexcept -> bool;
+
+  /**
    * @brief Runs one native slice, synchronously: delivers a pending interrupt, runs the engine
    *        until a bound, a stop request or a trap, dispatches due events, and when the core
    *        idles moves the clock to the next event or to until_time, whichever comes first, and
@@ -336,7 +388,8 @@ public:
    *        follow run the call. Reaching `frame.return_sentinel` stops with
    *        stop_reason::returned.
    * @param frame Call to make, its entry and sentinel set.
-   * @throws machine_busy when a call is already in progress.
+   * @throws machine_busy when a call is already in progress, or the core is held, see
+   *         hold_core().
    * @throws machine_running while a slice runs, handlers included.
    * @throws config_error when the arch module refuses the frame.
    */

@@ -157,6 +157,7 @@ auto mark_of(machine const& target) -> timeline_mark
 
 using deferred    = std::vector<std::move_only_function<void()>>;
 using waiter_list = std::vector<std::shared_ptr<waiter>>;
+using driver_cell = std::atomic<std::shared_ptr<member_driver>>;
 
 struct member_slot
 {
@@ -184,6 +185,10 @@ struct member_slot
   std::vector<stamped>      incoming{};
   std::uint64_t             next_seq = 0;
   timeline_mark             mark;
+  bool                      linked = false;
+  std::atomic<bool> const*  link_released{};
+  bool                      system_held = false;
+  driver_cell               driver{};
 
   void push_stamp(stamped made)
   {
@@ -221,14 +226,25 @@ struct member_slot
   }
 };
 
+auto event_due(member_slot const& slot) -> bool
+{
+  auto const next   = slot.engine->next_event();
+  auto const marked = slot.engine->held_through();
+  return next and marked and *next <= *marked;
+}
+
 struct turn_plan
 {
   std::deque<command> mail{};
   bool                cancel = false;
   bool                halt   = false;
   bool                slice  = false;
-  waiter_list         waiters{};
-  waiter_list         dropped{};
+  /** @brief Whether the slice first gives back the core a system held and has released. Decided
+   * under the host mutex, as the closer unlinks the member under it, and acted on before any
+   * instruction of the member's lone goal or free run. */
+  bool        unhold = false;
+  waiter_list waiters{};
+  waiter_list dropped{};
 };
 
 namespace
@@ -300,6 +316,20 @@ void fail_all(std::vector<stamped> const& dropped, std::exception_ptr const& err
   for(auto const& pending : dropped)
   {
     pending.promise.fail(error);
+  }
+}
+
+auto linked(member_slot const& slot) noexcept -> bool
+{
+  return slot.linked
+     and (slot.link_released == nullptr or not slot.link_released->load(std::memory_order_acquire));
+}
+
+void give_back(machine& engine)
+{
+  if(engine.core_held() and not engine.in_call())
+  {
+    engine.hold_core(false);
   }
 }
 
@@ -497,11 +527,11 @@ struct host_core
         }
         if(slot->goal)
         {
-          goal_slice(*slot, done);
+          goal_slice(*slot, plan.unhold, done);
         }
         else if(slot->free_run)
         {
-          free_slice(*slot, std::exchange(plan.waiters, {}), done);
+          free_slice(*slot, std::exchange(plan.waiters, {}), plan.unhold, done);
         }
         run_all(done);
         publish_settled();
@@ -554,6 +584,12 @@ struct host_core
         {
           plan.waiters = slot->waiters;
         }
+        plan.unhold = plan.slice
+                  and not plan.cancel
+                  and not plan.halt
+                  and (slot->goal ? not slot->goal->goal.driver : slot->free_run)
+                  and not linked(*slot)
+                  and std::exchange(slot->system_held, false);
         any = any
            or not plan.mail.empty()
            or not plan.dropped.empty()
@@ -721,6 +757,7 @@ struct host_core
       lock.lock();
     }
     transition(slot, done);
+    slot.driver.store(nullptr);
     slot.with_host        = false;
     slot.cancel_requested = false;
     slot.halt_requested   = false;
@@ -842,6 +879,10 @@ struct host_core
 
   void apply_due(member_slot& slot)
   {
+    if(detail::event_due(slot))
+    {
+      return;
+    }
     auto const           now = slot.engine->virtual_clock().time();
     std::vector<stamped> due;
     {
@@ -915,10 +956,82 @@ struct host_core
     });
   }
 
-  void goal_slice(member_slot& slot, deferred& done)
+  void driver_slice(member_slot& slot, deferred& done)
+  {
+    auto&                        goal   = *slot.goal;
+    auto&                        driver = *goal.goal.driver;
+    std::optional<slice_request> planned;
+    auto const                   earliest = [this, &slot] {
+      accept_stamps(slot);
+      return next_stamp(slot);
+    };
+    try
+    {
+      owner_scope const owning{this};
+      planned = driver.plan(*slot.engine, earliest);
+    }
+    catch(...)
+    {
+      owner_scope const owning{this};
+      driver.failed(*slot.engine, std::current_exception());
+      return;
+    }
+    if(not planned and driver.sleep_requested())
+    {
+      std::scoped_lock const lock{mutex};
+      if(not std::exchange(slot.woken, false))
+      {
+        slot.state = host_state::idle_wait;
+      }
+      return;
+    }
+    if(not planned)
+    {
+      goal_result const outcome{.stopped = {}, .executed = goal.executed, .yielded = true};
+      park(slot, done, [&outcome](member_slot& parked, deferred& later) {
+        later.push_back([goal = std::move(parked.goal), outcome] { goal->promise.set(outcome); });
+      });
+      return;
+    }
+    auto&        request = *planned;
+    slice_result result;
+    try
+    {
+      owner_scope const owning{this};
+      at_boundary(slot);
+      result = slot.engine->run_slice(request);
+    }
+    catch(...)
+    {
+      owner_scope const owning{this};
+      driver.failed(*slot.engine, std::current_exception());
+      return;
+    }
+    request.stop_when = {};
+    after_slice(slot, request, result);
+    goal.executed.value += result.executed.value;
+    try
+    {
+      owner_scope const owning{this};
+      at_boundary(slot);
+      driver.ran(*slot.engine, result);
+    }
+    catch(...)
+    {
+      owner_scope const owning{this};
+      driver.failed(*slot.engine, std::current_exception());
+    }
+  }
+
+  void goal_slice(member_slot& slot, bool unhold, deferred& done)
   {
     accept_stamps(slot);
     apply_due(slot);
+    if(slot.goal->goal.driver)
+    {
+      driver_slice(slot, done);
+      return;
+    }
     auto&         goal  = *slot.goal;
     auto const&   once  = goal.goal.once;
     auto const    limit = once ? once->bounds : bounds;
@@ -939,6 +1052,10 @@ struct host_core
     try
     {
       owner_scope const owning{this};
+      if(unhold)
+      {
+        give_back(*slot.engine);
+      }
       at_boundary(slot);
       result = slot.engine->run_slice(request);
     }
@@ -1011,7 +1128,7 @@ struct host_core
     }
   }
 
-  void free_slice(member_slot& slot, waiter_list waiters, deferred& done)
+  void free_slice(member_slot& slot, waiter_list waiters, bool unhold, deferred& done)
   {
     accept_stamps(slot);
     apply_due(slot);
@@ -1065,6 +1182,10 @@ struct host_core
     try
     {
       owner_scope const owning{this};
+      if(unhold)
+      {
+        give_back(*slot.engine);
+      }
       at_boundary(slot);
       result = slot.engine->run_slice(request);
     }
@@ -1258,6 +1379,7 @@ struct host_core
             waiting->settling().fail(closed_error());
           }
         });
+        slot->driver.store(nullptr);
         slot->with_host        = false;
         slot->session          = false;
         slot->free_run         = false;
@@ -1753,7 +1875,9 @@ void host::post_stamped(
   {
     throw detail::past_stamp(at, now);
   }
-  if(at == now)
+  if(at == now
+     and not detail::event_due(slot)
+     and not(slot.next_stamp() and *slot.next_stamp() <= at))
   {
     std::optional<owner_scope> owning;
     if(not inline_owner)
@@ -1848,11 +1972,16 @@ auto host::run(held_lock const& held, member_id who, run_goal goal) -> host_futu
   {
     throw machine_busy("the machine already runs a goal or a free run");
   }
+  if(detail::linked(slot) and not goal.driver)
+  {
+    throw machine_busy("the machine is a member of a linked system");
+  }
   auto made             = std::make_unique<detail::goal_run>();
   made->remaining       = goal.budget;
   made->left            = goal.exact;
   made->goal            = std::move(goal);
   auto future           = made->promise.future();
+  auto driver           = made->goal.driver;
   slot.goal             = std::move(made);
   slot.halt_requested   = false;
   slot.cancel_requested = false;
@@ -1860,6 +1989,7 @@ auto host::run(held_lock const& held, member_id who, run_goal goal) -> host_futu
   slot.with_host = true;
   slot.state     = host_state::running;
   ensure_thread();
+  slot.driver.store(std::move(driver));
   core_->wake_locked(slot);
   return future;
 }
@@ -1875,6 +2005,10 @@ void host::start(held_lock const& held, member_id who)
   {
     throw machine_busy("the machine already runs a goal or a free run");
   }
+  if(detail::linked(slot))
+  {
+    throw machine_busy("the machine is a member of a linked system");
+  }
   ++slot.sessions;
   slot.session          = true;
   slot.free_run         = true;
@@ -1885,6 +2019,35 @@ void host::start(held_lock const& held, member_id who)
   slot.state     = host_state::running;
   ensure_thread();
   core_->wake_locked(slot);
+}
+
+void host::link(held_lock const& held, member_id who, bool on, std::atomic<bool> const* released)
+{
+  if(on and busy(held, who))
+  {
+    throw machine_busy("the machine runs a goal or a free run");
+  }
+  core_->members[who]->linked        = on;
+  core_->members[who]->link_released = on ? released : nullptr;
+  if(on)
+  {
+    core_->members[who]->system_held = true;
+  }
+}
+
+void host::give_back_core(held_lock const& held, member_id who)
+{
+  auto& slot = *core_->members[who];
+  if(core_->abandoned
+     or busy(held, who)
+     or not parked(held, who)
+     or detail::linked(slot)
+     or not std::exchange(slot.system_held, false))
+  {
+    return;
+  }
+  owner_scope const owning{*this, held};
+  detail::give_back(*slot.engine);
 }
 
 auto host::wait(held_lock const&, member_id who, waiter_spec spec) -> waiter_handle
@@ -1934,6 +2097,10 @@ auto host::request_cancel(member_id who) -> std::optional<std::uint64_t>
   {
     return std::nullopt;
   }
+  if(slot.goal->goal.driver)
+  {
+    throw machine_busy("a linked system runs the machine");
+  }
   slot.cancel_requested = true;
   core_->notify_locked(slot);
   if(detail::on_host_thread)
@@ -1956,6 +2123,10 @@ auto host::request_halt(member_id who, bool refuse_goal) -> halt_ticket
   if(core_->abandoned or (not slot.goal and not slot.session))
   {
     return {};
+  }
+  if(slot.goal and slot.goal->goal.driver)
+  {
+    throw machine_busy("a linked system runs the machine");
   }
   if(refuse_goal and slot.goal and not detail::on_host_thread)
   {
@@ -2154,6 +2325,12 @@ auto host::owns_engine() const noexcept -> bool
   return detail::engine_owner == core_.get();
 }
 
+void host::wake(member_id who)
+{
+  std::scoped_lock const lock{core_->mutex};
+  core_->wake_locked(*core_->members[who]);
+}
+
 void host::close()
 {
   refuse_forked();
@@ -2230,6 +2407,13 @@ void host::ensure_thread()
 
 void host::request_stop()
 {
+  for(auto const& slot : core_->members)
+  {
+    if(auto const driving = slot->driver.load())
+    {
+      driving->abort();
+    }
+  }
   for(auto const& slot : core_->members)
   {
     slot->engine->interrupt();

@@ -65,6 +65,15 @@ from popcorn._project import (
 from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any_of
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
+from popcorn._system import (
+    LinkedSystem,
+    System,
+    SystemSnapshot,
+    SystemStop,
+    TapFrame,
+    UartLink,
+    UartTap,
+)
 from popcorn._views import (
     Memory,
     Peripherals,
@@ -104,6 +113,7 @@ __all__ = [
     "ImageView",
     "Initiator",
     "Intercept",
+    "LinkedSystem",
     "Location",
     "LogEntry",
     "Machine",
@@ -140,7 +150,13 @@ __all__ = [
     "StopReason",
     "Symbol",
     "SymbolError",
+    "System",
+    "SystemSnapshot",
+    "SystemStop",
+    "TapFrame",
     "TraceRecording",
+    "UartLink",
+    "UartTap",
     "UsbError",
     "UsbStall",
     "UsbTimeout",

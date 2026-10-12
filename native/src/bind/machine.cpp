@@ -513,7 +513,7 @@ void machine_handle::restore(snapshot_handle const& saved)
   });
 }
 
-auto machine_handle::open_uart_pty(std::string name, uart_link const& link) -> pty_handle
+auto machine_handle::open_uart_pty(std::string name, uart_queue const& link) -> pty_handle
 {
   return open_pty(std::move(name), link.bridged_link());
 }
@@ -594,6 +594,11 @@ void pty_handle::close()
 
 void machine_handle::begin_call(arch::call_frame const& frame)
 {
+  if(not host_->owns_engine() and not host_->abandoned())
+  {
+    auto const held = lock_releasing();
+    host_->give_back_core(held, core::member_id{});
+  }
   access([&](core::machine& target) { target.begin_call(frame); });
 }
 
@@ -751,5 +756,15 @@ auto machine_handle::owns_engine() const noexcept -> bool
 auto machine_handle::native() const noexcept -> core::machine&
 {
   return *engine_;
+}
+
+auto machine_handle::host() const noexcept -> std::shared_ptr<core::host> const&
+{
+  return host_;
+}
+
+auto machine_handle::slot() const noexcept -> detail::host_ref
+{
+  return slot_;
 }
 }

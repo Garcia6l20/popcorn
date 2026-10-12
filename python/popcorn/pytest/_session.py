@@ -178,10 +178,12 @@ class PopcornSession:
         digest = devices_digest(self.project(key), devices)
         return dataclasses.replace(key, devices=UNCACHED if digest is None else digest)
 
-    def build(self, key: Key, devices: Devices | None = None) -> Machine:
-        """A new machine of `key` with `devices`, not reset, counting coverage under
-        `--popcorn-cov`."""
-        machine = self.project(key).machine(strict_peripherals=key.strict, devices=devices)
+    def build(self, key: Key, devices: Devices | None = None, name: str | None = None) -> Machine:
+        """A new machine of `key` with `devices`, named `name`, not reset, counting coverage
+        under `--popcorn-cov`."""
+        machine = self.project(key).machine(
+            strict_peripherals=key.strict, devices=devices, name=name
+        )
         if self.coverage is not None:
             machine.coverage.enable()
         return machine
@@ -232,43 +234,50 @@ class PopcornSession:
             finally:
                 self._locks.pop(key, None)
 
-    def booted_with(self, key: Key, devices: Devices) -> tuple[Machine, Snapshot]:
-        """A machine of `key`, a `device_key`, built with `devices`, and the boot snapshot to
-        restore into it, booting on the owned loop when this process has no boot of `key`.
+    def booted_with(
+        self, key: Key, devices: Devices, name: str | None = None
+    ) -> tuple[Machine, Snapshot]:
+        """A machine of `key`, a `device_key`, built with `devices` and named `name`, and the boot
+        snapshot to restore into it, booting on the owned loop when this process has no boot of
+        `key`. The machine that boots is the one returned, so its boot logs carry `name`.
 
         Raises:
             RuntimeError: A boot is needed and an event loop is running.
         """
         found = self._device_boots.get(key)
         if found is not None:
-            return self.build(key, devices), found
+            return self.build(key, devices, name), found
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return self.loop.run(self.booted_with_async(key, devices), contextvars.copy_context())
+            return self.loop.run(
+                self.booted_with_async(key, devices, name), contextvars.copy_context()
+            )
         raise RuntimeError(
             f"the popcorn boot of {key} runs from sync fixture setup or "
             "`await machine_factory.booted(...)`, not from inside a running event loop"
         )
 
-    async def booted_with_async(self, key: Key, devices: Devices) -> tuple[Machine, Snapshot]:
+    async def booted_with_async(
+        self, key: Key, devices: Devices, name: str | None = None
+    ) -> tuple[Machine, Snapshot]:
         """As `booted_with`, booting on the running loop. A boot whose devices cannot be keyed
         is never shared: each one boots."""
         found = self._device_boots.get(key)
         if found is not None:
-            return self.build(key, devices), found
+            return self.build(key, devices, name), found
         self._device_keys.add(key)
         project = self.project(key)
         if key.devices == UNCACHED:
-            booted = await self._fresh_boot(key, project, devices)
+            booted = await self._fresh_boot(key, project, devices, name)
             return booted.machine, booted.decoded()
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             found = self._device_boots.get(key)
             if found is not None:
-                return self.build(key, devices), found
+                return self.build(key, devices, name), found
             try:
-                booted = await self._cached_boot(key, project, devices)
+                booted = await self._cached_boot(key, project, devices, name)
             finally:
                 self._locks.pop(key, None)
         self._device_boots[key] = booted.decoded()
@@ -348,30 +357,30 @@ class PopcornSession:
         return booted
 
     async def _cached_boot(
-        self, key: Key, project: Project, devices: Devices | None = None
+        self, key: Key, project: Project, devices: Devices | None = None, name: str | None = None
     ) -> Booted:
         if self.cache is None:
-            return await self._fresh_boot(key, project, devices)
+            return await self._fresh_boot(key, project, devices, name)
         self.cache.mkdir(parents=True, exist_ok=True)
         entry = Entry.of(self.cache, cache_key(project, key.strict, key.devices))
         async with locked(entry):
             if entry.exists(self.coverage is not None):
-                restored = self._restored_from(key, entry, devices)
+                restored = self._restored_from(key, entry, devices, name)
                 if restored is not None:
                     return restored
-            booted = await self._fresh_boot(key, project, devices)
+            booted = await self._fresh_boot(key, project, devices, name)
             entry.save(booted.snapshot, booted.boot_stop, self._boot_coverage_bytes(key, booted))
             return booted
 
     def _restored_from(
-        self, key: Key, entry: Entry, devices: Devices | None = None
+        self, key: Key, entry: Entry, devices: Devices | None = None, name: str | None = None
     ) -> Booted | None:
         """The boot of `key` restored from `entry`, None when the entry cannot be used: it is
         dropped and the key boots. Any error falls back to the boot, a Python model's `restore`
         raising its own exception type included."""
         machine: Machine | None = None
         try:
-            machine = self.build(key, devices)
+            machine = self.build(key, devices, name)
             ptys = machine.board.ptys
             machine.restore(Snapshot.load(entry.snapshot))
             snapshot = machine.snapshot()
@@ -402,12 +411,12 @@ class PopcornSession:
         return path.read_bytes() if path.is_file() else None
 
     async def _fresh_boot(
-        self, key: Key, project: Project, devices: Devices | None = None
+        self, key: Key, project: Project, devices: Devices | None = None, name: str | None = None
     ) -> Booted:
         self.boots += 1
         machine: Machine | None = None
         try:
-            machine = self.build(key, devices)
+            machine = self.build(key, devices, name)
             image_count = len(machine.images)
             ptys = machine.board.ptys
             if project.boot.until is None:

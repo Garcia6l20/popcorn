@@ -141,7 +141,7 @@ struct systick_state
   bool flag{};
   /** @brief Crossings of the current anchor already dispatched, 0 for none. */
   std::uint64_t fired{};
-  /** @brief Live event generation when saved, a floor for the generation after a restore. */
+  /** @brief Live event generation when saved, the generation a restore takes back. */
   std::uint64_t generation_floor{};
 
   /** @brief Member-wise equality. */
@@ -201,6 +201,9 @@ struct state
   bool event_register{};
   /** @brief Set while a call masks asynchronous exceptions. */
   bool call_masked{};
+  /** @brief Instruction count at which the core was held, set while it is: SysTick and CYCCNT
+   * read the clock as this count. */
+  std::optional<std::uint64_t> held_at{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(state const&, state const&) -> bool = default;

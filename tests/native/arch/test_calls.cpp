@@ -327,7 +327,9 @@ TEST_CASE("a call keeps the paused context and SysTick phase")
   auto const before  = registers_by_name(f);
   auto const t0      = ticks(f);
   auto const counter = f.word(fn("counter"));
+  auto const pending = f.target->pending_events();
   REQUIRE(call(f, frame("add", {i32(2), i32(3)})).value == 5);
+  CHECK(f.target->pending_events() == pending);
   CHECK(registers_by_name(f) == before);
   CHECK(f.word(fn("counter")) == counter);
   run_for(f, 10 * period);
@@ -369,11 +371,15 @@ TEST_CASE("a call that reprograms SysTick keeps the new reload, counted once")
   for(auto const rewrite : {false, true})
   {
     CAPTURE(rewrite);
-    auto       f  = booted_main();
-    auto const t0 = ticks(f);
+    auto       f    = booted_main();
+    auto const t0   = ticks(f);
+    auto       twin = booted_main();
+    REQUIRE(twin.target->mem().write(0xE000'E018, 4, 0));
+    REQUIRE(twin.target->mem().write(0xE000'E014, 4, 1999));
     REQUIRE(
         call(f, frame("reprogram_systick", {}), icount{1000}).stopped.reason
         == stop_reason::returned);
+    CHECK(f.target->pending_events() == twin.target->pending_events());
     CHECK(f.target->mem().read(0xE000'E014, 4) == 1999u);
     if(rewrite)
     {

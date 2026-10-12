@@ -76,6 +76,10 @@ auto test_model::on_write(
   {
     return std::unexpected(bus_error::denied);
   }
+  if(throw_dma_writes and ctx.by == initiator::dma)
+  {
+    throw std::runtime_error{std::format("write {}", accesses.size())};
+  }
   note(std::format("write {:#x}", offset));
   if(size == 4)
   {
@@ -127,12 +131,22 @@ void test_model::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   fired_at   = context_.clock.now();
   fired_time = context_.clock.time();
+  if(dma_on_event)
+  {
+    std::ignore =
+        context_.services.write(dma_on_event->first, 4, dma_on_event->second, initiator::dma);
+  }
   note("event", event_pc);
   if(data_on_event)
   {
     context_.regs.poke(data_offset, 1);
   }
   context_.irqs.front().raise();
+}
+
+auto test_model::drives_core_clock() const noexcept -> bool
+{
+  return drives_clock;
 }
 
 void test_model::save(std::vector<std::byte>& out) const

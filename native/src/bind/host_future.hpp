@@ -242,6 +242,13 @@ void unregister_host(std::shared_ptr<core::host> const& on);
 void abandon(std::shared_ptr<core::host> on) noexcept;
 
 /**
+ * @brief Waits until @p until for the threads that close linked systems dropped on a machine's
+ *        thread, the GIL released, checking signals. Then reports any still running on stderr
+ *        and abandons the member hosts they hold. Called with the GIL held, at exit.
+ */
+void settle_closers(std::chrono::steady_clock::time_point until);
+
+/**
  * @brief Throws unless a host may start a thread now.
  * @throws std::runtime_error after shutdown_hosts() or while the interpreter finalizes.
  */
@@ -364,6 +371,10 @@ public:
   [[= py::doc{"Cancel: halt a goal, drop a waiter, withdraw a command. Returns when done, and "
               "for a command whether this call withdrew it."}]] auto cancel() -> bool;
 
+  /** @brief The log token of the machine the request runs on, its owner, 0 for none. */
+  [[= py::doc{"Log token of the machine the request runs on, 0 for none."}]] [[nodiscard]] auto
+      owner() const noexcept -> std::uint64_t;
+
 private:
   std::shared_ptr<detail::pending_request> request_;
   void                                     refuse_inherited() const;
@@ -374,7 +385,8 @@ private:
 
 /**
  * @brief Closes and joins every live host, and refuses to start new host threads. Waits at most
- *        10 s in all, checking signals every 50 ms: a host whose thread did not stop by then, a
+ *        10 s in all, or POPCORN_TEST_EXIT_WAIT_MS milliseconds when set, a hook for tests,
+ *        checking signals every 50 ms: a host whose thread did not stop by then, a
  *        handler blocked, or at a signal, is abandoned and named on stderr.
  */
 [[= py::doc{"Close and join every machine thread, refuse new ones. Run at interpreter exit."}]] void

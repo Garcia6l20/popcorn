@@ -12,6 +12,7 @@ import os
 import sys
 import types
 import warnings
+import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload, runtime_checkable
@@ -50,6 +51,7 @@ from popcorn._errors import (
     ConfigError,
     EmulationError,
     FaultError,
+    MachineBusy,
     MachineRunning,
     SymbolError,
 )
@@ -101,6 +103,7 @@ from popcorn.trace import TraceKind
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
+    from popcorn._system import LinkedSystem
     from popcorn.image.dwarf import DebugInfo, DebugType
 
 
@@ -267,8 +270,28 @@ def _ps(value: VirtualDuration | None) -> int | None:
     return None if value is None else value.ps
 
 
-def _stop_error(stopped: Stop, during: str = "the background run") -> EmulationError:
-    message = f"{during} stopped with {stopped.reason.name}: {stopped}"
+def check_machine_name(name: str | None) -> None:
+    """Refuse a machine name `Machine(name=)` would refuse, None passing.
+
+    Raises:
+        ValueError: `name` is empty or holds whitespace or a dot.
+    """
+    if name is None:
+        return
+    if not name or "." in name or any(c.isspace() for c in name):
+        raise ValueError(f"name {name!r} must be non-empty, without whitespace or a dot")
+
+
+def error_prefix(machine: Machine) -> str:
+    """What starts the text of an error a machine raises: `<name>: ` when the machine has a
+    name other than its part, empty otherwise."""
+    return "" if machine.name == machine.description.part else f"{machine.name}: "
+
+
+def _stop_error(
+    stopped: Stop, during: str = "the background run", prefix: str = ""
+) -> EmulationError:
+    message = f"{prefix}{during} stopped with {stopped.reason.name}: {stopped}"
     if stopped.reason is StopReason.FAULT and stopped.fault is not None:
         fault = stopped.fault
         return FaultError(
@@ -345,6 +368,32 @@ class _Native:
 
     def ready(self, machine: Machine) -> bool:
         return self.predicate.holds()
+
+
+class _Linked(Protocol):
+    """What a member hands its runs to: its `LinkedSystem`."""
+
+    async def _goal(
+        self,
+        machine: Machine,
+        *,
+        until: int | None = None,
+        budget: int | None = None,
+        exact: int | None = None,
+        for_: VirtualDuration | None = None,
+        deadline: VirtualTime | None = None,
+        stop_when: Callable[[], bool] | None = None,
+        gate: _core.Predicate | None = None,
+        run: bool = False,
+    ) -> Stop: ...
+
+    def _halt_member(self, machine: Machine) -> None: ...
+
+    async def _open_goal(self, machine: Machine) -> None: ...
+
+    async def _close_open(self, machine: Machine) -> Stop | None: ...
+
+    def reset(self, member: str, kind: ResetKind = ResetKind.POWER_ON) -> None: ...
 
 
 class Machine:
@@ -459,6 +508,7 @@ class Machine:
         "_logs",
         "_memory",
         "_model_context",
+        "_name",
         "_nvic",
         "_parked_ends",
         "_peripherals",
@@ -468,7 +518,9 @@ class Machine:
         "_registers",
         "_ring",
         "_sentinel",
+        "_strict_peripherals",
         "_surfaced",
+        "_system",
         "_usb",
     )
 
@@ -496,6 +548,7 @@ class Machine:
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
         usb: Mapping[str, UsbHostOptions] | None = None,
         supply: SupplyOptions | None = None,
+        name: str | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -534,6 +587,8 @@ class Machine:
                 not listed has no host: it sees no VBUS and never enumerates.
             supply: Supply voltages of the board, None for its defaults, a 3.0 V VDDA. VDDA is
                 the reference of every conversion of the built-in ADC model.
+            name: Name of the machine in its log records and errors, the description's part
+                when None. Not part of any configuration digest or snapshot.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
@@ -550,9 +605,11 @@ class Machine:
                 or a timeout not above 0, named as `usb.<NAME>`. With `supply`: a VDDA outside 1620
                 to 3600 mV.
             ImageError: An image does not fit the memory map.
+            ValueError: `name` is empty or holds whitespace or a dot.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
+        check_machine_name(name)
         if not isinstance(description, MachineDescription):
             description = load_description(description)
         config = _core.MachineConfig()
@@ -578,6 +635,9 @@ class Machine:
         config.slice_instructions = slice_instructions
         config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._description = description
+        self._strict_peripherals = strict_peripherals
+        self._system: weakref.ref[LinkedSystem] | None = None
+        self._name = description.part if name is None else name
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
         config.models_context = self._model_context
@@ -631,7 +691,7 @@ class Machine:
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
         self._callback_table = CallbackTable()
         self._posted_bodies = PostedBodies(self._callback_table)
-        self._handle.forward_logs(functools.partial(forward_log, description.part))
+        self._handle.forward_logs(functools.partial(forward_log, self._name))
         watch_logs(self._handle.log_token(), self)
         self._irqs = Irqs(description)
         self._arena = (
@@ -696,6 +756,14 @@ class Machine:
         return self._description
 
     @property
+    def name(self) -> str:
+        """Name of the machine in its log records and errors, the part unless `name=` was given.
+
+        Every log record of the machine carries it as the `popcorn_machine` extra.
+        """
+        return self._name
+
+    @property
     def config_digest(self) -> str:
         """Digest of the configuration the machine was built from, empty when none."""
         return self._config_digest
@@ -713,7 +781,8 @@ class Machine:
 
     @property
     def instructions(self) -> int:
-        """Instructions executed since reset.
+        """Instructions executed since reset. A sleeping core's time counts one per core clock
+        cycle, and so does a linked member's halted time.
 
         Raises:
             MachineRunning: The machine is busy, read outside its callbacks: use
@@ -779,11 +848,18 @@ class Machine:
     def reset(self, kind: ResetKind = ResetKind.POWER_ON) -> None:
         """Reset: clock to 0, core from its vector table, peripherals to reset values.
 
-        Memory is kept.
+        Memory is kept. A member of a linked system resets through `LinkedSystem.reset`, its
+        system time running on unchanged.
 
         Raises:
-            MachineRunning: The machine is busy, outside its handlers.
+            MachineRunning: The machine is busy, outside its handlers. For a member: the system
+                runs, or the member has a goal pending.
+            RuntimeError: For a member, called from a callback of a machine.
         """
+        system = self._linked()
+        if system is not None:
+            system.reset(self._name, kind)
+            return
         self._require_stopped()
         self._handle.reset(_core.ResetKind(kind.value))
         self._last_stop = None
@@ -917,6 +993,12 @@ class Machine:
         A sync read made from a callback of another machine waits for this machine as the class
         doc says, `read` itself never holds a machine while it waits.
 
+        On a member of a `LinkedSystem` whose goal is pending, a batch posted while the system
+        is paused runs at once at the member's position there, which depends on the system's
+        quantum, as do the values read. With `at`, whether the member already stands past `at`,
+        and the batch is refused, depends on the quantum too. For an exact position read a
+        member that is halted, after its goal's stop or with the goal withdrawn.
+
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.
             ValueError: A ref of another machine, or `at` before the time of a parked machine.
@@ -952,6 +1034,12 @@ class Machine:
         word in one access on the machine's thread, so the other bits keep what the firmware
         wrote meanwhile. A sync write made from a callback of another machine waits for this
         machine as the class doc says, `write` itself never holds a machine while it waits.
+
+        On a member of a `LinkedSystem` whose goal is pending, writes posted while the system is
+        paused land at the member's position there, which depends on the system's quantum, and
+        so does everything the member does after them. With `at`, whether the member already
+        stands past `at`, and the writes are refused, depends on the quantum too. Write a halted
+        member for an exact point: after its goal's stop, or with the goal withdrawn.
 
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.
@@ -1833,7 +1921,13 @@ class Machine:
 
         Raises:
             MachineRunning: The machine is busy, from its handlers too.
+            MachineBusy: The machine is a member of a linked system: its state is taken with
+                the others, `LinkedSystem.snapshot`.
         """
+        self._refuse_member("snapshot")
+        return self._snapshot()
+
+    def _snapshot(self) -> Snapshot:
         self._require_idle()
         offset = 0 if self._arena is None else self._arena.used
         return Snapshot(self._handle.snapshot(), offset)
@@ -1847,6 +1941,8 @@ class Machine:
                 a file names another description, images or configuration, keyed by the digest
                 that differs.
             MachineRunning: The machine is busy, from its handlers too.
+            MachineBusy: The machine is a member of a linked system: restore it with the
+                others, `LinkedSystem.restore`.
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
@@ -1861,6 +1957,11 @@ class Machine:
         function drops the microphone frames not read yet and gets back the speaker samples not
         yet sent, and its streams run or not as the snapshot had them.
         """
+        self._refuse_member("restore")
+        self._check_snapshot(snapshot)
+        self._restore(snapshot)
+
+    def _check_snapshot(self, snapshot: Snapshot) -> None:
         self._require_idle()
         machine_id = snapshot.machine_id
         if machine_id not in (0, self._handle.id()):
@@ -1871,6 +1972,9 @@ class Machine:
                 key="machine",
                 expected="restore into the machine that took it, or load its saved form",
             )
+
+    def _restore(self, snapshot: Snapshot) -> None:
+        self._require_idle()
         self._handle.restore(snapshot.native)
         self._last_stop = None
         self._ports.discard()
@@ -1941,7 +2045,8 @@ class Machine:
         Cancelling the awaiting task halts the run at the next block boundary.
 
         Raises:
-            MachineBusy: Another run, step, call, wait or free run is active.
+            MachineBusy: Another run, step, call, wait or free run is active, the member's own
+                `running()` of a linked system included.
             Exception: A kept log filter or handler error, as for `read`.
         """
         _check_duration(for_)
@@ -1952,6 +2057,7 @@ class Machine:
             for_=for_,
             stop_when=stop_when,
             exact=None,
+            run=True,
         )
 
     async def _bounded_run(
@@ -1992,8 +2098,23 @@ class Machine:
         stop_when: Callable[[Machine], bool] | None,
         exact: int | None,
         deadline: VirtualTime | None = None,
+        run: bool = False,
     ) -> Stop:
         self._last_stop = None
+        system = self._linked()
+        if system is not None:
+            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
+                self,
+                until=until,
+                budget=budget,
+                exact=exact,
+                for_=for_,
+                deadline=deadline,
+                stop_when=None if stop_when is None else self._handler(stop_when),
+                run=run,
+            )
+            self._last_stop = stop
+            return stop
         stop = await awaited(
             self._handle.run_goal(
                 until=until,
@@ -2030,11 +2151,13 @@ class Machine:
             )
             stop = stop_of(raw)
             if ended:
-                raise _stop_error(stop, f"the free run, while waiting for {ready.what()}")
+                raise _stop_error(
+                    stop, f"the free run, while waiting for {ready.what()}", error_prefix(self)
+                )
             return stop.time
         stop = await self.wait_for(_Native(ready), for_=for_, deadline=deadline)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, f"the run waiting for {ready.what()}")
+            raise _stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(self))
         return stop.time
 
     async def _wait_gated(
@@ -2049,9 +2172,11 @@ class Machine:
             return self.time
         stop = await self.wait_for(event, for_=for_, deadline=deadline)
         if stop.reason is StopReason.USER and not event.fired:
-            raise _stop_error(stop, "the free run, while waiting for a Python predicate")
+            raise _stop_error(
+                stop, "the free run, while waiting for a Python predicate", error_prefix(self)
+            )
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
-            raise _stop_error(stop, "the run waiting for a Python predicate")
+            raise _stop_error(stop, "the run waiting for a Python predicate", error_prefix(self))
         return stop.time
 
     async def wait_until(
@@ -2110,7 +2235,7 @@ class Machine:
             return stop.time
         if stop.reason in (StopReason.TIME, StopReason.IDLE):
             return None
-        raise _stop_error(stop, "the run waiting for the predicate")
+        raise _stop_error(stop, "the run waiting for the predicate", error_prefix(self))
 
     async def wait_for(
         self,
@@ -2229,9 +2354,15 @@ class Machine:
         if self._handle.session_open():
             stop = await self._waited(None, duration)
         else:
-            stop = await self.run(for_=duration)
+            stop = await self._goal(
+                until=None,
+                budget=self._default_budget,
+                for_=duration,
+                stop_when=None,
+                exact=None,
+            )
         if stop.reason is not StopReason.TIME:
-            raise _stop_error(stop, "the run letting time pass")
+            raise _stop_error(stop, "the run letting time pass", error_prefix(self))
         return stop.time
 
     def now(self) -> Pending[VirtualTime]:
@@ -2258,6 +2389,13 @@ class Machine:
         deadline: VirtualTime | None = None,
     ) -> Stop:
         self._last_stop = None
+        system = self._linked()
+        if system is not None:
+            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
+                self, budget=self._default_budget, for_=for_, deadline=deadline, gate=ready
+            )
+            self._last_stop = stop
+            return stop
         stop = await awaited(
             self._handle.run_predicate(
                 ready, self._default_budget, _ps(for_), deadline_ps(deadline)
@@ -2275,6 +2413,18 @@ class Machine:
         deadline: VirtualTime | None,
     ) -> Stop:
         self._last_stop = None
+        system = self._linked()
+        if system is not None:
+            stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
+                self,
+                budget=self._default_budget,
+                for_=for_,
+                deadline=deadline,
+                stop_when=self._handler(ready),
+                gate=gate,
+            )
+            self._last_stop = stop
+            return stop
         stop = await awaited(
             self._handle.run_gated(
                 gate,
@@ -2299,17 +2449,17 @@ class Machine:
         conditions = event if isinstance(event, Conditions) else any_of(event)
         members = conditions.members
         if not self._handle.session_open():
-            stopped: list[bool] = []
+            stopped: list[tuple[Condition, ...]] = []
 
             def stop_when(machine: Machine) -> bool:
                 held = event.ready(machine)
                 if held:
-                    stopped.append(True)
+                    stopped.append(tuple(member for member in members if member.ready(machine)))
                 return held
 
             stop = await self._bounded_run(for_=for_, deadline=deadline, stop_when=stop_when)
             held = stop.reason is StopReason.USER and bool(stopped)
-            fired = tuple(member for member in members if member.ready(self)) if held else ()
+            fired = stopped[-1] if held else ()
             stop = dataclasses.replace(stop, fired=fired)
             self._last_stop = stop
             return stop
@@ -2353,6 +2503,10 @@ class Machine:
             RuntimeError: Called from a handler, which runs on a machine's thread.
         """
         self._refuse_on_host()
+        if self._linked() is not None:
+            raise MachineBusy(
+                f"{self._name} is a member of a linked system: use the member's running()"
+            )
         self._handle.start()
         self._last_stop = None
         self._surfaced = None
@@ -2370,11 +2524,16 @@ class Machine:
                 BudgetExceeded for BUDGET, EmulationError otherwise, carrying the stop.
             BaseException: The exception a handler raised during the free run.
         """
+        system = self._linked()
+        if system is not None:
+            self._refuse_on_host()
+            system._halt_member(self)  # pyright: ignore[reportPrivateUsage]
+            return
         ended = self._halted()
         if isinstance(ended, BaseException):
             raise ended
         if ended is not None:
-            raise _stop_error(ended)
+            raise _stop_error(ended, prefix=error_prefix(self))
         if self._parked_ends:
             raise self._parked_ends.pop(0)
 
@@ -2402,7 +2561,7 @@ class Machine:
         if ended is None or ended is surfaced:
             return None
         if isinstance(ended, Stop):
-            ended = _stop_error(ended)
+            ended = _stop_error(ended, prefix=error_prefix(self))
         self._parked_ends.append(ended)
         return ended
 
@@ -2456,6 +2615,25 @@ class Machine:
             EmulationError: The free run stopped for a reason other than IDLE.
             BaseException: The exception a handler of the free run raised.
         """
+        system = self._linked()
+        if system is not None:
+            await system._open_goal(self)  # pyright: ignore[reportPrivateUsage]
+            ending = system._close_open  # pyright: ignore[reportPrivateUsage]
+            try:
+                yield
+            except BaseException as error:
+                try:
+                    stopped = await ending(self)
+                except Exception as failed:
+                    error.add_note(f"leaving the member's run raised: {failed!r}")
+                    raise error from None
+                if stopped is not None:
+                    error.add_note(f"member run stopped: {stopped}")
+                raise
+            stopped = await ending(self)
+            if stopped is not None:
+                raise _stop_error(stopped, "the member's run", error_prefix(self))
+            return
         self.start()
         try:
             yield
@@ -2474,6 +2652,18 @@ class Machine:
                 error.add_note(f"background run raised: {ended!r}")
             raise
         self.halt()
+
+    def _linked(self) -> _Linked | None:
+        owner = self._system
+        return None if owner is None else cast(_Linked | None, owner())
+
+    def _refuse_member(self, what: str) -> None:
+        owner = self._system
+        if owner is not None and owner() is not None:
+            raise MachineBusy(
+                f"{self._name} is a member of a linked system: no {what} of a member, use the"
+                f" system's {what}()"
+            )
 
     def _require_idle(self) -> None:
         if self.busy:
@@ -2505,7 +2695,10 @@ class Machine:
         return call
 
     def __repr__(self) -> str:
-        return f"Machine({self._description.part}, images={len(self._images)})"
+        part = self._description.part
+        if self._name == part:
+            return f"Machine({part}, images={len(self._images)})"
+        return f"Machine({self._name}, {part}, images={len(self._images)})"
 
 
 def _masked_stop(raw: object) -> tuple[Stop, int]:
@@ -2517,7 +2710,7 @@ def _masked_stop(raw: object) -> tuple[Stop, int]:
 def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
     """Open pty bridges on `handle`, holding the handle and not the `Machine`."""
 
-    def opened(name: str, link: _core.UartLink | _core.CdcLink) -> _core.PtyBridge:
+    def opened(name: str, link: _core.UartQueue | _core.CdcLink) -> _core.PtyBridge:
         if isinstance(link, _core.CdcLink):
             return handle.open_cdc_pty(name, link)
         return handle.open_uart_pty(name, link)

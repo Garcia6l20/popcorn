@@ -1,0 +1,145 @@
+# One controller and two responders linked by UART, HAL DMA
+
+Three STM32U575 machines run on one virtual clock as a `popcorn.System`. A controller talks to
+two responders over UART at 460800 baud, 8N1, OVER16:
+
+- The controller's UART4 runs to responder 1's USART3, its USART3 to responder 2's USART3.
+- Every link sends by GPDMA with `HAL_UART_Transmit_DMA` and receives with
+  `HAL_UARTEx_ReceiveToIdle_DMA` into a 256-byte circular ring, a GPDMA linked list of one
+  node. `HAL_UARTEx_RxEventCallback` copies the ring from its last read position up to the
+  position the DMA remaining count gives, at half, complete and IDLE. IDLE ends a message.
+
+The protocol, `firmware/controller.c` and `firmware/responder.c`:
+
+- The controller sends each responder its node id, `N` and the id. The responder answers `n`
+  and the id. Until then it answers nothing, and the controller sends the id again every 1.5 s.
+- Every 16 ms the controller sends each responder a 512-byte block, `B`, a sequence number,
+  then a counter. The responder answers with a 512-byte block holding its id, the sequence
+  number and the block's checksum. The controller compares that checksum with its own.
+- Every 100 ms the controller sends a 4-byte poll, the responder answers with its id.
+- Both directions carry about 70 percent of the line.
+- The controller marks a responder lost after 3 s without an answer and sends its node id
+  again. A responder reports the controller lost after 5 s without a message.
+- Both run at 160 MHz from HSI16 through PLL1, refresh a 500 ms IWDG before each WFI and set
+  `DBG_IWDG_STOP`. A test sets `starve` to stop the refresh. Each prints link events on
+  USART1 at 115200 baud.
+
+## Layout
+
+A system test needs one project per firmware image, so this example has three test folders
+where the others have one:
+
+- `linked_projects.py`: `CONTROLLER` and `RESPONDER`, two `popcorn.Project` values in a plain
+  module. pytest imports `conftest.py` beside it first and puts this folder on `sys.path`.
+- `controller/` and `responder/`: each image alone. Their `conftest.py` returns the project as
+  `popcorn_project`, and the tests use the `machine` fixture.
+- `system/`: the three machines linked. Its `conftest.py` returns the system as
+  `popcorn_system`, and the tests use the `system` fixture.
+
+A member boots from the boot snapshot of its own project, the one the `machine` fixture of
+`controller/` and `responder/` uses. Two members of one project share one boot.
+
+## Declaring the system
+
+This is `system/conftest.py`:
+
+```python
+LATENCY = us(20)
+
+SYSTEM = popcorn.System(
+    members={"controller": CONTROLLER, "responder1": RESPONDER, "responder2": RESPONDER},
+    links=[
+        popcorn.UartLink("controller.UART4", "responder1.USART3", latency=LATENCY, baud=460_800),
+        popcorn.UartLink("controller.USART3", "responder2.USART3", latency=LATENCY, baud=460_800),
+    ],
+)
+
+
+@pytest.fixture(scope="session")
+def popcorn_system() -> popcorn.System:
+    return SYSTEM
+```
+
+A test takes the linked system and runs it:
+
+```python
+async def test_each_responder_gets_its_node_id(system: LinkedSystem) -> None:
+    await system.run(for_=ms(1))
+    assert system.members["responder1"].var("node_id").value == 1
+```
+
+`system.members[name]` is the member's `Machine`. `system.tap("controller.UART4")` shows every
+frame of that link with its system times and injects, replaces or drops frames.
+`system.snapshot()` and `system.restore()` save and restore every member and every link
+together.
+
+## Latency
+
+A frame whose stop bit ends at the sender's system time t ends at the receiver at exactly
+t + L. L is the link's `latency`. It has no default: the test author picks it as part of the
+model, like a baud rate or a cable. Every hop adds L, so a request and its answer take 2 L more
+than the firmware's own time. 20 us here is an example value.
+
+The members meet every Q of system time, Q the smallest L of the system. Q sets how often they
+meet, never what happens: the frames, their times and every member's state are the same at any
+Q, any slicing and any thread timing. `test_the_run_is_the_same_at_any_slicing_quantum_or_cpu_count`
+checks it against a 997-instruction slicing, a third 3 us link lowering Q, and every thread
+pinned to one CPU.
+
+## Threads
+
+- Each member runs on its own native host thread.
+- The members meet at a barrier every Q. Between barriers they run at once.
+- A sender appends each frame to its link's mailbox. After the barrier each receiver's thread
+  drains its own mailboxes into its machine, senders in member order, then links in their
+  order in `links`.
+- No Python runs on the link path.
+- The Python callbacks of different members, intercepts, models and devices, run at the same
+  wall time on their own member's thread, each in the context copied when it was installed.
+  Python state two members share sees an order that depends on thread timing. Keep callback
+  state per member, as `record_idles` in `system/test_linked_uart.py` does, and couple members
+  through links.
+
+## Halted members
+
+A member without a goal while another runs one, `await controller.run(...)`, is halted: its core
+executes nothing, its clocks, peripherals and DMA follow system time, and the DBGMCU freeze
+bits it set apply. Both images set `DBG_IWDG_STOP`, so a halted member's watchdog does not
+bite. Halted time counts in `Stop.instructions` and `Machine.instructions`, as a sleeping core's
+time does. A goal's `budget` counts executed instructions only, halted time excluded.
+
+## Run
+
+From the repository root:
+
+```sh
+uv run pytest -q examples/stm32u575/linked_uart
+```
+
+## Read first
+
+- `system/test_linked_uart.py`:
+  - every block comes back with its checksum, checked from the tap and from the controller.
+  - each IDLE at a responder comes one frame after the sender's stop-bit end plus L, the ring
+    position equal to the bytes sent. The core wakes at its first cycle at or after IDLE and
+    enters `USART3_IRQHandler` 4 cycles later.
+  - the intercepts of two members run on two threads, neither the test's.
+  - a 50 us link moves responder 1's IDLE by 30 us and the controller's answer by 60 us.
+  - the same frames and IDLE log at any slicing, quantum or CPU count.
+  - a starved responder's IWDG bites 500 ms after its last refresh, to the picosecond. Its
+    frame in flight shows `lost` in the tap. It reboots, the controller marks it lost 3 s
+    after its last answer and assigns it again, and responder 1 never misses a block.
+  - a frame replaced from inside `system.running()` changes the checksum of its block.
+  - a poll injected towards responder 2 is answered.
+  - a snapshot restored replays the same frames.
+- `firmware/link.c`: the ring, the IDLE cut and the TX gap.
+- `firmware/controller.c` and `firmware/responder.c`: the protocol.
+
+## Rebuild the firmware
+
+With arm-none-eabi-gcc on PATH:
+
+```sh
+uv run pcons -B build -j4
+cp build/example-firmware/examples/stm32u575/linked_uart/linked_*.elf examples/stm32u575/linked_uart/prebuilt/
+```

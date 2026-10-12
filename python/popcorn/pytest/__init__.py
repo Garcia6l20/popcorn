@@ -32,6 +32,31 @@ Fixtures:
   booted once.
 - `machine_factory`: a `MachineFactory`, new machines separate from `machine`, with the
   project's bus devices or the test's own, from the test's project or another one.
+- `popcorn_system`: the tests' `popcorn.System`, defined by the user in a conftest.py as
+  `popcorn_project` is. The plugin's own fails the tests that use `system`, naming the fix.
+- `system`: the `popcorn_system` linked, a `popcorn.LinkedSystem`. Each member is a new machine
+  restored from the boot snapshot of its own project, booted once per key as for `machine`, so
+  a member and a `machine` of the same project and strictness share one boot, and two members
+  of one project are two machines. It needs no `popcorn_project`. The marker's `strict` and
+  `budget` and `--popcorn-strict` and `--popcorn-budget` apply to every member, `budget` as
+  its `default_budget`. A marker `config` fails the test and `--popcorn-config` does not apply:
+  a member's config is part of its project. Teardown halts a free run left started, closes the
+  system, then parks and closes the members. A failing test reports each member as
+  `system member <name>`, and `--popcorn-trace-on-fail` keeps `<test>.<member>.pctr` per member.
+
+    # conftest.py
+    @pytest.fixture(scope="session")
+    def popcorn_system() -> popcorn.System:
+        return popcorn.System(
+            members={"ctl": CONTROLLER, "r1": RESPONDER, "r2": RESPONDER},
+            links=[
+                popcorn.UartLink("ctl.UART4", "r1.USART3", latency=us(20), baud=460_800),
+                popcorn.UartLink("ctl.USART3", "r2.USART3", latency=us(20), baud=460_800),
+            ],
+        )
+
+  Keep projects shared by several conftest.py files in a plain module with a unique name, not
+  in a conftest.py.
 
 A boot is keyed by the `Project.digest` of the project with its config applied, the
 strictness and the bus devices given. One session can run the tests of several conftest

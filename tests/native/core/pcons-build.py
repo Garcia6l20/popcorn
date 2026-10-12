@@ -40,6 +40,7 @@ add_doctest(
     env={
         "POPCORN_TOY_DESC": toy,
         "POPCORN_SNAPSHOT_V2": str(project_dir / "tests" / "data" / "core" / "snapshot_v2.bson"),
+        "POPCORN_SNAPSHOT_V4": str(project_dir / "tests" / "data" / "core" / "snapshot_v4.bson"),
     },
 )
 add_doctest("core-unicorn-dev", [here / "test_unicorn_dev.cpp"], [smoke_support, core])
@@ -177,6 +178,41 @@ test_host = add_doctest(
 for _, target in core_firmware.values():
     if target is not None:
         test_host.depends(target)
+
+test_host_concurrent = add_doctest(
+    "core-host-concurrent",
+    [here / "test_host_concurrent.cpp", *tsan_sources],
+    [test_support, core],
+    env=m33_env,
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_host_concurrent.depends(target)
+
+add_doctest("core-window-barrier", [here / "test_window_barrier.cpp", *tsan_sources], [core])
+test_system = add_doctest(
+    "core-system",
+    [here / "test_system.cpp", *tsan_sources],
+    [test_support, core],
+    env=m33_env,
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_system.depends(target)
+bench_window_barrier = project.Program(
+    "bench-window-barrier",
+    project.default_environment,
+    sources=[here / "bench_window_barrier.cpp"],
+)
+bench_window_barrier.link(test_support)
+bench_window_barrier.link(core)
+bench_window_barrier.private.defines.extend(
+    f'{variable}="{value}"' for variable, value in m33_env.items()
+)
+alias_bare_name(bench_window_barrier)
+for _, target in core_firmware.values():
+    if target is not None:
+        bench_window_barrier.depends(target)
 
 test_loop_waker = add_doctest(
     "core-loop-waker", [here / "test_loop_waker.cpp", *tsan_sources], [test_support, core]

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn.units import ms
 
 
 def test_machine_builds_loads_and_resets(
@@ -122,3 +124,42 @@ def test_vector_table_option_stands_in_for_an_executable_region(m33_json: Path) 
         popcorn.Machine(description)
     assert caught.value.key == "regions"
     popcorn.Machine(description, vector_table=0x0800_0000)
+
+
+def test_a_machine_is_named_after_its_part_by_default(
+    m33: popcorn.MachineDescription, basic: popcorn.Image
+) -> None:
+    m = popcorn.Machine(m33, image=basic)
+    assert m.name == "POPCORN-M33-TEST"
+    assert repr(m) == "Machine(POPCORN-M33-TEST, images=1)"
+    named = popcorn.Machine(m33, image=basic, name="node1")
+    assert named.name == "node1"
+    assert repr(named) == "Machine(node1, POPCORN-M33-TEST, images=1)"
+    with pytest.raises(AttributeError):
+        object.__setattr__(named, "name", "node2")
+
+
+@pytest.mark.parametrize("name", ["", "a b", "a\tb", "a.b", "."])
+def test_a_name_with_whitespace_or_a_dot_is_refused(
+    m33: popcorn.MachineDescription, name: str
+) -> None:
+    with pytest.raises(ValueError, match="name"):
+        popcorn.Machine(m33, name=name)
+
+
+def fault_message(m33: popcorn.MachineDescription, basic: popcorn.Image, name: str | None) -> str:
+    m = popcorn.Machine(m33, image=basic, name=name)
+    m.reset()
+    m.reg.pc = 0x3000_0000
+    with pytest.raises(popcorn.FaultError) as caught:
+        asyncio.run(m.elapse(ms(1)))
+    return str(caught.value)
+
+
+def test_a_stop_error_of_a_named_machine_names_it(
+    m33: popcorn.MachineDescription, basic: popcorn.Image
+) -> None:
+    plain = fault_message(m33, basic, None)
+    assert plain.startswith("the run letting time pass stopped with FAULT: ")
+    assert fault_message(m33, basic, "POPCORN-M33-TEST") == plain
+    assert fault_message(m33, basic, "node1") == f"node1: {plain}"

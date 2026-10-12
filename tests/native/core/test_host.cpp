@@ -1157,6 +1157,64 @@ TEST_CASE("interrupts from another thread do not move a requested stop")
   CHECK(got.executed == expected.executed);
 }
 
+TEST_CASE("interrupts from another thread leave a held member's run unchanged")
+{
+  struct ended
+  {
+    std::uint64_t              expiries;
+    icount                     now;
+    std::size_t                pending;
+    std::vector<std::uint64_t> registers;
+    int                        sent;
+  };
+  auto const held_run = [](bool stress) {
+    popcorn::testing::machine_fixture<> f{m33(), "idle", core::machine_options{}};
+    REQUIRE(f.run_to_stop().reason == stop_reason::user);
+    f.set("pc", sym("idle", "idle_entry"));
+    REQUIRE(
+        f.run_to_stop({.stop_when = [&f] { return f.module->timer_expiries == 1; }}).reason
+        == stop_reason::user);
+    f.target->hold_core(true);
+    auto const* const module = f.module;
+    auto* const       target = f.target.get();
+    auto const until = vtime{target->virtual_clock().time().ps + 2000 * ps_per_instruction * 1000};
+    hosted     h{
+        std::move(f.target), {.max_instructions = icount{1'000'000'000}, .wall_budget = long_wall}
+    };
+    auto const goal = h.run({.until_time = until});
+    int        sent = 0;
+    while(stress and sent < 10'000 and not goal.done())
+    {
+      target->interrupt();
+      ++sent;
+      std::this_thread::yield();
+    }
+    auto const got = goal.get();
+    REQUIRE(got.stopped.reason == stop_reason::time);
+    return core::access(*h.on, 0, [&](core::machine& m) {
+      std::vector<std::uint64_t> registers;
+      for(auto const& reg : m.regs().list())
+      {
+        registers.push_back(m.regs().read(reg));
+      }
+      return ended{
+          .expiries  = module->timer_expiries,
+          .now       = m.virtual_clock().now(),
+          .pending   = m.pending_events(),
+          .registers = std::move(registers),
+          .sent      = sent};
+    });
+  };
+  auto const quiet    = held_run(false);
+  auto const stressed = held_run(true);
+  MESSAGE("interrupts sent: " << stressed.sent);
+  CHECK(quiet.expiries > 1);
+  CHECK(stressed.expiries == quiet.expiries);
+  CHECK(stressed.now == quiet.now);
+  CHECK(stressed.pending == quiet.pending);
+  CHECK(stressed.registers == quiet.registers);
+}
+
 TEST_CASE("two members on one host each equal the same goal on its own host")
 {
   core::run_goal const goal{.until = sym("alu", "alu_done")};
@@ -2142,6 +2200,17 @@ TEST_CASE("a reset or a restore fails pending stamps")
     std::ignore = h.run({.budget = icount{10'000}}).get();
     CHECK(after.done());
   }
+  SUBCASE("parked reset of a held member")
+  {
+    hosted h{alu(0)};
+    std::ignore = h.run({.budget = icount{1000}}).get();
+    core::access(*h.on, 0, [](core::machine& m) { m.hold_core(true); });
+    auto const stamp = h.post([](core::machine&) {}, at_instruction(5000));
+    core::access(*h.on, 0, [](core::machine& m) { m.reset(); });
+    std::ignore = h.run({.until_time = at_instruction(10'000)}).get();
+    CHECK_THROWS_AS(stamp.get(), core::operation_cancelled);
+    CHECK(core::access(*h.on, 0, [](core::machine& m) { return m.core_held(); }));
+  }
   SUBCASE("model-requested reset during a run")
   {
     popcorn::testing::machine_fixture<resetting_arch> f{
@@ -2936,4 +3005,424 @@ TEST_CASE("a then_thread that throws fails the goal and the member parks usable"
   goal.then_thread  = [](core::machine&) { throw std::runtime_error{"then_thread failed"}; };
   CHECK_THROWS_WITH(std::ignore = h.run(std::move(goal)).get(), doctest::Contains("then_thread"));
   CHECK(h.run({.budget = icount{100}}).get().stopped.reason == stop_reason::budget);
+}
+
+namespace
+{
+class test_driver final : public core::member_driver
+{
+public:
+  using planner = std::function<std::optional<
+      core::slice_request>(test_driver&, core::machine&, core::member_driver::earliest_stamp)>;
+
+  explicit test_driver(planner how) : how_{std::move(how)}
+  {}
+
+  auto plan(core::machine& target, earliest_stamp stamp)
+      -> std::optional<core::slice_request> override
+  {
+    ++plans;
+    if(aborted.load())
+    {
+      return std::nullopt;
+    }
+    return how_(*this, target, stamp);
+  }
+
+  void ran(core::machine& target, core::slice_result const& result) override
+  {
+    executed += result.executed.value;
+    if(result.stopped)
+    {
+      ++stops;
+    }
+    if(on_ran)
+    {
+      on_ran(target, result);
+    }
+  }
+
+  void failed(core::machine&, std::exception_ptr error) noexcept override
+  {
+    failures.push_back(std::move(error));
+  }
+
+  void abort() noexcept override
+  {
+    aborted.store(true);
+    aborted.notify_all();
+    gate.store(true);
+    gate.notify_all();
+  }
+
+  void block_once()
+  {
+    entered.store(true);
+    entered.notify_all();
+    gate.wait(false);
+  }
+
+  void release()
+  {
+    gate.store(true);
+    gate.notify_all();
+  }
+
+  void wait_entered() const
+  {
+    entered.wait(false);
+  }
+
+  std::function<void(core::machine&, core::slice_result const&)> on_ran{};
+  std::atomic<bool>                                              aborted{false};
+  std::atomic<bool>                                              entered{false};
+  std::atomic<bool>                                              gate{false};
+  std::atomic<int>                                               plans{0};
+  std::uint64_t                                                  executed = 0;
+  int                                                            stops    = 0;
+  std::vector<std::exception_ptr>                                failures{};
+
+private:
+  planner how_;
+};
+
+auto slices_of(std::uint64_t instructions, int count) -> test_driver::planner
+{
+  return [instructions, count](
+             test_driver& self, core::machine&,
+             core::member_driver::earliest_stamp) -> std::optional<core::slice_request> {
+    if(self.plans > count)
+    {
+      return std::nullopt;
+    }
+    return core::slice_request{
+        .max_instructions = icount{instructions},
+        .wall_budget      = long_wall,
+    };
+  };
+}
+
+auto driven(std::shared_ptr<test_driver> const& driver) -> core::run_goal
+{
+  return core::run_goal{.driver = driver};
+}
+}
+
+TEST_CASE("a driver goal runs the slices its driver plans and yields when it plans none")
+{
+  auto       driver = std::make_shared<test_driver>(slices_of(997, 100));
+  hosted     h{alu(0)};
+  auto const got = h.run(driven(driver)).get();
+  CHECK(got.yielded);
+  CHECK(driver->plans == 101);
+  CHECK(driver->stops == 0);
+  CHECK(got.executed.value == driver->executed);
+  CHECK(got.executed.value >= 99'700);
+  CHECK(got.executed.value < 99'700 + 100 * 512);
+  CHECK(h.on->state(0) == core::host_state::parked);
+  auto const regs = core::access(*h.on, 0, alu_regs);
+
+  hosted     plain{alu(0)};
+  auto const reference = plain.run({.budget = got.executed}).get();
+  CHECK(reference.stopped.reason == stop_reason::budget);
+  CHECK(reference.executed == got.executed);
+  CHECK(core::access(*plain.on, 0, alu_regs) == regs);
+  std::weak_ptr<test_driver> const released = driver;
+  driver.reset();
+  CHECK(released.expired());
+}
+
+TEST_CASE("a command posted while a driver blocks in plan runs at the next boundary")
+{
+  auto released = std::make_shared<std::atomic<bool>>(false);
+  auto driver   = std::make_shared<test_driver>(
+      [released](test_driver& self, core::machine&, core::member_driver::earliest_stamp)
+          -> std::optional<core::slice_request> {
+        if(self.plans == 1)
+        {
+          self.block_once();
+          released->store(true);
+        }
+        if(self.plans > 3)
+        {
+          return std::nullopt;
+        }
+        return core::slice_request{.max_instructions = icount{1000}, .wall_budget = long_wall};
+      });
+  hosted     h{alu(0)};
+  auto const goal = h.run(driven(driver));
+  driver->wait_entered();
+  auto       after   = std::make_shared<bool>(false);
+  auto const command = h.post([released, after](core::machine&) { *after = released->load(); });
+  CHECK_FALSE(command.wait_for(20ms));
+  driver->release();
+  std::ignore = command.get();
+  CHECK(*after);
+  CHECK(goal.get().yielded);
+}
+
+TEST_CASE("a stamp posted while a driver blocks in plan bounds the slice planned after the wait")
+{
+  for(auto const at : {std::uint64_t{50'003}, std::uint64_t{1'000'003}})
+  {
+    CAPTURE(at);
+    auto const t       = at_instruction(at);
+    auto       seen    = std::make_shared<std::optional<vtime>>();
+    auto       seen_in = std::make_shared<int>(0);
+    auto       driver  = std::make_shared<test_driver>(
+        [seen, seen_in](
+            test_driver& self, core::machine& m,
+            core::member_driver::earliest_stamp earliest) -> std::optional<core::slice_request> {
+          if(self.plans == 1)
+          {
+            self.block_once();
+          }
+          auto const stamp = earliest();
+          if(stamp and not *seen)
+          {
+            *seen    = stamp;
+            *seen_in = self.plans;
+          }
+          if(m.virtual_clock().now().value > 2'000'000)
+          {
+            return std::nullopt;
+          }
+          core::slice_request request{
+              .max_instructions = icount{100'000},
+              .wall_budget      = long_wall,
+          };
+          if(stamp)
+          {
+            request.until_time    = stamp;
+            request.internal_stop = true;
+          }
+          return request;
+        });
+    hosted     h{alu(0)};
+    auto const goal = h.run(driven(driver));
+    driver->wait_entered();
+    auto       landed = std::make_shared<vtime>();
+    auto const stamp =
+        h.post([landed](core::machine& m) { *landed = m.virtual_clock().time(); }, t);
+    driver->release();
+    CHECK(goal.get().yielded);
+    REQUIRE(seen->has_value());
+    CHECK(**seen == t);
+    CHECK(*seen_in == 1);
+    CHECK(stamp.get() == *landed);
+    CHECK(*landed >= t);
+    CHECK(landed->ps < t.ps + 512 * ps_per_instruction);
+    CHECK(driver->stops == 0);
+  }
+}
+
+TEST_CASE("a stamp posted after a driver read the earliest stamp lands where an earlier post does")
+{
+  auto const t           = at_instruction(50'003);
+  auto const landing_for = [t](bool read_before_post) {
+    auto driver = std::make_shared<test_driver>(
+        [read_before_post](
+            test_driver& self, core::machine& m,
+            core::member_driver::earliest_stamp earliest) -> std::optional<core::slice_request> {
+          std::optional<vtime> stamp;
+          if(self.plans == 1 and read_before_post)
+          {
+            stamp = earliest();
+            self.block_once();
+          }
+          else
+          {
+            if(self.plans == 1)
+            {
+              self.block_once();
+            }
+            stamp = earliest();
+          }
+          if(m.virtual_clock().now().value > 200'000)
+          {
+            return std::nullopt;
+          }
+          core::slice_request request{
+              .max_instructions = icount{100'000},
+              .wall_budget      = long_wall,
+          };
+          if(stamp)
+          {
+            request.until_time    = stamp;
+            request.internal_stop = true;
+          }
+          return request;
+        });
+    hosted     h{alu(0)};
+    auto const goal = h.run(driven(driver));
+    driver->wait_entered();
+    auto       landed = std::make_shared<vtime>();
+    auto const stamp =
+        h.post([landed](core::machine& m) { *landed = m.virtual_clock().time(); }, t);
+    driver->release();
+    CHECK(goal.get().yielded);
+    CHECK(stamp.get() == *landed);
+    CHECK(driver->stops == 0);
+    return *landed;
+  };
+  auto const early = landing_for(false);
+  auto const late  = landing_for(true);
+  CHECK(early >= t);
+  CHECK(early.ps < t.ps + 512 * ps_per_instruction);
+  CHECK(late == early);
+}
+
+TEST_CASE("close aborts a driver blocked in plan and returns")
+{
+  auto driver = std::make_shared<test_driver>(
+      [](test_driver& self, core::machine&,
+         core::member_driver::earliest_stamp) -> std::optional<core::slice_request> {
+        self.block_once();
+        return core::slice_request{.max_instructions = icount{1000}, .wall_budget = long_wall};
+      });
+  hosted     h{alu(0)};
+  auto const goal = h.run(driven(driver));
+  driver->wait_entered();
+  auto const start = std::chrono::steady_clock::now();
+  CHECK(h.on->close_for(5s));
+  CHECK(std::chrono::steady_clock::now() - start < 5s);
+  CHECK(driver->aborted);
+  REQUIRE(goal.wait_for(5s));
+  auto const yielded_or_closed = [&goal] {
+    try
+    {
+      return goal.get().yielded;
+    }
+    catch(core::machine_closed const&)
+    {
+      return true;
+    }
+  };
+  CHECK(yielded_or_closed());
+}
+
+TEST_CASE("destroying a host on another thread aborts a driver blocked in plan")
+{
+  auto driver = std::make_shared<test_driver>(
+      [](test_driver& self, core::machine&,
+         core::member_driver::earliest_stamp) -> std::optional<core::slice_request> {
+        self.block_once();
+        return core::slice_request{.max_instructions = icount{1000}, .wall_budget = long_wall};
+      });
+  auto       h    = std::make_shared<hosted>(alu(0));
+  auto const goal = h->run(driven(driver));
+  driver->wait_entered();
+  auto         gone = std::make_shared<std::atomic<bool>>(false);
+  std::jthread destroying{[h = std::move(h), gone] mutable {
+    h.reset();
+    gone->store(true);
+  }};
+  CHECK(settles([&] { return gone->load(); }));
+  CHECK(driver->aborted);
+}
+
+TEST_CASE("a linked member refuses plain runs and free runs and stays reachable parked")
+{
+  hosted h{alu(1000)};
+  {
+    auto held = h.on->lock();
+    h.on->link(held, 0, true);
+    CHECK_THROWS_AS(
+        std::ignore = h.on->run(held, 0, {.budget = icount{10}}), popcorn::machine_busy);
+    CHECK_THROWS_AS(h.on->start(held, 0), popcorn::machine_busy);
+  }
+  CHECK(h.reg("r0") == 1000);
+  auto const posted = h.post([](core::machine& m) { m.regs().write(*m.regs().find("r1"), 7); });
+  CHECK(posted.done());
+  CHECK(h.reg("r1") == 7);
+  auto const driver = std::make_shared<test_driver>(slices_of(100, 2));
+  CHECK(h.run(driven(driver)).get().yielded);
+  {
+    auto held = h.on->lock();
+    h.on->link(held, 0, false);
+  }
+  CHECK(h.run({.budget = icount{10}}).get().stopped.reason == stop_reason::budget);
+}
+
+TEST_CASE("link refuses a member that runs a free run or a goal")
+{
+  hosted h{alu(0)};
+  h.start();
+  {
+    auto held = h.on->lock();
+    CHECK_THROWS_AS(h.on->link(held, 0, true), popcorn::machine_busy);
+    h.on->link(held, 0, false);
+  }
+  CHECK_FALSE(h.on->halt(0).has_value());
+  auto const goal = h.run({.until = sym("alu", "alu_done")});
+  {
+    auto held = h.on->lock();
+    CHECK_THROWS_AS(h.on->link(held, 0, true), popcorn::machine_busy);
+  }
+  h.on->cancel(0);
+  {
+    auto held = h.on->lock();
+    h.on->link(held, 0, true);
+  }
+}
+
+TEST_CASE("cancel and halt refuse a member that runs a driver goal")
+{
+  auto driver = std::make_shared<test_driver>(
+      [](test_driver& self, core::machine&,
+         core::member_driver::earliest_stamp) -> std::optional<core::slice_request> {
+        if(self.plans == 1)
+        {
+          self.block_once();
+        }
+        return std::nullopt;
+      });
+  hosted     h{alu(0)};
+  auto const goal = h.run(driven(driver));
+  driver->wait_entered();
+  CHECK_THROWS_AS(h.on->cancel(0), popcorn::machine_busy);
+  CHECK_THROWS_AS(h.on->halt(0), popcorn::machine_busy);
+  CHECK_THROWS_AS(std::ignore = h.on->request_cancel(0), popcorn::machine_busy);
+  CHECK_THROWS_AS(std::ignore = h.on->request_halt(0), popcorn::machine_busy);
+  driver->release();
+  CHECK(goal.get().yielded);
+}
+
+TEST_CASE("a throw from plan, the slice or ran goes to failed and the driver goal goes on")
+{
+  for(auto const where : {"plan", "slice", "ran"})
+  {
+    CAPTURE(where);
+    std::string_view const at{where};
+    auto                   driver = std::make_shared<test_driver>(
+        [at](test_driver& self, core::machine&, core::member_driver::earliest_stamp)
+            -> std::optional<core::slice_request> {
+          if(not self.failures.empty())
+          {
+            return std::nullopt;
+          }
+          if(at == "plan" and self.plans == 2)
+          {
+            throw test_failure("plan");
+          }
+          core::slice_request request{.max_instructions = icount{1000}, .wall_budget = long_wall};
+          if(at == "slice")
+          {
+            request.stop_when = []() -> bool { throw test_failure("slice"); };
+          }
+          return request;
+        });
+    if(at == "ran")
+    {
+      driver->on_ran = [](core::machine&, core::slice_result const&) { throw test_failure("ran"); };
+    }
+    hosted     h{alu(0)};
+    auto const goal = h.run(driven(driver));
+    auto const done = goal.get();
+    CHECK(done.yielded);
+    REQUIRE(driver->failures.size() == 1);
+    CHECK_THROWS_WITH_AS(std::rethrow_exception(driver->failures[0]), where, test_failure);
+    CHECK(h.on->state(0) == core::host_state::parked);
+    CHECK(h.run({.budget = icount{10}}).get().stopped.reason == stop_reason::budget);
+  }
 }

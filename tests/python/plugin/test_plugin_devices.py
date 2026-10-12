@@ -58,11 +58,13 @@ from api.devices_example import Eeprom24
 
 def test_one_boot_per_device_set(machine_factory):
     given = Eeprom24(0x50, 4096)
-    first = machine_factory(devices={"I2C1": [given]})
+    first = machine_factory(devices={"I2C1": [given]}, name="first")
+    assert first.name == "first"
     assert first.board.devices("I2C1") == (given,)
     assert first.pc == first.sym("main")
     again = Eeprom24(0x50, 4096)
-    second = machine_factory(devices={"SEC_I2C1": [again]})
+    second = machine_factory(devices={"SEC_I2C1": [again]}, name="second")
+    assert second.name == "second"
     assert second.board.devices("I2C1") == (again,)
     assert second.pc == first.pc and second.instructions == first.instructions
     small = machine_factory(devices={"I2C1": [Eeprom24(0x50, 256)]})
@@ -70,7 +72,8 @@ def test_one_boot_per_device_set(machine_factory):
 
 
 async def test_the_async_form_shares_them(machine_factory):
-    m = await machine_factory.booted(devices={"I2C1": [Eeprom24(0x50, 4096)]})
+    m = await machine_factory.booted(devices={"I2C1": [Eeprom24(0x50, 4096)]}, name="m")
+    assert m.name == "m"
     assert m.pc == m.sym("main")
     again = machine_factory(devices={"I2C1": [Eeprom24(0x50, 4096)]})
     assert again.pc == m.pc
@@ -166,6 +169,58 @@ def test_a_device_given_twice_keeps_the_cached_boot(
     second = pytester.runpytest(*BASE)
     second.assert_outcomes(passed=1)
     second.stdout.no_fnmatch_line("popcorn: *")
+
+
+BOOT_ONCE = """
+from api.devices_example import Eeprom24
+
+
+def test_boot(machine_factory):
+    machine_factory(devices={"I2C1": [Eeprom24(0x50, 4096)]})
+"""
+
+BAD_NAME = """
+import pytest
+from api.devices_example import Eeprom24
+
+
+def test_a_bad_name_leaves_the_cached_boot(machine_factory):
+    with pytest.raises(ValueError, match="name"):
+        machine_factory(devices={"I2C1": [Eeprom24(0x50, 4096)]}, name="a.b")
+    with pytest.raises(ValueError, match="name"):
+        machine_factory(name="a b")
+    m = machine_factory(devices={"I2C1": [Eeprom24(0x50, 4096)]}, name="ok")
+    assert m.name == "ok"
+    assert m.pc == m.sym("main")
+"""
+
+BAD_NAME_ASYNC = """
+import pytest
+from api.devices_example import Eeprom24
+
+
+async def test_a_bad_name_leaves_the_cached_boot(machine_factory):
+    with pytest.raises(ValueError, match="name"):
+        await machine_factory.booted(devices={"I2C1": [Eeprom24(0x50, 4096)]}, name="a.b")
+    m = await machine_factory.booted(devices={"I2C1": [Eeprom24(0x50, 4096)]}, name="ok")
+    assert m.name == "ok"
+    assert m.pc == m.sym("main")
+"""
+
+
+def test_a_bad_name_is_refused_before_the_boot_cache_is_read(
+    pytester: pytest.Pytester, u575_project: Path
+) -> None:
+    pytester.makepyfile(BOOT_ONCE)
+    first = pytester.runpytest(*BASE)
+    first.assert_outcomes(passed=1)
+    assert summary(first) == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
+    for later in (BAD_NAME, BAD_NAME_ASYNC):
+        pytester.makepyfile(later)
+        result = pytester.runpytest(*BASE)
+        result.assert_outcomes(passed=1)
+        assert summary(result) == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
+        result.stdout.no_fnmatch_line("*dropped*")
 
 
 DIGEST = """

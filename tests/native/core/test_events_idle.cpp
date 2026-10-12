@@ -1,7 +1,9 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/scheduler.hpp>
+#include <popcorn/core/snapshot.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
@@ -12,7 +14,9 @@
 #include <chrono>
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -738,4 +742,796 @@ TEST_CASE("pending_events counts scheduled events until they are cancelled or di
   CHECK(f.target->pending_events() == before + 1);
   REQUIRE(f.run_to_stop({.budget_left = icount{200}}).reason == stop_reason::budget);
   CHECK(f.target->pending_events() == before);
+}
+
+namespace
+{
+constexpr std::uint16_t thumb_nop       = 0xbf00;
+constexpr std::uint16_t branch_self     = 0xe7fe;
+constexpr std::uint16_t store_ctrl      = 0x65d1;
+constexpr address       testdev         = 0x4001'0000;
+constexpr std::uint32_t logged_kind     = 1;
+constexpr std::uint64_t long_block      = 401;
+constexpr std::uint64_t bound_in_block  = 200;
+constexpr std::uint64_t rate_change_nth = 300;
+
+struct lanes
+{
+  fixture       f;
+  std::uint64_t start;
+
+  explicit lanes(bool rate_change = false, bool exact_epoch = false)
+      : f{booted("calls", options())}, start{}
+  {
+    std::vector<std::uint16_t> code(long_block - 1, thumb_nop);
+    if(rate_change)
+    {
+      code[rate_change_nth]    = store_ctrl;
+      model().halve_rate_on_go = true;
+      model().drives_clock     = exact_epoch;
+      model().go_delay         = 1'000'000'000;
+    }
+    code.push_back(branch_self);
+    write_code(f, code);
+    f.set("pc", scratch_code);
+    f.set("r1", 1);
+    f.set("r2", testdev);
+    f.module->event_log.clear();
+    start = clock().now().value;
+  }
+
+  static auto options() -> core::machine_options
+  {
+    core::machine_options made;
+    made.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+    return made;
+  }
+
+  [[nodiscard]] auto model() const -> popcorn::testing::test_model&
+  {
+    return dynamic_cast<popcorn::testing::test_model&>(*f.target->model("TESTDEV"));
+  }
+
+  [[nodiscard]] auto clock() const -> core::clock const&
+  {
+    return f.target->virtual_clock();
+  }
+
+  [[nodiscard]] auto time_of(std::uint64_t offset) const -> vtime
+  {
+    auto const ps = ps_per_second / clock().instruction_hz();
+    REQUIRE(ps * clock().instruction_hz() == ps_per_second);
+    return vtime{clock().time().ps + (start + offset - clock().now().value) * ps};
+  }
+
+  void local(std::uint64_t offset, std::uint64_t payload) const
+  {
+    std::ignore =
+        f.module->attached_events().schedule(icount{start + offset}, logged_kind, payload);
+  }
+
+  void local_at(std::uint64_t offset, std::uint64_t payload) const
+  {
+    std::ignore = f.module->attached_events().schedule_at(
+        time_of(offset), logged_kind, payload, f.target->virtual_clock());
+  }
+
+  void lane(std::uint64_t offset, std::uint64_t payload, std::uint32_t which = 1) const
+  {
+    lane_at(time_of(offset), payload, which);
+  }
+
+  void lane_at(vtime due, std::uint64_t payload, std::uint32_t which = 1) const
+  {
+    std::ignore = f.module->attached_events().schedule_at(
+        due, logged_kind, payload, which, f.target->virtual_clock());
+  }
+
+  auto slice(vtime until, bool hold) const -> core::slice_result
+  {
+    return f.run(
+        {.max_instructions = icount{1'000'000},
+         .wall_budget      = long_wall,
+         .until_time       = until,
+         .hold_from_until  = hold});
+  }
+
+  [[nodiscard]] auto payloads() const -> std::vector<std::uint64_t>
+  {
+    std::vector<std::uint64_t> out;
+    for(auto const& one : f.module->event_log)
+    {
+      out.push_back(one.payload);
+    }
+    return out;
+  }
+};
+
+auto stopped_on_time(core::slice_result const& result) -> bool
+{
+  return result.stopped and result.stopped->reason == stop_reason::time;
+}
+}
+
+TEST_CASE("same-count events fire local ones first, then lanes in order, then in post order")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto&       events = f.module->attached_events();
+  auto const& clock  = f.target->virtual_clock();
+  auto const  due    = vtime{clock.time().ps + ps_per_second / 1000};
+  std::ignore        = events.schedule_at(due, logged_kind, 30, 2, clock);
+  std::ignore        = events.schedule_at(due, logged_kind, 20, 1, clock);
+  std::ignore        = events.schedule_at(due, logged_kind, 10, clock);
+  std::ignore        = events.schedule(clock.to_icount(due), logged_kind, 11);
+  std::ignore        = events.schedule_at(due, logged_kind, 21, 1, clock);
+  f.module->event_log.clear();
+  REQUIRE(f.run_to_stop({.until_time = vtime{due.ps + 1}}).reason == stop_reason::time);
+  std::vector<std::uint64_t> order;
+  for(auto const& one : f.module->event_log)
+  {
+    CHECK(one.at == clock.to_icount(due));
+    order.push_back(one.payload);
+  }
+  CHECK(order == std::vector<std::uint64_t>{10, 11, 20, 21, 30});
+}
+
+TEST_CASE("a lane event due ahead fires at its own count, not at once")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock = f.target->virtual_clock();
+  auto const  now   = clock.now().value;
+  auto const  due   = vtime{clock.time().ps + 1000 * (ps_per_second / clock.instruction_hz())};
+  std::ignore       = f.module->attached_events().schedule_at(due, logged_kind, 5, 1, clock);
+  f.module->event_log.clear();
+  REQUIRE(
+      f.run_to_stop({.until_time = vtime{due.ps + ps_per_second / 1000}}).reason
+      == stop_reason::time);
+  CHECK(
+      f.module->event_log
+      == std::vector<logged>{
+          {.kind = logged_kind, .payload = 5, .at = icount{now + 1000}}
+  });
+}
+
+TEST_CASE("a slice held at until_time dispatches only the events due before it")
+{
+  lanes      l;
+  auto const h = l.time_of(bound_in_block);
+  l.local(bound_in_block - 1, 1);
+  l.local(bound_in_block, 2);
+  l.local(bound_in_block + 100, 3);
+  auto const first = l.slice(h, true);
+  REQUIRE(stopped_on_time(first));
+  auto const b1 = l.clock().now().value;
+  CHECK(b1 == l.start + long_block);
+  CHECK(l.payloads() == std::vector<std::uint64_t>{1});
+  CHECK(l.f.target->pending_events() >= 2);
+  REQUIRE(stopped_on_time(l.slice(l.time_of(long_block + 1000), true)));
+  CHECK(l.payloads() == std::vector<std::uint64_t>{1, 2, 3});
+  CHECK(l.f.module->event_log[1].at == icount{b1});
+  CHECK(l.f.module->event_log[2].at == icount{b1});
+}
+
+TEST_CASE("a held slice ended by its budget past until_time still holds")
+{
+  lanes      l;
+  auto const h = l.time_of(bound_in_block);
+  l.local(bound_in_block - 1, 1);
+  l.local(bound_in_block, 2);
+  l.local(bound_in_block + 100, 3);
+  auto const first = l.f.run(
+      {.max_instructions = icount{1'000'000},
+       .wall_budget      = long_wall,
+       .budget_left      = icount{bound_in_block + 1},
+       .until_time       = h,
+       .hold_from_until  = true});
+  REQUIRE(first.stopped.has_value());
+  CHECK(first.stopped->reason == stop_reason::budget);
+  CHECK(l.payloads() == std::vector<std::uint64_t>{1});
+  REQUIRE(stopped_on_time(l.slice(l.time_of(long_block + 1000), false)));
+  CHECK(l.payloads() == std::vector<std::uint64_t>{1, 2, 3});
+}
+
+TEST_CASE("a slice to a stamp bound without the hold dispatches every event due at its end")
+{
+  lanes      l;
+  auto const h = l.time_of(bound_in_block);
+  l.local(bound_in_block - 1, 1);
+  l.local(bound_in_block, 2);
+  l.local(bound_in_block + 100, 3);
+  auto const first = l.f.run(
+      {.max_instructions = icount{1'000'000},
+       .wall_budget      = long_wall,
+       .until_time       = h,
+       .internal_stop    = true});
+  REQUIRE(stopped_on_time(first));
+  CHECK(l.clock().now().value == l.start + long_block);
+  CHECK(l.payloads() == std::vector<std::uint64_t>{1, 2, 3});
+}
+
+TEST_CASE("a lane event posted after a held slice fires as if posted before it")
+{
+  auto const reference = [] {
+    lanes l;
+    l.local(bound_in_block - 1, 1);
+    l.local(bound_in_block, 2);
+    l.local(bound_in_block + 100, 3);
+    l.lane_at(l.time_of(bound_in_block + 20), 50);
+    REQUIRE(stopped_on_time(l.slice(l.time_of(long_block + 1000), false)));
+    return l.f.module->event_log;
+  };
+  auto const run = [](bool late) {
+    lanes      l;
+    auto const h = l.time_of(bound_in_block);
+    auto const a = l.time_of(bound_in_block + 20);
+    l.local(bound_in_block - 1, 1);
+    l.local(bound_in_block, 2);
+    l.local(bound_in_block + 100, 3);
+    if(not late)
+    {
+      l.lane_at(a, 50);
+    }
+    REQUIRE(stopped_on_time(l.slice(h, true)));
+    CHECK(l.payloads() == std::vector<std::uint64_t>{1});
+    if(late)
+    {
+      REQUIRE(l.clock().time() > a);
+      l.lane_at(a, 50);
+    }
+    REQUIRE(stopped_on_time(l.slice(l.time_of(long_block + 1000), true)));
+    return l.f.module->event_log;
+  };
+  auto const early = run(false);
+  auto const late  = run(true);
+  CHECK(late == early);
+  CHECK(reference() == early);
+  std::vector<std::uint64_t> order;
+  for(auto const& one : late)
+  {
+    order.push_back(one.payload);
+  }
+  CHECK(order == std::vector<std::uint64_t>{1, 2, 50, 3});
+}
+
+TEST_CASE("a rate change in the held block gives the same order to early and late lane posts")
+{
+  for(auto const exact_epoch : {false, true})
+  {
+    CAPTURE(exact_epoch);
+    auto const run = [exact_epoch](bool late) {
+      lanes      l{true, exact_epoch};
+      auto const h = l.time_of(bound_in_block);
+      auto const a = l.time_of(bound_in_block + 30);
+      l.local(bound_in_block - 1, 1);
+      l.local_at(bound_in_block + 50, 2);
+      if(not late)
+      {
+        l.lane_at(a, 50);
+      }
+      REQUIRE(stopped_on_time(l.slice(h, true)));
+      REQUIRE(l.model().go_time.has_value());
+      auto const clock = l.f.target->snapshot().data().clock;
+      if(exact_epoch)
+      {
+        CHECK(clock.epoch_icount < clock.now);
+      }
+      else
+      {
+        CHECK(clock.epoch_icount == clock.now);
+        CHECK(l.clock().epoch_time() > h);
+        CHECK(l.payloads() == std::vector<std::uint64_t>{1});
+      }
+      if(late)
+      {
+        l.lane_at(a, 50);
+      }
+      REQUIRE(stopped_on_time(l.slice(vtime{l.clock().time().ps + ps_per_second / 1000}, true)));
+      return l.f.module->event_log;
+    };
+    auto const early = run(false);
+    CHECK(run(true) == early);
+    lanes reference{true, exact_epoch};
+    reference.local(bound_in_block - 1, 1);
+    reference.local_at(bound_in_block + 50, 2);
+    reference.lane_at(reference.time_of(bound_in_block + 30), 50);
+    REQUIRE(stopped_on_time(reference.slice(
+        vtime{reference.time_of(bound_in_block).ps + ps_per_second / 1000}, false)));
+    CHECK(reference.f.module->event_log == early);
+    if(not exact_epoch)
+    {
+      std::vector<std::uint64_t> order;
+      for(auto const& one : early)
+      {
+        order.push_back(one.payload);
+      }
+      CHECK(order == std::vector<std::uint64_t>{1, 2, 50});
+    }
+  }
+}
+
+TEST_CASE("a pending lane event survives a snapshot, then fires or cancels by its seq")
+{
+  for(auto const cancel : {false, true})
+  {
+    CAPTURE(cancel);
+    auto f = booted("idle");
+    f.set("pc", sym("idle", "idle_forever"));
+    REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+    auto&       events = f.module->attached_events();
+    auto const& clock  = f.target->virtual_clock();
+    auto const  due    = vtime{clock.time().ps + ps_per_second / 1000};
+    auto const  seq    = events.schedule_at(due, logged_kind, 50, 1, clock);
+    REQUIRE(seq >= core::scheduler::lane_seq_base);
+    auto const saved =
+        core::snapshot{core::decode_snapshot(core::encode_snapshot(f.target->snapshot().data()))};
+    std::ignore = events.schedule_at(due, logged_kind, 51, 1, clock);
+    f.target->restore(saved);
+    REQUIRE(f.target->pending_events() == 1);
+    if(cancel)
+    {
+      events.cancel(seq);
+      CHECK(f.target->pending_events() == 0);
+    }
+    f.module->event_log.clear();
+    REQUIRE(
+        f.run_to_stop({.until_time = vtime{due.ps + ps_per_second / 1000}}).reason
+        == stop_reason::time);
+    if(cancel)
+    {
+      CHECK(f.module->event_log.empty());
+    }
+    else
+    {
+      CHECK(
+          f.module->event_log
+          == std::vector<logged>{
+              {.kind = logged_kind, .payload = 50, .at = clock.to_icount(due)}
+      });
+    }
+    CHECK(events.schedule_at(due, logged_kind, 52, 1, clock) == seq + 1);
+  }
+}
+
+TEST_CASE("local sequence numbers do not depend on lane posts")
+{
+  auto const local_seqs = [](bool with_lanes) {
+    auto f = booted("idle");
+    f.set("pc", sym("idle", "idle_forever"));
+    REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+    auto&                      events = f.module->attached_events();
+    auto const&                clock  = f.target->virtual_clock();
+    auto const                 due    = vtime{clock.time().ps + ps_per_second / 1000};
+    std::vector<std::uint64_t> seqs;
+    seqs.push_back(events.schedule_at(due, logged_kind, 1, clock));
+    if(with_lanes)
+    {
+      auto const lane_seq = events.schedule_at(due, logged_kind, 50, 1, clock);
+      CHECK(lane_seq >= core::scheduler::lane_seq_base);
+    }
+    seqs.push_back(events.schedule_at(due, logged_kind, 2, clock));
+    if(with_lanes)
+    {
+      auto const lane_seq = events.schedule_at(due, logged_kind, 51, 2, clock);
+      CHECK(lane_seq >= core::scheduler::lane_seq_base);
+      events.cancel(lane_seq);
+    }
+    seqs.push_back(events.schedule(clock.now(), logged_kind, 3));
+    auto const saved = f.target->snapshot().data().events;
+    seqs.push_back(saved.next_seq);
+    CHECK(saved.next_lane_seq == (with_lanes ? 2u : 0u));
+    return seqs;
+  };
+  CHECK(local_seqs(true) == local_seqs(false));
+}
+
+TEST_CASE("an idle jump landing on a held bound holds the event due there")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock = f.target->virtual_clock();
+  auto const  h     = vtime{clock.time().ps + ps_per_second / 1000};
+  auto const  at    = clock.to_icount(h);
+  std::ignore       = f.module->attached_events().schedule(icount{at.value - 1}, logged_kind, 1);
+  std::ignore       = f.module->attached_events().schedule(at, logged_kind, 2);
+  f.module->event_log.clear();
+  auto const first = f.run({.wall_budget = long_wall, .until_time = h, .hold_from_until = true});
+  REQUIRE(stopped_on_time(first));
+  CHECK(clock.now() == at);
+  CHECK(
+      f.module->event_log
+      == std::vector<logged>{
+          {.kind = logged_kind, .payload = 1, .at = icount{at.value - 1}}
+  });
+  auto const saved = f.target->snapshot();
+  auto const next  = vtime{h.ps + ps_per_second / 1000};
+  REQUIRE(stopped_on_time(
+      f.run({.wall_budget = long_wall, .until_time = next, .hold_from_until = true})));
+  auto const after = f.module->event_log;
+  CHECK(after.size() == 2);
+  CHECK(after.back() == logged{.kind = logged_kind, .payload = 2, .at = at});
+  f.target->restore(saved);
+  f.module->event_log.resize(1);
+  REQUIRE(stopped_on_time(
+      f.run({.wall_budget = long_wall, .until_time = next, .hold_from_until = true})));
+  CHECK(f.module->event_log == after);
+}
+
+TEST_CASE("a hold at count 0 holds the events at count 0")
+{
+  auto f = booted("idle");
+  f.target->reset();
+  REQUIRE(f.target->virtual_clock().now() == icount{0});
+  std::ignore = f.module->attached_events().schedule(icount{0}, logged_kind, 4);
+  f.module->event_log.clear();
+  auto const held =
+      f.run({.wall_budget = long_wall, .until_time = vtime{0}, .hold_from_until = true});
+  REQUIRE(stopped_on_time(held));
+  CHECK(f.module->event_log.empty());
+  REQUIRE(stopped_on_time(f.run({.wall_budget = long_wall, .until_time = vtime{1}})));
+  CHECK(
+      f.module->event_log
+      == std::vector<logged>{
+          {.kind = logged_kind, .payload = 4, .at = icount{0}}
+  });
+}
+
+namespace
+{
+auto registers_of(fixture const& f) -> std::vector<std::uint64_t>
+{
+  std::vector<std::uint64_t> values;
+  for(auto const& reg : f.target->regs().list())
+  {
+    values.push_back(f.target->regs().read(reg));
+  }
+  return values;
+}
+
+struct held_run
+{
+  std::vector<logged>        log;
+  std::vector<std::uint64_t> registers;
+  icount                     now;
+  std::uint64_t              executed;
+  std::uint64_t              engine_runs;
+};
+
+auto run_held(std::uint64_t slice_instructions) -> held_run
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  auto const start = f.target->virtual_clock().now().value;
+  for(std::uint64_t k = 1; k <= 5; ++k)
+  {
+    std::ignore = f.module->attached_events().schedule(icount{start + 333 * k}, logged_kind, k);
+  }
+  auto const before = registers_of(f);
+  f.module->event_log.clear();
+  f.target->hold_core(true);
+  CHECK(f.target->core_held());
+  auto const    runs     = core::machine_internals::counters(*f.target).engine_runs;
+  auto const    until    = vtime{f.target->virtual_clock().time().ps + 2000 * 250'000};
+  std::uint64_t executed = 0;
+  for(;;)
+  {
+    auto const slice = f.run(
+        {.max_instructions = icount{slice_instructions},
+         .wall_budget      = long_wall,
+         .until_time       = until});
+    executed += slice.executed.value;
+    if(slice.stopped)
+    {
+      CHECK(slice.stopped->reason == stop_reason::time);
+      break;
+    }
+  }
+  CHECK(registers_of(f) == before);
+  return {
+      .log         = f.module->event_log,
+      .registers   = registers_of(f),
+      .now         = f.target->virtual_clock().now(),
+      .executed    = executed,
+      .engine_runs = core::machine_internals::counters(*f.target).engine_runs - runs};
+}
+}
+
+TEST_CASE("a held core executes nothing while its events fire at their counts, at any slicing")
+{
+  auto const whole = run_held(1'000'000);
+  CHECK(whole.executed == 0);
+  CHECK(whole.engine_runs == 0);
+  REQUIRE(whole.log.size() == 5);
+  for(std::size_t k = 0; k < whole.log.size(); ++k)
+  {
+    CHECK(whole.log[k].payload == k + 1);
+    CHECK(whole.log[k].at.value == whole.log[0].at.value + 333 * k);
+  }
+  auto const sliced = run_held(997);
+  CHECK(sliced.executed == 0);
+  CHECK(sliced.engine_runs == 0);
+  CHECK(sliced.log == whole.log);
+  CHECK(sliced.registers == whole.registers);
+  CHECK(sliced.now == whole.now);
+}
+
+TEST_CASE("a held core stops idle with nothing pending and at until_time with a bound")
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  f.target->hold_core(true);
+  auto const before = f.target->virtual_clock().now();
+  CHECK(f.run_to_stop().reason == stop_reason::idle);
+  CHECK(f.target->virtual_clock().now() == before);
+  auto const until = vtime{f.target->virtual_clock().time().ps + 1'000'000'000};
+  auto const timed = f.run_to_stop({.until_time = until});
+  CHECK(timed.reason == stop_reason::time);
+  CHECK(f.target->virtual_clock().time() == until);
+  f.target->hold_core(false);
+  CHECK_FALSE(f.target->core_held());
+  CHECK(f.run_to_stop({.budget_left = icount{100}}).reason == stop_reason::budget);
+}
+
+TEST_CASE("hold_core refuses a running machine and a call in progress")
+{
+  auto                f = booted("calls");
+  std::optional<bool> refused;
+  std::ignore = f.run({.max_instructions = icount{100}, .wall_budget = long_wall, .stop_when = [&] {
+                         try
+                         {
+                           f.target->hold_core(true);
+                           refused = false;
+                         }
+                         catch(popcorn::machine_running const&)
+                         {
+                           refused = true;
+                         }
+                         return true;
+                       }});
+  CHECK(refused == true);
+  CHECK_FALSE(f.target->core_held());
+  f.target->begin_call(
+      {.entry           = sym("calls", "add"),
+       .args            = {},
+       .returns         = popcorn::arch::value_kind::i32,
+       .abi             = popcorn::arch::float_abi::soft,
+       .return_sentinel = 0x3000'0000});
+  CHECK_THROWS_AS(f.target->hold_core(true), popcorn::machine_busy);
+  std::ignore = f.target->end_call();
+  CHECK_FALSE(f.target->core_held());
+}
+
+TEST_CASE("a held core refuses a call and keeps its clock and events")
+{
+  auto f      = booted("calls");
+  std::ignore = f.module->attached_events().schedule(
+      icount{f.target->virtual_clock().now().value + 50}, logged_kind, 1);
+  f.target->hold_core(true);
+  auto const now     = f.target->virtual_clock().now();
+  auto const pending = f.target->pending_events();
+  auto const call    = popcorn::arch::call_frame{
+      .entry           = sym("calls", "add"),
+      .args            = {},
+      .returns         = popcorn::arch::value_kind::i32,
+      .abi             = popcorn::arch::float_abi::soft,
+      .return_sentinel = 0x3000'0000};
+  CHECK_THROWS_AS(f.target->begin_call(call), popcorn::machine_busy);
+  CHECK_THROWS_AS(std::ignore = f.target->call(call, icount{1000}), popcorn::machine_busy);
+  CHECK_FALSE(f.target->in_call());
+  CHECK(f.target->virtual_clock().now() == now);
+  CHECK(f.target->pending_events() == pending);
+  f.target->hold_core(false);
+  CHECK(f.target->call(call, icount{1000}).stopped.reason == stop_reason::returned);
+}
+
+TEST_CASE("a model failure while the core is held leaves the slice at once, resumable")
+{
+  core::machine_options options;
+  options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
+  auto  f     = booted("calls", std::move(options));
+  auto& model = dynamic_cast<popcorn::testing::test_model&>(*f.target->model("TESTDEV"));
+  REQUIRE(f.target->mem().write(0x4001'0000 + popcorn::testing::test_model::ctrl_offset, 4, 1));
+  model.throw_dma_writes = true;
+  model.dma_on_event     = {0x4001'0000 + popcorn::testing::test_model::data_offset, 7};
+  f.target->hold_core(true);
+  auto const until = vtime{f.target->virtual_clock().time().ps + 1'000'000'000};
+  CHECK_THROWS_AS(f.run({.wall_budget = long_wall, .until_time = until}), std::runtime_error);
+  CHECK(f.target->core_held());
+  std::ignore            = f.target->snapshot();
+  model.throw_dma_writes = false;
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+}
+
+TEST_CASE("a held machine stays held across a reset and its snapshot keeps the hold")
+{
+  auto f = booted("calls");
+  f.target->hold_core(true);
+  auto const resets = f.target->resets();
+  f.target->reset();
+  CHECK(f.target->core_held());
+  CHECK(f.target->resets() == resets + 1);
+  auto const saved = f.target->snapshot();
+  CHECK(saved.data().core_held);
+  auto back = popcorn::core::decode_snapshot(popcorn::core::encode_snapshot(saved.data()));
+  CHECK(back.core_held);
+  f.target->hold_core(false);
+  f.target->restore(saved);
+  CHECK(f.target->core_held());
+  auto const before = f.target->virtual_clock().now();
+  CHECK(
+      f.run_to_stop({.until_time = vtime{f.target->virtual_clock().time().ps + 250'000'000}}).reason
+      == stop_reason::time);
+  CHECK(f.target->virtual_clock().now().value == before.value + 1000);
+}
+
+TEST_CASE("a quiescent slice stops where the core fell asleep instead of jumping to until_time")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock = f.target->virtual_clock();
+  auto const  start = clock.time();
+  auto const  until = vtime{start.ps + ps_per_second / 1000};
+  std::size_t stops = 0;
+  auto const  sink  = f.target->add_trace_sink(
+      {core::trace_kind::stop},
+      [&stops](std::span<core::trace_record const> records) { stops += records.size(); });
+  auto const quiet = f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = long_wall,
+       .until_time       = until,
+       .internal_stop    = true,
+       .stop_quiescent   = true});
+  REQUIRE(quiet.stopped.has_value());
+  CHECK(quiet.stopped->reason == stop_reason::idle);
+  CHECK(quiet.stopped->time == start);
+  CHECK(quiet.stopped->where.symbol.empty());
+  CHECK(quiet.executed == icount{0});
+  CHECK(clock.time() == start);
+  CHECK(stops == 0);
+  auto const reported = f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = long_wall,
+       .until_time       = until,
+       .stop_quiescent   = true});
+  REQUIRE(reported.stopped.has_value());
+  CHECK(reported.stopped->reason == stop_reason::idle);
+  CHECK(reported.stopped->where.symbol == "idle_forever");
+  CHECK(stops == 1);
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+  CHECK(clock.time() == until);
+}
+
+TEST_CASE("a quiescent slice dispatches the events due before until_time and stops at the last")
+{
+  auto f = booted("idle");
+  f.set("pc", sym("idle", "idle_forever"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+  auto const& clock  = f.target->virtual_clock();
+  auto const  now    = clock.now().value;
+  auto const  until  = vtime{clock.time().ps + ps_per_second / 1000};
+  auto const  bound  = clock.to_icount(until);
+  auto&       events = f.module->attached_events();
+  std::ignore        = events.schedule(icount{now + 100}, 1, 1);
+  std::ignore        = events.schedule(icount{now + 300}, 1, 2);
+  std::ignore        = events.schedule(bound, 1, 3);
+  f.module->event_log.clear();
+  auto const stop = f.run_to_stop({.until_time = until, .stop_quiescent = true});
+  CHECK(stop.reason == stop_reason::idle);
+  CHECK(clock.now() == icount{now + 300});
+  CHECK(
+      f.module->event_log
+      == std::vector<logged>{
+          {.kind = 1, .payload = 1, .at = icount{now + 100}},
+          {.kind = 1, .payload = 2, .at = icount{now + 300}}
+  });
+  CHECK(f.target->pending_events() == 1);
+  CHECK(f.run_to_stop({.until_time = until, .stop_quiescent = true}).reason == stop_reason::idle);
+  CHECK(clock.now() == icount{now + 300});
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+  CHECK(f.module->event_log.size() == 3);
+}
+
+TEST_CASE("a quiescent slice in small slices stops at the same event as in one slice")
+{
+  auto const run = [](std::uint64_t slice) {
+    auto f = booted("idle");
+    f.set("pc", sym("idle", "idle_forever"));
+    REQUIRE(f.run_to_stop().reason == stop_reason::idle);
+    auto const& clock = f.target->virtual_clock();
+    auto const  now   = clock.now().value;
+    std::ignore       = f.module->attached_events().schedule(icount{now + 500}, 1, 1);
+    auto const until  = vtime{clock.time().ps + ps_per_second / 1000};
+    for(;;)
+    {
+      auto const result = f.run(
+          {.max_instructions = icount{slice},
+           .wall_budget      = long_wall,
+           .until_time       = until,
+           .stop_quiescent   = true});
+      if(result.stopped)
+      {
+        CHECK(result.stopped->reason == stop_reason::idle);
+        return clock.now().value - now;
+      }
+    }
+  };
+  CHECK(run(1'000'000'000) == 500);
+  CHECK(run(7) == 500);
+}
+
+TEST_CASE("a held core in a quiescent slice stops at once with nothing due")
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  f.target->hold_core(true);
+  auto const before = f.target->virtual_clock().time();
+  auto const until  = vtime{before.ps + 1'000'000'000};
+  CHECK(f.run_to_stop({.until_time = until, .stop_quiescent = true}).reason == stop_reason::idle);
+  CHECK(f.target->virtual_clock().time() == before);
+  CHECK(f.run_to_stop({.until_time = until}).reason == stop_reason::time);
+}
+
+TEST_CASE("stop_when_events_only asks stop_when after events, never at the slice end")
+{
+  auto f = booted("calls");
+  REQUIRE(f.target->pending_events() == 0);
+  auto       asked  = 0;
+  auto const always = [&asked] {
+    ++asked;
+    return true;
+  };
+  auto const quiet = f.run(
+      {.max_instructions      = icount{100},
+       .wall_budget           = long_wall,
+       .stop_when             = always,
+       .stop_when_events_only = true});
+  CHECK_FALSE(quiet.stopped.has_value());
+  CHECK(asked == 0);
+  auto const ended =
+      f.run({.max_instructions = icount{100}, .wall_budget = long_wall, .stop_when = always});
+  REQUIRE(ended.stopped.has_value());
+  CHECK(ended.stopped->reason == stop_reason::user);
+  CHECK(asked == 1);
+
+  auto g = booted("idle");
+  g.set("pc", sym("idle", "idle_entry"));
+  auto const stop = g.run_to_stop(
+      {.stop_when = [&g] { return g.module->timer_expiries == 3; }, .stop_when_events_only = true});
+  CHECK(stop.reason == stop_reason::user);
+  CHECK(g.module->timer_expiries == 3);
+}
+
+TEST_CASE("a predicate made true by executed code stops at the next event at any slicing")
+{
+  auto const run = [](std::uint64_t slice) {
+    auto        f      = booted("calls");
+    auto const& clock  = f.target->virtual_clock();
+    auto const  start  = clock.now().value;
+    auto&       events = f.module->attached_events();
+    std::ignore        = events.schedule(icount{start + 1200}, 1, 1);
+    std::ignore        = events.schedule(icount{start + 2000}, 1, 2);
+    for(;;)
+    {
+      auto const result = f.run(
+          {.max_instructions      = icount{slice},
+           .wall_budget           = long_wall,
+           .stop_when             = [&clock, start] { return clock.now().value >= start + 1000; },
+           .stop_when_events_only = true});
+      if(result.stopped)
+      {
+        CHECK(result.stopped->reason == stop_reason::user);
+        return std::pair{result.stopped->instructions.value - start, f.module->event_log.size()};
+      }
+    }
+  };
+  auto const whole = run(1'000'000'000);
+  CHECK(whole.first >= 1200);
+  CHECK(whole.second == 1);
+  CHECK(run(7) == whole);
+  CHECK(run(301) == whole);
 }

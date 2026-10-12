@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from popcorn import EmulationError, Machine, MachineRunning, Stop
+from popcorn import EmulationError, LinkedSystem, Machine, MachineRunning, Stop
 from popcorn._obs import FormatError
 from popcorn.pytest._options import SETTINGS
 from popcorn.report import stop_report
@@ -33,7 +33,8 @@ class Tracked:
     """A machine a test used.
 
     Attributes:
-        label: How the report names it, `machine` or `machine_factory #<n>`.
+        label: How the report names it, `machine`, `machine_factory #<n>` or
+            `system member <name>`.
         machine: The machine.
         key: Its project, config and strictness, as text.
     """
@@ -47,16 +48,20 @@ MACHINES = pytest.StashKey[list[Tracked]]()
 NAME_LENGTH = 150
 RING_HINT = "trace ring: not shown, pass --popcorn-ring=N for its last N lines"
 CALL_FAILED = pytest.StashKey[bool]()
-KEPT_TRACE = pytest.StashKey[Path]()
+KEPT_TRACES = pytest.StashKey[list[Path]]()
 HELD = pytest.StashKey[dict[int, BaseException | None]]()
+SYSTEMS = pytest.StashKey[list[LinkedSystem]]()
 
 
 class TraceOnFail:
     """A full trace of one test's machine, kept only when the test's call fails."""
 
-    def __init__(self, item: pytest.Item, directory: Path) -> None:
-        """Prepare the trace of the test `item` in `directory`."""
+    def __init__(self, item: pytest.Item, directory: Path, member: str | None = None) -> None:
+        """Prepare the trace of the test `item` in `directory`, `<name>.pctr`, or
+        `<name>.<member>.pctr` for the member `member` of its linked system."""
         name = file_name(item)
+        if member is not None:
+            name = f"{name}.{re.sub(r'[^A-Za-z0-9_.-]', '_', member)}"
         self.path = directory / f"{name}.pctr"
         self._directory = directory
         self._part = directory / f"{name}.pctr.part"
@@ -79,7 +84,7 @@ class TraceOnFail:
                 stacklevel=1,
             )
             return False
-        self._item.stash[KEPT_TRACE] = self.path
+        self._item.stash.setdefault(KEPT_TRACES, list[Path]()).append(self.path)
         return True
 
     def finish(self) -> None:
@@ -140,9 +145,18 @@ def track(item: pytest.Item, label: str, machine: Machine, key: object) -> None:
     item.stash.setdefault(MACHINES, list[Tracked]()).append(Tracked(label, machine, str(key)))
 
 
+def track_system(item: pytest.Item, system: LinkedSystem) -> None:
+    """Close `system` before a failure report of `item` parks its members."""
+    item.stash.setdefault(SYSTEMS, list[LinkedSystem]()).append(system)
+
+
 def park(item: pytest.Item) -> None:
     """Park every machine `item` tracks and keep what ended each free run by itself, and never
-    reached the test, for the teardown of its fixture."""
+    reached the test, for the teardown of its fixture. The linked systems of `item` are closed
+    first: a member of a running system cannot park. What a system kept for its teardown stays
+    kept."""
+    for system in item.stash.get(SYSTEMS, list[LinkedSystem]()):
+        system.close()
     held = item.stash.setdefault(HELD, dict[int, BaseException | None]())
     for entry in item.stash.get(MACHINES, list[Tracked]()):
         if id(entry.machine) not in held:
@@ -316,13 +330,15 @@ def pytest_runtest_makereport(
             text = section_text(tracked, error, item.config.stash[SETTINGS].ring, item)
         except Exception as broken:
             text = f"popcorn report failed: {type(broken).__name__}: {broken}"
-        kept = item.stash.get(KEPT_TRACE, None)
-        if call.when == "call" and kept is not None:
-            text += f"\ntrace: {kept}"
+        if call.when == "call":
+            for kept in item.stash.get(KEPT_TRACES, list[Path]()):
+                text += f"\ntrace: {kept}"
         report.sections.append(("popcorn", text))
     if call.when == "teardown":
         if MACHINES in item.stash:
             del item.stash[MACHINES]
+        if SYSTEMS in item.stash:
+            del item.stash[SYSTEMS]
         if HELD in item.stash:
             for ended in item.stash[HELD].values():
                 if ended is not None:

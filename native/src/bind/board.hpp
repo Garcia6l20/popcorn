@@ -29,6 +29,8 @@ struct[[= py::rename{"UartFrame"}]] uart_frame
   [[= py::readonly]] std::uint16_t data{};
   /** @brief Virtual time its stop bit ended, in picoseconds. */
   [[= py::readonly]] std::uint64_t at_ps{};
+  /** @brief Whether it was a break, data 0. */
+  [[= py::readonly]] bool brk{};
 };
 
 /**
@@ -36,7 +38,7 @@ struct[[= py::rename{"UartFrame"}]] uart_frame
  *        with their time, frames Python sends enter the receiver at the configured baud. Valid
  *        while the machine lives, every method raises ConfigError after.
  */
-class[[= py::rename{"UartLink"}]] uart_link
+class[[= py::rename{"UartQueue"}]] uart_queue
 {
 public:
   /**
@@ -45,7 +47,7 @@ public:
    * @param alive Cleared when the machine is destroyed.
    * @param host The machine's host, through which send() and queued() reach the UART.
    */
-  [[= py::skip]] uart_link(
+  [[= py::skip]] uart_queue(
       periph::stm32::uart_port& port,
       detail::alive_flag        alive,
       detail::host_ref          host);
@@ -122,6 +124,16 @@ public:
    * @throws config_error once the machine is destroyed.
    */
   [[= py::skip]] [[nodiscard]] auto bridged_link() const -> std::unique_ptr<detail::pty_link>;
+
+  /**
+   * @brief The UART, for a linked system that attaches a wire to it.
+   * @throws config_error once the machine is destroyed.
+   */
+  [[= py::skip]] [[nodiscard]] auto native_port() const -> periph::stm32::uart_port&;
+
+  /** @brief The queue endpoint attached to the UART, which a wire forwards to. */
+  [[= py::skip]] [[nodiscard]] auto endpoint() const noexcept
+      -> std::shared_ptr<detail::queue_endpoint> const&;
 
 private:
   [[nodiscard]] auto port() const -> periph::stm32::uart_port&;

@@ -144,6 +144,37 @@ TEST_CASE(
   CHECK(back == data);
 }
 
+TEST_CASE(
+    "the format 4 form encode_snapshot(filled()) wrote at b3b4acc reads back with its events in "
+    "lane 0")
+{
+  char const* const path = std::getenv("POPCORN_SNAPSHOT_V4");
+  REQUIRE(path != nullptr);
+  std::ifstream           file{path, std::ios::binary};
+  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
+  REQUIRE_FALSE(raw.empty());
+  auto const back = core::decode_snapshot(std::as_bytes(std::span{raw}));
+  REQUIRE(back.events.pending.size() == filled().events.pending.size());
+  for(auto const& pending : back.events.pending)
+  {
+    CHECK(pending.lane == 0);
+  }
+  CHECK(back.format == core::snapshot_format_version);
+  CHECK_FALSE(back.core_held);
+  CHECK(back == filled());
+}
+
+TEST_CASE("an event's lane survives the saved form")
+{
+  auto data                          = filled();
+  data.events.pending.front().lane   = 3;
+  data.events.pending.front().kind   = core::deadline::time;
+  data.events.pending.front().due_ps = 25'000'000;
+  auto const back                    = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.events.pending.front().lane == 3);
+  CHECK(back == data);
+}
+
 TEST_CASE("a format 3 snapshot reads back as the current format, its clock holding nothing")
 {
   auto data   = filled();

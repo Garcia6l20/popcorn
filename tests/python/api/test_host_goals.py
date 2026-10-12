@@ -935,6 +935,30 @@ def test_a_condition_reports_itself_in_stop_fired_parked(m33: popcorn.MachineDes
     assert stopped.fired == ()
 
 
+def test_a_parked_condition_s_fired_is_taken_at_its_stopping_boundary(
+    m33: popcorn.MachineDescription,
+) -> None:
+    m = exact(m33)
+    ticks = m.ref.var("ticks")
+    fires, later = ticks.ge(3), ticks.ge(1_000)
+    written: list[bool] = []
+
+    async def scenario() -> popcorn.Stop:
+        waiting = asyncio.create_task(m.wait_for(popcorn.any_of(fires, later), for_=ms(10)))
+        await asyncio.sleep(0)
+        while m.busy:
+            await asyncio.sleep(0)
+        written.append(not waiting.done())
+        m.var("ticks").value = 2_000
+        return await waiting
+
+    stop = run_bounded(scenario(), HANG)
+    assert written == [True]
+    assert stop.reason is popcorn.StopReason.USER
+    assert stop.fired == (fires,)
+    assert later.ready(m)
+
+
 def test_a_condition_reports_itself_in_stop_fired_running(m33: popcorn.MachineDescription) -> None:
     m = exact(m33)
     fires, never = m.ref.var("ticks").ge(3), m.ref.var("ticks").gt(1_000_000)

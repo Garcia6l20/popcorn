@@ -230,6 +230,11 @@ auto machine_handle::lock_for_request() const -> core::held_lock
   return held;
 }
 
+auto detail::stop_info(stop const& stopped) -> stop_record
+{
+  return record(stopped);
+}
+
 auto machine_handle::lock_releasing() const -> core::held_lock
 {
   return detail::lock_releasing_gil(*host_);
@@ -307,6 +312,7 @@ auto machine_handle::call_goal(
     {
       throw popcorn::machine_busy("a call is already in progress on this machine");
     }
+    host_->give_back_core(held, core::member_id{});
     if(prepare and not prepare->is_none())
     {
       (*prepare)();

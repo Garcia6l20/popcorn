@@ -159,6 +159,9 @@ struct host_abandon
 /** @brief Takes the mutex of @p ptys, releasing the GIL while it blocks when the thread holds it.
  */
 [[nodiscard]] auto lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>;
+
+/** @brief The StopInfo of @p stopped, owning its text. */
+[[nodiscard]] auto stop_info(stop const& stopped) -> stop_record;
 }
 
 /**
@@ -545,7 +548,7 @@ public:
    * @throws config_error once the machine is destroyed.
    */
   [[= py::doc{"Bridge a UART to a new host pty pumped by the machine thread."}]] auto
-      open_uart_pty(std::string name, uart_link const& link) -> pty_handle;
+      open_uart_pty(std::string name, uart_queue const& link) -> pty_handle;
 
   /**
    * @brief As open_uart_pty(), for a CDC ACM function of a virtual USB host.
@@ -908,7 +911,7 @@ public:
    * @throws model_error when the peripheral's model is not a UART.
    */
   [[= py::doc{"Connect a UART to Python, replacing its far end."}]] [[nodiscard]] auto
-      attach_uart(std::string const& peripheral) -> uart_link;
+      attach_uart(std::string const& peripheral) -> uart_queue;
 
   /**
    * @brief Names of the peripherals whose model is a built-in SAI, in description order.
@@ -1140,6 +1143,12 @@ public:
 
   /** @brief The native machine, for its fixed data only: the host owns it. */
   [[= py::skip]] [[nodiscard]] auto native() const noexcept -> core::machine&;
+
+  /** @brief The host that runs the machine. */
+  [[= py::skip]] [[nodiscard]] auto host() const noexcept -> std::shared_ptr<core::host> const&;
+
+  /** @brief The slot its views and links reach the host through. */
+  [[= py::skip]] [[nodiscard]] auto slot() const noexcept -> detail::host_ref;
 
 private:
   enum class wait_shape : std::uint8_t

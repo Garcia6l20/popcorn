@@ -52,6 +52,10 @@ struct event
   std::uint64_t due_ps{};
   /** @brief What the deadline counts. at is derived from due_ps for deadline::time. */
   deadline kind{deadline::instructions};
+  /** @brief Delivery lane, 0 for an event of this machine, 1 and up for an event delivered from
+   * another machine. Events due at the same count fire by lane, then by seq. A lane event keeps
+   * its own count when its due time has already passed. */
+  std::uint32_t lane{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(event const&, event const&) -> bool = default;
@@ -61,7 +65,7 @@ static_assert(std::is_trivially_copyable_v<event_id>);
 static_assert(std::is_trivially_copyable_v<event>);
 
 /**
- * @brief Event queue of a machine, ordered by due count then by sequence number. Holds no
+ * @brief Event queue of a machine, ordered by due count, then lane, then sequence number. Holds no
  *        callables: the run loop pops due events and dispatches each to its owner model.
  *        Neither copyable nor movable: event ports hold references to it.
  */
@@ -105,9 +109,30 @@ public:
       -> std::uint64_t;
 
   /**
+   * @brief Schedules an event delivered from another machine at a virtual time, in a lane. A
+   *        time already passed keeps its own count, clamped to the start of the current epoch,
+   *        so the event fires in key order with the local events of that count still pending.
+   * @param due Virtual time since reset.
+   * @param id Owner and kind.
+   * @param payload Passed back to the owner.
+   * @param lane Delivery lane, 1 and up.
+   * @param time Clock converting @p due at its current rate.
+   * @return Sequence number, a cancel() handle from a range of its own, at or above
+   *         lane_seq_base, so the sequence numbers of local events do not depend on when lane
+   *         events were posted.
+   */
+  auto schedule_at(
+      vtime         due,
+      event_id      id,
+      std::uint64_t payload,
+      std::uint32_t lane,
+      clock const&  time) -> std::uint64_t pre(lane > 0);
+
+  /**
    * @brief Recomputes the instruction count of every deadline::time event at @p time's current
-   *        rate, never before its current instruction, and keeps the tie order. Called by the
-   *        machine on every core rate change.
+   *        rate, never before its current instruction for a lane 0 event, and keeps the tie
+   *        order. A lane event follows the rule of the lane overload of schedule_at(). Called by
+   *        the machine on every core rate change.
    * @param time Clock after the change.
    */
   void rekey(clock const& time);
@@ -152,18 +177,30 @@ public:
   /** @brief Sequence number the next schedule() returns, for a snapshot. */
   [[nodiscard]] auto next_seq() const noexcept -> std::uint64_t;
 
+  /** @brief Lane sequence numbers handed out so far, for a snapshot. The next lane event gets
+   * lane_seq_base plus this count. */
+  [[nodiscard]] auto next_lane_seq() const noexcept -> std::uint64_t;
+
+  /** @brief First sequence number of lane events, above any local one. */
+  static constexpr std::uint64_t lane_seq_base = std::uint64_t{1} << 63;
+
   /**
    * @brief Replaces the queue with a snapshot's content, tie order and sequence counter included.
    * @param events Pending events as pending() returned them.
    * @param next_seq Sequence number as next_seq() returned it.
+   * @param next_lane_seq Lane count as next_lane_seq() returned it.
    */
-  void restore(std::span<event const> events, std::uint64_t next_seq);
+  void restore(
+      std::span<event const> events,
+      std::uint64_t          next_seq,
+      std::uint64_t          next_lane_seq = 0);
 
 private:
   void refresh_earliest() noexcept;
 
   std::vector<event> queue_;
-  std::uint64_t      next_seq_ = 0;
+  std::uint64_t      next_seq_      = 0;
+  std::uint64_t      next_lane_seq_ = 0;
   icount             earliest_{std::numeric_limits<std::uint64_t>::max()};
 };
 
@@ -208,6 +245,25 @@ public:
       -> std::uint64_t
   {
     return queue_.schedule_at(due, event_id{owner_, kind}, payload, time);
+  }
+
+  /**
+   * @brief Schedules an event delivered from another machine for the owning model, in a lane.
+   * @param due Virtual time since reset.
+   * @param kind Event kind, passed back to `periph::model::on_event`.
+   * @param payload Passed back to `periph::model::on_event`.
+   * @param lane Delivery lane, 1 and up.
+   * @param time The machine's clock, `model_context::clock`.
+   * @return Sequence number, the handle for cancel().
+   */
+  auto schedule_at(
+      vtime         due,
+      std::uint32_t kind,
+      std::uint64_t payload,
+      std::uint32_t lane,
+      clock const&  time) -> std::uint64_t pre(lane > 0)
+  {
+    return queue_.schedule_at(due, event_id{owner_, kind}, payload, lane, time);
   }
 
   /**

@@ -16,6 +16,7 @@ sources += [
         "exti.cpp",
         "gpdma.cpp",
         "usart.cpp",
+        "uart_wire.cpp",
         "tim.cpp",
         "iwdg.cpp",
         "rtc.cpp",

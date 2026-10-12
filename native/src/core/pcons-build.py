@@ -26,7 +26,9 @@ sources = [
         "snapshots.cpp",
         "spin.cpp",
         "symbols.cpp",
+        "system.cpp",
         "trace_feed.cpp",
         "views.cpp",
+        "window_barrier.cpp",
     )
 ]

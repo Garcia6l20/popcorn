@@ -15,7 +15,7 @@ namespace
 {
 auto dispatch_key(event const& e) noexcept
 {
-  return std::tuple{e.at.value, e.seq};
+  return std::tuple{e.at.value, e.lane, e.seq};
 }
 
 auto instruction_of(std::uint64_t due_ps, clock const& time) -> icount
@@ -25,6 +25,13 @@ auto instruction_of(std::uint64_t due_ps, clock const& time) -> icount
     return time.now();
   }
   return std::max(time.now(), time.to_icount(vtime{due_ps}));
+}
+
+auto external_instruction_of(std::uint64_t due_ps, clock const& time) -> icount
+{
+  auto const from = vtime{std::max(due_ps, time.epoch_time().ps)};
+  return from.ps <= time.time().ps ? std::min(time.now(), time.to_icount(from))
+                                   : time.to_icount(from);
 }
 }
 
@@ -148,13 +155,34 @@ auto scheduler::schedule_at(vtime due, event_id id, std::uint64_t payload, clock
   return added.seq;
 }
 
+auto scheduler::schedule_at(
+    vtime         due,
+    event_id      id,
+    std::uint64_t payload,
+    std::uint32_t lane,
+    clock const&  time) -> std::uint64_t
+{
+  event const added{
+      .at      = external_instruction_of(due.ps, time),
+      .seq     = lane_seq_base + next_lane_seq_++,
+      .id      = id,
+      .payload = payload,
+      .due_ps  = due.ps,
+      .kind    = deadline::time,
+      .lane    = lane};
+  queue_.insert(std::ranges::upper_bound(queue_, dispatch_key(added), {}, dispatch_key), added);
+  refresh_earliest();
+  return added.seq;
+}
+
 void scheduler::rekey(clock const& time)
 {
   for(auto& pending : queue_)
   {
     if(pending.kind == deadline::time)
     {
-      pending.at = instruction_of(pending.due_ps, time);
+      pending.at = pending.lane == 0 ? instruction_of(pending.due_ps, time)
+                                     : external_instruction_of(pending.due_ps, time);
     }
   }
   std::ranges::sort(queue_, {}, dispatch_key);
@@ -205,11 +233,20 @@ auto scheduler::next_seq() const noexcept -> std::uint64_t
   return next_seq_;
 }
 
-void scheduler::restore(std::span<event const> events, std::uint64_t next_seq)
+auto scheduler::next_lane_seq() const noexcept -> std::uint64_t
+{
+  return next_lane_seq_;
+}
+
+void scheduler::restore(
+    std::span<event const> events,
+    std::uint64_t          next_seq,
+    std::uint64_t          next_lane_seq)
 {
   queue_.assign(events.begin(), events.end());
   std::ranges::sort(queue_, {}, dispatch_key);
-  next_seq_ = next_seq;
+  next_seq_      = next_seq;
+  next_lane_seq_ = next_lane_seq;
   refresh_earliest();
 }
 }

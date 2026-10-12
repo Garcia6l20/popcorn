@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import lzma
 import os
 import stat
 from pathlib import Path
+from typing import cast
 
 import popcorn
 import pytest
+from popcorn.units import VirtualDuration, ms, us
 
-from .conftest import DRIVER_ELF, M33_JSON, Machines
+from .conftest import DRIVER_ELF, M33_JSON, ROOT, Machines
+from .snapshot_doc import bson
+
+USART_ELF = ROOT / "examples" / "stm32u575" / "usart" / "prebuilt" / "usart_echo.elf"
+USART_RX_V4 = ROOT / "tests" / "data" / "api" / "usart_rx_v4.snap.xz"
 
 
 def state(m: popcorn.Machine) -> tuple[int, int, tuple[int, ...], bytes]:
@@ -165,3 +172,107 @@ def test_snapshot_refuses_a_running_machine_even_from_a_handler(machines: Machin
             await task
 
     asyncio.run(scenario())
+
+
+def usart_at(u575: popcorn.MachineDescription, after: VirtualDuration) -> popcorn.Machine:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(USART_ELF))
+    m.reset()
+    stop = asyncio.run(m.run(until="main", budget=1_000_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS, stop
+    asyncio.run(m.run(for_=after))
+    return m
+
+
+def without_generation(m: popcorn.Machine) -> tuple[int, dict[str, object]]:
+    doc = bson(m.snapshot().to_bytes())
+    generation = doc.pop("generation")
+    assert isinstance(generation, int)
+    return generation, doc
+
+
+def test_a_restore_after_a_reset_runs_as_a_machine_never_reset(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usart_at(u575, ms(1))
+    twin = usart_at(u575, ms(1))
+    boot = m.snapshot()
+    asyncio.run(m.run(for_=ms(25)))
+    m.reset()
+    asyncio.run(m.run(until="main", budget=1_000_000))
+    m.restore(boot)
+    assert without_generation(m)[1] == without_generation(twin)[1]
+    for _ in range(5):
+        asyncio.run(m.run(for_=ms(5)))
+        asyncio.run(twin.run(for_=ms(5)))
+        assert m.pending_events == twin.pending_events == 1
+        assert without_generation(m)[1] == without_generation(twin)[1]
+
+
+def test_a_restore_of_a_machines_own_snapshot_adds_no_state(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usart_at(u575, ms(25))
+    twin = usart_at(u575, ms(25))
+    generation, before = without_generation(m)
+    assert m.pending_events == 1
+    m.restore(m.snapshot())
+    restored_generation, after = without_generation(m)
+    assert restored_generation == generation + 1
+    assert after == before
+    assert m.pending_events == 1
+    for _ in range(3):
+        asyncio.run(m.run(for_=ms(5)))
+        asyncio.run(twin.run(for_=ms(5)))
+        assert without_generation(m)[1] == without_generation(twin)[1]
+
+
+def test_a_call_adds_no_state_but_the_instructions_it_ran(
+    u575: popcorn.MachineDescription,
+) -> None:
+    m = usart_at(u575, ms(25))
+    twin = usart_at(u575, ms(25))
+    assert m.pending_events == 1
+    asyncio.run(m.call("HAL_GetTick"))
+    assert m.pending_events == 1
+    ran = m.instructions - twin.instructions
+    assert ran > 0
+    for _ in range(3):
+        called = bson(m.snapshot().to_bytes())
+        alone = bson(twin.snapshot().to_bytes())
+        for doc in (called, alone):
+            clock = doc["clock"]
+            assert isinstance(clock, dict)
+            now = cast(dict[str, object], clock).pop("now")
+            assert isinstance(now, dict)
+            doc["now"] = cast(dict[str, int], now)["value"]
+        assert called.pop("now") == cast(int, alone.pop("now")) + ran
+        assert called == alone
+        asyncio.run(m.run(for_=ms(5)))
+        asyncio.run(twin.run(for_=ms(5)))
+
+
+def test_a_format_4_snapshot_mid_reception_restores_and_runs_on(
+    u575: popcorn.MachineDescription,
+) -> None:
+    """The fixture is the lzma snapshot a format 4 build takes after this case's first half, up to
+    the 5 ms + 40 us run. It binds the U575 description digest: regenerate it when that changes."""
+    m = usart_at(u575, ms(0))
+    port = m.periph.USART1.port
+    start = m.time
+    port.write(b"alpha\r\n", at=start + ms(5))
+    asyncio.run(m.run(for_=ms(5) + us(40)))
+    saved = lzma.decompress(USART_RX_V4.read_bytes())
+    assert bson(saved)["format"] == 4
+    assert m.time.ps == 5_341_000_000
+    asyncio.run(port.read_frames(port.available))
+    asyncio.run(m.run(for_=ms(5)))
+    sent = asyncio.run(port.read_frames(port.available))
+
+    other = usart_at(u575, ms(0))
+    other.restore(popcorn.Snapshot.from_bytes(saved))
+    asyncio.run(other.run(for_=ms(5)))
+    other_port = other.periph.USART1.port
+    got = asyncio.run(other_port.read_frames(other_port.available))
+    assert [(f.data, f.at) for f in got] == [(f.data, f.at) for f in sent]
+    assert b"echo: alpha" in bytes(f.data for f in got)
+    assert without_generation(other)[1] == without_generation(m)[1]

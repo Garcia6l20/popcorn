@@ -16,7 +16,7 @@
 
 namespace popcorn::bind
 {
-uart_link::uart_link(
+uart_queue::uart_queue(
     periph::stm32::uart_port& port,
     detail::alive_flag        alive,
     detail::host_ref          host)
@@ -26,7 +26,7 @@ uart_link::uart_link(
   port.attach(endpoint_);
 }
 
-auto uart_link::port() const -> periph::stm32::uart_port&
+auto uart_queue::port() const -> periph::stm32::uart_port&
 {
   if(not detail::is_alive(alive_))
   {
@@ -44,14 +44,14 @@ auto frames_of(reflex::py::nb::bytes const& data) -> std::vector<std::uint16_t>
 }
 }
 
-void uart_link::send(reflex::py::nb::bytes const& data)
+void uart_queue::send(reflex::py::nb::bytes const& data)
 {
   auto const frames = frames_of(data);
   auto&      uart   = port();
   detail::host_access(host_, [&] { uart.receive(frames); });
 }
 
-auto uart_link::command_send(reflex::py::nb::bytes const& data) const -> access_op
+auto uart_queue::command_send(reflex::py::nb::bytes const& data) const -> access_op
 {
   std::ignore = port();
   auto link   = *this;
@@ -73,25 +73,25 @@ auto live_port(Port* port, detail::alive_flag const& alive, char const* what) ->
 }
 }
 
-auto uart_link::queued() const -> std::uint64_t
+auto uart_queue::queued() const -> std::uint64_t
 {
   auto& uart = port();
   return detail::host_access(host_, [&] { return uart.queued(); });
 }
 
-auto uart_link::op_queued() const -> access_op
+auto uart_queue::op_queued() const -> access_op
 {
   return detail::link_op(
       [uart = &port(), alive = alive_] { return live_port(uart, alive, "uart").queued(); });
 }
 
-auto uart_link::available() const -> std::uint64_t
+auto uart_queue::available() const -> std::uint64_t
 {
   return detail::link_locked(
       *endpoint_, [&](core::link_guard const& held) { return endpoint_->available(held); });
 }
 
-auto uart_link::peek(std::uint64_t start, std::uint64_t count) const -> reflex::py::nb::bytes
+auto uart_queue::peek(std::uint64_t start, std::uint64_t count) const -> reflex::py::nb::bytes
 {
   auto const copied = detail::link_locked(*endpoint_, [&](core::link_guard const& held) {
     return endpoint_->peek(held, start, count);
@@ -99,30 +99,30 @@ auto uart_link::peek(std::uint64_t start, std::uint64_t count) const -> reflex::
   return reflex::py::nb::bytes(copied.data(), copied.size());
 }
 
-auto uart_link::drain(std::uint64_t count) -> std::vector<uart_frame>
+auto uart_queue::drain(std::uint64_t count) -> std::vector<uart_frame>
 {
   return drain_until(count, std::numeric_limits<std::uint64_t>::max());
 }
 
-auto uart_link::drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>
+auto uart_queue::drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>
 {
   auto const taken = detail::link_locked(*endpoint_, [&](core::link_guard const& held) {
     return endpoint_->take(held, count, until_ps);
   });
   return taken
        | std::views::transform([](detail::queued_uart_frame const& frame) {
-           return uart_frame{.data = frame.data, .at_ps = frame.at_ps};
+           return uart_frame{.data = frame.data, .at_ps = frame.at_ps, .brk = frame.brk};
          })
        | std::ranges::to<std::vector>();
 }
 
-auto uart_link::dropped() const -> std::uint64_t
+auto uart_queue::dropped() const -> std::uint64_t
 {
   return detail::link_locked(
       *endpoint_, [&](core::link_guard const& held) { return endpoint_->dropped(held); });
 }
 
-void uart_link::set_frame_limit(std::uint64_t limit)
+void uart_queue::set_frame_limit(std::uint64_t limit)
 {
   if(limit == 0)
   {
@@ -132,9 +132,19 @@ void uart_link::set_frame_limit(std::uint64_t limit)
       *endpoint_, [&](core::link_guard const& held) { endpoint_->set_limit(held, limit); });
 }
 
-auto uart_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
+auto uart_queue::bridged_link() const -> std::unique_ptr<detail::pty_link>
 {
   return std::make_unique<detail::uart_pty_link>(port(), endpoint_);
+}
+
+auto uart_queue::native_port() const -> periph::stm32::uart_port&
+{
+  return port();
+}
+
+auto uart_queue::endpoint() const noexcept -> std::shared_ptr<detail::queue_endpoint> const&
+{
+  return endpoint_;
 }
 
 audio_link::audio_link(
@@ -328,14 +338,14 @@ auto machine_handle::uart_names() const -> std::vector<std::string>
   return names;
 }
 
-auto machine_handle::attach_uart(std::string const& peripheral) -> uart_link
+auto machine_handle::attach_uart(std::string const& peripheral) -> uart_queue
 {
   auto* const port = dynamic_cast<periph::stm32::uart_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
   }
-  return access([&](core::machine&) { return uart_link{*port, alive_, slot_}; });
+  return access([&](core::machine&) { return uart_queue{*port, alive_, slot_}; });
 }
 
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
@@ -485,7 +495,7 @@ auto machine_handle::op_adc_drive(
 {
   return detail::machine_op(adc_drive_body(analog(peripheral), channel, microvolts));
 }
-auto uart_link::predicate_available(std::uint64_t count) const -> native_predicate
+auto uart_queue::predicate_available(std::uint64_t count) const -> native_predicate
 {
   std::ignore = port();
   return native_predicate{
@@ -499,7 +509,7 @@ auto uart_link::predicate_available(std::uint64_t count) const -> native_predica
       .described("UART data");
 }
 
-auto uart_link::predicate_changed(count_mark const& mark) const -> native_predicate
+auto uart_queue::predicate_changed(count_mark const& mark) const -> native_predicate
 {
   std::ignore = port();
   return native_predicate{

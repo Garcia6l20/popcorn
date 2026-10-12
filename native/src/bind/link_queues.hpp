@@ -26,6 +26,8 @@ struct queued_uart_frame
   std::uint16_t data{};
   /** @brief Virtual time its stop bit ended, in picoseconds. */
   std::uint64_t at_ps{};
+  /** @brief Whether it was a break. */
+  bool brk{};
 };
 
 /**
@@ -48,11 +50,11 @@ public:
     return core::link_guard{mutex_, std::try_to_lock};
   }
 
-  void transmitted(std::uint16_t data, vtime at) override
+  void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
     auto const held = lock();
     trim(held, limit_ - 1);
-    frames_.push_back({.data = data, .at_ps = at.ps});
+    frames_.push_back({.data = data, .at_ps = at.ps, .brk = brk});
   }
 
   /** @brief Frames not drained yet. */

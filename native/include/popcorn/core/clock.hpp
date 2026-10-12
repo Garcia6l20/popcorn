@@ -132,6 +132,12 @@ public:
     return std::max(time_at(now()), state_.held_time);
   }
 
+  /** @brief Virtual time of the current epoch's start, the last rate change. */
+  [[nodiscard]] auto epoch_time() const noexcept -> vtime
+  {
+    return state_.epoch_time;
+  }
+
   /**
    * @brief Virtual time since the last power-on reset: time() plus the time run before every
    *        other kind of reset since. What a backup-domain device such as an RTC keeps counting

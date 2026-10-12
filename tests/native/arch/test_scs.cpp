@@ -397,10 +397,9 @@ TEST_CASE("the module state round trips through its saved bytes")
   std::vector<std::byte> second;
   f.module->save(second);
   auto const before = reflex::serde::bson::deserializer{first}.load<armv8m::state>();
-  auto       after  = reflex::serde::bson::deserializer{second}.load<armv8m::state>();
-  CHECK(after.systick.generation_floor == before.systick.generation_floor + 1);
-  after.systick.generation_floor = before.systick.generation_floor;
+  auto const after  = reflex::serde::bson::deserializer{second}.load<armv8m::state>();
   CHECK(after == before);
+  CHECK(second == first);
   CHECK(f.target->mem().read(0xE000'1020, 4) == 0x2000'1234u);
   CHECK(f.target->mem().read(0xE000'1038, 4) == 0x0000'0005u);
   CHECK(

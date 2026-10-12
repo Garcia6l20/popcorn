@@ -1,9 +1,11 @@
+#include "debug_freeze.hpp"
 #include "factories.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/core_hold.hpp>
 
 #include <algorithm>
 #include <array>
@@ -52,6 +54,8 @@ struct iwdg_state
   std::uint8_t                                      unlocked{};
   std::uint8_t                                      bitten{};
   std::uint8_t                                      waiting{};
+  std::uint8_t                                      held{};
+  std::uint64_t                                     held_ps{};
 
   friend auto operator==(iwdg_state const&, iwdg_state const&) -> bool = default;
 };
@@ -72,10 +76,16 @@ struct iwdg_state
  *        new prescaler restarts the division sequence when PVU falls, an error under one period
  *        of the old prescaled clock, a refresh reloads at the key write instead of one period
  *        later, and EWIC acknowledges without the 0x5555 key, as LL_IWDG_ClearFlag_EWIF expects.
- *        Once started it runs until reset. Not modelled: the hardware watchdog option, the debug
- *        freeze.
+ *        Once started it runs until reset. While the machine holds its core with DBGMCU
+ *        `DBG_IWDG_STOP` set, the counter, the early wake-up and the register update
+ *        synchronisers stop at the time of the hold and resume at the release, their phase kept
+ *        to the picosecond. RM0456 says only "IWDG is frozen while CPU is in debug mode": that
+ *        the update synchronisers stop with the counter is an assumption. The bit is read at the
+ *        hold. Not modelled: the hardware watchdog option.
  */
-class iwdg final : public dispatch_model<iwdg, iwdg_state>, public clock_listener
+class iwdg final : public dispatch_model<iwdg, iwdg_state>,
+                   public clock_listener,
+                   public core_hold_listener
 {
 public:
   iwdg(model_context& ctx, peripheral_desc const& desc);
@@ -83,6 +93,7 @@ public:
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_clock_change() override;
+  void on_core_hold(bool held) override;
 
   void                                key_written(std::uint32_t old, std::uint32_t now);
   template <update_index Update> void guarded_written(std::uint32_t old, std::uint32_t now);
@@ -122,6 +133,7 @@ private:
   reg_ref                  early_register_;
   core::clock_domain       lsi_;
   irq_line&                line_;
+  bool                     freeze_logged_ = false;
 };
 
 constexpr std::array<write_entry<iwdg>, 6> iwdg_writes{
@@ -146,7 +158,7 @@ iwdg::iwdg(model_context& ctx, peripheral_desc const& desc)
 
 auto iwdg::now_ps() const -> std::uint64_t
 {
-  return ctx_.clock.time().ps;
+  return state_.held != 0 ? state_.held_ps : ctx_.clock.time().ps;
 }
 
 auto iwdg::divider() const -> std::uint32_t
@@ -194,6 +206,10 @@ void iwdg::schedule_at_tick(std::uint32_t kind, std::uint64_t ticks)
 void iwdg::post(std::uint32_t kind, std::uint64_t due)
 {
   withdraw(kind);
+  if(state_.held != 0)
+  {
+    return;
+  }
   state_.queued[kind] =
       ctx_.events.schedule_at(vtime{due}, kind, ++state_.generation[kind], ctx_.clock) + 1;
 }
@@ -453,6 +469,46 @@ void iwdg::on_clock_change()
     rebase(now_ps(), hz);
     reschedule();
   }
+}
+
+void iwdg::on_core_hold(bool held)
+{
+  if(held)
+  {
+    if(not debug_frozen(freeze_logged_) or state_.held != 0)
+    {
+      return;
+    }
+    state_.held_ps = ctx_.clock.time().ps;
+    state_.held    = 1;
+    for(std::uint32_t kind = 0; kind < state_.generation.size(); ++kind)
+    {
+      withdraw(kind);
+      ++state_.generation[kind];
+    }
+    return;
+  }
+  if(state_.held == 0)
+  {
+    return;
+  }
+  auto const span = ctx_.clock.time().ps - state_.held_ps;
+  state_.held     = 0;
+  state_.held_ps  = 0;
+  state_.anchor_ps += span;
+  for(std::size_t which = 0; which < updates; ++which)
+  {
+    if((state_.waiting >> which & 1u) == 0)
+    {
+      continue;
+    }
+    if(state_.update_due[which] != 0)
+    {
+      state_.update_due[which] += span;
+    }
+    schedule_update(which);
+  }
+  reschedule();
 }
 }
 

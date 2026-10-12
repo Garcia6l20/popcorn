@@ -1553,6 +1553,8 @@ struct tim_state_fields
   std::uint8_t                 down{};
   std::uint8_t                 scheduled{};
   std::uint8_t                 gate{};
+  std::uint8_t                 held{};
+  std::uint64_t                held_ps{};
 };
 
 struct tim_state_without_edges
@@ -2173,4 +2175,458 @@ TEST_CASE("DBL 11010 runs 26 transfers, reserved DBL values run 26 and log once"
     b.cpu(0x0000'4848);
     CHECK(b.reg("CCMR1_Output") == 0x4848);
   }
+}
+
+namespace
+{
+constexpr std::uint64_t tim1_tick = 250'000;
+
+struct held_tim
+{
+  direct        d;
+  std::uint64_t slice;
+
+  explicit held_tim(
+      std::uint64_t         instructions,
+      core::machine_options options = popcorn::testing::stm32_options())
+      : d{std::move(options)}, slice{instructions}
+  {}
+
+  void to(std::uint64_t ticks) const
+  {
+    auto const until = vtime{d.start + ticks * tim1_tick};
+    for(;;)
+    {
+      auto const result = d.f.run(
+          {.max_instructions = icount{slice},
+           .wall_budget      = std::chrono::seconds{60},
+           .until_time       = until});
+      if(result.stopped)
+      {
+        REQUIRE(result.stopped->reason == stop_reason::time);
+        return;
+      }
+    }
+  }
+
+  [[nodiscard]] auto block() const -> std::vector<std::uint32_t>
+  {
+    auto const&                regs = d.f.target->peripheral("TIM1");
+    std::vector<std::uint32_t> out;
+    for(std::uint32_t offset = 0; offset < regs.description().size; offset += 4)
+    {
+      out.push_back(regs.peek(offset));
+    }
+    return out;
+  }
+};
+}
+
+TEST_CASE("with DBG_TIM1_STOP a held TIM1 keeps its count and resumes on its phase")
+{
+  auto const run = [](std::uint64_t instructions) {
+    held_tim t{instructions};
+    t.d.begin();
+    t.to(1000);
+    CHECK(t.d.count() == 1000);
+    popcorn::testing::set_debug_freeze(t.d.f, "DBG_TIM1_STOP", true);
+    t.d.f.target->hold_core(true);
+    t.to(6000);
+    CHECK(t.d.count() == 1000);
+    t.d.f.target->hold_core(false);
+    t.to(7000);
+    CHECK(t.d.count() == 2000);
+    return t.block();
+  };
+  CHECK(run(997) == run(1'000'000'000));
+}
+
+TEST_CASE("without DBG_TIM1_STOP a held TIM1 counts on")
+{
+  held_tim t{1'000'000'000};
+  t.d.begin();
+  t.to(1000);
+  t.d.f.target->hold_core(true);
+  t.to(6000);
+  CHECK(t.d.count() == 6000);
+}
+
+TEST_CASE("a TIM1 hold released at once mid-prescale leaves the counter as never held")
+{
+  auto const run = [](bool hold) {
+    held_tim t{1'000'000'000};
+    t.d.b.write("TIM1", "TIM1_PSC", 7);
+    t.d.b.write("TIM1", "TIM1_ARR", 99);
+    t.d.begin();
+    popcorn::testing::set_debug_freeze(t.d.f, "DBG_TIM1_STOP", true);
+    t.to(1003);
+    if(hold)
+    {
+      t.d.f.target->hold_core(true);
+      t.d.f.target->hold_core(false);
+    }
+    std::vector<std::uint32_t> seen;
+    for(std::uint64_t ticks = 1004; ticks < 2600; ticks += 7)
+    {
+      t.to(ticks);
+      seen.push_back(t.d.count());
+      seen.push_back(t.d.flag("UIF"));
+    }
+    return seen;
+  };
+  CHECK(run(true) == run(false));
+}
+
+TEST_CASE("a core clock change and back during a frozen hold keeps the TIM1 phase")
+{
+  held_tim t{1'000'000'000};
+  t.d.b.write("TIM1", "TIM1_PSC", 7);
+  t.d.begin();
+  popcorn::testing::set_debug_freeze(t.d.f, "DBG_TIM1_STOP", true);
+  t.to(1003);
+  t.d.f.target->hold_core(true);
+  t.to(2000);
+  auto const icscr1 = t.d.b.read("RCC", "RCC_ICSCR1");
+  t.d.b.write("RCC", "RCC_ICSCR1", (icscr1 & ~(0xFu << 28)) | (1u << 28) | (1u << 23));
+  t.to(3000);
+  t.d.b.write("RCC", "RCC_ICSCR1", icscr1 | (1u << 23));
+  t.to(4000);
+  t.d.f.target->hold_core(false);
+  t.to(4000 + 9000 - 1003);
+
+  held_tim twin{1'000'000'000};
+  twin.d.b.write("TIM1", "TIM1_PSC", 7);
+  twin.d.begin();
+  twin.to(9000);
+  CHECK(t.d.count() == twin.d.count());
+  CHECK(t.d.flag("UIF") == twin.d.flag("UIF"));
+}
+
+TEST_CASE("a frozen TIM1 restores frozen into another machine and resumes as the original")
+{
+  held_tim t{1'000'000'000};
+  t.d.begin();
+  popcorn::testing::set_debug_freeze(t.d.f, "DBG_TIM1_STOP", true);
+  t.to(1000);
+  t.d.f.target->hold_core(true);
+  t.to(3000);
+  auto const bytes = core::encode_snapshot(t.d.f.target->snapshot().data());
+  t.d.f.target->hold_core(false);
+  t.to(5000);
+
+  held_tim other{1'000'000'000};
+  other.d.f.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  other.d.start = t.d.start;
+  CHECK(other.d.f.target->core_held());
+  CHECK(other.d.count() == 1000);
+  other.d.f.target->hold_core(false);
+  other.to(5000);
+  CHECK(other.d.count() == t.d.count());
+  CHECK(other.d.count() == 3000);
+}
+
+TEST_CASE("a TIM1 hold with no freeze field to read warns once and the timer counts on")
+{
+  auto desc = popcorn::testing::u575();
+  auto dbg  = std::ranges::find(
+      desc.peripherals, std::string_view{"DBGMCU"}, &popcorn::peripheral_desc::name);
+  REQUIRE(dbg != desc.peripherals.end());
+  for(auto& reg : dbg->registers)
+  {
+    std::erase_if(
+        reg.fields, [](popcorn::field_desc const& field) { return field.name == "DBG_TIM1_STOP"; });
+  }
+  stm32_fixture f{desc, "tim_ll", popcorn::testing::stm32_options()};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("tim_ll", "main")})
+          .reason
+      == stop_reason::address);
+  f.set("pc", sym("tim_ll", "idle"));
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  bus b{f};
+  b.set("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+  b.write("TIM1", "TIM1_EGR", 1);
+  b.set("TIM1", "TIM1_CR1", "CEN", 1);
+  f.target->hold_core(true);
+  f.target->hold_core(false);
+  f.target->hold_core(true);
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{1'000'000'000},
+                     .until_time = vtime{f.target->virtual_clock().time().ps + 1000 * tim1_tick}})
+          .reason
+      == stop_reason::time);
+  CHECK((b.read("TIM1", "TIM1_CNT") & 0xffffu) >= 1000);
+  auto const warnings = std::ranges::count_if(logged, [](core::log_record const& record) {
+    return record.kind == core::log_kind::model_warning and record.peripheral == "TIM1";
+  });
+  CHECK(warnings == 1);
+}
+
+TEST_CASE("a frozen TIM1 with updates due during the hold takes none until the release")
+{
+  held_tim t{1'000'000'000};
+  t.d.b.write("TIM1", "TIM1_ARR", 99);
+  t.d.begin();
+  popcorn::testing::set_debug_freeze(t.d.f, "DBG_TIM1_STOP", true);
+  t.to(1050);
+  t.d.b.write("TIM1", "TIM1_SR", 0);
+  t.d.f.target->hold_core(true);
+  t.to(3050);
+  CHECK(t.d.count() == 50);
+  t.to(6050);
+  CHECK(t.d.flag("UIF") == 0);
+  CHECK(t.d.count() == 50);
+  t.d.f.target->hold_core(false);
+  t.to(6099);
+  CHECK(t.d.flag("UIF") == 0);
+  t.to(6100);
+  CHECK(t.d.flag("UIF") == 1);
+  CHECK(t.d.count() == 0);
+}
+
+TEST_CASE("an update held at a barrier when the core is held raises its DMA request at the hold")
+{
+  direct      t{with_recorder()};
+  auto* const dma = t.f.model_of<recorder>("GPDMA1");
+  REQUIRE(dma != nullptr);
+  t.b.write("TIM1", "TIM1_ARR", 9);
+  t.begin();
+  t.b.write("TIM1", "TIM1_DIER", 1u << 8);
+  popcorn::testing::set_debug_freeze(t.f, "DBG_TIM1_STOP", true);
+  auto const h      = vtime{t.start + 10 * tim1_tick};
+  auto const result = t.f.run(
+      {.max_instructions = icount{1'000'000'000},
+       .wall_budget      = std::chrono::seconds{60},
+       .until_time       = h,
+       .hold_from_until  = true});
+  REQUIRE(result.stopped.has_value());
+  REQUIRE(result.stopped->reason == stop_reason::time);
+  CHECK(dma->levels.empty());
+  t.f.target->hold_core(true);
+  CHECK(
+      dma->levels
+      == std::vector<std::pair<std::uint32_t, bool>>{
+          {2, true}
+  });
+}
+
+TEST_CASE("a hold on a machine without DBGMCU warns once for the machine, not per model")
+{
+  auto desc = popcorn::testing::u575();
+  std::erase_if(
+      desc.peripherals, [](popcorn::peripheral_desc const& unit) { return unit.name == "DBGMCU"; });
+  stm32_fixture f{desc, "tim_ll", popcorn::testing::stm32_options()};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("tim_ll", "main")})
+          .reason
+      == stop_reason::address);
+  f.set("pc", sym("tim_ll", "idle"));
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  bus b{f};
+  b.set("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+  b.set("RCC", "RCC_APB1ENR1", "TIM2EN", 1);
+  b.write("TIM1", "TIM1_EGR", 1);
+  b.set("TIM1", "TIM1_CR1", "CEN", 1);
+  b.write("TIM2", "EGR", 1);
+  b.set("TIM2", "CR1", "CEN", 1);
+  b.write("IWDG", "KR", 0xCCCC);
+  f.target->hold_core(true);
+  f.target->hold_core(false);
+  f.target->hold_core(true);
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{1'000'000'000},
+                     .until_time = vtime{f.target->virtual_clock().time().ps + 1000 * tim1_tick}})
+          .reason
+      == stop_reason::time);
+  CHECK((b.read("TIM1", "TIM1_CNT") & 0xffffu) >= 1000);
+  auto const warnings = std::ranges::count_if(logged, [](core::log_record const& record) {
+    return record.kind == core::log_kind::model_warning and record.message.contains("no DBGMCU");
+  });
+  CHECK(warnings == 1);
+  CHECK(
+      std::ranges::count_if(
+          logged,
+          [](core::log_record const& record) {
+            return record.kind == core::log_kind::model_warning;
+          })
+      == 1);
+}
+
+TEST_CASE("slave edges reaching a frozen TIM3 apply at the time of the hold")
+{
+  auto const hold = [](slaves& t, std::uint64_t from, std::uint64_t to) {
+    t.at(from);
+    popcorn::testing::set_debug_freeze(t.f, "DBG_TIM3_STOP", true);
+    t.f.target->hold_core(true);
+    t.at(to);
+    t.f.target->hold_core(false);
+  };
+  SUBCASE("reset mode")
+  {
+    slaves t;
+    t.base("TIM1", 0, 9);
+    t.master("TIM1", master_update);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_reset, ts_itr0));
+    t.enable("TIM3");
+    t.enable("TIM1");
+    t.at(103);
+    CHECK(t.count("TIM3") == 3);
+    hold(t, 103, 147);
+    CHECK(t.count("TIM3") == 0);
+    t.at(149);
+    CHECK(t.count("TIM3") == 2);
+  }
+  SUBCASE("trigger mode")
+  {
+    slaves t;
+    t.base("TIM1", 0, 9);
+    t.master("TIM1", master_update);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_trigger, ts_itr0));
+    t.enable("TIM1");
+    hold(t, 5, 47);
+    CHECK(t.bits("TIM3", "CR1", "CEN") == 1);
+    CHECK(t.count("TIM3") == 0);
+    t.at(49);
+    CHECK(t.count("TIM3") == 2);
+  }
+  SUBCASE("external clock mode 1")
+  {
+    slaves t;
+    t.base("TIM1", 0, 9);
+    t.master("TIM1", master_update);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
+    t.enable("TIM3");
+    t.enable("TIM1");
+    hold(t, 103, 147);
+    CHECK(t.count("TIM3") == 14);
+    t.at(149);
+    CHECK(t.count("TIM3") == 14);
+    t.at(155);
+    CHECK(t.count("TIM3") == 15);
+  }
+  SUBCASE("gated mode")
+  {
+    slaves t;
+    t.base("TIM1", 0, 0xffff);
+    t.master("TIM1", master_enable);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+    t.enable("TIM3");
+    t.at(100);
+    popcorn::testing::set_debug_freeze(t.f, "DBG_TIM3_STOP", true);
+    t.f.target->hold_core(true);
+    t.at(120);
+    t.enable("TIM1");
+    t.at(147);
+    CHECK(t.count("TIM3") == 0);
+    t.f.target->hold_core(false);
+    t.at(150);
+    CHECK(t.count("TIM3") == 3);
+  }
+}
+
+TEST_CASE("a frozen reset slave dates its TRGO at the current time for a sink that runs on")
+{
+  slaves t;
+  t.base("TIM1", 0, 9);
+  t.master("TIM1", master_update);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_reset, ts_itr0));
+  t.master("TIM3", master_update);
+  t.base("TIM4", 0, 0xffff);
+  t.write("TIM4", "SMCR", smcr(sms_reset, ts_itr2));
+  t.enable("TIM4");
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.at(103);
+  CHECK(t.count("TIM4") == 3);
+  popcorn::testing::set_debug_freeze(t.f, "DBG_TIM3_STOP", true);
+  t.f.target->hold_core(true);
+  t.at(147);
+  CHECK(t.count("TIM3") == 0);
+  CHECK(t.count("TIM4") == 7);
+  t.f.target->hold_core(false);
+  t.at(149);
+  CHECK(t.count("TIM3") == 2);
+  CHECK(t.count("TIM4") == 9);
+}
+
+TEST_CASE(
+    "a frozen TIM3 switched to MMS 001 during the hold opens a running gated sink at the write")
+{
+  slaves t;
+  t.base("TIM3", 0, 0xffff);
+  t.base("TIM4", 0, 0xffff);
+  t.write("TIM4", "SMCR", smcr(sms_gated, ts_itr2));
+  t.enable("TIM4");
+  t.enable("TIM3");
+  t.at(100);
+  CHECK(t.count("TIM4") == 0);
+  popcorn::testing::set_debug_freeze(t.f, "DBG_TIM3_STOP", true);
+  t.f.target->hold_core(true);
+  t.at(120);
+  t.master("TIM3", master_enable);
+  t.at(147);
+  CHECK(t.count("TIM3") == 100);
+  CHECK(t.count("TIM4") == 27);
+  t.f.target->hold_core(false);
+}
+
+TEST_CASE("a frozen TIM5 burst is finished by a GPDMA channel that runs on, then resumes on phase")
+{
+  constexpr popcorn::address words = 0x2001'0000;
+  auto const                 setup = [&](slaves& t) {
+    t.b.set("RCC", "RCC_AHB1ENR", "GPDMA1EN", 1);
+    for(std::uint32_t index = 0; index < 9; ++index)
+    {
+      REQUIRE(t.f.target->mem().write(words + 4 * index, 4, index + 1));
+    }
+    auto* const controller = dynamic_cast<stm32::dma_controller*>(t.f.target->model("GPDMA1"));
+    REQUIRE(controller != nullptr);
+    auto const request = controller->request_of("tim5_upd_dma");
+    REQUIRE(request.has_value());
+    t.b.set("GPDMA1", "GPDMA_C0TR1", "SDW_LOG2", 2);
+    t.b.set("GPDMA1", "GPDMA_C0TR1", "DDW_LOG2", 2);
+    t.b.set("GPDMA1", "GPDMA_C0TR1", "SINC", 1);
+    t.b.set("GPDMA1", "GPDMA_C0TR2", "REQSEL", *request);
+    t.b.write("GPDMA1", "GPDMA_C0BR1", 36);
+    t.b.write("GPDMA1", "GPDMA_C0SAR", static_cast<std::uint32_t>(words));
+    t.b.write("GPDMA1", "GPDMA_C0DAR", static_cast<std::uint32_t>(t.b.at("TIM5", "DMAR")));
+    t.b.set("GPDMA1", "GPDMA_C0CR", "EN", 1);
+    t.base("TIM5", 0, 99);
+    t.write("TIM5", "DCR", dcr(13, 3, dbss_update));
+    t.write("TIM5", "DIER", 1u << 8);
+    t.enable("TIM5");
+  };
+  auto const seen = [](slaves const& t) {
+    return std::vector<std::uint32_t>{
+        t.count("TIM5"), t.read("TIM5", "CCR1"), t.read("TIM5", "CCR2"), t.read("TIM5", "CCR3"),
+        t.b.bits("GPDMA1", "GPDMA_C0BR1", "BNDT")};
+  };
+  slaves twin;
+  setup(twin);
+  slaves t;
+  setup(t);
+  t.at(105);
+  REQUIRE(seen(t)[1] == 1);
+  REQUIRE(seen(t)[3] == 0);
+  popcorn::testing::set_debug_freeze(t.f, "DBG_TIM5_STOP", true);
+  t.f.target->hold_core(true);
+  t.at(505);
+  CHECK(seen(t) == std::vector<std::uint32_t>{5, 1, 2, 3, 24});
+  t.f.target->hold_core(false);
+  for(std::uint64_t tick : {550u, 615u, 705u, 815u})
+  {
+    t.at(tick);
+    twin.at(tick - 400);
+    CHECK(seen(t) == seen(twin));
+  }
+  CHECK(seen(t) == std::vector<std::uint32_t>{15, 7, 8, 9, 0});
 }

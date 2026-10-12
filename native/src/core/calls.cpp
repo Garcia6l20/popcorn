@@ -70,6 +70,10 @@ void machine::begin_call(arch::call_frame const& frame)
   {
     throw machine_busy("a call is already in progress");
   }
+  if(run_->core_held)
+  {
+    throw machine_busy("the core is held");
+  }
   saved_call saved{.frame = frame, .registers = read_registers(engine_.get(), arch_->registers())};
   arch_->save(saved.arch_state);
   arch_->prepare_call(frame);

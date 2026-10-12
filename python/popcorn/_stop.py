@@ -40,7 +40,8 @@ class Stop:
         reason: Why it stopped.
         pc: Address of the next instruction to execute.
         location: Symbol, offset, file and line of pc.
-        instructions: Instructions executed since reset.
+        instructions: Instructions executed since reset. A sleeping core's time counts one per
+            core clock cycle, and so does a linked member's halted time.
         time: Virtual time since reset.
         fault: The fault, set exactly when reason is FAULT.
         detail: What caused the stop beyond its reason, such as the loop of a SPIN.

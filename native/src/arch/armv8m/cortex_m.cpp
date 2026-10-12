@@ -430,7 +430,6 @@ void cortex_m::load(std::span<std::byte const> in)
   auto live = state_;
   state_    = reflex::serde::bson::deserializer{in}.load<state>();
   set_context(engine_handle(), state_.special, stack_limits());
-  generation_ = std::max(generation_, state_.systick.generation_floor) + 1;
   if(in_call_)
   {
     in_call_ = false;
@@ -454,7 +453,10 @@ void cortex_m::load(std::span<std::byte const> in)
       }
     }
   }
-  arm_systick();
+  else
+  {
+    generation_ = state_.systick.generation_floor;
+  }
   refresh_pending();
 }
 

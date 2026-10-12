@@ -9,10 +9,14 @@
 
 #include <doctest/doctest.h>
 
+#include <reflex/serde/bson.hpp>
+
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -807,4 +811,126 @@ TEST_CASE("a tickless idle loses only the uncompensated reload edges against vir
       CHECK(drift <= static_cast<std::int64_t>(tickless_idle::seconds));
     }
   }
+}
+
+namespace
+{
+constexpr address       demcr      = 0xE000'EDFC;
+constexpr address       dwt_ctrl   = 0xE000'1000;
+constexpr address       dwt_cyccnt = 0xE000'1004;
+constexpr std::uint64_t held_span  = 20'000;
+
+auto counting_sleeper() -> arch_fixture
+{
+  auto f = sleeping();
+  put(f, demcr, get(f, demcr) | 1u << 24);
+  put(f, dwt_ctrl, get(f, dwt_ctrl) | 1u);
+  return f;
+}
+
+auto saved_state(arch_fixture const& f) -> popcorn::arch::armv8m::state
+{
+  std::vector<std::byte> bytes;
+  f.module->save(bytes);
+  return reflex::serde::bson::deserializer{bytes}.load<popcorn::arch::armv8m::state>();
+}
+
+auto last_ticks(arch_fixture const& f, std::size_t count) -> std::vector<std::uint64_t>
+{
+  auto const entries = tick_entries(f);
+  REQUIRE(entries.size() >= count);
+  return {entries.end() - static_cast<std::ptrdiff_t>(count), entries.end()};
+}
+}
+
+TEST_CASE("a held core keeps SysTick and CYCCNT, then ticks on its phase shifted by the hold")
+{
+  auto       f     = counting_sleeper();
+  auto       twin  = counting_sleeper();
+  auto const held  = now(f);
+  auto const cvr   = get(f, syst_cvr);
+  auto const cyc   = get(f, dwt_cyccnt);
+  auto const count = ticks(f);
+  f.target->hold_core(true);
+  CHECK(saved_state(f).held_at == held);
+  auto const span = run_to_instruction(f, held + held_span);
+  CHECK(span.executed.value == 0);
+  CHECK(get(f, syst_cvr) == cvr);
+  CHECK(get(f, dwt_cyccnt) == cyc);
+  CHECK(ticks(f) == count);
+  f.target->hold_core(false);
+  CHECK_FALSE(saved_state(f).held_at.has_value());
+  run_to_instruction(f, held + held_span + 3 * period + period / 2);
+  run_to_instruction(twin, held + 3 * period + period / 2);
+  CHECK(ticks(f) == ticks(twin));
+  CHECK(get(f, syst_cvr) == get(twin, syst_cvr));
+  CHECK(get(f, dwt_cyccnt) == get(twin, dwt_cyccnt));
+  auto shifted = last_ticks(twin, 3);
+  for(auto& at : shifted)
+  {
+    at += held_span;
+  }
+  CHECK(last_ticks(f, 3) == shifted);
+}
+
+TEST_CASE("a SysTick pended while the core is held is taken at the release, not during the hold")
+{
+  auto       f     = sleeping();
+  auto const held  = now(f);
+  auto const count = ticks(f);
+  f.target->hold_core(true);
+  put(f, icsr, pendstset);
+  run_to_instruction(f, held + held_span);
+  CHECK(ticks(f) == count);
+  f.target->hold_core(false);
+  run_to_instruction(f, held + held_span + 10);
+  CHECK(ticks(f) == count + 1);
+  CHECK(last_ticks(f, 1) == std::vector<std::uint64_t>{held + held_span});
+}
+
+TEST_CASE("a hold released with no time between leaves SysTick and the core as never held")
+{
+  auto       f    = counting_sleeper();
+  auto       twin = counting_sleeper();
+  auto const held = now(f);
+  f.target->hold_core(true);
+  f.target->hold_core(false);
+  run_to_instruction(f, held + 3 * period + period / 2);
+  run_to_instruction(twin, held + 3 * period + period / 2);
+  CHECK(last_ticks(f, 3) == last_ticks(twin, 3));
+  CHECK(get(f, syst_cvr) == get(twin, syst_cvr));
+  CHECK(get(f, dwt_cyccnt) == get(twin, dwt_cyccnt));
+  CHECK(f.reg("pc") == twin.reg("pc"));
+  CHECK(f.reg("sp") == twin.reg("sp"));
+}
+
+TEST_CASE("a reset of a held core freezes SysTick again from the reset")
+{
+  auto f = sleeping();
+  f.target->hold_core(true);
+  f.target->reset();
+  CHECK(f.target->core_held());
+  CHECK(saved_state(f).held_at == std::optional<std::uint64_t>{0});
+}
+
+TEST_CASE("a held core restored from its saved form into another machine stays held and frozen")
+{
+  auto       f    = counting_sleeper();
+  auto       twin = counting_sleeper();
+  auto const held = now(f);
+  f.target->hold_core(true);
+  run_to_instruction(f, held + held_span / 2);
+  auto const bytes = core::encode_snapshot(f.target->snapshot().data());
+
+  auto other = booted();
+  other.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(other.target->core_held());
+  CHECK(saved_state(other).held_at == held);
+  run_to_instruction(other, held + held_span);
+  other.target->hold_core(false);
+  run_to_instruction(other, held + held_span + 3 * period + period / 2);
+  run_to_instruction(twin, held + 3 * period + period / 2);
+  CHECK(ticks(other) == ticks(twin));
+  CHECK(get(other, dwt_cyccnt) == get(twin, dwt_cyccnt));
+  CHECK(get(other, syst_cvr) == get(twin, syst_cvr));
 }

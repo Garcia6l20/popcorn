@@ -52,6 +52,7 @@ public:
   auto               on_unmapped(address addr, memory_op op) -> trap_result override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto idle() const -> bool override;
+  void               hold_core(bool held) override;
   [[nodiscard]] auto pc() const -> address override;
   [[nodiscard]] auto instructions_between(address from, address to) const
       -> std::optional<std::uint32_t> override;
@@ -119,6 +120,7 @@ private:
       std::uint64_t value,
       void*         user) noexcept;
 
+  [[nodiscard]] auto timer_now() const -> std::uint64_t;
   [[nodiscard]] auto systick_ticks() const -> std::uint64_t;
   auto               read_systick(std::uint32_t offset) -> std::uint32_t;
   void               write_systick(std::uint32_t offset, std::uint32_t value, std::uint32_t mask);

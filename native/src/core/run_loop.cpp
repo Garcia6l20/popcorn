@@ -4,12 +4,14 @@
 #include "handler_scope.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/core_hold.hpp>
 
 #include <reflex/enum.hpp>
 
 #include <algorithm>
 #include <format>
 #include <limits>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <tuple>
@@ -26,6 +28,24 @@ auto add_sat(icount now, std::uint64_t count) noexcept -> icount
 {
   constexpr auto most = std::numeric_limits<std::uint64_t>::max();
   return icount{count > most - now.value ? most : now.value + count};
+}
+
+auto hold_limit(vtime until, clock const& time) -> std::optional<icount>
+{
+  auto const from  = vtime{std::max(until.ps, time.epoch_time().ps)};
+  auto const first = time.to_icount(from).value;
+  if(first == 0)
+  {
+    return std::nullopt;
+  }
+  return icount{first - 1};
+}
+
+auto internal_end(slice_request const& request, stop const& stopped) noexcept -> bool
+{
+  return request.internal_stop
+     and (stopped.reason == stop_reason::time
+          or (request.stop_quiescent and stopped.reason == stop_reason::idle));
 }
 
 auto left(icount bound, icount done) noexcept -> std::uint64_t
@@ -161,6 +181,7 @@ void machine::run_state::install_hooks()
 void machine::run_state::reset_machine(reset_kind kind)
 {
   owner.scheduler_.restore({}, 0);
+  held_through.reset();
   auto fresh            = owner.clock_driver_.state();
   fresh.before_reset_ps = kind == reset_kind::power_on ? 0 : owner.clock_.since_power_on().ps;
   fresh.now             = {};
@@ -211,6 +232,25 @@ void machine::run_state::reset_machine(reset_kind kind)
   owner.trace_.rebase(icount{0});
   rebase_sinks(icount{0});
   ++resets;
+  if(core_held)
+  {
+    notify_core_hold(true);
+  }
+}
+
+void machine::run_state::notify_core_hold(bool held)
+{
+  owner.arch_->hold_core(held);
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot)
+    {
+      if(auto* const listener = dynamic_cast<periph::core_hold_listener*>(slot->model.get()))
+      {
+        listener->on_core_hold(held);
+      }
+    }
+  }
 }
 
 void machine::run_state::code_changed(
@@ -626,7 +666,19 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
 auto machine::run_state::dispatch_due(slice_request const& request) -> std::optional<slice_end>
 {
   std::uint32_t countdown = wall_check_blocks;
-  while(auto const due = owner.scheduler_.pop_due(owner.clock_driver_.exact_now()))
+  auto          limit     = owner.clock_driver_.exact_now();
+  auto          holding   = false;
+  if(request.hold_from_until and request.until_time)
+  {
+    auto const held = hold_limit(*request.until_time, owner.clock_);
+    if(not held)
+    {
+      return std::nullopt;
+    }
+    holding = *held < limit;
+    limit   = std::min(limit, *held);
+  }
+  while(auto const due = owner.scheduler_.pop_due(limit))
   {
     if(due->id.owner == arch::arch_event_owner)
     {
@@ -661,6 +713,10 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
         return slice_end{};
       }
     }
+  }
+  if(not holding)
+  {
+    held_through.reset();
   }
   return std::nullopt;
 }
@@ -700,6 +756,11 @@ auto machine::run_state::idle_jump(slice_request const& request) -> std::optiona
   {
     return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
   }
+  if(request.stop_quiescent
+     and (not next or (request.until_time and *next >= owner.clock_.to_icount(*request.until_time))))
+  {
+    return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
+  }
   auto const now = owner.clock_driver_.exact_now();
   auto target = add_sat(now, left(request.max_instructions, icount{executed.value + jumped.value}));
   if(next)
@@ -725,6 +786,7 @@ auto machine::run_state::exit_list(slice_request const& request) const -> std::v
   {
     list.push_back(*request.until);
   }
+  list.append_range(request.until_also);
   if(call)
   {
     list.push_back(call->frame.return_sentinel);
@@ -732,15 +794,27 @@ auto machine::run_state::exit_list(slice_request const& request) const -> std::v
   return list;
 }
 
+auto machine::run_state::at_until(slice_request const& request, address pc) -> bool
+{
+  return request.until == pc or std::ranges::contains(request.until_also, pc);
+}
+
 auto machine::run_state::leaving_until(slice_request const& request) const -> bool
 {
-  return request.leave_until and executed.value == 0;
+  if(not request.leave_until
+     or executed.value != 0
+     or (not request.until and request.until_also.empty()))
+  {
+    return false;
+  }
+  auto const pc = arch->pc();
+  return at_until(request, pc) and not std::ranges::contains(request.arrive_at, pc);
 }
 
 void machine::run_state::step_off_until(slice_request const& request)
 {
   auto list = exit_list(request);
-  list.erase(std::ranges::find(list, *request.until));
+  list.erase(std::ranges::find(list, arch->pc()));
   set_exits(std::move(list));
   deadline = std::min(deadline, add_sat(owner.clock_driver_.exact_now(), 1));
 }
@@ -768,7 +842,9 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
   {
     return slice_end{make_stop(stop_reason::time, {}, std::nullopt)};
   }
-  if(request.until and owner.arch_->pc() == *request.until and not leaving_until(request))
+  if((request.until or not request.until_also.empty())
+     and at_until(request, owner.arch_->pc())
+     and not leaving_until(request))
   {
     return slice_end{make_stop(stop_reason::address, {}, std::nullopt)};
   }
@@ -879,12 +955,21 @@ auto machine::run_state::finish(slice_request const& request, slice_end end) -> 
   {
     end.stopped = make_stop(stop_reason::time, {}, std::nullopt);
   }
-  if(not end.stopped and request.stop_when and asks_stop(request))
+  if(not end.stopped
+     and request.stop_when
+     and not request.stop_when_events_only
+     and asks_stop(request))
   {
     end.stopped = make_stop(stop_reason::user, {}, std::nullopt);
     end.asked   = true;
   }
-  if(end.stopped and not(request.internal_stop and end.stopped->reason == stop_reason::time))
+  if(request.hold_from_until
+     and request.until_time
+     and owner.clock_driver_.exact_time() >= *request.until_time)
+  {
+    held_through = owner.clock_driver_.exact_now();
+  }
+  if(end.stopped and not internal_end(request, *end.stopped))
   {
     auto& where = end.stopped->where;
     where       = locate(where.pc);
@@ -942,6 +1027,16 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, std::move(*end));
     }
+    if(core_held)
+    {
+      rethrow_failure();
+      spin.progress();
+      if(auto end = idle_jump(request))
+      {
+        return finish(request, std::move(*end));
+      }
+      continue;
+    }
     auto const before      = coverage_on ? arch->pc() : address{};
     auto const spin_before = spin_on ? arch->pc() : address{};
     auto const spin_asleep = spin_on and arch->idle();
@@ -988,7 +1083,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       spin.previous         = {};
     }
     boundary_stop      = false;
-    auto const leaving = leaving_until(request) and request.until and arch->pc() == *request.until;
+    auto const leaving = leaving_until(request);
     if(leaving)
     {
       step_off_until(request);
