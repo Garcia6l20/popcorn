@@ -18,11 +18,11 @@ VREFINT_CAL = 6635
 TS_CAL1 = 4107
 
 
-async def test_vdda_and_temperature_at_reset_conditions(machine: Machine) -> None:
-    stop = await machine.run(until="measured", for_=ms(50))
+async def test_vdda_and_temperature_at_reset_conditions(adc: Machine) -> None:
+    stop = await adc.run(until="measured", for_=ms(50))
     assert stop.reason is StopReason.ADDRESS, stop
-    assert machine.var("vrefint_data").value == VREFINT_CAL
-    assert machine.var("vref_mv").value == 3000
-    assert machine.var("sensor_data").value == TS_CAL1
-    assert machine.var("temperature_c").value == 30
-    assert machine.var("vrefint_data_12b").value == VREFINT_CAL >> 2
+    assert adc.var("vrefint_data").value == VREFINT_CAL
+    assert adc.var("vref_mv").value == 3000
+    assert adc.var("sensor_data").value == TS_CAL1
+    assert adc.var("temperature_c").value == 30
+    assert adc.var("vrefint_data_12b").value == VREFINT_CAL >> 2

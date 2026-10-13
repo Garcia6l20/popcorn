@@ -25,7 +25,7 @@ class Adc(SpiTarget):
 
     Without a source it answers a ramp of `counts_per_ms` counts per millisecond of virtual
     time on channel 0, and its mirror, full scale minus the ramp, on channel 1. Both are fixed
-    when the ADC is built and read-only, because the `machine` fixture reuses one ADC for every
+    when the ADC is built and read-only, because the `spi_mock` fixture reuses one ADC for every
     test of a config. A test wanting another source gets its own machine from
     `machine_factory.booted(devices={"SPI1": [Adc(cs="PB0", source=...)]})`.
 

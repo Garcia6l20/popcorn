@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 from popcorn.devices import At25sf
 from popcorn.units import us
 
@@ -20,6 +20,6 @@ PROJECT = popcorn.MachineDescription(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.MachineDescription:
+@popcorn.pytest.machine
+def spi() -> popcorn.MachineDescription:
     return PROJECT

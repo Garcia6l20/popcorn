@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import popcorn
+import popcorn.pytest
 import pytest
 from spiadc import Adc
 
@@ -17,6 +18,11 @@ PROJECT = popcorn.MachineDescription(
         "SPI1": popcorn.Periph(devices=[popcorn.Device(Adc, cs="PB0", counts_per_ms=25)]),
     },
 )
+
+
+@popcorn.pytest.machine
+def spi_mock() -> popcorn.MachineDescription:
+    return PROJECT
 
 
 @pytest.fixture(scope="session")

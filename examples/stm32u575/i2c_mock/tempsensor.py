@@ -26,7 +26,7 @@ class TempSensor(I2CTarget):
     Each read of the temperature register takes the next reading of `readings`, the last one
     repeating once they are used up. The annotated fields are the state a snapshot keeps.
     `readings` is not one of them: it is the script, fixed when the sensor is built and
-    read-only, because the `machine` fixture reuses one sensor for every test of a config. A
+    read-only, because the `i2c_mock` fixture reuses one sensor for every test of a config. A
     test wanting other readings uses a config of `MachineDescription.with_configs`, or builds its
     own
     machine with `Machine(devices={"I2C1": [TempSensor(0x48, readings=...)]})`.

@@ -7,7 +7,7 @@ two milliseconds of counts. Channel 1 is converted a few tens of microseconds af
 so its mirror lags by less than one millisecond of counts.
 
 Two ways to attach a mock: the project's `Periph(devices=[Device(Adc, ...)])` on SPI1, which the
-`machine` fixture uses, and `machine_factory.booted(devices={"SPI1": [adc]})`, which can pass what
+`spi_mock` fixture uses, and `machine_factory.booted(devices={"SPI1": [adc]})`, which can pass what
 a project cannot, here a Python function as the sample source. The factory machine keeps the
 rest of the project build. An ADC holding a function cannot key the boot cache: that machine
 boots each time.
@@ -46,20 +46,20 @@ def samples(machine: Machine, channel: int) -> list[int]:
     return [int(value) for value in values]
 
 
-async def test_the_buffer_follows_a_ramp_in_virtual_time(machine: Machine) -> None:
-    await run_to_done(machine)
-    assert machine.var("adc_result").conversions.value == CONVERSIONS
-    step = adc(machine).counts_per_ms
-    rising, mirrored = samples(machine, 0), samples(machine, 1)
+async def test_the_buffer_follows_a_ramp_in_virtual_time(spi_mock: Machine) -> None:
+    await run_to_done(spi_mock)
+    assert spi_mock.var("adc_result").conversions.value == CONVERSIONS
+    step = adc(spi_mock).counts_per_ms
+    rising, mirrored = samples(spi_mock, 0), samples(spi_mock, 1)
     for earlier, later in itertools.pairwise(rising):
         assert step <= later - earlier < 3 * step
     for up, down in zip(rising, mirrored, strict=True):
         assert 0 <= FULL_SCALE - down - up < step
 
 
-async def test_each_conversion_is_one_chip_select_period(machine: Machine) -> None:
-    await run_to_done(machine)
-    device = adc(machine)
+async def test_each_conversion_is_one_chip_select_period(spi_mock: Machine) -> None:
+    await run_to_done(spi_mock)
+    device = adc(spi_mock)
     assert device.selects == device.deselects == CONVERSIONS * CHANNELS
     assert device.bad_frames == 0
 

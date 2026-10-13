@@ -34,53 +34,53 @@ async def press(machine: Machine) -> None:
 
 
 async def test_the_button_rests_high_on_its_pull_up_and_the_led_starts_off(
-    machine: Machine,
+    gpio: Machine,
 ) -> None:
-    await settle(machine)
-    assert machine.periph.GPIOC.pin(13).level
-    assert not machine.periph.GPIOA.pin(5).level
-    assert machine.var("presses").value == 0
+    await settle(gpio)
+    assert gpio.periph.GPIOC.pin(13).level
+    assert not gpio.periph.GPIOA.pin(5).level
+    assert gpio.var("presses").value == 0
 
 
-async def test_each_press_toggles_the_led(machine: Machine) -> None:
-    await settle(machine)
-    led = machine.periph.GPIOA.pin(5)
+async def test_each_press_toggles_the_led(gpio: Machine) -> None:
+    await settle(gpio)
+    led = gpio.periph.GPIOA.pin(5)
     seen: list[bool] = []
     for _ in range(3):
-        await press(machine)
+        await press(gpio)
         seen.append(led.level)
     assert seen == [True, False, True]
-    assert machine.var("presses").value == 3
+    assert gpio.var("presses").value == 3
 
 
-async def test_driving_the_button_high_and_releasing_it_is_no_press(machine: Machine) -> None:
-    await settle(machine)
-    button = machine.periph.GPIOC.pin(13)
+async def test_driving_the_button_high_and_releasing_it_is_no_press(gpio: Machine) -> None:
+    await settle(gpio)
+    button = gpio.periph.GPIOC.pin(13)
     button.level = 1
-    await settle(machine)
+    await settle(gpio)
     button.release()
-    await settle(machine)
-    assert machine.var("presses").value == 0
+    await settle(gpio)
+    assert gpio.var("presses").value == 0
 
 
-async def test_the_firmware_sleeps_between_presses(machine: Machine, tmp_path: Path) -> None:
-    await press(machine)
-    machine.ring.clear()
-    with machine.trace([TraceKind.BLOCK], tmp_path / "idle.pctr"):
-        stop = await machine.run(for_=ms(10))
+async def test_the_firmware_sleeps_between_presses(gpio: Machine, tmp_path: Path) -> None:
+    await press(gpio)
+    gpio.ring.clear()
+    with gpio.trace([TraceKind.BLOCK], tmp_path / "idle.pctr"):
+        stop = await gpio.run(for_=ms(10))
     assert stop.reason is StopReason.TIME, stop
 
-    entries = [r.number for r in machine.ring.records() if isinstance(r, Irq) and r.enter]
+    entries = [r.number for r in gpio.ring.records() if isinstance(r, Irq) and r.enter]
     assert entries == [SYSTICK] * 10
     blocks = [r for r in read(tmp_path / "idle.pctr") if isinstance(r, Block)]
     assert len(blocks) <= MAX_BLOCKS_PER_TICK * len(entries)
 
 
-async def test_a_press_runs_the_exti13_handler_once(machine: Machine) -> None:
-    await settle(machine)
-    machine.ring.clear()
-    await press(machine)
-    entries = [r.number for r in machine.ring.records() if isinstance(r, Irq) and r.enter]
+async def test_a_press_runs_the_exti13_handler_once(gpio: Machine) -> None:
+    await settle(gpio)
+    gpio.ring.clear()
+    await press(gpio)
+    entries = [r.number for r in gpio.ring.records() if isinstance(r, Irq) and r.enter]
     assert entries.count(EXTI13) == 1
 
 
@@ -94,13 +94,13 @@ async def test_a_second_machine_from_the_boot_snapshot_takes_presses(
     assert second.periph.GPIOA.pin(5).level
 
 
-async def test_an_interrupt_enabled_by_a_call_stays_enabled(machine: Machine) -> None:
-    await settle(machine)
+async def test_an_interrupt_enabled_by_a_call_stays_enabled(gpio: Machine) -> None:
+    await settle(gpio)
     irq = EXTI13 - 16
-    machine.nvic.disable(irq)
-    await press(machine)
-    assert machine.var("presses").value == 0
-    await machine.call("HAL_NVIC_EnableIRQ", irq)
-    assert machine.nvic.enabled(irq)
-    await press(machine)
-    assert machine.var("presses").value == 1
+    gpio.nvic.disable(irq)
+    await press(gpio)
+    assert gpio.var("presses").value == 0
+    await gpio.call("HAL_NVIC_EnableIRQ", irq)
+    assert gpio.nvic.enabled(irq)
+    await press(gpio)
+    assert gpio.var("presses").value == 1

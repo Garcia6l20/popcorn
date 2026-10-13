@@ -79,24 +79,24 @@ def test_the_reference_matches_the_catalogue_check_values() -> None:
 
 
 async def test_the_hal_inits_without_error_and_nothing_is_logged(
-    machine: Machine, caplog: pytest.LogCaptureFixture
+    crc: Machine, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="popcorn"):
-        assert (await results(machine))["errors"] == 0
+        assert (await results(crc))["errors"] == 0
     assert [record.getMessage() for record in caplog.records] == []
 
 
-async def test_words_in_the_reset_configuration_compute_crc32_mpeg2(machine: Machine) -> None:
-    seen = await results(machine)
+async def test_words_in_the_reset_configuration_compute_crc32_mpeg2(crc: Machine) -> None:
+    seen = await results(crc)
     assert seen["one_word"] == reference(MPEG_2, big_endian(WORDS[0])) == 0xDF8A8A2B
     assert seen["two_words"] == reference(MPEG_2, big_endian(*WORDS)) == 0x7D24A31B
 
 
-async def test_reversed_bytes_compute_crc32_iso_hdlc(machine: Machine) -> None:
-    seen = await results(machine)
+async def test_reversed_bytes_compute_crc32_iso_hdlc(crc: Machine) -> None:
+    seen = await results(crc)
     assert seen["iso_hdlc"] == reference(ISO_HDLC, CHECK_INPUT) == 0xCBF43926
 
 
-async def test_a_16_bit_polynomial_computes_crc16_ibm_3740(machine: Machine) -> None:
-    seen = await results(machine)
+async def test_a_16_bit_polynomial_computes_crc16_ibm_3740(crc: Machine) -> None:
+    seen = await results(crc)
     assert seen["ibm_3740"] == reference(IBM_3740, CHECK_INPUT) == 0x29B1

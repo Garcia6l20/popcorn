@@ -36,14 +36,14 @@ async def run_for(machine: Machine, duration_ms: int) -> None:
     assert stop.reason is StopReason.TIME, stop
 
 
-async def test_tim2_ticks_at_1_khz(machine: Machine) -> None:
-    await run_for(machine, 100)
-    assert machine.var("ticks").value == 99
+async def test_tim2_ticks_at_1_khz(tim: Machine) -> None:
+    await run_for(tim, 100)
+    assert tim.var("ticks").value == 99
 
 
-async def test_each_update_comes_1_ms_after_the_last_and_toggles_pa5(machine: Machine) -> None:
-    seen = updates(machine)
-    await run_for(machine, 20)
+async def test_each_update_comes_1_ms_after_the_last_and_toggles_pa5(tim: Machine) -> None:
+    seen = updates(tim)
+    await run_for(tim, 20)
 
     times = [at for at, _ in seen]
     assert len(times) >= 19
@@ -52,7 +52,7 @@ async def test_each_update_comes_1_ms_after_the_last_and_toggles_pa5(machine: Ma
     assert levels == [index % 2 == 1 for index in range(len(levels))]
 
 
-async def test_the_one_pulse_timer_fires_once_after_50_ms(machine: Machine) -> None:
-    await run_for(machine, 200)
-    assert machine.var("pulses").value == 1
-    assert machine.var("ticks_at_pulse").value == 50
+async def test_the_one_pulse_timer_fires_once_after_50_ms(tim: Machine) -> None:
+    await run_for(tim, 200)
+    assert tim.var("pulses").value == 1
+    assert tim.var("ticks_at_pulse").value == 50

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import popcorn
+import popcorn.pytest
 import pytest
 from rngmodel import Rng
 
@@ -21,6 +22,16 @@ PROJECT = BASE.with_configs(
 )
 
 
+@popcorn.pytest.machine
+def python_model() -> popcorn.MachineDescription:
+    return PROJECT
+
+
+@popcorn.pytest.machine(config="seeded")
+def python_model_seeded() -> popcorn.MachineDescription:
+    return PROJECT
+
+
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.MachineDescription:
+def python_model_description() -> popcorn.MachineDescription:
     return PROJECT

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 from tempsensor import TempSensor
 
 HERE = Path(__file__).parent
@@ -30,6 +30,11 @@ PROJECT = BASE.with_configs(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.MachineDescription:
+@popcorn.pytest.machine
+def i2c_mock() -> popcorn.MachineDescription:
+    return PROJECT
+
+
+@popcorn.pytest.machine(config="hot")
+def i2c_mock_hot() -> popcorn.MachineDescription:
     return PROJECT

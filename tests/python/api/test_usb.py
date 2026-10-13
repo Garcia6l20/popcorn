@@ -281,11 +281,11 @@ def test_a_boot_past_the_enumeration_is_cached_configured(
     u575_json: Path, pytester: pytest.Pytester
 ) -> None:
     pytester.makeconftest(
-        "from pathlib import Path\n\nimport popcorn\nimport pytest\n"
+        "from pathlib import Path\n\nimport popcorn\nimport popcorn.pytest\n"
         "from popcorn.board import UsbHostOptions\n\n"
         'pytest_plugins = ["popcorn.pytest"]\n\n\n'
-        '@pytest.fixture(scope="session")\n'
-        "def popcorn_project():\n"
+        "@popcorn.pytest.machine\n"
+        "def usb():\n"
         "    return popcorn.MachineDescription(\n"
         '        part="STM32U575QGIx",\n'
         f"        description=Path({str(u575_json)!r}),\n"
@@ -296,8 +296,8 @@ def test_a_boot_past_the_enumeration_is_cached_configured(
     )
     pytester.makepyfile(
         "from pathlib import Path\n\n\n"
-        "async def test_state(machine):\n"
-        "    host = machine.periph.OTG_FS.host\n"
+        "async def test_state(usb):\n"
+        "    host = usb.periph.OTG_FS.host\n"
         "    reply = await host.control(0x80, 8, 0, 0, 1)\n"
         "    with Path('states.txt').open('a') as states:\n"
         "        states.write(f'{host.state.name} {host.address} {reply.hex()}\\n')\n"

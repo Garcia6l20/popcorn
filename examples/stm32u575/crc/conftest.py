@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 
 HERE = Path(__file__).parent
 
@@ -16,6 +16,6 @@ PROJECT = popcorn.MachineDescription(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.MachineDescription:
+@popcorn.pytest.machine
+def crc() -> popcorn.MachineDescription:
     return PROJECT

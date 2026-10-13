@@ -21,26 +21,26 @@ BANNER = b"popcorn usart example, 115200 baud\r\n"
 PCLK2_HZ = 4_000_000
 
 
-async def test_the_banner_comes_out_at_the_brr_rate(machine: Machine) -> None:
-    frames = await machine.periph.USART1.port.read_frames(len(BANNER), for_=ms(10))
+async def test_the_banner_comes_out_at_the_brr_rate(usart: Machine) -> None:
+    frames = await usart.periph.USART1.port.read_frames(len(BANNER), for_=ms(10))
     assert bytes(frame.data for frame in frames) == BANNER
 
-    brr = machine.periph.USART1.BRR.value
+    brr = usart.periph.USART1.BRR.value
     assert brr == round(PCLK2_HZ / 115_200)
     frame_ps = 10 * brr * 10**12 // PCLK2_HZ
     for earlier, later in itertools.pairwise(frames):
         assert abs((later.at - earlier.at).ps - frame_ps) < ns(1).ps
 
 
-async def test_a_line_comes_back_prefixed(machine: Machine) -> None:
-    port = machine.periph.USART1.port
+async def test_a_line_comes_back_prefixed(usart: Machine) -> None:
+    port = usart.periph.USART1.port
     await port.read(len(BANNER), for_=ms(10))
     await port.write(b"hello\r\n")
     assert await port.read(13, for_=ms(10)) == b"echo: hello\r\n"
 
 
-async def test_each_line_is_echoed_in_turn(machine: Machine) -> None:
-    port = machine.periph.USART1.port
+async def test_each_line_is_echoed_in_turn(usart: Machine) -> None:
+    port = usart.periph.USART1.port
     await port.read(len(BANNER), for_=ms(10))
     for word in (b"one", b"two", b"three"):
         await port.write(word + b"\r\n")

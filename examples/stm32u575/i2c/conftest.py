@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import popcorn
+import popcorn.pytest
 import pytest
 from popcorn.devices import Eeprom24xx, TableTarget
 from popcorn.units import ms
@@ -33,6 +34,16 @@ PROJECT = BASE.with_configs(
         "scripted": BASE.replace(board={"I2C1": popcorn.Periph(devices=[SCRIPTED])}),
     }
 )
+
+
+@popcorn.pytest.machine
+def i2c() -> popcorn.MachineDescription:
+    return PROJECT
+
+
+@popcorn.pytest.machine(config="scripted")
+def i2c_scripted() -> popcorn.MachineDescription:
+    return PROJECT
 
 
 @pytest.fixture(scope="session")

@@ -44,20 +44,20 @@ SET_IDLE, SET_REPORT = 0x0A, 0x09
 REPORT_DESCRIPTOR = 0x2200
 
 
-async def test_the_host_enumerates_the_device_from_boot(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_the_host_enumerates_the_device_from_boot(usb_cdc: Machine) -> None:
+    host = usb_cdc.periph.OTG_FS.host
     await host.wait_configured(for_=s(2))
     assert host.state is UsbState.CONFIGURED
     assert host.address == 1
     assert host.configuration == 1
 
-    device = machine.var("desc_device")
-    assert host.device_descriptor == machine.mem.read(device.address, device.size)
+    device = usb_cdc.var("desc_device")
+    assert host.device_descriptor == usb_cdc.mem.read(device.address, device.size)
     assert device.idVendor.value == 0xCAFE
     total = int.from_bytes(host.configuration_descriptor[2:4], "little")
     assert total == len(host.configuration_descriptor) == 9 + 66 + 25 + 32
-    assert host.configuration_descriptor == machine.mem.read(
-        machine.var("desc_configuration").address, total
+    assert host.configuration_descriptor == usb_cdc.mem.read(
+        usb_cdc.var("desc_configuration").address, total
     )
     assert host.strings == {
         1: "TinyUSB",
@@ -79,17 +79,17 @@ async def test_the_host_enumerates_the_device_from_boot(machine: Machine) -> Non
         UsbTransferType.INTERRUPT,
         10,
     )
-    assert machine.var("usb_mounted").value == 1
+    assert usb_cdc.var("usb_mounted").value == 1
 
 
-async def test_string_zero_lists_english(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_string_zero_lists_english(usb_cdc: Machine) -> None:
+    host = usb_cdc.periph.OTG_FS.host
     await host.wait_configured(for_=s(2))
     assert await host.control(0x80, GET_DESCRIPTOR, STRING, 0, 255) == ENGLISH
 
 
-async def test_a_request_to_an_unknown_recipient_stalls(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_a_request_to_an_unknown_recipient_stalls(usb_cdc: Machine) -> None:
+    host = usb_cdc.periph.OTG_FS.host
     await host.wait_configured(for_=s(2))
     with pytest.raises(UsbStall):
         await host.control(0x83, GET_STATUS, 0, 0, 2)
@@ -97,48 +97,48 @@ async def test_a_request_to_an_unknown_recipient_stalls(machine: Machine) -> Non
 
 
 async def test_a_restored_snapshot_stays_configured_without_enumerating_again(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    host = machine.periph.OTG_FS.host
+    host = usb_cdc.periph.OTG_FS.host
     await host.wait_configured(for_=s(2))
-    await machine.run(for_=ms(20), stop_when=lambda _: host.hid(1).report_descriptor != b"")
+    await usb_cdc.run(for_=ms(20), stop_when=lambda _: host.hid(1).report_descriptor != b"")
     assert host.hid(1).report_descriptor != b""
-    configured = machine.snapshot()
+    configured = usb_cdc.snapshot()
     await host.detach()
-    await machine.run(for_=ms(5))
+    await usb_cdc.run(for_=ms(5))
     assert host.state is UsbState.DETACHED
 
-    machine.restore(configured)
+    usb_cdc.restore(configured)
     assert host.attached
     assert host.state is UsbState.CONFIGURED
-    before = machine.time
+    before = usb_cdc.time
     assert await host.control(0x80, GET_CONFIGURATION, 0, 0, 1) == b"\x01"
-    assert machine.time - before < ms(5)
+    assert usb_cdc.time - before < ms(5)
 
 
-async def test_unplugging_and_plugging_the_cable_enumerates_again(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_unplugging_and_plugging_the_cable_enumerates_again(usb_cdc: Machine) -> None:
+    host = usb_cdc.periph.OTG_FS.host
     await host.wait_configured(for_=s(2))
     await host.detach()
-    await machine.run(for_=ms(5))
+    await usb_cdc.run(for_=ms(5))
     assert (host.attached, host.state) == (False, UsbState.DETACHED)
-    assert machine.var("usb_mounted").value == 1
+    assert usb_cdc.var("usb_mounted").value == 1
 
     await host.attach()
     await host.wait_configured(for_=s(1))
     assert host.address == 1
 
 
-async def test_the_cdc_function_echoes_upper_cased(machine: Machine) -> None:
-    cdc = machine.periph.OTG_FS.host.cdc()
+async def test_the_cdc_function_echoes_upper_cased(usb_cdc: Machine) -> None:
+    cdc = usb_cdc.periph.OTG_FS.host.cdc()
     await cdc.write(b"hello")
     assert await cdc.read(5, for_=s(2)) == b"HELLO"
     assert cdc.bound and cdc.dtr and cdc.rts
-    assert machine.var("cdc_connected").value == 1
+    assert usb_cdc.var("cdc_connected").value == 1
 
 
-async def test_wait_ready_waits_for_dtr_after_the_configuration(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_wait_ready_waits_for_dtr_after_the_configuration(usb_cdc: Machine) -> None:
+    host = usb_cdc.periph.OTG_FS.host
     earlier = len(host.requests)
     cdc = host.cdc()
     await host.wait_configured(for_=s(2))
@@ -149,9 +149,9 @@ async def test_wait_ready_waits_for_dtr_after_the_configuration(machine: Machine
     assert (states[-1].status, states[-1].value) == ("completed", 3)
 
 
-async def test_1000_bytes_come_back_in_order_in_packets_of_64(machine: Machine) -> None:
-    cdc = machine.periph.OTG_FS.host.cdc()
-    await machine.periph.OTG_FS.host.wait_configured(for_=s(2))
+async def test_1000_bytes_come_back_in_order_in_packets_of_64(usb_cdc: Machine) -> None:
+    cdc = usb_cdc.periph.OTG_FS.host.cdc()
+    await usb_cdc.periph.OTG_FS.host.wait_configured(for_=s(2))
     sent = bytes(b"abcdefghijklmnopqrstuvwxyz"[n % 26] for n in range(1000))
     await cdc.write(sent)
     packets = await cdc.read_packets(16, for_=ms(100))
@@ -162,33 +162,33 @@ async def test_1000_bytes_come_back_in_order_in_packets_of_64(machine: Machine) 
 
 
 async def test_a_restore_drops_unread_bytes_and_sends_unsent_ones_again(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    cdc = machine.periph.OTG_FS.host.cdc()
-    await machine.periph.OTG_FS.host.wait_configured(for_=s(1))
+    cdc = usb_cdc.periph.OTG_FS.host.cdc()
+    await usb_cdc.periph.OTG_FS.host.wait_configured(for_=s(1))
     await cdc.write(b"one")
-    saved = machine.snapshot()
-    await machine.run(for_=ms(20))
+    saved = usb_cdc.snapshot()
+    await usb_cdc.run(for_=ms(20))
     assert cdc.available == 3
     assert cdc.queued == 0
 
-    machine.restore(saved)
+    usb_cdc.restore(saved)
     assert cdc.available == 0
     assert cdc.queued == 3
     assert await cdc.read(3, for_=ms(20)) == b"ONE"
 
 
-async def test_a_snapshot_in_the_middle_of_a_transfer_restores_it(machine: Machine) -> None:
-    cdc = machine.periph.OTG_FS.host.cdc()
-    await machine.periph.OTG_FS.host.wait_configured(for_=s(1))
+async def test_a_snapshot_in_the_middle_of_a_transfer_restores_it(usb_cdc: Machine) -> None:
+    cdc = usb_cdc.periph.OTG_FS.host.cdc()
+    await usb_cdc.periph.OTG_FS.host.wait_configured(for_=s(1))
     sent = bytes(range(32, 127)) * 10
     await cdc.write(sent)
-    await machine.run(for_=ms(50), stop_when=lambda _: cdc.available >= 128)
-    middle = machine.snapshot()
+    await usb_cdc.run(for_=ms(50), stop_when=lambda _: cdc.available >= 128)
+    middle = usb_cdc.snapshot()
     first = await cdc.read(len(sent), for_=ms(100))
     assert first == sent.upper()
 
-    machine.restore(middle)
+    usb_cdc.restore(middle)
     assert cdc.queued == len(sent)
     assert cdc.available == 0
     rest = await cdc.read(len(sent), for_=ms(100))
@@ -197,12 +197,12 @@ async def test_a_snapshot_in_the_middle_of_a_transfer_restores_it(machine: Machi
 
 
 async def test_unplugging_keeps_the_bytes_received_and_replugging_carries_on(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    host = machine.periph.OTG_FS.host
+    host = usb_cdc.periph.OTG_FS.host
     cdc = host.cdc()
     await cdc.write(b"xyz")
-    await machine.run(for_=s(1), stop_when=lambda _: cdc.available == 3)
+    await usb_cdc.run(for_=s(1), stop_when=lambda _: cdc.available == 3)
     await host.detach()
     assert not cdc.bound
     assert await cdc.read(3) == b"XYZ"
@@ -228,15 +228,15 @@ def serial_client(path: str, line: bytes) -> bytes:
         os.close(fd)
 
 
-async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_a_serial_tool_talks_to_the_cdc_function_through_a_pty(usb_cdc: Machine) -> None:
+    host = usb_cdc.periph.OTG_FS.host
     earlier = len(host.requests)
     await host.wait_configured(for_=s(1))
-    path = machine.board.pty("OTG_FS")
-    assert machine.board.ptys == {"OTG_FS": path}
-    async with machine.running():
+    path = usb_cdc.board.pty("OTG_FS")
+    assert usb_cdc.board.ptys == {"OTG_FS": path}
+    async with usb_cdc.running():
         assert serial_client(path, b"ping") == b"PING"
-        (requests,) = await machine.read(machine.ref.periph.OTG_FS.host.requests)
+        (requests,) = await usb_cdc.read(usb_cdc.ref.periph.OTG_FS.host.requests)
         before = len(requests)
         await asyncio.sleep(0.1)
     assert len(host.requests) == before
@@ -267,9 +267,9 @@ async def press(machine: Machine) -> int:
     return pressed.time.ps
 
 
-async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machine) -> None:
-    earlier = len(machine.periph.OTG_FS.host.requests)
-    host = await hid_ready(machine)
+async def test_the_host_probes_each_hid_interface_as_linux_usbhid(usb_cdc: Machine) -> None:
+    earlier = len(usb_cdc.periph.OTG_FS.host.requests)
+    host = await hid_ready(usb_cdc)
     requests = host.requests[earlier:]
     hid = [
         (r.request_type, r.request, r.value, r.index, r.length)
@@ -290,44 +290,44 @@ async def test_the_host_probes_each_hid_interface_as_linux_usbhid(machine: Machi
     ]
     assert all(r.status == "completed" for r in requests)
     for index, name in enumerate(("desc_hid_report", "desc_hid_io_report")):
-        array = machine.var(name)
-        assert host.hid(index).report_descriptor == machine.mem.read(array.address, sizes[index])
+        array = usb_cdc.var(name)
+        assert host.hid(index).report_descriptor == usb_cdc.mem.read(array.address, sizes[index])
         assert host.hid(index).bound
 
 
-async def test_a_button_press_sends_one_report_within_one_interval(machine: Machine) -> None:
-    host = await hid_ready(machine)
+async def test_a_button_press_sends_one_report_within_one_interval(usb_cdc: Machine) -> None:
+    host = await hid_ready(usb_cdc)
     hid = host.hid()
-    pressed = await press(machine)
+    pressed = await press(usb_cdc)
     [report] = await hid.read_reports(1, for_=ms(50))
     assert report.data == b"\x01\x01"
     assert pressed < report.at.ps <= pressed + ms(11).ps
-    assert machine.var("hid_reports").value == 1
+    assert usb_cdc.var("hid_reports").value == 1
 
 
 async def test_a_press_timed_inside_running_reports_within_one_interval(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    hid = (await hid_ready(machine)).hid()
-    async with machine.running():
+    hid = (await hid_ready(usb_cdc)).hid()
+    async with usb_cdc.running():
         await asyncio.sleep(0.01)
-        pressed = await press(machine)
+        pressed = await press(usb_cdc)
         [report] = await hid.read_reports(1, for_=ms(50))
-        after = (await machine.read()).time
+        after = (await usb_cdc.read()).time
     assert pressed < report.at.ps <= pressed + ms(11).ps
     assert report.at <= after
 
 
 async def test_two_presses_5_ms_apart_give_two_reports_5_ms_apart_within_one_interval(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    host = await hid_ready(machine)
+    host = await hid_ready(usb_cdc)
     hid = host.hid()
-    button = machine.periph.GPIOC.pin(13)
+    button = usb_cdc.periph.GPIOC.pin(13)
     button.level = True
-    await machine.run(for_=ms(2))
+    await usb_cdc.run(for_=ms(2))
     button.level = False
-    await machine.run(for_=ms(3))
+    await usb_cdc.run(for_=ms(3))
     button.level = True
     first, second = await hid.read_reports(2, for_=ms(50))
     assert (first.data, second.data) == (b"\x01\x01", b"\x01\x02")
@@ -335,12 +335,12 @@ async def test_two_presses_5_ms_apart_give_two_reports_5_ms_apart_within_one_int
 
 
 async def test_an_output_report_without_an_out_endpoint_goes_as_set_report(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    host = await hid_ready(machine)
+    host = await hid_ready(usb_cdc)
     await host.hid().write_report(b"\x02\x5a")
-    await led_written(machine, 1)
-    assert machine.var("hid_led").value == 0x5A
+    await led_written(usb_cdc, 1)
+    assert usb_cdc.var("hid_led").value == 0x5A
     last = host.requests[-1]
     assert (last.request_type, last.request, last.value, last.index, last.length) == (
         0x21,
@@ -352,9 +352,9 @@ async def test_an_output_report_without_an_out_endpoint_goes_as_set_report(
 
 
 async def test_an_output_report_goes_on_the_out_endpoint_and_comes_back_inverted(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    host = await hid_ready(machine)
+    host = await hid_ready(usb_cdc)
     hid = host.hid(1)
     before = len(host.requests)
     await hid.write_report(b"\x00" + bytes(range(8)))
@@ -364,8 +364,8 @@ async def test_an_output_report_goes_on_the_out_endpoint_and_comes_back_inverted
     assert hid.queued == 0
 
 
-async def test_feature_reports_read_and_write_as_hidraw(machine: Machine) -> None:
-    host = await hid_ready(machine)
+async def test_feature_reports_read_and_write_as_hidraw(usb_cdc: Machine) -> None:
+    host = await hid_ready(usb_cdc)
     hid = host.hid(1)
     assert await hid.get_feature(0, 5) == b"\x00\xf0\xf1\xf2\xf3"
     await hid.set_feature(b"\x00abcd")
@@ -374,19 +374,19 @@ async def test_feature_reports_read_and_write_as_hidraw(machine: Machine) -> Non
 
 
 async def test_get_feature_on_an_interface_without_feature_reports_stalls(
-    machine: Machine,
+    usb_cdc: Machine,
 ) -> None:
-    host = await hid_ready(machine)
+    host = await hid_ready(usb_cdc)
     with pytest.raises(UsbStall):
         await host.hid().get_feature(0, 2)
     assert await host.hid().get_feature(1, 2) == b"\x01"
 
 
-async def test_hid_and_cdc_run_at_once(machine: Machine) -> None:
-    host = await hid_ready(machine)
+async def test_hid_and_cdc_run_at_once(usb_cdc: Machine) -> None:
+    host = await hid_ready(usb_cdc)
     cdc, hid = host.cdc(), host.hid()
     await cdc.write(b"both")
-    await press(machine)
+    await press(usb_cdc)
     await host.hid(1).write_report(b"\x00\x0f")
     [report] = await hid.read_reports(1, for_=ms(20))
     [echo] = await host.hid(1).read_reports(1, for_=ms(20))
@@ -394,46 +394,46 @@ async def test_hid_and_cdc_run_at_once(machine: Machine) -> None:
     assert (report.data, echo.data) == (b"\x01\x01", b"\xf0")
 
 
-async def test_an_output_report_written_unplugged_survives_a_restore(machine: Machine) -> None:
-    host = await hid_ready(machine)
+async def test_an_output_report_written_unplugged_survives_a_restore(usb_cdc: Machine) -> None:
+    host = await hid_ready(usb_cdc)
     hid = host.hid()
     await host.detach()
-    await machine.run(for_=ms(5))
+    await usb_cdc.run(for_=ms(5))
     writing = asyncio.create_task(hid.write_report(b"\x02\x33"))
     await asyncio.sleep(0)
     writing.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await writing
     assert (hid.bound, hid.queued) == (False, 1)
-    unplugged = machine.snapshot()
+    unplugged = usb_cdc.snapshot()
 
     await host.attach()
     await host.wait_configured(for_=s(1))
-    await machine.run(for_=ms(50), stop_when=lambda _: hid.queued == 0)
-    await led_written(machine, 1)
-    assert machine.var("hid_led").value == 0x33
+    await usb_cdc.run(for_=ms(50), stop_when=lambda _: hid.queued == 0)
+    await led_written(usb_cdc, 1)
+    assert usb_cdc.var("hid_led").value == 0x33
 
-    machine.restore(unplugged)
+    usb_cdc.restore(unplugged)
     assert (hid.bound, hid.queued, hid.available) == (False, 1, 0)
-    assert machine.var("hid_led").value == 0
+    assert usb_cdc.var("hid_led").value == 0
     await host.attach()
     await host.wait_configured(for_=s(1))
-    await machine.run(for_=ms(50), stop_when=lambda _: hid.queued == 0)
-    await led_written(machine, 1)
-    assert machine.var("hid_led").value == 0x33
+    await usb_cdc.run(for_=ms(50), stop_when=lambda _: hid.queued == 0)
+    await led_written(usb_cdc, 1)
+    assert usb_cdc.var("hid_led").value == 0x33
     await hid.write_report(b"\x02\x44")
-    await led_written(machine, 2)
-    assert machine.var("hid_led_writes").value == 2
-    assert machine.var("hid_led").value == 0x44
+    await led_written(usb_cdc, 2)
+    assert usb_cdc.var("hid_led_writes").value == 2
+    assert usb_cdc.var("hid_led").value == 0x44
 
 
-async def test_a_restore_drops_unread_reports(machine: Machine) -> None:
-    host = await hid_ready(machine)
+async def test_a_restore_drops_unread_reports(usb_cdc: Machine) -> None:
+    host = await hid_ready(usb_cdc)
     hid = host.hid()
-    saved = machine.snapshot()
-    await press(machine)
-    await machine.run(for_=ms(20))
+    saved = usb_cdc.snapshot()
+    await press(usb_cdc)
+    await usb_cdc.run(for_=ms(20))
     assert hid.available == 1
-    machine.restore(saved)
+    usb_cdc.restore(saved)
     assert hid.available == 0
     assert hid.report_descriptor != b""

@@ -170,9 +170,9 @@ async def test_every_block_comes_back_with_its_checksum(system: System) -> None:
 
 
 async def test_idle_is_one_frame_after_the_last_byte_arrives(
-    system: System, popcorn_system: popcorn.SystemDescription
+    system: System, system_description: popcorn.SystemDescription
 ) -> None:
-    latency = {link.b.partition(".")[0]: link.latency for link in popcorn_system.links}
+    latency = {link.b.partition(".")[0]: link.latency for link in system_description.links}
     idles = record_idles(system)
     await run_for(system, s(1))
     frames = tapped(system)
@@ -217,10 +217,13 @@ async def node_id_exchange(
         return first, answer[-1].arrival
 
 
-async def test_latency_is_a_model_parameter(popcorn_system: popcorn.SystemDescription) -> None:
-    slower = [dataclasses.replace(popcorn_system.links[0], latency=us(50)), popcorn_system.links[1]]
-    fast, fast_answer = await node_id_exchange(popcorn_system)
-    slow, slow_answer = await node_id_exchange(popcorn_system.replace(links=slower))
+async def test_latency_is_a_model_parameter(system_description: popcorn.SystemDescription) -> None:
+    slower = [
+        dataclasses.replace(system_description.links[0], latency=us(50)),
+        system_description.links[1],
+    ]
+    fast, fast_answer = await node_id_exchange(system_description)
+    slow, slow_answer = await node_id_exchange(system_description.replace(links=slower))
     assert slow["responder1"].ps - fast["responder1"].ps == us(30).ps
     assert slow["responder2"] == fast["responder2"]
     assert slow_answer.ps - fast_answer.ps == us(60).ps
@@ -256,27 +259,27 @@ PINNABLE = hasattr(os, "sched_setaffinity") and Path("/proc/self/task").is_dir()
 
 @pytest.mark.parametrize("variant", ["slicing", "quantum", "one cpu"])
 async def test_the_run_is_the_same_at_any_slicing_quantum_or_cpu_count(
-    popcorn_system: popcorn.SystemDescription, variant: str
+    system_description: popcorn.SystemDescription, variant: str
 ) -> None:
     if variant == "one cpu" and not PINNABLE:
         pytest.skip("pinning threads needs Linux")
-    async with booted(popcorn_system) as system:
+    async with booted(system_description) as system:
         reference = await one_second(system)
     if variant == "slicing":
-        async with booted(popcorn_system, slice_instructions=997) as system:
+        async with booted(system_description, slice_instructions=997) as system:
             assert await one_second(system) == reference
     elif variant == "quantum":
-        spec = _third_link(popcorn_system)
+        spec = _third_link(system_description)
         assert spec.quantum == us(3)
         async with booted(spec) as system:
             assert await one_second(system) == reference
     else:
         with pinned_to_one_cpu() as cpu:
             before = set(_threads())
-            async with booted(popcorn_system) as system:
+            async with booted(system_description) as system:
                 observed = await one_second(system)
                 started = set(_threads()) - before
-                assert len(started) >= len(popcorn_system.members)
+                assert len(started) >= len(system_description.members)
                 assert all(os.sched_getaffinity(tid) == {cpu} for tid in started)
         assert observed == reference
 
