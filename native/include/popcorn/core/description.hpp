@@ -15,7 +15,7 @@
 
 namespace popcorn
 {
-/** @brief Schema version of the MCU description format, bumped on any breaking change. */
+/** @brief Schema version of the part description format, bumped on any breaking change. */
 inline constexpr std::uint32_t description_schema_version = 1;
 
 /** @brief Access permitted to a register or field, as SVD `access` spells it. */
@@ -258,7 +258,7 @@ struct core_desc
 };
 
 /** @brief What an MCU is: core, memory map, peripherals and interrupts. */
-struct mcu_description
+struct part_description
 {
   /** @brief Format version, 0 when absent from the file, which the loader refuses. */
   std::uint32_t schema_version{};
@@ -279,38 +279,38 @@ struct mcu_description
   std::vector<irq_desc> irqs;
 
   /** @brief Member-wise equality. */
-  friend auto operator==(mcu_description const&, mcu_description const&) -> bool = default;
+  friend auto operator==(part_description const&, part_description const&) -> bool = default;
 };
 
 /**
- * @brief Parses a JSON MCU description.
+ * @brief Parses a JSON part description.
  * @param json JSON text.
  * @param source Name of the text's origin, used in error messages.
  * @return The description.
  * @throws config_error when @p json is malformed, does not match the schema, carries no
  *         schema_version, or carries one other than description_schema_version, naming both.
  */
-auto parse_description(std::string_view json, std::string_view source) -> mcu_description;
+auto parse_description(std::string_view json, std::string_view source) -> part_description;
 
 /**
- * @brief Loads a JSON MCU description file.
+ * @brief Loads a JSON part description file.
  * @param file Path of the file.
  * @return The description.
  * @throws config_error when @p file cannot be read, or as parse_description().
  */
-auto load_description(std::filesystem::path const& file) -> mcu_description;
+auto load_description(std::filesystem::path const& file) -> part_description;
 
 /**
- * @brief Serializes an MCU description to compact JSON, stamped with the current format.
+ * @brief Serializes a part description to compact JSON, stamped with the current format.
  * @param description Description to serialize.
  * @return JSON text whose schema_version is description_schema_version whatever
  *         @p description carries, which parse_description() reads back to a value equal to
  *         @p description in every other member.
  */
-auto dump_description(mcu_description const& description) -> std::string;
+auto dump_description(part_description const& description) -> std::string;
 
 /**
- * @brief JSON Schema of the MCU description format, derived from the aggregates by reflection.
+ * @brief JSON Schema of the part description format, derived from the aggregates by reflection.
  * @return Compact JSON Schema (draft 2020-12) text.
  */
 auto description_json_schema() -> std::string;
@@ -322,11 +322,11 @@ auto description_json_schema() -> std::string;
  * @param description Description to digest.
  * @return 64 hex digits.
  */
-auto description_digest(mcu_description const& description) -> std::string;
+auto description_digest(part_description const& description) -> std::string;
 
 /**
  * @brief Position of a register in a description: index of its peripheral in
- *        `mcu_description::peripherals`, then of the register in `peripheral_desc::registers`.
+ *        `part_description::peripherals`, then of the register in `peripheral_desc::registers`.
  */
 struct register_ref
 {
@@ -346,7 +346,7 @@ struct register_ref
  * @param description Description the reference points into.
  * @param ref Register position, within the description.
  */
-auto flat_register_id(mcu_description const& description, register_ref ref) -> std::uint32_t
+auto flat_register_id(part_description const& description, register_ref ref) -> std::uint32_t
     pre(ref.peripheral < description.peripherals.size())
         pre(ref.reg < description.peripherals[ref.peripheral].registers.size());
 
@@ -356,6 +356,6 @@ auto flat_register_id(mcu_description const& description, register_ref ref) -> s
  * @param id Flat register id.
  * @return Its position, empty when the description has fewer registers.
  */
-auto register_at(mcu_description const& description, std::uint32_t id)
+auto register_at(part_description const& description, std::uint32_t id)
     -> std::optional<register_ref>;
 }

@@ -38,7 +38,7 @@ constexpr address wide_cr    = 0x4004'0000;
 constexpr address wide_tail  = 0x4004'04fc;
 constexpr address last_dr    = 0x4004'0600;
 
-auto shared() -> popcorn::mcu_description
+auto shared() -> popcorn::part_description
 {
   return popcorn::testing::description_from("POPCORN_M33_SHARED_DESC");
 }
@@ -93,7 +93,7 @@ auto refused(auto&& edit) -> bool
   return false;
 }
 
-auto unit(popcorn::mcu_description& desc, std::string_view name) -> popcorn::peripheral_desc&
+auto unit(popcorn::part_description& desc, std::string_view name) -> popcorn::peripheral_desc&
 {
   auto const found = std::ranges::find(desc.peripherals, name, &popcorn::peripheral_desc::name);
   REQUIRE(found != desc.peripherals.end());
@@ -282,12 +282,12 @@ TEST_CASE("a snapshot round trip restores every peripheral of a shared page")
 
 TEST_CASE("peripherals that overlap or cannot share a page are refused")
 {
-  CHECK_FALSE(refused([](popcorn::mcu_description&) {}));
-  CHECK(refused([](popcorn::mcu_description& desc) { unit(desc, "PAIR").size = 0x104; }));
-  CHECK(refused([](popcorn::mcu_description& desc) { unit(desc, "PAIR").base = 0x4003'0020; }));
-  CHECK(refused([](popcorn::mcu_description& desc) { unit(desc, "SECOND").base = 0x4003'0102; }));
-  CHECK(
-      refused([](popcorn::mcu_description& desc) { unit(desc, "UNMODELLED").base = 0x4002'0100; }));
+  CHECK_FALSE(refused([](popcorn::part_description&) {}));
+  CHECK(refused([](popcorn::part_description& desc) { unit(desc, "PAIR").size = 0x104; }));
+  CHECK(refused([](popcorn::part_description& desc) { unit(desc, "PAIR").base = 0x4003'0020; }));
+  CHECK(refused([](popcorn::part_description& desc) { unit(desc, "SECOND").base = 0x4003'0102; }));
+  CHECK(refused(
+      [](popcorn::part_description& desc) { unit(desc, "UNMODELLED").base = 0x4002'0100; }));
 }
 
 TEST_CASE(

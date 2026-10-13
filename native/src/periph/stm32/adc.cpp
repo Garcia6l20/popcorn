@@ -122,7 +122,7 @@ struct adc_common_state
   friend auto operator==(adc_common_state const&, adc_common_state const&) -> bool = default;
 };
 
-[[nodiscard]] auto factory_halfword(mcu_description const& part, address at)
+[[nodiscard]] auto factory_halfword(part_description const& part, address at)
     -> std::optional<std::uint16_t>
 {
   for(auto const& region : part.regions)

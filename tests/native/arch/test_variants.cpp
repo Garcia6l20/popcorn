@@ -57,9 +57,9 @@ constexpr core_variant cm4{"CM4", "r0p1", true, false, "_m4"};
 constexpr core_variant cm7{"CM7", "r1p2", true, true, "_m7"};
 constexpr core_variant cm3{"CM3", "r2p1", false, false, "_m3"};
 
-auto description(core_variant const& v) -> popcorn::mcu_description
+auto description(core_variant const& v) -> popcorn::part_description
 {
-  return m33_with([&](popcorn::mcu_description& d) {
+  return m33_with([&](popcorn::part_description& d) {
     d.core.cpu            = std::string{v.cpu};
     d.core.revision       = std::string{v.revision};
     d.core.fpu            = v.fpu;
@@ -113,7 +113,7 @@ auto register_values(arch_fixture const& f) -> std::vector<std::uint64_t>
 auto exceptions_log(core_variant const* v) -> std::vector<std::uint32_t>
 {
   auto const firmware = v == nullptr ? std::string{"exceptions"} : name_of("exceptions", *v);
-  auto desc = v == nullptr ? m33_with([](popcorn::mcu_description& d) { d.core.num_irqs = 20; })
+  auto desc = v == nullptr ? m33_with([](popcorn::part_description& d) { d.core.num_irqs = 20; })
                            : description(*v);
   arch_fixture f{std::move(desc), firmware, {}};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);

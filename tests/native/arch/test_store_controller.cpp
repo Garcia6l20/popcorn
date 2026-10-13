@@ -147,7 +147,7 @@ auto booted(bool with_model = true) -> machine_under
           return out.model;
         });
   }
-  auto desc = m33_with([](popcorn::mcu_description& d) { d.regions[0].controller = "TESTDEV"; });
+  auto desc = m33_with([](popcorn::part_description& d) { d.regions[0].controller = "TESTDEV"; });
   out.f     = std::make_unique<arch_fixture>(std::move(desc), "rom_store", std::move(options));
   REQUIRE(out.f->run_to_stop().reason == stop_reason::user);
   return out;

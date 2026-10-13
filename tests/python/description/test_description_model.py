@@ -6,7 +6,7 @@ import black
 import jsonschema.validators
 from popcorn.stm32.description import _codegen, _model
 
-SCHEMA_PATH = Path(__file__).parents[3] / "data" / "schema" / "mcu_description.schema.json"
+SCHEMA_PATH = Path(__file__).parents[3] / "data" / "schema" / "part_description.schema.json"
 DESCRIPTION_DIR = Path(__file__).parents[3] / "python" / "popcorn" / "stm32" / "description"
 MODEL_PATH = DESCRIPTION_DIR / "_model.py"
 

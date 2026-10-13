@@ -1,4 +1,4 @@
-"""Dataclasses and enums generated from data/schema/mcu_description.schema.json.
+"""Dataclasses and enums generated from data/schema/part_description.schema.json.
 
 Regenerate with ``python -m popcorn.stm32.description._codegen``. Do not edit by hand.
 """

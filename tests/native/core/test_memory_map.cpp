@@ -22,19 +22,19 @@ namespace
 namespace core = popcorn::core;
 using popcorn::address;
 
-auto description(char const* variable) -> popcorn::mcu_description
+auto description(char const* variable) -> popcorn::part_description
 {
   char const* const path = std::getenv(variable);
   REQUIRE_MESSAGE(path != nullptr, variable);
   return popcorn::load_description(path);
 }
 
-auto m33() -> popcorn::mcu_description
+auto m33() -> popcorn::part_description
 {
   return description("POPCORN_M33_DESC");
 }
 
-auto m33_code_alias() -> popcorn::mcu_description
+auto m33_code_alias() -> popcorn::part_description
 {
   return description("POPCORN_M33_CODE_ALIAS_DESC");
 }

@@ -350,7 +350,7 @@ class MachineDescription:
         name: Name for reports.
         core: Core of a multi-core part.
         svd: SVD file, None for the one of the local ST install.
-        description: MCU description JSON replacing the one built from `part` and `svd`. Its
+        description: part description JSON replacing the one built from `part` and `svd`. Its
             part must equal `part`.
         boot: How the machine boots.
         core_hz: Core clock at power-on in Hz, None for the description's reset clock.
@@ -512,7 +512,7 @@ class MachineDescription:
         return hashlib.sha256(text.encode()).hexdigest()
 
     def part_description(self) -> PartDescription:
-        """The MCU description: `description` when set, else the one built for `part`.
+        """The part description: `description` when set, else the one built for `part`.
 
         Raises:
             ConfigError: The description names another part, or the part is unknown.

@@ -7,12 +7,12 @@ from pcons import cli_command
 
 from popcorn_build.config import build_dir, project_dir
 
-SCHEMA_FILE = project_dir / "data" / "schema" / "mcu_description.schema.json"
+SCHEMA_FILE = project_dir / "data" / "schema" / "part_description.schema.json"
 GENERATOR = "popcorn-describe-schema"
 
 
 def regenerate() -> None:
-    """Build the schema generator and rewrite the committed MCU description JSON Schema."""
+    """Build the schema generator and rewrite the committed part description JSON Schema."""
     subprocess.run(
         [sys.executable, "-m", "pcons", "-B", str(build_dir), GENERATOR],
         cwd=project_dir,
@@ -28,5 +28,5 @@ def regenerate() -> None:
 def register() -> None:
     @cli_command()
     def schema() -> None:
-        """Regenerate data/schema/mcu_description.schema.json from the C++ aggregates."""
+        """Regenerate data/schema/part_description.schema.json from the C++ aggregates."""
         regenerate()

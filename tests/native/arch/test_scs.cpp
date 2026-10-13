@@ -142,7 +142,7 @@ TEST_CASE("the factory implements CM33, CM4, CM7 and CM3, refuses CM0, and opens
 
 TEST_CASE("a peripheral in the core's system space is refused")
 {
-  auto desc = m33_with([](popcorn::mcu_description& d) {
+  auto desc = m33_with([](popcorn::part_description& d) {
     auto dcb = d.peripherals.front();
     dcb.name = "DCB";
     dcb.base = 0xE000'EE08;

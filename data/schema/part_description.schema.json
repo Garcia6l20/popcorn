@@ -457,6 +457,6 @@
     "peripherals",
     "irqs"
   ],
-  "title": "popcorn MCU description",
+  "title": "popcorn part description",
   "type": "object"
 }

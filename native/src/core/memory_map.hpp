@@ -93,7 +93,7 @@ struct machine::mapped_region
    */
   static auto build(
       uc_struct*                          engine,
-      mcu_description const&              description,
+      part_description const&             description,
       std::optional<address_range> const& scratch) -> std::vector<std::unique_ptr<mapped_region>>;
 
   /**
@@ -104,9 +104,9 @@ struct machine::mapped_region
    * @throws config_error with key `scratch`, as build() documents.
    */
   static auto scratch_region(
-      mcu_description const& description,
-      address_range const&   scratch,
-      std::uint32_t          page) -> std::unique_ptr<mapped_region>;
+      part_description const& description,
+      address_range const&    scratch,
+      std::uint32_t           page) -> std::unique_ptr<mapped_region>;
 
   /**
    * @brief Region holding every byte of an access.

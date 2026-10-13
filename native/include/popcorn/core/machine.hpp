@@ -242,7 +242,7 @@ public:
    *         with execute access.
    * @throws emulation_error when the engine cannot be opened, or is not the pinned dev build.
    */
-  machine(mcu_description description, arch::arch_factory factory, machine_options options)
+  machine(part_description description, arch::arch_factory factory, machine_options options)
       pre(static_cast<bool>(factory)) pre(options.cpi > 0.0) pre(options.trace_capacity > 0)
           pre(is_enumerator(options.faults)) pre(is_enumerator(options.on_reset_request));
 
@@ -258,7 +258,7 @@ public:
   ~machine() override;
 
   /** @brief Description the machine was built from. */
-  [[nodiscard]] auto description() const noexcept -> mcu_description const&;
+  [[nodiscard]] auto description() const noexcept -> part_description const&;
 
   /** @brief Identity of this machine, unique within the process, never 0. */
   [[nodiscard]] auto id() const noexcept -> std::uint64_t;
@@ -668,7 +668,7 @@ private:
   friend struct machine_internals;
 
   std::uint64_t                                 id_;
-  mcu_description                               description_;
+  part_description                              description_;
   machine_options                               options_;
   std::unique_ptr<uc_struct, engine_closer>     engine_;
   std::vector<std::unique_ptr<mapped_region>>   memory_{};

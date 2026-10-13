@@ -103,9 +103,9 @@ auto allocate(region_desc const& region) -> std::shared_ptr<host_buffer>
 }
 
 auto machine::mapped_region::scratch_region(
-    mcu_description const& description,
-    address_range const&   scratch,
-    std::uint32_t          page) -> std::unique_ptr<mapped_region>
+    part_description const& description,
+    address_range const&    scratch,
+    std::uint32_t           page) -> std::unique_ptr<mapped_region>
 {
   auto const refuse = [&](std::string expected) {
     throw config_error("machine_options", 0, "scratch", std::move(expected));
@@ -158,7 +158,7 @@ void aligned_free::operator()(std::byte* bytes) const noexcept
 
 auto machine::mapped_region::build(
     uc_struct*                          engine,
-    mcu_description const&              description,
+    part_description const&             description,
     std::optional<address_range> const& scratch) -> std::vector<std::unique_ptr<mapped_region>>
 {
   std::uint32_t page = 0;

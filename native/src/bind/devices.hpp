@@ -38,7 +38,7 @@ void bind_native_devices(reflex::py::nb::module_ scope);
  *         when no built-in model serves an RCC of @p description.
  */
 [[nodiscard]] auto device_factories(
-    mcu_description const&                                            description,
+    part_description const&                                           description,
     std::map<std::string, std::vector<reflex::py::nb::object>> const& devices,
     std::optional<periph::stm32::rcc_options> const&                  rcc,
     std::vector<reflex::py::nb::handle>&                              python_owned)

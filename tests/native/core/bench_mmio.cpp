@@ -152,7 +152,7 @@ struct bench_machine
   popcorn::testing::test_arch*   module = nullptr;
   std::unique_ptr<core::machine> target;
 
-  explicit bench_machine(popcorn::mcu_description desc, bool with_model = true)
+  explicit bench_machine(popcorn::part_description desc, bool with_model = true)
   {
     target = std::make_unique<core::machine>(
         std::move(desc),

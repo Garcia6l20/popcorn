@@ -51,9 +51,9 @@ constexpr std::uint64_t us           = 1'000'000;
 constexpr std::uint32_t all_channels = 0xF'FFFF;
 
 auto options_with(
-    stm32::supply_options           supply,
-    popcorn::mcu_description const& description,
-    bool                            strict) -> core::machine_options
+    stm32::supply_options            supply,
+    popcorn::part_description const& description,
+    bool                             strict) -> core::machine_options
 {
   stm32::board board{};
   board.supply               = supply;
@@ -66,10 +66,10 @@ auto options_with(
 struct adc_fixture : stm32_fixture
 {
   explicit adc_fixture(
-      popcorn::mcu_description const& description = u575(),
-      stm32::supply_options           supply      = {},
-      bool                            clocked     = true,
-      bool                            strict      = false)
+      popcorn::part_description const& description = u575(),
+      stm32::supply_options            supply      = {},
+      bool                             clocked     = true,
+      bool                             strict      = false)
       : stm32_fixture{description, "rcc_ll", options_with(supply, description, strict)}
   {
     set("pc", sym("rcc_ll", "idle"));

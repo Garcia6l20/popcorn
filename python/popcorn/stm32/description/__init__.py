@@ -1,4 +1,4 @@
-"""MCU description: schema-generated types, the JSON binder, source lookup and build cache."""
+"""Part description: schema-generated types, the JSON binder, source lookup and build cache."""
 
 from popcorn.stm32.description._binder import (
     check_bounds,

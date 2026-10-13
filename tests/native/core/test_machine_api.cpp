@@ -20,7 +20,7 @@ namespace
 {
 namespace core = popcorn::core;
 
-auto toy() -> popcorn::mcu_description
+auto toy() -> popcorn::part_description
 {
   char const* const path = std::getenv("POPCORN_TOY_DESC");
   REQUIRE(path != nullptr);

@@ -44,7 +44,7 @@ using popcorn::testing::sym;
 template <typename Arch = popcorn::testing::test_arch>
 struct fixture : popcorn::testing::machine_fixture<Arch>
 {
-  explicit fixture(popcorn::mcu_description desc, std::string_view firmware, auto... extra)
+  explicit fixture(popcorn::part_description desc, std::string_view firmware, auto... extra)
       : popcorn::testing::machine_fixture<Arch>{
             std::move(desc), firmware, core::machine_options{}, extra...}
   {}
@@ -99,7 +99,7 @@ auto alu(std::uint32_t loops) -> fixture<>
   return f;
 }
 
-auto boot_run(popcorn::mcu_description desc) -> fixture<>
+auto boot_run(popcorn::part_description desc) -> fixture<>
 {
   fixture<>  f{std::move(desc), "run"};
   auto const booted = f.run_to_stop();
@@ -571,7 +571,7 @@ public:
 };
 
 template <typename Arch>
-auto boot_with(popcorn::mcu_description desc, auto... extra) -> fixture<Arch>
+auto boot_with(popcorn::part_description desc, auto... extra) -> fixture<Arch>
 {
   fixture<Arch> f{std::move(desc), "run", extra...};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);

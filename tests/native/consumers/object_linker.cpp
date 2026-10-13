@@ -18,7 +18,7 @@ namespace popcorn::consumers::object_linker
 inline constexpr address trampoline_base = 0x1000'0000;
 inline constexpr address arena_base      = 0x3000'0000;
 
-auto with_linker_regions(mcu_description description) -> mcu_description
+auto with_linker_regions(part_description description) -> part_description
 {
   description.regions.push_back({
       .name       = "trampolines",

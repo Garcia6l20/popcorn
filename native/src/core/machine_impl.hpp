@@ -1418,6 +1418,6 @@ void write_registers(
  * @brief Power-on core clock of a machine.
  * @throws config_error when neither the options nor the description give one.
  */
-auto core_clock_hz(mcu_description const& description, machine_options const& options)
+auto core_clock_hz(part_description const& description, machine_options const& options)
     -> std::uint64_t;
 }

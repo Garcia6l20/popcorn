@@ -25,7 +25,9 @@ add_doctest(
     [core],
     env={
         "POPCORN_TOY_DESC": toy,
-        "POPCORN_DESC_SCHEMA": str(project_dir / "data" / "schema" / "mcu_description.schema.json"),
+        "POPCORN_DESC_SCHEMA": str(
+            project_dir / "data" / "schema" / "part_description.schema.json"
+        ),
     },
 )
 bench_description = project.Program(

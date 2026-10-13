@@ -15,9 +15,9 @@ constexpr std::size_t registers_per_peripheral = 25;
 constexpr std::size_t fields_per_register      = 10;
 constexpr std::size_t runs                     = 20;
 
-auto synthetic_description() -> popcorn::mcu_description
+auto synthetic_description() -> popcorn::part_description
 {
-  popcorn::mcu_description description;
+  popcorn::part_description description;
   description.schema_version = popcorn::description_schema_version;
   description.part           = "SYNTH5K";
   description.generator      = "bench-description";

@@ -7,7 +7,7 @@ from popcorn.stm32.description._binder import dump_json, load_json
 from popcorn.stm32.description._builder import build_description, resolve_ip
 from popcorn.stm32.description._sources import Sources
 
-SCHEMA_PATH = Path(__file__).parents[3] / "data" / "schema" / "mcu_description.schema.json"
+SCHEMA_PATH = Path(__file__).parents[3] / "data" / "schema" / "part_description.schema.json"
 
 
 def _schema() -> dict[str, object]:

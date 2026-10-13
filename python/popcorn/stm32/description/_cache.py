@@ -1,4 +1,4 @@
-"""JSON cache of built McuDescriptions, keyed by part, core and the resolved sources' digests."""
+"""JSON cache of built PartDescriptions, keyed by part, core and the resolved sources' digests."""
 
 import hashlib
 import json

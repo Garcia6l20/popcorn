@@ -51,7 +51,7 @@ constexpr std::size_t      audio_words   = 2 * 7;
 constexpr std::uint32_t    link_baud     = 460'800;
 constexpr std::string_view firmware_name = "usart_ll";
 
-auto u575() -> popcorn::mcu_description const&
+auto u575() -> popcorn::part_description const&
 {
   static auto const desc = popcorn::load_description(POPCORN_U575_DESC);
   return desc;
