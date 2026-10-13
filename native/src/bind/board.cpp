@@ -3,6 +3,7 @@
 #include "machine.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/stm32/i2c.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -486,6 +488,39 @@ auto machine_handle::op_adc_input(std::string const& peripheral, std::uint8_t ch
     -> access_op
 {
   return detail::machine_op(adc_input_body(analog(peripheral), channel));
+}
+
+auto machine_handle::command_i2c_hold(
+    std::string const&           peripheral,
+    std::optional<std::uint64_t> at_ps,
+    std::uint64_t                for_ps) const -> access_op
+{
+  auto* const bus = dynamic_cast<periph::stm32::i2c_bus*>(engine().model(peripheral));
+  if(bus == nullptr)
+  {
+    throw config_error(peripheral, 0, "devices", "a built-in I2C model");
+  }
+  auto constexpr last = std::numeric_limits<std::uint64_t>::max();
+  if(for_ps == 0 or (at_ps and *at_ps > last - for_ps))
+  {
+    throw std::invalid_argument(
+        "a bus hold lasts at least 1 ps and ends within the 64-bit picosecond range");
+  }
+  return detail::machine_op([bus, at_ps, for_ps](core::machine& target) {
+    auto const now  = target.virtual_clock().time().ps;
+    auto const from = at_ps.value_or(now);
+    if(from < now)
+    {
+      throw std::invalid_argument(
+          std::format("a bus hold at {} ps starts before the machine time {} ps", from, now));
+    }
+    if(from > last - for_ps)
+    {
+      throw std::invalid_argument("a bus hold ends within the 64-bit picosecond range");
+    }
+    bus->hold(vtime{from}, vtime{from + for_ps});
+    return from;
+  });
 }
 
 auto machine_handle::op_adc_drive(

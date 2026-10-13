@@ -17,11 +17,13 @@ from popcorn.units import VirtualDuration, VirtualTime
 
 if typing.TYPE_CHECKING:
     from popcorn._audio import Block
+    from popcorn._refs import Pending
 
 _CS = re.compile(r"P([A-Z])(\d{1,2})")
 _MAX_STRETCH_PS = 10**12
 _STATES: weakref.WeakKeyDictionary[type, tuple[tuple[str, type], ...]] = weakref.WeakKeyDictionary()
-_ATTACHED: dict[int, tuple[weakref.ReferenceType[object], weakref.WeakMethod[AudioClock]]] = {}
+_MAX_PS = (1 << 64) - 1
+_ATTACHED: dict[int, _Attachment] = {}
 
 
 def _state_of(
@@ -101,6 +103,14 @@ type BusDevice = _core.I2CTargetBase | _core.SpiTargetBase
 type AudioClock = Callable[[BusDevice, str, Block, int], None]
 """What a machine does when a device sets an audio clock: the device, the SAI, the block, the
 frame rate."""
+
+type BusHold = Callable[[str, VirtualTime | None, VirtualDuration], Pending[VirtualTime]]
+"""What a machine does when an I2C target holds its bus: the peripheral, the start or None for
+the command's time, the length."""
+
+type _Attachment = tuple[
+    weakref.ReferenceType[object], weakref.WeakMethod[AudioClock], weakref.WeakMethod[BusHold], str
+]
 
 
 class DeviceBoard:
@@ -284,6 +294,50 @@ class I2CTarget(_core.I2CTargetBase):
             )
         self._stretch_ps = for_.ps
 
+    def hold_bus(
+        self, *, for_: VirtualDuration, at: VirtualTime | None = None
+    ) -> Pending[VirtualTime]:
+        """Hold the bus of the machine the target serves as another controller would, from `at`
+        for `for_`, posted as one command as `UartStream.write` is: at once while the machine is
+        parked, at the next block boundary while it runs. The hold itself begins at exactly
+        `at`, or at the time the command runs with `at` None, which depends on that boundary
+        while running.
+
+        BUSY reads 1 during the hold while PE is set, and a START the firmware requests waits
+        for its end. A hold due while the firmware's transfer runs starts at that transfer's
+        STOP, at the end of a lost arbitration, or when PE is cleared, its end unchanged: on
+        silicon the firmware would lose arbitration instead, which `I2CError.ARBITRATION_LOST`
+        injects. A second hold replaces one not over yet, the one
+        owning the bus keeping it until its own end or the replacement's start, whichever is
+        first. A reset of the machine drops it. Await the result for the hold's start.
+
+        Raises:
+            TypeError: `for_` is no `VirtualDuration`, or `at` no `VirtualTime`.
+            ValueError: `for_` is not positive, `at` is negative, or the end passes 2**64 - 1
+                ps. From the await, `at` is already past when the command runs.
+            ConfigError: The target serves no live machine.
+            RuntimeError: Called from a handler, a hook or a model.
+        """
+        if not isinstance(cast(object, for_), VirtualDuration):
+            raise TypeError(f"hold_bus() takes for_ as a VirtualDuration, not {for_!r}")
+        if at is not None and not isinstance(cast(object, at), VirtualTime):
+            raise TypeError(f"hold_bus() takes at as a VirtualTime or None, not {at!r}")
+        if for_.ps <= 0:
+            raise ValueError(f"a bus hold lasts more than 0 ps, not {for_}")
+        if for_.ps > _MAX_PS:
+            raise ValueError(f"a bus hold of {for_} leaves the 64-bit picosecond range")
+        if at is not None and not 0 <= at.ps <= _MAX_PS - for_.ps:
+            raise ValueError(f"a bus hold from {at} for {for_} leaves the 64-bit picosecond range")
+        held = _ATTACHED.get(id(self))
+        hold = None if held is None else held[2]()
+        if held is None or hold is None:
+            raise ConfigError(
+                f"{self!r} serves no live machine",
+                key="devices",
+                expected="a target serving a live machine",
+            )
+        return hold(held[3], at, for_)
+
     def reset(self, kind: ResetKind) -> None:
         """The machine was reset. Does nothing by default."""
 
@@ -435,11 +489,23 @@ def parked[T](device: BusDevice, read: Callable[[], T]) -> T:
     return cast(T, handle.parked(read))
 
 
-def attach(device: BusDevice, machine: object, audio_clock: AudioClock) -> None:
-    """Mark `device` as serving `machine`, `audio_clock` a method of `machine` its
-    `DeviceBoard` calls. The mark is weak: once that machine is gone the device may serve
-    another one. Keyed by identity, so a device defining `__eq__` works."""
+def attach(
+    device: BusDevice,
+    machine: object,
+    audio_clock: AudioClock,
+    bus_hold: BusHold,
+    peripheral: str,
+) -> None:
+    """Mark `device` as serving `machine` on `peripheral`, `audio_clock` a method of `machine`
+    its `DeviceBoard` calls, `bus_hold` one `I2CTarget.hold_bus` calls. The mark is weak: once
+    that machine is gone the device may serve another one. Keyed by identity, so a device
+    defining `__eq__` works."""
     key = id(device)
     if key not in _ATTACHED:
         weakref.finalize(device, _ATTACHED.pop, key, None)
-    _ATTACHED[key] = (weakref.ref(machine), weakref.WeakMethod(audio_clock))
+    _ATTACHED[key] = (
+        weakref.ref(machine),
+        weakref.WeakMethod(audio_clock),
+        weakref.WeakMethod(bus_hold),
+        peripheral,
+    )

@@ -680,9 +680,9 @@ class Machine:
             self._ports.bridges,
         )
         self._devices = attached
-        for targets in attached.values():
+        for peripheral, targets in attached.items():
             for target in targets:
-                attach(target, self, self._device_audio_clock)
+                attach(target, self, self._device_audio_clock, self._device_bus_hold, peripheral)
         self._board = Board(
             self._ports,
             attached,
@@ -2712,6 +2712,13 @@ class Machine:
                 expected=f"the device {device!r}",
             )
         self._audio.stream(name, block).external_frame_hz = frame_hz
+
+    def _device_bus_hold(
+        self, peripheral: str, at: VirtualTime | None, for_: VirtualDuration
+    ) -> Pending[VirtualTime]:
+        self._refuse_on_host()
+        command = self._handle.command_i2c_hold(peripheral, None if at is None else at.ps, for_.ps)
+        return self._post(command).mapped(lambda done: VirtualTime(cast(int, done[0])))
 
     def _require_stopped(self) -> None:
         if self.busy and not self._handle.owns_engine():

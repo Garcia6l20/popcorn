@@ -1674,3 +1674,263 @@ TEST_CASE("SCL is released once both the stretching target and the waiting contr
     }
   }
 }
+
+namespace
+{
+constexpr std::uint64_t hold_ps = 50 * us;
+
+auto bus_of(rig const& r) -> stm32::i2c_bus&
+{
+  auto* const held = dynamic_cast<stm32::i2c_bus*>(r.f->target->model("I2C1"));
+  REQUIRE(held != nullptr);
+  return *held;
+}
+
+void hold(rig const& r, std::uint64_t from, std::uint64_t until)
+{
+  bus_of(r).hold(vtime{from}, vtime{until});
+}
+}
+
+TEST_CASE("a hold on an idle bus reads BUSY until its end and delays a START to it")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  auto const t1 = b.now() + 10 * us;
+  auto const t2 = t1 + hold_ps;
+  hold(r, t1, t2);
+  b.run_until(t1 - period_ps);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  b.run_until(t1 + period_ps);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  b.command(0x38, 0, false, true);
+  CHECK(b.get("CR2", "START") == 1);
+  b.run_until(t2 - period_ps);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  CHECK(b.get("CR2", "START") == 1);
+  CHECK(r.table->events.empty());
+  b.run_until(t2 + address_ps + 2 * period_ps);
+  REQUIRE(r.table->events.size() == 2);
+  CHECK(r.table->events[0] == bus_event{'W', 0, t2 + address_ps});
+  CHECK(b.get("ISR", "BUSY") == 0);
+  CHECK(b.get("ISR", "STOPF") == 1);
+}
+
+TEST_CASE("a hold without a START releases BUSY at its end")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  auto const t1 = b.now();
+  hold(r, t1, t1 + hold_ps);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  b.run_until(t1 + period_ps);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  b.run_until(t1 + hold_ps + period_ps);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  CHECK(r.f->target->pending_events() == 0);
+}
+
+TEST_CASE("a hold due during a transfer starts at its STOP and keeps its end")
+{
+  for(auto const over : {false, true})
+  {
+    CAPTURE(over);
+    rig r{"idle"};
+    bus b{*r.f};
+    b.controller();
+    b.command(0x38, 0, false, true);
+    auto const stop  = b.now() + address_ps + period_ps;
+    auto const until = over ? b.now() + address_ps : stop + hold_ps;
+    hold(r, b.now() + period_ps, until);
+    b.run_until(stop - period_ps / 2);
+    CHECK(b.get("ISR", "BUSY") == 1);
+    b.run_until(stop + period_ps / 2);
+    CHECK(b.get("ISR", "STOPF") == 1);
+    CHECK(b.get("ISR", "BUSY") == (over ? 0u : 1u));
+    b.set("ICR", "STOPCF", 1);
+    b.command(0x38, 0, false, true);
+    b.run_until(stop + hold_ps + address_ps + 2 * period_ps);
+    REQUIRE(r.table->events.size() == 4);
+    CHECK(r.table->events[2].at == (over ? stop + period_ps / 2 : stop + hold_ps) + address_ps);
+  }
+}
+
+TEST_CASE("clearing PE inside a hold reads BUSY 0 and setting it again reads BUSY 1")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  auto const t1 = b.now();
+  hold(r, t1, t1 + hold_ps);
+  b.run_until(t1 + period_ps);
+  REQUIRE(b.get("ISR", "BUSY") == 1);
+  b.set("CR1", "PE", 0);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  b.run_until(t1 + 2 * period_ps);
+  b.set("CR1", "PE", 1);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  b.command(0x38, 0, false, true);
+  b.run_until(t1 + hold_ps + address_ps + 2 * period_ps);
+  REQUIRE(r.table->events.size() == 2);
+  CHECK(r.table->events[0].at == t1 + hold_ps + address_ps);
+}
+
+TEST_CASE("a hold due during a transfer that PE clears starts at the clear")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  b.command(0x38, 2, false, false);
+  auto const t1 = b.now();
+  hold(r, t1 + period_ps, t1 + hold_ps);
+  b.run_until(t1 + 2 * period_ps);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  b.set("CR1", "PE", 0);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  b.set("CR1", "PE", 1);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  b.run_until(t1 + hold_ps + period_ps);
+  CHECK(b.get("ISR", "BUSY") == 0);
+}
+
+TEST_CASE("a second hold replaces a pending one and leaves no stale event")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  auto const base = r.f->target->pending_events();
+  auto const t1   = b.now() + 10 * us;
+  for(std::uint64_t index = 0; index < 1000; ++index)
+  {
+    hold(r, t1 + index, t1 + hold_ps + index);
+  }
+  CHECK(r.f->target->pending_events() == base + 2);
+  hold(r, t1 + 2 * hold_ps, t1 + 3 * hold_ps);
+  b.run_until(t1 + period_ps);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  b.run_until(t1 + 2 * hold_ps + period_ps);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  b.run_until(t1 + 3 * hold_ps + period_ps);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  CHECK(r.f->target->pending_events() == base);
+}
+
+TEST_CASE("a hold replacing one that owns the bus takes over at its start or after the old end")
+{
+  for(auto const gap : {false, true})
+  {
+    CAPTURE(gap);
+    rig r{"idle"};
+    bus b{*r.f};
+    b.controller();
+    auto const t1 = b.now();
+    hold(r, t1, t1 + hold_ps);
+    b.run_until(t1 + period_ps);
+    REQUIRE(b.get("ISR", "BUSY") == 1);
+    auto const from = gap ? t1 + 2 * hold_ps : t1 + hold_ps / 2;
+    hold(r, from, from + hold_ps);
+    b.run_until(t1 + hold_ps + period_ps);
+    CHECK(b.get("ISR", "BUSY") == (gap ? 0u : 1u));
+    b.run_until(from + period_ps);
+    CHECK(b.get("ISR", "BUSY") == 1);
+    b.run_until(from + hold_ps + period_ps);
+    CHECK(b.get("ISR", "BUSY") == 0);
+    CHECK(r.f->target->pending_events() == 0);
+  }
+}
+
+TEST_CASE("a replacement starting at the end of the owning hold keeps a queued START waiting")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  auto const t1 = b.now();
+  auto const t2 = t1 + hold_ps;
+  hold(r, t1, t2);
+  b.run_until(t1 + period_ps);
+  b.command(0x38, 0, false, true);
+  hold(r, t2, t2 + hold_ps);
+  b.run_until(t2 + hold_ps - period_ps);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  CHECK(r.table->events.empty());
+  b.run_until(t2 + hold_ps + address_ps + 2 * period_ps);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  REQUIRE(r.table->events.size() == 2);
+  CHECK(r.table->events[0].at == t2 + hold_ps + address_ps);
+  CHECK(r.f->target->pending_events() == 0);
+}
+
+TEST_CASE("a snapshot inside a hold restores BUSY and the delayed START")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  auto const t1 = b.now();
+  auto const t2 = t1 + hold_ps;
+  hold(r, t1 + period_ps, t2);
+  b.run_until(t1 + 2 * period_ps);
+  b.command(0x38, 0, false, true);
+  auto const saved = r.f->target->snapshot();
+
+  rig other{"idle"};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  bus o{*other.f};
+  CHECK(o.get("ISR", "BUSY") == 1);
+  o.run_until(t2 - period_ps);
+  CHECK(o.get("ISR", "BUSY") == 1);
+  o.run_until(t2 + address_ps + 2 * period_ps);
+  REQUIRE(other.table->events.size() == 2);
+  CHECK(other.table->events[0].at == t2 + address_ps);
+}
+
+TEST_CASE("a hold due at the instant of a STOP comes after it however early it was posted")
+{
+  std::vector<std::vector<bus_event>> seen;
+  for(auto const early : {true, false})
+  {
+    CAPTURE(early);
+    rig r{"idle"};
+    bus b{*r.f};
+    b.controller();
+    b.command(0x38, 0, false, true);
+    auto const stop = b.now() + address_ps + period_ps;
+    if(early)
+    {
+      hold(r, stop, stop + hold_ps);
+    }
+    b.run_until(stop - period_ps / 2);
+    b.command(0x50, 0, false, true);
+    if(not early)
+    {
+      hold(r, stop, stop + hold_ps);
+    }
+    b.run_until(stop + hold_ps + 2 * address_ps);
+    REQUIRE_FALSE(r.memory->events.empty());
+    CHECK(r.memory->events[0] == bus_event{'W', 0, stop + address_ps});
+    seen.push_back(r.memory->events);
+  }
+  CHECK(seen[0] == seen[1]);
+}
+
+TEST_CASE("a hold due inside a lost arbitration starts at the other controller's STOP")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  b.command(0x33, 1, true, true);
+  auto const end = b.now() + address_ps;
+  hold(r, end + period_ps / 2, end + hold_ps);
+  b.run_until(end + period_ps / 4);
+  REQUIRE(b.get("ISR", "ARLO") == 1);
+  b.command(0x38, 0, false, true);
+  b.run_until(end + period_ps + period_ps / 2);
+  CHECK(b.get("ISR", "BUSY") == 1);
+  CHECK(r.table->events.empty());
+  b.run_until(end + hold_ps + address_ps + 2 * period_ps);
+  REQUIRE(r.table->events.size() == 2);
+  CHECK(r.table->events[0].at == end + hold_ps + address_ps);
+}

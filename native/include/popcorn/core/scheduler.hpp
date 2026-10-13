@@ -53,13 +53,21 @@ struct event
   /** @brief What the deadline counts. at is derived from due_ps for deadline::time. */
   deadline kind{deadline::instructions};
   /** @brief Delivery lane, 0 for an event of this machine, 1 and up for an event delivered from
-   * another machine. Events due at the same count fire by lane, then by seq. A lane event keeps
-   * its own count when its due time has already passed. */
+   * another machine, host_lane for one a host command scheduled. Events due at the same count
+   * fire by lane, then by seq. A lane event keeps its own count when its due time has already
+   * passed. */
   std::uint32_t lane{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(event const&, event const&) -> bool = default;
 };
+
+/**
+ * @brief Lane of events a host command schedules at an exact virtual time, such as a bus hold
+ *        posted from Python. Above every link lane, so such an event fires after the local and
+ *        link events due at the same count, whatever boundary the command ran at.
+ */
+inline constexpr std::uint32_t host_lane = std::numeric_limits<std::uint32_t>::max();
 
 static_assert(std::is_trivially_copyable_v<event_id>);
 static_assert(std::is_trivially_copyable_v<event>);

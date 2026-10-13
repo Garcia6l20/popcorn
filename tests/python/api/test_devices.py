@@ -18,7 +18,7 @@ from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from . import models_example
-from .conftest import run_bounded
+from .conftest import run_bounded, stalled
 from .devices_example import Eeprom24, JedecDevice
 from .projects import DEVICES
 
@@ -1083,3 +1083,154 @@ def test_a_stretching_hook_takes_the_gil_once_per_call(u575: popcorn.PartDescrip
     assert target.stretched_at >= 0
     starts = sum(kind == "on_start" for kind, _ in target.events)
     assert gil_entries(m) - before == len(target.events) + starts
+
+
+HOLD_AT = ms(2)
+HOLD_FOR = ms(1)
+ADDRESS_PS = 10 * 2_500_000
+
+
+def held_eeprom(u575: popcorn.PartDescription) -> tuple[popcorn.Machine, Stamped, VirtualTime]:
+    target = Stamped()
+    m, _ = eeprom_machine(u575, target)
+    enter(m, "eeprom_rw")
+    return m, target, m.time + HOLD_AT
+
+
+def check_held_starts(starts: list[int], at: VirtualTime) -> None:
+    end = (at + HOLD_FOR).ps
+    assert any(t < at.ps for t in starts)
+    assert not any(at.ps + ADDRESS_PS < t < end + ADDRESS_PS for t in starts)
+    assert end + ADDRESS_PS in starts
+
+
+def test_a_held_bus_delays_the_firmware_start_to_the_hold_end(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, target, at = held_eeprom(u575)
+    events = m.pending_events
+    assert asyncio.run(target.hold_bus(at=at, for_=HOLD_FOR)) == at
+    assert m.pending_events == events + 2
+    assert finish(m)[0] == 20
+    check_held_starts(target.starts, at)
+
+
+def test_a_hold_is_alike_parked_and_running(u575: popcorn.PartDescription) -> None:
+    m, parked, at = held_eeprom(u575)
+    asyncio.run(parked.hold_bus(at=at, for_=HOLD_FOR))
+    parked_log = finish(m)
+    m, running, at = held_eeprom(u575)
+
+    async def post(_: VirtualTime) -> VirtualTime:
+        return await running.hold_bus(at=at, for_=HOLD_FOR)
+
+    async def body() -> None:
+        async with m.running():
+            boundary, start = await stalled(m, post)
+            assert boundary < at
+            assert start == at
+            await m.wait_for(m.ref.var("log_len").ge(4))
+
+    with pytest.raises(popcorn.EmulationError, match=r"USER at .* eeprom_rw"):
+        run_bounded(body(), 30)
+    assert log(m) == parked_log
+    assert running.starts == parked.starts
+    check_held_starts(running.starts, at)
+
+
+def test_a_hold_of_a_target_serving_no_machine_is_a_config_error(
+    u575: popcorn.PartDescription,
+) -> None:
+    target = I2CTarget(0x38)
+    with pytest.raises(ConfigError, match="serves no live machine"):
+        target.hold_bus(for_=ms(1))
+    m = popcorn.Machine(u575, devices={"I2C1": [target]})
+    asyncio.run(target.hold_bus(for_=ms(1)))
+    machine = weakref.ref(m)
+    del m
+    gc.collect()
+    assert machine() is None
+    with pytest.raises(ConfigError, match="serves no live machine"):
+        target.hold_bus(for_=ms(1))
+
+
+def test_a_hold_keeps_neither_the_machine_nor_the_target_alive(
+    u575: popcorn.PartDescription,
+) -> None:
+    target = I2CTarget(0x38)
+    m = popcorn.Machine(u575, devices={"I2C1": [target]})
+    asyncio.run(target.hold_bus(at=m.time + ms(1), for_=ms(1)))
+    watched = weakref.ref(m), weakref.ref(target)
+    del m, target
+    gc.collect()
+    assert [w() for w in watched] == [None, None]
+
+
+@pytest.mark.parametrize(
+    ("for_", "at", "error"),
+    [
+        (5, None, TypeError),
+        (ms(1), 5, TypeError),
+        (ms(0), None, ValueError),
+        (VirtualDuration(-1), None, ValueError),
+        (ms(1), VirtualTime(-1), ValueError),
+        (ms(1), VirtualTime((1 << 64) - 2), ValueError),
+        (VirtualDuration(1 << 64), None, ValueError),
+    ],
+    ids=["for-type", "at-type", "zero", "negative", "at-negative", "overflow", "for-overflow"],
+)
+def test_a_bad_hold_is_refused_at_the_call_with_nothing_posted(
+    u575: popcorn.PartDescription, for_: object, at: object, error: type[Exception]
+) -> None:
+    target = I2CTarget(0x38)
+    m = popcorn.Machine(u575, devices={"I2C1": [target]})
+    events = m.pending_events
+    with pytest.raises(error):
+        target.hold_bus(for_=cast(VirtualDuration, for_), at=cast(VirtualTime | None, at))
+    assert m.pending_events == events
+
+
+def test_a_hold_in_the_past_of_a_parked_machine_is_refused_and_posts_nothing(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, target, at = held_eeprom(u575)
+    assert m.time.ps > 0
+    events = m.pending_events
+    with pytest.raises(ValueError, match="before the machine time"):
+        asyncio.run(target.hold_bus(at=VirtualTime(0), for_=HOLD_FOR))
+    assert m.pending_events == events
+    assert asyncio.run(target.hold_bus(at=at, for_=HOLD_FOR)) == at
+    assert finish(m)[0] == 20
+    check_held_starts(target.starts, at)
+
+
+def test_a_thousand_replaced_holds_leave_two_events(u575: popcorn.PartDescription) -> None:
+    target = I2CTarget(0x38)
+    m = popcorn.Machine(u575, devices={"I2C1": [target]})
+    events = m.pending_events
+    for index in range(1000):
+        asyncio.run(target.hold_bus(at=m.time + us(index + 1), for_=ms(1)))
+    assert m.pending_events == events + 2
+
+
+def test_a_hold_takes_no_gil_on_the_machine_thread(u575: popcorn.PartDescription) -> None:
+    target = I2CTarget(0x38)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [target]})
+    enter(m, "idle")
+    asyncio.run(target.hold_bus(at=m.time + us(10), for_=us(100)))
+    before = gil_entries(m)
+    asyncio.run(m.run(for_=ms(1)))
+    assert gil_entries(m) == before
+
+
+class Holding(Stamped):
+    def on_start(self, read: bool, at: VirtualTime) -> bool:
+        self.hold_bus(for_=ms(1))
+        return True
+
+
+def test_a_hold_from_a_hook_is_refused_from_the_run(u575: popcorn.PartDescription) -> None:
+    m, _ = eeprom_machine(u575, Holding())
+    enter(m, "eeprom_rw")
+    with pytest.raises(RuntimeError, match="a handler accesses the machine directly"):
+        asyncio.run(m.run(budget=BUDGET))

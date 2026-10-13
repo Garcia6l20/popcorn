@@ -3,6 +3,7 @@
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/scheduler.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 
@@ -25,6 +26,8 @@ namespace
 {
 constexpr std::uint64_t ps_per_second  = 1'000'000'000'000;
 constexpr std::uint32_t phase_done     = 0;
+constexpr std::uint32_t hold_begin     = 1;
+constexpr std::uint32_t hold_end       = 2;
 constexpr std::uint32_t no_target      = ~std::uint32_t{};
 constexpr std::uint32_t address_length = 10;
 constexpr std::uint32_t byte_length    = 9;
@@ -43,6 +46,17 @@ enum class phase : std::uint8_t
   lost,
 };
 
+struct i2c_hold
+{
+  std::uint32_t id{};
+  std::uint64_t from_ps{};
+  std::uint64_t until_ps{};
+  std::uint64_t begin_seq{};
+  std::uint64_t end_seq{};
+
+  friend auto operator==(i2c_hold const&, i2c_hold const&) -> bool = default;
+};
+
 struct i2c_state
 {
   std::uint32_t                       generation{};
@@ -56,6 +70,10 @@ struct i2c_state
   std::uint8_t                        rx_held{};
   std::uint8_t                        rx_data{};
   std::uint64_t                       end_ps{};
+  std::uint32_t                       holds{};
+  i2c_hold                            pending{};
+  std::uint8_t                        pending_waits{};
+  i2c_hold                            active{};
   std::vector<std::vector<std::byte>> devices;
 
   friend auto operator==(i2c_state const&, i2c_state const&) -> bool = default;
@@ -86,8 +104,15 @@ auto lower(std::string_view name) -> std::string
  *        sends a STOP after the current byte. STOPF and BUSY clear at the end of the STOP. A
  *        target's reply stretches SCL after its byte by the reply's stretch_ps: the next phase
  *        starts once both the target and the controller release SCL, the phase lengths
- *        unchanged. ICR clears its flags, PE = 0 resets the transfer, CR2's START, STOP, NACK and
- *        PECBYTE and
+ *        unchanged. A host hold, i2c_bus::hold, is another controller owning the bus: BUSY 1 while
+ *        PE is set, a START requested meanwhile sent at the hold's end, a hold due while the
+ *        firmware's transfer runs taken at that transfer's STOP, at the end of a lost
+ *        arbitration or at PE clear, its end unchanged. Deviation from RM0456: setting PE
+ *        during a hold reads BUSY 1 at once, where silicon waits for the next START it detects. Its
+ *        events go on core::host_lane, after the model's own events of the same instant. Deviation:
+ *        on silicon the firmware's transfer would lose arbitration instead, which a target's ARLO
+ *        reply models. ICR clears its flags, PE = 0 resets the transfer, CR2's START, STOP, NACK
+ *        and PECBYTE and
  *        the ISR flags. The event IRQ follows TXIS, RXNE, ADDR, NACKF, STOPF, TC and TCR with
  *        their enables, the error IRQ BERR, ARLO, OVR, PECERR, TIMEOUT and ALERT with ERRIE. BERR,
  *        ARLO and OVR are set only when a target's reply to an address or a byte carries that
@@ -105,7 +130,7 @@ auto lower(std::string_view name) -> std::string
  *        the model. Not modelled, logged once: target mode, 10-bit addressing, SMBus and PEC, the
  *        autonomous trigger.
  */
-class i2c final : public dispatch_model<i2c, i2c_state>
+class i2c final : public dispatch_model<i2c, i2c_state>, public i2c_bus
 {
 public:
   i2c(model_context&                           ctx,
@@ -125,6 +150,7 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
+  void hold(vtime from, vtime until) override;
 
   void enable_written(std::uint32_t old, std::uint32_t now);
   void command_written(std::uint32_t old, std::uint32_t now);
@@ -152,6 +178,10 @@ private:
   void               byte_done();
   void               stop_done();
   void               lost_done();
+  void               hold_begun();
+  void               hold_ended(std::uint32_t id);
+  void               take_bus();
+  [[nodiscard]] auto held() const -> bool;
   void               lose();
   [[nodiscard]] auto failed(i2c_error error) -> bool;
   void               abort();
@@ -519,7 +549,11 @@ void i2c::stop_done()
     auto const target = std::exchange(state_.target, no_target);
     targets_[target]->stop(target_at());
   }
-  if(get(regs_, start_) != 0)
+  if(state_.pending_waits != 0)
+  {
+    take_bus();
+  }
+  if(get(regs_, start_) != 0 and not held())
   {
     begin_start(state_.end_ps);
   }
@@ -561,9 +595,83 @@ void i2c::lost_done()
     auto const target = std::exchange(state_.target, no_target);
     targets_[target]->stop(target_at());
   }
-  if(get(regs_, start_) != 0)
+  if(state_.pending_waits != 0)
+  {
+    take_bus();
+  }
+  if(get(regs_, start_) != 0 and not held())
   {
     begin_start(state_.end_ps);
+  }
+}
+
+auto i2c::held() const -> bool
+{
+  return state_.active.id != 0;
+}
+
+void i2c::hold(vtime from, vtime until)
+{
+  if(state_.pending.id != 0)
+  {
+    ctx_.events.cancel(state_.pending.begin_seq);
+    ctx_.events.cancel(state_.pending.end_seq);
+  }
+  auto const id        = ++state_.holds;
+  state_.pending_waits = 0;
+  state_.pending       = {
+      .id        = id,
+      .from_ps   = from.ps,
+      .until_ps  = until.ps,
+      .begin_seq = ctx_.events.schedule_at(from, hold_begin, id, core::host_lane, ctx_.clock),
+      .end_seq   = ctx_.events.schedule_at(until, hold_end, id, core::host_lane, ctx_.clock)};
+}
+
+void i2c::hold_begun()
+{
+  if(step() != phase::idle)
+  {
+    state_.pending_waits = 1;
+    return;
+  }
+  take_bus();
+}
+
+void i2c::take_bus()
+{
+  if(held())
+  {
+    ctx_.events.cancel(state_.active.end_seq);
+  }
+  state_.active        = std::exchange(state_.pending, {});
+  state_.pending_waits = 0;
+  update(regs_, busy_, enabled() ? 1 : 0);
+}
+
+void i2c::hold_ended(std::uint32_t id)
+{
+  if(id == state_.pending.id)
+  {
+    state_.pending       = {};
+    state_.pending_waits = 0;
+    return;
+  }
+  if(id != state_.active.id or not held())
+  {
+    return;
+  }
+  auto const until = state_.active.until_ps;
+  state_.active    = {};
+  if(state_.pending.id != 0 and state_.pending.from_ps <= until)
+  {
+    ctx_.events.cancel(state_.pending.begin_seq);
+    take_bus();
+    return;
+  }
+  update(regs_, busy_, 0);
+  if(enabled() and get(regs_, start_) != 0)
+  {
+    begin_start(until);
   }
 }
 
@@ -582,6 +690,10 @@ void i2c::abort()
   state_.target = no_target;
   regs_.poke(command_.offset, regs_.peek(command_.offset) & ~command_set_only_);
   regs_.poke(status_.offset, (regs_.peek(status_.offset) & ~status_reset_mask_) | tx_empty_.mask());
+  if(state_.pending_waits != 0)
+  {
+    take_bus();
+  }
 }
 
 void i2c::reset(register_file& regs, reset_kind kind)
@@ -591,8 +703,10 @@ void i2c::reset(register_file& regs, reset_kind kind)
     regs.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation = state_.generation + 1;
+  auto const holds      = state_.holds;
   state_                = {};
   state_.generation     = generation;
+  state_.holds          = holds;
   tx_dma_.resolve();
   rx_dma_.resolve();
   event_dma_.resolve();
@@ -664,6 +778,10 @@ void i2c::enable_written(std::uint32_t old, std::uint32_t now)
   {
     abort();
   }
+  if(enable_.of(old) == 0 and enable_.of(now) != 0 and held())
+  {
+    update(regs_, busy_, 1);
+  }
 }
 
 void i2c::command_written(std::uint32_t old, std::uint32_t now)
@@ -685,7 +803,7 @@ void i2c::command_written(std::uint32_t old, std::uint32_t now)
       {
         update(regs_, stop_, 0);
       }
-      if(started)
+      if(started and not held())
       {
         begin_start(ctx_.clock.time().ps);
       }
@@ -807,6 +925,18 @@ auto i2c::on_write(
 
 void i2c::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == hold_begin and payload == state_.pending.id)
+  {
+    hold_begun();
+    flags();
+    return;
+  }
+  if(kind == hold_end)
+  {
+    hold_ended(static_cast<std::uint32_t>(payload));
+    flags();
+    return;
+  }
   if(kind != phase_done or payload != state_.generation)
   {
     return;

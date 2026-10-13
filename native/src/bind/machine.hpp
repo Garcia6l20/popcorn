@@ -765,6 +765,21 @@ public:
   /** @brief adc_input() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of adc_input."}]] [[nodiscard]] auto
       op_adc_input(std::string const& peripheral, std::uint8_t channel) const -> access_op;
+  /**
+   * @brief A command holding an I2C bus as another controller would, i2c_bus::hold, checked
+   *        now. Its value is the hold's start in picoseconds.
+   * @param peripheral I2C instance name.
+   * @param at_ps Start, machine time since reset, empty for the time the command runs at.
+   * @param for_ps Length, at least 1.
+   * @throws config_error now, when the peripheral's model is no built-in I2C.
+   * @throws std::invalid_argument now for a length of 0 or an end past the time range, when
+   *         the command runs for a start already past.
+   */
+  [[= py::doc{"Command holding an I2C bus, its value the start."}]] [[nodiscard]] auto
+      command_i2c_hold(
+          std::string const&           peripheral,
+          std::optional<std::uint64_t> at_ps,
+          std::uint64_t                for_ps) const -> access_op;
   /** @brief adc_drive() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of adc_drive."}]] [[nodiscard]] auto op_adc_drive(
       std::string const& peripheral,
