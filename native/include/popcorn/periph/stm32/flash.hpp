@@ -14,6 +14,8 @@ struct flash_options
 {
   /** @brief tprog, 128-bit programming time in normal mode. */
   std::chrono::nanoseconds quad_word_program = std::chrono::microseconds{118};
+  /** @brief tprog in burst mode, 48 us per 128-bit line, times the 8 lines of a BWR burst. */
+  std::chrono::nanoseconds burst_program = std::chrono::microseconds{8 * 48};
   /** @brief tERASE, erase time of one 8-Kbyte page, 10 k endurance cycles. */
   std::chrono::nanoseconds page_erase = std::chrono::microseconds{1500};
   /** @brief tME, mass erase time of one bank. */

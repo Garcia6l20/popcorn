@@ -51,6 +51,7 @@ constexpr std::uint32_t optstrt    = 1u << 17;
 constexpr std::uint32_t eopie      = 1u << 24;
 constexpr std::uint32_t errie      = 1u << 25;
 constexpr std::uint32_t all_errors = 0x20fb;
+constexpr std::uint32_t eop        = 1u << 0;
 constexpr std::uint32_t hsion      = 1u << 8;
 constexpr std::uint32_t sw_hsi16   = 1;
 constexpr std::uint32_t vos_range1 = 3u << 16;
@@ -289,6 +290,16 @@ struct flash_rig
 auto erased(std::size_t count) -> std::vector<std::uint32_t>
 {
   return std::vector<std::uint32_t>(count, 0xffff'ffffu);
+}
+
+auto burst_data(std::uint32_t seed) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t i = 0; i < 32; ++i)
+  {
+    out.push_back(0x1234'0000u + seed + i);
+  }
+  return out;
 }
 }
 
@@ -710,21 +721,266 @@ TEST_CASE("HSI16 runs while PG or STRT is set, then stops unless HSION keeps it"
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
 }
 
-TEST_CASE("BWR and write protection are logged once as not modelled")
+TEST_CASE("HSI16 stays on while a held program runs after PG is cleared")
+{
+  flash_rig rig;
+  REQUIRE(rig.f.field("RCC", "RCC_CR", "HSION") == 0);
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4});
+  rig.wait_idle();
+  REQUIRE(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  rig.store_words(last_page + 16, {5, 6, 7, 8});
+  REQUIRE(rig.status("BSY") == 1);
+  rig.control(0);
+  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  rig.wait_idle();
+  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
+}
+
+TEST_CASE("write protection is logged once as not modelled")
 {
   flash_rig rig;
   rig.logged.clear();
-  rig.program(last_page, {1, 2, 3, 4}, bwr);
-  rig.program(last_page + 16, {1, 2, 3, 4}, bwr);
-  REQUIRE(rig.logged.size() == 2);
-  auto const mentions = [&rig](std::string_view text) {
-    return std::ranges::count_if(rig.logged, [text](core::log_record const& record) {
-      return record.message.contains(text);
-    });
-  };
-  CHECK(mentions("write protection") == 1);
-  CHECK(mentions("BWR") == 1);
+  rig.program(last_page, {1, 2, 3, 4});
+  rig.program(last_page + 16, {1, 2, 3, 4});
+  REQUIRE(rig.logged.size() == 1);
+  CHECK(rig.logged.front().message.contains("write protection"));
   CHECK(rig.words(last_page + 16, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+}
+
+TEST_CASE("a BWR burst collects 32 words then programs 128 bytes under one BSY")
+{
+  flash_rig rig;
+  rig.logged.clear();
+  auto const data = burst_data(0x100);
+  rig.control(pg | bwr | eopie);
+  rig.store_words(last_page, std::vector<std::uint32_t>(data.begin(), data.end() - 1));
+  CHECK(rig.status("WDW") == 1);
+  CHECK(rig.status("BSY") == 0);
+  CHECK(rig.words(last_page, 32) == erased(32));
+  auto const start = rig.f.target->virtual_clock().time().ps;
+  rig.store_words(last_page + 124, {data.back()});
+  CHECK(rig.status("WDW") == 0);
+  CHECK(rig.status("BSY") == 1);
+  rig.control(eopie);
+  rig.call("spin", {100});
+  CHECK(rig.f.target->virtual_clock().time().ps - start >= 100'000'000u);
+  CHECK(rig.status("BSY") == 1);
+  CHECK(rig.words(last_page, 32) == erased(32));
+  rig.wait_idle();
+  auto const took = rig.f.target->virtual_clock().time().ps - start;
+  CHECK(took >= 384'000'000u);
+  CHECK(took < 450'000'000u);
+  CHECK(rig.words(last_page, 32) == data);
+  CHECK(rig.words(last_page + 128, 4) == erased(4));
+  CHECK(rig.status("EOP") == 1);
+  CHECK((rig.read("FLASH_NSSR") & all_errors & ~eop) == 0);
+  CHECK(rig.logged.size() == 1);
+}
+
+TEST_CASE("firmware bursts with PG and BWR cleared before or after BSY drops")
+{
+  flash_rig  rig;
+  auto const buffer = sym("flash_ll", "words");
+  for(std::uint32_t const clear_first : {1u, 0u})
+  {
+    CAPTURE(clear_first);
+    auto const to   = last_page + (clear_first != 0 ? 0u : 128u);
+    auto const data = burst_data(clear_first << 8);
+    for(std::size_t i = 0; i < data.size(); ++i)
+    {
+      REQUIRE(rig.f.target->mem().write(buffer + 4 * i, 4, data[i]).has_value());
+    }
+    rig.call("burst_program", {to, buffer, clear_first});
+    CHECK(rig.status("BSY") == 0);
+    CHECK(rig.status("WDW") == 0);
+    CHECK(rig.field("FLASH_NSCR", "PG") == 0);
+    CHECK((rig.read("FLASH_NSSR") & all_errors) == 0);
+    CHECK(rig.words(to, 32) == data);
+  }
+}
+
+TEST_CASE("a quad-word stored while BSY is set programs after PG is cleared")
+{
+  flash_rig rig;
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4, 5, 6, 7, 8});
+  REQUIRE(rig.status("BSY") == 1);
+  rig.control(0);
+  rig.wait_idle();
+  CHECK((rig.read("FLASH_NSSR") & all_errors) == 0);
+  CHECK(rig.words(last_page, 8) == std::vector<std::uint32_t>{1, 2, 3, 4, 5, 6, 7, 8});
+}
+
+TEST_CASE("a burst stored while BSY is set keeps BWR after PG and BWR are cleared")
+{
+  flash_rig  rig;
+  auto const data = burst_data(0x40);
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4});
+  REQUIRE(rig.status("BSY") == 1);
+  rig.control(pg | bwr);
+  rig.store_words(last_page + 128, data);
+  rig.control(0);
+  rig.wait_idle();
+  CHECK((rig.read("FLASH_NSSR") & all_errors) == 0);
+  CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+  CHECK(rig.words(last_page + 128, 32) == data);
+}
+
+TEST_CASE("a DMA store held while BSY is set takes the PG of the time BSY clears")
+{
+  flash_rig  rig;
+  auto const buffer = sym("flash_ll", "words");
+  auto const bit    = [&](std::string_view reg, std::string_view name) {
+    auto const& unit = rig.f.target->peripheral("GPDMA1").description();
+    auto const  regd = std::ranges::find(unit.registers, reg, &popcorn::register_desc::name);
+    REQUIRE(regd != unit.registers.end());
+    auto const bits = std::ranges::find(regd->fields, name, &popcorn::field_desc::name);
+    REQUIRE(bits != regd->fields.end());
+    return std::uint32_t{1} << bits->lsb;
+  };
+  for(std::uint32_t i = 0; i < 4; ++i)
+  {
+    REQUIRE(rig.f.target->mem().write(buffer + 64 + 4 * i, 4, 0x5000 + i).has_value());
+  }
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4});
+  REQUIRE(rig.status("BSY") == 1);
+  auto const start = rig.f.target->virtual_clock().time().ps;
+  rig.write(
+      "GPDMA1", "GPDMA_C0TR1",
+      2u * bit("GPDMA_C0TR1", "SDW_LOG2")
+          | 2u * bit("GPDMA_C0TR1", "DDW_LOG2")
+          | bit("GPDMA_C0TR1", "SINC")
+          | bit("GPDMA_C0TR1", "DINC"));
+  rig.write("GPDMA1", "GPDMA_C0TR2", bit("GPDMA_C0TR2", "SWREQ"));
+  rig.write("GPDMA1", "GPDMA_C0BR1", 16);
+  rig.write("GPDMA1", "GPDMA_C0SAR", static_cast<std::uint32_t>(buffer + 64));
+  rig.write("GPDMA1", "GPDMA_C0DAR", static_cast<std::uint32_t>(last_page + 16));
+  rig.write("GPDMA1", "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  rig.call("spin", {20});
+  REQUIRE(rig.status("BSY") == 1);
+  REQUIRE(rig.f.target->virtual_clock().time().ps - start < 100'000'000u);
+  rig.control(0);
+  rig.wait_idle();
+  CHECK(rig.status("PGSERR") == 1);
+  CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+  CHECK(rig.words(last_page + 16, 4) == erased(4));
+}
+
+TEST_CASE("burst errors follow RM0456 7.3.9 and flush the buffer")
+{
+  flash_rig  rig;
+  auto const data  = burst_data(0x80);
+  auto const flags = [&rig] {
+    auto const value = rig.read("FLASH_NSSR") & all_errors;
+    rig.control(0);
+    rig.clear_errors();
+    return value;
+  };
+  constexpr std::uint32_t pgaerr  = 1u << 5;
+  constexpr std::uint32_t pgserr  = 1u << 7;
+  constexpr std::uint32_t sizerr  = 1u << 6;
+  constexpr std::uint32_t progerr = 1u << 3;
+  SUBCASE("a first word off a 128-byte address")
+  {
+    rig.control(pg | bwr);
+    rig.store_words(last_page + 16, {1});
+    CHECK(rig.status("WDW") == 0);
+    CHECK(flags() == pgaerr);
+  }
+  SUBCASE("a word that skips one")
+  {
+    rig.control(pg | bwr);
+    rig.store_words(last_page, {1, 2});
+    rig.store_words(last_page + 12, {4});
+    CHECK(rig.status("WDW") == 0);
+    CHECK(flags() == pgaerr);
+  }
+  SUBCASE("a word stored twice")
+  {
+    rig.control(pg | bwr);
+    rig.store_words(last_page, {1, 2});
+    rig.store_words(last_page + 4, {2});
+    CHECK(rig.status("WDW") == 0);
+    CHECK(flags() == pgaerr);
+  }
+  SUBCASE("a word past PG cleared")
+  {
+    rig.control(pg | bwr);
+    rig.store_words(last_page, {1, 2});
+    rig.control(bwr);
+    rig.store_words(last_page + 8, {3});
+    CHECK(rig.status("WDW") == 0);
+    CHECK(flags() == pgserr);
+  }
+  SUBCASE("a half-word in the burst")
+  {
+    rig.control(pg | bwr);
+    rig.store_words(last_page, {1, 2});
+    rig.call("store_half", {last_page + 8, 3});
+    CHECK(rig.status("WDW") == 0);
+    CHECK(flags() == sizerr);
+  }
+  SUBCASE("one programmed quad-word in the row")
+  {
+    rig.program(last_page + 112, {1, 2, 3, 4});
+    rig.control(pg | bwr);
+    rig.store_words(last_page, data);
+    rig.wait_idle();
+    CHECK(flags() == progerr);
+    CHECK(rig.words(last_page, 28) == erased(28));
+  }
+  SUBCASE("BWR cleared after the first word keeps the burst")
+  {
+    rig.control(pg | bwr);
+    rig.store_words(last_page, {data.front()});
+    rig.control(pg);
+    rig.store_words(last_page + 4, std::vector<std::uint32_t>(data.begin() + 1, data.end() - 1));
+    CHECK(rig.status("BSY") == 0);
+    CHECK(rig.status("WDW") == 1);
+    rig.store_words(last_page + 124, {data.back()});
+    rig.wait_idle();
+    CHECK(flags() == 0);
+    CHECK(rig.words(last_page, 32) == data);
+  }
+  rig.control(pg | bwr);
+  rig.store_words(last_page + 128, data);
+  rig.wait_idle();
+  CHECK(flags() == 0);
+  CHECK(rig.words(last_page + 128, 32) == data);
+}
+
+TEST_CASE("a snapshot taken mid burst or while it is BSY completes it after restore")
+{
+  flash_rig  rig;
+  auto const data = burst_data(0x20);
+  auto const half = std::vector<std::uint32_t>(data.begin(), data.begin() + 16);
+  auto const rest = std::vector<std::uint32_t>(data.begin() + 16, data.end());
+  rig.control(pg | bwr);
+  rig.store_words(last_page, half);
+  REQUIRE(rig.status("WDW") == 1);
+  auto const collecting = rig.f.target->snapshot();
+  rig.store_words(last_page + 64, std::vector<std::uint32_t>(16, 0));
+  REQUIRE(rig.status("BSY") == 1);
+  auto const busy =
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(rig.f.target->snapshot().data()))};
+  rig.wait_idle();
+  rig.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(collecting.data()))});
+  CHECK(rig.status("WDW") == 1);
+  CHECK(rig.words(last_page, 32) == erased(32));
+  rig.store_words(last_page + 64, rest);
+  rig.wait_idle();
+  CHECK((rig.read("FLASH_NSSR") & all_errors) == 0);
+  CHECK(rig.words(last_page, 32) == data);
+  rig.f.target->restore(busy);
+  CHECK(rig.status("BSY") == 1);
+  CHECK(rig.words(last_page, 32) == erased(32));
+  rig.wait_idle();
+  CHECK(rig.words(last_page, 16) == half);
+  CHECK(rig.words(last_page + 64, 16) == std::vector<std::uint32_t>(16, 0));
 }
 
 TEST_CASE("raising HCLK past LATENCY warns once, the RM0456 order does not")

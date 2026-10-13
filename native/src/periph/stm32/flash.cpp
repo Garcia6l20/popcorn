@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -27,8 +28,9 @@ namespace
 constexpr std::uint32_t key1          = 0x4567'0123;
 constexpr std::uint32_t key2          = 0xcdef'89ab;
 constexpr std::uint32_t quad_word     = 16;
+constexpr std::uint32_t burst_size    = 8 * quad_word;
+constexpr std::uint32_t burst_words   = burst_size / 4;
 constexpr std::uint32_t page_size     = 8 * 1024;
-constexpr std::uint8_t  all_words     = 0xf;
 constexpr std::uint32_t operation_end = 0;
 
 enum class operation : std::uint8_t
@@ -45,22 +47,25 @@ struct held_store
   std::uint32_t addr{};
   std::uint8_t  size{};
   std::uint32_t value{};
+  std::uint32_t control{};
+  bool          dma{};
 
   friend auto operator==(held_store const&, held_store const&) -> bool = default;
 };
 
 struct flash_state
 {
-  bool                         first_key{};
-  bool                         locked_up{};
-  std::array<std::uint32_t, 4> buffer{};
-  std::uint8_t                 filled{};
-  std::uint32_t                buffer_addr{};
-  std::uint8_t                 running{};
-  std::uint32_t                target{};
-  std::uint32_t                length{};
-  std::uint32_t                generation{};
-  std::vector<held_store>      held{};
+  bool                                   first_key{};
+  bool                                   locked_up{};
+  std::array<std::uint32_t, burst_words> buffer{};
+  std::uint32_t                          filled{};
+  bool                                   burst{};
+  std::uint32_t                          buffer_addr{};
+  std::uint8_t                           running{};
+  std::uint32_t                          target{};
+  std::uint32_t                          length{};
+  std::uint32_t                          generation{};
+  std::vector<held_store>                held{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -142,22 +147,26 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *
  * Program, RM0456 7.3.7: with PG set, a 32-bit store at a quad-word address opens the write
  * buffer and sets WDW, the fourth word of that quad-word launches the program, BSY is set for
- * flash_options::quad_word_program, then the 16 bytes are written. Erase, RM0456 7.3.6: STRT
- * with PER erases the page PNB of the bank BKER, with MER1 and MER2 one or both banks, BSY set
- * for the flash_options time, then the range reads 0xFF and STRT clears. EOP is set at the end
- * only with EOPIE. Geometry: option bytes are not modelled, so the model uses the production
- * FLASH_OPTR value 0x1FEFF8AA, RM0456 7.9.13: DUALBANK = 1, SWAP_BANK = 0, bank 2 at the flash
- * base plus half its size, 8 Kbyte pages. A PNB at or above the pages of a bank, which RM0456
+ * flash_options::quad_word_program, then the 16 bytes are written. With BWR also set when the
+ * first word is stored, the buffer collects a burst of 8 quad-words: the first word at a 128-byte
+ * address, the 31 others at consecutive addresses, then one program of the 128 bytes holds BSY
+ * for flash_options::burst_program. RM0456 leaves a BWR change while the buffer fills
+ * undefined: the mode of the first word holds until the buffer launches or is flushed. Erase,
+ * RM0456 7.3.6: STRT with PER erases the page PNB of the bank BKER, with MER1 and MER2 one or both
+ * banks, BSY set for the flash_options time, then the range reads 0xFF and STRT clears. EOP is set
+ * at the end only with EOPIE. Geometry: option bytes are not modelled, so the model uses the
+ * production FLASH_OPTR value 0x1FEFF8AA, RM0456 7.9.13: DUALBANK = 1, SWAP_BANK = 0, bank 2 at the
+ * flash base plus half its size, 8 Kbyte pages. A PNB at or above the pages of a bank, which RM0456
  * leaves undefined, erases nothing, sets no flag and logs a model_warning once, and raises
  * model_error under strict_peripherals.
  *
  * Errors, RM0456 7.3.9: PGSERR, SIZERR, PGAERR and PROGERR as its list states. For PROGERR the
  * 7.3.9 list wins over the FLASH_NSSR bit text, which accepts all-zero data over an all-zero
- * target: the model refuses it. Every error aborts the operation and flushes the write buffer.
+ * target: the model refuses it. A burst is checked per quad-word and programs nothing when one
+ * of its 8 quad-words fails. Every error aborts the operation and flushes the write buffer.
  * With ERRIE an error also sets OPERR. FLASH_IRQn follows EOP with EOPIE and OPERR with ERRIE.
- * WRPERR is not modelled: write protection needs option bytes, logged once. Burst programming,
- * BWR, is logged once and programs quad-word by quad-word. HSI16 is kept on while PG or STRT is
- * set, through the RCC model.
+ * WRPERR is not modelled: write protection needs option bytes, logged once. HSI16 is kept on
+ * while PG or STRT is set, through the RCC model.
  *
  * Latency, RM0456 7.3.3: FLASH_ACR.LATENCY is compared with Table 54, or Table 55 with LPM set,
  * for HCLK and the voltage range PWR_SVMSR.ACTVOS applies, on a FLASH_ACR write, an HCLK change
@@ -170,10 +179,13 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *
  * Deviations: a store into flash while BSY is set stalls the bus on silicon until BSY clears.
  * The model lets the store complete at once and applies it by the rules above when BSY clears,
- * so the next instructions run earlier than on silicon. The held stores have no bound: a store
- * stream during a 195 ms bank erase keeps every word until the erase ends. Code fetches from a
- * bank being erased or programmed also stall on silicon, RM0456 7.3.10, the model keeps
- * executing without a stall. STRT written while BSY is set, which RM0456 leaves undefined, is
+ * with the PG and BWR bits FLASH_NSCR held when the store was made, as the stalled bus would
+ * have seen them. A store from a DMA channel instead takes the PG and BWR bits FLASH_NSCR holds
+ * when BSY clears, since silicon stalls the channel and not the CPU, which can still write
+ * FLASH_NSCR meanwhile. The next instructions run earlier than on silicon. The held stores have no
+ * bound: a store stream during a 195 ms bank erase keeps every word until the erase ends. Code
+ * fetches from a bank being erased or programmed also stall on silicon, RM0456 7.3.10, the model
+ * keeps executing without a stall. STRT written while BSY is set, which RM0456 leaves undefined, is
  * ignored: STRT stays set and no flag is raised.
  */
 class flash final : public dispatch_model<flash, flash_state>,
@@ -214,7 +226,7 @@ private:
   void               fail(field_ref flag);
   void               interrupt();
   void               finish();
-  void               store(std::uint32_t addr, std::uint8_t size, std::uint32_t value);
+  void               store(held_store const& one);
   void               start(operation which, std::uint32_t target, std::uint32_t length);
   void               start_erase(std::uint32_t control);
   void               program();
@@ -258,7 +270,6 @@ private:
   std::uint32_t                                                     clearable_{};
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
-  bool                                                              burst_logged_{};
   bool                                                              protection_logged_{};
 };
 
@@ -405,23 +416,31 @@ auto flash::on_memory_write(
     address            addr,
     std::uint8_t       size,
     std::uint32_t      value,
-    access_ctx) -> std::expected<void, bus_error>
+    access_ctx         ctx) -> std::expected<void, bus_error>
 {
-  auto const at = region.physical
-                    ? static_cast<std::uint32_t>(*region.physical + (addr - region.start))
-                    : static_cast<std::uint32_t>(addr);
+  auto const       at = region.physical
+                          ? static_cast<std::uint32_t>(*region.physical + (addr - region.start))
+                          : static_cast<std::uint32_t>(addr);
+  held_store const one{
+      .addr    = at,
+      .size    = size,
+      .value   = value,
+      .control = regs_.peek(program_.offset),
+      .dma     = ctx.by == initiator::dma};
   if(busy())
   {
-    state_.held.push_back({.addr = at, .size = size, .value = value});
+    state_.held.push_back(one);
     return {};
   }
-  store(at, size, value);
+  store(one);
   return {};
 }
 
-void flash::store(std::uint32_t addr, std::uint8_t size, std::uint32_t value)
+void flash::store(held_store const& one)
 {
-  if(get(regs_, program_) == 0)
+  auto const [addr, size, value, written, dma] = one;
+  auto const control                           = dma ? regs_.peek(program_.offset) : written;
+  if(program_.of(control) == 0)
   {
     fail(sequence_error_);
     return;
@@ -436,9 +455,12 @@ void flash::store(std::uint32_t addr, std::uint8_t size, std::uint32_t value)
     fail(size_error_);
     return;
   }
+  auto const next =
+      state_.buffer_addr + 4 * static_cast<std::uint32_t>(std::popcount(state_.filled));
   if(state_.filled == 0)
   {
-    if(addr % quad_word != 0)
+    state_.burst = burst_.of(control) != 0;
+    if(addr % (state_.burst ? burst_size : quad_word) != 0)
     {
       fail(alignment_error_);
       return;
@@ -446,24 +468,23 @@ void flash::store(std::uint32_t addr, std::uint8_t size, std::uint32_t value)
     state_.buffer_addr = addr;
     update(regs_, waiting_, 1);
   }
-  else if(addr < state_.buffer_addr or addr >= state_.buffer_addr + quad_word)
+  else if(
+      state_.burst ? addr != next
+                   : addr < state_.buffer_addr or addr >= state_.buffer_addr + quad_word)
   {
     fail(alignment_error_);
     return;
   }
+  auto const length   = state_.burst ? burst_size : quad_word;
   auto const word     = (addr - state_.buffer_addr) / 4;
   state_.buffer[word] = value;
-  state_.filled |= static_cast<std::uint8_t>(1u << word);
-  if(state_.filled != all_words)
+  state_.filled |= 1u << word;
+  if(std::cmp_not_equal(std::popcount(state_.filled), length / 4))
   {
     return;
   }
-  if(get(regs_, burst_) != 0 and not std::exchange(burst_logged_, true))
-  {
-    warn("FLASH_NSCR", "BWR burst programming is not modelled: it programs quad-word by quad-word");
-  }
   update(regs_, waiting_, 0);
-  start(operation::program, state_.buffer_addr, quad_word);
+  start(operation::program, state_.buffer_addr, length);
 }
 
 void flash::start(operation which, std::uint32_t target, std::uint32_t length)
@@ -477,7 +498,7 @@ void flash::start(operation which, std::uint32_t target, std::uint32_t length)
     switch(which)
     {
       case operation::program:
-        return options_.quad_word_program;
+        return length == quad_word ? options_.quad_word_program : options_.burst_program;
       case operation::page_erase:
         return options_.page_erase;
       case operation::bank_erase:
@@ -532,8 +553,10 @@ void flash::start_erase(std::uint32_t control)
 
 void flash::program()
 {
-  std::array<std::byte, quad_word> target{};
-  std::array<std::byte, quad_word> data{};
+  std::array<std::byte, burst_size> target_bytes{};
+  std::array<std::byte, burst_size> data_bytes{};
+  auto const                        target = std::span{target_bytes}.first(state_.length);
+  auto const                        data   = std::span{data_bytes}.first(state_.length);
   for(std::size_t i = 0; i < data.size(); ++i)
   {
     data[i] = static_cast<std::byte>(state_.buffer[i / 4] >> (8 * (i % 4)));
@@ -544,12 +567,15 @@ void flash::program()
     fail(program_error_);
     return;
   }
-  auto const zero_data = all_of_byte(data, std::byte{0});
-  if(all_of_byte(target, std::byte{0})
-     or (not all_of_byte(target, std::byte{0xff}) and not zero_data))
+  for(std::size_t line = 0; line < data.size(); line += quad_word)
   {
-    fail(program_error_);
-    return;
+    auto const old       = target.subspan(line, quad_word);
+    auto const zero_data = all_of_byte(data.subspan(line, quad_word), std::byte{0});
+    if(all_of_byte(old, std::byte{0}) or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
+    {
+      fail(program_error_);
+      return;
+    }
   }
   static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
 }
@@ -569,10 +595,6 @@ void flash::finish()
     std::vector<std::byte> const erased(state_.length, std::byte{0xff});
     static_cast<void>(ctx_.services.write_block(state_.target, erased, initiator::debugger));
     update(regs_, start_, 0);
-    if(get(regs_, program_) == 0)
-    {
-      hold_hsi16(false);
-    }
   }
   if(errors_pending() == errors and get(regs_, end_irq_) != 0)
   {
@@ -587,7 +609,11 @@ void flash::finish()
       state_.held.push_back(one);
       continue;
     }
-    store(one.addr, one.size, one.value);
+    store(one);
+  }
+  if(not busy() and get(regs_, program_) == 0 and get(regs_, start_) == 0)
+  {
+    hold_hsi16(false);
   }
 }
 
@@ -734,7 +760,7 @@ void flash::control_written(std::uint32_t old, std::uint32_t now)
       update(regs_, start_, 0);
     }
   }
-  auto const held_after = get(regs_, program_) != 0 or get(regs_, start_) != 0;
+  auto const held_after = get(regs_, program_) != 0 or get(regs_, start_) != 0 or busy();
   if(held_after != held_before)
   {
     hold_hsi16(held_after);

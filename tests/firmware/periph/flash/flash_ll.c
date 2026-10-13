@@ -43,7 +43,7 @@ int main(void)
   DONE();
 }
 
-uint32_t words[16];
+uint32_t words[32];
 
 void copy_words(uint32_t volatile* dst, uint32_t const* src, uint32_t count);
 void store_half(uint16_t volatile* dst, uint32_t value);
@@ -94,5 +94,26 @@ __attribute__((noipa)) void spin(uint32_t count)
   for(uint32_t volatile i = 0; i < count; ++i)
   {
   }
+  DONE();
+}
+
+void burst_program(uint32_t volatile* dst, uint32_t const* src, uint32_t clear_first);
+
+__attribute__((noipa)) void
+    burst_program(uint32_t volatile* dst, uint32_t const* src, uint32_t clear_first)
+{
+  SET_BIT(FLASH->NSCR, FLASH_NSCR_PG | FLASH_NSCR_BWR);
+  for(uint32_t i = 0; i < 32u; ++i)
+  {
+    dst[i] = src[i];
+  }
+  if(clear_first != 0u)
+  {
+    CLEAR_BIT(FLASH->NSCR, FLASH_NSCR_PG | FLASH_NSCR_BWR);
+  }
+  while(READ_BIT(FLASH->NSSR, FLASH_NSSR_BSY) != 0)
+  {
+  }
+  CLEAR_BIT(FLASH->NSCR, FLASH_NSCR_PG | FLASH_NSCR_BWR);
   DONE();
 }

@@ -16,5 +16,6 @@ add_ll_firmware(
         "store_double",
         "wait_idle",
         "spin",
+        "burst_program",
     ],
 )
