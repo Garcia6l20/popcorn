@@ -82,3 +82,15 @@ class I2CError(enum.Enum):
     OVERRUN = 3
     """ISR.OVR: an overrun or underrun. Set on silicon only in target mode with NOSTRETCH, so
     this exercises firmware handlers. The byte completes as if acknowledged."""
+
+
+class UartError(enum.Enum):
+    """A line error `UartStream.write` tags its bytes with, RM0456 66.8 USART_ISR. The flag
+    rises when the byte reaches RDR, behind the bytes ahead of it in the RX FIFO."""
+
+    FRAMING = 1
+    """ISR.FE: the stop bit sampled 0. The byte arrives with its data."""
+    NOISE = 2
+    """ISR.NE: samples of a bit disagreed. The byte arrives with its data."""
+    PARITY = 3
+    """ISR.PE: the parity bit inverted. With CR1.PCE 0 the byte arrives clean, logged once."""

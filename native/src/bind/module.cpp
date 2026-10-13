@@ -67,6 +67,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::core::condition_set>("ConditionSet");
   m.bind_enum<popcorn::periph::stm32::pin_mode>("PinMode");
   m.bind_enum<popcorn::periph::stm32::i2c_error>("I2CError");
+  m.bind_enum<popcorn::periph::stm32::uart_error>("UartError");
   m.bind_enum<popcorn::periph::usb::device_state>("UsbDeviceState");
   m.bind_enum<popcorn::periph::usb::transfer_status>("UsbTransferStatus");
   m.bind_enum<popcorn::core::log_kind>("LogKind");

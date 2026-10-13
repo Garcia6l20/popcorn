@@ -9,6 +9,7 @@
 #include <popcorn/periph/stm32/uart.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
 #include <array>
@@ -1553,8 +1554,14 @@ constexpr std::uint32_t cr1_m1     = 1u << 28;
 constexpr std::uint32_t cr1_fifoen = 1u << 29;
 constexpr std::uint32_t isr_pe     = 1u << 0;
 constexpr std::uint32_t isr_rxfne  = 1u << 5;
+constexpr std::uint32_t isr_idle   = 1u << 4;
 constexpr std::uint32_t icr_pecf   = 1u << 0;
 constexpr std::uint32_t rqr_rxfrq  = 1u << 3;
+constexpr std::uint32_t isr_fe     = 1u << 1;
+constexpr std::uint32_t isr_ne     = 1u << 2;
+constexpr std::uint32_t isr_ore    = 1u << 3;
+constexpr std::uint32_t isr_errors = isr_pe | isr_fe | isr_ne;
+constexpr std::uint32_t icr_errors = 0b111u;
 constexpr std::uint32_t nvic_ispr1 = 0xe000'e204u;
 constexpr std::uint32_t nvic_icpr1 = 0xe000'e284u;
 constexpr std::uint32_t usart1_irq = 1u << (61 - 32);
@@ -1688,6 +1695,21 @@ struct parity_rig
   [[nodiscard]] auto rdr() const -> std::uint32_t
   {
     return t.read("USART1", "RDR");
+  }
+
+  [[nodiscard]] auto pop() const -> std::uint32_t
+  {
+    auto* const probe = t.r.f->model_of<bus_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    auto const word = probe->context.services.read(
+        address_of(*t.r.f, "USART1", "RDR"), 4, popcorn::initiator::cpu);
+    REQUIRE(word.has_value());
+    return static_cast<std::uint32_t>(*word);
+  }
+
+  void tagged(std::span<stm32::host_frame const> frames) const
+  {
+    t.r.port("USART1").receive_frames(frames);
   }
 
   [[nodiscard]] auto pending() const -> bool
@@ -1974,6 +1996,266 @@ TEST_CASE("a snapshot between host frames under 7E1 restores to the same RDR wor
   CHECK(first == std::vector<std::uint32_t>{0x41, 0xc3, 0xff, 0x00, 0x55});
   p.t.r.f->target->restore(saved);
   CHECK(drain() == first);
+}
+
+namespace
+{
+using stm32::frame_kind;
+using stm32::host_frame;
+using stm32::uart_error;
+
+struct rx_view
+{
+  std::uint32_t word{};
+  std::uint32_t errors{};
+
+  friend auto operator==(rx_view const&, rx_view const&) -> bool = default;
+};
+
+auto drain_rx(parity_rig const& p) -> std::vector<rx_view>
+{
+  std::vector<rx_view> out;
+  while((p.isr() & isr_rxfne) != 0)
+  {
+    out.push_back({.word = p.rdr(), .errors = p.isr() & isr_errors});
+    p.t.cpu("USART1", "ICR", icr_errors);
+    std::ignore = p.pop();
+  }
+  return out;
+}
+}
+
+TEST_CASE("in FIFO mode a tagged host frame's flag rises when it reaches RDR, not at arrival")
+{
+  struct tagged_case
+  {
+    uart_error    error{};
+    line_config   config{};
+    std::uint32_t flag{};
+  };
+  line_config const even{.bits = 9, .parity = stm32::line_parity::even};
+  for(auto const [error, config, flag] : std::array<tagged_case, 3>{
+          {{uart_error::framing, {}, isr_fe},
+           {uart_error::noise, {}, isr_ne},
+           {uart_error::parity, even, isr_pe}}
+  })
+  {
+    CAPTURE(error);
+    parity_rig                      p{config, 35, cr1_fifoen};
+    std::array<host_frame, 3> const frames{
+        {{.data = 'a'}, {.data = 'b', .error = error}, {.data = 'c'}}
+    };
+    p.tagged(frames);
+    p.advance(400 * us_ps);
+    CHECK(p.rdr() == expected_word('a', config));
+    CHECK((p.isr() & isr_errors) == 0);
+    CHECK(p.pop() == expected_word('a', config));
+    auto const word_b = error == uart_error::parity ? expected_word('b', config) ^ 0x100u
+                                                    : expected_word('b', config);
+    CHECK(p.rdr() == word_b);
+    CHECK((p.isr() & isr_errors) == flag);
+    CHECK(p.pop() == word_b);
+    CHECK(p.rdr() == expected_word('c', config));
+    CHECK((p.isr() & isr_errors) == flag);
+  }
+}
+
+TEST_CASE("without FIFO a tagged host frame sets its flag with its data, an overrun drops it")
+{
+  parity_rig                      p{{}};
+  std::array<host_frame, 1> const one{{{.data = 'b', .error = uart_error::framing}}};
+  p.tagged(one);
+  p.advance(200 * us_ps);
+  CHECK(p.rdr() == 'b');
+  CHECK((p.isr() & isr_errors) == isr_fe);
+  p.t.cpu("USART1", "ICR", icr_errors);
+  std::ignore = p.pop();
+  std::array<host_frame, 2> const two{
+      {{.data = 'a'}, {.data = 'c', .error = uart_error::noise}}
+  };
+  p.tagged(two);
+  p.advance(300 * us_ps);
+  CHECK(p.rdr() == 'a');
+  CHECK((p.isr() & isr_ore) != 0);
+  CHECK((p.isr() & isr_errors) == 0);
+}
+
+TEST_CASE("a parity tag without PCE delivers the byte untouched, logs once and sets no PE")
+{
+  parity_rig                      p{{}, 35, cr1_fifoen};
+  std::array<host_frame, 2> const frames{
+      {{.data = 0xc1, .error = uart_error::parity}, {.data = 0x41, .error = uart_error::parity}}
+  };
+  p.tagged(frames);
+  p.advance(300 * us_ps);
+  CHECK(
+      drain_rx(p)
+      == std::vector<rx_view>{
+          {.word = 0xc1, .errors = 0},
+          {.word = 0x41, .errors = 0}
+  });
+  REQUIRE(p.t.logged.size() == 1);
+  CHECK(p.t.logged[0].kind == core::log_kind::model_warning);
+  CHECK(p.t.logged[0].reg == "CR1");
+}
+
+TEST_CASE("a host break reads as 0 with FE and holds the line a frame and 2 bits before the next")
+{
+  parity_rig                      p{{}, 35, cr1_fifoen};
+  auto const                      frame = frame_of(*p.t.r.f, "USART1", 4'000'000, false);
+  auto const                      start = p.now();
+  constexpr std::uint64_t         slack = 2 * us_ps;
+  std::array<host_frame, 2> const frames{
+      {{.kind = frame_kind::brk}, {.data = 'x'}}
+  };
+  p.tagged(frames);
+  CHECK(p.t.r.port("USART1").queued() == 2);
+  p.advance(start + frame + slack - p.now());
+  CHECK((p.isr() & isr_rxfne) != 0);
+  CHECK(p.rdr() == 0);
+  CHECK((p.isr() & isr_errors) == isr_fe);
+  std::ignore = p.pop();
+  p.advance(start + 2 * frame + frame / 5 - slack - p.now());
+  CHECK((p.isr() & isr_rxfne) == 0);
+  p.advance(2 * slack);
+  CHECK((p.isr() & isr_rxfne) != 0);
+  CHECK(p.rdr() == 'x');
+}
+
+TEST_CASE("a lone host break holds the line 2 bits for a byte queued after it was delivered")
+{
+  parity_rig                      p{{}, 35, cr1_fifoen};
+  auto const                      frame = frame_of(*p.t.r.f, "USART1", 4'000'000, false);
+  auto const                      start = p.now();
+  constexpr std::uint64_t         slack = 2 * us_ps;
+  std::array<host_frame, 1> const brk{{{.kind = frame_kind::brk}}};
+  p.tagged(brk);
+  p.advance(start + frame + slack - p.now());
+  CHECK((p.isr() & isr_rxfne) != 0);
+  std::ignore = p.pop();
+  p.advance(start + frame + frame / 10 - p.now());
+  std::array<host_frame, 1> const x{{{.data = 'x'}}};
+  p.tagged(x);
+  p.advance(start + frame + frame / 5 + frame - slack - p.now());
+  CHECK((p.isr() & isr_rxfne) == 0);
+  p.advance(2 * slack);
+  CHECK((p.isr() & isr_rxfne) != 0);
+  CHECK(p.rdr() == 'x');
+}
+
+TEST_CASE("IDLE after a lone host break rises one frame after the break ends")
+{
+  parity_rig                      p{{}, 35, cr1_fifoen};
+  auto const                      frame = frame_of(*p.t.r.f, "USART1", 4'000'000, false);
+  auto const                      start = p.now();
+  constexpr std::uint64_t         slack = 2 * us_ps;
+  std::array<host_frame, 1> const brk{{{.kind = frame_kind::brk}}};
+  p.tagged(brk);
+  p.advance(start + 2 * frame - slack - p.now());
+  CHECK((p.isr() & isr_idle) == 0);
+  p.advance(2 * slack);
+  CHECK((p.isr() & isr_idle) != 0);
+}
+
+TEST_CASE("in FIFO mode a linked frame sampled with NE behind a good byte raises NE at RDR")
+{
+  parity_rig good{{}};
+  parity_rig noisy{{}, 39};
+  good.send(0x41);
+  noisy.send(0x55);
+  REQUIRE(good.box->posts.size() == 1);
+  REQUIRE(noisy.box->posts.size() == 1);
+
+  parity_rig alone{{}};
+  alone.linked(noisy.box->posts[0].frame);
+  REQUIRE((alone.isr() & isr_ne) != 0);
+  auto const sampled = alone.rdr();
+
+  parity_rig b{{}, 35, cr1_fifoen};
+  b.linked(good.box->posts[0].frame);
+  b.linked(noisy.box->posts[0].frame);
+  CHECK(b.rdr() == 0x41);
+  CHECK((b.isr() & isr_ne) == 0);
+  std::ignore = b.pop();
+  CHECK(b.rdr() == sampled);
+  CHECK((b.isr() & isr_ne) != 0);
+}
+
+TEST_CASE("tagged host frames still queued survive a snapshot and 1000 restores with their tags")
+{
+  line_config const               even{.bits = 9, .parity = stm32::line_parity::even};
+  parity_rig                      p{even, 35, cr1_fifoen};
+  std::array<host_frame, 5> const frames{
+      {{.data = 'a'},
+       {.data = 'b', .error = uart_error::framing},
+       {.kind = frame_kind::brk},
+       {.data = 'c', .error = uart_error::noise},
+       {.data = 'd', .error = uart_error::parity}}
+  };
+  p.tagged(frames);
+  p.advance(20 * us_ps);
+  auto& port = p.t.r.port("USART1");
+  REQUIRE(port.queued() == 5);
+  auto const saved = p.t.r.f->target->snapshot();
+  auto const run   = [&] {
+    p.advance(800 * us_ps);
+    return drain_rx(p);
+  };
+  auto const first = run();
+  CHECK(
+      first
+      == std::vector<rx_view>{
+          {.word = expected_word('a', even), .errors = 0},
+          {.word = expected_word('b', even), .errors = isr_fe},
+          {.word = 0, .errors = isr_fe},
+          {.word = expected_word('c', even), .errors = isr_ne},
+          {.word = expected_word('d', even) ^ 0x100u, .errors = isr_pe}
+  });
+  for(int index = 0; index < 1000; ++index)
+  {
+    p.t.r.f->target->restore(saved);
+    REQUIRE(port.queued() == 5);
+  }
+  CHECK(run() == first);
+
+  p.t.r.f->target->restore(saved);
+  p.advance(310 * us_ps);
+  REQUIRE(port.queued() == 2);
+  CHECK((p.isr() & isr_errors) == 0);
+  auto const midway = p.t.r.f->target->snapshot();
+  CHECK(run() == first);
+  for(int index = 0; index < 100; ++index)
+  {
+    p.t.r.f->target->restore(midway);
+    REQUIRE(port.queued() == 2);
+  }
+  CHECK(run() == first);
+}
+
+namespace
+{
+struct untagged_usart_state
+{
+  std::vector<std::uint16_t> rx_fifo;
+  std::vector<std::uint16_t> host;
+};
+}
+
+TEST_CASE("a USART state saved before tagged frames loads its RX FIFO and host bytes clean")
+{
+  parity_rig  p{{}, 35, cr1_fifoen};
+  auto* const usart = p.t.r.f->model_of<popcorn::periph::model>("USART1");
+  REQUIRE(usart != nullptr);
+  std::vector<std::byte> saved;
+  reflex::serde::bson::serializer{
+      saved
+  }
+      .dump(untagged_usart_state{.rx_fifo = {0x41, 0x42}, .host = {0x43}});
+  usart->load(saved);
+  CHECK(p.t.r.port("USART1").queued() == 1);
+  CHECK(p.pop() == 0x41);
+  CHECK(p.pop() == 0x42);
+  CHECK((p.isr() & isr_errors) == 0);
 }
 
 TEST_CASE("SBKRQ sends a break after the frame in flight, SBKF set until its low part ends")

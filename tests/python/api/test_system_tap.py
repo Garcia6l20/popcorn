@@ -273,6 +273,8 @@ def test_a_linked_uart_s_stream_refuses_writes_and_reads_its_own_transmissions(
     a = system.members["a"]
     with pytest.raises(RuntimeError, match="inject through the system's tap"):
         a.periph.USART1.port.write(b"x")
+    with pytest.raises(RuntimeError, match="inject through the system's tap"):
+        a.periph.USART1.port.write_break()
     assert asyncio.run(a.periph.USART1.port.read(4)) == bytes(TX_BYTES[:4])
     a.halt()
     system.close()

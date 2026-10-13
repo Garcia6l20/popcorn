@@ -11,14 +11,16 @@ import re
 import select
 import weakref
 from pathlib import Path
+from typing import Any, cast
 
 import popcorn
 import pytest
 from popcorn import ModelError, _core
-from popcorn.board import AudioOptions, Frame
+from popcorn._refs import Pending
+from popcorn.board import AudioOptions, Frame, UartError
 from popcorn.model import Model
 from popcorn.trace import TraceKind, read
-from popcorn.units import VirtualTime, ms, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .conftest import BOARD_ELF, holds_pty, late_drained_read, run_bounded, stalled
 
@@ -268,6 +270,8 @@ def test_board_commands_run_on_the_machine_thread_without_the_gil(
     async def scenario() -> None:
         async with m.running():
             await port.write(b"x")
+            await port.write(b"y", error=UartError.NOISE)
+            await port.write_break()
             await stream.write([1, 2])
             tracing.__exit__(None, None, None)
 
@@ -568,6 +572,111 @@ def test_a_parity_echo_reads_the_data_bits_the_same_parked_and_running(
     board.restore(start)
     post(at)
     assert asyncio.run(reads(at)) == frames
+
+
+@pytest.mark.parametrize(
+    ("error", "fields", "flag"),
+    [
+        (UartError.FRAMING, {}, "FE"),
+        (UartError.NOISE, {}, "NE"),
+        (UartError.PARITY, {"PCE": 1, "M0": 1}, "PE"),
+    ],
+    ids=["framing", "noise", "parity"],
+)
+def test_a_tagged_byte_reaches_the_firmware_with_its_flag(
+    board: popcorn.Machine, error: UartError, fields: dict[str, int], flag: str
+) -> None:
+    uart = board.periph.USART1.port
+    if fields:
+        board.periph.USART1.CR1_disabled.poke(**fields)
+    isr = board.periph.USART1.ISR_disabled
+
+    async def exchange(data: bytes, tag: UartError | None) -> list[Frame]:
+        await uart.write(data, error=tag)
+        return await uart.read_frames(1, for_=ms(1))
+
+    assert [f.data for f in asyncio.run(exchange(b"a", None))] == [ord("a")]
+    assert (isr.FE, isr.NE, isr.PE) == (0, 0, 0)
+    assert [f.data for f in asyncio.run(exchange(b"b", error))] == [ord("b")]
+    assert {name: getattr(isr, name) for name in ("FE", "NE", "PE")} == {
+        name: int(name == flag) for name in ("FE", "NE", "PE")
+    }
+
+
+ISR_STEPS = (1.5, 2.5, 4.1, 4.5)
+"""Sample times in frames after the writes: after a, after the FRAMING b, inside the break's
+2-bit hold, after the NOISE c."""
+
+
+def test_tagged_bytes_and_a_break_give_the_same_flags_and_frames_parked_and_running(
+    board: popcorn.Machine,
+) -> None:
+    uart = board.periph.USART1.port
+    isr = board.periph.USART1.ISR_disabled
+    start = board.snapshot()
+    samples: list[Pending[tuple[int, int]]] = []
+
+    def flags() -> tuple[int, int]:
+        return isr.FE, isr.NE
+
+    def post(at: VirtualTime) -> None:
+        samples.clear()
+        sent = at + ms(1)
+        uart.write(b"a", at=sent)
+        uart.write(b"b", at=sent, error=UartError.FRAMING)
+        uart.write_break(at=sent)
+        uart.write(b"c", at=sent, error=UartError.NOISE)
+        for step in ISR_STEPS:
+            samples.append(board.sample(flags, at=sent + VirtualDuration(int(step * FRAME_PS))))
+
+    async def reads(at: VirtualTime) -> tuple[list[Frame], list[tuple[int, int]]]:
+        frames = await uart.read_frames(4, deadline=at + ms(4))
+        return frames, [await sample for sample in samples]
+
+    async def running() -> tuple[VirtualTime, tuple[list[Frame], list[tuple[int, int]]]]:
+        async with board.running():
+            return await late_drained_read(board, post, reads, ms(8))
+
+    at, (frames, seen) = run_bounded(running(), 20)
+    assert [f.data for f in frames] == [ord("a"), ord("b"), 0, ord("c")]
+    assert seen == [(0, 0), (1, 0), (1, 0), (1, 1)]
+    assert abs(frames[3].at.ps - frames[2].at.ps - (FRAME_PS + FRAME_PS // 5)) < us(1).ps
+    board.restore(start)
+    post(at)
+    assert asyncio.run(reads(at)) == (frames, seen)
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_write_refuses_an_error_that_is_no_uart_error_at_the_call(
+    board: popcorn.Machine, running: bool
+) -> None:
+    uart = board.periph.USART1.port
+
+    def refused() -> None:
+        with pytest.raises(TypeError, match="error must be a UartError or None, not str"):
+            uart.write(b"a", error=cast(Any, "framing"))
+        with pytest.raises(TypeError, match="not int"):
+            uart.write(b"a", error=cast(Any, 1))
+
+    async def inside() -> None:
+        async with board.running():
+            refused()
+
+    if running:
+        run_bounded(inside(), 10)
+    else:
+        refused()
+    assert uart.queued == 0
+
+
+def test_a_native_command_send_refuses_an_error_value_that_is_no_uart_error(
+    board: popcorn.Machine,
+) -> None:
+    uart = board.periph.USART1.port
+    link = uart._link  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(popcorn.ConfigError):
+        link.command_send(b"a", 7)
+    assert uart.queued == 0
 
 
 def test_read_until_takes_through_the_match(board: popcorn.Machine) -> None:

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from popcorn import _core
 from popcorn._devices import BusDevice, I2CTarget, SpiTarget
+from popcorn._enums import UartError
 from popcorn._errors import ConfigError
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.units import VirtualDuration, VirtualTime
@@ -281,7 +282,7 @@ class UartStream:
 
     @property
     def queued(self) -> int:
-        """Bytes written and not yet delivered to the firmware's receiver.
+        """Bytes and breaks written and not yet delivered to the firmware's receiver.
 
         Raises:
             MachineRunning: The machine is busy, read outside its callbacks: use
@@ -289,27 +290,57 @@ class UartStream:
         """
         return self._link.queued()
 
-    def write(self, data: bytes, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
+    def write(
+        self, data: bytes, *, at: VirtualTime | None = None, error: UartError | None = None
+    ) -> Pending[VirtualTime]:
         """Queue bytes towards the firmware, posted at the call as one command: at once while the
         machine is parked, at the next block boundary while it runs, or at the first boundary at
         or after `at`. They arrive one frame time apart as the machine runs. Await the result
         for the virtual time the bytes were queued at. With a parity configured, each byte
         arrives with the parity bit the receiver expects in the MSB of its M-bit word, so bit 7
-        of a byte sent to a 7E1 receiver is replaced, and none sets PE.
+        of a byte sent to a 7E1 receiver is replaced, and none sets PE unless tagged.
+
+        `error` tags every byte of this write: `UartError.FRAMING` sets ISR.FE and `NOISE`
+        ISR.NE with the byte's data, `PARITY` inverts its parity bit so ISR.PE rises, or logs
+        once and delivers the byte clean with CR1.PCE 0. The flag rises when the byte reaches
+        RDR, in FIFO mode behind the bytes ahead of it. A byte finding the RX FIFO full is
+        dropped with its tag and sets ORE. Write the bytes that need a tag separately.
 
         Raises:
+            TypeError: `error` is neither a `UartError` nor None, at the call.
             RuntimeError: Called from a handler or a model, or the UART is linked to another
                 member of a `System`: its receiver hears the link only, inject through
                 `System.tap`.
             ValueError: `at` before the time of a parked machine, from the await when running.
         """
+        tag = cast(object, error)
+        if not isinstance(tag, UartError | None):
+            raise TypeError(f"error must be a UartError or None, not {type(tag).__name__}")
+        self._check_writable()
+        link = self._link
+        data = bytes(data)
+        value = 0 if error is None else error.value
+        return written(self._post(link.command_send(data, value), at))
+
+    def write_break(self, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
+        """Queue one break towards the firmware after the bytes already queued, posted as `write`
+        is. It reads as a 0 byte with ISR.FE, as a break from a linked machine does, and holds
+        the line one frame time plus 2 bit times before the next byte. Await the result for the
+        virtual time it was queued at.
+
+        Raises:
+            RuntimeError: Called from a handler or a model, or the UART is linked to another
+                member of a `System`, as for `write`.
+            ValueError: `at` before the time of a parked machine, from the await when running.
+        """
+        self._check_writable()
+        return written(self._post(self._link.command_break(), at))
+
+    def _check_writable(self) -> None:
         if self.name in self._linked:
             raise RuntimeError(
                 f"{self.name} is linked in a System: inject through the system's tap"
             )
-        link = self._link
-        data = bytes(data)
-        return written(self._post(link.command_send(data), at))
 
     async def read(
         self,

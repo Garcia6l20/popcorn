@@ -32,3 +32,9 @@ def test_i2c_error_matches_the_native_errors_but_none() -> None:
     native = {m.name.upper(): m.value for m in _core.I2CError if m.value != 0}
     assert {m.name: m.value for m in popcorn.board.I2CError} == native
     assert _core.I2CError(0).name == "none"
+
+
+def test_uart_error_matches_the_native_errors_but_none() -> None:
+    native = {m.name.upper(): m.value for m in _core.UartError if m.value != 0}
+    assert {m.name: m.value for m in popcorn.board.UartError} == native
+    assert _core.UartError(0).name == "none"

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from popcorn._audio import AudioFrame, AudioOptions, AudioStream
 from popcorn._devices import DeviceBoard, I2CTarget, SpiTarget
-from popcorn._enums import I2CError, PinMode
+from popcorn._enums import I2CError, PinMode, UartError
 from popcorn._nvic import Irqs, Nvic
 from popcorn._rcc import RccOptions
 from popcorn._streams import Board, Frame, UartStream
@@ -63,6 +63,7 @@ __all__ = [
     "UacMic",
     "UacSpeaker",
     "UacStream",
+    "UartError",
     "UartStream",
     "UsbData",
     "UsbEndpoint",

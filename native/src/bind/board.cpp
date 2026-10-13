@@ -6,6 +6,7 @@
 #include <popcorn/periph/stm32/i2c.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <format>
 #include <limits>
@@ -53,13 +54,36 @@ void uart_queue::send(reflex::py::nb::bytes const& data)
   detail::host_access(host_, [&] { uart.receive(frames); });
 }
 
-auto uart_queue::command_send(reflex::py::nb::bytes const& data) const -> access_op
+auto uart_queue::command_send(reflex::py::nb::bytes const& data, std::uint8_t error) const
+    -> access_op
+{
+  auto const tag = static_cast<periph::stm32::uart_error>(error);
+  if(not is_enumerator(tag))
+  {
+    throw config_error("uart", 0, "error", "a UartError value");
+  }
+  std::ignore = port();
+  auto link   = *this;
+  link.host_.reset();
+  auto frames = frames_of(data)
+              | std::views::transform([tag](std::uint16_t word) {
+                  return periph::stm32::host_frame{.data = word, .error = tag};
+                })
+              | std::ranges::to<std::vector>();
+  return detail::link_op(
+      [link = std::move(link), frames = std::move(frames)] { link.port().receive_frames(frames); });
+}
+
+auto uart_queue::command_break() const -> access_op
 {
   std::ignore = port();
   auto link   = *this;
   link.host_.reset();
-  return detail::link_op(
-      [link = std::move(link), frames = frames_of(data)] { link.port().receive(frames); });
+  return detail::link_op([link = std::move(link)] {
+    std::array<periph::stm32::host_frame, 1> const frame{
+        {{.kind = periph::stm32::frame_kind::brk}}};
+    link.port().receive_frames(frame);
+  });
 }
 
 namespace

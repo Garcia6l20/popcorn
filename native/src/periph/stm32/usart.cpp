@@ -6,6 +6,8 @@
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
+#include <reflex/serde/annotations.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -130,23 +132,37 @@ struct linked_frame
   friend auto operator==(linked_frame const&, linked_frame const&) -> bool = default;
 };
 
+struct rx_entry
+{
+  std::uint16_t data{};
+  bool          framing{};
+  bool          noise{};
+  bool          parity{};
+
+  friend auto operator==(rx_entry const&, rx_entry const&) -> bool = default;
+};
+
 struct usart_state
 {
-  std::array<std::uint32_t, 3> generation{};
-  std::vector<std::uint16_t>   tx_fifo;
-  std::vector<std::uint16_t>   rx_fifo;
-  std::vector<std::uint16_t>   host;
-  std::uint16_t                shift{};
-  std::uint64_t                tx_end_ps{};
-  std::uint64_t                rx_due_ps{};
-  bool                         shifting{};
-  bool                         receiving{};
-  bool                         idle_pending{};
-  std::vector<linked_frame>    linked;
-  std::uint64_t                idle_due_ps{};
-  std::uint32_t                linked_generation{};
-  bool                         break_pending{};
-  bool                         break_shifting{};
+  std::array<std::uint32_t, 3>                                       generation{};
+  std::vector<std::uint16_t>                                         tx_fifo;
+  [[= reflex::serde::rename{"rx_entries"}]] std::vector<rx_entry>    rx_fifo;
+  [[= reflex::serde::rename{"host_frames"}]] std::vector<host_frame> host;
+  std::uint16_t                                                      shift{};
+  std::uint64_t                                                      tx_end_ps{};
+  std::uint64_t                                                      rx_due_ps{};
+  bool                                                               shifting{};
+  bool                                                               receiving{};
+  bool                                                               idle_pending{};
+  std::vector<linked_frame>                                          linked;
+  std::uint64_t                                                      idle_due_ps{};
+  std::uint32_t                                                      linked_generation{};
+  bool                                                               break_pending{};
+  bool                                                               break_shifting{};
+  /** @brief RX FIFO of a state saved before tagged frames, moved into rx_fifo by usart::load(). */
+  [[= reflex::serde::rename{"rx_fifo"}]] std::vector<std::uint16_t> legacy_rx;
+  /** @brief Host queue of a state saved before tagged frames, moved into host by usart::load(). */
+  [[= reflex::serde::rename{"host"}]] std::vector<std::uint16_t> legacy_host;
 
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
@@ -219,9 +235,15 @@ struct lock
  *        frame is never taken for a start bit. With CR1.PCE, PS chooses even or odd parity, the
  *        parity bit taking the MSB of the M-bit word, RM0456 66.5: a TX frame carries the bit
  *        computed over the TDR data bits, and the endpoint's `transmitted` gets the data bits
- *        alone. A host frame gets the receiver's bit at delivery, so it never sets PE. A frame
- *        from another machine keeps its sender's bit, or the sampled one, and PE rises when it
- *        fails the receiver's check, with RDR holding the word as received. RQR.SBKRQ sets SBKF
+ *        alone. A host frame gets the receiver's bit at delivery, inverted when it is tagged with
+ *        a parity error, which then sets PE. A host frame tagged with a framing or a noise error
+ *        sets FE or NE with its data, a host break reads as 0 with FE and holds the line one frame
+ *        time plus 2 bit times before the next host frame. A frame from another machine keeps its
+ *        sender's bit, or the sampled one, and PE rises when it fails the receiver's check, with
+ *        RDR holding the word as received. FE, NE and PE rise when their frame becomes RDR's, at
+ *        its push into an empty RX FIFO or at the RDR read that exposes it, RM0456 66.8: in FIFO
+ *        mode a flag waits behind the frames ahead of it. A frame finding the RX FIFO full is
+ *        dropped with its errors and sets ORE. RQR.SBKRQ sets SBKF
  *        and sends a break after the frame in flight, ahead of the TX FIFO: a frame time low,
  *        then 2 bits high before the next frame, SBKF clearing as the low part ends. A break from
  *        another machine reads as 0 with FE and never sets PE, LBDF is LIN only and not modelled.
@@ -232,6 +254,7 @@ public:
   usart(model_context& ctx, peripheral_desc const& desc, std::shared_ptr<uart_endpoint> far_end);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void load(std::span<std::byte const> in) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -243,7 +266,7 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
-  void               receive(std::span<std::uint16_t const> data) override;
+  void               receive_frames(std::span<host_frame const> frames) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
   void               attach(std::shared_ptr<uart_endpoint> far_end) override;
   void               receive_at(line_frame const& frame, std::uint32_t lane) override;
@@ -267,11 +290,10 @@ private:
   [[nodiscard]] auto shape() -> rx_shape;
   auto schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
   void start_frame(std::uint64_t from_ps);
-  void deliver(
-      std::uint16_t data,
-      bool          framing      = false,
-      bool          noise        = false,
-      bool          parity_error = false);
+  void deliver(rx_entry entry);
+  void expose();
+  [[nodiscard]] auto next_host_frame() -> std::optional<host_frame>;
+  [[nodiscard]] auto entry_of(host_frame const& frame) -> rx_entry;
   void               schedule_linked();
   void               idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
@@ -343,6 +365,7 @@ private:
   irq_line&                                    line_;
   bool                                         unsupported_logged_{};
   bool                                         no_baud_logged_{};
+  bool                                         parity_tag_logged_{};
   std::vector<lock>                            locks_;
   std::optional<field_ref>                     auto_baud_;
   std::optional<field_ref>                     auto_baud_mode_;
@@ -562,10 +585,24 @@ void usart::reset(register_file& regs, reset_kind)
   state_.break_shifting = false;
   state_.shifting       = false;
   state_.receiving      = false;
+  state_.rx_due_ps      = 0;
   state_.idle_pending   = false;
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
+}
+
+void usart::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  for(auto const word : std::exchange(state_.legacy_rx, {}))
+  {
+    state_.rx_fifo.push_back({.data = word});
+  }
+  for(auto const word : std::exchange(state_.legacy_host, {}))
+  {
+    state_.host.push_back({.data = word});
+  }
 }
 
 auto usart::enabled() const -> bool
@@ -732,7 +769,7 @@ void usart::flags()
   update(regs_, busy_, state_.receiving ? 1 : 0);
   update(regs_, tx_ack_, enabled() and get(regs_, transmit_) != 0 ? 1 : 0);
   update(regs_, rx_ack_, enabled() and get(regs_, receive_) != 0 ? 1 : 0);
-  regs_.poke(rdr_.offset, state_.rx_fifo.empty() ? 0 : state_.rx_fifo.front());
+  regs_.poke(rdr_.offset, state_.rx_fifo.empty() ? 0 : state_.rx_fifo.front().data);
   interrupts();
   auto const up        = enabled();
   auto const tx_wanted = get(regs_, dma_transmit_) != 0 and get(regs_, transmit_) != 0;
@@ -797,7 +834,8 @@ void usart::control_written(std::uint32_t, std::uint32_t)
     if(auto const ps = frame_ps(); ps != 0)
     {
       state_.receiving = true;
-      state_.rx_due_ps = schedule(receive_due, ctx_.clock.time().ps, ps);
+      state_.rx_due_ps =
+          schedule(receive_due, std::max(ctx_.clock.time().ps, state_.rx_due_ps), ps);
     }
   }
   start_frame(ctx_.clock.time().ps);
@@ -862,8 +900,9 @@ auto usart::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
   {
     return dispatch_model::on_read(regs, offset, size, ctx);
   }
-  auto const value = state_.rx_fifo.front();
+  auto const value = state_.rx_fifo.front().data;
   state_.rx_fifo.erase(state_.rx_fifo.begin());
+  expose();
   flags();
   return read_lanes(value, offset, size);
 }
@@ -893,12 +932,13 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
                   and rx.half_stops == head.frame.half_stops;
     if(not head.cut and head.frame.kind == frame_kind::brk)
     {
-      deliver(0, true);
+      deliver({.framing = true});
     }
     else if(not head.cut and (same or rx.frame_ps == 0))
     {
       deliver(
-          head.frame.data, false, false, not parity_ok(head.frame.data, rx.word_bits, parity()));
+          {.data   = head.frame.data,
+           .parity = not parity_ok(head.frame.data, rx.word_bits, parity())});
     }
     else if(not head.cut)
     {
@@ -907,7 +947,11 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
           head.frame,
           next != state_.linked.end() ? std::optional{next->frame.start.ps} : std::nullopt, rx);
       auto const word = static_cast<std::uint16_t>(seen.data & word_mask());
-      deliver(word, seen.framing, seen.noise, not parity_ok(word, rx.word_bits, parity()));
+      deliver(
+          {.data    = word,
+           .framing = seen.framing,
+           .noise   = seen.noise,
+           .parity  = not parity_ok(word, rx.word_bits, parity())});
     }
     schedule_linked();
     auto const ps    = frame_ps();
@@ -957,25 +1001,31 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     return;
   }
   state_.receiving = false;
-  if(state_.host.empty())
+  auto const frame = next_host_frame();
+  if(not frame)
   {
     flags();
     return;
   }
-  auto const data = state_.host.front();
-  state_.host.erase(state_.host.begin());
-  deliver(with_parity(data, word_bits(), parity()));
-  auto const ps = frame_ps();
+  deliver(entry_of(*frame));
+  auto const ps   = frame_ps();
+  auto const hold = frame->kind == frame_kind::brk
+                      ? 4 * ps / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)])
+                      : 0;
   if(ps != 0 and not state_.host.empty())
   {
     state_.receiving = true;
-    state_.rx_due_ps = schedule(receive_due, state_.rx_due_ps, ps);
+    state_.rx_due_ps = schedule(receive_due, state_.rx_due_ps + hold, ps);
   }
   else if(ps != 0 and not state_.idle_pending and not linked_before(state_.rx_due_ps + ps))
   {
     state_.idle_pending = true;
     ++state_.generation[idle_due];
     state_.idle_due_ps = schedule(idle_due, state_.rx_due_ps, ps);
+  }
+  if(state_.host.empty())
+  {
+    state_.rx_due_ps += hold;
   }
   flags();
 }
@@ -987,32 +1037,87 @@ auto usart::linked_before(std::uint64_t due_ps) const -> bool
   });
 }
 
-void usart::deliver(std::uint16_t data, bool framing, bool noise, bool parity_error)
+void usart::deliver(rx_entry entry)
 {
   auto const depth = fifo() ? fifo_depth : 1;
-  if(enabled() and get(regs_, receive_) != 0)
+  if(not enabled() or get(regs_, receive_) == 0)
   {
-    if(framing)
+    return;
+  }
+  if(state_.rx_fifo.size() < depth)
+  {
+    state_.rx_fifo.push_back(entry);
+    if(state_.rx_fifo.size() == 1)
     {
-      update(regs_, framing_, 1);
-    }
-    if(noise)
-    {
-      update(regs_, noise_, 1);
-    }
-    if(parity_error)
-    {
-      update(regs_, parity_, 1);
-    }
-    if(state_.rx_fifo.size() < depth)
-    {
-      state_.rx_fifo.push_back(data);
-    }
-    else if(get(regs_, overrun_disable_) == 0)
-    {
-      update(regs_, overrun_, 1);
+      expose();
     }
   }
+  else if(get(regs_, overrun_disable_) == 0)
+  {
+    update(regs_, overrun_, 1);
+  }
+}
+
+void usart::expose()
+{
+  if(state_.rx_fifo.empty())
+  {
+    return;
+  }
+  auto const& head = state_.rx_fifo.front();
+  if(head.framing)
+  {
+    update(regs_, framing_, 1);
+  }
+  if(head.noise)
+  {
+    update(regs_, noise_, 1);
+  }
+  if(head.parity)
+  {
+    update(regs_, parity_, 1);
+  }
+}
+
+auto usart::next_host_frame() -> std::optional<host_frame>
+{
+  if(state_.host.empty())
+  {
+    return std::nullopt;
+  }
+  auto const frame = state_.host.front();
+  state_.host.erase(state_.host.begin());
+  return frame;
+}
+
+auto usart::entry_of(host_frame const& frame) -> rx_entry
+{
+  if(frame.kind == frame_kind::brk)
+  {
+    return {.framing = true};
+  }
+  auto const bits = word_bits();
+  auto       word = with_parity(frame.data, bits, parity());
+  auto const odd  = frame.error == uart_error::parity;
+  if(odd and parity() == line_parity::none)
+  {
+    if(not std::exchange(parity_tag_logged_, true))
+    {
+      warn(
+          "CR1",
+          "a host frame tagged with a parity error reached a receiver without PCE: delivered "
+          "clean");
+    }
+  }
+  else if(odd)
+  {
+    word = static_cast<std::uint16_t>(word ^ (1u << (bits - 1)));
+  }
+  return {
+      .data    = word,
+      .framing = frame.error == uart_error::framing,
+      .noise   = frame.error == uart_error::noise,
+      .parity  = not parity_ok(word, bits, parity())};
 }
 
 void usart::schedule_linked()
@@ -1084,9 +1189,9 @@ void usart::cancel_in_flight(vtime at, std::uint32_t lane)
   }
 }
 
-void usart::receive(std::span<std::uint16_t const> data)
+void usart::receive_frames(std::span<host_frame const> frames)
 {
-  state_.host.insert(state_.host.end(), data.begin(), data.end());
+  state_.host.insert(state_.host.end(), frames.begin(), frames.end());
   if(state_.receiving or state_.host.empty())
   {
     return;
@@ -1096,7 +1201,7 @@ void usart::receive(std::span<std::uint16_t const> data)
     state_.receiving = true;
     ++state_.generation[idle_due];
     state_.idle_pending = false;
-    state_.rx_due_ps    = schedule(receive_due, ctx_.clock.time().ps, ps);
+    state_.rx_due_ps = schedule(receive_due, std::max(ctx_.clock.time().ps, state_.rx_due_ps), ps);
     flags();
   }
 }

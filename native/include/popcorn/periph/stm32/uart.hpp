@@ -88,6 +88,33 @@ enum class[[= reflex::derive{reflex::Format}]] frame_kind
   brk,
 };
 
+/**
+ * @brief A line error a host frame carries into the receiver, RM0456 66.8 USART_ISR: `framing`
+ *        sets FE, `noise` NE, `parity` inverts the parity bit so the check sets PE. With CR1.PCE 0
+ *        a `parity` frame arrives clean.
+ */
+enum class[[= reflex::derive{reflex::Format}]] uart_error : std::uint8_t
+{
+  none,
+  framing,
+  noise,
+  parity,
+};
+
+/** @brief One frame the host queues towards a receiver. */
+struct host_frame
+{
+  /** @brief Data bits, right-aligned, 0 for a break. */
+  std::uint16_t data{};
+  /** @brief The line error the frame carries, ignored for a break. */
+  uart_error error{};
+  /** @brief Data or a break. */
+  frame_kind kind{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(host_frame const&, host_frame const&) -> bool = default;
+};
+
 /** @brief One frame on a UART line, as its sender shaped it. */
 struct line_frame
 {
@@ -180,15 +207,35 @@ public:
 
   /**
    * @brief Queues frames on the line towards the firmware. They arrive one frame time apart at the
-   *        configured baud, the first one frame time from now. The queue is saved in snapshots.
-   *        An MCU reset drops the frames still queued, as the line keeps no data on hardware.
-   *        With a parity configured, each frame gets the receiver's parity bit as it arrives, in
-   *        place of the MSB of its M-bit word, so it never sets PE.
+   *        configured baud, the first one frame time from now. The queue is saved in snapshots,
+   *        tags included. An MCU reset drops the frames still queued, as the line keeps no data
+   *        on hardware. With a parity configured, each data frame gets the receiver's parity bit
+   *        as it arrives, in place of the MSB of its M-bit word, so it sets PE only when tagged
+   *        uart_error::parity, which inverts that bit. uart_error::framing sets FE and
+   *        uart_error::noise NE with the frame's data. A break reads as 0 with FE and holds the
+   *        line one frame time plus 2 bit times before the next frame. In FIFO mode as without
+   *        it, a frame's flags rise when it reaches RDR. A frame finding the RX FIFO full is
+   *        dropped with its tag and sets ORE.
+   * @param frames Frames, with their tags.
+   */
+  virtual void receive_frames(std::span<host_frame const> frames) = 0;
+
+  /**
+   * @brief Queues clean data frames, as receive_frames().
    * @param data Frames, data bits right-aligned.
    */
-  virtual void receive(std::span<std::uint16_t const> data) = 0;
+  void receive(std::span<std::uint16_t const> data)
+  {
+    std::vector<host_frame> frames;
+    frames.reserve(data.size());
+    for(auto const word : data)
+    {
+      frames.push_back({.data = word});
+    }
+    receive_frames(frames);
+  }
 
-  /** @brief Host frames still queued by receive(), not yet delivered to the receiver. */
+  /** @brief Host frames still queued by receive_frames(), not yet delivered to the receiver. */
   [[nodiscard]] virtual auto queued() const -> std::size_t = 0;
 
   /**
@@ -198,7 +245,8 @@ public:
    *        word as sampled when its shape differs, and is checked against the receiver's
    *        parity: a mismatch sets PE. Its start bit cancels an IDLE due after it. Called on this
    *        machine's host thread while no slice runs, or from its own loopback endpoint. A break
-   *        frame reads as 0 with FE and never sets PE. Host frames of receive() and these are not
+   *        frame reads as 0 with FE and never sets PE. A frame's FE, NE and PE rise when it
+   *        reaches RDR, as a host frame's. Host frames of receive_frames() and these are not
    *        arbitrated: a linked UART takes no host frames.
    * @param frame The frame, times already in this machine's virtual time.
    * @param lane Lane of the wire it came on, 1 and up.

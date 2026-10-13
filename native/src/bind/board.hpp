@@ -74,9 +74,19 @@ public:
   [[= py::doc{"Predicate: available() differs from the mark."}]] [[nodiscard]] auto
       predicate_changed(count_mark const& mark) const -> native_predicate;
 
-  /** @brief send() as a command of MachineHandle.submit_ops(). */
-  [[= py::doc{"Command of send."}]] [[nodiscard]] auto
-      command_send(reflex::py::nb::bytes const& data) const -> access_op;
+  /**
+   * @brief send() as a command of MachineHandle.submit_ops(), every frame tagged with @p error.
+   * @param data Frames, one per byte.
+   * @param error A periph::stm32::uart_error value, 0 for clean frames.
+   * @throws config_error when @p error is no uart_error, before anything is posted.
+   */
+  [[= py::doc{
+      "Command of send, every byte tagged with the UartError value error."}]] [[nodiscard]] auto
+      command_send(reflex::py::nb::bytes const& data, std::uint8_t error) const -> access_op;
+
+  /** @brief A command of MachineHandle.submit_ops() queueing one break frame. */
+  [[= py::doc{"Command queueing one break frame towards the firmware."}]] [[nodiscard]] auto
+      command_break() const -> access_op;
 
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto
