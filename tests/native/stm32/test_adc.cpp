@@ -6,6 +6,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
 
 #include <doctest/doctest.h>
@@ -2192,4 +2193,28 @@ TEST_CASE(
           f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
       popcorn::model_error);
   CHECK(f.cr("ADSTART") == 0);
+}
+
+TEST_CASE("an LPTIM1_CH1 pin never reaches the ADC trigger of that name, fresh or restored")
+{
+  auto const pin_high_converts = [](adc_fixture const& f) {
+    auto* const port = f.model_of<stm32::gpio_port>("GPIOB");
+    REQUIRE(port != nullptr);
+    f.put("RCC", "RCC_AHB2ENR1", "GPIOBEN", 1);
+    f.put("GPIOB", "GPIO_AFRL", "AFSEL2", 1);
+    f.put("GPIOB", "GPIO_MODER", "MODE2", 2);
+    port->drive(2, true);
+    f.run_until(f.now() + 2 * scan_ps);
+    return f.isr("EOC") != 0;
+  };
+  adc_fixture const fresh;
+  downstream_scan(fresh, ovrmod | exten_rising | extsel(18));
+  static_cast<void>(start_scan(fresh));
+  auto const saved = fresh.target->snapshot();
+  CHECK_FALSE(pin_high_converts(fresh));
+
+  adc_fixture const restored;
+  restored.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK_FALSE(pin_high_converts(restored));
 }

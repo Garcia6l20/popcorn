@@ -56,6 +56,18 @@ public:
    */
   virtual void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) = 0;
 
+  /**
+   * @brief Whether the sink takes @p signal from a GPIO pin in alternate function mode, such as a
+   *        timer its own `tim3_ch1`. Fixed for the sink's life, unlike listens(): a GPIO port
+   *        forwards a pin signal only to the sinks that take it, through triggered().
+   * @param signal Signal name in lower case.
+   */
+  [[nodiscard]] virtual auto takes_pin(std::string_view signal) const -> bool
+  {
+    static_cast<void>(signal);
+    return false;
+  }
+
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~trigger_sink() = default;

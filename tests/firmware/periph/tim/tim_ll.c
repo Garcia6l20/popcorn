@@ -1,6 +1,7 @@
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_dma.h"
+#include "stm32u5xx_ll_gpio.h"
 #include "stm32u5xx_ll_rcc.h"
 #include "stm32u5xx_ll_tim.h"
 
@@ -38,6 +39,7 @@ void tim6_dma_bsrr(void);
 void tim2_two_requests(void);
 void tim5_burst_cpu(void);
 void tim5_burst_dma(void);
+void tim3_encoder(void);
 
 void idle(void)
 {
@@ -518,4 +520,29 @@ void tim5_burst_dma(void)
 int main(void)
 {
   tim16_updates();
+}
+
+void tim3_encoder(void)
+{
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM3);
+  LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_6, LL_GPIO_AF_2);
+  LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_7, LL_GPIO_AF_2);
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_6, LL_GPIO_MODE_ALTERNATE);
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_7, LL_GPIO_MODE_ALTERNATE);
+  time_base(TIM3, 0, 0xffff);
+  LL_TIM_IC_SetActiveInput(TIM3, LL_TIM_CHANNEL_CH1, LL_TIM_ACTIVEINPUT_DIRECTTI);
+  LL_TIM_IC_SetActiveInput(TIM3, LL_TIM_CHANNEL_CH2, LL_TIM_ACTIVEINPUT_DIRECTTI);
+  LL_TIM_SetEncoderMode(TIM3, LL_TIM_ENCODERMODE_X4_TI12);
+  LL_TIM_EnableCounter(TIM3);
+  while(LL_TIM_GetCounter(TIM3) != 40u)
+  {
+  }
+  LOG(LL_TIM_GetDirection(TIM3) == LL_TIM_COUNTERDIRECTION_DOWN);
+  while(LL_TIM_GetCounter(TIM3) != 30u)
+  {
+  }
+  LOG(LL_TIM_GetCounter(TIM3));
+  LOG(LL_TIM_GetDirection(TIM3) == LL_TIM_COUNTERDIRECTION_DOWN);
+  DONE();
 }

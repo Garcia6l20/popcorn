@@ -1,5 +1,6 @@
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <functional>
@@ -17,6 +19,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -65,7 +68,15 @@ struct listener_table
  *        of the same pin. The LCKR key sequence freezes the configuration of the locked pins
  *        until reset. Level changes reach board listeners, then the EXTI model. Edges
  *        scheduled with drive_at() apply through events on core::host_lane, kept in the state
- *        with their board time, rescheduled at every reset at the same instant.
+ *        with their board time, rescheduled at every reset at the same instant. A pin in
+ *        alternate function mode carries its level to the signal its AFSEL selects in the
+ *        description's alternates, entries with a pin or AF above 15 ignored: every change of a
+ *        signal's level, from a pin edge, a mode or AFSEL write or a pull, reaches the
+ *        trigger_sink peers that take it from a pin, trigger_sink::takes_pin, at the time of the
+ *        edge. A signal two pins of the port carry reads high when either does. Entries whose
+ *        signal no peer takes are dropped once the peers exist, so a pin in USART, SPI or LPTIM
+ *        alternate function mode costs a write nothing and reaches no ADC trigger of the same
+ *        name.
  */
 class gpio final : public dispatch_model<gpio, gpio_state>, public gpio_port
 {
@@ -83,6 +94,8 @@ public:
   [[nodiscard]] auto alternate(std::uint8_t pin) const -> std::uint8_t override;
   [[nodiscard]] auto on_change(std::function<void(std::uint8_t pin, bool level)> listener)
       -> subscription override;
+  [[nodiscard]] auto signal_level(std::string_view signal) const -> std::optional<bool> override;
+  void               load(std::span<std::byte const> in) override;
 
   template <std::size_t Which> void config_written(std::uint32_t old, std::uint32_t now);
   void                              output_written(std::uint32_t old, std::uint32_t now);
@@ -97,24 +110,37 @@ private:
   [[nodiscard]] auto pending() const -> std::span<pending_edge const>;
   void               apply(std::uint8_t pin, std::optional<bool> level);
   void               settle(bool notify);
+  [[nodiscard]] auto routed() const -> std::vector<std::uint8_t>;
+  void               route_pins();
+  void               forward();
+  auto               sinks() -> std::span<trigger_sink* const>;
 
-  register_file&                  regs_;
-  std::uint8_t                    port_;
-  std::array<field_ref, pins>     mode_{};
-  std::array<field_ref, pins>     type_{};
-  std::array<field_ref, pins>     speed_{};
-  std::array<field_ref, pins>     pull_{};
-  std::array<field_ref, pins>     alternate_{};
-  std::array<field_ref, pins>     input_{};
-  std::array<field_ref, pins>     output_{};
-  std::array<field_ref, pins>     set_{};
-  std::array<field_ref, pins>     clear_{};
-  std::array<field_ref, pins>     brr_{};
-  std::array<field_ref, pins>     lock_{};
-  field_ref                       lock_key_;
-  std::uint32_t                   reported_{};
-  std::uint32_t                   notifying_{};
-  std::shared_ptr<listener_table> listeners_ = std::make_shared<listener_table>();
+  register_file&                            regs_;
+  std::uint8_t                              port_;
+  std::array<field_ref, pins>               mode_{};
+  std::array<field_ref, pins>               type_{};
+  std::array<field_ref, pins>               speed_{};
+  std::array<field_ref, pins>               pull_{};
+  std::array<field_ref, pins>               alternate_{};
+  std::array<field_ref, pins>               input_{};
+  std::array<field_ref, pins>               output_{};
+  std::array<field_ref, pins>               set_{};
+  std::array<field_ref, pins>               clear_{};
+  std::array<field_ref, pins>               brr_{};
+  std::array<field_ref, pins>               lock_{};
+  field_ref                                 lock_key_;
+  std::uint32_t                             reported_{};
+  std::uint32_t                             notifying_{};
+  std::shared_ptr<listener_table>           listeners_ = std::make_shared<listener_table>();
+  std::vector<std::string>                  signals_;
+  std::vector<std::array<std::uint16_t, 3>> alternates_;
+  std::vector<std::uint8_t>                 forwarded_;
+  std::array<std::uint16_t, pins>           af_entries_{};
+  std::uint16_t                             routed_pins_{};
+  bool                                      forwarding_{};
+  std::optional<std::uint64_t>              edge_at_;
+  std::vector<trigger_sink*>                sinks_;
+  bool                                      sinks_resolved_{};
 };
 
 constexpr std::array<write_entry<gpio>, 11> gpio_writes{
@@ -153,6 +179,28 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
     brr_[pin]       = field("GPIO_BRR", "BR" + n);
     lock_[pin]      = field("GPIO_LCKR", "LCK" + n);
   }
+  for(auto const& entry : desc.alternates.value_or(std::vector<alternate_desc>{}))
+  {
+    if(entry.pin >= pins or entry.af >= 16)
+    {
+      continue;
+    }
+    auto found = std::ranges::find(signals_, entry.signal);
+    if(found == signals_.end())
+    {
+      if(signals_.size() >= std::numeric_limits<std::uint16_t>::max())
+      {
+        throw config_error(
+            ctx.part.part, 0, std::format("peripherals.{}.alternates", desc.name),
+            "at most 65535 distinct signals on one port");
+      }
+      signals_.push_back(entry.signal);
+      found = signals_.end() - 1;
+    }
+    alternates_.push_back(
+        {entry.pin, entry.af, static_cast<std::uint16_t>(found - signals_.begin())});
+  }
+  forwarded_.assign(signals_.size(), 0);
 }
 
 void gpio::reset(register_file& regs, reset_kind)
@@ -208,7 +256,18 @@ void gpio::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     state_.edges.erase(found);
   }
-  apply(edge.pin, edge.level == released ? std::nullopt : std::optional<bool>{edge.level != 0});
+  auto const base = board_base();
+  edge_at_        = edge.board_ps > base ? edge.board_ps - base : ctx_.clock.time().ps;
+  try
+  {
+    apply(edge.pin, edge.level == released ? std::nullopt : std::optional<bool>{edge.level != 0});
+  }
+  catch(...)
+  {
+    edge_at_.reset();
+    throw;
+  }
+  edge_at_.reset();
 }
 
 void gpio::drive_at(std::uint8_t pin, std::optional<bool> level, vtime at)
@@ -297,6 +356,111 @@ auto gpio::computed() const -> std::uint32_t
   return levels;
 }
 
+void gpio::route_pins()
+{
+  if(not sinks_resolved_ and not ctx_.peers.all().empty())
+  {
+    std::erase_if(alternates_, [this](auto const& entry) {
+      return std::ranges::none_of(
+          sinks(), [&](trigger_sink* sink) { return sink->takes_pin(signals_[entry[2]]); });
+    });
+    for(auto const& [pin, af, signal] : alternates_)
+    {
+      af_entries_[pin] |= static_cast<std::uint16_t>(1u << af);
+    }
+  }
+  routed_pins_ = 0;
+  for(std::uint8_t pin = 0; pin < pins; ++pin)
+  {
+    if(mode(pin) == pin_mode::alternate and ((af_entries_[pin] >> alternate(pin)) & 1u) != 0)
+    {
+      routed_pins_ |= static_cast<std::uint16_t>(1u << pin);
+    }
+  }
+}
+
+auto gpio::routed() const -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> levels(signals_.size());
+  if(routed_pins_ == 0)
+  {
+    return levels;
+  }
+  for(auto const& [pin, af, signal] : alternates_)
+  {
+    if(((routed_pins_ >> pin) & 1u) != 0 and alternate(pin) == af and level(pin))
+    {
+      levels[signal] = 1;
+    }
+  }
+  return levels;
+}
+
+auto gpio::sinks() -> std::span<trigger_sink* const>
+{
+  if(not sinks_resolved_ and not ctx_.peers.all().empty())
+  {
+    sinks_resolved_ = true;
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto* const sink = dynamic_cast<trigger_sink*>(peer))
+      {
+        sinks_.push_back(sink);
+      }
+    }
+  }
+  return sinks_;
+}
+
+void gpio::forward()
+{
+  if(routed_pins_ == 0 and not forwarding_)
+  {
+    return;
+  }
+  auto const before = std::exchange(forwarded_, routed());
+  forwarding_       = routed_pins_ != 0;
+  auto const after  = forwarded_;
+  if(before == after)
+  {
+    return;
+  }
+  auto const at = edge_at_.value_or(ctx_.clock.time().ps);
+  for(std::size_t signal = 0; signal < signals_.size(); ++signal)
+  {
+    if(before[signal] == after[signal])
+    {
+      continue;
+    }
+    auto const edge = after[signal] != 0 ? trigger_edge::rising : trigger_edge::falling;
+    for(auto* const sink : sinks())
+    {
+      if(sink->takes_pin(signals_[signal]))
+      {
+        sink->triggered(signals_[signal], edge, at);
+      }
+    }
+  }
+}
+
+auto gpio::signal_level(std::string_view signal) const -> std::optional<bool>
+{
+  auto const found = std::ranges::find(signals_, signal);
+  if(found == signals_.end())
+  {
+    return std::nullopt;
+  }
+  return routed()[static_cast<std::size_t>(found - signals_.begin())] != 0;
+}
+
+void gpio::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  route_pins();
+  forwarded_  = routed();
+  forwarding_ = routed_pins_ != 0;
+}
+
 void gpio::settle(bool notify)
 {
   std::uint32_t before = 0;
@@ -309,8 +473,16 @@ void gpio::settle(bool notify)
   {
     update(regs_, input_[pin], after >> pin & 1u);
   }
-  if(not notify or before == after)
+  if(not notify)
   {
+    route_pins();
+    forwarded_  = routed();
+    forwarding_ = routed_pins_ != 0;
+    return;
+  }
+  if(before == after)
+  {
+    forward();
     return;
   }
   if(notifying_ == 0)
@@ -347,6 +519,7 @@ void gpio::settle(bool notify)
     }
   }
   --notifying_;
+  forward();
 }
 
 template <std::size_t Which> void gpio::config_written(std::uint32_t old, std::uint32_t now)
@@ -375,6 +548,7 @@ template <std::size_t Which> void gpio::config_written(std::uint32_t old, std::u
     }
     regs_.poke((*fields)[first].offset, now);
   }
+  route_pins();
   settle(true);
 }
 

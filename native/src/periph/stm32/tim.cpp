@@ -5,6 +5,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/periph/core_hold.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -138,6 +139,8 @@ struct tim_state
   std::uint8_t                            gate{};
   std::uint8_t                            held{};
   std::uint64_t                           held_ps{};
+  std::uint8_t                            inputs_seen{};
+  std::uint8_t                            inputs_filtered{};
 
   friend auto operator==(tim_state const&, tim_state const&) -> bool = default;
 };
@@ -145,6 +148,10 @@ struct tim_state
 struct channel
 {
   reg_ref                   ccr;
+  std::optional<field_ref>  input_select;
+  std::optional<field_ref>  polarity;
+  std::optional<field_ref>  polarity_n;
+  std::optional<field_ref>  capture_enable;
   field_ref                 select;
   std::optional<field_ref>  preload;
   field_ref                 flag;
@@ -204,10 +211,23 @@ auto lower(std::string_view name) -> std::string
  *        the timer clock comes back. Gated + reset also reinitialises the counter when the
  *        gate closes. Every slave edge sets TIF, gate openings and closings included. ITR7,
  *        ITR8, ITR11, a timer's own ITR and the reserved codes reach nothing: the slave holds and
- *        one warning is logged at the SMCR write. Timer input pins are not modelled: the encoder
- *        modes, RM0456 55.4 "Encoder interface mode", and external clock mode 2 on ETR, ECE 1,
- *        stop the counter, and a slave mode on a pin input, TS 4 to 7, sees no edge. Each of the
- *        three logs once, at the SMCR write or when the counter starts. Deviations: an ARR written
+ *        one warning is logged at the SMCR write. Timer input pins: tim_ti1 to tim_ti4 are the
+ *        `<instance>_ch1` to `_ch4` signals a GPIO pin in alternate function mode gives, while
+ *        TIxSEL is 0, through the GPIO peers' signal levels. Another TIxSEL selects comparators,
+ *        LSE, MCO or RTC: not modelled, the input reads low, logged once at the TISEL write.
+ *        CR2.TI1S XORs tim_ti1 to tim_ti3 into tim_ti1. Each input transition takes effect at the
+ *        time of its pin edge. The encoder modes, RM0456 55.4 "Encoder interface mode", SMS 0001
+ *        to 0011 and 1010 to 1111, count on tim_ti1fp1 and tim_ti2fp2, CC1P and CC2P inverting
+ *        them, by Table 569 and Table 570 and the clock plus direction rules, each count pulse
+ *        through the prescaler, the counter wrapping between 0 and ARR with its update events.
+ *        DIR follows every transition in the quadrature modes, tim_ti1 in the clock plus
+ *        direction modes, the counting line in the directional clock modes, and DIRF rises when
+ *        it changes. Table 569's "Down" for a tim_ti2fp2 falling edge in mode 0001 with tim_ti1fp1
+ *        low counts nothing here: mode 0001 counts tim_ti1 edges only. The encoder index, ECR.IE,
+ *        and the transition and index error flags are not modelled, IE logs once. External clock
+ *        mode 2 on ETR, ECE 1, stops the counter, and a slave mode on a pin input, TS 4 to 7, sees
+ *        no edge, each logged once, at the SMCR write or when the counter starts. Deviations: an
+ *        ARR written
  * below the count lets the counter run to its maximum and wrap with no update, a count written
  * above ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
  *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
@@ -269,6 +289,7 @@ public:
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto takes_pin(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
@@ -355,6 +376,17 @@ private:
   void reschedule();
   void warn_unsupported();
   void warn_inputs();
+  [[nodiscard]] auto input_signal(std::string_view signal) const -> bool;
+  [[nodiscard]] auto pin_level(std::string_view signal) const -> bool;
+  [[nodiscard]] auto raw_input(std::size_t ch) const -> bool;
+  [[nodiscard]] auto effective_input(std::size_t ch) const -> bool;
+  [[nodiscard]] auto filtered(std::size_t ch) const -> bool;
+  [[nodiscard]] auto polarised(std::size_t ch) const -> bool;
+  void               input_edge(std::uint64_t at);
+  void               inputs_changed(std::uint64_t at, bool clocked);
+  void               input_transition(std::size_t ch, bool level, std::uint64_t at, bool clocked);
+  void               encoder_edge(std::size_t ch, std::uint64_t at);
+  void               warn_selects();
 
   register_file&                               regs_;
   std::string                                  prefix_;
@@ -418,6 +450,17 @@ private:
   bool                                         pin_logged_{};
   bool                                         freeze_logged_{};
   bool                                         master_logged_{};
+  std::vector<std::string>                     input_signals_;
+  std::optional<field_ref>                     ti1_xor_;
+  std::optional<field_ref>                     direction_flag_;
+  std::optional<field_ref>                     index_enable_;
+  std::optional<std::uint32_t>                 select_word_;
+  std::optional<std::uint32_t>                 control2_word_;
+  std::optional<std::uint32_t>                 index_word_;
+  bool                                         select_logged_{};
+  mutable std::vector<gpio_port const*>        ports_;
+  mutable bool                                 ports_resolved_{};
+  bool                                         index_logged_{};
 };
 
 template <std::size_t... Ch>
@@ -433,7 +476,7 @@ auto compare_entries(std::string_view prefix, std::index_sequence<Ch...>)
 
 auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
 {
-  static constexpr std::array<write_entry<tim>, 12> plain{
+  static constexpr std::array<write_entry<tim>, 14> plain{
       {
        {"CR1", &tim::control_written},
        {"CR2", &tim::master_written},
@@ -447,9 +490,11 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
        {"RCR", &tim::plain_written},
        {"DCR", &tim::burst_written},
        {"DMAR", &tim::plain_written},
+       {"TISEL", &tim::plain_written},
+       {"ECR", &tim::plain_written},
        }
   };
-  static constexpr std::array<write_entry<tim>, 12> prefixed{
+  static constexpr std::array<write_entry<tim>, 14> prefixed{
       {
        {"TIM1_CR1", &tim::control_written},
        {"TIM1_CR2", &tim::master_written},
@@ -463,6 +508,8 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
        {"TIM1_RCR", &tim::plain_written},
        {"TIM1_DCR", &tim::burst_written},
        {"TIM1_DMAR", &tim::plain_written},
+       {"TIM1_TISEL", &tim::plain_written},
+       {"TIM1_ECR", &tim::plain_written},
        }
   };
   auto const has = [&](std::string_view reg) {
@@ -476,7 +523,9 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
                        or entry.reg.ends_with("SMCR")
                        or entry.reg.ends_with("RCR")
                        or entry.reg.ends_with("DCR")
-                       or entry.reg.ends_with("DMAR");
+                       or entry.reg.ends_with("DMAR")
+                       or entry.reg.ends_with("TISEL")
+                       or entry.reg.ends_with("ECR");
     if(has(entry.reg) or not optional)
     {
       out.push_back(entry);
@@ -599,15 +648,20 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
     {
       missing(std::format("{}CCMR{}.{}", prefix_, mode, pe));
     }
-    auto& c       = channels_.emplace_back();
-    c.ccr         = reg(ccr);
-    c.select      = field(view, std::format("CC{}S", n));
-    c.preload     = preload;
-    c.flag        = field(name("SR"), std::format("CC{}IF", n));
-    c.overcapture = optional_field(name("SR"), std::format("CC{}OF", n));
-    c.interrupt   = field(name("DIER"), std::format("CC{}IE", n));
-    c.dma         = optional_field(name("DIER"), std::format("CC{}DE", n));
-    c.generate    = field(name("EGR"), std::format("CC{}G", n));
+    auto& c          = channels_.emplace_back();
+    c.ccr            = reg(ccr);
+    c.select         = field(view, std::format("CC{}S", n));
+    c.preload        = preload;
+    c.flag           = field(name("SR"), std::format("CC{}IF", n));
+    c.overcapture    = optional_field(name("SR"), std::format("CC{}OF", n));
+    c.interrupt      = field(name("DIER"), std::format("CC{}IE", n));
+    c.dma            = optional_field(name("DIER"), std::format("CC{}DE", n));
+    c.generate       = field(name("EGR"), std::format("CC{}G", n));
+    c.input_select   = optional_field(name("TISEL"), std::format("TI{}SEL", n));
+    c.polarity       = optional_field(name("CCER"), std::format("CC{}P", n));
+    c.polarity_n     = optional_field(name("CCER"), std::format("CC{}NP", n));
+    c.capture_enable = optional_field(name("CCER"), std::format("CC{}E", n));
+    input_signals_.push_back(std::format("{}_ch{}", instance, n));
     if(c.dma)
     {
       c.signal.emplace(ctx.peers, std::format("{}_cc{}_dma", instance, n));
@@ -680,6 +734,21 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
   if(has_register(name("DMAR")))
   {
     burst_word_ = reg(name("DMAR")).offset;
+  }
+  ti1_xor_        = optional_field(name("CR2"), "TI1S");
+  direction_flag_ = optional_field(name("SR"), "DIRF");
+  index_enable_   = optional_field(name("ECR"), "IE");
+  if(has_register(name("TISEL")))
+  {
+    select_word_ = reg(name("TISEL")).offset;
+  }
+  if(has_register(name("CR2")))
+  {
+    control2_word_ = reg(name("CR2")).offset;
+  }
+  if(index_enable_)
+  {
+    index_word_ = index_enable_->offset;
   }
   for(auto const& claimed : claims())
   {
@@ -1575,14 +1644,191 @@ void tim::warn_inputs()
   auto const mode   = slave();
   auto const select = slave_ ? trigger_select_of(regs_.peek(slave_->offset)) : 0u;
   once(
-      encoder_logged_, encoding(mode),
-      "encoder mode: TI1/TI2 inputs are not modelled, the counter holds");
+      encoder_logged_, encoding(mode) and index_enable_ and get(regs_, *index_enable_) != 0,
+      "encoder index, ECR.IE: not modelled, the index input resets nothing");
   once(
       etr_logged_, external_clock2_ and get(regs_, *external_clock2_) != 0,
       "external clock mode 2: ETR is not modelled, the counter holds");
   once(
       pin_logged_, modelled(mode) and pin_select(select),
       std::format("TS {} selects a timer input pin, not modelled", select));
+}
+
+auto tim::input_signal(std::string_view signal) const -> bool
+{
+  return std::ranges::contains(input_signals_, signal);
+}
+
+auto tim::pin_level(std::string_view signal) const -> bool
+{
+  if(not ports_resolved_ and not ctx_.peers.all().empty())
+  {
+    ports_resolved_ = true;
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto const* const port = dynamic_cast<gpio_port const*>(peer))
+      {
+        ports_.push_back(port);
+      }
+    }
+  }
+  return std::ranges::any_of(
+      ports_, [&](gpio_port const* port) { return port->signal_level(signal).value_or(false); });
+}
+
+auto tim::raw_input(std::size_t ch) const -> bool
+{
+  auto const& select = channels_[ch].input_select;
+  if(select and get(regs_, *select) != 0)
+  {
+    return false;
+  }
+  return pin_level(input_signals_[ch]);
+}
+
+auto tim::effective_input(std::size_t ch) const -> bool
+{
+  if(ch == 0 and ti1_xor_ and get(regs_, *ti1_xor_) != 0)
+  {
+    auto level = raw_input(0);
+    for(std::size_t other = 1; other < std::min<std::size_t>(channels_.size(), 3); ++other)
+    {
+      level = level != raw_input(other);
+    }
+    return level;
+  }
+  return raw_input(ch);
+}
+
+auto tim::filtered(std::size_t ch) const -> bool
+{
+  return ((state_.inputs_filtered >> ch) & 1u) != 0;
+}
+
+auto tim::polarised(std::size_t ch) const -> bool
+{
+  auto const& polarity = channels_[ch].polarity;
+  return filtered(ch) != (polarity and get(regs_, *polarity) != 0);
+}
+
+void tim::input_edge(std::uint64_t at)
+{
+  auto const           clocked = ctx_.clock.hz(domain_) != 0;
+  auto const           when    = state_.held != 0 ? std::min(at, state_.held_ps) : at;
+  reacting_scope const reacting{reacting_};
+  if(clocked)
+  {
+    catch_up(std::min(when, now_ps()));
+  }
+  inputs_changed(when, clocked);
+  settle();
+}
+
+void tim::inputs_changed(std::uint64_t at, bool clocked)
+{
+  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
+  {
+    auto const level = effective_input(ch);
+    auto const bit   = static_cast<std::uint8_t>(1u << ch);
+    if(((state_.inputs_seen & bit) != 0) == level)
+    {
+      continue;
+    }
+    state_.inputs_seen ^= bit;
+    input_transition(ch, level, at, clocked);
+  }
+}
+
+void tim::input_transition(std::size_t ch, bool level, std::uint64_t at, bool clocked)
+{
+  auto const bit         = static_cast<std::uint8_t>(1u << ch);
+  state_.inputs_filtered = static_cast<std::uint8_t>(
+      level ? state_.inputs_filtered | bit : state_.inputs_filtered & ~bit);
+  if(clocked and ch < 2 and encoding(slave()) and active())
+  {
+    encoder_edge(ch, at);
+  }
+}
+
+void tim::encoder_edge(std::size_t ch, std::uint64_t at)
+{
+  using enum slave_mode;
+  auto const fp1      = polarised(0);
+  auto const fp2      = polarised(1);
+  auto const rising   = ch == 0 ? fp1 : fp2;
+  auto const opposite = ch == 0 ? fp2 : fp1;
+  auto const up4      = ch == 0 ? rising != opposite : rising == opposite;
+  auto const mode     = slave();
+  auto       count    = false;
+  auto       up       = up4;
+  auto       steer    = true;
+  switch(mode)
+  {
+    case std::to_underlying(encoder1):
+      count = ch == 0;
+      break;
+    case std::to_underlying(encoder2):
+      count = ch == 1;
+      break;
+    case std::to_underlying(encoder3):
+      count = true;
+      break;
+    case 0b1010:
+      count = ch == 1;
+      up    = fp1;
+      break;
+    case 0b1011:
+      count = ch == 1 and rising;
+      up    = fp1;
+      break;
+    case 0b1100:
+      count = opposite;
+      up    = ch == 1;
+      steer = count;
+      break;
+    case 0b1101:
+      count = opposite and not rising;
+      up    = ch == 1;
+      steer = count;
+      break;
+    case 0b1110:
+      count = ch == 0 and opposite;
+      break;
+    case 0b1111:
+      count = ch == 1 and opposite;
+      break;
+    default:
+      return;
+  }
+  if(steer and direction_)
+  {
+    auto const was = get(regs_, *direction_) == 0;
+    update(regs_, *direction_, up ? 0 : 1);
+    if(was != up and direction_flag_)
+    {
+      update(regs_, *direction_flag_, 1);
+    }
+  }
+  if(count)
+  {
+    external_tick(at);
+  }
+}
+
+void tim::warn_selects()
+{
+  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
+  {
+    auto const& select = channels_[ch].input_select;
+    if(select and get(regs_, *select) != 0 and not std::exchange(select_logged_, true))
+    {
+      warn(
+          name("TISEL"),
+          std::format(
+              "TI{}SEL {}: internal input sources are not modelled, tim_ti{} reads low", ch + 1,
+              get(regs_, *select), ch + 1));
+    }
+  }
 }
 
 void tim::reset(register_file& regs, reset_kind)
@@ -1702,6 +1948,19 @@ auto tim::on_write(
   {
     start_at(ps);
   }
+  if(select_word_ and word == *select_word_)
+  {
+    warn_selects();
+  }
+  if(index_word_ and word == *index_word_)
+  {
+    warn_inputs();
+  }
+  if((select_word_ and word == *select_word_) or (control2_word_ and word == *control2_word_))
+  {
+    reacting_scope const reacting{reacting_};
+    inputs_changed(ps, ctx_.clock.hz(domain_) != 0);
+  }
   if(burst)
   {
     advance_burst(access);
@@ -1801,6 +2060,11 @@ auto tim::level(std::string_view signal) const -> std::optional<bool>
   return counter_enabled();
 }
 
+auto tim::takes_pin(std::string_view signal) const -> bool
+{
+  return input_signal(signal);
+}
+
 auto tim::listens(std::string_view signal) const -> bool
 {
   auto const input = slave_ ? input_of(regs_.peek(slave_->offset)) : std::nullopt;
@@ -1809,6 +2073,11 @@ auto tim::listens(std::string_view signal) const -> bool
 
 void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps)
 {
+  if(input_signal(signal))
+  {
+    input_edge(at_ps);
+    return;
+  }
   if(not listens(signal) or ctx_.clock.hz(domain_) == 0)
   {
     return;

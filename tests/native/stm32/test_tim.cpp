@@ -1570,6 +1570,8 @@ struct tim_state_fields
   std::uint8_t                 gate{};
   std::uint8_t                 held{};
   std::uint64_t                held_ps{};
+  std::uint8_t                 inputs_seen{};
+  std::uint8_t                 inputs_filtered{};
 };
 
 struct tim_state_without_edges
@@ -1877,7 +1879,7 @@ TEST_CASE("SMS back to 0000 with CEN 1 counts from the SMCR write")
   CHECK(t.count("TIM3") == 50);
 }
 
-TEST_CASE("an encoder mode, ECE and a pin input each log once")
+TEST_CASE("an encoder index, ECE and a pin input each log once")
 {
   auto const last = [](slaves const& t) {
     REQUIRE(not t.logged.empty());
@@ -1889,12 +1891,14 @@ TEST_CASE("an encoder mode, ECE and a pin input each log once")
     t.base("TIM3", 0, 0xffff);
     t.write("TIM3", "CCMR1_Input", 0x0101);
     t.write("TIM3", "SMCR", smcr(0b0011, 0));
-    CHECK(t.warnings() == 1);
-    CHECK(last(t).contains("encoder"));
+    CHECK(t.warnings() == 0);
     t.enable("TIM3");
     t.enable("TIM3", false);
     t.enable("TIM3");
+    CHECK(t.warnings() == 0);
+    t.write("TIM3", "ECR", 1);
     CHECK(t.warnings() == 1);
+    CHECK(last(t).contains("encoder index"));
     t.enable("TIM3", false);
     t.write("TIM3", "SMCR", 1u << 14);
     CHECK(t.warnings() == 2);
@@ -1914,19 +1918,17 @@ TEST_CASE("an encoder mode, ECE and a pin input each log once")
     CHECK(t.warnings() == 1);
     CHECK(last(t).contains("timer input pin"));
   }
-  SUBCASE("an encoder SMCR write with CEN 1 logs at the write")
+  SUBCASE("an encoder SMCR write with CEN 1 logs nothing")
   {
     slaves t;
     t.base("TIM3", 0, 0xffff);
     t.enable("TIM3");
-    CHECK(t.warnings() == 0);
     t.write("TIM3", "SMCR", smcr(0b0011, 0));
-    CHECK(t.warnings() == 1);
-    CHECK(last(t).contains("encoder"));
+    CHECK(t.warnings() == 0);
   }
 }
 
-TEST_CASE("TIM3 in encoder mode logs only the encoder warning, firmware")
+TEST_CASE("TIM3 in encoder mode with no input edges logs nothing, firmware")
 {
   auto                          f = entered("tim3_encoder_idle");
   std::vector<core::log_record> logged;
@@ -1937,8 +1939,7 @@ TEST_CASE("TIM3 in encoder mode logs only the encoder warning, firmware")
     }
   });
   static_cast<void>(finish(f));
-  REQUIRE(logged.size() == 1);
-  CHECK(logged[0].message.contains("encoder"));
+  CHECK(logged.empty());
 }
 
 TEST_CASE("CPU writes to DMAR land in CCR1 to CCR3 through DBA, firmware")
@@ -2676,4 +2677,324 @@ TEST_CASE("a pin edge due at a TIM update instant applies after it however early
     seen.push_back(flagged);
   }
   CHECK(seen == std::vector<std::uint32_t>{1, 1});
+}
+
+namespace
+{
+constexpr std::uint64_t edge_gap = 10 * us;
+
+struct inputs : slaves
+{
+  stm32::gpio_port* porta{};
+  std::uint64_t     next{};
+  bool              ti1{};
+  bool              ti2{};
+
+  inputs()
+  {
+    b.set("RCC", "RCC_AHB2ENR1", "GPIOAEN", 1);
+    porta = f.model_of<stm32::gpio_port>("GPIOA");
+    REQUIRE(porta != nullptr);
+    next = start;
+  }
+
+  void route(std::uint8_t pin, std::uint8_t af) const
+  {
+    auto const n = std::to_string(pin);
+    b.set("GPIOA", "GPIO_MODER", "MODE" + n, 2);
+    b.set("GPIOA", pin < 8 ? "GPIO_AFRL" : "GPIO_AFRH", "AFSEL" + n, af);
+  }
+
+  void encoder(std::uint32_t mode, std::uint32_t reload = 0xffff) const
+  {
+    route(6, 2);
+    route(7, 2);
+    base("TIM3", 0, reload);
+    write("TIM3", "CCMR1_Input", 0x0101);
+    write("TIM3", "SMCR", smcr(mode, 0));
+    enable("TIM3");
+  }
+
+  void edge(std::uint8_t pin, bool level)
+  {
+    next += edge_gap;
+    porta->drive_at(pin, level, vtime{next});
+    (pin == 6 ? ti1 : ti2) = level;
+  }
+
+  void quadrature(int steps)
+  {
+    for(int step = 0; step < (steps < 0 ? -steps : steps); ++step)
+    {
+      auto const forward = steps > 0;
+      if(ti1 == ti2)
+      {
+        forward ? edge(6, not ti1) : edge(7, not ti2);
+      }
+      else
+      {
+        forward ? edge(7, not ti2) : edge(6, not ti1);
+      }
+    }
+  }
+
+  void settle() const
+  {
+    auto const until = vtime{next + edge_gap};
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = until}).reason
+        == stop_reason::time);
+  }
+};
+}
+
+TEST_CASE("TIM3 encoder mode 3 on PA6 and PA7 counts 40 edges forward then 10 back, DIR follows")
+{
+  SUBCASE("no wrap")
+  {
+    inputs t;
+    t.porta->drive(6, false);
+    t.porta->drive(7, false);
+    t.encoder(0b0011);
+    t.quadrature(40);
+    t.settle();
+    CHECK(t.count("TIM3") == 40);
+    CHECK(t.bits("TIM3", "CR1", "DIR") == 0);
+    CHECK(t.bits("TIM3", "SR", "DIRF") == 0);
+    t.quadrature(-10);
+    t.settle();
+    CHECK(t.count("TIM3") == 30);
+    CHECK(t.bits("TIM3", "CR1", "DIR") == 1);
+    CHECK(t.bits("TIM3", "SR", "DIRF") == 1);
+    CHECK(t.bits("TIM3", "SR", "UIF") == 0);
+  }
+  SUBCASE("wrapping at ARR 24")
+  {
+    inputs t;
+    t.encoder(0b0011, 24);
+    t.quadrature(40);
+    t.settle();
+    CHECK(t.count("TIM3") == 15);
+    CHECK(t.bits("TIM3", "SR", "UIF") == 1);
+    t.write("TIM3", "SR", 0);
+    t.quadrature(-16);
+    t.settle();
+    CHECK(t.count("TIM3") == 24);
+    CHECK(t.bits("TIM3", "SR", "UIF") == 1);
+  }
+}
+
+TEST_CASE("each quadrature encoder mode counts its edges of 8 forward and 8 backward steps")
+{
+  struct expected
+  {
+    std::uint32_t mode;
+    std::uint32_t forward;
+  };
+  for(auto const [mode, forward] : {
+          expected{0b0001, 4},
+          expected{0b0010, 4},
+          expected{0b0011, 8},
+          expected{0b1110, 2},
+          expected{0b1111, 2}
+  })
+  {
+    CAPTURE(mode);
+    inputs t;
+    t.encoder(mode);
+    t.write("TIM3", "CNT", 100);
+    t.quadrature(8);
+    t.settle();
+    CHECK(t.count("TIM3") == 100 + forward);
+    t.quadrature(-8);
+    t.settle();
+    CHECK(t.count("TIM3") == 100);
+  }
+}
+
+TEST_CASE("CC1P inverts tim_ti1fp1, reversing the quadrature count")
+{
+  inputs t;
+  t.encoder(0b0011);
+  t.write("TIM3", "CCER", 1u << 1);
+  t.write("TIM3", "CNT", 100);
+  t.quadrature(8);
+  t.settle();
+  CHECK(t.count("TIM3") == 92);
+}
+
+TEST_CASE("clock plus direction and directional clock modes count TI2 or each line")
+{
+  SUBCASE("1010 counts both TI2 edges, up while TI1 is high")
+  {
+    inputs t;
+    t.encoder(0b1010);
+    t.write("TIM3", "CNT", 100);
+    t.edge(6, true);
+    for(int pulse = 0; pulse < 3; ++pulse)
+    {
+      t.edge(7, true);
+      t.edge(7, false);
+    }
+    t.edge(6, false);
+    t.edge(7, true);
+    t.settle();
+    CHECK(t.count("TIM3") == 105);
+    CHECK(t.bits("TIM3", "CR1", "DIR") == 1);
+  }
+  SUBCASE("1011 counts TI2 rising edges only")
+  {
+    inputs t;
+    t.encoder(0b1011);
+    t.write("TIM3", "CNT", 100);
+    t.edge(6, true);
+    for(int pulse = 0; pulse < 3; ++pulse)
+    {
+      t.edge(7, true);
+      t.edge(7, false);
+    }
+    t.settle();
+    CHECK(t.count("TIM3") == 103);
+  }
+  SUBCASE("1100 counts down on TI1 and up on TI2 edges while the other idles high")
+  {
+    inputs t;
+    t.porta->drive(6, true);
+    t.porta->drive(7, true);
+    t.ti1 = t.ti2 = true;
+    t.encoder(0b1100);
+    t.write("TIM3", "CNT", 100);
+    for(int pulse = 0; pulse < 3; ++pulse)
+    {
+      t.edge(7, false);
+      t.edge(7, true);
+    }
+    t.edge(6, false);
+    t.edge(6, true);
+    t.settle();
+    CHECK(t.count("TIM3") == 104);
+    CHECK(t.bits("TIM3", "CR1", "DIR") == 1);
+  }
+  SUBCASE("1101 counts falling edges only")
+  {
+    inputs t;
+    t.porta->drive(6, true);
+    t.porta->drive(7, true);
+    t.ti1 = t.ti2 = true;
+    t.encoder(0b1101);
+    t.write("TIM3", "CNT", 100);
+    for(int pulse = 0; pulse < 3; ++pulse)
+    {
+      t.edge(7, false);
+      t.edge(7, true);
+    }
+    t.settle();
+    CHECK(t.count("TIM3") == 103);
+  }
+}
+
+TEST_CASE("a TI1SEL other than 0 leaves the encoder without TI1 edges and logs once")
+{
+  inputs t;
+  t.encoder(0b0001);
+  t.write("TIM3", "TISEL", 1);
+  CHECK(t.warnings() == 1);
+  CHECK(t.logged.back().message.contains("TI1SEL"));
+  t.write("TIM3", "TISEL", 2);
+  CHECK(t.warnings() == 1);
+  t.quadrature(8);
+  t.settle();
+  CHECK(t.count("TIM3") == 0);
+}
+
+TEST_CASE("an encoder ignores pin edges while CEN is 0 and a pin not in its AF")
+{
+  inputs t;
+  t.encoder(0b0001);
+  t.enable("TIM3", false);
+  t.quadrature(4);
+  t.settle();
+  CHECK(t.count("TIM3") == 0);
+  t.enable("TIM3");
+  t.b.set("GPIOA", "GPIO_AFRL", "AFSEL6", 1);
+  t.quadrature(4);
+  t.settle();
+  CHECK(t.count("TIM3") == 0);
+  t.b.set("GPIOA", "GPIO_AFRL", "AFSEL6", 2);
+  t.quadrature(4);
+  t.settle();
+  CHECK(t.count("TIM3") == 2);
+}
+
+TEST_CASE("a snapshot between encoder edges restores the count and the pending edges")
+{
+  inputs t;
+  t.encoder(0b0011);
+  t.quadrature(6);
+  auto const mid = t.next - 3 * edge_gap + edge_gap / 2;
+  REQUIRE(
+      t.f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{mid}}).reason
+      == stop_reason::time);
+  CHECK(t.count("TIM3") == 3);
+  auto const saved = t.f.target->snapshot();
+  t.settle();
+  CHECK(t.count("TIM3") == 6);
+  t.f.target->restore(saved);
+  CHECK(t.count("TIM3") == 3);
+  t.settle();
+  CHECK(t.count("TIM3") == 6);
+}
+
+TEST_CASE("a pin entering its timer AF while high gives the timer a rising edge")
+{
+  inputs t;
+  t.porta->drive(6, true);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CCMR1_Input", 0x0101);
+  t.write("TIM3", "SMCR", smcr(0b0011, 0));
+  t.enable("TIM3");
+  t.route(7, 2);
+  CHECK(t.count("TIM3") == 0);
+  t.route(6, 2);
+  CHECK(t.count("TIM3") == 1);
+  t.b.set("GPIOA", "GPIO_MODER", "MODE6", 0);
+  CHECK(t.count("TIM3") == 0);
+}
+
+TEST_CASE("CR2.TI1S feeds tim_ti1 with TI1 xor TI2 xor TI3")
+{
+  inputs t;
+  t.encoder(0b0001);
+  t.write("TIM3", "CR2", 1u << 7);
+  t.edge(7, true);
+  t.edge(7, false);
+  t.settle();
+  CHECK(t.count("TIM3") == 2);
+  t.write("TIM3", "CR2", 0);
+  t.edge(7, true);
+  t.edge(7, false);
+  t.settle();
+  CHECK(t.count("TIM3") == 2);
+}
+
+TEST_CASE("after a restore, routing a pin already high into its timer AF gives the timer an edge")
+{
+  inputs t;
+  t.porta->drive(6, true);
+  t.b.set("GPIOA", "GPIO_MODER", "MODE6", 0);
+  t.b.set("GPIOA", "GPIO_AFRL", "AFSEL6", 2);
+  t.route(7, 2);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CCMR1_Input", 0x0101);
+  t.write("TIM3", "SMCR", smcr(0b0011, 0));
+  t.enable("TIM3");
+  auto const saved = t.f.target->snapshot();
+  t.b.set("GPIOA", "GPIO_MODER", "MODE6", 2);
+  CHECK(t.count("TIM3") == 1);
+  t.f.target->restore(saved);
+  CHECK(t.count("TIM3") == 0);
+  t.b.set("GPIOA", "GPIO_MODER", "MODE6", 2);
+  CHECK(t.count("TIM3") == 1);
+  t.b.set("GPIOA", "GPIO_MODER", "MODE6", 3);
+  CHECK(t.count("TIM3") == 0);
 }

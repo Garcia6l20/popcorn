@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 namespace popcorn::periph::stm32
@@ -123,6 +124,16 @@ public:
 
   /** @brief Number of edges drive_at() scheduled that have not applied yet. */
   [[nodiscard]] virtual auto pending_edges() const -> std::size_t = 0;
+
+  /**
+   * @brief Level a pin of this port gives to an alternate function input, such as `tim3_ch1`:
+   *        high when a pin in alternate function mode whose AFSEL selects that signal reads
+   *        high. Every change of it reaches the trigger_sink peers listening to the signal, at
+   *        the time of the edge that caused it.
+   * @param signal Signal name in lower case, as the description's alternates spell it.
+   * @return The level, empty when no pin of the port carries the signal at any AF.
+   */
+  [[nodiscard]] virtual auto signal_level(std::string_view signal) const -> std::optional<bool> = 0;
 
   /**
    * @brief Level of a pin as GPIOx_IDR reads it: the output for a push-pull output, the external
