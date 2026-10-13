@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import random
 import struct
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ DIGEST_SIZES = (20, 16, 28, 32)
 LENGTHS = (0, 3, 64, 68, 300)
 TICK_CYCLES = 4000
 INIT = 1 << 2
+MODE = 1 << 6
+LKEY = 1 << 16
 DCAL = 1 << 8
 RESULTS = len(ALGORITHMS) * len(LENGTHS)
 
@@ -262,3 +265,140 @@ def test_dma_input_hashes_alike_parked_and_running(u575: popcorn.PartDescription
 
     assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
     assert dma_results(other) == (digests, controls)
+
+
+def key_pattern(size: int) -> bytes:
+    return bytes((index * 53 + 7) & 0xFF for index in range(size))
+
+
+def register_phase(
+    m: popcorn.Machine, data: bytes, datatype: int, rng: random.Random, last: bool
+) -> None:
+    unit = m.periph.HASH
+    for at in range(0, len(data), 4):
+        chunk = data[at : at + 4]
+        valid = 8 * len(chunk)
+        word = int.from_bytes(chunk.ljust(4, b"\0"), "big")
+        if valid < 32:
+            word |= rng.getrandbits(32) & (0xFFFF_FFFF >> valid)
+        unit.DIN.write(din_word(word, datatype))
+    unit.STR.write((8 * len(data)) % 32)
+    unit.STR.write(DCAL)
+    assert unit.SR.BUSY == 1
+    assert asyncio.run(m.run(for_=ms(1))).reason is popcorn.StopReason.TIME
+    assert bool(unit.SR.DCIS) is last
+    assert unit.SR.DINIS == 1
+
+
+def register_hmac(
+    m: popcorn.Machine, algo: int, key: bytes, message: bytes, datatype: int, rng: random.Random
+) -> bytes:
+    unit = m.periph.HASH
+    long_key = LKEY if len(key) > 64 else 0
+    unit.CR.write(INIT | MODE | long_key | (algo << 17) | (datatype << 4))
+    register_phase(m, key, datatype, rng, last=False)
+    register_phase(m, message, datatype, rng, last=False)
+    register_phase(m, key, datatype, rng, last=True)
+    words = [unit[f"HR{index}"].read() for index in range(8)]
+    assert [unit[f"HRA{index}"].read() for index in range(5)] == words[:5]
+    size = DIGEST_SIZES[algo]
+    assert words[size // 4 :] == [0] * (8 - size // 4)
+    return struct.pack(">8I", *words)[:size]
+
+
+@pytest.mark.parametrize("algo", range(len(ALGORITHMS)), ids=ALGORITHMS)
+def test_random_hmacs_written_from_python_match_hmac(
+    u575: popcorn.PartDescription, algo: int
+) -> None:
+    m = entered(u575, "idle")
+    rng = random.Random(0x4AC + algo)
+    for _ in range(60):
+        key = rng.randbytes(rng.randrange(151))
+        message = rng.randbytes(rng.randrange(301))
+        datatype = rng.randrange(4)
+        got = register_hmac(m, algo, key, message, datatype, rng)
+        expected = hmac.new(key, message, ALGORITHMS[algo]).digest()
+        assert got == expected, (len(key), len(message), datatype)
+
+
+HMAC_CASES = [
+    (algo, key, length)
+    for algo in range(len(ALGORITHMS))
+    for key, length in ((20, 0), (20, 68), (64, 300), (131, 50))
+]
+HMAC_DMA_CASES = [
+    (algo, key, length) for algo in range(len(ALGORITHMS)) for key, length in ((20, 68), (131, 300))
+]
+
+
+@dataclass(frozen=True, slots=True)
+class HmacResults:
+    digests: tuple[bytes, ...]
+    dinis_irqs: tuple[int, ...]
+
+
+def hmac_results(m: popcorn.Machine, entry: str) -> HmacResults:
+    if entry == "hmac_dma":
+        count, digest_name = len(HMAC_DMA_CASES), "hmac_dma_digest"
+        assert words(m, "hmac_dma_count", 1) == (count,)
+        irqs: tuple[int, ...] = ()
+    else:
+        count, digest_name = len(HMAC_CASES), "hmac_digest"
+        assert words(m, "hmac_count", 1) == (count,)
+        irqs = words(m, "hmac_dinis_irqs", count)
+    raw = words(m, digest_name, 8 * count)
+    digests = tuple(struct.pack(">8I", *raw[8 * index : 8 * index + 8]) for index in range(count))
+    return HmacResults(digests=digests, dinis_irqs=irqs)
+
+
+def hmac_run(u575: popcorn.PartDescription, entry: str, *, parked: bool) -> HmacResults:
+    m = entered(u575, entry)
+    if parked:
+        stop = asyncio.run(m.wait_for(m.ref.var("hash_done").ge(1), for_=ms(2000)))
+        assert stop.reason is popcorn.StopReason.USER
+        return hmac_results(m, entry)
+
+    async def body() -> popcorn.Stop:
+        async with m.running():
+            return await m.wait_for(m.ref.var("hash_done").ge(1))
+
+    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    return hmac_results(m, entry)
+
+
+@pytest.mark.parametrize("entry", ["hmac_poll", "hmac_irq", "hmac_dma"])
+def test_the_firmware_computes_hmacs_alike_parked_and_running(
+    u575: popcorn.PartDescription, entry: str
+) -> None:
+    first = hmac_run(u575, entry, parked=True)
+    cases = HMAC_DMA_CASES if entry == "hmac_dma" else HMAC_CASES
+    for (algo, key, length), digest in zip(cases, first.digests, strict=True):
+        size = DIGEST_SIZES[algo]
+        expected = hmac.new(key_pattern(key), pattern(length), ALGORITHMS[algo]).digest()
+        assert digest == expected + bytes(32 - size), (ALGORITHMS[algo], key, length)
+    if entry == "hmac_irq":
+        assert first.dinis_irqs == tuple(
+            2 * irq_feeds(key) + irq_feeds(length) for _, key, length in cases
+        )
+    if entry == "hmac_poll":
+        assert first.dinis_irqs == (0,) * len(cases)
+    assert hmac_run(u575, entry, parked=False) == first
+
+
+def test_hmac_phases_closed_back_to_back_keep_one_pending_event(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = entered(u575, "idle")
+    unit = m.periph.HASH
+    before = m.pending_events
+    for _ in range(1000):
+        unit.CR.write(INIT | MODE | (3 << 17))
+        for _ in range(3):
+            unit.STR.write(DCAL)
+            assert m.pending_events == before + 1
+    assert unit.SR.BUSY == 1
+    assert asyncio.run(m.run(for_=ms(1))).reason is popcorn.StopReason.TIME
+    assert m.pending_events == before
+    assert unit.SR.DCIS == 1
+    words = [unit[f"HR{index}"].read() for index in range(8)]
+    assert struct.pack(">8I", *words) == hmac.new(b"", b"", "sha256").digest()

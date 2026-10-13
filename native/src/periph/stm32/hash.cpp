@@ -34,6 +34,13 @@ constexpr std::uint8_t sha1   = 0;
 constexpr std::uint8_t md5    = 1;
 constexpr std::uint8_t sha224 = 2;
 
+constexpr std::uint8_t phase_inner_key = 0;
+constexpr std::uint8_t phase_message   = 1;
+constexpr std::uint8_t phase_outer_key = 2;
+
+constexpr std::uint32_t ipad = 0x3636'3636;
+constexpr std::uint32_t opad = 0x5C5C'5C5C;
+
 using chain = std::array<std::uint32_t, 8>;
 using block = std::array<std::uint32_t, block_words>;
 
@@ -283,13 +290,17 @@ struct hash_state
   std::uint8_t                 busy{};
   std::uint8_t                 final_pending{};
   std::uint8_t                 digested{};
+  std::uint8_t                 hmac{};
+  std::uint8_t                 long_key{};
+  std::uint8_t                 phase{};
+  std::array<std::uint32_t, 8> inner{};
 
   friend auto operator==(hash_state const&, hash_state const&) -> bool = default;
 };
 
 /**
- * @brief Hash processor of the STM32U5, RM0456 section 51: SHA-1, MD5, SHA-224 and SHA-256 over
- *        words written to DIN, polling and IRQ-driven.
+ * @brief Hash processor of the STM32U5, RM0456 section 51: SHA-1, MD5, SHA-224 and SHA-256, and
+ *        HMAC over them, on words written to DIN by the CPU or by DMA.
  *
  *        Each DIN word is swapped by the DATATYPE in CR at the time of the write into message
  *        bits in big-endian order. A write that finds 16 words pending compresses them first, so
@@ -322,11 +333,24 @@ struct hash_state
  *        before, RM0456 51.4.5 step 3b. With MDMAT 1 the message continues with the next
  *        transfer.
  *
+ *        HMAC, RM0456 51.4.7: MODE 1 at INIT selects HMAC and latches LKEY. Three phases follow,
+ *        each closed by DCAL: the inner key, the message, the outer key. A key phase ends by
+ *        compressing the key, zero-padded to 64 bytes and XORed with ipad or opad, the key being
+ *        the words written in that phase with NBLW valid bits in the last one, or their digest
+ *        with LKEY 1, whatever their length. The message phase keeps its digest, the outer key
+ *        phase hashes it after the key block and shows the HMAC. Between phases BUSY ends with
+ *        DINIS 1 and DCIS 0, DCIS rises after the outer key only. Every DCAL closes its phase,
+ *        an empty message or key included, the automatic one of a DMA transfer too. A DCAL
+ *        after the outer key with no word since keeps the HMAC, and words written after it
+ *        start a new inner key. Each phase takes one block time per block it compresses: the
+ *        key's digest with LKEY 1, the padded key block, the message's last blocks and the inner
+ *        digest's block, not RM0456's approximate factors.
+ *
  *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on. Not
  *        modelled, each logged once and a model_error under strict_peripherals, thrown before
- *        the write is stored: HMAC, MODE 1 at INIT, ignored. DMAE 1 with no controller serving
- *        hash_in_dma. Context swap, reads of CSR0-53 return 0 and writes are dropped. The
- *        RCC clock gate is not modelled.
+ *        the write is stored: an HMAC key longer than 64 bytes with LKEY 0, hashed as with
+ *        LKEY 1. DMAE 1 with no controller serving hash_in_dma. Context swap, reads of CSR0-53
+ *        return 0 and writes are dropped. The RCC clock gate is not modelled.
  */
 class hash final : public dispatch_model<hash, hash_state>, public dma_requester
 {
@@ -359,6 +383,12 @@ private:
   void               status_written(std::uint32_t value);
   void               initialise(std::uint32_t control);
   void               finish_digest();
+  [[nodiscard]] auto last_bits() const -> std::uint32_t;
+  auto               pad(std::uint32_t last_bits) -> std::size_t;
+  [[nodiscard]] auto output() const -> std::array<std::uint32_t, 8>;
+  void               restart();
+  auto               open_hmac(std::uint32_t pad_word) -> std::size_t;
+  [[nodiscard]] auto key_overflows() const -> bool;
   void               calculate();
   void               request();
   void               work(std::uint64_t cycles, bool final);
@@ -380,6 +410,7 @@ private:
   field_ref                            dmas_;
   field_ref                            datatype_;
   field_ref                            mode_;
+  field_ref                            lkey_;
   field_ref                            algo_;
   field_ref                            nbw_;
   field_ref                            cr_dinne_;
@@ -397,7 +428,7 @@ private:
   std::array<std::uint32_t, hra_count> hra_{};
   irq_line*                            line_;
   dma_signal                           dma_;
-  bool                                 hmac_logged_{};
+  bool                                 long_key_logged_{};
   bool                                 dma_logged_{};
   bool                                 swap_logged_{};
 };
@@ -442,11 +473,12 @@ hash::hash(model_context& ctx, peripheral_desc const& desc)
       din_{reg("DIN").offset}, sr_{reg("SR").offset}, csr0_{reg("CSR0").offset},
       init_{field("CR", "INIT")}, dmae_{field("CR", "DMAE")}, mdmat_{field("CR", "MDMAT")},
       dmas_{field("SR", "DMAS")}, datatype_{field("CR", "DATATYPE")}, mode_{field("CR", "MODE")},
-      algo_{field("CR", "ALGO")}, nbw_{field("CR", "NBW")}, cr_dinne_{field("CR", "DINNE")},
-      nblw_{field("STR", "NBLW")}, dcal_{field("STR", "DCAL")}, dinie_{field("IMR", "DINIE")},
-      dcie_{field("IMR", "DCIE")}, dinis_{field("SR", "DINIS")}, dcis_{field("SR", "DCIS")},
-      busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")}, dinne_{field("SR", "DINNE")},
-      nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")}, dma_{ctx.peers, "hash_in_dma"}
+      lkey_{field("CR", "LKEY")}, algo_{field("CR", "ALGO")}, nbw_{field("CR", "NBW")},
+      cr_dinne_{field("CR", "DINNE")}, nblw_{field("STR", "NBLW")}, dcal_{field("STR", "DCAL")},
+      dinie_{field("IMR", "DINIE")}, dcie_{field("IMR", "DCIE")}, dinis_{field("SR", "DINIS")},
+      dcis_{field("SR", "DCIS")}, busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")},
+      dinne_{field("SR", "DINNE")}, nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")},
+      dma_{ctx.peers, "hash_in_dma"}
 {
   for(std::size_t i = 0; i < hr_count; ++i)
   {
@@ -513,6 +545,12 @@ auto hash::on_write(
   }
   if(offset == din_)
   {
+    if(key_overflows())
+    {
+      unmodelled(
+          long_key_logged_, "DIN", offset,
+          "an HMAC key longer than 64 bytes needs LKEY 1: the key is hashed as with LKEY 1");
+    }
     data_written(value);
     return {};
   }
@@ -528,11 +566,6 @@ auto hash::on_write(
       unmodelled(
           dma_logged_, "CR", offset,
           "no DMA controller serves hash_in_dma: DMAE 1 requests nothing");
-    }
-    if(init_.of(value) != 0 and mode_.of(value) != 0)
-    {
-      unmodelled(
-          hmac_logged_, "CR", offset, "HMAC is not modelled: MODE 1 at INIT computes a hash");
     }
   }
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
@@ -577,6 +610,10 @@ void hash::initialise(std::uint32_t control)
   state_.digested      = 0;
   state_.digest        = {};
   state_.digest_size   = 0;
+  state_.hmac          = static_cast<std::uint8_t>(mode_.of(control));
+  state_.long_key      = static_cast<std::uint8_t>(state_.hmac != 0 ? lkey_.of(control) : 0);
+  state_.phase         = phase_inner_key;
+  state_.inner         = {};
   withdraw();
   update(regs_, nbwe_, fresh_expect);
   update(regs_, dinne_, 0);
@@ -622,16 +659,121 @@ void hash::start_written(std::uint32_t old, std::uint32_t now)
 
 void hash::calculate()
 {
-  if(std::exchange(state_.digested, 1) == 0)
+  if(state_.digested == 0)
   {
     finish_digest();
   }
 }
 
+auto hash::key_overflows() const -> bool
+{
+  return state_.hmac != 0
+     and state_.long_key == 0
+     and state_.phase != phase_message
+     and state_.blocks == 0
+     and state_.count == block_words;
+}
+
+auto hash::last_bits() const -> std::uint32_t
+{
+  auto const valid = get(regs_, nblw_);
+  return valid == 0 ? 32u : valid;
+}
+
+void hash::restart()
+{
+  state_.h      = initial_values[state_.algo];
+  state_.blocks = 0;
+  state_.count  = 0;
+}
+
+auto hash::output() const -> std::array<std::uint32_t, 8>
+{
+  std::array<std::uint32_t, 8> out{};
+  auto const                   size = digest_words[state_.algo];
+  for(std::size_t i = 0; i < size; ++i)
+  {
+    out[i] = state_.algo == md5 ? std::byteswap(state_.h[i]) : state_.h[i];
+  }
+  return out;
+}
+
+auto hash::open_hmac(std::uint32_t pad_word) -> std::size_t
+{
+  block       key{};
+  std::size_t compressed = 0;
+  if(state_.long_key == 0 and state_.blocks == 0)
+  {
+    std::copy_n(state_.pending.begin(), state_.count, key.begin());
+    if(auto const bits = last_bits(); state_.count != 0 and bits < 32)
+    {
+      key[state_.count - 1] &= ~(~std::uint32_t{} >> bits);
+    }
+  }
+  else
+  {
+    compressed = pad(last_bits());
+    std::ranges::copy(output(), key.begin());
+  }
+  restart();
+  for(auto& word : key)
+  {
+    word ^= pad_word;
+  }
+  compress(state_.algo, state_.h, key);
+  state_.blocks = 1;
+  return compressed + 1;
+}
+
 void hash::finish_digest()
 {
-  auto const                                 valid     = get(regs_, nblw_);
-  auto const                                 last_bits = valid == 0 ? 32u : valid;
+  std::size_t compressed = 0;
+  bool        final      = true;
+  if(state_.hmac == 0)
+  {
+    compressed    = pad(last_bits());
+    state_.digest = output();
+  }
+  else if(state_.phase == phase_inner_key)
+  {
+    compressed   = open_hmac(ipad);
+    state_.phase = phase_message;
+    final        = false;
+  }
+  else if(state_.phase == phase_message)
+  {
+    compressed   = pad(last_bits());
+    state_.inner = output();
+    state_.phase = phase_outer_key;
+    restart();
+    final = false;
+  }
+  else
+  {
+    compressed      = open_hmac(opad);
+    auto const size = digest_words[state_.algo];
+    std::copy_n(state_.inner.begin(), size, state_.pending.begin());
+    state_.count = static_cast<std::uint8_t>(size);
+    compressed += pad(32);
+    state_.digest = output();
+    state_.phase  = phase_inner_key;
+  }
+  if(final)
+  {
+    state_.digest_size = static_cast<std::uint8_t>(digest_words[state_.algo]);
+    state_.digested    = 1;
+    restart();
+  }
+  update(regs_, dinne_, 0);
+  update(regs_, dcis_, 0);
+  show_digest(false);
+  publish();
+  work(compressed * block_cycles[state_.algo], final);
+  interrupts();
+}
+
+auto hash::pad(std::uint32_t last_bits) -> std::size_t
+{
   std::array<std::uint32_t, 2 * block_words> tail{};
   std::copy_n(state_.pending.begin(), state_.count, tail.begin());
   std::size_t   at   = state_.count;
@@ -666,21 +808,7 @@ void hash::finish_digest()
         tail.begin() + static_cast<std::ptrdiff_t>(i * block_words), block_words, piece.begin());
     compress(state_.algo, state_.h, piece);
   }
-  auto const size = digest_words[state_.algo];
-  for(std::size_t i = 0; i < size; ++i)
-  {
-    state_.digest[i] = state_.algo == md5 ? std::byteswap(state_.h[i]) : state_.h[i];
-  }
-  state_.digest_size = static_cast<std::uint8_t>(size);
-  state_.h           = initial_values[state_.algo];
-  state_.blocks      = 0;
-  state_.count       = 0;
-  update(regs_, dinne_, 0);
-  update(regs_, dcis_, 0);
-  show_digest(false);
-  publish();
-  work(blocks * block_cycles[state_.algo], true);
-  interrupts();
+  return blocks;
 }
 
 void hash::work(std::uint64_t cycles, bool final)

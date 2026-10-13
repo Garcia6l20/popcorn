@@ -53,6 +53,7 @@ constexpr std::uint32_t hr0           = 0x310;
 constexpr std::uint32_t cr_init       = 1u << 2;
 constexpr std::uint32_t cr_dmae       = 1u << 3;
 constexpr std::uint32_t cr_mode       = 1u << 6;
+constexpr std::uint32_t cr_lkey       = 1u << 16;
 constexpr std::uint32_t str_dcal      = 1u << 8;
 constexpr std::uint32_t sr_dinis      = 1u << 0;
 constexpr std::uint32_t sr_dcis       = 1u << 1;
@@ -351,6 +352,32 @@ struct hash_rig
     feed(message, datatype);
     finish(8 * message.size());
     settle();
+    return digest(algo);
+  }
+
+  void hmac_begin(std::uint32_t algo, bool long_key, std::uint32_t datatype = 2) const
+  {
+    write(cr, cr_init | cr_mode | (long_key ? cr_lkey : 0u) | (algo << 17) | (datatype << 4));
+  }
+
+  void phase(bytes const& data, std::uint32_t datatype = 2) const
+  {
+    feed(data, datatype);
+    finish(8 * data.size());
+    settle();
+  }
+
+  [[nodiscard]] auto hmac(
+      std::uint32_t algo,
+      bytes const&  key,
+      bytes const&  data,
+      bool          long_key,
+      std::uint32_t datatype = 2) const -> bytes
+  {
+    hmac_begin(algo, long_key, datatype);
+    phase(key, datatype);
+    phase(data, datatype);
+    phase(key, datatype);
     return digest(algo);
   }
 
@@ -901,32 +928,22 @@ TEST_CASE("byte and half-word accesses to HASH registers are bus errors")
   CHECK(r.logged.empty());
 }
 
-TEST_CASE("MODE 1, DMAE 1 with no controller and the context swap registers log once each")
+TEST_CASE("DMAE 1 with no controller and the context swap registers log once each")
 {
   hash_rig const r{false, controller::unrouted};
-  r.write(cr, cr_init | cr_mode | (sha256 << 17) | (2u << 4));
-  r.write(cr, cr_init | cr_mode | (sha256 << 17) | (2u << 4));
-  CHECK((r.read(cr) & cr_mode) != 0);
-  r.feed(text("abc"));
-  r.finish(24);
-  r.settle();
-  CHECK(r.digest(sha256) == abc(sha256));
-  REQUIRE(r.logged.size() == 1);
-  CHECK(r.logged[0].kind == core::log_kind::model_warning);
-  CHECK(r.logged[0].reg == "CR");
-
   r.write(cr, cr_dmae | (sha256 << 17));
   r.write(cr, cr_dmae | (sha256 << 17));
   CHECK((r.read(cr) & cr_dmae) != 0);
-  REQUIRE(r.logged.size() == 2);
-  CHECK(r.logged[1].reg == "CR");
+  REQUIRE(r.logged.size() == 1);
+  CHECK(r.logged[0].kind == core::log_kind::model_warning);
+  CHECK(r.logged[0].reg == "CR");
 
   r.write(csr0 + 4, 0x1234'5678);
   CHECK(r.read(csr0 + 4) == 0);
   CHECK(r.read(csr0) == 0);
   r.write(csr0 + 4 * 53, 1);
-  REQUIRE(r.logged.size() == 3);
-  CHECK(r.logged[2].reg == "CSR1");
+  REQUIRE(r.logged.size() == 2);
+  CHECK(r.logged[1].reg == "CSR1");
 }
 
 TEST_CASE("a refused CR write under strict peripherals stores nothing")
@@ -942,7 +959,6 @@ TEST_CASE("a refused CR write under strict peripherals stores nothing")
   r.begin(sha224);
   r.feed(text("abc"));
   r.write(cr, before);
-  throws(cr_init | cr_mode | (sha256 << 17));
   throws(cr_dmae | (sha256 << 17));
   throws(cr_init | cr_dmae | (sha256 << 17));
   CHECK(field(r.read(sr), 9, 5) == 1);
@@ -1062,4 +1078,410 @@ TEST_CASE("MDMAT 1 keeps the message open across transfers")
     r.settle();
     CHECK(r.digest(algo) == edge(algo, 300));
   }
+}
+
+namespace
+{
+struct hmac_case
+{
+  std::uint32_t    algo;
+  bytes            key;
+  bytes            data;
+  std::string_view digest;
+};
+
+auto filled(std::uint8_t value, std::size_t count) -> bytes
+{
+  return bytes(count, value);
+}
+
+auto counting(std::size_t count) -> bytes
+{
+  bytes out(count);
+  for(std::size_t index = 0; index < count; ++index)
+  {
+    out[index] = static_cast<std::uint8_t>(index + 1);
+  }
+  return out;
+}
+
+constexpr std::string_view large_key_first =
+    "Test Using Larger Than Block-Size Key - Hash Key First";
+constexpr std::string_view large_both_2202 =
+    "Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data";
+constexpr std::string_view large_both_4231 =
+    "This is a test using a larger than block-size key and a larger than block-size data. The key "
+    "needs to be hashed before being used by the HMAC algorithm.";
+
+auto rfc_family(
+    std::uint32_t                          algo,
+    std::size_t                            short_key,
+    std::size_t                            long_key,
+    std::string_view                       large_both,
+    std::array<std::string_view, 7> const& digests) -> std::vector<hmac_case>
+{
+  return {
+      {algo, filled(0x0B, short_key), text("Hi There"), digests[0]},
+      {algo, text("Jefe"), text("what do ya want for nothing?"), digests[1]},
+      {algo, filled(0xAA, short_key), filled(0xDD, 50), digests[2]},
+      {algo, counting(25), filled(0xCD, 50), digests[3]},
+      {algo, filled(0x0C, short_key), text("Test With Truncation"), digests[4]},
+      {algo, filled(0xAA, long_key), text(large_key_first), digests[5]},
+      {algo, filled(0xAA, long_key), text(large_both), digests[6]},
+  };
+}
+
+auto rfc_vectors() -> std::vector<hmac_case>
+{
+  std::vector<hmac_case> out;
+  auto const             add = [&](std::vector<hmac_case> family) {
+    std::ranges::move(family, std::back_inserter(out));
+  };
+  add(rfc_family(
+      md5, 16, 80, large_both_2202,
+      {"9294727a3638bb1c13f48ef8158bfc9d", "750c783e6ab0b503eaa86e310a5db738",
+       "56be34521d144c88dbb8c733f0e8b3f6", "697eaf0aca3a3aea3a75164746ffaa79",
+       "56461ef2342edc00f9bab995690efd4c", "6b1ab7fe4bd7bf8f0b62e6ce61b9d0cd",
+       "6f630fad67cda0ee1fb1f562db3aa53e"}));
+  add(rfc_family(
+      sha1, 20, 80, large_both_2202,
+      {"b617318655057264e28bc0b6fb378c8ef146be00", "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79",
+       "125d7342b9ac11cd91a39af48aa17b4f63f175d3", "4c9007f4026250c6bc8414f9bf50c86c2d7235da",
+       "4c1a03424b55e07fe7f27be1d58bb9324a9a5a04", "aa4ae5e15272d00e95705637ce8a3b55ed402112",
+       "e8e99d0f45237d786d6bbaa7965c7808bbff1a91"}));
+  add(rfc_family(
+      sha224, 20, 131, large_both_4231,
+      {"896fb1128abbdf196832107cd49df33f47b4b1169912ba4f53684b22",
+       "a30e01098bc6dbbf45690f3a7e9e6d0f8bbea2a39e6148008fd05e44",
+       "7fb3cb3588c6c1f6ffa9694d7d6ad2649365b0c1f65d69d1ec8333ea",
+       "6c11506874013cac6a2abc1bb382627cec6a90d86efc012de7afec5a",
+       "0e2aea68a90c8d37c988bcdb9fca6fa8099cd857c7ec4a1815cac54c",
+       "95e9a0db962095adaebe9b2d6f0dbce2d499f112f2d2b7273fa6870e",
+       "3a854166ac5d9f023f54d517d0b39dbd946770db9c2b95c9f6f565d1"}));
+  add(rfc_family(
+      sha256, 20, 131, large_both_4231,
+      {"b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+       "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+       "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
+       "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
+       "a3b6167473100ee06e0c796c2955552bfa6f7c0a6a8aef8b93f860aab0cd20c5",
+       "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+       "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2"}));
+  return out;
+}
+
+auto rfc_vector(std::uint32_t algo, std::size_t test) -> hmac_case
+{
+  auto const all = rfc_vectors();
+  return all.at(7 * (algo == md5 ? 0 : algo == sha1 ? 1 : algo) + test - 1);
+}
+
+constexpr std::array<std::string_view, 4> jefe_hashed_key{
+    "4547faa9ce151d58a36288bdac6809f7615dc1ec",
+    "5ef35b04eb414e85e2f4795aa25cac36",
+    "7b1e22819aa09c76541e6da666176b7e3c17d62ae6c06cb00cefc489",
+    "142c7fede7587937a94a739156b6e8176dc3ff6d5dc58b43b5700a605fac8df3",
+};
+
+constexpr std::array<std::string_view, 4> empty_message{
+    "123fd78bda0100786ae86b76f50f01bd18e477f3",
+    "c9e99a43cd8fa24a840aa85c7cca0061",
+    "ba7d81028e07b30466b867d8fefaa52db111d56b45df5a0e1465bf39",
+    "999a901219f032cd497cadb5e6051e97b6a29ab297bd6ae722bd6062a2f59542",
+};
+
+constexpr std::array<std::string_view, 4> empty_key{
+    "69536cc84eee5fe51c5b051aff8485f5c9ef0b58",
+    "72c33c78cac0b7a581ac263a344ed01d",
+    "da8f94de91d62154b55ea4e8d6eb133f6d553bcd1f1ba205b9488945",
+    "e48411262715c8370cd5e7bf8e82bef53bd53712d007f3429351843b77c7bb9b",
+};
+}
+
+TEST_CASE("RFC 2202 and RFC 4231 HMAC vectors hash through the three phases")
+{
+  hash_rig const r;
+  for(auto const& c : rfc_vectors())
+  {
+    CAPTURE(c.algo);
+    CAPTURE(c.key.size());
+    CAPTURE(c.data.size());
+    CHECK(r.hmac(c.algo, c.key, c.data, c.key.size() > 64) == unhex(c.digest));
+  }
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    auto const c = rfc_vector(algo, 7);
+    for(std::uint32_t datatype = 0; datatype < 4; ++datatype)
+    {
+      CAPTURE(algo);
+      CAPTURE(datatype);
+      CHECK(r.hmac(algo, c.key, c.data, true, datatype) == unhex(c.digest));
+    }
+  }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("the RM0456 HMAC-SHA1 example gives its digest with DATATYPE 0")
+{
+  hash_rig const r;
+  bytes          key(64);
+  for(std::size_t index = 0; index < key.size(); ++index)
+  {
+    key[index] = static_cast<std::uint8_t>(index);
+  }
+  auto const message = text("Sample message for keylen=blocklen");
+  REQUIRE(message.size() == 34);
+  r.hmac_begin(sha1, false, 0);
+  r.phase(key, 0);
+  r.phase(message, 0);
+  r.phase(key, 0);
+  constexpr std::array<std::uint32_t, 5> expected{
+      0x5FD5'96EE, 0x78D5'553C, 0x8FF4'E72D, 0x266D'FD19, 0x2366'DA29};
+  for(std::uint32_t index = 0; index < expected.size(); ++index)
+  {
+    CAPTURE(index);
+    CHECK(r.read(hr0 + 4 * index) == expected[index]);
+    CHECK(r.read(hra0 + 4 * index) == expected[index]);
+  }
+  CHECK(r.read(hr0 + 4 * 5) == 0);
+}
+
+TEST_CASE("LKEY 1 hashes the key whatever its length")
+{
+  hash_rig const r;
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    auto const c = rfc_vector(algo, 2);
+    CHECK(r.hmac(algo, c.key, c.data, true) == unhex(jefe_hashed_key[algo]));
+    CHECK(r.hmac(algo, c.key, c.data, false) == unhex(c.digest));
+  }
+}
+
+TEST_CASE("between HMAC phases BUSY ends with DINIS 1 and DCIS 0")
+{
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    hash_rig const r;
+    auto const     c     = rfc_vector(algo, 1);
+    auto const     block = block_cycles[algo] * r.cycle_ps();
+    auto const     step  = [&](bytes const& data, std::uint64_t blocks, bool last) {
+      r.feed(data);
+      CHECK((r.read(sr) & sr_dinis) == 0);
+      r.finish(8 * data.size());
+      auto const end = r.now() + blocks * block;
+      CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_busy);
+      r.until(end - r.cycle_ps());
+      CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == sr_busy);
+      CHECK_FALSE(r.pending());
+      r.until(end);
+      if(last)
+      {
+        CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == (sr_dcis | sr_dinis));
+        CHECK(r.pending());
+        return;
+      }
+      CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == sr_dinis);
+      CHECK(field(r.read(sr), 16, 5) == 0x11);
+      CHECK(field(r.read(sr), 9, 5) == 0);
+      CHECK(r.read(hr0) == 0);
+      CHECK(r.read(hra0) == 0);
+      CHECK_FALSE(r.pending());
+    };
+    r.write(imr, imr_dcie);
+    r.hmac_begin(algo, false);
+    step(c.key, 1, false);
+    step(c.data, 1, false);
+    step(c.key, 2, true);
+    CHECK(r.digest(algo) == unhex(c.digest));
+
+    auto const l = rfc_vector(algo, 6);
+    r.write(imr, 0);
+    r.hmac_begin(algo, true);
+    r.feed(l.key);
+    r.settle();
+    r.write(sr, ~sr_dinis);
+    r.unpend();
+    r.finish(8 * l.key.size());
+    r.write(imr, imr_dinie);
+    auto const key_end = r.now() + 2 * block;
+    r.until(key_end - r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dinis)) == sr_busy);
+    CHECK_FALSE(r.pending());
+    r.until(key_end);
+    CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == sr_dinis);
+    CHECK(r.pending());
+    r.write(imr, 0);
+    r.unpend();
+    r.phase(l.data);
+    r.feed(l.key);
+    r.settle();
+    r.finish(8 * l.key.size());
+    auto const outer_end = r.now() + 3 * block;
+    r.until(outer_end - r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_busy);
+    r.until(outer_end);
+    CHECK(r.digest(algo) == unhex(l.digest));
+  }
+}
+
+TEST_CASE("a DCAL closes every HMAC phase, empty ones included, and keeps the HMAC after the last")
+{
+  hash_rig const r;
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    auto const c = rfc_vector(algo, 1);
+    CHECK(r.hmac(algo, c.key, {}, false) == unhex(empty_message[algo]));
+    CHECK(r.hmac(algo, {}, c.data, false) == unhex(empty_key[algo]));
+
+    REQUIRE(r.hmac(algo, c.key, c.data, false) == unhex(c.digest));
+    r.write(str, str_dcal);
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_dcis);
+    r.settle();
+    CHECK(r.digest(algo) == unhex(c.digest));
+
+    auto const next = rfc_vector(algo, 4);
+    r.phase(next.key);
+    CHECK((r.read(sr) & sr_dcis) == 0);
+    r.phase(next.data);
+    r.phase(next.key);
+    CHECK(r.digest(algo) == unhex(next.digest));
+  }
+}
+
+TEST_CASE("INIT ends an HMAC between its phases")
+{
+  hash_rig const r;
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    auto const c = rfc_vector(algo, 3);
+    r.hmac_begin(algo, false);
+    r.phase(c.key);
+    r.feed(c.data);
+    CHECK(r.hmac(algo, c.key, c.data, false) == unhex(c.digest));
+
+    r.hmac_begin(algo, false);
+    r.phase(c.key);
+    r.phase(c.data);
+    CHECK(r.hash(algo, text("abc")) == abc(algo));
+    CHECK(r.hmac(algo, c.key, c.data, false) == unhex(c.digest));
+
+    r.hmac_begin(algo, false);
+    r.phase(c.key);
+    r.write(cr, cr_init | cr_lkey | (algo << 17) | (2u << 4));
+    CHECK(r.hash(algo, text("abc")) == abc(algo));
+  }
+}
+
+TEST_CASE("an HMAC key longer than 64 bytes with LKEY 0 logs once and is hashed")
+{
+  {
+    hash_rig const r{false};
+    for(auto const algo : {sha1, md5, sha224, sha256})
+    {
+      CAPTURE(algo);
+      auto const c = rfc_vector(algo, 7);
+      CHECK(r.hmac(algo, c.key, c.data, false) == unhex(c.digest));
+    }
+    REQUIRE(r.logged.size() == 1);
+    CHECK(r.logged[0].kind == core::log_kind::model_warning);
+    CHECK(r.logged[0].reg == "DIN");
+    auto const c = rfc_vector(sha256, 4);
+    CHECK(r.hmac(sha256, c.key, c.data, false) == unhex(c.digest));
+    CHECK(r.logged.size() == 1);
+  }
+  {
+    hash_rig const r;
+    auto const     c = rfc_vector(sha256, 6);
+    r.hmac_begin(sha256, false);
+    r.feed(bytes(c.key.begin(), c.key.begin() + 64));
+    CHECK(field(r.read(sr), 9, 5) == 16);
+    CHECK_THROWS_AS(
+        static_cast<void>(r.f.target->mem().write(hash_base + din, 4, 0xAAAA'AAAA)),
+        popcorn::model_error);
+    CHECK(field(r.read(sr), 9, 5) == 16);
+    CHECK((r.read(sr) & sr_busy) == 0);
+    r.finish(512);
+    r.settle();
+    r.phase(c.data);
+    r.phase(filled(0xAA, 64));
+    CHECK(
+        r.digest(sha256)
+        == unhex("84332a7580ed3cf75de83c644c8d2c1c262ad90e0190e5c5ae4b82b2102e8e75"));
+    CHECK(r.hmac(sha256, c.key, c.data, true) == unhex(c.digest));
+  }
+}
+
+TEST_CASE("each HMAC phase fed by DMA closes at its transfer's end")
+{
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    hash_rig const r{true, controller::recording};
+    auto const     c         = rfc_vector(algo, 7);
+    auto const     control   = cr_mode | cr_lkey | (algo << 17) | (2u << 4);
+    auto const     key_phase = [&] {
+      r.write(str, static_cast<std::uint32_t>(8 * c.key.size() % 32));
+      r.write(cr, control | cr_dmae);
+      r.feed(c.key);
+      r.complete();
+      CHECK((r.read(cr) & cr_dmae) == 0);
+      CHECK((r.read(sr) & (sr_busy | sr_dmas)) == sr_busy);
+      r.settle();
+    };
+    r.write(cr, control | cr_init);
+    key_phase();
+    CHECK((r.read(sr) & (sr_dinis | sr_dcis)) == sr_dinis);
+
+    auto const half = c.data.size() / 64 * 32;
+    r.write(str, static_cast<std::uint32_t>(8 * c.data.size() % 32));
+    r.write(cr, control | cr_dmae | cr_mdmat);
+    r.feed(bytes(c.data.begin(), c.data.begin() + static_cast<std::ptrdiff_t>(half)));
+    r.complete();
+    CHECK((r.read(cr) & cr_dmae) != 0);
+    r.settle();
+    r.write(cr, control | cr_dmae);
+    r.feed(bytes(c.data.begin() + static_cast<std::ptrdiff_t>(half), c.data.end()));
+    r.complete();
+    CHECK((r.read(cr) & cr_dmae) == 0);
+    r.settle();
+    CHECK((r.read(sr) & (sr_dinis | sr_dcis)) == sr_dinis);
+
+    key_phase();
+    CHECK(r.digest(algo) == unhex(c.digest));
+    r.write(str, str_dcal);
+    r.settle();
+    CHECK(r.digest(algo) == unhex(c.digest));
+  }
+}
+
+TEST_CASE("a snapshot taken between HMAC phases restores the phase and the inner digest")
+{
+  hash_rig const r;
+  auto const     c = rfc_vector(sha256, 7);
+  r.hmac_begin(sha256, true);
+  r.phase(c.key);
+  r.feed(c.data);
+  r.finish(8 * c.data.size());
+  REQUIRE((r.read(sr) & sr_busy) != 0);
+  auto const saved  = r.f.target->snapshot();
+  auto const finish = [&](hash_rig const& at) {
+    at.settle();
+    CHECK((at.read(sr) & (sr_dinis | sr_dcis)) == sr_dinis);
+    at.phase(c.key);
+    CHECK(at.digest(sha256) == unhex(c.digest));
+  };
+  finish(r);
+  r.f.target->restore(saved);
+  finish(r);
+
+  hash_rig const other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  finish(other);
+  CHECK(r.logged.empty());
+  CHECK(other.logged.empty());
 }
