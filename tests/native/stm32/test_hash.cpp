@@ -1,9 +1,12 @@
+#include "dma.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+
+#include <popcorn/periph/model.hpp>
 
 #include <doctest/doctest.h>
 #include <reflex/hash/sha256.hpp>
@@ -13,7 +16,11 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
@@ -21,7 +28,9 @@
 
 namespace
 {
-namespace core = popcorn::core;
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
@@ -116,10 +125,82 @@ constexpr auto din_word(std::uint32_t message_word, std::uint32_t datatype) -> s
   }
 }
 
-auto idle(bool strict) -> stm32_fixture
+constexpr std::uint32_t hash_request = 89;
+constexpr std::uint32_t cr_mdmat     = 1u << 13;
+constexpr std::uint32_t sr_dmas      = 1u << 2;
+
+class recorder final : public periph::model, public stm32::dma_controller
+{
+public:
+  explicit recorder(bool knows_hash) : knows_hash_{knows_hash}
+  {}
+
+  std::vector<std::pair<std::uint32_t, bool>> levels;
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+  void on_request(std::uint32_t request, bool level) override
+  {
+    levels.emplace_back(request, level);
+  }
+  [[nodiscard]] auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> override
+  {
+    if(knows_hash_ and signal == "hash_in_dma")
+    {
+      return hash_request;
+    }
+    return std::nullopt;
+  }
+
+private:
+  bool knows_hash_;
+};
+
+enum class controller
+{
+  gpdma,
+  recording,
+  unrouted,
+};
+
+auto idle(bool strict, controller dma = controller::gpdma) -> stm32_fixture
 {
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = strict;
+  if(dma != controller::gpdma)
+  {
+    options.models.emplace(
+        "GPDMA1", [known = dma == controller::recording](
+                      periph::model_context&, popcorn::peripheral_desc const&) {
+          return std::make_shared<recorder>(known);
+        });
+  }
   stm32_fixture f{u575(), "hash_ll", options};
   REQUIRE(
       f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("hash_ll", "main")})
@@ -131,8 +212,22 @@ auto idle(bool strict) -> stm32_fixture
 
 struct hash_rig
 {
-  explicit hash_rig(bool strict = true) : f{idle(strict)}
+  explicit hash_rig(bool strict = true, controller dma = controller::gpdma) : f{idle(strict, dma)}
   {}
+
+  [[nodiscard]] auto dma() const -> recorder&
+  {
+    auto* const found = f.model_of<recorder>("GPDMA1");
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  void complete(std::uint32_t request = hash_request) const
+  {
+    auto* const requester = f.model_of<stm32::dma_requester>("HASH");
+    REQUIRE(requester != nullptr);
+    requester->transfer_completed(request);
+  }
 
   [[nodiscard]] auto read(std::uint32_t offset, std::uint32_t base = hash_base) const
       -> std::uint32_t
@@ -791,9 +886,9 @@ TEST_CASE("byte and half-word accesses to HASH registers are bus errors")
   CHECK(r.logged.empty());
 }
 
-TEST_CASE("MODE 1, DMAE 1 and the context swap registers log once each and hash on")
+TEST_CASE("MODE 1, DMAE 1 with no controller and the context swap registers log once each")
 {
-  hash_rig const r{false};
+  hash_rig const r{false, controller::unrouted};
   r.write(cr, cr_init | cr_mode | (sha256 << 17) | (2u << 4));
   r.write(cr, cr_init | cr_mode | (sha256 << 17) | (2u << 4));
   CHECK((r.read(cr) & cr_mode) != 0);
@@ -821,7 +916,7 @@ TEST_CASE("MODE 1, DMAE 1 and the context swap registers log once each and hash 
 
 TEST_CASE("a refused CR write under strict peripherals stores nothing")
 {
-  hash_rig const r;
+  hash_rig const r{true, controller::unrouted};
   auto const     before = (sha1 << 17) | (2u << 4);
   r.write(cr, before);
   auto const throws = [&](std::uint32_t value) {
@@ -844,4 +939,109 @@ TEST_CASE("a refused CR write under strict peripherals stores nothing")
       static_cast<void>(r.f.target->mem().write(hash_base + csr0, 4, 1)), popcorn::model_error);
   CHECK_THROWS_AS(
       static_cast<void>(r.f.target->mem().read(hash_base + csr0, 4)), popcorn::model_error);
+}
+
+TEST_CASE("a DCAL with no word since the last digest keeps that digest")
+{
+  hash_rig const r;
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    REQUIRE(r.hash(algo, text("abc")) == abc(algo));
+    r.write(str, str_dcal);
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_dcis);
+    r.settle();
+    CHECK(r.digest(algo) == abc(algo));
+    r.begin(algo);
+    r.write(str, str_dcal);
+    r.settle();
+    CHECK(r.digest(algo) == edge(algo, 0));
+  }
+}
+
+TEST_CASE("DMAE drives the hash_in_dma request and SR.DMAS")
+{
+  hash_rig const r{true, controller::recording};
+  r.dma().levels.clear();
+  r.write(cr, cr_init | cr_dmae | cr_mdmat | (sha256 << 17) | (2u << 4));
+  CHECK((r.read(sr) & sr_dmas) != 0);
+  REQUIRE_FALSE(r.dma().levels.empty());
+  CHECK(r.dma().levels.back() == std::pair{hash_request, true});
+  r.write(cr, (sha256 << 17) | (2u << 4));
+  CHECK((r.read(sr) & sr_dmas) == 0);
+  CHECK(r.dma().levels.back() == std::pair{hash_request, false});
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a transfer completed with MDMAT 0 clears DMAE and computes the digest")
+{
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    hash_rig const r{true, controller::recording};
+    r.write(str, 0);
+    r.write(cr, cr_init | cr_dmae | (algo << 17) | (2u << 4));
+    r.feed(pattern(300));
+    r.complete(hash_request + 1);
+    CHECK((r.read(cr) & cr_dmae) != 0);
+    CHECK((r.read(sr) & sr_busy) != 0);
+    r.settle();
+    CHECK((r.read(sr) & sr_dcis) == 0);
+    r.complete();
+    CHECK((r.read(cr) & cr_dmae) == 0);
+    CHECK((r.read(sr) & sr_dmas) == 0);
+    CHECK(r.dma().levels.back() == std::pair{hash_request, false});
+    r.settle();
+    CHECK(r.digest(algo) == edge(algo, 300));
+    r.write(str, str_dcal);
+    r.settle();
+    CHECK(r.digest(algo) == edge(algo, 300));
+    r.complete();
+    CHECK(r.digest(algo) == edge(algo, 300));
+  }
+}
+
+TEST_CASE("the automatic DCAL of a transfer keeps NBLW for a partial last word")
+{
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    hash_rig const r{true, controller::recording};
+    r.write(str, 24);
+    r.write(cr, cr_init | cr_dmae | (algo << 17) | (2u << 4));
+    r.feed_bits(text("abc"), 24);
+    r.complete();
+    CHECK((r.read(cr) & cr_dmae) == 0);
+    r.settle();
+    CHECK(r.digest(algo) == abc(algo));
+
+    r.write(str, 8);
+    r.write(cr, cr_init | cr_dmae | (algo << 17) | (2u << 4));
+    r.feed_bits(pattern(65), 8 * 65);
+    r.complete();
+    r.settle();
+    CHECK(r.digest(algo) == edge(algo, 65));
+  }
+}
+
+TEST_CASE("MDMAT 1 keeps the message open across transfers")
+{
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    hash_rig const r{true, controller::recording};
+    auto const     message = pattern(300);
+    r.write(str, 0);
+    r.write(cr, cr_init | cr_dmae | cr_mdmat | (algo << 17) | (2u << 4));
+    r.feed(bytes(message.begin(), message.begin() + 128));
+    r.complete();
+    r.settle();
+    CHECK((r.read(cr) & cr_dmae) != 0);
+    CHECK((r.read(sr) & sr_dcis) == 0);
+    r.feed(bytes(message.begin() + 128, message.end()));
+    r.write(cr, cr_dmae | (algo << 17) | (2u << 4));
+    r.complete();
+    r.settle();
+    CHECK(r.digest(algo) == edge(algo, 300));
+  }
 }

@@ -13,6 +13,7 @@ add_ll_firmware(
         "hash_poll",
         "hash_backtoback",
         "hash_irq",
+        "hash_dma",
         "hash_done",
         "hash_count",
         "hash_digest",
@@ -21,5 +22,8 @@ add_ll_firmware(
         "hash_dinis_irqs",
         "hash_dcis_irqs",
         "hash_busy_feeds",
+        "hash_dma_count",
+        "hash_dma_digest",
+        "hash_dma_control",
     ],
 )

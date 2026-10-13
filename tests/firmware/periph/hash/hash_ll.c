@@ -6,6 +6,8 @@
 #define HASH_TICK_CYCLES   4000u
 #define HASH_ALGOS         4u
 #define HASH_LENGTHS       5u
+#define HASH_DMA_RESULTS   24u
+#define HASH_DMA_REQUEST   89u
 
 volatile uint32_t hash_done;
 volatile uint32_t hash_count;
@@ -15,6 +17,9 @@ uint32_t          hash_ticks[HASH_MAX_RESULTS];
 uint32_t          hash_dinis_irqs[HASH_MAX_RESULTS];
 uint32_t          hash_dcis_irqs[HASH_MAX_RESULTS];
 uint32_t          hash_busy_feeds[HASH_MAX_RESULTS];
+volatile uint32_t hash_dma_count;
+uint32_t          hash_dma_digest[HASH_DMA_RESULTS][8];
+uint32_t          hash_dma_control[HASH_DMA_RESULTS];
 
 static uint32_t          message[HASH_MESSAGE_WORDS];
 static volatile uint32_t ticks;
@@ -36,6 +41,7 @@ void idle(void);
 void hash_poll(void);
 void hash_backtoback(void);
 void hash_irq(void);
+void hash_dma(void);
 
 void SysTick_Handler(void)
 {
@@ -216,6 +222,76 @@ static void irq_one(uint32_t algo, uint32_t length)
   record(irq_cycles, since);
 }
 
+static void dma_words(uint32_t const* source, uint32_t bytes)
+{
+  DMA_Channel_TypeDef* const channel = GPDMA1_Channel10;
+  channel->CFCR                      = 0x00007F00u;
+  channel->CTR1                      = DMA_CTR1_SINC | DMA_CTR1_SDW_LOG2_1 | DMA_CTR1_DDW_LOG2_1;
+  channel->CTR2                      = DMA_CTR2_DREQ | HASH_DMA_REQUEST;
+  channel->CBR1                      = bytes;
+  channel->CSAR                      = (uint32_t)source;
+  channel->CDAR                      = (uint32_t)&HASH->DIN;
+  channel->CLLR                      = 0;
+  channel->CCR                       = DMA_CCR_EN;
+  while((channel->CCR & DMA_CCR_EN) != 0u)
+  {
+    __WFI();
+  }
+}
+
+static void dma_record(void)
+{
+  while((HASH->SR & HASH_SR_DCIS) == 0u || (HASH->SR & HASH_SR_BUSY) != 0u)
+  {
+    __WFE();
+  }
+  uint32_t const at = hash_dma_count;
+  if(at >= HASH_DMA_RESULTS)
+  {
+    FAIL(2);
+  }
+  for(uint32_t index = 0; index < 5u; ++index)
+  {
+    hash_dma_digest[at][index] = HASH->HR[index];
+  }
+  for(uint32_t index = 5; index < 8u; ++index)
+  {
+    hash_dma_digest[at][index] = HASH_DIGEST->HR[index];
+  }
+  hash_dma_control[at] = HASH->CR;
+  hash_dma_count       = at + 1u;
+}
+
+static void dma_single(uint32_t algo, uint32_t length)
+{
+  HASH->STR = 0;
+  HASH->CR  = HASH_CR_INIT | HASH_CR_DMAE | (algo << HASH_CR_ALGO_Pos) | HASH_CR_DATATYPE_1;
+  dma_words(message, length);
+  HASH->STR |= HASH_STR_DCAL;
+  dma_record();
+}
+
+static void dma_partial(uint32_t algo, uint32_t length)
+{
+  HASH->STR = (length % 4u) * 8u;
+  HASH->CR  = HASH_CR_INIT | HASH_CR_DMAE | (algo << HASH_CR_ALGO_Pos) | HASH_CR_DATATYPE_1;
+  dma_words(message, (length + 3u) / 4u * 4u);
+  dma_record();
+}
+
+static void dma_split(uint32_t algo, uint32_t length)
+{
+  uint32_t const first = (length / 32u) * 16u;
+  HASH->STR            = 0;
+  HASH->CR =
+      HASH_CR_INIT | HASH_CR_DMAE | HASH_CR_MDMAT | (algo << HASH_CR_ALGO_Pos) | HASH_CR_DATATYPE_1;
+  dma_words(message, first);
+  HASH->CR &= ~HASH_CR_MDMAT;
+  HASH->CR |= HASH_CR_DMAE;
+  dma_words(message + first / 4u, length - first);
+  dma_record();
+}
+
 void idle(void)
 {
   for(;;)
@@ -259,6 +335,23 @@ void hash_irq(void)
     {
       irq_one(algo, lengths[index]);
     }
+  }
+  finish();
+}
+
+void hash_dma(void)
+{
+  start();
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPDMA1EN;
+  (void)RCC->AHB1ENR;
+  for(uint32_t algo = 0; algo < HASH_ALGOS; ++algo)
+  {
+    dma_single(algo, 68u);
+    dma_single(algo, 300u);
+    dma_split(algo, 68u);
+    dma_split(algo, 300u);
+    dma_partial(algo, 67u);
+    dma_partial(algo, 66u);
   }
   finish();
 }

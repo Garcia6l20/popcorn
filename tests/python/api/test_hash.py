@@ -121,7 +121,7 @@ def results(m: popcorn.Machine) -> Results:
 
 def parked(u575: popcorn.PartDescription, entry: str) -> Results:
     m = entered(u575, entry)
-    stop = asyncio.run(m.wait_for(m.ref.var("hash_done").ge(1)))
+    stop = asyncio.run(m.wait_for(m.ref.var("hash_done").ge(1), for_=ms(2000)))
     assert stop.reason is popcorn.StopReason.USER
     return results(m)
 
@@ -217,3 +217,48 @@ def test_init_dcal_loop_keeps_one_pending_event(u575: popcorn.PartDescription) -
     assert unit.SR.BUSY == 0
     words = [unit[f"HR{index}"].read() for index in range(8)]
     assert struct.pack(">8I", *words) == hashlib.sha256(b"").digest()
+
+
+DMA_CASES = [
+    (algo, length, split)
+    for algo in range(len(ALGORITHMS))
+    for split, length in (
+        (False, 68),
+        (False, 300),
+        (True, 68),
+        (True, 300),
+        (False, 67),
+        (False, 66),
+    )
+]
+DMAE = 1 << 3
+
+
+def dma_results(m: popcorn.Machine) -> tuple[tuple[bytes, ...], tuple[int, ...]]:
+    assert words(m, "hash_dma_count", 1) == (len(DMA_CASES),)
+    raw = words(m, "hash_dma_digest", 8 * len(DMA_CASES))
+    digests = tuple(
+        struct.pack(">8I", *raw[8 * index : 8 * index + 8]) for index in range(len(DMA_CASES))
+    )
+    return digests, words(m, "hash_dma_control", len(DMA_CASES))
+
+
+def test_dma_input_hashes_alike_parked_and_running(u575: popcorn.PartDescription) -> None:
+    m = entered(u575, "hash_dma")
+    stop = asyncio.run(m.wait_for(m.ref.var("hash_done").ge(1), for_=ms(2000)))
+    assert stop.reason is popcorn.StopReason.USER
+    digests, controls = dma_results(m)
+    for (algo, length, split), digest, control in zip(DMA_CASES, digests, controls, strict=True):
+        size = DIGEST_SIZES[algo]
+        expected = hashlib.new(ALGORITHMS[algo], pattern(length)).digest()
+        assert digest == expected + bytes(32 - size), (ALGORITHMS[algo], length, split)
+        assert control & DMAE == 0
+
+    other = entered(u575, "hash_dma")
+
+    async def body() -> popcorn.Stop:
+        async with other.running():
+            return await other.wait_for(other.ref.var("hash_done").ge(1))
+
+    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert dma_results(other) == (digests, controls)

@@ -1,3 +1,5 @@
+#include "dma.hpp"
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 
@@ -280,6 +282,7 @@ struct hash_state
   std::uint64_t                queued{};
   std::uint8_t                 busy{};
   std::uint8_t                 final_pending{};
+  std::uint8_t                 digested{};
 
   friend auto operator==(hash_state const&, hash_state const&) -> bool = default;
 };
@@ -292,32 +295,40 @@ struct hash_state
  *        bits in big-endian order. A write that finds 16 words pending compresses them first, so
  *        block k starts on word 16k+1. A DIN write clears DINIS. An STR write with DCAL 1 keeps
  *        the previous NBLW, pads the message with the last word holding NBLW valid bits from its
- *        MSB, NBLW 0 meaning 32, the bits after them ignored, and computes the digest. INIT
- *        latches ALGO, resets the computation, NBWP to 0, NBWE to 0x11, DINIS to 1, DCIS to 0
- *        and the digest registers to 0, and keeps NBLW. CR keeps every rw field as written,
- *        INIT and STR.DCAL read 0, CR.NBW shows the low four bits of SR.NBWP and CR.DINNE
- *        SR.DINNE. ALGO, MODE and LKEY act at INIT only.
+ *        MSB, NBLW 0 meaning 32, the bits after them ignored, and computes the digest. A DCAL with
+ *        no DIN word since the last digest keeps it, as drivers that write DCAL after the
+ *        automatic one read the right digest on silicon. INIT latches ALGO, resets the
+ *        computation, NBWP to 0, NBWE to 0x11, DINIS to 1, DCIS to 0 and the digest registers to
+ *        0, and keeps NBLW. CR keeps every rw field as written, INIT and STR.DCAL read 0, CR.NBW
+ *        shows the low four bits of SR.NBWP and CR.DINNE SR.DINNE. ALGO, MODE and LKEY act at INIT
+ *        only.
  *
  *        The arithmetic is done at the write, only the flags follow time. Each block keeps BUSY
  *        set for 82 HCLK cycles on SHA-1 and 66 on the others, RM0456 Table 487, the final
  *        digest one block time per block it compresses. Work arriving while BUSY queues behind
  *        the current block, its end time fixed on arrival from the core clock, which is HCLK.
  *        One BUSY end event is pending at a time, moved to the queue's end when it fires early.
- *        At the end of a partial block DINIS rises when at most one word is pending and NBWE
  *        INIT and reset cancel it, so the queue never holds more than one event of this model.
+ *        At the end of a partial block DINIS rises when at most one word is pending and NBWE
  *        reads 17 minus NBWP. At the end of a final digest DCIS and DINIS rise, NBWE reads 0x11
  *        and HR0-7 and HRA0-4 show the digest, digest bytes 4i to 4i+3 in HRi as a big-endian
  *        word. They read 0 while DCIS is 0, and past the algorithm's digest size. SR.DINIS and
  *        SR.DCIS clear by a write of 0. HASH_IRQn follows DINIS with DINIE and DCIS with DCIE.
  *        Accesses narrower than 32 bits return a bus error, RM0456 51.6.
  *
+ *        DMA input, RM0456 51.4.9: CR.DMAE drives the hash_in_dma request and SR.DMAS reads it.
+ *        The request stays high while DMAE is 1, words never wait. When the channel serving the
+ *        request completes with MDMAT 0, DMAE clears and DCAL starts with the NBLW written
+ *        before, RM0456 51.4.5 step 3b. With MDMAT 1 the message continues with the next
+ *        transfer.
+ *
  *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on. Not
  *        modelled, each logged once and a model_error under strict_peripherals, thrown before
- *        the write is stored: HMAC, MODE 1 at INIT, ignored. DMA input, DMAE 1, kept in CR,
- *        no request. Context swap, reads of CSR0-53 return 0 and writes are dropped. The
+ *        the write is stored: HMAC, MODE 1 at INIT, ignored. DMAE 1 with no controller serving
+ *        hash_in_dma. Context swap, reads of CSR0-53 return 0 and writes are dropped. The
  *        RCC clock gate is not modelled.
  */
-class hash final : public dispatch_model<hash, hash_state>
+class hash final : public dispatch_model<hash, hash_state>, public dma_requester
 {
 public:
   hash(model_context& ctx, peripheral_desc const& desc);
@@ -333,10 +344,11 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void transfer_completed(std::uint32_t request) override;
 
-  void control_written(std::uint32_t old, std::uint32_t now);
   void post();
   void withdraw();
+  void control_written(std::uint32_t old, std::uint32_t now);
   void start_written(std::uint32_t old, std::uint32_t now);
   void mask_written(std::uint32_t, std::uint32_t);
   void stored(std::uint32_t, std::uint32_t)
@@ -347,6 +359,8 @@ private:
   void               status_written(std::uint32_t value);
   void               initialise(std::uint32_t control);
   void               finish_digest();
+  void               calculate();
+  void               request();
   void               work(std::uint64_t cycles, bool final);
   void               finish_work();
   void               publish();
@@ -362,6 +376,8 @@ private:
   std::uint32_t                        csr0_;
   field_ref                            init_;
   field_ref                            dmae_;
+  field_ref                            mdmat_;
+  field_ref                            dmas_;
   field_ref                            datatype_;
   field_ref                            mode_;
   field_ref                            algo_;
@@ -380,6 +396,7 @@ private:
   std::array<std::uint32_t, hr_count>  hr_{};
   std::array<std::uint32_t, hra_count> hra_{};
   irq_line*                            line_;
+  dma_signal                           dma_;
   bool                                 hmac_logged_{};
   bool                                 dma_logged_{};
   bool                                 swap_logged_{};
@@ -423,12 +440,13 @@ auto hash_writes() -> std::span<write_entry<hash> const>
 hash::hash(model_context& ctx, peripheral_desc const& desc)
     : dispatch_model{ctx, desc, "HASH", hash_writes()}, regs_{ctx.regs}, cr_{reg("CR").offset},
       din_{reg("DIN").offset}, sr_{reg("SR").offset}, csr0_{reg("CSR0").offset},
-      init_{field("CR", "INIT")}, dmae_{field("CR", "DMAE")}, datatype_{field("CR", "DATATYPE")},
-      mode_{field("CR", "MODE")}, algo_{field("CR", "ALGO")}, nbw_{field("CR", "NBW")},
-      cr_dinne_{field("CR", "DINNE")}, nblw_{field("STR", "NBLW")}, dcal_{field("STR", "DCAL")},
-      dinie_{field("IMR", "DINIE")}, dcie_{field("IMR", "DCIE")}, dinis_{field("SR", "DINIS")},
-      dcis_{field("SR", "DCIS")}, busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")},
-      dinne_{field("SR", "DINNE")}, nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")}
+      init_{field("CR", "INIT")}, dmae_{field("CR", "DMAE")}, mdmat_{field("CR", "MDMAT")},
+      dmas_{field("SR", "DMAS")}, datatype_{field("CR", "DATATYPE")}, mode_{field("CR", "MODE")},
+      algo_{field("CR", "ALGO")}, nbw_{field("CR", "NBW")}, cr_dinne_{field("CR", "DINNE")},
+      nblw_{field("STR", "NBLW")}, dcal_{field("STR", "DCAL")}, dinie_{field("IMR", "DINIE")},
+      dcie_{field("IMR", "DCIE")}, dinis_{field("SR", "DINIS")}, dcis_{field("SR", "DCIS")},
+      busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")}, dinne_{field("SR", "DINNE")},
+      nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")}, dma_{ctx.peers, "hash_in_dma"}
 {
   for(std::size_t i = 0; i < hr_count; ++i)
   {
@@ -449,6 +467,7 @@ void hash::reset(register_file& regs, reset_kind)
   withdraw();
   state_ = {};
   line_->lower();
+  dma_.resolve();
 }
 
 auto hash::is_csr(std::uint32_t offset) const -> bool
@@ -504,10 +523,11 @@ auto hash::on_write(
   }
   if(offset == cr_)
   {
-    if(dmae_.of(value) != 0)
+    if(dmae_.of(value) != 0 and not dma_.routed())
     {
       unmodelled(
-          dma_logged_, "CR", offset, "DMA input is not modelled: DMAE 1 requests no transfer");
+          dma_logged_, "CR", offset,
+          "no DMA controller serves hash_in_dma: DMAE 1 requests nothing");
     }
     if(init_.of(value) != 0 and mode_.of(value) != 0)
     {
@@ -520,12 +540,30 @@ auto hash::on_write(
 
 void hash::control_written(std::uint32_t, std::uint32_t now)
 {
-  if(init_.of(now) == 0)
+  if(init_.of(now) != 0)
+  {
+    regs_.poke(cr_, init_.with(now, 0));
+    initialise(now);
+  }
+  request();
+}
+
+void hash::request()
+{
+  auto const enabled = get(regs_, dmae_);
+  update(regs_, dmas_, enabled);
+  dma_.set(enabled != 0);
+}
+
+void hash::transfer_completed(std::uint32_t number)
+{
+  if(not dma_.carries(number) or get(regs_, dmae_) == 0 or get(regs_, mdmat_) != 0)
   {
     return;
   }
-  regs_.poke(cr_, init_.with(now, 0));
-  initialise(now);
+  update(regs_, dmae_, 0);
+  request();
+  calculate();
 }
 
 void hash::initialise(std::uint32_t control)
@@ -536,6 +574,7 @@ void hash::initialise(std::uint32_t control)
   state_.count         = 0;
   state_.busy          = 0;
   state_.final_pending = 0;
+  state_.digested      = 0;
   state_.digest        = {};
   state_.digest_size   = 0;
   withdraw();
@@ -560,6 +599,7 @@ void hash::data_written(std::uint32_t value)
     work(block_cycles[state_.algo], false);
   }
   state_.pending[state_.count++] = word;
+  state_.digested                = 0;
   update(regs_, dinis_, 0);
   update(regs_, dinne_, 1);
   if(auto const expected = get(regs_, nbwe_); expected > 0)
@@ -577,7 +617,15 @@ void hash::start_written(std::uint32_t old, std::uint32_t now)
     return;
   }
   regs_.poke(nblw_.offset, dcal_.with(nblw_.with(now, nblw_.of(old)), 0));
-  finish_digest();
+  calculate();
+}
+
+void hash::calculate()
+{
+  if(std::exchange(state_.digested, 1) == 0)
+  {
+    finish_digest();
+  }
 }
 
 void hash::finish_digest()
