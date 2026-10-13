@@ -1,6 +1,7 @@
 {
   "counts": {
     "aliases": 98,
+    "alternates": 743,
     "cross_rules": 570,
     "fields": 48130,
     "irqs": 121,
@@ -12,6 +13,7 @@
   "part": "STM32U575QGIx",
   "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
   "tables": {
+    "alternates": "9ab9e6a8480f68dfd5bb6092004b6a45f52b553029ca299c1844287404071ca0",
     "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
     "fields": "aaa665cb37846ce34901671188edc5d114e53f099c8c7e5f51831d77ad59a9ac",
     "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",

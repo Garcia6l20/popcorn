@@ -1,14 +1,20 @@
-"""CubeMX db: part lookup, rzone regions and processor facts, IP instance join."""
+"""CubeMX db: part lookup, rzone regions and processor facts, IP instance join, GPIO alternate
+functions."""
 
+import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from xml.etree.ElementTree import Element
 
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._model import RegionAccess, RegionDesc, RegionKind
+from popcorn.stm32.description._model import AlternateDesc, RegionAccess, RegionDesc, RegionKind
 
 _MCU_NS = "http://mcd.rou.st.com/modules.php?name=mcu"
+_PIN_RE = re.compile(r"P([A-Z])(\d+)")
+_AF_RE = re.compile(r"GPIO_AF(\d+)_")
+MAX_GPIO_MODES_BYTES = 8 << 20
+"""Largest GPIO modes file read_gpio_alternates parses, 26 times the 311 KiB of the U5 one."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -28,6 +34,7 @@ class DbPart:
     flash_kib: list[int]
     ips: list[DbIp]
     package: str = ""
+    pins: dict[str, frozenset[str]] = field(default_factory=dict[str, frozenset[str]])
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -101,6 +108,13 @@ def read_part(data: bytes, *, file: str) -> DbPart:
             raise DescriptionError(file, 0, "Mcu.IP", "InstanceName and Name")
         ips.append(DbIp(instance=instance, name=name, version=ip_el.get("Version") or ""))
 
+    pins: dict[str, frozenset[str]] = {}
+    for pin_el in root.findall(q("Pin")):
+        pin_name = pin_el.get("Name")
+        if pin_name is not None:
+            signals = {s.get("Name") for s in pin_el.findall(q("Signal"))}
+            pins[pin_name] = frozenset(name for name in signals if name is not None)
+
     return DbPart(
         ref_name=ref_name,
         family=family,
@@ -110,6 +124,7 @@ def read_part(data: bytes, *, file: str) -> DbPart:
         flash_kib=flash_kib,
         ips=ips,
         package=root.get("Package") or "",
+        pins=pins,
     )
 
 
@@ -239,3 +254,58 @@ def instance_ips(
             if target in names and target not in result:
                 result[target] = ip
     return result
+
+
+def gpio_modes_file_name(part: DbPart) -> str | None:
+    """Name of the `db/mcu/IP/` GPIO modes file of @p part, `GPIO-<version>_Modes.xml` for the
+    version of its GPIO IP, None when the part lists no versioned GPIO IP."""
+    for ip in part.ips:
+        if ip.name == "GPIO" and ip.version:
+            return f"GPIO-{ip.version}_Modes.xml"
+    return None
+
+
+def read_gpio_alternates(
+    data: bytes, *, file: str, pins: Mapping[str, frozenset[str]]
+) -> dict[str, list[AlternateDesc]]:
+    """Alternate functions of a `GPIO-<version>_Modes.xml` document, keyed by port letter, each
+    list sorted by pin, function and signal. Keeps the pins @p pins lists, the package pins of the
+    part, and of each the signals @p pins gives it, so AF15 `EVENTOUT`, which no MCU file lists,
+    never enters the table. Only `GPIO_AF<n>_` selections are read: the STM32F1 modes files remap
+    through AFIO and give an empty table. DescriptionError when @p data is larger than
+    MAX_GPIO_MODES_BYTES, malformed, or does not carry the CubeMX Mcu namespace."""
+    if len(data) > MAX_GPIO_MODES_BYTES:
+        raise DescriptionError(
+            file, 0, "<root>", f"a GPIO modes file of at most {MAX_GPIO_MODES_BYTES} bytes"
+        )
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        line = exc.position[0] if exc.position else 0
+        raise DescriptionError(file, line, "<root>", "valid XML") from exc
+    if root.tag != f"{{{_MCU_NS}}}IP":
+        raise DescriptionError(file, 0, "IP", f"namespace {_MCU_NS}")
+
+    def q(tag: str) -> str:
+        return f"{{{_MCU_NS}}}{tag}"
+
+    ports: dict[str, set[tuple[int, int, str]]] = {}
+    for pin_el in root.iter(q("GPIO_Pin")):
+        pin_name = pin_el.get("Name") or ""
+        allowed = pins.get(pin_name)
+        found = _PIN_RE.match(pin_name)
+        if allowed is None or found is None or int(found.group(2)) > 15:
+            continue
+        port, pin = found.group(1), int(found.group(2))
+        for signal_el in pin_el.findall(q("PinSignal")):
+            signal = signal_el.get("Name")
+            if signal is None or signal not in allowed:
+                continue
+            for value_el in signal_el.iter(q("PossibleValue")):
+                af = _AF_RE.match((value_el.text or "").strip())
+                if af is not None and int(af.group(1)) <= 15:
+                    ports.setdefault(port, set()).add((pin, int(af.group(1)), signal.lower()))
+    return {
+        port: [AlternateDesc(pin=pin, af=af, signal=signal) for pin, af, signal in sorted(entries)]
+        for port, entries in sorted(ports.items())
+    }

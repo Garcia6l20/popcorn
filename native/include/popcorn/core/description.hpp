@@ -129,6 +129,21 @@ struct cross_rule
   friend auto operator==(cross_rule const&, cross_rule const&) -> bool = default;
 };
 
+/** @brief Alternate function of a GPIO pin: the signal the pin carries when its AFSEL selects
+ * the function, from the CubeMX GPIO modes table. */
+struct alternate_desc
+{
+  /** @brief Pin number in its port, 0 to 15. */
+  std::uint8_t pin{};
+  /** @brief Alternate function number, 0 to 15. */
+  std::uint8_t af{};
+  /** @brief Signal in lower case, such as `tim3_ch1`. */
+  std::string signal;
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(alternate_desc const&, alternate_desc const&) -> bool = default;
+};
+
 /** @brief Peripheral instance. */
 struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
 {
@@ -150,6 +165,9 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
   std::vector<std::uint16_t> irqs;
   /** @brief Peripheral whose storage this one aliases, such as a `SEC_*` instance. */
   std::optional<std::string> alias_of;
+  /** @brief Alternate functions of the pins of a GPIO port, by pin, then function, then signal.
+   * Absent on other peripherals and on parts without a GPIO modes table. */
+  std::optional<std::vector<alternate_desc>> alternates;
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_desc const&, peripheral_desc const&) -> bool = default;

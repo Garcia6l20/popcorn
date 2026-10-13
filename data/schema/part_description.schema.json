@@ -10,6 +10,30 @@
       ],
       "type": "string"
     },
+    "alternate_desc": {
+      "additionalProperties": false,
+      "properties": {
+        "af": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pin": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pin",
+        "af",
+        "signal"
+      ],
+      "type": "object"
+    },
     "core_desc": {
       "additionalProperties": false,
       "properties": {
@@ -179,6 +203,12 @@
       "properties": {
         "alias_of": {
           "type": "string"
+        },
+        "alternates": {
+          "items": {
+            "$ref": "#/$defs/alternate_desc"
+          },
+          "type": "array"
         },
         "base": {
           "maximum": 4294967295,

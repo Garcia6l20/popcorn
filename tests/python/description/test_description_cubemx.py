@@ -1,16 +1,21 @@
+import time
 from pathlib import Path
 
 import pytest
 from popcorn.stm32.description._cubemx import (
+    MAX_GPIO_MODES_BYTES,
+    DbIp,
     DbPart,
     Rzone,
+    gpio_modes_file_name,
     instance_ips,
+    read_gpio_alternates,
     read_part,
     read_rzone,
     rzone_file_name,
 )
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._model import RegionKind
+from popcorn.stm32.description._model import AlternateDesc, RegionKind
 from popcorn.stm32.description._svd import expand_svd
 
 DATA_DIR = Path(__file__).parents[3] / "tests" / "data" / "stm32" / "db"
@@ -243,3 +248,98 @@ def test_u575_ip_join_unmatched_peripherals_match_i05(st_svd_u575: Path, u575_pa
     assert sec_unmatched == {name for name in svd_names if name.startswith("SEC_")}
     assert result["USART1"].name == "USART"
     assert result["OTG_FS"].instance == "USB_OTG_FS"
+
+
+_MODES_HEAD = b"""<?xml version="1.0"?>
+<IP xmlns="http://mcd.rou.st.com/modules.php?name=mcu" Name="GPIO" Version="v1_synth">
+"""
+
+
+def _signal(name: str, value: str) -> bytes:
+    return (
+        f'<PinSignal Name="{name}"><SpecificParameter Name="GPIO_AF">'
+        f"<PossibleValue>{value}</PossibleValue></SpecificParameter></PinSignal>"
+    ).encode()
+
+
+def _modes(*pins: tuple[str, list[bytes]]) -> bytes:
+    body = b"".join(
+        f'<GPIO_Pin PortName="P{name[1]}" Name="{name}">'.encode()
+        + b"".join(signals)
+        + b"</GPIO_Pin>"
+        for name, signals in pins
+    )
+    return _MODES_HEAD + body + b"</IP>"
+
+
+def test_gpio_alternates_keep_package_pins_and_signals_sorted_lower_case() -> None:
+    data = _modes(
+        (
+            "PA6",
+            [
+                _signal("TIM3_CH1", "GPIO_AF2_TIM3"),
+                _signal("SPI1_MISO", "GPIO_AF5_SPI1"),
+                _signal("TIM1_BKIN", "GPIO_AF1_TIM1"),
+                _signal("NOT_ON_PACKAGE", "GPIO_AF7_X"),
+            ],
+        ),
+        ("PA13 (JTMS/SWDIO)", [_signal("TIM9_ETR", "GPIO_AF0_TIM9")]),
+        ("PB2", [_signal("TIM4_CH2", "GPIO_AF2_TIM4"), _signal("EVENTOUT", "no AF")]),
+        ("PC3", [_signal("TIM5_CH4", "GPIO_AF2_TIM5")]),
+        ("PD16", [_signal("TIM5_CH1", "GPIO_AF2_TIM5")]),
+    )
+    pins = {
+        "PA6": frozenset({"TIM3_CH1", "SPI1_MISO", "TIM1_BKIN"}),
+        "PA13 (JTMS/SWDIO)": frozenset({"TIM9_ETR"}),
+        "PB2": frozenset({"TIM4_CH2", "EVENTOUT"}),
+        "PD16": frozenset({"TIM5_CH1"}),
+    }
+    alternates = read_gpio_alternates(data, file="modes.xml", pins=pins)
+    assert alternates == {
+        "A": [
+            AlternateDesc(pin=6, af=1, signal="tim1_bkin"),
+            AlternateDesc(pin=6, af=2, signal="tim3_ch1"),
+            AlternateDesc(pin=6, af=5, signal="spi1_miso"),
+            AlternateDesc(pin=13, af=0, signal="tim9_etr"),
+        ],
+        "B": [AlternateDesc(pin=2, af=2, signal="tim4_ch2")],
+    }
+
+
+def test_gpio_alternates_outside_the_namespace_are_a_description_error() -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        read_gpio_alternates(b"<IP/>", file="modes.xml", pins={})
+    assert excinfo.value.key == "IP"
+
+
+def test_malformed_gpio_alternates_are_a_description_error() -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        read_gpio_alternates(b"<IP", file="modes.xml", pins={})
+    assert excinfo.value.key == "<root>"
+
+
+def test_gpio_modes_file_name_follows_the_gpio_ip_version() -> None:
+    data = (DATA_DIR / "mcu" / "STM32T001ABCx.xml").read_bytes()
+    part = read_part(data, file="STM32T001ABCx.xml")
+    assert gpio_modes_file_name(part) == "GPIO-v1_synth_Modes.xml"
+    bare = DbPart(
+        ref_name="X",
+        family="",
+        line="",
+        die="D",
+        ram_kib=[1],
+        flash_kib=[1],
+        ips=[DbIp(instance="GPIOA", name="GPIO", version="")],
+    )
+    assert gpio_modes_file_name(bare) is None
+
+
+def test_a_modes_file_over_the_cap_is_refused_within_a_second() -> None:
+    signal = _signal("TIM3_CH1", "GPIO_AF2_TIM3")
+    data = _modes(("PA6", [signal] * (MAX_GPIO_MODES_BYTES // len(signal) + 1)))
+    assert len(data) > MAX_GPIO_MODES_BYTES
+    started = time.perf_counter()
+    with pytest.raises(DescriptionError) as excinfo:
+        read_gpio_alternates(data, file="modes.xml", pins={"PA6": frozenset({"TIM3_CH1"})})
+    assert time.perf_counter() - started < 1.0
+    assert excinfo.value.key == "<root>"

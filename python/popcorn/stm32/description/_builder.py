@@ -1,12 +1,24 @@
 """Assembles an PartDescription from Sources: expand the SVD, read the db and rzone, apply every
-patch, build the IRQ table, then assemble core, regions and peripherals."""
+patch, build the IRQ table, then assemble core, regions and peripherals, GPIO alternate functions
+included."""
 
-from popcorn.stm32.description._cubemx import instance_ips, read_part, read_rzone
+import logging
+import re
+
+from popcorn.stm32.description._cubemx import (
+    instance_ips,
+    read_gpio_alternates,
+    read_part,
+    read_rzone,
+)
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
 from popcorn.stm32.description._model import CoreDesc, IrqDesc, PartDescription, PeripheralDesc
 from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
 from popcorn.stm32.description._sources import Sources, compute_source_digests, generator_string
 from popcorn.stm32.description._svd import expand_svd
+
+_LOG = logging.getLogger("popcorn")
+_GPIO_PORT_RE = re.compile(r"GPIO([A-Z])")
 
 
 def resolve_ip(
@@ -115,6 +127,25 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
             peripheral.irqs = numbers
 
     target.core.num_irqs = irq_table.num_irqs
+
+    if sources.gpio_modes is None:
+        _LOG.warning(
+            "%s: no CubeMX GPIO modes file, GPIO ports carry no alternate functions", sources.part
+        )
+    else:
+        alternates = read_gpio_alternates(
+            sources.gpio_modes.read_bytes(), file=str(sources.gpio_modes), pins=db_part.pins
+        )
+        if not alternates:
+            _LOG.warning(
+                "%s: the CubeMX GPIO modes file selects no alternate function by AF number, as "
+                "AFIO remapping parts do, GPIO ports carry no alternate functions",
+                sources.part,
+            )
+        for peripheral in target.peripherals:
+            port = _GPIO_PORT_RE.fullmatch(peripheral.name)
+            if alternates and port is not None and peripheral.alias_of is None:
+                peripheral.alternates = alternates.get(port.group(1), [])
 
     description = PartDescription(
         part=sources.part,

@@ -16,6 +16,13 @@ class Access(StrEnum):
 
 
 @dataclass(slots=True, kw_only=True)
+class AlternateDesc:
+    pin: int = field(metadata={"minimum": 0, "maximum": 255})
+    af: int = field(metadata={"minimum": 0, "maximum": 255})
+    signal: str
+
+
+@dataclass(slots=True, kw_only=True)
 class CoreDesc:
     cpu: str
     revision: str
@@ -106,6 +113,7 @@ class PeripheralDesc:
     cross_rules: list[CrossRule]
     irqs: list[int]
     alias_of: str | None = None
+    alternates: list[AlternateDesc] | None = None
 
 
 @dataclass(slots=True, kw_only=True)

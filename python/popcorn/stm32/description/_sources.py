@@ -1,4 +1,4 @@
-"""Source lookup: SVD, CubeMX db, rzone, CMSIS header and patch files for a part."""
+"""Source lookup: SVD, CubeMX db, rzone, GPIO modes, CMSIS header and patch files for a part."""
 
 import difflib
 import hashlib
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from popcorn._errors import absent
-from popcorn.stm32.description._cubemx import read_part, rzone_file_name
+from popcorn.stm32.description._cubemx import gpio_modes_file_name, read_part, rzone_file_name
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._patches import load_patches
 
@@ -35,6 +35,7 @@ class Sources:
     rzone: Path
     cmsis_header: Path | None
     patches: list[Path]
+    gpio_modes: Path | None = None
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
@@ -218,7 +219,8 @@ def find_sources(
     """Sources of @p part: db files by exact db lookup, SVD by family-prefix matching across
     @p search's directories (or the spec 04 defaults, when @p search is None), CMSIS header
     optionally, every patch file in the package whose [match] selects this part and the resolved
-    SVD file name. MissingSource, a MissingInput and a DescriptionError, naming the path when a
+    SVD file name, and the GPIO modes file of the part's GPIO IP version when it exists, None
+    otherwise. MissingSource, a MissingInput and a DescriptionError, naming the path when a
     required source does not exist: no CubeMX db, no existing SVD directory, an absent db, rzone
     or SVD file. DescriptionError for an unknown part in an existing db, or a source that exists
     but is not a file."""
@@ -239,6 +241,10 @@ def find_sources(
 
     rzone = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
     _require(rzone, str(db_dir), refname, f"an rzone file at {rzone}")
+    modes_name = gpio_modes_file_name(db_part)
+    gpio_modes = db_dir / "mcu" / "IP" / modes_name if modes_name is not None else None
+    if gpio_modes is not None and not gpio_modes.is_file():
+        gpio_modes = None
 
     if svd is not None:
         svd_path = svd
@@ -267,6 +273,7 @@ def find_sources(
         rzone=rzone,
         cmsis_header=cmsis_header_path,
         patches=[loaded.path for loaded in patches],
+        gpio_modes=gpio_modes,
     )
 
 
@@ -275,8 +282,8 @@ def _sha256_bytes(data: bytes) -> str:
 
 
 def compute_source_digests(sources: Sources) -> dict[str, str]:
-    """SHA-256 hex digest of each of @p sources's files, keyed svd/mcu_db/rzone/cmsis_header
-    (when present) and patch:<file name> per patch file."""
+    """SHA-256 hex digest of each of @p sources's files, keyed svd/mcu_db/rzone, cmsis_header and
+    gpio_modes when present, and patch:<file name> per patch file."""
     digests = {
         "svd": _sha256_bytes(sources.svd.read_bytes()),
         "mcu_db": _sha256_bytes(sources.mcu_db.read_bytes()),
@@ -284,6 +291,8 @@ def compute_source_digests(sources: Sources) -> dict[str, str]:
     }
     if sources.cmsis_header is not None:
         digests["cmsis_header"] = _sha256_bytes(sources.cmsis_header.read_bytes())
+    if sources.gpio_modes is not None:
+        digests["gpio_modes"] = _sha256_bytes(sources.gpio_modes.read_bytes())
     for patch_path in sources.patches:
         digests[f"patch:{patch_path.name}"] = _sha256_bytes(patch_path.read_bytes())
     return digests

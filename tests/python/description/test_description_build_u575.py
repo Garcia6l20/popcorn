@@ -1,10 +1,14 @@
 import json
+import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
 import jsonschema.validators
+import pytest
 from popcorn.stm32.description._binder import dump_json, load_json
 from popcorn.stm32.description._builder import build_description, resolve_ip
+from popcorn.stm32.description._model import AlternateDesc
 from popcorn.stm32.description._sources import Sources
 
 SCHEMA_PATH = Path(__file__).parents[3] / "data" / "schema" / "part_description.schema.json"
@@ -30,6 +34,50 @@ def test_build_u575_matches_expected_shape(u575_sources: Sources) -> None:
     assert description.sources["cmsis_header"]
     assert description.sources["patch:stm32u5.toml"]
     assert description.sources["patch:stm32u575.toml"]
+    assert description.sources["gpio_modes"]
+
+
+def test_build_u575_gpio_ports_carry_their_alternate_functions(u575_sources: Sources) -> None:
+    description = build_description(u575_sources)
+    by_name = {p.name: p for p in description.peripherals}
+    porta = by_name["GPIOA"].alternates
+    assert porta is not None
+    assert AlternateDesc(pin=6, af=2, signal="tim3_ch1") in porta
+    assert AlternateDesc(pin=0, af=1, signal="tim2_ch1") in porta
+    assert AlternateDesc(pin=0, af=14, signal="tim2_etr") in porta
+    assert porta == sorted(porta, key=lambda a: (a.pin, a.af, a.signal))
+    assert by_name["GPIOH"].alternates == []
+    assert all(
+        p.alternates is None
+        for p in description.peripherals
+        if not p.name.startswith("GPIO") or p.alias_of is not None
+    )
+
+
+def test_a_modes_file_without_af_numbers_logs_and_carries_none(
+    u575_sources: Sources, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    modes = tmp_path / "GPIO-afio_Modes.xml"
+    modes.write_bytes(
+        b'<IP xmlns="http://mcd.rou.st.com/modules.php?name=mcu"><GPIO_Pin Name="PA6">'
+        b'<PinSignal Name="TIM3_CH1"><SpecificParameter Name="GPIO_AF">'
+        b"<PossibleValue>__HAL_AFIO_REMAP_TIM3_DISABLE</PossibleValue>"
+        b"</SpecificParameter></PinSignal></GPIO_Pin></IP>"
+    )
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        description = build_description(replace(u575_sources, gpio_modes=modes))
+    assert all(p.alternates is None for p in description.peripherals)
+    assert any("AFIO" in record.message for record in caplog.records)
+
+
+def test_build_without_a_gpio_modes_file_logs_and_carries_none(
+    u575_sources: Sources, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        description = build_description(replace(u575_sources, gpio_modes=None))
+    assert all(p.alternates is None for p in description.peripherals)
+    assert "gpio_modes" not in description.sources
+    assert any("no CubeMX GPIO modes file" in record.message for record in caplog.records)
 
 
 def test_build_u575_validates_against_schema(u575_sources: Sources) -> None:

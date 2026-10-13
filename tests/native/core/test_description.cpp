@@ -143,11 +143,30 @@ TEST_CASE("optional members and every effect round-trip")
   CHECK(popcorn::parse_description(text, "dump") == description);
 }
 
+TEST_CASE("GPIO alternate functions round-trip")
+{
+  popcorn::part_description description;
+  description.schema_version = popcorn::description_schema_version;
+  description.part           = "AF";
+  popcorn::peripheral_desc port;
+  port.name       = "GPIOA";
+  port.alternates = std::vector<popcorn::alternate_desc>{
+      {.pin = 6, .af = 2,  .signal = "tim3_ch1"},
+      {.pin = 0, .af = 14, .signal = "tim2_etr"}
+  };
+  description.peripherals.push_back(port);
+
+  auto const text = popcorn::dump_description(description);
+  CHECK(text.contains("\"alternates\":[{\"pin\":6,\"af\":2,\"signal\":\"tim3_ch1\"}"));
+  CHECK(popcorn::parse_description(text, "dump") == description);
+}
+
 TEST_CASE("absent optional members are omitted from the output")
 {
   auto const text =
       popcorn::dump_description(popcorn::load_description(env_path("POPCORN_TOY_DESC")));
   CHECK_FALSE(text.contains("alias_of"));
+  CHECK_FALSE(text.contains("alternates"));
   CHECK_FALSE(text.contains("alternate_of"));
   CHECK_FALSE(text.contains("physical"));
   CHECK_FALSE(text.contains("controller"));

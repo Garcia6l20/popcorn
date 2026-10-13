@@ -5,6 +5,7 @@ Table format, one line per item, in description order (already deterministic, sp
   R periph reg offset width access reset mask nfields alternate_of
   F periph reg field lsb width access on_write on_read
   I number name
+  A periph pin af signal
   G name start size kind read write execute secure physical content
   C cpu revision fpu fpu_double mpu mpu_regions mpu_regions_secure sau_regions trustzone dsp
     nvic_prio_bits num_irqs vendor_systick_config reset_clock_hz
@@ -21,7 +22,7 @@ from typing import TypedDict, cast
 from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._patches import PatchReport
 
-_TABLES = ("peripherals", "registers", "fields", "regions", "irqs", "core")
+_TABLES = ("peripherals", "registers", "fields", "regions", "irqs", "core", "alternates")
 
 
 class GoldenCountsDict(TypedDict):
@@ -33,6 +34,7 @@ class GoldenCountsDict(TypedDict):
     aliases: int
     cross_rules: int
     patched_fields: int
+    alternates: int
 
 
 class GoldenTablesDict(TypedDict):
@@ -42,6 +44,7 @@ class GoldenTablesDict(TypedDict):
     regions: str
     irqs: str
     core: str
+    alternates: str
 
 
 class GoldenFile(TypedDict):
@@ -85,6 +88,15 @@ def _dump_irqs(description: PartDescription) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _dump_alternates(description: PartDescription) -> str:
+    lines = [
+        f"A {p.name} {a.pin} {a.af} {a.signal}"
+        for p in description.peripherals
+        for a in p.alternates or []
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def _dump_regions(description: PartDescription) -> str:
     lines: list[str] = []
     for r in description.regions:
@@ -119,12 +131,13 @@ _DUMPERS = {
     "regions": _dump_regions,
     "irqs": _dump_irqs,
     "core": _dump_core,
+    "alternates": _dump_alternates,
 }
 
 
 def canonical_dumps(description: PartDescription) -> dict[str, str]:
-    """The six canonical text tables of @p description, keyed peripherals/registers/fields/
-    regions/irqs/core."""
+    """The seven canonical text tables of @p description, keyed peripherals/registers/fields/
+    regions/irqs/core/alternates."""
     return {name: _DUMPERS[name](description) for name in _TABLES}
 
 
@@ -142,6 +155,7 @@ class GoldenCounts:
     aliases: int
     cross_rules: int
     patched_fields: int
+    alternates: int
 
 
 def compute_counts(description: PartDescription, report: PatchReport) -> GoldenCounts:
@@ -149,6 +163,7 @@ def compute_counts(description: PartDescription, report: PatchReport) -> GoldenC
     registers = sum(len(p.registers) for p in description.peripherals)
     fields = sum(len(r.fields) for p in description.peripherals for r in p.registers)
     aliases = sum(1 for p in description.peripherals if p.alias_of is not None)
+    alternates = sum(len(p.alternates or []) for p in description.peripherals)
     return GoldenCounts(
         peripherals=len(description.peripherals),
         registers=registers,
@@ -158,6 +173,7 @@ def compute_counts(description: PartDescription, report: PatchReport) -> GoldenC
         aliases=aliases,
         cross_rules=report.cross_rules_added,
         patched_fields=report.fields_touched,
+        alternates=alternates,
     )
 
 
@@ -181,6 +197,7 @@ def compute_golden(
             aliases=counts.aliases,
             cross_rules=counts.cross_rules,
             patched_fields=counts.patched_fields,
+            alternates=counts.alternates,
         ),
         tables=tables,
     )
