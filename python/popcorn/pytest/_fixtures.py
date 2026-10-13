@@ -1,10 +1,11 @@
 """The plugin's fixtures: `popcorn_project`, `popcorn_selected_project`, `machine`,
-`machine_factory`, `popcorn_system` and `system`."""
+`machine_factory`, `popcorn_system` and `system`, and the bodies the declared fixtures share
+with them."""
 
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator, Generator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
 from dataclasses import dataclass
 
 import pytest
@@ -19,7 +20,7 @@ from popcorn import (
     SystemDescription,
 )
 from popcorn._machine import check_machine_name
-from popcorn.pytest._options import UNSET, marker_options
+from popcorn.pytest._options import UNSET, MarkerOptions, marker_options
 from popcorn.pytest._report import (
     TraceOnFail,
     kept_ends,
@@ -28,7 +29,7 @@ from popcorn.pytest._report import (
     track_system,
     unclaimed,
 )
-from popcorn.pytest._session import Booted, Devices, Key, PopcornSession, popcorn_session
+from popcorn.pytest._session import Booted, Devices, Key, PopcornSession, Slot, popcorn_session
 
 
 class _Factory:
@@ -211,8 +212,9 @@ class SystemFactory(_Factory):
     from the boot snapshot of its own machine description's key, parked and closed after the
     test."""
 
-    def __init__(self, session: PopcornSession, item: pytest.Item) -> None:
-        """Make members for the system test `item`, with its marker and command-line settings.
+    def __init__(self, session: PopcornSession, item: pytest.Item, fixture: str = "system") -> None:
+        """Make members for the system fixture `fixture` of the test `item`, with its marker and
+        command-line settings.
 
         Raises:
             pytest.fail.Exception: The marker is malformed or names a config.
@@ -220,8 +222,8 @@ class SystemFactory(_Factory):
         options = marker_options(item)
         if options.config is not UNSET:
             pytest.fail(
-                "@pytest.mark.popcorn config does not apply to the system fixture: a member's "
-                "config is part of its machine description, "
+                f"@pytest.mark.popcorn config does not apply to the system fixture {fixture}: a "
+                "member's config is part of its machine description, "
                 "SystemDescription(members={name: project.config(...)})",
                 pytrace=False,
             )
@@ -230,11 +232,13 @@ class SystemFactory(_Factory):
             session, item, settings.budget if options.budget is UNSET else options.budget
         )
         self._strict = True if options.strict is None and settings.strict else options.strict
+        self._fixture = fixture
 
     async def member(self, name: str, project: MachineDescription) -> Machine:
-        """A new machine named `name` of the base config of `project`, booted from its key."""
+        """A new machine named `name` of the base config of `project`, booted from its key,
+        reported as `<fixture> member <name>`."""
         key = self._session.key(project, None, self._strict)
-        label = f"system member {name}"
+        label = f"{self._fixture} member {name}"
         with _skipping_missing(self._session.project(key)):
             try:
                 snapshot = (await self._session.booted_async(key)).decoded()
@@ -275,8 +279,44 @@ def settings_of(
         ConfigError: The config does not exist.
     """
     options = marker_options(item)
+    config = session.settings.config if options.config is UNSET else options.config
+    return _with_config(options, session, project, config)
+
+
+DECLARED_CONFIG = (
+    "@pytest.mark.popcorn config does not apply to the machine fixture {name}: its config is set "
+    "on @popcorn.pytest.machine(config=...)"
+)
+
+
+def declared_settings(
+    item: pytest.Item,
+    session: PopcornSession,
+    project: MachineDescription,
+    config: str | None,
+    name: str,
+) -> ItemSettings:
+    """The settings of `item` for the declared machine fixture `name` of `project` and the config
+    `config`: strictness and budget from the marker over the command line over the machine
+    description, as `settings_of`. `--popcorn-config` does not apply.
+
+    Raises:
+        pytest.fail.Exception: The marker is malformed or names a config.
+        ConfigError: The config does not exist.
+    """
+    options = marker_options(item)
+    if options.config is not UNSET:
+        pytest.fail(DECLARED_CONFIG.format(name=name), pytrace=False)
+    return _with_config(options, session, project, config)
+
+
+def _with_config(
+    options: MarkerOptions,
+    session: PopcornSession,
+    project: MachineDescription,
+    config: str | None,
+) -> ItemSettings:
     settings = session.settings
-    config = settings.config if options.config is UNSET else options.config
     strict = options.strict
     if strict is None and settings.strict:
         strict = True
@@ -320,7 +360,7 @@ def popcorn_selected_project(
         ConfigError: The selected config does not exist.
     """
     project = _checked(popcorn_project)
-    return _popcorn_session.project(settings_of(_item(request), _popcorn_session, project).key)
+    return _popcorn_session.project(settings_of(item_of(request), _popcorn_session, project).key)
 
 
 @pytest.fixture
@@ -340,24 +380,51 @@ def machine(
     A machine description with `missing="skip"` skips the test when it raises MissingInput, the
     missing path as the reason, for every test of its key.
     """
-    item = _item(request)
-    project = _checked(popcorn_project)
-    test = settings_of(item, _popcorn_session, project)
-    with _skipping_missing(_popcorn_session.project(test.key)):
+    test = settings_of(item_of(request), _popcorn_session, _checked(popcorn_project))
+    with lending(request, _popcorn_session, test, None) as m:
+        yield m
+
+
+@contextlib.contextmanager
+def booting(item: pytest.Item, session: PopcornSession, key: Key, label: str) -> Generator[None]:
+    """Skip `item` on missing input of a machine description with `missing="skip"`, and report
+    the machine of a failed boot of `key` under `label`."""
+    with _skipping_missing(session.project(key)):
         try:
-            booted = _restored(_popcorn_session, test.key)
+            yield
         except PopcornError:
-            failed = _popcorn_session.failed_machine(test.key)
+            failed = session.failed_machine(key)
             if failed is not None:
-                track(item, "machine", failed, test.key)
+                track(item, label, failed, key)
             raise
-    track(item, "machine", booted.machine, test.key)
-    m = booted.machine
+
+
+@contextlib.contextmanager
+def lending(
+    request: pytest.FixtureRequest, session: PopcornSession, test: ItemSettings, name: str | None
+) -> Generator[Machine]:
+    """The reused machine of `test.key` restored for the test of `request`: the `machine`
+    fixture's boot machine for a None `name`, else the slot of the declared machine fixture
+    `name`, reported and traced under that name.
+
+    The machine gets the test's budget and, with `--popcorn-trace-on-fail`, a trace. At exit it
+    is parked, its trace kept or deleted, and it is replaced when spoiled, else its hooks and
+    call baseline are reset. What ended a free run by itself and never reached the test is
+    raised then.
+
+    Raises:
+        BaseException: What ended the first such free run, at exit.
+    """
+    item = item_of(request)
+    lent = _Lent(session, test.key, name)
+    with booting(item, session, test.key, lent.label):
+        m = lent.restored()
+    track(item, lent.label, m, test.key)
     m.default_budget = test.budget
-    settings = _popcorn_session.settings
+    settings = session.settings
     trace = None
     if settings.trace_on_fail:
-        trace = TraceOnFail(item, trace_directory(request.config, settings.trace_dir))
+        trace = TraceOnFail(item, trace_directory(request.config, settings.trace_dir), name)
         if not trace.start(m):
             trace = None
     yield m
@@ -373,13 +440,55 @@ def machine(
     finally:
         if not closed and held is not None:
             unclaimed(item.nodeid, held)
-        if not closed or _spoiled(m, booted):
-            _popcorn_session.rebuild(test.key)
+        if not closed or lent.spoiled():
+            lent.rebuild()
         else:
             m.remove_hooks()
             m.set_call_baseline(None)
     if held is not None:
         raise held
+
+
+@dataclass(slots=True)
+class _Lent:
+    session: PopcornSession
+    key: Key
+    name: str | None
+    _reused: Booted | Slot | None = None
+
+    @property
+    def label(self) -> str:
+        return "machine" if self.name is None else self.name
+
+    def restored(self) -> Machine:
+        if self.name is None:
+            booted = self.session.booted(self.key)
+            self._reused = booted
+            return _restored(booted.machine, booted.snapshot, self._rebuilt_boot)
+        slot, snapshot = self.session.slot(self.key, self.name)
+        self._reused = slot
+        return _restored(slot.machine, snapshot, self._rebuilt_slot)
+
+    def spoiled(self) -> bool:
+        reused = self._reused
+        assert reused is not None
+        machine = reused.machine
+        return len(machine.images) != reused.image_count or machine.board.ptys != reused.ptys
+
+    def rebuild(self) -> None:
+        if self.name is None:
+            self.session.rebuild(self.key)
+        else:
+            self.session.rebuild_slot(self.key, self.name)
+
+    def _rebuilt_boot(self) -> tuple[Machine, Snapshot]:
+        booted = self._reused = self.session.rebuild(self.key)
+        return booted.machine, booted.snapshot
+
+    def _rebuilt_slot(self) -> tuple[Machine, Snapshot]:
+        assert self.name is not None
+        slot = self._reused = self.session.rebuild_slot(self.key, self.name)
+        return slot.machine, self.session.booted(self.key).decoded()
 
 
 @pytest.fixture
@@ -388,7 +497,7 @@ def machine_factory(
 ) -> Iterator[MachineFactory]:
     """A `MachineFactory` for this test, its machines parked and closed after it, as
     `MachineFactory.close` does."""
-    item = _item(request)
+    item = item_of(request)
     project = _checked(popcorn_project)
     factory = MachineFactory(_popcorn_session, settings_of(item, _popcorn_session, project), item)
     yield factory
@@ -405,7 +514,8 @@ def _checked(project: object) -> MachineDescription:
     return project
 
 
-def _item(request: pytest.FixtureRequest) -> pytest.Item:
+def item_of(request: pytest.FixtureRequest) -> pytest.Item:
+    """The test `request` sets up a fixture for."""
     item: object = getattr(request, _NODE)
     assert isinstance(item, pytest.Item)
     return item
@@ -421,20 +531,17 @@ def _skipping_missing(project: MachineDescription) -> Generator[None]:
         pytest.skip(f"missing input: {error.path}")
 
 
-def _restored(session: PopcornSession, key: Key) -> Booted:
-    booted = session.booted(key)
-    assert not booted.machine.busy, "the previous test's teardown parks the machine"
+def _restored(
+    machine: Machine, snapshot: Snapshot, rebuilt: Callable[[], tuple[Machine, Snapshot]]
+) -> Machine:
+    assert not machine.busy, "the previous test's teardown parks the machine"
     try:
-        booted.machine.restore(booted.snapshot)
+        machine.restore(snapshot)
     except PopcornError:
-        booted = session.rebuild(key)
-        booted.machine.restore(booted.snapshot)
-    booted.machine.ring.clear()
-    return booted
-
-
-def _spoiled(machine: Machine, booted: Booted) -> bool:
-    return len(machine.images) != booted.image_count or machine.board.ptys != booted.ptys
+        machine, snapshot = rebuilt()
+        machine.restore(snapshot)
+    machine.ring.clear()
+    return machine
 
 
 MISSING_SYSTEM = (
@@ -475,17 +582,39 @@ async def system(
     Teardown halts a free run the test left started, closes the system, then parks and closes
     the members. What ended a free run by itself and never reached the test fails the teardown.
     """
-    item = _item(request)
-    spec = _checked_system(popcorn_system)
-    factory = SystemFactory(_popcorn_session, item)
-    settings = _popcorn_session.settings
+    async with linking(request, _popcorn_session, _checked_system(popcorn_system), None) as linked:
+        yield linked
+
+
+@contextlib.asynccontextmanager
+async def linking(
+    request: pytest.FixtureRequest,
+    session: PopcornSession,
+    spec: SystemDescription,
+    fixture: str | None,
+) -> AsyncGenerator[System]:
+    """`spec` booted and linked for the test of `request`, each member a new machine named as
+    the member: the `system` fixture's for a None `fixture`, else the declared system fixture
+    `fixture`'s, its members reported as `<fixture> member <name>` and traced to
+    `<test>.<fixture>.<member>.pctr`.
+
+    At exit a free run left started is halted, the system closed, the members parked and
+    closed. What ended a free run by itself and never reached the test is raised then.
+
+    Raises:
+        BaseException: What ended the first such free run, at exit.
+    """
+    item = item_of(request)
+    factory = SystemFactory(session, item, fixture or "system")
+    settings = session.settings
     traces: list[TraceOnFail] = []
     try:
         machines = {name: await factory.member(name, p) for name, p in spec.members.items()}
         if settings.trace_on_fail:
             directory = trace_directory(request.config, settings.trace_dir)
             for name, m in machines.items():
-                trace = TraceOnFail(item, directory, name)
+                member = name if fixture is None else f"{fixture}.{name}"
+                trace = TraceOnFail(item, directory, member)
                 if trace.start(m):
                     traces.append(trace)
         linked = spec.link(machines)

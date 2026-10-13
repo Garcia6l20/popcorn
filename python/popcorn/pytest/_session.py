@@ -1,5 +1,5 @@
-"""Per-process plugin state: the machine descriptions by digest, one booted machine per key, the
-boot counters."""
+"""Per-process plugin state: the machine descriptions by digest, one booted machine per key, one
+reused machine per declared machine fixture and key, the boot counters."""
 
 from __future__ import annotations
 
@@ -94,6 +94,26 @@ class Booted:
         return self._decoded
 
 
+@dataclass(slots=True)
+class Slot:
+    """The machine a declared machine fixture reuses for every test of one key.
+
+    Attributes:
+        machine: The machine, named after the fixture, restored from the saved boot of the key.
+        image_count: How many images the machine had after the build.
+        ptys: The pty bridges the machine had after the build.
+    """
+
+    machine: Machine
+    image_count: int
+    ptys: dict[str, str]
+
+    @classmethod
+    def of(cls, machine: Machine) -> Slot:
+        """The slot of `machine`, just built."""
+        return cls(machine, len(machine.images), machine.board.ptys)
+
+
 @dataclass(frozen=True, slots=True)
 class CoverageRun:
     """Where this process saves firmware coverage for `--popcorn-cov`.
@@ -137,6 +157,7 @@ class PopcornSession:
     _failed_machines: dict[Key, Machine] = field(default_factory=dict[Key, Machine])
     _device_boots: dict[Key, Snapshot] = field(default_factory=dict[Key, Snapshot])
     _device_keys: set[Key] = field(default_factory=set[Key])
+    _slots: dict[tuple[Key, str], Slot] = field(default_factory=dict[tuple[Key, str], Slot])
 
     @property
     def keys(self) -> list[Key]:
@@ -302,9 +323,39 @@ class PopcornSession:
         self.rebuilds += 1
         return booted
 
+    def slot(self, key: Key, name: str) -> tuple[Slot, Snapshot]:
+        """The reused machine of the declared machine fixture `name` for `key`, built named
+        `name` the first time, and the saved boot of `key` to restore into it, booting `key` on
+        the owned loop when this process has no boot of it.
+
+        Raises:
+            RuntimeError: `key` is not booted yet and an event loop is running.
+            Exception: The boot of `key` failed, now or earlier in the session.
+        """
+        booted = self.booted(key)
+        found = self._slots.get((key, name))
+        if found is None:
+            found = self._slots[key, name] = Slot.of(self.build(key, name=name))
+        return found, booted.decoded()
+
+    def rebuild_slot(self, key: Key, name: str) -> Slot:
+        """Replace the reused machine of the fixture `name` for `key` by a new one, not
+        restored."""
+        slot = Slot.of(self.build(key, name=name))
+        old = self._slots[key, name]
+        self._slots[key, name] = slot
+        self.collect(old.machine)
+        old.machine.board.close()
+        self.rebuilds += 1
+        return slot
+
     def booted_machines(self) -> list[Machine]:
-        """The reused machine of every key booted in this process."""
-        return [booted.machine for booted in self._booted.values()]
+        """The reused machine of every key booted in this process and of every declared machine
+        fixture and key."""
+        return [
+            *(booted.machine for booted in self._booted.values()),
+            *(slot.machine for slot in self._slots.values()),
+        ]
 
     def failed_machine(self, key: Key) -> Machine | None:
         """The machine whose boot of `key` failed, as the failure left it, None when the build
@@ -316,6 +367,10 @@ class PopcornSession:
         is warned as unraisable: no test owns it any more."""
         machines = [
             *((f"the machine of {key}", booted.machine) for key, booted in self._booted.items()),
+            *(
+                (f"the machine {name} of {key}", slot.machine)
+                for (key, name), slot in self._slots.items()
+            ),
             *((f"the failed boot of {key}", m) for key, m in self._failed_machines.items()),
         ]
         ends = [(owner, park_ended(machine)) for owner, machine in machines]
@@ -327,6 +382,8 @@ class PopcornSession:
         """Close the pty bridges of the reused machines and of those whose boot failed."""
         for booted in self._booted.values():
             booted.machine.board.close()
+        for slot in self._slots.values():
+            slot.machine.board.close()
         for machine in self._failed_machines.values():
             machine.board.close()
 

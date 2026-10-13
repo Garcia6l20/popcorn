@@ -6,6 +6,37 @@ root `conftest.py` of a test suite:
 
     pytest_plugins = ["popcorn.pytest"]
 
+Declared fixtures, any number per conftest.py, each named after its function:
+
+    # conftest.py
+    import popcorn
+    import popcorn.pytest
+
+    @popcorn.pytest.machine
+    def controller() -> popcorn.MachineDescription:
+        return CONTROLLER
+
+    @popcorn.pytest.machine(config="variant")
+    def controller_variant() -> popcorn.MachineDescription:
+        return CONTROLLER
+
+    @popcorn.pytest.system
+    def linked() -> popcorn.SystemDescription:
+        return SYSTEM
+
+    # test_app.py
+    async def test_x(controller: popcorn.Machine, linked: popcorn.System) -> None: ...
+
+- `popcorn.pytest.machine`: a booted machine named after the fixture, restored from the boot
+  snapshot of its key before each test as `machine` is. Each fixture name has its own machine
+  per key: two fixtures of one description in one test are two machines of one boot. The config
+  is set on the decorator only, a marker `config` fails the test.
+- `popcorn.pytest.system`: the description linked, a `popcorn.System`, as `system` gives it. A
+  failing test reports each member as `<fixture> member <name>`.
+
+The decorated function is a fixture function: it may request fixtures and be a coroutine
+function. Both decorators take `params=` and `ids=` as `pytest.fixture` does.
+
 Fixtures:
 
     # conftest.py
@@ -187,7 +218,8 @@ pytest_plugins = [
 
 pytest.register_assert_rewrite(*pytest_plugins)
 
+from popcorn.pytest._declare import machine, system  # noqa: E402
 from popcorn.pytest._fixtures import MachineFactory  # noqa: E402
 from popcorn.pytest._options import Settings  # noqa: E402
 
-__all__ = ["MachineFactory", "Settings"]
+__all__ = ["MachineFactory", "Settings", "machine", "system"]
