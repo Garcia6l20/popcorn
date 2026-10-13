@@ -10,7 +10,7 @@ The firmware runs `HAL_CRC_Init` three times, then stops at `computed`:
 
 The HAL feeds a byte buffer four bytes per word write, then a half-word and a byte write for the
 tail, so the last two CRCs also cover sub-word CRC_DR writes. The project sets
-`Project(strict=True)`: any register access the CRC model does not serve fails the run.
+`MachineDescription(strict=True)`: any register access the CRC model does not serve fails the run.
 """
 
 import logging

@@ -9,7 +9,15 @@ from dataclasses import dataclass
 
 import pytest
 
-from popcorn import LinkedSystem, Machine, MissingInput, PopcornError, Project, Snapshot, System
+from popcorn import (
+    LinkedSystem,
+    Machine,
+    MachineDescription,
+    MissingInput,
+    PopcornError,
+    Snapshot,
+    System,
+)
 from popcorn._machine import check_machine_name
 from popcorn.pytest._options import UNSET, marker_options
 from popcorn.pytest._report import (
@@ -76,22 +84,23 @@ class MachineFactory(_Factory):
     `factory()` gives a new machine restored from the boot snapshot of its key, booting the key
     first when no test did yet. From inside an async test, use `await factory.booted()` for a
     key not booted yet: the sync form cannot boot while the event loop runs.
-    `factory(booted=False)` gives a new machine as `Project.machine` builds it, powered off and
-    not reset, for a test that boots it itself. `factory(project=other)` builds from another
-    `popcorn.Project` than the test's, booted once per key as the test's own.
+    `factory(booted=False)` gives a new machine as `MachineDescription.machine` builds it, powered
+    off and
+    not reset, for a test that boots it itself. `factory(description=other)` builds from another
+    `popcorn.MachineDescription` than the test's, booted once per key as the test's own.
 
     Booted machines get the test's default instruction budget, the `budget` of its marker or
     `--popcorn-budget`. Machines not booted get none: it would bound their boot too.
 
-    A project with `missing="skip"` skips the test instead of raising MissingInput, as the
-    `machine` fixture does.
+    A machine description with `missing="skip"` skips the test instead of raising MissingInput, as
+    the `machine` fixture does.
 
-    `devices` gives bus devices instead of the project's, as `Project.machine(devices=)`
-    takes them. A device serves one machine: an instance given before, to a machine still
-    open, is refused. A boot with devices is shared, in the process and through the boot
-    cache, with the boots whose devices have the same classes, class sources, `snapshot()` and
-    instance attributes. Devices holding anything other than plain values or their own
-    methods, such as a function, and `popcorn.devices` devices are booted for each machine.
+    `devices` gives bus devices instead of the machine description's, as
+    `MachineDescription.machine(devices=)` takes them. A device serves one machine: an instance
+    given before, to a machine still open, is refused. A boot with devices is shared, in the process
+    and through the boot cache, with the boots whose devices have the same classes, class sources,
+    `snapshot()` and instance attributes. Devices holding anything other than plain values or their
+    own methods, such as a function, and `popcorn.devices` devices are booted for each machine.
     Not keyed: class attributes changed at run time, module globals or class-level containers
     a device reads, and the modules a device imports. A stale boot matters only when the
     firmware talks to the device before `boot.until`.
@@ -107,7 +116,7 @@ class MachineFactory(_Factory):
         self,
         config: str | None = None,
         *,
-        project: Project | None = None,
+        description: MachineDescription | None = None,
         strict: bool | None = None,
         booted: bool = True,
         devices: Devices | None = None,
@@ -116,14 +125,14 @@ class MachineFactory(_Factory):
         """A new machine of the config `config` of `project`.
 
         Args:
-            config: The config name, by default the test's for the test's project and the base
-                for another `project`.
-            project: The project, the test's `popcorn_project` by default.
+            config: The config name, by default the test's for the test's machine description and
+                the base for another `description`.
+            description: The `MachineDescription` to build, the test's `popcorn_project` by default.
             strict: Whether unmodelled peripheral accesses raise, by default the test's for its
-                own project and config, else the selected config's `strict`.
+                own machine description and config, else the selected config's `strict`.
             booted: Whether the machine is restored from the boot snapshot of its key, or left
                 powered off and not reset.
-            devices: Bus devices instead of the project's devices of their peripherals.
+            devices: Bus devices instead of the machine description's devices of their peripherals.
             name: Name of the machine in its log records and errors, the part when None. The
                 machine that boots a key for the boot cache is another one and logs its boot
                 under the part, unless `devices` are given: then the machine returned is the
@@ -132,11 +141,11 @@ class MachineFactory(_Factory):
         Raises:
             ValueError: `name` is empty or holds whitespace or a dot.
             RuntimeError: `booted` and the key is not booted yet while an event loop runs.
-            ConfigError: The project has no config `config`, a device serves another live
-                machine, or `Project.machine` refuses `devices`.
+            ConfigError: The machine description has no config `config`, a device serves another
+                live machine, or `MachineDescription.machine` refuses `devices`.
         """
         check_machine_name(name)
-        key = self._key(config, project, strict)
+        key = self._key(config, description, strict)
         with _skipping_missing(self._session.project(key)):
             if not booted:
                 return self._keep(self._session.build(key, devices, name), key, self._label())
@@ -159,14 +168,14 @@ class MachineFactory(_Factory):
         self,
         config: str | None = None,
         *,
-        project: Project | None = None,
+        description: MachineDescription | None = None,
         strict: bool | None = None,
         devices: Devices | None = None,
         name: str | None = None,
     ) -> Machine:
         """A new booted machine as `factory()` gives, booting the key on the running loop."""
         check_machine_name(name)
-        key = self._key(config, project, strict)
+        key = self._key(config, description, strict)
         with _skipping_missing(self._session.project(key)):
             if devices is not None:
                 key = self._session.device_key(key, devices)
@@ -183,9 +192,11 @@ class MachineFactory(_Factory):
                 self._track_failed(key, f"machine_factory boot of {key}")
                 raise
 
-    def _key(self, config: str | None, project: Project | None, strict: bool | None) -> Key:
-        if project is not None:
-            return self._session.key(project, config, strict)
+    def _key(
+        self, config: str | None, description: MachineDescription | None, strict: bool | None
+    ) -> Key:
+        if description is not None:
+            return self._session.key(description, config, strict)
         config = self._default.config if config is None else config
         if strict is None and config == self._default.config:
             strict = self._default.strict
@@ -196,8 +207,9 @@ class MachineFactory(_Factory):
 
 
 class SystemFactory(_Factory):
-    """Boots the members of a `popcorn.System` for one test, each a new machine restored from
-    the boot snapshot of its own project's key, parked and closed after the test."""
+    """Boots the members of a `popcorn.System` for one test, each a new machine restored
+    from the boot snapshot of its own machine description's key, parked and closed after the
+    test."""
 
     def __init__(self, session: PopcornSession, item: pytest.Item) -> None:
         """Make members for the system test `item`, with its marker and command-line settings.
@@ -209,7 +221,8 @@ class SystemFactory(_Factory):
         if options.config is not UNSET:
             pytest.fail(
                 "@pytest.mark.popcorn config does not apply to the system fixture: a member's "
-                "config is part of its project, System(members={name: project.config(...)})",
+                "config is part of its machine description, "
+                "System(members={name: project.config(...)})",
                 pytrace=False,
             )
         settings = session.settings
@@ -218,7 +231,7 @@ class SystemFactory(_Factory):
         )
         self._strict = True if options.strict is None and settings.strict else options.strict
 
-    async def member(self, name: str, project: Project) -> Machine:
+    async def member(self, name: str, project: MachineDescription) -> Machine:
         """A new machine named `name` of the base config of `project`, booted from its key."""
         key = self._session.key(project, None, self._strict)
         label = f"system member {name}"
@@ -240,18 +253,20 @@ class ItemSettings:
 
     Attributes:
         project: Its `popcorn_project`, no config applied.
-        key: The project, config and strictness of its machines.
+        key: The machine description, config and strictness of its machines.
         budget: The default instruction budget of its booted machines, None for unbounded.
     """
 
-    project: Project
+    project: MachineDescription
     key: Key
     budget: int | None
 
 
-def settings_of(item: pytest.Item, session: PopcornSession, project: Project) -> ItemSettings:
-    """The settings of `item` with the project `project`: marker over command line over
-    project, per setting.
+def settings_of(
+    item: pytest.Item, session: PopcornSession, project: MachineDescription
+) -> ItemSettings:
+    """The settings of `item` with the machine description `project`: marker over command line over
+    machine description, per setting.
 
     `--popcorn-strict` can only turn strictness on, `strict=False` in a marker turns it off.
 
@@ -275,14 +290,15 @@ def _popcorn_session(request: pytest.FixtureRequest) -> PopcornSession:
 
 
 MISSING_PROJECT = (
-    "define a `popcorn_project` fixture returning a `popcorn.Project` in a conftest.py above "
+    "define a `popcorn_project` fixture returning a `popcorn.MachineDescription` in a conftest.py "
+    "above "
     "this test"
 )
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> Project:
-    """The project of the tests below a conftest.py, overridden there by the user.
+def popcorn_project() -> MachineDescription:
+    """The machine description of the tests below a conftest.py, overridden there by the user.
 
     The nearest override wins, as for any pytest fixture. Without one, the tests using
     `machine` or `machine_factory` fail, naming the fix.
@@ -293,12 +309,12 @@ def popcorn_project() -> Project:
 @pytest.fixture
 def popcorn_selected_project(
     request: pytest.FixtureRequest, _popcorn_session: PopcornSession, popcorn_project: object
-) -> Project:
+) -> MachineDescription:
     """The `popcorn_project` with this test's config applied.
 
     The config is the one `machine` and `machine_factory` run under: the `popcorn` marker's,
-    else `--popcorn-config`, else none, which gives the base project. Use it to boot machines
-    by hand with the same behaviour as `machine`.
+    else `--popcorn-config`, else none, which gives the base machine description. Use it to boot
+    machines by hand with the same behaviour as `machine`.
 
     Raises:
         ConfigError: The selected config does not exist.
@@ -321,8 +337,8 @@ def machine(
     Teardown parks the machine: a free run the test left started is halted and the machine is
     reused. What ended that free run by itself and never reached the test fails the teardown.
 
-    A project with `missing="skip"` skips the test when it raises MissingInput, the missing
-    path as the reason, for every test of its key.
+    A machine description with `missing="skip"` skips the test when it raises MissingInput, the
+    missing path as the reason, for every test of its key.
     """
     item = _item(request)
     project = _checked(popcorn_project)
@@ -379,10 +395,10 @@ def machine_factory(
     factory.close()
 
 
-def _checked(project: object) -> Project:
-    if not isinstance(project, Project):
+def _checked(project: object) -> MachineDescription:
+    if not isinstance(project, MachineDescription):
         pytest.fail(
-            f"popcorn_project returned {type(project).__name__}, not a popcorn.Project: "
+            f"popcorn_project returned {type(project).__name__}, not a popcorn.MachineDescription: "
             f"{MISSING_PROJECT}",
             pytrace=False,
         )
@@ -396,7 +412,7 @@ def _item(request: pytest.FixtureRequest) -> pytest.Item:
 
 
 @contextlib.contextmanager
-def _skipping_missing(project: Project) -> Generator[None]:
+def _skipping_missing(project: MachineDescription) -> Generator[None]:
     try:
         yield
     except MissingInput as error:
@@ -444,12 +460,13 @@ async def system(
     """The `popcorn_system` booted and linked for this test.
 
     Each member is a new machine named as the member, restored from the boot snapshot of its
-    own project's key, booted once per key and process as for `machine`: two members of one
-    project are two machines of one boot. Never the `machine` fixture's object. Each stands at
-    its boot stop, its system time from `System.offsets`.
+    own machine description's key, booted once per key and process as for `machine`: two members of
+    one machine description are two machines of one boot. Never the `machine` fixture's object. Each
+    stands at its boot stop, its system time from `System.offsets`.
 
-    Per member, from the `popcorn` marker over the command line over the member's project:
-    `strict`, and `budget` as its `default_budget`, which bounds its run, wait_for and call goals.
+    Per member, from the `popcorn` marker over the command line over the member's machine
+    description: `strict`, and `budget` as its `default_budget`, which bounds its run, wait_for and
+    call goals.
     `system.run` is bounded by its `for_` or `until` only. A marker naming a `config` fails the
     test, `--popcorn-config` does not apply to members. With `--popcorn-trace-on-fail`, each
     member is traced to `<test>.<member>.pctr`. With `--popcorn-cov`, each member counts.

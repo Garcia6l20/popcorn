@@ -105,7 +105,8 @@ def write_project(
     """A `conftest.py` defining `popcorn_project` over the M33 test description and `elf`,
     `driver.elf` by default, in `directory` or the pytester directory.
 
-    `vtor` names a `vt_*` table of `elf` the boot starts from. `extra` holds more `Project`
+    `vtor` names a `vt_*` table of `elf` the boot starts from. `extra` holds more
+    `MachineDescription`
     keyword arguments as Python source, `configs` the keyword arguments of `with_configs`, where
     `BASE` names the project before them, and `imports` the lines its expressions need.
     """
@@ -113,7 +114,7 @@ def write_project(
     if vtor is not None:
         boot.append(f"vtor={popcorn.Image.elf(elf).lookup(vtor).value:#x}")
     base = (
-        "popcorn.Project(\n"
+        "popcorn.MachineDescription(\n"
         '    part="POPCORN-M33-TEST",\n'
         f"    description=Path({str(M33_JSON)!r}),\n"
         f"    images=[popcorn.Elf(Path({str(elf)!r}))],\n"
@@ -130,10 +131,10 @@ def write_project(
 def write_model_project(pytester: pytest.Pytester, extra: str = "") -> Path:
     """A `conftest.py` defining `popcorn_project` over the model test description and
     `model.elf`, booted to `ready`, lax about unmodelled peripherals. `extra` holds more
-    `Project` keyword arguments as Python source."""
+    `MachineDescription` keyword arguments as Python source."""
     return write_project_conftest(
         pytester.path,
-        "popcorn.Project(\n"
+        "popcorn.MachineDescription(\n"
         '    part="POPCORN-M33-TEST",\n'
         f"    description=Path({str(MODEL_JSON)!r}),\n"
         f"    images=[popcorn.Elf(Path({str(MODEL_ELF)!r}))],\n"

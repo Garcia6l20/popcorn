@@ -405,7 +405,7 @@ def test_a_project_device_takes_an_image_path(
 def test_a_project_table_target_takes_integer_register_keys(
     u575: popcorn.PartDescription,
 ) -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(I2C_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),
@@ -441,7 +441,7 @@ def test_a_project_integer_duration_is_refused() -> None:
 
 
 def test_a_project_declares_native_i2c_devices(u575: popcorn.PartDescription) -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(I2C_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),

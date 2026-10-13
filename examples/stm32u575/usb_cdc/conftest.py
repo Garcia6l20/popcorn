@@ -1,4 +1,4 @@
-"""Project of the usb_cdc example."""
+"""MachineDescription of the usb_cdc example."""
 
 from pathlib import Path
 
@@ -8,7 +8,7 @@ from popcorn.board import UsbHostOptions
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PROJECT = popcorn.MachineDescription(
     name="usb-cdc",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/usb_cdc.elf")],
@@ -20,5 +20,5 @@ PROJECT = popcorn.Project(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

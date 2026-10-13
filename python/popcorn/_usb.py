@@ -1,8 +1,8 @@
 """The virtual USB host of a device controller: cable, enumeration, descriptors, control
 requests, CDC ACM streams, HID functions and USB Audio 2.0 functions, in virtual time.
 
-`Periph(host=UsbHostOptions())` on OTG_FS in the project plugs a full-speed host into the
-controller, `machine.periph.OTG_FS.host` is its `UsbHost`. Everything below Python runs in
+`Periph(host=UsbHostOptions())` on OTG_FS in the machine description plugs a full-speed host into
+the controller, `machine.periph.OTG_FS.host` is its `UsbHost`. Everything below Python runs in
 model events: no Python call per transaction.
 
 Example:
@@ -289,8 +289,8 @@ class CdcStream:
     `Periph(connect="pty")` or by `m.board.pty(name)`, `read` and `read_packets`
     raise `RuntimeError("OTG_FS is bridged to /dev/pts/N")`, the key and path of the bridge,
     for the life of the machine. `write` is not refused, its bytes mix with the pty client's.
-    `Periph(connect="pty")` bridges at build, for every test of the project. A test that reads the
-    stream leaves `connect` out, and a test that wants the pty calls `m.board.pty(name)`,
+    `Periph(connect="pty")` bridges at build, for every test of the machine description. A test that
+    reads the stream leaves `connect` out, and a test that wants the pty calls `m.board.pty(name)`,
     which bridges on first call.
     """
 

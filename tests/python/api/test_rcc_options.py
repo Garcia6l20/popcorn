@@ -1,4 +1,5 @@
-"""The board clock sources of the built-in STM32 RCC model: Machine(rcc=) and Project(rcc=)."""
+"""The board clock sources of the built-in STM32 RCC model: Machine(rcc=) and "
+"MachineDescription(rcc=)."""
 
 from __future__ import annotations
 
@@ -82,7 +83,7 @@ def test_a_clock_outside_its_range_is_refused(
 def test_board_rcc_in_the_project_sets_the_hse_rate(
     u575: popcorn.PartDescription,
 ) -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx", images=[popcorn.Elf(RCC_ELF)], rcc=RccOptions(hse_hz=32_000_000)
     )
     m = project.machine()

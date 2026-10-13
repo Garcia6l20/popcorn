@@ -565,8 +565,8 @@ class Machine:
                 its requests and checks its waiters.
             slice_wall_budget: Wall seconds after which a slice of the machine's thread serves
                 its requests and checks its waiters.
-            config_digest: Digest of the configuration, such as a project's digest, that snapshots
-                record.
+            config_digest: Digest of the configuration, such as a machine description's digest, that
+                snapshots record.
             arena_base: First address of the call arena, a RAM region outside the description,
                 None for no arena. It must not overlap a region or a peripheral.
             arena_size: Size of the call arena, a multiple of 4 KiB.

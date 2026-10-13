@@ -1,4 +1,4 @@
-"""Project of the spi_mock example."""
+"""MachineDescription of the spi_mock example."""
 
 from pathlib import Path
 
@@ -8,7 +8,7 @@ from spiadc import Adc
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PROJECT = popcorn.MachineDescription(
     name="spi-mock",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/spi_adc.elf")],
@@ -20,5 +20,5 @@ PROJECT = popcorn.Project(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

@@ -18,7 +18,7 @@ from popcorn import _core
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
 from popcorn._host import awaited, watch_awaits
-from popcorn._project import Project, _FrozenMap  # pyright: ignore[reportPrivateUsage]
+from popcorn._project import MachineDescription, _FrozenMap  # pyright: ignore[reportPrivateUsage]
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn.units import VirtualDuration, VirtualTime
@@ -72,10 +72,10 @@ class UartLink:
 class System:
     """Members and links of a linked system, as data: what `LinkedSystem` runs.
 
-    A value, as `Project` is: frozen, hashable, equal by content, holding projects and never a
-    machine. Declaring one reads no file, so a conftest imports it before the firmware exists.
-    `machines`, `boot` and `link` build the runtime. The pytest plugin's `system` fixture boots
-    each member from its own project's boot cache.
+    A value, as `MachineDescription` is: frozen, hashable, equal by content, holding machine
+    descriptions and never a machine. Declaring one reads no file, so a conftest imports it
+    before the firmware exists. `machines`, `boot` and `link` build the runtime. The pytest
+    plugin's `system` fixture boots each member from its own machine description's boot cache.
 
     Each member runs on its own host thread. The members meet at a barrier every `quantum` of
     system time, and after it each receiver's thread drains the frames sent to it, senders in
@@ -91,10 +91,10 @@ class System:
         )
 
     Attributes:
-        members: Each member's project, by member name, in member order. A name is a
-            `Machine` name: not empty, no whitespace, no dot. Members may share a project: each
-            is its own machine. A member's config and strictness are part of its project,
-            `CONTROLLER.config("audio")`, `RESPONDER.replace(strict=True)`.
+        members: Each member's machine description, by member name, in member order. A name is a
+            `Machine` name: not empty, no whitespace, no dot. Members may share a machine
+            description: each is its own machine. A member's config and strictness are part of its
+            machine description, `CONTROLLER.config("audio")`, `RESPONDER.replace(strict=True)`.
         links: The links, at least one. Their order is part of the system: it fixes the order
             of frames arriving at one receiver at the same instant on several links.
         offsets: System time of each member's local time at the start, 0 for an absent one.
@@ -105,7 +105,8 @@ class System:
 
     Raises:
         ConfigError: A check fails, its key naming the field: `members` empty, `members.<name>`
-            a bad name or no Project, `links` empty, `links[i].a` or `.b` naming no member's
+            a bad name or no MachineDescription, `links` empty, `links[i].a` or `.b` naming no
+            member's
             peripheral as `"<member>.<UART>"`, or a UART in two links, `links[i].latency`,
             `.baud`, `.data_bits`, `.stop_bits` or `.parity` out of range, `offsets.<name>`
             naming no member or below 0, `goal_cap` not above 0, or `on_member_reset` neither
@@ -113,7 +114,7 @@ class System:
             `link`, which has the description.
     """
 
-    members: Mapping[str, Project]
+    members: Mapping[str, MachineDescription]
     links: Sequence[UartLink]
     offsets: Mapping[str, VirtualDuration] = field(default_factory=_FrozenMap[str, VirtualDuration])
     goal_cap: VirtualDuration | None = None
@@ -135,11 +136,11 @@ class System:
                     key=key,
                     expected="a name, not empty, without whitespace or a dot",
                 )
-            if not isinstance(project, Project):
+            if not isinstance(project, MachineDescription):
                 raise ConfigError(
-                    f"{key}: a {type(project).__qualname__}, not a Project",
+                    f"{key}: a {type(project).__qualname__}, not a MachineDescription",
                     key=key,
-                    expected="a popcorn.Project",
+                    expected="a popcorn.MachineDescription",
                 )
         if not self.links:
             raise ConfigError("a linked system needs a link", key="links", expected="a link")
@@ -198,20 +199,20 @@ class System:
         return replace(self, **changes)
 
     def machines(self) -> dict[str, Machine]:
-        """A new machine per member, `Project.machine(name=<member>)`, not reset.
+        """A new machine per member, `MachineDescription.machine(name=<member>)`, not reset.
 
         Raises:
-            Exception: As `Project.machine`.
+            Exception: As `MachineDescription.machine`.
         """
         return {name: project.machine(name=name) for name, project in self.members.items()}
 
     async def boot(self) -> LinkedSystem:
-        """Build `machines`, boot each from reset as `Project.boot_machine` does, or only reset
-        it when its project has no `boot.until`, one after the other, then `link` them. For
-        scripts: the pytest plugin's `system` fixture boots from the boot cache instead.
+        """Build `machines`, boot each from reset as `MachineDescription.boot_machine` does, or only
+        reset it when its machine description has no `boot.until`, one after the other, then `link`
+        them. For scripts: the pytest plugin's `system` fixture boots from the boot cache instead.
 
         Raises:
-            Exception: As `machines`, `Project.boot_machine` and `link`.
+            Exception: As `machines`, `MachineDescription.boot_machine` and `link`.
         """
         machines = self.machines()
         for name, machine in machines.items():

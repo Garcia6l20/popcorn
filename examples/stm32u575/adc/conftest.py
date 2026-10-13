@@ -1,4 +1,4 @@
-"""Project of the adc example."""
+"""MachineDescription of the adc example."""
 
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PROJECT = popcorn.MachineDescription(
     name="adc-internal",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/adc_internal.elf")],
@@ -16,5 +16,5 @@ PROJECT = popcorn.Project(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

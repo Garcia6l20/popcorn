@@ -10,19 +10,19 @@ from pathlib import Path
 
 import popcorn
 import pytest
-from popcorn import ConfigError, Project, StopReason, System, UartLink
+from popcorn import ConfigError, MachineDescription, StopReason, System, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import PING_BYTES, USART_LL, logged, received
 
 L = us(20)
 
-PROJECT = Project(
+PROJECT = MachineDescription(
     part="STM32U575QGIx",
     images=[popcorn.Elf(USART_LL)],
     boot=popcorn.Boot(until="main", budget=1_000_000),
 )
-ABSENT = Project(part="STM32U575QGIx", images=[popcorn.Elf(Path("/nonexistent/fw.elf"))])
+ABSENT = MachineDescription(part="STM32U575QGIx", images=[popcorn.Elf(Path("/nonexistent/fw.elf"))])
 
 
 def link(a: object = "a.USART1", b: object = "b.USART1", **fields: object) -> UartLink:

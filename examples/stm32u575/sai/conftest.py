@@ -1,4 +1,4 @@
-"""Project of the sai example."""
+"""MachineDescription of the sai example."""
 
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PROJECT = popcorn.MachineDescription(
     name="sai-sine",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/sai_sine.elf")],
@@ -16,5 +16,5 @@ PROJECT = popcorn.Project(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

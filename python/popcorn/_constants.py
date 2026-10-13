@@ -138,7 +138,7 @@ class Constants:
     __slots__ = ("_files",)
 
     def __init__(self, *, _files: Iterable[tuple[str, Path]]) -> None:
-        """Use `Elf.constants`, `Project.constants` or `m.image.constants`."""
+        """Use `Elf.constants`, `MachineDescription.constants` or `m.image.constants`."""
         self._files = tuple(_files)
 
     def __getitem__(self, name: str) -> int:

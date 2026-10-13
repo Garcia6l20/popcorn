@@ -21,8 +21,8 @@ from pathlib import Path
 import popcorn
 
 
-def project(name: str, budget: int) -> popcorn.Project:
-    return popcorn.Project(
+def project(name: str, budget: int) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
         part="STM32U575QGIx",
         description=Path({description!r}),
         images=[popcorn.Elf(Path({elf!r}))],
@@ -238,7 +238,7 @@ def test_a_config_marker_fails_a_system_test(layout: Path, pytester: pytest.Pyte
     ("fixture", "expected"),
     [
         (None, "*define a `popcorn_system` fixture returning a `popcorn.System`*"),
-        ("A", "*popcorn_system returned Project, not a popcorn.System*"),
+        ("A", "*popcorn_system returned MachineDescription, not a popcorn.System*"),
     ],
 )
 def test_a_missing_or_wrong_system_fails_naming_the_fixture(
@@ -274,9 +274,9 @@ def test_a_failing_system_test_reports_and_traces_each_member(
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines_random(
         [
-            "system member a (project=a config=- digest=* strict=False):",
-            "system member b1 (project=b config=- digest=* strict=False):",
-            "system member b2 (project=b config=- digest=* strict=False):",
+            "system member a (description=a config=- digest=* strict=False):",
+            "system member b1 (description=b config=- digest=* strict=False):",
+            "system member b2 (description=b config=- digest=* strict=False):",
             f"trace: {traces}/*test_fail*.a.pctr",
             f"trace: {traces}/*test_fail*.b1.pctr",
             f"trace: {traces}/*test_fail*.b2.pctr",

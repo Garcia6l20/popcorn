@@ -663,10 +663,11 @@ class Board:
         The pty owns what the firmware sends, for the life of the machine: reads of the UART's
         `port`, or of the CDC function's `host.cdc()` stream, raise
         `RuntimeError("<key> is bridged to <path>")`, the key as in `ptys`.
-        `Periph(connect="pty")` in a `Project` calls this at build for every machine of the
-        project. Call it from the test that wants the pty instead, to keep stream reads in the
-        others. A CDC function's pty is keyed `name` in `ptys` for function 0, `name.<function>`
-        for the others.
+        `Periph(connect="pty")` in a `MachineDescription` calls this at build for every machine of
+        the
+        machine description. Call it from the test that wants the pty instead, to keep stream reads
+        in the others. A CDC function's pty is keyed `name` in `ptys` for function 0,
+        `name.<function>` for the others.
 
         A free run advances while the caller blocks: a sync call, a thread join, or a C call that
         releases the GIL. Open a peer whose connection blocks wall time, a probe or a handshake

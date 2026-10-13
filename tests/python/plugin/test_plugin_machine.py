@@ -197,13 +197,13 @@ def test_concurrent_async_boots_of_one_key_boot_once(pytester: pytest.Pytester) 
         import popcorn
 
         def pytest_configure(config):
-            boot = popcorn.Project.boot_machine
+            boot = popcorn.MachineDescription.boot_machine
 
             async def slow_boot(self, machine):
                 await asyncio.sleep(0.01)
                 return await boot(self, machine)
 
-            popcorn.Project.boot_machine = slow_boot
+            popcorn.MachineDescription.boot_machine = slow_boot
         """,
     )
     write_project(pytester)
@@ -234,7 +234,8 @@ def test_a_pty_spoils_the_machine(
     write_conftest(pytester)
     write_project_conftest(
         pytester.path,
-        f'popcorn.Project(part="STM32U575QGIx", images=[popcorn.Elf(Path({str(BOARD_ELF)!r}))], '
+        f'popcorn.MachineDescription(part="STM32U575QGIx", '
+        f"images=[popcorn.Elf(Path({str(BOARD_ELF)!r}))], "
         'boot=popcorn.Boot(until="ready", budget=1_000_000))',
     )
     pytester.makepyfile("""
@@ -333,7 +334,8 @@ def test_no_popcorn_project_override(pytester: pytest.Pytester) -> None:
     result.assert_outcomes(passed=1, errors=1)
     result.stdout.fnmatch_lines(
         [
-            "*define a `popcorn_project` fixture returning a `popcorn.Project` in a conftest.py "
+            "*define a `popcorn_project` fixture returning a `popcorn.MachineDescription` in a "
+            "conftest.py "
             "above this test*"
         ]
     )

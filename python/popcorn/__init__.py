@@ -56,10 +56,10 @@ from popcorn._project import (
     Elf,
     Hex,
     ImageFile,
+    MachineDescription,
     MemoryInit,
     Param,
     Periph,
-    Project,
     Use,
 )
 from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any_of
@@ -119,6 +119,7 @@ __all__ = [
     "Machine",
     "MachineBusy",
     "MachineCoverage",
+    "MachineDescription",
     "MachineRunning",
     "Memory",
     "MemoryInit",
@@ -131,7 +132,6 @@ __all__ = [
     "PeripheralView",
     "Peripherals",
     "PopcornError",
-    "Project",
     "Reached",
     "Readout",
     "Recorded",

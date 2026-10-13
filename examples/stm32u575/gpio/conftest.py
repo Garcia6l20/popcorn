@@ -1,4 +1,4 @@
-"""Project of the gpio example."""
+"""MachineDescription of the gpio example."""
 
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PROJECT = popcorn.MachineDescription(
     name="gpio-button",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/gpio_button.elf")],
@@ -16,5 +16,5 @@ PROJECT = popcorn.Project(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

@@ -1,4 +1,4 @@
-"""Project of the i2c_mock example."""
+"""MachineDescription of the i2c_mock example."""
 
 from pathlib import Path
 
@@ -11,7 +11,7 @@ HERE = Path(__file__).parent
 COLD = [21.0, 21.5, 22.25, 23.0, 22.5, 22.0]
 HOT = [34.0, 35.5, 36.0]
 
-BASE = popcorn.Project(
+BASE = popcorn.MachineDescription(
     name="i2c-mock",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/i2c_sensor.elf")],
@@ -31,5 +31,5 @@ PROJECT = BASE.with_configs(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

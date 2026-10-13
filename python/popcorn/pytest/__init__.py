@@ -10,39 +10,44 @@ Fixtures:
 
     # conftest.py
     @pytest.fixture(scope="session")
-    def popcorn_project() -> popcorn.Project:
-        return popcorn.Project(part="STM32U575QGIx", images=[popcorn.Elf(HERE / "app.elf")])
+    def popcorn_project() -> popcorn.MachineDescription:
+        return popcorn.MachineDescription(
+            part="STM32U575QGIx", images=[popcorn.Elf(HERE / "app.elf")]
+        )
 
     # test_app.py
     async def test_boot_state(machine: popcorn.Machine) -> None:
         await machine.call("check")
 
-- `popcorn_project`: the test's `popcorn.Project`, defined by the user in a conftest.py. The
+- `popcorn_project`: the test's `popcorn.MachineDescription`, defined by the user in a conftest.py.
+The
   nearest override above a test wins, as for any pytest fixture. The plugin's own fails the
   tests that use a machine, naming the fix.
 - `popcorn_selected_project`: `popcorn_project` with the test's config applied, selected as for
-  `machine`: the marker's, else `--popcorn-config`, else the base project. For tests that boot
-  machines themselves.
-- `machine`: the test's project's machine, built and booted once per session and process, then
-  restored from its boot snapshot before each test. Every test gets the same object. The plugin
-  removes the hooks a test installed, empties the intercept logs, the call baseline and the
-  trace ring. A test that loads another image, opens a pty or leaves the machine running spoils
-  it: the next test gets a new machine restored from the saved boot. A project without
+  `machine`: the marker's, else `--popcorn-config`, else the base machine description. For tests
+  that boot machines themselves.
+- `machine`: the test's machine description's machine, built and booted once per session and
+  process, then restored from its boot snapshot before each test. Every test gets the same object.
+  The plugin removes the hooks a test installed, empties the intercept logs, the call baseline and
+  the trace ring. A test that loads another image, opens a pty or leaves the machine running spoils
+  it: the next test gets a new machine restored from the saved boot. A machine description without
   `boot.until` boots to the reset state. A failed boot errors every test using the machine,
   booted once.
 - `machine_factory`: a `MachineFactory`, new machines separate from `machine`, with the
-  project's bus devices or the test's own, from the test's project or another one.
+  machine description's bus devices or the test's own, from the test's machine description or
+  another one.
 - `popcorn_system`: the tests' `popcorn.System`, defined by the user in a conftest.py as
   `popcorn_project` is. The plugin's own fails the tests that use `system`, naming the fix.
 - `system`: the `popcorn_system` linked, a `popcorn.LinkedSystem`. Each member is a new machine
-  restored from the boot snapshot of its own project, booted once per key as for `machine`, so
-  a member and a `machine` of the same project and strictness share one boot, and two members
-  of one project are two machines. It needs no `popcorn_project`. The marker's `strict` and
-  `budget` and `--popcorn-strict` and `--popcorn-budget` apply to every member, `budget` as
-  its `default_budget`. A marker `config` fails the test and `--popcorn-config` does not apply:
-  a member's config is part of its project. Teardown halts a free run left started, closes the
-  system, then parks and closes the members. A failing test reports each member as
-  `system member <name>`, and `--popcorn-trace-on-fail` keeps `<test>.<member>.pctr` per member.
+  restored from the boot snapshot of its own machine description, booted once per key as for
+  `machine`, so a member and a `machine` of the same machine description and strictness share one
+  boot, and two members of one machine description are two machines. It needs no `popcorn_project`.
+  The marker's `strict` and `budget` and `--popcorn-strict` and `--popcorn-budget` apply to every
+  member, `budget` as its `default_budget`. A marker `config` fails the test and `--popcorn-config`
+  does not apply: a member's config is part of its machine description. Teardown halts a free run
+  left started, closes the system, then parks and closes the members. A failing test reports each
+  member as `system member <name>`, and `--popcorn-trace-on-fail` keeps `<test>.<member>.pctr` per
+  member.
 
     # conftest.py
     @pytest.fixture(scope="session")
@@ -55,14 +60,14 @@ Fixtures:
             ],
         )
 
-  Keep projects shared by several conftest.py files in a plain module with a unique name, not
-  in a conftest.py.
+  Keep machine descriptions shared by several conftest.py files in a plain module with a unique
+  name, not in a conftest.py.
 
-A boot is keyed by the `Project.digest` of the project with its config applied, the
-strictness and the bus devices given. One session can run the tests of several conftest
-directories, each project booted once per key and process. Two config names with equal
-content share one boot. The report section names a key by the project's `name`, the config
-name and the first 12 hex digits of the digest.
+A boot is keyed by the `MachineDescription.digest` of the machine description with its config
+applied, the strictness and the bus devices given. One session can run the tests of several conftest
+directories, each machine description booted once per key and process. Two config names with equal
+content share one boot. The report section names a key by the machine description's `name`, the
+config name and the first 12 hex digits of the digest.
 
 A failing test that used a popcorn machine gets a "popcorn" section in its report, one block per
 machine: the stop of the failing exception or of the machine's last run, the fault registers
@@ -99,10 +104,10 @@ warnings too.
 
 Boot snapshots are cached in `.pytest_cache/d/popcorn/boot`: a later session, or another xdist
 worker, restores a configuration's boot instead of running it, one boot per configuration across
-workers. The cache key covers the popcorn build, the description, the images, the project
-digest, the strictness, the source of every board model and device class and of the modules its
-source file imports outside popcorn, the Python installation and site-packages, the files
-their parameters name, and for each peripheral without a board model the
+workers. The cache key covers the popcorn build, the description, the images, the machine
+description digest, the strictness, the source of every board model and device class and of the
+modules its source file imports outside popcorn, the Python installation and site-packages, the
+files their parameters name, and for each peripheral without a board model the
 `popcorn.model.register()` registration that serves it, with its class source and imports in
 the same way. A module imported only by those modules is not covered, and entries are
 never pruned: `--cache-clear` drops them all. `-p no:cacheprovider` turns the cache off.
@@ -154,13 +159,13 @@ Options, registered for `pytest --help`: `--popcorn-config`, `--popcorn-cov`,
 Each setting of a test comes from its `popcorn` marker, else the command line, else the
 project:
 
-- `config`: a name in `popcorn_project.configs`, from `Project.with_configs`, else
-  `--popcorn-config`, else the base project. `config=None` in a marker is the base project even
-  with `--popcorn-config`. An unknown name fails the test, naming the known ones.
-  `popcorn_project` itself stays the user's value, no config applied.
+- `config`: a name in `popcorn_project.configs`, from `MachineDescription.with_configs`, else
+  `--popcorn-config`, else the base machine description. `config=None` in a marker is the base
+  machine description even with `--popcorn-config`. An unknown name fails the test, naming the known
+  ones. `popcorn_project` itself stays the user's value, no config applied.
   `popcorn_selected_project` is the one with the config applied.
-- `strict`: None or absent, the command line then the project; True or False overrides.
-  `--popcorn-strict` turns strictness on, else `Project.strict` of the config applies.
+- `strict`: None or absent, the command line then the machine description; True or False overrides.
+  `--popcorn-strict` turns strictness on, else `MachineDescription.strict` of the config applies.
 - `budget`: `--popcorn-budget`, the `default_budget` of the test's booted machines, per `run`,
   `wait_for` and `call`, never a wall-clock timeout. `budget=None` in a marker is unbounded.
 

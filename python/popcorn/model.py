@@ -244,7 +244,7 @@ def _make_spec(cls: type[Model]) -> _Spec:
 class Model(_core.ModelBase):
     """Base of a peripheral model written in Python.
 
-    Built by its machine, from `Machine(models={name: cls})`, a project's
+    Built by its machine, from `Machine(models={name: cls})`, a machine description's
     `Periph(model=Use(cls))`, or `register()`: the constructor takes the subclass's own
     parameters only and must call `super().__init__()` first.
 
@@ -254,7 +254,7 @@ class Model(_core.ModelBase):
     receive the peripheral's IRQ lines in description order.
 
     Lifetime: the machine owns its models. A model must never keep a reference to its Machine,
-    or to anything holding it, such as a test fixture or a Project: native code holds the
+    or to anything holding it, such as a test fixture or a MachineDescription: native code holds the
     model, so such a reference is a cycle the garbage collector cannot see, and the machine is
     never freed. `peer()` reaches the other models of the machine, which covers the legitimate
     need.
@@ -303,7 +303,8 @@ class Model(_core.ModelBase):
         if context is None:
             raise TypeError(
                 f"{type(self).__qualname__} is built by its machine: pass the class to "
-                "Machine(models=...), a project's Periph(model=) or popcorn.model.register"
+                "Machine(models=...), a machine description's Periph(model=) or "
+                "popcorn.model.register"
             )
         super().__init__()
         spec = _spec_of(type(self))

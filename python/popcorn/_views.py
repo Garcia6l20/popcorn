@@ -334,7 +334,7 @@ class PeripheralView:
     @property
     def host(self) -> UsbHost:
         """The virtual USB host of this device controller, built with the machine from
-        `Periph(host=)` of the project or `Machine(usb=)`.
+        `Periph(host=)` of the machine description or `Machine(usb=)`.
 
         Raises:
             AttributeError: The machine has no USB hosts.

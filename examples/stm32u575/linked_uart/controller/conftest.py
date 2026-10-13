@@ -6,5 +6,5 @@ from linked_projects import CONTROLLER
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return CONTROLLER

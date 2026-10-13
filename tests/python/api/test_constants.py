@@ -114,7 +114,7 @@ def test_an_enum_nothing_uses_is_absent(constants: popcorn.Constants) -> None:
 
 
 def test_the_last_file_hides_the_earlier_ones() -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx", images=[popcorn.Elf(VIEWS_ELF), popcorn.Elf(CONSTS_ELF)]
     )
     assert project.constants["ROUTE_CAN"] == 9
@@ -161,7 +161,7 @@ def test_an_enum_parametrizes_at_collection_without_a_machine(
     def refused(*args: object, **kwargs: object) -> popcorn.Machine:
         raise AssertionError("a machine was built at collection")
 
-    monkeypatch.setattr(popcorn.Project, "machine", refused)
+    monkeypatch.setattr(popcorn.MachineDescription, "machine", refused)
     pytester.makepyfile(f"""
         from pathlib import Path
 
@@ -169,7 +169,7 @@ def test_an_enum_parametrizes_at_collection_without_a_machine(
         import pytest
 
         ELF = popcorn.Elf(Path({str(CONSTS_ELF)!r}))
-        PROJECT = popcorn.Project(part="STM32U575QGIx", images=[ELF])
+        PROJECT = popcorn.MachineDescription(part="STM32U575QGIx", images=[ELF])
 
 
         @pytest.mark.parametrize("channel", list(PROJECT.constants.enum("channel_t")))

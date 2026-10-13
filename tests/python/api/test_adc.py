@@ -107,7 +107,7 @@ def test_the_supply_sets_vdda_from_the_machine_or_the_project(
     m = ready(u575, SupplyOptions(vdda_mv=3300))
     m.periph.ADC1.input(5).volts = 1.65
     assert convert(m, 5) == 8192
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx", images=[popcorn.Elf(RCC_ELF)], supply=SupplyOptions(vdda_mv=3300)
     )
     m = project.machine()
@@ -131,7 +131,7 @@ def test_a_vdda_outside_the_datasheet_range_is_refused(
     with pytest.raises(ConfigError) as caught:
         popcorn.Machine(u575, supply=SupplyOptions(vdda_mv=vdda_mv))
     assert caught.value.key == "supply.vdda_mv"
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx", images=[], supply=SupplyOptions(vdda_mv=vdda_mv)
     )
     with pytest.raises(ConfigError) as caught:

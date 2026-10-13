@@ -53,8 +53,8 @@ def test_a_restored_run_stops_the_same_way(machines: Machines) -> None:
     assert state(m) == after
 
 
-def make_project(cpi: float = 1.0) -> popcorn.Project:
-    return popcorn.Project(
+def make_project(cpi: float = 1.0) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
         part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(DRIVER_ELF)], cpi=cpi
     )
 

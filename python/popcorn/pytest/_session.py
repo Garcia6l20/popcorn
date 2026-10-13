@@ -1,5 +1,5 @@
-"""Per-process plugin state: the projects by digest, one booted machine per key, the boot
-counters."""
+"""Per-process plugin state: the machine descriptions by digest, one booted machine per key, the
+boot counters."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import cast
 
 import pytest
 
-from popcorn import ConfigError, Machine, Project, Snapshot, Stop
+from popcorn import ConfigError, Machine, MachineDescription, Snapshot, Stop
 from popcorn._devices import serving
 from popcorn._machine import AttachedDevice
 from popcorn.coverage import Coverage, worker_path
@@ -25,7 +25,7 @@ from popcorn.pytest._options import SETTINGS, Settings
 from popcorn.pytest._report import park_ended, unclaimed
 
 type Devices = Mapping[str, Sequence[AttachedDevice]]
-"""Bus devices per peripheral, as `Project.machine(devices=)` takes them."""
+"""Bus devices per peripheral, as `MachineDescription.machine(devices=)` takes them."""
 
 UNCACHED = "uncached"
 """`Key.devices` of a device set that cannot be keyed: every boot of it is a new one."""
@@ -36,14 +36,14 @@ class Key:
     """What a booted machine depends on: equal keys share one boot.
 
     Attributes:
-        digest: The `Project.digest` of the project the machine is built from, its config
-            applied.
+        digest: The `MachineDescription.digest` of the machine description the machine is built
+            from, its config applied.
         strict: Whether unmodelled peripheral accesses raise.
-        devices: The digest of the bus devices given instead of the project's, UNCACHED when
-            they cannot be keyed, None for the project's.
-        name: The project's `name`, for reports only, not compared.
-        config: The config name selected, None for the base project, for reports only, not
-            compared.
+        devices: The digest of the bus devices given instead of the machine description's, UNCACHED
+            when they cannot be keyed, None for the machine description's.
+        name: The machine description's `name`, for reports only, not compared.
+        config: The config name selected, None for the base machine description, for reports only,
+            not compared.
     """
 
     digest: str
@@ -61,7 +61,7 @@ class Key:
     def __str__(self) -> str:
         base = f"config={self.config or '-'} digest={self.digest[:12]} strict={self.strict}"
         if self.name:
-            base = f"project={self.name} {base}"
+            base = f"description={self.name} {base}"
         return base if self.devices is None else f"{base} devices={self.devices}"
 
 
@@ -73,8 +73,8 @@ class Booted:
         machine: The machine the `machine` fixture restores for every test of the key.
         snapshot: The boot snapshot, taken on `machine`.
         saved: `snapshot` in its saved form, restorable into any machine of the key.
-        boot_stop: The stop of the boot, None for a project without `boot.until`. Read back
-            from the cache entry on a cache hit, located in this machine.
+        boot_stop: The stop of the boot, None for a machine description without `boot.until`. Read
+            back from the cache entry on a cache hit, located in this machine.
         image_count: How many images the machine had after the build.
         ptys: The pty bridges the machine had after the build.
     """
@@ -130,7 +130,7 @@ class PopcornSession:
     cache_hits: int = 0
     cache_dropped: int = 0
     rebuilds: int = 0
-    _projects: dict[str, Project] = field(default_factory=dict[str, Project])
+    _projects: dict[str, MachineDescription] = field(default_factory=dict[str, MachineDescription])
     _booted: dict[Key, Booted] = field(default_factory=dict[Key, Booted])
     _failed: dict[Key, BaseException] = field(default_factory=dict[Key, BaseException])
     _locks: dict[Key, asyncio.Lock] = field(default_factory=dict[Key, asyncio.Lock])
@@ -143,7 +143,7 @@ class PopcornSession:
         """The keys booted or tried in this process."""
         return [*self._booted, *self._failed, *self._device_keys]
 
-    def key(self, project: Project, config: str | None, strict: bool | None) -> Key:
+    def key(self, project: MachineDescription, config: str | None, strict: bool | None) -> Key:
         """The key of the config `config` of `project`, strictness from that config when
         `strict` is None.
 
@@ -157,12 +157,12 @@ class PopcornSession:
             strict = selected.strict
         return Key(digest, strict, name=selected.name, config=config)
 
-    def project(self, key: Key) -> Project:
-        """The project `key` was made from by `key()`."""
+    def project(self, key: Key) -> MachineDescription:
+        """The machine description `key` was made from by `key()`."""
         return self._projects[key.digest]
 
     def device_key(self, key: Key, devices: Devices) -> Key:
-        """`key` with the bus devices `devices` given instead of the project's.
+        """`key` with the bus devices `devices` given instead of the machine description's.
 
         Raises:
             ConfigError: A device serves another live machine.
@@ -357,7 +357,11 @@ class PopcornSession:
         return booted
 
     async def _cached_boot(
-        self, key: Key, project: Project, devices: Devices | None = None, name: str | None = None
+        self,
+        key: Key,
+        project: MachineDescription,
+        devices: Devices | None = None,
+        name: str | None = None,
     ) -> Booted:
         if self.cache is None:
             return await self._fresh_boot(key, project, devices, name)
@@ -411,7 +415,11 @@ class PopcornSession:
         return path.read_bytes() if path.is_file() else None
 
     async def _fresh_boot(
-        self, key: Key, project: Project, devices: Devices | None = None, name: str | None = None
+        self,
+        key: Key,
+        project: MachineDescription,
+        devices: Devices | None = None,
+        name: str | None = None,
     ) -> Booted:
         self.boots += 1
         machine: Machine | None = None

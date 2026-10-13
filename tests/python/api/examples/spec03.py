@@ -10,7 +10,7 @@ from popcorn.model import IrqLine, Model, on_read, on_write
 from popcorn.units import ms, us
 
 
-async def project_and_machine(project: popcorn.Project) -> popcorn.Snapshot:
+async def project_and_machine(project: popcorn.MachineDescription) -> popcorn.Snapshot:
     """Section 1: a project declared in Python, a machine, a boot snapshot."""
     m: popcorn.Machine = project.machine()
     m.reset()

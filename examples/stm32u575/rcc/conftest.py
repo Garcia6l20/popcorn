@@ -1,4 +1,4 @@
-"""Project of the rcc example."""
+"""MachineDescription of the rcc example."""
 
 from pathlib import Path
 
@@ -8,7 +8,7 @@ from popcorn.board import RccOptions
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PROJECT = popcorn.MachineDescription(
     name="rcc-clock",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/rcc_clock.elf")],
@@ -19,5 +19,5 @@ PROJECT = popcorn.Project(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

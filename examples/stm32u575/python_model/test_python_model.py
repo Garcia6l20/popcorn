@@ -18,7 +18,7 @@ covers the `machine` fixture, not that machine.
 import itertools
 
 import pytest
-from popcorn import Call, Machine, ModelError, Project, Return, StopReason
+from popcorn import Call, Machine, MachineDescription, ModelError, Return, StopReason
 from popcorn.units import VirtualTime, ms
 from rngmodel import CONVERSION, Rng, words
 
@@ -40,7 +40,9 @@ def received(machine: Machine) -> list[int]:
     return [int(result.words[index].value) for index in range(COUNT)]
 
 
-async def test_without_a_model_a_strict_run_names_the_rng(popcorn_project: Project) -> None:
+async def test_without_a_model_a_strict_run_names_the_rng(
+    popcorn_project: MachineDescription,
+) -> None:
     machine = Machine(
         popcorn_project.part_description(),
         image=[image.load() for image in popcorn_project.images],

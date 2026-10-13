@@ -6,14 +6,14 @@ import popcorn
 
 HERE = Path(__file__).parent
 
-CONTROLLER = popcorn.Project(
+CONTROLLER = popcorn.MachineDescription(
     name="linked-controller",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/linked_controller.elf")],
     boot=popcorn.Boot(until="links_ready", budget=2_000_000),
 )
 
-RESPONDER = popcorn.Project(
+RESPONDER = popcorn.MachineDescription(
     name="linked-responder",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/linked_responder.elf")],

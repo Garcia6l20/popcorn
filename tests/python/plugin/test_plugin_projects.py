@@ -63,8 +63,8 @@ def test_each_test_boots_the_project_nearest_above_it(pytester: pytest.Pytester)
     result.assert_outcomes(passed=2, failed=2)
     result.stdout.fnmatch_lines_random(
         [
-            "machine (project=driver config=- digest=* strict=False):",
-            "machine (project=fault config=- digest=* strict=False):",
+            "machine (description=driver config=- digest=* strict=False):",
+            "machine (description=fault config=- digest=* strict=False):",
         ]
     )
     assert summary(result) == "popcorn: 2 key(s), 2 boot(s), 0 from cache"
@@ -94,7 +94,7 @@ from pathlib import Path
 import popcorn
 from popcorn.pytest._session import popcorn_session
 
-DRIVER = popcorn.Project(
+DRIVER = popcorn.MachineDescription(
     part="POPCORN-M33-TEST",
     description=Path({str(M33_JSON)!r}),
     images=[popcorn.Elf(Path({str(DRIVER_ELF)!r}))],
@@ -105,9 +105,9 @@ DRIVER = popcorn.Project(
 
 def test_other(machine, machine_factory, request):
     assert machine.pc == machine.sym("ready")
-    driver = machine_factory(project=DRIVER)
+    driver = machine_factory(description=DRIVER)
     assert driver.pc == driver.sym("alu_mark")
-    assert machine_factory(project=DRIVER, booted=False).pc != driver.pc
+    assert machine_factory(description=DRIVER, booted=False).pc != driver.pc
     keys = popcorn_session(request.config).keys
     assert [key.strict for key in keys if key.digest == DRIVER.digest] == [True]
 """)
@@ -136,7 +136,7 @@ def test_the_rootdir_project_and_a_subproject(pytester: pytest.Pytester) -> None
     (fault / "test_fault.py").write_text(FAULT_TEST + "    assert False\n")
     result = run(pytester)
     result.assert_outcomes(passed=1, failed=1)
-    result.stdout.fnmatch_lines(["machine (project=fault config=- digest=* strict=False):"])
+    result.stdout.fnmatch_lines(["machine (description=fault config=- digest=* strict=False):"])
     assert summary(result) == "popcorn: 2 key(s), 2 boot(s), 0 from cache"
 
 
@@ -214,10 +214,14 @@ def test_an_unknown_selected_config_fails_naming_the_known_ones(pytester: pytest
         """)
     marker = run(pytester, "-k", "test_marker")
     marker.assert_outcomes(errors=1, deselected=1)
-    marker.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+    marker.stdout.fnmatch_lines(
+        ["*configs.nope: expected a config of the machine description: variant*"]
+    )
     option = run(pytester, "-k", "test_option", "--popcorn-config=nope")
     option.assert_outcomes(errors=1, deselected=1)
-    option.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+    option.stdout.fnmatch_lines(
+        ["*configs.nope: expected a config of the machine description: variant*"]
+    )
 
 
 def test_the_selected_project_alone_boots_no_machine(pytester: pytest.Pytester) -> None:
@@ -313,7 +317,7 @@ def test_a_missing_description_skips_a_factory_with_devices(pytester: pytest.Pyt
     absent = pytester.path / "absent.json"
     write_project_conftest(
         pytester.path,
-        "popcorn.Project(\n"
+        "popcorn.MachineDescription(\n"
         '    part="POPCORN-M33-TEST",\n'
         f"    description=Path({str(absent)!r}),\n"
         f"    images=[popcorn.Elf(Path({str(DRIVER_ELF)!r}))],\n"

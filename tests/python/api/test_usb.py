@@ -226,8 +226,8 @@ def test_usb_options_are_checked(
     assert caught.value.key == key
 
 
-def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
-    return popcorn.Project(
+def project(board: Mapping[str, popcorn.Periph]) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(USB_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),
@@ -286,7 +286,7 @@ def test_a_boot_past_the_enumeration_is_cached_configured(
         'pytest_plugins = ["popcorn.pytest"]\n\n\n'
         '@pytest.fixture(scope="session")\n'
         "def popcorn_project():\n"
-        "    return popcorn.Project(\n"
+        "    return popcorn.MachineDescription(\n"
         '        part="STM32U575QGIx",\n'
         f"        description=Path({str(u575_json)!r}),\n"
         f"        images=[popcorn.Elf(Path({str(USB_ELF)!r}))],\n"

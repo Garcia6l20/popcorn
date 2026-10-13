@@ -154,7 +154,7 @@ def check_address(address: int) -> None:
 class I2CTarget(_core.I2CTargetBase):
     """A target on an I2C bus, answering one 7-bit address, written in Python.
 
-    Attach it with `Machine(devices={"I2C1": [target]})` or a project's
+    Attach it with `Machine(devices={"I2C1": [target]})` or a machine description's
     `Periph(devices=[Device(cls, address=...)])`. The I2C model calls the `on_` methods at the end
     of each bus phase, one byte at a time: the controller decides how many bytes it reads, so a
     target never knows a transfer's length in advance. Of two targets answering one address, the
@@ -262,7 +262,7 @@ class I2CTarget(_core.I2CTargetBase):
 class SpiTarget(_core.SpiTargetBase):
     """A device on an SPI bus, written in Python.
 
-    Attach it with `Machine(devices={"SPI1": [device]})` or a project's
+    Attach it with `Machine(devices={"SPI1": [device]})` or a machine description's
     `Periph(devices=[Device(cls, cs=...)])`. The SPI model calls `on_select` on each chip select
     edge and `on_exchange` for each frame while the device is selected, full duplex. Devices
     sharing a chip select, or several on the hardware SS output, are all selected and see every

@@ -142,7 +142,7 @@ def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:
 
 
 def test_the_project_connects_a_pty(u575: popcorn.PartDescription) -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],
         board={"USART1": popcorn.Periph(connect="pty")},
@@ -153,7 +153,7 @@ def test_the_project_connects_a_pty(u575: popcorn.PartDescription) -> None:
 
 
 def test_other_connections_and_devices_are_refused(u575: popcorn.PartDescription) -> None:
-    socket = popcorn.Project(
+    socket = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],
         board={"USART1": popcorn.Periph(connect=cast("Literal['pty']", "socket"))},
@@ -161,7 +161,7 @@ def test_other_connections_and_devices_are_refused(u575: popcorn.PartDescription
     with pytest.raises(popcorn.ConfigError) as caught:
         socket.machine()
     assert caught.value.key == "board.USART1.connect"
-    fraction = popcorn.Project(
+    fraction = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],
         board={"I2C1": popcorn.Periph(devices=[popcorn.Device(Fraction, address=0x50)])},

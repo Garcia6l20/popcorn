@@ -31,7 +31,7 @@ def u575_project(u575_json: Path, pytester: pytest.Pytester) -> Path:
     write_conftest(pytester)
     return write_project_conftest(
         pytester.path,
-        "popcorn.Project(\n"
+        "popcorn.MachineDescription(\n"
         '    part="STM32U575QGIx",\n'
         f"    description=Path({str(u575_json)!r}),\n"
         f"    images=[popcorn.Elf(Path({str(I2C_ELF)!r}))],\n"
@@ -248,7 +248,9 @@ class Plain(I2CTarget):
 
 @pytest.fixture(scope="module")
 def m33_project():
-    return popcorn.Project(part="POPCORN-M33-TEST", description=Path(M33_JSON), images=[])
+    return popcorn.MachineDescription(
+        part="POPCORN-M33-TEST", description=Path(M33_JSON), images=[]
+    )
 
 
 @pytest.mark.parametrize(
@@ -266,7 +268,9 @@ def m33_project():
         {"k": [True]},
     ],
 )
-def test_plain_attributes_key_a_device(m33_project: popcorn.Project, extra: object) -> None:
+def test_plain_attributes_key_a_device(
+    m33_project: popcorn.MachineDescription, extra: object
+) -> None:
     digest = devices_digest(m33_project, {"TESTDEV": [Plain(extra)]})
     assert digest is not None
     assert digest == devices_digest(m33_project, {"TESTDEV": [Plain(extra)]})
@@ -278,13 +282,13 @@ def test_plain_attributes_key_a_device(m33_project: popcorn.Project, extra: obje
     [print, object(), [object()], {"k": object()}, {object(): 1}, Plain().on_read],
 )
 def test_other_attributes_leave_a_device_unkeyed(
-    m33_project: popcorn.Project, extra: object
+    m33_project: popcorn.MachineDescription, extra: object
 ) -> None:
     assert devices_digest(m33_project, {"TESTDEV": [Plain(extra)]}) is None
 
 
 def test_the_digest_follows_state_aliases_and_listed_peripherals(
-    m33_project: popcorn.Project,
+    m33_project: popcorn.MachineDescription,
 ) -> None:
     base = devices_digest(m33_project, {"TESTDEV": [Plain()]})
     moved = Plain()
@@ -307,14 +311,14 @@ class Shared(Plain):
 
 
 def test_the_digest_follows_a_snapshot_outside_the_attributes(
-    m33_project: popcorn.Project,
+    m33_project: popcorn.MachineDescription,
 ) -> None:
     before = devices_digest(m33_project, {"TESTDEV": [Shared()]})
     Shared.table[0] = 1
     assert devices_digest(m33_project, {"TESTDEV": [Shared()]}) != before
 
 
-def test_a_native_device_leaves_the_set_unkeyed(m33_project: popcorn.Project) -> None:
+def test_a_native_device_leaves_the_set_unkeyed(m33_project: popcorn.MachineDescription) -> None:
     assert devices_digest(m33_project, {"TESTDEV": [TableTarget(0x50)]}) is None
 """
 

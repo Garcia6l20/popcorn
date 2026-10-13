@@ -74,10 +74,14 @@ def test_an_unknown_config_name_fails_naming_the_known_ones(pytester: pytest.Pyt
         """)
     marker = run(pytester, "-k", "test_marker")
     marker.assert_outcomes(errors=1, deselected=1)
-    marker.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+    marker.stdout.fnmatch_lines(
+        ["*configs.nope: expected a config of the machine description: variant*"]
+    )
     option = run(pytester, "-k", "test_option", "--popcorn-config=nope")
     option.assert_outcomes(errors=1, deselected=1)
-    option.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+    option.stdout.fnmatch_lines(
+        ["*configs.nope: expected a config of the machine description: variant*"]
+    )
 
 
 def test_two_config_names_with_equal_content_share_one_boot(pytester: pytest.Pytester) -> None:

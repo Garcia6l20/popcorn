@@ -15,7 +15,7 @@ MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 
 
 def test_section_1_project_and_machine() -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(DRIVER_ELF)]
     )
     assert asyncio.run(spec03.project_and_machine(project)).machine_id != 0

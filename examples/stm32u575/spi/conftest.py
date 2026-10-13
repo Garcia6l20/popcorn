@@ -1,4 +1,4 @@
-"""Project of the spi example."""
+"""MachineDescription of the spi example."""
 
 from pathlib import Path
 
@@ -9,7 +9,7 @@ from popcorn.units import us
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PROJECT = popcorn.MachineDescription(
     name="spi-flash",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/spi_flash.elf")],
@@ -21,5 +21,5 @@ PROJECT = popcorn.Project(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

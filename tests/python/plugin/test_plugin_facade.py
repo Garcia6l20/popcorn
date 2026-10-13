@@ -44,8 +44,8 @@ def hooked() -> popcorn.Machine:
     return m
 
 
-def model_project() -> popcorn.Project:
-    base = popcorn.Project(
+def model_project() -> popcorn.MachineDescription:
+    base = popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
         description=MODEL_JSON,
         images=[popcorn.Elf(MODEL_ELF)],
@@ -55,11 +55,11 @@ def model_project() -> popcorn.Project:
     return base.with_configs(variant=base.replace(boot=base.boot.replace(budget=20_000)))
 
 
-def variant(project: popcorn.Project) -> popcorn.Project:
+def variant(project: popcorn.MachineDescription) -> popcorn.MachineDescription:
     return project.config("variant")
 
 
-def touch(project: popcorn.Project, m: popcorn.Machine) -> popcorn.CallResult:
+def touch(project: popcorn.MachineDescription, m: popcorn.Machine) -> popcorn.CallResult:
     async def body() -> popcorn.CallResult:
         await project.boot_machine(m)
         return await m.call("touch_unmodelled", budget=10_000)

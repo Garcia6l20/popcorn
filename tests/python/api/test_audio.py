@@ -220,8 +220,10 @@ def test_a_write_from_another_thread_during_a_run_is_posted(
     assert asyncio.run(body()) >= VirtualTime(0)
 
 
-def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
-    return popcorn.Project(part="STM32U575QGIx", images=[popcorn.Elf(SAI_ELF)], board=board)
+def project(board: Mapping[str, popcorn.Periph]) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
+        part="STM32U575QGIx", images=[popcorn.Elf(SAI_ELF)], board=board
+    )
 
 
 def test_a_project_sets_the_options_of_a_block() -> None:

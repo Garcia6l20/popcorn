@@ -141,9 +141,9 @@ class MarkerOptions:
     """The keywords of the closest `popcorn` marker of a test, `UNSET` where absent.
 
     Attributes:
-        config: The config to apply, None for the base project.
+        config: The config to apply, None for the base machine description.
         budget: The default instruction budget, None for unbounded runs.
-        strict: None or absent, the command line then the project; True or False
+        strict: None or absent, the command line then the machine description; True or False
             overrides.
     """
 

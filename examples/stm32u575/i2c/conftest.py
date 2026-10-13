@@ -1,4 +1,4 @@
-"""Project of the i2c example."""
+"""MachineDescription of the i2c example."""
 
 from pathlib import Path
 
@@ -17,7 +17,7 @@ SCRIPTED = popcorn.Device(
     replies={0x0100: bytes(range(0xC0, 0xE0))},
 )
 
-BASE = popcorn.Project(
+BASE = popcorn.MachineDescription(
     name="i2c-eeprom",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/i2c_eeprom.elf")],
@@ -36,5 +36,5 @@ PROJECT = BASE.with_configs(
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
+def popcorn_project() -> popcorn.MachineDescription:
     return PROJECT

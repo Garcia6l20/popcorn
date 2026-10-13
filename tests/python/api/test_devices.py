@@ -572,7 +572,7 @@ def test_project_devices_are_refused_with_their_key(
 def test_a_project_wires_spi_devices_by_chip_select(
     u575: popcorn.PartDescription, cs: str | None, entry: str
 ) -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(SPI_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),
@@ -592,7 +592,7 @@ def test_a_project_wires_spi_devices_by_chip_select(
     assert device.cs == cs
 
 
-def _two_bus_project() -> popcorn.Project:
+def _two_bus_project() -> popcorn.MachineDescription:
     base = DEVICES.replace(
         board={
             "I2C1": popcorn.Periph(devices=[popcorn.Device(Eeprom24, address=0x50, size=4096)]),

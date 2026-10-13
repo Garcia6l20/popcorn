@@ -1,4 +1,4 @@
-"""Projects: what a machine is built from and how it boots, as a typed value."""
+"""Machine descriptions: what a machine is built from and how it boots, as a typed value."""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ class Elf:
     """An ELF image, loaded at its segment addresses.
 
     Attributes:
-        path: The file, an absolute path. It is read by `Project.machine`.
+        path: The file, an absolute path. It is read by `MachineDescription.machine`.
     """
 
     path: Path
@@ -113,7 +113,7 @@ class Bin:
     """A raw binary image.
 
     Attributes:
-        path: The file, an absolute path. It is read by `Project.machine`.
+        path: The file, an absolute path. It is read by `MachineDescription.machine`.
         at: Guest address of its first byte.
     """
 
@@ -130,7 +130,7 @@ class Hex:
     """An Intel HEX image.
 
     Attributes:
-        path: The file, an absolute path. It is read by `Project.machine`.
+        path: The file, an absolute path. It is read by `MachineDescription.machine`.
     """
 
     path: Path
@@ -141,7 +141,7 @@ class Hex:
 
 
 type ImageFile = Elf | Bin | Hex
-"""An image file of a project."""
+"""An image file of a machine description."""
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -334,15 +334,15 @@ class Boot:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Project:
+class MachineDescription:
     """What a machine is built from and how it boots.
 
     A value: every field is data, compared and hashed by content, with a `digest` stable across
-    processes. `digest` is the identity of a project. Equality is coarser: it follows Python, so
-    `True == 1 == 1.0` and two projects differing only by such a param compare equal while their
-    digests differ, as the classes receive different types. Model and device classes are held
-    with their parameters and built anew for each machine. Image files are read by `machine`,
-    so a project can be declared before its firmware exists.
+    processes. `digest` is the identity of a machine description. Equality is coarser: it follows
+    Python, so `True == 1 == 1.0` and two machine descriptions differing only by such a param
+    compare equal while their digests differ, as the classes receive different types. Model and
+    device classes are held with their parameters and built anew for each machine. Image files are
+    read by `machine`, so a machine description can be declared before its firmware exists.
 
     Attributes:
         part: Part number, such as "STM32U575QGIx".
@@ -359,9 +359,11 @@ class Project:
         supply: Supply voltages, None for the defaults.
         board: What the board does with each peripheral, by name.
         strict: Whether an unmodelled peripheral access raises ModelError. Not in `digest`.
-        missing: What the pytest plugin does with a test whose project raises MissingInput:
-            "fail" it, or "skip" it with the missing path as the reason. Not in `digest`.
-        configs: Named variants of this project, as `config` selects them. Not in `digest`.
+        missing: What the pytest plugin does with a test whose machine description raises
+            MissingInput: "fail" it, or "skip" it with the missing path as the reason. Not in
+            `digest`.
+        configs: Named variants of this machine description, as `config` selects them. Not in
+            `digest`.
     """
 
     part: str
@@ -378,7 +380,9 @@ class Project:
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
     strict: bool = False
     missing: Literal["fail", "skip"] = "fail"
-    configs: Mapping[str, Project] = field(default_factory=_FrozenMap[str, "Project"])
+    configs: Mapping[str, MachineDescription] = field(
+        default_factory=_FrozenMap[str, "MachineDescription"]
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "images", tuple(self.images))
@@ -437,8 +441,10 @@ class Project:
                     )
                 self._check_param_paths(f"{key}.devices[{index}]", device.params)
         for name, config in cast(Mapping[object, object], self.configs).items():
-            if not isinstance(config, Project):
-                raise _plain_error(f"configs.{name}", f"a Project, not {type(config).__qualname__}")
+            if not isinstance(config, MachineDescription):
+                raise _plain_error(
+                    f"configs.{name}", f"a MachineDescription, not {type(config).__qualname__}"
+                )
 
     def _check_param_paths(self, key: str, value: object) -> None:
         if isinstance(value, Path):
@@ -460,16 +466,16 @@ class Project:
                 key, f"an absolute path such as Path(__file__).parent / {str(path)!r}, not {path}"
             )
 
-    def replace(self, **changes: object) -> Project:
+    def replace(self, **changes: object) -> MachineDescription:
         """A copy with `changes` applied, as `dataclasses.replace`."""
         return dataclasses.replace(self, **changes)
 
-    def with_configs(self, **configs: Project) -> Project:
+    def with_configs(self, **configs: MachineDescription) -> MachineDescription:
         """A copy whose `configs` also holds `configs`, replacing those of the same name."""
         return dataclasses.replace(self, configs={**self.configs, **configs})
 
-    def config(self, name: str | None) -> Project:
-        """The config `name` of `configs`, this project for None.
+    def config(self, name: str | None) -> MachineDescription:
+        """The config `name` of `configs`, this machine description for None.
 
         Raises:
             ConfigError: No config has that name, the known ones named.
@@ -479,7 +485,7 @@ class Project:
         found = self.configs.get(name)
         if found is None:
             known = ", ".join(sorted(self.configs)) or "none"
-            raise _plain_error(f"configs.{name}", f"a config of the project: {known}")
+            raise _plain_error(f"configs.{name}", f"a config of the machine description: {known}")
         return found
 
     @property
@@ -545,7 +551,7 @@ class Project:
             devices: Bus devices per I2C or SPI peripheral name or alias, as
                 `Machine(devices=)` takes them. A listed peripheral gets these devices instead
                 of its `board` devices, none for an empty list. A peripheral not listed keeps
-                the project's. Not part of `digest`.
+                the machine description's. Not part of `digest`.
             name: Name of the machine in its log records and errors, as `Machine(name=)`
                 takes it, the part when None. Not part of `digest`.
 
@@ -781,8 +787,8 @@ class Project:
             raise _plain_error(key, f"arguments {cls.__qualname__} accepts: {error}") from error
 
 
-def check_inputs(project: Project) -> None:
-    """Raise for the first file of `project` that does not exist: an image, `description`, or
+def check_inputs(description: MachineDescription) -> None:
+    """Raise for the first file of `description` that does not exist: an image, `description`, or
     `svd` when no `description` replaces it. A file that exists but cannot be read is left to
     its reader.
 
@@ -790,11 +796,11 @@ def check_inputs(project: Project) -> None:
         MissingInput: That file, with its key.
     """
     paths: list[tuple[str, Path | None]] = [
-        (f"images[{i}].path", image.path) for i, image in enumerate(project.images)
+        (f"images[{i}].path", image.path) for i, image in enumerate(description.images)
     ]
-    if project.description is None:
-        paths.append(("svd", project.svd))
-    paths.append(("description", project.description))
+    if description.description is None:
+        paths.append(("svd", description.svd))
+    paths.append(("description", description.description))
     for key, path in paths:
         if path is not None and absent(path):
             raise MissingInput(f"{key}: no file at {path}", path=path, key=key)
@@ -866,14 +872,14 @@ def _canonical(value: object) -> object:
         return {"path": value.as_posix()}
     if isinstance(value, type):
         return {"class": _reference(value)}
-    if isinstance(value, Project):
+    if isinstance(value, MachineDescription):
         skipped = {"name", "strict", "missing", "configs"}
         fields = {
             f.name: _canonical(getattr(value, f.name))
             for f in dataclasses.fields(value)
             if f.name not in skipped
         }
-        return {"$": "Project", **fields, "cpi": float(value.cpi)}
+        return {"$": "MachineDescription", **fields, "cpi": float(value.cpi)}
     if dataclasses.is_dataclass(value):
         fields = {f.name: _canonical(getattr(value, f.name)) for f in dataclasses.fields(value)}
         return {"$": type(value).__qualname__, **fields}
@@ -885,7 +891,7 @@ def _canonical(value: object) -> object:
         return {"int_map": [[k, _canonical(v)] for k, v in pairs]}
     if isinstance(value, list | tuple):
         return [_canonical(item) for item in cast(Sequence[object], value)]
-    raise TypeError(f"not a project value: {value!r}")
+    raise TypeError(f"not a machine description value: {value!r}")
 
 
 def _given_devices(
