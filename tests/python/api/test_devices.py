@@ -13,7 +13,7 @@ from typing import Literal, assert_type, cast
 import popcorn
 import pytest
 from popcorn import ConfigError, ModelError, ResetKind, StopReason, _core
-from popcorn.board import AudioOptions, DeviceBoard, I2CTarget, SpiTarget
+from popcorn.board import AudioOptions, DeviceBoard, I2CError, I2CTarget, SpiTarget
 from popcorn.model import Model
 from popcorn.units import VirtualTime, ms
 
@@ -853,3 +853,130 @@ def test_board_device_names_a_peripheral_the_part_lacks(
     with pytest.raises(ConfigError, match="a peripheral of") as raised:
         m.board.device("I2C9", Eeprom24)
     assert raised.value.key == "board.I2C9"
+
+
+ERROR_BITS = {
+    I2CError.BUS_ERROR: 1 << 8,
+    I2CError.ARBITRATION_LOST: 1 << 9,
+    I2CError.OVERRUN: 1 << 10,
+}
+HOOKS = [("on_start", "errors", 0), ("on_write", "errors", 1), ("on_read", "read_errors", 1)]
+
+
+class Faulty(I2CTarget):
+    """Answers 0x33 and returns `error` from `hook` once, on call `at_call` of a transfer: 0 is
+    the address, 1 the first data byte."""
+
+    def __init__(self, hook: str, error: object, at_call: int) -> None:
+        super().__init__(0x33)
+        self.hook = hook
+        self.error = error
+        self.at_call = at_call
+        self.shots = 1
+        self.calls = 0
+        self.events: list[tuple[str, int, int]] = []
+
+    def pick[T](self, hook: str, normal: T) -> T:
+        if hook != self.hook or self.calls != self.at_call or self.shots == 0:
+            return normal
+        self.shots -= 1
+        return cast(T, self.error)
+
+    def on_start(self, read: bool, at: VirtualTime) -> bool | I2CError:
+        self.calls = 0
+        self.events.append(("R" if read else "W", 0, at.ps))
+        return self.pick("on_start", True)
+
+    def on_write(self, byte: int, at: VirtualTime) -> bool | I2CError:
+        self.calls += 1
+        self.events.append(("w", byte, at.ps))
+        return self.pick("on_write", True)
+
+    def on_read(self, at: VirtualTime) -> int | I2CError:
+        self.calls += 1
+        self.events.append(("r", 0x5A, at.ps))
+        return self.pick("on_read", 0x5A)
+
+    def on_stop(self, at: VirtualTime) -> None:
+        self.events.append(("P", 0, at.ps))
+
+
+def faulty_machine(
+    u575: popcorn.PartDescription, hook: str, error: object, entry: str, at_call: int
+) -> tuple[popcorn.Machine, Faulty]:
+    device = Faulty(hook, error, at_call)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [device]})
+    enter(m, entry)
+    return m, device
+
+
+def expected_log(error: I2CError, entry: str) -> list[int]:
+    busy = 0 if error is I2CError.ARBITRATION_LOST else 1
+    data = [0x5A, 0x5A] if entry == "read_errors" else []
+    return [2, 1, ERROR_BITS[error], busy, 0, 0, *data]
+
+
+@pytest.mark.parametrize("error", list(I2CError), ids=lambda e: e.name)
+@pytest.mark.parametrize(("hook", "entry", "at_call"), HOOKS, ids=[h for h, _, _ in HOOKS])
+def test_an_i2c_error_returned_by_a_hook_reaches_the_firmware_error_handler(
+    u575: popcorn.PartDescription, error: I2CError, hook: str, entry: str, at_call: int
+) -> None:
+    m, device = faulty_machine(u575, hook, error, entry, at_call)
+    assert finish(m) == expected_log(error, entry)
+    kinds = "".join(kind for kind, _, _ in device.events[-4:])
+    assert kinds == ("Rrr" if entry == "read_errors" else "Www") + "P"
+
+
+@pytest.mark.parametrize(
+    ("hook", "value"),
+    [
+        ("on_start", "BERR"),
+        ("on_start", 1),
+        ("on_write", "BERR"),
+        ("on_write", 3),
+        ("on_write", None),
+        ("on_write", ResetKind.PIN),
+        ("on_read", "BERR"),
+        ("on_read", None),
+        ("on_read", ResetKind.PIN),
+    ],
+)
+def test_a_hook_returning_neither_its_value_nor_an_i2c_error_is_a_model_error(
+    u575: popcorn.PartDescription, hook: str, value: object
+) -> None:
+    entry, at_call = next((e, c) for h, e, c in HOOKS if h == hook)
+    m, _ = faulty_machine(u575, hook, value, entry, at_call)
+    with pytest.raises(ModelError, match=hook):
+        asyncio.run(m.run(budget=BUDGET))
+
+
+def gil_entries(m: popcorn.Machine) -> int:
+    return m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("error", [None, I2CError.BUS_ERROR], ids=["plain", "error"])
+def test_each_i2c_hook_call_takes_the_gil_once_with_or_without_an_error(
+    u575: popcorn.PartDescription, error: I2CError | None
+) -> None:
+    m, device = faulty_machine(u575, "on_write", error or True, "errors", 1)
+    before = gil_entries(m)
+    finish(m)
+    starts = sum(kind in "RW" for kind, _, _ in device.events)
+    assert gil_entries(m) - before == len(device.events) + starts
+
+
+def test_an_injected_arbitration_loss_is_alike_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, parked_device = faulty_machine(u575, "on_write", I2CError.ARBITRATION_LOST, "errors", 1)
+    parked_log = finish(m)
+    m, running_device = faulty_machine(u575, "on_write", I2CError.ARBITRATION_LOST, "errors", 1)
+
+    async def body() -> None:
+        async with m.running():
+            await m.wait_for(m.ref.var("log_len").ge(7))
+
+    with pytest.raises(popcorn.EmulationError, match=r"USER at .* errors"):
+        run_bounded(body(), 30)
+    assert log(m) == parked_log == expected_log(I2CError.ARBITRATION_LOST, "errors")
+    assert running_device.events == parked_device.events

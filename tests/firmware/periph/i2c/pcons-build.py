@@ -8,5 +8,5 @@ add_ll_firmware(
     "i2c_ll",
     [here / "i2c_ll.c"],
     ["i2c"],
-    ["idle", "eeprom_rw", "nack", "table", "reload", "dma"],
+    ["idle", "eeprom_rw", "nack", "table", "reload", "dma", "errors", "read_errors"],
 )

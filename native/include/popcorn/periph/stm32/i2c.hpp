@@ -2,6 +2,8 @@
 
 #include <popcorn/core/types.hpp>
 
+#include <reflex/enum.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -9,6 +11,40 @@
 
 namespace popcorn::periph::stm32
 {
+/**
+ * @brief A bus error a target injects for the byte it answers, RM0456 section 65.4.17 "Error
+ *        conditions". The I2C model sets the matching ISR flag at the end of that byte.
+ */
+enum class[[= reflex::derive{reflex::Format}]] i2c_error : std::uint8_t
+{
+  none,
+  bus_error,
+  arbitration_lost,
+  overrun,
+};
+
+/** @brief A target's answer to an address or to a byte the controller wrote. */
+struct i2c_reply
+{
+  /** @brief Whether the target acknowledges. Ignored with `i2c_error::arbitration_lost`. */
+  bool ack{true};
+  /** @brief The error the byte ends with, none by default. */
+  i2c_error error{};
+  /** @brief Picoseconds the target holds SCL low after the byte. Not used yet, keep 0. */
+  std::uint64_t stretch_ps{};
+};
+
+/** @brief A target's answer to a byte the controller reads. */
+struct i2c_read_reply
+{
+  /** @brief The byte the target sends. Dropped with `i2c_error::arbitration_lost`. */
+  std::uint8_t byte{0xFF};
+  /** @brief The error the byte ends with, none by default. */
+  i2c_error error{};
+  /** @brief Picoseconds the target holds SCL low after the byte. Not used yet, keep 0. */
+  std::uint64_t stretch_ps{};
+};
+
 /**
  * @brief A target on an I2C bus, addressed by its 7-bit address, driven by the I2C model of the
  *        instance it is attached to. Each call happens at the end of its bus phase. Times are the
@@ -37,24 +73,25 @@ public:
    * @brief A START or repeated START addressed the target.
    * @param read Whether the controller reads from the target.
    * @param at Virtual time since power-on at the end of the address byte.
-   * @return Whether the target acknowledges its address.
+   * @return Whether the target acknowledges its address, and the error the address byte ends
+   *         with.
    */
-  [[nodiscard]] virtual auto start(bool read, vtime at) -> bool = 0;
+  [[nodiscard]] virtual auto start(bool read, vtime at) -> i2c_reply = 0;
 
   /**
    * @brief The controller wrote one byte to the target.
    * @param byte The byte.
    * @param at Virtual time since power-on at the end of the byte.
-   * @return Whether the target acknowledges the byte.
+   * @return Whether the target acknowledges the byte, and the error the byte ends with.
    */
-  [[nodiscard]] virtual auto write(std::uint8_t byte, vtime at) -> bool = 0;
+  [[nodiscard]] virtual auto write(std::uint8_t byte, vtime at) -> i2c_reply = 0;
 
   /**
    * @brief The controller reads one byte from the target.
    * @param at Virtual time since power-on at the end of the byte.
-   * @return The byte the target sends.
+   * @return The byte the target sends, and the error the byte ends with.
    */
-  [[nodiscard]] virtual auto read(vtime at) -> std::uint8_t = 0;
+  [[nodiscard]] virtual auto read(vtime at) -> i2c_read_reply = 0;
 
   /**
    * @brief A STOP ended the transfer the target took part in.

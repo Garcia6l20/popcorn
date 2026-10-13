@@ -40,6 +40,7 @@ enum class phase : std::uint8_t
   wait_rx,
   wait_reload,
   wait_end,
+  lost,
 };
 
 struct i2c_state
@@ -85,13 +86,21 @@ auto lower(std::string_view name) -> std::string
  *        sends a STOP after the current byte. STOPF and BUSY clear at the end of the STOP. ICR
  *        clears its flags, PE = 0 resets the transfer, CR2's START, STOP, NACK and PECBYTE and
  *        the ISR flags. The event IRQ follows TXIS, RXNE, ADDR, NACKF, STOPF, TC and TCR with
- *        their enables, the error IRQ BERR, ARLO, OVR, PECERR, TIMEOUT and ALERT with ERRIE,
- *        which this model never sets. DMA requests, RM0456 section 65.7, through the GPDMA peer,
- *        low while PE is clear since PE = 0 clears their flags: `<instance>_tx_dma` follows
- *        TXIS with CR1.TXDMAEN, `<instance>_rx_dma` RXNE with CR1.RXDMAEN, `<instance>_evc_dma`
- *        TC with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets are saved and loaded
- *        with the model. Not modelled, logged once: target mode, 10-bit addressing, SMBus and
- *        PEC, the autonomous trigger.
+ *        their enables, the error IRQ BERR, ARLO, OVR, PECERR, TIMEOUT and ALERT with ERRIE. BERR,
+ *        ARLO and OVR are set only when a target's reply to an address or a byte carries that
+ *        error, at the end of that byte, RM0456 section 65.4.17: BERR and OVR leave the byte to
+ *        complete as the reply's acknowledge says, a read byte landing in RXDR. OVR exists on
+ *        silicon only in target mode with NOSTRETCH, the injection exercises firmware handlers.
+ *        ARLO releases the bus: CR2.START cleared, the byte read dropped, no NACKF, TC or STOPF,
+ *        BUSY kept 1 for one STOP length, the other controller's STOP, which clears BUSY and
+ *        CR2.STOP, ends the target's transfer and sends a START requested meanwhile. PE = 0 in
+ *        that window ends it at once, the target's STOP at the time of the write. PECERR, TIMEOUT
+ *        and ALERT are never set. DMA requests, RM0456 section 65.7, through the GPDMA
+ *        peer, low while PE is clear since PE = 0 clears their flags: `<instance>_tx_dma` follows
+ *        TXIS with CR1.TXDMAEN, `<instance>_rx_dma` RXNE with CR1.RXDMAEN, `<instance>_evc_dma` TC
+ *        with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets are saved and loaded with
+ *        the model. Not modelled, logged once: target mode, 10-bit addressing, SMBus and PEC, the
+ *        autonomous trigger.
  */
 class i2c final : public dispatch_model<i2c, i2c_state>
 {
@@ -128,19 +137,22 @@ private:
   [[nodiscard]] auto length_ps(std::uint32_t periods) -> std::uint64_t;
   [[nodiscard]] auto target_at() const -> vtime;
 
-  void enter(phase next);
-  void begin(phase next, std::uint32_t periods, std::uint64_t from_ps);
-  void begin_start(std::uint64_t from_ps);
-  void begin_stop(std::uint64_t from_ps);
-  void next_byte(std::uint64_t from_ps);
-  void after_byte(std::uint64_t from_ps);
-  void transfer_done(std::uint64_t from_ps);
-  void address_done();
-  void byte_done();
-  void stop_done();
-  void abort();
-  void flags();
-  void warn_unsupported();
+  void               enter(phase next);
+  void               begin(phase next, std::uint32_t periods, std::uint64_t from_ps);
+  void               begin_start(std::uint64_t from_ps);
+  void               begin_stop(std::uint64_t from_ps);
+  void               next_byte(std::uint64_t from_ps);
+  void               after_byte(std::uint64_t from_ps);
+  void               transfer_done(std::uint64_t from_ps);
+  void               address_done();
+  void               byte_done();
+  void               stop_done();
+  void               lost_done();
+  void               lose();
+  [[nodiscard]] auto failed(i2c_error error) -> bool;
+  void               abort();
+  void               flags();
+  void               warn_unsupported();
 
   register_file&                               regs_;
   std::vector<std::shared_ptr<i2c_target>>     targets_;
@@ -169,6 +181,9 @@ private:
   field_ref                                    stop_detected_;
   field_ref                                    nack_received_;
   field_ref                                    busy_;
+  field_ref                                    bus_error_;
+  field_ref                                    arbitration_lost_;
+  field_ref                                    overrun_;
   std::uint32_t                                command_set_only_{};
   std::uint32_t                                status_reset_mask_{};
   std::vector<std::pair<field_ref, field_ref>> clears_;
@@ -221,10 +236,12 @@ i2c::i2c(
       tx_interrupt_{field("ISR", "TXIS")}, rx_full_{field("ISR", "RXNE")},
       transfer_complete_{field("ISR", "TC")}, reload_complete_{field("ISR", "TCR")},
       stop_detected_{field("ISR", "STOPF")}, nack_received_{field("ISR", "NACKF")},
-      busy_{field("ISR", "BUSY")}, error_enable_{field("CR1", "ERRIE")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, event_line_{irq(desc.name + "_EV_IRQn")},
-      error_line_{irq(desc.name + "_ER_IRQn")}, tx_dma_enable_{field("CR1", "TXDMAEN")},
-      rx_dma_enable_{field("CR1", "RXDMAEN")}, complete_dma_enable_{field("I2C_AUTOCR", "TCDMAEN")},
+      busy_{field("ISR", "BUSY")}, bus_error_{field("ISR", "BERR")},
+      arbitration_lost_{field("ISR", "ARLO")}, overrun_{field("ISR", "OVR")},
+      error_enable_{field("CR1", "ERRIE")}, kernel_{ctx.clock.domain(lower(desc.name))},
+      event_line_{irq(desc.name + "_EV_IRQn")}, error_line_{irq(desc.name + "_ER_IRQn")},
+      tx_dma_enable_{field("CR1", "TXDMAEN")}, rx_dma_enable_{field("CR1", "RXDMAEN")},
+      complete_dma_enable_{field("I2C_AUTOCR", "TCDMAEN")},
       reload_dma_enable_{field("I2C_AUTOCR", "TCRDMAEN")},
       tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
       rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"},
@@ -413,7 +430,7 @@ void i2c::address_done()
   state_.left        = get(regs_, count_);
   state_.target      = no_target;
   auto const address = static_cast<std::uint8_t>((get(regs_, address_) >> 1) & 0x7Fu);
-  auto       ack     = false;
+  auto       reply   = i2c_reply{.ack = false};
   if(get(regs_, ten_bit_) == 0)
   {
     for(std::size_t index = 0; index < targets_.size(); ++index)
@@ -421,12 +438,16 @@ void i2c::address_done()
       if(targets_[index]->address() == address)
       {
         state_.target = static_cast<std::uint32_t>(index);
-        ack           = targets_[index]->start(state_.read != 0, target_at());
+        reply         = targets_[index]->start(state_.read != 0, target_at());
         break;
       }
     }
   }
-  if(not ack)
+  if(failed(reply.error))
+  {
+    return;
+  }
+  if(not reply.ack)
   {
     update(regs_, nack_received_, 1);
     begin_stop(state_.end_ps);
@@ -441,8 +462,13 @@ void i2c::byte_done()
   auto* const target = state_.target != no_target ? targets_[state_.target].get() : nullptr;
   if(state_.read == 0)
   {
-    auto const ack = target != nullptr and target->write(state_.shift, target_at());
-    if(not ack)
+    auto const reply =
+        target != nullptr ? target->write(state_.shift, target_at()) : i2c_reply{.ack = false};
+    if(failed(reply.error))
+    {
+      return;
+    }
+    if(not reply.ack)
     {
       update(regs_, nack_received_, 1);
       begin_stop(state_.end_ps);
@@ -451,7 +477,12 @@ void i2c::byte_done()
     after_byte(state_.end_ps);
     return;
   }
-  auto const data = target != nullptr ? target->read(target_at()) : std::uint8_t{0xFF};
+  auto const reply = target != nullptr ? target->read(target_at()) : i2c_read_reply{};
+  if(failed(reply.error))
+  {
+    return;
+  }
+  auto const data = reply.byte;
   if(get(regs_, rx_full_) != 0)
   {
     state_.rx_held = 1;
@@ -482,14 +513,61 @@ void i2c::stop_done()
   }
 }
 
+auto i2c::failed(i2c_error error) -> bool
+{
+  switch(error)
+  {
+    case i2c_error::none:
+      return false;
+    case i2c_error::bus_error:
+      update(regs_, bus_error_, 1);
+      return false;
+    case i2c_error::overrun:
+      update(regs_, overrun_, 1);
+      return false;
+    case i2c_error::arbitration_lost:
+      lose();
+      return true;
+  }
+  return false;
+}
+
+void i2c::lose()
+{
+  update(regs_, arbitration_lost_, 1);
+  update(regs_, start_, 0);
+  begin(phase::lost, stop_length, state_.end_ps);
+}
+
+void i2c::lost_done()
+{
+  enter(phase::idle);
+  update(regs_, stop_, 0);
+  update(regs_, busy_, 0);
+  if(state_.target != no_target)
+  {
+    auto const target = std::exchange(state_.target, no_target);
+    targets_[target]->stop(target_at());
+  }
+  if(get(regs_, start_) != 0)
+  {
+    begin_start(state_.end_ps);
+  }
+}
+
 void i2c::abort()
 {
   ++state_.generation;
+  auto const lost = step() == phase::lost;
   enter(phase::idle);
   state_.left    = 0;
   state_.tx_full = 0;
   state_.rx_held = 0;
-  state_.target  = no_target;
+  if(lost && state_.target != no_target)
+  {
+    targets_[state_.target]->stop(vtime{ctx_.clock.since_power_on().ps});
+  }
+  state_.target = no_target;
   regs_.poke(command_.offset, regs_.peek(command_.offset) & ~command_set_only_);
   regs_.poke(status_.offset, (regs_.peek(status_.offset) & ~status_reset_mask_) | tx_empty_.mask());
 }
@@ -630,6 +708,7 @@ void i2c::command_written(std::uint32_t old, std::uint32_t now)
     case phase::byte:
     case phase::stop:
     case phase::wait_rx:
+    case phase::lost:
       return;
   }
 }
@@ -730,6 +809,9 @@ void i2c::on_event(std::uint32_t kind, std::uint64_t payload)
       break;
     case phase::stop:
       stop_done();
+      break;
+    case phase::lost:
+      lost_done();
       break;
     case phase::idle:
     case phase::wait_tx:

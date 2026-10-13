@@ -38,7 +38,7 @@ struct host
   {
     std::vector<bool> acks;
     now += 25 * us;
-    acks.push_back(target.start(false, vtime{now}));
+    acks.push_back(target.start(false, vtime{now}).ack);
     if(not acks.back())
     {
       target.stop(vtime{now += us});
@@ -47,7 +47,7 @@ struct host
     for(auto const byte : bytes)
     {
       now += 25 * us;
-      acks.push_back(target.write(byte, vtime{now}));
+      acks.push_back(target.write(byte, vtime{now}).ack);
     }
     target.stop(vtime{now += us});
     return acks;
@@ -57,11 +57,11 @@ struct host
   {
     std::vector<std::uint8_t> out;
     now += 25 * us;
-    REQUIRE(target.start(true, vtime{now}));
+    REQUIRE(target.start(true, vtime{now}).ack);
     for(std::size_t index = 0; index < count; ++index)
     {
       now += 25 * us;
-      out.push_back(target.read(vtime{now}));
+      out.push_back(target.read(vtime{now}).byte);
     }
     if(stop)
     {
@@ -74,11 +74,11 @@ struct host
       -> std::vector<std::uint8_t>
   {
     now += 25 * us;
-    REQUIRE(target.start(false, vtime{now}));
+    REQUIRE(target.start(false, vtime{now}).ack);
     for(auto const byte : address)
     {
       now += 25 * us;
-      REQUIRE(target.write(byte, vtime{now}));
+      REQUIRE(target.write(byte, vtime{now}).ack);
     }
     return read(count);
   }
@@ -111,11 +111,11 @@ TEST_CASE("the write cycle NACKs the address until tWR has passed, to the virtua
   host                 h{eeprom};
   REQUIRE(h.write({0x00, 0xAA}) == std::vector<bool>(3, true));
   auto const stop = h.now;
-  CHECK_FALSE(eeprom.start(false, vtime{stop + 5 * ms - 1}));
+  CHECK_FALSE(eeprom.start(false, vtime{stop + 5 * ms - 1}).ack);
   eeprom.stop(vtime{stop + 5 * ms - 1});
-  CHECK_FALSE(eeprom.start(true, vtime{stop + 5 * ms - 1}));
+  CHECK_FALSE(eeprom.start(true, vtime{stop + 5 * ms - 1}).ack);
   eeprom.stop(vtime{stop + 5 * ms - 1});
-  CHECK(eeprom.start(false, vtime{stop + 5 * ms}));
+  CHECK(eeprom.start(false, vtime{stop + 5 * ms}).ack);
   eeprom.stop(vtime{stop + 5 * ms});
 }
 
@@ -124,7 +124,7 @@ TEST_CASE("a write of the word address only starts no write cycle")
   devices::eeprom_24xx eeprom{small_eeprom()};
   host                 h{eeprom};
   REQUIRE(h.write({0x40}) == std::vector<bool>(2, true));
-  CHECK(eeprom.start(true, vtime{h.now}));
+  CHECK(eeprom.start(true, vtime{h.now}).ack);
   eeprom.stop(vtime{h.now});
 }
 
@@ -132,12 +132,12 @@ TEST_CASE("a repeated START discards the data of an unfinished write")
 {
   devices::eeprom_24xx eeprom{small_eeprom()};
   host                 h{eeprom};
-  REQUIRE(eeprom.start(false, vtime{h.now}));
-  REQUIRE(eeprom.write(0x30, vtime{h.now += us}));
-  REQUIRE(eeprom.write(0x55, vtime{h.now += us}));
+  REQUIRE(eeprom.start(false, vtime{h.now}).ack);
+  REQUIRE(eeprom.write(0x30, vtime{h.now += us}).ack);
+  REQUIRE(eeprom.write(0x55, vtime{h.now += us}).ack);
   CHECK(h.read(1) == std::vector<std::uint8_t>{0xFF});
   CHECK(byte_at(eeprom, 0x30) == 0xFF);
-  CHECK(eeprom.start(false, vtime{h.now += us}));
+  CHECK(eeprom.start(false, vtime{h.now += us}).ack);
   eeprom.stop(vtime{h.now});
 }
 
@@ -176,9 +176,9 @@ TEST_CASE("save keeps the changed pages and the write cycle, load restores both"
   CHECK(byte_at(other, 0x20) == 7);
   CHECK(byte_at(other, 0x21) == 8);
   CHECK(byte_at(other, 0x22) == 0xFF);
-  CHECK_FALSE(other.start(false, vtime{h.now + 5 * ms - 1}));
-  CHECK(other.start(true, vtime{h.now + 5 * ms}));
-  CHECK(other.read(vtime{h.now + 5 * ms}) == 0xFF);
+  CHECK_FALSE(other.start(false, vtime{h.now + 5 * ms - 1}).ack);
+  CHECK(other.start(true, vtime{h.now + 5 * ms}).ack);
+  CHECK(other.read(vtime{h.now + 5 * ms}).byte == 0xFF);
 
   devices::eeprom_24xx bigger{{.size = 65536}};
   CHECK_THROWS_AS(bigger.load(saved), popcorn::config_error);
@@ -251,9 +251,9 @@ TEST_CASE("a table target can refuse reads of registers without a reply")
   };
   host h{table};
   CHECK(h.random_read({0x10}, 1) == std::vector<std::uint8_t>{0xAB});
-  REQUIRE(table.start(false, vtime{h.now += us}));
-  REQUIRE(table.write(0x11, vtime{h.now += us}));
-  CHECK_FALSE(table.start(true, vtime{h.now += us}));
+  REQUIRE(table.start(false, vtime{h.now += us}).ack);
+  REQUIRE(table.write(0x11, vtime{h.now += us}).ack);
+  CHECK_FALSE(table.start(true, vtime{h.now += us}).ack);
   table.stop(vtime{h.now += us});
   CHECK(table.writes().empty());
 }
@@ -265,14 +265,14 @@ TEST_CASE("a table target saves and loads its recorded writes and the transfer i
   host                                h{table};
   REQUIRE(h.write({0x01, 0x99}) == std::vector<bool>(3, true));
   REQUIRE(h.random_read({0x05}, 1) == std::vector<std::uint8_t>{1});
-  REQUIRE(table.start(true, vtime{h.now += us}));
-  REQUIRE(table.read(vtime{h.now += us}) == 1);
+  REQUIRE(table.start(true, vtime{h.now += us}).ack);
+  REQUIRE(table.read(vtime{h.now += us}).byte == 1);
   std::vector<std::byte> saved;
   table.save(saved);
 
   devices::table_target other{options};
   other.load(saved);
-  CHECK(other.read(vtime{h.now += us}) == 2);
+  CHECK(other.read(vtime{h.now += us}).byte == 2);
   REQUIRE(other.writes().size() == 1);
   CHECK(other.writes()[0] == devices::table_write{.reg = 0x01, .bytes = {0x99}});
 }
@@ -290,12 +290,12 @@ TEST_CASE("table target options outside the bus limits are refused")
 TEST_CASE("a repeated START ends a table write, the next one starts with its own register")
 {
   devices::table_target table{{.address = 0x38}};
-  REQUIRE(table.start(false, vtime{us}));
-  REQUIRE(table.write(0x10, vtime{2 * us}));
-  REQUIRE(table.write(0xAA, vtime{3 * us}));
-  REQUIRE(table.start(false, vtime{4 * us}));
-  REQUIRE(table.write(0x11, vtime{5 * us}));
-  REQUIRE(table.write(0xBB, vtime{6 * us}));
+  REQUIRE(table.start(false, vtime{us}).ack);
+  REQUIRE(table.write(0x10, vtime{2 * us}).ack);
+  REQUIRE(table.write(0xAA, vtime{3 * us}).ack);
+  REQUIRE(table.start(false, vtime{4 * us}).ack);
+  REQUIRE(table.write(0x11, vtime{5 * us}).ack);
+  REQUIRE(table.write(0xBB, vtime{6 * us}).ack);
   table.stop(vtime{7 * us});
   REQUIRE(table.writes().size() == 2);
   CHECK(table.writes()[0] == devices::table_write{.reg = 0x10, .bytes = {0xAA}});
@@ -312,7 +312,7 @@ TEST_CASE("a power-on reset during tWR lets the EEPROM answer at once in the new
     REQUIRE(h.write({0x00, 0x11}) == std::vector<bool>(3, true));
     h.now += 5 * ms;
     REQUIRE(h.write({0x20, 0xAA, 0xBB}) == std::vector<bool>(4, true));
-    CHECK_FALSE(eeprom.start(false, vtime{h.now += us}));
+    CHECK_FALSE(eeprom.start(false, vtime{h.now += us}).ack);
     eeprom.stop(vtime{h.now += us});
     eeprom.reset(kind);
     h.now = us;
@@ -328,7 +328,7 @@ TEST_CASE("a reset of another kind leaves the EEPROM in its write cycle")
   host                 h{eeprom};
   REQUIRE(h.write({0x20, 0xAA}) == std::vector<bool>(3, true));
   eeprom.reset(reset_kind::software);
-  CHECK_FALSE(eeprom.start(false, vtime{h.now += us}));
+  CHECK_FALSE(eeprom.start(false, vtime{h.now += us}).ack);
   eeprom.stop(vtime{h.now += us});
 }
 
@@ -340,9 +340,9 @@ TEST_CASE("a power-on reset drops the table write in progress and keeps the reco
     devices::table_target table{{.address = 0x38}};
     host                  h{table};
     REQUIRE(h.write({0x01, 0x99}) == std::vector<bool>(3, true));
-    REQUIRE(table.start(false, vtime{h.now += us}));
-    REQUIRE(table.write(0x02, vtime{h.now += us}));
-    REQUIRE(table.write(0x77, vtime{h.now += us}));
+    REQUIRE(table.start(false, vtime{h.now += us}).ack);
+    REQUIRE(table.write(0x02, vtime{h.now += us}).ack);
+    REQUIRE(table.write(0x77, vtime{h.now += us}).ack);
     table.reset(kind);
     table.stop(vtime{h.now += us});
     auto const kept = kind == reset_kind::power_on ? 1u : 2u;

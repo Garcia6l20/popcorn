@@ -6,6 +6,8 @@
 #define EEPROM_ADDRESS    (0x50u << 1)
 #define TABLE_ADDRESS     (0x38u << 1)
 #define ABSENT_ADDRESS    (0x2Au << 1)
+#define FAULTY_ADDRESS    (0x33u << 1)
+#define ERROR_FLAGS       (I2C_ISR_BERR | I2C_ISR_ARLO | I2C_ISR_OVR)
 #define TIMING_400K_AT_4M 0x00100305u
 
 static uint8_t           buffer[300];
@@ -13,8 +15,14 @@ static volatile uint32_t nack_entries;
 static volatile uint32_t stop_entries;
 static volatile uint32_t event_entries;
 static volatile uint32_t dma_done;
+static volatile uint32_t error_entries;
+static volatile uint32_t error_flags;
+static volatile uint32_t failed;
 
 void I2C1_EV_IRQHandler(void);
+void I2C1_ER_IRQHandler(void);
+void errors(void);
+void read_errors(void);
 void idle(void);
 void eeprom_rw(void);
 void nack(void);
@@ -276,6 +284,125 @@ void dma(void)
   }
   LOG(equal);
   LOG(dma_done);
+  DONE();
+}
+
+void I2C1_ER_IRQHandler(void)
+{
+  ++error_entries;
+  uint32_t const flags = I2C1->ISR & ERROR_FLAGS;
+  error_flags |= flags;
+  if(flags & I2C_ISR_BERR)
+  {
+    LL_I2C_ClearFlag_BERR(I2C1);
+  }
+  if(flags & I2C_ISR_ARLO)
+  {
+    LL_I2C_ClearFlag_ARLO(I2C1);
+  }
+  if(flags & I2C_ISR_OVR)
+  {
+    LL_I2C_ClearFlag_OVR(I2C1);
+  }
+  failed = 1;
+}
+
+static uint32_t attempt(uint32_t direction, uint8_t* bytes, uint32_t count)
+{
+  failed = 0;
+  LL_I2C_HandleTransfer(
+      I2C1, FAULTY_ADDRESS, LL_I2C_ADDRSLAVE_7BIT, count, LL_I2C_MODE_AUTOEND, direction);
+  for(uint32_t index = 0; index < count; ++index)
+  {
+    if(direction == LL_I2C_GENERATE_START_WRITE)
+    {
+      while(!LL_I2C_IsActiveFlag_TXIS(I2C1) && !failed)
+      {
+      }
+      if(failed)
+      {
+        return 0;
+      }
+      LL_I2C_TransmitData8(I2C1, bytes[index]);
+    }
+    else
+    {
+      while(!LL_I2C_IsActiveFlag_RXNE(I2C1) && !failed)
+      {
+      }
+      if(failed)
+      {
+        return 0;
+      }
+      bytes[index] = LL_I2C_ReceiveData8(I2C1);
+    }
+  }
+  while(!LL_I2C_IsActiveFlag_STOP(I2C1) && !failed)
+  {
+  }
+  if(failed)
+  {
+    return 0;
+  }
+  LL_I2C_ClearFlag_STOP(I2C1);
+  return 1;
+}
+
+static void recover(void)
+{
+  LL_I2C_ClearFlag_TXE(I2C1);
+  if(error_flags & I2C_ISR_ARLO)
+  {
+    while(LL_I2C_IsActiveFlag_BUSY(I2C1))
+    {
+    }
+    return;
+  }
+  LL_I2C_Disable(I2C1);
+  LL_I2C_Enable(I2C1);
+}
+
+static void serve_errors(uint32_t direction, uint8_t* bytes)
+{
+  configure();
+  LL_I2C_EnableIT_ERR(I2C1);
+  NVIC_EnableIRQ(I2C1_ER_IRQn);
+  uint32_t attempts         = 0;
+  uint32_t busy_after_error = 0;
+  for(;;)
+  {
+    ++attempts;
+    if(attempt(direction, bytes, 2))
+    {
+      break;
+    }
+    busy_after_error = LL_I2C_IsActiveFlag_BUSY(I2C1);
+    recover();
+    if(attempts == 4)
+    {
+      FAIL(attempts);
+    }
+  }
+  LOG(attempts);
+  LOG(error_entries);
+  LOG(error_flags);
+  LOG(busy_after_error);
+  LOG(LL_I2C_IsActiveFlag_BUSY(I2C1));
+  LOG(I2C1->ISR & ERROR_FLAGS);
+}
+
+void errors(void)
+{
+  static uint8_t bytes[2] = {0xA5, 0x5A};
+  serve_errors(LL_I2C_GENERATE_START_WRITE, bytes);
+  DONE();
+}
+
+void read_errors(void)
+{
+  serve_errors(LL_I2C_GENERATE_START_READ, buffer);
+  LOG(buffer[0]);
+  LOG(buffer[1]);
   DONE();
 }
 

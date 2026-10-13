@@ -56,6 +56,28 @@ template <typename T> auto or_value(std::optional<nb::object> const& result, T n
   return result ? nb::cast<T>(*result) : neutral;
 }
 
+auto reply_of(std::optional<nb::object> const& result) -> stm32::i2c_reply
+{
+  if(not result)
+  {
+    return {.ack = false};
+  }
+  auto const [ack, error, stretch] =
+      nb::cast<std::tuple<bool, std::uint8_t, std::uint64_t>>(*result);
+  return {.ack = ack, .error = static_cast<stm32::i2c_error>(error), .stretch_ps = stretch};
+}
+
+auto read_reply_of(std::optional<nb::object> const& result) -> stm32::i2c_read_reply
+{
+  if(not result)
+  {
+    return {.byte = 0};
+  }
+  auto const [byte, error, stretch] =
+      nb::cast<std::tuple<std::uint8_t, std::uint8_t, std::uint64_t>>(*result);
+  return {.byte = byte, .error = static_cast<stm32::i2c_error>(error), .stretch_ps = stretch};
+}
+
 void append(std::optional<nb::object> const& result, std::vector<std::byte>& out)
 {
   if(not result)
@@ -70,10 +92,12 @@ void append(std::optional<nb::object> const& result, std::vector<std::byte>& out
 /**
  * @brief nanobind trampoline letting a Python class implement stm32::i2c_target through the
  *        private methods `_address`, `_start`, `_write`, `_read`, `_stop`, `_reset`, `_save` and
- *        `_load` that `popcorn.board.I2CTarget` defines, which check the values returned. Every
- *        call takes the GIL. Times cross as picoseconds since power-on. Once its machine's
- *        Python side is collected no method is called: the run is asked to stop, the address
- *        matches nothing, `_start` and `_write` NACK, a read returns 0.
+ *        `_load` that `popcorn.board.I2CTarget` defines, which check the values returned:
+ *        `_start` and `_write` return (ack, error, stretch_ps), `_read` (byte, error,
+ *        stretch_ps), error an i2c_error value. Every call takes the GIL. Times cross as
+ *        picoseconds since power-on. Once its machine's Python side is collected no method is
+ *        called: the run is asked to stop, the address matches nothing, `_start` and `_write`
+ *        NACK, a read returns 0.
  */
 class python_i2c_target final : public stm32::i2c_target
 {
@@ -86,22 +110,22 @@ public:
     return or_value<std::uint8_t>(call(nb_trampoline, cell, "_address"), no_address);
   }
 
-  [[nodiscard]] auto start(bool read, vtime at) -> bool override
+  [[nodiscard]] auto start(bool read, vtime at) -> stm32::i2c_reply override
   {
     gil_entry const gil;
-    return or_value(call(nb_trampoline, cell, "_start", read, at.ps), false);
+    return reply_of(call(nb_trampoline, cell, "_start", read, at.ps));
   }
 
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> bool override
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
   {
     gil_entry const gil;
-    return or_value(call(nb_trampoline, cell, "_write", byte, at.ps), false);
+    return reply_of(call(nb_trampoline, cell, "_write", byte, at.ps));
   }
 
-  [[nodiscard]] auto read(vtime at) -> std::uint8_t override
+  [[nodiscard]] auto read(vtime at) -> stm32::i2c_read_reply override
   {
     gil_entry const gil;
-    return or_value<std::uint8_t>(call(nb_trampoline, cell, "_read", at.ps), 0);
+    return read_reply_of(call(nb_trampoline, cell, "_read", at.ps));
   }
 
   void stop(vtime at) override
@@ -221,22 +245,22 @@ public:
     return or_value<std::uint8_t>(device_->via(cell, "_address"), no_address);
   }
 
-  [[nodiscard]] auto start(bool read, vtime at) -> bool override
+  [[nodiscard]] auto start(bool read, vtime at) -> stm32::i2c_reply override
   {
     gil_entry const gil;
-    return or_value(device_->via(cell, "_start", read, at.ps), false);
+    return reply_of(device_->via(cell, "_start", read, at.ps));
   }
 
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> bool override
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
   {
     gil_entry const gil;
-    return or_value(device_->via(cell, "_write", byte, at.ps), false);
+    return reply_of(device_->via(cell, "_write", byte, at.ps));
   }
 
-  [[nodiscard]] auto read(vtime at) -> std::uint8_t override
+  [[nodiscard]] auto read(vtime at) -> stm32::i2c_read_reply override
   {
     gil_entry const gil;
-    return or_value<std::uint8_t>(device_->via(cell, "_read", at.ps), 0);
+    return read_reply_of(device_->via(cell, "_read", at.ps));
   }
 
   void stop(vtime at) override

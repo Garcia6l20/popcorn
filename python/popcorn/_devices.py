@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import cast
 
 from popcorn import _core
-from popcorn._enums import ResetKind
+from popcorn._enums import I2CError, ResetKind
 from popcorn._errors import ConfigError, ModelError
 from popcorn._state import StateReader, declared_fields, encode
 from popcorn.units import VirtualTime
@@ -65,16 +65,30 @@ def _saved(device: object, data: object) -> bytes:
     return bytes(typing.cast("bytes | bytearray | memoryview[int]", data))
 
 
-def _flag(device: object, method: str, value: object) -> bool:
-    if not isinstance(value, bool):
-        raise ModelError(f"{device!r}: {method}() returned a {type(value).__name__}, not a bool")
-    return value
-
-
 def _word(device: object, method: str, value: object, bits: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 1 << bits:
         raise ModelError(f"{device!r}: {method}() returned {value!r}, not a {bits}-bit int")
     return value
+
+
+def _reply(device: object, method: str, value: object) -> tuple[bool, int, int]:
+    if isinstance(value, I2CError):
+        return True, value.value, 0
+    if not isinstance(value, bool):
+        raise ModelError(
+            f"{device!r}: {method}() returned a {type(value).__name__}, not a bool or an I2CError"
+        )
+    return value, 0, 0
+
+
+def _read_reply(device: object, method: str, value: object) -> tuple[int, int, int]:
+    if isinstance(value, I2CError):
+        return 0xFF, value.value, 0
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 0x100:
+        raise ModelError(
+            f"{device!r}: {method}() returned {value!r}, not an 8-bit int or an I2CError"
+        )
+    return value, 0, 0
 
 
 type BusDevice = _core.I2CTargetBase | _core.SpiTargetBase
@@ -175,6 +189,14 @@ class I2CTarget(_core.I2CTargetBase):
 
     Lifetime: a target serves one machine at a time and must not keep a reference to it. It may
     keep its `board`, which holds no machine.
+
+    Errors: a hook returning an `I2CError` makes the byte it answers end with that error. The I2C
+    model sets the matching ISR flag at the end of that byte and raises the error IRQ when ERRIE
+    is set. Nothing is armed for a later byte. `BUS_ERROR` and `OVERRUN` leave the transfer
+    running, the byte acknowledged, a read byte 0xFF. `ARBITRATION_LOST` ends the transfer for the
+    controller: CR2.START cleared, no NACKF, TC or STOPF, BUSY 1 for one STOP length, then
+    `on_stop`, which a PE clear inside that window delivers at the time of the write. Raising from
+    a hook is not an injection: it stops the run as a handler error.
     """
 
     def __init__(self, address: int) -> None:
@@ -197,24 +219,40 @@ class I2CTarget(_core.I2CTargetBase):
         """What the target may drive on the board of the machine it serves."""
         return DeviceBoard(self)
 
-    def on_start(self, read: bool, at: VirtualTime) -> bool:
+    def on_start(self, read: bool, at: VirtualTime) -> bool | I2CError:
         """A START or repeated START addressed the target, `read` for a read transfer.
 
         Returns:
-            Whether the target acknowledges. True by default.
+            Whether the target acknowledges, True by default, or the `I2CError` the address
+            byte ends with.
+
+        Raises:
+            ModelError: From the run, when it returns anything else.
         """
         return True
 
-    def on_write(self, byte: int, at: VirtualTime) -> bool:
+    def on_write(self, byte: int, at: VirtualTime) -> bool | I2CError:
         """The controller wrote `byte`.
 
         Returns:
-            Whether the target acknowledges it. True by default.
+            Whether the target acknowledges it, True by default, or the `I2CError` the byte ends
+            with.
+
+        Raises:
+            ModelError: From the run, when it returns anything else.
         """
         return True
 
-    def on_read(self, at: VirtualTime) -> int:
-        """The byte the target sends to the controller, 0xFF by default."""
+    def on_read(self, at: VirtualTime) -> int | I2CError:
+        """The controller reads a byte.
+
+        Returns:
+            The byte the target sends, 0 to 0xFF, 0xFF by default, or the `I2CError` the byte
+            ends with.
+
+        Raises:
+            ModelError: From the run, when it returns anything else.
+        """
         return 0xFF
 
     def on_stop(self, at: VirtualTime) -> None:
@@ -234,14 +272,14 @@ class I2CTarget(_core.I2CTargetBase):
     def _address(self) -> int:
         return self._bus_address
 
-    def _start(self, read: bool, at: int) -> bool:
-        return _flag(self, "on_start", self.on_start(read, VirtualTime(at)))
+    def _start(self, read: bool, at: int) -> tuple[bool, int, int]:
+        return _reply(self, "on_start", self.on_start(read, VirtualTime(at)))
 
-    def _write(self, byte: int, at: int) -> bool:
-        return _flag(self, "on_write", self.on_write(byte, VirtualTime(at)))
+    def _write(self, byte: int, at: int) -> tuple[bool, int, int]:
+        return _reply(self, "on_write", self.on_write(byte, VirtualTime(at)))
 
-    def _read(self, at: int) -> int:
-        return _word(self, "on_read", self.on_read(VirtualTime(at)), 8)
+    def _read(self, at: int) -> tuple[int, int, int]:
+        return _read_reply(self, "on_read", self.on_read(VirtualTime(at)))
 
     def _stop(self, at: int) -> None:
         self.on_stop(VirtualTime(at))

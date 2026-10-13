@@ -69,3 +69,16 @@ class PinMode(enum.Enum):
     OUTPUT = 1
     ALTERNATE = 2
     ANALOG = 3
+
+
+class I2CError(enum.Enum):
+    """An error an `I2CTarget` hook returns for the byte it answers, RM0456 65.4.17."""
+
+    BUS_ERROR = 1
+    """ISR.BERR: a misplaced START or STOP. The byte completes as if acknowledged."""
+    ARBITRATION_LOST = 2
+    """ISR.ARLO: another controller won the bus. The controller releases it and BUSY clears one
+    STOP length later, at the other controller's STOP."""
+    OVERRUN = 3
+    """ISR.OVR: an overrun or underrun. Set on silicon only in target mode with NOSTRETCH, so
+    this exercises firmware handlers. The byte completes as if acknowledged."""

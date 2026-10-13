@@ -76,7 +76,7 @@ auto table_target::address() const -> std::uint8_t
   return impl_->options.address;
 }
 
-auto table_target::start(bool read, vtime) -> bool
+auto table_target::start(bool read, vtime) -> stm32::i2c_reply
 {
   auto& self = *impl_;
   self.end_write();
@@ -84,48 +84,48 @@ auto table_target::start(bool read, vtime) -> bool
   {
     if(self.options.nack_unknown and not self.options.replies.contains(self.state.reg))
     {
-      return false;
+      return {.ack = false};
     }
     self.state.reading  = 1;
     self.state.position = 0;
-    return true;
+    return {.ack = true};
   }
   self.state.writing       = 1;
   self.state.address_count = 0;
   self.state.reg           = 0;
-  return true;
+  return {.ack = true};
 }
 
-auto table_target::write(std::uint8_t byte, vtime) -> bool
+auto table_target::write(std::uint8_t byte, vtime) -> stm32::i2c_reply
 {
   auto& self = *impl_;
   if(self.state.writing == 0)
   {
-    return false;
+    return {.ack = false};
   }
   if(self.state.address_count < self.options.register_bytes)
   {
     self.state.reg = (self.state.reg << 8) | byte;
     ++self.state.address_count;
-    return true;
+    return {.ack = true};
   }
   self.state.data.push_back(byte);
-  return true;
+  return {.ack = true};
 }
 
-auto table_target::read(vtime) -> std::uint8_t
+auto table_target::read(vtime) -> stm32::i2c_read_reply
 {
   auto& self = *impl_;
   if(self.state.reading == 0)
   {
-    return 0xFF;
+    return {.byte = 0xFF};
   }
   auto const found = self.options.replies.find(self.state.reg);
   if(found == self.options.replies.end() or self.state.position >= found->second.size())
   {
-    return 0xFF;
+    return {.byte = 0xFF};
   }
-  return found->second[self.state.position++];
+  return {.byte = found->second[self.state.position++]};
 }
 
 void table_target::stop(vtime)

@@ -12,6 +12,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -72,25 +73,25 @@ public:
     return inner->address();
   }
 
-  auto start(bool read, vtime at) -> bool override
+  auto start(bool read, vtime at) -> stm32::i2c_reply override
   {
-    auto const ack = inner->start(read, at);
-    events.push_back({ack ? (read ? 'R' : 'W') : 'N', 0, at.ps});
-    return ack;
+    auto const reply = inner->start(read, at);
+    events.push_back({reply.ack ? (read ? 'R' : 'W') : 'N', 0, at.ps});
+    return reply;
   }
 
-  auto write(std::uint8_t byte, vtime at) -> bool override
+  auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
   {
-    auto const ack = inner->write(byte, at);
-    events.push_back({ack ? 'w' : 'n', byte, at.ps});
-    return ack;
+    auto const reply = inner->write(byte, at);
+    events.push_back({reply.ack ? 'w' : 'n', byte, at.ps});
+    return reply;
   }
 
-  auto read(vtime at) -> std::uint8_t override
+  auto read(vtime at) -> stm32::i2c_read_reply override
   {
-    auto const byte = inner->read(at);
-    events.push_back({'r', byte, at.ps});
-    return byte;
+    auto const reply = inner->read(at);
+    events.push_back({'r', reply.byte, at.ps});
+    return reply;
   }
 
   void stop(vtime at) override
@@ -129,20 +130,20 @@ public:
     return 0x21;
   }
 
-  auto start(bool, vtime) -> bool override
+  auto start(bool, vtime) -> stm32::i2c_reply override
   {
     written = 0;
-    return true;
+    return {.ack = true};
   }
 
-  auto write(std::uint8_t, vtime) -> bool override
+  auto write(std::uint8_t, vtime) -> stm32::i2c_reply override
   {
-    return written++ == 0;
+    return {.ack = written++ == 0};
   }
 
-  auto read(vtime) -> std::uint8_t override
+  auto read(vtime) -> stm32::i2c_read_reply override
   {
-    return 0;
+    return {.byte = 0};
   }
 
   void stop(vtime) override
@@ -156,6 +157,73 @@ public:
   void load(std::span<std::byte const> in) override
   {
     written = in.empty() ? 0 : std::to_integer<std::uint32_t>(in.front());
+  }
+};
+
+class faulty_target final : public stm32::i2c_target
+{
+public:
+  stm32::i2c_error       error{};
+  std::uint32_t          at_call{};
+  std::uint32_t          shots{1};
+  std::uint32_t          calls{};
+  std::vector<bus_event> events;
+
+  [[nodiscard]] auto address() const -> std::uint8_t override
+  {
+    return 0x33;
+  }
+
+  auto start(bool read, vtime at) -> stm32::i2c_reply override
+  {
+    calls = 0;
+    events.push_back({read ? 'R' : 'W', 0, at.ps});
+    return {.ack = true, .error = pick()};
+  }
+
+  auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
+  {
+    ++calls;
+    events.push_back({'w', byte, at.ps});
+    return {.ack = true, .error = pick()};
+  }
+
+  auto read(vtime at) -> stm32::i2c_read_reply override
+  {
+    ++calls;
+    events.push_back({'r', 0x5A, at.ps});
+    return {.byte = 0x5A, .error = pick()};
+  }
+
+  void stop(vtime at) override
+  {
+    events.push_back({'P', 0, at.ps});
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    for(auto const value : {calls, shots})
+    {
+      out.push_back(static_cast<std::byte>(value));
+    }
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    REQUIRE(in.size() == 2);
+    calls = std::to_integer<std::uint32_t>(in[0]);
+    shots = std::to_integer<std::uint32_t>(in[1]);
+  }
+
+private:
+  auto pick() -> stm32::i2c_error
+  {
+    if(calls != at_call or shots == 0)
+    {
+      return stm32::i2c_error::none;
+    }
+    --shots;
+    return error;
   }
 };
 
@@ -275,6 +343,7 @@ struct rig
   std::shared_ptr<recorded_target> table  = std::make_shared<recorded_target>(script);
   std::shared_ptr<recorded_target> picky =
       std::make_shared<recorded_target>(std::make_shared<picky_target>());
+  std::shared_ptr<faulty_target> faulty = std::make_shared<faulty_target>();
   std::shared_ptr<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>> resets =
       std::make_shared<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>>();
   stm32::board                   board{};
@@ -285,7 +354,7 @@ struct rig
     memory->resets    = resets;
     table->resets     = resets;
     picky->resets     = resets;
-    board.i2c["I2C1"] = {memory, table, picky};
+    board.i2c["I2C1"] = {memory, table, picky, faulty};
     auto options      = popcorn::testing::stm32_options();
     options.models    = stm32::factories(board, u575());
     if(probe)
@@ -1139,4 +1208,341 @@ TEST_CASE("setting AUTOCR.TRIGEN logs the unmodelled trigger once, at the write"
   CHECK(logged[0].message.contains("trigger"));
   b.set("I2C_AUTOCR", "TRIGPOL", 1);
   CHECK(logged.size() == 1);
+}
+
+namespace
+{
+struct injected
+{
+  stm32::i2c_error error;
+  std::string_view flag;
+  std::string_view clear;
+  std::uint32_t    bit;
+};
+
+constexpr std::array<injected, 3> injections{
+    {
+     {stm32::i2c_error::bus_error, "BERR", "BERRCF", 1u << 8},
+     {stm32::i2c_error::arbitration_lost, "ARLO", "ARLOCF", 1u << 9},
+     {stm32::i2c_error::overrun, "OVR", "OVRCF", 1u << 10},
+     }
+};
+
+constexpr std::uint32_t error_irq = 56;
+
+void unpend(stm32_fixture const& f, std::uint32_t irq)
+{
+  REQUIRE(f.target->mem().write(0xe000'e280u + 4 * (irq / 32), 4, 1u << (irq % 32)).has_value());
+}
+
+auto data_events(std::vector<bus_event> const& events) -> std::size_t
+{
+  return static_cast<std::size_t>(std::ranges::count_if(
+      events, [](bus_event const& e) { return e.kind == 'w' or e.kind == 'r'; }));
+}
+}
+
+TEST_CASE("a target's BERR, ARLO or OVR sets its ISR flag at the end of the byte it answered")
+{
+  for(auto const& kind : injections)
+  {
+    for(auto const read : {false, true})
+    {
+      for(auto const at_call : {0u, 1u})
+      {
+        CAPTURE(kind.flag);
+        CAPTURE(read);
+        CAPTURE(at_call);
+        rig r{"idle"};
+        bus b{*r.f};
+        b.controller();
+        r.faulty->error   = kind.error;
+        r.faulty->at_call = at_call;
+        if(not read)
+        {
+          b.send(0x11);
+        }
+        b.command(0x33, 2, read, false);
+        auto const start = b.now();
+        auto const end   = start + address_ps + at_call * byte_ps;
+        b.run_until(end - period_ps / 2);
+        CHECK(b.get("ISR", kind.flag) == 0);
+        if(not read and at_call == 1)
+        {
+          b.send(0x22);
+        }
+        b.run_until(end + period_ps / 2);
+        CHECK(b.get("ISR", kind.flag) == 1);
+        if(not read and at_call == 0)
+        {
+          b.send(0x22);
+        }
+        CHECK_FALSE(pending(*r.f, error_irq));
+        b.set("CR1", "ERRIE", 1);
+        CHECK(pending(*r.f, error_irq));
+        unpend(*r.f, error_irq);
+        CHECK(pending(*r.f, error_irq));
+        if(kind.error == stm32::i2c_error::arbitration_lost)
+        {
+          CHECK(b.get("CR2", "START") == 0);
+          CHECK(b.get("ISR", "BUSY") == 1);
+          CHECK(b.get("ISR", "NACKF") == 0);
+          CHECK(b.get("ISR", "TXIS") == 0);
+          CHECK(b.get("ISR", "RXNE") == 0);
+          auto const seen = r.faulty->events.size();
+          b.run_until(end + period_ps - period_ps / 4);
+          CHECK(b.get("ISR", "BUSY") == 1);
+          b.run_until(end + period_ps + period_ps / 4);
+          CHECK(b.get("ISR", "BUSY") == 0);
+          REQUIRE(r.faulty->events.size() == seen + 1);
+          CHECK(r.faulty->events.back().kind == 'P');
+          b.run_until(end + 4 * byte_ps);
+          CHECK(r.faulty->events.size() == seen + 1);
+          CHECK(data_events(r.faulty->events) == at_call);
+          CHECK(b.get("ISR", "STOPF") == 0);
+          CHECK(b.get("ISR", "TC") == 0);
+          CHECK(b.get("ISR", "NACKF") == 0);
+        }
+        else
+        {
+          if(read)
+          {
+            if(at_call == 0)
+            {
+              b.run_until(start + address_ps + byte_ps + period_ps / 2);
+            }
+            CHECK(b.receive() == 0x5A);
+          }
+          b.run_until(start + address_ps + 2 * byte_ps + period_ps / 2);
+          CHECK(b.get("ISR", "TC") == 1);
+          CHECK(b.get("ISR", "BUSY") == 1);
+          CHECK(data_events(r.faulty->events) == 2);
+        }
+        b.set("ICR", kind.clear, 1);
+        CHECK(b.get("ISR", kind.flag) == 0);
+        unpend(*r.f, error_irq);
+        CHECK_FALSE(pending(*r.f, error_irq));
+      }
+    }
+  }
+}
+
+TEST_CASE("a START written while a lost arbitration holds BUSY is sent at the other STOP")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  b.command(0x33, 1, true, true);
+  auto const end = b.now() + address_ps;
+  b.run_until(end + period_ps / 2);
+  REQUIRE(b.get("ISR", "ARLO") == 1);
+  b.command(0x38, 0, false, true);
+  CHECK(b.get("CR2", "START") == 1);
+  b.run_until(end + period_ps + address_ps + period_ps / 2);
+  REQUIRE(r.faulty->events.size() == 2);
+  CHECK(r.faulty->events[1] == bus_event{'P', 0, r.faulty->events[0].at + period_ps});
+  REQUIRE(r.table->events.size() == 1);
+  CHECK(r.table->events[0].kind == 'W');
+  CHECK(r.table->events[0].at - r.faulty->events[1].at == address_ps);
+  CHECK(b.get("ISR", "ARLO") == 1);
+}
+
+TEST_CASE("clearing PE inside a lost arbitration gives the target its STOP")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  b.command(0x33, 1, true, true);
+  auto const end = b.now() + address_ps;
+  b.run_until(end + period_ps / 2);
+  REQUIRE(b.get("ISR", "BUSY") == 1);
+  auto const written = b.now();
+  b.set("CR1", "PE", 0);
+  CHECK(b.get("ISR", "BUSY") == 0);
+  CHECK(b.get("ISR", "ARLO") == 0);
+  b.run_until(end + 4 * period_ps);
+  REQUIRE(r.faulty->events.size() == 2);
+  CHECK(r.faulty->events[1] == bus_event{'P', 0, written});
+  b.set("CR1", "PE", 1);
+  CHECK(b.get("ISR", "BUSY") == 0);
+}
+
+TEST_CASE("CR2.STOP set inside a lost arbitration is cleared at its end")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  b.command(0x33, 1, true, true);
+  auto const end = b.now() + address_ps;
+  b.run_until(end + period_ps / 2);
+  REQUIRE(b.get("ISR", "ARLO") == 1);
+  b.command(0x38, 2, false, true);
+  b.set("CR2", "STOP", 1);
+  CHECK(b.get("CR2", "STOP") == 1);
+  auto const freed = end + period_ps;
+  b.run_until(freed + period_ps / 2);
+  CHECK(b.get("CR2", "STOP") == 0);
+  b.run_until(freed + address_ps + period_ps / 2);
+  b.send(0x10);
+  b.run_until(freed + address_ps + byte_ps + period_ps / 2);
+  b.send(0x20);
+  b.run_until(freed + address_ps + 2 * byte_ps + 2 * period_ps);
+  CHECK(
+      r.table->events
+      == std::vector<bus_event>{
+          {'W', 0,    r.table->events[0].at},
+          {'w', 0x10, r.table->events[1].at},
+          {'w', 0x20, r.table->events[2].at},
+          {'P', 0,    r.table->events[3].at}
+  });
+}
+
+TEST_CASE("the DMA requests after an injected error follow TXIS and RXNE as without one")
+{
+  constexpr std::uint32_t rx_request = 12;
+  constexpr std::uint32_t tx_request = 13;
+  for(auto const& kind : injections)
+  {
+    CAPTURE(kind.flag);
+    auto const lost = kind.error == stm32::i2c_error::arbitration_lost;
+    {
+      rig r{"idle", true};
+      bus b{*r.f};
+      b.controller();
+      r.faulty->error   = kind.error;
+      r.faulty->at_call = 1;
+      b.set("CR1", "TXDMAEN", 1);
+      b.command(0x33, 3, false, false);
+      auto const start = b.now();
+      b.run_until(start + address_ps + period_ps / 2);
+      REQUIRE(r.level(tx_request));
+      b.send(0x11);
+      CHECK(r.level(tx_request));
+      b.run_until(start + address_ps + byte_ps + period_ps / 2);
+      REQUIRE(b.get("ISR", kind.flag) == 1);
+      CHECK(r.level(tx_request) == not lost);
+      CHECK(b.get("ISR", "TXIS") == (lost ? 0u : 1u));
+    }
+    {
+      rig r{"idle", true};
+      bus b{*r.f};
+      b.controller();
+      r.faulty->error   = kind.error;
+      r.faulty->at_call = 1;
+      b.set("CR1", "RXDMAEN", 1);
+      b.command(0x33, 2, true, false);
+      auto const start = b.now();
+      b.run_until(start + address_ps + byte_ps + period_ps / 2);
+      REQUIRE(b.get("ISR", kind.flag) == 1);
+      CHECK(r.level(rx_request) == not lost);
+      CHECK(b.get("ISR", "RXNE") == (lost ? 0u : 1u));
+    }
+  }
+}
+
+TEST_CASE("a snapshot before the erring byte or inside the lost BUSY restores the same flags")
+{
+  struct probe
+  {
+    std::uint32_t flag;
+    std::uint32_t busy;
+  };
+  for(auto const& kind : injections)
+  {
+    for(auto const inside : {false, true})
+    {
+      CAPTURE(kind.flag);
+      CAPTURE(inside);
+      if(inside and kind.error != stm32::i2c_error::arbitration_lost)
+      {
+        continue;
+      }
+      rig r{"idle"};
+      bus b{*r.f};
+      b.controller();
+      r.faulty->error   = kind.error;
+      r.faulty->at_call = 1;
+      b.command(0x33, 2, true, true);
+      auto const start = b.now();
+      auto const end   = start + address_ps + byte_ps;
+      b.run_until(inside ? end + period_ps / 2 : end - period_ps / 2);
+      auto const saved = r.f->target->snapshot();
+      auto const mark  = r.faulty->events.size();
+      auto const look  = [](bus const& on) {
+        return probe{
+            .flag = on.get("ISR", "BERR") | on.get("ISR", "ARLO") << 1 | on.get("ISR", "OVR") << 2,
+            .busy = on.get("ISR", "BUSY")};
+      };
+      std::vector<std::uint32_t> trace;
+      auto const                 sample = [&](bus const& on, std::vector<std::uint32_t>& out) {
+        for(auto const at :
+            {end + 3 * period_ps / 4, end + period_ps + period_ps / 4,
+             end + byte_ps + period_ps / 4, end + 3 * byte_ps})
+        {
+          on.run_until(at);
+          auto const seen = look(on);
+          out.push_back(seen.flag);
+          out.push_back(seen.busy);
+        }
+      };
+      sample(b, trace);
+      auto const tail = std::vector(
+          r.faulty->events.begin() + static_cast<std::ptrdiff_t>(mark), r.faulty->events.end());
+
+      rig other{"idle"};
+      other.faulty->error   = kind.error;
+      other.faulty->at_call = 1;
+      other.f->target->restore(
+          core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+      bus                        o{*other.f};
+      std::vector<std::uint32_t> again;
+      sample(o, again);
+      CHECK(again == trace);
+      CHECK(other.faulty->events == tail);
+      CHECK(trace[0] == kind.bit >> 8);
+    }
+  }
+}
+
+TEST_CASE("firmware serves each injected error in I2C1_ER_IRQHandler, clears it and retries")
+{
+  for(auto const& kind : injections)
+  {
+    for(auto const read : {false, true})
+    {
+      CAPTURE(kind.flag);
+      CAPTURE(read);
+      rig r{read ? "read_errors" : "errors"};
+      r.faulty->error   = kind.error;
+      r.faulty->at_call = 1;
+      auto const log    = r.finish();
+      REQUIRE(log.size() == (read ? 8u : 6u));
+      CHECK(log[0] == 2);
+      CHECK(log[1] == 1);
+      CHECK(log[2] == kind.bit);
+      CHECK(log[3] == (kind.error == stm32::i2c_error::arbitration_lost ? 0u : 1u));
+      CHECK(log[4] == 0);
+      CHECK(log[5] == 0);
+      auto const& events = r.faulty->events;
+      REQUIRE(events.size() >= 4);
+      auto const retry = std::vector(events.end() - 4, events.end());
+      CHECK(retry[0].kind == (read ? 'R' : 'W'));
+      CHECK(retry[3].kind == 'P');
+      if(read)
+      {
+        CHECK(retry[1].kind == 'r');
+        CHECK(retry[2].kind == 'r');
+        CHECK(log[6] == 0x5A);
+        CHECK(log[7] == 0x5A);
+      }
+      else
+      {
+        CHECK(retry[1] == bus_event{'w', 0xA5, retry[1].at});
+        CHECK(retry[2] == bus_event{'w', 0x5A, retry[2].at});
+      }
+    }
+  }
 }

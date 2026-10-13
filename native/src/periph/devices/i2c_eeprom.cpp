@@ -150,7 +150,7 @@ auto eeprom_24xx::address() const -> std::uint8_t
   return impl_->options.address;
 }
 
-auto eeprom_24xx::start(bool read, vtime at) -> bool
+auto eeprom_24xx::start(bool read, vtime at) -> stm32::i2c_reply
 {
   auto& self = *impl_;
   self.state.buffer.clear();
@@ -158,20 +158,20 @@ auto eeprom_24xx::start(bool read, vtime at) -> bool
   if(self.busy(at))
   {
     self.enter(phase::idle);
-    return false;
+    return {.ack = false};
   }
   if(read)
   {
     self.enter(phase::reading);
-    return true;
+    return {.ack = true};
   }
   self.enter(phase::word_address);
   self.state.address_count = 0;
   self.state.word_address  = 0;
-  return true;
+  return {.ack = true};
 }
 
-auto eeprom_24xx::write(std::uint8_t byte, vtime) -> bool
+auto eeprom_24xx::write(std::uint8_t byte, vtime) -> stm32::i2c_reply
 {
   auto& self = *impl_;
   switch(self.step())
@@ -184,28 +184,28 @@ auto eeprom_24xx::write(std::uint8_t byte, vtime) -> bool
         self.open_page();
         self.enter(phase::writing);
       }
-      return true;
+      return {.ack = true};
     case phase::writing:
       self.state.buffer[self.in_page(self.state.data_count)] = std::byte{byte};
       ++self.state.data_count;
-      return true;
+      return {.ack = true};
     case phase::idle:
     case phase::reading:
-      return false;
+      return {.ack = false};
   }
-  return false;
+  return {.ack = false};
 }
 
-auto eeprom_24xx::read(vtime) -> std::uint8_t
+auto eeprom_24xx::read(vtime) -> stm32::i2c_read_reply
 {
   auto& self = *impl_;
   if(self.step() != phase::reading)
   {
-    return 0xFF;
+    return {.byte = 0xFF};
   }
   auto const value   = std::to_integer<std::uint8_t>(self.array[self.state.pointer]);
   self.state.pointer = (self.state.pointer + 1) % self.options.size;
-  return value;
+  return {.byte = value};
 }
 
 void eeprom_24xx::stop(vtime at)
