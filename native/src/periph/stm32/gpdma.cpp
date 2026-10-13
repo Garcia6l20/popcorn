@@ -180,10 +180,10 @@ auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
  *        transfer event once its first item is loaded when its TCEM before that load is 2, and
  *        no event under 0 and 1. A request level held by a requester across a machine reset is
  *        cleared: the requester announces it again on its next change. A hardware-requested channel
- *        that completes, its TC with LLR = 0, tells every `dma_requester` peer its REQSEL, and
- *        so does every burst of a hardware-requested channel, after its beats and before its
- *        half, complete and next scheduling decisions: the requester drops the request it
- *        served. A burst ended by a data error acknowledges nothing.
+ *        that completes, its TC with LLR = 0, tells every `dma_requester` peer its REQSEL with
+ *        this controller, and so does every burst of a hardware-requested channel, after its
+ *        beats and before its half, complete and next scheduling decisions: the requester drops
+ *        the request it served. A burst ended by a data error acknowledges nothing.
  *        While the machine holds its core, a channel whose DBGMCU `DBG_GPDMA<n>_STOP` is set
  *        stops at a burst boundary: a burst due at the hold runs first, the next one waits for
  *        the release with the latency it had left, and requests arriving meanwhile stay latched.
@@ -604,7 +604,7 @@ void gpdma::burst(std::size_t ch)
   {
     for(auto* const requester : requesters())
     {
-      requester->acknowledged(request);
+      requester->acknowledged(*this, request);
     }
   }
   if(c.two_d and beat == beats)
@@ -787,7 +787,7 @@ void gpdma::finish(std::size_t ch, flag_index flag)
   auto const request = get(regs_, c.request);
   for(auto* const requester : requesters())
   {
-    requester->transfer_completed(request);
+    requester->transfer_completed(*this, request);
   }
 }
 

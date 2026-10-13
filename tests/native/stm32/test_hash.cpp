@@ -200,6 +200,9 @@ auto idle(bool strict, controller dma = controller::gpdma) -> stm32_fixture
                       periph::model_context&, popcorn::peripheral_desc const&) {
           return std::make_shared<recorder>(known);
         });
+    options.models.emplace("LPDMA1", [](periph::model_context&, popcorn::peripheral_desc const&) {
+      return std::make_shared<recorder>(false);
+    });
   }
   stm32_fixture f{u575(), "hash_ll", options};
   REQUIRE(
@@ -222,11 +225,23 @@ struct hash_rig
     return *found;
   }
 
+  [[nodiscard]] auto other_dma() const -> recorder&
+  {
+    auto* const found = f.model_of<recorder>("LPDMA1");
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
   void complete(std::uint32_t request = hash_request) const
+  {
+    complete(dma(), request);
+  }
+
+  void complete(stm32::dma_controller const& by, std::uint32_t request) const
   {
     auto* const requester = f.model_of<stm32::dma_requester>("HASH");
     REQUIRE(requester != nullptr);
-    requester->transfer_completed(request);
+    requester->transfer_completed(by, request);
   }
 
   [[nodiscard]] auto read(std::uint32_t offset, std::uint32_t base = hash_base) const
@@ -983,6 +998,9 @@ TEST_CASE("a transfer completed with MDMAT 0 clears DMAE and computes the digest
     r.write(cr, cr_init | cr_dmae | (algo << 17) | (2u << 4));
     r.feed(pattern(300));
     r.complete(hash_request + 1);
+    CHECK((r.read(cr) & cr_dmae) != 0);
+    CHECK((r.read(sr) & sr_busy) != 0);
+    r.complete(r.other_dma(), hash_request);
     CHECK((r.read(cr) & cr_dmae) != 0);
     CHECK((r.read(sr) & sr_busy) != 0);
     r.settle();

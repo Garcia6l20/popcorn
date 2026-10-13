@@ -1795,12 +1795,15 @@ public:
   void load(std::span<std::byte const>) override
   {}
 
-  void transfer_completed(std::uint32_t request) override
+  void transfer_completed(popcorn::periph::stm32::dma_controller const& by, std::uint32_t request)
+      override
   {
     completed.push_back(request);
+    controllers.push_back(&by);
   }
 
-  std::vector<std::uint32_t> completed;
+  std::vector<std::uint32_t>                                 completed;
+  std::vector<popcorn::periph::stm32::dma_controller const*> controllers;
 };
 
 auto probed_machine() -> stm32_fixture
@@ -1848,6 +1851,10 @@ TEST_CASE("a finished hardware-requested channel tells each requester its REQSEL
   CHECK(probe(f).completed == std::vector<std::uint32_t>{paced_request});
   idle_for(f, std::chrono::microseconds{50});
   CHECK(probe(f).completed == std::vector<std::uint32_t>{paced_request});
+  CHECK(
+      probe(f).controllers
+      == std::vector<popcorn::periph::stm32::dma_controller const*>{
+          dynamic_cast<popcorn::periph::stm32::dma_controller const*>(f.target->model("GPDMA1"))});
 }
 
 namespace

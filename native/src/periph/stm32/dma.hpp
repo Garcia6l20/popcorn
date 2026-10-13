@@ -6,7 +6,10 @@
 
 namespace popcorn::periph::stm32
 {
-/** @brief A model that serves DMA requests: the GPDMA model, found through the machine's peers. */
+/**
+ * @brief A model that serves DMA requests, such as GPDMA1 or LPDMA1, found through the machine's
+ *        peers. Each controller numbers its requests on its own.
+ */
 class dma_controller
 {
 public:
@@ -63,20 +66,24 @@ public:
   /**
    * @brief A hardware-requested channel completed its last transfer, its TC with LLR = 0. Called
    *        from a controller event or the core hold, never inside a requester's register
-   *        callback.
-   * @param request Request number of the channel, its request selection field.
+   *        callback. A request number means something only on its controller: the requester
+   *        matches the pair, see dma_signal::carries().
+   * @param by Controller of the channel.
+   * @param request Request number of the channel on @p by, its request selection field.
    */
-  virtual void transfer_completed(std::uint32_t request) = 0;
+  virtual void transfer_completed(dma_controller const& by, std::uint32_t request) = 0;
 
   /**
-   * @brief A hardware-requested channel finished one burst for @p request. Called from a
-   *        controller event or the core hold, never inside a requester's register callback. The
-   *        requester drops that request if the burst served it. The default ignores it, for
+   * @brief A hardware-requested channel of @p by finished one burst for @p request. Called from
+   *        a controller event or the core hold, never inside a requester's register callback.
+   *        The requester drops that request if the burst served it. The default ignores it, for
    *        requesters whose request follows their own flags.
-   * @param request Request number of the channel, its request selection field.
+   * @param by Controller of the channel.
+   * @param request Request number of the channel on @p by, its request selection field.
    */
-  virtual void acknowledged(std::uint32_t request)
+  virtual void acknowledged(dma_controller const& by, std::uint32_t request)
   {
+    static_cast<void>(by);
     static_cast<void>(request);
   }
 

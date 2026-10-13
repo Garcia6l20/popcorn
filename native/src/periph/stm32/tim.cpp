@@ -270,8 +270,8 @@ public:
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
-  void acknowledged(std::uint32_t request) override;
-  void transfer_completed(std::uint32_t request) override;
+  void acknowledged(dma_controller const& by, std::uint32_t request) override;
+  void transfer_completed(dma_controller const& by, std::uint32_t request) override;
 
   void                           control_written(std::uint32_t old, std::uint32_t now);
   void                           master_written(std::uint32_t old, std::uint32_t now);
@@ -348,7 +348,7 @@ private:
   void match(std::size_t ch, std::uint64_t at);
   void capture(std::size_t ch, std::uint64_t at);
   void request_update();
-  void release(std::uint32_t request);
+  void release(dma_controller const& by, std::uint32_t request);
   void advance_burst(access_ctx access);
   void warn_burst_range(std::uint32_t word);
   void settle();
@@ -1426,17 +1426,17 @@ void tim::request_update()
   }
 }
 
-void tim::release(std::uint32_t request)
+void tim::release(dma_controller const& by, std::uint32_t request)
 {
   auto const                     update = state_.update_request != 0
-                                      and update_signal_->carries(request)
+                                      and update_signal_->carries(by, request)
                                       and not holds_burst(burst_update);
   std::array<bool, max_channels> compare{};
   auto                           served = update;
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
     compare[ch] = state_.compare_request[ch] != 0
-              and channels_[ch].signal->carries(request)
+              and channels_[ch].signal->carries(by, request)
               and not holds_burst(burst_compare1 + static_cast<std::uint32_t>(ch));
     served = served or compare[ch];
   }
@@ -1461,13 +1461,14 @@ void tim::release(std::uint32_t request)
   settle();
 }
 
-void tim::acknowledged(std::uint32_t request)
+void tim::acknowledged(dma_controller const& by, std::uint32_t request)
 {
-  release(request);
+  release(by, request);
 }
 
-void tim::transfer_completed(std::uint32_t request)
+void tim::transfer_completed(dma_controller const& by, std::uint32_t request)
 {
+  static_cast<void>(by);
   static_cast<void>(request);
 }
 

@@ -348,7 +348,7 @@ public:
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_clock_change() override;
-  void               transfer_completed(std::uint32_t request) override;
+  void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
 
@@ -1195,9 +1195,9 @@ void adc::retune(std::optional<std::uint32_t> was)
   }
 }
 
-void adc::transfer_completed(std::uint32_t request)
+void adc::transfer_completed(dma_controller const& by, std::uint32_t request)
 {
-  if(get(regs_, dma_mode_) != dma_one_shot or not request_.carries(request))
+  if(get(regs_, dma_mode_) != dma_one_shot or not request_.carries(by, request))
   {
     return;
   }

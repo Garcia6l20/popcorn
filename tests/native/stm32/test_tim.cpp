@@ -139,10 +139,11 @@ struct bus
 class recorder final : public periph::model, public stm32::dma_controller
 {
 public:
-  explicit recorder(periph::model_context& ctx) : context{ctx}
+  explicit recorder(periph::model_context& ctx, bool knows = true) : context{ctx}, knows{knows}
   {}
 
   periph::model_context&                      context;
+  bool                                        knows;
   std::vector<std::pair<std::uint32_t, bool>> levels;
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
@@ -179,6 +180,10 @@ public:
   [[nodiscard]] auto request_of(std::string_view signal) const
       -> std::optional<std::uint32_t> override
   {
+    if(not knows)
+    {
+      return std::nullopt;
+    }
     if(signal == "tim1_cc1_dma")
     {
       return 1;
@@ -196,6 +201,9 @@ auto with_recorder() -> core::machine_options
   auto options = popcorn::testing::stm32_options();
   options.models.emplace("GPDMA1", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
     return std::make_shared<recorder>(ctx);
+  });
+  options.models.emplace("LPDMA1", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+    return std::make_shared<recorder>(ctx, false);
   });
   return options;
 }
@@ -768,7 +776,13 @@ TEST_CASE("CCxDE and UDE raise their DMA requests, each drops only at its own ac
   CHECK(dma->levels == both);
   auto* const requester = dynamic_cast<stm32::dma_requester*>(t.f.target->model("TIM1"));
   REQUIRE(requester != nullptr);
-  requester->acknowledged(1);
+  auto* const other = t.f.model_of<recorder>("LPDMA1");
+  REQUIRE(other != nullptr);
+  requester->acknowledged(*other, 1);
+  requester->acknowledged(*other, 2);
+  CHECK(dma->levels == both);
+  CHECK(other->levels.empty());
+  requester->acknowledged(*dma, 1);
   CHECK(
       dma->levels
       == std::vector<std::pair<std::uint32_t, bool>>{
@@ -776,7 +790,7 @@ TEST_CASE("CCxDE and UDE raise their DMA requests, each drops only at its own ac
           {2, true },
           {1, false}
   });
-  requester->acknowledged(2);
+  requester->acknowledged(*dma, 2);
   CHECK(
       dma->levels
       == std::vector<std::pair<std::uint32_t, bool>>{
@@ -2058,7 +2072,7 @@ TEST_CASE("the burst source holds its request across acknowledges until the inde
   auto const dmar   = t.b.at("TIM1", "TIM1_DMAR");
   auto const access = [&] {
     REQUIRE(dma->context.services.write(dmar, 4, 9, popcorn::initiator::dma).has_value());
-    requester->acknowledged(2);
+    requester->acknowledged(*dma, 2);
   };
   t.b.write("TIM1", "TIM1_ARR", 9);
   SUBCASE("update source")
@@ -2097,7 +2111,7 @@ TEST_CASE("the burst source holds its request across acknowledges until the inde
     });
     auto const cc1 = [&] {
       REQUIRE(dma->context.services.write(dmar, 4, 9, popcorn::initiator::dma).has_value());
-      requester->acknowledged(1);
+      requester->acknowledged(*dma, 1);
     };
     cc1();
     CHECK(dma->levels.size() == 1);

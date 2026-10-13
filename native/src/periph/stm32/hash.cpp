@@ -344,7 +344,7 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
-  void transfer_completed(std::uint32_t request) override;
+  void transfer_completed(dma_controller const& by, std::uint32_t request) override;
 
   void post();
   void withdraw();
@@ -555,9 +555,9 @@ void hash::request()
   dma_.set(enabled != 0);
 }
 
-void hash::transfer_completed(std::uint32_t number)
+void hash::transfer_completed(dma_controller const& by, std::uint32_t number)
 {
-  if(not dma_.carries(number) or get(regs_, dmae_) == 0 or get(regs_, mdmat_) != 0)
+  if(not dma_.carries(by, number) or get(regs_, dmae_) == 0 or get(regs_, mdmat_) != 0)
   {
     return;
   }
