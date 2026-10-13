@@ -1,4 +1,4 @@
-"""Canonical text dumps of an McuDescription and the golden digest file they round-trip through.
+"""Canonical text dumps of an PartDescription and the golden digest file they round-trip through.
 
 Table format, one line per item, in description order (already deterministic, spec 04):
   P name base size ip
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict, cast
 
-from popcorn.stm32.description._model import McuDescription
+from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._patches import PatchReport
 
 _TABLES = ("peripherals", "registers", "fields", "regions", "irqs", "core")
@@ -51,12 +51,12 @@ class GoldenFile(TypedDict):
     tables: GoldenTablesDict
 
 
-def _dump_peripherals(description: McuDescription) -> str:
+def _dump_peripherals(description: PartDescription) -> str:
     lines = [f"P {p.name} {p.base:#010x} {p.size:#010x} {p.ip}" for p in description.peripherals]
     return "\n".join(lines) + "\n"
 
 
-def _dump_registers(description: McuDescription) -> str:
+def _dump_registers(description: PartDescription) -> str:
     lines: list[str] = []
     for p in description.peripherals:
         for r in p.registers:
@@ -68,7 +68,7 @@ def _dump_registers(description: McuDescription) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _dump_fields(description: McuDescription) -> str:
+def _dump_fields(description: PartDescription) -> str:
     lines: list[str] = []
     for p in description.peripherals:
         for r in p.registers:
@@ -80,12 +80,12 @@ def _dump_fields(description: McuDescription) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _dump_irqs(description: McuDescription) -> str:
+def _dump_irqs(description: PartDescription) -> str:
     lines = [f"I {irq.number} {irq.name}" for irq in description.irqs]
     return "\n".join(lines) + "\n"
 
 
-def _dump_regions(description: McuDescription) -> str:
+def _dump_regions(description: PartDescription) -> str:
     lines: list[str] = []
     for r in description.regions:
         physical = f"{r.physical:#010x}" if r.physical is not None else "-"
@@ -102,7 +102,7 @@ def _dump_regions(description: McuDescription) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _dump_core(description: McuDescription) -> str:
+def _dump_core(description: PartDescription) -> str:
     core = description.core
     return (
         f"C {core.cpu} {core.revision} {int(core.fpu)} {int(core.fpu_double)} {int(core.mpu)} "
@@ -122,7 +122,7 @@ _DUMPERS = {
 }
 
 
-def canonical_dumps(description: McuDescription) -> dict[str, str]:
+def canonical_dumps(description: PartDescription) -> dict[str, str]:
     """The six canonical text tables of @p description, keyed peripherals/registers/fields/
     regions/irqs/core."""
     return {name: _DUMPERS[name](description) for name in _TABLES}
@@ -144,7 +144,7 @@ class GoldenCounts:
     patched_fields: int
 
 
-def compute_counts(description: McuDescription, report: PatchReport) -> GoldenCounts:
+def compute_counts(description: PartDescription, report: PatchReport) -> GoldenCounts:
     """Item counts of @p description, plus @p report's cross_rules_added/fields_touched."""
     registers = sum(len(p.registers) for p in description.peripherals)
     fields = sum(len(r.fields) for p in description.peripherals for r in p.registers)
@@ -162,7 +162,7 @@ def compute_counts(description: McuDescription, report: PatchReport) -> GoldenCo
 
 
 def compute_golden(
-    description: McuDescription, report: PatchReport, *, svd_sha256: str
+    description: PartDescription, report: PatchReport, *, svd_sha256: str
 ) -> GoldenFile:
     """The golden JSON shape for @p description: part, svd_sha256, counts and per-table
     digests."""
@@ -198,7 +198,7 @@ def write_golden(path: Path, golden: GoldenFile) -> None:
     path.write_text(json.dumps(golden, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def dump_tables(directory: Path, description: McuDescription) -> None:
+def dump_tables(directory: Path, description: PartDescription) -> None:
     """Writes each canonical table of @p description as <directory>/<table>.txt."""
     directory.mkdir(parents=True, exist_ok=True)
     for name, text in canonical_dumps(description).items():

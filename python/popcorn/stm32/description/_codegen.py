@@ -178,7 +178,7 @@ def generate(schema: JsonObject) -> str:
             parts.append(_emit_enum(name, node))
         else:
             parts.append(_emit_dataclass(name, node))
-    parts.append(_emit_dataclass("mcu_description", schema))
+    parts.append(_emit_dataclass("part_description", schema))
 
     return "\n\n\n".join(parts) + "\n"
 

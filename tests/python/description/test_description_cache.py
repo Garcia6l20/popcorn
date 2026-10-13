@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cache import cache_key, cached_description
-from popcorn.stm32.description._model import McuDescription
+from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._sources import Sources, compute_source_digests, generator_string
 
 
@@ -14,7 +14,7 @@ def test_cache_miss_then_hit(
 ) -> None:
     calls = 0
 
-    def counting_build(sources: Sources) -> McuDescription:
+    def counting_build(sources: Sources) -> PartDescription:
         nonlocal calls
         calls += 1
         return build_description(sources)

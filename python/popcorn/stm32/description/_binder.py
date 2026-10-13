@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, cast, get_args, get_origin, get_type_hints
 
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._model import McuDescription
+from popcorn.stm32.description._model import PartDescription
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -177,11 +177,11 @@ def _check_bounds(value: object, *, file: str, key: str) -> None:
 
 
 _SCHEMA_VERSION = next(
-    f.default for f in dataclasses.fields(McuDescription) if f.name == "schema_version"
+    f.default for f in dataclasses.fields(PartDescription) if f.name == "schema_version"
 )
 
 
-def dump_json(description: McuDescription, *, indent: int | None = None) -> str:
+def dump_json(description: PartDescription, *, indent: int | None = None) -> str:
     """Compact JSON of @p description, schema_version always the current format constant."""
     mapping = to_mapping(description)
     assert isinstance(mapping, dict)
@@ -191,11 +191,11 @@ def dump_json(description: McuDescription, *, indent: int | None = None) -> str:
     return json.dumps(mapping, indent=indent, ensure_ascii=True)
 
 
-def load_json(text: str, *, file: str) -> McuDescription:
-    """McuDescription of @p text, DescriptionError when it is not valid JSON or does not match
+def load_json(text: str, *, file: str) -> PartDescription:
+    """PartDescription of @p text, DescriptionError when it is not valid JSON or does not match
     the schema."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise DescriptionError(file, exc.lineno, "<root>", "valid JSON") from exc
-    return from_mapping(McuDescription, data, file=file)
+    return from_mapping(PartDescription, data, file=file)

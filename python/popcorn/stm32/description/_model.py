@@ -140,7 +140,7 @@ class RegionDesc:
 
 
 @dataclass(slots=True, kw_only=True)
-class McuDescription:
+class PartDescription:
     schema_version: int = field(default=1, metadata={"const": 1})
     part: str
     generator: str
