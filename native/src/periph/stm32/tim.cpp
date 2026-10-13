@@ -42,6 +42,9 @@ constexpr std::uint32_t burst_compare4       = 5;
 constexpr std::uint32_t burst_com            = 6;
 constexpr std::uint32_t burst_trigger        = 7;
 constexpr std::uint32_t max_burst            = 26;
+constexpr std::uint8_t  etr_bit              = 1u << 4;
+constexpr std::uint8_t  etrp_bit             = 1u << 5;
+constexpr std::size_t   etr_input            = 4;
 
 enum class slave_mode : std::uint8_t
 {
@@ -141,6 +144,7 @@ struct tim_state
   std::uint64_t                           held_ps{};
   std::uint8_t                            inputs_seen{};
   std::uint8_t                            inputs_filtered{};
+  std::uint8_t                            etr_edges{};
 
   friend auto operator==(tim_state const&, tim_state const&) -> bool = default;
 };
@@ -224,16 +228,23 @@ auto lower(std::string_view name) -> std::string
  *        direction modes, the counting line in the directional clock modes, and DIRF rises when
  *        it changes. Table 569's "Down" for a tim_ti2fp2 falling edge in mode 0001 with tim_ti1fp1
  *        low counts nothing here: mode 0001 counts tim_ti1 edges only. The encoder index, ECR.IE,
- *        and the transition and index error flags are not modelled, IE logs once. External clock
- *        mode 2 on ETR, ECE 1, stops the counter, and a slave mode on a pin input, TS 4 to 7, sees
- *        no edge, each logged once, at the SMCR write or when the counter starts. Deviations: an
- *        ARR written
- * below the count lets the counter run to its maximum and wrap with no update, a count written
- * above ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
- *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
- *        between timers drops the edge that would re-enter a timer still reacting to its own
- *        event, logged once per timer, where hardware would oscillate with a few clocks of
- *        resynchronisation delay per hop. Not modelled, logged once when the counter starts:
+ *        and the transition and index error flags are not modelled, IE logs once. tim_etr_in is
+ *        the `<instance>_etr` signal while AF1.ETRSEL is 0, other values read low and log once:
+ *        ETP inverts it, an ETP write that flips it being an edge, ETPS divides it by 1, 2, 4
+ *        or 8: tim_etrp rises at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising edges
+ *        later, giving tim_etrf. External
+ *        clock mode 2, ECE 1, counts each tim_etrf rising edge through the prescaler while a
+ *        gated slave mode's gate is open, and with ECE set external clock mode 1 counts tim_etrf
+ *        only, whatever TS, its trigger edges setting TIF alone. TS 00100 tim_ti1f_ed gives a
+ * rising edge at every tim_ti1 transition, TS 00101 tim_ti1fp1 and 00110 tim_ti2fp2 their active
+ * edge by CCxP and CCxNP, both edges with both set, and their level to gated mode, TS 00111
+ * tim_etrf: each drives the slave mode controller as an ITR edge does. Gated mode on tim_ti1f_ed
+ * holds and logs once. Deviations: an ARR written below the count lets the counter run to its
+ * maximum and wrap with no update, a count written above ARR in center-aligned mode does the same,
+ * UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the 32-bit
+ * TIM2 to TIM5, and a trigger cycle between timers drops the edge that would re-enter a timer still
+ * reacting to its own event, logged once per timer, where hardware would oscillate with a few
+ * clocks of resynchronisation delay per hop. Not modelled, logged once when the counter starts:
  *        SMSPE, input capture edges, dithering, CCDS, channels 1 and 2 left out in encoder
  *        modes. TDE logs once and raises no trigger DMA request. DMA burst mode, RM0456 55.4 "DMA
  *        burst mode" and TIMx_DCR: every CPU or DMA access to DMAR reaches the register at DBA +
@@ -359,23 +370,28 @@ private:
   void external_tick(std::uint64_t at);
   void reinitialise(std::uint64_t at);
   void begin(std::uint64_t at);
-  void gate(std::string_view signal, trigger_edge edge, bool closing_resets, std::uint64_t at);
-  void enable_changed(bool was, std::uint64_t at);
-  void slave_settled(std::optional<std::string_view> before, std::uint32_t smcr);
-  void skip_groups(std::uint64_t groups);
-  void update_event(bool software, std::uint64_t at);
-  void pulse_trgo(std::uint64_t at);
-  void enable_edge(trigger_edge edge, std::uint64_t at);
-  void match(std::size_t ch, std::uint64_t at);
-  void capture(std::size_t ch, std::uint64_t at);
-  void request_update();
-  void release(dma_controller const& by, std::uint32_t request);
-  void advance_burst(access_ctx access);
-  void warn_burst_range(std::uint32_t word);
-  void settle();
-  void reschedule();
-  void warn_unsupported();
-  void warn_inputs();
+  void gate(std::optional<bool> level, trigger_edge edge, bool closing_resets, std::uint64_t at);
+  void slave_edge(trigger_edge edge, std::optional<bool> level, std::uint64_t at);
+  void pin_trigger(std::size_t input, std::uint64_t at);
+  void etr_transition(bool level, std::uint64_t at, bool clocked);
+  void etr_filtered(bool level, std::uint64_t at, bool clocked);
+  [[nodiscard]] auto pin_trigger_level(std::uint32_t select) const -> std::optional<bool>;
+  void               enable_changed(bool was, std::uint64_t at);
+  void               slave_settled(std::optional<std::string_view> before, std::uint32_t smcr);
+  void               skip_groups(std::uint64_t groups);
+  void               update_event(bool software, std::uint64_t at);
+  void               pulse_trgo(std::uint64_t at);
+  void               enable_edge(trigger_edge edge, std::uint64_t at);
+  void               match(std::size_t ch, std::uint64_t at);
+  void               capture(std::size_t ch, std::uint64_t at);
+  void               request_update();
+  void               release(dma_controller const& by, std::uint32_t request);
+  void               advance_burst(access_ctx access);
+  void               warn_burst_range(std::uint32_t word);
+  void               settle();
+  void               reschedule();
+  void               warn_unsupported();
+  void               warn_inputs();
   [[nodiscard]] auto input_signal(std::string_view signal) const -> bool;
   [[nodiscard]] auto pin_level(std::string_view signal) const -> bool;
   [[nodiscard]] auto raw_input(std::size_t ch) const -> bool;
@@ -457,6 +473,11 @@ private:
   std::optional<std::uint32_t>                 select_word_;
   std::optional<std::uint32_t>                 control2_word_;
   std::optional<std::uint32_t>                 index_word_;
+  std::optional<std::uint32_t>                 etr_word_;
+  std::optional<field_ref>                     etr_select_;
+  std::optional<field_ref>                     etr_polarity_;
+  std::optional<field_ref>                     etr_prescaler_;
+  std::string                                  etr_signal_;
   bool                                         select_logged_{};
   mutable std::vector<gpio_port const*>        ports_;
   mutable bool                                 ports_resolved_{};
@@ -476,7 +497,7 @@ auto compare_entries(std::string_view prefix, std::index_sequence<Ch...>)
 
 auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
 {
-  static constexpr std::array<write_entry<tim>, 14> plain{
+  static constexpr std::array<write_entry<tim>, 15> plain{
       {
        {"CR1", &tim::control_written},
        {"CR2", &tim::master_written},
@@ -492,9 +513,10 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
        {"DMAR", &tim::plain_written},
        {"TISEL", &tim::plain_written},
        {"ECR", &tim::plain_written},
+       {"AF1", &tim::plain_written},
        }
   };
-  static constexpr std::array<write_entry<tim>, 14> prefixed{
+  static constexpr std::array<write_entry<tim>, 15> prefixed{
       {
        {"TIM1_CR1", &tim::control_written},
        {"TIM1_CR2", &tim::master_written},
@@ -510,6 +532,7 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
        {"TIM1_DMAR", &tim::plain_written},
        {"TIM1_TISEL", &tim::plain_written},
        {"TIM1_ECR", &tim::plain_written},
+       {"TIM1_AF1", &tim::plain_written},
        }
   };
   auto const has = [&](std::string_view reg) {
@@ -525,7 +548,8 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
                        or entry.reg.ends_with("DCR")
                        or entry.reg.ends_with("DMAR")
                        or entry.reg.ends_with("TISEL")
-                       or entry.reg.ends_with("ECR");
+                       or entry.reg.ends_with("ECR")
+                       or entry.reg.ends_with("AF1");
     if(has(entry.reg) or not optional)
     {
       out.push_back(entry);
@@ -750,6 +774,14 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
   {
     index_word_ = index_enable_->offset;
   }
+  etr_select_    = optional_field(name("AF1"), "ETRSEL");
+  etr_polarity_  = optional_field(name("SMCR"), "ETP");
+  etr_prescaler_ = optional_field(name("SMCR"), "ETPS");
+  if(etr_select_)
+  {
+    etr_word_   = etr_select_->offset;
+    etr_signal_ = instance + "_etr";
+  }
   for(auto const& claimed : claims())
   {
     claimed_words_.push_back(reg(claimed).offset);
@@ -917,6 +949,10 @@ auto tim::counter_enabled() const -> bool
 
 auto tim::input_level(std::uint32_t smcr) const -> std::optional<bool>
 {
+  if(modelled(slave_of(smcr)) and pin_select(trigger_select_of(smcr)))
+  {
+    return pin_trigger_level(trigger_select_of(smcr));
+  }
   auto const input = input_of(smcr);
   if(not input)
   {
@@ -1385,10 +1421,8 @@ void tim::begin(std::uint64_t at)
   enable_changed(was, at);
 }
 
-void tim::gate(std::string_view signal, trigger_edge edge, bool closing_resets, std::uint64_t at)
+void tim::gate(std::optional<bool> level, trigger_edge edge, bool closing_resets, std::uint64_t at)
 {
-  auto const* const source = trigger_source_of(ctx_.peers, signal);
-  auto const        level  = source != nullptr ? source->level(signal) : std::nullopt;
   if(not level and edge == trigger_edge::rising and not std::exchange(gate_logged_, true))
   {
     warn(
@@ -1647,16 +1681,14 @@ void tim::warn_inputs()
       encoder_logged_, encoding(mode) and index_enable_ and get(regs_, *index_enable_) != 0,
       "encoder index, ECR.IE: not modelled, the index input resets nothing");
   once(
-      etr_logged_, external_clock2_ and get(regs_, *external_clock2_) != 0,
-      "external clock mode 2: ETR is not modelled, the counter holds");
-  once(
-      pin_logged_, modelled(mode) and pin_select(select),
-      std::format("TS {} selects a timer input pin, not modelled", select));
+      pin_logged_, modelled(mode) and select == 4 and gating(mode),
+      "gated mode on TI1F_ED, TS 00100: the edge detector gives pulses, the counter holds");
 }
 
 auto tim::input_signal(std::string_view signal) const -> bool
 {
-  return std::ranges::contains(input_signals_, signal);
+  return std::ranges::contains(input_signals_, signal)
+      or (not etr_signal_.empty() and signal == etr_signal_);
 }
 
 auto tim::pin_level(std::string_view signal) const -> bool
@@ -1737,6 +1769,117 @@ void tim::inputs_changed(std::uint64_t at, bool clocked)
     state_.inputs_seen ^= bit;
     input_transition(ch, level, at, clocked);
   }
+  if(etr_select_)
+  {
+    auto const level = (get(regs_, *etr_select_) == 0 and pin_level(etr_signal_))
+                    != (etr_polarity_ and get(regs_, *etr_polarity_) != 0);
+    if(((state_.inputs_seen & etr_bit) != 0) != level)
+    {
+      state_.inputs_seen ^= etr_bit;
+      etr_transition(level, at, clocked);
+    }
+  }
+}
+
+void tim::etr_transition(bool level, std::uint64_t at, bool clocked)
+{
+  auto const prescaled = (state_.inputs_seen & etrp_bit) != 0;
+  auto const divide    = 1u << (etr_prescaler_ ? get(regs_, *etr_prescaler_) : 0u);
+  if(divide == 1)
+  {
+    if(level != prescaled)
+    {
+      state_.inputs_seen ^= etrp_bit;
+      etr_filtered(level, at, clocked);
+    }
+    return;
+  }
+  if(not level)
+  {
+    return;
+  }
+  if(++state_.etr_edges >= divide)
+  {
+    state_.etr_edges = 0;
+    state_.inputs_seen |= etrp_bit;
+    etr_filtered(true, at, clocked);
+  }
+  else if(state_.etr_edges == divide / 2 and prescaled)
+  {
+    state_.inputs_seen &= static_cast<std::uint8_t>(~etrp_bit);
+    etr_filtered(false, at, clocked);
+  }
+}
+
+void tim::etr_filtered(bool level, std::uint64_t at, bool clocked)
+{
+  state_.inputs_filtered = static_cast<std::uint8_t>(
+      level ? state_.inputs_filtered | etr_bit : state_.inputs_filtered & ~etr_bit);
+  if(not clocked)
+  {
+    return;
+  }
+  if(level and external_clock2_ and get(regs_, *external_clock2_) != 0 and active() and gate_open())
+  {
+    external_tick(at);
+  }
+  pin_trigger(etr_input, at);
+}
+
+auto tim::pin_trigger_level(std::uint32_t select) const -> std::optional<bool>
+{
+  auto const fp = [&](std::size_t ch) -> std::optional<bool> {
+    if(ch >= channels_.size())
+    {
+      return std::nullopt;
+    }
+    auto const& c    = channels_[ch];
+    auto const  both = c.polarity_n and get(regs_, *c.polarity_n) != 0;
+    return both ? filtered(ch) : polarised(ch);
+  };
+  switch(select)
+  {
+    case 5:
+      return fp(0);
+    case 6:
+      return fp(1);
+    case 7:
+      return etr_select_ ? std::optional<bool>{(state_.inputs_filtered & etr_bit) != 0}
+                         : std::nullopt;
+    default:
+      return std::nullopt;
+  }
+}
+
+void tim::pin_trigger(std::size_t input, std::uint64_t at)
+{
+  if(not slave_)
+  {
+    return;
+  }
+  auto const smcr   = regs_.peek(slave_->offset);
+  auto const select = trigger_select_of(smcr);
+  if(not modelled(slave_of(smcr)) or not pin_select(select))
+  {
+    return;
+  }
+  auto const wanted = select == 4 or select == 5 ? std::size_t{0}
+                    : select == 6                ? std::size_t{1}
+                                                 : etr_input;
+  if(input != wanted)
+  {
+    return;
+  }
+  auto       edge  = trigger_edge::rising;
+  auto const level = pin_trigger_level(select);
+  if(select != 4 and level and not *level)
+  {
+    auto const both = select != 7
+                  and channels_[wanted].polarity_n
+                  and get(regs_, *channels_[wanted].polarity_n) != 0;
+    edge = both ? trigger_edge::rising : trigger_edge::falling;
+  }
+  slave_edge(edge, select == 4 ? std::optional<bool>{false} : level, at);
 }
 
 void tim::input_transition(std::size_t ch, bool level, std::uint64_t at, bool clocked)
@@ -1744,10 +1887,15 @@ void tim::input_transition(std::size_t ch, bool level, std::uint64_t at, bool cl
   auto const bit         = static_cast<std::uint8_t>(1u << ch);
   state_.inputs_filtered = static_cast<std::uint8_t>(
       level ? state_.inputs_filtered | bit : state_.inputs_filtered & ~bit);
-  if(clocked and ch < 2 and encoding(slave()) and active())
+  if(not clocked)
+  {
+    return;
+  }
+  if(ch < 2 and encoding(slave()) and active())
   {
     encoder_edge(ch, at);
   }
+  pin_trigger(ch, at);
 }
 
 void tim::encoder_edge(std::size_t ch, std::uint64_t at)
@@ -1828,6 +1976,13 @@ void tim::warn_selects()
               "TI{}SEL {}: internal input sources are not modelled, tim_ti{} reads low", ch + 1,
               get(regs_, *select), ch + 1));
     }
+  }
+  if(etr_select_ and get(regs_, *etr_select_) != 0 and not std::exchange(etr_logged_, true))
+  {
+    warn(
+        name("AF1"), std::format(
+                         "ETRSEL {}: internal ETR sources are not modelled, tim_etr_in reads low",
+                         get(regs_, *etr_select_)));
   }
 }
 
@@ -1948,7 +2103,7 @@ auto tim::on_write(
   {
     start_at(ps);
   }
-  if(select_word_ and word == *select_word_)
+  if((select_word_ and word == *select_word_) or (etr_word_ and word == *etr_word_))
   {
     warn_selects();
   }
@@ -1956,7 +2111,10 @@ auto tim::on_write(
   {
     warn_inputs();
   }
-  if((select_word_ and word == *select_word_) or (control2_word_ and word == *control2_word_))
+  if((select_word_ and word == *select_word_)
+     or (control2_word_ and word == *control2_word_)
+     or (etr_word_ and word == *etr_word_)
+     or smcr)
   {
     reacting_scope const reacting{reacting_};
     inputs_changed(ps, ctx_.clock.hz(domain_) != 0);
@@ -2093,6 +2251,13 @@ void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
   reacting_scope const reacting{reacting_};
   auto const           at = state_.held != 0 ? std::min(at_ps, state_.held_ps) : at_ps;
   catch_up(std::min(at, now_ps()));
+  auto const* const source = trigger_source_of(ctx_.peers, signal);
+  slave_edge(edge, source != nullptr ? source->level(signal) : std::nullopt, at);
+  settle();
+}
+
+void tim::slave_edge(trigger_edge edge, std::optional<bool> level, std::uint64_t at)
+{
   auto const rising = edge == trigger_edge::rising;
   auto const mode   = static_cast<slave_mode>(slave());
   switch(mode)
@@ -2117,7 +2282,7 @@ void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
       if(rising)
       {
         update(regs_, *trigger_flag_, 1);
-        if(active())
+        if(not(external_clock2_ and get(regs_, *external_clock2_) != 0) and active())
         {
           external_tick(at);
         }
@@ -2125,12 +2290,11 @@ void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
       break;
     case slave_mode::gated:
     case slave_mode::gated_reset:
-      gate(signal, edge, mode == slave_mode::gated_reset, at);
+      gate(level, edge, mode == slave_mode::gated_reset, at);
       break;
     default:
       break;
   }
-  settle();
 }
 
 void tim::control_written(std::uint32_t old, std::uint32_t now)
@@ -2197,7 +2361,7 @@ void tim::slave_settled(std::optional<std::string_view> before, std::uint32_t sm
   auto const mode   = slave_of(smcr);
   if(modelled(mode)
      and not routed
-     and not pin_select(trigger_select_of(smcr))
+     and not(pin_select(trigger_select_of(smcr)) and (trigger_select_of(smcr) != 7 or etr_select_))
      and not std::exchange(unrouted_logged_, true))
   {
     warn(

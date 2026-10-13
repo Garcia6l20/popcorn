@@ -1572,6 +1572,7 @@ struct tim_state_fields
   std::uint64_t                held_ps{};
   std::uint8_t                 inputs_seen{};
   std::uint8_t                 inputs_filtered{};
+  std::uint8_t                 etr_edges{};
 };
 
 struct tim_state_without_edges
@@ -1849,7 +1850,7 @@ TEST_CASE("TIM3 in encoder mode with no input edges holds, firmware")
   CHECK(finish(f) == std::vector<std::uint32_t>{0, 0});
 }
 
-TEST_CASE("every encoder SMS value and ECE 1 stop the counter, SMS 0111 on a pin input too")
+TEST_CASE("without input edges every encoder SMS value, ECE 1 and SMS 0111 on a pin hold")
 {
   constexpr std::uint32_t ece = 1u << 14;
   for(auto const word :
@@ -1879,7 +1880,7 @@ TEST_CASE("SMS back to 0000 with CEN 1 counts from the SMCR write")
   CHECK(t.count("TIM3") == 50);
 }
 
-TEST_CASE("an encoder index, ECE and a pin input each log once")
+TEST_CASE("an encoder index, gated TI1F_ED and ETRSEL each log once, pin inputs do not")
 {
   auto const last = [](slaves const& t) {
     REQUIRE(not t.logged.empty());
@@ -1901,22 +1902,23 @@ TEST_CASE("an encoder index, ECE and a pin input each log once")
     CHECK(last(t).contains("encoder index"));
     t.enable("TIM3", false);
     t.write("TIM3", "SMCR", 1u << 14);
-    CHECK(t.warnings() == 2);
-    CHECK(last(t).contains("ETR"));
     t.write("TIM3", "SMCR", smcr(sms_external, 5));
-    CHECK(t.warnings() == 3);
-    CHECK(last(t).contains("timer input pin"));
     t.write("TIM3", "CCMR1_Input", 0);
     t.enable("TIM3");
+    CHECK(t.warnings() == 1);
+    t.write("TIM3", "SMCR", smcr(sms_gated, 4));
+    CHECK(t.warnings() == 2);
+    CHECK(last(t).contains("TI1F_ED"));
+    t.write("TIM3", "AF1", 1u << 14);
     CHECK(t.warnings() == 3);
+    CHECK(last(t).contains("ETRSEL"));
   }
-  SUBCASE("trigger mode on TI1FP1 with CEN 0 logs at the SMCR write")
+  SUBCASE("trigger mode on TI1FP1 with CEN 0 logs nothing")
   {
     slaves t;
     t.base("TIM3", 0, 0xffff);
     t.write("TIM3", "SMCR", smcr(sms_trigger, 5));
-    CHECK(t.warnings() == 1);
-    CHECK(last(t).contains("timer input pin"));
+    CHECK(t.warnings() == 0);
   }
   SUBCASE("an encoder SMCR write with CEN 1 logs nothing")
   {
@@ -2997,4 +2999,319 @@ TEST_CASE("after a restore, routing a pin already high into its timer AF gives t
   CHECK(t.count("TIM3") == 1);
   t.b.set("GPIOA", "GPIO_MODER", "MODE6", 3);
   CHECK(t.count("TIM3") == 0);
+}
+
+namespace
+{
+void pulses(inputs& t, std::uint8_t pin, int count)
+{
+  for(int pulse = 0; pulse < count; ++pulse)
+  {
+    t.edge(pin, true);
+    t.edge(pin, false);
+  }
+}
+
+auto etr_clocked(std::uint32_t smcr_word) -> inputs
+{
+  inputs t;
+  t.route(5, 2);
+  t.base("TIM2", 0, 0xffff'ffff);
+  t.write("TIM2", "SMCR", smcr_word);
+  t.enable("TIM2");
+  return t;
+}
+}
+
+TEST_CASE("TIM2 in external clock mode 2 counts ETR rising edges through ETPS and ETP")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  for(auto const& [prescale, counted] : {
+          std::pair{0u, 12u},
+          {1u, 6u },
+          {2u, 3u },
+          {3u, 1u }
+  })
+  {
+    CAPTURE(prescale);
+    auto t = etr_clocked(ece | (prescale << 12));
+    pulses(t, 5, 12);
+    t.settle();
+    CHECK(t.count("TIM2") == counted);
+    CHECK(t.bits("TIM2", "SR", "TIF") == 0);
+  }
+  SUBCASE("ETP counts falling edges")
+  {
+    auto t = etr_clocked(ece | (1u << 15));
+    t.edge(5, true);
+    t.settle();
+    CHECK(t.count("TIM2") == 0);
+    t.edge(5, false);
+    t.settle();
+    CHECK(t.count("TIM2") == 1);
+  }
+  SUBCASE("ETRSEL other than 0 reads low")
+  {
+    auto t = etr_clocked(ece);
+    t.write("TIM2", "AF1", 1u << 14);
+    pulses(t, 5, 4);
+    t.settle();
+    CHECK(t.count("TIM2") == 0);
+  }
+}
+
+TEST_CASE("external clock mode 1 on ETRF, TS 00111, counts each ETR rising edge once")
+{
+  for(auto const ece : {0u, 1u << 14})
+  {
+    CAPTURE(ece);
+    auto t = etr_clocked(ece | smcr(sms_external, 7));
+    pulses(t, 5, 5);
+    t.settle();
+    CHECK(t.count("TIM2") == 5);
+    CHECK(t.bits("TIM2", "SR", "TIF") == 1);
+  }
+}
+
+TEST_CASE("trigger mode on TI1FP1, TS 00101, starts the counter at the pin edge")
+{
+  inputs t;
+  t.route(6, 2);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CCMR1_Input", 0x0001);
+  t.write("TIM3", "SMCR", smcr(sms_trigger, 5));
+  t.edge(6, true);
+  auto const edge = t.next;
+  t.settle();
+  CHECK(t.bits("TIM3", "CR1", "CEN") == 1);
+  CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+  CHECK(t.count("TIM3") == (t.next + edge_gap - edge) / tick_ps);
+}
+
+TEST_CASE("TI1FP1 polarity picks the active edge, both edges with CC1NP and CC1P")
+{
+  struct expected
+  {
+    std::uint32_t ccer;
+    std::uint32_t ticks;
+  };
+  for(auto const [ccer, ticks] : {
+          expected{0b0000, 2},
+          expected{0b0010, 2},
+          expected{0b1010, 4}
+  })
+  {
+    CAPTURE(ccer);
+    inputs t;
+    t.route(6, 2);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "CCMR1_Input", 0x0001);
+    t.write("TIM3", "CCER", ccer);
+    t.write("TIM3", "SMCR", smcr(sms_external, 5));
+    t.enable("TIM3");
+    pulses(t, 6, 2);
+    t.settle();
+    CHECK(t.count("TIM3") == ticks);
+  }
+}
+
+TEST_CASE("reset mode on TI2FP2 and gated mode on TI1FP1 follow the pins")
+{
+  SUBCASE("reset")
+  {
+    inputs t;
+    t.route(7, 2);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "CCMR1_Input", 0x0100);
+    t.write("TIM3", "SMCR", smcr(sms_reset, 6));
+    t.enable("TIM3");
+    t.next = t.start + 100 * tick_ps;
+    t.edge(7, true);
+    auto const edge = t.next;
+    t.settle();
+    CHECK(t.count("TIM3") == (t.next + edge_gap - edge) / tick_ps);
+  }
+  SUBCASE("gated")
+  {
+    inputs t;
+    t.route(6, 2);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "CCMR1_Input", 0x0001);
+    t.write("TIM3", "SMCR", smcr(sms_gated, 5));
+    t.enable("TIM3");
+    t.edge(6, true);
+    t.edge(6, false);
+    t.settle();
+    CHECK(t.count("TIM3") == edge_gap / tick_ps);
+    t.write("TIM3", "SR", 0);
+    t.porta->drive(6, true);
+    CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+  }
+}
+
+TEST_CASE("TS 00100 triggers on every TI1F transition")
+{
+  inputs t;
+  t.route(6, 2);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CCMR1_Input", 0x0001);
+  t.write("TIM3", "CCER", 0b0010);
+  t.write("TIM3", "SMCR", smcr(sms_external, 4));
+  t.enable("TIM3");
+  pulses(t, 6, 3);
+  t.settle();
+  CHECK(t.count("TIM3") == 6);
+}
+
+TEST_CASE("external clock mode 2 counts only while a gate on TI1FP1 is open")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  auto                    t   = etr_clocked(ece | smcr(sms_gated, 5));
+  t.route(0, 1);
+  t.write("TIM2", "CCMR1_Input", 0x0001);
+  pulses(t, 5, 4);
+  t.settle();
+  CHECK(t.count("TIM2") == 0);
+  t.edge(0, true);
+  pulses(t, 5, 4);
+  t.settle();
+  CHECK(t.count("TIM2") == 4);
+  t.edge(0, false);
+  pulses(t, 5, 4);
+  t.settle();
+  CHECK(t.count("TIM2") == 4);
+}
+
+TEST_CASE("with ECE, external clock mode 1 on TI1FP1 counts tim_etrf only")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  auto                    t   = etr_clocked(ece | smcr(sms_external, 5));
+  t.route(0, 1);
+  t.write("TIM2", "CCMR1_Input", 0x0001);
+  pulses(t, 0, 3);
+  pulses(t, 5, 5);
+  t.settle();
+  CHECK(t.count("TIM2") == 5);
+  CHECK(t.bits("TIM2", "SR", "TIF") == 1);
+}
+
+TEST_CASE("an ETP write that flips tim_etr_in is an edge")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  auto                    t   = etr_clocked(ece);
+  t.write("TIM2", "SMCR", ece | (1u << 15));
+  CHECK(t.count("TIM2") == 1);
+  t.edge(5, true);
+  t.settle();
+  CHECK(t.count("TIM2") == 1);
+  t.edge(5, false);
+  t.settle();
+  CHECK(t.count("TIM2") == 2);
+}
+
+TEST_CASE("TS 00111 on TIM15, which has no ETR, logs once")
+{
+  slaves t;
+  t.base("TIM15", 0, 0xffff);
+  t.write("TIM15", "SMCR", smcr(sms_trigger, 7));
+  CHECK(t.warnings() == 1);
+  CHECK(t.logged.back().message.contains("not modelled"));
+}
+
+TEST_CASE("TS 00111 drives reset, trigger and gated modes from tim_etrf")
+{
+  SUBCASE("trigger")
+  {
+    auto t = etr_clocked(smcr(sms_trigger, 7));
+    t.enable("TIM2", false);
+    t.edge(5, true);
+    auto const edge = t.next;
+    t.settle();
+    CHECK(t.bits("TIM2", "CR1", "CEN") == 1);
+    CHECK(t.count("TIM2") == (t.next + edge_gap - edge) / tick_ps);
+  }
+  SUBCASE("reset")
+  {
+    auto t = etr_clocked(smcr(sms_reset, 7));
+    t.next = t.start + 100 * tick_ps;
+    t.edge(5, true);
+    auto const edge = t.next;
+    t.settle();
+    CHECK(t.count("TIM2") == (t.next + edge_gap - edge) / tick_ps);
+  }
+  SUBCASE("gated")
+  {
+    auto t = etr_clocked(smcr(sms_gated, 7));
+    t.edge(5, true);
+    t.edge(5, false);
+    t.settle();
+    CHECK(t.count("TIM2") == edge_gap / tick_ps);
+  }
+}
+
+TEST_CASE("the ETPS count survives a snapshot")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  auto                    t   = etr_clocked(ece | (3u << 12));
+  pulses(t, 5, 3);
+  t.settle();
+  auto const saved = t.f.target->snapshot();
+  t.f.target->restore(saved);
+  pulses(t, 5, 5);
+  t.settle();
+  CHECK(t.count("TIM2") == 1);
+}
+
+TEST_CASE("after a restore, routing an ETR pin already high gives external clock mode 2 an edge")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  inputs                  t;
+  t.porta->drive(5, true);
+  t.b.set("GPIOA", "GPIO_AFRL", "AFSEL5", 2);
+  t.base("TIM2", 0, 0xffff'ffff);
+  t.write("TIM2", "SMCR", ece);
+  t.enable("TIM2");
+  auto const saved = t.f.target->snapshot();
+  t.f.target->restore(saved);
+  t.b.set("GPIOA", "GPIO_MODER", "MODE5", 2);
+  CHECK(t.count("TIM2") == 1);
+}
+
+TEST_CASE("gated on tim_etrf with ETPS /2 stays open for half the divided period")
+{
+  auto t = etr_clocked(smcr(sms_gated, 7) | (1u << 12));
+  for(int pulse = 0; pulse < 3; ++pulse)
+  {
+    t.next += 15 * tick_ps;
+    t.porta->drive_at(5, true, vtime{t.next});
+    t.next += 5 * tick_ps;
+    t.porta->drive_at(5, false, vtime{t.next});
+  }
+  t.settle();
+  CHECK(t.count("TIM2") == 20);
+}
+
+TEST_CASE("on a busy core a pin edge reaches the timer at its own time, not at the dispatch")
+{
+  constexpr address loop = 0x2000'8000;
+  inputs            t;
+  for(std::uint32_t nop = 0; nop < 32; ++nop)
+  {
+    REQUIRE(t.f.target->mem().write(loop + 2 * nop, 2, 0xbf00).has_value());
+  }
+  REQUIRE(t.f.target->mem().write(loop + 64, 2, 0xe7de).has_value());
+  t.f.set("pc", loop);
+  t.route(6, 2);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CCMR1_Input", 0x0001);
+  t.write("TIM3", "SMCR", smcr(sms_trigger, 5));
+  auto const edge = t.start + 10 * us + 2 * tick_ps + tick_ps / 3;
+  t.porta->drive_at(6, true, vtime{edge});
+  REQUIRE(
+      t.f.run_to_stop(
+             {.max_instructions = icount{1'000'000'000}, .until_time = vtime{edge + 30 * us}})
+          .reason
+      == stop_reason::time);
+  auto const now = t.f.target->virtual_clock().time().ps;
+  CHECK(t.count("TIM3") == (now - edge) / tick_ps);
 }
