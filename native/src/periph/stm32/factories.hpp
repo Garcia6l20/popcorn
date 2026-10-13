@@ -51,6 +51,9 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
 
+/** @brief Factory of the LPDMA1 model, the GPDMA engine with 4 channels, RM0456 section 18. */
+[[nodiscard]] auto lpdma_factory() -> model_factory;
+
 /**
  * @brief Factory of the USART, UART and LPUART model, RM0456 sections 66 and 67.
  * @param b Board whose `uarts` give each instance its far end, copied: the endpoints stay

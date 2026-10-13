@@ -64,6 +64,7 @@ u575_programs = [
         ("stm32-flash", "test_flash.cpp"),
         ("stm32-gpio", "test_gpio.cpp"),
         ("stm32-gpdma", "test_gpdma.cpp"),
+        ("stm32-lpdma", "test_lpdma.cpp"),
         ("stm32-dma-routing", "test_dma_routing.cpp"),
         ("stm32-usart", "test_usart.cpp"),
         ("stm32-tim", "test_tim.cpp"),

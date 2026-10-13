@@ -6,7 +6,10 @@
 
 namespace popcorn::periph::stm32
 {
-/** @brief One GPDMA1 hardware request: its signal name and the GPDMA_CxTR2.REQSEL value. */
+/**
+ * @brief One hardware request of a DMA controller: its signal name and the value of the
+ *        channel's REQSEL field, GPDMA_CxTR2 or LPDMA_CxTR2.
+ */
 struct gpdma_request
 {
   /** @brief Signal name as RM0456 spells it, such as `usart1_tx_dma`. */
@@ -64,6 +67,32 @@ inline constexpr std::array<gpdma_request, 127> gpdma_requests{
      {"i2c6_tx_dma", 119},     {"i2c6_evc_dma", 120},     {"usart6_rx_dma", 121},
      {"usart6_tx_dma", 122},   {"adc2_dma", 123},         {"jpeg_rx_dma", 124},
      {"jpeg_tx_dma", 125},
+     }
+};
+
+/**
+ * @brief LPDMA1 requests of the STM32U5 family, RM0456 section 18.3.3, Table 147 "Programmed
+ *        LPDMA1 request".
+ */
+inline constexpr std::array<gpdma_request, 17> lpdma_requests{
+    {
+     {"lpuart1_rx_dma", 0},
+     {"lpuart1_tx_dma", 1},
+     {"spi3_rx_dma", 2},
+     {"spi3_tx_dma", 3},
+     {"i2c3_rx_dma", 4},
+     {"i2c3_tx_dma", 5},
+     {"i2c3_evc_dma", 6},
+     {"adc4_dma", 7},
+     {"dac1_ch1_dma", 8},
+     {"dac1_ch2_dma", 9},
+     {"adf1_flt0_dma", 10},
+     {"lptim1_ic1_dma", 11},
+     {"lptim1_ic2_dma", 12},
+     {"lptim1_ue_dma", 13},
+     {"lptim3_ic1_dma", 14},
+     {"lptim3_ic2_dma", 15},
+     {"lptim3_ue_dma", 16},
      }
 };
 }

@@ -26,8 +26,7 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::size_t   channels      = 16;
-constexpr std::size_t   first_2d      = 12;
+constexpr std::size_t   max_channels  = 16;
 constexpr std::size_t   requests      = 128;
 constexpr std::uint32_t burst_done    = 0;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
@@ -52,8 +51,8 @@ struct channel_state
 
 struct gpdma_state
 {
-  std::array<channel_state, channels> channel{};
-  std::array<std::uint8_t, requests>  request{};
+  std::array<channel_state, max_channels> channel{};
+  std::array<std::uint8_t, requests>      request{};
 
   friend auto operator==(gpdma_state const&, gpdma_state const&) -> bool = default;
 };
@@ -97,7 +96,7 @@ struct channel_fields
   field_ref                   suspended;
   field_ref                   source_width;
   field_ref                   source_increment;
-  field_ref                   source_burst;
+  std::optional<field_ref>    source_burst;
   field_ref                   destination_width;
   field_ref                   destination_increment;
   field_ref                   request;
@@ -116,9 +115,9 @@ struct channel_fields
   std::array<field_ref, 7>    clear;
   std::array<field_ref, 7>    interrupt_enable;
   field_ref                   packing;
-  field_ref                   source_exchange;
-  field_ref                   byte_exchange;
-  field_ref                   half_exchange;
+  std::optional<field_ref>    source_exchange;
+  std::optional<field_ref>    byte_exchange;
+  std::optional<field_ref>    half_exchange;
   std::optional<two_d_fields> two_d;
   irq_line*                   line{};
 };
@@ -138,64 +137,130 @@ enum flag_index : std::size_t
   suspended_flag,
 };
 
+/**
+ * @brief Shape of one instance of the engine: its register prefix, channel count, 2D channels,
+ *        burst and exchange fields, and request table.
+ */
+struct dma_layout
+{
+  std::string_view               ip;
+  std::size_t                    channels;
+  std::size_t                    first_2d;
+  bool                           bursts;
+  bool                           srd_only;
+  std::span<gpdma_request const> requests;
+};
+
+/** @brief Name prefix of the description's SRD SRAM regions, SRAM4 on the U5. */
+constexpr std::string_view srd_sram_prefix{"SRAM_SRD"};
+
+/** @brief Address range, end exclusive. */
+struct address_range
+{
+  std::uint64_t start;
+  std::uint64_t end;
+};
+
+/** @brief AHB3 and APB3 peripherals of the SRD domain, RM0456 2.1.13, non-secure aliases. */
+constexpr std::array<address_range, 2> srd_peripheral_windows{
+    address_range{0x4600'0400, 0x4600'8000},
+    address_range{0x4602'0000, 0x4602'6000}
+};
+constexpr std::uint64_t secure_alias_offset = 0x1000'0000;
+
+constexpr dma_layout gpdma_layout{
+    .ip       = "GPDMA",
+    .channels = 16,
+    .first_2d = 12,
+    .bursts   = true,
+    .srd_only = false,
+    .requests = gpdma_requests};
+constexpr dma_layout lpdma_layout{
+    .ip       = "LPDMA",
+    .channels = 4,
+    .first_2d = 4,
+    .bursts   = false,
+    .srd_only = true,
+    .requests = lpdma_requests};
+
 enum class unsupported : std::uint8_t
 {
   link_step,
 };
 
+enum class reach_kind : std::uint8_t
+{
+  source,
+  destination,
+  link,
+};
+
 class gpdma;
 
-auto gpdma_writes() -> std::span<write_entry<gpdma> const>;
-
 /**
- * @brief GPDMA1 of the STM32U5, RM0456 section 17: 16 channels, software or hardware requested,
- *        1D transfers in bursts, block and linked-list transfers, half and complete transfer,
- *        error, suspend and reset. Each burst is an event a transfer latency after its request,
- *        never performed inside a register or request callback. Data handling, RM0456 17.4.10
- *        and Table 141: SBX, then the width conversion of PAM, 0-padding or sign extension to a
- *        wider destination, right or left truncation to a narrower one, packing and unpacking
- *        LSB first, then DBX and DHX. BNDT counts source bytes. A packing channel needs BNDT to
- *        be a multiple of the destination width. A link with LLR.UB1 = 0 restores BNDT and BRC
- *        to the values the item started with, RM0456 GPDMA_CxBR1, so a last item with every update
- *        bit 0 and LA not 0 runs again without reading memory. A link with LLR.ULL = 0 keeps LLR:
- *        the item is recursive and the next link reads it again. Only LLR = 0 completes the
- *        channel. Channels 12 to 15 add 2D addressing, RM0456 17.4.10: BRC + 1 blocks per
- *        item, BNDT reloaded for each. SAO is added, or subtracted under SDEC, after each source
- *        burst of SBL_1 + 1 beats, never after a burst shortened by the block end. DAO likewise
- *        after each destination burst of DBL_1 + 1 items, counted after the data handling, so
- *        packing and unpacking change the count. A destination burst left partial by the block
- *        end gets no DAO, an assumption: RM0456 is silent on it. BRSAO and BRDAO apply after
- *        every block, per BRSDEC and BRDDEC, on top of the burst offsets. SAO, BRSAO not a
- *        multiple of the source width and DAO, BRDAO not a multiple of the destination width
- *        are user setting errors. A state saved before the destination burst count existed loads
- *        with the count 0, exact when the save fell on a destination burst boundary, as it always
- *        does with one-item destination bursts. Not modelled: link step mode, logging once and
- *        running to completion, and triggers. The half transfer event rises at the half of each
- *        block under TCEM 0, 1 and 2, and only in the last item, the one running with LLR = 0,
- *        under TCEM 3. On channels 12 to 15, TCEM 0 keeps the block level, while TCEM 1 and 2,
- *        and 3 in the last item, raise the half transfer once the rounded-up half of the BRC + 1
- *        blocks is done, and TCEM 1 raises the complete transfer at the end of the 2D block.
- *        With BRC 0 that half is the one block, so the half transfer rises at the block end,
- *        RM0456 GPDMA_CxTR2.TCEM and 17.7. A channel enabled with BNDT 0 raises the complete
- *        transfer event once its first item is loaded when its TCEM before that load is 2, and
- *        no event under 0 and 1. A request level held by a requester across a machine reset is
- *        cleared: the requester announces it again on its next change. A hardware-requested channel
- *        that completes, its TC with LLR = 0, tells every `dma_requester` peer its REQSEL with
- *        this controller, and so does every burst of a hardware-requested channel, after its
- *        beats and before its half, complete and next scheduling decisions: the requester drops
- *        the request it served. A burst ended by a data error acknowledges nothing.
- *        While the machine holds its core, a channel whose DBGMCU `DBG_GPDMA<n>_STOP` is set
- *        stops at a burst boundary: a burst due at the hold runs first, the next one waits for
- *        the release with the latency it had left, and requests arriving meanwhile stay latched.
- *        Other channels run on. The bits are read at the hold: without a DBGMCU model or field
- *        every channel runs on, a warning logged, a model_error under strict_peripherals.
+ * @brief GPDMA1 and LPDMA1 of the STM32U5. GPDMA1, RM0456 section 17: 16 channels, software or
+ *        hardware requested, 1D transfers in bursts, block and linked-list transfers, half and
+ *        complete transfer, error, suspend and reset. Each burst is an event a transfer latency
+ *        after its request, never performed inside a register or request callback. Data handling,
+ *        RM0456 17.4.10 and Table 141: SBX, then the width conversion of PAM, 0-padding or sign
+ *        extension to a wider destination, right or left truncation to a narrower one, packing and
+ *        unpacking LSB first, then DBX and DHX. BNDT counts source bytes. A packing channel needs
+ *        BNDT to be a multiple of the destination width. A link with LLR.UB1 = 0 restores BNDT and
+ *        BRC to the values the item started with, RM0456 GPDMA_CxBR1, so a last item with every
+ *        update bit 0 and LA not 0 runs again without reading memory. A link with LLR.ULL = 0 keeps
+ *        LLR: the item is recursive and the next link reads it again. Only LLR = 0 completes the
+ *        channel. Channels 12 to 15 add 2D addressing, RM0456 17.4.10: BRC + 1 blocks per item,
+ *        BNDT reloaded for each. SAO is added, or subtracted under SDEC, after each source burst of
+ *        SBL_1 + 1 beats, never after a burst shortened by the block end. DAO likewise after each
+ *        destination burst of DBL_1 + 1 items, counted after the data handling, so packing and
+ *        unpacking change the count. A destination burst left partial by the block end gets no DAO,
+ *        an assumption: RM0456 is silent on it. BRSAO and BRDAO apply after every block, per BRSDEC
+ *        and BRDDEC, on top of the burst offsets. SAO, BRSAO not a multiple of the source width and
+ *        DAO, BRDAO not a multiple of the destination width are user setting errors. A state saved
+ *        before the destination burst count existed loads with the count 0, exact when the save
+ *        fell on a destination burst boundary, as it always does with one-item destination bursts.
+ *        Not modelled: link step mode, logging once and running to completion, and triggers. The
+ *        half transfer event rises at the half of each block under TCEM 0, 1 and 2, and only in the
+ *        last item, the one running with LLR = 0, under TCEM 3. On channels 12 to 15, TCEM 0 keeps
+ *        the block level, while TCEM 1 and 2, and 3 in the last item, raise the half transfer once
+ *        the rounded-up half of the BRC + 1 blocks is done, and TCEM 1 raises the complete transfer
+ *        at the end of the 2D block. With BRC 0 that half is the one block, so the half transfer
+ *        rises at the block end, RM0456 GPDMA_CxTR2.TCEM and 17.7. A channel enabled with BNDT 0
+ *        raises the complete transfer event once its first item is loaded when its TCEM before that
+ *        load is 2, and no event under 0 and 1. A request level held by a requester across a
+ *        machine reset is cleared: the requester announces it again on its next change. A
+ *        hardware-requested channel that completes, its TC with LLR = 0, tells every
+ *        `dma_requester` peer its REQSEL with this controller, and so does every burst of a
+ *        hardware-requested channel, after its beats and before its half, complete and next
+ *        scheduling decisions: the requester drops the request it served. A burst ended by a data
+ *        error acknowledges nothing. While the machine holds its core, a channel whose DBGMCU
+ *        `DBG_GPDMA<n>_STOP` is set stops at a burst boundary: a burst due at the hold runs first,
+ *        the next one waits for the release with the latency it had left, and requests arriving
+ *        meanwhile stay latched. Other channels run on. The bits are read at the hold: without a
+ *        DBGMCU model or field every channel runs on, a warning logged, a model_error under
+ *        strict_peripherals. LPDMA1, RM0456 section 18, is the same engine on its own registers,
+ *        `LPDMA_C<n>`, 4 channels on `LPDMA1_Channel<n>_IRQn`, frozen by `DBG_LPDMA<n>_STOP`, its
+ *        requests from RM0456 Table 147. It keeps linked lists, TCEM, suspend, reset and the error
+ *        flags, and lacks what its registers lack, RM0456 18.4.10: one single per burst, no SBX,
+ *        DBX or DHX, no 2D channel, and a 1-bit PAM, which is GPDMA's PAM[0]: 0-padding or left
+ *        truncation at 0, sign extension or right truncation at 1, never packing. On
+ *        silicon LPDMA1 masters only SRAM4 and the SRD peripherals, RM0456 2.1.13, and the
+ *        outcome of an access outside them is not stated. The model still transfers, logs a
+ *        warning once per channel for a source, a destination and a linked-list fetch outside
+ *        the SRD SRAM regions of the description and the AHB3 and APB3 windows with their
+ *        secure aliases, and raises a model_error under strict_peripherals. No DTEF or ULEF is
+ *        set.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>,
                     public dma_controller,
                     public core_hold_listener
 {
 public:
-  gpdma(model_context& ctx, peripheral_desc const& desc);
+  gpdma(
+      model_context&                      ctx,
+      peripheral_desc const&              desc,
+      dma_layout const&                   layout,
+      std::span<write_entry<gpdma> const> table);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -228,23 +293,31 @@ private:
   void               raise_flag(std::size_t ch, flag_index flag);
   void               interrupts(std::size_t ch);
   void               warn_once(std::size_t ch, unsupported feature);
+  void               check_reach(std::size_t ch, reach_kind kind, popcorn::address at);
   auto               requesters() -> std::span<dma_requester* const>;
+  [[nodiscard]] auto or_zero(std::optional<field_ref> field) const -> std::uint32_t;
+  [[nodiscard]] auto channel_reg(std::size_t ch, std::string_view reg) const -> std::string;
 
-  register_file&                       regs_;
-  std::array<channel_fields, channels> ch_{};
-  reg_ref                              misr_;
-  std::array<field_ref, channels>      masked_{};
-  core::clock_domain                   hclk_;
-  std::array<bool, 1>                  unsupported_logged_{};
-  bool                                 stopped_clock_logged_{};
-  std::vector<dma_requester*>          requesters_;
-  bool                                 requesters_resolved_{};
-  bool                                 freeze_logged_{};
+  dma_layout const&                        layout_;
+  register_file&                           regs_;
+  std::array<channel_fields, max_channels> ch_{};
+  reg_ref                                  misr_;
+  std::array<field_ref, max_channels>      masked_{};
+  core::clock_domain                       hclk_;
+  std::array<bool, 1>                      unsupported_logged_{};
+  bool                                     stopped_clock_logged_{};
+  std::vector<dma_requester*>              requesters_;
+  bool                                     requesters_resolved_{};
+  bool                                     freeze_logged_{};
+  std::vector<address_range>               reach_;
+  std::array<std::uint8_t, max_channels>   reach_logged_{};
 };
 
 template <std::size_t... Ch>
-auto channel_entries(std::index_sequence<Ch...>, std::deque<std::string>& names)
-    -> std::vector<write_entry<gpdma>>
+auto channel_entries(
+    dma_layout const& layout,
+    std::index_sequence<Ch...>,
+    std::deque<std::string>& names) -> std::vector<write_entry<gpdma>>
 {
   std::vector<write_entry<gpdma>> out;
   auto const add = [&](std::string name, void (gpdma::*handler)(std::uint32_t, std::uint32_t)) {
@@ -253,7 +326,11 @@ auto channel_entries(std::index_sequence<Ch...>, std::deque<std::string>& names)
   };
   (
       [&] {
-        auto const prefix = std::format("GPDMA_C{}", Ch);
+        if(Ch >= layout.channels)
+        {
+          return;
+        }
+        auto const prefix = std::format("{}_C{}", layout.ip, Ch);
         add(prefix + "LBAR", &gpdma::plain_written);
         add(prefix + "FCR", &gpdma::clear_written<Ch>);
         add(prefix + "SR", &gpdma::plain_written);
@@ -264,33 +341,55 @@ auto channel_entries(std::index_sequence<Ch...>, std::deque<std::string>& names)
         add(prefix + "SAR", &gpdma::plain_written);
         add(prefix + "DAR", &gpdma::plain_written);
         add(prefix + "LLR", &gpdma::plain_written);
-        if(Ch >= first_2d)
+        if(Ch >= layout.first_2d)
         {
           add(prefix + "TR3", &gpdma::plain_written);
           add(prefix + "BR2", &gpdma::plain_written);
         }
       }(),
       ...);
-  names.push_back("GPDMA_MISR");
+  names.push_back(std::format("{}_MISR", layout.ip));
   out.push_back({names.back(), &gpdma::plain_written});
   return out;
 }
 
-auto gpdma_writes() -> std::span<write_entry<gpdma> const>
+template <dma_layout const& Layout> auto writes() -> std::span<write_entry<gpdma> const>
 {
   static std::deque<std::string>               names;
   static std::vector<write_entry<gpdma>> const table =
-      channel_entries(std::make_index_sequence<channels>{}, names);
+      channel_entries(Layout, std::make_index_sequence<max_channels>{}, names);
   return table;
 }
 
-gpdma::gpdma(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "GPDMA", gpdma_writes()}, regs_{ctx.regs}, misr_{reg("GPDMA_MISR")},
-      hclk_{ctx.clock.domain("hclk")}
+gpdma::gpdma(
+    model_context&                      ctx,
+    peripheral_desc const&              desc,
+    dma_layout const&                   layout,
+    std::span<write_entry<gpdma> const> table)
+    : dispatch_model{ctx, desc, layout.ip, table}, layout_{layout}, regs_{ctx.regs},
+      misr_{reg(std::format("{}_MISR", layout.ip))}, hclk_{ctx.clock.domain("hclk")}
 {
-  for(std::size_t ch = 0; ch < channels; ++ch)
+  if(layout_.srd_only)
   {
-    auto const p            = std::format("GPDMA_C{}", ch);
+    for(auto const& region : ctx.part.regions)
+    {
+      if(region.name.starts_with(srd_sram_prefix))
+      {
+        reach_.push_back({region.start, std::uint64_t{region.start} + region.size});
+      }
+    }
+    for(auto const& window : srd_peripheral_windows)
+    {
+      reach_.push_back(window);
+      reach_.push_back({window.start + secure_alias_offset, window.end + secure_alias_offset});
+    }
+  }
+  auto const optional = [&](std::string const& reg, std::string_view name) {
+    return layout_.bursts ? std::optional{field(reg, name)} : std::nullopt;
+  };
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
+  {
+    auto const p            = std::format("{}_C{}", layout_.ip, ch);
     auto&      c            = ch_[ch];
     c.lbar                  = reg(p + "LBAR");
     c.fcr                   = reg(p + "FCR");
@@ -310,7 +409,7 @@ gpdma::gpdma(model_context& ctx, peripheral_desc const& desc)
     c.suspended             = field(p + "SR", "SUSPF");
     c.source_width          = field(p + "TR1", "SDW_LOG2");
     c.source_increment      = field(p + "TR1", "SINC");
-    c.source_burst          = field(p + "TR1", "SBL_1");
+    c.source_burst          = optional(p + "TR1", "SBL_1");
     c.destination_width     = field(p + "TR1", "DDW_LOG2");
     c.destination_increment = field(p + "TR1", "DINC");
     c.request               = field(p + "TR2", "REQSEL");
@@ -326,16 +425,16 @@ gpdma::gpdma(model_context& ctx, peripheral_desc const& desc)
     c.update_tr2            = field(p + "LLR", "UT2");
     c.update_tr1            = field(p + "LLR", "UT1");
     c.packing               = field(p + "TR1", "PAM");
-    c.source_exchange       = field(p + "TR1", "SBX");
-    c.byte_exchange         = field(p + "TR1", "DBX");
-    c.half_exchange         = field(p + "TR1", "DHX");
+    c.source_exchange       = optional(p + "TR1", "SBX");
+    c.byte_exchange         = optional(p + "TR1", "DBX");
+    c.half_exchange         = optional(p + "TR1", "DHX");
     for(std::size_t f = 0; f < flag_names.size(); ++f)
     {
       c.flag[f]             = field(p + "SR", flag_names[f]);
       c.clear[f]            = field(p + "FCR", flag_names[f]);
       c.interrupt_enable[f] = field(p + "CR", enable_names[f]);
     }
-    if(ch >= first_2d)
+    if(ch >= layout_.first_2d)
     {
       c.two_d = two_d_fields{
           .tr3                         = reg(p + "TR3"),
@@ -354,8 +453,8 @@ gpdma::gpdma(model_context& ctx, peripheral_desc const& desc)
           .destination_burst           = field(p + "TR1", "DBL_1"),
       };
     }
-    c.line      = &irq(std::format("GPDMA1_Channel{}_IRQn", ch));
-    masked_[ch] = field("GPDMA_MISR", std::format("MIS{}", ch));
+    c.line      = &irq(std::format("{}_Channel{}_IRQn", desc.name, ch));
+    masked_[ch] = field(std::format("{}_MISR", layout_.ip), std::format("MIS{}", ch));
   }
 }
 
@@ -380,7 +479,7 @@ void gpdma::reset(register_file& regs, reset_kind)
     c.burst_held        = 0;
     c.remaining_ps      = 0;
   }
-  for(std::size_t ch = 0; ch < channels; ++ch)
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
   {
     interrupts(ch);
   }
@@ -388,6 +487,16 @@ void gpdma::reset(register_file& regs, reset_kind)
 
 void gpdma::plain_written(std::uint32_t, std::uint32_t)
 {}
+
+auto gpdma::or_zero(std::optional<field_ref> field) const -> std::uint32_t
+{
+  return field ? get(regs_, *field) : 0;
+}
+
+auto gpdma::channel_reg(std::size_t ch, std::string_view reg) const -> std::string
+{
+  return std::format("{}_C{}{}", layout_.ip, ch, reg);
+}
 
 auto gpdma::active(std::size_t ch) const -> bool
 {
@@ -435,8 +544,35 @@ void gpdma::warn_once(std::size_t ch, unsupported feature)
   if(not std::exchange(unsupported_logged_[std::to_underlying(feature)], true))
   {
     warn(
-        std::format("GPDMA_C{}CR", ch),
+        channel_reg(ch, "CR"),
         std::format("channel {} uses {}, not modelled: it runs to completion", ch, what));
+  }
+}
+
+void gpdma::check_reach(std::size_t ch, reach_kind kind, popcorn::address at)
+{
+  if(not layout_.srd_only or std::ranges::any_of(reach_, [&](address_range const& r) {
+       return at >= r.start and at < r.end;
+     }))
+  {
+    return;
+  }
+  constexpr std::array<std::string_view, 3> names{"source", "destination", "linked-list"};
+  auto const                                bit  = std::uint8_t(1u << std::to_underlying(kind));
+  auto const                                what = names[std::to_underlying(kind)];
+  if(not(reach_logged_[ch] & bit))
+  {
+    reach_logged_[ch] |= bit;
+    warn(
+        channel_reg(ch, "CR"),
+        std::format(
+            "channel {} {} address {:#010x} is outside SRAM4 and the SRD peripherals, which "
+            "LPDMA1 does not reach: the transfer goes on",
+            ch, what, at));
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(std::string{desc_.name}, channel_reg(ch, "CR"), 0);
   }
 }
 
@@ -486,7 +622,7 @@ void gpdma::schedule(std::size_t ch)
   {
     if(not std::exchange(stopped_clock_logged_, true))
     {
-      warn(std::format("GPDMA_C{}CR", ch), "HCLK is stopped: the transfer waits");
+      warn(channel_reg(ch, "CR"), "HCLK is stopped: the transfer waits");
     }
     return;
   }
@@ -503,7 +639,7 @@ void gpdma::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   auto const ch = static_cast<std::size_t>(payload >> 32);
   if(kind != burst_done
-     or ch >= channels
+     or ch >= layout_.channels
      or static_cast<std::uint32_t>(payload) != state_.channel[ch].generation)
   {
     return;
@@ -520,9 +656,10 @@ auto gpdma::deliver(std::size_t ch, std::uint32_t value) -> bool
   auto&      c           = ch_[ch];
   auto const dw          = static_cast<std::uint8_t>(1u << get(regs_, c.destination_width));
   auto const destination = regs_.peek(c.dar.offset);
-  auto const bytes       = get(regs_, c.byte_exchange) != 0;
-  auto const halves      = get(regs_, c.half_exchange) != 0;
-  auto const data        = exchange_destination(value, dw, bytes, halves);
+  check_reach(ch, reach_kind::destination, destination);
+  auto const bytes  = or_zero(c.byte_exchange) != 0;
+  auto const halves = or_zero(c.half_exchange) != 0;
+  auto const data   = exchange_destination(value, dw, bytes, halves);
   if(not ctx_.services.write(destination, dw, data, initiator::dma))
   {
     return false;
@@ -550,7 +687,7 @@ auto gpdma::convert(std::size_t ch, std::uint32_t value) -> bool
   auto const sw     = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
   auto const dw     = static_cast<std::uint8_t>(1u << get(regs_, c.destination_width));
   auto const pam    = get(regs_, c.packing);
-  auto const source = exchange_source(value, sw, get(regs_, c.source_exchange) != 0);
+  auto const source = exchange_source(value, sw, or_zero(c.source_exchange) != 0);
   if(sw == dw or (pam & 2u) == 0)
   {
     return deliver(ch, resize(source, sw, dw, pam));
@@ -582,13 +719,14 @@ void gpdma::burst(std::size_t ch)
   auto&         c       = ch_[ch];
   auto&         s       = state_.channel[ch];
   auto const    sw      = static_cast<std::uint8_t>(1u << get(regs_, c.source_width));
-  auto const    beats   = get(regs_, c.source_burst) + 1;
+  auto const    beats   = or_zero(c.source_burst) + 1;
   auto const    request = get(regs_, c.request);
   std::uint32_t beat    = 0;
   for(; beat < beats and get(regs_, c.bytes) != 0; ++beat)
   {
     auto const source = regs_.peek(c.sar.offset);
-    auto const value  = ctx_.services.read(source, sw, initiator::dma);
+    check_reach(ch, reach_kind::source, source);
+    auto const value = ctx_.services.read(source, sw, initiator::dma);
     if(not value or not convert(ch, *value))
     {
       finish(ch, data_error);
@@ -730,6 +868,7 @@ auto gpdma::link(std::size_t ch) -> bool
     {
       return true;
     }
+    check_reach(ch, reach_kind::link, at);
     auto const word = ctx_.services.read(at, 4, initiator::dma);
     if(not word)
     {
@@ -888,8 +1027,8 @@ template <std::size_t Ch> void gpdma::clear_written(std::uint32_t, std::uint32_t
 
 auto gpdma::request_of(std::string_view signal) const -> std::optional<std::uint32_t>
 {
-  auto const found = std::ranges::find(gpdma_requests, signal, &gpdma_request::signal);
-  if(found == gpdma_requests.end())
+  auto const found = std::ranges::find(layout_.requests, signal, &gpdma_request::signal);
+  if(found == layout_.requests.end())
   {
     return std::nullopt;
   }
@@ -901,12 +1040,12 @@ void gpdma::on_core_hold(bool held)
   auto const now = ctx_.clock.time().ps;
   if(held)
   {
-    std::array<bool, channels> frozen{};
-    for(std::size_t ch = 0; ch < channels; ++ch)
+    std::array<bool, max_channels> frozen{};
+    for(std::size_t ch = 0; ch < layout_.channels; ++ch)
     {
-      frozen[ch] = debug_frozen(freeze_logged_, std::format("GPDMA{}", ch));
+      frozen[ch] = debug_frozen(freeze_logged_, std::format("{}{}", layout_.ip, ch));
     }
-    for(std::size_t ch = 0; ch < channels; ++ch)
+    for(std::size_t ch = 0; ch < layout_.channels; ++ch)
     {
       auto& s = state_.channel[ch];
       if(not frozen[ch] or s.held != 0)
@@ -925,7 +1064,7 @@ void gpdma::on_core_hold(bool held)
     }
     return;
   }
-  for(std::size_t ch = 0; ch < channels; ++ch)
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
   {
     auto& s = state_.channel[ch];
     if(s.held == 0)
@@ -959,7 +1098,7 @@ void gpdma::on_request(std::uint32_t request, bool level)
   {
     return;
   }
-  for(std::size_t ch = 0; ch < channels; ++ch)
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
   {
     if(get(regs_, ch_[ch].software) == 0 and get(regs_, ch_[ch].request) == request)
     {
@@ -972,7 +1111,14 @@ void gpdma::on_request(std::uint32_t request, bool level)
 auto gpdma_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<gpdma>(ctx, desc);
+    return std::make_shared<gpdma>(ctx, desc, gpdma_layout, writes<gpdma_layout>());
+  };
+}
+
+auto lpdma_factory() -> model_factory
+{
+  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<gpdma>(ctx, desc, lpdma_layout, writes<lpdma_layout>());
   };
 }
 }

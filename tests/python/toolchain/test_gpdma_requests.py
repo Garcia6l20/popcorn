@@ -19,17 +19,26 @@ def ll_name(signal: str) -> str:
     return "DCMI_PSSI" if name in ("DCMI", "PSSI") else name
 
 
-def table() -> dict[str, int]:
-    rows = re.findall(r'\{"([a-z0-9_]+)",\s*(\d+)\}', TABLE.read_text())
-    assert len(rows) == 127
+def table(name: str, size: int) -> dict[str, int]:
+    found = re.search(
+        rf"std::array<gpdma_request, {size}> {name}\{{(.*?)\n\}};", TABLE.read_text(), re.S
+    )
+    assert found is not None
+    rows = re.findall(r'\{"([a-z0-9_]+)",\s*(\d+)\}', found.group(1))
+    assert len(rows) == size
     return {ll_name(signal): int(number) for signal, number in rows}
 
 
-def hal() -> dict[str, int]:
-    rows = re.findall(r"#define LL_GPDMA1_REQUEST_(\w+)\s+(\d+)U", LL_DMA.read_text())
+def hal(controller: str) -> dict[str, int]:
+    rows = re.findall(rf"#define LL_{controller}_REQUEST_(\w+)\s+(\d+)U", LL_DMA.read_text())
     return {name: int(number) for name, number in rows}
 
 
 @pytest.mark.skipif(not LL_DMA.is_file(), reason="STM32U5 HAL not fetched, no arm-none-eabi-gcc")
 def test_gpdma_request_table_matches_the_hal_ll_request_numbers() -> None:
-    assert table() == hal()
+    assert table("gpdma_requests", 127) == hal("GPDMA1")
+
+
+@pytest.mark.skipif(not LL_DMA.is_file(), reason="STM32U5 HAL not fetched, no arm-none-eabi-gcc")
+def test_lpdma_request_table_matches_the_hal_ll_request_numbers() -> None:
+    assert table("lpdma_requests", 17) == hal("LPDMA1")
