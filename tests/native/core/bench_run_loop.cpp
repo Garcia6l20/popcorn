@@ -259,6 +259,21 @@ auto machine_alu_block_sink() -> measured
   return result;
 }
 
+auto machine_alu_ring_blocks() -> measured
+{
+  auto const target = make_machine(POPCORN_M33_DESC);
+  target->set_ring_blocks(true);
+  set(*target, "r0", alu_loops);
+  auto const result = run_budget(
+      *target, {.max_instructions = icount{1'000'000}, .wall_budget = std::chrono::seconds{1}},
+      alu_count(alu_loops));
+  if(target->trace().appended() < alu_loops)
+  {
+    throw std::runtime_error{"the ring received no block"};
+  }
+  return result;
+}
+
 auto machine_alu_coverage() -> measured
 {
   auto const target = make_machine(POPCORN_M33_DESC);
@@ -403,6 +418,7 @@ auto main(int argc, char** argv) -> int
       {"machine-wall",          alu_count(alu_loops),     [] { return machine_alu({}); }                 },
       {"machine-block-sink",    alu_count(alu_loops),     machine_alu_block_sink                         },
       {"machine-coverage",      alu_count(alu_loops),     machine_alu_coverage                           },
+      {"machine-ring-blocks",   alu_count(alu_loops),     machine_alu_ring_blocks                        },
       {"spin-on",               alu_count(alu_loops),     machine_alu_spin                               },
       {"machine-1e4-until",     alu_count(alu_loops),
        [&] {

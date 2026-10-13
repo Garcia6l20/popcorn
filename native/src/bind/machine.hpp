@@ -1088,6 +1088,21 @@ public:
   [[= py::doc{"Drop every record of the trace ring."}]] void clear_ring();
 
   /**
+   * @brief Chooses whether executed blocks append block records to the trace ring.
+   * @param on Whether the ring keeps block records.
+   * @throws machine_running while the machine runs, handlers included.
+   */
+  [[= py::doc{"Choose whether executed blocks append BLOCK records to the trace ring."}]] void
+      set_ring_blocks(bool on);
+
+  /**
+   * @brief Whether executed blocks append block records to the trace ring.
+   * @throws machine_running while the machine runs, outside its handlers.
+   */
+  [[= py::doc{"Whether the trace ring keeps BLOCK records."}]] [[nodiscard]] auto
+      ring_blocks() const -> bool;
+
+  /**
    * @brief Forwards the machine's log records to Python. The machine's thread queues each record
    *        with its virtual time and no GIL, at most 4096 of them, later ones counted. A thread
    *        holding the GIL and no host mutex forwards the queue in order, through @p emit: the

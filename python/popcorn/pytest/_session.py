@@ -203,12 +203,13 @@ class PopcornSession:
 
     def build(self, key: Key, devices: Devices | None = None, name: str | None = None) -> Machine:
         """A new machine of `key` with `devices`, named `name`, not reset, counting coverage
-        under `--popcorn-cov`."""
+        under `--popcorn-cov`, its ring keeping BLOCK records under `--popcorn-ring-blocks`."""
         machine = self.project(key).machine(
             strict_peripherals=key.strict, devices=devices, name=name
         )
         if self.coverage is not None:
             machine.coverage.enable()
+        machine.ring.blocks = self.settings.ring_blocks
         return machine
 
     def collect(self, machine: Machine) -> None:

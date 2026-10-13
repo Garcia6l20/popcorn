@@ -561,6 +561,18 @@ public:
   [[nodiscard]] auto trace() noexcept -> trace_ring&;
 
   /**
+   * @brief Chooses whether executed blocks append block records to the trace ring, off by
+   *        default. Trace sinks select block records on their own. Machine configuration: not
+   *        in snapshots, kept across restore().
+   * @param on Whether the ring keeps block records.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void set_ring_blocks(bool on);
+
+  /** @brief Whether executed blocks append block records to the trace ring. */
+  [[nodiscard]] auto ring_blocks() const noexcept -> bool;
+
+  /**
    * @brief Streams trace records of the selected kinds to a sink, the full trace a `.pctr` file
    *        writer consumes. Kinds that cost a hook, such as block and mem, are hooked only while
    *        a sink selects them, and only over its ranges. dt counts per sink, see trace_sink.

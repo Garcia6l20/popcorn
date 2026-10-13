@@ -376,7 +376,7 @@ void machine::run_state::on_block(
       run.coverage.has_previous = false;
     }
   }
-  if(run.sinks_want_block) [[unlikely]]
+  if(run.block_records) [[unlikely]]
   {
     run.guarded([&run, addr, size] {
       auto const   pc = static_cast<address>(addr);
@@ -384,7 +384,7 @@ void machine::run_state::on_block(
           .kind = trace_kind::block, .payload = {pc, 0, 0}
       };
       record.aux = static_cast<std::uint16_t>(std::min<std::uint32_t>(size, 0xffff));
-      run.emit(record, pc, false);
+      run.emit(record, pc, run.ring_blocks);
       return false;
     });
   }

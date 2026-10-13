@@ -272,6 +272,18 @@ auto machine::trace() noexcept -> trace_ring&
   return trace_;
 }
 
+void machine::set_ring_blocks(bool on)
+{
+  require_stopped(*this);
+  run_->ring_blocks   = on;
+  run_->block_records = run_->sinks_want_block or on;
+}
+
+auto machine::ring_blocks() const noexcept -> bool
+{
+  return run_->ring_blocks;
+}
+
 void machine::do_end_after_instruction()
 {
   if(run_->in_engine)

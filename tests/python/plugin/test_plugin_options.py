@@ -15,6 +15,8 @@ OPTIONS = (
     "--popcorn-trace-on-fail=[[]DIR]",
     "--popcorn-strict",
     "--popcorn-budget=N",
+    "--popcorn-ring=N",
+    "--popcorn-ring-blocks",
 )
 
 
@@ -45,6 +47,8 @@ def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
                 trace_dir=None,
                 strict=False,
                 budget=None,
+                ring=0,
+                ring_blocks=False,
             )
         """)
     pytester.runpytest("-p", "no:asyncio").assert_outcomes(passed=1)
@@ -70,6 +74,7 @@ def test_values_parse_relative_to_the_invocation_directory(
             assert settings.trace_dir == here / "traces"
             assert settings.strict
             assert settings.budget == 1000
+            assert settings.ring_blocks
         """))
     monkeypatch.chdir(here)
     result = pytester.runpytest(
@@ -79,6 +84,7 @@ def test_values_parse_relative_to_the_invocation_directory(
         "--popcorn-trace-on-fail=traces",
         "--popcorn-strict",
         "--popcorn-budget=1000",
+        "--popcorn-ring-blocks",
     )
     result.assert_outcomes(passed=1)
 

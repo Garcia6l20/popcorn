@@ -64,6 +64,43 @@ def test_a_fault_reports_its_registers_and_frames(pytester: pytest.Pytester) -> 
     )
 
 
+@pytest.mark.parametrize("blocks", [False, True])
+def test_ring_blocks_show_how_execution_reached_the_fault(
+    pytester: pytest.Pytester, blocks: bool
+) -> None:
+    write_conftest(pytester)
+    write_project(pytester, until="ready", elf=FAULT_ELF)
+    pytester.makepyfile(FAULT)
+    result = run(pytester, "--popcorn-ring=8", *(["--popcorn-ring-blocks"] if blocks else []))
+    result.assert_outcomes(failed=1)
+    text = result.stdout.str()
+    ring = text[text.index("trace ring:") : text.index("short test summary")]
+    assert "stop  FAULT at" in ring
+    assert ("block " in ring) is blocks
+
+
+def test_ring_blocks_reach_every_machine_of_a_test(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile("""
+        def test_first(machine, machine_factory, description):
+            assert machine.ring.blocks
+            assert machine_factory(description).ring.blocks
+            assert machine_factory(description, booted=False).ring.blocks
+            machine.ring.blocks = False
+
+        def test_second(machine):
+            assert machine.ring.blocks
+        """)
+    run(pytester, "-p", "no:randomly", "--popcorn-ring-blocks").assert_outcomes(passed=2)
+    pytester.makepyfile(test_ring_blocks_reach_every_machine_of_a_test="""
+        def test_off(machine, machine_factory, description):
+            assert not machine.ring.blocks
+            assert not machine_factory(description).ring.blocks
+        """)
+    run(pytester).assert_outcomes(passed=1)
+
+
 def test_a_failed_boot_reports_the_boot_stop(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester, until="ready", elf=FAULT_ELF, vtor="vt_nested")

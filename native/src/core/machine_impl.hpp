@@ -853,8 +853,12 @@ struct machine::run_state
   bool coverage_on = false;
   /** @brief Coverage counters. */
   coverage_state coverage{};
-  /** @brief Whether some sink selects block records, tested by the block hook. */
+  /** @brief Whether some sink selects block records. */
   bool sinks_want_block = false;
+  /** @brief Whether block records go to the trace ring. */
+  bool ring_blocks = false;
+  /** @brief sinks_want_block or ring_blocks, the one flag the block hook tests. */
+  bool block_records = false;
   /** @brief Whether the mem record hooks and their exact pc reference are held. */
   bool sink_mem_active = false;
   /** @brief Memory hooks feeding mem records while some sink selects them. */

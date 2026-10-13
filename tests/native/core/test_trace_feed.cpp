@@ -18,6 +18,8 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace
@@ -71,6 +73,33 @@ struct collector
 void count_block(uc_struct*, std::uint64_t, std::uint32_t, void* user)
 {
   ++*static_cast<std::uint64_t*>(user);
+}
+
+void note_block(uc_struct*, std::uint64_t addr, std::uint32_t size, void* user)
+{
+  static_cast<std::vector<std::pair<address, std::uint32_t>>*>(user)->emplace_back(
+      static_cast<address>(addr), size);
+}
+
+auto ring_blocks_of(fixture const& f) -> std::vector<trace_record>
+{
+  return of_kind(f.target->trace().records(), trace_kind::block);
+}
+
+auto run_alu_noting(fixture& f) -> std::vector<std::pair<address, std::uint32_t>>
+{
+  std::vector<std::pair<address, std::uint32_t>> noted;
+  uc_hook                                        hook = 0;
+  REQUIRE(
+      uc_hook_add(
+          f.module->attached_engine(), &hook, UC_HOOK_BLOCK_ICOUNT,
+          reinterpret_cast<void*>(&note_block), &noted, 1, 0)
+      == UC_ERR_OK);
+  core::slice_request until;
+  until.until = sym("alu", "alu_done");
+  REQUIRE(f.run_to_stop(until).reason == stop_reason::address);
+  uc_hook_del(f.module->attached_engine(), hook);
+  return noted;
 }
 
 auto alu_fixture() -> fixture
@@ -385,4 +414,85 @@ TEST_CASE("a sized symbol that misses the pc does not hide an earlier one that h
   CHECK(inside.symbol == "inner");
   CHECK(inside.offset == 2);
   CHECK(at(0x081f'0200).symbol.empty());
+}
+
+TEST_CASE("the ring keeps a block record per executed block only while ring_blocks is set")
+{
+  SUBCASE("set")
+  {
+    auto f = alu_fixture();
+    CHECK_FALSE(f.target->ring_blocks());
+    f.target->set_ring_blocks(true);
+    CHECK(f.target->ring_blocks());
+    auto const start  = f.target->virtual_clock().now();
+    auto const noted  = run_alu_noting(f);
+    auto const blocks = ring_blocks_of(f);
+    REQUIRE(blocks.size() == 1001);
+    REQUIRE(blocks.size() == noted.size());
+    std::uint64_t instructions = 0;
+    for(auto const [record, block] : std::views::zip(blocks, noted))
+    {
+      CHECK(record.payload[0] == block.first);
+      CHECK(record.aux == block.second);
+      instructions += record.aux;
+    }
+    CHECK(instructions == f.target->virtual_clock().now().value - start.value);
+    CHECK(f.target->trace().records().back().kind == trace_kind::stop);
+  }
+  SUBCASE("not set")
+  {
+    auto f      = alu_fixture();
+    std::ignore = run_alu_noting(f);
+    CHECK(ring_blocks_of(f).empty());
+    CHECK(f.target->trace().records().back().kind == trace_kind::stop);
+  }
+}
+
+TEST_CASE("a block sink and the ring switch see each block once, apart")
+{
+  auto       f = alu_fixture();
+  collector  seen;
+  auto const sink = f.target->add_trace_sink({trace_kind::block}, seen.sink());
+  SUBCASE("both")
+  {
+    f.target->set_ring_blocks(true);
+    auto const noted = run_alu_noting(f);
+    CHECK(of_kind(seen.records, trace_kind::block).size() == noted.size());
+    CHECK(ring_blocks_of(f).size() == noted.size());
+  }
+  SUBCASE("sink only")
+  {
+    auto const noted = run_alu_noting(f);
+    CHECK(of_kind(seen.records, trace_kind::block).size() == noted.size());
+    CHECK(ring_blocks_of(f).empty());
+  }
+}
+
+TEST_CASE("ring_blocks is refused from a handler and kept across a restore")
+{
+  auto       f     = alu_fixture();
+  auto const taken = f.target->snapshot();
+  f.target->set_ring_blocks(true);
+  bool       refused = false;
+  auto const sink =
+      f.target->add_trace_sink({trace_kind::stop}, [&](std::span<trace_record const>) {
+        try
+        {
+          f.target->set_ring_blocks(false);
+        }
+        catch(popcorn::machine_running const&)
+        {
+          refused = true;
+        }
+      });
+  core::slice_request budget;
+  budget.budget_left = icount{100};
+  REQUIRE(f.run_to_stop(budget).reason == stop_reason::budget);
+  CHECK(refused);
+  CHECK(f.target->ring_blocks());
+  f.target->restore(taken);
+  CHECK(f.target->ring_blocks());
+  f.target->trace().clear(f.target->virtual_clock().now());
+  REQUIRE(f.run_to_stop(budget).reason == stop_reason::budget);
+  CHECK_FALSE(ring_blocks_of(f).empty());
 }

@@ -175,6 +175,24 @@ class Ring:
         self._idle()
         self._handle.clear_ring()
 
+    @property
+    def blocks(self) -> bool:
+        """Whether each executed block adds a BLOCK record, off by default. Machine
+        configuration: not in snapshots, kept across `Machine.restore`. With it on, a tight loop
+        fills the ring in a few thousand blocks and pushes out older records.
+
+        Raises:
+            TypeError: A value set is not a bool.
+            MachineRunning: The machine is busy. Setting raises from its handlers too.
+        """
+        return self._handle.ring_blocks()
+
+    @blocks.setter
+    def blocks(self, on: bool) -> None:
+        checked = _checked_flag(on)
+        self._idle()
+        self._handle.set_ring_blocks(checked)
+
     def records(self) -> list[Record]:
         """The kept records, oldest first, registers and symbols named."""
         import tempfile
@@ -225,6 +243,12 @@ class Ring:
                 return f"call  {symbol or self._locate(pc)} r0={r0:#x}"
             case Stop(_, pc, reason):
                 return f"stop  {StopReason(reason).name} at {self._locate(pc)}"
+
+
+def _checked_flag(on: object) -> bool:
+    if not isinstance(on, bool):
+        raise TypeError(f"Ring.blocks takes a bool, not {type(on).__name__}")
+    return on
 
 
 _PERIOD = 8

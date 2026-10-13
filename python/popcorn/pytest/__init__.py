@@ -91,7 +91,10 @@ decoded and the call stack. A machine without a stop since the test started show
 The report of a setup error from a failed boot shows the boot's stop. With `--popcorn-ring=N`,
 each block ends with the last N lines of the machine's trace ring, a group of up to 8 records
 repeated back to back printed once with its repeat count: a poll loop takes a few lines. Without
-it, a one-line hint names the option.
+it, a one-line hint names the option. The ring holds MMIO, IRQ, call and stop records. With
+`--popcorn-ring-blocks` every popcorn machine's ring also keeps a BLOCK record per executed block,
+showing how execution reached the stop. The ring keeps 4096 records, so blocks push out older
+MMIO records sooner.
 
 With `--popcorn-trace-on-fail=DIR`, every machine fixture and system member is traced for
 every test with `popcorn.trace.ALL`. A test whose call failed keeps
@@ -170,7 +173,7 @@ async test and fixture. They run on its loops, everything else on popcorn's. Mix
 Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture, are left to it.
 
 Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`,
-`--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`.
+`--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`, `--popcorn-ring-blocks`.
 
     @pytest.mark.popcorn(budget=1_000_000, strict=True)
     async def test_bounded(controller: popcorn.Machine, linked: popcorn.System) -> None: ...

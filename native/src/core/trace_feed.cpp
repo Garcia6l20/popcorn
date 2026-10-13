@@ -178,6 +178,7 @@ void machine::run_state::update_sink_hooks()
 {
   sinks_want_block = std::ranges::any_of(
       sinks, [](auto const& held) { return held.second->kinds.contains(trace_kind::block); });
+  block_records       = sinks_want_block or ring_blocks;
   auto const want_mem = std::ranges::any_of(
       sinks, [](auto const& held) { return held.second->kinds.contains(trace_kind::mem); });
   if(want_mem == sink_mem_active)

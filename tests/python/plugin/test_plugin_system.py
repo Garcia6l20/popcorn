@@ -206,6 +206,19 @@ def test_command_line_strictness_reaches_every_member(
     assert summary(result) == "popcorn: 2 key(s), 2 boot(s), 0 from cache"
 
 
+def test_ring_blocks_reach_every_member(layout: Path, pytester: pytest.Pytester) -> None:
+    (layout / "test_blocks.py").write_text(
+        "def test_blocks(system):\n"
+        "    assert all(m.ring.blocks for m in system.members.values())\n"
+    )
+    run(pytester, str(layout / "test_blocks.py"), "--popcorn-ring-blocks").assert_outcomes(passed=1)
+    (layout / "test_no_blocks.py").write_text(
+        "def test_no_blocks(system):\n"
+        "    assert not any(m.ring.blocks for m in system.members.values())\n"
+    )
+    run(pytester, str(layout / "test_no_blocks.py")).assert_outcomes(passed=1)
+
+
 def test_a_strict_marker_applies_to_the_members_only(
     layout: Path, pytester: pytest.Pytester
 ) -> None:

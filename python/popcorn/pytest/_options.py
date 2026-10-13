@@ -25,6 +25,8 @@ class Settings:
             `--popcorn-budget`.
         ring: How many lines of the collapsed trace ring a failure report shows, 0 for none,
             `--popcorn-ring`.
+        ring_blocks: Whether every popcorn machine's trace ring keeps BLOCK records,
+            `--popcorn-ring-blocks`.
     """
 
     cov: Path | None
@@ -33,6 +35,7 @@ class Settings:
     strict: bool
     budget: int | None
     ring: int = 0
+    ring_blocks: bool = False
 
     @classmethod
     def from_config(cls, config: pytest.Config) -> Settings:
@@ -49,6 +52,7 @@ class Settings:
             strict=config.getoption("popcorn_strict") is True,
             budget=budget if isinstance(budget, int) else None,
             ring=ring if isinstance(ring, int) else 0,
+            ring_blocks=config.getoption("popcorn_ring_blocks") is True,
         )
 
 
@@ -62,7 +66,7 @@ def _path(value: object, base: Path) -> Path | None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Register the five `--popcorn-*` options."""
+    """Register the six `--popcorn-*` options."""
     group = parser.getgroup("popcorn", "popcorn firmware emulation")
     group.addoption(
         "--popcorn-cov",
@@ -96,7 +100,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=0,
         metavar="N",
         help="show the last N lines of the trace ring in a failure report, repeated record "
-        "groups collapsed, default 0: not shown",
+        "groups collapsed, default 0: not shown. The ring holds no BLOCK record without "
+        "--popcorn-ring-blocks",
+    )
+    group.addoption(
+        "--popcorn-ring-blocks",
+        action="store_true",
+        help="every popcorn machine's trace ring keeps a BLOCK record per executed block. The "
+        "ring keeps 4096 records: a tight loop fills it and pushes out older MMIO records, "
+        "the report collapses the repeats. Shown in a failure report with --popcorn-ring=N",
     )
 
 

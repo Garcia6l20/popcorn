@@ -251,4 +251,14 @@ void machine_handle::clear_ring()
 {
   access([](core::machine& target) { target.trace().clear(target.virtual_clock().now()); });
 }
+
+void machine_handle::set_ring_blocks(bool on)
+{
+  access([on](core::machine& target) { target.set_ring_blocks(on); });
+}
+
+auto machine_handle::ring_blocks() const -> bool
+{
+  return access([](core::machine& target) { return target.ring_blocks(); });
+}
 }

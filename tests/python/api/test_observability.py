@@ -16,12 +16,13 @@ from popcorn.coverage import Coverage, ImageKind
 from popcorn.trace import ALL, Block, Mmio, Stop, TraceKind, read
 from popcorn.units import ms
 
-from .conftest import CORE_FIRMWARE, M33_JSON, ROOT
+from .conftest import CORE_FIRMWARE, M33_JSON, ROOT, run_bounded
 from .models_example import Timer
 
 BRANCHES_ELF = CORE_FIRMWARE / "branches.elf"
 MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
+FAULT_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "fault.elf"
 
 
 def branches(count: int = 4) -> popcorn.Machine:
@@ -201,6 +202,129 @@ def test_a_dump_refuses_a_last_below_one() -> None:
     m = modelled()
     with pytest.raises(ValueError, match="last must be at least 1, not 0"):
         m.ring.dump(last=0)
+
+
+def nested(*, blocks: bool) -> popcorn.Machine:
+    """A machine of `fault.elf` reset into `vt_nested`, its ring keeping BLOCK records when
+    `blocks`."""
+    image = popcorn.Image.elf(FAULT_ELF)
+    m = popcorn.Machine(M33_JSON, image=image, vector_table=image.lookup("vt_nested").value)
+    m.ring.blocks = blocks
+    m.reset()
+    return m
+
+
+def test_ring_blocks_lead_to_the_fault() -> None:
+    m = nested(blocks=True)
+    assert m.ring.blocks
+    stop = asyncio.run(m.run(budget=10_000))
+    assert stop.reason is popcorn.StopReason.FAULT
+    records = m.ring.records()
+    assert isinstance(records[-1], Stop)
+    assert isinstance(records[-2], Block)
+    blocks = [r for r in records if isinstance(r, Block)]
+    assert blocks[-1].pc <= stop.pc < blocks[-1].pc + 2 * blocks[-1].icount
+    assert sum(b.icount for b in blocks) == stop.instructions
+    assert "block " in m.ring.dump()
+
+
+def test_the_ring_keeps_no_block_by_default() -> None:
+    m = nested(blocks=False)
+    assert not m.ring.blocks
+    assert asyncio.run(m.run(budget=10_000)).reason is popcorn.StopReason.FAULT
+    assert not any(isinstance(r, Block) for r in m.ring.records())
+
+
+def ring_block_rows(m: popcorn.Machine) -> list[tuple[int, int, int]]:
+    return [(r.time, r.pc, r.icount) for r in m.ring.records() if isinstance(r, Block)]
+
+
+def test_ring_blocks_are_alike_parked_and_running() -> None:
+    parked = nested(blocks=True)
+    stop = asyncio.run(parked.run(budget=10_000))
+    assert stop.reason is popcorn.StopReason.FAULT
+    running = nested(blocks=True)
+
+    async def body() -> None:
+        async with running.running():
+            await running.wait_for(popcorn.Reached("level3"))
+
+    with pytest.raises(popcorn.FaultError) as raised:
+        run_bounded(body(), 30)
+    ended = raised.value.stop
+    assert ended is not None and ended.pc == stop.pc
+    assert ring_block_rows(parked)
+    assert ring_block_rows(running) == ring_block_rows(parked)
+
+
+def test_ring_blocks_are_checked_and_refused_while_running() -> None:
+    m = branches(count=1_000_000)
+    with pytest.raises(TypeError, match=r"Ring\.blocks takes a bool, not int"):
+        m.ring.blocks = 1  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def body() -> None:
+        async with m.running():
+            with pytest.raises(TypeError, match="not int"):
+                m.ring.blocks = 1  # pyright: ignore[reportAttributeAccessIssue]
+            with pytest.raises(popcorn.MachineRunning):
+                m.ring.blocks = True
+
+    asyncio.run(body())
+    assert not m.ring.blocks
+
+
+def test_ring_blocks_are_refused_from_a_command_of_a_free_run() -> None:
+    m = branches(count=1_000_000)
+    refused: list[type[BaseException]] = []
+
+    def toggle() -> None:
+        try:
+            m.ring.blocks = True
+        except popcorn.MachineRunning as error:
+            refused.append(type(error))
+
+    async def body() -> None:
+        async with m.running():
+            await m.sample(toggle)
+
+    run_bounded(body(), 30)
+    assert refused == [popcorn.MachineRunning]
+    assert not m.ring.blocks
+
+
+def test_ring_blocks_are_refused_from_a_handler_in_a_slice() -> None:
+    m = branches(count=2)
+    refused: list[type[BaseException]] = []
+
+    def handler(call: popcorn.Call) -> popcorn.Return:
+        try:
+            m.ring.blocks = True
+        except popcorn.MachineRunning as error:
+            refused.append(type(error))
+        return call.proceed()
+
+    m.intercept("branches", handler)
+
+    async def body() -> None:
+        async with m.running():
+            await m.wait_for(popcorn.Reached("outside"))
+
+    with pytest.raises(popcorn.EmulationError):
+        run_bounded(body(), 30)
+    assert refused == [popcorn.MachineRunning]
+    assert not m.ring.blocks
+
+
+def test_ring_blocks_stay_out_of_snapshots() -> None:
+    m = branches()
+    m.ring.blocks = True
+    taken = m.snapshot()
+    m.ring.blocks = False
+    m.restore(taken)
+    assert not m.ring.blocks
+    m.ring.blocks = True
+    m.restore(taken)
+    assert m.ring.blocks
 
 
 def test_collapse_finds_a_single_repeated_record() -> None:

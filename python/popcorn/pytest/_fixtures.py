@@ -350,7 +350,9 @@ class _Lent:
     def restored(self) -> Machine:
         slot, snapshot = self.session.slot(self.key, self.name)
         self._slot = slot
-        return _restored(slot.machine, snapshot, self._rebuilt)
+        machine = _restored(slot.machine, snapshot, self._rebuilt)
+        machine.ring.blocks = self.session.settings.ring_blocks
+        return machine
 
     def spoiled(self) -> bool:
         slot = self._slot
