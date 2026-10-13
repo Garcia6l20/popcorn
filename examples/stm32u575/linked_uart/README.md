@@ -26,44 +26,63 @@ The protocol, `firmware/controller.c` and `firmware/responder.c`:
 
 ## Layout
 
-A system test needs one project per firmware image, so this example has three test folders
-where the others have one:
+One root `conftest.py` declares the descriptions and the fixtures. The tests sit in three
+folders, one per kind of test:
 
-- `linked_projects.py`: `CONTROLLER` and `RESPONDER`, two `popcorn.Project` values in a plain
-  module. pytest imports `conftest.py` beside it first and puts this folder on `sys.path`.
-- `controller/` and `responder/`: each image alone. Their `conftest.py` returns the project as
-  `popcorn_project`, and the tests use the `machine` fixture.
-- `system/`: the three machines linked. Its `conftest.py` returns the system as
-  `popcorn_system`, and the tests use the `system` fixture.
+- `conftest.py`: `CONTROLLER` and `RESPONDER`, two `popcorn.MachineDescription` values, and
+  `SYSTEM`, the `popcorn.SystemDescription` linking them. A plain `system_description` fixture
+  hands `SYSTEM` to the tests that read or vary it.
+- `controller/` and `responder/`: each image alone, on the `controller` and `responder1`
+  machine fixtures.
+- `system/`: the three machines linked, on the `system` fixture.
 
-A member boots from the boot snapshot of its own project, the one the `machine` fixture of
-`controller/` and `responder/` uses. Two members of one project share one boot.
+`responder1` and `responder2` are two machines of one description, restored from one boot. A
+system member boots from the boot snapshot of its own description, the one the machine fixtures
+use, so the system adds no boot.
 
-## Declaring the system
+## Declaring the fixtures
 
-This is `system/conftest.py`:
+This is the end of `conftest.py`:
+
+```python
+@popcorn.pytest.machine
+def controller() -> popcorn.MachineDescription:
+    return CONTROLLER
+
+
+@popcorn.pytest.machine
+def responder1() -> popcorn.MachineDescription:
+    return RESPONDER
+
+
+@popcorn.pytest.machine
+def responder2() -> popcorn.MachineDescription:
+    return RESPONDER
+
+
+@popcorn.pytest.system
+def system() -> popcorn.SystemDescription:
+    return SYSTEM
+```
+
+`SYSTEM` is built above them:
 
 ```python
 LATENCY = us(20)
 
-SYSTEM = popcorn.System(
+SYSTEM = popcorn.SystemDescription(
     members={"controller": CONTROLLER, "responder1": RESPONDER, "responder2": RESPONDER},
     links=[
         popcorn.UartLink("controller.UART4", "responder1.USART3", latency=LATENCY, baud=460_800),
         popcorn.UartLink("controller.USART3", "responder2.USART3", latency=LATENCY, baud=460_800),
     ],
 )
-
-
-@pytest.fixture(scope="session")
-def popcorn_system() -> popcorn.System:
-    return SYSTEM
 ```
 
 A test takes the linked system and runs it:
 
 ```python
-async def test_each_responder_gets_its_node_id(system: LinkedSystem) -> None:
+async def test_each_responder_gets_its_node_id(system: System) -> None:
     await system.run(for_=ms(1))
     assert system.members["responder1"].var("node_id").value == 1
 ```

@@ -23,18 +23,19 @@ uv run pytest -q examples/stm32u575/spi_mock
 
 - `spiadc.py`: the whole mock. The SPI model calls `on_select` on each edge of PB0 and
   `on_exchange` for each frame while it is low. The annotated fields are the state a snapshot
-  keeps. The source and the ramp slope are read-only: the `machine` fixture reuses one ADC
-  for every test of a config.
-- `conftest.py`: `Device(Adc, cs="PB0", counts_per_ms=25)` on SPI1. `cs="PB0"` is the chip
+  keeps. The source and the ramp slope are read-only: the `spi_mock` fixture reuses one ADC
+  for every test.
+- `conftest.py`: the `spi_mock` fixture, declared with `@popcorn.pytest.machine`. The
+  description puts `Device(Adc, cs="PB0", counts_per_ms=25)` on SPI1. `cs="PB0"` is the chip
   select, `counts_per_ms` the ramp slope.
 - `test_spi_mock.py`:
   - the ramp read back from `adc_result`, rising with virtual time, channel 1 its mirror;
   - one select and one deselect per conversion, each holding two 16-bit frames;
-  - `machine_factory.booted(devices={"SPI1": [Adc(cs="PB0", source=source)]})`, with a
-    Python function as the source that also records what it served. It shows what a project
-    cannot pass. The factory machine keeps the rest of the project build and is covered
-    by the plugin's failure report. An ADC holding a function cannot key the boot cache, so
-    that machine boots each time.
+  - `machine_factory.booted(spi_mock_description, devices={"SPI1": [Adc(cs="PB0",
+    source=source)]})`, with a Python function as the source that also records what it
+    served. It shows what a description cannot pass. The factory machine keeps the rest of
+    the description's build and is covered by the plugin's failure report. An ADC holding a
+    function cannot key the boot cache, so that machine boots each time.
 - `firmware/main.c`: the chip select and the two-frame conversion.
 
 ## Rebuild the firmware

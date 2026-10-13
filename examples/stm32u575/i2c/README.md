@@ -21,11 +21,12 @@ uv run pytest -q examples/stm32u575/i2c
   replaces the EEPROM with a `TableTarget` that answers reads of register 0x0100 from a table.
 - `test_i2c.py`:
   - `Eeprom24xx.contents()` checked against what the firmware wrote.
-  - `await machine_factory.booted("slow-eeprom")` builds a second machine from another config
-    inside an async test, where the poll count doubles. A sync test calls
-    `machine_factory("slow-eeprom")` instead.
-  - `@pytest.mark.popcorn(config="scripted")` runs one test on the scripted board, checking
-    `TableTarget.writes()` and the bus time at popcorn's 400 kHz.
+  - `await machine_factory.booted(i2c_description, config="slow-eeprom")` builds a second
+    machine from another config inside an async test, where the poll count doubles. A sync test
+    calls `machine_factory(i2c_description, config="slow-eeprom")` instead.
+  - the `i2c_scripted` fixture, declared with `@popcorn.pytest.machine(config="scripted")`,
+    runs one test on the scripted board, checking `TableTarget.writes()` and the bus time at
+    popcorn's 400 kHz.
 - `firmware/main.c`: the LL transfers and the acknowledge polling.
 
 ## Rebuild the firmware

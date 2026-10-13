@@ -3,7 +3,7 @@
 TIMINGR gives 400 kHz by RM0456's SCL formula without the tSYNC delays, which popcorn does not
 model; the same TIMINGR runs slower on silicon.
 
-The project declares the EEPROM with a 5 ms write cycle. Two configs change the board:
+The description declares the EEPROM with a 5 ms write cycle. Two configs change the board:
 `slow-eeprom` doubles the write cycle, `scripted` swaps the EEPROM for a `TableTarget` whose
 reads come from a table. Without acknowledge polls, the scripted run takes the 9-bit frames of
 its three transfers at that 400 kHz, plus start, stop and CPU time.

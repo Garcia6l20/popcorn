@@ -3,11 +3,12 @@
 An STM32U575 application switches from the 4 MHz MSIS reset clock to PLL1 at 160 MHz. PLL1 is
 fed by a 32 MHz HSE in bypass mode, the usual setup for a board with an external oscillator:
 M 3, N 30, R 2. It follows RM0456 section 10.5.4: HSE ready, PLL1 source and booster
-prescaler set, regulator range 1, EPOD booster on, 4 flash wait states, then PLL1 enabled. Then SysTick counts milliseconds. The code uses LL only, and
-`HSE_VALUE` is 32 MHz so that `SystemCoreClockUpdate` computes the right rate.
+prescaler set, regulator range 1, EPOD booster on, 4 flash wait states, then PLL1 enabled. Then
+SysTick counts milliseconds. The code uses LL only, and `HSE_VALUE` is 32 MHz so that
+`SystemCoreClockUpdate` computes the right rate.
 
-`Project(strict=True)` makes any register access the RCC, PWR or FLASH models do not serve
-fail the run instead of being logged.
+`MachineDescription(strict=True)` makes any register access the RCC, PWR or FLASH models do not
+serve fail the run instead of being logged.
 
 ## Run
 
