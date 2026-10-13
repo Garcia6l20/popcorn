@@ -1844,6 +1844,23 @@ TEST_CASE("host frames reach RDR with the receiver's parity bit and never set PE
   CHECK(p.rdr() == 0xc1);
 }
 
+TEST_CASE("a host byte is masked to the M-bit word without a parity")
+{
+  parity_rig p{
+      {.bits = 7, .parity = stm32::line_parity::none}
+  };
+  p.host(0xff);
+  CHECK(p.rdr() == 0x7f);
+  p.clear_rx();
+  p.configure({.bits = 8, .parity = stm32::line_parity::none});
+  p.host(0xc1);
+  CHECK(p.rdr() == 0xc1);
+  p.clear_rx();
+  p.configure({.bits = 9, .parity = stm32::line_parity::none});
+  p.host(0x1ff);
+  CHECK(p.rdr() == 0x1ff);
+}
+
 TEST_CASE(
     "a linked frame of the receiver's parity sets no PE and one of the other parity always does")
 {

@@ -1553,6 +1553,14 @@ auto peek(node const& one, std::string_view peripheral, std::string_view reg) ->
   return static_cast<std::uint32_t>(*value);
 }
 
+void line_7n1(node const& one)
+{
+  constexpr std::uint32_t cr1 = 1u | (1u << 2) | (1u << 3) | (1u << 28) | (1u << 29);
+  poke(one, "RCC", "RCC_APB2ENR", peek(one, "RCC", "RCC_APB2ENR") | (1u << 14));
+  poke(one, "USART1", "BRR", 35);
+  poke(one, "USART1", "CR1_enabled", cr1);
+}
+
 void even_7e1(node const& one)
 {
   constexpr std::uint32_t cr1 = 1u | (1u << 2) | (1u << 3) | (1u << 10) | (1u << 29);
@@ -1594,4 +1602,49 @@ TEST_CASE("a 7E1 link taps data bits and gives edited and injected frames their 
   CHECK((isr & (1u << 5)) != 0);
   CHECK(peek(*r.nodes[1], "USART1", "RDR") == 0x41);
   CHECK(r.nodes[1]->warnings.empty());
+}
+
+TEST_CASE("a 7N1 link masks edited and injected frames to 7 bits")
+{
+  rig r;
+  r.add("idle");
+  r.add("idle");
+  auto& wire = r.link(
+      0, 1, latency_20,
+      {.baud = 114'286, .word_bits = 7, .half_stops = 2, .parity = stm32::line_parity::none});
+  for(auto const& one : r.nodes)
+  {
+    line_7n1(*one);
+  }
+  std::vector<std::uint16_t> const edit{0xff};
+  REQUIRE(wire.replace(1, edit));
+  REQUIRE(injected_byte(wire, 0xff, static_cast<std::int64_t>(ms_ps), std::nullopt).has_value());
+  r.enter(0, 0);
+  for(auto const value : {0x41u, 0x40u})
+  {
+    poke(*r.nodes[0], "USART1", "TDR", value);
+  }
+  r.run({.window = latency_20});
+  std::vector<std::uint32_t> tapped;
+  for(auto const& frame : r.taps[0])
+  {
+    tapped.push_back(frame.data);
+  }
+  CHECK(tapped == std::vector<std::uint32_t>{0x41, 0x7f, 0x7f});
+  CHECK(r.nodes[1]->warnings.empty());
+
+  rig lone;
+  lone.add("idle");
+  lone.add("idle");
+  auto& only = lone.link(
+      0, 1, latency_20,
+      {.baud = 114'286, .word_bits = 7, .half_stops = 2, .parity = stm32::line_parity::none});
+  for(auto const& one : lone.nodes)
+  {
+    line_7n1(*one);
+  }
+  REQUIRE(injected_byte(only, 0xff, static_cast<std::int64_t>(ms_ps), std::nullopt).has_value());
+  lone.enter(0, 0);
+  lone.run({.window = latency_20});
+  CHECK(peek(*lone.nodes[1], "USART1", "RDR") == 0x7f);
 }

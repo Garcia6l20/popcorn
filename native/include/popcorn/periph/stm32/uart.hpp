@@ -27,9 +27,10 @@ enum class[[= reflex::derive{reflex::Format}]] line_parity
 /**
  * @brief The M-bit word a UART puts on the line for @p data, RM0456 66.5: with a parity, the
  *        data bits below bit `bits - 1` and the parity bit computed over them in bit `bits - 1`.
- * @param data Data, bits from `bits - 1` up ignored with a parity.
+ *        Without one, @p data masked to @p bits bits.
+ * @param data Data, bits from `bits - 1` up ignored with a parity, from `bits` up without.
  * @param bits M bits, 7, 8 or 9, the parity bit included.
- * @param parity Parity, @p data unchanged for line_parity::none.
+ * @param parity Parity.
  * @return The word.
  */
 constexpr auto with_parity(std::uint16_t data, std::uint32_t bits, line_parity parity)
@@ -37,7 +38,7 @@ constexpr auto with_parity(std::uint16_t data, std::uint32_t bits, line_parity p
 {
   if(parity == line_parity::none)
   {
-    return data;
+    return static_cast<std::uint16_t>(data & ((1u << bits) - 1u));
   }
   auto const kept = static_cast<std::uint16_t>(data & ((1u << (bits - 1)) - 1u));
   auto const ones = static_cast<std::uint32_t>(std::popcount(kept)) & 1u;
@@ -66,19 +67,16 @@ constexpr auto parity_ok(std::uint16_t word, std::uint32_t bits, line_parity par
 }
 
 /**
- * @brief The data bits of an M-bit word: the word without its parity bit.
+ * @brief The data bits of an M-bit word: the word without its parity bit, masked to @p bits bits.
  * @param word The word.
  * @param bits M bits, 7, 8 or 9, the parity bit included.
- * @param parity Parity, @p word unchanged for line_parity::none.
+ * @param parity Parity, no bit stripped for line_parity::none.
  * @return The data bits, right-aligned.
  */
 constexpr auto data_of(std::uint16_t word, std::uint32_t bits, line_parity parity) -> std::uint16_t
 {
-  if(parity == line_parity::none)
-  {
-    return word;
-  }
-  return static_cast<std::uint16_t>(word & ((1u << (bits - 1)) - 1u));
+  return static_cast<std::uint16_t>(
+      word & ((1u << (parity == line_parity::none ? bits : bits - 1)) - 1u));
 }
 
 /** @brief What a UART frame carries. */
