@@ -268,8 +268,8 @@ def test_a_session_ends_with_a_started_machine_in_a_global(pytester: pytest.Pyte
     pytester.makepyfile("""
         KEPT = []
 
-        def test_keeps_one_running(popcorn_selected_project):
-            machine = popcorn_selected_project.machine()
+        def test_keeps_one_running(description):
+            machine = description.machine()
             machine.reset()
             machine.start()
             KEPT.append(machine)

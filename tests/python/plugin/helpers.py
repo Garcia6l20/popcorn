@@ -74,19 +74,37 @@ def write_conftest(pytester: pytest.Pytester, extra: str = "") -> Path:
     return _merge(pytester.path / "conftest.py", CONFTEST + textwrap.dedent(extra), "")
 
 
-PROJECT_FIXTURE = """
+LEGACY_FIXTURE = """
 @pytest.fixture(scope="session")
 def popcorn_project():
     return PROJECT
 """
 
+PROJECT_FIXTURE = f"""{LEGACY_FIXTURE}
 
-def write_project_conftest(directory: Path, project: str, imports: str = "") -> Path:
-    """The `conftest.py` of `directory` defining `popcorn_project` as the Python expression
-    `project`, after `imports`, appended to what the file holds."""
+@pytest.fixture(scope="session")
+def description():
+    return PROJECT
+
+
+@popcorn.pytest.machine
+def machine():
+    return PROJECT
+"""
+
+
+def write_project_conftest(
+    directory: Path, project: str, imports: str = "", *, legacy: bool = False
+) -> Path:
+    """The `conftest.py` of `directory` defining `PROJECT` as the Python expression `project`,
+    after `imports`, appended to what the file holds, with the plain fixture `description`
+    returning it, the machine fixture `machine` declared over it and `popcorn_project` returning
+    it for `machine_factory`. `legacy` defines `popcorn_project` only, for the tests of the
+    plugin's own `machine` fixture."""
+    fixtures = LEGACY_FIXTURE if legacy else PROJECT_FIXTURE
     text = (
-        "from pathlib import Path\n\nimport popcorn\nimport pytest\n"
-        f"{textwrap.dedent(imports)}\n\nPROJECT = {project}\n{PROJECT_FIXTURE}"
+        "from pathlib import Path\n\nimport popcorn\nimport popcorn.pytest\nimport pytest\n"
+        f"{textwrap.dedent(imports)}\n\nPROJECT = {project}\n{fixtures}"
     )
     return _merge(directory / "conftest.py", "", text)
 
@@ -101,14 +119,15 @@ def write_project(
     elf: Path = DRIVER_ELF,
     configs: str = "",
     imports: str = "",
+    legacy: bool = False,
 ) -> Path:
-    """A `conftest.py` defining `popcorn_project` over the M33 test description and `elf`,
-    `driver.elf` by default, in `directory` or the pytester directory.
+    """A `conftest.py` as `write_project_conftest` writes it, over the M33 test description and
+    `elf`, `driver.elf` by default, in `directory` or the pytester directory.
 
     `vtor` names a `vt_*` table of `elf` the boot starts from. `extra` holds more
-    `MachineDescription`
-    keyword arguments as Python source, `configs` the keyword arguments of `with_configs`, where
-    `BASE` names the project before them, and `imports` the lines its expressions need.
+    `MachineDescription` keyword arguments as Python source, `configs` the keyword arguments of
+    `with_configs`, where `BASE` names the project before them, and `imports` the lines its
+    expressions need.
     """
     boot = [] if until is None else [f"until={until!r}"]
     if vtor is not None:
@@ -124,12 +143,12 @@ def write_project(
     )
     project = f"BASE.with_configs({configs})" if configs else "BASE"
     return write_project_conftest(
-        directory or pytester.path, project, f"{imports}\n\nBASE = {base}\n"
+        directory or pytester.path, project, f"{imports}\n\nBASE = {base}\n", legacy=legacy
     )
 
 
 def write_model_project(pytester: pytest.Pytester, extra: str = "") -> Path:
-    """A `conftest.py` defining `popcorn_project` over the model test description and
+    """A `conftest.py` as `write_project_conftest` writes it, over the model test description and
     `model.elf`, booted to `ready`, lax about unmodelled peripherals. `extra` holds more
     `MachineDescription` keyword arguments as Python source."""
     return write_project_conftest(

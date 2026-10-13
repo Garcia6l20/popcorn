@@ -1,5 +1,5 @@
-"""The `popcorn_system` and `system` fixtures: members booted from their own projects' boot
-caches and linked."""
+"""Linked system fixtures declared with `popcorn.pytest.system`: members booted from their own
+descriptions' boot caches and linked."""
 
 from __future__ import annotations
 
@@ -36,13 +36,13 @@ B = project("b", 2_000_000)
 """
 
 PROJECT_CONFTEST = """
-import pytest
+import popcorn.pytest
 
 from link_projects import {name}
 
 
-@pytest.fixture(scope="session")
-def popcorn_project():
+@popcorn.pytest.machine
+def machine():
     return {name}
 """
 
@@ -53,6 +53,7 @@ import weakref
 from pathlib import Path
 
 import popcorn
+import popcorn.pytest
 import pytest
 from popcorn.units import us
 
@@ -61,8 +62,8 @@ from link_projects import A, B
 MEMBERS = []
 
 
-@pytest.fixture(scope="session")
-def popcorn_system():
+@popcorn.pytest.system
+def system():
     return popcorn.SystemDescription(
         members={"a": A, "b1": B, "b2": B},
         links=[
@@ -238,21 +239,25 @@ def test_a_config_marker_fails_a_system_test(layout: Path, pytester: pytest.Pyte
     ("fixture", "expected"),
     [
         (None, "*define a `popcorn_system` fixture returning a `popcorn.SystemDescription`*"),
-        ("A", "*popcorn_system returned MachineDescription, not a popcorn.SystemDescription*"),
+        (
+            "A",
+            "*the popcorn fixture system returned MachineDescription, not a "
+            "popcorn.SystemDescription*",
+        ),
     ],
 )
 def test_a_missing_or_wrong_system_fails_naming_the_fixture(
     layout: Path, pytester: pytest.Pytester, fixture: str | None, expected: str
 ) -> None:
     other = pytester.mkdir("other")
-    conftest = "import pytest\n"
+    conftest = "import popcorn.pytest\n"
     if fixture is not None:
         conftest += textwrap.dedent(f"""
             from link_projects import {fixture}
 
 
-            @pytest.fixture(scope="session")
-            def popcorn_system():
+            @popcorn.pytest.system
+            def system():
                 return {fixture}
             """)
     (other / "conftest.py").write_text(conftest)
@@ -277,9 +282,9 @@ def test_a_failing_system_test_reports_and_traces_each_member(
             "system member a (description=a config=- digest=* strict=False):",
             "system member b1 (description=b config=- digest=* strict=False):",
             "system member b2 (description=b config=- digest=* strict=False):",
-            f"trace: {traces}/*test_fail*.a.pctr",
-            f"trace: {traces}/*test_fail*.b1.pctr",
-            f"trace: {traces}/*test_fail*.b2.pctr",
+            f"trace: {traces}/*test_fail*.system.a.pctr",
+            f"trace: {traces}/*test_fail*.system.b1.pctr",
+            f"trace: {traces}/*test_fail*.system.b2.pctr",
         ]
     )
     kept = sorted(path.name.rsplit(".", 2)[1] for path in traces.glob("*.pctr"))

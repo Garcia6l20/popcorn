@@ -36,7 +36,7 @@ def test_the_plugin_is_disabled_by_name(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(BOOTED)
     result = pytester.runpytest_subprocess(*NO_ASYNCIO, "-p", "no:popcorn.pytest")
     result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*fixture 'machine' not found*"])
+    result.stdout.fnmatch_lines(["*fixture '_popcorn_session' not found*"])
 
 
 MARK_ALL = """

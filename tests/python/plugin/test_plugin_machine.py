@@ -147,7 +147,7 @@ def test_factory_names_its_machines_and_boots_once(pytester: pytest.Pytester) ->
         import pytest
 
         def test_named(machine, machine_factory):
-            assert machine.name == machine.description.part
+            assert machine.name == "machine"
             named = machine_factory(name="x")
             assert named.name == "x"
             assert named.pc == machine.pc
@@ -357,9 +357,9 @@ def test_the_project_of_an_ini_rootdir(
     write_project(pytester, directory=example)
     (example / "test_example.py").write_text(
         "from pathlib import Path\n\nimport popcorn\n\n\n"
-        "def test_booted(machine, popcorn_project, request):\n"
+        "def test_booted(machine, description, request):\n"
         "    assert request.config.rootpath.name == 'example'\n"
-        f"    assert popcorn_project.images == (popcorn.Elf(Path({str(DRIVER_ELF)!r})),)\n"
+        f"    assert description.images == (popcorn.Elf(Path({str(DRIVER_ELF)!r})),)\n"
         "    assert machine.pc == machine.sym('alu_mark')\n"
     )
     run(pytester, "example").assert_outcomes(passed=1)

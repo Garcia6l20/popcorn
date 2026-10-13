@@ -1,5 +1,5 @@
-"""Several projects in one session: each test boots the `popcorn_project` of the conftest.py
-nearest above it."""
+"""Several descriptions in one session: each test gets the `machine` fixture declared in the
+conftest.py nearest above it."""
 
 from __future__ import annotations
 
@@ -155,7 +155,9 @@ def test_the_project_fixture_is_the_test_project(pytester: pytest.Pytester) -> N
     driver, fault = two_projects(pytester)
     for directory, name in ((driver, "driver"), (fault, "fault")):
         (directory / f"test_{name}_project.py").write_text(
-            f"def test_project(popcorn_project):\n    assert popcorn_project.name == {name!r}\n"
+            "def test_project(machine, description):\n"
+            f"    assert description.name == {name!r}\n"
+            "    assert machine.config_digest == description.digest\n"
         )
     run(pytester).assert_outcomes(passed=4)
 
@@ -193,7 +195,7 @@ VARIANT = (
 
 def test_the_selected_project_follows_marker_then_option(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
+    write_project(pytester, configs=VARIANT, legacy=True)
     pytester.makepyfile(SELECTED)
     run(pytester).assert_outcomes(passed=4)
     run(pytester, "--popcorn-config=variant").assert_outcomes(passed=4)

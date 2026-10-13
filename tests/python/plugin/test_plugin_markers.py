@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 
 from .helpers import write_conftest, write_model_project, write_project
@@ -47,9 +49,15 @@ def run(pytester: pytest.Pytester, *args: str) -> pytest.RunResult:
     return pytester.runpytest(*NO_ASYNCIO, *args)
 
 
+def declare(pytester: pytest.Pytester, fixtures: str) -> None:
+    """Append `fixtures` to the conftest `write_project` wrote."""
+    path = pytester.path / "conftest.py"
+    path.write_text(path.read_text() + textwrap.dedent(fixtures))
+
+
 def test_config_from_marker_and_option(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
+    write_project(pytester, configs=VARIANT, legacy=True)
     pytester.makepyfile(CONFIGS)
     result = run(pytester)
     result.assert_outcomes(passed=4)
@@ -62,6 +70,22 @@ def test_config_from_marker_and_option(pytester: pytest.Pytester) -> None:
 def test_an_unknown_config_name_fails_naming_the_known_ones(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester, configs=VARIANT)
+    pytester.makepyfile("""
+        def test_factory(machine_factory):
+            machine_factory(config="nope")
+        """)
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        ["*configs.nope: expected a config of the machine description: variant*"]
+    )
+
+
+def test_an_unknown_marker_or_option_config_fails_naming_the_known_ones(
+    pytester: pytest.Pytester,
+) -> None:
+    write_conftest(pytester)
+    write_project(pytester, configs=VARIANT, legacy=True)
     pytester.makepyfile("""
         import pytest
 
@@ -87,20 +111,21 @@ def test_an_unknown_config_name_fails_naming_the_known_ones(pytester: pytest.Pyt
 def test_two_config_names_with_equal_content_share_one_boot(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester, configs=f"{VARIANT}, {VARIANT.replace('variant=', 'twin=', 1)}")
+    declare(
+        pytester,
+        """
+        @popcorn.pytest.machine(params=["variant", "twin"])
+        def configured(request):
+            return PROJECT.config(request.param)
+        """,
+    )
     pytester.makepyfile("""
-        import pytest
-
         SEEN = []
 
-        @pytest.mark.popcorn(config="variant")
-        def test_variant(machine):
-            SEEN.append(machine)
-            assert machine.mem.u32[machine.sym("alu_rounds")] == 7
-
-        @pytest.mark.popcorn(config="twin")
-        def test_twin(machine):
-            assert machine is SEEN[0]
-            assert machine.mem.u32[machine.sym("alu_rounds")] == 7
+        def test_config(configured):
+            SEEN.append(configured)
+            assert configured is SEEN[0]
+            assert configured.mem.u32[configured.sym("alu_rounds")] == 7
         """)
     result = run(pytester)
     result.assert_outcomes(passed=2)
@@ -244,21 +269,25 @@ def test_budget_is_reset_after_the_test(pytester: pytest.Pytester) -> None:
 
 def test_the_closest_marker_wins_without_merging(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
+    write_model_project(pytester)
     pytester.makepyfile("""
+        import popcorn
         import pytest
 
-        pytestmark = pytest.mark.popcorn(config="variant", budget=900)
+        pytestmark = pytest.mark.popcorn(strict=True, budget=900)
 
-        def rounds(machine):
-            return machine.mem.u32[machine.sym("alu_rounds")]
+        async def touch(machine):
+            return await machine.call("touch_unmodelled", budget=10_000)
 
-        def test_module_marker(machine):
-            assert (rounds(machine), machine.default_budget) == (7, 900)
+        async def test_module_marker(machine):
+            assert machine.default_budget == 900
+            with pytest.raises(popcorn.ModelError):
+                await touch(machine)
 
         @pytest.mark.popcorn(budget=300)
-        def test_function_marker(machine):
-            assert (rounds(machine), machine.default_budget) == (0, 300)
+        async def test_function_marker(machine):
+            assert machine.default_budget == 300
+            await touch(machine)
         """)
     run(pytester).assert_outcomes(passed=2)
 
@@ -289,19 +318,11 @@ def test_invalid_markers_error_at_setup(pytester: pytest.Pytester) -> None:
         def test_strict_str(machine):
             pass
 
-        @pytest.mark.popcorn(config=3)
-        def test_config_int(machine):
-            pass
-
-        @pytest.mark.popcorn(config="missing")
-        def test_missing_config(machine):
-            pass
-
         def test_fine(machine):
             pass
         """)
     result = run(pytester)
-    result.assert_outcomes(passed=1, errors=7)
+    result.assert_outcomes(passed=1, errors=5)
     result.stdout.fnmatch_lines_random(
         [
             "*@pytest.mark.popcorn takes keywords only, not the positional ('x',)*",
@@ -309,9 +330,28 @@ def test_invalid_markers_error_at_setup(pytester: pytest.Pytester) -> None:
             "*@pytest.mark.popcorn budget is an int above 0 or None, not -1*",
             "*@pytest.mark.popcorn budget is an int above 0 or None, not True*",
             "*@pytest.mark.popcorn strict is a bool or None, not 'yes'*",
-            "*@pytest.mark.popcorn config is a str or None, not 3*",
-            "*ConfigError*missing*",
         ]
+    )
+
+
+def test_invalid_marker_configs_error_at_setup(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, legacy=True)
+    pytester.makepyfile("""
+        import pytest
+
+        @pytest.mark.popcorn(config=3)
+        def test_config_int(machine):
+            pass
+
+        @pytest.mark.popcorn(config="missing")
+        def test_missing_config(machine):
+            pass
+        """)
+    result = run(pytester)
+    result.assert_outcomes(errors=2)
+    result.stdout.fnmatch_lines_random(
+        ["*@pytest.mark.popcorn config is a str or None, not 3*", "*ConfigError*missing*"]
     )
 
 

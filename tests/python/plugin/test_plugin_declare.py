@@ -169,7 +169,7 @@ VARIANT = (
 
 def test_the_config_is_set_on_the_decorator(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
+    write_project(pytester, configs=VARIANT, legacy=True)
     declare(
         pytester,
         """
