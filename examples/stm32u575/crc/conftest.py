@@ -7,7 +7,7 @@ import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+CRC = popcorn.MachineDescription(
     name="crc",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/crc.elf")],
@@ -18,4 +18,4 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def crc() -> popcorn.MachineDescription:
-    return PROJECT
+    return CRC

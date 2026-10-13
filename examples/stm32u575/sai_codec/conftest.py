@@ -9,7 +9,7 @@ from stereocodec import StereoCodec
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+SAI_CODEC = popcorn.MachineDescription(
     name="sai-codec",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/sai_codec.elf")],
@@ -23,4 +23,4 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def sai_codec() -> popcorn.MachineDescription:
-    return PROJECT
+    return SAI_CODEC

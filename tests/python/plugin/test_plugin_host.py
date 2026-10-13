@@ -90,8 +90,8 @@ def test_a_handler_error_of_a_free_run_errors_at_teardown_once(
         def test_next(machine):
             assert not machine.busy
 
-        def test_factory_body_passes(machine_factory):
-            other = machine_factory()
+        def test_factory_body_passes(machine_factory, description):
+            other = machine_factory(description)
             fired = raising(other)
             other.start()
             assert fired.wait(10)
@@ -189,9 +189,9 @@ def test_factory_ends_after_the_first_are_warned(pytester: pytest.Pytester) -> N
     pytester.makepyfile("""
         from raising_watch import raising
 
-        def test_two_end(machine_factory):
+        def test_two_end(machine_factory, description):
             for _ in range(2):
-                other = machine_factory()
+                other = machine_factory(description)
                 fired = raising(other)
                 other.start()
                 assert fired.wait(10)
@@ -254,9 +254,9 @@ def test_factory_machines_left_started_are_parked_and_counted(
     pytester: pytest.Pytester,
 ) -> None:
     pytester.makepyfile("""
-        def test_two_started(machine_factory):
+        def test_two_started(machine_factory, description):
             for _ in range(2):
-                machine_factory().start()
+                machine_factory(description).start()
         """)
     result = run(pytester, "--popcorn-cov=cov.info")
     result.assert_outcomes(passed=1)

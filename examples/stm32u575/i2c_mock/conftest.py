@@ -21,7 +21,7 @@ BASE = popcorn.MachineDescription(
     },
 )
 
-PROJECT = BASE.with_configs(
+I2C_MOCK = BASE.with_configs(
     hot=BASE.replace(
         board={
             "I2C1": popcorn.Periph(devices=[popcorn.Device(TempSensor, address=0x48, readings=HOT)])
@@ -32,9 +32,9 @@ PROJECT = BASE.with_configs(
 
 @popcorn.pytest.machine
 def i2c_mock() -> popcorn.MachineDescription:
-    return PROJECT
+    return I2C_MOCK
 
 
 @popcorn.pytest.machine(config="hot")
 def i2c_mock_hot() -> popcorn.MachineDescription:
-    return PROJECT
+    return I2C_MOCK

@@ -9,7 +9,7 @@ from spiadc import Adc
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+SPI_MOCK = popcorn.MachineDescription(
     name="spi-mock",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/spi_adc.elf")],
@@ -22,9 +22,9 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def spi_mock() -> popcorn.MachineDescription:
-    return PROJECT
+    return SPI_MOCK
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.MachineDescription:
-    return PROJECT
+def spi_mock_description() -> popcorn.MachineDescription:
+    return SPI_MOCK

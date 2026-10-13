@@ -7,7 +7,7 @@ import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+ADC = popcorn.MachineDescription(
     name="adc-internal",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/adc_internal.elf")],
@@ -17,4 +17,4 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def adc() -> popcorn.MachineDescription:
-    return PROJECT
+    return ADC

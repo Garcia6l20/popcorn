@@ -74,14 +74,7 @@ def write_conftest(pytester: pytest.Pytester, extra: str = "") -> Path:
     return _merge(pytester.path / "conftest.py", CONFTEST + textwrap.dedent(extra), "")
 
 
-LEGACY_FIXTURE = """
-@pytest.fixture(scope="session")
-def popcorn_project():
-    return PROJECT
-"""
-
-PROJECT_FIXTURE = f"""{LEGACY_FIXTURE}
-
+PROJECT_FIXTURE = """
 @pytest.fixture(scope="session")
 def description():
     return PROJECT
@@ -93,18 +86,13 @@ def machine():
 """
 
 
-def write_project_conftest(
-    directory: Path, project: str, imports: str = "", *, legacy: bool = False
-) -> Path:
+def write_project_conftest(directory: Path, project: str, imports: str = "") -> Path:
     """The `conftest.py` of `directory` defining `PROJECT` as the Python expression `project`,
     after `imports`, appended to what the file holds, with the plain fixture `description`
-    returning it, the machine fixture `machine` declared over it and `popcorn_project` returning
-    it for `machine_factory`. `legacy` defines `popcorn_project` only, for the tests of the
-    plugin's own `machine` fixture."""
-    fixtures = LEGACY_FIXTURE if legacy else PROJECT_FIXTURE
+    returning it, for `machine_factory`, and the machine fixture `machine` declared over it."""
     text = (
         "from pathlib import Path\n\nimport popcorn\nimport popcorn.pytest\nimport pytest\n"
-        f"{textwrap.dedent(imports)}\n\nPROJECT = {project}\n{fixtures}"
+        f"{textwrap.dedent(imports)}\n\nPROJECT = {project}\n{PROJECT_FIXTURE}"
     )
     return _merge(directory / "conftest.py", "", text)
 
@@ -119,7 +107,6 @@ def write_project(
     elf: Path = DRIVER_ELF,
     configs: str = "",
     imports: str = "",
-    legacy: bool = False,
 ) -> Path:
     """A `conftest.py` as `write_project_conftest` writes it, over the M33 test description and
     `elf`, `driver.elf` by default, in `directory` or the pytester directory.
@@ -143,7 +130,7 @@ def write_project(
     )
     project = f"BASE.with_configs({configs})" if configs else "BASE"
     return write_project_conftest(
-        directory or pytester.path, project, f"{imports}\n\nBASE = {base}\n", legacy=legacy
+        directory or pytester.path, project, f"{imports}\n\nBASE = {base}\n"
     )
 
 

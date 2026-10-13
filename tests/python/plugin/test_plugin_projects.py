@@ -105,9 +105,9 @@ DRIVER = popcorn.MachineDescription(
 
 def test_other(machine, machine_factory, request):
     assert machine.pc == machine.sym("ready")
-    driver = machine_factory(description=DRIVER)
+    driver = machine_factory(DRIVER)
     assert driver.pc == driver.sym("alu_mark")
-    assert machine_factory(description=DRIVER, booted=False).pc != driver.pc
+    assert machine_factory(DRIVER, booted=False).pc != driver.pc
     keys = popcorn_session(request.config).keys
     assert [key.strict for key in keys if key.digest == DRIVER.digest] == [True]
 """)
@@ -148,7 +148,7 @@ def test_a_project_above_the_rootdir_is_ignored(pytester: pytest.Pytester) -> No
     (example / "test_example.py").write_text(DRIVER_TEST)
     result = run(pytester, "example")
     result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*define a `popcorn_project` fixture*"])
+    result.stdout.fnmatch_lines(["*fixture 'machine' not found*"])
 
 
 def test_the_project_fixture_is_the_test_project(pytester: pytest.Pytester) -> None:
@@ -162,85 +162,6 @@ def test_the_project_fixture_is_the_test_project(pytester: pytest.Pytester) -> N
     run(pytester).assert_outcomes(passed=4)
 
 
-SELECTED = """
-import pytest
-
-def test_unmarked(popcorn_selected_project, popcorn_project, machine, request):
-    option = request.config.getoption("popcorn_config")
-    assert popcorn_selected_project.digest == popcorn_project.config(option).digest
-    assert machine.config_digest == popcorn_selected_project.digest
-    assert len(popcorn_selected_project.boot.memory_init) == (1 if option == "variant" else 0)
-
-@pytest.mark.popcorn(config="variant")
-def test_marker(popcorn_selected_project, popcorn_project, machine):
-    assert popcorn_selected_project.digest == popcorn_project.config("variant").digest
-    assert popcorn_selected_project.digest != popcorn_project.digest
-    assert machine.config_digest == popcorn_selected_project.digest
-
-def test_machine_and_selected_project_share_one_digest(popcorn_selected_project, machine):
-    assert machine.config_digest == popcorn_selected_project.digest
-    assert popcorn_selected_project.config(None).digest == popcorn_selected_project.digest
-
-@pytest.mark.popcorn(config=None)
-def test_marker_none(popcorn_selected_project, popcorn_project, machine):
-    assert popcorn_selected_project.digest == popcorn_project.digest
-    assert machine.config_digest == popcorn_selected_project.digest
-"""
-
-VARIANT = (
-    "variant=BASE.replace(boot=BASE.boot.replace("
-    'memory_init=[popcorn.MemoryInit("alu_rounds", bytes.fromhex("07000000"))]))'
-)
-
-
-def test_the_selected_project_follows_marker_then_option(pytester: pytest.Pytester) -> None:
-    write_conftest(pytester)
-    write_project(pytester, configs=VARIANT, legacy=True)
-    pytester.makepyfile(SELECTED)
-    run(pytester).assert_outcomes(passed=4)
-    run(pytester, "--popcorn-config=variant").assert_outcomes(passed=4)
-
-
-def test_an_unknown_selected_config_fails_naming_the_known_ones(pytester: pytest.Pytester) -> None:
-    write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
-    pytester.makepyfile("""
-        import pytest
-
-        @pytest.mark.popcorn(config="nope")
-        def test_marker(popcorn_selected_project):
-            pass
-
-        def test_option(popcorn_selected_project):
-            pass
-        """)
-    marker = run(pytester, "-k", "test_marker")
-    marker.assert_outcomes(errors=1, deselected=1)
-    marker.stdout.fnmatch_lines(
-        ["*configs.nope: expected a config of the machine description: variant*"]
-    )
-    option = run(pytester, "-k", "test_option", "--popcorn-config=nope")
-    option.assert_outcomes(errors=1, deselected=1)
-    option.stdout.fnmatch_lines(
-        ["*configs.nope: expected a config of the machine description: variant*"]
-    )
-
-
-def test_the_selected_project_alone_boots_no_machine(pytester: pytest.Pytester) -> None:
-    write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
-    pytester.makepyfile("""
-        import pytest
-        from popcorn.pytest._session import popcorn_session
-
-        @pytest.mark.popcorn(config="variant")
-        def test_alone(popcorn_selected_project, request):
-            assert len(popcorn_selected_project.boot.memory_init) == 1
-            assert popcorn_session(request.config).booted_machines() == []
-        """)
-    run(pytester).assert_outcomes(passed=1)
-
-
 MISSING_TESTS = """
 import asyncio
 
@@ -249,16 +170,16 @@ def test_machine(machine):
     pass
 
 
-def test_factory(machine_factory):
-    machine_factory()
+def test_factory(machine_factory, description):
+    machine_factory(description)
 
 
-def test_factory_booted(machine_factory):
-    asyncio.run(machine_factory.booted())
+def test_factory_booted(machine_factory, description):
+    asyncio.run(machine_factory.booted(description))
 
 
-def test_factory_not_booted(machine_factory):
-    machine_factory(booted=False)
+def test_factory_not_booted(machine_factory, description):
+    machine_factory(description, booted=False)
 """
 
 
@@ -308,8 +229,8 @@ class Target(I2CTarget):
     pass
 
 
-def test_factory_devices(machine_factory):
-    machine_factory(devices={"I2C1": [Target(0x50)]})
+def test_factory_devices(machine_factory, description):
+    machine_factory(description, devices={"I2C1": [Target(0x50)]})
 """
 
 

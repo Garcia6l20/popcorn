@@ -8,7 +8,7 @@ import pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+USART = popcorn.MachineDescription(
     name="usart-echo",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/usart_echo.elf")],
@@ -18,9 +18,9 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def usart() -> popcorn.MachineDescription:
-    return PROJECT
+    return USART
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.MachineDescription:
-    return PROJECT
+def usart_description() -> popcorn.MachineDescription:
+    return USART

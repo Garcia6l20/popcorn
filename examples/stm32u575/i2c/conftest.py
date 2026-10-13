@@ -26,7 +26,7 @@ BASE = popcorn.MachineDescription(
     board={"I2C1": popcorn.Periph(devices=[EEPROM])},
 )
 
-PROJECT = BASE.with_configs(
+I2C = BASE.with_configs(
     **{
         "slow-eeprom": BASE.replace(
             board={"I2C1": popcorn.Periph(devices=[EEPROM.replace(write_cycle=ms(10))])}
@@ -38,14 +38,14 @@ PROJECT = BASE.with_configs(
 
 @popcorn.pytest.machine
 def i2c() -> popcorn.MachineDescription:
-    return PROJECT
+    return I2C
 
 
 @popcorn.pytest.machine(config="scripted")
 def i2c_scripted() -> popcorn.MachineDescription:
-    return PROJECT
+    return I2C
 
 
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.MachineDescription:
-    return PROJECT
+def i2c_description() -> popcorn.MachineDescription:
+    return I2C

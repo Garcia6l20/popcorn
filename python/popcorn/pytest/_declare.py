@@ -12,7 +12,7 @@ import pytest
 from _pytest.fixtures import FixtureFunctionDefinition
 
 from popcorn import Machine, MachineDescription, System, SystemDescription
-from popcorn.pytest._fixtures import booting, declared_settings, item_of, lending, linking
+from popcorn.pytest._fixtures import booting, item_of, item_settings, lending, linking
 from popcorn.pytest._session import PopcornSession
 
 type Declaring = Callable[..., object]
@@ -57,9 +57,10 @@ def machine(
     The fixture gives each test a booted machine named after the fixture, restored from the
     boot snapshot of its key, its config applied. The key boots once per process, shared by
     every fixture of it. Each fixture name has its own machine per key, reused by every test, so
-    two fixtures of one description in one test are two machines of one boot. A spoiled machine
-    is replaced as for the `machine` fixture. The `popcorn` marker's `strict` and `budget` apply,
-    its `config` fails the test.
+    two fixtures of one description in one test are two machines of one boot. Teardown parks a
+    free run the test left started. A machine a test spoiled, by loading another image or
+    opening a pty, is replaced by a new one restored from the saved boot. The `popcorn` marker's
+    `strict` and `budget` apply.
 
     Args:
         fn: The function returning the description, when used bare.
@@ -82,10 +83,11 @@ def machine(
                 description = _checked(
                     name, MachineDescription, await cast(Awaitable[object], call(kwargs))
                 )
-                test = declared_settings(item_of(request), session, description, config, name)
-                with booting(item_of(request), session, test.key, name):
-                    await session.booted_async(test.key)
-                with lending(request, session, test, name) as m:
+                test = item_settings(item_of(request), session)
+                key = session.key(description, config, test.strict)
+                with booting(item_of(request), session, key, name):
+                    await session.booted_async(key)
+                with lending(request, session, test, key, name) as m:
                     yield m
 
             return _fixture(fn, booted, params, ids)
@@ -93,8 +95,9 @@ def machine(
         def restored(**kwargs: object) -> Iterator[Machine]:
             request, session = _own(kwargs)
             description = _checked(name, MachineDescription, call(kwargs))
-            test = declared_settings(item_of(request), session, description, config, name)
-            with lending(request, session, test, name) as m:
+            test = item_settings(item_of(request), session)
+            key = session.key(description, config, test.strict)
+            with lending(request, session, test, key, name) as m:
                 yield m
 
         return _fixture(fn, restored, params, ids)
@@ -122,9 +125,14 @@ def system(
 
     Use it bare, `@popcorn.pytest.system`, or with arguments. `fn` is a fixture function, as for
     `machine`. The fixture gives each test the description booted and linked, a
-    `popcorn.System`, as the `system` fixture does: each member a new machine named as the
-    member. A failing test reports each member as `<fixture> member <name>`, and
-    `--popcorn-trace-on-fail` keeps `<test>.<fixture>.<member>.pctr`.
+    `popcorn.System`. Each member is a new machine named as the member, restored from the boot
+    snapshot of its own description's key, booted once per key and process: two members of one
+    description are two machines of one boot. Each stands at its boot stop, its system time from
+    `SystemDescription.offsets`. The `popcorn` marker's `strict` and `budget` apply to every
+    member, `budget` as its `default_budget`. A failing test reports each member as
+    `<fixture> member <name>`, and `--popcorn-trace-on-fail` keeps
+    `<test>.<fixture>.<member>.pctr`. Teardown halts a free run the test left started, closes
+    the system, then parks and closes the members.
 
     Args:
         fn: The function returning the description, when used bare.

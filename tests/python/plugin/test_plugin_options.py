@@ -11,7 +11,6 @@ from .helpers import write_conftest
 pytest_plugins = ["pytester"]
 
 OPTIONS = (
-    "--popcorn-config=NAME",
     "--popcorn-cov=LCOV",
     "--popcorn-trace-on-fail=[[]DIR]",
     "--popcorn-strict",
@@ -19,7 +18,7 @@ OPTIONS = (
 )
 
 
-def test_help_lists_the_six_options(pytester: pytest.Pytester) -> None:
+def test_help_lists_the_options(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     result = pytester.runpytest("-p", "no:asyncio", "--help")
     assert result.ret == 0
@@ -29,7 +28,7 @@ def test_help_lists_the_six_options(pytester: pytest.Pytester) -> None:
 def test_markers_lists_popcorn(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     result = pytester.runpytest("-p", "no:asyncio", "--markers")
-    result.stdout.fnmatch_lines(["@pytest.mark.popcorn(config=None, budget=None, strict=None):*"])
+    result.stdout.fnmatch_lines(["@pytest.mark.popcorn(budget=None, strict=None):*"])
 
 
 def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
@@ -41,7 +40,6 @@ def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
         def test_defaults(request):
             settings = request.config.stash[SETTINGS]
             assert settings == Settings(
-                config=None,
                 cov=None,
                 trace_on_fail=False,
                 trace_dir=None,
@@ -67,7 +65,6 @@ def test_values_parse_relative_to_the_invocation_directory(
             settings = request.config.stash[SETTINGS]
             here = Path({str(here)!r})
             assert request.config.rootpath == here.parent
-            assert settings.config == "variant"
             assert settings.cov == here / "out" / "cov.info"
             assert settings.trace_on_fail
             assert settings.trace_dir == here / "traces"
@@ -78,7 +75,6 @@ def test_values_parse_relative_to_the_invocation_directory(
     result = pytester.runpytest(
         "-p",
         "no:asyncio",
-        "--popcorn-config=variant",
         "--popcorn-cov=out/cov.info",
         "--popcorn-trace-on-fail=traces",
         "--popcorn-strict",
@@ -87,11 +83,12 @@ def test_values_parse_relative_to_the_invocation_directory(
     result.assert_outcomes(passed=1)
 
 
-def test_the_project_option_is_gone(pytester: pytest.Pytester) -> None:
+@pytest.mark.parametrize("option", ["--popcorn-project=popcorn.toml", "--popcorn-config=variant"])
+def test_removed_options_are_usage_errors(pytester: pytest.Pytester, option: str) -> None:
     write_conftest(pytester)
-    result = pytester.runpytest("-p", "no:asyncio", "--popcorn-project=popcorn.toml")
+    result = pytester.runpytest("-p", "no:asyncio", option)
     assert result.ret == pytest.ExitCode.USAGE_ERROR
-    result.stderr.fnmatch_lines(["*unrecognized arguments: --popcorn-project=popcorn.toml*"])
+    result.stderr.fnmatch_lines([f"*unrecognized arguments: {option}*"])
 
 
 def test_bare_trace_on_fail_takes_the_default_directory(pytester: pytest.Pytester) -> None:

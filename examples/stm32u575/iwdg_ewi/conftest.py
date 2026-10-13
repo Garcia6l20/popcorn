@@ -7,7 +7,7 @@ import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+IWDG_EWI = popcorn.MachineDescription(
     name="iwdg-ewi",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/iwdg_ewi.elf")],
@@ -17,4 +17,4 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def iwdg_ewi() -> popcorn.MachineDescription:
-    return PROJECT
+    return IWDG_EWI

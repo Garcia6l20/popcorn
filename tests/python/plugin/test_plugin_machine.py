@@ -1,5 +1,4 @@
-"""The session boot, the `machine` fixture, `machine_factory` and `popcorn_project`, FR-PYT-1,
-FR-PYT-2."""
+"""The session boot, a declared machine fixture and `machine_factory`, FR-PYT-1, FR-PYT-2."""
 
 from __future__ import annotations
 
@@ -44,12 +43,9 @@ def test_one_boot_restored_for_every_test(pytester: pytest.Pytester) -> None:
             assert machine.last_stop is None
             await machine.call("alu_mark")
             assert machine.mem.u32[machine.sym("alu_rounds")] == 1
-
-        def test_the_project(popcorn_project):
-            assert popcorn_project.boot.until == "alu_mark"
         """)
     result = run(pytester)
-    result.assert_outcomes(passed=21)
+    result.assert_outcomes(passed=20)
     result.stdout.fnmatch_lines(["popcorn: 1 key(s), 1 boot(s), 0 from cache"])
 
 
@@ -119,20 +115,20 @@ def test_machine_factory(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester)
     pytester.makepyfile("""
-        def test_booted(machine, machine_factory):
-            other = machine_factory()
+        def test_booted(machine, machine_factory, description):
+            other = machine_factory(description)
             assert other is not machine
             assert other.pc == machine.pc == machine.sym("alu_mark")
             rounds = machine.sym("alu_rounds")
             assert other.mem.u32[rounds] == machine.mem.u32[rounds] == 0
             assert other.instructions == machine.instructions
-            second = machine_factory()
+            second = machine_factory(description)
             other.mem.u32[rounds] = 5
             assert second.mem.u32[rounds] == 0
             assert machine.mem.u32[rounds] == 0
 
-        def test_not_booted(machine_factory):
-            fresh = machine_factory(booted=False)
+        def test_not_booted(machine_factory, description):
+            fresh = machine_factory(description, booted=False)
             assert fresh.instructions == 0
             assert fresh.pc == 0
             assert fresh.pc != fresh.sym("Reset_Handler") & ~1
@@ -146,23 +142,57 @@ def test_factory_names_its_machines_and_boots_once(pytester: pytest.Pytester) ->
     pytester.makepyfile("""
         import pytest
 
-        def test_named(machine, machine_factory):
+        def test_named(machine, machine_factory, description):
             assert machine.name == "machine"
-            named = machine_factory(name="x")
+            named = machine_factory(description, name="x")
             assert named.name == "x"
             assert named.pc == machine.pc
-            assert machine_factory(name="y", booted=False).name == "y"
-            assert machine_factory().name == machine.description.part
+            assert machine_factory(description, name="y", booted=False).name == "y"
+            assert machine_factory(description).name == machine.description.part
             with pytest.raises(ValueError):
-                machine_factory(name="x.y")
+                machine_factory(description, name="x.y")
 
-        async def test_named_async(machine_factory):
-            m = await machine_factory.booted(name="z")
+        async def test_named_async(machine_factory, description):
+            m = await machine_factory.booted(description, name="z")
             assert m.name == "z"
         """)
     result = run(pytester)
     result.assert_outcomes(passed=2)
     result.stdout.fnmatch_lines(["popcorn: 1 key(s), 1 boot(s), 0 from cache"])
+
+
+def test_the_factory_takes_a_description_first(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester)
+    pytester.makepyfile("""
+        import pytest
+
+        MISSING = "missing 1 required positional argument: 'description'"
+        WRONG = "^machine_factory takes a popcorn.MachineDescription first, not str$"
+
+        def test_missing(machine_factory):
+            with pytest.raises(TypeError, match=MISSING):
+                machine_factory()
+
+        async def test_missing_async(machine_factory):
+            with pytest.raises(TypeError, match=MISSING):
+                await machine_factory.booted()
+
+        def test_a_config_name(machine_factory):
+            with pytest.raises(TypeError, match=WRONG):
+                machine_factory("variant")
+
+        async def test_a_config_name_async(machine_factory):
+            with pytest.raises(TypeError, match=WRONG):
+                await machine_factory.booted("variant", name="x")
+
+        def test_the_old_keyword(machine_factory, description):
+            with pytest.raises(TypeError, match="project"):
+                machine_factory(description, project=description)
+        """)
+    result = run(pytester)
+    result.assert_outcomes(passed=5)
+    result.stdout.no_fnmatch_line("popcorn: * key(s)*")
 
 
 def test_factory_boot_from_async_tests(pytester: pytest.Pytester) -> None:
@@ -171,16 +201,16 @@ def test_factory_boot_from_async_tests(pytester: pytest.Pytester) -> None:
     pytester.makepyfile("""
         import pytest
 
-        async def test_sync_form_refuses_to_boot(machine_factory):
+        async def test_sync_form_refuses_to_boot(machine_factory, description):
             with pytest.raises(RuntimeError, match="await machine_factory.booted"):
-                machine_factory()
+                machine_factory(description)
 
-        async def test_async_form_boots(machine_factory):
-            m = await machine_factory.booted()
+        async def test_async_form_boots(machine_factory, description):
+            m = await machine_factory.booted(description)
             assert m.pc == m.sym("alu_mark")
 
-        async def test_sync_form_after_the_boot(machine_factory):
-            m = machine_factory()
+        async def test_sync_form_after_the_boot(machine_factory, description):
+            m = machine_factory(description)
             assert m.pc == m.sym("alu_mark")
         """)
     result = run(pytester)
@@ -210,8 +240,10 @@ def test_concurrent_async_boots_of_one_key_boot_once(pytester: pytest.Pytester) 
     pytester.makepyfile("""
         import asyncio
 
-        async def test_two_tasks(machine_factory):
-            first, second = await asyncio.gather(machine_factory.booted(), machine_factory.booted())
+        async def test_two_tasks(machine_factory, description):
+            first, second = await asyncio.gather(
+                machine_factory.booted(description), machine_factory.booted(description)
+            )
             assert first is not second
             assert first.pc == second.pc == first.sym("alu_mark")
         """)
@@ -321,7 +353,7 @@ def test_without_boot_until_the_snapshot_is_the_reset_state(pytester: pytest.Pyt
     run(pytester).assert_outcomes(passed=1)
 
 
-def test_no_popcorn_project_override(pytester: pytest.Pytester) -> None:
+def test_the_plugin_declares_no_machine_fixture(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     pytester.makepyfile("""
         def test_uses_the_machine(machine):
@@ -332,13 +364,7 @@ def test_no_popcorn_project_override(pytester: pytest.Pytester) -> None:
         """)
     result = run(pytester)
     result.assert_outcomes(passed=1, errors=1)
-    result.stdout.fnmatch_lines(
-        [
-            "*define a `popcorn_project` fixture returning a `popcorn.MachineDescription` in a "
-            "conftest.py "
-            "above this test*"
-        ]
-    )
+    result.stdout.fnmatch_lines(["*fixture 'machine' not found*"])
 
 
 @pytest.mark.parametrize(

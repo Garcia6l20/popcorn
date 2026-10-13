@@ -228,17 +228,15 @@ def test_a_config_marker_fails_a_system_test(layout: Path, pytester: pytest.Pyte
         "def test_config(system):\n"
         "    pass\n"
     )
-    result = run(pytester, str(layout / "test_config.py"), "--popcorn-config=other")
+    result = run(pytester, str(layout / "test_config.py"))
     result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*config does not apply to the system fixture*"])
-    (layout / "test_config.py").unlink()
-    run(pytester, str(layout), "--popcorn-config=other").assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines(["*@pytest.mark.popcorn config is not a marker keyword: *"])
 
 
 @pytest.mark.parametrize(
     ("fixture", "expected"),
     [
-        (None, "*define a `popcorn_system` fixture returning a `popcorn.SystemDescription`*"),
+        (None, "*fixture 'system' not found*"),
         (
             "A",
             "*the popcorn fixture system returned MachineDescription, not a "

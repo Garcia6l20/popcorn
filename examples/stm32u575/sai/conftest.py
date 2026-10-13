@@ -7,7 +7,7 @@ import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+SAI = popcorn.MachineDescription(
     name="sai-sine",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/sai_sine.elf")],
@@ -17,4 +17,4 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def sai() -> popcorn.MachineDescription:
-    return PROJECT
+    return SAI

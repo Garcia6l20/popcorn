@@ -10,7 +10,7 @@ its three transfers at that 400 kHz, plus start, stop and CPU time.
 """
 
 import pytest
-from popcorn import Machine, StopReason
+from popcorn import Machine, MachineDescription, StopReason
 from popcorn.devices import Eeprom24xx, TableTarget, TableWrite
 from popcorn.pytest import MachineFactory
 from popcorn.units import us
@@ -45,14 +45,14 @@ async def test_the_page_reads_back_and_lands_in_the_eeprom(i2c: Machine) -> None
 
 
 async def test_acknowledge_polling_grows_with_the_write_cycle(
-    i2c: Machine, machine_factory: MachineFactory
+    i2c: Machine, machine_factory: MachineFactory, i2c_description: MachineDescription
 ) -> None:
     await run_to_done(i2c)
     polls = i2c.var("eeprom_result").nacked_polls.value
     assert isinstance(polls, int)
     assert polls > 0
 
-    slow = await machine_factory.booted("slow-eeprom")
+    slow = await machine_factory.booted(i2c_description, config="slow-eeprom")
     await run_to_done(slow)
     slow_polls = slow.var("eeprom_result").nacked_polls.value
     assert isinstance(slow_polls, int)

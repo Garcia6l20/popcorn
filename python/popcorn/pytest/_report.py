@@ -33,8 +33,8 @@ class Tracked:
     """A machine a test used.
 
     Attributes:
-        label: How the report names it, `machine`, `machine_factory #<n>` or
-            `system member <name>`.
+        label: How the report names it: the declared machine fixture's name,
+            `machine_factory #<n>` or `<system fixture> member <name>`.
         machine: The machine.
         key: Its machine description, config and strictness, as text.
     """
@@ -56,12 +56,10 @@ SYSTEMS = pytest.StashKey[list[System]]()
 class TraceOnFail:
     """A full trace of one test's machine, kept only when the test's call fails."""
 
-    def __init__(self, item: pytest.Item, directory: Path, member: str | None = None) -> None:
-        """Prepare the trace of the test `item` in `directory`, `<name>.pctr`, or
-        `<name>.<member>.pctr` for the member `member` of its linked system."""
-        name = file_name(item)
-        if member is not None:
-            name = f"{name}.{re.sub(r'[^A-Za-z0-9_.-]', '_', member)}"
+    def __init__(self, item: pytest.Item, directory: Path, member: str) -> None:
+        """Prepare the trace of the test `item` in `directory`, `<name>.<member>.pctr`, with
+        `member` the declared machine fixture's name or `<system fixture>.<member>`."""
+        name = f"{file_name(item)}.{re.sub(r'[^A-Za-z0-9_.-]', '_', member)}"
         self.path = directory / f"{name}.pctr"
         self._directory = directory
         self._part = directory / f"{name}.pctr.part"

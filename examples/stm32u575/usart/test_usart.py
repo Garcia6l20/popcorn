@@ -11,7 +11,7 @@ first, which adds 546 ps per frame.
 import itertools
 
 import pytest
-from popcorn import Machine, StopReason
+from popcorn import Machine, MachineDescription, StopReason
 from popcorn.pytest import MachineFactory
 from popcorn.units import ms, ns
 
@@ -49,9 +49,9 @@ async def test_each_line_is_echoed_in_turn(usart: Machine) -> None:
 
 
 async def test_the_banner_is_kept_for_a_port_taken_after_the_run(
-    machine_factory: MachineFactory,
+    machine_factory: MachineFactory, usart_description: MachineDescription
 ) -> None:
-    fresh = await machine_factory.booted()
+    fresh = await machine_factory.booted(usart_description)
     stop = await fresh.run(for_=ms(10))
     assert stop.reason is StopReason.TIME, stop
     assert await fresh.periph.USART1.port.read(len(BANNER), for_=ms(1)) == BANNER

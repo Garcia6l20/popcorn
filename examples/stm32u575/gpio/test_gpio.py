@@ -8,7 +8,7 @@ trace of the translated blocks shows a few blocks per SysTick wake-up, not a bus
 from pathlib import Path
 
 import pytest
-from popcorn import Machine, StopReason
+from popcorn import Machine, MachineDescription, StopReason
 from popcorn.pytest import MachineFactory
 from popcorn.trace import Block, Irq, TraceKind, read
 from popcorn.units import ms
@@ -85,9 +85,9 @@ async def test_a_press_runs_the_exti13_handler_once(gpio: Machine) -> None:
 
 
 async def test_a_second_machine_from_the_boot_snapshot_takes_presses(
-    machine_factory: MachineFactory,
+    machine_factory: MachineFactory, gpio_description: MachineDescription
 ) -> None:
-    second = await machine_factory.booted()
+    second = await machine_factory.booted(gpio_description)
     await settle(second)
     await press(second)
     assert second.var("presses").value == 1

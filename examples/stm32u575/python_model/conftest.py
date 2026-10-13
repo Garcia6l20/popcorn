@@ -17,21 +17,21 @@ BASE = popcorn.MachineDescription(
     board={"RNG": popcorn.Periph(model=popcorn.Use(Rng))},
 )
 
-PROJECT = BASE.with_configs(
+PYTHON_MODEL = BASE.with_configs(
     seeded=BASE.replace(board={"RNG": popcorn.Periph(model=popcorn.Use(Rng, seed=7))})
 )
 
 
 @popcorn.pytest.machine
 def python_model() -> popcorn.MachineDescription:
-    return PROJECT
+    return PYTHON_MODEL
 
 
 @popcorn.pytest.machine(config="seeded")
 def python_model_seeded() -> popcorn.MachineDescription:
-    return PROJECT
+    return PYTHON_MODEL
 
 
 @pytest.fixture(scope="session")
 def python_model_description() -> popcorn.MachineDescription:
-    return PROJECT
+    return PYTHON_MODEL

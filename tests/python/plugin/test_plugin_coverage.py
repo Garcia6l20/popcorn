@@ -98,8 +98,8 @@ def test_spoiled_and_factory_machines_are_counted(pytester: pytest.Pytester) -> 
         async def test_after(machine):
             await machine.call("negate", 2)
 
-        async def test_factory(machine_factory):
-            other = await machine_factory.booted()
+        async def test_factory(machine_factory, description):
+            other = await machine_factory.booted(description)
             await other.call("negate", 3)
         """)
     result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=a.info")

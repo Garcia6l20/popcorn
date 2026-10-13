@@ -169,7 +169,7 @@ VARIANT = (
 
 def test_the_config_is_set_on_the_decorator(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, configs=VARIANT, legacy=True)
+    write_project(pytester, configs=VARIANT)
     declare(
         pytester,
         """
@@ -203,18 +203,14 @@ def test_the_config_is_set_on_the_decorator(pytester: pytest.Pytester) -> None:
         @pytest.mark.popcorn(config="variant")
         def test_marker_config(base):
             pass
-
-        @pytest.mark.popcorn(config="variant")
-        def test_marker_config_on_the_old_fixture(machine):
-            assert rounds(machine) == 7
         """)
-    result = run(pytester, "--popcorn-config=variant")
-    result.assert_outcomes(passed=2, errors=2)
+    result = run(pytester)
+    result.assert_outcomes(passed=1, errors=2)
     result.stdout.fnmatch_lines_random(
         [
             "*ConfigError*nope*variant*",
-            "*config does not apply to the machine fixture base: its config is set on "
-            "@popcorn.pytest.machine(config=...)",
+            "*@pytest.mark.popcorn config is not a marker keyword: set it on the machine fixture, "
+            "@popcorn.pytest.machine(config=...)*",
         ]
     )
 

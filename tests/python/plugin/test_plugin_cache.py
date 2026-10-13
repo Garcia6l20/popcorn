@@ -245,7 +245,7 @@ def test_the_async_lock_wait_keeps_the_loop_running(pytester: pytest.Pytester) -
                     await asyncio.sleep(0.01)
 
             task = asyncio.create_task(ticker())
-            machine = await machine_factory.booted(config="other")
+            machine = await machine_factory.booted(description, config="other")
             done = True
             await task
             assert machine.pc == machine.sym("alu_mark")

@@ -7,16 +7,16 @@ two milliseconds of counts. Channel 1 is converted a few tens of microseconds af
 so its mirror lags by less than one millisecond of counts.
 
 Two ways to attach a mock: the project's `Periph(devices=[Device(Adc, ...)])` on SPI1, which the
-`spi_mock` fixture uses, and `machine_factory.booted(devices={"SPI1": [adc]})`, which can pass what
-a project cannot, here a Python function as the sample source. The factory machine keeps the
-rest of the project build. An ADC holding a function cannot key the boot cache: that machine
-boots each time.
+`spi_mock` fixture uses, and `machine_factory.booted(description, devices={"SPI1": [adc]})`,
+which can pass what a project cannot, here a Python function as the sample source. The factory
+machine keeps the rest of the project build. An ADC holding a function cannot key the boot
+cache: that machine boots each time.
 """
 
 import itertools
 
 import pytest
-from popcorn import Machine, StopReason
+from popcorn import Machine, MachineDescription, StopReason
 from popcorn.pytest import MachineFactory
 from popcorn.units import VirtualTime, ms
 from spiadc import FULL_SCALE, Adc
@@ -65,7 +65,7 @@ async def test_each_conversion_is_one_chip_select_period(spi_mock: Machine) -> N
 
 
 async def test_a_source_function_given_through_the_factory(
-    machine_factory: MachineFactory,
+    machine_factory: MachineFactory, spi_mock_description: MachineDescription
 ) -> None:
     served: list[tuple[int, int]] = []
 
@@ -74,7 +74,9 @@ async def test_a_source_function_given_through_the_factory(
         served.append((channel, value))
         return value
 
-    machine = await machine_factory.booted(devices={"SPI1": [Adc(cs="PB0", source=source)]})
+    machine = await machine_factory.booted(
+        spi_mock_description, devices={"SPI1": [Adc(cs="PB0", source=source)]}
+    )
     await run_to_done(machine)
 
     assert served[0::2] == [(0, value) for value in samples(machine, 0)]

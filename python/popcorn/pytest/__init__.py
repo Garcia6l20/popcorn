@@ -6,11 +6,16 @@ root `conftest.py` of a test suite:
 
     pytest_plugins = ["popcorn.pytest"]
 
-Declared fixtures, any number per conftest.py, each named after its function:
+Machine and system fixtures are declared in a conftest.py, any number of them, each named
+after its function:
 
     # conftest.py
     import popcorn
     import popcorn.pytest
+
+    CONTROLLER = popcorn.MachineDescription(
+        part="STM32U575QGIx", images=[popcorn.Elf(HERE / "app.elf")]
+    )
 
     @popcorn.pytest.machine
     def controller() -> popcorn.MachineDescription:
@@ -22,67 +27,6 @@ Declared fixtures, any number per conftest.py, each named after its function:
 
     @popcorn.pytest.system
     def linked() -> popcorn.SystemDescription:
-        return SYSTEM
-
-    # test_app.py
-    async def test_x(controller: popcorn.Machine, linked: popcorn.System) -> None: ...
-
-- `popcorn.pytest.machine`: a booted machine named after the fixture, restored from the boot
-  snapshot of its key before each test as `machine` is. Each fixture name has its own machine
-  per key: two fixtures of one description in one test are two machines of one boot. The config
-  is set on the decorator only, a marker `config` fails the test.
-- `popcorn.pytest.system`: the description linked, a `popcorn.System`, as `system` gives it. A
-  failing test reports each member as `<fixture> member <name>`.
-
-The decorated function is a fixture function: it may request fixtures and be a coroutine
-function. Both decorators take `params=` and `ids=` as `pytest.fixture` does.
-
-Fixtures:
-
-    # conftest.py
-    @pytest.fixture(scope="session")
-    def popcorn_project() -> popcorn.MachineDescription:
-        return popcorn.MachineDescription(
-            part="STM32U575QGIx", images=[popcorn.Elf(HERE / "app.elf")]
-        )
-
-    # test_app.py
-    async def test_boot_state(machine: popcorn.Machine) -> None:
-        await machine.call("check")
-
-- `popcorn_project`: the test's `popcorn.MachineDescription`, defined by the user in a conftest.py.
-The
-  nearest override above a test wins, as for any pytest fixture. The plugin's own fails the
-  tests that use a machine, naming the fix.
-- `popcorn_selected_project`: `popcorn_project` with the test's config applied, selected as for
-  `machine`: the marker's, else `--popcorn-config`, else the base machine description. For tests
-  that boot machines themselves.
-- `machine`: the test's machine description's machine, built and booted once per session and
-  process, then restored from its boot snapshot before each test. Every test gets the same object.
-  The plugin removes the hooks a test installed, empties the intercept logs, the call baseline and
-  the trace ring. A test that loads another image, opens a pty or leaves the machine running spoils
-  it: the next test gets a new machine restored from the saved boot. A machine description without
-  `boot.until` boots to the reset state. A failed boot errors every test using the machine,
-  booted once.
-- `machine_factory`: a `MachineFactory`, new machines separate from `machine`, with the
-  machine description's bus devices or the test's own, from the test's machine description or
-  another one.
-- `popcorn_system`: the tests' `popcorn.SystemDescription`, defined by the user in a conftest.py as
-  `popcorn_project` is. The plugin's own fails the tests that use `system`, naming the fix.
-- `system`: the `popcorn_system` linked, a `popcorn.System`. Each member is a new machine
-  restored from the boot snapshot of its own machine description, booted once per key as for
-  `machine`, so a member and a `machine` of the same machine description and strictness share one
-  boot, and two members of one machine description are two machines. It needs no `popcorn_project`.
-  The marker's `strict` and `budget` and `--popcorn-strict` and `--popcorn-budget` apply to every
-  member, `budget` as its `default_budget`. A marker `config` fails the test and `--popcorn-config`
-  does not apply: a member's config is part of its machine description. Teardown halts a free run
-  left started, closes the system, then parks and closes the members. A failing test reports each
-  member as `system member <name>`, and `--popcorn-trace-on-fail` keeps `<test>.<member>.pctr` per
-  member.
-
-    # conftest.py
-    @pytest.fixture(scope="session")
-    def popcorn_system() -> popcorn.SystemDescription:
         return popcorn.SystemDescription(
             members={"ctl": CONTROLLER, "r1": RESPONDER, "r2": RESPONDER},
             links=[
@@ -91,8 +35,47 @@ The
             ],
         )
 
-  Keep machine descriptions shared by several conftest.py files in a plain module with a unique
-  name, not in a conftest.py.
+    # test_app.py
+    async def test_x(controller: popcorn.Machine, linked: popcorn.System) -> None:
+        await controller.call("check")
+
+The decorated function is a fixture function: it may request other fixtures, `request`
+included, and be a coroutine function. It returns the description, it does not yield it. Both
+decorators take `params=` and `ids=` as `pytest.fixture` does, `request.param` in the function.
+The nearest declaration above a test wins, as for any pytest fixture. Keep descriptions shared
+by several conftest.py files in a plain module with a unique name, not in a conftest.py.
+
+- `@popcorn.pytest.machine`: a booted machine of the description, its config applied. The key,
+  the description with its config, the strictness and the bus devices, boots once per session
+  and process, shared by every fixture and `machine_factory` call of that key. Each fixture name
+  has its own machine per key, built named after the fixture and reused by every test: before
+  each test it is restored from the boot snapshot, its hooks removed, its intercept logs, call
+  baseline and trace ring emptied. Two fixtures of one description in one test are two machines
+  of one boot. A test that loads another image or opens a pty spoils the machine: the next test
+  gets a new one restored from the saved boot. A description without `boot.until` boots to the
+  reset state. A failed boot errors every test using the key, booted once. The config is set on
+  the decorator only, `config=None` for the base description.
+- `@popcorn.pytest.system`: the description booted and linked, a `popcorn.System`, new for each
+  test. Each member is a new machine named as the member, restored from the boot snapshot of its
+  own description's key, so a member and a machine fixture of the same description and
+  strictness share one boot. A member's config is part of its description,
+  `SystemDescription(members={name: description.config(...)})`. Teardown halts a free run left
+  started, closes the system, then parks and closes the members.
+- `machine_factory`: a `MachineFactory`, new machines for one test, never a fixture's, from a
+  description given at each call: `machine_factory(CONTROLLER, config="variant")`,
+  `await machine_factory.booted(CONTROLLER)` from an async test, `booted=False` for a machine
+  powered off and not reset, `devices=` for bus devices of the test's own.
+
+Teardown parks the machines a test left started: what ended a free run by itself and never
+reached the test fails the teardown.
+
+A machine fixture's machine is named after the fixture in its log records and errors, a
+system member after its member key, a `machine_factory` machine after its `name=` or the part.
+A failing test reports a machine fixture under its name, a system member as
+`<fixture> member <name>`, a factory machine as `machine_factory #<n>`.
+
+A description with `missing="skip"` skips the tests using it when an input is missing, the
+missing path as the reason.
 
 A boot is keyed by the `MachineDescription.digest` of the machine description with its config
 applied, the strictness and the bus devices given. One session can run the tests of several conftest
@@ -108,12 +91,14 @@ each block ends with the last N lines of the machine's trace ring, a group of up
 repeated back to back printed once with its repeat count: a poll loop takes a few lines. Without
 it, a one-line hint names the option.
 
-With `--popcorn-trace-on-fail=DIR`, the `machine` fixture traces every test with
-`popcorn.trace.ALL` and keeps `DIR/<node id>.pctr` for a test whose call failed, named in its
-report. The bare flag keeps them in `.pytest_cache/d/popcorn/traces`, or `.popcorn-traces` in the
-rootdir without the cache plugin. Write it as `--popcorn-trace-on-fail=DIR` or last on the command
-line: a bare flag before a path takes the path as its DIR. `machine_factory` machines are not
-traced. Kept traces are never pruned: `--cache-clear` removes those in the pytest cache.
+With `--popcorn-trace-on-fail=DIR`, every machine fixture and system member is traced for
+every test with `popcorn.trace.ALL`. A test whose call failed keeps
+`DIR/<node id>.<fixture>.pctr` per machine fixture and `DIR/<node id>.<fixture>.<member>.pctr`
+per system member, named in its report. The bare flag keeps them in
+`.pytest_cache/d/popcorn/traces`, or `.popcorn-traces` in the rootdir without the cache plugin.
+Write it as `--popcorn-trace-on-fail=DIR` or last on the command line: a bare flag before a path
+takes the path as its DIR. `machine_factory` machines are not traced. Kept traces are never
+pruned: `--cache-clear` removes those in the pytest cache.
 
 With `--popcorn-cov=LCOV`, every machine the plugin builds counts coverage. Each process adds
 its machines' counts to one `.pcov` file of a temporary `popcorn-cov-*` directory, the boot of
@@ -146,19 +131,20 @@ never pruned: `--cache-clear` drops them all. `-p no:cacheprovider` turns the ca
 Limits:
 
 - Host input queued on a UART and not delivered yet stays queued across the restore.
-- A trace opened with `machine.trace(...)` and never closed keeps its sink on the reused machine.
+- A trace opened with `machine.trace(...)` and never closed keeps its sink on the reused machine
+  of a machine fixture.
 
 Async tests:
 
     from popcorn.units import ms
 
-    async def test_ticks(machine: popcorn.Machine) -> None:
-        await machine.run(for_=ms(1))
+    async def test_ticks(controller: popcorn.Machine) -> None:
+        await controller.run(for_=ms(1))
 
 A coroutine test function runs on the plugin's own event loop, one `asyncio.Runner` per session
 and process, when no other plugin claimed it first. pytest-asyncio is not needed. Tasks a test
 leaves running are cancelled after it, with a warning. Machines run on their own threads, the
-loop only awaits them. Teardown parks the `machine` and `machine_factory` machines a test left
+loop only awaits them. Teardown parks the fixture and `machine_factory` machines a test left
 started, not machines the test built itself.
 
 Async fixtures, coroutines or async generators of any scope, run on the same loop when no other
@@ -181,28 +167,28 @@ async test and fixture. They run on its loops, everything else on popcorn's. Mix
 
 Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture, are left to it.
 
-Options, registered for `pytest --help`: `--popcorn-config`, `--popcorn-cov`,
-`--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`.
+Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`,
+`--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`.
 
-    @pytest.mark.popcorn(config="variant", budget=1_000_000, strict=True)
-    async def test_variant(machine: popcorn.Machine) -> None: ...
+    @pytest.mark.popcorn(budget=1_000_000, strict=True)
+    async def test_bounded(controller: popcorn.Machine, linked: popcorn.System) -> None: ...
 
-Each setting of a test comes from its `popcorn` marker, else the command line, else the
-project:
+The `popcorn` marker applies to every popcorn machine of the test: its machine fixtures, system
+members and `machine_factory` machines. Each setting comes from the marker, else the command
+line, else the description:
 
-- `config`: a name in `popcorn_project.configs`, from `MachineDescription.with_configs`, else
-  `--popcorn-config`, else the base machine description. `config=None` in a marker is the base
-  machine description even with `--popcorn-config`. An unknown name fails the test, naming the known
-  ones. `popcorn_project` itself stays the user's value, no config applied.
-  `popcorn_selected_project` is the one with the config applied.
-- `strict`: None or absent, the command line then the machine description; True or False overrides.
-  `--popcorn-strict` turns strictness on, else `MachineDescription.strict` of the config applies.
+- `strict`: None or absent takes the command line, then the description. True or False overrides.
+  `--popcorn-strict` turns strictness on, else `MachineDescription.strict` of the config
+  applies. A `strict=` given to `machine_factory` overrides all three.
 - `budget`: `--popcorn-budget`, the `default_budget` of the test's booted machines, per `run`,
   `wait_for` and `call`, never a wall-clock timeout. `budget=None` in a marker is unbounded.
+  `system.run` is bounded by its `for_` or `until` only.
 
-The closest marker wins whole, the function's over its class's over its module's: its keywords
-do not merge with those of a farther marker. Every marked test has its marker checked at setup,
-whether it uses a popcorn fixture or not.
+The marker takes no `config`: a marker naming one fails the test, the config is set on
+`@popcorn.pytest.machine(config=...)` or passed to `machine_factory`. The closest marker wins
+whole, the function's over its class's over its module's: its keywords do not merge with those
+of a farther marker. Every marked test has its marker checked at setup, whether it uses a
+popcorn fixture or not.
 """
 
 import pytest

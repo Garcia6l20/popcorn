@@ -8,7 +8,7 @@ from popcorn.board import RccOptions
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+RCC = popcorn.MachineDescription(
     name="rcc-clock",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/rcc_clock.elf")],
@@ -20,4 +20,4 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def rcc() -> popcorn.MachineDescription:
-    return PROJECT
+    return RCC

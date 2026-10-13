@@ -1,4 +1,4 @@
-"""UC-2: setup plus teardown of the `machine` fixture under 1 ms median per test.
+"""UC-2: setup plus teardown of a declared machine fixture under 1 ms median per test.
 
 Opt-in, `POPCORN_BENCH=1`, on a quiet host.
 """

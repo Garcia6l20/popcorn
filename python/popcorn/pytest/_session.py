@@ -1,5 +1,5 @@
-"""Per-process plugin state: the machine descriptions by digest, one booted machine per key, one
-reused machine per declared machine fixture and key, the boot counters."""
+"""Per-process plugin state: the machine descriptions by digest, one boot per key, one reused
+machine per declared machine fixture and key, the boot counters."""
 
 from __future__ import annotations
 
@@ -70,21 +70,20 @@ class Booted:
     """The booted state of one key.
 
     Attributes:
-        machine: The machine the `machine` fixture restores for every test of the key.
+        machine: The machine that booted the key or restored its boot from the cache. No test
+            gets it: declared machine fixtures and `machine_factory` restore `saved` into
+            machines of their own. It is parked, its coverage collected and its pty bridges
+            closed at session end.
         snapshot: The boot snapshot, taken on `machine`.
         saved: `snapshot` in its saved form, restorable into any machine of the key.
         boot_stop: The stop of the boot, None for a machine description without `boot.until`. Read
             back from the cache entry on a cache hit, located in this machine.
-        image_count: How many images the machine had after the build.
-        ptys: The pty bridges the machine had after the build.
     """
 
     machine: Machine
     snapshot: Snapshot
     saved: bytes
     boot_stop: Stop | None
-    image_count: int
-    ptys: dict[str, str]
     _decoded: Snapshot | None = None
 
     def decoded(self) -> Snapshot:
@@ -304,25 +303,6 @@ class PopcornSession:
         self._device_boots[key] = booted.decoded()
         return booted.machine, booted.decoded()
 
-    def rebuild(self, key: Key) -> Booted:
-        """Replace the reused machine of `key` by a new one restored from the saved form."""
-        old = self._booted[key]
-        self.collect(old.machine)
-        old.machine.board.close()
-        machine = self.build(key)
-        machine.restore(old.decoded())
-        booted = Booted(
-            machine=machine,
-            snapshot=machine.snapshot(),
-            saved=old.saved,
-            boot_stop=old.boot_stop,
-            image_count=len(machine.images),
-            ptys=machine.board.ptys,
-        )
-        self._booted[key] = booted
-        self.rebuilds += 1
-        return booted
-
     def slot(self, key: Key, name: str) -> tuple[Slot, Snapshot]:
         """The reused machine of the declared machine fixture `name` for `key`, built named
         `name` the first time, and the saved boot of `key` to restore into it, booting `key` on
@@ -350,8 +330,8 @@ class PopcornSession:
         return slot
 
     def booted_machines(self) -> list[Machine]:
-        """The reused machine of every key booted in this process and of every declared machine
-        fixture and key."""
+        """The machine that booted every key booted in this process, and the reused machine of
+        every declared machine fixture and key."""
         return [
             *(booted.machine for booted in self._booted.values()),
             *(slot.machine for slot in self._slots.values()),
@@ -363,10 +343,13 @@ class PopcornSession:
         return self._failed_machines.get(key)
 
     def park(self) -> None:
-        """Park the reused machines and those whose boot failed. What ended a free run by itself
-        is warned as unraisable: no test owns it any more."""
+        """Park the boot machines, the reused machines and those whose boot failed. What ended a
+        free run by itself is warned as unraisable: no test owns it any more."""
         machines = [
-            *((f"the machine of {key}", booted.machine) for key, booted in self._booted.items()),
+            *(
+                (f"the boot machine of {key}", booted.machine)
+                for key, booted in self._booted.items()
+            ),
             *(
                 (f"the machine {name} of {key}", slot.machine)
                 for (key, name), slot in self._slots.items()
@@ -379,7 +362,8 @@ class PopcornSession:
                 unclaimed(owner, ended)
 
     def close(self) -> None:
-        """Close the pty bridges of the reused machines and of those whose boot failed."""
+        """Close the pty bridges of the boot machines, the reused machines and those whose boot
+        failed."""
         for booted in self._booted.values():
             booted.machine.board.close()
         for slot in self._slots.values():
@@ -442,7 +426,6 @@ class PopcornSession:
         machine: Machine | None = None
         try:
             machine = self.build(key, devices, name)
-            ptys = machine.board.ptys
             machine.restore(Snapshot.load(entry.snapshot))
             snapshot = machine.snapshot()
             stop = entry.stop(machine)
@@ -461,8 +444,6 @@ class PopcornSession:
             snapshot=snapshot,
             saved=snapshot.to_bytes(),
             boot_stop=stop,
-            image_count=len(machine.images),
-            ptys=ptys,
         )
 
     def _boot_coverage_bytes(self, key: Key, booted: Booted) -> bytes | None:
@@ -482,8 +463,6 @@ class PopcornSession:
         machine: Machine | None = None
         try:
             machine = self.build(key, devices, name)
-            image_count = len(machine.images)
-            ptys = machine.board.ptys
             if project.boot.until is None:
                 machine.reset()
                 stop = None
@@ -501,8 +480,6 @@ class PopcornSession:
             snapshot=snapshot,
             saved=snapshot.to_bytes(),
             boot_stop=stop,
-            image_count=image_count,
-            ptys=ptys,
         )
 
 

@@ -78,7 +78,8 @@ class SystemDescription:
     A value, as `MachineDescription` is: frozen, hashable, equal by content, holding machine
     descriptions and never a machine. Declaring one reads no file, so a conftest imports it
     before the firmware exists. `machines`, `boot` and `link` build the runtime. The pytest
-    plugin's `system` fixture boots each member from its own machine description's boot cache.
+    plugin's `@popcorn.pytest.system` fixtures boot each member from its own description's boot
+    cache.
 
     Each member runs on its own host thread. The members meet at a barrier every `quantum` of
     system time, and after it each receiver's thread drains the frames sent to it, senders in
@@ -212,7 +213,8 @@ class SystemDescription:
     async def boot(self) -> System:
         """Build `machines`, boot each from reset as `MachineDescription.boot_machine` does, or only
         reset it when its machine description has no `boot.until`, one after the other, then `link`
-        them. For scripts: the pytest plugin's `system` fixture boots from the boot cache instead.
+        them. For scripts: the pytest plugin's `@popcorn.pytest.system` fixtures boot from the boot
+        cache instead.
 
         Raises:
             Exception: As `machines`, `MachineDescription.boot_machine` and `link`.

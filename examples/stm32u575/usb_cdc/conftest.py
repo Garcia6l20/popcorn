@@ -8,7 +8,7 @@ from popcorn.board import UsbHostOptions
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.MachineDescription(
+USB_CDC = popcorn.MachineDescription(
     name="usb-cdc",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/usb_cdc.elf")],
@@ -21,4 +21,4 @@ PROJECT = popcorn.MachineDescription(
 
 @popcorn.pytest.machine
 def usb_cdc() -> popcorn.MachineDescription:
-    return PROJECT
+    return USB_CDC
