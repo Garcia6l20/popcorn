@@ -14,7 +14,7 @@ from popcorn._errors import ConfigError
 
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
-    from popcorn._description import PartDescription
+    from popcorn._part_description import PartDescription
     from popcorn._streams import UartStream
     from popcorn._usb import UsbHost
 

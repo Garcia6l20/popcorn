@@ -35,7 +35,6 @@ from popcorn._call import (
     signature_of,
     slot_for,
 )
-from popcorn._description import PartDescription, load_description
 from popcorn._devices import (
     BusDevice,
     I2CTarget,
@@ -78,6 +77,7 @@ from popcorn._image_view import ImageView, debug_infos, find_variable
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
+from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
     Condition,

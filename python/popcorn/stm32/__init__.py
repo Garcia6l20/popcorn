@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from popcorn._description import PartDescription
+    from popcorn._part_description import PartDescription
 
 
 def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> PartDescription:
@@ -24,7 +24,7 @@ def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> PartD
     Raises:
         ConfigError: The part is unknown, with close matches, or ST's files are missing.
     """
-    from popcorn._description import load_description
+    from popcorn._part_description import load_description
     from popcorn.stm32.description import cached_description
 
     return load_description(cached_description(part, core=core, svd=svd))

@@ -8,12 +8,6 @@ from popcorn._arena import Arena, ArenaBlock
 from popcorn._call import F32, I64, CallResult, HandlerCallWarning, Stack, f32, i64
 from popcorn._constants import Constants
 from popcorn._core import version
-from popcorn._description import (
-    PartDescription,
-    description_digest,
-    load_description,
-    parse_description,
-)
 from popcorn._dwarf_views import Var
 from popcorn._enums import FaultKind, FloatAbi, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
@@ -48,8 +42,7 @@ from popcorn._hooks import (
 from popcorn._image import Image, Location, Segment, Symbol
 from popcorn._image_view import ImageView
 from popcorn._machine import Call, Event, Machine, Reached
-from popcorn._observe import MachineCoverage, Ring, TraceRecording
-from popcorn._project import (
+from popcorn._machine_description import (
     Bin,
     Boot,
     Device,
@@ -61,6 +54,13 @@ from popcorn._project import (
     Param,
     Periph,
     Use,
+)
+from popcorn._observe import MachineCoverage, Ring, TraceRecording
+from popcorn._part_description import (
+    PartDescription,
+    description_digest,
+    load_description,
+    parse_description,
 )
 from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any_of
 from popcorn._snapshot import Snapshot

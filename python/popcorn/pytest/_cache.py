@@ -35,8 +35,8 @@ from popcorn import (
     description_digest,
 )
 from popcorn._machine import AttachedDevice
+from popcorn._machine_description import check_inputs
 from popcorn._model_build import registered_classes
-from popcorn._project import check_inputs
 from popcorn.board import I2CTarget, SpiTarget
 from popcorn.units import VirtualTime
 

@@ -18,7 +18,10 @@ from popcorn import _core
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
 from popcorn._host import awaited, watch_awaits
-from popcorn._project import MachineDescription, _FrozenMap  # pyright: ignore[reportPrivateUsage]
+from popcorn._machine_description import (
+    MachineDescription,
+    _FrozenMap,  # pyright: ignore[reportPrivateUsage]
+)
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Stop, stop_of
 from popcorn.units import VirtualDuration, VirtualTime

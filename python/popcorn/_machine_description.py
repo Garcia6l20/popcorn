@@ -17,7 +17,6 @@ from typing import Literal, Self, cast
 from popcorn import _core
 from popcorn._audio import AudioOptions, Block
 from popcorn._constants import Constants
-from popcorn._description import PartDescription, load_description
 from popcorn._devices import check_address
 from popcorn._enums import StopReason
 from popcorn._errors import (
@@ -38,6 +37,7 @@ from popcorn._machine import (
     check_machine_name,
     error_prefix,
 )
+from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._stop import Stop
 from popcorn._supply import SupplyOptions

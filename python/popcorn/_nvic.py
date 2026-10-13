@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import difflib
 
-from popcorn._description import PartDescription
+from popcorn._part_description import PartDescription
 from popcorn._views import Memory
 
 _ISER = 0xE000_E100
