@@ -54,6 +54,9 @@ struct board
    * with the machine. A device object is shared by every machine built from these factories:
    * give each machine its own board and devices. */
   std::map<std::string, std::vector<spi_attachment>, std::less<>> spi{};
+  /** @brief The controller clocking each SPI instance in target mode, by instance name. An
+   * instance with one takes no device in `spi`. Shared as the devices are. */
+  std::map<std::string, std::shared_ptr<spi_controller_sink>, std::less<>> spi_controllers{};
   /** @brief Targets on each I2C instance by instance name, such as `I2C1`. The I2C model copies
    * the list when the machine is built, addresses the first target answering an address, saves
    * and loads each target with its own state, and resets it with the machine. A target object is

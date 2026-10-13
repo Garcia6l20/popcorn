@@ -87,4 +87,69 @@ struct spi_attachment
    * selected from CSTART to the end of the transfer while CFG2.SSOE is set. */
   std::optional<std::uint8_t> cs_pin{};
 };
+
+/**
+ * @brief A controller on an SPI bus, outside the MCU, clocking the SPI in target mode. It
+ *        drives frames through the instance's spi_controller_port and hears each frame back
+ *        here. One per SPI instance, none next to spi_target devices.
+ */
+class spi_controller_sink
+{
+public:
+  /** @brief Creates the controller. */
+  spi_controller_sink() = default;
+  /** @brief Not copyable. */
+  spi_controller_sink(spi_controller_sink const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(spi_controller_sink const&) -> spi_controller_sink& = delete;
+  /** @brief Not movable. */
+  spi_controller_sink(spi_controller_sink&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(spi_controller_sink&&) -> spi_controller_sink& = delete;
+  /** @brief Destroys the controller. */
+  virtual ~spi_controller_sink() = default;
+
+  /**
+   * @brief One frame of a transfer ended.
+   * @param sent Frame the controller sent, right-aligned.
+   * @param received Frame the controller received from the MCU, all ones when the SPI did not
+   *        drive MISO, right-aligned.
+   * @param at Machine time since reset at the end of the frame.
+   */
+  virtual void frame(std::uint32_t sent, std::uint32_t received, vtime at) = 0;
+};
+
+/**
+ * @brief What the SPI model of an instance offers the spi_controller_sink attached to it.
+ */
+class spi_controller_port
+{
+public:
+  /** @brief Most frames queued at once over every transfer not finished. */
+  static constexpr std::size_t max_frames = 4096;
+
+  /**
+   * @brief Queues one transfer: the NSS input selected at its start, @p frames shifted one
+   *        frame time apart, NSS released at the end of the last one. A transfer starts at the
+   *        later of @p start and the end of the transfers queued before it.
+   * @param start Machine time since reset of the earliest start, not before the current time.
+   * @param frame_ps Length of one frame, at least 1.
+   * @param bits Frame size, 4 to 32.
+   * @param frames The frames, 1 to max_frames, each below 2 to the @p bits.
+   * @return Machine time since reset at which the transfer starts.
+   * @throws config_error When no controller is attached to the instance, or the queue would
+   *         hold more than max_frames frames.
+   * @throws std::invalid_argument When @p start is past, the transfer ends past the time
+   *         range, or an argument is out of its range.
+   */
+  virtual auto transfer(
+      vtime                          start,
+      std::uint64_t                  frame_ps,
+      std::uint8_t                   bits,
+      std::span<std::uint32_t const> frames) -> vtime = 0;
+
+protected:
+  /** @brief Destroyed through its model only. */
+  ~spi_controller_port() = default;
+};
 }

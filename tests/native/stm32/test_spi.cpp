@@ -1,6 +1,8 @@
 #include "dma.hpp"
 #include "stm32_fixture.hpp"
 
+#include <popcorn/core/errors.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/devices/at25sf.hpp>
@@ -17,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -255,8 +258,9 @@ auto pending(stm32_fixture const& f, std::uint32_t irq) -> bool
   return (*word >> (irq % 32) & 1u) != 0;
 }
 
-constexpr std::uint32_t spi1_irq = 59;
-constexpr std::uint64_t us       = 1'000'000;
+constexpr std::uint32_t    spi1_irq   = 59;
+constexpr popcorn::address nvic_icpr1 = 0xe000'e284u;
+constexpr std::uint64_t    us         = 1'000'000;
 
 void speed_up_core(bus const& b)
 {
@@ -1276,4 +1280,558 @@ TEST_CASE("the SPI IRQ stays low while SPE is clear, except for MODF")
   CHECK_FALSE(pending(*r.f, spi1_irq));
   b.set("SPI_IER", "MODFIE", 1);
   CHECK(pending(*r.f, spi1_irq));
+}
+
+namespace
+{
+class controller_probe final : public stm32::spi_controller_sink
+{
+public:
+  struct heard
+  {
+    std::uint32_t sent;
+    std::uint32_t received;
+    vtime         at;
+
+    friend auto operator==(heard const&, heard const&) -> bool = default;
+  };
+
+  std::vector<heard> frames;
+
+  void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
+  {
+    frames.push_back({sent, received, at});
+  }
+
+  [[nodiscard]] auto received() const -> std::vector<std::uint32_t>
+  {
+    std::vector<std::uint32_t> out;
+    for(auto const& frame : frames)
+    {
+      out.push_back(frame.received);
+    }
+    return out;
+  }
+};
+
+constexpr std::uint64_t mhz_frame = 8 * us;
+
+struct target_rig
+{
+  std::shared_ptr<controller_probe> sink = std::make_shared<controller_probe>();
+  stm32::board                      board{};
+  std::unique_ptr<stm32_fixture>    f;
+  std::vector<core::log_record>     logged;
+  core::hook_handle                 log_hook;
+
+  explicit target_rig(bool attached = true, bool probe = false)
+  {
+    if(attached)
+    {
+      board.spi_controllers["SPI1"] = sink;
+    }
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, u575());
+    if(probe)
+    {
+      options.models.insert_or_assign(
+          "GPDMA1",
+          [](popcorn::periph::model_context&,
+             popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+            return std::make_shared<request_probe>();
+          });
+    }
+    f = std::make_unique<stm32_fixture>(u575(), "spi_ll", std::move(options));
+    f->set("pc", sym("spi_ll", "idle"));
+    log_hook = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
+  }
+
+  [[nodiscard]] auto port() const -> stm32::spi_controller_port&
+  {
+    auto* const found = dynamic_cast<stm32::spi_controller_port*>(f->target->model("SPI1"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  auto transfer(
+      std::uint64_t                     start,
+      std::vector<std::uint32_t> const& frames,
+      std::uint8_t                      bits = 8) const -> std::uint64_t
+  {
+    return port().transfer(vtime{start}, mhz_frame * bits / 8, bits, frames).ps;
+  }
+
+  [[nodiscard]] auto level(std::uint32_t request) const -> bool
+  {
+    auto* const probe = f->model_of<request_probe>("GPDMA1");
+    REQUIRE(probe != nullptr);
+    auto const found = probe->levels.find(request);
+    return found != probe->levels.end() and found->second;
+  }
+};
+
+void target(
+    bus const&    b,
+    std::uint32_t dsize,
+    std::uint32_t tsize,
+    std::uint32_t comm  = 0,
+    std::uint32_t fthlv = 0)
+{
+  b.set("RCC", "RCC_APB2ENR", "SPI1EN", 1);
+  b.set("SPI_CFG1", "DSIZE", dsize);
+  b.set("SPI_CFG1", "FTHLV", fthlv);
+  b.set("SPI_CFG2", "COMM", comm);
+  b.set("SPI_CFG2", "MASTER", 0);
+  b.set("SPI_CR2", "TSIZE", tsize);
+  b.set("SPI_CR1", "SPE", 1);
+}
+
+auto drain(bus const& b) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  while(b.get("SPI_SR", "RXPLVL") != 0 or b.get("SPI_SR", "RXWNE") != 0)
+  {
+    out.push_back(b.receive());
+  }
+  return out;
+}
+}
+
+TEST_CASE("a 4-frame transfer at 1 MHz clocks the target: 8 us frames, RX FIFO, EOT at TSIZE")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 4);
+  for(std::uint32_t const frame : {0xA1u, 0xA2u, 0xA3u, 0xA4u})
+  {
+    b.send(frame);
+  }
+  auto const start = b.now() + us;
+  CHECK(r.transfer(start, {1, 2, 3, 4}) == start);
+  b.run_until(start + 4 * mhz_frame - mhz_frame / 2);
+  CHECK(r.sink->frames.size() == 3);
+  CHECK(b.get("SPI_SR", "EOT") == 0);
+  b.run_until(start + 4 * mhz_frame);
+  REQUIRE(r.sink->frames.size() == 4);
+  for(std::uint32_t index = 0; index < 4; ++index)
+  {
+    CHECK(
+        r.sink->frames[index]
+        == controller_probe::heard{
+            index + 1, 0xA1 + index, vtime{start + (index + 1) * mhz_frame}});
+  }
+  CHECK(b.get("SPI_SR", "EOT") == 1);
+  CHECK(b.get("SPI_SR", "TXC") == 1);
+  CHECK(b.get("SPI_SR", "UDR") == 0);
+  CHECK(drain(b) == std::vector<std::uint32_t>{1, 2, 3, 4});
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("an empty TX FIFO underruns: UDRDR, the last frame received, or zeros in simplex TX")
+{
+  struct underrun_case
+  {
+    std::uint32_t              config;
+    std::uint32_t              comm;
+    std::vector<std::uint32_t> heard;
+  };
+  for(auto const& c : {
+          underrun_case{0, 0, {0xA1, 0xA2, 0x5A, 0x5A, 0xA5}},
+          underrun_case{1, 0, {0xA1, 0xA2, 2, 3, 0xA5}      },
+          underrun_case{1, 1, {0xA1, 0xA2, 0, 0, 0xA5}      },
+  })
+  {
+    CAPTURE(c.config);
+    CAPTURE(c.comm);
+    target_rig r;
+    bus        b{*r.f};
+    b.set("SPI_CFG1", "UDRCFG", c.config);
+    b.set("SPI_UDRDR", "UDRDR", 0x5A);
+    target(b, 7, 0, c.comm);
+    b.set("SPI_IER", "UDRIE", 1);
+    b.send(0xA1);
+    b.send(0xA2);
+    auto const start = b.now() + us;
+    r.transfer(start, {1, 2, 3, 4});
+    b.run_until(start + mhz_frame + mhz_frame / 2);
+    CHECK_FALSE(pending(*r.f, spi1_irq));
+    b.run_until(start + 2 * mhz_frame + mhz_frame / 2);
+    CHECK(b.get("SPI_SR", "UDR") == 1);
+    CHECK(pending(*r.f, spi1_irq));
+    b.send(0xA5);
+    b.run_until(start + 4 * mhz_frame);
+    b.set("SPI_IFCR", "UDRC", 1);
+    CHECK(b.get("SPI_SR", "UDR") == 0);
+    b.write(nvic_icpr1, 1u << (spi1_irq % 32));
+    CHECK_FALSE(pending(*r.f, spi1_irq));
+    auto const next = b.now() + us;
+    r.transfer(next, {5});
+    b.run_until(next + mhz_frame);
+    CHECK(r.sink->received() == c.heard);
+    CHECK(b.get("SPI_SR", "UDR") == 0);
+    CHECK(
+        drain(b)
+        == (c.comm == 1 ? std::vector<std::uint32_t>{}
+                        : std::vector<std::uint32_t>{1, 2, 3, 4, 5}));
+  }
+}
+
+TEST_CASE("a full RX FIFO in target mode sets OVR and drops the frame")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 0);
+  std::vector<std::uint32_t> frames;
+  for(std::uint32_t index = 0; index < 17; ++index)
+  {
+    frames.push_back(index);
+  }
+  auto const start = b.now() + us;
+  r.transfer(start, frames);
+  b.run_until(start + 16 * mhz_frame);
+  CHECK(b.get("SPI_SR", "OVR") == 0);
+  b.run_until(start + 17 * mhz_frame);
+  CHECK(b.get("SPI_SR", "OVR") == 1);
+  CHECK(drain(b) == std::vector(frames.begin(), frames.begin() + 16));
+}
+
+TEST_CASE("with SSM 1 the SSI bit against SSIOP selects the target, the controller's NSS ignored")
+{
+  struct select_case
+  {
+    std::uint32_t ssi;
+    std::uint32_t polarity;
+    bool          lands;
+  };
+  for(auto const c : {
+          select_case{1, 0, false},
+          select_case{0, 0, true },
+          select_case{1, 1, true },
+          select_case{0, 1, false}
+  })
+  {
+    CAPTURE(c.ssi);
+    CAPTURE(c.polarity);
+    target_rig r;
+    bus        b{*r.f};
+    b.set("SPI_CFG2", "SSM", 1);
+    b.set("SPI_CFG2", "SSIOP", c.polarity);
+    b.set("SPI_CR1", "SSI", c.ssi);
+    target(b, 7, 0);
+    b.send(0xA1);
+    auto const start = b.now() + us;
+    r.transfer(start, {0x42});
+    b.run_until(start + mhz_frame);
+    CHECK(r.sink->received() == std::vector<std::uint32_t>{c.lands ? 0xA1u : 0xFFu});
+    CHECK(drain(b) == (c.lands ? std::vector<std::uint32_t>{0x42} : std::vector<std::uint32_t>{}));
+    CHECK(b.get("SPI_SR", "UDR") == 0);
+  }
+}
+
+TEST_CASE("with SSM 0 a transfer selected while SPE is clear is ignored to its end")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 0);
+  b.set("SPI_CR1", "SPE", 0);
+  auto const start = b.now() + us;
+  r.transfer(start, {1, 2, 3});
+  b.run_until(start + mhz_frame + mhz_frame / 2);
+  b.set("SPI_CR1", "SPE", 1);
+  b.send(0xA1);
+  b.run_until(start + 3 * mhz_frame);
+  CHECK(r.sink->received() == std::vector<std::uint32_t>{0xFF, 0xFF, 0xFF});
+  CHECK(drain(b).empty());
+  r.transfer(b.now(), {4});
+  b.run_until(b.now() + mhz_frame);
+  CHECK(r.sink->received().back() == 0xA1);
+  CHECK(drain(b) == std::vector<std::uint32_t>{4});
+}
+
+TEST_CASE("after TSIZE frames the target ignores frames until SPE is cleared")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 2);
+  b.send(0xA1);
+  b.send(0xA2);
+  auto const start = b.now() + us;
+  r.transfer(start, {1, 2, 3});
+  b.run_until(start + 3 * mhz_frame);
+  CHECK(r.sink->received() == std::vector<std::uint32_t>{0xA1, 0xA2, 0xFF});
+  CHECK(b.get("SPI_SR", "EOT") == 1);
+  CHECK(b.get("SPI_SR", "UDR") == 0);
+  CHECK(drain(b) == std::vector<std::uint32_t>{1, 2});
+  b.set("SPI_CR1", "SPE", 0);
+  b.set("SPI_CR1", "SPE", 1);
+  b.send(0xA3);
+  r.transfer(b.now(), {4});
+  b.run_until(b.now() + mhz_frame);
+  CHECK(r.sink->received().back() == 0xA3);
+}
+
+TEST_CASE("the SPI1 DMA requests follow TXP and RXP in target mode")
+{
+  target_rig r{true, true};
+  bus        b{*r.f};
+  target(b, 7, 0);
+  b.set("SPI_CFG1", "TXDMAEN", 1);
+  CHECK(r.level(tx_request));
+  for(std::uint32_t index = 0; index < 16; ++index)
+  {
+    b.send(index);
+  }
+  CHECK_FALSE(r.level(tx_request));
+  b.set("SPI_CFG1", "RXDMAEN", 1);
+  CHECK_FALSE(r.level(rx_request));
+  auto const start = b.now() + us;
+  r.transfer(start, {7});
+  b.run_until(start + mhz_frame);
+  CHECK(r.level(tx_request));
+  CHECK(r.level(rx_request));
+  CHECK(b.receive() == 7);
+  CHECK_FALSE(r.level(rx_request));
+}
+
+TEST_CASE("a snapshot mid-transfer restores the queue and the remaining frames at their times")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 0);
+  for(std::uint32_t index = 0; index < 6; ++index)
+  {
+    b.send(0xA0 + index);
+  }
+  auto const start = b.now() + us;
+  r.transfer(start, {1, 2, 3, 4});
+  CHECK(r.transfer(start, {5, 6}) == start + 4 * mhz_frame);
+  b.run_until(start + 2 * mhz_frame + mhz_frame / 2);
+  REQUIRE(r.sink->frames.size() == 2);
+  auto const saved = r.f->target->snapshot();
+  b.run_until(start + 7 * mhz_frame);
+  auto const whole = r.sink->frames;
+  REQUIRE(whole.size() == 6);
+  auto const rest = std::vector(whole.begin() + 2, whole.end());
+
+  r.f->target->restore(saved);
+  r.sink->frames.clear();
+  b.run_until(start + 7 * mhz_frame);
+  CHECK(r.sink->frames == rest);
+  CHECK(drain(b) == std::vector<std::uint32_t>{1, 2, 3, 4, 5, 6});
+
+  target_rig other;
+  bus        o{*other.f};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  o.run_until(start + 7 * mhz_frame);
+  CHECK(other.sink->frames == rest);
+  CHECK(drain(o) == std::vector<std::uint32_t>{1, 2, 3, 4, 5, 6});
+}
+
+TEST_CASE("transfers queue back to back, start at their own time when later, and reset drops them")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  CHECK(r.transfer(start, {1, 2}) == start);
+  CHECK(r.transfer(start, {3}) == start + 2 * mhz_frame);
+  CHECK(r.transfer(start + 10 * mhz_frame, {4}) == start + 10 * mhz_frame);
+  b.run_until(start + 11 * mhz_frame);
+  REQUIRE(r.sink->frames.size() == 4);
+  CHECK(r.sink->frames[2].at.ps == start + 3 * mhz_frame);
+  CHECK(r.sink->frames[3].at.ps == start + 11 * mhz_frame);
+  CHECK(drain(b) == std::vector<std::uint32_t>{1, 2, 3, 4});
+
+  r.transfer(b.now() + us, {5});
+  r.f->target->reset();
+  b.run_until(b.now() + 20 * mhz_frame);
+  CHECK(r.sink->frames.size() == 4);
+}
+
+TEST_CASE("a transfer is refused before anything is queued")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 0);
+  auto const now = b.now();
+  CHECK_THROWS_AS(r.transfer(now + us, {0x100}), std::invalid_argument);
+  CHECK_THROWS_AS(r.transfer(now + us, {}), std::invalid_argument);
+  CHECK_THROWS_AS(
+      r.port().transfer(vtime{now + us}, mhz_frame, 3, std::vector<std::uint32_t>{1}),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      r.port().transfer(vtime{now + us}, 0, 8, std::vector<std::uint32_t>{1}),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      r.port().transfer(vtime{~std::uint64_t{} - 1}, 2, 8, std::vector<std::uint32_t>{1}),
+      std::invalid_argument);
+  b.run_until(now + us);
+  CHECK_THROWS_AS(r.transfer(now, {1}), std::invalid_argument);
+  std::vector<std::uint32_t> const half(2048, 0);
+  r.transfer(b.now() + us, half);
+  r.transfer(b.now() + us, std::vector<std::uint32_t>(2047, 0));
+  CHECK_THROWS_AS(r.transfer(b.now() + us, {1, 2}), popcorn::config_error);
+  CHECK(r.transfer(b.now() + us, {1}) == b.now() + us + 4095 * mhz_frame);
+  CHECK_THROWS_AS(r.transfer(b.now() + us, {1}), popcorn::config_error);
+  b.run_until(b.now() + us + 4096 * mhz_frame);
+  CHECK(r.sink->frames.size() == 4096);
+  for(int round = 0; round < 1000; ++round)
+  {
+    r.transfer(b.now(), {1, 2, 3, 4});
+    b.run_until(b.now() + 4 * mhz_frame);
+  }
+  CHECK(r.sink->frames.size() == 8096);
+  CHECK(r.transfer(b.now(), std::vector<std::uint32_t>(4096, 0)) == b.now());
+
+  target_rig bare{false};
+  CHECK_THROWS_AS(bare.transfer(0, {1}), popcorn::config_error);
+}
+
+TEST_CASE("a controller frame size other than DSIZE + 1 lands masked and logs once")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 0);
+  b.send(0xA1);
+  b.send(0xA2);
+  auto const start = b.now() + us;
+  r.transfer(start, {0x1234, 0x5678}, 16);
+  b.run_until(start + 4 * mhz_frame);
+  CHECK(r.sink->received() == std::vector<std::uint32_t>{0xA1, 0xA2});
+  CHECK(b.receive(2) == 0x7834);
+  REQUIRE(r.logged.size() == 1);
+  CHECK(r.logged[0].kind == core::log_kind::model_warning);
+}
+
+TEST_CASE("a controller-mode SPI selected by the controller takes a mode fault without SSOE")
+{
+  for(std::uint32_t const output : {0u, 1u})
+  {
+    CAPTURE(output);
+    target_rig r;
+    bus        b{*r.f};
+    target(b, 7, 0);
+    b.set("SPI_CR1", "SPE", 0);
+    b.set("SPI_CFG2", "MASTER", 1);
+    b.set("SPI_CFG2", "SSOE", output);
+    b.set("SPI_IER", "MODFIE", 1);
+    b.set("SPI_CR1", "SPE", 1);
+    b.send(0xA1);
+    CHECK_FALSE(pending(*r.f, spi1_irq));
+    auto const start = b.now() + us;
+    r.transfer(start, {1});
+    b.run_until(start + mhz_frame);
+    CHECK(r.sink->received() == std::vector<std::uint32_t>{0xFF});
+    CHECK(drain(b).empty());
+    auto const fault = output == 0 ? 1u : 0u;
+    CHECK(b.get("SPI_SR", "MODF") == fault);
+    CHECK(b.get("SPI_CR1", "SPE") == 1 - fault);
+    CHECK(b.get("SPI_CFG2", "MASTER") == 1 - fault);
+    CHECK(pending(*r.f, spi1_irq) == (fault != 0));
+    if(fault != 0)
+    {
+      b.set("SPI_CR1", "SPE", 1);
+      CHECK(b.get("SPI_CR1", "SPE") == 0);
+      b.set("SPI_IFCR", "MODFC", 1);
+      b.set("SPI_CR1", "SPE", 1);
+      CHECK(b.get("SPI_CR1", "SPE") == 1);
+      b.send(0xA2);
+      r.transfer(b.now(), {2});
+      b.run_until(b.now() + mhz_frame);
+      CHECK(r.sink->received().back() == 0xA2);
+      CHECK(drain(b) == std::vector<std::uint32_t>{2});
+    }
+  }
+}
+
+TEST_CASE("enabling a controller-mode SPI while the controller selects it takes a mode fault")
+{
+  struct enable_case
+  {
+    std::uint32_t output;
+    bool          during;
+    bool          fault;
+  };
+  for(auto const& c : {
+          enable_case{0, true,  true },
+          enable_case{1, true,  false},
+          enable_case{0, false, false},
+  })
+  {
+    CAPTURE(c.output);
+    CAPTURE(c.during);
+    target_rig r;
+    bus        b{*r.f};
+    target(b, 7, 0);
+    b.set("SPI_CR1", "SPE", 0);
+    b.set("SPI_IER", "MODFIE", 1);
+    auto const start = b.now() + us;
+    r.transfer(start, {1, 2, 3, 4});
+    b.run_until(c.during ? start + mhz_frame + mhz_frame / 2 : start + 4 * mhz_frame);
+    b.set("SPI_CFG2", "MASTER", 1);
+    b.set("SPI_CFG2", "SSOE", c.output);
+    b.set("SPI_CR1", "SPE", 1);
+    CHECK(b.get("SPI_SR", "MODF") == (c.fault ? 1u : 0u));
+    CHECK(b.get("SPI_CR1", "SPE") == (c.fault ? 0u : 1u));
+    CHECK(b.get("SPI_CFG2", "MASTER") == (c.fault ? 0u : 1u));
+    CHECK(pending(*r.f, spi1_irq) == c.fault);
+    b.run_until(start + 4 * mhz_frame);
+    CHECK(r.sink->received() == std::vector<std::uint32_t>{0xFF, 0xFF, 0xFF, 0xFF});
+    CHECK(drain(b).empty());
+  }
+}
+
+TEST_CASE("clearing SPE during a host frame drops that frame from the FIFO and from TSIZE")
+{
+  target_rig r;
+  bus        b{*r.f};
+  target(b, 7, 2);
+  b.send(0xA1);
+  b.send(0xA2);
+  auto const start = b.now() + us;
+  r.transfer(start, {1, 2, 3});
+  b.run_until(start + mhz_frame + mhz_frame / 2);
+  b.set("SPI_CR1", "SPE", 0);
+  b.run_until(start + 3 * mhz_frame);
+  CHECK(r.sink->received() == std::vector<std::uint32_t>{0xA1, 0xFF, 0xFF});
+  CHECK(b.get("SPI_SR", "RXPLVL") == 0);
+  CHECK(b.get("SPI_SR", "RXWNE") == 0);
+  b.set("SPI_CR1", "SPE", 1);
+  b.send(0xB1);
+  b.send(0xB2);
+  r.transfer(b.now(), {4, 5});
+  auto const next = b.now();
+  b.run_until(next + mhz_frame + mhz_frame / 2);
+  CHECK(b.get("SPI_SR", "EOT") == 0);
+  b.run_until(next + 2 * mhz_frame);
+  CHECK(b.get("SPI_SR", "EOT") == 1);
+  CHECK(drain(b) == std::vector<std::uint32_t>{4, 5});
+}
+
+TEST_CASE("TXC stays set during a host frame the target ignores")
+{
+  target_rig r;
+  bus        b{*r.f};
+  b.set("SPI_CFG2", "SSM", 1);
+  b.set("SPI_CR1", "SSI", 1);
+  target(b, 7, 0);
+  REQUIRE(b.get("SPI_SR", "TXC") == 1);
+  auto const start = b.now() + us;
+  r.transfer(start, {1});
+  b.run_until(start + mhz_frame / 2);
+  CHECK(b.get("SPI_SR", "TXC") == 1);
+  b.run_until(start + mhz_frame);
+  CHECK(r.sink->received() == std::vector<std::uint32_t>{0xFF});
+}
+
+TEST_CASE("an SPI instance with a controller and a device is refused at the build")
+{
+  stm32::board board{};
+  board.spi_controllers["SPI1"] = std::make_shared<controller_probe>();
+  board.spi["SPI1"].push_back({.device = std::make_shared<script_target>(), .cs_port = "GPIOA"});
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories(board, u575());
+  CHECK_THROWS_AS(stm32_fixture(u575(), "spi_ll", std::move(options)), popcorn::config_error);
 }
