@@ -1,7 +1,10 @@
 #pragma once
 
+#include <popcorn/core/types.hpp>
+
 #include <reflex/enum.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -74,6 +77,9 @@ private:
   std::function<void()> cancel_;
 };
 
+/** @brief Most edges a GPIO port keeps pending, gpio_port::drive_at. */
+inline constexpr std::size_t max_pending_edges = 65536;
+
 /**
  * @brief One GPIO port as a board sees it, implemented by the GPIO model. Reach it with
  *        `dynamic_cast<gpio_port*>(machine.model("GPIOA"))`.
@@ -99,6 +105,24 @@ public:
    * @param level Level driven, empty to release the pin to its pull.
    */
   virtual void drive(std::uint8_t pin, std::optional<bool> level) = 0;
+
+  /**
+   * @brief Drives a pin from outside the MCU, or releases it, at exactly a virtual time, through
+   *        an event of the model on core::host_lane: after the model events due at that
+   *        instant, edges of one instant in the order they were given. Pending edges are board
+   *        state: snapshots save them, and an MCU reset of any kind keeps each at its instant,
+   *        its remaining delay counted from the reset. After a reset, edges of one instant on
+   *        different ports apply in port order. drive() leaves them in place.
+   * @param pin Pin number, 0 to 15.
+   * @param level Level driven, empty to release the pin to its pull.
+   * @param at Time of the edge, machine time since reset, not before now.
+   * @throws std::invalid_argument when @p at lies before the machine time.
+   * @throws config_error when the port already keeps max_pending_edges pending edges.
+   */
+  virtual void drive_at(std::uint8_t pin, std::optional<bool> level, vtime at) = 0;
+
+  /** @brief Number of edges drive_at() scheduled that have not applied yet. */
+  [[nodiscard]] virtual auto pending_edges() const -> std::size_t = 0;
 
   /**
    * @brief Level of a pin as GPIOx_IDR reads it: the output for a push-pull output, the external

@@ -1,5 +1,6 @@
 #include "stm32_fixture.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
@@ -7,8 +8,11 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -18,7 +22,9 @@ namespace
 namespace stm32 = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::stop_reason;
+using popcorn::vtime;
 using popcorn::testing::stm32_fixture;
+using popcorn::testing::sym;
 using popcorn::testing::u575;
 
 constexpr std::uint32_t exti13_mark = 0xe013;
@@ -294,4 +300,196 @@ TEST_CASE("a machine restored from saved bytes without a reset forwards a pin ed
   port(fresh, "GPIOC").drive(13, false);
   CHECK(fresh.field("EXTI", "EXTI_FPR1", "FPIF13") == 1);
   CHECK(count(finished(fresh), exti13_mark) == 1);
+}
+
+namespace
+{
+constexpr std::uint64_t us_ps = 1'000'000;
+
+struct timed_change
+{
+  std::uint8_t  pin{};
+  bool          level{};
+  std::uint64_t at{};
+
+  friend auto operator==(timed_change const&, timed_change const&) -> bool = default;
+};
+
+auto idling() -> stm32_fixture
+{
+  stm32_fixture f{u575(), "tim_ll"};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("tim_ll", "main")})
+          .reason
+      == stop_reason::address);
+  f.set("pc", sym("tim_ll", "idle"));
+  auto moder = f.target->peripheral("GPIOC").peek(0);
+  write_port(f, "GPIOC", "GPIO_MODER", moder & ~(3u << 26));
+  return f;
+}
+
+void exti_falling_pc13(stm32_fixture const& f)
+{
+  auto const& desc = f.target->peripheral("EXTI").description();
+  auto const  at   = [&](std::string_view reg) {
+    auto const found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
+    REQUIRE(found != desc.registers.end());
+    return desc.base + found->offset;
+  };
+  REQUIRE(f.target->mem().write(at("EXTI_EXTICR4"), 4, 2u << 8).has_value());
+  REQUIRE(f.target->mem().write(at("EXTI_FTSR1"), 4, 1u << 13).has_value());
+}
+
+void run_until(stm32_fixture const& f, std::uint64_t until, std::uint64_t slice)
+{
+  while(f.target->virtual_clock().time().ps < until)
+  {
+    auto const result = f.run(
+        {.max_instructions = icount{slice},
+         .wall_budget      = std::chrono::seconds{60},
+         .until_time       = vtime{until}});
+    if(result.stopped)
+    {
+      REQUIRE(result.stopped->reason == stop_reason::time);
+    }
+  }
+}
+
+auto edges_seen(std::uint64_t slice) -> std::pair<std::vector<timed_change>, std::uint64_t>
+{
+  auto  f  = idling();
+  auto& pc = port(f, "GPIOC");
+  exti_falling_pc13(f);
+  pc.drive(13, true);
+  auto const                start = f.target->virtual_clock().time().ps;
+  std::vector<timed_change> seen;
+  std::uint32_t             falling = 0;
+  auto                      sub     = pc.on_change([&](std::uint8_t pin, bool level) {
+    seen.push_back({pin, level, f.target->virtual_clock().time().ps});
+    falling = f.field("EXTI", "EXTI_FPR1", "FPIF13");
+  });
+  pc.drive_at(13, false, vtime{start + 10 * us_ps});
+  pc.drive_at(13, true, vtime{start + 20 * us_ps});
+  pc.drive_at(13, false, vtime{start + 30 * us_ps});
+  CHECK(pc.pending_edges() == 3);
+  run_until(f, start + 25 * us_ps, slice);
+  CHECK(pc.pending_edges() == 1);
+  CHECK(f.field("EXTI", "EXTI_FPR1", "FPIF13") == 1);
+  run_until(f, start + 40 * us_ps, slice);
+  CHECK(pc.pending_edges() == 0);
+  CHECK(falling == 1);
+  return {seen, start};
+}
+}
+
+TEST_CASE("three timed edges reach IDR, listeners and EXTI at their exact times at any slicing")
+{
+  auto const [parked, start] = edges_seen(1'000'000'000);
+  CHECK(
+      parked
+      == std::vector<timed_change>{
+          {13, false, start + 10 * us_ps},
+          {13, true,  start + 20 * us_ps},
+          {13, false, start + 30 * us_ps}
+  });
+  for(auto const slice : {1u, 7u, 1000u})
+  {
+    CAPTURE(slice);
+    auto const [sliced, sliced_start] = edges_seen(slice);
+    CHECK(sliced_start == start);
+    CHECK(sliced == parked);
+  }
+}
+
+TEST_CASE("an edge before the machine time is refused, a full port refuses the next edge")
+{
+  auto       f   = idling();
+  auto&      pc  = port(f, "GPIOC");
+  auto const now = f.target->virtual_clock().time().ps;
+  run_until(f, now + us_ps, 1'000'000);
+  CHECK_THROWS_AS(pc.drive_at(13, true, vtime{now}), std::invalid_argument);
+  CHECK(pc.pending_edges() == 0);
+  auto const later = f.target->virtual_clock().time().ps + us_ps;
+  for(std::size_t index = 0; index < stm32::max_pending_edges; ++index)
+  {
+    pc.drive_at(13, index % 2 == 0, vtime{later + index});
+  }
+  CHECK_THROWS_AS(pc.drive_at(13, true, vtime{later}), popcorn::config_error);
+  CHECK(pc.pending_edges() == stm32::max_pending_edges);
+}
+
+TEST_CASE("a snapshot with pending edges restores them, a drive leaves them in place")
+{
+  auto       f     = idling();
+  auto&      pc    = port(f, "GPIOC");
+  auto const start = f.target->virtual_clock().time().ps;
+  pc.drive_at(13, true, vtime{start + 10 * us_ps});
+  pc.drive_at(13, false, vtime{start + 20 * us_ps});
+  auto const saved  = f.target->snapshot();
+  auto const events = f.target->pending_events();
+  run_until(f, start + 15 * us_ps, 1'000'000);
+  CHECK(pc.level(13));
+  pc.drive(13, false);
+  CHECK(pc.pending_edges() == 1);
+  f.target->restore(saved);
+  CHECK(pc.pending_edges() == 2);
+  CHECK(f.target->pending_events() == events);
+  std::vector<timed_change> seen;
+  auto                      sub = pc.on_change([&](std::uint8_t pin, bool level) {
+    seen.push_back({pin, level, f.target->virtual_clock().time().ps});
+  });
+  run_until(f, start + 30 * us_ps, 1'000'000);
+  CHECK(
+      seen
+      == std::vector<timed_change>{
+          {13, true,  start + 10 * us_ps},
+          {13, false, start + 20 * us_ps}
+  });
+}
+
+TEST_CASE("a system or power-on reset after a system reset keeps each pending edge at its instant")
+{
+  for(auto const kind : {popcorn::reset_kind::software, popcorn::reset_kind::power_on})
+  {
+    CAPTURE(kind);
+    auto  f  = idling();
+    auto& pc = port(f, "GPIOC");
+    run_until(f, f.target->virtual_clock().time().ps + 5 * us_ps, 1'000'000);
+    auto const first = f.target->virtual_clock().time().ps;
+    f.target->reset(popcorn::reset_kind::software);
+    f.set("pc", sym("tim_ll", "idle"));
+    auto const start = f.target->virtual_clock().time().ps;
+    pc.drive_at(13, true, vtime{start + 30 * us_ps});
+    run_until(f, start + 10 * us_ps, 1'000'000);
+    auto const reset_at = f.target->virtual_clock().time().ps;
+    f.target->reset(kind);
+    f.set("pc", sym("tim_ll", "idle"));
+    CHECK(pc.pending_edges() == 1);
+    static_cast<void>(first);
+    auto const due = start + 30 * us_ps - reset_at;
+    run_until(f, due - us_ps, 1'000'000);
+    CHECK(pc.pending_edges() == 1);
+    run_until(f, due, 1'000'000);
+    CHECK(pc.pending_edges() == 0);
+  }
+}
+
+TEST_CASE("edges of one instant keep their order across a reset")
+{
+  auto       f     = idling();
+  auto&      pc    = port(f, "GPIOC");
+  auto const start = f.target->virtual_clock().time().ps;
+  pc.drive(13, false);
+  pc.drive_at(13, true, vtime{start + 20 * us_ps});
+  pc.drive_at(13, false, vtime{start + 20 * us_ps});
+  run_until(f, start + 5 * us_ps, 1'000'000);
+  auto const reset_at = f.target->virtual_clock().time().ps;
+  f.target->reset(popcorn::reset_kind::software);
+  f.set("pc", sym("tim_ll", "idle"));
+  write_port(f, "GPIOC", "GPIO_MODER", f.target->peripheral("GPIOC").peek(0) & ~(3u << 26));
+  std::vector<bool> heard;
+  auto              sub = pc.on_change([&](std::uint8_t, bool level) { heard.push_back(level); });
+  run_until(f, start + 30 * us_ps - reset_at, 1'000'000);
+  CHECK(heard == std::vector<bool>{true, false});
+  CHECK_FALSE(pc.level(13));
 }

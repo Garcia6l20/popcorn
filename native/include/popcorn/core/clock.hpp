@@ -37,6 +37,9 @@ struct clock_state
   /** @brief Virtual time in picoseconds run before the last reset, summed over every reset since
    * the last power-on reset. */
   std::uint64_t before_reset_ps{};
+  /** @brief Virtual time in picoseconds run before the last reset, summed over every reset of
+   * any kind since the machine was built or its snapshot taken. */
+  std::uint64_t board_base_ps{};
   /** @brief Core clock frequency in Hz. */
   std::uint64_t core_hz{};
   /** @brief Core cycles per instruction. */
@@ -146,6 +149,16 @@ public:
   [[nodiscard]] auto since_power_on() const -> vtime
   {
     return vtime{state_.before_reset_ps + time().ps};
+  }
+
+  /**
+   * @brief Board time: time() plus the time run before every reset of any kind, power-on
+   *        included. What host-scheduled board state, such as a pending pin edge, counts in, so
+   *        it keeps its instant through every reset kind.
+   */
+  [[nodiscard]] auto board_time() const -> vtime
+  {
+    return vtime{state_.board_base_ps + time().ps};
   }
 
   /**

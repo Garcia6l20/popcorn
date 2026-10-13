@@ -6,24 +6,34 @@ import enum
 import math
 import struct
 from collections.abc import Callable, Iterator, Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from popcorn import _core
 from popcorn._enums import PinMode
 from popcorn._errors import ConfigError
+from popcorn.units import VirtualTime
 
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
     from popcorn._part_description import PartDescription
+    from popcorn._refs import Pending
     from popcorn._streams import UartStream
     from popcorn._usb import UsbHost
+
+type Poster = Callable[[_core.AccessOp], Pending[tuple[Any, VirtualTime]]]
+"""Posts one native command to the machine, `Machine._post`: its value and its time."""
+
+MAX_PIN_EDGES = 65536
+"""Most edges one `Pin.drive_edges` call takes, and most edges a GPIO port keeps pending."""
+
+_MAX_PS = (1 << 64) - 1
 
 
 class ViewAccess:
     """What a view needs from its machine: the native handle, which refuses an access while the
     machine is busy outside its callbacks, its UART and audio streams and its USB hosts."""
 
-    __slots__ = ("audio", "handle", "ports", "usb")
+    __slots__ = ("audio", "handle", "ports", "post", "usb")
 
     def __init__(
         self,
@@ -31,11 +41,13 @@ class ViewAccess:
         ports: Callable[[str], UartStream] | None = None,
         audio: Callable[[str, str], AudioStream] | None = None,
         usb: Callable[[str], UsbHost] | None = None,
+        post: Poster | None = None,
     ) -> None:
         self.handle = handle
         self.ports = ports
         self.audio = audio
         self.usb = usb
+        self.post = post
 
 
 class ScalarView[T: (int, float)]:
@@ -390,7 +402,10 @@ class Pin:
     own level. The drive is board state, kept across an MCU reset and restored by snapshots.
     While the machine is busy, every access raises MachineRunning outside its callbacks:
     `m.write((m.ref.periph.GPIOA.pin(0).level, True))` drives the pin at a block boundary then.
-    Every access raises ModelError when the port's model is not a GPIO port.
+    `drive_at` and `drive_edges` drive it at exact virtual times instead, parked or running. A
+    pin in alternate function mode gives its edges to the input its AF selects, such as
+    `tim3_ch1` or `tim2_etr`. Every access raises ModelError when the port's model is not a
+    GPIO port.
     """
 
     __slots__ = ("_access", "number", "port")
@@ -417,6 +432,69 @@ class Pin:
             MachineRunning: The machine is busy, outside its callbacks.
         """
         self._access.handle.gpio_drive(self.port, self.number, None)
+
+    def drive_at(self, level: bool, *, at: VirtualTime) -> Pending[VirtualTime]:
+        """Drive the pin to `level` at exactly `at`, as `drive_edges([(at, level)])` does.
+
+        Raises:
+            As `drive_edges`.
+        """
+        return self.drive_edges([(at, level)])
+
+    def drive_edges(self, edges: Sequence[tuple[VirtualTime, bool]]) -> Pending[VirtualTime]:
+        """Drive the pin to each level at its time, posted as one command as `UartStream.write`
+        is: at once while the machine is parked, at the next block boundary while it runs.
+
+        Each edge applies at exactly its `VirtualTime`, machine time since reset, through a GPIO
+        model event, whatever the block boundary the command ran at: the level reaches the
+        input data register, the pin listeners, EXTI and, in alternate function mode, the input
+        the AF selects. An edge at the time the command runs applies at the next event dispatch,
+        before the next instruction. Edges of one time apply in list order, after the model
+        events of that instant. The list is checked whole before anything is scheduled: it
+        schedules every edge or none.
+
+        Pending edges are board state, as a drive is: snapshots save them, and an MCU reset of
+        any kind keeps each at its instant, so an edge due at `m.time` T before a reset at R
+        applies at `m.time` T - R after it. After a reset, edges of one instant on different
+        ports apply in port order. A `level` set or a `release` applies at once and leaves
+        pending edges in place. Await the result for the time the command ran at.
+
+        Raises:
+            TypeError: `edges` is no sequence of `(VirtualTime, bool)` pairs.
+            ValueError: `edges` holds no edge or more than 65536, is not sorted by time, or an
+                edge time is outside 0 to 2**64 - 1 ps. From the await, the first edge is
+                already past when the command runs.
+            ConfigError: From the await, the port would keep more than 65536 pending edges.
+            ModelError: The port's model is not a GPIO port.
+            RuntimeError: Called from a handler, a hook or a model.
+        """
+        if isinstance(edges, str | bytes | bytearray) or not isinstance(
+            cast(object, edges), Sequence
+        ):
+            raise TypeError(f"drive_edges() takes a sequence of (VirtualTime, bool), not {edges!r}")
+        if not 1 <= len(edges) <= MAX_PIN_EDGES:
+            raise ValueError(f"drive_edges() takes 1 to {MAX_PIN_EDGES} edges, not {len(edges)}")
+        times: list[int] = []
+        levels: list[int] = []
+        for edge in edges:
+            if not isinstance(cast(object, edge), tuple) or len(edge) != 2:
+                raise TypeError(f"a pin edge is a (VirtualTime, bool) pair, not {edge!r}")
+            at, level = edge
+            if not isinstance(cast(object, at), VirtualTime):
+                raise TypeError(f"a pin edge time is a VirtualTime, not {at!r}")
+            if not isinstance(cast(object, level), bool):
+                raise TypeError(f"a pin edge level is a bool, not {level!r}")
+            if not 0 <= at.ps <= _MAX_PS:
+                raise ValueError(f"a pin edge at {at} leaves the 64-bit picosecond range")
+            if times and at.ps < times[-1]:
+                raise ValueError(f"pin edges are sorted by time, {at} follows a later edge")
+            times.append(at.ps)
+            levels.append(int(level))
+        command = self._access.handle.command_gpio_edges(self.port, self.number, times, levels)
+        post = self._access.post
+        if post is None:
+            raise RuntimeError(f"{self!r} belongs to no machine that posts commands")
+        return post(command).mapped(lambda done: done[1])
 
     @property
     def mode(self) -> PinMode:

@@ -1,6 +1,9 @@
 #include "factories.hpp"
 #include "model_base.hpp"
 
+#include <popcorn/core/clock.hpp>
+#include <popcorn/core/errors.hpp>
+#include <popcorn/core/scheduler.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
 
 #include <algorithm>
@@ -8,8 +11,11 @@
 #include <cstdint>
 #include <format>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,14 +24,29 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::size_t pins = 16;
+constexpr std::size_t   pins     = 16;
+constexpr std::uint32_t edge_due = 0;
+constexpr std::uint8_t  released = 2;
+
+struct pending_edge
+{
+  std::uint64_t board_ps{};
+  std::uint64_t id{};
+  std::uint8_t  pin{};
+  std::uint8_t  level{};
+
+  friend auto operator==(pending_edge const&, pending_edge const&) -> bool = default;
+};
 
 struct gpio_state
 {
-  std::uint32_t driven{};
-  std::uint32_t driven_high{};
-  std::uint32_t lock_step{};
-  std::uint32_t lock_value{};
+  std::uint32_t             driven{};
+  std::uint32_t             driven_high{};
+  std::uint32_t             lock_step{};
+  std::uint32_t             lock_value{};
+  std::vector<pending_edge> edges;
+  std::uint32_t             fired{};
+  std::uint64_t             next_edge{};
 
   friend auto operator==(gpio_state const&, gpio_state const&) -> bool = default;
 };
@@ -42,7 +63,9 @@ struct listener_table
  * @brief GPIO port of the STM32U5, RM0456 section 13. Pin levels follow the output register,
  *        external drives and pulls. BSRR and BRR set and reset outputs, a set wins over a reset
  *        of the same pin. The LCKR key sequence freezes the configuration of the locked pins
- *        until reset. Level changes reach board listeners, then the EXTI model.
+ *        until reset. Level changes reach board listeners, then the EXTI model. Edges
+ *        scheduled with drive_at() apply through events on core::host_lane, kept in the state
+ *        with their board time, rescheduled at every reset at the same instant.
  */
 class gpio final : public dispatch_model<gpio, gpio_state>, public gpio_port
 {
@@ -53,6 +76,8 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
 
   void               drive(std::uint8_t pin, std::optional<bool> level) override;
+  void               drive_at(std::uint8_t pin, std::optional<bool> level, vtime at) override;
+  [[nodiscard]] auto pending_edges() const -> std::size_t override;
   [[nodiscard]] auto level(std::uint8_t pin) const -> bool override;
   [[nodiscard]] auto mode(std::uint8_t pin) const -> pin_mode override;
   [[nodiscard]] auto alternate(std::uint8_t pin) const -> std::uint8_t override;
@@ -68,6 +93,9 @@ public:
 
 private:
   [[nodiscard]] auto computed() const -> std::uint32_t;
+  [[nodiscard]] auto board_base() const -> std::uint64_t;
+  [[nodiscard]] auto pending() const -> std::span<pending_edge const>;
+  void               apply(std::uint8_t pin, std::optional<bool> level);
   void               settle(bool notify);
 
   register_file&                  regs_;
@@ -136,10 +164,88 @@ void gpio::reset(register_file& regs, reset_kind)
   state_.lock_step  = 0;
   state_.lock_value = 0;
   settle(false);
+  auto const base = board_base();
+  for(auto const& edge : pending())
+  {
+    auto const due = edge.board_ps > base ? edge.board_ps - base : 0;
+    ctx_.events.schedule_at(vtime{due}, edge_due, edge.id, core::host_lane, ctx_.clock);
+  }
 }
 
-void gpio::on_event(std::uint32_t, std::uint64_t)
-{}
+auto gpio::board_base() const -> std::uint64_t
+{
+  return ctx_.clock.board_time().ps - ctx_.clock.time().ps;
+}
+
+auto gpio::pending() const -> std::span<pending_edge const>
+{
+  return std::span{state_.edges}.subspan(state_.fired);
+}
+
+void gpio::on_event(std::uint32_t kind, std::uint64_t payload)
+{
+  if(kind != edge_due)
+  {
+    return;
+  }
+  auto const live  = state_.edges.begin() + state_.fired;
+  auto const found = std::ranges::find(live, state_.edges.end(), payload, &pending_edge::id);
+  if(found == state_.edges.end())
+  {
+    return;
+  }
+  auto const edge = *found;
+  if(found == live)
+  {
+    ++state_.fired;
+    if(state_.fired * 2 >= state_.edges.size())
+    {
+      state_.edges.erase(state_.edges.begin(), state_.edges.begin() + state_.fired);
+      state_.fired = 0;
+    }
+  }
+  else
+  {
+    state_.edges.erase(found);
+  }
+  apply(edge.pin, edge.level == released ? std::nullopt : std::optional<bool>{edge.level != 0});
+}
+
+void gpio::drive_at(std::uint8_t pin, std::optional<bool> level, vtime at)
+{
+  auto const now  = ctx_.clock.time().ps;
+  auto const base = board_base();
+  if(at.ps < now)
+  {
+    throw std::invalid_argument(
+        std::format("a pin edge at {} ps lies before the machine time {} ps", at.ps, now));
+  }
+  if(at.ps > std::numeric_limits<std::uint64_t>::max() - base)
+  {
+    throw std::invalid_argument("a pin edge time leaves the 64-bit picosecond range");
+  }
+  if(pending_edges() >= max_pending_edges)
+  {
+    throw config_error(
+        desc_.name, 0, "edges", std::format("at most {} pending pin edges", max_pending_edges));
+  }
+  auto const edge = pending_edge{
+      .board_ps = base + at.ps,
+      .id       = ++state_.next_edge,
+      .pin      = pin,
+      .level    = level ? static_cast<std::uint8_t>(*level ? 1 : 0) : released};
+  state_.edges.insert(
+      std::ranges::upper_bound(
+          state_.edges.begin() + state_.fired, state_.edges.end(), edge.board_ps, {},
+          &pending_edge::board_ps),
+      edge);
+  ctx_.events.schedule_at(at, edge_due, edge.id, core::host_lane, ctx_.clock);
+}
+
+auto gpio::pending_edges() const -> std::size_t
+{
+  return state_.edges.size() - state_.fired;
+}
 
 auto gpio::mode(std::uint8_t pin) const -> pin_mode
 {
@@ -348,6 +454,11 @@ void gpio::lock_written(std::uint32_t old, std::uint32_t now)
 }
 
 void gpio::drive(std::uint8_t pin, std::optional<bool> level)
+{
+  apply(pin, level);
+}
+
+void gpio::apply(std::uint8_t pin, std::optional<bool> level)
 {
   auto const bit     = std::uint32_t{1} << pin;
   state_.driven      = level ? state_.driven | bit : state_.driven & ~bit;

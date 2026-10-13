@@ -6,6 +6,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
 #include <reflex/serde/bson.hpp>
@@ -2643,4 +2644,36 @@ TEST_CASE("a frozen TIM5 burst is finished by a GPDMA channel that runs on, then
     CHECK(seen(t) == seen(twin));
   }
   CHECK(seen(t) == std::vector<std::uint32_t>{15, 7, 8, 9, 0});
+}
+
+TEST_CASE("a pin edge due at a TIM update instant applies after it however early it was posted")
+{
+  std::vector<std::uint32_t> seen;
+  for(auto const early : {true, false})
+  {
+    CAPTURE(early);
+    direct d;
+    d.b.set("RCC", "RCC_AHB2ENR1", "GPIOCEN", 1);
+    d.b.set("GPIOC", "GPIO_MODER", "MODE13", 0);
+    auto* const pc = d.f.model_of<stm32::gpio_port>("GPIOC");
+    REQUIRE(pc != nullptr);
+    d.b.write("TIM1", "TIM1_ARR", 99);
+    auto const    update  = d.f.target->virtual_clock().time().ps + 100 * 250'000;
+    std::uint32_t flagged = 2;
+    auto          sub =
+        pc->on_change([&](std::uint8_t, bool) { flagged = d.f.field("TIM1", "TIM1_SR", "UIF"); });
+    if(early)
+    {
+      pc->drive_at(13, true, vtime{update});
+    }
+    d.begin();
+    REQUIRE(d.start + 100 * 250'000 == update);
+    if(not early)
+    {
+      pc->drive_at(13, true, vtime{update});
+    }
+    d.at(101);
+    seen.push_back(flagged);
+  }
+  CHECK(seen == std::vector<std::uint32_t>{1, 1});
 }

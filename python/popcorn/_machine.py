@@ -704,7 +704,9 @@ class Machine:
             part=description.part,
             peripherals=(p.name for p in description.peripherals),
         )
-        access = ViewAccess(self._handle, self._ports.stream, self._audio.stream, self._usb.host)
+        access = ViewAccess(
+            self._handle, self._ports.stream, self._audio.stream, self._usb.host, self._post
+        )
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
         self._peripherals = Peripherals(access, description)

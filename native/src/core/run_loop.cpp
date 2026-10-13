@@ -184,6 +184,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   held_through.reset();
   auto fresh            = owner.clock_driver_.state();
   fresh.before_reset_ps = kind == reset_kind::power_on ? 0 : owner.clock_.since_power_on().ps;
+  fresh.board_base_ps   = owner.clock_.board_time().ps;
   fresh.now             = {};
   fresh.epoch_icount    = {};
   fresh.epoch_time      = {};

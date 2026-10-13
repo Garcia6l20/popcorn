@@ -802,6 +802,25 @@ public:
           std::uint64_t                frame_ps,
           std::uint8_t                 bits,
           std::vector<std::uint32_t>   frames) const -> access_op;
+  /**
+   * @brief A command scheduling edges of a GPIO pin, gpio_port::drive_at for each, checked now
+   *        and when it runs: it schedules every edge or none.
+   * @param peripheral GPIO port name.
+   * @param pin Pin number, 0 to 15.
+   * @param at_ps Edge times in picoseconds, machine time since reset, sorted, 1 to
+   *        periph::stm32::max_pending_edges of them.
+   * @param levels Level of each edge, 0 or 1, as many as @p at_ps.
+   * @throws config_error now, when the port is unknown or the pin out of range, when the
+   *         command runs and the port would keep more than periph::stm32::max_pending_edges.
+   * @throws model_error now, when the peripheral's model is not a GPIO port.
+   * @throws std::invalid_argument now for lists of another length, unsorted times or a level
+   *         above 1, when the command runs for a first edge already past.
+   */
+  [[= py::doc{"Command scheduling edges of a GPIO pin."}]] [[nodiscard]] auto command_gpio_edges(
+      std::string const&         peripheral,
+      std::uint8_t               pin,
+      std::vector<std::uint64_t> at_ps,
+      std::vector<std::uint8_t>  levels) const -> access_op;
   /** @brief adc_drive() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of adc_drive."}]] [[nodiscard]] auto op_adc_drive(
       std::string const& peripheral,

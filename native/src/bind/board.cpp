@@ -568,6 +568,59 @@ auto machine_handle::command_spi_transfer(
       });
 }
 
+auto machine_handle::command_gpio_edges(
+    std::string const&         peripheral,
+    std::uint8_t               pin,
+    std::vector<std::uint64_t> at_ps,
+    std::vector<std::uint8_t>  levels) const -> access_op
+{
+  auto& port = gpio(peripheral, pin);
+  if(at_ps.empty() or at_ps.size() > periph::stm32::max_pending_edges)
+  {
+    throw std::invalid_argument(
+        std::format(
+            "a pin takes 1 to {} edges per call, not {}", periph::stm32::max_pending_edges,
+            at_ps.size()));
+  }
+  if(levels.size() != at_ps.size())
+  {
+    throw std::invalid_argument("a pin edge list has one level per time");
+  }
+  if(not std::ranges::is_sorted(at_ps))
+  {
+    throw std::invalid_argument("pin edges are sorted by time");
+  }
+  if(std::ranges::any_of(levels, [](std::uint8_t level) { return level > 1; }))
+  {
+    throw std::invalid_argument("a pin edge level is 0 or 1");
+  }
+  return detail::machine_op([port = &port, peripheral, pin, at_ps = std::move(at_ps),
+                             levels = std::move(levels)](core::machine& target) {
+    auto const now  = target.virtual_clock().time().ps;
+    auto const base = target.virtual_clock().board_time().ps - now;
+    if(at_ps.front() < now)
+    {
+      throw std::invalid_argument(
+          std::format(
+              "a pin edge at {} ps lies before the machine time {} ps", at_ps.front(), now));
+    }
+    if(at_ps.back() > std::numeric_limits<std::uint64_t>::max() - base)
+    {
+      throw std::invalid_argument("a pin edge time leaves the 64-bit picosecond range");
+    }
+    if(port->pending_edges() + at_ps.size() > periph::stm32::max_pending_edges)
+    {
+      throw config_error(
+          peripheral, 0, "edges",
+          std::format("at most {} pending pin edges", periph::stm32::max_pending_edges));
+    }
+    for(std::size_t index = 0; index < at_ps.size(); ++index)
+    {
+      port->drive_at(pin, levels[index] != 0, vtime{at_ps[index]});
+    }
+  });
+}
+
 auto machine_handle::op_adc_drive(
     std::string const& peripheral,
     std::uint8_t       channel,
