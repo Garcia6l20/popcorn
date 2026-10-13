@@ -225,19 +225,19 @@ template <typename T> auto schema_of(json::object& defs) -> json::value
 }
 }
 
-auto parse_description(std::string_view json, std::string_view source) -> mcu_description
+auto parse_description(std::string_view json, std::string_view source) -> part_description
 {
-  mcu_description description;
+  part_description description;
   try
   {
-    description = json::deserializer{json}.load<mcu_description>();
+    description = json::deserializer{json}.load<part_description>();
   }
   catch(std::exception const& failure)
   {
     refuse_other_version(json, source);
     throw config_error(
         std::string(source), 0, "",
-        std::format("an MCU description matching the schema: {}", failure.what()));
+        std::format("a part description matching the schema: {}", failure.what()));
   }
   if(description.schema_version != description_schema_version)
   {
@@ -247,19 +247,19 @@ auto parse_description(std::string_view json, std::string_view source) -> mcu_de
   return description;
 }
 
-auto load_description(std::filesystem::path const& file) -> mcu_description
+auto load_description(std::filesystem::path const& file) -> part_description
 {
   std::ifstream input(file, std::ios::binary);
   if(not input)
   {
-    throw config_error(file.string(), 0, "", "a readable MCU description file");
+    throw config_error(file.string(), 0, "", "a readable part description file");
   }
   std::ostringstream text;
   text << input.rdbuf();
   return parse_description(text.view(), file.string());
 }
 
-auto dump_description(mcu_description const& description) -> std::string
+auto dump_description(part_description const& description) -> std::string
 {
   auto stamped           = description;
   stamped.schema_version = description_schema_version;
@@ -272,17 +272,17 @@ auto dump_description(mcu_description const& description) -> std::string
 auto description_json_schema() -> std::string
 {
   static_assert(
-      definition_names_are_unique<mcu_description>(),
+      definition_names_are_unique<part_description>(),
       "two description types share a name, their $defs entries would collide");
   json::object defs;
-  schema_of<mcu_description>(defs);
+  schema_of<part_description>(defs);
   auto root =
-      std::move(defs.extract(std::string(std::meta::identifier_of(^^mcu_description))).mapped());
+      std::move(defs.extract(std::string(std::meta::identifier_of(^^part_description))).mapped());
   root.as_object()["properties"].as_object()["schema_version"] = json::value{
       {"const", static_cast<json::number>(description_schema_version)}
   };
   root.as_object().emplace("$schema", "https://json-schema.org/draft/2020-12/schema");
-  root.as_object().emplace("title", "popcorn MCU description");
+  root.as_object().emplace("title", "popcorn part description");
   root.as_object().emplace("$defs", std::move(defs));
 
   std::string      out;
@@ -291,14 +291,14 @@ auto description_json_schema() -> std::string
   return out;
 }
 
-auto description_digest(mcu_description const& description) -> std::string
+auto description_digest(part_description const& description) -> std::string
 {
   auto const digest = reflex::sha256_of(dump_description(description));
   auto const hex    = reflex::to_hex(digest);
   return std::string{hex.begin(), hex.end()};
 }
 
-auto flat_register_id(mcu_description const& description, register_ref ref) -> std::uint32_t
+auto flat_register_id(part_description const& description, register_ref ref) -> std::uint32_t
 {
   auto const before =
       description.peripherals
@@ -308,7 +308,7 @@ auto flat_register_id(mcu_description const& description, register_ref ref) -> s
        + ref.reg;
 }
 
-auto register_at(mcu_description const& description, std::uint32_t id)
+auto register_at(part_description const& description, std::uint32_t id)
     -> std::optional<register_ref>
 {
   std::size_t remaining = id;

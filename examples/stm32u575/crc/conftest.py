@@ -1,13 +1,13 @@
-"""Project of the crc example."""
+"""MachineDescription of the crc example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+CRC = popcorn.MachineDescription(
     name="crc",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/crc.elf")],
@@ -16,6 +16,6 @@ PROJECT = popcorn.Project(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def crc() -> popcorn.MachineDescription:
+    return CRC

@@ -250,16 +250,16 @@ private:
   }
 };
 
-auto described(std::string cpu) -> popcorn::mcu_description
+auto described(std::string cpu) -> popcorn::part_description
 {
-  popcorn::mcu_description description;
+  popcorn::part_description description;
   description.core.cpu = std::move(cpu);
   return description;
 }
 
 struct rig
 {
-  popcorn::mcu_description        description = described("toy");
+  popcorn::part_description       description = described("toy");
   popcorn::core::clock            clock{1'000'000};
   popcorn::core::scheduler        queue;
   popcorn::core::event_port       events{queue, popcorn::arch::arch_event_owner};
@@ -291,7 +291,7 @@ TEST_CASE("a dummy arch links and is created through a factory")
   CHECK(module->engine() == toy_arch::toy_engine);
   CHECK_FALSE(module->engine().cpu_model.has_value());
 
-  popcorn::mcu_description        other = described("cortex-m33");
+  popcorn::part_description       other = described("cortex-m33");
   popcorn::core::clock            clock{1'000'000};
   popcorn::core::scheduler        queue;
   popcorn::core::event_port       events{queue, popcorn::arch::arch_event_owner};

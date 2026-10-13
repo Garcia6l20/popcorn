@@ -37,7 +37,7 @@ constexpr std::array arch_modules{
     arch_module{.implements = &arch::armv8m::implements, .factory = &arch::armv8m::factory},
 };
 
-auto factory_for(mcu_description const& description) -> arch::arch_factory
+auto factory_for(part_description const& description) -> arch::arch_factory
 {
   auto const found = std::ranges::find_if(
       arch_modules, [&](arch_module const& module) { return module.implements(description.core); });
@@ -85,7 +85,7 @@ auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32
   return options;
 }
 
-auto supply_factories(mcu_description const& description, std::uint32_t vdda_mv)
+auto supply_factories(part_description const& description, std::uint32_t vdda_mv)
     -> std::map<std::string, periph::model_factory, std::less<>>
 {
   using periph::stm32::vdda_max_mv;
@@ -122,9 +122,9 @@ auto key_of(std::string const& usb) -> std::string
 using usb_hub_map = std::map<std::string, detail::usb_hubs>;
 
 auto usb_factories(
-    mcu_description const& description,
-    machine_config const&  config,
-    usb_hub_map const&     hubs) -> std::map<std::string, periph::model_factory, std::less<>>
+    part_description const& description,
+    machine_config const&   config,
+    usb_hub_map const&      hubs) -> std::map<std::string, periph::model_factory, std::less<>>
 {
   periph::stm32::board board;
   for(auto const& [name, host] : config.usb_hosts)
@@ -163,7 +163,7 @@ auto usb_factories(
 }
 
 auto options_of(
-    mcu_description const&               description,
+    part_description const&              description,
     machine_config const&                config,
     usb_hub_map const&                   hubs,
     std::vector<reflex::py::nb::handle>& python_owned) -> core::machine_options
@@ -346,7 +346,7 @@ auto report_of(core::held_end const& end, delivered_end const& delivered) -> ref
 }
 }
 
-machine_handle::machine_handle(mcu_description const& description, machine_config const& config)
+machine_handle::machine_handle(part_description const& description, machine_config const& config)
     : alive_{detail::make_alive()}, slot_{std::make_shared<detail::host_slot>()},
       ptys_{std::make_shared<detail::pty_bridges>()},
       thread_live_{std::make_shared<std::atomic<bool>>(false)},

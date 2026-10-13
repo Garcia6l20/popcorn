@@ -24,7 +24,7 @@ namespace popcorn::testing
  * @brief Description named by an environment variable the build script sets.
  * @param variable Variable holding the path, such as `POPCORN_M33_DESC`.
  */
-inline auto description_from(char const* variable) -> mcu_description
+inline auto description_from(char const* variable) -> part_description
 {
   char const* const path = std::getenv(variable);
   REQUIRE_MESSAGE(path != nullptr, variable);
@@ -32,13 +32,13 @@ inline auto description_from(char const* variable) -> mcu_description
 }
 
 /** @brief The core test description, `tests/data/core/m33.json`. */
-inline auto m33() -> mcu_description
+inline auto m33() -> part_description
 {
   return description_from("POPCORN_M33_DESC");
 }
 
 /** @brief The core test description with an rx alias over rw SRAM. */
-inline auto m33_code_alias() -> mcu_description
+inline auto m33_code_alias() -> part_description
 {
   return description_from("POPCORN_M33_CODE_ALIAS_DESC");
 }
@@ -87,7 +87,7 @@ template <typename Arch = test_arch> struct machine_fixture
    * @param extra Extra arguments of the Arch constructor after the core.
    */
   machine_fixture(
-      mcu_description       desc,
+      part_description      desc,
       std::string_view      firmware_name,
       core::machine_options options,
       auto... extra)

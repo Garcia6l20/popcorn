@@ -1,4 +1,4 @@
-"""JSON cache of built McuDescriptions, keyed by part, core and the resolved sources' digests."""
+"""JSON cache of built PartDescriptions, keyed by part, core and the resolved sources' digests."""
 
 import hashlib
 import json
@@ -8,14 +8,14 @@ from pathlib import Path
 
 from popcorn.stm32.description._binder import check_bounds, dump_json
 from popcorn.stm32.description._builder import build_description
-from popcorn.stm32.description._model import McuDescription
+from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._sources import (
     compute_source_digests,
     find_sources,
     generator_string,
 )
 
-_SCHEMA_VERSION = next(f.default for f in fields(McuDescription) if f.name == "schema_version")
+_SCHEMA_VERSION = next(f.default for f in fields(PartDescription) if f.name == "schema_version")
 
 
 def _default_cache_dir() -> Path:

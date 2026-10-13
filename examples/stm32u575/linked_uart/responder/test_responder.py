@@ -20,23 +20,23 @@ def checksum(data: bytes) -> int:
     return sums << 16 | total
 
 
-async def test_a_responder_answers_only_once_it_has_a_node_id(machine: Machine) -> None:
-    link = machine.periph.USART3.port
+async def test_a_responder_answers_only_once_it_has_a_node_id(responder1: Machine) -> None:
+    link = responder1.periph.USART3.port
     link.write(b"P\x05\x00\x00")
-    await machine.run(for_=ms(5))
+    await responder1.run(for_=ms(5))
     assert link.take() == b""
 
     link.write(b"N\x07")
-    await machine.run(for_=ms(5))
+    await responder1.run(for_=ms(5))
     assert link.take() == b"n\x07"
-    assert machine.var("node_id").value == 7
+    assert responder1.var("node_id").value == 7
 
     link.write(block(3))
-    stop = await machine.run(for_=ms(30))
+    stop = await responder1.run(for_=ms(30))
     assert stop.reason is StopReason.TIME, stop
     answer = link.take()
     assert len(answer) == BLOCK_BYTES
     assert answer[:3] == b"b\x07\x03"
     assert int.from_bytes(answer[3:7], "little") == checksum(block(3))
     assert answer[7:] == bytes([7]) * (BLOCK_BYTES - 7)
-    assert b"responder: node id 7\r\n" in machine.periph.USART1.port.take()
+    assert b"responder: node id 7\r\n" in responder1.periph.USART1.port.take()

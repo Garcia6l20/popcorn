@@ -84,7 +84,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::region_desc>("RegionDesc");
   m.bind<popcorn::irq_desc>("IrqDesc");
   m.bind<popcorn::core_desc>("CoreDesc");
-  m.bind<popcorn::mcu_description>("McuDescription");
+  m.bind<popcorn::part_description>("PartDescription");
   popcorn::bind::detail::bind_model_base(m.handle);
   popcorn::bind::detail::bind_device_bases(m.handle);
   popcorn::bind::detail::bind_native_devices(m.handle);

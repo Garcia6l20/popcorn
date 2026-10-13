@@ -52,55 +52,55 @@ async def run_samples(machine: Machine, count: int) -> None:
     await run_ms(machine, SAMPLE_MS * count)
 
 
-async def test_the_mean_follows_the_scripted_readings(machine: Machine) -> None:
-    seen = attempts(machine)
-    await run_ms(machine, SAMPLE_MS // 2)
-    await run_samples(machine, len(READINGS))
+async def test_the_mean_follows_the_scripted_readings(i2c_mock: Machine) -> None:
+    seen = attempts(i2c_mock)
+    await run_ms(i2c_mock, SAMPLE_MS // 2)
+    await run_samples(i2c_mock, len(READINGS))
     assert len(seen) == len(READINGS)
-    result = machine.var("sensor_result")
+    result = i2c_mock.var("sensor_result")
     assert result.samples.value == len(READINGS)
     assert result.errors.value == 0
     assert result.mean.value == sum(READINGS) // len(READINGS)
-    assert sensor(machine).served == len(READINGS)
-    assert not machine.periph.GPIOA.pin(5).level
+    assert sensor(i2c_mock).served == len(READINGS)
+    assert not i2c_mock.periph.GPIOA.pin(5).level
 
 
-async def test_the_firmware_writes_the_configuration_once(machine: Machine) -> None:
-    await run_ms(machine, SAMPLE_MS // 2)
-    await run_samples(machine, 2)
-    assert sensor(machine).config == CONFIG_12BIT_4HZ
-    assert sensor(machine).config_writes == 1
+async def test_the_firmware_writes_the_configuration_once(i2c_mock: Machine) -> None:
+    await run_ms(i2c_mock, SAMPLE_MS // 2)
+    await run_samples(i2c_mock, 2)
+    assert sensor(i2c_mock).config == CONFIG_12BIT_4HZ
+    assert sensor(i2c_mock).config_writes == 1
 
 
-async def test_nacked_addresses_are_counted_and_the_driver_recovers(machine: Machine) -> None:
-    seen = attempts(machine)
-    await run_ms(machine, SAMPLE_MS // 2)
-    await run_samples(machine, 1)
-    sensor(machine).nack_starts = 3
-    await run_samples(machine, 5)
+async def test_nacked_addresses_are_counted_and_the_driver_recovers(i2c_mock: Machine) -> None:
+    seen = attempts(i2c_mock)
+    await run_ms(i2c_mock, SAMPLE_MS // 2)
+    await run_samples(i2c_mock, 1)
+    sensor(i2c_mock).nack_starts = 3
+    await run_samples(i2c_mock, 5)
     assert len(seen) == 6
-    result = machine.var("sensor_result")
+    result = i2c_mock.var("sensor_result")
     assert result.errors.value == 3
     assert result.samples.value == 3
     assert result.mean.value == sum(READINGS[:3]) // 3
 
 
-async def test_the_sensor_state_follows_a_snapshot(machine: Machine) -> None:
-    await run_ms(machine, SAMPLE_MS // 2)
-    await run_samples(machine, 2)
-    snapshot = machine.snapshot()
-    await run_samples(machine, 2)
-    assert sensor(machine).served == 4
+async def test_the_sensor_state_follows_a_snapshot(i2c_mock: Machine) -> None:
+    await run_ms(i2c_mock, SAMPLE_MS // 2)
+    await run_samples(i2c_mock, 2)
+    snapshot = i2c_mock.snapshot()
+    await run_samples(i2c_mock, 2)
+    assert sensor(i2c_mock).served == 4
 
-    machine.restore(snapshot)
-    assert sensor(machine).served == 2
-    await run_samples(machine, 2)
-    assert machine.var("sensor_result").mean.value == sum(READINGS[:4]) // 4
+    i2c_mock.restore(snapshot)
+    assert sensor(i2c_mock).served == 2
+    await run_samples(i2c_mock, 2)
+    assert i2c_mock.var("sensor_result").mean.value == sum(READINGS[:4]) // 4
 
 
-@pytest.mark.popcorn(config="hot", budget=2_000_000)
-async def test_a_hot_sensor_drives_the_over_temperature_pin(machine: Machine) -> None:
-    await run_ms(machine, SAMPLE_MS // 2)
-    await run_samples(machine, 3)
-    assert machine.var("sensor_result").mean.value > 30 * 16
-    assert machine.periph.GPIOA.pin(5).level
+@pytest.mark.popcorn(budget=2_000_000)
+async def test_a_hot_sensor_drives_the_over_temperature_pin(i2c_mock_hot: Machine) -> None:
+    await run_ms(i2c_mock_hot, SAMPLE_MS // 2)
+    await run_samples(i2c_mock_hot, 3)
+    assert i2c_mock_hot.var("sensor_result").mean.value > 30 * 16
+    assert i2c_mock_hot.periph.GPIOA.pin(5).level

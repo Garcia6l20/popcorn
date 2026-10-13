@@ -1,8 +1,9 @@
-"""Project of the i2c example."""
+"""MachineDescription of the i2c example."""
 
 from pathlib import Path
 
 import popcorn
+import popcorn.pytest
 import pytest
 from popcorn.devices import Eeprom24xx, TableTarget
 from popcorn.units import ms
@@ -17,7 +18,7 @@ SCRIPTED = popcorn.Device(
     replies={0x0100: bytes(range(0xC0, 0xE0))},
 )
 
-BASE = popcorn.Project(
+BASE = popcorn.MachineDescription(
     name="i2c-eeprom",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/i2c_eeprom.elf")],
@@ -25,7 +26,7 @@ BASE = popcorn.Project(
     board={"I2C1": popcorn.Periph(devices=[EEPROM])},
 )
 
-PROJECT = BASE.with_configs(
+I2C = BASE.with_configs(
     **{
         "slow-eeprom": BASE.replace(
             board={"I2C1": popcorn.Periph(devices=[EEPROM.replace(write_cycle=ms(10))])}
@@ -35,6 +36,16 @@ PROJECT = BASE.with_configs(
 )
 
 
+@popcorn.pytest.machine
+def i2c() -> popcorn.MachineDescription:
+    return I2C
+
+
+@popcorn.pytest.machine(config="scripted")
+def i2c_scripted() -> popcorn.MachineDescription:
+    return I2C
+
+
 @pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+def i2c_description() -> popcorn.MachineDescription:
+    return I2C

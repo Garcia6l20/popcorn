@@ -1,4 +1,4 @@
-"""Generates ``_model.py`` from ``data/schema/mcu_description.schema.json``.
+"""Generates ``_model.py`` from ``data/schema/part_description.schema.json``.
 
 Regenerate with ``python -m popcorn.stm32.description._codegen <schema> <out>``.
 """
@@ -11,7 +11,7 @@ from typing import cast
 
 type JsonObject = Mapping[str, object]
 
-_HEADER = '''"""Dataclasses and enums generated from data/schema/mcu_description.schema.json.
+_HEADER = '''"""Dataclasses and enums generated from data/schema/part_description.schema.json.
 
 Regenerate with ``python -m popcorn.stm32.description._codegen``. Do not edit by hand.
 """
@@ -178,7 +178,7 @@ def generate(schema: JsonObject) -> str:
             parts.append(_emit_enum(name, node))
         else:
             parts.append(_emit_dataclass(name, node))
-    parts.append(_emit_dataclass("mcu_description", schema))
+    parts.append(_emit_dataclass("part_description", schema))
 
     return "\n\n\n".join(parts) + "\n"
 

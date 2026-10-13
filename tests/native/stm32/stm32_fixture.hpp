@@ -21,7 +21,7 @@
 namespace popcorn::testing
 {
 /** @brief The STM32U575 description built from ST's files, `POPCORN_U575_DESC`, read once. */
-inline auto u575() -> mcu_description const&
+inline auto u575() -> part_description const&
 {
   static auto const desc = description_from("POPCORN_U575_DESC");
   return desc;
@@ -51,7 +51,7 @@ struct stm32_fixture
    * @param options Machine options.
    */
   stm32_fixture(
-      mcu_description       desc,
+      part_description      desc,
       std::string_view      name,
       core::machine_options options = stm32_options())
       : firmware_name{name}

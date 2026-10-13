@@ -42,12 +42,12 @@ async def run_to_done(machine: Machine) -> None:
     assert stop.reason is StopReason.ADDRESS, stop
 
 
-async def test_every_command_is_answered(machine: Machine) -> None:
-    at = modem(machine, HAPPY)
+async def test_every_command_is_answered(uart_mock: Machine) -> None:
+    at = modem(uart_mock, HAPPY)
     await at.serve(3)
-    await run_to_done(machine)
+    await run_to_done(uart_mock)
 
-    result = machine.var("modem_result")
+    result = uart_mock.var("modem_result")
     assert [command for command, _ in at.commands] == list(HAPPY)
     assert (result.at.value, result.csq.value, result.send.value) == (OK, OK, OK)
     assert result.rssi.value == 17
@@ -56,23 +56,23 @@ async def test_every_command_is_answered(machine: Machine) -> None:
         assert ms(5) <= answered - asked < ms(5) + us(10)
 
 
-async def test_an_error_reply_is_reported(machine: Machine) -> None:
-    at = modem(machine, {**HAPPY, b"AT+SEND=hello": b"ERROR\r\n"})
+async def test_an_error_reply_is_reported(uart_mock: Machine) -> None:
+    at = modem(uart_mock, {**HAPPY, b"AT+SEND=hello": b"ERROR\r\n"})
     await at.serve(3)
-    await run_to_done(machine)
-    result = machine.var("modem_result")
+    await run_to_done(uart_mock)
+    result = uart_mock.var("modem_result")
     assert result.send.value == ERROR
     assert result.at.value == OK
 
 
 async def test_a_reply_that_never_comes_times_out_and_the_session_goes_on(
-    machine: Machine,
+    uart_mock: Machine,
 ) -> None:
-    at = modem(machine, {**HAPPY, b"AT+CSQ": None})
+    at = modem(uart_mock, {**HAPPY, b"AT+CSQ": None})
     await at.serve(3)
-    await run_to_done(machine)
+    await run_to_done(uart_mock)
 
-    result = machine.var("modem_result")
+    result = uart_mock.var("modem_result")
     assert result.csq.value == TIMEOUT
     assert result.rssi.value == -1
     assert result.send.value == OK

@@ -1,15 +1,15 @@
-"""Project of the sai_codec example."""
+"""MachineDescription of the sai_codec example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 from popcorn.board import AudioOptions
 from stereocodec import StereoCodec
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+SAI_CODEC = popcorn.MachineDescription(
     name="sai-codec",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/sai_codec.elf")],
@@ -21,6 +21,6 @@ PROJECT = popcorn.Project(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def sai_codec() -> popcorn.MachineDescription:
+    return SAI_CODEC

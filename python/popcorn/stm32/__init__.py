@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from popcorn._description import MachineDescription
+    from popcorn._part_description import PartDescription
 
 
-def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> MachineDescription:
+def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> PartDescription:
     """The description of an STM32 part, built from ST's files on first use and cached.
 
     Args:
@@ -24,7 +24,7 @@ def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> Machi
     Raises:
         ConfigError: The part is unknown, with close matches, or ST's files are missing.
     """
-    from popcorn._description import load_description
+    from popcorn._part_description import load_description
     from popcorn.stm32.description import cached_description
 
     return load_description(cached_description(part, core=core, svd=svd))

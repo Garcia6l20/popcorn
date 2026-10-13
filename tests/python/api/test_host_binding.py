@@ -266,6 +266,50 @@ def test_a_loop_flush_keeps_a_filter_error_for_the_next_raising_flush(
     assert [r.popcorn_register for r in logged] == ["CR"]  # type: ignore[attr-defined]
 
 
+def test_records_queued_before_a_rename_keep_the_old_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    m = popcorn.Machine(
+        popcorn.load_description(MODEL_JSON), image=popcorn.Image.elf(MODEL_ELF), name="old"
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    m.reg.r0 = 10
+    m.reg.lr = m.sym("ready") | 1
+    m.reg.pc = m.sym("start_timer") & ~1
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(failing)
+    try:
+        with caplog.at_level(logging.WARNING, logger="popcorn"):
+            queued_without_a_flush(m)
+            with pytest.raises(RuntimeError, match="filter failed"):
+                m.halt()
+            assert logged_timer(caplog) == []
+            m._rename("new")  # pyright: ignore[reportPrivateUsage]
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+            logged = logged_timer(caplog)
+    finally:
+        logger.removeFilter(failing)
+    assert [(r.popcorn_register, r.popcorn_machine) for r in logged] == [  # type: ignore[attr-defined]
+        ("CR", "old")
+    ]
+    assert m.name == "new"
+
+
+def test_a_busy_machine_refuses_a_rename() -> None:
+    m = timer_started_in_a_free_run()
+    m.start()
+    try:
+        with pytest.raises(popcorn.MachineRunning):
+            m._rename("other")  # pyright: ignore[reportPrivateUsage]
+        assert m.name == m.description.part
+    finally:
+        m.halt()
+    m._rename("other")  # pyright: ignore[reportPrivateUsage]
+    assert m.name == "other"
+
+
 def test_a_kept_log_error_is_reported_when_its_machine_is_collected(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -293,7 +337,7 @@ def test_a_kept_log_error_is_reported_when_its_machine_is_collected(
     assert reported == ["RuntimeError('filter failed')"]
 
 
-def gpio_holes(description: popcorn.MachineDescription, count: int) -> list[int]:
+def gpio_holes(description: popcorn.PartDescription, count: int) -> list[int]:
     """Byte addresses of GPIO windows that no register covers, each logged once when read."""
     holes: list[int] = []
     for port in "ABCDEFGHI":
@@ -727,7 +771,7 @@ def test_a_command_pending_when_its_machine_closes_raises_closed() -> None:
     assert child.stdout.strip() == "the machine was closed"
 
 
-def test_the_lock_order_holds_under_contention(u575: popcorn.MachineDescription) -> None:
+def test_the_lock_order_holds_under_contention(u575: popcorn.PartDescription) -> None:
     from .conftest import BOARD_ELF
 
     del u575
@@ -739,7 +783,7 @@ CURRENT: contextvars.ContextVar[object] = contextvars.ContextVar("host_binding_c
 
 
 def test_a_context_holding_the_machine_does_not_keep_it_alive(
-    m33: popcorn.MachineDescription, driver: popcorn.Image
+    m33: popcorn.PartDescription, driver: popcorn.Image
 ) -> None:
     gc.collect()
     before = _core.host_threads()
@@ -1103,7 +1147,7 @@ def device_machine() -> popcorn.Machine:
 
 @pytest.mark.parametrize("build", [model_machine, device_machine], ids=["model", "device"])
 def test_a_context_holding_the_machine_does_not_keep_its_models_alive(
-    build: Callable[[], popcorn.Machine], u575: popcorn.MachineDescription
+    build: Callable[[], popcorn.Machine], u575: popcorn.PartDescription
 ) -> None:
     del u575
     gc.collect()
@@ -1178,7 +1222,7 @@ def held_device_machine() -> tuple[popcorn.Machine, Recorder | Holding]:
 )
 def test_a_parked_machine_held_by_its_model_is_collected(
     build: Callable[[], tuple[popcorn.Machine, Recorder | Holding]],
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     del u575
     gc.collect()
@@ -1318,7 +1362,7 @@ def test_a_model_of_a_collected_machine_is_not_called_and_stops_the_run() -> Non
 
 
 def test_a_device_of_a_collected_machine_is_not_called_and_stops_the_run(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     from .test_devices import I2C_ELF, enter
 
@@ -2185,7 +2229,7 @@ print(late, sorted(set(device.seen[mark + len(late):])))
 
 
 def test_a_device_reattached_after_an_abandon_is_never_called_in_the_new_machines_context(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     """The abandoned machine's thread finishes the device call it blocked in after the device
     is attached to a new machine. Each attachment calls the device in its own machine's

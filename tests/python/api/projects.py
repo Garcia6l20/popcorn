@@ -43,7 +43,7 @@ class Plain:
     """A class that is not a model."""
 
 
-DEVICES = popcorn.Project(
+DEVICES = popcorn.MachineDescription(
     name="devices",
     part="STM32U575QGIx",
     images=[popcorn.Elf(PREBUILT / "i2c_ll.elf")],
@@ -51,7 +51,7 @@ DEVICES = popcorn.Project(
     board={"I2C1": popcorn.Periph(devices=[popcorn.Device(Eeprom24, address=0x50, size=4096)])},
 )
 
-NATIVE_DEVICES = popcorn.Project(
+NATIVE_DEVICES = popcorn.MachineDescription(
     name="native-devices",
     part="STM32U575QGIx",
     images=[popcorn.Elf(PREBUILT / "spi_ll.elf")],
@@ -66,8 +66,8 @@ NATIVE_DEVICES = popcorn.Project(
 )
 
 
-def model_project(board: dict[str, popcorn.Periph]) -> popcorn.Project:
-    return popcorn.Project(
+def model_project(board: dict[str, popcorn.Periph]) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
         description=MODEL_JSON,
         images=[popcorn.Elf(MODEL_ELF)],

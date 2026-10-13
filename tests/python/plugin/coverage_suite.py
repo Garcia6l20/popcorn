@@ -34,11 +34,17 @@ async def test_bump(machine, n):
 async def test_low_byte(machine, v):
     assert (await machine.call("low_byte", v)).value == v
 
-@pytest.mark.popcorn(config="booted")
 @pytest.mark.parametrize("n", range(6))
-async def test_alu_mark(machine, n):
-    await machine.call("alu_mark")
-    assert machine.mem.u32[machine.sym("alu_rounds")] == 1
+async def test_alu_mark(booted, n):
+    await booted.call("alu_mark")
+    assert booted.mem.u32[booted.sym("alu_rounds")] == 1
+"""
+
+BOOTED_FIXTURE = """
+
+@popcorn.pytest.machine(config="booted")
+def booted():
+    return PROJECT
 """
 
 NODE_IDS = (
@@ -53,7 +59,9 @@ NODE_IDS = (
 
 
 def write_suite(pytester: pytest.Pytester, conftest: str = "") -> None:
-    """The project, the conftest with `conftest` appended and `test_suite.py`."""
+    """The project, the conftest with `conftest` appended, the machine fixture `booted` of the
+    config `booted`, and `test_suite.py`."""
     write_conftest(pytester, conftest)
-    write_project(pytester, until=None, elf=CALLEE_ELF, configs=BOOTED)
+    path = write_project(pytester, until=None, elf=CALLEE_ELF, configs=BOOTED)
+    path.write_text(path.read_text() + BOOTED_FIXTURE)
     (pytester.path / "test_suite.py").write_text(TESTS)

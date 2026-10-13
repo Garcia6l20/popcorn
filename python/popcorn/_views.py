@@ -14,7 +14,7 @@ from popcorn._errors import ConfigError
 
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
-    from popcorn._description import MachineDescription
+    from popcorn._part_description import PartDescription
     from popcorn._streams import UartStream
     from popcorn._usb import UsbHost
 
@@ -334,7 +334,7 @@ class PeripheralView:
     @property
     def host(self) -> UsbHost:
         """The virtual USB host of this device controller, built with the machine from
-        `Periph(host=)` of the project or `Machine(usb=)`.
+        `Periph(host=)` of the machine description or `Machine(usb=)`.
 
         Raises:
             AttributeError: The machine has no USB hosts.
@@ -481,7 +481,7 @@ class Peripherals:
 
     __slots__ = ("_access", "_peripherals")
 
-    def __init__(self, access: ViewAccess, description: MachineDescription) -> None:
+    def __init__(self, access: ViewAccess, description: PartDescription) -> None:
         self._access = access
         self._peripherals = {p.name: p for p in description.peripherals}
 

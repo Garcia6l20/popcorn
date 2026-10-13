@@ -12,8 +12,8 @@ them with AWD3:
 - AWD3 watches IN6 with a window of 1241 to 2482, 1.0 V to 2.0 V at 3.3 V. Each result out of
   the window calls `HAL_ADCEx_LevelOutOfWindow3Callback`, which counts `monitor.alarms`.
 
-The `Project` in `conftest.py` sets the board supply that ADC1 converts against, and makes any
-register access popcorn does not model fail the run:
+The `MachineDescription` in `conftest.py` sets the board supply that ADC1 converts against, and
+makes any register access popcorn does not model fail the run:
 
 ```python
 supply=SupplyOptions(vdda_mv=3300),

@@ -53,8 +53,8 @@ def test_a_restored_run_stops_the_same_way(machines: Machines) -> None:
     assert state(m) == after
 
 
-def make_project(cpi: float = 1.0) -> popcorn.Project:
-    return popcorn.Project(
+def make_project(cpi: float = 1.0) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
         part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(DRIVER_ELF)], cpi=cpi
     )
 
@@ -174,7 +174,7 @@ def test_snapshot_refuses_a_running_machine_even_from_a_handler(machines: Machin
     asyncio.run(scenario())
 
 
-def usart_at(u575: popcorn.MachineDescription, after: VirtualDuration) -> popcorn.Machine:
+def usart_at(u575: popcorn.PartDescription, after: VirtualDuration) -> popcorn.Machine:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(USART_ELF))
     m.reset()
     stop = asyncio.run(m.run(until="main", budget=1_000_000))
@@ -191,7 +191,7 @@ def without_generation(m: popcorn.Machine) -> tuple[int, dict[str, object]]:
 
 
 def test_a_restore_after_a_reset_runs_as_a_machine_never_reset(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usart_at(u575, ms(1))
     twin = usart_at(u575, ms(1))
@@ -209,7 +209,7 @@ def test_a_restore_after_a_reset_runs_as_a_machine_never_reset(
 
 
 def test_a_restore_of_a_machines_own_snapshot_adds_no_state(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usart_at(u575, ms(25))
     twin = usart_at(u575, ms(25))
@@ -227,7 +227,7 @@ def test_a_restore_of_a_machines_own_snapshot_adds_no_state(
 
 
 def test_a_call_adds_no_state_but_the_instructions_it_ran(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usart_at(u575, ms(25))
     twin = usart_at(u575, ms(25))
@@ -252,7 +252,7 @@ def test_a_call_adds_no_state_but_the_instructions_it_ran(
 
 
 def test_a_format_4_snapshot_mid_reception_restores_and_runs_on(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     """The fixture is the lzma snapshot a format 4 build takes after this case's first half, up to
     the 5 ms + 40 us run. It binds the U575 description digest: regenerate it when that changes."""

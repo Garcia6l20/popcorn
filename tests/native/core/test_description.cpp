@@ -102,7 +102,7 @@ TEST_CASE("toy description re-serializes to an equal description")
 
 TEST_CASE("optional members and every effect round-trip")
 {
-  popcorn::mcu_description description;
+  popcorn::part_description description;
   description.schema_version = popcorn::description_schema_version;
   description.part           = "OPT";
   description.regions.push_back({
@@ -157,7 +157,7 @@ TEST_CASE("absent optional members are omitted from the output")
 
 TEST_CASE("dump stamps the current schema_version")
 {
-  popcorn::mcu_description description;
+  popcorn::part_description description;
   REQUIRE(description.schema_version == 0);
   auto const parsed = popcorn::parse_description(popcorn::dump_description(description), "dump");
   CHECK(parsed.schema_version == popcorn::description_schema_version);

@@ -75,7 +75,7 @@ def core_firmware() -> Path:
 
 
 @pytest.fixture
-def m33() -> popcorn.MachineDescription:
+def m33() -> popcorn.PartDescription:
     """The core test description, a Cortex-M33 with flash, SRAM and test peripherals."""
     return popcorn.load_description(M33_JSON)
 
@@ -95,7 +95,7 @@ def driver() -> popcorn.Image:
 class Machines:
     """Builds reset machines over the driver firmware, one scenario each."""
 
-    def __init__(self, description: popcorn.MachineDescription, image: popcorn.Image) -> None:
+    def __init__(self, description: popcorn.PartDescription, image: popcorn.Image) -> None:
         self.description = description
         self.image = image
 
@@ -122,13 +122,13 @@ class Machines:
 
 
 @pytest.fixture
-def machines(m33: popcorn.MachineDescription, driver: popcorn.Image) -> Machines:
+def machines(m33: popcorn.PartDescription, driver: popcorn.Image) -> Machines:
     """Factory of reset machines over the driver firmware."""
     return Machines(m33, driver)
 
 
 @pytest.fixture
-def views(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def views(m33: popcorn.PartDescription) -> popcorn.Machine:
     """A machine over the views firmware, stopped at its bkpt after copying .data."""
     m = popcorn.Machine(m33, image=popcorn.Image.elf(VIEWS_ELF))
     m.reset()
@@ -138,7 +138,7 @@ def views(m33: popcorn.MachineDescription) -> popcorn.Machine:
 
 
 @pytest.fixture
-def callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def callee(m33: popcorn.PartDescription) -> popcorn.Machine:
     """A machine over the callee firmware, reset, not booted."""
     m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF))
     m.reset()
@@ -146,7 +146,7 @@ def callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
 
 
 @pytest.fixture
-def hooked(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def hooked(m33: popcorn.PartDescription) -> popcorn.Machine:
     """A machine over the hooks firmware, stopped at its bkpt after copying .data."""
     m = popcorn.Machine(m33, image=popcorn.Image.elf(HOOKS_ELF))
     m.reset()
@@ -158,7 +158,7 @@ BOARD_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "board.elf"
 
 
 @pytest.fixture(scope="session")
-def u575() -> popcorn.MachineDescription:
+def u575() -> popcorn.PartDescription:
     """The STM32U575 description built from ST's files, the test skipped without them."""
     from popcorn.stm32 import mcu
     from popcorn.stm32.description import DescriptionError
@@ -170,7 +170,7 @@ def u575() -> popcorn.MachineDescription:
 
 
 @pytest.fixture
-def board(u575: popcorn.MachineDescription) -> popcorn.Machine:
+def board(u575: popcorn.PartDescription) -> popcorn.Machine:
     """A U575 machine over the board firmware, at `ready`: USART1 echoes, PA5 follows PA0."""
     m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
     m.reset()

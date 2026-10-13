@@ -76,16 +76,22 @@ def write_conftest(pytester: pytest.Pytester, extra: str = "") -> Path:
 
 PROJECT_FIXTURE = """
 @pytest.fixture(scope="session")
-def popcorn_project():
+def description():
+    return PROJECT
+
+
+@popcorn.pytest.machine
+def machine():
     return PROJECT
 """
 
 
 def write_project_conftest(directory: Path, project: str, imports: str = "") -> Path:
-    """The `conftest.py` of `directory` defining `popcorn_project` as the Python expression
-    `project`, after `imports`, appended to what the file holds."""
+    """The `conftest.py` of `directory` defining `PROJECT` as the Python expression `project`,
+    after `imports`, appended to what the file holds, with the plain fixture `description`
+    returning it, for `machine_factory`, and the machine fixture `machine` declared over it."""
     text = (
-        "from pathlib import Path\n\nimport popcorn\nimport pytest\n"
+        "from pathlib import Path\n\nimport popcorn\nimport popcorn.pytest\nimport pytest\n"
         f"{textwrap.dedent(imports)}\n\nPROJECT = {project}\n{PROJECT_FIXTURE}"
     )
     return _merge(directory / "conftest.py", "", text)
@@ -102,18 +108,19 @@ def write_project(
     configs: str = "",
     imports: str = "",
 ) -> Path:
-    """A `conftest.py` defining `popcorn_project` over the M33 test description and `elf`,
-    `driver.elf` by default, in `directory` or the pytester directory.
+    """A `conftest.py` as `write_project_conftest` writes it, over the M33 test description and
+    `elf`, `driver.elf` by default, in `directory` or the pytester directory.
 
-    `vtor` names a `vt_*` table of `elf` the boot starts from. `extra` holds more `Project`
-    keyword arguments as Python source, `configs` the keyword arguments of `with_configs`, where
-    `BASE` names the project before them, and `imports` the lines its expressions need.
+    `vtor` names a `vt_*` table of `elf` the boot starts from. `extra` holds more
+    `MachineDescription` keyword arguments as Python source, `configs` the keyword arguments of
+    `with_configs`, where `BASE` names the project before them, and `imports` the lines its
+    expressions need.
     """
     boot = [] if until is None else [f"until={until!r}"]
     if vtor is not None:
         boot.append(f"vtor={popcorn.Image.elf(elf).lookup(vtor).value:#x}")
     base = (
-        "popcorn.Project(\n"
+        "popcorn.MachineDescription(\n"
         '    part="POPCORN-M33-TEST",\n'
         f"    description=Path({str(M33_JSON)!r}),\n"
         f"    images=[popcorn.Elf(Path({str(elf)!r}))],\n"
@@ -128,12 +135,12 @@ def write_project(
 
 
 def write_model_project(pytester: pytest.Pytester, extra: str = "") -> Path:
-    """A `conftest.py` defining `popcorn_project` over the model test description and
+    """A `conftest.py` as `write_project_conftest` writes it, over the model test description and
     `model.elf`, booted to `ready`, lax about unmodelled peripherals. `extra` holds more
-    `Project` keyword arguments as Python source."""
+    `MachineDescription` keyword arguments as Python source."""
     return write_project_conftest(
         pytester.path,
-        "popcorn.Project(\n"
+        "popcorn.MachineDescription(\n"
         '    part="POPCORN-M33-TEST",\n'
         f"    description=Path({str(MODEL_JSON)!r}),\n"
         f"    images=[popcorn.Elf(Path({str(MODEL_ELF)!r}))],\n"

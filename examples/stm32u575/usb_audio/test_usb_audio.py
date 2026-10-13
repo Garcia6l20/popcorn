@@ -109,10 +109,10 @@ async def streaming(machine: Machine) -> UacFunction:
     return audio
 
 
-async def test_the_host_probes_the_function_as_linux_snd_usb_audio(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_the_host_probes_the_function_as_linux_snd_usb_audio(usb_audio: Machine) -> None:
+    host = usb_audio.periph.OTG_FS.host
     earlier = len(host.requests)
-    await ready_audio(machine)
+    await ready_audio(usb_audio)
     assert setups(host.requests[earlier:]) == [
         *streaming_probe(SPEAKER),
         *streaming_probe(MIC),
@@ -120,13 +120,13 @@ async def test_the_host_probes_the_function_as_linux_snd_usb_audio(machine: Mach
         *feature_probe(MIC_UNIT),
     ]
     assert all(r.status == "completed" for r in host.requests[earlier:])
-    assert machine.var("clock_set_requests").value == 0
+    assert usb_audio.var("clock_set_requests").value == 0
 
 
 async def test_the_streams_take_their_format_and_rate_from_the_descriptors(
-    machine: Machine,
+    usb_audio: Machine,
 ) -> None:
-    _, audio = await ready_audio(machine)
+    _, audio = await ready_audio(usb_audio)
     for stream, interface in ((audio.speaker, SPEAKER), (audio.mic, MIC)):
         assert stream.bound
         assert (stream.interface, stream.alternate) == (interface, 1)
@@ -136,8 +136,8 @@ async def test_the_streams_take_their_format_and_rate_from_the_descriptors(
         assert not stream.running
 
 
-async def test_the_feature_units_hold_what_the_probe_read(machine: Machine) -> None:
-    _, audio = await ready_audio(machine)
+async def test_the_feature_units_hold_what_the_probe_read(usb_audio: Machine) -> None:
+    _, audio = await ready_audio(usb_audio)
     units = {u.unit: u for u in audio.feature_units}
     assert sorted(units) == [SPEAKER_UNIT, MIC_UNIT]
     for found in units.values():
@@ -147,12 +147,12 @@ async def test_the_feature_units_hold_what_the_probe_read(machine: Machine) -> N
         assert found.volume_range == ((-50 * 256, 0, 256),) * 2
 
 
-async def test_set_volume_and_mute_reach_the_firmware(machine: Machine) -> None:
-    _, audio = await ready_audio(machine)
+async def test_set_volume_and_mute_reach_the_firmware(usb_audio: Machine) -> None:
+    _, audio = await ready_audio(usb_audio)
     await audio.set_volume(SPEAKER_UNIT, 1, -10 * 256)
     await audio.set_mute(MIC_UNIT, 0, True)
-    assert machine.var("feature_volume")[0][1].value == -10 * 256
-    assert machine.var("feature_mute")[1][0].value == 1
+    assert usb_audio.var("feature_volume")[0][1].value == -10 * 256
+    assert usb_audio.var("feature_mute")[1][0].value == 1
     units = {u.unit: u for u in audio.feature_units}
     assert units[SPEAKER_UNIT].volume == (0, -10 * 256)
     assert units[MIC_UNIT].mute == (True, False)
@@ -161,9 +161,9 @@ async def test_set_volume_and_mute_reach_the_firmware(machine: Machine) -> None:
 
 
 async def test_start_selects_the_alternate_setting_after_reading_the_clock(
-    machine: Machine,
+    usb_audio: Machine,
 ) -> None:
-    host, audio = await ready_audio(machine)
+    host, audio = await ready_audio(usb_audio)
     earlier = len(host.requests)
     await audio.mic.start()
     await audio.speaker.start()
@@ -175,11 +175,11 @@ async def test_start_selects_the_alternate_setting_after_reading_the_clock(
         setup(SET_INTERFACE, 1, SPEAKER, 0),
     ]
     assert audio.speaker.running and audio.mic.running
-    assert (machine.var("speaker_alt").value, machine.var("mic_alt").value) == (1, 1)
+    assert (usb_audio.var("speaker_alt").value, usb_audio.var("mic_alt").value) == (1, 1)
 
 
-async def test_a_sine_written_to_the_speaker_comes_back_on_the_mic(machine: Machine) -> None:
-    audio = await streaming(machine)
+async def test_a_sine_written_to_the_speaker_comes_back_on_the_mic(usb_audio: Machine) -> None:
+    audio = await streaming(usb_audio)
     await audio.speaker.write(SINE)
     frames = await audio.mic.read_frames(170, for_=ms(200))
     assert len(frames) == 170
@@ -193,48 +193,48 @@ async def test_a_sine_written_to_the_speaker_comes_back_on_the_mic(machine: Mach
     assert all(len(frame.samples) in (15, 16) for frame in frames)
 
 
-async def test_the_mic_hears_silence_while_nothing_is_written(machine: Machine) -> None:
-    audio = await streaming(machine)
+async def test_the_mic_hears_silence_while_nothing_is_written(usb_audio: Machine) -> None:
+    audio = await streaming(usb_audio)
     frames = await audio.mic.read_frames(20, for_=ms(30))
     assert len(frames) == 20
     assert all(frame.samples for frame in frames)
     assert all(sample == 0 for frame in frames for sample in frame.samples)
 
 
-async def test_drain_returns_once_the_last_sample_left_in_a_packet(machine: Machine) -> None:
-    audio = await streaming(machine)
+async def test_drain_returns_once_the_last_sample_left_in_a_packet(usb_audio: Machine) -> None:
+    audio = await streaming(usb_audio)
     await audio.speaker.write(SINE[: 10 * SAMPLES_PER_FRAME + 5])
     assert audio.speaker.queued == 10 * SAMPLES_PER_FRAME + 5
     await audio.speaker.drain(for_=ms(50))
     assert audio.speaker.queued == 0
     sent = audio.speaker.sent_at
     assert sent is not None
-    assert machine.time - sent <= ms(1)
+    assert usb_audio.time - sent <= ms(1)
 
 
-async def test_stop_closes_the_stream_and_no_packet_follows(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
-    audio = await streaming(machine)
+async def test_stop_closes_the_stream_and_no_packet_follows(usb_audio: Machine) -> None:
+    host = usb_audio.periph.OTG_FS.host
+    audio = await streaming(usb_audio)
     earlier = len(host.requests)
     await audio.speaker.stop()
     await audio.mic.stop()
-    await machine.run(for_=ms(10))
+    await usb_audio.run(for_=ms(10))
     assert not audio.speaker.running and not audio.mic.running
-    assert (machine.var("speaker_alt").value, machine.var("mic_alt").value) == (0, 0)
+    assert (usb_audio.var("speaker_alt").value, usb_audio.var("mic_alt").value) == (0, 0)
     assert setups(host.requests[earlier:]) == [
         setup(SET_INTERFACE, 0, SPEAKER, 0),
         setup(SET_INTERFACE, 0, MIC, 0),
     ]
     audio.mic.clear()
-    heard = machine.var("speaker_bytes").value
-    await machine.run(for_=ms(10))
+    heard = usb_audio.var("speaker_bytes").value
+    await usb_audio.run(for_=ms(10))
     assert audio.mic.available == 0
-    assert machine.var("speaker_bytes").value == heard
+    assert usb_audio.var("speaker_bytes").value == heard
 
 
-async def test_stop_with_the_machine_stopped_runs_at_once(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
-    audio = await streaming(machine)
+async def test_stop_with_the_machine_stopped_runs_at_once(usb_audio: Machine) -> None:
+    host = usb_audio.periph.OTG_FS.host
+    audio = await streaming(usb_audio)
     await audio.speaker.write(SINE)
     sent = audio.speaker.sent_at
 
@@ -243,13 +243,13 @@ async def test_stop_with_the_machine_stopped_runs_at_once(machine: Machine) -> N
         await audio.mic.stop()
 
     earlier = len(host.requests)
-    stopped_at = machine.time
+    stopped_at = usb_audio.time
     await teardown()
     assert not audio.speaker.running and not audio.mic.running
     assert audio.speaker.queued == 0
     assert host.requests[earlier:] == ()
     audio.mic.clear()
-    await machine.run(for_=ms(10))
+    await usb_audio.run(for_=ms(10))
     assert audio.mic.available == 0
     assert audio.speaker.sent_at == sent
     requests = host.requests[earlier:]
@@ -260,28 +260,28 @@ async def test_stop_with_the_machine_stopped_runs_at_once(machine: Machine) -> N
     assert all(r.at > stopped_at for r in requests)
 
 
-async def test_clear_drops_the_frames_read_before_it(machine: Machine) -> None:
-    audio = await streaming(machine)
-    await machine.run(for_=ms(5))
+async def test_clear_drops_the_frames_read_before_it(usb_audio: Machine) -> None:
+    audio = await streaming(usb_audio)
+    await usb_audio.run(for_=ms(5))
     assert audio.mic.available >= 4
-    cleared_at = machine.time
+    cleared_at = usb_audio.time
     audio.mic.clear()
     assert audio.mic.available == 0
     frames = await audio.mic.read_frames(1, for_=ms(5))
     assert frames[0].at > cleared_at
 
 
-async def test_a_restore_mid_stream_resumes_the_speaker_queue(machine: Machine) -> None:
-    audio = await streaming(machine)
+async def test_a_restore_mid_stream_resumes_the_speaker_queue(usb_audio: Machine) -> None:
+    audio = await streaming(usb_audio)
     await audio.speaker.write(SINE)
-    await machine.run(for_=ms(20))
+    await usb_audio.run(for_=ms(20))
     queued = audio.speaker.queued
     assert 0 < queued < len(SINE)
-    middle = machine.snapshot()
-    await machine.run(for_=ms(30))
+    middle = usb_audio.snapshot()
+    await usb_audio.run(for_=ms(30))
     assert audio.speaker.queued == queued - 30 * SAMPLES_PER_FRAME
 
-    machine.restore(middle)
+    usb_audio.restore(middle)
     assert audio.mic.available == 0
     assert audio.speaker.queued == queued
     assert audio.speaker.running and audio.mic.running
@@ -292,10 +292,10 @@ async def test_a_restore_mid_stream_resumes_the_speaker_queue(machine: Machine) 
     assert starts
 
 
-async def test_a_start_without_a_bound_function_raises(machine: Machine) -> None:
-    host = machine.periph.OTG_FS.host
+async def test_a_start_without_a_bound_function_raises(usb_audio: Machine) -> None:
+    host = usb_audio.periph.OTG_FS.host
     await host.wait_configured(for_=s(2))
     await host.detach()
-    await machine.run(for_=ms(5))
+    await usb_audio.run(for_=ms(5))
     with pytest.raises(UsbError, match="unbound"):
         await host.audio().speaker.start()

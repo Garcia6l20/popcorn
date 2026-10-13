@@ -12,7 +12,7 @@
 namespace popcorn::testing
 {
 /** @brief The toy description of `tests/data/desc/toy.json`, path from `POPCORN_TOY_DESC`. */
-inline auto toy_description() -> mcu_description
+inline auto toy_description() -> part_description
 {
   char const* const path = std::getenv("POPCORN_TOY_DESC");
   REQUIRE(path != nullptr);

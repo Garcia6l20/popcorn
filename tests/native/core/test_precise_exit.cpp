@@ -33,7 +33,7 @@ constexpr address       unmapped_page  = 0x3000'0000;
 constexpr std::uint32_t handler_value  = 0xaa;
 constexpr std::uint64_t handler_length = 4;
 
-auto with_neighbour() -> popcorn::mcu_description
+auto with_neighbour() -> popcorn::part_description
 {
   auto desc = m33();
   auto own  = std::ranges::find(
@@ -48,7 +48,7 @@ auto with_neighbour() -> popcorn::mcu_description
   return desc;
 }
 
-auto testdev_at_page_end() -> popcorn::mcu_description
+auto testdev_at_page_end() -> popcorn::part_description
 {
   auto desc = m33();
   auto own  = std::ranges::find(
@@ -66,7 +66,7 @@ auto testdev_at_page_end() -> popcorn::mcu_description
 
 struct fixture : popcorn::testing::machine_fixture<>
 {
-  explicit fixture(popcorn::mcu_description desc = m33())
+  explicit fixture(popcorn::part_description desc = m33())
       : popcorn::testing::machine_fixture<>{std::move(desc), "irq", options()}
   {
     REQUIRE(run_to_stop().reason == stop_reason::user);
@@ -120,7 +120,7 @@ struct fixture : popcorn::testing::machine_fixture<>
   }
 };
 
-auto raising(popcorn::mcu_description desc = m33()) -> fixture
+auto raising(popcorn::part_description desc = m33()) -> fixture
 {
   fixture f{std::move(desc)};
   f.model().raise_on_go        = true;

@@ -70,7 +70,7 @@ def expected_results(in3: float) -> list[int]:
 class Scan:
     """A machine running `scan_awd`, stopped right after TIM15 started counting."""
 
-    def __init__(self, u575: popcorn.MachineDescription) -> None:
+    def __init__(self, u575: popcorn.PartDescription) -> None:
         self.m = popcorn.Machine(
             u575, image=popcorn.Image.elf(ADC_ELF), supply=SupplyOptions(vdda_mv=VDDA_MV)
         )
@@ -153,7 +153,7 @@ def at_scans(scans: range | list[int], offset: int) -> list[int]:
 
 
 def test_the_scan_reads_the_factory_words_and_converts_every_500_ms(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     scan = Scan(u575)
     scan.run_to(scan.trigger_ps(4) + ms(100).ps)
@@ -168,7 +168,7 @@ def test_the_scan_reads_the_factory_words_and_converts_every_500_ms(
 
 
 def test_a_plug_flags_awd3_at_rank_two_and_the_callback_runs_at_the_end_of_that_scan(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     scan = Scan(u575)
     scan.between_scans(1)
@@ -197,7 +197,7 @@ def test_a_plug_flags_awd3_at_rank_two_and_the_callback_runs_at_the_end_of_that_
 
 
 def test_awd3_trips_strictly_past_the_thresholds_one_microvolt_apart(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     scan = Scan(u575)
     steps: list[tuple[float, list[tuple[int, int]]]] = [
@@ -215,7 +215,7 @@ def test_awd3_trips_strictly_past_the_thresholds_one_microvolt_apart(
 
 
 def test_with_interrupts_masked_across_the_scan_the_callback_runs_one_scan_later(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     scan = Scan(u575)
     scan.between_scans(1)
@@ -237,7 +237,7 @@ def test_with_interrupts_masked_across_the_scan_the_callback_runs_one_scan_later
 
 
 def test_a_snapshot_between_awd3_and_the_end_of_scan_keeps_the_pending_callback(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     scan = Scan(u575)
     scan.between_scans(1)

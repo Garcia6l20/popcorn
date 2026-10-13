@@ -495,7 +495,7 @@ def test_a_trace_close_refused_inside_another_machine_keeps_its_sink(
     assert sum(1 for _ in read_trace(path)) > 0
 
 
-def test_a_reached_wait_in_a_free_run_holds_no_gil(m33: popcorn.MachineDescription) -> None:
+def test_a_reached_wait_in_a_free_run_holds_no_gil(m33: popcorn.PartDescription) -> None:
     m = popcorn.Machine(m33, image=popcorn.Image.elf(VIEWS_ELF))
     m.reset()
     assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
@@ -737,7 +737,7 @@ class Counting:
         return False
 
 
-def ticking(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def ticking(m33: popcorn.PartDescription) -> popcorn.Machine:
     """A reset machine over the callee firmware, its SysTick counting `ticks`, whose only slice
     ends are its waiters' deadlines."""
     m = popcorn.Machine(
@@ -782,7 +782,7 @@ def gated(m: popcorn.Machine, event: popcorn.Event, for_: VirtualDuration) -> po
 
 
 def test_a_python_wait_posted_inside_a_slice_counts_for_from_its_post(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(
         m33,
@@ -809,7 +809,7 @@ class Recording:
 
 
 def test_a_python_wait_is_not_checked_at_the_boundary_a_sibling_post_creates(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(
         m33,
@@ -836,7 +836,7 @@ def test_a_python_wait_is_not_checked_at_the_boundary_a_sibling_post_creates(
     assert event.calls[0] > 1_000, event.calls
 
 
-def test_a_free_run_waiter_predicate_runs_once_per_slice(m33: popcorn.MachineDescription) -> None:
+def test_a_free_run_waiter_predicate_runs_once_per_slice(m33: popcorn.PartDescription) -> None:
     m = ticking(m33)
     event = Counting()
     before = m.instructions
@@ -855,7 +855,7 @@ def test_a_free_run_waiter_predicate_runs_once_per_slice(m33: popcorn.MachineDes
 
 
 def test_a_python_busy_thread_slows_a_free_run_waiter_per_slice_only(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = ticking(m33)
     done = threading.Event()
@@ -884,7 +884,7 @@ EXACT = 100_000_000
 SRAM = 0x2000_8000
 
 
-def exact(m33: popcorn.MachineDescription, elf: pathlib.Path = CALLEE_ELF) -> popcorn.Machine:
+def exact(m33: popcorn.PartDescription, elf: pathlib.Path = CALLEE_ELF) -> popcorn.Machine:
     """A reset machine whose only slice ends are its waiters' deadlines and posted requests."""
     m = popcorn.Machine(
         m33, image=popcorn.Image.elf(elf), slice_instructions=EXACT, slice_wall_budget=10.0
@@ -903,7 +903,7 @@ def waited(m: popcorn.Machine, event: popcorn.Event, for_: VirtualDuration) -> p
     return run_bounded(scenario(), HANG)
 
 
-def test_a_condition_fires_where_a_parked_predicate_does(m33: popcorn.MachineDescription) -> None:
+def test_a_condition_fires_where_a_parked_predicate_does(m33: popcorn.PartDescription) -> None:
     parked, running = exact(m33), exact(m33)
     Gate(parked).opened.set()
     want = asyncio.run(parked.run(for_=ms(200), stop_when=lambda m: m.var("ticks").value >= 100))
@@ -919,7 +919,7 @@ def stop_on_tick(m: popcorn.Machine) -> None:
     m.intercept("SysTick_Handler", lambda call: call.stop())
 
 
-def test_a_condition_reports_itself_in_stop_fired_parked(m33: popcorn.MachineDescription) -> None:
+def test_a_condition_reports_itself_in_stop_fired_parked(m33: popcorn.PartDescription) -> None:
     m = exact(m33)
     fires, never = m.ref.var("ticks").ge(3), m.ref.var("ticks").gt(1_000_000)
     fired = asyncio.run(m.wait_for(fires, for_=ms(10)))
@@ -936,7 +936,7 @@ def test_a_condition_reports_itself_in_stop_fired_parked(m33: popcorn.MachineDes
 
 
 def test_a_parked_condition_s_fired_is_taken_at_its_stopping_boundary(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = exact(m33)
     ticks = m.ref.var("ticks")
@@ -959,7 +959,7 @@ def test_a_parked_condition_s_fired_is_taken_at_its_stopping_boundary(
     assert later.ready(m)
 
 
-def test_a_condition_reports_itself_in_stop_fired_running(m33: popcorn.MachineDescription) -> None:
+def test_a_condition_reports_itself_in_stop_fired_running(m33: popcorn.PartDescription) -> None:
     m = exact(m33)
     fires, never = m.ref.var("ticks").ge(3), m.ref.var("ticks").gt(1_000_000)
     fired = waited(m, fires, ms(10))
@@ -984,7 +984,7 @@ async def collect_stop(m: popcorn.Machine, condition: popcorn.Condition) -> popc
             m.halt()
 
 
-def test_a_condition_already_true_fires_at_once(m33: popcorn.MachineDescription) -> None:
+def test_a_condition_already_true_fires_at_once(m33: popcorn.PartDescription) -> None:
     m = exact(m33)
     condition = m.ref.var("ticks").ge(0)
     stop = waited(m, condition, s(5))
@@ -993,7 +993,7 @@ def test_a_condition_already_true_fires_at_once(m33: popcorn.MachineDescription)
     assert stop.instructions < EXACT // 100
 
 
-def views_machine(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def views_machine(m33: popcorn.PartDescription) -> popcorn.Machine:
     """A machine over the views firmware past its bkpt, counting in a loop."""
     m = exact(m33, VIEWS_ELF)
     assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER
@@ -1034,7 +1034,7 @@ BUILT: list[tuple[Callable[[popcorn.Machine], popcorn.Condition], bool]] = [
 
 @pytest.mark.parametrize(("build", "expected"), BUILT)
 def test_a_condition_on_a_bit_field_or_mask_agrees_with_the_parked_path(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
     build: Callable[[popcorn.Machine], popcorn.Condition],
     expected: bool,
 ) -> None:
@@ -1043,7 +1043,7 @@ def test_a_condition_on_a_bit_field_or_mask_agrees_with_the_parked_path(
     assert holds_both_ways(m, build(m)) is expected
 
 
-def test_f32_condition_compares_in_double(m33: popcorn.MachineDescription) -> None:
+def test_f32_condition_compares_in_double(m33: popcorn.PartDescription) -> None:
     m = views_machine(m33)
     m.mem.f32[SRAM] = 0.1
     assert not holds_both_ways(m, m.ref.mem.f32[SRAM].eq(0.1))
@@ -1054,7 +1054,7 @@ def test_f32_condition_compares_in_double(m33: popcorn.MachineDescription) -> No
 
 
 def test_a_float_condition_takes_only_int_constants_a_double_holds(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = views_machine(m33)
     m.mem.f64[SRAM] = float(2**53)
@@ -1067,7 +1067,7 @@ def test_a_float_condition_takes_only_int_constants_a_double_holds(
             f64.lt(value)
 
 
-def test_a_condition_from_another_machine_is_refused(m33: popcorn.MachineDescription) -> None:
+def test_a_condition_from_another_machine_is_refused(m33: popcorn.PartDescription) -> None:
     m, other = exact(m33), exact(m33)
     condition = other.ref.var("ticks").ge(1)
     with pytest.raises(ValueError, match="another machine"):
@@ -1076,7 +1076,7 @@ def test_a_condition_from_another_machine_is_refused(m33: popcorn.MachineDescrip
         waited(m, condition, ms(1))
 
 
-def test_any_of_fires_where_a_parked_predicate_does(m33: popcorn.MachineDescription) -> None:
+def test_any_of_fires_where_a_parked_predicate_does(m33: popcorn.PartDescription) -> None:
     parked, running = exact(m33), exact(m33)
 
     def either(m: popcorn.Machine) -> bool:
@@ -1102,7 +1102,7 @@ def test_any_of_fires_where_a_parked_predicate_does(m33: popcorn.MachineDescript
     assert got.fired == expected
 
 
-def test_any_of_reports_both_members_true_on_one_event(m33: popcorn.MachineDescription) -> None:
+def test_any_of_reports_both_members_true_on_one_event(m33: popcorn.PartDescription) -> None:
     m = exact(m33)
     ticks = m.ref.var("ticks")
     first, second = ticks.ge(100), ticks.gt(99)
@@ -1111,7 +1111,7 @@ def test_any_of_reports_both_members_true_on_one_event(m33: popcorn.MachineDescr
     assert stop.fired == (first, second)
 
 
-def test_all_of_fires_when_every_member_holds(m33: popcorn.MachineDescription) -> None:
+def test_all_of_fires_when_every_member_holds(m33: popcorn.PartDescription) -> None:
     parked, running = exact(m33), exact(m33)
 
     def both(m: popcorn.Machine) -> bool:
@@ -1126,7 +1126,7 @@ def test_all_of_fires_when_every_member_holds(m33: popcorn.MachineDescription) -
     assert got.fired == conditions.members
 
 
-def test_conditions_time_out_with_nothing_fired(m33: popcorn.MachineDescription) -> None:
+def test_conditions_time_out_with_nothing_fired(m33: popcorn.PartDescription) -> None:
     m = exact(m33)
     ticks = m.ref.var("ticks")
     conditions = popcorn.all_of(ticks.ge(10), ticks.eq(1_000_000))
@@ -1138,7 +1138,7 @@ def test_conditions_time_out_with_nothing_fired(m33: popcorn.MachineDescription)
     assert stop.fired == ()
 
 
-def test_conditions_parked_match_running(m33: popcorn.MachineDescription) -> None:
+def test_conditions_parked_match_running(m33: popcorn.PartDescription) -> None:
     parked, running = exact(m33), exact(m33)
     sets = [
         popcorn.any_of(m.ref.var("ticks").ge(40), m.ref.var("ticks").ge(30))
@@ -1152,7 +1152,7 @@ def test_conditions_parked_match_running(m33: popcorn.MachineDescription) -> Non
     assert got.fired == (sets[1].members[1],)
 
 
-def test_one_set_awaited_twice_reports_each_wait(m33: popcorn.MachineDescription) -> None:
+def test_one_set_awaited_twice_reports_each_wait(m33: popcorn.PartDescription) -> None:
     m = exact(m33)
     ticks = m.ref.var("ticks")
     conditions = popcorn.any_of(ticks.ge(30), ticks.eq(1_000_000))
@@ -1176,7 +1176,7 @@ def test_one_set_awaited_twice_reports_each_wait(m33: popcorn.MachineDescription
 
 
 def test_conditions_refuse_nesting_empty_and_mixed_machines(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m, other = exact(m33), exact(m33)
     condition = m.ref.var("ticks").ge(1)
@@ -1225,7 +1225,7 @@ def test_halt_from_another_machines_handler_is_refused_and_its_goal_goes_on(
 
 
 def test_a_handler_stop_while_a_condition_holds_fires_nothing_parked(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     """The handler makes the condition hold and stops in one callback, with no event between in
     which the condition could fire."""
@@ -1343,7 +1343,7 @@ def test_now_in_a_free_run_is_monotonic(machines: Machines) -> None:
 
 
 def test_wait_until_in_a_free_run_returns_the_boundary_where_it_held(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = ticking(m33)
     seen: list[tuple[VirtualTime, int]] = []
@@ -1603,7 +1603,7 @@ def test_a_slow_sample_stalls_the_machine(machines: Machines) -> None:
     assert before == after
 
 
-def test_record_returns_slices_by_mark_while_running(m33: popcorn.MachineDescription) -> None:
+def test_record_returns_slices_by_mark_while_running(m33: popcorn.PartDescription) -> None:
     m = ticking(m33)
     recording = m.record_returns("tick", lambda r: int(r.value or 0))
 
@@ -1649,7 +1649,7 @@ def copied_until(
     ("native", "returns"), [(True, 20_000), (False, 2_000)], ids=["native", "convert"]
 )
 def test_a_recording_read_in_a_loop_while_running_stays_consecutive(
-    m33: popcorn.MachineDescription, native: bool, returns: int
+    m33: popcorn.PartDescription, native: bool, returns: int
 ) -> None:
     m = ticking(m33)
     if native:
@@ -1682,7 +1682,7 @@ def test_a_recording_read_in_a_loop_while_running_stays_consecutive(
 
 
 def test_a_recording_removed_while_running_keeps_its_entries(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = ticking(m33)
     recording = m.record_returns("tick")
@@ -1704,7 +1704,7 @@ def test_a_recording_removed_while_running_keeps_its_entries(
 
 @pytest.mark.parametrize("native", [True, False], ids=["native", "convert"])
 def test_a_recording_without_convert_takes_no_gil_on_the_machine_thread(
-    m33: popcorn.MachineDescription, native: bool
+    m33: popcorn.PartDescription, native: bool
 ) -> None:
     m = ticking(m33)
     recording = m.record_returns("tick") if native else m.record_returns("tick", tick_value)
@@ -1726,7 +1726,7 @@ def tick_value(returned: popcorn.Returned) -> int:
 
 
 def test_a_recording_removed_by_a_handler_while_running_stops(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = ticking(m33)
     recording = m.record_returns("tick")

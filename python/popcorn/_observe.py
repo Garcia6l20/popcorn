@@ -281,3 +281,16 @@ def forward_log(name: str, record: _core.LogRecord, time_ps: int) -> None:
             "popcorn_time": VirtualTime(time_ps),
         },
     )
+
+
+class LogForwarder:
+    """Forwards the log records of one machine through `forward_log` under `name`, which a
+    rename changes for the records forwarded after it."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __call__(self, record: _core.LogRecord, time_ps: int) -> None:
+        forward_log(self.name, record, time_ps)

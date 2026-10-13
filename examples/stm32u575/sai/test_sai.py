@@ -49,30 +49,30 @@ def table(machine: Machine) -> list[tuple[int, int]]:
     return list(itertools.batched(words, 2, strict=True))
 
 
-async def test_the_frames_are_the_table_repeated(machine: Machine) -> None:
-    stream = machine.periph.SAI1.audio("A")
+async def test_the_frames_are_the_table_repeated(sai: Machine) -> None:
+    stream = sai.periph.SAI1.audio("A")
     frames = await stream.read_frames(FRAMES, for_=ms(20))
-    assert [frame.slots for frame in frames] == table(machine) * 10
+    assert [frame.slots for frame in frames] == table(sai) * 10
     assert all(
         (frame.data_bits, frame.active_slots, frame.mono) == (16, 0b11, False) for frame in frames
     )
     assert stream.dropped == 0
 
 
-async def test_frames_come_at_48_khz(machine: Machine) -> None:
-    frames = await machine.periph.SAI1.audio("A").read_frames(FRAMES, for_=ms(20))
-    period = frame_ps(machine)
+async def test_frames_come_at_48_khz(sai: Machine) -> None:
+    frames = await sai.periph.SAI1.audio("A").read_frames(FRAMES, for_=ms(20))
+    period = frame_ps(sai)
     assert abs(period - 10**12 / 48_000) < 1
     for earlier, later in itertools.pairwise(frames):
         assert abs((later.at - earlier.at).ps - period) < 1
     assert abs((frames[-1].at - frames[0].at).ps - (FRAMES - 1) * period) < 1
 
 
-async def test_the_dma_callbacks_follow_the_frames_sent(machine: Machine) -> None:
-    stop = await machine.run(for_=ms(10))
+async def test_the_dma_callbacks_follow_the_frames_sent(sai: Machine) -> None:
+    stop = await sai.run(for_=ms(10))
     assert stop.reason is StopReason.TIME, stop
-    sent_words = 2 * machine.periph.SAI1.audio("A").available
-    playback = machine.var("playback")
+    sent_words = 2 * sai.periph.SAI1.audio("A").available
+    playback = sai.var("playback")
     halves, completes = int(playback.halves.value), int(playback.completes.value)
     assert completes >= 9
     assert halves - completes in (0, 1)

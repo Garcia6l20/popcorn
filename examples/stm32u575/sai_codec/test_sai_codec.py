@@ -52,33 +52,33 @@ def rows(machine: Machine, name: str) -> list[list[int]]:
 
 
 async def test_the_codec_frames_block_a_from_its_power_write_to_the_end_of_the_frame_in_progress(
-    machine: Machine,
+    sai_codec: Machine,
 ) -> None:
-    await machine.periph.SAI1.audio("B").write(RECEIVED)
-    await stream_until_the_codec_stops(machine)
-    stop = await machine.run(for_=ms(1))
+    await sai_codec.periph.SAI1.audio("B").write(RECEIVED)
+    await stream_until_the_codec_stops(sai_codec)
+    stop = await sai_codec.run(for_=ms(1))
     assert stop.reason is StopReason.TIME, stop
-    frames = sent(machine)
-    started = VirtualTime(codec(machine).started_ps)
-    stopped = VirtualTime(codec(machine).stopped_ps)
+    frames = sent(sai_codec)
+    started = VirtualTime(codec(sai_codec).started_ps)
+    stopped = VirtualTime(codec(sai_codec).stopped_ps)
     assert frames[0].at == started
     for k, frame in enumerate(frames):
         assert abs((frame.at - started).ps - k * FRAME_PS) < 1
     assert frames[-1].at < stopped < frames[-1].at + us(20.84)
     assert len(frames) > BUFFERS * FRAMES
-    assert machine.periph.SAI1.audio("A").external_frame_hz == 0
-    assert machine.periph.SAI1.ASR.OVRUDR == 0
-    assert machine.periph.SAI1.BSR.OVRUDR == 0
+    assert sai_codec.periph.SAI1.audio("A").external_frame_hz == 0
+    assert sai_codec.periph.SAI1.ASR.OVRUDR == 0
+    assert sai_codec.periph.SAI1.BSR.OVRUDR == 0
 
 
 async def test_channel_12_interleaves_the_two_rows_of_playback_into_frames(
-    machine: Machine,
+    sai_codec: Machine,
 ) -> None:
-    await machine.periph.SAI1.audio("B").write(RECEIVED)
-    await stream_until_the_codec_stops(machine)
-    left, right = rows(machine, "playback")
+    await sai_codec.periph.SAI1.audio("B").write(RECEIVED)
+    await stream_until_the_codec_stops(sai_codec)
+    left, right = rows(sai_codec, "playback")
     assert (left[1], right[1]) == (512, 0x10000 - 512)
-    frames = sent(machine)
+    frames = sent(sai_codec)
     assert [frame.slots for frame in frames] == [
         (left[k % FRAMES], right[k % FRAMES]) for k in range(len(frames))
     ]
@@ -86,38 +86,38 @@ async def test_channel_12_interleaves_the_two_rows_of_playback_into_frames(
 
 
 async def test_channel_13_splits_each_received_frame_into_the_two_rows_of_capture(
-    machine: Machine,
+    sai_codec: Machine,
 ) -> None:
-    await machine.periph.SAI1.audio("B").write(RECEIVED)
-    await stream_until_the_codec_stops(machine)
-    count = len(sent(machine))
+    await sai_codec.periph.SAI1.audio("B").write(RECEIVED)
+    await stream_until_the_codec_stops(sai_codec)
+    count = len(sent(sai_codec))
     last = [max(k for k in range(count) if k % FRAMES == j) for j in range(FRAMES)]
-    assert rows(machine, "capture") == [[0x1000 | k for k in last], [0x2000 | k for k in last]]
+    assert rows(sai_codec, "capture") == [[0x1000 | k for k in last], [0x2000 | k for k in last]]
 
 
 async def test_half_and_complete_callbacks_come_per_2d_block_of_64_frames(
-    machine: Machine,
+    sai_codec: Machine,
 ) -> None:
     seen: dict[str, list[int]] = {}
 
     def recorder(name: str) -> None:
         def record(call: Call) -> Return:
-            seen.setdefault(name, []).append(machine.time.ps)
+            seen.setdefault(name, []).append(sai_codec.time.ps)
             return call.proceed()
 
-        machine.intercept(name, record)
+        sai_codec.intercept(name, record)
 
     for name in ("tx_half", "tx_complete", "rx_half", "rx_complete"):
         recorder(name)
-    await machine.periph.SAI1.audio("B").write(RECEIVED)
-    await stream_until_the_codec_stops(machine)
+    await sai_codec.periph.SAI1.audio("B").write(RECEIVED)
+    await stream_until_the_codec_stops(sai_codec)
     assert {name: len(times) for name, times in seen.items()} == {
         "tx_half": BUFFERS,
         "tx_complete": BUFFERS,
         "rx_half": BUFFERS,
         "rx_complete": BUFFERS,
     }
-    started = codec(machine).started_ps
+    started = codec(sai_codec).started_ps
     for name, frames, earliest, latest in (
         ("rx_half", FRAMES // 2, us(12.0), us(12.17)),
         ("rx_complete", FRAMES, us(15.75), us(15.92)),
@@ -131,26 +131,26 @@ async def test_half_and_complete_callbacks_come_per_2d_block_of_64_frames(
 
 
 async def test_a_snapshot_mid_stream_replays_the_same_frames_and_codec_stop(
-    machine: Machine,
+    sai_codec: Machine,
 ) -> None:
-    receiver = machine.periph.SAI1.audio("B")
+    receiver = sai_codec.periph.SAI1.audio("B")
     await receiver.write(RECEIVED)
-    stop = await machine.run(stop_when=lambda m: codec(m).started_ps != 0)
+    stop = await sai_codec.run(stop_when=lambda m: codec(m).started_ps != 0)
     assert stop.reason is StopReason.USER, stop
-    stop = await machine.run(for_=ms(2))
+    stop = await sai_codec.run(for_=ms(2))
     assert stop.reason is StopReason.TIME, stop
-    sent(machine)
+    sent(sai_codec)
     unserved = RECEIVED[len(RECEIVED) - receiver.queued :]
-    saved = machine.snapshot()
-    await stream_until_the_codec_stops(machine)
-    rest = sent(machine)
-    captured = rows(machine, "capture")
-    stopped = codec(machine).stopped_ps
+    saved = sai_codec.snapshot()
+    await stream_until_the_codec_stops(sai_codec)
+    rest = sent(sai_codec)
+    captured = rows(sai_codec, "capture")
+    stopped = codec(sai_codec).stopped_ps
 
-    machine.restore(saved)
-    assert codec(machine).stopped_ps == 0
+    sai_codec.restore(saved)
+    assert codec(sai_codec).stopped_ps == 0
     await receiver.write(unserved)
-    await stream_until_the_codec_stops(machine)
-    assert sent(machine) == rest
-    assert rows(machine, "capture") == captured
-    assert codec(machine).stopped_ps == stopped
+    await stream_until_the_codec_stops(sai_codec)
+    assert sent(sai_codec) == rest
+    assert rows(sai_codec, "capture") == captured
+    assert codec(sai_codec).stopped_ps == stopped

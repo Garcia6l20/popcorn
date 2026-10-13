@@ -11,9 +11,9 @@ store into flash without PG shows the PGSERR flag. Last, it reads the device ele
 signature of RM0456 chapter 76 with `LL_GetFlashSize`, `LL_GetPackageType` and the
 `LL_GetUID_Word` calls. The code uses LL and CMSIS only.
 
-`Project(strict=True)` makes any register access the models do not serve, and any flash wait
-state count below RM0456 Table 54 for the clock and voltage range, fail the run instead of being
-logged.
+`MachineDescription(strict=True)` makes any register access the models do not serve, and any
+flash wait state count below RM0456 Table 54 for the clock and voltage range, fail the run
+instead of being logged.
 
 ## Run
 

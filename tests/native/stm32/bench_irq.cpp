@@ -52,7 +52,7 @@ constexpr std::size_t   irq_array_size = 32;
 constexpr std::size_t   uart_words     = 2 * 3;
 constexpr std::uint32_t tim_cnt        = 0x24;
 
-auto u575() -> popcorn::mcu_description const&
+auto u575() -> popcorn::part_description const&
 {
   static auto const desc = popcorn::load_description(POPCORN_U575_DESC);
   return desc;

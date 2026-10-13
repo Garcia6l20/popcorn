@@ -52,7 +52,7 @@ def finish(m: popcorn.Machine) -> list[int]:
 
 
 def eeprom_machine(
-    u575: popcorn.MachineDescription, eeprom: I2CTarget | None = None
+    u575: popcorn.PartDescription, eeprom: I2CTarget | None = None
 ) -> tuple[popcorn.Machine, Eeprom24]:
     device = Eeprom24(0x50, 4096) if eeprom is None else eeprom
     assert isinstance(device, Eeprom24)
@@ -60,7 +60,7 @@ def eeprom_machine(
     return m, device
 
 
-def test_the_firmware_writes_and_reads_a_python_eeprom(u575: popcorn.MachineDescription) -> None:
+def test_the_firmware_writes_and_reads_a_python_eeprom(u575: popcorn.PartDescription) -> None:
     m, eeprom = eeprom_machine(u575)
     enter(m, "eeprom_rw")
     result = finish(m)
@@ -73,14 +73,14 @@ def test_the_firmware_writes_and_reads_a_python_eeprom(u575: popcorn.MachineDesc
     assert m.board.devices("I2C2") == ()
 
 
-def test_an_address_nobody_answers_is_nacked(u575: popcorn.MachineDescription) -> None:
+def test_an_address_nobody_answers_is_nacked(u575: popcorn.PartDescription) -> None:
     m, _ = eeprom_machine(u575)
     enter(m, "nack")
     assert finish(m) == [1, 1, 1, 0]
 
 
 def test_the_firmware_reads_the_jedec_id_of_a_python_spi_device(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     device = JedecDevice("PA4", (0x1F, 0x87, 0x01))
     m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
@@ -91,7 +91,7 @@ def test_the_firmware_reads_the_jedec_id_of_a_python_spi_device(
 
 
 def test_a_snapshot_mid_transfer_restores_into_a_fresh_machine_and_devices(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     fresh, _ = eeprom_machine(u575)
     enter(fresh, "eeprom_rw")
@@ -112,7 +112,7 @@ def test_a_snapshot_mid_transfer_restores_into_a_fresh_machine_and_devices(
     assert copy.array == eeprom.array
 
 
-def test_two_identical_runs_give_identical_snapshots(u575: popcorn.MachineDescription) -> None:
+def test_two_identical_runs_give_identical_snapshots(u575: popcorn.PartDescription) -> None:
     states: list[bytes] = []
     for _ in range(2):
         m, _ = eeprom_machine(u575)
@@ -123,7 +123,7 @@ def test_two_identical_runs_give_identical_snapshots(u575: popcorn.MachineDescri
 
 
 def test_every_machine_reset_reaches_each_device_with_its_kind(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     eeprom = Eeprom24(0x50, 4096)
     other = Eeprom24(0x51, 256)
@@ -136,7 +136,7 @@ def test_every_machine_reset_reaches_each_device_with_its_kind(
 
 
 def test_a_power_on_reset_during_twr_lets_the_eeprom_answer_at_once(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     fresh, _ = eeprom_machine(u575)
     enter(fresh, "eeprom_rw")
@@ -153,7 +153,7 @@ def test_a_power_on_reset_during_twr_lets_the_eeprom_answer_at_once(
     assert finish(m) == expected
 
 
-def test_the_default_reset_keeps_the_device_state(u575: popcorn.MachineDescription) -> None:
+def test_the_default_reset_keeps_the_device_state(u575: popcorn.PartDescription) -> None:
     class Counter(I2CTarget):
         count: int
 
@@ -194,7 +194,7 @@ class Flaky(Eeprom24):
 
 @pytest.mark.parametrize("method", ["on_start", "on_write", "on_read"])
 def test_a_device_exception_reaches_the_run_and_a_restore_recovers(
-    u575: popcorn.MachineDescription, method: str
+    u575: popcorn.PartDescription, method: str
 ) -> None:
     fresh, _ = eeprom_machine(u575)
     enter(fresh, "eeprom_rw")
@@ -224,7 +224,7 @@ class Stamped(Eeprom24):
         return super().on_start(read, at)
 
 
-def test_device_time_restarts_on_power_on_only(u575: popcorn.MachineDescription) -> None:
+def test_device_time_restarts_on_power_on_only(u575: popcorn.PartDescription) -> None:
     stamped = Stamped()
     m, _ = eeprom_machine(u575, stamped)
     enter(m, "eeprom_rw")
@@ -244,7 +244,7 @@ def test_device_time_restarts_on_power_on_only(u575: popcorn.MachineDescription)
 
 
 def test_an_spi_snapshot_mid_transfer_restores_into_a_fresh_device(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     device = JedecDevice("PA4", (0x1F, 0x87, 0x01))
     m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
@@ -261,7 +261,7 @@ def test_an_spi_snapshot_mid_transfer_restores_into_a_fresh_device(
     assert finish(m) == [0xFF, 0x1F, 0x87, 0x01]
 
 
-def test_a_device_on_the_hardware_ss_output(u575: popcorn.MachineDescription) -> None:
+def test_a_device_on_the_hardware_ss_output(u575: popcorn.PartDescription) -> None:
     device = JedecDevice(None, (0x1F, 0x87, 0x01))
     m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
     enter(m, "hw_ss")
@@ -271,7 +271,7 @@ def test_a_device_on_the_hardware_ss_output(u575: popcorn.MachineDescription) ->
 
 @pytest.mark.parametrize("value", [256, -1, "x", 1.5])
 def test_a_read_outside_a_byte_is_a_model_error(
-    u575: popcorn.MachineDescription, value: object
+    u575: popcorn.PartDescription, value: object
 ) -> None:
     class Wrong(Eeprom24):
         def on_read(self, at: VirtualTime) -> int:
@@ -284,7 +284,7 @@ def test_a_read_outside_a_byte_is_a_model_error(
 
 
 def test_a_machine_keeps_its_devices_and_frees_them_with_it(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     device = Eeprom24(0x50, 256)
     watch = weakref.ref(device)
@@ -297,7 +297,7 @@ def test_a_machine_keeps_its_devices_and_frees_them_with_it(
     assert watch() is None
 
 
-def test_a_device_serves_one_live_machine(u575: popcorn.MachineDescription) -> None:
+def test_a_device_serves_one_live_machine(u575: popcorn.PartDescription) -> None:
     device = Eeprom24(0x50, 256)
     m = popcorn.Machine(u575, devices={"I2C1": [device]})
     with pytest.raises(ConfigError) as refused:
@@ -335,21 +335,21 @@ type _Devices = Callable[[], Mapping[str, Sequence[I2CTarget | SpiTarget]]]
     ],
 )
 def test_refused_devices_name_the_peripheral(
-    u575: popcorn.MachineDescription, devices: _Devices, reason: str
+    u575: popcorn.PartDescription, devices: _Devices, reason: str
 ) -> None:
     with pytest.raises(ConfigError, match=reason) as refused:
         popcorn.Machine(u575, devices=devices())
     assert refused.value.key.startswith("devices.")
 
 
-def test_one_device_listed_twice_is_refused(u575: popcorn.MachineDescription) -> None:
+def test_one_device_listed_twice_is_refused(u575: popcorn.PartDescription) -> None:
     device = Eeprom24(0x50, 256)
     with pytest.raises(ConfigError, match="listed once"):
         popcorn.Machine(u575, devices={"I2C1": [device, device]})
 
 
 def test_a_python_model_and_devices_on_one_peripheral_are_refused(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     class Plain(Model):
         pass
@@ -360,7 +360,7 @@ def test_a_python_model_and_devices_on_one_peripheral_are_refused(
 
 
 def test_an_acknowledge_that_is_not_a_bool_is_a_model_error(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     class Loose(Eeprom24):
         def on_start(self, read: bool, at: VirtualTime) -> bool:
@@ -373,7 +373,7 @@ def test_an_acknowledge_that_is_not_a_bool_is_a_model_error(
 
 
 def test_an_spi_frame_wider_than_its_bits_is_a_model_error(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     class Wide(JedecDevice):
         def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
@@ -386,7 +386,7 @@ def test_an_spi_frame_wider_than_its_bits_is_a_model_error(
         asyncio.run(m.run(budget=BUDGET))
 
 
-def test_a_plain_spi_target_returns_an_idle_miso(u575: popcorn.MachineDescription) -> None:
+def test_a_plain_spi_target_returns_an_idle_miso(u575: popcorn.PartDescription) -> None:
     m = popcorn.Machine(
         u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [SpiTarget("PA4")]}
     )
@@ -394,7 +394,7 @@ def test_a_plain_spi_target_returns_an_idle_miso(u575: popcorn.MachineDescriptio
     assert finish(m) == [0xFF, 0xFF, 0xFF, 0xFF]
 
 
-def test_a_plain_i2c_target_acknowledges_and_reads_ff(u575: popcorn.MachineDescription) -> None:
+def test_a_plain_i2c_target_acknowledges_and_reads_ff(u575: popcorn.PartDescription) -> None:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [I2CTarget(0x50)]})
     enter(m, "eeprom_rw")
     result = finish(m)
@@ -402,7 +402,7 @@ def test_a_plain_i2c_target_acknowledges_and_reads_ff(u575: popcorn.MachineDescr
     assert result[1:] == [0, 0]
 
 
-def test_a_device_defining_eq_is_attached_by_identity(u575: popcorn.MachineDescription) -> None:
+def test_a_device_defining_eq_is_attached_by_identity(u575: popcorn.PartDescription) -> None:
     class Equal(I2CTarget):
         def __eq__(self, other: object) -> bool:
             return isinstance(other, Equal)
@@ -414,7 +414,7 @@ def test_a_device_defining_eq_is_attached_by_identity(u575: popcorn.MachineDescr
         popcorn.Machine(u575, devices={"I2C1": [second]})
 
 
-def test_state_of_another_type_needs_its_own_snapshot(u575: popcorn.MachineDescription) -> None:
+def test_state_of_another_type_needs_its_own_snapshot(u575: popcorn.PartDescription) -> None:
     class Plain(I2CTarget):
         table: dict[int, int]
 
@@ -451,7 +451,7 @@ def test_state_of_another_type_needs_its_own_snapshot(u575: popcorn.MachineDescr
     ],
 )
 def test_the_native_layer_refuses_devices_on_its_own(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     peripheral: str,
     device: Callable[[], object],
     reason: str,
@@ -467,7 +467,7 @@ DATA = Path(__file__).parents[2] / "data" / "api"
 
 
 def test_fr_per_5_a_project_wires_an_eeprom_the_firmware_uses(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     project = DEVICES
     m = project.machine()
@@ -557,7 +557,7 @@ def jedec_entry(*, address: int | None = None, cs: str | None = None) -> popcorn
     ],
 )
 def test_project_devices_are_refused_with_their_key(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     board: dict[str, popcorn.Periph],
     key: str,
     expected: str,
@@ -570,9 +570,9 @@ def test_project_devices_are_refused_with_their_key(
 
 @pytest.mark.parametrize(("cs", "entry"), [("PA4", "poll"), (None, "hw_ss")])
 def test_a_project_wires_spi_devices_by_chip_select(
-    u575: popcorn.MachineDescription, cs: str | None, entry: str
+    u575: popcorn.PartDescription, cs: str | None, entry: str
 ) -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(SPI_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),
@@ -592,7 +592,7 @@ def test_a_project_wires_spi_devices_by_chip_select(
     assert device.cs == cs
 
 
-def _two_bus_project() -> popcorn.Project:
+def _two_bus_project() -> popcorn.MachineDescription:
     base = DEVICES.replace(
         board={
             "I2C1": popcorn.Periph(devices=[popcorn.Device(Eeprom24, address=0x50, size=4096)]),
@@ -603,7 +603,7 @@ def _two_bus_project() -> popcorn.Project:
 
 
 def test_project_devices_replace_those_of_their_peripheral_only(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     project = _two_bus_project()
     given = Eeprom24(0x50, 4096)
@@ -619,7 +619,7 @@ def test_project_devices_replace_those_of_their_peripheral_only(
 
 
 def test_project_devices_through_an_alias_a_config_or_an_empty_list(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     project = _two_bus_project()
     given = Eeprom24(0x50, 4096)
@@ -644,7 +644,7 @@ def test_project_devices_through_an_alias_a_config_or_an_empty_list(
     ],
 )
 def test_refused_project_devices_name_their_key(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     devices: dict[str, list[I2CTarget]],
     key: str,
     expected: str,
@@ -656,14 +656,14 @@ def test_refused_project_devices_name_their_key(
 
 
 def test_project_devices_given_for_a_peripheral_are_not_built(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     broken = DEVICES.replace(board={"I2C1": popcorn.Periph(devices=[eeprom_entry(size=0)])})
     given = Eeprom24(0x50, 16)
     assert broken.machine(devices={"I2C1": [given]}).board.devices("I2C1") == (given,)
 
 
-def clocked_machine(u575: popcorn.MachineDescription, *devices: I2CTarget) -> popcorn.Machine:
+def clocked_machine(u575: popcorn.PartDescription, *devices: I2CTarget) -> popcorn.Machine:
     return popcorn.Machine(
         u575,
         devices={"I2C1": list(devices)},
@@ -672,7 +672,7 @@ def clocked_machine(u575: popcorn.MachineDescription, *devices: I2CTarget) -> po
 
 
 def test_a_device_drives_the_clock_of_the_sai_block_wired_to_it_only(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     codec, other = I2CTarget(0x38), I2CTarget(0x39)
     m = clocked_machine(u575, codec, other)
@@ -697,7 +697,7 @@ def test_a_device_drives_the_clock_of_the_sai_block_wired_to_it_only(
 
 
 def test_a_device_board_without_a_live_machine_is_refused(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     codec = I2CTarget(0x38)
     with pytest.raises(ConfigError):
@@ -727,7 +727,7 @@ def test_a_device_board_without_a_live_machine_is_refused(
     ],
 )
 def test_a_clocked_by_naming_no_attached_device_is_refused_at_build(
-    u575: popcorn.MachineDescription, clocked_by: str, key: str
+    u575: popcorn.PartDescription, clocked_by: str, key: str
 ) -> None:
     codec = I2CTarget(0x38)
     with pytest.raises(ConfigError) as refused:
@@ -741,7 +741,7 @@ def test_a_clocked_by_naming_no_attached_device_is_refused_at_build(
 
 
 def test_clocked_by_names_an_spi_device_by_its_chip_select(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     on_ss, on_pin = SpiTarget(), SpiTarget("PA4")
     m = popcorn.Machine(
@@ -762,7 +762,7 @@ def test_clocked_by_names_an_spi_device_by_its_chip_select(
         on_pin.board.set_audio_clock("SAI1", "A", 0)
 
 
-def test_clocked_by_names_a_bus_through_its_alias(u575: popcorn.MachineDescription) -> None:
+def test_clocked_by_names_a_bus_through_its_alias(u575: popcorn.PartDescription) -> None:
     codec = I2CTarget(0x38)
     m = popcorn.Machine(
         u575,
@@ -775,7 +775,7 @@ def test_clocked_by_names_a_bus_through_its_alias(u575: popcorn.MachineDescripti
 
 @pytest.mark.parametrize("method", ["on_start", "on_write", "on_read"])
 def test_an_i2c_device_error_inside_running_raises_at_the_next_wait(
-    u575: popcorn.MachineDescription, method: str
+    u575: popcorn.PartDescription, method: str
 ) -> None:
     flaky = Flaky()
     flaky.broken = method
@@ -797,7 +797,7 @@ class BrokenJedec(JedecDevice):
 
 
 def test_an_spi_device_error_inside_running_raises_at_the_next_wait(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     device = BrokenJedec("PA4", (0x1F, 0x87, 0x01))
     m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
@@ -817,7 +817,7 @@ class Marker(I2CTarget):
 
 
 def test_board_device_returns_the_one_device_of_a_class_typed(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     eeprom = Eeprom24(0x50, 4096)
     marker = Marker(0x51)
@@ -830,7 +830,7 @@ def test_board_device_returns_the_one_device_of_a_class_typed(
     assert m.board.devices("SEC_I2C1") == m.board.devices("I2C1") == (eeprom, marker)
 
 
-def test_board_device_matches_a_subclass_instance(u575: popcorn.MachineDescription) -> None:
+def test_board_device_matches_a_subclass_instance(u575: popcorn.PartDescription) -> None:
     eeprom = Eeprom24(0x50, 4096)
     m = popcorn.Machine(u575, devices={"I2C1": [eeprom]})
     assert m.board.device("I2C1", I2CTarget) is eeprom
@@ -838,7 +838,7 @@ def test_board_device_matches_a_subclass_instance(u575: popcorn.MachineDescripti
 
 @pytest.mark.parametrize(("peripheral", "cls"), [("I2C1", I2CTarget), ("I2C2", Eeprom24)])
 def test_board_device_refuses_none_or_several(
-    u575: popcorn.MachineDescription, peripheral: str, cls: type[I2CTarget]
+    u575: popcorn.PartDescription, peripheral: str, cls: type[I2CTarget]
 ) -> None:
     m = popcorn.Machine(u575, devices={"I2C1": [Eeprom24(0x50, 4096), Marker(0x51)]})
     with pytest.raises(ConfigError) as raised:
@@ -847,7 +847,7 @@ def test_board_device_refuses_none_or_several(
 
 
 def test_board_device_names_a_peripheral_the_part_lacks(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(u575, devices={"I2C1": [Eeprom24(0x50, 4096)]})
     with pytest.raises(ConfigError, match="a peripheral of") as raised:

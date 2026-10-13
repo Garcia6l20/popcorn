@@ -39,29 +39,27 @@ async def run_transfers(machine: Machine) -> None:
     assert stop.reason is StopReason.ADDRESS, stop
 
 
-async def test_both_transfers_arrive_in_order(machine: Machine) -> None:
-    await run_transfers(machine)
-    assert machine.var("transfers_done").value == 2
+async def test_both_transfers_arrive_in_order(gpdma: Machine) -> None:
+    await run_transfers(gpdma)
+    assert gpdma.var("transfers_done").value == 2
 
-    frames = await machine.periph.USART1.port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
+    frames = await gpdma.periph.USART1.port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
     assert bytes(frame.data for frame in frames) == BLOCK + HEAD + TAIL
 
 
-async def test_the_dma_keeps_the_usart_busy_back_to_back(machine: Machine) -> None:
-    await run_transfers(machine)
-    frames = await machine.periph.USART1.port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
+async def test_the_dma_keeps_the_usart_busy_back_to_back(gpdma: Machine) -> None:
+    await run_transfers(gpdma)
+    frames = await gpdma.periph.USART1.port.read_frames(len(BLOCK + HEAD + TAIL), for_=ms(1))
 
-    frame_ps = 10 * machine.periph.USART1.BRR.value * 10**12 // PCLK2_HZ
+    frame_ps = 10 * gpdma.periph.USART1.BRR.value * 10**12 // PCLK2_HZ
     first, second = frames[: len(BLOCK)], frames[len(BLOCK) :]
     for transfer in (first, second):
         for earlier, later in itertools.pairwise(transfer):
             assert abs((later.at - earlier.at).ps - frame_ps) < ns(1).ps
 
 
-async def test_the_cpu_sleeps_while_the_dma_moves_the_data(
-    machine: Machine, tmp_path: Path
-) -> None:
-    with machine.trace([TraceKind.BLOCK], tmp_path / "transfers.pctr"):
-        await run_transfers(machine)
+async def test_the_cpu_sleeps_while_the_dma_moves_the_data(gpdma: Machine, tmp_path: Path) -> None:
+    with gpdma.trace([TraceKind.BLOCK], tmp_path / "transfers.pctr"):
+        await run_transfers(gpdma)
     blocks = sum(1 for record in read(tmp_path / "transfers.pctr") if isinstance(record, Block))
     assert blocks < MAX_BLOCKS

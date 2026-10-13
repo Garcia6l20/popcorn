@@ -6,17 +6,17 @@ converts both channels, 16 rounds with `HAL_Delay(1)` between them, into `adc_re
 two milliseconds of counts. Channel 1 is converted a few tens of microseconds after channel 0,
 so its mirror lags by less than one millisecond of counts.
 
-Two ways to attach a mock: the project's `Periph(devices=[Device(Adc, ...)])` on SPI1, which the
-`machine` fixture uses, and `machine_factory.booted(devices={"SPI1": [adc]})`, which can pass what
-a project cannot, here a Python function as the sample source. The factory machine keeps the
-rest of the project build. An ADC holding a function cannot key the boot cache: that machine
-boots each time.
+Two ways to attach a mock: the description's `Periph(devices=[Device(Adc, ...)])` on SPI1, which the
+`spi_mock` fixture uses, and `machine_factory.booted(description, devices={"SPI1": [adc]})`,
+which can pass what a description cannot, here a Python function as the sample source. The factory
+machine keeps the rest of the description's build. An ADC holding a function cannot key the boot
+cache: that machine boots each time.
 """
 
 import itertools
 
 import pytest
-from popcorn import Machine, StopReason
+from popcorn import Machine, MachineDescription, StopReason
 from popcorn.pytest import MachineFactory
 from popcorn.units import VirtualTime, ms
 from spiadc import FULL_SCALE, Adc
@@ -46,26 +46,26 @@ def samples(machine: Machine, channel: int) -> list[int]:
     return [int(value) for value in values]
 
 
-async def test_the_buffer_follows_a_ramp_in_virtual_time(machine: Machine) -> None:
-    await run_to_done(machine)
-    assert machine.var("adc_result").conversions.value == CONVERSIONS
-    step = adc(machine).counts_per_ms
-    rising, mirrored = samples(machine, 0), samples(machine, 1)
+async def test_the_buffer_follows_a_ramp_in_virtual_time(spi_mock: Machine) -> None:
+    await run_to_done(spi_mock)
+    assert spi_mock.var("adc_result").conversions.value == CONVERSIONS
+    step = adc(spi_mock).counts_per_ms
+    rising, mirrored = samples(spi_mock, 0), samples(spi_mock, 1)
     for earlier, later in itertools.pairwise(rising):
         assert step <= later - earlier < 3 * step
     for up, down in zip(rising, mirrored, strict=True):
         assert 0 <= FULL_SCALE - down - up < step
 
 
-async def test_each_conversion_is_one_chip_select_period(machine: Machine) -> None:
-    await run_to_done(machine)
-    device = adc(machine)
+async def test_each_conversion_is_one_chip_select_period(spi_mock: Machine) -> None:
+    await run_to_done(spi_mock)
+    device = adc(spi_mock)
     assert device.selects == device.deselects == CONVERSIONS * CHANNELS
     assert device.bad_frames == 0
 
 
 async def test_a_source_function_given_through_the_factory(
-    machine_factory: MachineFactory,
+    machine_factory: MachineFactory, spi_mock_description: MachineDescription
 ) -> None:
     served: list[tuple[int, int]] = []
 
@@ -74,7 +74,9 @@ async def test_a_source_function_given_through_the_factory(
         served.append((channel, value))
         return value
 
-    machine = await machine_factory.booted(devices={"SPI1": [Adc(cs="PB0", source=source)]})
+    machine = await machine_factory.booted(
+        spi_mock_description, devices={"SPI1": [Adc(cs="PB0", source=source)]}
+    )
     await run_to_done(machine)
 
     assert served[0::2] == [(0, value) for value in samples(machine, 0)]

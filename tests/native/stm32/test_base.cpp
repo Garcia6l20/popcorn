@@ -110,7 +110,7 @@ public:
 
 struct bench
 {
-  popcorn::mcu_description part = popcorn::testing::description_from("POPCORN_STM32_BASE_DESC");
+  popcorn::part_description part = popcorn::testing::description_from("POPCORN_STM32_BASE_DESC");
   popcorn::peripheral_desc const& rcc = part.peripherals.front();
   periph::register_file           regs{rcc};
   core::clock                     clock{4'000'000};

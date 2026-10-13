@@ -745,7 +745,7 @@ TEST_CASE("a watchdog started while the core is held starts counting at the rele
 
 namespace
 {
-auto without_freeze_field() -> popcorn::mcu_description
+auto without_freeze_field() -> popcorn::part_description
 {
   auto desc = u575();
   auto dbg  = std::ranges::find(
@@ -759,7 +759,7 @@ auto without_freeze_field() -> popcorn::mcu_description
   return desc;
 }
 
-auto without_dbgmcu() -> popcorn::mcu_description
+auto without_dbgmcu() -> popcorn::part_description
 {
   auto desc = u575();
   std::erase_if(
@@ -767,7 +767,7 @@ auto without_dbgmcu() -> popcorn::mcu_description
   return desc;
 }
 
-auto entered_on(popcorn::mcu_description const& desc, core::machine_options options)
+auto entered_on(popcorn::part_description const& desc, core::machine_options options)
     -> stm32_fixture
 {
   stm32_fixture f{desc, "iwdg_ll", std::move(options)};
@@ -784,8 +784,8 @@ TEST_CASE("a hold with no freeze field to read warns once and the watchdog runs 
 {
   struct absent
   {
-    popcorn::mcu_description desc;
-    std::string_view         says;
+    popcorn::part_description desc;
+    std::string_view          says;
   };
   for(auto const& [desc, says] : {
           absent{without_freeze_field(), "DBG_IWDG_STOP"},

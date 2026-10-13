@@ -209,7 +209,7 @@ public:
    * @throws config_error naming `core.cpu` when no arch module implements the core, naming
    *         `cpi` or `trace_capacity` when not above 0, or as core::machine's constructor.
    */
-  machine_handle(mcu_description const& description, machine_config const& config);
+  machine_handle(part_description const& description, machine_config const& config);
 
   /** @brief Not copyable, models hold its lifetime flag. */
   machine_handle(machine_handle const&) = delete;

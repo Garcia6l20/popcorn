@@ -74,7 +74,8 @@ def test_changes_invalidate_the_entry(pytester: pytest.Pytester) -> None:
         write_conftest(pytester)
         write_project_conftest(
             pytester.path,
-            f'popcorn.Project(part="POPCORN-M33-TEST", description=Path({str(M33_JSON)!r}), '
+            f'popcorn.MachineDescription(part="POPCORN-M33-TEST", '
+            f"description=Path({str(M33_JSON)!r}), "
             f"images=[popcorn.Elf(Path({str(image)!r}))], boot=popcorn.Boot({boot}))",
             extra,
         )
@@ -226,10 +227,10 @@ def test_the_async_lock_wait_keeps_the_loop_running(pytester: pytest.Pytester) -
 
         from popcorn.pytest._cache import Entry, cache_directory, cache_key
 
-        async def test_waits(machine_factory, popcorn_project, request):
+        async def test_waits(machine_factory, description, request):
             directory = cache_directory(request.config)
             directory.mkdir(parents=True, exist_ok=True)
-            project = popcorn_project.config("other")
+            project = description.config("other")
             entry = Entry.of(directory, cache_key(project, False))
             holder = os.open(entry.lock, os.O_RDWR | os.O_CREAT)
             fcntl.flock(holder, fcntl.LOCK_EX)
@@ -244,7 +245,7 @@ def test_the_async_lock_wait_keeps_the_loop_running(pytester: pytest.Pytester) -
                     await asyncio.sleep(0.01)
 
             task = asyncio.create_task(ticker())
-            machine = await machine_factory.booted(config="other")
+            machine = await machine_factory.booted(description, config="other")
             done = True
             await task
             assert machine.pc == machine.sym("alu_mark")
@@ -302,8 +303,8 @@ def test_a_hit_restores_the_boot_stop(pytester: pytest.Pytester) -> None:
 
         from popcorn.pytest._session import Key, popcorn_session
 
-        def test_stop(machine, popcorn_project, request):
-            key = Key(popcorn_project.digest, False)
+        def test_stop(machine, description, request):
+            key = Key(description.digest, False)
             stop = popcorn_session(request.config).booted(key).boot_stop
             with Path("stops.txt").open("a") as stops:
                 stops.write(f"{stop!r}\\n")
@@ -472,7 +473,7 @@ class Dma(Model):
     pass
 
 
-project = popcorn.Project(part="STM32U575QGIx", images=[])
+project = popcorn.MachineDescription(part="STM32U575QGIx", images=[])
 keys = [cache_key(project, False)]
 unregister("GPDMA", "STM32U5_dma3_*")
 keys.append(cache_key(project, False))

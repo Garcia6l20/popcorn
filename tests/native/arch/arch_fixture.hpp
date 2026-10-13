@@ -20,7 +20,7 @@ using arch_fixture = machine_fixture<arch::armv8m::cortex_m>;
  * @brief The core test description with fields changed in code.
  * @param edit Called with the description to change.
  */
-inline auto m33_with(auto&& edit) -> mcu_description
+inline auto m33_with(auto&& edit) -> part_description
 {
   auto desc = m33();
   edit(desc);

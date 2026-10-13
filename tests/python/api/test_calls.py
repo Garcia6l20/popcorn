@@ -68,7 +68,7 @@ def test_a_struct_filled_in_the_arena_reads_back_by_field(callee: popcorn.Machin
     assert point.var.scale.value == 1.5
 
 
-def test_without_dwarf_kinds_come_from_python_types(m33: popcorn.MachineDescription) -> None:
+def test_without_dwarf_kinds_come_from_python_types(m33: popcorn.PartDescription) -> None:
     image = popcorn.Image.elf(CALLEE_ELF)
     stripped = popcorn.Machine(m33, image=image)
     stripped.reset()
@@ -201,7 +201,7 @@ def test_the_abi_override_reads_a_soft_float_function(callee: popcorn.Machine) -
     assert asyncio.run(callee.call("soft_mixed", *args)).value != 16.0
 
 
-def test_calls_work_without_an_arena(m33: popcorn.MachineDescription) -> None:
+def test_calls_work_without_an_arena(m33: popcorn.PartDescription) -> None:
     m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF), arena_base=None)
     m.reset()
     assert call(m, "add", 40, 2).value == 42
@@ -272,7 +272,7 @@ SCS_WRITES = {
 
 
 @pytest.fixture
-def strict_callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def strict_callee(m33: popcorn.PartDescription) -> popcorn.Machine:
     m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF), strict_peripherals=True)
     m.reset()
     m.mem.write(STORE_AT, STORE_TWICE)
@@ -282,7 +282,7 @@ def strict_callee(m33: popcorn.MachineDescription) -> popcorn.Machine:
 @pytest.mark.parametrize("register", SCS_WRITES)
 @pytest.mark.parametrize("ending", ["returned", "model_error"])
 def test_scs_writes_made_in_a_call_stay(
-    strict_callee: popcorn.Machine, m33: popcorn.MachineDescription, register: str, ending: str
+    strict_callee: popcorn.Machine, m33: popcorn.PartDescription, register: str, ending: str
 ) -> None:
     address, value = SCS_WRITES[register]
     unmodelled = next(p.base for p in m33.peripherals if p.ip == "unmodelled")

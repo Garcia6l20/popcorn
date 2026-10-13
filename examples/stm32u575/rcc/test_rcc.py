@@ -33,31 +33,31 @@ async def configure_clock(machine: Machine) -> None:
     assert stop.reason is StopReason.ADDRESS, stop
 
 
-async def test_firmware_computes_160_mhz_from_the_pll1_registers(machine: Machine) -> None:
-    await configure_clock(machine)
-    assert machine.var("SystemCoreClock").value == SYSCLK_HZ
-    assert machine.periph.RCC.RCC_CFGR1.SWS == SWS_PLL1
+async def test_firmware_computes_160_mhz_from_the_pll1_registers(rcc: Machine) -> None:
+    await configure_clock(rcc)
+    assert rcc.var("SystemCoreClock").value == SYSCLK_HZ
+    assert rcc.periph.RCC.RCC_CFGR1.SWS == SWS_PLL1
 
 
-async def test_hse_is_ready_before_pll1_locks(machine: Machine) -> None:
+async def test_hse_is_ready_before_pll1_locks(rcc: Machine) -> None:
     ready: dict[str, tuple[int, int]] = {}
     for hook in ("hse_ready", "pll_ready"):
 
         def flags(call: Call, hook: str = hook) -> Return:
-            cr = machine.periph.RCC.RCC_CR
+            cr = rcc.periph.RCC.RCC_CR
             ready[hook] = (cr.HSERDY, cr.PLL1RDY)
             return call.proceed()
 
-        machine.intercept(hook, flags)
-    await configure_clock(machine)
+        rcc.intercept(hook, flags)
+    await configure_clock(rcc)
 
     assert ready == {"hse_ready": (1, 0), "pll_ready": (1, 1)}
 
 
-async def test_systick_ticks_every_millisecond_at_160_mhz(machine: Machine) -> None:
-    await configure_clock(machine)
-    ticks = timestamps(machine, "SysTick_Handler")
-    stop = await machine.run(for_=ms(5))
+async def test_systick_ticks_every_millisecond_at_160_mhz(rcc: Machine) -> None:
+    await configure_clock(rcc)
+    ticks = timestamps(rcc, "SysTick_Handler")
+    stop = await rcc.run(for_=ms(5))
     assert stop.reason is StopReason.TIME, stop
 
     assert len(ticks) >= 4

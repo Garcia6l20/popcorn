@@ -427,7 +427,7 @@ void bind_device_bases(nb::module_ scope)
 }
 
 auto device_factories(
-    mcu_description const&                                description,
+    part_description const&                               description,
     std::map<std::string, std::vector<nb::object>> const& devices,
     std::optional<stm32::rcc_options> const&              rcc,
     std::vector<nb::handle>&                              python_owned)

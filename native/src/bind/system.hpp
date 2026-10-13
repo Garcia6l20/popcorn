@@ -22,7 +22,7 @@ namespace popcorn::bind
 {
 namespace py = reflex::py;
 
-/** @brief One direction of a UART link, as LinkedSystem declares it to SystemHandle. */
+/** @brief One direction of a UART link, as System declares it to SystemHandle. */
 struct[[= py::rename{"WireSpec"}]] wire_spec
 {
   /** @brief Index of the sending member. */
@@ -74,7 +74,7 @@ struct[[= py::rename{"TapRecord"}]] tap_record
 
 /**
  * @brief Owner of one core::system over the hosts of MachineHandles, the object
- *        `popcorn.LinkedSystem` wraps. Members and wires are added, then start() builds and
+ *        `popcorn.System` wraps. Members and wires are added, then start() builds and
  *        starts the system. Every method that takes the system mutex tries it with the GIL held
  *        and on contention releases the GIL and blocks, then calls the system with the GIL
  *        released, since the system takes host mutexes. A method called from a callback of a

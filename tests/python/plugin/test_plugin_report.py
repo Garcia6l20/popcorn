@@ -267,8 +267,8 @@ def test_two_machines_get_two_blocks(pytester: pytest.Pytester) -> None:
     pytester.makepyfile("""
         import popcorn
 
-        async def test_two(machine, machine_factory):
-            other = machine_factory()
+        async def test_two(machine, machine_factory, description):
+            other = machine_factory(description)
             await other.run(budget=500)
             assert False
         """)
@@ -290,8 +290,8 @@ def test_the_machine_that_raised_is_marked(pytester: pytest.Pytester) -> None:
     pytester.makepyfile("""
         import popcorn
 
-        async def test_two(machine, machine_factory):
-            machine_factory()
+        async def test_two(machine, machine_factory, description):
+            machine_factory(description)
             machine.nvic.pend(0)
             async with machine.running():
                 await machine.wait_for(popcorn.Reached("ready"))
@@ -348,10 +348,10 @@ def test_the_faulting_factory_machine_carries_the_fault(pytester: pytest.Pyteste
     pytester.makepyfile("""
         import popcorn
 
-        async def test_second_faults(machine_factory):
-            first = await machine_factory.booted()
+        async def test_second_faults(machine_factory, description):
+            first = await machine_factory.booted(description)
             await first.run(budget=100)
-            second = machine_factory()
+            second = machine_factory(description)
             second.nvic.pend(0)
             async with second.running():
                 await second.wait_for(popcorn.Reached("ready"))
@@ -425,8 +425,8 @@ def test_machines_are_released_after_the_teardown_report(pytester: pytest.Pytest
 
         REFS = []
 
-        def test_makes_a_machine(machine_factory):
-            REFS.append(weakref.ref(machine_factory()))
+        def test_makes_a_machine(machine_factory, description):
+            REFS.append(weakref.ref(machine_factory(description)))
 
         def test_it_is_gone():
             gc.collect()
@@ -439,8 +439,8 @@ def test_a_factory_boot_failure_is_reported(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester, until="ready", elf=FAULT_ELF, vtor="vt_nested")
     pytester.makepyfile("""
-        def test_factory(machine_factory):
-            machine_factory()
+        def test_factory(machine_factory, description):
+            machine_factory(description)
         """)
     result = run(pytester)
     result.assert_outcomes(failed=1)

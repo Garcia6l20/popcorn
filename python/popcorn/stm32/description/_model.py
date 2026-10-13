@@ -1,4 +1,4 @@
-"""Dataclasses and enums generated from data/schema/mcu_description.schema.json.
+"""Dataclasses and enums generated from data/schema/part_description.schema.json.
 
 Regenerate with ``python -m popcorn.stm32.description._codegen``. Do not edit by hand.
 """
@@ -140,7 +140,7 @@ class RegionDesc:
 
 
 @dataclass(slots=True, kw_only=True)
-class McuDescription:
+class PartDescription:
     schema_version: int = field(default=1, metadata={"const": 1})
     part: str
     generator: str

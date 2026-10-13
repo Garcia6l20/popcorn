@@ -18,15 +18,15 @@ HAL_OK = 0
 CORE_ID_310A = 0x4F54310A
 
 
-async def test_the_pcd_driver_brings_the_core_up(machine: Machine) -> None:
-    stop = await machine.run(until="usb_core_ready", for_=ms(100))
+async def test_the_pcd_driver_brings_the_core_up(otg_fs: Machine) -> None:
+    stop = await otg_fs.run(until="usb_core_ready", for_=ms(100))
     assert stop.reason is StopReason.ADDRESS, stop
-    assert machine.var("init_status").value == HAL_OK
-    assert machine.var("start_status").value == HAL_OK
-    assert machine.var("core_id").value == CORE_ID_310A
-    grstctl = machine.periph.OTG_FS.GRSTCTL
+    assert otg_fs.var("init_status").value == HAL_OK
+    assert otg_fs.var("start_status").value == HAL_OK
+    assert otg_fs.var("core_id").value == CORE_ID_310A
+    grstctl = otg_fs.periph.OTG_FS.GRSTCTL
     assert grstctl.AHBIDL == 1
     assert grstctl.CSRST == 0
     assert grstctl.RXFFLSH == 0
     assert grstctl.TXFFLSH == 0
-    assert not machine.nvic.pending(machine.irq.OTG_FS_IRQn)
+    assert not otg_fs.nvic.pending(otg_fs.irq.OTG_FS_IRQn)

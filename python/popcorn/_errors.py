@@ -38,11 +38,11 @@ class ConfigError(PopcornError):
 
 
 class MissingInput(ConfigError):
-    """A file or directory a project needs does not exist: an image, an SVD, a description, or
-    the ST install a part's description is built from.
+    """A file or directory a machine description needs does not exist: an image, an SVD, a
+    description, or the ST install a part's description is built from.
 
     A malformed file, an unknown part in an existing install or an image that does not fit
-    raise another error. `Project.missing` makes the pytest plugin skip on this one.
+    raise another error. `MachineDescription.missing` makes the pytest plugin skip on this one.
 
     Attributes:
         path: The path that does not exist.

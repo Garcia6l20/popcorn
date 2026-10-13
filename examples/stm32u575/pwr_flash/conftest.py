@@ -1,13 +1,13 @@
-"""Project of the pwr_flash example."""
+"""MachineDescription of the pwr_flash example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+PWR_FLASH = popcorn.MachineDescription(
     name="pwr-flash",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/pwr_flash.elf")],
@@ -16,6 +16,6 @@ PROJECT = popcorn.Project(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def pwr_flash() -> popcorn.MachineDescription:
+    return PWR_FLASH

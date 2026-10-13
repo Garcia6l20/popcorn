@@ -316,7 +316,7 @@ def ticks_reach(count: int) -> Callable[[popcorn.Machine], bool]:
     return lambda m: int(m.var("ticks").value) >= count
 
 
-def test_wait_until_parked_returns_where_stop_when_stops(m33: popcorn.MachineDescription) -> None:
+def test_wait_until_parked_returns_where_stop_when_stops(m33: popcorn.PartDescription) -> None:
     callee = popcorn.Machine(
         m33,
         image=popcorn.Image.elf(CALLEE_ELF),

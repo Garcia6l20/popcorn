@@ -14,7 +14,7 @@ namespace popcorn::core
 {
 namespace
 {
-void fill_trace_ids(auto& slot, mcu_description const& description, std::uint32_t peripheral)
+void fill_trace_ids(auto& slot, part_description const& description, std::uint32_t peripheral)
 {
   auto const&                  unit = description.peripherals[peripheral];
   std::map<std::uint32_t, int> per_word;

@@ -30,7 +30,7 @@ class cortex_m : public arch
 public:
   /**
    * @brief Creates the module for a core.
-   * @param core Core of the MCU description.
+   * @param core Core of the part description.
    * @throws config_error naming `core.cpu` for a core the module does not implement, or
    *         `core.revision` for a revision not spelled `rNpM`.
    */

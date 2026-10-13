@@ -68,7 +68,7 @@ void register_builtin_models()
   });
 }
 
-auto factories(board const& b, mcu_description const& part)
+auto factories(board const& b, part_description const& part)
     -> std::map<std::string, model_factory, std::less<>>
 {
   std::map<std::string, model_factory, std::less<>> out;

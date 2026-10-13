@@ -1,5 +1,5 @@
-"""Per-process plugin state: the projects by digest, one booted machine per key, the boot
-counters."""
+"""Per-process plugin state: the machine descriptions by digest, one boot per key, one reused
+machine per declared machine fixture and key, the boot counters."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import cast
 
 import pytest
 
-from popcorn import ConfigError, Machine, Project, Snapshot, Stop
+from popcorn import ConfigError, Machine, MachineDescription, Snapshot, Stop
 from popcorn._devices import serving
 from popcorn._machine import AttachedDevice
 from popcorn.coverage import Coverage, worker_path
@@ -25,7 +25,7 @@ from popcorn.pytest._options import SETTINGS, Settings
 from popcorn.pytest._report import park_ended, unclaimed
 
 type Devices = Mapping[str, Sequence[AttachedDevice]]
-"""Bus devices per peripheral, as `Project.machine(devices=)` takes them."""
+"""Bus devices per peripheral, as `MachineDescription.machine(devices=)` takes them."""
 
 UNCACHED = "uncached"
 """`Key.devices` of a device set that cannot be keyed: every boot of it is a new one."""
@@ -36,14 +36,14 @@ class Key:
     """What a booted machine depends on: equal keys share one boot.
 
     Attributes:
-        digest: The `Project.digest` of the project the machine is built from, its config
-            applied.
+        digest: The `MachineDescription.digest` of the machine description the machine is built
+            from, its config applied.
         strict: Whether unmodelled peripheral accesses raise.
-        devices: The digest of the bus devices given instead of the project's, UNCACHED when
-            they cannot be keyed, None for the project's.
-        name: The project's `name`, for reports only, not compared.
-        config: The config name selected, None for the base project, for reports only, not
-            compared.
+        devices: The digest of the bus devices given instead of the machine description's, UNCACHED
+            when they cannot be keyed, None for the machine description's.
+        name: The machine description's `name`, for reports only, not compared.
+        config: The config name selected, None for the base machine description, for reports only,
+            not compared.
     """
 
     digest: str
@@ -61,7 +61,7 @@ class Key:
     def __str__(self) -> str:
         base = f"config={self.config or '-'} digest={self.digest[:12]} strict={self.strict}"
         if self.name:
-            base = f"project={self.name} {base}"
+            base = f"description={self.name} {base}"
         return base if self.devices is None else f"{base} devices={self.devices}"
 
 
@@ -70,21 +70,23 @@ class Booted:
     """The booted state of one key.
 
     Attributes:
-        machine: The machine the `machine` fixture restores for every test of the key.
+        machine: The machine that booted the key or restored its boot from the cache, named
+            after the part. The first declared machine fixture of the key takes it, renamed
+            after the fixture. `machine_factory` and system members restore `saved` into
+            machines of their own. Unless taken, it is parked, its coverage collected and its
+            pty bridges closed at session end.
         snapshot: The boot snapshot, taken on `machine`.
         saved: `snapshot` in its saved form, restorable into any machine of the key.
-        boot_stop: The stop of the boot, None for a project without `boot.until`. Read back
-            from the cache entry on a cache hit, located in this machine.
-        image_count: How many images the machine had after the build.
-        ptys: The pty bridges the machine had after the build.
+        boot_stop: The stop of the boot, None for a machine description without `boot.until`. Read
+            back from the cache entry on a cache hit, located in this machine.
+        adopted: Whether a declared machine fixture took `machine`, which its slot now owns.
     """
 
     machine: Machine
     snapshot: Snapshot
     saved: bytes
     boot_stop: Stop | None
-    image_count: int
-    ptys: dict[str, str]
+    adopted: bool = False
     _decoded: Snapshot | None = None
 
     def decoded(self) -> Snapshot:
@@ -92,6 +94,26 @@ class Booted:
         if self._decoded is None:
             self._decoded = Snapshot.from_bytes(self.saved)
         return self._decoded
+
+
+@dataclass(slots=True)
+class Slot:
+    """The machine a declared machine fixture reuses for every test of one key.
+
+    Attributes:
+        machine: The machine, named after the fixture, restored from the saved boot of the key.
+        image_count: How many images the machine had after the build.
+        ptys: The pty bridges the machine had after the build.
+    """
+
+    machine: Machine
+    image_count: int
+    ptys: dict[str, str]
+
+    @classmethod
+    def of(cls, machine: Machine) -> Slot:
+        """The slot of `machine`, just built."""
+        return cls(machine, len(machine.images), machine.board.ptys)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,20 +152,21 @@ class PopcornSession:
     cache_hits: int = 0
     cache_dropped: int = 0
     rebuilds: int = 0
-    _projects: dict[str, Project] = field(default_factory=dict[str, Project])
+    _projects: dict[str, MachineDescription] = field(default_factory=dict[str, MachineDescription])
     _booted: dict[Key, Booted] = field(default_factory=dict[Key, Booted])
     _failed: dict[Key, BaseException] = field(default_factory=dict[Key, BaseException])
     _locks: dict[Key, asyncio.Lock] = field(default_factory=dict[Key, asyncio.Lock])
     _failed_machines: dict[Key, Machine] = field(default_factory=dict[Key, Machine])
     _device_boots: dict[Key, Snapshot] = field(default_factory=dict[Key, Snapshot])
     _device_keys: set[Key] = field(default_factory=set[Key])
+    _slots: dict[tuple[Key, str], Slot] = field(default_factory=dict[tuple[Key, str], Slot])
 
     @property
     def keys(self) -> list[Key]:
         """The keys booted or tried in this process."""
         return [*self._booted, *self._failed, *self._device_keys]
 
-    def key(self, project: Project, config: str | None, strict: bool | None) -> Key:
+    def key(self, project: MachineDescription, config: str | None, strict: bool | None) -> Key:
         """The key of the config `config` of `project`, strictness from that config when
         `strict` is None.
 
@@ -157,12 +180,12 @@ class PopcornSession:
             strict = selected.strict
         return Key(digest, strict, name=selected.name, config=config)
 
-    def project(self, key: Key) -> Project:
-        """The project `key` was made from by `key()`."""
+    def project(self, key: Key) -> MachineDescription:
+        """The machine description `key` was made from by `key()`."""
         return self._projects[key.digest]
 
     def device_key(self, key: Key, devices: Devices) -> Key:
-        """`key` with the bus devices `devices` given instead of the project's.
+        """`key` with the bus devices `devices` given instead of the machine description's.
 
         Raises:
             ConfigError: A device serves another live machine.
@@ -283,28 +306,43 @@ class PopcornSession:
         self._device_boots[key] = booted.decoded()
         return booted.machine, booted.decoded()
 
-    def rebuild(self, key: Key) -> Booted:
-        """Replace the reused machine of `key` by a new one restored from the saved form."""
-        old = self._booted[key]
+    def slot(self, key: Key, name: str) -> tuple[Slot, Snapshot]:
+        """The reused machine of the declared machine fixture `name` for `key`, and the saved
+        boot of `key` to restore into it, booting `key` on the owned loop when this process has
+        no boot of it. The first fixture name of `key` takes the machine that booted it, renamed
+        `name`, its boot log records keeping the part name. Every later name builds one named
+        `name`.
+
+        Raises:
+            RuntimeError: `key` is not booted yet and an event loop is running.
+            Exception: The boot of `key` failed, now or earlier in the session.
+        """
+        booted = self.booted(key)
+        found = self._slots.get((key, name))
+        if found is None:
+            machine = self.build(key, name=name) if booted.adopted else _adopt(booted, name)
+            found = self._slots[key, name] = Slot.of(machine)
+            booted.adopted = True
+        return found, booted.decoded()
+
+    def rebuild_slot(self, key: Key, name: str) -> Slot:
+        """Replace the reused machine of the fixture `name` for `key` by a new one, not
+        restored."""
+        slot = Slot.of(self.build(key, name=name))
+        old = self._slots[key, name]
+        self._slots[key, name] = slot
         self.collect(old.machine)
         old.machine.board.close()
-        machine = self.build(key)
-        machine.restore(old.decoded())
-        booted = Booted(
-            machine=machine,
-            snapshot=machine.snapshot(),
-            saved=old.saved,
-            boot_stop=old.boot_stop,
-            image_count=len(machine.images),
-            ptys=machine.board.ptys,
-        )
-        self._booted[key] = booted
         self.rebuilds += 1
-        return booted
+        return slot
 
     def booted_machines(self) -> list[Machine]:
-        """The reused machine of every key booted in this process."""
-        return [booted.machine for booted in self._booted.values()]
+        """The machine that booted every key booted in this process, unless a declared machine
+        fixture took it, and the reused machine of every declared machine fixture and key."""
+        return [
+            *(booted.machine for booted in self._booted.values() if not booted.adopted),
+            *(slot.machine for slot in self._slots.values()),
+        ]
 
     def failed_machine(self, key: Key) -> Machine | None:
         """The machine whose boot of `key` failed, as the failure left it, None when the build
@@ -312,10 +350,19 @@ class PopcornSession:
         return self._failed_machines.get(key)
 
     def park(self) -> None:
-        """Park the reused machines and those whose boot failed. What ended a free run by itself
-        is warned as unraisable: no test owns it any more."""
+        """Park the boot machines no fixture took, the reused machines and those whose boot
+        failed. What ended a free run by itself is warned as unraisable: no test owns it any
+        more."""
         machines = [
-            *((f"the machine of {key}", booted.machine) for key, booted in self._booted.items()),
+            *(
+                (f"the boot machine of {key}", booted.machine)
+                for key, booted in self._booted.items()
+                if not booted.adopted
+            ),
+            *(
+                (f"the machine {name} of {key}", slot.machine)
+                for (key, name), slot in self._slots.items()
+            ),
             *((f"the failed boot of {key}", m) for key, m in self._failed_machines.items()),
         ]
         ends = [(owner, park_ended(machine)) for owner, machine in machines]
@@ -324,9 +371,13 @@ class PopcornSession:
                 unclaimed(owner, ended)
 
     def close(self) -> None:
-        """Close the pty bridges of the reused machines and of those whose boot failed."""
+        """Close the pty bridges of the boot machines no fixture took, the reused machines and
+        those whose boot failed."""
         for booted in self._booted.values():
-            booted.machine.board.close()
+            if not booted.adopted:
+                booted.machine.board.close()
+        for slot in self._slots.values():
+            slot.machine.board.close()
         for machine in self._failed_machines.values():
             machine.board.close()
 
@@ -357,7 +408,11 @@ class PopcornSession:
         return booted
 
     async def _cached_boot(
-        self, key: Key, project: Project, devices: Devices | None = None, name: str | None = None
+        self,
+        key: Key,
+        project: MachineDescription,
+        devices: Devices | None = None,
+        name: str | None = None,
     ) -> Booted:
         if self.cache is None:
             return await self._fresh_boot(key, project, devices, name)
@@ -381,7 +436,6 @@ class PopcornSession:
         machine: Machine | None = None
         try:
             machine = self.build(key, devices, name)
-            ptys = machine.board.ptys
             machine.restore(Snapshot.load(entry.snapshot))
             snapshot = machine.snapshot()
             stop = entry.stop(machine)
@@ -400,8 +454,6 @@ class PopcornSession:
             snapshot=snapshot,
             saved=snapshot.to_bytes(),
             boot_stop=stop,
-            image_count=len(machine.images),
-            ptys=ptys,
         )
 
     def _boot_coverage_bytes(self, key: Key, booted: Booted) -> bytes | None:
@@ -411,14 +463,16 @@ class PopcornSession:
         return path.read_bytes() if path.is_file() else None
 
     async def _fresh_boot(
-        self, key: Key, project: Project, devices: Devices | None = None, name: str | None = None
+        self,
+        key: Key,
+        project: MachineDescription,
+        devices: Devices | None = None,
+        name: str | None = None,
     ) -> Booted:
         self.boots += 1
         machine: Machine | None = None
         try:
             machine = self.build(key, devices, name)
-            image_count = len(machine.images)
-            ptys = machine.board.ptys
             if project.boot.until is None:
                 machine.reset()
                 stop = None
@@ -436,8 +490,6 @@ class PopcornSession:
             snapshot=snapshot,
             saved=snapshot.to_bytes(),
             boot_stop=stop,
-            image_count=image_count,
-            ptys=ptys,
         )
 
 
@@ -448,6 +500,12 @@ def boot_coverage_path(directory: Path, key: Key, snapshot: Snapshot) -> Path:
         (key.identity, snapshot.description_digest, *snapshot.image_digests, snapshot.config_digest)
     )
     return directory / f"boot-{hashlib.sha256(identity.encode()).hexdigest()[:16]}.pcov"
+
+
+def _adopt(booted: Booted, name: str) -> Machine:
+    """The boot machine of `booted`, renamed `name`."""
+    booted.machine._rename(name)  # pyright: ignore[reportPrivateUsage]
+    return booted.machine
 
 
 def fresh_copy(error: BaseException) -> BaseException:

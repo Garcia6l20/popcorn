@@ -54,7 +54,7 @@ auto model_context_view::description() const -> peripheral_desc
   return context().regs.description();
 }
 
-auto model_context_view::part() const -> mcu_description
+auto model_context_view::part() const -> part_description
 {
   return context().part;
 }

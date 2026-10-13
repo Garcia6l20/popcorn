@@ -1,9 +1,9 @@
-"""Assembles an McuDescription from Sources: expand the SVD, read the db and rzone, apply every
+"""Assembles an PartDescription from Sources: expand the SVD, read the db and rzone, apply every
 patch, build the IRQ table, then assemble core, regions and peripherals."""
 
 from popcorn.stm32.description._cubemx import instance_ips, read_part, read_rzone
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
-from popcorn.stm32.description._model import CoreDesc, IrqDesc, McuDescription, PeripheralDesc
+from popcorn.stm32.description._model import CoreDesc, IrqDesc, PartDescription, PeripheralDesc
 from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
 from popcorn.stm32.description._sources import Sources, compute_source_digests, generator_string
 from popcorn.stm32.description._svd import expand_svd
@@ -24,14 +24,14 @@ def resolve_ip(
     return fallback, ""
 
 
-def build_description(sources: Sources) -> McuDescription:
-    """McuDescription assembled from @p sources."""
+def build_description(sources: Sources) -> PartDescription:
+    """PartDescription assembled from @p sources."""
     description, _ = build_description_with_report(sources)
     return description
 
 
-def build_description_with_report(sources: Sources) -> tuple[McuDescription, PatchReport]:
-    """@ref build_description's McuDescription, paired with the PatchReport of every rule
+def build_description_with_report(sources: Sources) -> tuple[PartDescription, PatchReport]:
+    """@ref build_description's PartDescription, paired with the PatchReport of every rule
     apply_patches applied while assembling it."""
     svd = expand_svd(sources.svd.read_bytes(), file=str(sources.svd))
     db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
@@ -116,7 +116,7 @@ def build_description_with_report(sources: Sources) -> tuple[McuDescription, Pat
 
     target.core.num_irqs = irq_table.num_irqs
 
-    description = McuDescription(
+    description = PartDescription(
         part=sources.part,
         generator=generator_string(),
         sources=compute_source_digests(sources),

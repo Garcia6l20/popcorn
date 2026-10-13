@@ -45,7 +45,7 @@ def test_the_firmware_echoes_at_the_configured_baud(board: popcorn.Machine) -> N
     assert all(gap >= FRAME_PS for gap in gaps)
 
 
-def test_the_same_exchange_gives_the_same_times(u575: popcorn.MachineDescription) -> None:
+def test_the_same_exchange_gives_the_same_times(u575: popcorn.PartDescription) -> None:
     from .conftest import BOARD_ELF
 
     def once() -> list[tuple[int, int]]:
@@ -120,7 +120,7 @@ def test_reads_take_frames_in_order_in_parts(board: popcorn.Machine) -> None:
 
 
 def test_a_stream_keeps_its_machine_and_both_are_freed_together(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     from .conftest import BOARD_ELF
 
@@ -165,7 +165,7 @@ def test_a_secure_alias_shares_the_port_of_the_uart_it_aliases(board: popcorn.Ma
 
 
 def test_a_python_model_in_a_uart_slot_is_not_connected(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(u575, models={"USART2": Silent})
     with pytest.raises(ModelError):
@@ -207,7 +207,7 @@ def test_a_restore_drops_frames_not_read_yet(board: popcorn.Machine) -> None:
     assert uart.available == 0 and uart.queued == 0
 
 
-def test_a_link_kept_past_its_handle_refuses_access(u575: popcorn.MachineDescription) -> None:
+def test_a_link_kept_past_its_handle_refuses_access(u575: popcorn.PartDescription) -> None:
     handle = _core.MachineHandle(u575, _core.MachineConfig())
     link = handle.attach_uart("USART1")
     del handle
@@ -249,7 +249,7 @@ def test_a_read_inside_running_raises_a_handler_error(board: popcorn.Machine) ->
 
 
 def test_board_commands_run_on_the_machine_thread_without_the_gil(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.PartDescription, tmp_path: Path
 ) -> None:
     m = popcorn.Machine(
         u575,
@@ -282,7 +282,7 @@ def test_board_commands_run_on_the_machine_thread_without_the_gil(
 
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_a_uart_read_waits_on_the_machine_thread_without_the_gil(
-    u575: popcorn.MachineDescription, running: bool
+    u575: popcorn.PartDescription, running: bool
 ) -> None:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
     m.reset()
@@ -301,7 +301,7 @@ def test_a_uart_read_waits_on_the_machine_thread_without_the_gil(
 
 
 def test_a_trace_closed_again_after_its_posted_close_closes_once(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.PartDescription, tmp_path: Path
 ) -> None:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
     m.reset()
@@ -608,7 +608,7 @@ def test_read_until_gives_the_same_bytes_and_span_parked_and_running(
 
 
 def test_a_growing_match_is_the_shortest_even_when_one_slice_saw_every_byte(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(
         u575,
@@ -695,7 +695,7 @@ def test_read_until_takes_no_gil_parked_without_bytes(board: popcorn.Machine) ->
 
 
 def reading_board(
-    u575: popcorn.MachineDescription, cancel: bool
+    u575: popcorn.PartDescription, cancel: bool
 ) -> tuple[weakref.ref[popcorn.Machine], weakref.ref[re.Pattern[bytes]]]:
     """A board machine whose free run ran a read_until, cancelled or matched, then ended."""
     m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
@@ -722,7 +722,7 @@ def reading_board(
 
 @pytest.mark.parametrize("cancel", [True, False], ids=["cancelled", "matched"])
 def test_a_finished_read_until_keeps_neither_machine_nor_pattern(
-    u575: popcorn.MachineDescription, cancel: bool
+    u575: popcorn.PartDescription, cancel: bool
 ) -> None:
     machine, pattern = reading_board(u575, cancel)
     re.purge()
@@ -811,7 +811,7 @@ def test_a_take_during_read_until_raises(board: popcorn.Machine) -> None:
 PERIPH_USART_ELF = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "usart_ll.elf"
 
 
-def break_sender(u575: popcorn.MachineDescription) -> popcorn.Machine:
+def break_sender(u575: popcorn.PartDescription) -> popcorn.Machine:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(PERIPH_USART_ELF))
     m.reset()
     stop = asyncio.run(m.run(until="main", budget=1_000_000))
@@ -821,7 +821,7 @@ def break_sender(u575: popcorn.MachineDescription) -> popcorn.Machine:
 
 
 def test_a_break_reads_as_a_marked_frame_and_a_zero_byte(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     marked = break_sender(u575)
     stop = asyncio.run(marked.run(budget=100_000_000))
@@ -837,7 +837,7 @@ def test_a_break_reads_as_a_marked_frame_and_a_zero_byte(
     assert Frame(0, VirtualTime(5), True).brk is True
 
 
-def test_a_break_reaches_a_pty_as_a_zero_byte(u575: popcorn.MachineDescription) -> None:
+def test_a_break_reaches_a_pty_as_a_zero_byte(u575: popcorn.PartDescription) -> None:
     m = break_sender(u575)
     path = m.board.pty("USART1")
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)

@@ -39,8 +39,8 @@ def minimal_project(
     memory_init: Sequence[popcorn.MemoryInit] = (),
     arena_base: int | Literal[False] | None = None,
     arena_size: int | None = None,
-) -> popcorn.Project:
-    return popcorn.Project(
+) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
         description=M33_JSON,
         images=[popcorn.Elf(DRIVER_ELF)],
@@ -56,9 +56,9 @@ def minimal_project(
 
 
 def test_an_unknown_part_lists_close_matches() -> None:
-    project = popcorn.Project(part="STM32U575QGI", images=[])
+    project = popcorn.MachineDescription(part="STM32U575QGI", images=[])
     try:
-        project.machine_description()
+        project.part_description()
     except popcorn.ConfigError as error:
         if "close matches" not in error.expected:
             pytest.skip(f"ST's description sources are not installed: {error}")
@@ -69,9 +69,9 @@ def test_an_unknown_part_lists_close_matches() -> None:
 
 
 def test_a_description_for_another_part_is_refused() -> None:
-    project = popcorn.Project(part="OTHER", description=M33_JSON, images=[])
+    project = popcorn.MachineDescription(part="OTHER", description=M33_JSON, images=[])
     with pytest.raises(popcorn.ConfigError) as caught:
-        project.machine_description()
+        project.part_description()
     assert caught.value.key == "description"
 
 
@@ -163,7 +163,7 @@ def test_the_description_package_imports_without_the_native_extension() -> None:
     assert done.stdout.strip() == "ok", done.stderr
 
 
-def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.MachineDescription) -> None:
+def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.PartDescription) -> None:
     handle = _core.MachineHandle(m33, _core.MachineConfig())
     with pytest.raises(popcorn.ConfigError) as caught:
         handle.write_memory(0xFFFF_FFFF, b"\x00\x00")
@@ -222,7 +222,7 @@ class NotADevice:
         self.address = address
 
 
-def with_devices(*devices: popcorn.Device) -> popcorn.Project:
+def with_devices(*devices: popcorn.Device) -> popcorn.MachineDescription:
     return minimal_project().replace(board={"TESTDEV": popcorn.Periph(devices=devices)})
 
 
@@ -255,9 +255,9 @@ def test_an_spi_class_taking_any_keyword_takes_cs() -> None:
     assert (device.cs, device.params) == ("PA4", {"size": 1})
 
 
-def sample() -> popcorn.Project:
+def sample() -> popcorn.MachineDescription:
     """A project using every kind of field and parameter value."""
-    return popcorn.Project(
+    return popcorn.MachineDescription(
         name="sample",
         part="POPCORN-M33-TEST",
         description=M33_JSON,
@@ -310,11 +310,13 @@ def test_the_digest_is_equal_across_processes() -> None:
     assert digests == {sample().digest}
 
 
-def _periph(name: str, periph: popcorn.Periph) -> Callable[[popcorn.Project], popcorn.Project]:
+def _periph(
+    name: str, periph: popcorn.Periph
+) -> Callable[[popcorn.MachineDescription], popcorn.MachineDescription]:
     return lambda p: p.replace(board={**p.board, name: periph})
 
 
-def _boot(**changes: object) -> Callable[[popcorn.Project], popcorn.Project]:
+def _boot(**changes: object) -> Callable[[popcorn.MachineDescription], popcorn.MachineDescription]:
     return lambda p: p.replace(boot=p.boot.replace(**changes))
 
 
@@ -324,7 +326,7 @@ def _device(**params: popcorn.Param) -> popcorn.Periph:
     )
 
 
-DIGEST_CHANGES: dict[str, Callable[[popcorn.Project], popcorn.Project]] = {
+DIGEST_CHANGES: dict[str, Callable[[popcorn.MachineDescription], popcorn.MachineDescription]] = {
     "part": lambda p: p.replace(part="OTHER"),
     "image path": lambda p: p.replace(images=[popcorn.Elf(DRIVER_ELF.with_name("hooks.elf"))]),
     "image kind": lambda p: p.replace(images=[popcorn.Hex(DRIVER_ELF), *p.images[1:]]),
@@ -375,7 +377,7 @@ DIGEST_CHANGES: dict[str, Callable[[popcorn.Project], popcorn.Project]] = {
 
 @pytest.mark.parametrize("change", DIGEST_CHANGES.values(), ids=DIGEST_CHANGES.keys())
 def test_the_digest_follows_every_field(
-    change: Callable[[popcorn.Project], popcorn.Project],
+    change: Callable[[popcorn.MachineDescription], popcorn.MachineDescription],
 ) -> None:
     base = sample()
     changed = change(base)
@@ -431,7 +433,7 @@ def test_each_machine_model_gets_its_own_params() -> None:
             made.append(items)
 
     use = popcorn.Use(Keeper, items=[1, 2])
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
         description=M33_JSON,
         images=[popcorn.Elf(DRIVER_ELF)],
@@ -506,7 +508,7 @@ def test_configs_are_named_variants() -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         project.config("absent")
     assert caught.value.key == "configs.absent"
-    assert caught.value.expected == "a config of the project: fast, slow"
+    assert caught.value.expected == "a config of the machine description: fast, slow"
 
 
 @pytest.mark.parametrize(
@@ -516,10 +518,10 @@ def test_configs_are_named_variants() -> None:
         (lambda: popcorn.Boot(arena_base=0x1_0000_0000), "boot.arena_base"),
         (lambda: popcorn.Boot(arena_size=0), "boot.arena_size"),
         (lambda: popcorn.Boot(vtor=-4), "boot.vtor"),
-        (lambda: popcorn.Project(part="X", images=[], cpi=0), "cpi"),
-        (lambda: popcorn.Project(part="X", images=[], core_hz=0), "core_hz"),
+        (lambda: popcorn.MachineDescription(part="X", images=[], cpi=0), "cpi"),
+        (lambda: popcorn.MachineDescription(part="X", images=[], core_hz=0), "core_hz"),
         (
-            lambda: popcorn.Project(
+            lambda: popcorn.MachineDescription(
                 part="X",
                 images=[],
                 board={"I2C1": popcorn.Periph(devices=[popcorn.Device(At25sf, address=0x78)])},
@@ -527,7 +529,7 @@ def test_configs_are_named_variants() -> None:
             "board.I2C1.devices[0].address",
         ),
         (
-            lambda: popcorn.Project(
+            lambda: popcorn.MachineDescription(
                 part="X",
                 images=[],
                 board={
@@ -537,7 +539,7 @@ def test_configs_are_named_variants() -> None:
             "board.I2C1.devices[0].cs",
         ),
         (
-            lambda: popcorn.Project(
+            lambda: popcorn.MachineDescription(
                 part="X",
                 images=[],
                 board={
@@ -549,23 +551,25 @@ def test_configs_are_named_variants() -> None:
             "board.TIM2.devices",
         ),
         (
-            lambda: popcorn.Project(part="X", images=cast(list[popcorn.ImageFile], ["app.elf"])),
+            lambda: popcorn.MachineDescription(
+                part="X", images=cast(list[popcorn.ImageFile], ["app.elf"])
+            ),
             "images[0]",
         ),
         (
-            lambda: popcorn.Project(
+            lambda: popcorn.MachineDescription(
                 part="X", images=[], board=cast(dict[str, popcorn.Periph], {"TIM2": Model})
             ),
             "board.TIM2",
         ),
         (
-            lambda: popcorn.Project(
+            lambda: popcorn.MachineDescription(
                 part="X", images=[], board={"TIM2": popcorn.Periph(model=cast(popcorn.Use, Model))}
             ),
             "board.TIM2.model",
         ),
         (
-            lambda: popcorn.Project(
+            lambda: popcorn.MachineDescription(
                 part="X",
                 images=[],
                 board={
@@ -577,8 +581,8 @@ def test_configs_are_named_variants() -> None:
             "board.I2C1.devices[0]",
         ),
         (
-            lambda: popcorn.Project(
-                part="X", images=[], configs=cast(dict[str, popcorn.Project], {"x": "y"})
+            lambda: popcorn.MachineDescription(
+                part="X", images=[], configs=cast(dict[str, popcorn.MachineDescription], {"x": "y"})
             ),
             "configs.x",
         ),
@@ -609,7 +613,7 @@ def test_construction_refuses_what_types_cannot_say(make: Callable[[], object], 
 
 
 def test_a_python_project_boots_and_checks_against_its_description() -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
         description=M33_JSON,
         images=[popcorn.Elf(DRIVER_ELF)],
@@ -620,7 +624,7 @@ def test_a_python_project_boots_and_checks_against_its_description() -> None:
     stop = asyncio.run(project.boot_machine(m))
     assert stop.location.symbol == "alu_mark"
     with pytest.raises(popcorn.ConfigError) as caught:
-        project.replace(part="OTHER").machine_description()
+        project.replace(part="OTHER").part_description()
     assert caught.value.key == "description"
     unknown = project.replace(board={"TIM9": popcorn.Periph(model=popcorn.Use(Model))})
     with pytest.raises(popcorn.ConfigError) as caught:
@@ -632,20 +636,28 @@ def test_a_python_project_boots_and_checks_against_its_description() -> None:
     ("make", "key"),
     [
         (
-            lambda: popcorn.Project(part="X", images=[popcorn.Elf(Path("app.elf"))]),
+            lambda: popcorn.MachineDescription(part="X", images=[popcorn.Elf(Path("app.elf"))]),
             "images[0].path",
         ),
         (
-            lambda: popcorn.Project(
+            lambda: popcorn.MachineDescription(
                 part="X", images=[popcorn.Elf(DRIVER_ELF), popcorn.Bin(Path("b.bin"), 0)]
             ),
             "images[1].path",
         ),
-        (lambda: popcorn.Project(part="X", images=[popcorn.Hex(Path("a.hex"))]), "images[0].path"),
-        (lambda: popcorn.Project(part="X", images=[], svd=Path("part.svd")), "svd"),
-        (lambda: popcorn.Project(part="X", images=[], description=Path("m.json")), "description"),
         (
-            lambda: popcorn.Project(part="X", images=[popcorn.Elf(cast(Path, str(DRIVER_ELF)))]),
+            lambda: popcorn.MachineDescription(part="X", images=[popcorn.Hex(Path("a.hex"))]),
+            "images[0].path",
+        ),
+        (lambda: popcorn.MachineDescription(part="X", images=[], svd=Path("part.svd")), "svd"),
+        (
+            lambda: popcorn.MachineDescription(part="X", images=[], description=Path("m.json")),
+            "description",
+        ),
+        (
+            lambda: popcorn.MachineDescription(
+                part="X", images=[popcorn.Elf(cast(Path, str(DRIVER_ELF)))]
+            ),
             "images[0].path",
         ),
     ],
@@ -659,15 +671,17 @@ def test_a_relative_path_is_refused(make: Callable[[], object], key: str) -> Non
 
 def test_paths_are_kept_as_given() -> None:
     linked = DRIVER_ELF.parent / ".." / DRIVER_ELF.parent.name / DRIVER_ELF.name
-    project = popcorn.Project(part="X", images=[popcorn.Elf(linked)])
+    project = popcorn.MachineDescription(part="X", images=[popcorn.Elf(linked)])
     assert project.images[0].path is linked
-    assert project.digest == popcorn.Project(part="X", images=[popcorn.Elf(linked)]).digest
+    assert (
+        project.digest == popcorn.MachineDescription(part="X", images=[popcorn.Elf(linked)]).digest
+    )
     assert "Path(__file__).parent" in _refused_message()
 
 
 def _refused_message() -> str:
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project(part="X", images=[popcorn.Elf(Path("app.elf"))])
+        popcorn.MachineDescription(part="X", images=[popcorn.Elf(Path("app.elf"))])
     return caught.value.expected
 
 
@@ -700,7 +714,7 @@ def test_cpi_digest_is_the_same_for_an_int_and_a_float() -> None:
 )
 def test_a_relative_path_param_is_refused(periph: popcorn.Periph, key: str) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
-        popcorn.Project(part="X", images=[], board={"TESTDEV": periph})
+        popcorn.MachineDescription(part="X", images=[], board={"TESTDEV": periph})
     assert caught.value.key == key
     assert "Path(__file__).parent" in caught.value.expected
 
@@ -708,14 +722,16 @@ def test_a_relative_path_param_is_refused(periph: popcorn.Periph, key: str) -> N
 def test_an_absolute_path_param_is_kept_as_given() -> None:
     linked = DATA / ".." / "api" / "blob.bin"
     use = popcorn.Use(Model, data=linked)
-    project = popcorn.Project(part="X", images=[], board={"TESTDEV": popcorn.Periph(model=use)})
+    project = popcorn.MachineDescription(
+        part="X", images=[], board={"TESTDEV": popcorn.Periph(model=use)}
+    )
     model = project.board["TESTDEV"].model
     assert model is not None and model.params["data"] is linked
 
 
 def test_missing_image_raises_missing_input(tmp_path: Path) -> None:
     absent = tmp_path / "absent.elf"
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(absent)]
     )
     with pytest.raises(popcorn.MissingInput) as caught:
@@ -734,7 +750,9 @@ def test_a_missing_description_raises_missing_input(tmp_path: Path) -> None:
 
 def test_a_missing_svd_raises_missing_input_when_it_is_used(tmp_path: Path) -> None:
     absent = tmp_path / "absent.svd"
-    project = popcorn.Project(part="STM32U575QGIx", svd=absent, images=[popcorn.Elf(DRIVER_ELF)])
+    project = popcorn.MachineDescription(
+        part="STM32U575QGIx", svd=absent, images=[popcorn.Elf(DRIVER_ELF)]
+    )
     with pytest.raises(popcorn.MissingInput) as caught:
         project.machine()
     assert (caught.value.path, caught.value.key) == (absent, "svd")

@@ -43,7 +43,8 @@ public:
       -> peripheral_desc;
 
   /** @brief Description of the whole MCU. */
-  [[= py::doc{"Description of the whole MCU."}]] [[nodiscard]] auto part() const -> mcu_description;
+  [[= py::doc{"Description of the whole MCU."}]] [[nodiscard]] auto part() const
+      -> part_description;
 
   /**
    * @brief Stored word of the peripheral, without read effects.

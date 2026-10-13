@@ -42,7 +42,7 @@ def missing_description(tmp_path: Path, _: Machines) -> object:
 
 def missing_image(tmp_path: Path, _: Machines) -> object:
     absent = tmp_path / "absent.elf"
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="POPCORN-M33-TEST", description=M33_JSON, images=[popcorn.Elf(absent)]
     )
     return project.machine()
@@ -105,7 +105,7 @@ def fault_in_running(_: Path, machines: Machines) -> object:
 
 
 def boot_budget(_: Path, __: Machines) -> object:
-    loaded = popcorn.Project(
+    loaded = popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
         description=M33_JSON,
         images=[popcorn.Elf(DRIVER_ELF)],

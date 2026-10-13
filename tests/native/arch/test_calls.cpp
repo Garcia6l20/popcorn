@@ -85,7 +85,7 @@ auto frame(
       .return_sentinel = sentinel};
 }
 
-auto booted(core::machine_options options = {}, popcorn::mcu_description desc = m33())
+auto booted(core::machine_options options = {}, popcorn::part_description desc = m33())
     -> arch_fixture
 {
   arch_fixture f{std::move(desc), "abi", std::move(options)};
@@ -248,7 +248,7 @@ TEST_CASE("prepare_call refusals throw before any register changes")
   CHECK(registers_by_name(f) == before);
   CHECK_FALSE(f.target->in_call());
 
-  auto fpu_less    = booted({}, m33_with([](popcorn::mcu_description& d) { d.core.fpu = false; }));
+  auto fpu_less    = booted({}, m33_with([](popcorn::part_description& d) { d.core.fpu = false; }));
   auto const plain = registers_by_name(fpu_less);
   CHECK_THROWS_AS(
       fpu_less.target->begin_call(frame("add", {i32(2), i32(3)})), popcorn::config_error);
@@ -627,7 +627,7 @@ TEST_CASE("an IRQ pended before an unmasked call runs once, during the call")
 
 TEST_CASE("a call stack may span two adjacent writable regions")
 {
-  auto split = m33_with([](popcorn::mcu_description& d) {
+  auto split = m33_with([](popcorn::part_description& d) {
     auto  second = d.regions.back();
     auto& first  = d.regions.back();
     first.size   = 0x6'0000;

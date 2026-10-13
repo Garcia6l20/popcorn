@@ -24,7 +24,7 @@ uv run pytest -q examples/stm32u575/i2c_mock
 - `tempsensor.py`: the whole mock. `on_start`, `on_write` and `on_read` are called by the I2C
   model one bus phase at a time. The annotated fields are the state a snapshot keeps, and
   `reset` clears the registers on a power-on. `nack_starts` makes the sensor NACK its address,
-  for fault injection. `readings` is read-only: the `machine` fixture reuses one sensor for
+  for fault injection. `readings` is read-only: the `i2c_mock` fixture reuses one sensor for
   every test of a config, so a test wanting other readings uses a config of `with_configs` or
   builds its own machine with `Machine(devices={"I2C1": [TempSensor(0x48, readings=...)]})`.
   The module is named after the device, not a generic `mocks.py`, so no two examples' mocks
@@ -32,7 +32,7 @@ uv run pytest -q examples/stm32u575/i2c_mock
 - `conftest.py`: `Device(TempSensor, address=0x48, readings=COLD)` on I2C1, `readings` passed to
   the constructor. `with_configs(hot=...)` gives the sensor readings above 30 degrees.
 - `test_i2c_mock.py`:
-  - `machine.board.devices("I2C1")` returns the mock the project built.
+  - `machine.board.devices("I2C1")` returns the mock the description built.
   - an intercept on `sample_taken` counts the samples of runs of fixed virtual length.
   - the mean read through `machine.var("sensor_result")` against the Python mean;
   - the configuration word the firmware wrote, read from the mock;

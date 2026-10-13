@@ -192,7 +192,7 @@ TEST_CASE("the context forwards a stop request to the machine services")
   popcorn::core::event_port       events{queue, 0};
   popcorn::testing::fake_services services;
   no_peers                        peers;
-  popcorn::mcu_description const  part{};
+  popcorn::part_description const part{};
   popcorn::periph::model_context  ctx{
       .regs     = regs,
       .irqs     = {},

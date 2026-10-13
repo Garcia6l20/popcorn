@@ -184,7 +184,7 @@ def test_image_view_writes_raise_and_leave_the_machine_alone(views: popcorn.Mach
     assert views.var("table").mode.value == 17
 
 
-def test_image_view_of_a_hex_image_has_no_variables(m33: popcorn.MachineDescription) -> None:
+def test_image_view_of_a_hex_image_has_no_variables(m33: popcorn.PartDescription) -> None:
     m = popcorn.Machine(m33, image=popcorn.Image.hex(HEX))
     with pytest.raises(popcorn.SymbolError):
         m.image.var("gains")
@@ -192,7 +192,7 @@ def test_image_view_of_a_hex_image_has_no_variables(m33: popcorn.MachineDescript
         m.var("gains")
 
 
-def test_image_view_reads_the_file_now(m33: popcorn.MachineDescription, tmp_path: Path) -> None:
+def test_image_view_reads_the_file_now(m33: popcorn.PartDescription, tmp_path: Path) -> None:
     elf = tmp_path / "views.elf"
     elf.write_bytes(VIEWS_ELF.read_bytes())
     m = popcorn.Machine(m33, image=popcorn.Image.elf(elf))

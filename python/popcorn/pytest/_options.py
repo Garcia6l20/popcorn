@@ -9,7 +9,7 @@ from typing import NoReturn, cast
 
 import pytest
 
-MARKER = "popcorn(config=None, budget=None, strict=None): popcorn machine settings for this test"
+MARKER = "popcorn(budget=None, strict=None): popcorn machine settings for this test"
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,8 +17,6 @@ class Settings:
     """The plugin's command-line options, parsed once per session.
 
     Attributes:
-        config: The config of `popcorn_project` applied when a test names none,
-            `--popcorn-config`.
         cov: The lcov file written at session end, `--popcorn-cov`.
         trace_on_fail: Whether a failing test keeps its trace, `--popcorn-trace-on-fail`.
         trace_dir: Where kept traces go, None for the default location under the pytest cache.
@@ -29,7 +27,6 @@ class Settings:
             `--popcorn-ring`.
     """
 
-    config: str | None
     cov: Path | None
     trace_on_fail: bool
     trace_dir: Path | None
@@ -43,11 +40,9 @@ class Settings:
         here = config.invocation_params.dir
         cov = _path(config.getoption("popcorn_cov"), here)
         trace = config.getoption("popcorn_trace_on_fail")
-        name = config.getoption("popcorn_config")
         budget = config.getoption("popcorn_budget")
         ring = config.getoption("popcorn_ring")
         return cls(
-            config=name if isinstance(name, str) else None,
             cov=cov,
             trace_on_fail=trace is not None,
             trace_dir=_path(trace, here) if trace else None,
@@ -67,13 +62,8 @@ def _path(value: object, base: Path) -> Path | None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Register the six `--popcorn-*` options."""
+    """Register the five `--popcorn-*` options."""
     group = parser.getgroup("popcorn", "popcorn firmware emulation")
-    group.addoption(
-        "--popcorn-config",
-        metavar="NAME",
-        help="config NAME of popcorn_project applied when a test names none",
-    )
     group.addoption(
         "--popcorn-cov",
         metavar="LCOV",
@@ -85,7 +75,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         const="",
         default=None,
         metavar="DIR",
-        help="keep a .pctr trace of each failing test using the machine fixture, "
+        help="keep a .pctr trace of each failing test using a popcorn machine fixture, "
         "in .pytest_cache/d/popcorn/traces, or in DIR given as --popcorn-trace-on-fail=DIR: "
         "a bare flag before a path takes the path as DIR",
     )
@@ -133,7 +123,12 @@ class Unset(enum.Enum):
 
 UNSET = Unset.UNSET
 
-_KEYWORDS = ("config", "budget", "strict")
+_KEYWORDS = ("budget", "strict")
+
+CONFIG = (
+    "config is not a marker keyword: set it on the machine fixture, "
+    "@popcorn.pytest.machine(config=...), or pass it to machine_factory(description, config=...)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,13 +136,11 @@ class MarkerOptions:
     """The keywords of the closest `popcorn` marker of a test, `UNSET` where absent.
 
     Attributes:
-        config: The config to apply, None for the base project.
         budget: The default instruction budget, None for unbounded runs.
-        strict: None or absent, the command line then the project; True or False
+        strict: None or absent, the command line then the machine description; True or False
             overrides.
     """
 
-    config: str | Unset | None = UNSET
     budget: int | Unset | None = UNSET
     strict: bool | None = None
 
@@ -157,22 +150,21 @@ def marker_options(item: pytest.Item) -> MarkerOptions:
     class's, else its module's. Keywords do not merge across levels.
 
     Raises:
-        pytest.fail.Exception: A positional argument, an unknown keyword or a value of the wrong
-            type or range.
+        pytest.fail.Exception: A positional argument, `config`, an unknown keyword or a value of
+            the wrong type or range.
     """
     marker = item.get_closest_marker("popcorn")
     if marker is None:
         return MarkerOptions()
     if marker.args:
         _refuse(f"takes keywords only, not the positional {marker.args!r}")
+    if "config" in marker.kwargs:
+        _refuse(CONFIG)
     unknown = sorted(set(marker.kwargs) - set(_KEYWORDS))
     if unknown:
         _refuse(f"has no keyword {', '.join(unknown)}: use {', '.join(_KEYWORDS)}")
-    config: object = marker.kwargs.get("config", UNSET)
     budget: object = marker.kwargs.get("budget", UNSET)
     strict: object = marker.kwargs.get("strict")
-    if not (config is UNSET or config is None or isinstance(config, str)):
-        _refuse(f"config is a str or None, not {config!r}")
     if not (
         budget is UNSET
         or budget is None
@@ -181,11 +173,7 @@ def marker_options(item: pytest.Item) -> MarkerOptions:
         _refuse(f"budget is an int above 0 or None, not {budget!r}")
     if not (strict is None or isinstance(strict, bool)):
         _refuse(f"strict is a bool or None, not {strict!r}")
-    return MarkerOptions(
-        config=cast(str | Unset | None, config),
-        budget=cast(int | Unset | None, budget),
-        strict=strict,
-    )
+    return MarkerOptions(budget=cast(int | Unset | None, budget), strict=strict)
 
 
 @pytest.hookimpl(tryfirst=True)

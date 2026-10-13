@@ -26,7 +26,7 @@ using popcorn::address;
 
 constexpr address estack = 0x200c'0000;
 
-auto m33() -> popcorn::mcu_description
+auto m33() -> popcorn::part_description
 {
   char const* const path = std::getenv("POPCORN_M33_DESC");
   REQUIRE(path != nullptr);

@@ -39,7 +39,7 @@ class Echoed:
 
 
 def scenario(
-    u575: popcorn.MachineDescription, noise: Callable[[], None], read_count: int = 0
+    u575: popcorn.PartDescription, noise: Callable[[], None], read_count: int = 0
 ) -> Digest:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
     m.reset()
@@ -94,7 +94,7 @@ def scenario(
 
 
 def test_two_runs_with_different_wall_timing_give_the_same_virtual_results(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     quiet = scenario(u575, lambda: None)
     spinning = threading.Event()

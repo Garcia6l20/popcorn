@@ -25,7 +25,7 @@ namespace arch = popcorn::arch;
 using popcorn::address;
 using popcorn::icount;
 using popcorn::initiator;
-using popcorn::mcu_description;
+using popcorn::part_description;
 using popcorn::stop_reason;
 using popcorn::testing::m33;
 using popcorn::testing::sym;
@@ -49,7 +49,7 @@ auto with_model() -> core::machine_options
 auto booted(
     std::string_view      firmware = "snapshot",
     core::machine_options options  = with_model(),
-    mcu_description       desc     = m33()) -> fixture
+    part_description      desc     = m33()) -> fixture
 {
   fixture f{std::move(desc), firmware, std::move(options)};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);

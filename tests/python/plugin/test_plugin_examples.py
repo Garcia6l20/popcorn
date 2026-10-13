@@ -28,7 +28,6 @@ def test_help_lists_the_options_and_marker(pytester: pytest.Pytester) -> None:
     options.stdout.fnmatch_lines(
         [
             "popcorn firmware emulation:",
-            "*--popcorn-config*",
             "*--popcorn-cov*",
             "*--popcorn-trace-on-fail*",
             "*--popcorn-strict*",
@@ -37,4 +36,4 @@ def test_help_lists_the_options_and_marker(pytester: pytest.Pytester) -> None:
         ]
     )
     markers = pytester.runpytest("-p", "no:asyncio", "--markers")
-    markers.stdout.fnmatch_lines(["@pytest.mark.popcorn(config=None, budget=None, strict=None):*"])
+    markers.stdout.fnmatch_lines(["@pytest.mark.popcorn(budget=None, strict=None):*"])

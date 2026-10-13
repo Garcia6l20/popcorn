@@ -1,6 +1,8 @@
-"""The `popcorn` marker and the config, strict and budget options, FR-PYT-5, FR-PYT-6."""
+"""The `popcorn` marker and the strict and budget options, FR-PYT-5, FR-PYT-6."""
 
 from __future__ import annotations
+
+import textwrap
 
 import pytest
 
@@ -15,88 +17,49 @@ VARIANT = (
     'memory_init=[popcorn.MemoryInit("alu_rounds", bytes.fromhex("07000000"))]))'
 )
 
-CONFIGS = """
-import pytest
-
-def rounds(machine):
-    return machine.mem.u32[machine.sym("alu_rounds")]
-
-def test_unmarked(machine, popcorn_project, request):
-    option = request.config.getoption("popcorn_config")
-    expected = 7 if option == "variant" else 0
-    assert rounds(machine) == expected
-    assert popcorn_project.boot.memory_init == ()
-    assert len(popcorn_project.config(option).boot.memory_init) == (1 if option == "variant" else 0)
-
-@pytest.mark.popcorn(config="variant")
-def test_variant(machine):
-    assert rounds(machine) == 7
-
-@pytest.mark.popcorn(config=None)
-def test_base(machine):
-    assert rounds(machine) == 0
-
-@pytest.mark.popcorn(config="variant")
-def test_factory_follows_the_marker(machine_factory):
-    assert rounds(machine_factory()) == 7
-    assert rounds(machine_factory(config="variant")) == 7
-"""
-
 
 def run(pytester: pytest.Pytester, *args: str) -> pytest.RunResult:
     return pytester.runpytest(*NO_ASYNCIO, *args)
 
 
-def test_config_from_marker_and_option(pytester: pytest.Pytester) -> None:
-    write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
-    pytester.makepyfile(CONFIGS)
-    result = run(pytester)
-    result.assert_outcomes(passed=4)
-    result.stdout.fnmatch_lines(["popcorn: 2 key(s), 2 boot(s), 0 from cache"])
-    result = run(pytester, "--popcorn-config=variant")
-    result.assert_outcomes(passed=4)
-    result.stdout.fnmatch_lines(["popcorn: 2 key(s), 0 boot(s), 2 from cache"])
+def declare(pytester: pytest.Pytester, fixtures: str) -> None:
+    """Append `fixtures` to the conftest `write_project` wrote."""
+    path = pytester.path / "conftest.py"
+    path.write_text(path.read_text() + textwrap.dedent(fixtures))
 
 
 def test_an_unknown_config_name_fails_naming_the_known_ones(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester, configs=VARIANT)
     pytester.makepyfile("""
-        import pytest
-
-        @pytest.mark.popcorn(config="nope")
-        def test_marker(machine):
-            pass
-
-        def test_option(machine_factory):
-            pass
+        def test_factory(machine_factory, description):
+            machine_factory(description, config="nope")
         """)
-    marker = run(pytester, "-k", "test_marker")
-    marker.assert_outcomes(errors=1, deselected=1)
-    marker.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
-    option = run(pytester, "-k", "test_option", "--popcorn-config=nope")
-    option.assert_outcomes(errors=1, deselected=1)
-    option.stdout.fnmatch_lines(["*configs.nope: expected a config of the project: variant*"])
+    result = run(pytester)
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        ["*configs.nope: expected a config of the machine description: variant*"]
+    )
 
 
 def test_two_config_names_with_equal_content_share_one_boot(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_project(pytester, configs=f"{VARIANT}, {VARIANT.replace('variant=', 'twin=', 1)}")
+    declare(
+        pytester,
+        """
+        @popcorn.pytest.machine(params=["variant", "twin"])
+        def configured(request):
+            return PROJECT.config(request.param)
+        """,
+    )
     pytester.makepyfile("""
-        import pytest
-
         SEEN = []
 
-        @pytest.mark.popcorn(config="variant")
-        def test_variant(machine):
-            SEEN.append(machine)
-            assert machine.mem.u32[machine.sym("alu_rounds")] == 7
-
-        @pytest.mark.popcorn(config="twin")
-        def test_twin(machine):
-            assert machine is SEEN[0]
-            assert machine.mem.u32[machine.sym("alu_rounds")] == 7
+        def test_config(configured):
+            SEEN.append(configured)
+            assert configured is SEEN[0]
+            assert configured.mem.u32[configured.sym("alu_rounds")] == 7
         """)
     result = run(pytester)
     result.assert_outcomes(passed=2)
@@ -127,17 +90,25 @@ async def test_strict(machine):
         await touch(machine)
 
 @pytest.mark.popcorn(strict=None)
-async def test_strict_none(machine_factory, request):
+async def test_strict_none(machine_factory, description, request):
     if request.config.getoption("popcorn_strict"):
         with pytest.raises(popcorn.ModelError):
-            await touch(machine_factory())
+            await touch(machine_factory(description))
     else:
-        await touch(machine_factory())
+        await touch(machine_factory(description))
 
 @pytest.mark.popcorn(strict=True)
-async def test_strict_factory(machine_factory):
+async def test_strict_factory(machine_factory, description):
     with pytest.raises(popcorn.ModelError):
-        await touch(machine_factory())
+        await touch(machine_factory(description))
+
+@pytest.mark.popcorn(strict=True)
+async def test_factory_lax_overrides_strict_marker(machine_factory, description):
+    await touch(machine_factory(description, strict=False))
+
+async def test_factory_strict_overrides_lax_default(machine_factory, description):
+    with pytest.raises(popcorn.ModelError):
+        await touch(machine_factory(description, strict=True))
 """
 
 
@@ -145,8 +116,8 @@ def test_strict_from_marker_and_option(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
     write_model_project(pytester)
     pytester.makepyfile(STRICT)
-    run(pytester).assert_outcomes(passed=5)
-    run(pytester, "--popcorn-strict").assert_outcomes(passed=5)
+    run(pytester).assert_outcomes(passed=7)
+    run(pytester, "--popcorn-strict").assert_outcomes(passed=7)
 
 
 def test_every_strict_test_on_a_reused_machine_raises(pytester: pytest.Pytester) -> None:
@@ -206,9 +177,9 @@ def test_marker_none(machine):
     assert machine.default_budget is None
 
 @pytest.mark.popcorn(budget=700)
-def test_factory(machine_factory):
-    assert machine_factory().default_budget == 700
-    assert machine_factory(booted=False).default_budget is None
+def test_factory(machine_factory, description):
+    assert machine_factory(description).default_budget == 700
+    assert machine_factory(description, booted=False).default_budget is None
 
 def test_next_test_gets_the_option_again(machine):
     assert machine.default_budget == 10_000
@@ -240,21 +211,25 @@ def test_budget_is_reset_after_the_test(pytester: pytest.Pytester) -> None:
 
 def test_the_closest_marker_wins_without_merging(pytester: pytest.Pytester) -> None:
     write_conftest(pytester)
-    write_project(pytester, configs=VARIANT)
+    write_model_project(pytester)
     pytester.makepyfile("""
+        import popcorn
         import pytest
 
-        pytestmark = pytest.mark.popcorn(config="variant", budget=900)
+        pytestmark = pytest.mark.popcorn(strict=True, budget=900)
 
-        def rounds(machine):
-            return machine.mem.u32[machine.sym("alu_rounds")]
+        async def touch(machine):
+            return await machine.call("touch_unmodelled", budget=10_000)
 
-        def test_module_marker(machine):
-            assert (rounds(machine), machine.default_budget) == (7, 900)
+        async def test_module_marker(machine):
+            assert machine.default_budget == 900
+            with pytest.raises(popcorn.ModelError):
+                await touch(machine)
 
         @pytest.mark.popcorn(budget=300)
-        def test_function_marker(machine):
-            assert (rounds(machine), machine.default_budget) == (0, 300)
+        async def test_function_marker(machine):
+            assert machine.default_budget == 300
+            await touch(machine)
         """)
     run(pytester).assert_outcomes(passed=2)
 
@@ -285,19 +260,11 @@ def test_invalid_markers_error_at_setup(pytester: pytest.Pytester) -> None:
         def test_strict_str(machine):
             pass
 
-        @pytest.mark.popcorn(config=3)
-        def test_config_int(machine):
-            pass
-
-        @pytest.mark.popcorn(config="missing")
-        def test_missing_config(machine):
-            pass
-
         def test_fine(machine):
             pass
         """)
     result = run(pytester)
-    result.assert_outcomes(passed=1, errors=7)
+    result.assert_outcomes(passed=1, errors=5)
     result.stdout.fnmatch_lines_random(
         [
             "*@pytest.mark.popcorn takes keywords only, not the positional ('x',)*",
@@ -305,10 +272,47 @@ def test_invalid_markers_error_at_setup(pytester: pytest.Pytester) -> None:
             "*@pytest.mark.popcorn budget is an int above 0 or None, not -1*",
             "*@pytest.mark.popcorn budget is an int above 0 or None, not True*",
             "*@pytest.mark.popcorn strict is a bool or None, not 'yes'*",
-            "*@pytest.mark.popcorn config is a str or None, not 3*",
-            "*ConfigError*missing*",
         ]
     )
+
+
+def test_a_marker_config_fails_naming_the_decorator(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    write_project(pytester, configs=VARIANT)
+    pytester.makepyfile(
+        test_function="""
+        import pytest
+
+        @pytest.mark.popcorn(config="variant")
+        def test_named(machine):
+            pass
+
+        @pytest.mark.popcorn(config=None, budget=5)
+        def test_none(machine_factory):
+            pass
+
+        @pytest.mark.popcorn(config="variant")
+        def test_without_fixtures():
+            pass
+        """,
+        test_module="""
+        import pytest
+
+        pytestmark = pytest.mark.popcorn(config="variant")
+
+        def test_module(machine):
+            pass
+        """,
+    )
+    result = run(pytester)
+    result.assert_outcomes(errors=4)
+    message = (
+        "@pytest.mark.popcorn config is not a marker keyword: set it on the machine fixture, "
+        "@popcorn.pytest.machine(config=...), or pass it to "
+        "machine_factory(description, config=...)"
+    )
+    assert result.stdout.str().count(message) == 4
+    result.stdout.no_fnmatch_line("*popcorn: * key(s)*")
 
 
 @pytest.mark.parametrize("budget", ["0", "-5"])

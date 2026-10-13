@@ -13,7 +13,7 @@ from popcorn.stm32.description._binder import (
 )
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
-    McuDescription,
+    PartDescription,
     PeripheralDesc,
     RegionDesc,
     RegisterDesc,
@@ -77,7 +77,7 @@ def test_empty_peripherals_and_sources() -> None:
     data = _toy()
     data["peripherals"] = []
     data["irqs"] = []
-    description = from_mapping(McuDescription, data, file="test")
+    description = from_mapping(PartDescription, data, file="test")
     assert description.peripherals == []
     assert description.irqs == []
 
@@ -87,7 +87,7 @@ def test_unknown_key_reports_nested_path() -> None:
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     peripherals[0]["bogus"] = 1
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "peripherals[0].bogus"
 
 
@@ -95,7 +95,7 @@ def test_missing_required_key() -> None:
     data = _toy()
     del data["part"]
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "part"
 
 
@@ -104,7 +104,7 @@ def test_null_for_optional_is_refused() -> None:
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     peripherals[0]["alias_of"] = None
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "peripherals[0].alias_of"
 
 
@@ -113,7 +113,7 @@ def test_true_for_integer_is_refused() -> None:
     core = cast(dict[str, object], data["core"])
     core["num_irqs"] = True
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "core.num_irqs"
 
 
@@ -122,7 +122,7 @@ def test_out_of_range_uint8_is_refused() -> None:
     core = cast(dict[str, object], data["core"])
     core["nvic_prio_bits"] = 256
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "core.nvic_prio_bits"
 
 
@@ -131,7 +131,7 @@ def test_negative_integer_is_refused() -> None:
     core = cast(dict[str, object], data["core"])
     core["nvic_prio_bits"] = -1
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "core.nvic_prio_bits"
 
 
@@ -141,7 +141,7 @@ def test_wrong_enum_string_is_refused() -> None:
     registers = cast(list[dict[str, object]], peripherals[0]["registers"])
     registers[0]["acc"] = "bogus_access"
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "peripherals[0].registers[0].acc"
 
 
@@ -149,12 +149,12 @@ def test_string_for_list_is_refused() -> None:
     data = _toy()
     data["peripherals"] = "not-a-list"
     with pytest.raises(DescriptionError) as excinfo:
-        from_mapping(McuDescription, data, file="test")
+        from_mapping(PartDescription, data, file="test")
     assert excinfo.value.key == "peripherals"
 
 
 def test_check_bounds_accepts_valid_description() -> None:
-    description = from_mapping(McuDescription, _toy(), file="test")
+    description = from_mapping(PartDescription, _toy(), file="test")
     check_bounds(description, file="test")
 
 

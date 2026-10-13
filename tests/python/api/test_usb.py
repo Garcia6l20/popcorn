@@ -60,7 +60,7 @@ SET_CONTROL_LINE_STATE = 0x22
 
 
 def usb_machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     options: UsbHostOptions | None = None,
     elf: Path = USB_ELF,
 ) -> popcorn.Machine:
@@ -73,7 +73,7 @@ def usb_machine(
     return m
 
 
-def configured(u575: popcorn.MachineDescription) -> tuple[popcorn.Machine, UsbHost]:
+def configured(u575: popcorn.PartDescription) -> tuple[popcorn.Machine, UsbHost]:
     m = usb_machine(u575)
     host = m.periph.OTG_FS.host
     asyncio.run(host.wait_configured(for_=s(2)))
@@ -86,7 +86,7 @@ def test_python_states_match_the_native_device_states() -> None:
     }
 
 
-def test_the_host_enumerates_from_power_on(u575: popcorn.MachineDescription) -> None:
+def test_the_host_enumerates_from_power_on(u575: popcorn.PartDescription) -> None:
     m, host = configured(u575)
     assert host.attached
     assert (host.state, host.address, host.configuration) == (UsbState.CONFIGURED, 1, 1)
@@ -102,7 +102,7 @@ def test_the_host_enumerates_from_power_on(u575: popcorn.MachineDescription) -> 
     assert m.periph.SEC_OTG_FS.host is host
 
 
-def test_control_requests_in_and_out(u575: popcorn.MachineDescription) -> None:
+def test_control_requests_in_and_out(u575: popcorn.PartDescription) -> None:
     _, host = configured(u575)
 
     async def body() -> tuple[bytes, bytes, bytes]:
@@ -128,14 +128,14 @@ def test_control_requests_in_and_out(u575: popcorn.MachineDescription) -> None:
     ],
 )
 def test_control_refuses_malformed_requests(
-    u575: popcorn.MachineDescription, args: tuple[int, int, int, int, bytes | int], match: str
+    u575: popcorn.PartDescription, args: tuple[int, int, int, int, bytes | int], match: str
 ) -> None:
     host = usb_machine(u575).periph.OTG_FS.host
     with pytest.raises(ValueError, match=match):
         asyncio.run(host.control(*args))
 
 
-def test_a_stall_raises_usb_stall(u575: popcorn.MachineDescription) -> None:
+def test_a_stall_raises_usb_stall(u575: popcorn.PartDescription) -> None:
     _, host = configured(u575)
     with pytest.raises(popcorn.UsbStall) as caught:
         asyncio.run(host.control(0x83, 0, 0, 0, 2))
@@ -145,7 +145,7 @@ def test_a_stall_raises_usb_stall(u575: popcorn.MachineDescription) -> None:
 
 
 def test_a_device_that_never_answers_raises_usb_timeout(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(timeout=ms(20)))
     host = m.periph.OTG_FS.host
@@ -160,7 +160,7 @@ def test_a_device_that_never_answers_raises_usb_timeout(
     assert ms(20) <= m.time - before < ms(25)
 
 
-def test_a_request_without_a_device_is_cancelled(u575: popcorn.MachineDescription) -> None:
+def test_a_request_without_a_device_is_cancelled(u575: popcorn.PartDescription) -> None:
     host = usb_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host
     with pytest.raises(popcorn.UsbError) as caught:
         asyncio.run(host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 18))
@@ -168,7 +168,7 @@ def test_a_request_without_a_device_is_cancelled(u575: popcorn.MachineDescriptio
     assert not isinstance(caught.value, popcorn.UsbStall | popcorn.UsbTimeout)
 
 
-def test_an_unplugged_cable_is_plugged_from_python(u575: popcorn.MachineDescription) -> None:
+def test_an_unplugged_cable_is_plugged_from_python(u575: popcorn.PartDescription) -> None:
     m = usb_machine(u575, UsbHostOptions(attached=False))
     host = m.periph.OTG_FS.host
     assert not host.attached
@@ -183,7 +183,7 @@ def test_an_unplugged_cable_is_plugged_from_python(u575: popcorn.MachineDescript
     assert not host.attached
 
 
-def test_a_snapshot_keeps_the_host_and_its_cable(u575: popcorn.MachineDescription) -> None:
+def test_a_snapshot_keeps_the_host_and_its_cable(u575: popcorn.PartDescription) -> None:
     m, host = configured(u575)
     saved = m.snapshot()
     asyncio.run(host.detach())
@@ -200,7 +200,7 @@ def test_a_snapshot_keeps_the_host_and_its_cable(u575: popcorn.MachineDescriptio
 
 
 def test_a_controller_without_a_host_refuses_the_accessor(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(OTG_ELF))
     with pytest.raises(popcorn.ModelError, match="no virtual USB host") as caught:
@@ -219,15 +219,15 @@ def test_a_controller_without_a_host_refuses_the_accessor(
     ],
 )
 def test_usb_options_are_checked(
-    u575: popcorn.MachineDescription, usb: dict[str, UsbHostOptions], key: str
+    u575: popcorn.PartDescription, usb: dict[str, UsbHostOptions], key: str
 ) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Machine(u575, image=popcorn.Image.elf(USB_ELF), usb=usb)
     assert caught.value.key == key
 
 
-def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
-    return popcorn.Project(
+def project(board: Mapping[str, popcorn.Periph]) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(USB_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),
@@ -236,7 +236,7 @@ def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
 
 
 def test_a_project_wires_the_host_and_its_timings(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.PartDescription, tmp_path: Path
 ) -> None:
     del u575
     host_options = UsbHostOptions(attached=False, debounce=ms(20))
@@ -260,7 +260,7 @@ def test_a_project_wires_the_host_and_its_timings(
     ],
 )
 def test_a_host_table_needs_a_usb_controller_with_the_built_in_model(
-    u575: popcorn.MachineDescription, board: dict[str, popcorn.Periph]
+    u575: popcorn.PartDescription, board: dict[str, popcorn.Periph]
 ) -> None:
     del u575
     with pytest.raises(popcorn.ConfigError) as caught:
@@ -269,7 +269,7 @@ def test_a_host_table_needs_a_usb_controller_with_the_built_in_model(
 
 
 @pytest.fixture(scope="session")
-def u575_json(u575: popcorn.MachineDescription) -> Path:
+def u575_json(u575: popcorn.PartDescription) -> Path:
     """The cached STM32U575 description file, found before pytester moves HOME."""
     del u575
     from popcorn.stm32.description import cached_description
@@ -281,12 +281,12 @@ def test_a_boot_past_the_enumeration_is_cached_configured(
     u575_json: Path, pytester: pytest.Pytester
 ) -> None:
     pytester.makeconftest(
-        "from pathlib import Path\n\nimport popcorn\nimport pytest\n"
+        "from pathlib import Path\n\nimport popcorn\nimport popcorn.pytest\n"
         "from popcorn.board import UsbHostOptions\n\n"
         'pytest_plugins = ["popcorn.pytest"]\n\n\n'
-        '@pytest.fixture(scope="session")\n'
-        "def popcorn_project():\n"
-        "    return popcorn.Project(\n"
+        "@popcorn.pytest.machine\n"
+        "def usb():\n"
+        "    return popcorn.MachineDescription(\n"
         '        part="STM32U575QGIx",\n'
         f"        description=Path({str(u575_json)!r}),\n"
         f"        images=[popcorn.Elf(Path({str(USB_ELF)!r}))],\n"
@@ -296,8 +296,8 @@ def test_a_boot_past_the_enumeration_is_cached_configured(
     )
     pytester.makepyfile(
         "from pathlib import Path\n\n\n"
-        "async def test_state(machine):\n"
-        "    host = machine.periph.OTG_FS.host\n"
+        "async def test_state(usb):\n"
+        "    host = usb.periph.OTG_FS.host\n"
         "    reply = await host.control(0x80, 8, 0, 0, 1)\n"
         "    with Path('states.txt').open('a') as states:\n"
         "        states.write(f'{host.state.name} {host.address} {reply.hex()}\\n')\n"
@@ -320,7 +320,7 @@ def line_states(host: UsbHost) -> list[int]:
 
 
 def test_the_cdc_driver_sets_the_line_coding_then_dtr_and_rts(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
@@ -340,7 +340,7 @@ def test_the_cdc_driver_sets_the_line_coding_then_dtr_and_rts(
 
 
 def test_dtr_off_by_option_leaves_the_firmware_unconnected_until_python_sets_it(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(dtr=False))
     host = m.periph.OTG_FS.host
@@ -362,7 +362,7 @@ def test_dtr_off_by_option_leaves_the_firmware_unconnected_until_python_sets_it(
 
 
 def test_wait_ready_runs_past_configuration_until_the_control_line_state_ended(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575)
     host = m.periph.OTG_FS.host
@@ -384,7 +384,7 @@ def test_wait_ready_runs_past_configuration_until_the_control_line_state_ended(
 
 
 def test_wait_ready_with_dtr_off_waits_for_the_control_line_state_too(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(dtr=False, rts=False))
     cdc = m.periph.OTG_FS.host.cdc()
@@ -395,7 +395,7 @@ def test_wait_ready_with_dtr_off_waits_for_the_control_line_state_too(
 
 
 def test_wait_ready_raises_usb_timeout_unbound_or_not_ready(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(attached=False))
     host = m.periph.OTG_FS.host
@@ -416,7 +416,7 @@ def test_wait_ready_raises_usb_timeout_unbound_or_not_ready(
 
 
 def test_ready_follows_the_binding_through_a_restore_and_an_unplug(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
@@ -432,7 +432,7 @@ def test_ready_follows_the_binding_through_a_restore_and_an_unplug(
     assert (cdc.bound, cdc.ready) == (False, False)
 
 
-def test_dtr_drops_only_on_request(u575: popcorn.MachineDescription) -> None:
+def test_dtr_drops_only_on_request(u575: popcorn.PartDescription) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
 
@@ -449,7 +449,7 @@ def test_dtr_drops_only_on_request(u575: popcorn.MachineDescription) -> None:
     assert line_states(host) == [3, 2]
 
 
-def test_set_line_coding_reaches_the_device(u575: popcorn.MachineDescription) -> None:
+def test_set_line_coding_reaches_the_device(u575: popcorn.PartDescription) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
 
@@ -472,14 +472,14 @@ def test_set_line_coding_reaches_the_device(u575: popcorn.MachineDescription) ->
     ],
 )
 def test_set_line_coding_refuses_bad_fields(
-    u575: popcorn.MachineDescription, kwargs: dict[str, Any], match: str
+    u575: popcorn.PartDescription, kwargs: dict[str, Any], match: str
 ) -> None:
     cdc = usb_machine(u575).periph.OTG_FS.host.cdc()
     with pytest.raises(ValueError, match=match):
         asyncio.run(cdc.set_line_coding(**kwargs))
 
 
-def test_a_request_with_no_driver_bound_raises(u575: popcorn.MachineDescription) -> None:
+def test_a_request_with_no_driver_bound_raises(u575: popcorn.PartDescription) -> None:
     cdc = usb_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host.cdc()
     assert not cdc.bound
     with pytest.raises(popcorn.UsbError, match="no CDC ACM driver") as caught:
@@ -488,7 +488,7 @@ def test_a_request_with_no_driver_bound_raises(u575: popcorn.MachineDescription)
 
 
 def test_cdc_functions_are_checked_once_the_configuration_is_read(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575)
     host = m.periph.OTG_FS.host
@@ -505,7 +505,7 @@ def test_cdc_functions_are_checked_once_the_configuration_is_read(
         m.board.pty("USART1", function=1)
 
 
-def test_a_pty_on_an_alias_is_keyed_by_the_controller(u575: popcorn.MachineDescription) -> None:
+def test_a_pty_on_an_alias_is_keyed_by_the_controller(u575: popcorn.PartDescription) -> None:
     m = usb_machine(u575)
     path = m.board.pty("SEC_OTG_FS")
     assert m.board.ptys == {"OTG_FS": path}
@@ -514,7 +514,7 @@ def test_a_pty_on_an_alias_is_keyed_by_the_controller(u575: popcorn.MachineDescr
 
 
 def test_connect_pty_bridges_the_cdc_function_from_the_project(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     del u575
     periph = popcorn.Periph(host=UsbHostOptions(dtr=False, rts=False), connect="pty")
@@ -529,7 +529,7 @@ def test_connect_pty_bridges_the_cdc_function_from_the_project(
 
 
 def test_connect_pty_on_a_controller_without_a_host_is_refused(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     del u575
     with pytest.raises(popcorn.ModelError):
@@ -537,7 +537,7 @@ def test_connect_pty_on_a_controller_without_a_host_is_refused(
 
 
 def test_bytes_written_unplugged_survive_a_restore_into_a_fresh_machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(attached=False))
     asyncio.run(m.periph.OTG_FS.host.cdc().write(b"queued"))
@@ -570,7 +570,7 @@ async def queue_report(hid: HidStream, data: bytes) -> None:
 
 
 def test_hid_streams_exist_before_configuration_and_are_checked_after(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575)
     host = m.periph.OTG_FS.host
@@ -589,7 +589,7 @@ def test_hid_streams_exist_before_configuration_and_are_checked_after(
 
 
 def test_a_feature_request_with_no_hid_driver_bound_raises(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     hid = usb_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host.hid()
     with pytest.raises(popcorn.UsbError, match="no HID driver") as caught:
@@ -613,7 +613,7 @@ BAD_HID_CALLS: list[tuple[Callable[[HidStream], Coroutine[Any, Any, object]], st
 
 @pytest.mark.parametrize(("call", "match"), BAD_HID_CALLS)
 def test_hid_calls_refuse_bad_arguments(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     call: Callable[[HidStream], Coroutine[Any, Any, object]],
     match: str,
 ) -> None:
@@ -623,7 +623,7 @@ def test_hid_calls_refuse_bad_arguments(
 
 
 def test_an_output_report_written_unplugged_survives_a_restore_into_a_fresh_machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(attached=False))
     asyncio.run(queue_report(m.periph.OTG_FS.host.hid(), b"\x02\x77"))
@@ -654,7 +654,7 @@ def test_an_output_report_written_unplugged_survives_a_restore_into_a_fresh_mach
 
 
 def test_a_report_whose_await_is_cancelled_before_it_is_queued_is_not_done(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(attached=False))
     hid = m.periph.OTG_FS.host.hid()
@@ -675,7 +675,7 @@ def test_a_report_whose_await_is_cancelled_before_it_is_queued_is_not_done(
 
 
 def test_a_report_command_left_by_a_cancel_reports_its_later_failure(
-    u575: popcorn.MachineDescription, monkeypatch: pytest.MonkeyPatch
+    u575: popcorn.PartDescription, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(attached=False))
     hid = m.periph.OTG_FS.host.hid()
@@ -707,7 +707,7 @@ def test_a_report_command_left_by_a_cancel_reports_its_later_failure(
 
 
 def test_an_unplugged_function_keeps_its_report_descriptor_across_a_restore(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     hid = host.hid()
@@ -726,7 +726,7 @@ def test_an_unplugged_function_keeps_its_report_descriptor_across_a_restore(
 
 
 def test_hid_wait_ready_runs_until_the_report_descriptor_is_read(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     _, host = configured(u575)
     first, second = host.hid(0), host.hid(1)
@@ -741,7 +741,7 @@ def test_hid_wait_ready_runs_until_the_report_descriptor_is_read(
 
 
 def test_a_count_ended_hid_read_takes_the_echoed_report_by_its_ready_time(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     _, host = configured(u575)
     hid = host.hid(1)
@@ -756,13 +756,13 @@ def test_a_count_ended_hid_read_takes_the_echoed_report_by_its_ready_time(
 
 
 def audio_machine(
-    u575: popcorn.MachineDescription, options: UsbHostOptions | None = None
+    u575: popcorn.PartDescription, options: UsbHostOptions | None = None
 ) -> popcorn.Machine:
     return usb_machine(u575, options, AUDIO_ELF)
 
 
 def test_audio_functions_exist_before_configuration_and_are_checked_after(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = audio_machine(u575)
     host = m.periph.OTG_FS.host
@@ -780,7 +780,7 @@ def test_audio_functions_exist_before_configuration_and_are_checked_after(
         host.audio(2)
 
 
-def test_audio_wait_ready_raises_unbound_when_unplugged(u575: popcorn.MachineDescription) -> None:
+def test_audio_wait_ready_raises_unbound_when_unplugged(u575: popcorn.PartDescription) -> None:
     audio = audio_machine(u575, UsbHostOptions(attached=False)).periph.OTG_FS.host.audio()
     with pytest.raises(popcorn.UsbTimeout) as caught:
         asyncio.run(audio.wait_ready(for_=ms(5)))
@@ -796,7 +796,7 @@ def test_audio_wait_ready_raises_unbound_when_unplugged(u575: popcorn.MachineDes
 
 
 def test_a_drain_right_after_start_waits_for_the_first_packet_on_the_bus(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = audio_machine(u575)
     speaker = m.periph.OTG_FS.host.audio().speaker
@@ -819,7 +819,7 @@ def test_a_drain_right_after_start_waits_for_the_first_packet_on_the_bus(
 
 @pytest.mark.parametrize("drop", ["stop", "unplug"])
 def test_a_drain_raises_stopped_when_the_last_packet_is_dropped_before_the_bus(
-    u575: popcorn.MachineDescription, drop: str
+    u575: popcorn.PartDescription, drop: str
 ) -> None:
     m = popcorn.Machine(
         u575,
@@ -849,7 +849,7 @@ def test_a_drain_raises_stopped_when_the_last_packet_is_dropped_before_the_bus(
     assert speaker.sent_at is None
 
 
-def test_a_stop_during_drain_raises_stopped(u575: popcorn.MachineDescription) -> None:
+def test_a_stop_during_drain_raises_stopped(u575: popcorn.PartDescription) -> None:
     m = audio_machine(u575)
     speaker = m.periph.OTG_FS.host.audio().speaker
 
@@ -879,7 +879,7 @@ def test_a_stop_during_drain_raises_stopped(u575: popcorn.MachineDescription) ->
     assert speaker.queued == 0
 
 
-def test_speaker_writes_refuse_bad_samples(u575: popcorn.MachineDescription) -> None:
+def test_speaker_writes_refuse_bad_samples(u575: popcorn.PartDescription) -> None:
     m = audio_machine(u575)
     audio = m.periph.OTG_FS.host.audio()
     speaker = audio.speaker
@@ -898,7 +898,7 @@ def test_speaker_writes_refuse_bad_samples(u575: popcorn.MachineDescription) -> 
         asyncio.run(audio.mic.read_frames(-1))
 
 
-def test_drain_raises_while_the_speaker_does_not_run(u575: popcorn.MachineDescription) -> None:
+def test_drain_raises_while_the_speaker_does_not_run(u575: popcorn.PartDescription) -> None:
     m = audio_machine(u575)
     audio = m.periph.OTG_FS.host.audio()
     asyncio.run(audio.wait_ready(for_=s(2)))
@@ -911,7 +911,7 @@ def test_drain_raises_while_the_speaker_does_not_run(u575: popcorn.MachineDescri
 
 
 def test_a_start_inside_running_streams_from_the_background_run(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = audio_machine(u575)
     audio = m.periph.OTG_FS.host.audio()
@@ -929,7 +929,7 @@ def test_a_start_inside_running_streams_from_the_background_run(
 
 
 def test_speaker_samples_written_unplugged_survive_a_restore_into_a_fresh_machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = audio_machine(u575, UsbHostOptions(attached=False))
     asyncio.run(m.periph.OTG_FS.host.audio().speaker.write([5, 6, 7]))
@@ -955,7 +955,7 @@ def test_speaker_samples_written_unplugged_survive_a_restore_into_a_fresh_machin
 
 
 def test_a_restore_drops_mic_frames_and_keeps_the_streams_running(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = audio_machine(u575)
     audio = m.periph.OTG_FS.host.audio()
@@ -1036,7 +1036,7 @@ CDC_COMMANDS: dict[str, Command] = {
 
 @pytest.mark.parametrize("kind", list(CDC_COMMANDS))
 def test_a_usb_command_runs_on_the_machine_thread_without_the_gil(
-    u575: popcorn.MachineDescription, kind: str
+    u575: popcorn.PartDescription, kind: str
 ) -> None:
     m, host = configured(u575)
     cdc, hid = host.cdc(), host.hid(0)
@@ -1058,7 +1058,7 @@ UAC_COMMANDS: dict[str, Callable[[popcorn.Machine, Any], Any]] = {
 
 @pytest.mark.parametrize("kind", list(UAC_COMMANDS))
 def test_an_audio_command_runs_on_the_machine_thread_without_the_gil(
-    u575: popcorn.MachineDescription, kind: str
+    u575: popcorn.PartDescription, kind: str
 ) -> None:
     m = audio_machine(u575)
     audio = m.periph.OTG_FS.host.audio()
@@ -1099,7 +1099,7 @@ USB_CALLS: dict[str, UsbCall] = {
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 @pytest.mark.parametrize("kind", list(USB_CALLS))
 def test_a_usb_call_waits_on_the_machine_thread_without_the_gil(
-    u575: popcorn.MachineDescription, kind: str, running: bool
+    u575: popcorn.PartDescription, kind: str, running: bool
 ) -> None:
     m, host = configured(u575)
     cdc, hid = host.cdc(), host.hid(0 if kind != "hid-ready" else 1)
@@ -1137,7 +1137,7 @@ UAC_CALLS: dict[str, Callable[[Any], Coroutine[Any, Any, object]]] = {
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 @pytest.mark.parametrize("kind", list(UAC_CALLS))
 def test_an_audio_call_waits_on_the_machine_thread_without_the_gil(
-    u575: popcorn.MachineDescription, kind: str, running: bool
+    u575: popcorn.PartDescription, kind: str, running: bool
 ) -> None:
     m = audio_machine(u575)
     audio = m.periph.OTG_FS.host.audio()
@@ -1156,7 +1156,7 @@ def test_an_audio_call_waits_on_the_machine_thread_without_the_gil(
 
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_a_failed_enumeration_raises_with_its_step_without_the_gil(
-    u575: popcorn.MachineDescription, running: bool
+    u575: popcorn.PartDescription, running: bool
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(timeout=ms(1)), OTG_ELF)
     host = m.periph.OTG_FS.host
@@ -1176,7 +1176,7 @@ def test_a_failed_enumeration_raises_with_its_step_without_the_gil(
 
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_concurrent_control_requests_each_take_their_own_result(
-    u575: popcorn.MachineDescription, running: bool
+    u575: popcorn.PartDescription, running: bool
 ) -> None:
     """Running, the first request takes its result only once the second one's result waits
     too, and the second one starts waiting only after that take."""
@@ -1245,7 +1245,7 @@ def test_concurrent_control_requests_each_take_their_own_result(
 
 @pytest.mark.parametrize("when", ["post", "in_flight", "ended", "twice"])
 def test_a_cancelled_control_request_gives_its_result_up(
-    u575: popcorn.MachineDescription, when: str
+    u575: popcorn.PartDescription, when: str
 ) -> None:
     """Cancelled after its command ran but before the post returned, while the transfer runs,
     once it ended, and twice while it runs: no result stays behind."""
@@ -1300,7 +1300,7 @@ def test_a_cancelled_control_request_gives_its_result_up(
 
 
 def test_a_stale_control_forget_after_a_restore_leaves_the_new_request(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     """The restore rewinds the transfer ids, so the new request reuses the cancelled one's id."""
     m, host = configured(u575)
@@ -1333,7 +1333,7 @@ def test_a_stale_control_forget_after_a_restore_leaves_the_new_request(
 
 
 def test_a_control_wait_ended_before_its_result_gives_the_result_up(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     now = m.time
@@ -1367,7 +1367,7 @@ class FailOnce(logging.Filter):
 
 
 def test_a_cdc_pty_overflow_warning_reaches_a_raising_filter_off_the_machine_thread(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     """The firmware echoes what the pty sends and nothing reads the echo, so the bridge's output
     passes its 64 KiB bound and warns once. Each read of the running machine flushes its log
@@ -1404,7 +1404,7 @@ def test_a_cdc_pty_overflow_warning_reaches_a_raising_filter_off_the_machine_thr
     assert [str(error) for error in raised] == ["filter failed"]
 
 
-def gpio_hole(description: popcorn.MachineDescription) -> int:
+def gpio_hole(description: popcorn.PartDescription) -> int:
     """A byte of GPIOA's window no register covers: a read of it logs one record."""
     found = next(p for p in description.peripherals if p.name == "GPIOA")
     taken = {r.offset + k for r in found.registers for k in range(4)}
@@ -1412,7 +1412,7 @@ def gpio_hole(description: popcorn.MachineDescription) -> int:
 
 
 def test_a_log_error_at_a_consuming_await_keeps_its_result(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     hole = gpio_hole(u575)
@@ -1438,7 +1438,7 @@ def test_a_log_error_at_a_consuming_await_keeps_its_result(
 
 
 def test_forgetting_on_the_links_of_a_dead_machine_does_nothing(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     cdc = usb_link_of(host.cdc(0))
@@ -1451,7 +1451,7 @@ def test_forgetting_on_the_links_of_a_dead_machine_does_nothing(
 
 
 def test_a_dropped_report_write_leaves_no_result_behind(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     hid = host.hid()
@@ -1471,7 +1471,7 @@ def ready_hid(m: popcorn.Machine, host: UsbHost) -> HidStream:
 
 
 def test_a_dropped_stamped_report_write_leaves_its_machine_collectable(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     hid = ready_hid(m, host)
@@ -1484,7 +1484,7 @@ def test_a_dropped_stamped_report_write_leaves_its_machine_collectable(
 
 
 def test_a_dropped_report_write_on_a_running_machine_takes_no_gil(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     hid = ready_hid(m, host)
@@ -1510,7 +1510,7 @@ def test_a_dropped_report_write_on_a_running_machine_takes_no_gil(
 
 
 def test_a_report_write_left_by_a_cancel_warns_of_its_failure_and_keeps_no_result(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(timeout=ms(20)))
     host = m.periph.OTG_FS.host
@@ -1539,7 +1539,7 @@ def test_a_report_write_left_by_a_cancel_warns_of_its_failure_and_keeps_no_resul
 
 
 def test_a_report_write_collected_on_the_machine_thread_warns_off_it(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     m = usb_machine(u575, UsbHostOptions(timeout=ms(20)))
     host = m.periph.OTG_FS.host
@@ -1573,7 +1573,7 @@ EMPTY_TAKES: dict[str, tuple[Path, Callable[[popcorn.Machine], Any], str]] = {
 
 @pytest.mark.parametrize("kind", list(EMPTY_TAKES))
 def test_a_take_of_a_stream_that_never_held_anything_is_empty_while_running(
-    u575: popcorn.MachineDescription, kind: str
+    u575: popcorn.PartDescription, kind: str
 ) -> None:
     elf, stream_of, method = EMPTY_TAKES[kind]
     if elf in (USB_ELF, AUDIO_ELF):
@@ -1592,7 +1592,7 @@ def test_a_take_of_a_stream_that_never_held_anything_is_empty_while_running(
     assert run_bounded(scenario(), HANG) == ([], 0)
 
 
-def test_cdc_read_until_takes_through_the_match(u575: popcorn.MachineDescription) -> None:
+def test_cdc_read_until_takes_through_the_match(u575: popcorn.PartDescription) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
 
@@ -1614,7 +1614,7 @@ def test_cdc_read_until_takes_through_the_match(u575: popcorn.MachineDescription
 
 
 def test_cdc_read_until_matches_the_shortest_prefix_of_a_packet(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
@@ -1636,7 +1636,7 @@ def test_cdc_read_until_matches_the_shortest_prefix_of_a_packet(
 
 
 def test_cdc_read_until_reports_bytes_the_full_queue_dropped(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     _, host = configured(u575)
     cdc = host.cdc()
@@ -1652,7 +1652,7 @@ def test_cdc_read_until_reports_bytes_the_full_queue_dropped(
     assert cdc.available <= 2
 
 
-def test_cdc_take_equals_a_read_of_what_is_available(u575: popcorn.MachineDescription) -> None:
+def test_cdc_take_equals_a_read_of_what_is_available(u575: popcorn.PartDescription) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
     start = m.snapshot()
@@ -1673,7 +1673,7 @@ def test_cdc_take_equals_a_read_of_what_is_available(u575: popcorn.MachineDescri
     assert cdc.take() == b"ABC"
 
 
-def test_cdc_take_inside_running_empties_the_queue(u575: popcorn.MachineDescription) -> None:
+def test_cdc_take_inside_running_empties_the_queue(u575: popcorn.PartDescription) -> None:
     m, host = configured(u575)
     cdc = host.cdc()
 
@@ -1705,7 +1705,7 @@ async def cdc_packets_read(cdc: Any, at: VirtualTime) -> tuple[bytes, bytes]:
 
 @pytest.mark.parametrize("reads", [cdc_bytes_read, cdc_packets_read])
 def test_a_free_run_cdc_deadline_read_takes_what_a_parked_one_takes(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     reads: Callable[[Any, VirtualTime], Coroutine[Any, Any, tuple[bytes, bytes]]],
 ) -> None:
     m, host = configured(u575)
@@ -1730,7 +1730,7 @@ def test_a_free_run_cdc_deadline_read_takes_what_a_parked_one_takes(
 
 
 def test_a_bridged_cdc_function_is_not_taken_from_python(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     m.board.pty("OTG_FS")
@@ -1742,7 +1742,7 @@ def test_a_bridged_cdc_function_is_not_taken_from_python(
 
 
 def test_hid_take_reports_equals_a_read_of_what_is_available(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     echo = host.hid(1)
@@ -1763,7 +1763,7 @@ def test_hid_take_reports_equals_a_read_of_what_is_available(
 
 
 def test_mic_take_frames_equals_a_read_of_what_is_available(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = audio_machine(u575)
     audio = m.periph.OTG_FS.host.audio()
@@ -1784,7 +1784,7 @@ def test_mic_take_frames_equals_a_read_of_what_is_available(
 
 
 def test_a_free_run_hid_deadline_read_takes_what_a_parked_one_takes(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
     echo = host.hid(1)
@@ -1835,7 +1835,7 @@ async def parked_to(m: popcorn.Machine, at: VirtualTime) -> None:
 
 
 def test_a_free_run_mic_deadline_read_takes_what_a_parked_one_takes(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = audio_machine(u575)
     mic = m.periph.OTG_FS.host.audio().mic
@@ -1893,7 +1893,7 @@ USB_WAITS: dict[str, tuple[Path, Callable[[UsbHost], Any], Bounded]] = {
 
 @pytest.mark.parametrize("kind", list(USB_WAITS))
 def test_a_usb_wait_with_a_past_deadline_runs_nothing(
-    u575: popcorn.MachineDescription, kind: str
+    u575: popcorn.PartDescription, kind: str
 ) -> None:
     elf, stream_of, wait = USB_WAITS[kind]
     m = usb_machine(u575, elf=elf)
@@ -1907,7 +1907,7 @@ def test_a_usb_wait_with_a_past_deadline_runs_nothing(
 
 @pytest.mark.parametrize("kind", list(USB_WAITS))
 def test_a_usb_wait_with_a_past_deadline_ends_at_once_while_running(
-    u575: popcorn.MachineDescription, kind: str
+    u575: popcorn.PartDescription, kind: str
 ) -> None:
     elf, stream_of, wait = USB_WAITS[kind]
     m = usb_machine(u575, UsbHostOptions(attached=False), elf)
@@ -1925,7 +1925,7 @@ def test_a_usb_wait_with_a_past_deadline_ends_at_once_while_running(
 
 @pytest.mark.parametrize("kind", [kind for kind in USB_WAITS if kind != "speaker-drain"])
 def test_a_usb_wait_with_a_deadline_stops_there_while_running(
-    u575: popcorn.MachineDescription, kind: str
+    u575: popcorn.PartDescription, kind: str
 ) -> None:
     elf, stream_of, wait = USB_WAITS[kind]
     m = usb_machine(u575, UsbHostOptions(attached=False), elf)
@@ -1943,9 +1943,7 @@ def test_a_usb_wait_with_a_deadline_stops_there_while_running(
 
 
 @pytest.mark.parametrize("kind", list(USB_WAITS))
-def test_a_usb_wait_refuses_both_for_and_deadline(
-    u575: popcorn.MachineDescription, kind: str
-) -> None:
+def test_a_usb_wait_refuses_both_for_and_deadline(u575: popcorn.PartDescription, kind: str) -> None:
     elf, stream_of, wait = USB_WAITS[kind]
     m = usb_machine(u575, elf=elf)
     stream = stream_of(m.periph.OTG_FS.host)

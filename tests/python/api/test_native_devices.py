@@ -30,7 +30,7 @@ def eeprom(write_cycle: VirtualDuration | None = None) -> Eeprom24xx:
 
 
 def machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     elf: Path,
     bus: str,
     *devices: Eeprom24xx | TableTarget | Eeprom24,
@@ -38,7 +38,7 @@ def machine(
     return popcorn.Machine(u575, image=popcorn.Image.elf(elf), devices={bus: list(devices)})
 
 
-def spi_machine(u575: popcorn.MachineDescription, flash: At25sf) -> popcorn.Machine:
+def spi_machine(u575: popcorn.PartDescription, flash: At25sf) -> popcorn.Machine:
     return popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [flash]})
 
 
@@ -47,7 +47,7 @@ def run(m: popcorn.Machine, entry: str) -> list[int]:
     return finish(m)
 
 
-def into_write_cycle(u575: popcorn.MachineDescription, m: popcorn.Machine) -> None:
+def into_write_cycle(u575: popcorn.PartDescription, m: popcorn.Machine) -> None:
     """Run `m`, entered at eeprom_rw, to where the Python EEPROM of the same run NACKs its
     fourth poll, in the first write cycle."""
     probe = Eeprom24(0x50, 4096)
@@ -59,7 +59,7 @@ def into_write_cycle(u575: popcorn.MachineDescription, m: popcorn.Machine) -> No
 
 
 def test_the_firmware_uses_a_native_eeprom_as_it_uses_the_python_one(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     native = eeprom()
     python = Eeprom24(0x50, 4096)
@@ -74,7 +74,7 @@ def test_the_firmware_uses_a_native_eeprom_as_it_uses_the_python_one(
 
 
 def test_the_write_cycle_sets_how_long_the_firmware_polls(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     short = run(machine(u575, I2C_ELF, "I2C1", eeprom(ms(5))), "eeprom_rw")
     long = run(machine(u575, I2C_ELF, "I2C1", eeprom(ms(10))), "eeprom_rw")
@@ -83,7 +83,7 @@ def test_the_write_cycle_sets_how_long_the_firmware_polls(
 
 
 def test_the_machine_board_lists_the_native_device_it_serves(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     device = eeprom()
     m = machine(u575, I2C_ELF, "I2C1", device)
@@ -93,7 +93,7 @@ def test_the_machine_board_lists_the_native_device_it_serves(
 
 @pytest.mark.parametrize(("cs", "entry"), [(None, "hw_ss"), ("PA4", "poll")])
 def test_the_firmware_reads_the_jedec_id_of_a_custom_at25sf(
-    u575: popcorn.MachineDescription, cs: str | None, entry: str
+    u575: popcorn.PartDescription, cs: str | None, entry: str
 ) -> None:
     flash = At25sf(cs, jedec=CUSTOM, size=4 << 20)
     assert run(spi_machine(u575, flash), entry) == [0xFF, *CUSTOM]
@@ -101,14 +101,14 @@ def test_the_firmware_reads_the_jedec_id_of_a_custom_at25sf(
     assert len(flash.contents()) == 4 << 20
 
 
-def test_the_default_at25sf_is_an_at25sf641(u575: popcorn.MachineDescription) -> None:
+def test_the_default_at25sf_is_an_at25sf641(u575: popcorn.PartDescription) -> None:
     flash = At25sf()
     assert run(spi_machine(u575, flash), "hw_ss") == [0xFF, 0x1F, 0x32, 0x17]
     assert len(flash.contents()) == 8 << 20
 
 
 def test_a_page_program_lands_and_its_time_sets_the_busy_polls(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     fast = At25sf("PA4", page_program=us(600))
     slow = At25sf("PA4", page_program=us(1200))
@@ -119,7 +119,7 @@ def test_a_page_program_lands_and_its_time_sets_the_busy_polls(
     assert fast.contents()[0x1000:0x1010] == bytes(range(0xA0, 0xB0))
 
 
-def test_a_sector_erase_time_sets_the_busy_polls(u575: popcorn.MachineDescription) -> None:
+def test_a_sector_erase_time_sets_the_busy_polls(u575: popcorn.PartDescription) -> None:
     short = run(spi_machine(u575, At25sf("PA4", initial=b"\x00" * 0x2000, erase_4k=ms(1))), "erase")
     long = run(spi_machine(u575, At25sf("PA4", initial=b"\x00" * 0x2000, erase_4k=ms(2))), "erase")
     assert short[1] == long[1] == 16
@@ -127,7 +127,7 @@ def test_a_sector_erase_time_sets_the_busy_polls(u575: popcorn.MachineDescriptio
 
 
 def test_a_table_target_records_writes_and_answers_reads(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     table = TableTarget(0x38, register_bytes=2, replies={0x4002: [0x12, 0x34]})
     assert run(machine(u575, I2C_ELF, "I2C1", table), "table") == [0x12, 0x34]
@@ -137,7 +137,7 @@ def test_a_table_target_records_writes_and_answers_reads(
 
 @pytest.mark.parametrize(("nack_unknown", "log"), [(False, [0xFF, 0xFF]), (True, [])])
 def test_a_read_from_a_register_without_a_reply_is_refused_on_request(
-    u575: popcorn.MachineDescription, nack_unknown: bool, log: list[int]
+    u575: popcorn.PartDescription, nack_unknown: bool, log: list[int]
 ) -> None:
     table = TableTarget(0x38, register_bytes=2, nack_unknown=nack_unknown)
     m = machine(u575, I2C_ELF, "I2C1", table)
@@ -153,7 +153,7 @@ def test_a_table_target_replies_accept_bytes() -> None:
 
 
 def test_a_snapshot_mid_run_restores_into_a_fresh_machine_and_device(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     expected = run(machine(u575, I2C_ELF, "I2C1", eeprom()), "eeprom_rw")
 
@@ -177,7 +177,7 @@ def test_a_snapshot_mid_run_restores_into_a_fresh_machine_and_device(
 
 
 def test_a_device_snapshot_round_trips_through_a_fresh_device(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     device = eeprom()
     run(machine(u575, I2C_ELF, "I2C1", device), "eeprom_rw")
@@ -200,7 +200,7 @@ def test_a_device_snapshot_round_trips_through_a_fresh_device(
 
 
 def served(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> list[tuple[popcorn.Machine, Eeprom24xx | At25sf | TableTarget]]:
     device = eeprom()
     flash = At25sf("PA4")
@@ -213,7 +213,7 @@ def served(
 
 
 def test_device_state_accessors_are_machine_running_while_its_machine_runs(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     async def scenario(m: popcorn.Machine, device: Eeprom24xx | At25sf | TableTarget) -> None:
         state = device.snapshot()
@@ -233,7 +233,7 @@ def test_device_state_accessors_are_machine_running_while_its_machine_runs(
 
 
 def test_device_state_accessors_work_on_a_parked_machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     for m, device in served(u575):
         asyncio.run(m.run(budget=10_000))
@@ -255,7 +255,7 @@ def test_restore_refuses_the_state_of_another_size_or_initial_contents() -> None
 
 
 def test_a_power_on_reset_mid_write_cycle_lets_the_next_run_start_fresh(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     expected = run(machine(u575, I2C_ELF, "I2C1", eeprom()), "eeprom_rw")
     device = eeprom()
@@ -319,7 +319,7 @@ def test_a_duration_must_be_a_virtual_duration() -> None:
 
 
 def test_native_devices_are_checked_as_python_ones_are(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     with pytest.raises(ConfigError, match="an SPI peripheral for an SpiTarget") as refused:
         popcorn.Machine(u575, devices={"I2C1": [At25sf()]})
@@ -337,7 +337,7 @@ def test_native_devices_are_checked_as_python_ones_are(
     machine(u575, I2C_ELF, "I2C1", device)
 
 
-def test_the_machine_keeps_its_native_devices_alive(u575: popcorn.MachineDescription) -> None:
+def test_the_machine_keeps_its_native_devices_alive(u575: popcorn.PartDescription) -> None:
     device = eeprom()
     held = weakref.ref(device)
     m = machine(u575, I2C_ELF, "I2C1", device)
@@ -351,7 +351,7 @@ def test_the_machine_keeps_its_native_devices_alive(u575: popcorn.MachineDescrip
 
 
 def test_a_project_declares_a_custom_at25sf_on_the_hardware_ss(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     project = NATIVE_DEVICES
     (entry,) = project.board["SPI1"].devices
@@ -371,7 +371,7 @@ def test_a_project_declares_a_custom_at25sf_on_the_hardware_ss(
 
 
 def test_a_project_device_takes_a_page_program_duration(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     project = NATIVE_DEVICES.replace(
         board={
@@ -389,7 +389,7 @@ def test_a_project_device_takes_a_page_program_duration(
 
 
 def test_a_project_device_takes_an_image_path(
-    u575: popcorn.MachineDescription, tmp_path: Path
+    u575: popcorn.PartDescription, tmp_path: Path
 ) -> None:
     image = tmp_path / "flash.bin"
     image.write_bytes(b"\x5a\xa5")
@@ -403,9 +403,9 @@ def test_a_project_device_takes_an_image_path(
 
 
 def test_a_project_table_target_takes_integer_register_keys(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(I2C_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),
@@ -440,8 +440,8 @@ def test_a_project_integer_duration_is_refused() -> None:
     assert refused.value.key == "board.SPI1.devices[0]"
 
 
-def test_a_project_declares_native_i2c_devices(u575: popcorn.MachineDescription) -> None:
-    project = popcorn.Project(
+def test_a_project_declares_native_i2c_devices(u575: popcorn.PartDescription) -> None:
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(I2C_ELF)],
         boot=popcorn.Boot(until="main", budget=BUDGET),
@@ -470,7 +470,7 @@ def bare_at25sf() -> _core.At25sfBase:
     )
 
 
-def test_a_bare_native_spi_base_is_refused_not_crashed(u575: popcorn.MachineDescription) -> None:
+def test_a_bare_native_spi_base_is_refused_not_crashed(u575: popcorn.PartDescription) -> None:
     with pytest.raises(ConfigError, match="At25sf instances") as refused:
         popcorn.Machine(u575, devices={"SPI1": [cast(At25sf, bare_at25sf())]})
     assert refused.value.key == "devices.SPI1"

@@ -31,9 +31,9 @@ def run(pytester: pytest.Pytester, *args: str) -> pytest.RunResult:
     return pytester.runpytest(*NO_ASYNCIO, *args)
 
 
-def expected_name(nodeid: str) -> str:
+def expected_name(nodeid: str, fixture: str = "machine") -> str:
     sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", nodeid)
-    return f"{sanitized[:150]}-{hashlib.sha256(nodeid.encode()).hexdigest()[:8]}.pctr"
+    return f"{sanitized[:150]}-{hashlib.sha256(nodeid.encode()).hexdigest()[:8]}.{fixture}.pctr"
 
 
 def alu_mark() -> int:
@@ -145,7 +145,7 @@ def test_a_long_id_is_shortened(pytester: pytest.Pytester) -> None:
     run(pytester, f"--popcorn-trace-on-fail={traces}").assert_outcomes(failed=1)
     names = [path.name for path in traces.iterdir()]
     assert len(names) == 1
-    assert len(names[0]) == 150 + len("-12345678.pctr")
+    assert len(names[0]) == 150 + len("-12345678.machine.pctr")
 
 
 def test_a_trace_that_cannot_start_warns_and_the_test_runs(pytester: pytest.Pytester) -> None:

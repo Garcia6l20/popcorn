@@ -20,7 +20,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
-from popcorn import Call, LinkedSystem, Machine, Return, StopReason, TapFrame, UartLink
+from popcorn import Call, Machine, Return, StopReason, System, TapFrame, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 RESPONDERS = ("responder1", "responder2")
@@ -77,7 +77,7 @@ def data(message: Sequence[TapFrame]) -> bytes:
     return bytes(frame.data for frame in message)
 
 
-def record_idles(system: LinkedSystem) -> dict[str, list[Idle]]:
+def record_idles(system: System) -> dict[str, list[Idle]]:
     """Log every IDLE interrupt of each responder's link, one list per member: the intercepts of
     two members run on two threads at once, so each appends to its own member's list."""
     log: dict[str, list[Idle]] = {}
@@ -95,7 +95,7 @@ def record_idles(system: LinkedSystem) -> dict[str, list[Idle]]:
     return log
 
 
-def tapped(system: LinkedSystem) -> Frames:
+def tapped(system: System) -> Frames:
     """Every frame the controller's two links carried since the last read, by receiving end."""
     taken: Frames = {}
     for end in LINK_ENDS:
@@ -107,8 +107,8 @@ def tapped(system: LinkedSystem) -> Frames:
 
 @contextlib.asynccontextmanager
 async def booted(
-    spec: popcorn.System, slice_instructions: int = 1_000_000
-) -> AsyncGenerator[LinkedSystem]:
+    spec: popcorn.SystemDescription, slice_instructions: int = 1_000_000
+) -> AsyncGenerator[System]:
     """`spec` booted member by member and linked, as a script would. After, the system is
     closed, then each member's board."""
     machines = spec.machines()
@@ -125,12 +125,12 @@ async def booted(
             machine.board.close()
 
 
-async def run_for(system: LinkedSystem, duration: VirtualDuration) -> None:
+async def run_for(system: System, duration: VirtualDuration) -> None:
     stop = await system.run(for_=duration)
     assert stop.reason is StopReason.TIME, stop
 
 
-async def one_second(system: LinkedSystem) -> tuple[Frames, Idles]:
+async def one_second(system: System) -> tuple[Frames, Idles]:
     """Run `system` for 1 s: the frames on both links and each responder's IDLE log."""
     idles = record_idles(system)
     await run_for(system, s(1))
@@ -139,13 +139,13 @@ async def one_second(system: LinkedSystem) -> tuple[Frames, Idles]:
     }
 
 
-async def test_each_responder_gets_its_node_id(system: LinkedSystem) -> None:
+async def test_each_responder_gets_its_node_id(system: System) -> None:
     await run_for(system, ms(1))
     assert system.members["responder1"].var("node_id").value == 1
     assert system.members["responder2"].var("node_id").value == 2
 
 
-async def test_every_block_comes_back_with_its_checksum(system: LinkedSystem) -> None:
+async def test_every_block_comes_back_with_its_checksum(system: System) -> None:
     await run_for(system, s(1))
     controller = system.members["controller"]
     frames = tapped(system)
@@ -170,9 +170,9 @@ async def test_every_block_comes_back_with_its_checksum(system: LinkedSystem) ->
 
 
 async def test_idle_is_one_frame_after_the_last_byte_arrives(
-    system: LinkedSystem, popcorn_system: popcorn.System
+    system: System, system_description: popcorn.SystemDescription
 ) -> None:
-    latency = {link.b.partition(".")[0]: link.latency for link in popcorn_system.links}
+    latency = {link.b.partition(".")[0]: link.latency for link in system_description.links}
     idles = record_idles(system)
     await run_for(system, s(1))
     frames = tapped(system)
@@ -194,7 +194,7 @@ async def test_idle_is_one_frame_after_the_last_byte_arrives(
         assert [(idle.time.ps, idle.position) for idle in idles[name]] == expected
 
 
-async def test_member_callbacks_run_on_their_own_threads(system: LinkedSystem) -> None:
+async def test_member_callbacks_run_on_their_own_threads(system: System) -> None:
     idles = record_idles(system)
     await run_for(system, ms(100))
     threads = {name: {idle.thread for idle in log} for name, log in idles.items()}
@@ -204,7 +204,9 @@ async def test_member_callbacks_run_on_their_own_threads(system: LinkedSystem) -
     assert threading.get_ident() not in (first, second)
 
 
-async def node_id_exchange(spec: popcorn.System) -> tuple[dict[str, VirtualTime], VirtualTime]:
+async def node_id_exchange(
+    spec: popcorn.SystemDescription,
+) -> tuple[dict[str, VirtualTime], VirtualTime]:
     """Each responder's first IDLE, at its node id, in system time, and when the controller has
     responder 1's answer in full."""
     async with booted(spec) as system:
@@ -215,10 +217,13 @@ async def node_id_exchange(spec: popcorn.System) -> tuple[dict[str, VirtualTime]
         return first, answer[-1].arrival
 
 
-async def test_latency_is_a_model_parameter(popcorn_system: popcorn.System) -> None:
-    slower = [dataclasses.replace(popcorn_system.links[0], latency=us(50)), popcorn_system.links[1]]
-    fast, fast_answer = await node_id_exchange(popcorn_system)
-    slow, slow_answer = await node_id_exchange(popcorn_system.replace(links=slower))
+async def test_latency_is_a_model_parameter(system_description: popcorn.SystemDescription) -> None:
+    slower = [
+        dataclasses.replace(system_description.links[0], latency=us(50)),
+        system_description.links[1],
+    ]
+    fast, fast_answer = await node_id_exchange(system_description)
+    slow, slow_answer = await node_id_exchange(system_description.replace(links=slower))
     assert slow["responder1"].ps - fast["responder1"].ps == us(30).ps
     assert slow["responder2"] == fast["responder2"]
     assert slow_answer.ps - fast_answer.ps == us(60).ps
@@ -243,7 +248,7 @@ def _threads() -> list[int]:
     return [int(tid) for tid in os.listdir("/proc/self/task")]
 
 
-def _third_link(spec: popcorn.System) -> popcorn.System:
+def _third_link(spec: popcorn.SystemDescription) -> popcorn.SystemDescription:
     """`spec` with a 3 us link between two unused LPUART1s, which lowers the quantum to 3 us."""
     third = UartLink("controller.LPUART1", "responder1.LPUART1", latency=us(3), baud=460_800)
     return spec.replace(links=[*spec.links, third])
@@ -254,32 +259,32 @@ PINNABLE = hasattr(os, "sched_setaffinity") and Path("/proc/self/task").is_dir()
 
 @pytest.mark.parametrize("variant", ["slicing", "quantum", "one cpu"])
 async def test_the_run_is_the_same_at_any_slicing_quantum_or_cpu_count(
-    popcorn_system: popcorn.System, variant: str
+    system_description: popcorn.SystemDescription, variant: str
 ) -> None:
     if variant == "one cpu" and not PINNABLE:
         pytest.skip("pinning threads needs Linux")
-    async with booted(popcorn_system) as system:
+    async with booted(system_description) as system:
         reference = await one_second(system)
     if variant == "slicing":
-        async with booted(popcorn_system, slice_instructions=997) as system:
+        async with booted(system_description, slice_instructions=997) as system:
             assert await one_second(system) == reference
     elif variant == "quantum":
-        spec = _third_link(popcorn_system)
+        spec = _third_link(system_description)
         assert spec.quantum == us(3)
         async with booted(spec) as system:
             assert await one_second(system) == reference
     else:
         with pinned_to_one_cpu() as cpu:
             before = set(_threads())
-            async with booted(popcorn_system) as system:
+            async with booted(system_description) as system:
                 observed = await one_second(system)
                 started = set(_threads()) - before
-                assert len(started) >= len(popcorn_system.members)
+                assert len(started) >= len(system_description.members)
                 assert all(os.sched_getaffinity(tid) == {cpu} for tid in started)
         assert observed == reference
 
 
-async def test_a_starved_responder_resets_and_comes_back(system: LinkedSystem) -> None:
+async def test_a_starved_responder_resets_and_comes_back(system: System) -> None:
     controller = system.members["controller"]
     responder = system.members["responder2"]
     refreshes: list[VirtualTime] = []
@@ -331,7 +336,7 @@ async def test_a_starved_responder_resets_and_comes_back(system: LinkedSystem) -
     assert controller.var("responders")[0].sums_bad.value == 0
 
 
-async def test_a_replaced_frame_changes_the_checksum_of_its_block(system: LinkedSystem) -> None:
+async def test_a_replaced_frame_changes_the_checksum_of_its_block(system: System) -> None:
     controller = system.members["controller"]
     tap = system.tap("controller.UART4")
     await run_for(system, ms(500))
@@ -352,7 +357,7 @@ async def test_a_replaced_frame_changes_the_checksum_of_its_block(system: Linked
     assert state.last_bad_seq.value == seq
 
 
-async def test_an_injected_poll_is_answered(system: LinkedSystem) -> None:
+async def test_an_injected_poll_is_answered(system: System) -> None:
     await run_for(system, s(2))
     tap = system.tap("controller.USART3")
     line = tap.frames(towards="responder2.USART3")
@@ -378,7 +383,7 @@ async def test_an_injected_poll_is_answered(system: LinkedSystem) -> None:
     assert b"p\x02\x7f\x00" in answers
 
 
-async def test_a_restored_snapshot_replays_the_same_frames(system: LinkedSystem) -> None:
+async def test_a_restored_snapshot_replays_the_same_frames(system: System) -> None:
     await run_for(system, ms(500))
     tapped(system)
     saved = system.snapshot()

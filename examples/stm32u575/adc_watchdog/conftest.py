@@ -1,14 +1,14 @@
-"""Project of the adc_watchdog example."""
+"""MachineDescription of the adc_watchdog example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 from popcorn.board import SupplyOptions
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+ADC_WATCHDOG = popcorn.MachineDescription(
     name="adc-watchdog",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/adc_watchdog.elf")],
@@ -18,6 +18,6 @@ PROJECT = popcorn.Project(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def adc_watchdog() -> popcorn.MachineDescription:
+    return ADC_WATCHDOG

@@ -4,24 +4,24 @@
 
 namespace popcorn::bind
 {
-auto load_description(std::string const& path) -> mcu_description
+auto load_description(std::string const& path) -> part_description
 {
   reflex::py::nb::gil_scoped_release unlocked;
   return popcorn::load_description(path);
 }
 
-auto parse_description(std::string const& json, std::string const& source) -> mcu_description
+auto parse_description(std::string const& json, std::string const& source) -> part_description
 {
   reflex::py::nb::gil_scoped_release unlocked;
   return popcorn::parse_description(json, source);
 }
 
-auto dump_description(mcu_description const& description) -> std::string
+auto dump_description(part_description const& description) -> std::string
 {
   return popcorn::dump_description(description);
 }
 
-auto description_digest(mcu_description const& description) -> std::string
+auto description_digest(part_description const& description) -> std::string
 {
   return popcorn::description_digest(description);
 }

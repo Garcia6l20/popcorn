@@ -10,7 +10,7 @@ a 4-byte feature report. The firmware starts HSI48 as the 48 MHz ICLK, powers
 VDDUSB, calls `tusb_init` and runs `tud_task` in a main loop that sleeps in WFI. Descriptors
 use TinyUSB's example values: VID 0xCafe, PID 0x4005, strings `TinyUSB` and `TinyUSB Device`.
 
-`Periph(host=UsbHostOptions())` on OTG_FS in the project gives the OTG_FS model a virtual
+`Periph(host=UsbHostOptions())` on OTG_FS in the description gives the OTG_FS model a virtual
 full-speed host with its cable plugged from power-on. The host sees the pull-up, waits the 100 ms debounce,
 resets the bus and enumerates the device as Linux does, in virtual time, without Python on the
 transaction path. Its state is in snapshots, so a snapshot taken once configured restores a
@@ -38,7 +38,7 @@ then SET_CONTROL_LINE_STATE with DTR and RTS. `host.cdc()` is the function as a 
 acknowledged and written bytes go out. With `UsbHostOptions(dtr=False)` the control line state
 still goes out, DTR off, and `wait_ready` waits for it the same way.
 
-The pty owns what the device sends. With `connect="pty"`, every machine of the project is
+The pty owns what the device sends. With `connect="pty"`, every machine of the description is
 bridged at build, and `host.cdc()` reads raise
 `RuntimeError: OTG_FS is bridged to /dev/pts/N` for the life of the machine. Writes are not
 refused, they mix with the pty client's bytes. To keep `host.cdc()` reads in most tests, leave

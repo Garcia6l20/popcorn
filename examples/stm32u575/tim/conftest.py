@@ -1,13 +1,13 @@
-"""Project of the tim example."""
+"""MachineDescription of the tim example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+TIM = popcorn.MachineDescription(
     name="tim-ticks",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/tim_ticks.elf")],
@@ -15,6 +15,6 @@ PROJECT = popcorn.Project(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def tim() -> popcorn.MachineDescription:
+    return TIM

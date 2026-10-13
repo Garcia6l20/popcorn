@@ -15,7 +15,7 @@ master:
 - The firmware powers the codec on with `HAL_I2C_Mem_Write`, waits for four complete callbacks on
   the receive side, then powers it off and reaches `codec_stopped`.
 
-The `Project` in `conftest.py` attaches the codec and wires its clock to block A:
+The `MachineDescription` in `conftest.py` attaches the codec and wires its clock to block A:
 
 ```python
 board={
@@ -101,7 +101,7 @@ before block A.
 - The clock rate and phase are board state. A snapshot keeps them, and a restore resets the
   stream: it drops the frames not read yet and the words not served yet, so the test writes the
   unserved receive words again.
-- A power-on or brown-out reset returns the clock to the project wiring, stopped here. Other
+- A power-on or brown-out reset returns the clock to the description's wiring, stopped here. Other
   resets keep it running in phase.
 
 `HAL_I2C_Init` sets OA1EN with own address 0, so the I2C model logs that target mode is not

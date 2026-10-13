@@ -1,14 +1,14 @@
-"""Project of the usb_audio example."""
+"""MachineDescription of the usb_audio example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 from popcorn.board import UsbHostOptions
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+USB_AUDIO = popcorn.MachineDescription(
     name="usb-audio",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/usb_audio.elf")],
@@ -19,6 +19,6 @@ PROJECT = popcorn.Project(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def usb_audio() -> popcorn.MachineDescription:
+    return USB_AUDIO

@@ -13,7 +13,7 @@ from popcorn.units import ms
 
 
 def test_machine_builds_loads_and_resets(
-    m33: popcorn.MachineDescription, basic: popcorn.Image, core_firmware: Path
+    m33: popcorn.PartDescription, basic: popcorn.Image, core_firmware: Path
 ) -> None:
     m = popcorn.Machine(m33, image=basic)
     m.reset()
@@ -42,16 +42,14 @@ def test_image_reports_abi_entry_symbols_and_lines(basic: popcorn.Image) -> None
     assert where.line > 0
 
 
-def test_machine_locates_like_its_image(
-    m33: popcorn.MachineDescription, basic: popcorn.Image
-) -> None:
+def test_machine_locates_like_its_image(m33: popcorn.PartDescription, basic: popcorn.Image) -> None:
     m = popcorn.Machine(m33, image=basic)
     address = basic.lookup("Reset_Handler").value + 2
     assert m.locate(address) == basic.locate(address)
     assert m.locate(0x2000_1000) == popcorn.Location(0x2000_1000)
 
 
-def test_bin_image_loads_at_its_address(tmp_path: Path, m33: popcorn.MachineDescription) -> None:
+def test_bin_image_loads_at_its_address(tmp_path: Path, m33: popcorn.PartDescription) -> None:
     path = tmp_path / "blob.bin"
     path.write_bytes(bytes(range(16)))
     blob = popcorn.Image.bin(path, 0x2000_0100)
@@ -87,7 +85,7 @@ def test_a_core_no_arch_module_implements_is_a_config_error(m33_json: Path) -> N
     ],
 )
 def test_options_out_of_range_are_config_errors(
-    m33: popcorn.MachineDescription, options: dict[str, float], key: str
+    m33: popcorn.PartDescription, options: dict[str, float], key: str
 ) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Machine(
@@ -99,11 +97,11 @@ def test_options_out_of_range_are_config_errors(
     assert caught.value.key == key
 
 
-def test_one_instruction_per_second_is_accepted(m33: popcorn.MachineDescription) -> None:
+def test_one_instruction_per_second_is_accepted(m33: popcorn.PartDescription) -> None:
     popcorn.Machine(m33, core_hz=2, cpi=2.0)
 
 
-def test_description_digest_is_stable(m33: popcorn.MachineDescription, m33_json: Path) -> None:
+def test_description_digest_is_stable(m33: popcorn.PartDescription, m33_json: Path) -> None:
     again = popcorn.load_description(m33_json)
     assert popcorn.description_digest(m33) == popcorn.description_digest(again)
     assert len(popcorn.description_digest(m33)) == 64
@@ -127,7 +125,7 @@ def test_vector_table_option_stands_in_for_an_executable_region(m33_json: Path) 
 
 
 def test_a_machine_is_named_after_its_part_by_default(
-    m33: popcorn.MachineDescription, basic: popcorn.Image
+    m33: popcorn.PartDescription, basic: popcorn.Image
 ) -> None:
     m = popcorn.Machine(m33, image=basic)
     assert m.name == "POPCORN-M33-TEST"
@@ -141,13 +139,23 @@ def test_a_machine_is_named_after_its_part_by_default(
 
 @pytest.mark.parametrize("name", ["", "a b", "a\tb", "a.b", "."])
 def test_a_name_with_whitespace_or_a_dot_is_refused(
-    m33: popcorn.MachineDescription, name: str
+    m33: popcorn.PartDescription, name: str
 ) -> None:
     with pytest.raises(ValueError, match="name"):
         popcorn.Machine(m33, name=name)
 
 
-def fault_message(m33: popcorn.MachineDescription, basic: popcorn.Image, name: str | None) -> str:
+@pytest.mark.parametrize("name", ["", "a b", "a\tb", "a.b", "."])
+def test_a_rename_to_a_name_with_whitespace_or_a_dot_is_refused(
+    m33: popcorn.PartDescription, name: str
+) -> None:
+    m = popcorn.Machine(m33, name="node1")
+    with pytest.raises(ValueError, match="name"):
+        m._rename(name)  # pyright: ignore[reportPrivateUsage]
+    assert m.name == "node1"
+
+
+def fault_message(m33: popcorn.PartDescription, basic: popcorn.Image, name: str | None) -> str:
     m = popcorn.Machine(m33, image=basic, name=name)
     m.reset()
     m.reg.pc = 0x3000_0000
@@ -157,7 +165,7 @@ def fault_message(m33: popcorn.MachineDescription, basic: popcorn.Image, name: s
 
 
 def test_a_stop_error_of_a_named_machine_names_it(
-    m33: popcorn.MachineDescription, basic: popcorn.Image
+    m33: popcorn.PartDescription, basic: popcorn.Image
 ) -> None:
     plain = fault_message(m33, basic, None)
     assert plain.startswith("the run letting time pass stopped with FAULT: ")

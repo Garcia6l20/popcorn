@@ -59,7 +59,7 @@ def run_entry(m: popcorn.Machine, entry: str) -> list[int]:
 
 
 def sai_machine(
-    u575: popcorn.MachineDescription, options: dict[Block, AudioOptions] | None = None
+    u575: popcorn.PartDescription, options: dict[Block, AudioOptions] | None = None
 ) -> popcorn.Machine:
     m = popcorn.Machine(
         u575,
@@ -75,7 +75,7 @@ def read_all(stream: AudioStream) -> list[tuple[int, ...]]:
 
 
 def test_frames_a_block_sent_before_the_stream_was_taken_are_captured(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     assert run_entry(m, "tx_poll") == [0]
@@ -94,7 +94,7 @@ def test_frames_a_block_sent_before_the_stream_was_taken_are_captured(
 
 
 def test_a_receiving_block_takes_the_words_written_in_slot_order(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     words = [0xA000 + index for index in range(FRAMES)]
@@ -108,7 +108,7 @@ def test_a_receiving_block_takes_the_words_written_in_slot_order(
     assert receiver.queued == 0
 
 
-def test_decimation_stretches_every_frame(u575: popcorn.MachineDescription) -> None:
+def test_decimation_stretches_every_frame(u575: popcorn.PartDescription) -> None:
     m = sai_machine(u575, {"A": AudioOptions(decimation=2)})
     run_entry(m, "tx_poll")
     frames = asyncio.run(m.periph.SAI1.audio("A").read_frames(FRAMES))
@@ -116,7 +116,7 @@ def test_decimation_stretches_every_frame(u575: popcorn.MachineDescription) -> N
 
 
 def test_a_restore_drops_unread_frames_and_unserved_words(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     saved = m.snapshot()
@@ -132,7 +132,7 @@ def test_a_restore_drops_unread_frames_and_unserved_words(
 
 
 def test_a_full_queue_drops_its_oldest_frames_and_counts_them(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     saved = m.snapshot()
@@ -152,7 +152,7 @@ def test_a_full_queue_drops_its_oldest_frames_and_counts_them(
 
 
 def test_a_secure_alias_shares_the_stream_and_names_the_sai(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(
         u575,
@@ -183,7 +183,7 @@ def test_a_secure_alias_shares_the_stream_and_names_the_sai(
     ],
 )
 def test_audio_options_are_checked(
-    u575: popcorn.MachineDescription, audio: dict[str, dict[Block, AudioOptions]], key: str
+    u575: popcorn.PartDescription, audio: dict[str, dict[Block, AudioOptions]], key: str
 ) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Machine(u575, audio=audio)
@@ -191,7 +191,7 @@ def test_audio_options_are_checked(
 
 
 def test_the_accessor_refuses_other_blocks_and_peripherals(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(u575, models={"SAI2": Silent})
     with pytest.raises(popcorn.ConfigError):
@@ -205,7 +205,7 @@ def test_the_accessor_refuses_other_blocks_and_peripherals(
 
 
 def test_a_write_from_another_thread_during_a_run_is_posted(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     receiver = m.periph.SAI1.audio("B")
@@ -220,8 +220,10 @@ def test_a_write_from_another_thread_during_a_run_is_posted(
     assert asyncio.run(body()) >= VirtualTime(0)
 
 
-def project(board: Mapping[str, popcorn.Periph]) -> popcorn.Project:
-    return popcorn.Project(part="STM32U575QGIx", images=[popcorn.Elf(SAI_ELF)], board=board)
+def project(board: Mapping[str, popcorn.Periph]) -> popcorn.MachineDescription:
+    return popcorn.MachineDescription(
+        part="STM32U575QGIx", images=[popcorn.Elf(SAI_ELF)], board=board
+    )
 
 
 def test_a_project_sets_the_options_of_a_block() -> None:
@@ -258,7 +260,7 @@ def test_a_block_table_needs_an_sai_with_the_built_in_model(
     assert caught.value.key == key
 
 
-def codec_dma_machine(u575: popcorn.MachineDescription) -> tuple[popcorn.Machine, AudioStream]:
+def codec_dma_machine(u575: popcorn.PartDescription) -> tuple[popcorn.Machine, AudioStream]:
     m = sai_machine(u575)
     m.reg.pc = m.sym("codec_dma")
     stop = asyncio.run(m.run(budget=BUDGET, stop_when=lambda m: m.periph.SAI1.BCR1.SAIAEN == 1))
@@ -270,7 +272,7 @@ def codec_dma_machine(u575: popcorn.MachineDescription) -> tuple[popcorn.Machine
 
 
 def test_the_external_clock_starts_changes_and_stops_a_slave_block_from_the_test_body(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, sender = codec_dma_machine(u575)
     assert (sender.available, sender.external_frame_hz) == (0, 0)
@@ -300,7 +302,7 @@ def test_the_external_clock_starts_changes_and_stops_a_slave_block_from_the_test
 
 
 def test_the_external_clock_is_board_state_restored_by_a_snapshot(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m, sender = codec_dma_machine(u575)
     stopped = m.snapshot()
@@ -325,7 +327,7 @@ def test_the_external_clock_is_board_state_restored_by_a_snapshot(
 
 @pytest.mark.parametrize("hz", [-1, True, 1 << 32, cast(int, 16_000.0)])
 def test_an_external_frame_rate_outside_32_bits_is_a_value_error(
-    u575: popcorn.MachineDescription, hz: int
+    u575: popcorn.PartDescription, hz: int
 ) -> None:
     sender = popcorn.Machine(u575).periph.SAI1.audio("A")
     with pytest.raises(ValueError, match=r"2\*\*32"):
@@ -334,7 +336,7 @@ def test_an_external_frame_rate_outside_32_bits_is_a_value_error(
 
 
 def test_an_external_clock_set_from_another_thread_during_a_run_is_refused(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     sender = m.periph.SAI1.audio("A")
@@ -394,7 +396,7 @@ def codec_words() -> list[int]:
 
 
 def codec_machine(
-    u575: popcorn.MachineDescription, codec: CodecStandIn, words: list[int]
+    u575: popcorn.PartDescription, codec: CodecStandIn, words: list[int]
 ) -> popcorn.Machine:
     m = popcorn.Machine(
         u575,
@@ -420,7 +422,7 @@ def event_ticks(m: popcorn.Machine, name: str) -> list[int]:
 
 
 def test_a_python_codec_on_i2c_starts_and_stops_the_sai1_clock_of_the_audio_path(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     codec = CodecStandIn()
     m = codec_machine(u575, codec, codec_words())
@@ -481,7 +483,7 @@ def checksum(buffer: list[list[int]]) -> int:
 
 
 def test_a_codec_run_restored_mid_stream_into_a_fresh_machine_and_codec_runs_the_same(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     words = codec_words()
     codec = CodecStandIn()
@@ -545,7 +547,7 @@ def unclocked_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 def test_a_block_wired_to_a_codec_waits_for_its_clock_without_a_warning(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     codec = CodecStandIn()
     with caplog.at_level(logging.WARNING, logger="popcorn"):
@@ -557,7 +559,7 @@ def test_a_block_wired_to_a_codec_waits_for_its_clock_without_a_warning(
 
 
 def test_a_slave_block_nothing_clocks_logs_once_that_it_sees_no_frame(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="popcorn"):
         codec_dma_machine(u575)
@@ -566,7 +568,7 @@ def test_a_slave_block_nothing_clocks_logs_once_that_it_sees_no_frame(
 
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_a_frame_read_waits_on_the_machine_thread_without_the_gil(
-    u575: popcorn.MachineDescription, running: bool
+    u575: popcorn.PartDescription, running: bool
 ) -> None:
     m = sai_machine(u575)
     run_entry(m, "tx_poll")
@@ -584,7 +586,7 @@ def test_a_frame_read_waits_on_the_machine_thread_without_the_gil(
 
 
 def test_take_frames_equals_a_read_of_what_is_available(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     start = m.snapshot()
@@ -598,7 +600,7 @@ def test_take_frames_equals_a_read_of_what_is_available(
     assert taken == asyncio.run(stream.read_frames(stream.available))
 
 
-def test_an_audio_read_with_a_deadline_stops_there(u575: popcorn.MachineDescription) -> None:
+def test_an_audio_read_with_a_deadline_stops_there(u575: popcorn.PartDescription) -> None:
     m = sai_machine(u575)
     stream = m.periph.SAI1.audio("A")
     before = m.instructions
@@ -612,7 +614,7 @@ def test_an_audio_read_with_a_deadline_stops_there(u575: popcorn.MachineDescript
 
 
 def test_an_audio_read_with_a_past_deadline_ends_at_once_while_running(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     stream = m.periph.SAI1.audio("A")
@@ -627,7 +629,7 @@ def test_an_audio_read_with_a_past_deadline_ends_at_once_while_running(
 
 
 def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = sai_machine(u575)
     m.reg.pc = m.sym("tx_poll") & ~1

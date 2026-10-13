@@ -1,4 +1,4 @@
-"""The MCU description through the binding: region controllers and content."""
+"""The part description through the binding: region controllers and content."""
 
 from __future__ import annotations
 

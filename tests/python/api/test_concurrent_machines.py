@@ -104,7 +104,7 @@ def digest(m: popcorn.Machine, restorable: bool = False) -> Digest:
 
 
 def members(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     slice_instructions: int = 1_000_000,
     ticks: Sequence[Handler] = (),
 ) -> list[Member]:
@@ -191,7 +191,7 @@ def late_line(one: Member) -> None:
 
 
 def reference(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     steps: int = STEPS,
     hooked: bool = False,
     restorable: bool = False,
@@ -207,7 +207,7 @@ def reference(
     return Reference(digests, frames(alone))
 
 
-def test_the_reference_echoes_its_line_and_diverges(u575: popcorn.MachineDescription) -> None:
+def test_the_reference_echoes_its_line_and_diverges(u575: popcorn.PartDescription) -> None:
     ref = reference(u575)
     a, b, c = ref.frames
     assert b"echo: alpha" in bytes(data for data, _ in a)
@@ -216,7 +216,7 @@ def test_the_reference_echoes_its_line_and_diverges(u575: popcorn.MachineDescrip
     assert ref.digests[0][-1] != ref.digests[1][-1]
 
 
-def test_machines_driven_in_turn_equal_each_alone(u575: popcorn.MachineDescription) -> None:
+def test_machines_driven_in_turn_equal_each_alone(u575: popcorn.PartDescription) -> None:
     ref = reference(u575)
     chosen = members(u575)
     assert asyncio.run(in_turn(chosen, every_ms(1, STEPS))) == ref.digests
@@ -224,7 +224,7 @@ def test_machines_driven_in_turn_equal_each_alone(u575: popcorn.MachineDescripti
 
 
 def test_uneven_targets_in_reverse_order_equal_each_alone(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     ref = reference(u575)
     chosen = members(u575)
@@ -236,7 +236,7 @@ def test_uneven_targets_in_reverse_order_equal_each_alone(
 
 @pytest.mark.parametrize("slice_instructions", [1_000_000, 1_000])
 def test_machines_run_at_once_equal_each_alone(
-    u575: popcorn.MachineDescription, slice_instructions: int
+    u575: popcorn.PartDescription, slice_instructions: int
 ) -> None:
     ref = reference(u575)
     chosen = members(u575, slice_instructions)
@@ -245,7 +245,7 @@ def test_machines_run_at_once_equal_each_alone(
 
 
 def test_slices_of_1000_instructions_driven_in_turn_equal_each_alone(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     ref = reference(u575)
     chosen = members(u575, 1_000)
@@ -278,7 +278,7 @@ class Rendezvous:
 
 
 def test_machines_held_inside_their_runs_together_equal_each_alone(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     ref = reference(u575, hooked=True)
     meeting = Rendezvous(len(LINES))
@@ -299,7 +299,7 @@ def test_machines_held_inside_their_runs_together_equal_each_alone(
 
 
 def test_a_restore_mid_run_leaves_the_other_machines_alone(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     ref = reference(u575, 75, restorable=True)
     chosen = members(u575)

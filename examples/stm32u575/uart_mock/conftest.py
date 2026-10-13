@@ -1,13 +1,13 @@
-"""Project of the uart_mock example."""
+"""MachineDescription of the uart_mock example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 
 HERE = Path(__file__).parent
 
-PROJECT = popcorn.Project(
+UART_MOCK = popcorn.MachineDescription(
     name="uart-mock",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/at_client.elf")],
@@ -15,6 +15,6 @@ PROJECT = popcorn.Project(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def uart_mock() -> popcorn.MachineDescription:
+    return UART_MOCK

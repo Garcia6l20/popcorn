@@ -44,9 +44,9 @@ auto fn(std::string_view name) -> address
   return sym("exceptions", name);
 }
 
-auto description() -> popcorn::mcu_description
+auto description() -> popcorn::part_description
 {
-  return m33_with([](popcorn::mcu_description& d) { d.core.num_irqs = 20; });
+  return m33_with([](popcorn::part_description& d) { d.core.num_irqs = 20; });
 }
 
 auto booted(core::machine_options options = {}) -> arch_fixture

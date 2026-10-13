@@ -1,13 +1,13 @@
 """Native bus devices: an AT25SF serial NOR flash on SPI, a 24xx EEPROM and a table-scripted
 target on I2C.
 
-Attach them as `popcorn.board` targets are, with `Machine(devices=)` or a project's
+Attach them as `popcorn.board` targets are, with `Machine(devices=)` or a machine description's
 `Periph(devices=[...])`, for example
 `Device(At25sf, jedec=[0x1F, 0x87, 0x01], size=4194304)`. They run in
 C++, the bus models call them without Python. Their state is part of every machine snapshot,
 and they reset on POWER_ON and BROWN_OUT as the native devices document.
 
-Durations are VirtualDuration values of a whole number of nanoseconds. A project writes
+Durations are VirtualDuration values of a whole number of nanoseconds. A machine description writes
 them with `popcorn.units`, such as `us(600)`, and the register keys of `TableTarget` replies as
 integers.
 

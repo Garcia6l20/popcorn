@@ -408,7 +408,7 @@ def test_a_condition_is_refused_where_it_cannot_run_natively(
         views.ref.var("table").eq(0)
 
 
-def views_at_loop(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def views_at_loop(m33: popcorn.PartDescription) -> popcorn.Machine:
     """A machine over the views firmware, past its bkpt in the endless loop after it."""
     m = popcorn.Machine(m33, image=popcorn.Image.elf(VIEWS_ELF))
     m.reset()
@@ -416,7 +416,7 @@ def views_at_loop(m33: popcorn.MachineDescription) -> popcorn.Machine:
     return m
 
 
-def board_with_links(u575: popcorn.MachineDescription) -> popcorn.Machine:
+def board_with_links(u575: popcorn.PartDescription) -> popcorn.Machine:
     """A U575 machine over the board firmware, at `ready`, with a USB host and an audio
     block."""
     m = popcorn.Machine(
@@ -506,7 +506,7 @@ def equivalent(build: Callable[[], popcorn.Machine], ref_of: RefOf, value: objec
 
 @pytest.mark.parametrize("kind", list(VIEWS_KINDS))
 def test_a_ref_reads_and_writes_as_its_sync_view_without_the_gil(
-    m33: popcorn.MachineDescription, kind: str
+    m33: popcorn.PartDescription, kind: str
 ) -> None:
     ref_of, value = VIEWS_KINDS[kind]
     equivalent(lambda: views_at_loop(m33), ref_of, value)
@@ -514,7 +514,7 @@ def test_a_ref_reads_and_writes_as_its_sync_view_without_the_gil(
 
 @pytest.mark.parametrize("kind", list(BOARD_KINDS))
 def test_a_board_ref_reads_and_writes_as_its_sync_view_without_the_gil(
-    u575: popcorn.MachineDescription, kind: str
+    u575: popcorn.PartDescription, kind: str
 ) -> None:
     ref_of, value = BOARD_KINDS[kind]
     equivalent(lambda: board_with_links(u575), ref_of, value)
@@ -532,7 +532,7 @@ def test_a_failing_op_names_its_argument_and_stops_the_batch(machines: Machines)
     assert m.mem.u32[SRAM] == 7
 
 
-def test_a_write_validates_at_the_call(u575: popcorn.MachineDescription) -> None:
+def test_a_write_validates_at_the_call(u575: popcorn.PartDescription) -> None:
     m = board_with_links(u575)
     with pytest.raises(ValueError, match="not a voltage"):
         m.write((m.ref.periph.ADC1.input(5).volts, -1.0))
@@ -540,7 +540,7 @@ def test_a_write_validates_at_the_call(u575: popcorn.MachineDescription) -> None
         m.write((m.ref.mem.u8[SRAM], 256))
 
 
-def test_a_variable_write_validates_at_the_call(m33: popcorn.MachineDescription) -> None:
+def test_a_variable_write_validates_at_the_call(m33: popcorn.PartDescription) -> None:
     m = views_at_loop(m33)
     with pytest.raises(ValueError, match="does not fit"):
         m.write((m.ref.var("table").mode, 99))
@@ -549,7 +549,7 @@ def test_a_variable_write_validates_at_the_call(m33: popcorn.MachineDescription)
 
 
 def test_a_field_write_keeps_the_siblings_written_after_its_post(
-    u575: popcorn.MachineDescription, m33: popcorn.MachineDescription
+    u575: popcorn.PartDescription, m33: popcorn.PartDescription
 ) -> None:
     board = board_with_links(u575)
     moder = board.periph.GPIOB.GPIO_MODER

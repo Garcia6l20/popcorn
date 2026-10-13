@@ -99,7 +99,7 @@ def test_a_run_between_slices_moves_pty_bytes_both_ways(
 
 
 def test_a_pty_made_inside_a_loop_is_freed_with_its_machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     selector = selectors.DefaultSelector()
 
@@ -141,8 +141,8 @@ def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:
         asyncio.run(board.periph.USART1.port.read_until(re.compile(rb"x")))
 
 
-def test_the_project_connects_a_pty(u575: popcorn.MachineDescription) -> None:
-    project = popcorn.Project(
+def test_the_project_connects_a_pty(u575: popcorn.PartDescription) -> None:
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],
         board={"USART1": popcorn.Periph(connect="pty")},
@@ -152,8 +152,8 @@ def test_the_project_connects_a_pty(u575: popcorn.MachineDescription) -> None:
     assert os.path.exists(m.board.ptys["USART1"])
 
 
-def test_other_connections_and_devices_are_refused(u575: popcorn.MachineDescription) -> None:
-    socket = popcorn.Project(
+def test_other_connections_and_devices_are_refused(u575: popcorn.PartDescription) -> None:
+    socket = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],
         board={"USART1": popcorn.Periph(connect=cast("Literal['pty']", "socket"))},
@@ -161,7 +161,7 @@ def test_other_connections_and_devices_are_refused(u575: popcorn.MachineDescript
     with pytest.raises(popcorn.ConfigError) as caught:
         socket.machine()
     assert caught.value.key == "board.USART1.connect"
-    fraction = popcorn.Project(
+    fraction = popcorn.MachineDescription(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],
         board={"I2C1": popcorn.Periph(devices=[popcorn.Device(Fraction, address=0x50)])},

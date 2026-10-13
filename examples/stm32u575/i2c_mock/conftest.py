@@ -1,9 +1,9 @@
-"""Project of the i2c_mock example."""
+"""MachineDescription of the i2c_mock example."""
 
 from pathlib import Path
 
 import popcorn
-import pytest
+import popcorn.pytest
 from tempsensor import TempSensor
 
 HERE = Path(__file__).parent
@@ -11,7 +11,7 @@ HERE = Path(__file__).parent
 COLD = [21.0, 21.5, 22.25, 23.0, 22.5, 22.0]
 HOT = [34.0, 35.5, 36.0]
 
-BASE = popcorn.Project(
+BASE = popcorn.MachineDescription(
     name="i2c-mock",
     part="STM32U575QGIx",
     images=[popcorn.Elf(HERE / "prebuilt/i2c_sensor.elf")],
@@ -21,7 +21,7 @@ BASE = popcorn.Project(
     },
 )
 
-PROJECT = BASE.with_configs(
+I2C_MOCK = BASE.with_configs(
     hot=BASE.replace(
         board={
             "I2C1": popcorn.Periph(devices=[popcorn.Device(TempSensor, address=0x48, readings=HOT)])
@@ -30,6 +30,11 @@ PROJECT = BASE.with_configs(
 )
 
 
-@pytest.fixture(scope="session")
-def popcorn_project() -> popcorn.Project:
-    return PROJECT
+@popcorn.pytest.machine
+def i2c_mock() -> popcorn.MachineDescription:
+    return I2C_MOCK
+
+
+@popcorn.pytest.machine(config="hot")
+def i2c_mock_hot() -> popcorn.MachineDescription:
+    return I2C_MOCK

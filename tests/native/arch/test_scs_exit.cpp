@@ -182,7 +182,7 @@ TEST_CASE("an AIRCR store to a finer PRIGROUP that unmasks a pending interrupt t
   core::machine_options options;
   options.models.emplace("TESTDEV", popcorn::testing::test_model_factory());
   arch_fixture f{
-      popcorn::testing::m33_with([](popcorn::mcu_description& d) { d.core.nvic_prio_bits = 4; }),
+      popcorn::testing::m33_with([](popcorn::part_description& d) { d.core.nvic_prio_bits = 4; }),
       "irq", std::move(options)};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   REQUIRE(f.target->mem().write(iser0, 4, 1u << testdev_irq));

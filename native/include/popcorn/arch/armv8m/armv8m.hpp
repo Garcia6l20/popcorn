@@ -8,7 +8,7 @@ namespace popcorn::arch::armv8m
 /**
  * @brief Whether the Cortex-M module implements a core: `cpu` CM33, CM4, CM7 or CM3 in this
  *        release. CM0 and CM0PLUS are refused.
- * @param core Core of an MCU description.
+ * @param core Core of a part description.
  */
 [[nodiscard]] auto implements(core_desc const& core) -> bool;
 

@@ -1,4 +1,4 @@
-"""MCU description: schema-generated types, the JSON binder, source lookup and build cache."""
+"""Part description: schema-generated types, the JSON binder, source lookup and build cache."""
 
 from popcorn.stm32.description._binder import (
     check_bounds,
@@ -17,7 +17,7 @@ from popcorn.stm32.description._model import (
     CrossRule,
     FieldDesc,
     IrqDesc,
-    McuDescription,
+    PartDescription,
     PeripheralDesc,
     ReadEffect,
     RegionAccess,
@@ -36,7 +36,7 @@ __all__ = [
     "DescriptionError",
     "FieldDesc",
     "IrqDesc",
-    "McuDescription",
+    "PartDescription",
     "PeripheralDesc",
     "ReadEffect",
     "RegionAccess",

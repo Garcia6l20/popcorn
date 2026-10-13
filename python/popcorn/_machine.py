@@ -35,7 +35,6 @@ from popcorn._call import (
     signature_of,
     slot_for,
 )
-from popcorn._description import MachineDescription, load_description
 from popcorn._devices import (
     BusDevice,
     I2CTarget,
@@ -77,7 +76,15 @@ from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._image_view import ImageView, debug_infos, find_variable
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
-from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
+from popcorn._observe import (
+    LogForwarder,
+    MachineCoverage,
+    Ranges,
+    Ring,
+    TraceRecording,
+    open_trace,
+)
+from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
     Condition,
@@ -103,7 +110,7 @@ from popcorn.trace import TraceKind
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
-    from popcorn._system import LinkedSystem
+    from popcorn._system import System
     from popcorn.image.dwarf import DebugInfo, DebugType
 
 
@@ -371,7 +378,7 @@ class _Native:
 
 
 class _Linked(Protocol):
-    """What a member hands its runs to: its `LinkedSystem`."""
+    """What a member hands its runs to: its `System`."""
 
     async def _goal(
         self,
@@ -505,6 +512,7 @@ class Machine:
         "_installed",
         "_irqs",
         "_last_stop",
+        "_log_forwarder",
         "_logs",
         "_memory",
         "_model_context",
@@ -526,7 +534,7 @@ class Machine:
 
     def __init__(
         self,
-        description: MachineDescription | str | os.PathLike[str],
+        description: PartDescription | str | os.PathLike[str],
         *,
         image: Image | Iterable[Image] = (),
         core_hz: int = 0,
@@ -565,8 +573,8 @@ class Machine:
                 its requests and checks its waiters.
             slice_wall_budget: Wall seconds after which a slice of the machine's thread serves
                 its requests and checks its waiters.
-            config_digest: Digest of the configuration, such as a project's digest, that snapshots
-                record.
+            config_digest: Digest of the configuration, such as a machine description's digest, that
+                snapshots record.
             arena_base: First address of the call arena, a RAM region outside the description,
                 None for no arena. It must not overlap a region or a peripheral.
             arena_size: Size of the call arena, a multiple of 4 KiB.
@@ -610,7 +618,7 @@ class Machine:
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
         check_machine_name(name)
-        if not isinstance(description, MachineDescription):
+        if not isinstance(description, PartDescription):
             description = load_description(description)
         config = _core.MachineConfig()
         config.core_hz = core_hz
@@ -636,7 +644,7 @@ class Machine:
         config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._description = description
         self._strict_peripherals = strict_peripherals
-        self._system: weakref.ref[LinkedSystem] | None = None
+        self._system: weakref.ref[System] | None = None
         self._name = description.part if name is None else name
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
@@ -691,7 +699,8 @@ class Machine:
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
         self._callback_table = CallbackTable()
         self._posted_bodies = PostedBodies(self._callback_table)
-        self._handle.forward_logs(functools.partial(forward_log, self._name))
+        self._log_forwarder = LogForwarder(self._name)
+        self._handle.forward_logs(self._log_forwarder)
         watch_logs(self._handle.log_token(), self)
         self._irqs = Irqs(description)
         self._arena = (
@@ -751,7 +760,7 @@ class Machine:
                 del unclaimed
 
     @property
-    def description(self) -> MachineDescription:
+    def description(self) -> PartDescription:
         """Description the machine was built from."""
         return self._description
 
@@ -762,6 +771,28 @@ class Machine:
         Every log record of the machine carries it as the `popcorn_machine` extra.
         """
         return self._name
+
+    def _rename(self, name: str) -> None:
+        """Give the machine the name `name` for its later log records and errors, as `name=`
+        would at construction. The records it logged before keep the old name, those still
+        queued included: they are forwarded first. Except after a filter or handler error
+        during that flush, or when called from inside a log handler: the records still queued
+        go out later under `name`.
+
+        Raises:
+            ValueError: `name` is empty or holds whitespace or a dot.
+            MachineRunning: The machine is busy, handlers included.
+            MachineBusy: The machine is a member of a live linked system, which keys it by its
+                name.
+        """
+        check_machine_name(name)
+        self._require_idle()
+        owner = self._system
+        if owner is not None and owner() is not None:
+            raise MachineBusy(f"{self._name} is a member of a linked system: it keeps its name")
+        self._handle.flush_logs()
+        self._name = name
+        self._log_forwarder.name = name
 
     @property
     def config_digest(self) -> str:
@@ -848,7 +879,7 @@ class Machine:
     def reset(self, kind: ResetKind = ResetKind.POWER_ON) -> None:
         """Reset: clock to 0, core from its vector table, peripherals to reset values.
 
-        Memory is kept. A member of a linked system resets through `LinkedSystem.reset`, its
+        Memory is kept. A member of a linked system resets through `System.reset`, its
         system time running on unchanged.
 
         Raises:
@@ -993,7 +1024,7 @@ class Machine:
         A sync read made from a callback of another machine waits for this machine as the class
         doc says, `read` itself never holds a machine while it waits.
 
-        On a member of a `LinkedSystem` whose goal is pending, a batch posted while the system
+        On a member of a `System` whose goal is pending, a batch posted while the system
         is paused runs at once at the member's position there, which depends on the system's
         quantum, as do the values read. With `at`, whether the member already stands past `at`,
         and the batch is refused, depends on the quantum too. For an exact position read a
@@ -1035,7 +1066,7 @@ class Machine:
         wrote meanwhile. A sync write made from a callback of another machine waits for this
         machine as the class doc says, `write` itself never holds a machine while it waits.
 
-        On a member of a `LinkedSystem` whose goal is pending, writes posted while the system is
+        On a member of a `System` whose goal is pending, writes posted while the system is
         paused land at the member's position there, which depends on the system's quantum, and
         so does everything the member does after them. With `at`, whether the member already
         stands past `at`, and the writes are refused, depends on the quantum too. Write a halted
@@ -1922,7 +1953,7 @@ class Machine:
         Raises:
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: its state is taken with
-                the others, `LinkedSystem.snapshot`.
+                the others, `System.snapshot`.
         """
         self._refuse_member("snapshot")
         return self._snapshot()
@@ -1942,7 +1973,7 @@ class Machine:
                 that differs.
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: restore it with the
-                others, `LinkedSystem.restore`.
+                others, `System.restore`.
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a
@@ -2719,7 +2750,7 @@ def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
 
 
 def _model_makers(
-    description: MachineDescription, models: Mapping[str, Callable[[], Model]]
+    description: PartDescription, models: Mapping[str, Callable[[], Model]]
 ) -> dict[str, object]:
     served = {p.name for p in description.peripherals if p.alias_of is None}
     for name in models:
@@ -2849,7 +2880,7 @@ def _device_named(
 
 
 def _checked_devices(
-    description: MachineDescription,
+    description: PartDescription,
     devices: Mapping[str, Sequence[BusDevice]],
     models: Mapping[str, object],
 ) -> dict[str, tuple[BusDevice, ...]]:
@@ -2909,7 +2940,7 @@ def _checked_budget(budget: object) -> int | None:
     return budget
 
 
-def _free_sentinel(description: MachineDescription) -> int:
+def _free_sentinel(description: PartDescription) -> int:
     """First 16-byte-aligned address from the default arena base, else from 0x1000, below the
     Arm system region, that no region or peripheral covers: the return address of a call without
     an arena."""

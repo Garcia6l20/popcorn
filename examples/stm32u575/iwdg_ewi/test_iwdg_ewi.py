@@ -17,26 +17,26 @@ pytestmark = pytest.mark.popcorn(budget=20_000_000)
 IWDG_EVENTS = 2
 
 
-async def test_reloads_keep_at_most_two_watchdog_events_queued(machine: Machine) -> None:
-    stop = await machine.run(until="watchdog_starting", for_=ms(10))
+async def test_reloads_keep_at_most_two_watchdog_events_queued(iwdg_ewi: Machine) -> None:
+    stop = await iwdg_ewi.run(until="watchdog_starting", for_=ms(10))
     assert stop.reason is StopReason.ADDRESS, stop
-    baseline = machine.pending_events
-    stop = await machine.run(until="watchdog_configured", for_=ms(10))
+    baseline = iwdg_ewi.pending_events
+    stop = await iwdg_ewi.run(until="watchdog_configured", for_=ms(10))
     assert stop.reason is StopReason.ADDRESS, stop
 
-    await machine.run(for_=ms(50))
-    assert machine.var("reloads").value > 1000
-    assert machine.pending_events <= baseline + IWDG_EVENTS
-    assert machine.periph.IWDG.SR.EWIF == 0
+    await iwdg_ewi.run(for_=ms(50))
+    assert iwdg_ewi.var("reloads").value > 1000
+    assert iwdg_ewi.pending_events <= baseline + IWDG_EVENTS
+    assert iwdg_ewi.periph.IWDG.SR.EWIF == 0
 
 
-async def test_reloading_for_a_second_never_wakes_early(machine: Machine) -> None:
-    stop = await machine.run(until="watchdog_configured", for_=ms(10))
+async def test_reloading_for_a_second_never_wakes_early(iwdg_ewi: Machine) -> None:
+    stop = await iwdg_ewi.run(until="watchdog_configured", for_=ms(10))
     assert stop.reason is StopReason.ADDRESS, stop
-    configured = machine.pending_events
+    configured = iwdg_ewi.pending_events
 
-    stop = await machine.run(for_=ms(1000))
+    stop = await iwdg_ewi.run(for_=ms(1000))
     assert stop.reason is StopReason.TIME, stop
-    assert machine.var("reloads").value > 30_000
-    assert machine.pending_events <= configured
-    assert machine.periph.IWDG.SR.EWIF == 0
+    assert iwdg_ewi.var("reloads").value > 30_000
+    assert iwdg_ewi.pending_events <= configured
+    assert iwdg_ewi.periph.IWDG.SR.EWIF == 0

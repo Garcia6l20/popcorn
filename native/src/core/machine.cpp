@@ -22,7 +22,7 @@ auto next_machine_id() -> std::uint64_t
   return ++last;
 }
 
-auto reset_vector_of(mcu_description const& description, machine_options const& options) -> address
+auto reset_vector_of(part_description const& description, machine_options const& options) -> address
 {
   if(options.vector_table)
   {
@@ -54,7 +54,7 @@ void require_stopped(machine const& target)
   }
 }
 
-auto core_clock_hz(mcu_description const& description, machine_options const& options)
+auto core_clock_hz(part_description const& description, machine_options const& options)
     -> std::uint64_t
 {
   std::uint64_t const hz = options.core_hz != 0 ? options.core_hz : description.core.reset_clock_hz;
@@ -67,7 +67,7 @@ auto core_clock_hz(mcu_description const& description, machine_options const& op
   return hz;
 }
 
-machine::machine(mcu_description description, arch::arch_factory factory, machine_options options)
+machine::machine(part_description description, arch::arch_factory factory, machine_options options)
     : id_{next_machine_id()}, description_{std::move(description)}, options_{std::move(options)},
       clock_{core_clock_hz(description_, options_), options_.cpi}, clock_driver_{clock_},
       arch_events_{scheduler_, arch::arch_event_owner}, trace_{options_.trace_capacity},
@@ -117,7 +117,7 @@ machine::~machine()
   engine_.reset();
 }
 
-auto machine::description() const noexcept -> mcu_description const&
+auto machine::description() const noexcept -> part_description const&
 {
   return description_;
 }

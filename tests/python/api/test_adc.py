@@ -32,7 +32,7 @@ def settle(m: popcorn.Machine, duration: int = 200) -> None:
 
 
 def idle(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     supply: SupplyOptions | None = None,
     slice_instructions: int = 1_000_000,
 ) -> popcorn.Machine:
@@ -83,14 +83,14 @@ def convert(m: popcorn.Machine, channel: int) -> int:
     return adc.ADC_DR.value
 
 
-def ready(u575: popcorn.MachineDescription, supply: SupplyOptions | None = None) -> popcorn.Machine:
+def ready(u575: popcorn.PartDescription, supply: SupplyOptions | None = None) -> popcorn.Machine:
     m = idle(u575, supply)
     at_16_mhz(m)
     enable(m)
     return m
 
 
-def test_a_driven_channel_converts_at_the_default_vdda(u575: popcorn.MachineDescription) -> None:
+def test_a_driven_channel_converts_at_the_default_vdda(u575: popcorn.PartDescription) -> None:
     m = ready(u575)
     channel = m.periph.ADC1.input(5)
     assert isinstance(channel, AnalogInput)
@@ -101,13 +101,13 @@ def test_a_driven_channel_converts_at_the_default_vdda(u575: popcorn.MachineDesc
 
 
 def test_the_supply_sets_vdda_from_the_machine_or_the_project(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     assert SupplyOptions() == SupplyOptions(vdda_mv=3000)
     m = ready(u575, SupplyOptions(vdda_mv=3300))
     m.periph.ADC1.input(5).volts = 1.65
     assert convert(m, 5) == 8192
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx", images=[popcorn.Elf(RCC_ELF)], supply=SupplyOptions(vdda_mv=3300)
     )
     m = project.machine()
@@ -126,12 +126,12 @@ def test_the_supply_sets_vdda_from_the_machine_or_the_project(
 
 @pytest.mark.parametrize("vdda_mv", [1000, 1619, 3601, 3700])
 def test_a_vdda_outside_the_datasheet_range_is_refused(
-    u575: popcorn.MachineDescription, vdda_mv: int
+    u575: popcorn.PartDescription, vdda_mv: int
 ) -> None:
     with pytest.raises(ConfigError) as caught:
         popcorn.Machine(u575, supply=SupplyOptions(vdda_mv=vdda_mv))
     assert caught.value.key == "supply.vdda_mv"
-    project = popcorn.Project(
+    project = popcorn.MachineDescription(
         part="STM32U575QGIx", images=[], supply=SupplyOptions(vdda_mv=vdda_mv)
     )
     with pytest.raises(ConfigError) as caught:
@@ -139,7 +139,7 @@ def test_a_vdda_outside_the_datasheet_range_is_refused(
     assert caught.value.key == "supply.vdda_mv"
 
 
-def test_only_external_channels_take_an_input(u575: popcorn.MachineDescription) -> None:
+def test_only_external_channels_take_an_input(u575: popcorn.PartDescription) -> None:
     m = popcorn.Machine(u575)
     for channel in (0, 18, 19, 20):
         with pytest.raises(ConfigError):
@@ -152,7 +152,7 @@ def test_only_external_channels_take_an_input(u575: popcorn.MachineDescription) 
 
 
 def test_the_input_is_board_state_in_snapshots_and_across_a_reset(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = ready(u575)
     channel = m.periph.ADC1.input(3)
@@ -167,7 +167,7 @@ def test_the_input_is_board_state_in_snapshots_and_across_a_reset(
 
 
 def test_a_drive_from_another_thread_during_a_run_raises(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = ready(u575)
     errors: list[BaseException] = []
@@ -194,7 +194,7 @@ class ConversionEnded:
         return machine.periph.ADC1.ADC_ISR.EOC == 1
 
 
-def test_a_drive_inside_running_reaches_the_conversion(u575: popcorn.MachineDescription) -> None:
+def test_a_drive_inside_running_reaches_the_conversion(u575: popcorn.PartDescription) -> None:
     m = idle(u575, slice_instructions=1_000)
     at_16_mhz(m)
     enable(m)
@@ -225,7 +225,7 @@ def range_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 
 
 def test_an_adc_clock_above_55_mhz_warns_on_each_enable(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     m = idle(u575)
     at_72_mhz(m)
@@ -239,7 +239,7 @@ def test_an_adc_clock_above_55_mhz_warns_on_each_enable(
 
 
 def test_an_adc_clock_at_16_mhz_does_not_warn(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="popcorn"):
         ready(u575)

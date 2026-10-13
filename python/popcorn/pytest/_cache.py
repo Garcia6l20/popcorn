@@ -26,7 +26,7 @@ import popcorn
 from popcorn import (
     Machine,
     MachineDescription,
-    Project,
+    PartDescription,
     Snapshot,
     Stop,
     StopReason,
@@ -35,8 +35,8 @@ from popcorn import (
     description_digest,
 )
 from popcorn._machine import AttachedDevice
+from popcorn._machine_description import check_inputs
 from popcorn._model_build import registered_classes
-from popcorn._project import check_inputs
 from popcorn.board import I2CTarget, SpiTarget
 from popcorn.units import VirtualTime
 
@@ -180,9 +180,11 @@ def _device_line(device: AttachedDevice) -> str | None:
     return f"{cls.__module__}.{cls.__qualname__} {_class_source(cls)} {state.hex()} {attributes}"
 
 
-def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevice]]) -> str | None:
-    """The digest of `devices` as `Project.machine(devices=)` takes them, None when a device
-    cannot be keyed.
+def devices_digest(
+    project: MachineDescription, devices: Mapping[str, Sequence[AttachedDevice]]
+) -> str | None:
+    """The digest of `devices` as `MachineDescription.machine(devices=)` takes them, None when a
+    device cannot be keyed.
 
     A device is keyed by its class and the class's source file, its `snapshot()` and its
     instance attributes. It can be keyed when it is a `popcorn.board.I2CTarget` or `SpiTarget`
@@ -195,13 +197,12 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
     firmware talks to the device before `boot.until`.
 
     Raises:
-        MissingInput: An input file of `project` does not exist, as `Project.machine` raises.
+        MissingInput: An input file of `project` does not exist, as `MachineDescription.machine`
+        raises.
     """
     check_inputs(project)
     aliases = {
-        p.name: p.alias_of
-        for p in project.machine_description().peripherals
-        if p.alias_of is not None
+        p.name: p.alias_of for p in project.part_description().peripherals if p.alias_of is not None
     }
     lines: list[str] = []
     for key, targets in sorted(devices.items(), key=lambda item: aliases.get(item[0], item[0])):
@@ -215,7 +216,7 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
 
 
-def _registration_lines(project: Project, description: MachineDescription) -> list[str]:
+def _registration_lines(project: MachineDescription, description: PartDescription) -> list[str]:
     wired = {name for name, periph in project.board.items() if periph.model is not None}
     lines: list[str] = []
     for p in sorted(description.peripherals, key=lambda p: p.name):
@@ -234,9 +235,9 @@ def _registration_lines(project: Project, description: MachineDescription) -> li
     return lines
 
 
-def cache_key(project: Project, strict: bool, devices: str | None = None) -> str:
+def cache_key(project: MachineDescription, strict: bool, devices: str | None = None) -> str:
     """The name of a boot of `project` with strictness `strict` and the device set of digest
-    `devices`, None for the project's.
+    `devices`, None for the machine description's.
 
     It covers the popcorn version and native extension, the description, every image,
     `project.digest`, `strict`, the source file of every board model and device class and of
@@ -251,10 +252,11 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
     modules is not covered: `--cache-clear` drops the cache.
 
     Raises:
-        MissingInput: An input file of `project` does not exist, as `Project.machine` raises.
+        MissingInput: An input file of `project` does not exist, as `MachineDescription.machine`
+        raises.
     """
     check_inputs(project)
-    description = project.machine_description()
+    description = project.part_description()
     lines = [
         FORMAT,
         popcorn.version(),

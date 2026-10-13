@@ -227,7 +227,7 @@ struct arch_context
   /** @brief Engine the module drives, open and with memory mapped. */
   uc_struct* engine;
   /** @brief Description of the MCU: core features, IRQ count, regions. */
-  mcu_description const& description;
+  part_description const& description;
   /** @brief Virtual clock of the machine, read by system timers. */
   core::clock& clock;
   /** @brief The module's own access to the event queue, owner arch_event_owner. */
