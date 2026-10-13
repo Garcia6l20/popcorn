@@ -70,20 +70,23 @@ class Booted:
     """The booted state of one key.
 
     Attributes:
-        machine: The machine that booted the key or restored its boot from the cache. No test
-            gets it: declared machine fixtures and `machine_factory` restore `saved` into
-            machines of their own. It is parked, its coverage collected and its pty bridges
-            closed at session end.
+        machine: The machine that booted the key or restored its boot from the cache, named
+            after the part. The first declared machine fixture of the key takes it, renamed
+            after the fixture. `machine_factory` and system members restore `saved` into
+            machines of their own. Unless taken, it is parked, its coverage collected and its
+            pty bridges closed at session end.
         snapshot: The boot snapshot, taken on `machine`.
         saved: `snapshot` in its saved form, restorable into any machine of the key.
         boot_stop: The stop of the boot, None for a machine description without `boot.until`. Read
             back from the cache entry on a cache hit, located in this machine.
+        adopted: Whether a declared machine fixture took `machine`, which its slot now owns.
     """
 
     machine: Machine
     snapshot: Snapshot
     saved: bytes
     boot_stop: Stop | None
+    adopted: bool = False
     _decoded: Snapshot | None = None
 
     def decoded(self) -> Snapshot:
@@ -304,9 +307,11 @@ class PopcornSession:
         return booted.machine, booted.decoded()
 
     def slot(self, key: Key, name: str) -> tuple[Slot, Snapshot]:
-        """The reused machine of the declared machine fixture `name` for `key`, built named
-        `name` the first time, and the saved boot of `key` to restore into it, booting `key` on
-        the owned loop when this process has no boot of it.
+        """The reused machine of the declared machine fixture `name` for `key`, and the saved
+        boot of `key` to restore into it, booting `key` on the owned loop when this process has
+        no boot of it. The first fixture name of `key` takes the machine that booted it, renamed
+        `name`, its boot log records keeping the part name. Every later name builds one named
+        `name`.
 
         Raises:
             RuntimeError: `key` is not booted yet and an event loop is running.
@@ -315,7 +320,9 @@ class PopcornSession:
         booted = self.booted(key)
         found = self._slots.get((key, name))
         if found is None:
-            found = self._slots[key, name] = Slot.of(self.build(key, name=name))
+            machine = self.build(key, name=name) if booted.adopted else _adopt(booted, name)
+            found = self._slots[key, name] = Slot.of(machine)
+            booted.adopted = True
         return found, booted.decoded()
 
     def rebuild_slot(self, key: Key, name: str) -> Slot:
@@ -330,10 +337,10 @@ class PopcornSession:
         return slot
 
     def booted_machines(self) -> list[Machine]:
-        """The machine that booted every key booted in this process, and the reused machine of
-        every declared machine fixture and key."""
+        """The machine that booted every key booted in this process, unless a declared machine
+        fixture took it, and the reused machine of every declared machine fixture and key."""
         return [
-            *(booted.machine for booted in self._booted.values()),
+            *(booted.machine for booted in self._booted.values() if not booted.adopted),
             *(slot.machine for slot in self._slots.values()),
         ]
 
@@ -343,12 +350,14 @@ class PopcornSession:
         return self._failed_machines.get(key)
 
     def park(self) -> None:
-        """Park the boot machines, the reused machines and those whose boot failed. What ended a
-        free run by itself is warned as unraisable: no test owns it any more."""
+        """Park the boot machines no fixture took, the reused machines and those whose boot
+        failed. What ended a free run by itself is warned as unraisable: no test owns it any
+        more."""
         machines = [
             *(
                 (f"the boot machine of {key}", booted.machine)
                 for key, booted in self._booted.items()
+                if not booted.adopted
             ),
             *(
                 (f"the machine {name} of {key}", slot.machine)
@@ -362,10 +371,11 @@ class PopcornSession:
                 unclaimed(owner, ended)
 
     def close(self) -> None:
-        """Close the pty bridges of the boot machines, the reused machines and those whose boot
-        failed."""
+        """Close the pty bridges of the boot machines no fixture took, the reused machines and
+        those whose boot failed."""
         for booted in self._booted.values():
-            booted.machine.board.close()
+            if not booted.adopted:
+                booted.machine.board.close()
         for slot in self._slots.values():
             slot.machine.board.close()
         for machine in self._failed_machines.values():
@@ -490,6 +500,12 @@ def boot_coverage_path(directory: Path, key: Key, snapshot: Snapshot) -> Path:
         (key.identity, snapshot.description_digest, *snapshot.image_digests, snapshot.config_digest)
     )
     return directory / f"boot-{hashlib.sha256(identity.encode()).hexdigest()[:16]}.pcov"
+
+
+def _adopt(booted: Booted, name: str) -> Machine:
+    """The boot machine of `booted`, renamed `name`."""
+    booted.machine._rename(name)  # pyright: ignore[reportPrivateUsage]
+    return booted.machine
 
 
 def fresh_copy(error: BaseException) -> BaseException:

@@ -84,6 +84,69 @@ def test_two_fixtures_of_one_description_are_two_machines_of_one_boot(
     result.stdout.fnmatch_lines([ONE_BOOT])
 
 
+COUNTED_BUILDS = """
+    import pytest
+    from popcorn.pytest._session import PopcornSession
+
+    BUILDS = []
+
+    @pytest.fixture(scope="module", autouse=True)
+    def counted():
+        build = PopcornSession.build
+
+        def counting(self, key, devices=None, name=None):
+            BUILDS.append(name)
+            return build(self, key, devices, name)
+
+        PopcornSession.build = counting
+        yield
+        PopcornSession.build = build
+    """
+
+
+def test_the_first_fixture_of_a_key_takes_its_boot_machine(pytester: pytest.Pytester) -> None:
+    write_pair(pytester)
+    pytester.makepyfile(COUNTED_BUILDS + """
+    def test_one(first, _popcorn_session):
+        (booted,) = _popcorn_session._booted.values()
+        assert booted.machine is first
+        assert first.name == "first"
+        assert BUILDS == [None]
+        assert _popcorn_session.booted_machines() == [first]
+
+    def test_two(first, second, _popcorn_session):
+        assert BUILDS == [None, "second"]
+        assert _popcorn_session.booted_machines() == [first, second]
+        assert first is not second
+        assert second.name == "second"
+    """)
+    result = run(pytester)
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines([ONE_BOOT])
+
+
+def test_a_fixture_takes_the_boot_machine_of_a_key_the_factory_booted(
+    pytester: pytest.Pytester,
+) -> None:
+    write_pair(pytester)
+    pytester.makepyfile(COUNTED_BUILDS + """
+    def test_factory(machine_factory, description):
+        made = machine_factory(description)
+        assert made.name == "POPCORN-M33-TEST"
+        assert BUILDS == [None, None]
+
+    def test_fixture(first, _popcorn_session):
+        (booted,) = _popcorn_session._booted.values()
+        assert booted.machine is first
+        assert first.name == "first"
+        assert BUILDS == [None, None]
+        assert first.pc == first.sym("alu_mark")
+    """)
+    result = run(pytester)
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines([ONE_BOOT])
+
+
 def test_a_spoiled_machine_is_rebuilt_and_a_parked_one_reused(pytester: pytest.Pytester) -> None:
     write_pair(pytester)
     pytester.makepyfile(f"""

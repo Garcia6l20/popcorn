@@ -48,13 +48,15 @@ by several conftest.py files in a plain module with a unique name, not in a conf
 - `@popcorn.pytest.machine`: a booted machine of the description, its config applied. The key,
   the description with its config, the strictness and the bus devices, boots once per session
   and process, shared by every fixture and `machine_factory` call of that key. Each fixture name
-  has its own machine per key, built named after the fixture and reused by every test: before
-  each test it is restored from the boot snapshot, its hooks removed, its intercept logs, call
-  baseline and trace ring emptied. Two fixtures of one description in one test are two machines
-  of one boot. A test that loads another image or opens a pty spoils the machine: the next test
-  gets a new one restored from the saved boot. A description without `boot.until` boots to the
-  reset state. A failed boot errors every test using the key, booted once. The config is set on
-  the decorator only, `config=None` for the base description.
+  has its own machine per key, reused by every test: the first fixture name of a key takes the
+  machine that booted it, renamed after the fixture, its boot log records keeping the part name,
+  and every other one is built named after the fixture. Before each test it is restored from
+  the boot snapshot, its hooks removed, its intercept logs, call baseline and trace ring
+  emptied. Two fixtures of one description in one test are two machines of one boot. A test
+  that loads another image or opens a pty spoils the machine: the next test gets a new one
+  restored from the saved boot. A description without `boot.until` boots to the reset state. A
+  failed boot errors every test using the key, booted once. The config is set on the decorator
+  only, `config=None` for the base description.
 - `@popcorn.pytest.system`: the description booted and linked, a `popcorn.System`, new for each
   test. Each member is a new machine named as the member, restored from the boot snapshot of its
   own description's key, so a member and a machine fixture of the same description and
