@@ -1,12 +1,12 @@
-"""Devices on the I2C and SPI buses of the MCU, written in Python: `popcorn.board.I2CTarget` and
-`popcorn.board.SpiTarget`, served by the native bus models."""
+"""Devices on the I2C and SPI buses of the MCU, written in Python: `popcorn.board.I2CTarget`,
+`popcorn.board.SpiTarget` and `popcorn.board.SpiController`, served by the native bus models."""
 
 from __future__ import annotations
 
 import re
 import typing
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import cast
 
 from popcorn import _core
@@ -23,6 +23,8 @@ _CS = re.compile(r"P([A-Z])(\d{1,2})")
 _MAX_STRETCH_PS = 10**12
 _STATES: weakref.WeakKeyDictionary[type, tuple[tuple[str, type], ...]] = weakref.WeakKeyDictionary()
 _MAX_PS = (1 << 64) - 1
+_MAX_SCK_HZ = 100_000_000
+_MAX_FRAMES = 4096
 _ATTACHED: dict[int, _Attachment] = {}
 
 
@@ -96,8 +98,8 @@ def _read_reply(
     return value, 0, stretch_ps
 
 
-type BusDevice = _core.I2CTargetBase | _core.SpiTargetBase
-"""A device the native I2C or SPI models serve: a `popcorn.board` target or a
+type BusDevice = _core.I2CTargetBase | _core.SpiTargetBase | _core.SpiControllerBase
+"""A device the native I2C or SPI models serve: a `popcorn.board` target or controller, or a
 `popcorn.devices` device."""
 
 type AudioClock = Callable[[BusDevice, str, Block, int], None]
@@ -108,8 +110,16 @@ type BusHold = Callable[[str, VirtualTime | None, VirtualDuration], Pending[Virt
 """What a machine does when an I2C target holds its bus: the peripheral, the start or None for
 the command's time, the length."""
 
+type SpiTransfer = Callable[[str, VirtualTime | None, int, int, list[int]], Pending[VirtualTime]]
+"""What a machine does when an SPI controller transfers: the peripheral, the start or None for
+the command's time, the frame length in ps, the frame size, the frames."""
+
 type _Attachment = tuple[
-    weakref.ReferenceType[object], weakref.WeakMethod[AudioClock], weakref.WeakMethod[BusHold], str
+    weakref.ReferenceType[object],
+    weakref.WeakMethod[AudioClock],
+    weakref.WeakMethod[BusHold],
+    weakref.WeakMethod[SpiTransfer],
+    str,
 ]
 
 
@@ -336,7 +346,7 @@ class I2CTarget(_core.I2CTargetBase):
                 key="devices",
                 expected="a target serving a live machine",
             )
-        return hold(held[3], at, for_)
+        return hold(held[4], at, for_)
 
     def reset(self, kind: ResetKind) -> None:
         """The machine was reset. Does nothing by default."""
@@ -471,6 +481,128 @@ class SpiTarget(_core.SpiTargetBase):
         return f"<{type(self).__qualname__} on {self._cs or 'SS'}>"
 
 
+class SpiController(_core.SpiControllerBase):
+    """A controller on an SPI bus, outside the MCU, clocking an SPI the firmware runs in target
+    mode, CFG2.MASTER 0. Written in Python.
+
+    Attach it with `Machine(devices={"SPI1": [SpiController(sck_hz=1_000_000)]})` or a machine
+    description's `Periph(devices=[Device(SpiController, sck_hz=...)])`, alone on its SPI: no
+    `SpiTarget` and no second controller on that instance.
+
+    `transfer` selects the SPI's NSS input, shifts its frames one frame time apart, `bits` bits
+    each at `sck_hz`, and deselects. NSS is driven directly, not through a GPIO pin: with
+    CFG2.SSM 1 the firmware's CR1.SSI decides, as on silicon. The firmware's SPI returns one
+    frame per frame sent: the TX FIFO head, its underrun pattern, or all ones when it is not
+    selected or not in target mode. `on_frame` hears each frame at its end.
+
+    Time: `at` is the machine time since reset, as `Machine.time` and `transfer(at=)`, not the
+    time since power-on an `SpiTarget` or `I2CTarget` hook gets: after a reset other than
+    POWER_ON the two differ by the time before that reset.
+
+    Reset: a reset of the machine drops the transfers not finished, the frames not yet shifted
+    included, and `on_frame` is not called for them. `received` then holds fewer frames than were
+    queued.
+
+    State: the queued transfers are the SPI model's state, saved with a snapshot. `received`
+    belongs to the test: a snapshot does not save it and a restore does not change it.
+
+    Lifetime: as `I2CTarget`.
+    """
+
+    received: list[int]
+    """The frames the firmware sent, in order, as the default `on_frame` appends them. Frames a
+    reset dropped are missing."""
+
+    def __init__(self, *, sck_hz: int, bits: int = 8) -> None:
+        """Clock frames of `bits` bits at `sck_hz`.
+
+        Raises:
+            TypeError: `sck_hz` or `bits` is no int.
+            ValueError: `sck_hz` is outside 1 to 100 MHz, or `bits` outside 4 to 32.
+        """
+        for name, value in (("sck_hz", sck_hz), ("bits", bits)):
+            if isinstance(value, bool) or not isinstance(cast(object, value), int):
+                raise TypeError(f"SpiController takes {name} as an int, not {value!r}")
+        if not 1 <= sck_hz <= _MAX_SCK_HZ:
+            raise ValueError(f"an SPI clock is 1 Hz to 100 MHz, not {sck_hz} Hz")
+        if not 4 <= bits <= 32:
+            raise ValueError(f"an SPI frame is 4 to 32 bits, not {bits}")
+        super().__init__()
+        self._sck_hz = sck_hz
+        self._bits = bits
+        self.received = []
+
+    @property
+    def sck_hz(self) -> int:
+        """The SCK frequency in Hz the controller clocks frames at, 1 to 100 MHz. Read-only."""
+        return self._sck_hz
+
+    @property
+    def bits(self) -> int:
+        """The size in bits of each frame the controller shifts, 4 to 32. Read-only."""
+        return self._bits
+
+    def transfer(
+        self, frames: Sequence[int], *, at: VirtualTime | None = None
+    ) -> Pending[VirtualTime]:
+        """Shift `frames` into the SPI the controller serves, posted as one command as
+        `UartStream.write` is: at once while the machine is parked, at the next block boundary
+        while it runs. The transfer starts at exactly `at`, or at the time the command runs with
+        `at` None, which depends on that boundary while running, and in both cases not before
+        the end of the transfers queued before it. Each frame lasts `bits * 10**12 // sck_hz`
+        ps. `at` and the start are machine times since reset. A reset of the machine drops the
+        transfer if it has not finished. Await the result for the start.
+
+        Raises:
+            TypeError: `frames` is no sequence of ints, or `at` no `VirtualTime`.
+            ValueError: `frames` holds no frame or more than 4096, a frame is outside 0 to
+                2**bits - 1, or `at` is negative or past 2**64 - 1 ps. From the await, `at` is
+                already past when the command runs, or the transfer ends past 2**64 - 1 ps.
+            ConfigError: The controller serves no live machine. From the await, the transfers
+                queued and not finished would hold more than 4096 frames.
+            RuntimeError: Called from a handler, a hook or a model.
+        """
+        if isinstance(frames, str | bytes | bytearray) or not isinstance(
+            cast(object, frames), Sequence
+        ):
+            raise TypeError(f"transfer() takes a sequence of ints, not {frames!r}")
+        if at is not None and not isinstance(cast(object, at), VirtualTime):
+            raise TypeError(f"transfer() takes at as a VirtualTime or None, not {at!r}")
+        if not 1 <= len(frames) <= _MAX_FRAMES:
+            raise ValueError(f"an SPI transfer has 1 to 4096 frames, not {len(frames)}")
+        checked: list[int] = []
+        for frame in frames:
+            if isinstance(frame, bool) or not isinstance(cast(object, frame), int):
+                raise TypeError(f"an SPI frame is an int, not {frame!r}")
+            if not 0 <= frame < 1 << self._bits:
+                raise ValueError(f"a {self._bits}-bit SPI frame is 0 to {(1 << self._bits) - 1}")
+            checked.append(frame)
+        if at is not None and not 0 <= at.ps <= _MAX_PS:
+            raise ValueError(f"an SPI transfer at {at} leaves the 64-bit picosecond range")
+        held = _ATTACHED.get(id(self))
+        post = None if held is None else held[3]()
+        if held is None or post is None:
+            raise ConfigError(
+                f"{self!r} serves no live machine",
+                key="devices",
+                expected="a controller serving a live machine",
+            )
+        return post(held[4], at, self._bits * 10**12 // self._sck_hz, self._bits, checked)
+
+    def on_frame(self, sent: int, received: int, at: VirtualTime) -> None:
+        """One frame ended at `at`, machine time since reset: `sent` the controller's frame,
+        `received` the frame the firmware sent, all ones when its SPI did not take part.
+        Appends `received` to `received` by default. Called on the machine's thread with the
+        GIL, once per frame."""
+        self.received.append(received)
+
+    def _frame(self, sent: int, received: int, at: int) -> None:
+        self.on_frame(sent, received, VirtualTime(at))
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__qualname__} at {self._sck_hz} Hz, {self._bits} bits>"
+
+
 def serving(device: BusDevice) -> object | None:
     """The live machine `device` serves, None when it serves none."""
     held = _ATTACHED.get(id(device))
@@ -494,10 +626,12 @@ def attach(
     machine: object,
     audio_clock: AudioClock,
     bus_hold: BusHold,
+    spi_transfer: SpiTransfer,
     peripheral: str,
 ) -> None:
     """Mark `device` as serving `machine` on `peripheral`, `audio_clock` a method of `machine`
-    its `DeviceBoard` calls, `bus_hold` one `I2CTarget.hold_bus` calls. The mark is weak: once
+    its `DeviceBoard` calls, `bus_hold` one `I2CTarget.hold_bus` calls, `spi_transfer` one
+    `SpiController.transfer` calls. The mark is weak: once
     that machine is gone the device may serve another one. Keyed by identity, so a device
     defining `__eq__` works."""
     key = id(device)
@@ -507,5 +641,6 @@ def attach(
         weakref.ref(machine),
         weakref.WeakMethod(audio_clock),
         weakref.WeakMethod(bus_hold),
+        weakref.WeakMethod(spi_transfer),
         peripheral,
     )

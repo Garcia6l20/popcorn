@@ -780,6 +780,28 @@ public:
           std::string const&           peripheral,
           std::optional<std::uint64_t> at_ps,
           std::uint64_t                for_ps) const -> access_op;
+  /**
+   * @brief A command queuing an SPI transfer of the instance's controller,
+   *        spi_controller_port::transfer, checked when it runs. Its value is the transfer's
+   *        start in picoseconds.
+   * @param peripheral SPI instance name.
+   * @param at_ps Earliest start, machine time since reset, empty for the time the command runs at.
+   * @param frame_ps Length of one frame.
+   * @param bits Frame size, 4 to 32.
+   * @param frames The frames.
+   * @throws config_error now, when the peripheral's model is no built-in SPI, when the command
+   *         runs with no controller attached or the queue full.
+   * @throws std::invalid_argument when the command runs, for a start already past or an
+   *         argument out of range.
+   */
+  [[= py::doc{
+      "Command queuing an SPI controller transfer, its value the start."}]] [[nodiscard]] auto
+      command_spi_transfer(
+          std::string const&           peripheral,
+          std::optional<std::uint64_t> at_ps,
+          std::uint64_t                frame_ps,
+          std::uint8_t                 bits,
+          std::vector<std::uint32_t>   frames) const -> access_op;
   /** @brief adc_drive() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of adc_drive."}]] [[nodiscard]] auto op_adc_drive(
       std::string const& peripheral,

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from popcorn import _core
-from popcorn._devices import BusDevice, I2CTarget, SpiTarget
+from popcorn._devices import BusDevice, I2CTarget, SpiController, SpiTarget
 from popcorn._enums import UartError
 from popcorn._errors import ConfigError
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget
@@ -656,15 +656,15 @@ class Board:
 
     def devices(
         self, peripheral: str
-    ) -> tuple[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget, ...]:
+    ) -> tuple[I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget, ...]:
         """The devices on bus `peripheral`, in attachment order, empty for none. An alias, such
         as a secure address window, names the bus it serves."""
         return cast(
-            "tuple[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget, ...]",
+            "tuple[I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget, ...]",
             self._devices.get(self._ports.serving(peripheral), ()),
         )
 
-    def device[D: I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget](
+    def device[D: I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget](
         self, peripheral: str, cls: type[D]
     ) -> D:
         """The one device of class `cls` on bus `peripheral`, typed. A subclass instance

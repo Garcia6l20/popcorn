@@ -1,10 +1,11 @@
 """What is wired to the MCU: UART streams, SAI audio streams, USB hosts, host ptys, GPIO pins,
-ADC inputs, the NVIC, I2C and SPI devices, the clock sources of the RCC and the supply voltages."""
+ADC inputs, the NVIC, I2C and SPI devices, SPI controllers, the clock sources of the RCC and the
+supply voltages."""
 
 from __future__ import annotations
 
 from popcorn._audio import AudioFrame, AudioOptions, AudioStream
-from popcorn._devices import DeviceBoard, I2CTarget, SpiTarget
+from popcorn._devices import DeviceBoard, I2CTarget, SpiController, SpiTarget
 from popcorn._enums import I2CError, PinMode, UartError
 from popcorn._nvic import Irqs, Nvic
 from popcorn._rcc import RccOptions
@@ -54,6 +55,7 @@ __all__ = [
     "Pin",
     "PinMode",
     "RccOptions",
+    "SpiController",
     "SpiTarget",
     "SupplyOptions",
     "UacFeatureUnit",

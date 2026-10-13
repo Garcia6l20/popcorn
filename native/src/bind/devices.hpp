@@ -13,7 +13,8 @@
 
 namespace popcorn::bind::detail
 {
-/** @brief Binds `I2CTargetBase` and `SpiTargetBase`, the trampolines over the bus targets. */
+/** @brief Binds `I2CTargetBase`, `SpiTargetBase` and `SpiControllerBase`, the trampolines over
+ *        the bus devices. */
 void bind_device_bases(reflex::py::nb::module_ scope);
 
 /**
@@ -26,14 +27,16 @@ void bind_native_devices(reflex::py::nb::module_ scope);
  * @brief Factories of the built-in bus models serving the peripherals that have Python devices,
  *        and of the RCC model when the board sets its clock sources.
  * @param description The MCU.
- * @param devices Python targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
- *        instances, an SPI target carrying its chip select as `_cs_port` and `_cs_pin`.
+ * @param devices Python devices per peripheral name, `popcorn.board.I2CTarget`, `SpiTarget` or
+ *        `SpiController` instances, an SPI target carrying its chip select as `_cs_port` and
+ *        `_cs_pin`.
  * @param rcc Board clock sources of the RCC model, empty for its defaults and no RCC factory.
  * @param python_owned Receives, borrowed, each Python device of @p devices whose reference a
  *        factory now holds, once per reference.
  * @return One factory per named peripheral, plus one for the RCC with @p rcc.
  * @throws config_error when a named peripheral is not an I2C or SPI peripheral of @p description,
- *         a target is of the other bus kind, an object is not a target, or no built-in bus model
+ *         a target is of the other bus kind, an object is not a target, an SpiController shares
+ *         its SPI instance with another device, or no built-in bus model
  *         serves a peripheral with targets. A peripheral with no targets is skipped. With @p rcc,
  *         when no built-in model serves an RCC of @p description.
  */

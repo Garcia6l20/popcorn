@@ -330,7 +330,10 @@ type _Devices = Callable[[], Mapping[str, Sequence[I2CTarget | SpiTarget]]]
         (lambda: {"RCC": list[I2CTarget]()}, "an I2C or SPI peripheral"),
         (lambda: {"SPI1": [Eeprom24(0x50, 256)]}, "an I2C peripheral for an I2CTarget"),
         (lambda: {"I2C1": [JedecDevice(None, (1, 2, 3))]}, "an SPI peripheral for an SpiTarget"),
-        (lambda: cast(dict[str, list[I2CTarget]], {"I2C1": [object()]}), "I2CTarget or SpiTarget"),
+        (
+            lambda: cast(dict[str, list[I2CTarget]], {"I2C1": [object()]}),
+            "I2CTarget, SpiTarget or SpiController",
+        ),
         (lambda: {"SPI1": [JedecDevice("PZ4", (1, 2, 3))]}, "GPIO port"),
     ],
 )

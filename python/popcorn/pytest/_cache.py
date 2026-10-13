@@ -37,7 +37,7 @@ from popcorn import (
 from popcorn._machine import AttachedDevice
 from popcorn._machine_description import check_inputs
 from popcorn._model_build import registered_classes
-from popcorn.board import I2CTarget, SpiTarget
+from popcorn.board import I2CTarget, SpiController, SpiTarget
 from popcorn.units import VirtualTime
 
 FORMAT = "popcorn-boot-cache 1"
@@ -167,9 +167,11 @@ def _plain(value: object, owner: object) -> str | None:
 
 
 def _device_line(device: AttachedDevice) -> str | None:
-    if not isinstance(device, I2CTarget | SpiTarget):
+    if not isinstance(device, I2CTarget | SpiTarget | SpiController):
         return None
     cls = type(device)
+    if isinstance(device, SpiController):
+        return f"{cls.__module__}.{cls.__qualname__} {_class_source(cls)}"
     try:
         state = device.snapshot()
         attributes = _plain(vars(device), device)
@@ -190,6 +192,8 @@ def devices_digest(
     instance attributes. It can be keyed when it is a `popcorn.board.I2CTarget` or `SpiTarget`
     whose attributes hold only None, bool, int, float, str, bytes, bytearray, enum members,
     methods of the device itself, and lists, tuples, sets and dicts of these. A
+    `popcorn.board.SpiController` is keyed by its class and source only: it acts only through
+    `transfer`, which needs the booted machine, so it cannot act before `boot.until`. A
     `popcorn.devices` device keeps its parameters natively and cannot be keyed.
 
     Not keyed: class attributes changed at run time, module globals or class-level containers

@@ -8,6 +8,7 @@ static uint8_t const     command[4] = {0x9F, 0, 0, 0};
 static uint8_t           answer[4];
 static volatile uint32_t received;
 static volatile uint32_t finished;
+static volatile uint32_t echoing;
 
 void SPI1_IRQHandler(void);
 void idle(void);
@@ -18,6 +19,7 @@ void hw_ss(void);
 void write_read(void);
 void erase(void);
 void dma(void);
+void target_echo(void);
 void GPDMA1_Channel2_IRQHandler(void);
 void GPDMA1_Channel3_IRQHandler(void);
 
@@ -127,8 +129,28 @@ void hw_ss(void)
   DONE();
 }
 
+static void echo_frames(void)
+{
+  while(LL_SPI_IsActiveFlag_RXP(SPI1) && received < sizeof answer)
+  {
+    uint8_t const value = LL_SPI_ReceiveData8(SPI1);
+    answer[received++]  = value;
+    LL_SPI_TransmitData8(SPI1, (uint8_t)(value + 0x10u));
+  }
+  if(received == sizeof answer)
+  {
+    LL_SPI_DisableIT_RXP(SPI1);
+    finished = 1;
+  }
+}
+
 void SPI1_IRQHandler(void)
 {
+  if(echoing)
+  {
+    echo_frames();
+    return;
+  }
   while(LL_SPI_IsActiveFlag_RXP(SPI1) && received < sizeof answer)
   {
     answer[received++] = LL_SPI_ReceiveData8(SPI1);
@@ -341,6 +363,42 @@ void dma(void)
   LOG(equal);
   LOG(tx_done);
   LOG(rx_done);
+  DONE();
+}
+
+void target_echo(void)
+{
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SPI1);
+  LL_SPI_InitTypeDef config = {
+      .TransferDirection = LL_SPI_FULL_DUPLEX,
+      .Mode              = LL_SPI_MODE_SLAVE,
+      .DataWidth         = LL_SPI_DATAWIDTH_8BIT,
+      .ClockPolarity     = LL_SPI_POLARITY_LOW,
+      .ClockPhase        = LL_SPI_PHASE_1EDGE,
+      .NSS               = LL_SPI_NSS_HARD_INPUT,
+      .BaudRate          = LL_SPI_BAUDRATEPRESCALER_DIV2,
+      .BitOrder          = LL_SPI_MSB_FIRST,
+      .CRCCalculation    = LL_SPI_CRCCALCULATION_DISABLE,
+      .CRCPoly           = 7,
+  };
+  LL_SPI_Init(SPI1, &config);
+  LL_SPI_SetFIFOThreshold(SPI1, LL_SPI_FIFO_TH_01DATA);
+  LL_SPI_SetTransferSize(SPI1, 0);
+  LL_SPI_SetUDRConfiguration(SPI1, LL_SPI_UDR_CONFIG_REGISTER_PATTERN);
+  SPI1->UDRDR = 0xEEu;
+  echoing     = 1;
+  LL_SPI_Enable(SPI1);
+  LL_SPI_TransmitData8(SPI1, 0xA0u);
+  LL_SPI_TransmitData8(SPI1, 0xA1u);
+  LL_SPI_EnableIT_RXP(SPI1);
+  NVIC_EnableIRQ(SPI1_IRQn);
+  while(finished == 0)
+  {
+    __WFI();
+  }
+  log_answer();
+  LOG(LL_SPI_IsActiveFlag_UDR(SPI1));
+  LL_SPI_Disable(SPI1);
   DONE();
 }
 

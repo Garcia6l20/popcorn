@@ -4,12 +4,14 @@
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
+#include <popcorn/periph/stm32/spi.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <format>
 #include <limits>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -545,6 +547,25 @@ auto machine_handle::command_i2c_hold(
     bus->hold(vtime{from}, vtime{from + for_ps});
     return from;
   });
+}
+
+auto machine_handle::command_spi_transfer(
+    std::string const&           peripheral,
+    std::optional<std::uint64_t> at_ps,
+    std::uint64_t                frame_ps,
+    std::uint8_t                 bits,
+    std::vector<std::uint32_t>   frames) const -> access_op
+{
+  auto* const port = dynamic_cast<periph::stm32::spi_controller_port*>(engine().model(peripheral));
+  if(port == nullptr)
+  {
+    throw config_error(peripheral, 0, "devices", "a built-in SPI model");
+  }
+  return detail::machine_op(
+      [port, at_ps, frame_ps, bits, frames = std::move(frames)](core::machine& target) {
+        auto const from = at_ps.value_or(target.virtual_clock().time().ps);
+        return port->transfer(vtime{from}, frame_ps, bits, frames).ps;
+      });
 }
 
 auto machine_handle::op_adc_drive(

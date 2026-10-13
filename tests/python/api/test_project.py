@@ -231,7 +231,7 @@ def test_a_device_class_must_be_a_bus_target() -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         project.machine()
     assert caught.value.key == "board.TESTDEV.devices[0].model"
-    assert "I2CTarget or SpiTarget" in caught.value.expected
+    assert "I2CTarget, SpiTarget or SpiController" in caught.value.expected
 
 
 def test_devices_need_an_i2c_bus() -> None:

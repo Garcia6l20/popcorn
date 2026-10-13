@@ -38,6 +38,7 @@ from popcorn._call import (
 from popcorn._devices import (
     BusDevice,
     I2CTarget,
+    SpiController,
     SpiTarget,
     attach,
     cs_of,
@@ -550,7 +551,11 @@ class Machine:
         arena_size: int = DEFAULT_ARENA_SIZE,
         models: Mapping[str, Callable[[], Model]] | None = None,
         devices: (
-            Mapping[str, Sequence[I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget]] | None
+            Mapping[
+                str,
+                Sequence[I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget],
+            ]
+            | None
         ) = None,
         rcc: RccOptions | None = None,
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
@@ -582,8 +587,9 @@ class Machine:
                 callable building one, such as `functools.partial(Timer, period=5)`. It
                 replaces the registered model of that peripheral.
             devices: Bus devices per I2C or SPI peripheral name, `popcorn.board` targets or
-                `popcorn.devices` devices of one bus kind, in attachment order. The built-in bus
-                model of the peripheral serves them. A device serves one live machine at a time.
+                `popcorn.devices` devices of one bus kind, in attachment order, or one
+                `popcorn.board.SpiController` alone on an SPI. The built-in bus model of the
+                peripheral serves them. A device serves one live machine at a time.
             rcc: Clock sources the board gives the built-in RCC model, None for its defaults,
                 a 16 MHz HSE and a 32.768 kHz LSE.
             audio: Options of SAI audio blocks by SAI instance and block, such as
@@ -603,8 +609,9 @@ class Machine:
                 models key names no peripheral, a model is refused, or devices are refused:
                 a peripheral that is not a built-in bus of their kind or has a Python model,
                 a chip select pin the description lacks, a device already serving a live
-                machine or listed twice. With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz
-                or above 1 MHz, an RCC with a Python model or one no built-in model serves.
+                machine or listed twice, an `SpiController` next to another device on its SPI.
+                With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz or above 1 MHz, an RCC
+                with a Python model or one no built-in model serves.
                 With `audio`: a key that is not an SAI with the built-in model, two keys naming
                 one SAI, a block other than A or B, a decimation below 1 or a negative frame
                 rate, or a `clocked_by` naming no device of `devices`, named as
@@ -682,7 +689,14 @@ class Machine:
         self._devices = attached
         for peripheral, targets in attached.items():
             for target in targets:
-                attach(target, self, self._device_audio_clock, self._device_bus_hold, peripheral)
+                attach(
+                    target,
+                    self,
+                    self._device_audio_clock,
+                    self._device_bus_hold,
+                    self._device_spi_transfer,
+                    peripheral,
+                )
         self._board = Board(
             self._ports,
             attached,
@@ -2720,6 +2734,15 @@ class Machine:
         command = self._handle.command_i2c_hold(peripheral, None if at is None else at.ps, for_.ps)
         return self._post(command).mapped(lambda done: VirtualTime(cast(int, done[0])))
 
+    def _device_spi_transfer(
+        self, peripheral: str, at: VirtualTime | None, frame_ps: int, bits: int, frames: list[int]
+    ) -> Pending[VirtualTime]:
+        self._refuse_on_host()
+        command = self._handle.command_spi_transfer(
+            peripheral, None if at is None else at.ps, frame_ps, bits, frames
+        )
+        return self._post(command).mapped(lambda done: VirtualTime(cast(int, done[0])))
+
     def _require_stopped(self) -> None:
         if self.busy and not self._handle.owns_engine():
             raise MachineRunning(_RUNNING)
@@ -2789,10 +2812,10 @@ _FAULT_CONTEXT = (
     "control",
 )
 
-type AttachedDevice = I2CTarget | SpiTarget | At25sf | Eeprom24xx | TableTarget
+type AttachedDevice = I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget
 """A device `Machine(devices=)` takes, of `popcorn.board` or `popcorn.devices`."""
 
-_BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI"}
+_BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI", SpiController: "SPI"}
 
 
 def _is_u32(value: object, lowest: int) -> bool:
@@ -2915,12 +2938,20 @@ def _checked_devices(
             raise refuse(name, "a peripheral without a Python model")
         listed: list[BusDevice] = []
         for candidate in cast(Sequence[object], targets):
-            if not isinstance(candidate, _core.I2CTargetBase | _core.SpiTargetBase):
+            if not isinstance(
+                candidate, _core.I2CTargetBase | _core.SpiTargetBase | _core.SpiControllerBase
+            ):
                 raise refuse(
-                    name, "popcorn.board.I2CTarget or SpiTarget or popcorn.devices instances"
+                    name,
+                    "popcorn.board.I2CTarget, SpiTarget or SpiController or popcorn.devices"
+                    " instances",
                 )
             target = candidate
-            kind = I2CTarget if isinstance(target, _core.I2CTargetBase) else SpiTarget
+            kind = (
+                I2CTarget
+                if isinstance(target, _core.I2CTargetBase)
+                else SpiController if isinstance(target, _core.SpiControllerBase) else SpiTarget
+            )
             listed.append(target)
             if peripheral.ip != _BUS_IPS[kind]:
                 raise refuse(name, f"an {_BUS_IPS[kind]} peripheral for an {kind.__name__}")
@@ -2934,6 +2965,9 @@ def _checked_devices(
                 port = f"GPIO{cs[1]}"
                 if port not in peripherals:
                     raise refuse(name, f"a chip select on a GPIO port of {description.part}")
+        controllers = sum(isinstance(d, _core.SpiControllerBase) for d in listed)
+        if controllers and len(listed) > 1:
+            raise refuse(name, f"one SpiController alone on {name}, no other device next to it")
         if listed:
             out[name] = tuple(listed)
     return out

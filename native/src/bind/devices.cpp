@@ -226,6 +226,38 @@ public:
 };
 
 /**
+ * @brief nanobind trampoline letting a Python class implement stm32::spi_controller_sink through
+ *        the private method `_frame` that `popcorn.board.SpiController` defines. Every call takes
+ *        the GIL, one per frame. Times cross as picoseconds since reset. Once its machine's
+ *        Python side is collected no method is called: the run is asked to stop.
+ */
+class python_spi_controller final : public stm32::spi_controller_sink
+{
+public:
+  NB_TRAMPOLINE(stm32::spi_controller_sink, 1);
+
+  void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
+  {
+    gil_entry const gil;
+    call(nb_trampoline, cell, "_frame", sent, received, at.ps);
+  }
+
+  /**
+   * @brief Calls the Python method @p name in @p through, the cell of one attachment.
+   * @return Its result, empty when the cell refused the call.
+   */
+  template <typename... Args>
+  auto via(callback_cell const& through, char const* name, Args&&... args) const
+      -> std::optional<nb::object>
+  {
+    return call(nb_trampoline, through, name, std::forward<Args>(args)...);
+  }
+
+  /** @brief The cell its calls run in. */
+  callback_cell cell;
+};
+
+/**
  * @brief One machine's attachment of a Python I2C target: the machine's engine calls it, and
  *        it calls the device in its own cell. A device reattached to another machine gets a
  *        new attachment, so an old engine still running never calls it in the new machine's
@@ -341,6 +373,28 @@ private:
   std::shared_ptr<python_spi_target> device_;
 };
 
+/** @brief One machine's attachment of a Python SPI controller, as attached_i2c_target. */
+class attached_spi_controller final : public stm32::spi_controller_sink
+{
+public:
+  /** @brief Attaches @p device. */
+  explicit attached_spi_controller(std::shared_ptr<python_spi_controller> device) noexcept
+      : device_{std::move(device)}
+  {}
+
+  void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
+  {
+    gil_entry const gil;
+    device_->via(cell, "_frame", sent, received, at.ps);
+  }
+
+  /** @brief The cell of this attachment. */
+  callback_cell cell;
+
+private:
+  std::shared_ptr<python_spi_controller> device_;
+};
+
 auto bytes_of(std::span<std::byte const> data) -> nb::bytes
 {
   return nb::bytes(data.data(), data.size());
@@ -448,6 +502,10 @@ void bind_device_bases(nb::module_ scope)
       scope, "SpiTargetBase",
       "Native side of popcorn.board.SpiTarget: an SPI device implemented in Python.")
       .def(nb::init<>());
+  nb::class_<stm32::spi_controller_sink, python_spi_controller>(
+      scope, "SpiControllerBase",
+      "Native side of popcorn.board.SpiController: an SPI controller implemented in Python.")
+      .def(nb::init<>());
 }
 
 auto device_factories(
@@ -484,8 +542,28 @@ auto device_factories(
         }
         board.i2c[peripheral].push_back(std::move(target));
       }
+      else if(
+          std::shared_ptr<stm32::spi_controller_sink> controller;
+          nb::try_cast(object, controller) and controller)
+      {
+        if(unit->ip != "SPI")
+        {
+          throw refused(peripheral, "an SPI peripheral for an SpiController");
+        }
+        if(board.spi_controllers.contains(peripheral) or board.spi.contains(peripheral))
+        {
+          throw refused(peripheral, "one SpiController alone on the SPI instance");
+        }
+        adopt<python_spi_controller, attached_spi_controller>(
+            controller, object, peripheral, cells, python_owned);
+        board.spi_controllers[peripheral] = std::move(controller);
+      }
       else
       {
+        if(board.spi_controllers.contains(peripheral))
+        {
+          throw refused(peripheral, "one SpiController alone on the SPI instance");
+        }
         if(unit->ip != "SPI")
         {
           throw refused(peripheral, "an I2C peripheral for an I2CTarget");
