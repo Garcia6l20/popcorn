@@ -111,4 +111,7 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the CRC model, RM0456 section 24. */
 [[nodiscard]] auto crc_factory() -> model_factory;
+
+/** @brief Factory of the HASH model, RM0456 section 51. */
+[[nodiscard]] auto hash_factory() -> model_factory;
 }

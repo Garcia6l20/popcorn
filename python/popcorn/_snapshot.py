@@ -25,6 +25,9 @@ class Snapshot:
 
     Restorable any number of times into the machine that took it. Its saved form, `save()`,
     loads into another machine built from the same description, images and configuration.
+    A snapshot restores only into a machine with the same set of peripheral models. One taken
+    by a popcorn build that lacked a model the current build has, such as HASH, is refused and
+    must be taken again.
     """
 
     __slots__ = ("_arena_offset", "_native")

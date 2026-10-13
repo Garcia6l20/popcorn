@@ -1970,7 +1970,9 @@ class Machine:
         Raises:
             ConfigError: The snapshot was taken by another machine, or a snapshot read back from
                 a file names another description, images or configuration, keyed by the digest
-                that differs.
+                that differs. Also raised when the snapshot has no state for a peripheral model
+                this build gives the machine, as with a snapshot taken before that model
+                existed: take it again.
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: restore it with the
                 others, `System.restore`.
