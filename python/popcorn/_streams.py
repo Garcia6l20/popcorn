@@ -295,13 +295,13 @@ class UartStream:
 
         Raises:
             RuntimeError: Called from a handler or a model, or the UART is linked to another
-                member of a `LinkedSystem`: its receiver hears the link only, inject through
-                `LinkedSystem.tap`.
+                member of a `System`: its receiver hears the link only, inject through
+                `System.tap`.
             ValueError: `at` before the time of a parked machine, from the await when running.
         """
         if self.name in self._linked:
             raise RuntimeError(
-                f"{self.name} is linked in a LinkedSystem: inject through the system's tap"
+                f"{self.name} is linked in a System: inject through the system's tap"
             )
         link = self._link
         data = bytes(data)
@@ -681,7 +681,7 @@ class Board:
         Raises:
             ValueError: `function` is negative, above 0 for a UART, or beyond the CDC ACM
                 functions of a configuration already read.
-            RuntimeError: The UART is linked by a `LinkedSystem`, until its `close()`.
+            RuntimeError: The UART is linked by a `System`, until its `close()`.
             ModelError: The peripheral's model is neither a UART nor a USB device controller
                 with a virtual host.
             ConfigError: The description has no such peripheral.
@@ -693,7 +693,7 @@ class Board:
             raise ValueError(f"{name}: a UART has no function {function}, only 0")
         name = self._ports.serving(name)
         if name in self._ports.linked:
-            raise RuntimeError(f"{name} is linked in a LinkedSystem, which owns its line")
+            raise RuntimeError(f"{name} is linked in a System, which owns its line")
         return self._ports.bridge(name, self._ports.link(name)).path
 
     @property

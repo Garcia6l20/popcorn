@@ -1,4 +1,4 @@
-"""Cases of a `LinkedSystem` carried from the v1 plan: member stops and errors inside gathers,
+"""Cases of a `System` carried from the v1 plan: member stops and errors inside gathers,
 halted members' peripherals, a pty waking a sleeping system, and Python models on several
 member threads."""
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import popcorn
 import pytest
-from popcorn import LinkedSystem, Stop, StopReason, UartLink
+from popcorn import Stop, StopReason, System, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import Ticker, logged, member, ticker
@@ -30,7 +30,7 @@ BAD_PC = 0xEFFF_FFF0
 OVERRUN = 3
 TX_BYTES = [0x20 + index for index in range(64)]
 
-Build = Callable[..., LinkedSystem]
+Build = Callable[..., System]
 Models = dict[str, type[popcorn.model.Model]] | None
 
 
@@ -38,7 +38,7 @@ Models = dict[str, type[popcorn.model.Model]] | None
 def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
     """Builds `a` running `a_entry` and `b` running `b_entry`, linked on `unit`, with a 3 us
     third link on USART3 when `third` is given."""
-    made: list[LinkedSystem] = []
+    made: list[System] = []
 
     def build(
         slice_instructions: int = 1_000_000,
@@ -49,13 +49,13 @@ def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
         unit: str = "USART1",
         a_models: Models = None,
         b_models: Models = None,
-    ) -> LinkedSystem:
+    ) -> System:
         a = member(u575, a_entry, "a", slice_instructions, models=a_models)
         b = member(u575, b_entry, "b", slice_instructions, models=b_models)
         links = [UartLink(f"a.{unit}", f"b.{unit}", latency=L, baud=460_800)]
         if third is not None:
             links.append(UartLink("a.USART3", "b.USART3", latency=third, baud=460_800))
-        system = LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions)
+        system = System({"a": a, "b": b}, links, slice_instructions=slice_instructions)
         made.append(system)
         return system
 
@@ -66,7 +66,7 @@ def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
 
 def across(
     pair: Build,
-    body: Callable[[LinkedSystem], Coroutine[Any, Any, object]],
+    body: Callable[[System], Coroutine[Any, Any, object]],
     variants: list[tuple[int, VirtualDuration | None]] | None = None,
     **options: Any,
 ) -> Any:
@@ -86,7 +86,7 @@ def point(stop: Stop) -> tuple[object, ...]:
 def test_a_fault_ends_its_member_s_goal_and_the_peer_reaches_its_own(
     u575: popcorn.PartDescription, pair: Build
 ) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         a.reg.pc = BAD_PC
         a_stop, b_stop = await asyncio.gather(a.run(for_=ms(1)), b.run(for_=ms(1)))
@@ -104,7 +104,7 @@ def test_a_fault_ends_its_member_s_goal_and_the_peer_reaches_its_own(
 def test_a_budget_ends_its_member_s_goal_as_on_a_lone_machine(
     u575: popcorn.PartDescription, pair: Build
 ) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         async with asyncio.timeout(30):
             a_stop, b_stop = await asyncio.gather(
@@ -120,7 +120,7 @@ def test_a_budget_ends_its_member_s_goal_as_on_a_lone_machine(
 
 
 def test_goals_of_a_sleeping_system_each_resolve_idle(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         async with asyncio.timeout(30):
             a_stop, b_stop = await asyncio.gather(a.run(until=NEVER), b.run(until=NEVER))
@@ -132,7 +132,7 @@ def test_goals_of_a_sleeping_system_each_resolve_idle(pair: Build) -> None:
 
 
 def test_every_pending_goal_fails_with_a_member_s_error_which_names_it(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         ticker(a).raise_at = 50
         results = await asyncio.gather(a.run(for_=ms(2)), b.run(for_=ms(1)), return_exceptions=True)
@@ -150,7 +150,7 @@ def test_every_pending_goal_fails_with_a_member_s_error_which_names_it(pair: Bui
 
 
 def test_a_goal_resolved_before_a_member_s_error_keeps_its_stop(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         ticker(a).raise_at = 50
         results = await asyncio.gather(
@@ -164,7 +164,7 @@ def test_a_goal_resolved_before_a_member_s_error_keeps_its_stop(pair: Build) -> 
 
 
 def test_a_task_group_fails_with_a_member_s_error_in_every_goal(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         ticker(a).raise_at = 50
         with pytest.raises(ExceptionGroup) as raised:
@@ -180,7 +180,7 @@ def test_a_task_group_fails_with_a_member_s_error_in_every_goal(pair: Build) -> 
 
 
 def test_a_halted_member_s_error_fails_the_goal_of_the_next_run(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         ticker(a).raise_at = 150
         first = await a.run(for_=us(100))
@@ -193,7 +193,7 @@ def test_a_halted_member_s_error_fails_the_goal_of_the_next_run(pair: Build) -> 
 
 
 def test_a_member_s_goals_count_only_what_it_executed_not_its_halt(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         first = await a.run(for_=us(300))
         before = system._handle.executed_of(0)  # pyright: ignore[reportPrivateUsage]
@@ -210,7 +210,7 @@ def test_a_member_s_goals_count_only_what_it_executed_not_its_halt(pair: Build) 
 
 
 def test_gather_order_lone_goals_and_halted_sequences_are_exact(pair: Build) -> None:
-    async def gathered(system: LinkedSystem, reverse: bool) -> object:
+    async def gathered(system: System, reverse: bool) -> object:
         a, b = system.members["a"], system.members["b"]
         if reverse:
             b_stop, a_stop = await asyncio.gather(b.run(for_=ms(1)), a.run(until=IRQ))
@@ -218,15 +218,15 @@ def test_gather_order_lone_goals_and_halted_sequences_are_exact(pair: Build) -> 
             a_stop, b_stop = await asyncio.gather(a.run(until=IRQ), b.run(for_=ms(1)))
         return point(a_stop), point(b_stop), system.time_of("a"), system.time_of("b")
 
-    async def forward(system: LinkedSystem) -> object:
+    async def forward(system: System) -> object:
         return await gathered(system, False)
 
-    async def backward(system: LinkedSystem) -> object:
+    async def backward(system: System) -> object:
         return await gathered(system, True)
 
     assert across(pair, forward) == across(pair, backward)
 
-    async def sequence(system: LinkedSystem) -> object:
+    async def sequence(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         first = await a.run(for_=us(300))
         assert a.time == first.time
@@ -242,7 +242,7 @@ def test_gather_order_lone_goals_and_halted_sequences_are_exact(pair: Build) -> 
 def test_a_halted_receiver_s_usart_overruns_and_takes_its_interrupt_on_its_next_goal(
     pair: Build,
 ) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         await b.run(for_=us(700))
         before = len(logged(b))
@@ -263,7 +263,7 @@ def test_a_halted_receiver_s_usart_overruns_and_takes_its_interrupt_on_its_next_
 def test_a_halted_receiver_s_dma_ring_fills_unless_its_channel_is_frozen(
     pair: Build, frozen: bool
 ) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         if frozen:
             b.periph.DBGMCU.AHB1FZR.DBG_GPDMA3_STOP = 1
@@ -282,7 +282,7 @@ def test_a_halted_receiver_s_dma_ring_fills_unless_its_channel_is_frozen(
 def test_a_halted_sender_s_watchdog_bites_unless_it_is_frozen(
     pair: Build, frozen: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         if frozen:
             a.periph.DBGMCU.APB1LFZR.DBG_IWDG_STOP = 1
@@ -298,7 +298,7 @@ def test_a_halted_sender_s_watchdog_bites_unless_it_is_frozen(
     across(pair, body, a_entry="link_iwdg", b_entry="link_rx")
 
 
-async def sleeps_reach(system: LinkedSystem, count: int) -> None:
+async def sleeps_reach(system: System, count: int) -> None:
     """Let the loop turn until the members went to sleep `count` times in all, under a 10 s
     guard against a hang."""
     async with asyncio.timeout(10):
@@ -319,7 +319,7 @@ def pty_woken(
         links.append(UartLink("a.USART3", "b.USART3", latency=third, baud=460_800))
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
     try:
-        with LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
+        with System({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
 
             async def body() -> tuple[int, int]:
                 system.start()
@@ -353,7 +353,7 @@ def test_python_models_on_two_members_run_deterministically_one_gil_entry_per_ca
     def ports(m: popcorn.Machine, words: int) -> list[int]:
         return [m.mem.u32[m.sym("audio_ports") + 4 * index] for index in range(words)]
 
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         ticker(a).period_us = ticker(b).period_us = 20
         entries = [m._handle.gil_entries() for m in (a, b)]  # pyright: ignore[reportPrivateUsage]
@@ -383,7 +383,7 @@ def test_python_models_on_two_members_run_deterministically_one_gil_entry_per_ca
     assert min(ticks) > 4_000
     assert a_ports[4] == a_ports[11] == 6
 
-    async def long(system: LinkedSystem) -> object:
+    async def long(system: System) -> object:
         for m in system.members.values():
             ticker(m).period_us = 20
         stop = await system.run(for_=ms(1000))
@@ -393,7 +393,7 @@ def test_python_models_on_two_members_run_deterministically_one_gil_entry_per_ca
     assert reason is StopReason.TIME
 
 
-async def to(system: LinkedSystem, until: VirtualTime) -> None:
+async def to(system: System, until: VirtualTime) -> None:
     """Run to `until`, again after each member stop."""
     async with asyncio.timeout(30):
         while (await system.run(until=until)).reason is not StopReason.TIME:
@@ -401,7 +401,7 @@ async def to(system: LinkedSystem, until: VirtualTime) -> None:
 
 
 def test_a_watchdog_reset_of_a_running_member_lets_the_system_run_on(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a = system.members["a"]
         boot = a.time
         await to(system, VirtualTime(ms(8).ps))
@@ -415,7 +415,7 @@ def test_a_watchdog_reset_of_a_running_member_lets_the_system_run_on(pair: Build
 
 
 def test_an_armed_replace_taken_in_a_snapshot_applies_again_after_a_restore(pair: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         b = system.members["b"]
         tap = system.tap("a.USART1")
         tap.replace(40, b"abc", towards="b.USART1")

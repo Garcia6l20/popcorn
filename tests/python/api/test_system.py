@@ -1,4 +1,4 @@
-"""`popcorn.LinkedSystem`: members on one virtual clock, their UARTs linked."""
+"""`popcorn.System`: members on one virtual clock, their UARTs linked."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any, Literal, cast
 
 import popcorn
 import pytest
-from popcorn import LinkedSystem, StopReason, SystemStop, UartLink
+from popcorn import StopReason, System, SystemStop, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .linked import PING_BYTES, Ticker, logged, member, received, ticker
@@ -26,7 +26,7 @@ VARIANTS = [
     pytest.param(997, us(3), id="997 q=3us"),
 ]
 
-Build = Callable[..., LinkedSystem]
+Build = Callable[..., System]
 
 
 def links(third: VirtualDuration | None) -> list[UartLink]:
@@ -38,7 +38,7 @@ def links(third: VirtualDuration | None) -> list[UartLink]:
 
 @pytest.fixture
 def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
-    made: list[LinkedSystem] = []
+    made: list[System] = []
 
     def build(
         slice_instructions: int = 1_000_000,
@@ -46,10 +46,10 @@ def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
         *,
         b_entry: str = "link_echo",
         **options: object,
-    ) -> LinkedSystem:
+    ) -> System:
         a = member(u575, "link_ping", "a", slice_instructions)
         b = member(u575, b_entry, "b", slice_instructions)
-        system = LinkedSystem(
+        system = System(
             {"a": a, "b": b},
             links(third),
             slice_instructions=slice_instructions,
@@ -63,7 +63,7 @@ def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
         one.close()
 
 
-def state(system: LinkedSystem) -> tuple[object, ...]:
+def state(system: System) -> tuple[object, ...]:
     members = system.members
     return tuple(
         (
@@ -95,7 +95,7 @@ def test_a_run_reaches_its_target_on_every_member(ping: Build) -> None:
     assert system.time >= VirtualTime(ms(3).ps)
 
 
-async def _to(system: LinkedSystem, until: VirtualDuration) -> list[SystemStop]:
+async def _to(system: System, until: VirtualDuration) -> list[SystemStop]:
     """Run to system time `until`, again after each member stop, until the TIME stop."""
     stops = [await system.run(until=VirtualTime(until.ps))]
     while stops[-1].reason is not StopReason.TIME:
@@ -151,55 +151,51 @@ def test_construction_checks(u575: popcorn.PartDescription) -> None:
     b = member(u575, "link_echo", "b")
     good = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
     cases: list[tuple[Callable[[], object], str]] = [
-        (lambda: LinkedSystem({"x": a, "b": b}, good), "members.x"),
-        (lambda: LinkedSystem({"a": a, "b": b}, []), "links"),
+        (lambda: System({"x": a, "b": b}, good), "members.x"),
+        (lambda: System({"a": a, "b": b}, []), "links"),
         (
-            lambda: LinkedSystem(
-                {"a": a, "b": b}, [UartLink("a", "b.USART1", latency=L, baud=460_800)]
-            ),
+            lambda: System({"a": a, "b": b}, [UartLink("a", "b.USART1", latency=L, baud=460_800)]),
             "links[0].a",
         ),
         (
-            lambda: LinkedSystem(
+            lambda: System(
                 {"a": a, "b": b}, [UartLink("a.USART1", "c.USART1", latency=L, baud=460_800)]
             ),
             "links[0].b",
         ),
         (
-            lambda: LinkedSystem(
+            lambda: System(
                 {"a": a, "b": b}, [UartLink("a.USART1", "b.GPIOA", latency=L, baud=460_800)]
             ),
             "links[0].b",
         ),
         (
-            lambda: LinkedSystem(
+            lambda: System(
                 {"a": a, "b": b},
                 [*good, UartLink("a.USART1", "b.USART2", latency=L, baud=460_800)],
             ),
             "links[1].a",
         ),
         (
-            lambda: LinkedSystem(
+            lambda: System(
                 {"a": a, "b": b},
                 [UartLink("a.USART1", "b.USART1", latency=VirtualDuration(0), baud=460_800)],
             ),
             "links[0].latency",
         ),
         (
-            lambda: LinkedSystem(
+            lambda: System(
                 {"a": a, "b": b},
                 [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800, stop_bits=3)],
             ),
             "links[0].stop_bits",
         ),
         (
-            lambda: LinkedSystem(
-                {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=0)]
-            ),
+            lambda: System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=0)]),
             "links[0].baud",
         ),
         (
-            lambda: LinkedSystem(
+            lambda: System(
                 {"a": a, "b": b},
                 [
                     UartLink(
@@ -210,7 +206,7 @@ def test_construction_checks(u575: popcorn.PartDescription) -> None:
             "links[0].data_bits",
         ),
         (
-            lambda: LinkedSystem(
+            lambda: System(
                 {"a": a, "b": b},
                 [
                     UartLink(
@@ -220,9 +216,9 @@ def test_construction_checks(u575: popcorn.PartDescription) -> None:
             ),
             "links[0].parity",
         ),
-        (lambda: LinkedSystem({"a": a, "b": b}, good, offsets={"c": us(1)}), "offsets.c"),
+        (lambda: System({"a": a, "b": b}, good, offsets={"c": us(1)}), "offsets.c"),
         (
-            lambda: LinkedSystem({"a": a, "b": b}, good, offsets={"a": VirtualDuration(-1)}),
+            lambda: System({"a": a, "b": b}, good, offsets={"a": VirtualDuration(-1)}),
             "offsets.a",
         ),
     ]
@@ -231,20 +227,18 @@ def test_construction_checks(u575: popcorn.PartDescription) -> None:
             build()
         assert raised.value.key == key
     with pytest.raises(ValueError, match="above 0"):
-        LinkedSystem({"a": a, "b": b}, good, slice_instructions=0)
+        System({"a": a, "b": b}, good, slice_instructions=0)
     b.board.pty("USART1")
     with pytest.raises(popcorn.ConfigError, match="bridged to a pty") as raised:
-        LinkedSystem({"a": a, "b": b}, good)
+        System({"a": a, "b": b}, good)
     assert raised.value.key == "links[0].b"
-    with LinkedSystem(
+    with System(
         {"a": a, "b": b}, [UartLink("a.USART1", "b.USART2", latency=L, baud=460_800)]
     ) as system:
         with pytest.raises(popcorn.ConfigError, match="another linked system"):
-            LinkedSystem(
-                {"a": a, "b": b}, [UartLink("a.USART3", "b.USART3", latency=L, baud=460_800)]
-            )
+            System({"a": a, "b": b}, [UartLink("a.USART3", "b.USART3", latency=L, baud=460_800)])
         assert system.members["a"] is a
-    with LinkedSystem(
+    with System(
         {"a": a, "b": b}, [UartLink("a.USART3", "b.USART3", latency=L, baud=460_800)]
     ) as last:
         assert last.quantum == L
@@ -306,7 +300,7 @@ def test_a_strict_shape_mismatch_stops_the_system_with_its_error(
 ) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b", strict=True)
-    with LinkedSystem(
+    with System(
         {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=115_200)]
     ) as system:
         with pytest.raises(popcorn.ModelError):
@@ -321,7 +315,7 @@ def test_a_member_s_handler_error_stops_the_system_and_names_the_member(
     a = member(u575, "link_ping", "a", models={"TIM6": Ticker})
     b = member(u575, "link_echo", "b")
     ticker(a).raise_at = 50
-    with LinkedSystem({"a": a, "b": b}, links(None)) as system:
+    with System({"a": a, "b": b}, links(None)) as system:
         with pytest.raises(RuntimeError, match="TIM6 tick 50") as raised:
             asyncio.run(system.run(for_=ms(1)))
         assert raised.value.__notes__ == ["raised by member a at system time t=100500000 ps"]
@@ -334,7 +328,7 @@ def test_a_member_s_handler_error_stops_the_system_and_names_the_member(
 def test_a_closed_system_and_its_members_are_freed(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
-    system = LinkedSystem({"a": a, "b": b}, links(None))
+    system = System({"a": a, "b": b}, links(None))
     asyncio.run(system.run(for_=ms(1)))
     held = weakref.ref(system), weakref.ref(a), weakref.ref(b)
     system.close()
@@ -382,10 +376,10 @@ def test_types_are_checked_at_the_call(ping: Build) -> None:
 def test_for_counts_from_the_last_target_not_from_a_member_past_it(
     u575: popcorn.PartDescription,
 ) -> None:
-    def build() -> LinkedSystem:
+    def build() -> System:
         a = member(u575, "link_tx_count", "a")
         b = member(u575, "link_rx", "b")
-        return LinkedSystem({"a": a, "b": b}, links(None))
+        return System({"a": a, "b": b}, links(None))
 
     with build() as chunked, build() as whole:
         first = asyncio.run(chunked.run(for_=us(100)))
@@ -469,7 +463,7 @@ def parity_warnings(
     a = member(u575, "idle", names[0])
     b = member(u575, "idle", names[1])
     caplog.clear()
-    with LinkedSystem(
+    with System(
         {names[0]: a, names[1]: b},
         [
             UartLink(
@@ -524,7 +518,7 @@ def _self_linked(
     ]
     if third is not None:
         made.append(UartLink("b.USART2", "a.UART4", latency=third, baud=460_800))
-    with LinkedSystem({"a": a, "b": b}, made, slice_instructions=slice_instructions) as system:
+    with System({"a": a, "b": b}, made, slice_instructions=slice_instructions) as system:
         stop = asyncio.run(system.run(for_=ms(3)))
         assert (stop.reason, stop.member) == (StopReason.USER, "a")
         frames = system.tap("a.USART1").frames()

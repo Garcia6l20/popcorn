@@ -37,7 +37,7 @@ _UNDELIVERED = "a member stop the last run found is not delivered yet: run the s
 
 @dataclass(frozen=True)
 class UartLink:
-    """A UART link of a `LinkedSystem`, both directions, between two members or between two
+    """A UART link of a `System`, both directions, between two members or between two
     UARTs of one member.
 
     A frame whose stop bit ends at the sender's system time t ends at the receiver at exactly
@@ -69,8 +69,8 @@ class UartLink:
 
 
 @dataclass(frozen=True, slots=True)
-class System:
-    """Members and links of a linked system, as data: what `LinkedSystem` runs.
+class SystemDescription:
+    """Members and links of a linked system, as data: what `System` runs.
 
     A value, as `MachineDescription` is: frozen, hashable, equal by content, holding machine
     descriptions and never a machine. Declaring one reads no file, so a conftest imports it
@@ -82,7 +82,7 @@ class System:
     member order, then links in `links` order. The Python callbacks of different members run
     at once, each on its member's thread.
 
-        SYSTEM = popcorn.System(
+        SYSTEM = popcorn.SystemDescription(
             members={"ctl": CONTROLLER, "r1": RESPONDER, "r2": RESPONDER},
             links=[
                 popcorn.UartLink("ctl.UART4", "r1.USART3", latency=us(20), baud=460_800),
@@ -99,9 +99,9 @@ class System:
             of frames arriving at one receiver at the same instant on several links.
         offsets: System time of each member's local time at the start, 0 for an absent one.
         goal_cap: Virtual time a member goal may run from its start, None for no cap, as
-            `LinkedSystem(goal_cap=)`.
+            `System(goal_cap=)`.
         on_member_reset: What a firmware or watchdog reset of a running member does, as
-            `LinkedSystem(on_member_reset=)`.
+            `System(on_member_reset=)`.
 
     Raises:
         ConfigError: A check fails, its key naming the field: `members` empty, `members.<name>`
@@ -194,7 +194,7 @@ class System:
         """The quantum Q, the smallest link latency: members meet every Q of system time."""
         return min(link.latency for link in self.links)
 
-    def replace(self, **changes: object) -> System:
+    def replace(self, **changes: object) -> SystemDescription:
         """A copy with `changes` applied, as `dataclasses.replace`, checked again."""
         return replace(self, **changes)
 
@@ -206,7 +206,7 @@ class System:
         """
         return {name: project.machine(name=name) for name, project in self.members.items()}
 
-    async def boot(self) -> LinkedSystem:
+    async def boot(self) -> System:
         """Build `machines`, boot each from reset as `MachineDescription.boot_machine` does, or only
         reset it when its machine description has no `boot.until`, one after the other, then `link`
         them. For scripts: the pytest plugin's `system` fixture boots from the boot cache instead.
@@ -229,19 +229,19 @@ class System:
         *,
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
-    ) -> LinkedSystem:
-        """The `LinkedSystem` of this system over `machines`, booted any way, each standing
+    ) -> System:
+        """The `System` of this system over `machines`, booted any way, each standing
         where its system time starts: `offsets` gives that time.
 
         Args:
             machines: A parked machine per member, by member name, named as the member.
-            slice_instructions: As `LinkedSystem(slice_instructions=)`.
-            slice_wall_budget: As `LinkedSystem(slice_wall_budget=)`.
+            slice_instructions: As `System(slice_instructions=)`.
+            slice_wall_budget: As `System(slice_wall_budget=)`.
 
         Raises:
             ConfigError: `machines` misses a member or names another, at `members.<name>`, or
-                as `LinkedSystem`.
-            Exception: As `LinkedSystem`.
+                as `System`.
+            Exception: As `System`.
         """
         unmatched = sorted(set(self.members).symmetric_difference(machines))
         if unmatched:
@@ -251,7 +251,7 @@ class System:
                 key=f"members.{name}",
                 expected="one machine per member",
             )
-        return LinkedSystem(
+        return System(
             {name: machines[name] for name in self.members},
             self.links,
             offsets=self.offsets,
@@ -264,7 +264,7 @@ class System:
 
 @dataclass(frozen=True)
 class SystemStop:
-    """Why and where a `LinkedSystem.run` ended.
+    """Why and where a `System.run` ended.
 
     Attributes:
         reason: TIME when every member reached the target, IDLE when every member slept with
@@ -289,8 +289,8 @@ class SystemStop:
 
 @dataclass(frozen=True)
 class SystemSnapshot:
-    """A `LinkedSystem`'s whole state at a stop, `LinkedSystem.snapshot`, restorable into it
-    any number of times with `LinkedSystem.restore`. In memory only.
+    """A `System`'s whole state at a stop, `System.snapshot`, restorable into it
+    any number of times with `System.restore`. In memory only.
 
     Attributes:
         members: Each member's own snapshot, keyed by name.
@@ -426,7 +426,7 @@ def _reached_of(raw: object) -> tuple[Stop, int]:
     return stop_of(info), at
 
 
-class LinkedSystem:
+class System:
     """Several machines, its members, on one virtual clock, their UARTs linked by `UartLink`s.
 
         async with asyncio.timeout(10):
@@ -492,7 +492,7 @@ class LinkedSystem:
     runs, and while the member has a pending goal, since its position at a pause depends on the
     quantum. They are allowed on a halted member while the system is stopped. `start`,
     `snapshot` and `restore` of a member raise MachineBusy, `halt` releases it, and `reset` goes
-    through `LinkedSystem.reset`. `snapshot` and `restore` take and give back the whole
+    through `System.reset`. `snapshot` and `restore` take and give back the whole
     system's state, every member included, while it is stopped. Its
     Python callbacks run on its own thread, concurrently with other members' callbacks: Python
     state they share sees an order that depends on thread timing, so keep callback state per
@@ -881,7 +881,7 @@ class LinkedSystem:
 
     async def wait_for(
         self,
-        predicate: Callable[[LinkedSystem], bool],
+        predicate: Callable[[System], bool],
         *,
         every: VirtualDuration,
         for_: VirtualDuration | None = None,
@@ -1918,7 +1918,7 @@ class LinkedSystem:
                 with contextlib.suppress(Exception):
                     await asyncio.shield(flight)
 
-    def __enter__(self) -> LinkedSystem:
+    def __enter__(self) -> System:
         return self
 
     def __exit__(
@@ -1942,11 +1942,11 @@ class LinkedSystem:
             raise MachineRunning("the linked system runs")
 
     def __repr__(self) -> str:
-        return f"LinkedSystem({', '.join(self._names)})"
+        return f"System({', '.join(self._names)})"
 
 
 class UartTap:
-    """Both directions of one link of a `LinkedSystem`, `system.tap("a.USART1")`: every frame
+    """Both directions of one link of a `System`, `system.tap("a.USART1")`: every frame
     on the line with its system times, and frames injected, replaced or dropped by number.
 
     The tap gets a frame once it ended, its stop-bit end at or before a point where the system
@@ -1970,8 +1970,8 @@ class UartTap:
         "_wires",
     )
 
-    def __init__(self, system: LinkedSystem, wired: _LinkWires) -> None:
-        """Wrap a link of `system`. Use `LinkedSystem.tap` instead."""
+    def __init__(self, system: System, wired: _LinkWires) -> None:
+        """Wrap a link of `system`. Use `System.tap` instead."""
         self._system = system
         self._ends = wired.ends
         self._wires = wired.wires
@@ -1995,7 +1995,7 @@ class UartTap:
     @property
     def dropped(self) -> int:
         """Frames the tap dropped, both directions, because it held its limit, since system
-        start or the last `LinkedSystem.restore`."""
+        start or the last `System.restore`."""
         return self._dropped_total() - self._dropped_base
 
     def _dropped_total(self) -> int:

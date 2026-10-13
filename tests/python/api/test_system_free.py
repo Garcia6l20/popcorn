@@ -1,4 +1,4 @@
-"""A `LinkedSystem`'s free run: `start()`, `halt()` and `running()`, every member's core running
+"""A `System`'s free run: `start()`, `halt()` and `running()`, every member's core running
 until halted, member waits on it, and the system's `wait_for` at fixed check points."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Any
 
 import popcorn
 import pytest
-from popcorn import LinkedSystem, Stop, StopReason, UartLink
+from popcorn import Stop, StopReason, System, UartLink
 from popcorn._errors import MachineBusy
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
@@ -26,22 +26,20 @@ VARIANTS: list[tuple[int, VirtualDuration | None]] = [
     (997, us(3)),
 ]
 
-Build = Callable[..., LinkedSystem]
+Build = Callable[..., System]
 
 
 @pytest.fixture
 def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
-    made: list[LinkedSystem] = []
+    made: list[System] = []
 
-    def build(
-        slice_instructions: int = 1_000_000, third: VirtualDuration | None = None
-    ) -> LinkedSystem:
+    def build(slice_instructions: int = 1_000_000, third: VirtualDuration | None = None) -> System:
         a = member(u575, "link_ping", "a", slice_instructions)
         b = member(u575, "link_echo", "b", slice_instructions)
         links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
         if third is not None:
             links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-        system = LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions)
+        system = System({"a": a, "b": b}, links, slice_instructions=slice_instructions)
         made.append(system)
         return system
 
@@ -82,7 +80,7 @@ def bounded(main: Coroutine[Any, Any, None], timeout: float = 30) -> None:
         raise failed[0]
 
 
-def across(ping: Build, body: Callable[[LinkedSystem], Coroutine[Any, Any, object]]) -> object:
+def across(ping: Build, body: Callable[[System], Coroutine[Any, Any, object]]) -> object:
     """`body`'s result on a fresh system in every variant, checked equal, and returned."""
     results: list[object] = []
     for slice_instructions, third in VARIANTS:
@@ -96,7 +94,7 @@ def point(stop: Stop) -> tuple[object, ...]:
     return (stop.reason, stop.pc, stop.instructions, stop.time, [str(one) for one in stop.fired])
 
 
-def clean(system: LinkedSystem) -> bool:
+def clean(system: System) -> bool:
     """Whether `system` keeps nothing of a run: no flight, goal, open goal, end or parked member."""
     return (
         system._flight is None  # pyright: ignore[reportPrivateUsage]
@@ -111,7 +109,7 @@ def clean(system: LinkedSystem) -> bool:
 
 
 def test_a_wait_in_the_system_s_free_run_stops_exactly_at_any_slicing(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a = system.members["a"]
         echoed = a.ref.var("log_len").ge(10)
         async with system.running():
@@ -125,7 +123,7 @@ def test_a_wait_in_the_system_s_free_run_stops_exactly_at_any_slicing(ping: Buil
 
 
 def test_a_member_stop_ends_its_run_only_and_leaving_raises_it(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         waited: list[Stop] = []
         with pytest.raises(popcorn.EmulationError, match="USER") as raised:
@@ -144,7 +142,7 @@ def test_a_member_stop_ends_its_run_only_and_leaving_raises_it(ping: Build) -> N
 
 
 def test_a_member_stop_with_no_wait_is_raised_on_leaving(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         b = system.members["b"]
         with pytest.raises(popcorn.EmulationError, match="USER") as raised:
             async with system.running():
@@ -290,9 +288,7 @@ def free_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[obje
     """A system free run ending by `path`, then the system closed: weakrefs to what it held."""
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
-    system = LinkedSystem(
-        {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
-    )
+    system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
     held = Held()
 
     def refuse(call: popcorn.Call) -> popcorn.Return:
@@ -337,7 +333,7 @@ def test_a_free_run_frees_what_it_held(u575: popcorn.PartDescription, path: str)
     assert [one() for one in refs] == [None, None, None]
 
 
-def echoes(system: LinkedSystem) -> int:
+def echoes(system: System) -> int:
     """Log words of member a, two per echo it received."""
     return int(system.members["a"].var("log_len").value)
 
@@ -345,10 +341,10 @@ def echoes(system: LinkedSystem) -> int:
 def test_a_system_wait_stops_at_the_first_check_point_where_it_holds(ping: Build) -> None:
     every = us(50)
 
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         seen: list[int] = []
 
-        def echoed(s: LinkedSystem) -> bool:
+        def echoed(s: System) -> bool:
             seen.append(echoes(s))
             return seen[-1] >= 8
 
@@ -367,7 +363,7 @@ def test_a_system_wait_ends_at_for_without_asking_there(ping: Build) -> None:
     system = ping()
     asked: list[VirtualTime] = []
 
-    def never(s: LinkedSystem) -> bool:
+    def never(s: System) -> bool:
         asked.append(s.time_of("b"))
         return False
 
@@ -382,7 +378,7 @@ def test_a_system_wait_ends_at_for_without_asking_there(ping: Build) -> None:
 
 
 def test_a_member_stop_ends_a_system_wait(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         stop = await system.wait_for(lambda _: False, every=us(100))
         assert stop.member == "a" and stop.reason is StopReason.USER
         assert stop.stop is not None
@@ -394,12 +390,12 @@ def test_a_member_stop_ends_a_system_wait(ping: Build) -> None:
 def test_system_wait_refusals(ping: Build) -> None:
     system = ping()
 
-    def nested(s: LinkedSystem) -> bool:
+    def nested(s: System) -> bool:
         with pytest.raises(MachineBusy):
             s.start()
         return True
 
-    def raising(_: LinkedSystem) -> bool:
+    def raising(_: System) -> bool:
         raise KeyError("asked")
 
     async def body() -> None:

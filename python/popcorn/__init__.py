@@ -66,8 +66,8 @@ from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, Stop
 from popcorn._system import (
-    LinkedSystem,
     System,
+    SystemDescription,
     SystemSnapshot,
     SystemStop,
     TapFrame,
@@ -113,7 +113,6 @@ __all__ = [
     "ImageView",
     "Initiator",
     "Intercept",
-    "LinkedSystem",
     "Location",
     "LogEntry",
     "Machine",
@@ -151,6 +150,7 @@ __all__ = [
     "Symbol",
     "SymbolError",
     "System",
+    "SystemDescription",
     "SystemSnapshot",
     "SystemStop",
     "TapFrame",

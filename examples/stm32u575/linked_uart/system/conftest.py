@@ -7,7 +7,7 @@ from popcorn.units import us
 
 LATENCY = us(20)
 
-SYSTEM = popcorn.System(
+SYSTEM = popcorn.SystemDescription(
     members={"controller": CONTROLLER, "responder1": RESPONDER, "responder2": RESPONDER},
     links=[
         popcorn.UartLink("controller.UART4", "responder1.USART3", latency=LATENCY, baud=460_800),
@@ -17,5 +17,5 @@ SYSTEM = popcorn.System(
 
 
 @pytest.fixture(scope="session")
-def popcorn_system() -> popcorn.System:
+def popcorn_system() -> popcorn.SystemDescription:
     return SYSTEM

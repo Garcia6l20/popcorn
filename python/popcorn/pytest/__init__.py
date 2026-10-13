@@ -36,9 +36,9 @@ The
 - `machine_factory`: a `MachineFactory`, new machines separate from `machine`, with the
   machine description's bus devices or the test's own, from the test's machine description or
   another one.
-- `popcorn_system`: the tests' `popcorn.System`, defined by the user in a conftest.py as
+- `popcorn_system`: the tests' `popcorn.SystemDescription`, defined by the user in a conftest.py as
   `popcorn_project` is. The plugin's own fails the tests that use `system`, naming the fix.
-- `system`: the `popcorn_system` linked, a `popcorn.LinkedSystem`. Each member is a new machine
+- `system`: the `popcorn_system` linked, a `popcorn.System`. Each member is a new machine
   restored from the boot snapshot of its own machine description, booted once per key as for
   `machine`, so a member and a `machine` of the same machine description and strictness share one
   boot, and two members of one machine description are two machines. It needs no `popcorn_project`.
@@ -51,8 +51,8 @@ The
 
     # conftest.py
     @pytest.fixture(scope="session")
-    def popcorn_system() -> popcorn.System:
-        return popcorn.System(
+    def popcorn_system() -> popcorn.SystemDescription:
+        return popcorn.SystemDescription(
             members={"ctl": CONTROLLER, "r1": RESPONDER, "r2": RESPONDER},
             links=[
                 popcorn.UartLink("ctl.UART4", "r1.USART3", latency=us(20), baud=460_800),

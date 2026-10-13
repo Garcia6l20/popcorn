@@ -1,4 +1,4 @@
-"""`LinkedSystem.tap`: frames on a link with their system times, injected, replaced and dropped
+"""`System.tap`: frames on a link with their system times, injected, replaced and dropped
 frames, and the streams of linked UARTs."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import cast
 
 import popcorn
 import pytest
-from popcorn import EmulationError, LinkedSystem, StopReason, TapFrame, UartLink, UartTap, _core
+from popcorn import EmulationError, StopReason, System, TapFrame, UartLink, UartTap, _core
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import LINK_BYTE, logged, member
@@ -33,7 +33,7 @@ VARIANT_VALUES: list[tuple[int, VirtualDuration | None]] = [
 TX_BYTES = [0x20 + index for index in range(64)]
 FIRMWARE_BAUD = 461_095
 
-Build = Callable[..., LinkedSystem]
+Build = Callable[..., System]
 
 
 def links(third: VirtualDuration | None, baud: int = 460_800) -> list[UartLink]:
@@ -46,7 +46,7 @@ def links(third: VirtualDuration | None, baud: int = 460_800) -> list[UartLink]:
 @pytest.fixture
 def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
     """Builds `a` running `a_entry` linked USART1 to USART1 with `b` running `b_entry`."""
-    made: list[LinkedSystem] = []
+    made: list[System] = []
 
     def build(
         slice_instructions: int = 1_000_000,
@@ -55,12 +55,10 @@ def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
         a_entry: str = "link_tx",
         b_entry: str = "link_rx",
         baud: int = 460_800,
-    ) -> LinkedSystem:
+    ) -> System:
         a = member(u575, a_entry, "a", slice_instructions)
         b = member(u575, b_entry, "b", slice_instructions)
-        system = LinkedSystem(
-            {"a": a, "b": b}, links(third, baud), slice_instructions=slice_instructions
-        )
+        system = System({"a": a, "b": b}, links(third, baud), slice_instructions=slice_instructions)
         made.append(system)
         return system
 
@@ -69,13 +67,13 @@ def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
         one.close()
 
 
-async def to(system: LinkedSystem, until: VirtualTime) -> None:
+async def to(system: System, until: VirtualTime) -> None:
     """Run to `until`, again after each member stop."""
     while (await system.run(until=until)).reason is not StopReason.TIME:
         pass
 
 
-def past_done(system: LinkedSystem) -> None:
+def past_done(system: System) -> None:
     """Move a, parked on link_tx's final breakpoint, to the idle loop, so a free run goes on."""
     a = system.members["a"]
     assert a.mem.u16[a.pc - 2] == 0xBE01
@@ -86,7 +84,7 @@ def at(micros: float) -> VirtualTime:
     return VirtualTime(us(micros).ps)
 
 
-def tap_pauses(system: LinkedSystem) -> list[list[TapFrame]]:
+def tap_pauses(system: System) -> list[list[TapFrame]]:
     """The frames the tap of `system`'s first link takes at each of seven TIME pauses."""
     tap = system.tap("a.USART1")
     seen: list[list[TapFrame]] = []
@@ -122,7 +120,7 @@ def test_the_tap_at_each_pause_holds_the_frames_ended_by_it_at_any_quantum(
     assert [word & 0xFFFF for word in results[0][1][::2] if word >> 16 == LINK_BYTE] == TX_BYTES
 
 
-async def in_flight(system: LinkedSystem) -> None:
+async def in_flight(system: System) -> None:
     """Let the event loop turn until the system's free run resumes after a member wait."""
     for _ in range(100):
         if system._flight is not None:  # pyright: ignore[reportPrivateUsage]
@@ -131,9 +129,7 @@ async def in_flight(system: LinkedSystem) -> None:
     raise AssertionError("the free run did not resume")
 
 
-def injected_run(
-    system: LinkedSystem, running: bool
-) -> tuple[tuple[int, ...], tuple[TapFrame, ...]]:
+def injected_run(system: System, running: bool) -> tuple[tuple[int, ...], tuple[TapFrame, ...]]:
     """Inject b"xyz" towards b at 4 ms, from a stopped system at 3 ms or from the system's free
     run asleep on IDLE, then run to 6 ms: b's log and the tap from 3 ms on."""
     asyncio.run(to(system, at(3000)))
@@ -208,7 +204,7 @@ def test_an_injection_stopped_is_checked_at_the_call(pair: Build) -> None:
     tap.inject(b"z", at=at(4010), towards="a.USART1")
 
 
-async def overlapping(system: LinkedSystem, tap: UartTap) -> None:
+async def overlapping(system: System, tap: UartTap) -> None:
     """Inject, from the free run, a frame at 4010 us overlapping one injected at 4000 us."""
     b = system.members["b"]
     async with system.running():
@@ -237,7 +233,7 @@ def test_an_overlap_injected_while_running_stops_the_system_at_its_start(pair: B
     assert "4010000000 ps" in errors[0]
 
 
-def edited_run(system: LinkedSystem) -> tuple[object, ...]:
+def edited_run(system: System) -> tuple[object, ...]:
     tap = system.tap("a.USART1")
     assert tap.posted(towards="b.USART1") == 0
     tap.replace(40, b"abc", towards="b.USART1")
@@ -316,7 +312,7 @@ def test_a_closed_system_s_tap_holds_every_frame_ended_by_its_last_pause(
     u575: popcorn.PartDescription,
 ) -> None:
     a = member(u575, "link_tx", "a")
-    system = LinkedSystem({"a": a, "b": member(u575, "link_rx", "b")}, links(None))
+    system = System({"a": a, "b": member(u575, "link_rx", "b")}, links(None))
     tap = system.tap("a.USART1")
     asyncio.run(to(system, at(1001)))
     system.close()
@@ -394,7 +390,7 @@ def test_frames_take_one_direction_or_both_in_end_order(pair: Build) -> None:
 def test_a_linked_uart_refuses_a_pty_until_its_system_closes(pair: Build) -> None:
     system = pair()
     a = system.members["a"]
-    with pytest.raises(RuntimeError, match="USART1 is linked in a LinkedSystem"):
+    with pytest.raises(RuntimeError, match="USART1 is linked in a System"):
         a.board.pty("USART1")
     assert a.board.ptys == {}
     system.close()
@@ -405,9 +401,9 @@ def test_a_system_collected_unclosed_gives_its_uarts_back(
     u575: popcorn.PartDescription,
 ) -> None:
     a = member(u575, "link_tx", "a")
-    system = LinkedSystem({"a": a, "b": member(u575, "link_rx", "b")}, links(None))
+    system = System({"a": a, "b": member(u575, "link_rx", "b")}, links(None))
     asyncio.run(to(system, at(100)))
-    with pytest.raises(RuntimeError, match="linked in a LinkedSystem"):
+    with pytest.raises(RuntimeError, match="linked in a System"):
         a.periph.USART1.port.write(b"x")
     held = weakref.ref(system)
     del system

@@ -103,7 +103,7 @@ from popcorn.trace import TraceKind
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
-    from popcorn._system import LinkedSystem
+    from popcorn._system import System
     from popcorn.image.dwarf import DebugInfo, DebugType
 
 
@@ -371,7 +371,7 @@ class _Native:
 
 
 class _Linked(Protocol):
-    """What a member hands its runs to: its `LinkedSystem`."""
+    """What a member hands its runs to: its `System`."""
 
     async def _goal(
         self,
@@ -636,7 +636,7 @@ class Machine:
         config.slice_wall_ns = max(1, round(slice_wall_budget * 1e9))
         self._description = description
         self._strict_peripherals = strict_peripherals
-        self._system: weakref.ref[LinkedSystem] | None = None
+        self._system: weakref.ref[System] | None = None
         self._name = description.part if name is None else name
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
@@ -848,7 +848,7 @@ class Machine:
     def reset(self, kind: ResetKind = ResetKind.POWER_ON) -> None:
         """Reset: clock to 0, core from its vector table, peripherals to reset values.
 
-        Memory is kept. A member of a linked system resets through `LinkedSystem.reset`, its
+        Memory is kept. A member of a linked system resets through `System.reset`, its
         system time running on unchanged.
 
         Raises:
@@ -993,7 +993,7 @@ class Machine:
         A sync read made from a callback of another machine waits for this machine as the class
         doc says, `read` itself never holds a machine while it waits.
 
-        On a member of a `LinkedSystem` whose goal is pending, a batch posted while the system
+        On a member of a `System` whose goal is pending, a batch posted while the system
         is paused runs at once at the member's position there, which depends on the system's
         quantum, as do the values read. With `at`, whether the member already stands past `at`,
         and the batch is refused, depends on the quantum too. For an exact position read a
@@ -1035,7 +1035,7 @@ class Machine:
         wrote meanwhile. A sync write made from a callback of another machine waits for this
         machine as the class doc says, `write` itself never holds a machine while it waits.
 
-        On a member of a `LinkedSystem` whose goal is pending, writes posted while the system is
+        On a member of a `System` whose goal is pending, writes posted while the system is
         paused land at the member's position there, which depends on the system's quantum, and
         so does everything the member does after them. With `at`, whether the member already
         stands past `at`, and the writes are refused, depends on the quantum too. Write a halted
@@ -1922,7 +1922,7 @@ class Machine:
         Raises:
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: its state is taken with
-                the others, `LinkedSystem.snapshot`.
+                the others, `System.snapshot`.
         """
         self._refuse_member("snapshot")
         return self._snapshot()
@@ -1942,7 +1942,7 @@ class Machine:
                 that differs.
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: restore it with the
-                others, `LinkedSystem.restore`.
+                others, `System.restore`.
 
         UART frames the firmware transmitted and Python did not read yet are dropped, as are
         bytes waiting for a pty. Host input not yet delivered to the firmware is kept across a

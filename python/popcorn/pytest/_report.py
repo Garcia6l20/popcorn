@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from popcorn import EmulationError, LinkedSystem, Machine, MachineRunning, Stop
+from popcorn import EmulationError, Machine, MachineRunning, Stop, System
 from popcorn._obs import FormatError
 from popcorn.pytest._options import SETTINGS
 from popcorn.report import stop_report
@@ -50,7 +50,7 @@ RING_HINT = "trace ring: not shown, pass --popcorn-ring=N for its last N lines"
 CALL_FAILED = pytest.StashKey[bool]()
 KEPT_TRACES = pytest.StashKey[list[Path]]()
 HELD = pytest.StashKey[dict[int, BaseException | None]]()
-SYSTEMS = pytest.StashKey[list[LinkedSystem]]()
+SYSTEMS = pytest.StashKey[list[System]]()
 
 
 class TraceOnFail:
@@ -145,9 +145,9 @@ def track(item: pytest.Item, label: str, machine: Machine, key: object) -> None:
     item.stash.setdefault(MACHINES, list[Tracked]()).append(Tracked(label, machine, str(key)))
 
 
-def track_system(item: pytest.Item, system: LinkedSystem) -> None:
+def track_system(item: pytest.Item, system: System) -> None:
     """Close `system` before a failure report of `item` parks its members."""
-    item.stash.setdefault(SYSTEMS, list[LinkedSystem]()).append(system)
+    item.stash.setdefault(SYSTEMS, list[System]()).append(system)
 
 
 def park(item: pytest.Item) -> None:
@@ -155,7 +155,7 @@ def park(item: pytest.Item) -> None:
     reached the test, for the teardown of its fixture. The linked systems of `item` are closed
     first: a member of a running system cannot park. What a system kept for its teardown stays
     kept."""
-    for system in item.stash.get(SYSTEMS, list[LinkedSystem]()):
+    for system in item.stash.get(SYSTEMS, list[System]()):
         system.close()
     held = item.stash.setdefault(HELD, dict[int, BaseException | None]())
     for entry in item.stash.get(MACHINES, list[Tracked]()):

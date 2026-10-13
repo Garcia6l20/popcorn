@@ -109,7 +109,7 @@ async def awaited[T](
     cancels the same way.
 
     Each linked system sees the future first: a member parked at a goal's stop whose awaiting
-    task now awaits a future of another machine is released, `LinkedSystem`.
+    task now awaits a future of another machine is released, `System`.
 
     The machine's thread wakes the loop through the loop's eventfd, without the GIL, so a loop
     that never blocks, spinning on `asyncio.sleep(0)`, still sees it. A loop without

@@ -63,7 +63,7 @@ MEMBERS = []
 
 @pytest.fixture(scope="session")
 def popcorn_system():
-    return popcorn.System(
+    return popcorn.SystemDescription(
         members={"a": A, "b1": B, "b2": B},
         links=[
             popcorn.UartLink("a.USART1", "b1.USART1", latency=us(20), baud=460_800),
@@ -237,8 +237,8 @@ def test_a_config_marker_fails_a_system_test(layout: Path, pytester: pytest.Pyte
 @pytest.mark.parametrize(
     ("fixture", "expected"),
     [
-        (None, "*define a `popcorn_system` fixture returning a `popcorn.System`*"),
-        ("A", "*popcorn_system returned MachineDescription, not a popcorn.System*"),
+        (None, "*define a `popcorn_system` fixture returning a `popcorn.SystemDescription`*"),
+        ("A", "*popcorn_system returned MachineDescription, not a popcorn.SystemDescription*"),
     ],
 )
 def test_a_missing_or_wrong_system_fails_naming_the_fixture(

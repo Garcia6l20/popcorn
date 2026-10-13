@@ -1,4 +1,4 @@
-"""`LinkedSystem.reset`, `snapshot` and `restore`: member resets on the system's clock and the
+"""`System.reset`, `snapshot` and `restore`: member resets on the system's clock and the
 whole system's state taken and given back."""
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ from typing import Any, cast
 import popcorn
 import pytest
 from popcorn import (
-    LinkedSystem,
     ResetKind,
     StopReason,
+    System,
     SystemStop,
     TapFrame,
     UartLink,
@@ -34,7 +34,7 @@ VARIANTS: list[tuple[int, VirtualDuration | None]] = [
     (997, us(3)),
 ]
 
-Build = Callable[..., LinkedSystem]
+Build = Callable[..., System]
 
 
 def links(third: VirtualDuration | None) -> list[UartLink]:
@@ -47,7 +47,7 @@ def links(third: VirtualDuration | None) -> list[UartLink]:
 @pytest.fixture
 def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
     """Builds `a` running `a_entry` linked USART1 to USART1 with `b` running `b_entry`."""
-    made: list[LinkedSystem] = []
+    made: list[System] = []
 
     def build(
         slice_instructions: int = 1_000_000,
@@ -55,10 +55,10 @@ def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
         *,
         a_entry: str = "link_ping",
         b_entry: str = "link_echo",
-    ) -> LinkedSystem:
+    ) -> System:
         a = member(u575, a_entry, "a", slice_instructions)
         b = member(u575, b_entry, "b", slice_instructions)
-        system = LinkedSystem({"a": a, "b": b}, links(third), slice_instructions=slice_instructions)
+        system = System({"a": a, "b": b}, links(third), slice_instructions=slice_instructions)
         made.append(system)
         return system
 
@@ -67,7 +67,7 @@ def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
         one.close()
 
 
-def observed(system: LinkedSystem) -> tuple[object, ...]:
+def observed(system: System) -> tuple[object, ...]:
     """What a member shows: logs, pc, instructions, local and system time."""
     return tuple(
         (tuple(logged(m)), m.pc, m.instructions, m.time, system.time_of(name))
@@ -75,7 +75,7 @@ def observed(system: LinkedSystem) -> tuple[object, ...]:
     )
 
 
-def encoded(system: LinkedSystem) -> tuple[object, ...]:
+def encoded(system: System) -> tuple[object, ...]:
     """Each member's snapshot document but its generation, which a restore bumps, and the
     system's own state bytes."""
     taken = system.snapshot()
@@ -91,7 +91,7 @@ def stops_of(stops: list[SystemStop]) -> list[tuple[object, ...]]:
     return [(one.reason, one.member, one.time) for one in stops]
 
 
-async def run_for(system: LinkedSystem, for_: VirtualDuration) -> list[SystemStop]:
+async def run_for(system: System, for_: VirtualDuration) -> list[SystemStop]:
     """`run(for_=)` again after each member stop, until the TIME stop: each counts from the
     same last target."""
     stops = [await system.run(for_=for_)]
@@ -100,7 +100,7 @@ async def run_for(system: LinkedSystem, for_: VirtualDuration) -> list[SystemSto
     return stops
 
 
-def frames(system: LinkedSystem) -> list[TapFrame]:
+def frames(system: System) -> list[TapFrame]:
     return system.tap("a.USART1").frames()
 
 
@@ -163,7 +163,7 @@ def test_a_snapshot_at_a_member_s_stop_releases_it_at_the_same_point(
             system = pair(slice_instructions, third)
             a = system.members["a"]
 
-            async def body(system: LinkedSystem = system, a: popcorn.Machine = a) -> object:
+            async def body(system: System = system, a: popcorn.Machine = a) -> object:
                 if held_by == "run":
                     stop = await system.run(for_=ms(3))
                     assert (stop.reason, stop.member) == (StopReason.USER, "a")
@@ -269,7 +269,7 @@ def test_a_member_stop_not_delivered_yet_holds_snapshots_back(
     x = member(u575, "tx_irq", "x")
     y = member(u575, "tx_irq", "y")
     link = UartLink("x.USART2", "y.USART2", latency=L, baud=460_800)
-    with LinkedSystem({"x": x, "y": y}, [link]) as system:
+    with System({"x": x, "y": y}, [link]) as system:
         start = x.time
         taken = system.snapshot()
         first = asyncio.run(system.run(for_=ms(5)))
@@ -333,7 +333,7 @@ def test_a_member_held_at_its_goal_s_stop_resets_and_goes_on(pair: Build) -> Non
         system = pair(slice_instructions, third)
         a = system.members["a"]
 
-        async def body(system: LinkedSystem = system, a: popcorn.Machine = a) -> object:
+        async def body(system: System = system, a: popcorn.Machine = a) -> object:
             stop, _ = await asyncio.gather(
                 a.run(for_=us(700)), system.members["b"].run(for_=us(900))
             )
@@ -350,7 +350,7 @@ def test_a_member_held_at_its_goal_s_stop_resets_and_goes_on(pair: Build) -> Non
 def test_a_system_snapshot_holds_no_system(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
-    system = LinkedSystem({"a": a, "b": b}, links(None))
+    system = System({"a": a, "b": b}, links(None))
     asyncio.run(system.run(until=VirtualTime(us(300).ps)))
     entries = [m._handle.gil_entries() for m in (a, b)]  # pyright: ignore[reportPrivateUsage]
     taken = system.snapshot()
@@ -376,7 +376,7 @@ def test_a_member_reset_after_its_reset_request_runs_on_as_a_lone_machine(
         for reset in ("at once", "after a run", None):
             a = member(u575, "link_tx_reset", "a", slice_instructions)
             b = member(u575, "link_rx", "b", slice_instructions)
-            with LinkedSystem(
+            with System(
                 {"a": a, "b": b},
                 links(third),
                 on_member_reset="stop",
@@ -417,7 +417,7 @@ def test_a_reset_drops_a_member_stop_not_delivered_yet(u575: popcorn.PartDescrip
     x = member(u575, "tx_irq", "x")
     y = member(u575, "tx_irq", "y")
     link = UartLink("x.USART2", "y.USART2", latency=L, baud=460_800)
-    with LinkedSystem({"x": x, "y": y}, [link]) as system:
+    with System({"x": x, "y": y}, [link]) as system:
         first = asyncio.run(system.run(for_=ms(5)))
         assert (first.reason, first.member) == (StopReason.USER, "x")
         stopped = (x.pc, tuple(logged(x)))

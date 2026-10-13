@@ -1,5 +1,5 @@
-"""`popcorn.System`: members and links as data, checked at construction, built into a
-`LinkedSystem`."""
+"""`popcorn.SystemDescription`: members and links as data, checked at construction, built into a
+`System`."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
-from popcorn import ConfigError, MachineDescription, StopReason, System, UartLink
+from popcorn import ConfigError, MachineDescription, StopReason, SystemDescription, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import PING_BYTES, USART_LL, logged, received
@@ -30,13 +30,13 @@ def link(a: object = "a.USART1", b: object = "b.USART1", **fields: object) -> Ua
     return UartLink(a, b, **values)  # pyright: ignore[reportArgumentType]
 
 
-def spec(**changes: object) -> System:
+def spec(**changes: object) -> SystemDescription:
     values: dict[str, object] = {
         "members": {"a": PROJECT, "b": PROJECT},
         "links": [link()],
         **changes,
     }
-    return System(**values)  # pyright: ignore[reportArgumentType]
+    return SystemDescription(**values)  # pyright: ignore[reportArgumentType]
 
 
 def test_a_valid_system_is_a_frozen_hashable_value() -> None:
@@ -62,12 +62,12 @@ def test_a_valid_system_is_a_frozen_hashable_value() -> None:
 
 
 def test_a_system_of_absent_images_is_declared_without_reading_them() -> None:
-    declared = System(members={"a": ABSENT, "b": ABSENT}, links=[link()])
+    declared = SystemDescription(members={"a": ABSENT, "b": ABSENT}, links=[link()])
     assert declared.members["a"] is ABSENT
 
 
 def test_a_link_between_two_uarts_of_one_member_is_accepted() -> None:
-    lone = System(members={"a": PROJECT}, links=[link("a.USART1", "a.USART3")])
+    lone = SystemDescription(members={"a": PROJECT}, links=[link("a.USART1", "a.USART3")])
     assert lone.quantum == L
 
 
@@ -167,7 +167,7 @@ def test_two_members_of_one_project_share_a_boot_and_keep_their_own_state(
     u575: popcorn.PartDescription,
 ) -> None:
     del u575
-    declared = System(
+    declared = SystemDescription(
         members={"a": PROJECT, "b1": PROJECT, "b2": PROJECT},
         links=[link("a.USART1", "b1.USART1"), link("a.USART2", "b2.USART1")],
     )
@@ -197,7 +197,7 @@ def test_two_members_of_one_project_share_a_boot_and_keep_their_own_state(
 
 def test_a_system_of_one_member_linked_to_itself_runs(u575: popcorn.PartDescription) -> None:
     del u575
-    declared = System(members={"a": PROJECT}, links=[link("a.USART1", "a.USART3")])
+    declared = SystemDescription(members={"a": PROJECT}, links=[link("a.USART1", "a.USART3")])
 
     async def run() -> None:
         with await declared.boot() as system:

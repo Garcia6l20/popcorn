@@ -10,13 +10,13 @@ from dataclasses import dataclass
 import pytest
 
 from popcorn import (
-    LinkedSystem,
     Machine,
     MachineDescription,
     MissingInput,
     PopcornError,
     Snapshot,
     System,
+    SystemDescription,
 )
 from popcorn._machine import check_machine_name
 from popcorn.pytest._options import UNSET, marker_options
@@ -207,7 +207,7 @@ class MachineFactory(_Factory):
 
 
 class SystemFactory(_Factory):
-    """Boots the members of a `popcorn.System` for one test, each a new machine restored
+    """Boots the members of a `popcorn.SystemDescription` for one test, each a new machine restored
     from the boot snapshot of its own machine description's key, parked and closed after the
     test."""
 
@@ -222,7 +222,7 @@ class SystemFactory(_Factory):
             pytest.fail(
                 "@pytest.mark.popcorn config does not apply to the system fixture: a member's "
                 "config is part of its machine description, "
-                "System(members={name: project.config(...)})",
+                "SystemDescription(members={name: project.config(...)})",
                 pytrace=False,
             )
         settings = session.settings
@@ -438,13 +438,14 @@ def _spoiled(machine: Machine, booted: Booted) -> bool:
 
 
 MISSING_SYSTEM = (
-    "define a `popcorn_system` fixture returning a `popcorn.System` in a conftest.py above this "
+    "define a `popcorn_system` fixture returning a `popcorn.SystemDescription` in a conftest.py "
+    "above this "
     "test"
 )
 
 
 @pytest.fixture(scope="session")
-def popcorn_system() -> System:
+def popcorn_system() -> SystemDescription:
     """The linked system of the tests below a conftest.py, overridden there by the user.
 
     The nearest override wins, as for any pytest fixture. Without one, the tests using `system`
@@ -456,13 +457,13 @@ def popcorn_system() -> System:
 @pytest.fixture
 async def system(
     request: pytest.FixtureRequest, _popcorn_session: PopcornSession, popcorn_system: object
-) -> AsyncIterator[LinkedSystem]:
+) -> AsyncIterator[System]:
     """The `popcorn_system` booted and linked for this test.
 
     Each member is a new machine named as the member, restored from the boot snapshot of its
     own machine description's key, booted once per key and process as for `machine`: two members of
     one machine description are two machines of one boot. Never the `machine` fixture's object. Each
-    stands at its boot stop, its system time from `System.offsets`.
+    stands at its boot stop, its system time from `SystemDescription.offsets`.
 
     Per member, from the `popcorn` marker over the command line over the member's machine
     description: `strict`, and `budget` as its `default_budget`, which bounds its run, wait_for and
@@ -524,10 +525,10 @@ def _end_traces(traces: list[TraceOnFail]) -> None:
         raise errors[0]
 
 
-def _checked_system(spec: object) -> System:
-    if not isinstance(spec, System):
+def _checked_system(spec: object) -> SystemDescription:
+    if not isinstance(spec, SystemDescription):
         pytest.fail(
-            f"popcorn_system returned {type(spec).__name__}, not a popcorn.System: "
+            f"popcorn_system returned {type(spec).__name__}, not a popcorn.SystemDescription: "
             f"{MISSING_SYSTEM}",
             pytrace=False,
         )

@@ -1,4 +1,4 @@
-"""Member goals of a `LinkedSystem`: a member's `run`, `step`, `wait_for` and `running()` run as
+"""Member goals of a `System`: a member's `run`, `step`, `wait_for` and `running()` run as
 goals on the system's clock, park at their stop, and release by the code's structure."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any
 
 import popcorn
 import pytest
-from popcorn import LinkedSystem, Stop, StopReason, UartLink, _core
+from popcorn import Stop, StopReason, System, UartLink, _core
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .linked import Ticker, logged, member, received, ticker
@@ -29,26 +29,24 @@ VARIANTS: list[tuple[int, VirtualDuration | None]] = [
     (997, us(3)),
 ]
 
-Build = Callable[..., LinkedSystem]
+Build = Callable[..., System]
 
 
 @pytest.fixture
 def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
-    made: list[LinkedSystem] = []
+    made: list[System] = []
 
     def build(
         slice_instructions: int = 1_000_000,
         third: VirtualDuration | None = None,
         **options: Any,
-    ) -> LinkedSystem:
+    ) -> System:
         a = member(u575, "link_ping", "a", slice_instructions)
         b = member(u575, "link_echo", "b", slice_instructions)
         links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
         if third is not None:
             links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-        system = LinkedSystem(
-            {"a": a, "b": b}, links, slice_instructions=slice_instructions, **options
-        )
+        system = System({"a": a, "b": b}, links, slice_instructions=slice_instructions, **options)
         made.append(system)
         return system
 
@@ -57,7 +55,7 @@ def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
         one.close()
 
 
-def across(ping: Build, body: Callable[[LinkedSystem], Coroutine[Any, Any, object]]) -> object:
+def across(ping: Build, body: Callable[[System], Coroutine[Any, Any, object]]) -> object:
     """`body`'s result on a fresh system in every variant, checked equal, and returned."""
     results: list[object] = []
     for slice_instructions, third in VARIANTS:
@@ -75,7 +73,7 @@ ECHOED = ms(1)
 
 
 def test_a_gather_of_member_goals_parks_each_at_its_stop_at_any_slicing(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         a_stop, b_stop = await asyncio.gather(a.run(until=IRQ), b.run(for_=ECHOED))
         assert a_stop.reason is StopReason.ADDRESS and b_stop.reason is StopReason.TIME
@@ -90,7 +88,7 @@ def test_a_gather_of_member_goals_parks_each_at_its_stop_at_any_slicing(ping: Bu
 
 
 def test_a_member_resolved_first_is_halted_up_to_the_last_one(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         a_stop, b_stop = await asyncio.gather(a.run(until=IRQ), b.run(for_=ECHOED))
         executed = a.instructions
@@ -103,7 +101,7 @@ def test_a_member_resolved_first_is_halted_up_to_the_last_one(ping: Build) -> No
 
 
 def test_a_nested_re_issue_starts_exactly_at_the_first_stop(ping: Build) -> None:
-    async def two(system: LinkedSystem, pause: bool) -> tuple[Stop, Stop]:
+    async def two(system: System, pause: bool) -> tuple[Stop, Stop]:
         a = system.members["a"]
         first = await a.run(until=IRQ)
         if pause:
@@ -111,7 +109,7 @@ def test_a_nested_re_issue_starts_exactly_at_the_first_stop(ping: Build) -> None
         second = await a.step(5)
         return first, second
 
-    async def body(system: LinkedSystem, pause: bool = False) -> object:
+    async def body(system: System, pause: bool = False) -> object:
         b = system.members["b"]
         (first, second), b_stop = await asyncio.gather(two(system, pause), b.run(for_=ECHOED))
         assert second.reason is StopReason.BUDGET
@@ -119,14 +117,14 @@ def test_a_nested_re_issue_starts_exactly_at_the_first_stop(ping: Build) -> None
 
     plain = across(ping, body)
 
-    async def slept(system: LinkedSystem) -> object:
+    async def slept(system: System) -> object:
         return await body(system, True)
 
     assert across(ping, slept) == plain
 
 
 def test_a_member_halted_after_its_stop_lets_the_gather_go_on(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
 
         async def first() -> Stop:
@@ -172,7 +170,7 @@ def test_the_watchdog_names_a_member_kept_parked_by_a_foreign_wait(
 
 
 def test_a_write_on_a_halted_member_lands_at_the_delivered_point(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         await b.run(for_=ECHOED)
         a.mem.u32[a.sym("log_len")] = 0
@@ -280,7 +278,7 @@ def test_a_goal_failed_by_a_halted_member_s_error_raises_it_naming_that_member(
     if third is not None:
         links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
     ticker(a).raise_at = 150
-    with LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions):
+    with System({"a": a, "b": b}, links, slice_instructions=slice_instructions):
 
         async def body() -> None:
             await a.run(for_=us(100))
@@ -316,7 +314,7 @@ def test_leaving_a_member_s_running_raises_a_peer_s_error_landing_meanwhile(
     ticker(b).raise_at = ticker(b).ticks + 5
     Blocking.entered.clear()
     Blocking.go.clear()
-    with LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions):
+    with System({"a": a, "b": b}, links, slice_instructions=slice_instructions):
 
         async def body() -> None:
             async with asyncio.timeout(10):
@@ -357,9 +355,7 @@ def goal_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[obje
     """Run one goal of `path` on a fresh system, close it, return weakrefs to what it held."""
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
-    system = LinkedSystem(
-        {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
-    )
+    system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
     held = Held()
 
     def predicate(_: popcorn.Machine) -> bool:
@@ -439,7 +435,7 @@ def test_awaiting_another_machine_releases_a_parked_member(ping: Build) -> None:
 
 
 def test_a_halt_and_a_goal_in_the_same_turn_start_together(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
 
         async def seq() -> tuple[Stop, Stop]:
@@ -491,9 +487,7 @@ def running_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[o
     body held."""
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
-    system = LinkedSystem(
-        {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
-    )
+    system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
     held = Held()
 
     def refuse(call: popcorn.Call) -> popcorn.Return:
@@ -569,7 +563,7 @@ def test_waits_inside_a_member_s_running_equal_a_lone_machine_s(
         links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
         if third is not None:
             links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-        with LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
+        with System({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
             assert asyncio.run(waits_in_running(system.members["a"])) == lone
 
 
@@ -602,7 +596,7 @@ def test_a_breakpoint_during_a_wait_ends_the_member_s_run_as_a_lone_machine_s(
         links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
         if third is not None:
             links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-        with LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
+        with System({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
             assert asyncio.run(stopped_in_running(a, b)) == lone
             assert system._opens == {}  # pyright: ignore[reportPrivateUsage]
             assert system._handle.undecided() == []  # pyright: ignore[reportPrivateUsage]
@@ -650,7 +644,7 @@ def test_a_breakpoint_right_after_a_wait_s_condition_turns_true_ends_the_run(
         links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
         if third is not None:
             links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-        with LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions):
+        with System({"a": a, "b": b}, links, slice_instructions=slice_instructions):
             assert asyncio.run(counted_in_running(a, b)) == want
 
 
@@ -693,20 +687,20 @@ def test_two_waits_on_a_member_each_resolve_at_their_own_stop(
         links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
         if third is not None:
             links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-        with LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
+        with System({"a": a, "b": b}, links, slice_instructions=slice_instructions) as system:
             assert asyncio.run(both_waits(a, cancel)) == want
             assert system._waits.get(0, []) == []  # pyright: ignore[reportPrivateUsage]
 
 
 def tx_pair(
     u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
-) -> tuple[popcorn.Machine, LinkedSystem]:
+) -> tuple[popcorn.Machine, System]:
     a = member(u575, "tx_irq", "a", slice_instructions)
     b = member(u575, "idle", "b", slice_instructions)
     links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
     if third is not None:
         links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-    return a, LinkedSystem({"a": a, "b": b}, links, slice_instructions=slice_instructions)
+    return a, System({"a": a, "b": b}, links, slice_instructions=slice_instructions)
 
 
 async def reached_beside_elapse(m: popcorn.Machine, after: VirtualDuration) -> tuple[object, ...]:
@@ -791,9 +785,7 @@ def test_a_cancelled_wait_inside_running_lets_the_member_run_on(
         gate.wait(10)
         return False
 
-    system = LinkedSystem(
-        {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
-    )
+    system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
 
     async def body() -> VirtualTime:
         async with a.running():
@@ -835,9 +827,7 @@ def test_a_wait_cancelled_as_its_system_closes_reports_nothing(
 ) -> None:
     a = member(u575, "idle", "a")
     b = member(u575, "tx_irq", "b")
-    system = LinkedSystem(
-        {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
-    )
+    system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
 
     async def body() -> None:
         with contextlib.suppress(popcorn.EmulationError):
@@ -860,7 +850,7 @@ def test_a_wait_cancelled_as_its_system_closes_reports_nothing(
     assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
 
 
-def flying(system: LinkedSystem) -> bool:
+def flying(system: System) -> bool:
     """Whether `system` has a resume in flight."""
     return system._flight is not None  # pyright: ignore[reportPrivateUsage]
 
@@ -892,9 +882,7 @@ def cut_flight(u575: popcorn.PartDescription) -> list[weakref.ref[popcorn.Machin
         gate.wait(10)
         return False
 
-    system = LinkedSystem(
-        {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
-    )
+    system = System({"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)])
 
     async def body() -> None:
         goal = asyncio.create_task(b.run(stop_when=held, for_=ms(1)))
@@ -916,7 +904,7 @@ Converted = tuple[list[VirtualTime], list[VirtualTime], tuple[object, ...], tupl
 
 
 def test_member_times_convert_both_ways_at_any_quantum(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> Converted:
+    async def body(system: System) -> Converted:
         a, b = system.members["a"], system.members["b"]
         bases = [system.to_system(name, VirtualTime(0)) for name in ("a", "b")]
         assert [base.ps for base in bases] == [ms(1).ps - a.time.ps, us(500).ps - b.time.ps]
@@ -947,7 +935,7 @@ def test_member_times_convert_both_ways_at_any_quantum(ping: Build) -> None:
     assert during == bases
 
 
-async def close_in_flight(system: LinkedSystem) -> None:
+async def close_in_flight(system: System) -> None:
     """Close `system` during a long goal of b, with a held: b's first goal leaves a halted with
     its core held, and only `finish()` would give it back."""
     b = system.members["b"]
@@ -964,7 +952,7 @@ async def close_in_flight(system: LinkedSystem) -> None:
 def test_a_member_halted_when_its_system_closes_runs_alone_at_once(
     ping: Build, slice_instructions: int, third: VirtualDuration | None
 ) -> None:
-    async def body(system: LinkedSystem) -> tuple[Stop, Stop]:
+    async def body(system: System) -> tuple[Stop, Stop]:
         a = system.members["a"]
         await close_in_flight(system)
         return await a.run(budget=10), await a.run(for_=us(10))
@@ -979,7 +967,7 @@ def test_a_member_halted_when_its_system_closes_runs_alone_at_once(
 def test_a_member_halted_when_its_system_closes_takes_a_call_at_once(
     ping: Build, slice_instructions: int, third: VirtualDuration | None, direct: bool
 ) -> None:
-    async def body(system: LinkedSystem) -> Stop | None:
+    async def body(system: System) -> Stop | None:
         a = system.members["a"]
         await close_in_flight(system)
         if not direct:
@@ -997,7 +985,7 @@ def test_a_member_halted_when_its_system_closes_takes_a_call_at_once(
 
 
 def test_member_times_convert_from_a_member_s_callback_as_after_the_run(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> list[tuple[VirtualTime, ...]]:
+    async def body(system: System) -> list[tuple[VirtualTime, ...]]:
         a, b = system.members["a"], system.members["b"]
         seen: list[tuple[VirtualTime, ...]] = []
 
@@ -1030,7 +1018,7 @@ def test_member_times_convert_from_a_member_s_callback_as_after_the_run(ping: Bu
 def test_a_stamped_write_on_a_halted_member_lands_at_its_system_time(ping: Build) -> None:
     target = VirtualTime(ms(1.5).ps)
 
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         address = b.sym("received_count")
         value = b.mem.u32[address]
@@ -1045,7 +1033,7 @@ def test_a_stamped_write_on_a_halted_member_lands_at_its_system_time(ping: Build
 
 
 def test_a_member_reset_moves_its_base_to_the_reset_s_system_time(ping: Build) -> None:
-    async def body(system: LinkedSystem) -> object:
+    async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
         await b.run(for_=ms(1))
         b.halt()
