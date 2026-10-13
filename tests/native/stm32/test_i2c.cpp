@@ -167,6 +167,8 @@ public:
   std::uint32_t          at_call{};
   std::uint32_t          shots{1};
   std::uint32_t          calls{};
+  std::uint32_t          stretch_call{~0u};
+  std::uint64_t          stretch_ps{};
   std::vector<bus_event> events;
 
   [[nodiscard]] auto address() const -> std::uint8_t override
@@ -178,21 +180,21 @@ public:
   {
     calls = 0;
     events.push_back({read ? 'R' : 'W', 0, at.ps});
-    return {.ack = true, .error = pick()};
+    return {.ack = true, .error = pick(), .stretch_ps = stretch()};
   }
 
   auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
   {
     ++calls;
     events.push_back({'w', byte, at.ps});
-    return {.ack = true, .error = pick()};
+    return {.ack = true, .error = pick(), .stretch_ps = stretch()};
   }
 
   auto read(vtime at) -> stm32::i2c_read_reply override
   {
     ++calls;
     events.push_back({'r', 0x5A, at.ps});
-    return {.byte = 0x5A, .error = pick()};
+    return {.byte = 0x5A, .error = pick(), .stretch_ps = stretch()};
   }
 
   void stop(vtime at) override
@@ -216,6 +218,11 @@ public:
   }
 
 private:
+  [[nodiscard]] auto stretch() const -> std::uint64_t
+  {
+    return calls == stretch_call ? stretch_ps : 0;
+  }
+
   auto pick() -> stm32::i2c_error
   {
     if(calls != at_call or shots == 0)
@@ -1543,6 +1550,127 @@ TEST_CASE("firmware serves each injected error in I2C1_ER_IRQHandler, clears it 
         CHECK(retry[1] == bus_event{'w', 0xA5, retry[1].at});
         CHECK(retry[2] == bus_event{'w', 0x5A, retry[2].at});
       }
+    }
+  }
+}
+
+namespace
+{
+constexpr std::uint64_t stretch_ps = 10 * us;
+
+auto served(bus const& b, rig const& r, std::uint64_t until) -> std::vector<bus_event>
+{
+  std::uint8_t next = 0x10;
+  for(auto at = b.now() + period_ps / 2; at < until; at += period_ps / 2)
+  {
+    b.run_until(at);
+    if(b.get("ISR", "TXIS") == 1)
+    {
+      b.send(next++);
+    }
+    if(b.get("ISR", "RXNE") == 1)
+    {
+      std::ignore = b.receive();
+    }
+  }
+  return r.faulty->events;
+}
+
+auto stretched_transfer(bool read, std::uint32_t call) -> std::vector<bus_event>
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.controller();
+  r.faulty->stretch_call = call;
+  r.faulty->stretch_ps   = stretch_ps;
+  if(not read)
+  {
+    b.send(0x0F);
+  }
+  b.command(0x33, 3, read, true);
+  return served(b, r, b.now() + address_ps + 3 * byte_ps + period_ps + 2 * stretch_ps);
+}
+}
+
+TEST_CASE("a target stretching SCL after a byte delays every later phase by the stretch")
+{
+  for(auto const read : {false, true})
+  {
+    auto const plain = stretched_transfer(read, ~0u);
+    REQUIRE(plain.size() == 5);
+    CHECK(plain[4].kind == 'P');
+    for(std::uint32_t call = 0; call < 4; ++call)
+    {
+      CAPTURE(read);
+      CAPTURE(call);
+      auto const events = stretched_transfer(read, call);
+      REQUIRE(events.size() == plain.size());
+      for(std::size_t index = 0; index < events.size(); ++index)
+      {
+        CAPTURE(index);
+        CHECK(events[index].kind == plain[index].kind);
+        CHECK(events[index].at == plain[index].at + (index > call ? stretch_ps : 0));
+      }
+    }
+  }
+}
+
+TEST_CASE("SCL is released once both the stretching target and the waiting controller let go")
+{
+  for(auto const late : {false, true})
+  {
+    CAPTURE(late);
+    auto const release = late ? stretch_ps + 3 * period_ps : stretch_ps / 2;
+    {
+      rig r{"idle"};
+      bus b{*r.f};
+      b.controller();
+      r.faulty->stretch_call = 1;
+      r.faulty->stretch_ps   = stretch_ps;
+      b.send(0x10);
+      b.command(0x33, 2, false, true);
+      auto const end = b.now() + address_ps + byte_ps;
+      b.run_until(end + release);
+      b.send(0x20);
+      b.run_until(end + release + stretch_ps + byte_ps + 2 * period_ps);
+      REQUIRE(r.faulty->events.size() == 4);
+      CHECK(
+          r.faulty->events[2].at - r.faulty->events[1].at
+          == std::max(release, stretch_ps) + byte_ps);
+    }
+    {
+      rig r{"idle"};
+      bus b{*r.f};
+      b.controller();
+      r.faulty->stretch_call = 2;
+      r.faulty->stretch_ps   = stretch_ps;
+      b.command(0x33, 3, true, true);
+      auto const end = b.now() + address_ps + 2 * byte_ps;
+      b.run_until(end + release);
+      CHECK(b.receive() == 0x5A);
+      CHECK(b.receive() == 0x5A);
+      b.run_until(end + release + stretch_ps + byte_ps + 2 * period_ps);
+      REQUIRE(r.faulty->events.size() == 5);
+      CHECK(
+          r.faulty->events[3].at - r.faulty->events[2].at
+          == std::max(release, stretch_ps) + byte_ps);
+    }
+    {
+      rig r{"idle"};
+      bus b{*r.f};
+      b.controller();
+      r.faulty->stretch_call = 1;
+      r.faulty->stretch_ps   = stretch_ps;
+      b.command(0x33, 1, true, false);
+      auto const end = b.now() + address_ps + byte_ps;
+      b.run_until(end + release);
+      REQUIRE(b.get("ISR", "TC") == 1);
+      b.set("CR2", "STOP", 1);
+      b.run_until(end + release + stretch_ps + 2 * period_ps);
+      REQUIRE(r.faulty->events.size() == 3);
+      CHECK(
+          r.faulty->events[2].at - r.faulty->events[1].at
+          == std::max(release, stretch_ps) + period_ps);
     }
   }
 }

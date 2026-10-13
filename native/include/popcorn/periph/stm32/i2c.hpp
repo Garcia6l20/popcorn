@@ -30,7 +30,8 @@ struct i2c_reply
   bool ack{true};
   /** @brief The error the byte ends with, none by default. */
   i2c_error error{};
-  /** @brief Picoseconds the target holds SCL low after the byte. Not used yet, keep 0. */
+  /** @brief Picoseconds the target holds SCL low after the byte, delaying the next phase. Ignored
+   * with `i2c_error::arbitration_lost`. */
   std::uint64_t stretch_ps{};
 };
 
@@ -41,7 +42,8 @@ struct i2c_read_reply
   std::uint8_t byte{0xFF};
   /** @brief The error the byte ends with, none by default. */
   i2c_error error{};
-  /** @brief Picoseconds the target holds SCL low after the byte. Not used yet, keep 0. */
+  /** @brief Picoseconds the target holds SCL low after the byte, delaying the next phase. Ignored
+   * with `i2c_error::arbitration_lost`. */
   std::uint64_t stretch_ps{};
 };
 

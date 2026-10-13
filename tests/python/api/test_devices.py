@@ -15,7 +15,7 @@ import pytest
 from popcorn import ConfigError, ModelError, ResetKind, StopReason, _core
 from popcorn.board import AudioOptions, DeviceBoard, I2CError, I2CTarget, SpiTarget
 from popcorn.model import Model
-from popcorn.units import VirtualTime, ms
+from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from . import models_example
 from .conftest import run_bounded
@@ -980,3 +980,106 @@ def test_an_injected_arbitration_loss_is_alike_parked_and_running(
         run_bounded(body(), 30)
     assert log(m) == parked_log == expected_log(I2CError.ARBITRATION_LOST, "errors")
     assert running_device.events == parked_device.events
+
+
+class Stretching(I2CTarget):
+    """Answers the table address, records each call, and stretches SCL by `for_` once, on the
+    `nth` call of `hook`, counted from 0 over the whole run."""
+
+    def __init__(self, hook: str = "", nth: int = 0, for_: object = None) -> None:
+        super().__init__(0x38)
+        self.hook = hook
+        self.nth = nth
+        self.for_ = for_
+        self.counts: dict[str, int] = {}
+        self.events: list[tuple[str, int]] = []
+        self.stretched_at = -1
+
+    def note(self, hook: str, at: VirtualTime) -> None:
+        count = self.counts.get(hook, 0)
+        self.counts[hook] = count + 1
+        self.events.append((hook, at.ps))
+        if hook == self.hook and count == self.nth:
+            self.stretched_at = len(self.events) - 1
+            self.stretch(cast(VirtualDuration, self.for_))
+
+    def on_start(self, read: bool, at: VirtualTime) -> bool | I2CError:
+        self.note("on_start", at)
+        return True
+
+    def on_write(self, byte: int, at: VirtualTime) -> bool | I2CError:
+        self.note("on_write", at)
+        return True
+
+    def on_read(self, at: VirtualTime) -> int | I2CError:
+        self.note("on_read", at)
+        return 0x11
+
+    def on_stop(self, at: VirtualTime) -> None:
+        self.events.append(("on_stop", at.ps))
+
+
+def stretched_table(u575: popcorn.PartDescription, target: Stretching) -> list[int]:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [target]})
+    enter(m, "table")
+    return finish(m)
+
+
+STRETCHES = [("on_write", 1), ("on_start", 3), ("on_read", 0)]
+
+
+@pytest.mark.parametrize(("hook", "nth"), STRETCHES, ids=[h for h, _ in STRETCHES])
+def test_a_stretch_inside_a_hook_delays_the_next_bus_phase_by_its_duration(
+    u575: popcorn.PartDescription, hook: str, nth: int
+) -> None:
+    plain = Stretching()
+    expected = stretched_table(u575, plain)
+    target = Stretching(hook, nth, us(10))
+    assert stretched_table(u575, target) == expected
+    index = target.stretched_at
+    assert target.events[index][0] == hook
+    assert [kind for kind, _ in target.events] == [kind for kind, _ in plain.events]
+
+    def gap(events: list[tuple[str, int]]) -> int:
+        return events[index + 1][1] - events[index][1]
+
+    assert gap(target.events) == gap(plain.events) + us(10).ps
+    assert target.events[: index + 1] == plain.events[: index + 1]
+
+
+def test_a_stretch_outside_a_hook_or_of_a_bad_duration_is_refused() -> None:
+    target = I2CTarget(0x38)
+    with pytest.raises(RuntimeError, match="on_start, on_write or on_read"):
+        target.stretch(us(10))
+    with pytest.raises(TypeError, match="VirtualDuration"):
+        target.stretch(cast(VirtualDuration, 5))
+    with pytest.raises(ValueError, match="0 to 1 s"):
+        target.stretch(ms(2000))
+    with pytest.raises(ValueError, match="0 to 1 s"):
+        target.stretch(us(-1))
+
+
+@pytest.mark.parametrize(
+    ("value", "error"), [(5, TypeError), (ms(2000), ValueError)], ids=["type", "range"]
+)
+def test_a_bad_stretch_inside_a_hook_stops_the_run_and_resets_the_hook_state(
+    u575: popcorn.PartDescription, value: object, error: type[Exception]
+) -> None:
+    target = Stretching("on_write", 0, value)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [target]})
+    enter(m, "table")
+    with pytest.raises(error):
+        asyncio.run(m.run(budget=BUDGET))
+    with pytest.raises(RuntimeError, match="on_start, on_write or on_read"):
+        target.stretch(us(1))
+
+
+def test_a_stretching_hook_takes_the_gil_once_per_call(u575: popcorn.PartDescription) -> None:
+    target = Stretching("on_write", 1, us(10))
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [target]})
+    enter(m, "table")
+    before = gil_entries(m)
+    finish(m)
+    assert target.stretched_at >= 0
+    starts = sum(kind == "on_start" for kind, _ in target.events)
+    assert gil_entries(m) - before == len(target.events) + starts

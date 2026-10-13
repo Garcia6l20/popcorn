@@ -13,12 +13,13 @@ from popcorn import _core
 from popcorn._enums import I2CError, ResetKind
 from popcorn._errors import ConfigError, ModelError
 from popcorn._state import StateReader, declared_fields, encode
-from popcorn.units import VirtualTime
+from popcorn.units import VirtualDuration, VirtualTime
 
 if typing.TYPE_CHECKING:
     from popcorn._audio import Block
 
 _CS = re.compile(r"P([A-Z])(\d{1,2})")
+_MAX_STRETCH_PS = 10**12
 _STATES: weakref.WeakKeyDictionary[type, tuple[tuple[str, type], ...]] = weakref.WeakKeyDictionary()
 _ATTACHED: dict[int, tuple[weakref.ReferenceType[object], weakref.WeakMethod[AudioClock]]] = {}
 
@@ -71,24 +72,26 @@ def _word(device: object, method: str, value: object, bits: int) -> int:
     return value
 
 
-def _reply(device: object, method: str, value: object) -> tuple[bool, int, int]:
+def _reply(device: object, method: str, value: object, stretch_ps: int) -> tuple[bool, int, int]:
     if isinstance(value, I2CError):
-        return True, value.value, 0
+        return True, value.value, stretch_ps
     if not isinstance(value, bool):
         raise ModelError(
             f"{device!r}: {method}() returned a {type(value).__name__}, not a bool or an I2CError"
         )
-    return value, 0, 0
+    return value, 0, stretch_ps
 
 
-def _read_reply(device: object, method: str, value: object) -> tuple[int, int, int]:
+def _read_reply(
+    device: object, method: str, value: object, stretch_ps: int
+) -> tuple[int, int, int]:
     if isinstance(value, I2CError):
-        return 0xFF, value.value, 0
+        return 0xFF, value.value, stretch_ps
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 0x100:
         raise ModelError(
             f"{device!r}: {method}() returned {value!r}, not an 8-bit int or an I2CError"
         )
-    return value, 0, 0
+    return value, 0, stretch_ps
 
 
 type BusDevice = _core.I2CTargetBase | _core.SpiTargetBase
@@ -208,6 +211,7 @@ class I2CTarget(_core.I2CTargetBase):
         check_address(address)
         super().__init__()
         self._bus_address = address
+        self._stretch_ps: int | None = None
 
     @property
     def address(self) -> int:
@@ -258,6 +262,28 @@ class I2CTarget(_core.I2CTargetBase):
     def on_stop(self, at: VirtualTime) -> None:
         """A STOP ended the transfer the target took part in."""
 
+    def stretch(self, for_: VirtualDuration) -> None:
+        """Hold SCL low for `for_` after the byte the running `on_start`, `on_write` or `on_read`
+        answers, delaying the next bus phase by that much. The phases keep their length. The
+        last call of one hook wins, nothing carries over to the next byte. The controller's own
+        stretching, waiting for TXDR or RXDR, overlaps it: the bus moves once both release SCL.
+        Ignored when the hook returns `I2CError.ARBITRATION_LOST`.
+
+        Raises:
+            RuntimeError: Called outside `on_start`, `on_write` and `on_read`.
+            TypeError: `for_` is no `VirtualDuration`.
+            ValueError: `for_` is below 0 or above 1 s.
+        """
+        if not isinstance(cast(object, for_), VirtualDuration):
+            raise TypeError(f"stretch() takes a VirtualDuration, not {type(for_).__name__}")
+        if not 0 <= for_.ps <= _MAX_STRETCH_PS:
+            raise ValueError(f"a stretch is 0 to 1 s, not {for_}")
+        if self._stretch_ps is None:
+            raise RuntimeError(
+                f"{self!r}: stretch() is called from on_start, on_write or on_read only"
+            )
+        self._stretch_ps = for_.ps
+
     def reset(self, kind: ResetKind) -> None:
         """The machine was reset. Does nothing by default."""
 
@@ -273,13 +299,28 @@ class I2CTarget(_core.I2CTargetBase):
         return self._bus_address
 
     def _start(self, read: bool, at: int) -> tuple[bool, int, int]:
-        return _reply(self, "on_start", self.on_start(read, VirtualTime(at)))
+        self._stretch_ps = 0
+        try:
+            return _reply(self, "on_start", self.on_start(read, VirtualTime(at)), self._stretched())
+        finally:
+            self._stretch_ps = None
 
     def _write(self, byte: int, at: int) -> tuple[bool, int, int]:
-        return _reply(self, "on_write", self.on_write(byte, VirtualTime(at)))
+        self._stretch_ps = 0
+        try:
+            return _reply(self, "on_write", self.on_write(byte, VirtualTime(at)), self._stretched())
+        finally:
+            self._stretch_ps = None
 
     def _read(self, at: int) -> tuple[int, int, int]:
-        return _read_reply(self, "on_read", self.on_read(VirtualTime(at)))
+        self._stretch_ps = 0
+        try:
+            return _read_reply(self, "on_read", self.on_read(VirtualTime(at)), self._stretched())
+        finally:
+            self._stretch_ps = None
+
+    def _stretched(self) -> int:
+        return self._stretch_ps or 0
 
     def _stop(self, at: int) -> None:
         self.on_stop(VirtualTime(at))

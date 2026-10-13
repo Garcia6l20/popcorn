@@ -83,8 +83,11 @@ auto lower(std::string_view name) -> std::string
  *        Receive: each byte lands in RXDR and sets RXNE, SCL stretched while RXDR is full. After
  *        NBYTES bytes: TCR with RELOAD until NBYTES is written again, a STOP with AUTOEND, a
  *        repeated START when START is already set, otherwise TC until START or STOP. CR2.STOP
- *        sends a STOP after the current byte. STOPF and BUSY clear at the end of the STOP. ICR
- *        clears its flags, PE = 0 resets the transfer, CR2's START, STOP, NACK and PECBYTE and
+ *        sends a STOP after the current byte. STOPF and BUSY clear at the end of the STOP. A
+ *        target's reply stretches SCL after its byte by the reply's stretch_ps: the next phase
+ *        starts once both the target and the controller release SCL, the phase lengths
+ *        unchanged. ICR clears its flags, PE = 0 resets the transfer, CR2's START, STOP, NACK and
+ *        PECBYTE and
  *        the ISR flags. The event IRQ follows TXIS, RXNE, ADDR, NACKF, STOPF, TC and TCR with
  *        their enables, the error IRQ BERR, ARLO, OVR, PECERR, TIMEOUT and ALERT with ERRIE. BERR,
  *        ARLO and OVR are set only when a target's reply to an address or a byte carries that
@@ -136,6 +139,7 @@ private:
   [[nodiscard]] auto to_load() const -> std::uint32_t;
   [[nodiscard]] auto length_ps(std::uint32_t periods) -> std::uint64_t;
   [[nodiscard]] auto target_at() const -> vtime;
+  [[nodiscard]] auto released() const -> std::uint64_t;
 
   void               enter(phase next);
   void               begin(phase next, std::uint32_t periods, std::uint64_t from_ps);
@@ -344,6 +348,11 @@ auto i2c::target_at() const -> vtime
   return vtime{state_.end_ps + ctx_.clock.since_power_on().ps - ctx_.clock.time().ps};
 }
 
+auto i2c::released() const -> std::uint64_t
+{
+  return std::max(ctx_.clock.time().ps, state_.end_ps);
+}
+
 void i2c::begin(phase next, std::uint32_t periods, std::uint64_t from_ps)
 {
   enter(next);
@@ -447,6 +456,7 @@ void i2c::address_done()
   {
     return;
   }
+  state_.end_ps += reply.stretch_ps;
   if(not reply.ack)
   {
     update(regs_, nack_received_, 1);
@@ -468,6 +478,7 @@ void i2c::byte_done()
     {
       return;
     }
+    state_.end_ps += reply.stretch_ps;
     if(not reply.ack)
     {
       update(regs_, nack_received_, 1);
@@ -482,6 +493,7 @@ void i2c::byte_done()
   {
     return;
   }
+  state_.end_ps += reply.stretch_ps;
   auto const data = reply.byte;
   if(get(regs_, rx_full_) != 0)
   {
@@ -665,7 +677,7 @@ void i2c::command_written(std::uint32_t old, std::uint32_t now)
   regs_.poke(command_.offset, word);
   auto const started = start_.of(old) == 0 and start_.of(word) != 0;
   auto const stopped = stop_.of(old) == 0 and stop_.of(word) != 0;
-  auto const time    = ctx_.clock.time().ps;
+  auto const time    = released();
   switch(step())
   {
     case phase::idle:
@@ -675,7 +687,7 @@ void i2c::command_written(std::uint32_t old, std::uint32_t now)
       }
       if(started)
       {
-        begin_start(time);
+        begin_start(ctx_.clock.time().ps);
       }
       return;
     case phase::wait_end:
@@ -757,7 +769,7 @@ auto i2c::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
     {
       regs_.poke(receive_.offset, state_.rx_data);
       update(regs_, rx_full_, 1);
-      after_byte(ctx_.clock.time().ps);
+      after_byte(released());
     }
   }
   flags();
@@ -782,7 +794,7 @@ auto i2c::on_write(
       regs_.poke(transmit_.offset, data);
       if(step() == phase::wait_tx)
       {
-        next_byte(ctx_.clock.time().ps);
+        next_byte(released());
       }
     }
     flags();
