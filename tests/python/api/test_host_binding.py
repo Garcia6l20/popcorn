@@ -266,6 +266,50 @@ def test_a_loop_flush_keeps_a_filter_error_for_the_next_raising_flush(
     assert [r.popcorn_register for r in logged] == ["CR"]  # type: ignore[attr-defined]
 
 
+def test_records_queued_before_a_rename_keep_the_old_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    m = popcorn.Machine(
+        popcorn.load_description(MODEL_JSON), image=popcorn.Image.elf(MODEL_ELF), name="old"
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    m.reg.r0 = 10
+    m.reg.lr = m.sym("ready") | 1
+    m.reg.pc = m.sym("start_timer") & ~1
+    failing = FailOnce()
+    logger = logging.getLogger("popcorn")
+    logger.addFilter(failing)
+    try:
+        with caplog.at_level(logging.WARNING, logger="popcorn"):
+            queued_without_a_flush(m)
+            with pytest.raises(RuntimeError, match="filter failed"):
+                m.halt()
+            assert logged_timer(caplog) == []
+            m._rename("new")  # pyright: ignore[reportPrivateUsage]
+            m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+            logged = logged_timer(caplog)
+    finally:
+        logger.removeFilter(failing)
+    assert [(r.popcorn_register, r.popcorn_machine) for r in logged] == [  # type: ignore[attr-defined]
+        ("CR", "old")
+    ]
+    assert m.name == "new"
+
+
+def test_a_busy_machine_refuses_a_rename() -> None:
+    m = timer_started_in_a_free_run()
+    m.start()
+    try:
+        with pytest.raises(popcorn.MachineRunning):
+            m._rename("other")  # pyright: ignore[reportPrivateUsage]
+        assert m.name == m.description.part
+    finally:
+        m.halt()
+    m._rename("other")  # pyright: ignore[reportPrivateUsage]
+    assert m.name == "other"
+
+
 def test_a_kept_log_error_is_reported_when_its_machine_is_collected(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

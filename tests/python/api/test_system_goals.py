@@ -181,6 +181,15 @@ def test_a_write_on_a_halted_member_lands_at_the_delivered_point(ping: Build) ->
     across(ping, body)
 
 
+def test_a_member_of_a_live_system_refuses_a_rename(ping: Build) -> None:
+    system = ping()
+    a = system.members["a"]
+    with pytest.raises(popcorn.MachineBusy, match="a is a member of a linked system"):
+        a._rename("z")  # pyright: ignore[reportPrivateUsage]
+    assert a.name == "a"
+    assert system.members["a"] is a
+
+
 def test_sync_access_to_a_member_with_a_goal_raises(ping: Build) -> None:
     system = ping()
     a, b = system.members["a"], system.members["b"]

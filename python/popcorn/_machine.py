@@ -76,7 +76,14 @@ from popcorn._image import Image, Location, Symbol, location_of
 from popcorn._image_view import ImageView, debug_infos, find_variable
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
-from popcorn._observe import MachineCoverage, Ranges, Ring, TraceRecording, forward_log, open_trace
+from popcorn._observe import (
+    LogForwarder,
+    MachineCoverage,
+    Ranges,
+    Ring,
+    TraceRecording,
+    open_trace,
+)
 from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
@@ -505,6 +512,7 @@ class Machine:
         "_installed",
         "_irqs",
         "_last_stop",
+        "_log_forwarder",
         "_logs",
         "_memory",
         "_model_context",
@@ -691,7 +699,8 @@ class Machine:
         self._ring = Ring(self._handle, self.locate, self._require_stopped, self._require_idle)
         self._callback_table = CallbackTable()
         self._posted_bodies = PostedBodies(self._callback_table)
-        self._handle.forward_logs(functools.partial(forward_log, self._name))
+        self._log_forwarder = LogForwarder(self._name)
+        self._handle.forward_logs(self._log_forwarder)
         watch_logs(self._handle.log_token(), self)
         self._irqs = Irqs(description)
         self._arena = (
@@ -762,6 +771,28 @@ class Machine:
         Every log record of the machine carries it as the `popcorn_machine` extra.
         """
         return self._name
+
+    def _rename(self, name: str) -> None:
+        """Give the machine the name `name` for its later log records and errors, as `name=`
+        would at construction. The records it logged before keep the old name, those still
+        queued included: they are forwarded first. Except after a filter or handler error
+        during that flush, or when called from inside a log handler: the records still queued
+        go out later under `name`.
+
+        Raises:
+            ValueError: `name` is empty or holds whitespace or a dot.
+            MachineRunning: The machine is busy, handlers included.
+            MachineBusy: The machine is a member of a live linked system, which keys it by its
+                name.
+        """
+        check_machine_name(name)
+        self._require_idle()
+        owner = self._system
+        if owner is not None and owner() is not None:
+            raise MachineBusy(f"{self._name} is a member of a linked system: it keeps its name")
+        self._handle.flush_logs()
+        self._name = name
+        self._log_forwarder.name = name
 
     @property
     def config_digest(self) -> str:

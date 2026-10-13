@@ -14,6 +14,7 @@ from popcorn import _obs
 from popcorn._observe import collapsed
 from popcorn.coverage import Coverage, ImageKind
 from popcorn.trace import ALL, Block, Mmio, Stop, TraceKind, read
+from popcorn.units import ms
 
 from .conftest import CORE_FIRMWARE, M33_JSON, ROOT
 from .models_example import Timer
@@ -281,6 +282,38 @@ def test_two_machines_of_one_part_log_apart(caplog: pytest.LogCaptureFixture) ->
     records = unmodelled_records(caplog, [modelled("a"), modelled("b")])
     assert [r.getMessage().split(":")[0] for r in records] == ["a", "b"]
     assert [vars(r)["popcorn_machine"] for r in records] == ["a", "b"]
+
+
+def test_a_renamed_machine_logs_and_raises_under_its_new_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    m = modelled("old")
+    base = next(p.base for p in m.description.peripherals if p.name == "UNMODELLED")
+    (before,) = unmodelled_records(caplog, [m])
+    m._rename("new")  # pyright: ignore[reportPrivateUsage]
+    assert m.name == "new"
+    assert repr(m) == "Machine(new, POPCORN-M33-TEST, images=1)"
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        asyncio.run(m.read(m.ref.mem.u32[base + 4]))
+    records = [r for r in caplog.records if getattr(r, "popcorn_peripheral", None) == "UNMODELLED"]
+    assert [vars(r)["popcorn_machine"] for r in records] == ["old", "new"]
+    assert records[0] is before
+    assert before.getMessage().startswith("old: read of UNMODELLED")
+    assert records[1].getMessage().startswith("new: read of UNMODELLED")
+    m.reg.pc = 0x3000_0000
+    with pytest.raises(popcorn.FaultError, match=r"^new: the run letting time pass stopped"):
+        asyncio.run(m.elapse(ms(1)))
+    m._rename(m.description.part)  # pyright: ignore[reportPrivateUsage]
+    assert repr(m) == "Machine(POPCORN-M33-TEST, images=1)"
+
+
+def test_a_renamed_machine_is_collected() -> None:
+    m = modelled("old")
+    m._rename("new")  # pyright: ignore[reportPrivateUsage]
+    probe = weakref.ref(m)
+    del m
+    gc.collect()
+    assert probe() is None
 
 
 def test_concurrent_machines_keep_their_records_apart(caplog: pytest.LogCaptureFixture) -> None:

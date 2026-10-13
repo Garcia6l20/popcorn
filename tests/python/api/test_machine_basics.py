@@ -145,6 +145,16 @@ def test_a_name_with_whitespace_or_a_dot_is_refused(
         popcorn.Machine(m33, name=name)
 
 
+@pytest.mark.parametrize("name", ["", "a b", "a\tb", "a.b", "."])
+def test_a_rename_to_a_name_with_whitespace_or_a_dot_is_refused(
+    m33: popcorn.PartDescription, name: str
+) -> None:
+    m = popcorn.Machine(m33, name="node1")
+    with pytest.raises(ValueError, match="name"):
+        m._rename(name)  # pyright: ignore[reportPrivateUsage]
+    assert m.name == "node1"
+
+
 def fault_message(m33: popcorn.PartDescription, basic: popcorn.Image, name: str | None) -> str:
     m = popcorn.Machine(m33, image=basic, name=name)
     m.reset()
