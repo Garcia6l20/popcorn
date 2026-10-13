@@ -26,5 +26,6 @@ add_ll_firmware(
         "tim5_burst_cpu",
         "tim5_burst_dma",
         "tim3_encoder",
+        "tim3_capture",
     ],
 )

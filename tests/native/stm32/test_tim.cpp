@@ -1573,6 +1573,10 @@ struct tim_state_fields
   std::uint8_t                 inputs_seen{};
   std::uint8_t                 inputs_filtered{};
   std::uint8_t                 etr_edges{};
+  std::array<std::uint8_t, 4>  capture_edges{};
+  std::array<std::uint32_t, 5> input_generation{};
+  std::array<std::uint64_t, 5> input_due_ps{};
+  std::array<std::uint64_t, 5> input_due_seq{};
 };
 
 struct tim_state_without_edges
@@ -3314,4 +3318,323 @@ TEST_CASE("on a busy core a pin edge reaches the timer at its own time, not at t
       == stop_reason::time);
   auto const now = t.f.target->virtual_clock().time().ps;
   CHECK(t.count("TIM3") == (now - edge) / tick_ps);
+}
+
+namespace
+{
+auto capturing(std::uint32_t ccmr, std::uint32_t ccer = 0b0001) -> inputs
+{
+  inputs t;
+  t.route(6, 2);
+  t.route(7, 2);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CCMR1_Input", ccmr);
+  t.write("TIM3", "CCER", ccer);
+  t.enable("TIM3");
+  return t;
+}
+
+auto ticks_at(inputs const& t, std::uint64_t at) -> std::uint32_t
+{
+  return static_cast<std::uint32_t>((at - t.start) / tick_ps);
+}
+}
+
+TEST_CASE(
+    "CH1 captures the count at each rising edge of TI1, CC1OF on an uncleared one, debugger reads "
+    "keep CC1IF")
+{
+  auto t = capturing(0x0001);
+  t.edge(6, true);
+  auto const first = t.next;
+  t.edge(6, false);
+  t.settle();
+  CHECK(t.bits("TIM3", "SR", "CC1IF") == 1);
+  CHECK(t.bits("TIM3", "SR", "CC1OF") == 0);
+  CHECK(t.read("TIM3", "CCR1") == ticks_at(t, first));
+  CHECK(t.bits("TIM3", "SR", "CC1IF") == 1);
+  t.write("TIM3", "SR", 0);
+  t.edge(6, true);
+  t.edge(6, false);
+  t.edge(6, true);
+  auto const third = t.next;
+  t.settle();
+  CHECK(t.bits("TIM3", "SR", "CC1OF") == 1);
+  CHECK(t.read("TIM3", "CCR1") == ticks_at(t, third));
+}
+
+TEST_CASE("IC1PSC captures every fourth active edge, the count reset by CC1E 0")
+{
+  auto                       t = capturing(0x0001 | (2u << 2));
+  std::vector<std::uint64_t> rising;
+  for(int pulse = 0; pulse < 9; ++pulse)
+  {
+    t.edge(6, true);
+    rising.push_back(t.next);
+    t.edge(6, false);
+    if(pulse == 3)
+    {
+      t.settle();
+      CHECK(t.read("TIM3", "CCR1") == ticks_at(t, rising[3]));
+    }
+  }
+  t.settle();
+  CHECK(t.read("TIM3", "CCR1") == ticks_at(t, rising[7]));
+  t.write("TIM3", "CCER", 0);
+  t.write("TIM3", "CCER", 0b0001);
+  for(int pulse = 0; pulse < 3; ++pulse)
+  {
+    t.edge(6, true);
+    t.edge(6, false);
+  }
+  t.settle();
+  CHECK(t.read("TIM3", "CCR1") == ticks_at(t, rising[7]));
+}
+
+TEST_CASE("capture polarity, the neighbour input and CC1E 0")
+{
+  SUBCASE("falling")
+  {
+    auto t = capturing(0x0001, 0b0011);
+    t.edge(6, true);
+    t.edge(6, false);
+    auto const fall = t.next;
+    t.settle();
+    CHECK(t.read("TIM3", "CCR1") == ticks_at(t, fall));
+  }
+  SUBCASE("both edges")
+  {
+    auto t = capturing(0x0001 | (1u << 2), 0b1011);
+    t.edge(6, true);
+    t.edge(6, false);
+    auto const fall = t.next;
+    t.settle();
+    CHECK(t.read("TIM3", "CCR1") == ticks_at(t, fall));
+  }
+  SUBCASE("CC2S 10 captures TI1 into CCR2")
+  {
+    auto t = capturing(0x0200, 0b0001'0000);
+    t.edge(6, true);
+    auto const rise = t.next;
+    t.settle();
+    CHECK(t.bits("TIM3", "SR", "CC2IF") == 1);
+    CHECK(t.read("TIM3", "CCR2") == ticks_at(t, rise));
+  }
+  SUBCASE("disabled")
+  {
+    auto t = capturing(0x0001, 0);
+    t.edge(6, true);
+    t.settle();
+    CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
+  }
+}
+
+TEST_CASE("IC1F with 8 samples drops a 5-sample pulse and passes a 10-sample one 8 samples late")
+{
+  constexpr std::uint64_t sample = tick_ps;
+  auto                    t      = capturing(0x0001 | (3u << 4));
+  t.next += edge_gap;
+  t.porta->drive_at(6, true, vtime{t.next});
+  t.porta->drive_at(6, false, vtime{t.next + 5 * sample});
+  t.next += edge_gap;
+  auto const pulse = t.next;
+  t.porta->drive_at(6, true, vtime{pulse});
+  t.porta->drive_at(6, false, vtime{pulse + 10 * sample});
+  t.settle();
+  CHECK(t.bits("TIM3", "SR", "CC1OF") == 0);
+  CHECK(t.read("TIM3", "CCR1") == ticks_at(t, pulse + 8 * sample));
+}
+
+TEST_CASE("ETF delays the ETR edges ECE counts by its sample count on fDTS")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  auto                    t   = etr_clocked(ece | (4u << 8));
+  t.write("TIM2", "CR1", t.read("TIM2", "CR1") | (1u << 8));
+  t.edge(5, true);
+  auto const rise = t.next;
+  auto const due  = rise + 6 * 4 * tick_ps;
+  REQUIRE(
+      t.f.run_to_stop(
+             {.max_instructions = icount{1'000'000'000}, .until_time = vtime{due - tick_ps}})
+          .reason
+      == stop_reason::time);
+  CHECK(t.count("TIM2") == 0);
+  t.settle();
+  CHECK(t.count("TIM2") == 1);
+}
+
+TEST_CASE("a snapshot with a filtered edge pending restores it")
+{
+  auto t = capturing(0x0001 | (3u << 4));
+  t.edge(6, true);
+  auto const rise = t.next;
+  REQUIRE(
+      t.f.run_to_stop(
+             {.max_instructions = icount{1'000'000'000}, .until_time = vtime{rise + tick_ps}})
+          .reason
+      == stop_reason::time);
+  auto const saved = t.f.target->snapshot();
+  t.settle();
+  auto const captured = t.read("TIM3", "CCR1");
+  CHECK(captured == ticks_at(t, rise + 8 * tick_ps));
+  t.f.target->restore(saved);
+  CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
+  t.settle();
+  CHECK(t.read("TIM3", "CCR1") == captured);
+}
+
+TEST_CASE("a CCxP write that flips the polarised input is an edge")
+{
+  SUBCASE("encoder")
+  {
+    inputs t;
+    t.encoder(0b0011);
+    t.edge(6, true);
+    t.settle();
+    t.write("TIM3", "CNT", 100);
+    t.write("TIM3", "CCER", 1u << 1);
+    CHECK(t.count("TIM3") == 99);
+  }
+  SUBCASE("trigger on TI1FP1")
+  {
+    inputs t;
+    t.route(6, 2);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "CCMR1_Input", 0x0001);
+    t.write("TIM3", "SMCR", smcr(sms_trigger, 5));
+    t.write("TIM3", "CCER", 1u << 1);
+    CHECK(t.bits("TIM3", "CR1", "CEN") == 1);
+    CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+  }
+  SUBCASE("capture")
+  {
+    auto t = capturing(0x0001);
+    t.write("TIM3", "CCER", 0b0011);
+    CHECK(t.bits("TIM3", "SR", "CC1IF") == 1);
+  }
+}
+
+namespace
+{
+auto model_read(inputs const& t, std::string_view reg, popcorn::initiator by) -> std::uint32_t
+{
+  auto&      regs = t.f.target->peripheral("TIM3");
+  auto const found =
+      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != regs.description().registers.end());
+  auto const value = t.f.target->model("TIM3")->on_read(
+      regs, found->offset, 4, {.pc = 0, .now = icount{0}, .by = by});
+  REQUIRE(value.has_value());
+  return *value;
+}
+
+void run_to(inputs const& t, std::uint64_t ps)
+{
+  REQUIRE(
+      t.f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{ps}}).reason
+      == stop_reason::time);
+}
+}
+
+TEST_CASE("ETF passes prescaled ETR pulses as the divider output holds them")
+{
+  constexpr std::uint32_t ece = 1u << 14;
+  auto                    t   = etr_clocked(ece | (3u << 12) | (3u << 8));
+  for(int pulse = 0; pulse < 16; ++pulse)
+  {
+    t.next += 19 * us;
+    t.porta->drive_at(5, true, vtime{t.next});
+    t.next += us;
+    t.porta->drive_at(5, false, vtime{t.next});
+  }
+  t.settle();
+  CHECK(t.count("TIM2") == 2);
+}
+
+TEST_CASE(
+    "a filtered edge maturing in a debug freeze applies at the hold, a glitch in it stays out")
+{
+  auto const trigger_on_slow_filter = [](inputs& t) {
+    t.route(6, 2);
+    t.base("TIM3", 0, 0xffff);
+    t.write("TIM3", "CCMR1_Input", 0x0001 | (15u << 4));
+    t.write("TIM3", "SMCR", smcr(sms_trigger, 5));
+    popcorn::testing::set_debug_freeze(t.f, "DBG_TIM3_STOP", true);
+  };
+  SUBCASE("edge before the hold")
+  {
+    inputs t;
+    trigger_on_slow_filter(t);
+    auto const edge = t.start + 10 * us;
+    t.porta->drive_at(6, true, vtime{edge});
+    run_to(t, edge + 10 * us);
+    t.f.target->hold_core(true);
+    run_to(t, edge + 100 * us);
+    t.f.target->hold_core(false);
+    run_to(t, edge + 200 * us);
+    CHECK(t.bits("TIM3", "CR1", "CEN") == 1);
+    CHECK(t.count("TIM3") == 100 * us / tick_ps);
+  }
+  SUBCASE("glitch inside the hold")
+  {
+    inputs t;
+    trigger_on_slow_filter(t);
+    run_to(t, t.start + 10 * us);
+    t.f.target->hold_core(true);
+    auto const glitch = t.start + 110 * us;
+    t.porta->drive_at(6, true, vtime{glitch});
+    t.porta->drive_at(6, false, vtime{glitch + 5 * us});
+    run_to(t, t.start + 1'010 * us);
+    t.f.target->hold_core(false);
+    run_to(t, t.start + 1'100 * us);
+    CHECK(t.bits("TIM3", "CR1", "CEN") == 0);
+  }
+}
+
+TEST_CASE("a DMA read of CCR1, direct or through DMAR, clears CC1IF, a debugger read does not")
+{
+  for(auto const burst : {false, true})
+  {
+    CAPTURE(burst);
+    auto t = capturing(0x0001);
+    t.write("TIM3", "DCR", 13u);
+    t.edge(6, true);
+    t.settle();
+    REQUIRE(t.bits("TIM3", "SR", "CC1IF") == 1);
+    static_cast<void>(model_read(t, burst ? "DMAR" : "CCR1", popcorn::initiator::debugger));
+    CHECK(t.bits("TIM3", "SR", "CC1IF") == 1);
+    static_cast<void>(model_read(t, burst ? "DMAR" : "CCR1", popcorn::initiator::dma));
+    CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
+  }
+}
+
+TEST_CASE("a CCxNP write that moves the gated TI1FP1 level is a gate edge")
+{
+  inputs t;
+  t.route(6, 2);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "CCMR1_Input", 0x0001);
+  t.write("TIM3", "CCER", 1u << 1);
+  t.write("TIM3", "SMCR", smcr(sms_gated, 5));
+  t.enable("TIM3");
+  run_to(t, t.start + 10 * us);
+  auto const counted = t.count("TIM3");
+  CHECK(counted > 0);
+  t.write("TIM3", "CCER", (1u << 1) | (1u << 3));
+  run_to(t, t.start + 20 * us);
+  CHECK(t.count("TIM3") == counted);
+}
+
+TEST_CASE("a glitching filtered input keeps one filter event queued")
+{
+  auto       t      = capturing(0x0001 | (15u << 4));
+  auto const events = t.f.target->pending_events();
+  for(int glitch = 0; glitch < 1000; ++glitch)
+  {
+    t.next += tick_ps;
+    t.porta->drive_at(6, glitch % 2 == 0, vtime{t.next});
+  }
+  run_to(t, t.next);
+  CHECK(t.f.target->pending_events() <= events + 1);
+  CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
 }

@@ -40,6 +40,7 @@ void tim2_two_requests(void);
 void tim5_burst_cpu(void);
 void tim5_burst_dma(void);
 void tim3_encoder(void);
+void tim3_capture(void);
 
 void idle(void)
 {
@@ -125,6 +126,11 @@ void TIM3_IRQHandler(void)
   {
     LL_TIM_ClearFlag_UPDATE(TIM3);
     ++updates;
+  }
+  if(LL_TIM_IsActiveFlag_CC1(TIM3))
+  {
+    LOG(LL_TIM_IC_GetCaptureCH1(TIM3));
+    ++matches;
   }
 }
 
@@ -544,5 +550,27 @@ void tim3_encoder(void)
   }
   LOG(LL_TIM_GetCounter(TIM3));
   LOG(LL_TIM_GetDirection(TIM3) == LL_TIM_COUNTERDIRECTION_DOWN);
+  DONE();
+}
+
+void tim3_capture(void)
+{
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM3);
+  LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_6, LL_GPIO_AF_2);
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_6, LL_GPIO_MODE_ALTERNATE);
+  time_base(TIM3, 0, 0xffff);
+  LL_TIM_IC_SetActiveInput(TIM3, LL_TIM_CHANNEL_CH1, LL_TIM_ACTIVEINPUT_DIRECTTI);
+  LL_TIM_IC_SetPrescaler(TIM3, LL_TIM_CHANNEL_CH1, LL_TIM_ICPSC_DIV4);
+  LL_TIM_IC_SetFilter(TIM3, LL_TIM_CHANNEL_CH1, LL_TIM_IC_FILTER_FDIV1_N8);
+  LL_TIM_IC_SetPolarity(TIM3, LL_TIM_CHANNEL_CH1, LL_TIM_IC_POLARITY_RISING);
+  LL_TIM_CC_EnableChannel(TIM3, LL_TIM_CHANNEL_CH1);
+  LL_TIM_EnableIT_CC1(TIM3);
+  NVIC_EnableIRQ(TIM3_IRQn);
+  LL_TIM_EnableCounter(TIM3);
+  while(matches < 3u)
+  {
+  }
+  LOG(LL_TIM_IsActiveFlag_CC1OVR(TIM3));
   DONE();
 }

@@ -85,3 +85,40 @@ def test_an_encoder_counts_a_quadrature_sequence_alike_parked_and_running(
     assert gil_entries(m) == before
     assert m.periph.TIM3.CNT.read() == 30
     assert (log(m), m.time) == (log(running), running.time)
+
+
+def pulse_train(start: VirtualTime, count: int) -> list[tuple[VirtualTime, bool]]:
+    edges: list[tuple[VirtualTime, bool]] = []
+    for pulse in range(count):
+        edges.append((start + EDGE_GAP * (2 * pulse + 1), True))
+        edges.append((start + EDGE_GAP * (2 * pulse + 2), False))
+    return edges
+
+
+def test_a_capture_with_icpsc_4_and_a_filter_logs_every_fourth_edge_alike_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    running = entered(u575, "tim3_capture")
+    edges: list[tuple[VirtualTime, bool]] = []
+
+    async def body() -> None:
+        async with running.running():
+
+            async def post(boundary: VirtualTime) -> VirtualTime:
+                edges.extend(pulse_train(boundary + us(200), 12))
+                return await running.periph.GPIOA.pin(6).drive_edges(edges)
+
+            await stalled(running, post)
+            await running.wait_for(running.ref.mem.u32[running.sym("log_len")].ge(4))
+
+    with pytest.raises(popcorn.EmulationError, match="USER"):
+        run_bounded(body(), 30)
+    first, second, third, overcapture = log(running)
+    ticks_per_capture = 4 * 2 * EDGE_GAP.ps // 250_000
+    assert (second - first, third - second, overcapture) == (ticks_per_capture,) * 2 + (0,)
+
+    m = entered(u575, "tim3_capture")
+    asyncio.run(m.periph.GPIOA.pin(6).drive_edges(edges))
+    stop = asyncio.run(m.run(budget=50_000_000))
+    assert stop.reason is popcorn.StopReason.USER
+    assert (log(m), m.time) == (log(running), running.time)
