@@ -290,7 +290,7 @@ def test_the_digest_follows_state_aliases_and_listed_peripherals(
     moved = Plain()
     moved.level = 1
     assert devices_digest(m33_project, {"TESTDEV": [moved]}) != base
-    alias = next(p.name for p in m33_project.machine_description().peripherals if p.alias_of)
+    alias = next(p.name for p in m33_project.part_description().peripherals if p.alias_of)
     assert devices_digest(m33_project, {alias: [Plain()]}) == base
     assert devices_digest(m33_project, {"TESTDEV": []}) != devices_digest(m33_project, {})
     assert devices_digest(m33_project, {"TESTDEV": [Plain(), Plain()]}) != base

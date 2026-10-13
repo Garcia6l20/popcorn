@@ -625,7 +625,7 @@ MSIS_48_MHZ = MSIRGSEL | MSIKRANGE_4MHZ | MSISRANGE_48MHZ
 
 
 def test_an_event_keeps_its_virtual_time_across_a_core_clock_change(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     from .conftest import BOARD_ELF
 

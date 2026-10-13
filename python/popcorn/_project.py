@@ -17,7 +17,7 @@ from typing import Literal, Self, cast
 from popcorn import _core
 from popcorn._audio import AudioOptions, Block
 from popcorn._constants import Constants
-from popcorn._description import MachineDescription, load_description
+from popcorn._description import PartDescription, load_description
 from popcorn._devices import check_address
 from popcorn._enums import StopReason
 from popcorn._errors import (
@@ -505,7 +505,7 @@ class Project:
         text = json.dumps(_canonical(self), sort_keys=True, separators=(",", ":"), allow_nan=False)
         return hashlib.sha256(text.encode()).hexdigest()
 
-    def machine_description(self) -> MachineDescription:
+    def part_description(self) -> PartDescription:
         """The MCU description: `description` when set, else the one built for `part`.
 
         Raises:
@@ -551,7 +551,7 @@ class Project:
 
         Raises:
             ValueError: `name` is empty or holds whitespace or a dot.
-            ConfigError: As `machine_description`, a model is not a `popcorn.model.Model` or a
+            ConfigError: As `part_description`, a model is not a `popcorn.model.Model` or a
                 device not a `popcorn.board.I2CTarget` or `SpiTarget`, a class refuses its
                 parameters, a model replaces no peripheral of the description, a memory_init
                 symbol or range is invalid, an I2C target sits on a peripheral that is not an
@@ -567,7 +567,7 @@ class Project:
         """
         check_machine_name(name)
         check_inputs(self)
-        description = self.machine_description()
+        description = self.part_description()
         served = {p.name for p in description.peripherals if p.alias_of is None}
         given = _given_devices(description, devices or {})
         self._check_board()
@@ -717,7 +717,7 @@ class Project:
                     self._check_params(cls, (), {**chip, **params}, at)
 
     def _devices(
-        self, name: str, periph: Periph, description: MachineDescription
+        self, name: str, periph: Periph, description: PartDescription
     ) -> list[AttachedDevice]:
         peripheral = next(
             (p for p in description.peripherals if p.name == name and p.alias_of is None), None
@@ -889,7 +889,7 @@ def _canonical(value: object) -> object:
 
 
 def _given_devices(
-    description: MachineDescription, devices: Mapping[str, Sequence[AttachedDevice]]
+    description: PartDescription, devices: Mapping[str, Sequence[AttachedDevice]]
 ) -> dict[str, list[AttachedDevice]]:
     aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
     given: dict[str, list[AttachedDevice]] = {}

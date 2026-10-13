@@ -54,7 +54,7 @@ def test_the_defaults_mirror_the_rcc_model() -> None:
     ],
 )
 def test_the_core_runs_at_the_board_hse_rate_once_switched_to_hse(
-    u575: popcorn.MachineDescription, rcc: RccOptions | None, hz: int
+    u575: popcorn.PartDescription, rcc: RccOptions | None, hz: int
 ) -> None:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF), rcc=rcc)
     on_hse(m)
@@ -72,7 +72,7 @@ def test_the_core_runs_at_the_board_hse_rate_once_switched_to_hse(
     ],
 )
 def test_a_clock_outside_its_range_is_refused(
-    u575: popcorn.MachineDescription, rcc: RccOptions, key: str
+    u575: popcorn.PartDescription, rcc: RccOptions, key: str
 ) -> None:
     with pytest.raises(ConfigError) as caught:
         popcorn.Machine(u575, rcc=rcc)
@@ -80,7 +80,7 @@ def test_a_clock_outside_its_range_is_refused(
 
 
 def test_board_rcc_in_the_project_sets_the_hse_rate(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     project = popcorn.Project(
         part="STM32U575QGIx", images=[popcorn.Elf(RCC_ELF)], rcc=RccOptions(hse_hz=32_000_000)
@@ -101,7 +101,7 @@ HERE = bytes.fromhex("fee7")
 NOP_W = bytes.fromhex("aff30080")
 
 
-def on_main(u575: popcorn.MachineDescription) -> popcorn.Machine:
+def on_main(u575: popcorn.PartDescription) -> popcorn.Machine:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF))
     m.reset()
     assert asyncio.run(m.run(until="main", budget=1_000_000)).reason is StopReason.ADDRESS
@@ -118,7 +118,7 @@ def period_ps(m: popcorn.Machine) -> int:
 
 @pytest.mark.parametrize(("wide", "nops"), [(0, 0), (0, 100), (0, 400), (5, 10)])
 def test_the_rest_of_a_block_runs_at_the_rate_its_store_set(
-    u575: popcorn.MachineDescription, wide: int, nops: int
+    u575: popcorn.PartDescription, wide: int, nops: int
 ) -> None:
     m = on_main(u575)
     old = period_ps(m)
@@ -137,7 +137,7 @@ def test_the_rest_of_a_block_runs_at_the_rate_its_store_set(
 
 
 def test_a_stepped_store_and_a_debugger_write_charge_no_block_ahead(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = on_main(u575)
     old = period_ps(m)
@@ -164,7 +164,7 @@ def test_a_stepped_store_and_a_debugger_write_charge_no_block_ahead(
 
 
 def test_pending_events_counts_the_hse_ready_event_until_it_fires(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF))
     m.reset()

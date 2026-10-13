@@ -99,7 +99,7 @@ def test_a_run_between_slices_moves_pty_bytes_both_ways(
 
 
 def test_a_pty_made_inside_a_loop_is_freed_with_its_machine(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     selector = selectors.DefaultSelector()
 
@@ -141,7 +141,7 @@ def test_a_bridged_uart_is_not_read_from_python(board: popcorn.Machine) -> None:
         asyncio.run(board.periph.USART1.port.read_until(re.compile(rb"x")))
 
 
-def test_the_project_connects_a_pty(u575: popcorn.MachineDescription) -> None:
+def test_the_project_connects_a_pty(u575: popcorn.PartDescription) -> None:
     project = popcorn.Project(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],
@@ -152,7 +152,7 @@ def test_the_project_connects_a_pty(u575: popcorn.MachineDescription) -> None:
     assert os.path.exists(m.board.ptys["USART1"])
 
 
-def test_other_connections_and_devices_are_refused(u575: popcorn.MachineDescription) -> None:
+def test_other_connections_and_devices_are_refused(u575: popcorn.PartDescription) -> None:
     socket = popcorn.Project(
         part="STM32U575QGIx",
         images=[popcorn.Elf(BOARD_ELF)],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import difflib
 
-from popcorn._description import MachineDescription
+from popcorn._description import PartDescription
 from popcorn._views import Memory
 
 _ISER = 0xE000_E100
@@ -68,7 +68,7 @@ class Irqs:
 
     __slots__ = ("_numbers",)
 
-    def __init__(self, description: MachineDescription) -> None:
+    def __init__(self, description: PartDescription) -> None:
         """Index the description's interrupt table."""
         self._numbers = {irq.name: irq.number for irq in description.irqs}
 

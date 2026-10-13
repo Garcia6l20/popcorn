@@ -9,7 +9,7 @@ from popcorn._call import F32, I64, CallResult, HandlerCallWarning, Stack, f32, 
 from popcorn._constants import Constants
 from popcorn._core import version
 from popcorn._description import (
-    MachineDescription,
+    PartDescription,
     description_digest,
     load_description,
     parse_description,
@@ -119,7 +119,6 @@ __all__ = [
     "Machine",
     "MachineBusy",
     "MachineCoverage",
-    "MachineDescription",
     "MachineRunning",
     "Memory",
     "MemoryInit",
@@ -127,6 +126,7 @@ __all__ = [
     "MissingInput",
     "ModelError",
     "Param",
+    "PartDescription",
     "Periph",
     "PeripheralView",
     "Peripherals",

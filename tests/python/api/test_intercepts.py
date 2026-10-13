@@ -284,7 +284,7 @@ def test_record_returns_refuses_an_empty_capacity(hooked: popcorn.Machine) -> No
 
 
 def test_recorded_times_match_the_time_an_on_return_handler_reads(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF))
     m.reset()
@@ -327,7 +327,7 @@ ISR_HANDLERS = (
 )
 
 
-def isr_machine(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def isr_machine(m33: popcorn.PartDescription) -> popcorn.Machine:
     """A reset machine over the isr firmware: each round pends a handler that tail-calls
     `irq_exit`, two handlers that tail-chain, a low handler that a mid handler preempts, itself
     preempted by a high one, and a handler that tail-calls the float `fpu_exit`. Four phases of
@@ -346,7 +346,7 @@ def isr_done(m: popcorn.Machine) -> bool:
 
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_record_returns_counts_each_exception_return_of_a_handler_or_its_tail_call(
-    m33: popcorn.MachineDescription, running: bool
+    m33: popcorn.PartDescription, running: bool
 ) -> None:
     m = isr_machine(m33)
     recordings = {name: m.record_returns(name) for name in ISR_HANDLERS}
@@ -380,7 +380,7 @@ def test_record_returns_counts_each_exception_return_of_a_handler_or_its_tail_ca
 
 
 def test_an_exception_return_counts_after_the_handler_body_and_before_a_tail_chain(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = isr_machine(m33)
     seen: dict[str, list[tuple[int, int, int]]] = {}
@@ -417,7 +417,7 @@ def test_an_exception_return_counts_after_the_handler_body_and_before_a_tail_cha
 
 
 def test_a_raising_handler_on_an_exception_return_leaves_the_exit_completed(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = isr_machine(m33)
     handlers = m.record_returns("tail_handler")

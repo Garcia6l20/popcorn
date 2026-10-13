@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from popcorn._description import MachineDescription
+    from popcorn._description import PartDescription
 
 
-def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> MachineDescription:
+def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> PartDescription:
     """The description of an STM32 part, built from ST's files on first use and cached.
 
     Args:

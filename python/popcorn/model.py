@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from popcorn import _core
-from popcorn._description import MachineDescription
+from popcorn._description import PartDescription
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, ModelError
 from popcorn._model_build import build_model, building, registered_classes
@@ -327,7 +327,7 @@ class Model(_core.ModelBase):
         self._words = self._dispatch(registers)
 
     @property
-    def part(self) -> MachineDescription:
+    def part(self) -> PartDescription:
         """Description of the whole MCU, a copy."""
         return self._context.part()
 

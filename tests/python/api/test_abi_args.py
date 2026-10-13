@@ -11,7 +11,7 @@ from .conftest import ABI_ELF
 
 
 @pytest.fixture
-def abi(m33: popcorn.MachineDescription) -> popcorn.Machine:
+def abi(m33: popcorn.PartDescription) -> popcorn.Machine:
     image = popcorn.Image.elf(ABI_ELF)
     assert image.abi is popcorn.FloatAbi.HARD_DOUBLE
     m = popcorn.Machine(m33, image=image)

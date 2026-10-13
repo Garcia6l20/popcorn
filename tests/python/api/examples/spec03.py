@@ -19,7 +19,7 @@ async def project_and_machine(project: popcorn.Project) -> popcorn.Snapshot:
     return m.snapshot()
 
 
-def machine_without_project(description: popcorn.MachineDescription, elf: Path) -> popcorn.Machine:
+def machine_without_project(description: popcorn.PartDescription, elf: Path) -> popcorn.Machine:
     """Section 1: a machine built directly, for small tests."""
     return popcorn.Machine(description, image=popcorn.Image.elf(elf))
 

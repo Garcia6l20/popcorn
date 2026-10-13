@@ -25,7 +25,7 @@ import pytest
 import popcorn
 from popcorn import (
     Machine,
-    MachineDescription,
+    PartDescription,
     Project,
     Snapshot,
     Stop,
@@ -199,9 +199,7 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
     """
     check_inputs(project)
     aliases = {
-        p.name: p.alias_of
-        for p in project.machine_description().peripherals
-        if p.alias_of is not None
+        p.name: p.alias_of for p in project.part_description().peripherals if p.alias_of is not None
     }
     lines: list[str] = []
     for key, targets in sorted(devices.items(), key=lambda item: aliases.get(item[0], item[0])):
@@ -215,7 +213,7 @@ def devices_digest(project: Project, devices: Mapping[str, Sequence[AttachedDevi
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
 
 
-def _registration_lines(project: Project, description: MachineDescription) -> list[str]:
+def _registration_lines(project: Project, description: PartDescription) -> list[str]:
     wired = {name for name, periph in project.board.items() if periph.model is not None}
     lines: list[str] = []
     for p in sorted(description.peripherals, key=lambda p: p.name):
@@ -254,7 +252,7 @@ def cache_key(project: Project, strict: bool, devices: str | None = None) -> str
         MissingInput: An input file of `project` does not exist, as `Project.machine` raises.
     """
     check_inputs(project)
-    description = project.machine_description()
+    description = project.part_description()
     lines = [
         FORMAT,
         popcorn.version(),

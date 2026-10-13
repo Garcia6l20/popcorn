@@ -42,7 +42,7 @@ def received(machine: Machine) -> list[int]:
 
 async def test_without_a_model_a_strict_run_names_the_rng(popcorn_project: Project) -> None:
     machine = Machine(
-        popcorn_project.machine_description(),
+        popcorn_project.part_description(),
         image=[image.load() for image in popcorn_project.images],
         strict_peripherals=True,
     )

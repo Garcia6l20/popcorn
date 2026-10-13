@@ -58,7 +58,7 @@ def minimal_project(
 def test_an_unknown_part_lists_close_matches() -> None:
     project = popcorn.Project(part="STM32U575QGI", images=[])
     try:
-        project.machine_description()
+        project.part_description()
     except popcorn.ConfigError as error:
         if "close matches" not in error.expected:
             pytest.skip(f"ST's description sources are not installed: {error}")
@@ -71,7 +71,7 @@ def test_an_unknown_part_lists_close_matches() -> None:
 def test_a_description_for_another_part_is_refused() -> None:
     project = popcorn.Project(part="OTHER", description=M33_JSON, images=[])
     with pytest.raises(popcorn.ConfigError) as caught:
-        project.machine_description()
+        project.part_description()
     assert caught.value.key == "description"
 
 
@@ -163,7 +163,7 @@ def test_the_description_package_imports_without_the_native_extension() -> None:
     assert done.stdout.strip() == "ok", done.stderr
 
 
-def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.MachineDescription) -> None:
+def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.PartDescription) -> None:
     handle = _core.MachineHandle(m33, _core.MachineConfig())
     with pytest.raises(popcorn.ConfigError) as caught:
         handle.write_memory(0xFFFF_FFFF, b"\x00\x00")
@@ -620,7 +620,7 @@ def test_a_python_project_boots_and_checks_against_its_description() -> None:
     stop = asyncio.run(project.boot_machine(m))
     assert stop.location.symbol == "alu_mark"
     with pytest.raises(popcorn.ConfigError) as caught:
-        project.replace(part="OTHER").machine_description()
+        project.replace(part="OTHER").part_description()
     assert caught.value.key == "description"
     unknown = project.replace(board={"TIM9": popcorn.Periph(model=popcorn.Use(Model))})
     with pytest.raises(popcorn.ConfigError) as caught:

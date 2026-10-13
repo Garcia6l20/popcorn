@@ -380,7 +380,7 @@ def test_an_identifier_resolves_in_the_units_of_its_macro(
         constants.macro("DERIVED")
 
 
-def test_image_macros_read_while_running(m33: popcorn.MachineDescription) -> None:
+def test_image_macros_read_while_running(m33: popcorn.PartDescription) -> None:
     m = popcorn.Machine(m33, image=popcorn.Image.elf(CONSTS_ELF))
     m.reset()
     assert asyncio.run(m.run(budget=100_000)).reason is popcorn.StopReason.USER

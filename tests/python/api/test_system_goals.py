@@ -33,7 +33,7 @@ Build = Callable[..., LinkedSystem]
 
 
 @pytest.fixture
-def ping(u575: popcorn.MachineDescription) -> Iterator[Build]:
+def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
     made: list[LinkedSystem] = []
 
     def build(
@@ -272,7 +272,7 @@ def test_a_goal_cap_not_above_0_is_refused(ping: Build, cap: VirtualDuration) ->
 
 @pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
 def test_a_goal_failed_by_a_halted_member_s_error_raises_it_naming_that_member(
-    u575: popcorn.MachineDescription, slice_instructions: int, third: VirtualDuration | None
+    u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
 ) -> None:
     a = member(u575, "link_ping", "a", slice_instructions, models={"TIM6": Ticker})
     b = member(u575, "link_echo", "b", slice_instructions)
@@ -306,7 +306,7 @@ class Blocking(Ticker):
 
 @pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
 def test_leaving_a_member_s_running_raises_a_peer_s_error_landing_meanwhile(
-    u575: popcorn.MachineDescription, slice_instructions: int, third: VirtualDuration | None
+    u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
 ) -> None:
     a = member(u575, "link_ping", "a", slice_instructions)
     b = member(u575, "link_echo", "b", slice_instructions, models={"TIM6": Blocking})
@@ -353,7 +353,7 @@ class Held:
     pass
 
 
-def goal_path(u575: popcorn.MachineDescription, path: str) -> list[weakref.ref[object]]:
+def goal_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[object]]:
     """Run one goal of `path` on a fresh system, close it, return weakrefs to what it held."""
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
@@ -392,7 +392,7 @@ def goal_path(u575: popcorn.MachineDescription, path: str) -> list[weakref.ref[o
 
 @pytest.mark.parametrize("path", ["success", "raised", "withdrawn", "closed"])
 def test_a_goal_s_predicate_and_members_are_freed_on_every_path(
-    u575: popcorn.MachineDescription, path: str
+    u575: popcorn.PartDescription, path: str
 ) -> None:
     refs = goal_path(u575, path)
     gc.collect()
@@ -486,7 +486,7 @@ def test_a_goal_delivered_after_its_task_was_cancelled_releases_its_member(
     assert system._undecided == {}  # pyright: ignore[reportPrivateUsage]
 
 
-def running_path(u575: popcorn.MachineDescription, path: str) -> list[weakref.ref[object]]:
+def running_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[object]]:
     """A member's running() body ending by `path`, then the system closed: weakrefs to what the
     body held."""
     a = member(u575, "link_ping", "a")
@@ -534,9 +534,7 @@ def running_path(u575: popcorn.MachineDescription, path: str) -> list[weakref.re
 
 
 @pytest.mark.parametrize("path", ["plain", "raised", "stopped", "closed", "failed"])
-def test_a_member_running_body_frees_what_it_held(
-    u575: popcorn.MachineDescription, path: str
-) -> None:
+def test_a_member_running_body_frees_what_it_held(u575: popcorn.PartDescription, path: str) -> None:
     refs = running_path(u575, path)
     gc.collect()
     assert [one() for one in refs] == [None, None, None]
@@ -555,7 +553,7 @@ async def waits_in_running(m: popcorn.Machine) -> tuple[object, ...]:
 
 
 def test_waits_inside_a_member_s_running_equal_a_lone_machine_s(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     async def parked(m: popcorn.Machine) -> tuple[object, ...]:
         stop = await m.wait_for(m.ref.var("tx_next").ge(3))
@@ -593,7 +591,7 @@ async def stopped_in_running(
 
 
 def test_a_breakpoint_during_a_wait_ends_the_member_s_run_as_a_lone_machine_s(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     lone = asyncio.run(stopped_in_running(member(u575, "tx_irq", "a")))
     assert len(lone) == 3 and lone[0] == lone[1] == lone[2]
@@ -637,7 +635,7 @@ async def counted_in_running(m: popcorn.Machine, peer: popcorn.Machine) -> list[
 
 
 def test_a_breakpoint_right_after_a_wait_s_condition_turns_true_ends_the_run(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     lone = member(u575, "tx_irq", "a", slice_wall_budget=60)
     reached = counting(lone)
@@ -682,7 +680,7 @@ async def both_waits(m: popcorn.Machine, cancel: str | None) -> tuple[object, ..
 
 @pytest.mark.parametrize("cancel", [None, "at_once", "later"])
 def test_two_waits_on_a_member_each_resolve_at_their_own_stop(
-    u575: popcorn.MachineDescription, cancel: str | None
+    u575: popcorn.PartDescription, cancel: str | None
 ) -> None:
     lone = member(u575, "tx_irq", "a", slice_wall_budget=60)
     stop = asyncio.run(lone.wait_for(lone.ref.var("tx_next").ge(3)))
@@ -701,7 +699,7 @@ def test_two_waits_on_a_member_each_resolve_at_their_own_stop(
 
 
 def tx_pair(
-    u575: popcorn.MachineDescription, slice_instructions: int, third: VirtualDuration | None
+    u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
 ) -> tuple[popcorn.Machine, LinkedSystem]:
     a = member(u575, "tx_irq", "a", slice_instructions)
     b = member(u575, "idle", "b", slice_instructions)
@@ -722,7 +720,7 @@ async def reached_beside_elapse(m: popcorn.Machine, after: VirtualDuration) -> t
 
 
 def test_a_reached_wait_stands_at_its_address_when_another_wait_stops_there(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     lone = member(u575, "tx_irq", "a")
     start = lone.time
@@ -748,7 +746,7 @@ async def reached_two(m: popcorn.Machine) -> tuple[object, ...]:
 
 
 def test_reached_waits_for_two_addresses_each_stop_at_their_own(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     early = asyncio.run(member(u575, "tx_irq", "a").run(until="enable"))
     late = asyncio.run(member(u575, "tx_irq", "a").run(until=IRQ))
@@ -762,7 +760,7 @@ def test_reached_waits_for_two_addresses_each_stop_at_their_own(
 
 
 def test_a_run_inside_a_member_s_running_raises_machine_busy(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     a, system = tx_pair(u575, 1_000_000, None)
 
@@ -781,7 +779,7 @@ def test_a_run_inside_a_member_s_running_raises_machine_busy(
 
 @pytest.mark.parametrize("point", ["before", "settle", "wait"])
 def test_a_cancelled_wait_inside_running_lets_the_member_run_on(
-    u575: popcorn.MachineDescription, point: str
+    u575: popcorn.PartDescription, point: str
 ) -> None:
     a = member(u575, "idle", "a")
     b = member(u575, "tx_irq", "b")
@@ -833,7 +831,7 @@ def test_a_cancelled_wait_inside_running_lets_the_member_run_on(
 
 
 def test_a_wait_cancelled_as_its_system_closes_reports_nothing(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     a = member(u575, "idle", "a")
     b = member(u575, "tx_irq", "b")
@@ -868,7 +866,7 @@ def flying(system: LinkedSystem) -> bool:
 
 
 def test_a_flight_cut_by_a_closed_system_and_a_loop_s_end_reports_nothing(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.ERROR, logger="asyncio"):
         refs = cut_flight(u575)
@@ -881,7 +879,7 @@ def test_a_flight_cut_by_a_closed_system_and_a_loop_s_end_reports_nothing(
     assert [one() for one in refs] == [None, None]
 
 
-def cut_flight(u575: popcorn.MachineDescription) -> list[weakref.ref[popcorn.Machine]]:
+def cut_flight(u575: popcorn.PartDescription) -> list[weakref.ref[popcorn.Machine]]:
     """A flight held by a blocked `stop_when` when the system closes and the loop ends: weakrefs
     to the members, their thread then let go."""
     a = member(u575, "idle", "a")

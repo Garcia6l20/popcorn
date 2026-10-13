@@ -44,7 +44,7 @@ def test_blocks_are_zeroed_aligned_and_bounded(machines: Machines) -> None:
         m.arena.alloc(m.arena.size)
 
 
-def test_a_machine_without_an_arena_says_so(m33: popcorn.MachineDescription) -> None:
+def test_a_machine_without_an_arena_says_so(m33: popcorn.PartDescription) -> None:
     m = popcorn.Machine(m33, arena_base=None)
     with pytest.raises(popcorn.ConfigError, match="no arena"):
         _ = m.arena

@@ -188,7 +188,7 @@ SRAM_END = 0x2000_0000 + 786432
 
 
 def test_cstring_reads_up_to_the_end_of_memory_and_raises_past_it(
-    m33: popcorn.MachineDescription,
+    m33: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(m33)
     m.mem.write(SRAM_END - 4, b"abc\0")

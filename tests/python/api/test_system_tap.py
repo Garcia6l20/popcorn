@@ -44,7 +44,7 @@ def links(third: VirtualDuration | None, baud: int = 460_800) -> list[UartLink]:
 
 
 @pytest.fixture
-def pair(u575: popcorn.MachineDescription) -> Iterator[Build]:
+def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
     """Builds `a` running `a_entry` linked USART1 to USART1 with `b` running `b_entry`."""
     made: list[LinkedSystem] = []
 
@@ -99,7 +99,7 @@ def tap_pauses(system: LinkedSystem) -> list[list[TapFrame]]:
 
 
 def test_the_tap_at_each_pause_holds_the_frames_ended_by_it_at_any_quantum(
-    u575: popcorn.MachineDescription, pair: Build
+    u575: popcorn.PartDescription, pair: Build
 ) -> None:
     results: list[tuple[list[list[TapFrame]], list[int]]] = []
     for slice_instructions, third in VARIANT_VALUES:
@@ -157,7 +157,7 @@ def injected_run(
     return tuple(logged(b)), tuple(tap.frames())
 
 
-def lone_written(u575: popcorn.MachineDescription) -> tuple[int, ...]:
+def lone_written(u575: popcorn.PartDescription) -> tuple[int, ...]:
     """The last log words of a lone link_rx machine whose port writes b"xyz" at 4 ms of system
     time: three bytes and an IDLE, each with its cycle count."""
     lone = member(u575, "link_rx", "b")
@@ -175,7 +175,7 @@ def lone_written(u575: popcorn.MachineDescription) -> tuple[int, ...]:
 
 @pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
 def test_frames_injected_running_equal_those_injected_stopped_and_a_lone_write(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     pair: Build,
     slice_instructions: int,
     third: VirtualDuration | None,
@@ -313,7 +313,7 @@ def test_tap_arguments_are_checked_at_the_call(pair: Build) -> None:
 
 
 def test_a_closed_system_s_tap_holds_every_frame_ended_by_its_last_pause(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     a = member(u575, "link_tx", "a")
     system = LinkedSystem({"a": a, "b": member(u575, "link_rx", "b")}, links(None))
@@ -402,7 +402,7 @@ def test_a_linked_uart_refuses_a_pty_until_its_system_closes(pair: Build) -> Non
 
 
 def test_a_system_collected_unclosed_gives_its_uarts_back(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     a = member(u575, "link_tx", "a")
     system = LinkedSystem({"a": a, "b": member(u575, "link_rx", "b")}, links(None))

@@ -45,7 +45,7 @@ def links(third: VirtualDuration | None) -> list[UartLink]:
 
 
 @pytest.fixture
-def pair(u575: popcorn.MachineDescription) -> Iterator[Build]:
+def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
     """Builds `a` running `a_entry` linked USART1 to USART1 with `b` running `b_entry`."""
     made: list[LinkedSystem] = []
 
@@ -264,7 +264,7 @@ def test_a_snapshot_of_other_machines_restores_nothing(pair: Build) -> None:
 
 
 def test_a_member_stop_not_delivered_yet_holds_snapshots_back(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     x = member(u575, "tx_irq", "x")
     y = member(u575, "tx_irq", "y")
@@ -286,7 +286,7 @@ def test_a_member_stop_not_delivered_yet_holds_snapshots_back(
 
 
 def test_a_reset_member_runs_as_a_lone_machine_reset_at_the_same_point(
-    pair: Build, u575: popcorn.MachineDescription
+    pair: Build, u575: popcorn.PartDescription
 ) -> None:
     reset_at = VirtualTime(us(500).ps)
     end = VirtualTime(ms(1.5).ps)
@@ -347,7 +347,7 @@ def test_a_member_held_at_its_goal_s_stop_resets_and_goes_on(pair: Build) -> Non
     assert seen[1:] == seen[:1] * 3
 
 
-def test_a_system_snapshot_holds_no_system(u575: popcorn.MachineDescription) -> None:
+def test_a_system_snapshot_holds_no_system(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
     system = LinkedSystem({"a": a, "b": b}, links(None))
@@ -368,7 +368,7 @@ def test_a_system_snapshot_holds_no_system(u575: popcorn.MachineDescription) -> 
 
 
 def test_a_member_reset_after_its_reset_request_runs_on_as_a_lone_machine(
-    pair: Build, u575: popcorn.MachineDescription
+    pair: Build, u575: popcorn.PartDescription
 ) -> None:
     end = VirtualTime(ms(2.5).ps)
     seen: dict[str, list[tuple[object, ...]]] = {}
@@ -413,7 +413,7 @@ def test_a_member_reset_after_its_reset_request_runs_on_as_a_lone_machine(
         assert one[1:] == one[:1] * 3
 
 
-def test_a_reset_drops_a_member_stop_not_delivered_yet(u575: popcorn.MachineDescription) -> None:
+def test_a_reset_drops_a_member_stop_not_delivered_yet(u575: popcorn.PartDescription) -> None:
     x = member(u575, "tx_irq", "x")
     y = member(u575, "tx_irq", "y")
     link = UartLink("x.USART2", "y.USART2", latency=L, baud=460_800)

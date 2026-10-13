@@ -30,7 +30,7 @@ Build = Callable[..., LinkedSystem]
 
 
 @pytest.fixture
-def ping(u575: popcorn.MachineDescription) -> Iterator[Build]:
+def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
     made: list[LinkedSystem] = []
 
     def build(
@@ -286,7 +286,7 @@ class Held:
     pass
 
 
-def free_path(u575: popcorn.MachineDescription, path: str) -> list[weakref.ref[object]]:
+def free_path(u575: popcorn.PartDescription, path: str) -> list[weakref.ref[object]]:
     """A system free run ending by `path`, then the system closed: weakrefs to what it held."""
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
@@ -331,7 +331,7 @@ def free_path(u575: popcorn.MachineDescription, path: str) -> list[weakref.ref[o
 
 
 @pytest.mark.parametrize("path", ["plain", "raised", "stopped", "closed", "failed"])
-def test_a_free_run_frees_what_it_held(u575: popcorn.MachineDescription, path: str) -> None:
+def test_a_free_run_frees_what_it_held(u575: popcorn.PartDescription, path: str) -> None:
     refs = free_path(u575, path)
     gc.collect()
     assert [one() for one in refs] == [None, None, None]

@@ -16,7 +16,7 @@ PING_BYTES = 16
 
 
 def member(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     entry: str,
     name: str,
     slice_instructions: int = 1_000_000,

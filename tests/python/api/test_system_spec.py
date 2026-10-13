@@ -120,7 +120,7 @@ def test_a_link_without_latency_cannot_be_declared() -> None:
         UartLink("a.USART1", "b.USART1", baud=460_800)  # pyright: ignore[reportCallIssue]
 
 
-def test_link_needs_one_machine_per_member(u575: popcorn.MachineDescription) -> None:
+def test_link_needs_one_machine_per_member(u575: popcorn.PartDescription) -> None:
     del u575
     declared = spec()
     a = PROJECT.machine(name="a")
@@ -135,7 +135,7 @@ def test_link_needs_one_machine_per_member(u575: popcorn.MachineDescription) -> 
     assert caught.value.key == "members.b"
 
 
-def test_machines_builds_a_named_machine_per_member(u575: popcorn.MachineDescription) -> None:
+def test_machines_builds_a_named_machine_per_member(u575: popcorn.PartDescription) -> None:
     del u575
     machines = spec().machines()
     assert list(machines) == ["a", "b"]
@@ -143,7 +143,7 @@ def test_machines_builds_a_named_machine_per_member(u575: popcorn.MachineDescrip
     assert machines["a"] is not machines["b"]
 
 
-def test_boot_links_members_booted_from_reset(u575: popcorn.MachineDescription) -> None:
+def test_boot_links_members_booted_from_reset(u575: popcorn.PartDescription) -> None:
     del u575
     declared = spec(offsets={"b": us(5)}, goal_cap=ms(50), on_member_reset="stop")
 
@@ -164,7 +164,7 @@ def test_boot_links_members_booted_from_reset(u575: popcorn.MachineDescription) 
 
 
 def test_two_members_of_one_project_share_a_boot_and_keep_their_own_state(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     del u575
     declared = System(
@@ -195,7 +195,7 @@ def test_two_members_of_one_project_share_a_boot_and_keep_their_own_state(
         assert snapshot.members["b1"].to_bytes() != snapshot.members["b2"].to_bytes()
 
 
-def test_a_system_of_one_member_linked_to_itself_runs(u575: popcorn.MachineDescription) -> None:
+def test_a_system_of_one_member_linked_to_itself_runs(u575: popcorn.PartDescription) -> None:
     del u575
     declared = System(members={"a": PROJECT}, links=[link("a.USART1", "a.USART3")])
 

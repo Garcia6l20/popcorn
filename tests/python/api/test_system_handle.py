@@ -97,7 +97,7 @@ def run_to(linked: Linked, until_ps: int) -> list[tuple[str, int | None, int]]:
 
 
 @pytest.fixture
-def ping(u575: popcorn.MachineDescription) -> Iterator[Callable[[int, int | None], Linked]]:
+def ping(u575: popcorn.PartDescription) -> Iterator[Callable[[int, int | None], Linked]]:
     made: list[Linked] = []
 
     def make(slice_instructions: int, third: int | None) -> Linked:
@@ -268,7 +268,7 @@ def test_a_member_runs_alone_only_once_the_system_is_closed(
     assert linked.handle.posted(0) == posted
 
 
-def test_wires_and_members_are_checked_before_start(u575: popcorn.MachineDescription) -> None:
+def test_wires_and_members_are_checked_before_start(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
     handle = _core.SystemHandle(1_000_000, 1_000_000)
@@ -373,7 +373,7 @@ def test_a_stop_when_goal_takes_the_gil_only_for_its_calls(
     assert b_handle.gil_entries() == b_before
 
 
-def test_the_handle_holds_its_members_until_closed(u575: popcorn.MachineDescription) -> None:
+def test_the_handle_holds_its_members_until_closed(u575: popcorn.PartDescription) -> None:
     gc.collect()
     threads = _core.host_threads()
     a = member(u575, "link_ping", "a")
@@ -471,7 +471,7 @@ def test_save_load_reset_and_finish_while_paused(ping: Callable[[int, int | None
         linked.handle.resume(None)
 
 
-def test_closing_from_another_thread_while_calls_run(u575: popcorn.MachineDescription) -> None:
+def test_closing_from_another_thread_while_calls_run(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
     outcomes: set[str] = set()
@@ -503,7 +503,7 @@ def test_closing_from_another_thread_while_calls_run(u575: popcorn.MachineDescri
 
 
 def test_a_system_collected_on_a_machine_thread_closes_off_that_thread(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     gc.collect()
     before = _core.host_threads()
@@ -548,7 +548,7 @@ def settles(reached: Callable[[], bool], seconds: float = 10) -> bool:
 
 @pytest.mark.parametrize("closer_delay_ms", [None, 50])
 def test_a_running_system_collected_in_a_member_s_callback_closes_off_that_thread(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     monkeypatch: pytest.MonkeyPatch,
     closer_delay_ms: int | None,
 ) -> None:
@@ -696,7 +696,7 @@ time.sleep(0.05)
 
 @pytest.mark.parametrize("body", [COLLECTED, LEFT_OPEN], ids=["collected", "left open"])
 def test_an_interpreter_exits_with_a_system_closing_or_open(
-    u575: popcorn.MachineDescription, body: str
+    u575: popcorn.PartDescription, body: str
 ) -> None:
     child = subprocess.run(
         [sys.executable, "-c", CHILD.format(elf=str(USART_LL), body=body)],
@@ -711,7 +711,7 @@ def test_an_interpreter_exits_with_a_system_closing_or_open(
 
 
 def test_an_exit_reports_a_closer_stuck_past_the_exit_budget(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     child = subprocess.run(
         [sys.executable, "-c", CHILD.format(elf=str(USART_LL), body=BLOCKED)],

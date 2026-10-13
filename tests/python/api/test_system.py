@@ -37,7 +37,7 @@ def links(third: VirtualDuration | None) -> list[UartLink]:
 
 
 @pytest.fixture
-def ping(u575: popcorn.MachineDescription) -> Iterator[Build]:
+def ping(u575: popcorn.PartDescription) -> Iterator[Build]:
     made: list[LinkedSystem] = []
 
     def build(
@@ -146,7 +146,7 @@ def test_offsets_fix_each_member_s_system_time(ping: Build) -> None:
     assert stop.stops["b"].time.ps == b.time.ps
 
 
-def test_construction_checks(u575: popcorn.MachineDescription) -> None:
+def test_construction_checks(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
     good = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
@@ -302,7 +302,7 @@ def test_a_cancelled_run_pauses_and_the_next_run_goes_on(ping: Build) -> None:
 
 
 def test_a_strict_shape_mismatch_stops_the_system_with_its_error(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b", strict=True)
@@ -316,7 +316,7 @@ def test_a_strict_shape_mismatch_stops_the_system_with_its_error(
 
 
 def test_a_member_s_handler_error_stops_the_system_and_names_the_member(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     a = member(u575, "link_ping", "a", models={"TIM6": Ticker})
     b = member(u575, "link_echo", "b")
@@ -331,7 +331,7 @@ def test_a_member_s_handler_error_stops_the_system_and_names_the_member(
         assert raised.value.__notes__ == ["raised by member a at system time t=100500000 ps"]
 
 
-def test_a_closed_system_and_its_members_are_freed(u575: popcorn.MachineDescription) -> None:
+def test_a_closed_system_and_its_members_are_freed(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
     system = LinkedSystem({"a": a, "b": b}, links(None))
@@ -380,7 +380,7 @@ def test_types_are_checked_at_the_call(ping: Build) -> None:
 
 
 def test_for_counts_from_the_last_target_not_from_a_member_past_it(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     def build() -> LinkedSystem:
         a = member(u575, "link_tx_count", "a")
@@ -456,7 +456,7 @@ PARITY_CALLS = itertools.count()
 
 
 def parity_warnings(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
     caplog: pytest.LogCaptureFixture,
     declared: Literal["none", "even", "odd"],
     odd: tuple[bool, bool] | None,
@@ -499,7 +499,7 @@ def parity_warnings(
 
 
 def test_a_link_s_parity_reaches_both_directions(
-    u575: popcorn.MachineDescription, caplog: pytest.LogCaptureFixture
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
 ) -> None:
     assert parity_warnings(u575, caplog, "none", None) == []
     assert parity_warnings(u575, caplog, "even", (False, False)) == []
@@ -514,7 +514,7 @@ def test_a_link_s_parity_reaches_both_directions(
 
 
 def _self_linked(
-    u575: popcorn.MachineDescription, slice_instructions: int, third: VirtualDuration | None
+    u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
 ) -> tuple[object, ...]:
     a = member(u575, "link_self", "a", slice_instructions)
     b = member(u575, "idle", "b", slice_instructions)
@@ -539,7 +539,7 @@ def _self_linked(
 
 
 def test_a_link_between_two_uarts_of_one_member_runs_as_any_link(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     results = [
         _self_linked(u575, slice_instructions, third)

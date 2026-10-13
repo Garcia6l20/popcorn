@@ -17,13 +17,13 @@ HSION = 1 << 8
 SW_HSI16 = 0b01
 
 
-def register(description: popcorn.MachineDescription, peripheral: str, name: str) -> int:
+def register(description: popcorn.PartDescription, peripheral: str, name: str) -> int:
     unit = next(p for p in description.peripherals if p.name == peripheral)
     return unit.base + next(r.offset for r in unit.registers if r.name == name)
 
 
 def test_lowering_the_range_under_16_mhz_raises_model_error_from_the_run(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(u575, image=popcorn.Image.elf(FLASH_ELF), strict_peripherals=True)
     m.reset()

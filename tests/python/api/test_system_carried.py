@@ -35,7 +35,7 @@ Models = dict[str, type[popcorn.model.Model]] | None
 
 
 @pytest.fixture
-def pair(u575: popcorn.MachineDescription) -> Iterator[Build]:
+def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
     """Builds `a` running `a_entry` and `b` running `b_entry`, linked on `unit`, with a 3 us
     third link on USART3 when `third` is given."""
     made: list[LinkedSystem] = []
@@ -84,7 +84,7 @@ def point(stop: Stop) -> tuple[object, ...]:
 
 
 def test_a_fault_ends_its_member_s_goal_and_the_peer_reaches_its_own(
-    u575: popcorn.MachineDescription, pair: Build
+    u575: popcorn.PartDescription, pair: Build
 ) -> None:
     async def body(system: LinkedSystem) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -102,7 +102,7 @@ def test_a_fault_ends_its_member_s_goal_and_the_peer_reaches_its_own(
 
 
 def test_a_budget_ends_its_member_s_goal_as_on_a_lone_machine(
-    u575: popcorn.MachineDescription, pair: Build
+    u575: popcorn.PartDescription, pair: Build
 ) -> None:
     async def body(system: LinkedSystem) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -307,7 +307,7 @@ async def sleeps_reach(system: LinkedSystem, count: int) -> None:
 
 
 def pty_woken(
-    u575: popcorn.MachineDescription, slice_instructions: int, third: VirtualDuration | None
+    u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
 ) -> tuple[tuple[int, int], list[int], tuple[object, ...]]:
     """Start a system of an idle `a` and a `b` receiving on a pty, write one byte once both
     sleep, halt once both sleep again: the sleep counts, b's log, the members' positions."""
@@ -338,7 +338,7 @@ def pty_woken(
 
 
 def test_a_pty_byte_wakes_a_sleeping_system_at_the_same_point_at_any_slicing(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     results = [pty_woken(u575, slice_instructions, third) for slice_instructions, third in VARIANTS]
     assert results[1:] == results[:1] * 3

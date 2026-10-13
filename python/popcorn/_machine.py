@@ -35,7 +35,7 @@ from popcorn._call import (
     signature_of,
     slot_for,
 )
-from popcorn._description import MachineDescription, load_description
+from popcorn._description import PartDescription, load_description
 from popcorn._devices import (
     BusDevice,
     I2CTarget,
@@ -526,7 +526,7 @@ class Machine:
 
     def __init__(
         self,
-        description: MachineDescription | str | os.PathLike[str],
+        description: PartDescription | str | os.PathLike[str],
         *,
         image: Image | Iterable[Image] = (),
         core_hz: int = 0,
@@ -610,7 +610,7 @@ class Machine:
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
         check_machine_name(name)
-        if not isinstance(description, MachineDescription):
+        if not isinstance(description, PartDescription):
             description = load_description(description)
         config = _core.MachineConfig()
         config.core_hz = core_hz
@@ -751,7 +751,7 @@ class Machine:
                 del unclaimed
 
     @property
-    def description(self) -> MachineDescription:
+    def description(self) -> PartDescription:
         """Description the machine was built from."""
         return self._description
 
@@ -2719,7 +2719,7 @@ def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
 
 
 def _model_makers(
-    description: MachineDescription, models: Mapping[str, Callable[[], Model]]
+    description: PartDescription, models: Mapping[str, Callable[[], Model]]
 ) -> dict[str, object]:
     served = {p.name for p in description.peripherals if p.alias_of is None}
     for name in models:
@@ -2849,7 +2849,7 @@ def _device_named(
 
 
 def _checked_devices(
-    description: MachineDescription,
+    description: PartDescription,
     devices: Mapping[str, Sequence[BusDevice]],
     models: Mapping[str, object],
 ) -> dict[str, tuple[BusDevice, ...]]:
@@ -2909,7 +2909,7 @@ def _checked_budget(budget: object) -> int | None:
     return budget
 
 
-def _free_sentinel(description: MachineDescription) -> int:
+def _free_sentinel(description: PartDescription) -> int:
     """First 16-byte-aligned address from the default arena base, else from 0x1000, below the
     Arm system region, that no region or peripheral covers: the return address of a call without
     an arena."""

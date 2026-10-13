@@ -32,7 +32,7 @@ def test_an_image_error_thrown_in_another_extension_is_translated_too(tmp_path: 
 
 
 def test_image_outside_memory_is_an_image_error_naming_the_address(
-    tmp_path: Path, m33: popcorn.MachineDescription
+    tmp_path: Path, m33: popcorn.PartDescription
 ) -> None:
     path = tmp_path / "far.bin"
     path.write_bytes(bytes(16))
@@ -82,7 +82,7 @@ def test_fault_and_budget_errors_are_emulation_errors() -> None:
 
 
 def test_reset_with_no_vector_table_is_an_emulation_error(
-    m33: popcorn.MachineDescription, basic: popcorn.Image
+    m33: popcorn.PartDescription, basic: popcorn.Image
 ) -> None:
     m = popcorn.Machine(m33, image=basic, vector_table=0x3000_0000)
     with pytest.raises(popcorn.EmulationError) as caught:

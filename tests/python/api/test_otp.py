@@ -16,7 +16,7 @@ OTP_ALIAS = 0x0FFA_0000
 
 
 def test_otp_reads_erased_and_the_secure_alias_shares_it(
-    u575: popcorn.MachineDescription,
+    u575: popcorn.PartDescription,
 ) -> None:
     m = popcorn.Machine(u575)
     assert m.mem.read(OTP, 0x200) == b"\xff" * 0x200
@@ -28,7 +28,7 @@ def test_otp_reads_erased_and_the_secure_alias_shares_it(
 
 @pytest.mark.parametrize("address", [OTP, OTP_ALIAS])
 def test_a_cpu_store_to_otp_faults(
-    u575: popcorn.MachineDescription, m33_json: Path, address: int
+    u575: popcorn.PartDescription, m33_json: Path, address: int
 ) -> None:
     raw = json.loads(m33_json.read_text())
     for region in u575.regions:
