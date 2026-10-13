@@ -118,7 +118,8 @@ void uart_wire::started(line_frame const& frame)
       }
       else
       {
-        post.frame.data = edited->data[post.index - edited->first];
+        post.frame.data =
+            with_parity(edited->data[post.index - edited->first], frame.word_bits, frame.parity);
       }
       if(post.index + 1 == edited->first + edited->count)
       {
@@ -284,7 +285,7 @@ void uart_wire::collect(std::vector<detail::wire_post> const& posts, std::vector
         {.from    = ends_.sender,
          .to      = ends_.receiver,
          .index   = post.index,
-         .data    = post.frame.data,
+         .data    = data_of(post.frame.data, post.frame.word_bits, post.frame.parity),
          .start   = post.start,
          .end     = post.end,
          .arrival = shifted(post.end, latency_),
@@ -355,7 +356,7 @@ void uart_wire::deliver_injection(
   if(not dropped)
   {
     into_.port->receive_at(
-        {.data       = frame.data,
+        {.data       = with_parity(frame.data, declared_.word_bits, declared_.parity),
          .word_bits  = declared_.word_bits,
          .half_stops = declared_.half_stops,
          .parity     = declared_.parity,
@@ -375,7 +376,7 @@ void uart_wire::deliver_injection(
       {.from     = ends_.sender,
        .to       = ends_.receiver,
        .index    = frame.index,
-       .data     = frame.data,
+       .data     = data_of(frame.data, declared_.word_bits, declared_.parity),
        .start    = frame.start,
        .end      = frame.end,
        .arrival  = frame.end,

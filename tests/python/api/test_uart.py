@@ -536,6 +536,40 @@ def test_a_read_registered_past_its_deadline_takes_only_the_frames_ready_by_it(
     assert asyncio.run(reads(at)) == (waited, fast, later)
 
 
+@pytest.mark.parametrize(
+    ("fields", "sent", "echoed"),
+    [
+        ({"M0": 1}, b"\x00\x01\x7f\xff", b"\x00\x01\x7f\xff"),
+        ({"M0": 1, "PS": 1}, b"\x00\x01\x7f\xff", b"\x00\x01\x7f\xff"),
+        ({}, b"\x41\xc1\x7f\xff", b"\x41\x41\x7f\x7f"),
+    ],
+    ids=["8E1", "8O1", "7E1"],
+)
+def test_a_parity_echo_reads_the_data_bits_the_same_parked_and_running(
+    board: popcorn.Machine, fields: dict[str, int], sent: bytes, echoed: bytes
+) -> None:
+    uart = board.periph.USART1.port
+    board.periph.USART1.CR1_disabled.poke(PCE=1, **fields)
+    start = board.snapshot()
+
+    def post(at: VirtualTime) -> None:
+        uart.write(sent, at=at + ms(1))
+
+    async def reads(at: VirtualTime) -> list[Frame]:
+        return await uart.read_frames(len(sent), deadline=at + ms(4))
+
+    async def running() -> tuple[VirtualTime, list[Frame]]:
+        async with board.running():
+            return await late_drained_read(board, post, reads, ms(8))
+
+    at, frames = run_bounded(running(), 20)
+    assert bytes(f.data for f in frames) == echoed
+    assert board.periph.USART1.ISR_disabled.PE == 0
+    board.restore(start)
+    post(at)
+    assert asyncio.run(reads(at)) == frames
+
+
 def test_read_until_takes_through_the_match(board: popcorn.Machine) -> None:
     uart = board.periph.USART1.port
 

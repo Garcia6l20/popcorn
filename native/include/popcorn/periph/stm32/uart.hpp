@@ -4,6 +4,7 @@
 
 #include <reflex/enum.hpp>
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -23,6 +24,63 @@ enum class[[= reflex::derive{reflex::Format}]] line_parity
   odd,
 };
 
+/**
+ * @brief The M-bit word a UART puts on the line for @p data, RM0456 66.5: with a parity, the
+ *        data bits below bit `bits - 1` and the parity bit computed over them in bit `bits - 1`.
+ * @param data Data, bits from `bits - 1` up ignored with a parity.
+ * @param bits M bits, 7, 8 or 9, the parity bit included.
+ * @param parity Parity, @p data unchanged for line_parity::none.
+ * @return The word.
+ */
+constexpr auto with_parity(std::uint16_t data, std::uint32_t bits, line_parity parity)
+    -> std::uint16_t
+{
+  if(parity == line_parity::none)
+  {
+    return data;
+  }
+  auto const kept = static_cast<std::uint16_t>(data & ((1u << (bits - 1)) - 1u));
+  auto const ones = static_cast<std::uint32_t>(std::popcount(kept)) & 1u;
+  auto const bit  = parity == line_parity::even ? ones : ones ^ 1u;
+  return static_cast<std::uint16_t>(kept | (bit << (bits - 1)));
+}
+
+/**
+ * @brief Whether the parity bit of a received M-bit word matches @p parity: an even or odd count
+ *        of ones over its @p bits bits.
+ * @param word The word as received.
+ * @param bits M bits, 7, 8 or 9, the parity bit included.
+ * @param parity Parity the receiver checks, always true for line_parity::none.
+ * @return Whether the word passes the check.
+ */
+constexpr auto parity_ok(std::uint16_t word, std::uint32_t bits, line_parity parity) -> bool
+{
+  if(parity == line_parity::none)
+  {
+    return true;
+  }
+  auto const ones = static_cast<std::uint32_t>(
+                        std::popcount(static_cast<std::uint16_t>(word & ((1u << bits) - 1u))))
+                  & 1u;
+  return ones == (parity == line_parity::even ? 0u : 1u);
+}
+
+/**
+ * @brief The data bits of an M-bit word: the word without its parity bit.
+ * @param word The word.
+ * @param bits M bits, 7, 8 or 9, the parity bit included.
+ * @param parity Parity, @p word unchanged for line_parity::none.
+ * @return The data bits, right-aligned.
+ */
+constexpr auto data_of(std::uint16_t word, std::uint32_t bits, line_parity parity) -> std::uint16_t
+{
+  if(parity == line_parity::none)
+  {
+    return word;
+  }
+  return static_cast<std::uint16_t>(word & ((1u << (bits - 1)) - 1u));
+}
+
 /** @brief What a UART frame carries. */
 enum class[[= reflex::derive{reflex::Format}]] frame_kind
 {
@@ -35,7 +93,7 @@ enum class[[= reflex::derive{reflex::Format}]] frame_kind
 /** @brief One frame on a UART line, as its sender shaped it. */
 struct line_frame
 {
-  /** @brief Data bits, right-aligned. */
+  /** @brief The M-bit word on the line, right-aligned, the parity bit in its MSB with a parity. */
   std::uint16_t data{};
   /** @brief M bits: 7, 8 or 9, parity included when there is one. */
   std::uint8_t word_bits{8};
@@ -80,7 +138,8 @@ public:
 
   /**
    * @brief A frame left the transmitter.
-   * @param data Data bits of the frame, 7 to 9 of them, right-aligned, 0 for a break.
+   * @param data Data bits of the frame, 6 to 9 of them, right-aligned, 0 for a break: the
+   *        parity bit is stripped. started() gets the word with it.
    * @param at Virtual time the stop bit ended, the break's last low bit for a break.
    * @param brk Whether the frame is a break.
    */
@@ -125,6 +184,8 @@ public:
    * @brief Queues frames on the line towards the firmware. They arrive one frame time apart at the
    *        configured baud, the first one frame time from now. The queue is saved in snapshots.
    *        An MCU reset drops the frames still queued, as the line keeps no data on hardware.
+   *        With a parity configured, each frame gets the receiver's parity bit as it arrives, in
+   *        place of the MSB of its M-bit word, so it never sets PE.
    * @param data Frames, data bits right-aligned.
    */
   virtual void receive(std::span<std::uint16_t const> data) = 0;
@@ -135,10 +196,12 @@ public:
   /**
    * @brief Queues a frame from another machine. Its data reaches the receiver at @p frame.end,
    *        exactly, even when that time has already passed, in key order with the events of
-   *        that instant, see core::scheduler. Its start bit cancels an IDLE due after it. Called
-   *        on this machine's host thread while no slice runs, or from its own loopback endpoint.
-   *        A break frame reads as 0 with FE. Host frames of receive() and these
-   *        are not arbitrated: a linked UART takes no host frames.
+   *        that instant, see core::scheduler. Its word keeps its sender's parity bit, or is the
+   *        word as sampled when its shape differs, and is checked against the receiver's
+   *        parity: a mismatch sets PE. Its start bit cancels an IDLE due after it. Called on this
+   *        machine's host thread while no slice runs, or from its own loopback endpoint. A break
+   *        frame reads as 0 with FE and never sets PE. Host frames of receive() and these are not
+   *        arbitrated: a linked UART takes no host frames.
    * @param frame The frame, times already in this machine's virtual time.
    * @param lane Lane of the wire it came on, 1 and up.
    */

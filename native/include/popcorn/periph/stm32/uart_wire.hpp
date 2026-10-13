@@ -89,7 +89,7 @@ struct tap_frame
   /** @brief Number of the frame among the sender's frames on this wire, from 0, or among the
    * injected frames for an injected one. */
   std::uint64_t index{};
-  /** @brief Data bits, 0 for a break. */
+  /** @brief Data bits, the parity bit stripped, 0 for a break. */
   std::uint16_t data{};
   /** @brief Start-bit edge at the sender, system time. At the receiver for an injected frame. */
   core::sys_time start{};
@@ -318,7 +318,8 @@ public:
    *        happens depends on wall timing while the sender runs, the effect of an accepted edit
    *        only on the numbers.
    * @param index Number of the first frame, see tap_frame::index.
-   * @param data Data bits for frames @p index and on, not empty.
+   * @param data Data bits for frames @p index and on, not empty. Each frame gets the parity bit
+   *        of its sender's parity in place of the MSB of its word.
    * @return Whether the edit was armed: false when a frame it covers has started, or when it
    *         overlaps an edit already armed.
    */
@@ -346,7 +347,8 @@ public:
    *        after the reach of the drains so far, then delivered by the drain whose reach covers
    *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
    *        is found at the drain, a system error.
-   * @param data Data bits, one frame each, not empty.
+   * @param data Data bits, one frame each, not empty. Each frame gets the declared parity's bit
+   *        in place of the MSB of its word.
    * @param at Start-bit edge of the first frame at the receiver, system time.
    * @param stopped The receiver, when the system is stopped or paused.
    * @return Nothing, or why the frames were refused.

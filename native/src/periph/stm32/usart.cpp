@@ -216,11 +216,15 @@ struct lock
  *        sixteenths with OVER16, 3, 4 and 5 eighths with OVER8, the middle one with ONEBIT or on
  *        an LPUART: a disagreement sets NE, a stop bit sampled 0 sets FE, the sampled word enters
  *        RDR. The receiver resynchronises on each sender start bit: a falling edge inside a later
- *        frame is never taken for a start bit. Parity is not modelled: PCE logs a warning once,
- *        a model_error under strict_peripherals. RQR.SBKRQ sets SBKF and sends a break after
- *        the frame in flight, ahead of the TX FIFO: a frame time low, then 2 bits high before
- *        the next frame, SBKF clearing as the low part ends. A break from another machine reads
- *        as 0 with FE, LBDF is LIN only and not modelled.
+ *        frame is never taken for a start bit. With CR1.PCE, PS chooses even or odd parity, the
+ *        parity bit taking the MSB of the M-bit word, RM0456 66.5: a TX frame carries the bit
+ *        computed over the TDR data bits, and the endpoint's `transmitted` gets the data bits
+ *        alone. A host frame gets the receiver's bit at delivery, so it never sets PE. A frame
+ *        from another machine keeps its sender's bit, or the sampled one, and PE rises when it
+ *        fails the receiver's check, with RDR holding the word as received. RQR.SBKRQ sets SBKF
+ *        and sends a break after the frame in flight, ahead of the TX FIFO: a frame time low,
+ *        then 2 bits high before the next frame, SBKF clearing as the low part ends. A break from
+ *        another machine reads as 0 with FE and never sets PE, LBDF is LIN only and not modelled.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_port
 {
@@ -261,12 +265,15 @@ private:
   [[nodiscard]] auto parity() const -> line_parity;
   [[nodiscard]] auto word_mask() const -> std::uint32_t;
   [[nodiscard]] auto shape() -> rx_shape;
-  void               warn_parity();
   auto schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t;
   void start_frame(std::uint64_t from_ps);
-  void deliver(std::uint16_t data, bool framing = false, bool noise = false);
-  void schedule_linked();
-  void idle_at(std::uint64_t due_ps);
+  void deliver(
+      std::uint16_t data,
+      bool          framing      = false,
+      bool          noise        = false,
+      bool          parity_error = false);
+  void               schedule_linked();
+  void               idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
   void               flags();
   void               interrupts();
@@ -340,7 +347,6 @@ private:
   std::optional<field_ref>                     auto_baud_;
   std::optional<field_ref>                     auto_baud_mode_;
   std::optional<field_ref>                     retransmissions_;
-  bool                                         parity_logged_{};
 };
 
 auto usart_writes(bool low_power) -> std::span<write_entry<usart> const>
@@ -615,22 +621,6 @@ auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps
   return due;
 }
 
-void usart::warn_parity()
-{
-  if(get(regs_, parity_enable_) == 0)
-  {
-    return;
-  }
-  if(not std::exchange(parity_logged_, true))
-  {
-    warn(cr1_, "parity is not modelled: PCE is set, no parity bit is sent or checked");
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, std::string{cr1_}, parity_enable_.offset);
-  }
-}
-
 auto usart::shape() -> rx_shape
 {
   rx_shape out{
@@ -687,7 +677,7 @@ void usart::start_frame(std::uint64_t from_ps)
   }
   else
   {
-    state_.shift = state_.tx_fifo.front();
+    state_.shift = with_parity(state_.tx_fifo.front(), word_bits(), parity());
     state_.tx_fifo.erase(state_.tx_fifo.begin());
   }
   state_.shifting  = true;
@@ -782,7 +772,6 @@ void usart::interrupts()
 void usart::control_written(std::uint32_t, std::uint32_t)
 {
   warn_unsupported();
-  warn_parity();
   if(not enabled())
   {
     if(state_.shifting and far_end_)
@@ -908,7 +897,8 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     }
     else if(not head.cut and (same or rx.frame_ps == 0))
     {
-      deliver(head.frame.data);
+      deliver(
+          head.frame.data, false, false, not parity_ok(head.frame.data, rx.word_bits, parity()));
     }
     else if(not head.cut)
     {
@@ -916,7 +906,8 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
       auto const seen = sample(
           head.frame,
           next != state_.linked.end() ? std::optional{next->frame.start.ps} : std::nullopt, rx);
-      deliver(static_cast<std::uint16_t>(seen.data & word_mask()), seen.framing, seen.noise);
+      auto const word = static_cast<std::uint16_t>(seen.data & word_mask());
+      deliver(word, seen.framing, seen.noise, not parity_ok(word, rx.word_bits, parity()));
     }
     schedule_linked();
     auto const ps    = frame_ps();
@@ -939,7 +930,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     auto const brk  = std::exchange(state_.break_shifting, false);
     if(far_end_)
     {
-      far_end_->transmitted(data, vtime{state_.tx_end_ps}, brk);
+      far_end_->transmitted(data_of(data, word_bits(), parity()), vtime{state_.tx_end_ps}, brk);
     }
     auto next = state_.tx_end_ps;
     if(brk)
@@ -973,7 +964,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   auto const data = state_.host.front();
   state_.host.erase(state_.host.begin());
-  deliver(data);
+  deliver(with_parity(data, word_bits(), parity()));
   auto const ps = frame_ps();
   if(ps != 0 and not state_.host.empty())
   {
@@ -996,7 +987,7 @@ auto usart::linked_before(std::uint64_t due_ps) const -> bool
   });
 }
 
-void usart::deliver(std::uint16_t data, bool framing, bool noise)
+void usart::deliver(std::uint16_t data, bool framing, bool noise, bool parity_error)
 {
   auto const depth = fifo() ? fifo_depth : 1;
   if(enabled() and get(regs_, receive_) != 0)
@@ -1008,6 +999,10 @@ void usart::deliver(std::uint16_t data, bool framing, bool noise)
     if(noise)
     {
       update(regs_, noise_, 1);
+    }
+    if(parity_error)
+    {
+      update(regs_, parity_, 1);
     }
     if(state_.rx_fifo.size() < depth)
     {

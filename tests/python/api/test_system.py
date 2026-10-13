@@ -507,6 +507,29 @@ def test_a_link_s_parity_reaches_both_directions(
     assert all("8 data bits" in one and "9 data bits" in one for one in plain)
 
 
+@pytest.mark.parametrize(("odd", "word", "pe"), [(False, 0x041, 0), (True, 0x141, 1)])
+def test_a_linked_receiver_checks_the_sender_s_parity_bit(
+    u575: popcorn.PartDescription, odd: bool, word: int, pe: int
+) -> None:
+    call = next(PARITY_CALLS)
+    names = (f"pa{call}", f"pb{call}")
+    a = member(u575, "idle", names[0])
+    b = member(u575, "idle", names[1])
+    link = UartLink(
+        f"{names[0]}.USART2", f"{names[1]}.USART2", latency=L, baud=115_200, parity="even"
+    )
+    with System({names[0]: a, names[1]: b}, [link]) as system:
+        for m, ps in ((a, int(odd)), (b, 0)):
+            m.periph.RCC.RCC_APB1ENR1.USART2EN = 1
+            m.periph.USART2.BRR.value = 35
+            m.periph.USART2.CR1_disabled.poke(UE=1, TE=1, RE=1, PCE=1, M0=1, PS=ps)
+        a.periph.USART2.TDR.value = 0x41
+        assert asyncio.run(system.run(for_=ms(1))).reason is StopReason.TIME
+        assert b.periph.USART2.ISR_disabled.RXFNE == 1
+        assert pe == b.periph.USART2.ISR_disabled.PE
+        assert b.periph.USART2.RDR.value == word
+
+
 def _self_linked(
     u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
 ) -> tuple[object, ...]:

@@ -56,10 +56,11 @@ class UartLink:
         data_bits: Declared data bits, 7, 8 or 9, at most 8 with a parity bit: a frame
             carries data bits plus the parity bit in at most 9 bits.
         stop_bits: Declared stop bits, 0.5, 1, 1.5 or 2.
-        parity: Declared parity, "none", "even" or "odd". A sender whose USART frames with
-            another parity, CR1.PCE and PS, is warned about as for another baud. Parity bits
-            are not computed or checked, `uart-parity-pce` known issue: the warning is the
-            whole effect.
+        parity: Declared parity, "none", "even" or "odd": the parity bit of injected frames.
+            A sender whose USART frames with another parity, CR1.PCE and PS, is warned about
+            as for another baud. Each USART computes the parity bit of the frames it sends and
+            checks the bit of the frames it receives, a mismatch setting ISR.PE, so a link
+            whose ends match its declared parity carries correct bits.
     """
 
     a: str
@@ -315,7 +316,7 @@ class TapFrame:
     """One frame on one direction of a link, as `UartTap` shows it. Times are system times.
 
     Attributes:
-        data: Data bits, 0 for a break.
+        data: Data bits, 0 for a break, the parity bit stripped as in `Frame.data`.
         index: Number of the frame among its sender's frames in this direction, from 0 at
             system start, or among the frames injected in this direction for an injected one:
             the index `UartTap.replace` and `drop` take for a sender's frame.
@@ -2039,7 +2040,8 @@ class UartTap:
         """Put frames on the line towards `towards`, back to back at the link's declared baud
         and shape, as if a device on the line sent them. `at` is the start-bit edge of the first
         frame at the receiver, system time. Delivered at exactly their times, whatever the
-        quantum, the slicing or the wall timing.
+        quantum, the slicing or the wall timing. With a declared parity, each frame carries
+        its parity bit in the MSB of its word, in place of that data bit.
 
         Stopped or paused, they are checked at the call: `at` must be at or after the
         receiver's system time, and no frame may overlap one already on the receiver's line.
@@ -2087,9 +2089,10 @@ class UartTap:
 
     def replace(self, index: int, data: bytes, *, towards: str) -> None:
         """Give the sender's frames numbered `index` on, one per byte, new data before they
-        start: the receiver and the tap see the new data at the frames' own times. Armed at
-        any time, from a `running()` body too: while the sender runs, whether the edit comes
-        before the frame starts depends on wall timing, its effect does not.
+        start: the receiver and the tap see the new data at the frames' own times, with the
+        parity bit of the sender's own parity in the MSB of the word. Armed at any time, from
+        a `running()` body too: while the sender runs, whether the edit comes before the frame
+        starts depends on wall timing, its effect does not.
 
         Raises:
             TypeError: `index` is no int, `data` no bytes, or `towards` no str.

@@ -206,7 +206,9 @@ class Frame:
     """One frame the firmware transmitted.
 
     Attributes:
-        data: Data bits, 0 for a break.
+        data: Data bits, 0 for a break. With a parity, CR1.PCE, the parity bit the frame
+            carried on the line in the MSB of its M-bit word is stripped: a 7E1 frame gives
+            7 bits, an 8E1 frame 8 bits, M = 7 with PCE 6 bits. `read` gives the same bits.
         at: Virtual time its stop bit ended.
         brk: Whether it was a break. `read` gives a break as a 0 byte.
     """
@@ -291,7 +293,9 @@ class UartStream:
         """Queue bytes towards the firmware, posted at the call as one command: at once while the
         machine is parked, at the next block boundary while it runs, or at the first boundary at
         or after `at`. They arrive one frame time apart as the machine runs. Await the result
-        for the virtual time the bytes were queued at.
+        for the virtual time the bytes were queued at. With a parity configured, each byte
+        arrives with the parity bit the receiver expects in the MSB of its M-bit word, so bit 7
+        of a byte sent to a 7E1 receiver is replaced, and none sets PE.
 
         Raises:
             RuntimeError: Called from a handler or a model, or the UART is linked to another

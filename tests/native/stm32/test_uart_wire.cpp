@@ -183,7 +183,11 @@ struct rig
     return *nodes.back();
   }
 
-  auto link(std::size_t from, std::size_t to, std::uint64_t latency) -> stm32::uart_wire&
+  auto link(
+      std::size_t       from,
+      std::size_t       to,
+      std::uint64_t     latency,
+      stm32::line_shape shape = declared()) -> stm32::uart_wire&
   {
     auto&      sender   = *nodes[from];
     auto&      receiver = *nodes[to];
@@ -192,7 +196,7 @@ struct rig
     auto       wire     = std::make_shared<stm32::uart_wire>(
         stm32::wire_ends{.sender = from, .receiver = to},
         stm32::wire_lanes{.peer = lane, .injected = lane + 1},
-        core::sys_time{static_cast<std::int64_t>(latency)}, declared(),
+        core::sys_time{static_cast<std::int64_t>(latency)}, shape,
         stm32::wire_receiver{
             .port   = receiver.port,
             .unit   = "USART1",
@@ -1527,4 +1531,67 @@ TEST_CASE("a receiver reset drops an injection queued within L after it at any w
   }
   CHECK(dumps[1] == dumps[0]);
   CHECK(dumps[2] == dumps[0]);
+}
+
+namespace
+{
+void poke(node const& one, std::string_view peripheral, std::string_view reg, std::uint32_t value)
+{
+  auto const& desc  = one.f->target->peripheral(peripheral).description();
+  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != desc.registers.end());
+  REQUIRE(one.f->target->mem().write(desc.base + found->offset, 4, value).has_value());
+}
+
+auto peek(node const& one, std::string_view peripheral, std::string_view reg) -> std::uint32_t
+{
+  auto const& desc  = one.f->target->peripheral(peripheral).description();
+  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
+  REQUIRE(found != desc.registers.end());
+  auto const value = one.f->target->mem().read(desc.base + found->offset, 4);
+  REQUIRE(value.has_value());
+  return static_cast<std::uint32_t>(*value);
+}
+
+void even_7e1(node const& one)
+{
+  constexpr std::uint32_t cr1 = 1u | (1u << 2) | (1u << 3) | (1u << 10) | (1u << 29);
+  poke(one, "RCC", "RCC_APB2ENR", peek(one, "RCC", "RCC_APB2ENR") | (1u << 14));
+  poke(one, "USART1", "BRR", 35);
+  poke(one, "USART1", "CR1_enabled", cr1);
+}
+}
+
+TEST_CASE("a 7E1 link taps data bits and gives edited and injected frames their parity bit")
+{
+  rig r;
+  r.add("idle");
+  r.add("idle");
+  auto& wire = r.link(
+      0, 1, latency_20,
+      {.baud = 114'286, .word_bits = 8, .half_stops = 2, .parity = stm32::line_parity::even});
+  for(auto const& one : r.nodes)
+  {
+    even_7e1(*one);
+  }
+  std::vector<std::uint16_t> const edit{0x01};
+  REQUIRE(wire.replace(1, edit));
+  REQUIRE(injected_byte(wire, 0xc1, static_cast<std::int64_t>(ms_ps), std::nullopt).has_value());
+  r.enter(0, 0);
+  for(auto const value : {0x41u, 0x40u, 0x7fu})
+  {
+    poke(*r.nodes[0], "USART1", "TDR", value);
+  }
+  r.run({.window = latency_20});
+  std::vector<std::uint32_t> tapped;
+  for(auto const& frame : r.taps[0])
+  {
+    tapped.push_back(frame.data);
+  }
+  CHECK(tapped == std::vector<std::uint32_t>{0x41, 0x01, 0x7f, 0x41});
+  auto const isr = peek(*r.nodes[1], "USART1", "ISR_enabled");
+  CHECK((isr & 1u) == 0);
+  CHECK((isr & (1u << 5)) != 0);
+  CHECK(peek(*r.nodes[1], "USART1", "RDR") == 0x41);
+  CHECK(r.nodes[1]->warnings.empty());
 }

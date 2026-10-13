@@ -11,6 +11,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -1540,35 +1541,422 @@ TEST_CASE("OVER8 and ONEBIT receivers sample 0x55 at their own offsets")
   CHECK(errors_of(near16.log).empty());
 }
 
-TEST_CASE("PCE logs once, and is a model_error under strict_peripherals")
+namespace
 {
-  rig                           r{"idle"};
-  std::vector<core::log_record> logged;
-  auto const                    sink =
-      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
-  auto const& desc = r.f->target->peripheral("USART1").description();
-  auto const  cr1  = std::ranges::find(
-      desc.registers, std::string_view{"CR1_enabled"}, &popcorn::register_desc::name);
-  REQUIRE(cr1 != desc.registers.end());
-  auto const pce =
-      std::ranges::find(cr1->fields, std::string_view{"PCE"}, &popcorn::field_desc::name);
-  REQUIRE(pce != cr1->fields.end());
-  REQUIRE(r.f->target->mem().write(desc.base + cr1->offset, 4, 1u << pce->lsb).has_value());
-  REQUIRE(r.f->target->mem().write(desc.base + cr1->offset, 4, 1u << pce->lsb).has_value());
-  REQUIRE(r.f->run_to_stop({.budget_left = icount{10}}).reason != stop_reason::user);
-  auto const parity = std::ranges::count_if(logged, [](core::log_record const& record) {
-    return record.kind == core::log_kind::model_warning and record.message.contains("parity");
-  });
-  CHECK(parity == 1);
+constexpr std::uint32_t cr1_re     = 1u << 2;
+constexpr std::uint32_t cr1_te     = 1u << 3;
+constexpr std::uint32_t cr1_peie   = 1u << 8;
+constexpr std::uint32_t cr1_ps     = 1u << 9;
+constexpr std::uint32_t cr1_pce    = 1u << 10;
+constexpr std::uint32_t cr1_m0     = 1u << 12;
+constexpr std::uint32_t cr1_m1     = 1u << 28;
+constexpr std::uint32_t cr1_fifoen = 1u << 29;
+constexpr std::uint32_t isr_pe     = 1u << 0;
+constexpr std::uint32_t isr_rxfne  = 1u << 5;
+constexpr std::uint32_t icr_pecf   = 1u << 0;
+constexpr std::uint32_t rqr_rxfrq  = 1u << 3;
+constexpr std::uint32_t nvic_ispr1 = 0xe000'e204u;
+constexpr std::uint32_t nvic_icpr1 = 0xe000'e284u;
+constexpr std::uint32_t usart1_irq = 1u << (61 - 32);
 
-  auto options               = popcorn::testing::stm32_options();
-  options.strict_peripherals = true;
-  stm32::board board{};
-  options.models = stm32::factories(board, u575());
-  stm32_fixture strict{u575(), "usart_ll", std::move(options)};
-  CHECK_THROWS_AS(
-      (void)strict.target->mem().write(desc.base + cr1->offset, 4, 1u << pce->lsb),
-      popcorn::model_error);
+struct line_config
+{
+  std::uint32_t      bits{8};
+  stm32::line_parity parity{};
+};
+
+constexpr std::array<line_config, 9> line_configs{
+    {
+     {.bits = 9, .parity = stm32::line_parity::even},
+     {.bits = 9, .parity = stm32::line_parity::odd},
+     {.bits = 8, .parity = stm32::line_parity::even},
+     {.bits = 8, .parity = stm32::line_parity::odd},
+     {.bits = 7, .parity = stm32::line_parity::even},
+     {.bits = 7, .parity = stm32::line_parity::odd},
+     {.bits = 9, .parity = stm32::line_parity::none},
+     {.bits = 8, .parity = stm32::line_parity::none},
+     {.bits = 7, .parity = stm32::line_parity::none},
+     }
+};
+
+constexpr std::array<std::uint32_t, 4> parity_values{0x00, 0x01, 0x7f, 0xff};
+
+auto cr1_of(line_config config) -> std::uint32_t
+{
+  std::uint32_t out = ue | cr1_re | cr1_te;
+  out |= config.bits == 9 ? cr1_m0 : (config.bits == 7 ? cr1_m1 : 0u);
+  if(config.parity != stm32::line_parity::none)
+  {
+    out |= cr1_pce | (config.parity == stm32::line_parity::odd ? cr1_ps : 0u);
+  }
+  return out;
+}
+
+auto ones_of(std::uint32_t word) -> std::uint32_t
+{
+  std::uint32_t ones = 0;
+  for(; word != 0; word >>= 1)
+  {
+    ones += word & 1u;
+  }
+  return ones;
+}
+
+auto data_bits(line_config config) -> std::uint32_t
+{
+  return config.parity == stm32::line_parity::none ? config.bits : config.bits - 1;
+}
+
+auto expected_word(std::uint32_t value, line_config config) -> std::uint32_t
+{
+  auto const data = value & ((1u << data_bits(config)) - 1u);
+  if(config.parity == stm32::line_parity::none)
+  {
+    return data;
+  }
+  auto const odd = config.parity == stm32::line_parity::odd ? 1u : 0u;
+  return data | (((ones_of(data) % 2) ^ odd) << (config.bits - 1));
+}
+
+struct parity_rig
+{
+  locked_rig               t;
+  std::shared_ptr<mailbox> box = std::make_shared<mailbox>();
+
+  explicit parity_rig(line_config config, std::uint32_t brr = 35, std::uint32_t extra = 0)
+  {
+    t.r.port("USART1").attach(box);
+    configure(config, brr, extra);
+  }
+
+  void configure(line_config config, std::uint32_t brr = 35, std::uint32_t extra = 0) const
+  {
+    t.cpu("USART1", "CR1_enabled", 0);
+    t.cpu("USART1", "BRR", brr);
+    t.cpu("USART1", "CR1_enabled", cr1_of(config) | extra);
+  }
+
+  [[nodiscard]] auto now() const -> std::uint64_t
+  {
+    return t.r.f->target->virtual_clock().time().ps;
+  }
+
+  void advance(std::uint64_t ps) const
+  {
+    auto const until = now() + ps;
+    for(;;)
+    {
+      auto const result = t.r.f->run(
+          {.max_instructions = icount{1'000'000'000},
+           .wall_budget      = std::chrono::seconds{60},
+           .until_time       = vtime{until}});
+      if(result.stopped)
+      {
+        REQUIRE(result.stopped->reason == stop_reason::time);
+        return;
+      }
+    }
+  }
+
+  void send(std::uint32_t value) const
+  {
+    t.cpu("USART1", "TDR", value);
+    advance(200 * us_ps);
+  }
+
+  void host(std::uint16_t value) const
+  {
+    std::vector<std::uint16_t> const one{value};
+    t.r.port("USART1").receive(one);
+    advance(200 * us_ps);
+  }
+
+  void linked(stm32::line_frame frame) const
+  {
+    auto const start = now() + 10 * us_ps;
+    frame.end        = vtime{start + (frame.end.ps - frame.start.ps)};
+    frame.start      = vtime{start};
+    t.r.port("USART1").receive_at(frame, 1);
+    advance(300 * us_ps);
+  }
+
+  [[nodiscard]] auto isr() const -> std::uint32_t
+  {
+    return t.read("USART1", "ISR_enabled");
+  }
+
+  [[nodiscard]] auto rdr() const -> std::uint32_t
+  {
+    return t.read("USART1", "RDR");
+  }
+
+  [[nodiscard]] auto pending() const -> bool
+  {
+    auto const word = t.r.f->target->mem().read(nvic_ispr1, 4);
+    REQUIRE(word.has_value());
+    return (*word & usart1_irq) != 0;
+  }
+
+  void unpend() const
+  {
+    REQUIRE(t.r.f->target->mem().write(nvic_icpr1, 4, usart1_irq).has_value());
+  }
+
+  void clear_rx() const
+  {
+    t.cpu("USART1", "ICR", icr_pecf);
+    t.cpu("USART1", "RQR", rqr_rxfrq);
+  }
+};
+
+struct received
+{
+  std::uint32_t word{};
+  bool          pe{};
+
+  friend auto operator==(received const&, received const&) -> bool = default;
+};
+
+auto across(
+    line_config                    sender,
+    line_config                    receiver,
+    std::span<std::uint32_t const> values,
+    std::uint32_t                  receiver_brr = 35) -> std::vector<received>
+{
+  parity_rig a{sender};
+  parity_rig b{receiver, receiver_brr};
+  for(auto const value : values)
+  {
+    a.send(value);
+  }
+  REQUIRE(a.box->posts.size() == values.size());
+  std::vector<received> out;
+  for(auto const& post : a.box->posts)
+  {
+    b.linked(post.frame);
+    CHECK((b.isr() & isr_rxfne) != 0);
+    out.push_back({.word = b.rdr(), .pe = (b.isr() & isr_pe) != 0});
+    b.clear_rx();
+  }
+  return out;
+}
+}
+
+TEST_CASE("TX frames carry the parity bit in their word and the endpoint gets the data bits")
+{
+  parity_rig p{line_configs[0]};
+  for(auto const config : line_configs)
+  {
+    CAPTURE(config.bits);
+    CAPTURE(config.parity);
+    p.configure(config);
+    p.box->posts.clear();
+    p.box->sent.clear();
+    for(auto const value : parity_values)
+    {
+      p.send(value);
+    }
+    REQUIRE(p.box->posts.size() == parity_values.size());
+    REQUIRE(p.box->sent.size() == parity_values.size());
+    for(std::size_t index = 0; index < parity_values.size(); ++index)
+    {
+      CAPTURE(parity_values[index]);
+      auto const word = expected_word(parity_values[index], config);
+      CHECK(p.box->posts[index].frame.data == word);
+      CHECK(p.box->posts[index].frame.parity == config.parity);
+      CHECK(p.box->posts[index].frame.word_bits == config.bits);
+      CHECK(p.box->sent[index].data == (word & ((1u << data_bits(config)) - 1u)));
+      if(config.parity != stm32::line_parity::none)
+      {
+        CHECK(ones_of(word) % 2 == (config.parity == stm32::line_parity::odd ? 1u : 0u));
+      }
+    }
+  }
+}
+
+TEST_CASE("PCE 0 sends the TDR word unchanged in the M bits")
+{
+  parity_rig p{
+      {.bits = 9, .parity = stm32::line_parity::none}
+  };
+  for(auto const value : {0x000u, 0x0ffu, 0x100u, 0x1ffu, 0x2a5u})
+  {
+    p.send(value);
+  }
+  std::vector<std::uint32_t> words;
+  std::vector<std::uint32_t> sent;
+  for(std::size_t index = 0; index < p.box->posts.size(); ++index)
+  {
+    words.push_back(p.box->posts[index].frame.data);
+    sent.push_back(p.box->sent[index].data);
+  }
+  CHECK(words == std::vector<std::uint32_t>{0x000, 0x0ff, 0x100, 0x1ff, 0x0a5});
+  CHECK(sent == words);
+}
+
+TEST_CASE("an 8E1 frame takes the time of a 9N1 frame and 11 bit times")
+{
+  auto const frame_of = [](line_config config) {
+    parity_rig p{config};
+    p.send(0x55);
+    p.send(0x56);
+    REQUIRE(p.box->posts.size() == 2);
+    REQUIRE(p.box->sent.size() == 2);
+    auto const& frame = p.box->posts[0].frame;
+    CHECK(frame.end.ps - frame.start.ps == frame.frame_ps);
+    CHECK(p.box->sent[0].at == frame.end);
+    return frame.frame_ps;
+  };
+  auto const even = frame_of({.bits = 9, .parity = stm32::line_parity::even});
+  auto const odd  = frame_of({.bits = 9, .parity = stm32::line_parity::odd});
+  auto const nine = frame_of({.bits = 9, .parity = stm32::line_parity::none});
+  auto const n81  = frame_of({.bits = 8, .parity = stm32::line_parity::none});
+  CHECK(even == nine);
+  CHECK(odd == nine);
+  CHECK(even * 10 + 10 >= n81 * 11);
+  CHECK(even * 10 <= n81 * 11 + 10);
+}
+
+TEST_CASE("host frames reach RDR with the receiver's parity bit and never set PE")
+{
+  parity_rig p{line_configs[0]};
+  for(auto const config : line_configs)
+  {
+    if(config.parity == stm32::line_parity::none)
+    {
+      continue;
+    }
+    CAPTURE(config.bits);
+    CAPTURE(config.parity);
+    p.configure(config);
+    for(auto const value : {0x00u, 0x01u, 0x7fu, 0xffu, 0xc1u})
+    {
+      CAPTURE(value);
+      p.host(static_cast<std::uint16_t>(value));
+      CHECK((p.isr() & isr_rxfne) != 0);
+      CHECK((p.isr() & isr_pe) == 0);
+      CHECK(p.rdr() == expected_word(value, config));
+      p.clear_rx();
+    }
+  }
+  p.configure({.bits = 8, .parity = stm32::line_parity::none});
+  p.host(0xc1);
+  CHECK(p.rdr() == 0xc1);
+}
+
+TEST_CASE(
+    "a linked frame of the receiver's parity sets no PE and one of the other parity always does")
+{
+  for(auto const bits : {9u, 8u, 7u})
+  {
+    CAPTURE(bits);
+    line_config const     even{.bits = bits, .parity = stm32::line_parity::even};
+    line_config const     odd{.bits = bits, .parity = stm32::line_parity::odd};
+    std::vector<received> same;
+    std::vector<received> crossed;
+    for(auto const value : parity_values)
+    {
+      same.push_back({.word = expected_word(value, even), .pe = false});
+      crossed.push_back({.word = expected_word(value, odd), .pe = true});
+    }
+    CHECK(across(even, even, parity_values) == same);
+    CHECK(across(odd, even, parity_values) == crossed);
+  }
+}
+
+TEST_CASE("a 9N1 sender on an 8E1 receiver sets PE on words with an odd count of ones")
+{
+  std::array<std::uint32_t, 6> const words{0x000, 0x001, 0x003, 0x100, 0x1ff, 0x0fe};
+  std::vector<received>              expected;
+  for(auto const word : words)
+  {
+    expected.push_back({.word = word, .pe = ones_of(word) % 2 == 1});
+  }
+  CHECK(
+      across(
+          {.bits = 9, .parity = stm32::line_parity::none},
+          {.bits = 9, .parity = stm32::line_parity::even}, words)
+      == expected);
+}
+
+TEST_CASE("a sampled linked frame is checked as sampled: same parity clean and the other one PE")
+{
+  line_config const     even{.bits = 9, .parity = stm32::line_parity::even};
+  line_config const     odd{.bits = 9, .parity = stm32::line_parity::odd};
+  std::vector<received> same;
+  std::vector<received> crossed;
+  for(auto const value : parity_values)
+  {
+    same.push_back({.word = expected_word(value, even), .pe = false});
+    crossed.push_back({.word = expected_word(value, odd), .pe = true});
+  }
+  CHECK(across(even, even, parity_values, 36) == same);
+  CHECK(across(odd, even, parity_values, 36) == crossed);
+}
+
+TEST_CASE("PE raises USART1_IRQn with PEIE only and PECF clears it")
+{
+  line_config const even{.bits = 9, .parity = stm32::line_parity::even};
+  parity_rig        a{
+      {.bits = 9, .parity = stm32::line_parity::odd}
+  };
+  parity_rig b{even};
+  a.send(0x41);
+  REQUIRE(a.box->posts.size() == 1);
+  b.linked(a.box->posts[0].frame);
+  REQUIRE((b.isr() & isr_pe) != 0);
+  b.t.cpu("USART1", "RQR", rqr_rxfrq);
+  b.unpend();
+  CHECK_FALSE(b.pending());
+  b.t.cpu("USART1", "CR3", 1u);
+  CHECK((b.isr() & isr_pe) != 0);
+  CHECK_FALSE(b.pending());
+  b.t.cpu("USART1", "CR1_enabled", cr1_of(even) | cr1_peie);
+  CHECK(b.pending());
+  b.t.cpu("USART1", "ICR", icr_pecf);
+  CHECK((b.isr() & isr_pe) == 0);
+  b.unpend();
+  CHECK_FALSE(b.pending());
+}
+
+TEST_CASE("PCE under strict peripherals runs without a model_error or a warning")
+{
+  locked_rig t{true};
+  t.cpu("USART1", "CR1_enabled", cr1_pce | cr1_m0);
+  t.cpu("USART1", "CR1_enabled", ue | cr1_pce | cr1_m0 | cr1_te);
+  REQUIRE(t.r.f->run_to_stop({.budget_left = icount{10}}).reason != stop_reason::user);
+  CHECK(t.logged.empty());
+}
+
+TEST_CASE("a snapshot between host frames under 7E1 restores to the same RDR words")
+{
+  parity_rig p{
+      {.bits = 8, .parity = stm32::line_parity::even},
+      35, cr1_fifoen
+  };
+  std::vector<std::uint16_t> const bytes{0x41, 0xc3, 0x7f, 0x80, 0x55};
+  p.t.r.port("USART1").receive(bytes);
+  p.advance(150 * us_ps);
+  auto const saved = p.t.r.f->target->snapshot();
+  auto const drain = [&] {
+    p.advance(800 * us_ps);
+    std::vector<std::uint32_t> words;
+    auto* const                probe = p.t.r.f->model_of<bus_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    while((p.isr() & isr_rxfne) != 0)
+    {
+      auto const word = probe->context.services.read(
+          address_of(*p.t.r.f, "USART1", "RDR"), 4, popcorn::initiator::cpu);
+      REQUIRE(word.has_value());
+      words.push_back(static_cast<std::uint32_t>(*word));
+    }
+    CHECK((p.isr() & isr_pe) == 0);
+    return words;
+  };
+  auto const first = drain();
+  CHECK(first == std::vector<std::uint32_t>{0x41, 0xc3, 0xff, 0x00, 0x55});
+  p.t.r.f->target->restore(saved);
+  CHECK(drain() == first);
 }
 
 TEST_CASE("SBKRQ sends a break after the frame in flight, SBKF set until its low part ends")
