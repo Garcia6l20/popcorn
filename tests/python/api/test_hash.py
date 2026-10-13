@@ -271,23 +271,34 @@ def key_pattern(size: int) -> bytes:
     return bytes((index * 53 + 7) & 0xFF for index in range(size))
 
 
-def register_phase(
-    m: popcorn.Machine, data: bytes, datatype: int, rng: random.Random, last: bool
+def feed_words(
+    m: popcorn.Machine, data: bytes, words: range, datatype: int, rng: random.Random
 ) -> None:
     unit = m.periph.HASH
-    for at in range(0, len(data), 4):
-        chunk = data[at : at + 4]
+    for index in words:
+        chunk = data[4 * index : 4 * index + 4]
         valid = 8 * len(chunk)
         word = int.from_bytes(chunk.ljust(4, b"\0"), "big")
         if valid < 32:
             word |= rng.getrandbits(32) & (0xFFFF_FFFF >> valid)
         unit.DIN.write(din_word(word, datatype))
+
+
+def close_phase(m: popcorn.Machine, data: bytes, last: bool) -> None:
+    unit = m.periph.HASH
     unit.STR.write((8 * len(data)) % 32)
     unit.STR.write(DCAL)
     assert unit.SR.BUSY == 1
     assert asyncio.run(m.run(for_=ms(1))).reason is popcorn.StopReason.TIME
     assert bool(unit.SR.DCIS) is last
     assert unit.SR.DINIS == 1
+
+
+def register_phase(
+    m: popcorn.Machine, data: bytes, datatype: int, rng: random.Random, last: bool
+) -> None:
+    feed_words(m, data, range((len(data) + 3) // 4), datatype, rng)
+    close_phase(m, data, last)
 
 
 def register_hmac(
@@ -324,7 +335,7 @@ def test_random_hmacs_written_from_python_match_hmac(
 HMAC_CASES = [
     (algo, key, length)
     for algo in range(len(ALGORITHMS))
-    for key, length in ((20, 0), (20, 68), (64, 300), (131, 50))
+    for key, length in ((20, 0), (21, 68), (64, 300), (131, 50))
 ]
 HMAC_DMA_CASES = [
     (algo, key, length) for algo in range(len(ALGORITHMS)) for key, length in ((20, 68), (131, 300))
@@ -402,3 +413,190 @@ def test_hmac_phases_closed_back_to_back_keep_one_pending_event(
     assert unit.SR.DCIS == 1
     words = [unit[f"HR{index}"].read() for index in range(8)]
     assert struct.pack(">8I", *words) == hmac.new(b"", b"", "sha256").digest()
+
+
+CR_SAVED = (1 << 3) | (3 << 4) | MODE | (1 << 13) | LKEY | (3 << 17)
+HASH_CSRS = 38
+HMAC_CSRS = 54
+
+
+def save_context(m: popcorn.Machine, csrs: int) -> list[int]:
+    unit = m.periph.HASH
+    assert unit.SR.BUSY == 0
+    assert unit.SR.DINIS == 1
+    head = [unit.IMR.read() & 3, unit.STR.read() & 0x1F, unit.CR.read() & CR_SAVED]
+    return head + [unit[f"CSR{index}"].read() for index in range(csrs)]
+
+
+def restore_context(m: popcorn.Machine, saved: list[int]) -> None:
+    unit = m.periph.HASH
+    unit.IMR.write(saved[0])
+    unit.STR.write(saved[1])
+    unit.CR.write(saved[2])
+    unit.CR.write(saved[2] | INIT)
+    for index, word in enumerate(saved[3:]):
+        unit[f"CSR{index}"].write(word)
+
+
+def interrupt(m: popcorn.Machine, rng: random.Random) -> None:
+    algo = rng.randrange(len(ALGORITHMS))
+    message = rng.randbytes(rng.randrange(200))
+    datatype = rng.randrange(4)
+    if rng.randrange(2) == 0:
+        got = register_hash(m, algo, message, datatype, rng)
+        assert got == hashlib.new(ALGORITHMS[algo], message).digest()
+        return
+    key = rng.randbytes(rng.randrange(100))
+    got = register_hmac(m, algo, key, message, datatype, rng)
+    assert got == hmac.new(key, message, ALGORITHMS[algo]).digest()
+
+
+def swapped(
+    m: popcorn.Machine,
+    algo: int,
+    steps: list[bytes],
+    keyed: bool,
+    datatype: int,
+    rng: random.Random,
+) -> tuple[bytes, int, int]:
+    unit = m.periph.HASH
+    control = (algo << 17) | (datatype << 4)
+    if keyed:
+        control |= MODE | (LKEY if len(steps[0]) > 64 else 0)
+    unit.CR.write(INIT | control)
+    phase = rng.randrange(len(steps))
+    full = len(steps[phase]) // 4
+    at = rng.choice([0, *range(17, full + 1, 16)])
+    for step, data in enumerate(steps):
+        words = (len(data) + 3) // 4
+        split = at if step == phase else words
+        feed_words(m, data, range(split), datatype, rng)
+        if step == phase:
+            assert asyncio.run(m.run(for_=ms(1))).reason is popcorn.StopReason.TIME
+            saved = save_context(m, HMAC_CSRS if keyed else HASH_CSRS)
+            interrupt(m, rng)
+            restore_context(m, saved)
+            feed_words(m, data, range(split, words), datatype, rng)
+        close_phase(m, data, last=step == len(steps) - 1)
+    words = [unit[f"HR{index}"].read() for index in range(8)]
+    assert [unit[f"HRA{index}"].read() for index in range(5)] == words[:5]
+    return struct.pack(">8I", *words)[: DIGEST_SIZES[algo]], phase, at
+
+
+@pytest.mark.parametrize("algo", range(len(ALGORITHMS)), ids=ALGORITHMS)
+def test_contexts_swapped_from_python_resume_to_hashlib_and_hmac(
+    u575: popcorn.PartDescription, algo: int
+) -> None:
+    m = entered(u575, "idle")
+    rng = random.Random(0x9D0 + algo)
+    seen: set[tuple[bool, int, bool]] = set()
+    for _ in range(120):
+        keyed = rng.randrange(2) == 1
+        message = rng.randbytes(rng.randrange(301))
+        datatype = rng.randrange(4)
+        if keyed:
+            key = rng.randbytes(rng.randrange(151))
+            got, phase, at = swapped(m, algo, [key, message, key], True, datatype, rng)
+            expected = hmac.new(key, message, ALGORITHMS[algo]).digest()
+        else:
+            got, phase, at = swapped(m, algo, [message], False, datatype, rng)
+            expected = hashlib.new(ALGORITHMS[algo], message).digest()
+        assert got == expected, (keyed, phase, at, len(message), datatype)
+        seen.add((keyed, phase, at != 0))
+    assert seen == {(False, 0, False), (False, 0, True)} | {
+        (True, phase, inside) for phase in range(3) for inside in (False, True)
+    }
+
+
+SWAP_RESULTS = 32
+
+
+def swap_expected() -> list[bytes]:
+    out: list[bytes] = []
+    for algo, name in enumerate(ALGORITHMS):
+        other = ALGORITHMS[(algo + 1) % len(ALGORITHMS)]
+        out.append(hashlib.new(other, pattern(68)).digest())
+        out.append(hashlib.new(name, pattern(300)).digest())
+        for _ in range(3):
+            out.append(hmac.new(key_pattern(21), pattern(68), other).digest())
+            out.append(hmac.new(key_pattern(131), pattern(300), name).digest())
+    return [digest + bytes(32 - len(digest)) for digest in out]
+
+
+def swap_results(m: popcorn.Machine) -> tuple[bytes, ...]:
+    assert words(m, "swap_count", 1) == (SWAP_RESULTS,)
+    raw = words(m, "swap_digest", 8 * SWAP_RESULTS)
+    return tuple(
+        struct.pack(">8I", *raw[8 * index : 8 * index + 8]) for index in range(SWAP_RESULTS)
+    )
+
+
+def test_the_firmware_swaps_contexts_alike_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = entered(u575, "hash_swap")
+    stop = asyncio.run(m.wait_for(m.ref.var("hash_done").ge(1), for_=ms(2000)))
+    assert stop.reason is popcorn.StopReason.USER
+    first = swap_results(m)
+    assert list(first) == swap_expected()
+
+    other = entered(u575, "hash_swap")
+
+    async def body() -> popcorn.Stop:
+        async with other.running():
+            return await other.wait_for(other.ref.var("hash_done").ge(1))
+
+    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert swap_results(other) == first
+
+
+DMA_SWAP_CASES = 2 * len(ALGORITHMS)
+DMA_SWAP_RESULTS = 2 * DMA_SWAP_CASES
+
+
+def dma_swap_expected() -> list[bytes]:
+    out: list[bytes] = []
+    for algo, name in enumerate(ALGORITHMS):
+        other = ALGORITHMS[(algo + 1) % len(ALGORITHMS)]
+        out.append(hashlib.new(other, pattern(68)).digest())
+        out.append(hashlib.new(name, pattern(300)).digest())
+        out.append(hmac.new(key_pattern(21), pattern(68), other).digest())
+        out.append(hmac.new(key_pattern(131), pattern(300), name).digest())
+    return [digest + bytes(32 - len(digest)) for digest in out]
+
+
+def dma_swap_results(
+    m: popcorn.Machine,
+) -> tuple[tuple[bytes, ...], tuple[int, ...], tuple[int, ...]]:
+    assert words(m, "dma_swap_count", 1) == (DMA_SWAP_RESULTS,)
+    raw = words(m, "dma_swap_digest", 8 * DMA_SWAP_RESULTS)
+    digests = tuple(
+        struct.pack(">8I", *raw[8 * index : 8 * index + 8]) for index in range(DMA_SWAP_RESULTS)
+    )
+    return (
+        digests,
+        words(m, "dma_swap_flags", DMA_SWAP_CASES),
+        words(m, "dma_swap_words", DMA_SWAP_CASES),
+    )
+
+
+def test_the_firmware_suspends_dma_input_alike_parked_and_running(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = entered(u575, "hash_dma_swap")
+    stop = asyncio.run(m.wait_for(m.ref.var("hash_done").ge(1), for_=ms(2000)))
+    assert stop.reason is popcorn.StopReason.USER
+    first = dma_swap_results(m)
+    digests, flags, consumed = first
+    assert list(digests) == dma_swap_expected()
+    assert flags == (0xF,) * DMA_SWAP_CASES
+    assert consumed == (33,) * DMA_SWAP_CASES
+
+    other = entered(u575, "hash_dma_swap")
+
+    async def body() -> popcorn.Stop:
+        async with other.running():
+            return await other.wait_for(other.ref.var("hash_done").ge(1))
+
+    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert dma_swap_results(other) == first

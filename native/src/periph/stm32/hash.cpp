@@ -29,6 +29,12 @@ constexpr std::uint32_t fresh_expect  = 17;
 constexpr std::size_t   hra_count     = 5;
 constexpr std::size_t   hr_count      = 8;
 constexpr std::size_t   csr_count     = 54;
+constexpr std::uint32_t swap_tag      = 0x4853'0001;
+constexpr std::size_t   csr_config    = 1;
+constexpr std::size_t   csr_blocks    = 2;
+constexpr std::size_t   csr_chain     = 4;
+constexpr std::size_t   csr_pending   = 12;
+constexpr std::size_t   csr_inner     = 38;
 
 constexpr std::uint8_t sha1   = 0;
 constexpr std::uint8_t md5    = 1;
@@ -37,6 +43,10 @@ constexpr std::uint8_t sha224 = 2;
 constexpr std::uint8_t phase_inner_key = 0;
 constexpr std::uint8_t phase_message   = 1;
 constexpr std::uint8_t phase_outer_key = 2;
+
+constexpr std::uint8_t suspend_none     = 0;
+constexpr std::uint8_t suspend_held     = 1;
+constexpr std::uint8_t suspend_launched = 2;
 
 constexpr std::uint32_t ipad = 0x3636'3636;
 constexpr std::uint32_t opad = 0x5C5C'5C5C;
@@ -294,6 +304,8 @@ struct hash_state
   std::uint8_t                 long_key{};
   std::uint8_t                 phase{};
   std::array<std::uint32_t, 8> inner{};
+  std::uint8_t                 refused{};
+  std::uint8_t                 suspend{};
 
   friend auto operator==(hash_state const&, hash_state const&) -> bool = default;
 };
@@ -333,6 +345,15 @@ struct hash_state
  *        before, RM0456 51.4.5 step 3b. With MDMAT 1 the message continues with the next
  *        transfer.
  *
+ *        DMA suspend, RM0456 51.4.8: software clearing DMAE while the pending words do not yet
+ *        form a launched block keeps the request and SR.DMAS high up to the DIN write that
+ *        compresses the block, the one that leaves one word pending. They drop at that write,
+ *        and the BUSY end raises DINIS whatever the count, so words of a burst already started
+ *        stay pending in the context. With no word pending, DINIS 1, or one word pending behind
+ *        a running block, they drop at the CR write. A channel completing while the request is
+ *        held drops it too, and with MDMAT 0 starts DCAL as at any transfer end, so DCIS rises
+ *        as RM0456 step 4 foresees. Setting DMAE or INIT ends the hold.
+ *
  *        HMAC, RM0456 51.4.7: MODE 1 at INIT selects HMAC and latches LKEY. Three phases follow,
  *        each closed by DCAL: the inner key, the message, the outer key. A key phase ends by
  *        compressing the key, zero-padded to 64 bytes and XORed with ipad or opad, the key being
@@ -342,15 +363,31 @@ struct hash_state
  *        DINIS 1 and DCIS 0, DCIS rises after the outer key only. Every DCAL closes its phase,
  *        an empty message or key included, the automatic one of a DMA transfer too. A DCAL
  *        after the outer key with no word since keeps the HMAC, and words written after it
- *        start a new inner key. Each phase takes one block time per block it compresses: the
- *        key's digest with LKEY 1, the padded key block, the message's last blocks and the inner
- *        digest's block, not RM0456's approximate factors.
+ *        start a new inner key. That last rule is an emulator choice: RM0456 does not say, the
+ *        HAL always writes INIT first. Each phase takes one block time per block it compresses:
+ *        the key's digest with LKEY 1, the padded key block, the message's last blocks and the
+ *        inner digest's block, not RM0456's approximate factors.
+ *
+ *        Context swap, RM0456 51.4.8 and 51.6.7: CSR0-53 hold an emulator-defined serialisation of
+ *        the state, not silicon's layout, and read 0 while DINIS is 0. CSR0 reads 0x48530001, a tag
+ *        and a version, out of reset too, where RM0456 gives 0x00000002. CSR1 holds ALGO in bits
+ *        0-1, MODE in bit 2, LKEY in bit 3, the HMAC phase in bits 4-5 and the pending word count
+ *        in bits 8-12. CSR2 and CSR3 hold the count of compressed blocks, low word first, CSR4-11
+ *        the chaining value, CSR12-27 the pending block, CSR38-45 the inner HMAC digest, the others
+ *        read 0. A hash needs CSR0-37 and an HMAC CSR0-53, as RM0456 says. Each CSR write loads its
+ *        word into the state at once, NBWP, NBWE and DINNE follow CSR1. Restoring IMR, STR, CR,
+ *        then INIT, then the CSRs resumes the message where it was saved. NBLW is not part of the
+ *        context, STR holds it. Reads while BUSY show the state after the queued work. A CSR1 write
+ *        while BUSY without INIT first is outside RM0456's sequence: it replaces the count under
+ *        the pending BUSY end, which then sets DINIS and NBWE from the new count.
  *
  *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on. Not
  *        modelled, each logged once and a model_error under strict_peripherals, thrown before
  *        the write is stored: an HMAC key longer than 64 bytes with LKEY 0, hashed as with
- *        LKEY 1. DMAE 1 with no controller serving hash_in_dma. Context swap, reads of CSR0-53
- *        return 0 and writes are dropped. The RCC clock gate is not modelled.
+ *        LKEY 1. DMAE 1 with no controller serving hash_in_dma. A CSR0 write other than the tag,
+ *        or a CSR1 write whose ALGO, MODE or LKEY differ from those latched at INIT, with a count
+ *        above 16 or a phase out of range: without strict_peripherals the CSR writes that follow
+ *        are dropped up to the next INIT or CSR0 tag write. The RCC clock gate is not modelled.
  */
 class hash final : public dispatch_model<hash, hash_state>, public dma_requester
 {
@@ -389,6 +426,7 @@ private:
   void               restart();
   auto               open_hmac(std::uint32_t pad_word) -> std::size_t;
   [[nodiscard]] auto key_overflows() const -> bool;
+  [[nodiscard]] auto block_launched() const -> bool;
   void               calculate();
   void               request();
   void               work(std::uint64_t cycles, bool final);
@@ -397,6 +435,10 @@ private:
   void               show_digest(bool visible);
   void               interrupts();
   [[nodiscard]] auto is_csr(std::uint32_t offset) const -> bool;
+  [[nodiscard]] auto context_word(std::size_t index) const -> std::uint32_t;
+  void               context_written(std::size_t index, std::uint32_t value);
+  [[nodiscard]] auto config_valid(std::uint32_t value) const -> bool;
+  void               load_config(std::uint32_t value);
   void unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message);
 
   register_file&                       regs_;
@@ -516,10 +558,7 @@ auto hash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size,
   }
   if(is_csr(offset))
   {
-    unmodelled(
-        swap_logged_, std::format("CSR{}", (offset - csr0_) / 4), offset,
-        "context swap is not modelled: CSR0-53 read 0 and ignore writes");
-    return 0u;
+    return get(regs_, dinis_) != 0 ? context_word((offset - csr0_) / 4) : 0u;
   }
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
@@ -538,9 +577,7 @@ auto hash::on_write(
   }
   if(is_csr(offset))
   {
-    unmodelled(
-        swap_logged_, std::format("CSR{}", (offset - csr0_) / 4), offset,
-        "context swap is not modelled: CSR0-53 read 0 and ignore writes");
+    context_written((offset - csr0_) / 4, value);
     return {};
   }
   if(offset == din_)
@@ -571,29 +608,172 @@ auto hash::on_write(
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }
 
-void hash::control_written(std::uint32_t, std::uint32_t now)
+auto hash::context_word(std::size_t index) const -> std::uint32_t
+{
+  if(index == 0)
+  {
+    return swap_tag;
+  }
+  if(index == csr_config)
+  {
+    return state_.algo
+         | std::uint32_t{state_.hmac} << 2
+         | std::uint32_t{state_.long_key} << 3
+         | std::uint32_t{state_.phase} << 4
+         | std::uint32_t{state_.count} << 8;
+  }
+  if(index == csr_blocks)
+  {
+    return static_cast<std::uint32_t>(state_.blocks);
+  }
+  if(index == csr_blocks + 1)
+  {
+    return static_cast<std::uint32_t>(state_.blocks >> 32);
+  }
+  if(index >= csr_chain and index < csr_chain + state_.h.size())
+  {
+    return state_.h[index - csr_chain];
+  }
+  if(index >= csr_pending and index < csr_pending + block_words)
+  {
+    return state_.pending[index - csr_pending];
+  }
+  if(index >= csr_inner and index < csr_inner + state_.inner.size())
+  {
+    return state_.inner[index - csr_inner];
+  }
+  return 0;
+}
+
+auto hash::config_valid(std::uint32_t value) const -> bool
+{
+  auto const phase = (value >> 4) & 3u;
+  auto const hmac  = (value >> 2) & 1u;
+  return (value & ~0x1F3Fu) == 0
+     and (value & 3u) == state_.algo
+     and hmac == state_.hmac
+     and ((value >> 3) & 1u) == state_.long_key
+     and ((value >> 8) & 0x1Fu) <= block_words
+     and phase <= phase_outer_key
+     and (hmac != 0 or phase == phase_inner_key);
+}
+
+void hash::load_config(std::uint32_t value)
+{
+  state_.phase    = static_cast<std::uint8_t>((value >> 4) & 3u);
+  state_.count    = static_cast<std::uint8_t>((value >> 8) & 0x1Fu);
+  state_.digested = 0;
+  update(regs_, dinne_, state_.count != 0 ? 1u : 0u);
+  update(regs_, nbwe_, fresh_expect - state_.count);
+  publish();
+}
+
+void hash::context_written(std::size_t index, std::uint32_t value)
+{
+  auto const refuse = [&](std::string message) {
+    unmodelled(swap_logged_, std::format("CSR{}", index), csr0_ + 4 * index, std::move(message));
+    state_.refused = 1;
+  };
+  if(index == 0)
+  {
+    if(value != swap_tag)
+    {
+      refuse(
+          std::format(
+              "CSR0 {:#010x} is not a context saved by this model, which writes {:#010x}: the CSR "
+              "writes that follow are dropped",
+              value, swap_tag));
+      return;
+    }
+    state_.refused = 0;
+    return;
+  }
+  if(state_.refused != 0)
+  {
+    return;
+  }
+  if(index == csr_config)
+  {
+    if(not config_valid(value))
+    {
+      refuse(
+          std::format(
+              "CSR1 {:#010x} does not match the ALGO, MODE and LKEY latched at INIT or holds an "
+              "invalid phase or count: the CSR writes that follow are dropped",
+              value));
+      return;
+    }
+    load_config(value);
+    return;
+  }
+  if(index == csr_blocks)
+  {
+    state_.blocks = (state_.blocks & ~std::uint64_t{0xFFFF'FFFF}) | value;
+  }
+  else if(index == csr_blocks + 1)
+  {
+    state_.blocks = (state_.blocks & 0xFFFF'FFFF) | std::uint64_t{value} << 32;
+  }
+  else if(index >= csr_chain and index < csr_chain + state_.h.size())
+  {
+    state_.h[index - csr_chain] = value;
+  }
+  else if(index >= csr_pending and index < csr_pending + block_words)
+  {
+    state_.pending[index - csr_pending] = value;
+  }
+  else if(index >= csr_inner and index < csr_inner + state_.inner.size())
+  {
+    state_.inner[index - csr_inner] = value;
+  }
+}
+
+void hash::control_written(std::uint32_t old, std::uint32_t now)
 {
   if(init_.of(now) != 0)
   {
     regs_.poke(cr_, init_.with(now, 0));
     initialise(now);
   }
+  if(dmae_.of(now) != 0)
+  {
+    state_.suspend = suspend_none;
+  }
+  else if(dmae_.of(old) != 0 and not block_launched())
+  {
+    state_.suspend = suspend_held;
+  }
   request();
+}
+
+auto hash::block_launched() const -> bool
+{
+  return state_.count == 0 or get(regs_, dinis_) != 0 or (state_.busy != 0 and state_.count == 1);
 }
 
 void hash::request()
 {
-  auto const enabled = get(regs_, dmae_);
-  update(regs_, dmas_, enabled);
-  dma_.set(enabled != 0);
+  auto const active = get(regs_, dmae_) != 0 or state_.suspend == suspend_held;
+  update(regs_, dmas_, active ? 1u : 0u);
+  dma_.set(active);
 }
 
 void hash::transfer_completed(dma_controller const& by, std::uint32_t number)
 {
-  if(not dma_.carries(by, number) or get(regs_, dmae_) == 0 or get(regs_, mdmat_) != 0)
+  if(not dma_.carries(by, number) or (get(regs_, dmae_) == 0 and state_.suspend == suspend_none))
   {
     return;
   }
+  if(get(regs_, mdmat_) != 0)
+  {
+    if(state_.suspend == suspend_held)
+    {
+      state_.suspend = suspend_none;
+      request();
+    }
+    return;
+  }
+  state_.suspend = suspend_none;
   update(regs_, dmae_, 0);
   request();
   calculate();
@@ -614,6 +794,8 @@ void hash::initialise(std::uint32_t control)
   state_.long_key      = static_cast<std::uint8_t>(state_.hmac != 0 ? lkey_.of(control) : 0);
   state_.phase         = phase_inner_key;
   state_.inner         = {};
+  state_.refused       = 0;
+  state_.suspend       = suspend_none;
   withdraw();
   update(regs_, nbwe_, fresh_expect);
   update(regs_, dinne_, 0);
@@ -645,6 +827,11 @@ void hash::data_written(std::uint32_t value)
   }
   publish();
   interrupts();
+  if(state_.suspend == suspend_held and block_launched())
+  {
+    state_.suspend = suspend_launched;
+    request();
+  }
 }
 
 void hash::start_written(std::uint32_t old, std::uint32_t now)
@@ -858,6 +1045,11 @@ void hash::on_event(std::uint32_t kind, std::uint64_t)
 
 void hash::finish_work()
 {
+  auto const launched = state_.suspend == suspend_launched;
+  if(launched)
+  {
+    state_.suspend = suspend_none;
+  }
   state_.busy = 0;
   update(regs_, busy_, 0);
   if(std::exchange(state_.final_pending, 0) != 0)
@@ -869,7 +1061,7 @@ void hash::finish_work()
   }
   else
   {
-    if(state_.count <= 1)
+    if(state_.count <= 1 or launched)
     {
       update(regs_, dinis_, 1);
     }

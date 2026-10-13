@@ -214,6 +214,19 @@ auto idle(bool strict, controller dma = controller::gpdma) -> stm32_fixture
   return f;
 }
 
+constexpr std::uint32_t swap_tag  = 0x4853'0001;
+constexpr std::size_t   hash_csrs = 38;
+constexpr std::size_t   hmac_csrs = 54;
+constexpr std::uint32_t cr_saved  = cr_dmae | (3u << 4) | cr_mode | cr_mdmat | cr_lkey | (3u << 17);
+
+struct context
+{
+  std::uint32_t              imr;
+  std::uint32_t              str;
+  std::uint32_t              cr;
+  std::vector<std::uint32_t> csr;
+};
+
 struct hash_rig
 {
   explicit hash_rig(bool strict = true, controller dma = controller::gpdma) : f{idle(strict, dma)}
@@ -379,6 +392,39 @@ struct hash_rig
     phase(data, datatype);
     phase(key, datatype);
     return digest(algo);
+  }
+
+  [[nodiscard]] auto save(std::size_t count) const -> context
+  {
+    REQUIRE((read(sr) & (sr_busy | sr_dinis)) == sr_dinis);
+    context out{read(imr) & (imr_dinie | imr_dcie), read(str) & 0x1Fu, read(cr) & cr_saved, {}};
+    for(std::uint32_t index = 0; index < count; ++index)
+    {
+      out.csr.push_back(read(csr0 + 4 * index));
+    }
+    return out;
+  }
+
+  void reinit(context const& saved) const
+  {
+    write(imr, saved.imr);
+    write(str, saved.str);
+    write(cr, saved.cr);
+    write(cr, saved.cr | cr_init);
+  }
+
+  void load(context const& saved, std::size_t from, std::size_t to) const
+  {
+    for(auto index = from; index < to; ++index)
+    {
+      write(csr0 + 4 * static_cast<std::uint32_t>(index), saved.csr[index]);
+    }
+  }
+
+  void restore(context const& saved) const
+  {
+    reinit(saved);
+    load(saved, 0, saved.csr.size());
   }
 
   [[nodiscard]] auto pending() const -> bool
@@ -928,7 +974,7 @@ TEST_CASE("byte and half-word accesses to HASH registers are bus errors")
   CHECK(r.logged.empty());
 }
 
-TEST_CASE("DMAE 1 with no controller and the context swap registers log once each")
+TEST_CASE("DMAE 1 with no controller logs once")
 {
   hash_rig const r{false, controller::unrouted};
   r.write(cr, cr_dmae | (sha256 << 17));
@@ -937,13 +983,6 @@ TEST_CASE("DMAE 1 with no controller and the context swap registers log once eac
   REQUIRE(r.logged.size() == 1);
   CHECK(r.logged[0].kind == core::log_kind::model_warning);
   CHECK(r.logged[0].reg == "CR");
-
-  r.write(csr0 + 4, 0x1234'5678);
-  CHECK(r.read(csr0 + 4) == 0);
-  CHECK(r.read(csr0) == 0);
-  r.write(csr0 + 4 * 53, 1);
-  REQUIRE(r.logged.size() == 2);
-  CHECK(r.logged[1].reg == "CSR1");
 }
 
 TEST_CASE("a refused CR write under strict peripherals stores nothing")
@@ -966,10 +1005,6 @@ TEST_CASE("a refused CR write under strict peripherals stores nothing")
   r.settle();
   CHECK(r.digest(sha224) == abc(sha224));
   CHECK(r.hash(sha256, text("abc")) == abc(sha256));
-  CHECK_THROWS_AS(
-      static_cast<void>(r.f.target->mem().write(hash_base + csr0, 4, 1)), popcorn::model_error);
-  CHECK_THROWS_AS(
-      static_cast<void>(r.f.target->mem().read(hash_base + csr0, 4)), popcorn::model_error);
 }
 
 TEST_CASE("a DCAL with no word since the last digest keeps that digest")
@@ -999,6 +1034,14 @@ TEST_CASE("DMAE drives the hash_in_dma request and SR.DMAS")
   REQUIRE_FALSE(r.dma().levels.empty());
   CHECK(r.dma().levels.back() == std::pair{hash_request, true});
   r.write(cr, (sha256 << 17) | (2u << 4));
+  CHECK((r.read(sr) & sr_dmas) == 0);
+  CHECK(r.dma().levels.back() == std::pair{hash_request, false});
+  r.write(cr, cr_init | cr_dmae | (sha256 << 17) | (2u << 4));
+  r.feed(pattern(20));
+  r.write(cr, (sha256 << 17) | (2u << 4));
+  CHECK((r.read(sr) & sr_dmas) != 0);
+  CHECK(r.dma().levels.back() == std::pair{hash_request, true});
+  r.write(cr, cr_init | (sha256 << 17) | (2u << 4));
   CHECK((r.read(sr) & sr_dmas) == 0);
   CHECK(r.dma().levels.back() == std::pair{hash_request, false});
   CHECK(r.logged.empty());
@@ -1484,4 +1527,627 @@ TEST_CASE("a snapshot taken between HMAC phases restores the phase and the inner
   finish(other);
   CHECK(r.logged.empty());
   CHECK(other.logged.empty());
+}
+
+TEST_CASE("CSR0-53 read the state while DINIS is 1 and 0 while it is 0")
+{
+  hash_rig const r;
+  auto const     message = pattern(300);
+  r.begin(sha256);
+  CHECK(r.read(csr0) == swap_tag);
+  CHECK(r.read(csr0 + 4) == sha256);
+  CHECK(r.read(csr0 + 4 * 4) == 0x6A09'E667);
+  r.feed(bytes(message.begin(), message.begin() + 4));
+  REQUIRE((r.read(sr) & sr_dinis) == 0);
+  for(std::uint32_t index = 0; index < hmac_csrs; ++index)
+  {
+    CAPTURE(index);
+    CHECK(r.read(csr0 + 4 * index) == 0);
+  }
+  r.feed(bytes(message.begin() + 4, message.begin() + 68));
+  r.settle();
+  REQUIRE((r.read(sr) & (sr_busy | sr_dinis)) == sr_dinis);
+  CHECK(r.read(csr0) == swap_tag);
+  CHECK(r.read(csr0 + 4) == (sha256 | 1u << 8));
+  CHECK(r.read(csr0 + 4 * 2) == 1);
+  CHECK(r.read(csr0 + 4 * 3) == 0);
+  CHECK(r.read(csr0 + 4 * 4) != 0x6A09'E667);
+  CHECK(r.read(csr0 + 4 * 12) == 0x4B70'95BA);
+  for(std::uint32_t index = 28; index < hmac_csrs; ++index)
+  {
+    CAPTURE(index);
+    CHECK(r.read(csr0 + 4 * index) == 0);
+  }
+  r.finish(8 * 68);
+  r.settle();
+  CHECK(r.digest(sha256) == edge(sha256, 68));
+
+  auto const c = rfc_vector(sha1, 1);
+  r.hmac_begin(sha1, false);
+  CHECK(r.read(csr0 + 4) == (sha1 | 1u << 2));
+  r.phase(c.key);
+  CHECK(r.read(csr0 + 4) == (sha1 | 1u << 2 | 1u << 4));
+  CHECK(r.read(csr0 + 4 * 2) == 1);
+  r.phase(c.data);
+  CHECK(r.read(csr0 + 4) == (sha1 | 1u << 2 | 2u << 4));
+  CHECK(r.read(csr0 + 4 * 38) != 0);
+  CHECK(r.read(csr0 + 4 * 43) == 0);
+  r.phase(c.key);
+  CHECK(r.digest(sha1) == unhex(c.digest));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a hash saved at a DINIS point resumes after another hash")
+{
+  auto const message = pattern(300);
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    for(std::size_t const words : {0, 17, 33, 65})
+    {
+      for(auto const count : {hash_csrs, hmac_csrs})
+      {
+        CAPTURE(algo);
+        CAPTURE(words);
+        CAPTURE(count);
+        hash_rig const r;
+        auto const     at = static_cast<std::ptrdiff_t>(4 * words);
+        r.write(imr, imr_dcie);
+        r.begin(algo);
+        r.feed(bytes(message.begin(), message.begin() + at));
+        r.settle();
+        auto const saved = r.save(count);
+        auto const other = (algo + 1) % 4;
+        CHECK(r.hash(other, text("abc")) == abc(other));
+        auto const c = rfc_vector(other, 2);
+        CHECK(r.hmac(other, c.key, c.data, false) == unhex(c.digest));
+        r.restore(saved);
+        r.unpend();
+        CHECK(r.read(imr) == imr_dcie);
+        CHECK(r.read(cr) == (algo << 17 | 2u << 4 | (words == 0 ? 0u : 1u << 12 | 1u << 8)));
+        CHECK(field(r.read(sr), 9, 5) == (words == 0 ? 0 : 1));
+        CHECK(field(r.read(sr), 16, 5) == (words == 0 ? 0x11 : 0x10));
+        CHECK(field(r.read(sr), 15, 1) == (words == 0 ? 0 : 1));
+        CHECK_FALSE(r.pending());
+        r.feed(bytes(message.begin() + at, message.end()));
+        r.finish(8 * message.size());
+        r.settle();
+        CHECK(r.pending());
+        CHECK(r.digest(algo) == edge(algo, 300));
+        CHECK(r.logged.empty());
+      }
+    }
+  }
+}
+
+TEST_CASE("an HMAC saved in each phase resumes after another HMAC")
+{
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    auto const c = rfc_vector(algo, 7);
+    REQUIRE(c.key.size() >= 68);
+    REQUIRE(c.data.size() >= 68);
+    for(std::size_t phase = 0; phase < 3; ++phase)
+    {
+      for(std::size_t const words : {0, 17})
+      {
+        CAPTURE(algo);
+        CAPTURE(phase);
+        CAPTURE(words);
+        hash_rig const r;
+        r.hmac_begin(algo, true);
+        for(std::size_t step = 0; step < 3; ++step)
+        {
+          auto const& data = step == 1 ? c.data : c.key;
+          if(step != phase)
+          {
+            r.phase(data);
+            continue;
+          }
+          auto const at = static_cast<std::ptrdiff_t>(4 * words);
+          r.feed(bytes(data.begin(), data.begin() + at));
+          r.settle();
+          auto const saved = r.save(hmac_csrs);
+          auto const other = (algo + 2) % 4;
+          auto const o     = rfc_vector(other, 6);
+          CHECK(r.hmac(other, o.key, o.data, true) == unhex(o.digest));
+          CHECK(r.hash(algo, text("abc")) == abc(algo));
+          r.restore(saved);
+          r.feed(bytes(data.begin() + at, data.end()));
+          r.finish(8 * data.size());
+          r.settle();
+          CHECK((r.read(sr) & sr_dcis) == (step == 2 ? sr_dcis : 0u));
+        }
+        CHECK(r.digest(algo) == unhex(c.digest));
+        CHECK(r.logged.empty());
+      }
+    }
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t channel10 = 0x4002'0550;
+constexpr std::uint32_t ch_cfcr   = 0x0C;
+constexpr std::uint32_t ch_csr    = 0x10;
+constexpr std::uint32_t ch_ccr    = 0x14;
+constexpr std::uint32_t ch_ctr1   = 0x40;
+constexpr std::uint32_t ch_ctr2   = 0x44;
+constexpr std::uint32_t ch_cbr1   = 0x48;
+constexpr std::uint32_t ch_csar   = 0x4C;
+constexpr std::uint32_t ch_cdar   = 0x50;
+constexpr std::uint32_t ch_cllr   = 0x7C;
+constexpr std::uint32_t ccr_en    = 1u << 0;
+constexpr std::uint32_t ccr_reset = 1u << 1;
+constexpr std::uint32_t ccr_susp  = 1u << 2;
+constexpr std::uint32_t csr_suspf = 1u << 13;
+constexpr std::uint32_t staged    = 0x2002'0000;
+
+struct dma_feed
+{
+  void stage(bytes const& data) const
+  {
+    for(std::size_t at = 0; at < data.size(); at += 4)
+    {
+      std::uint32_t word = 0;
+      for(std::size_t byte = 0; byte < 4 and at + byte < data.size(); ++byte)
+      {
+        word |= std::uint32_t{data[at + byte]} << (8 * byte);
+      }
+      REQUIRE(
+          r.f.target->mem().write(staged + static_cast<std::uint32_t>(at), 4, word).has_value());
+    }
+  }
+
+  void start(std::uint32_t from, std::uint32_t words)
+  {
+    first = from;
+    count = words;
+    r.write(ch_cfcr, 0x7F00, channel10);
+    r.write(ch_ctr1, 1u << 3 | 2u | 2u << 16 | (beats - 1) << 4, channel10);
+    r.write(ch_ctr2, 1u << 10 | hash_request, channel10);
+    r.write(ch_cbr1, 4 * words, channel10);
+    r.write(ch_csar, staged + 4 * from, channel10);
+    r.write(ch_cdar, hash_base + din, channel10);
+    r.write(ch_cllr, 0, channel10);
+    r.write(ch_ccr, ccr_en, channel10);
+  }
+
+  [[nodiscard]] auto sent() const -> std::uint32_t
+  {
+    return first + count - (r.read(ch_cbr1, channel10) & 0xFFFFu) / 4;
+  }
+
+  [[nodiscard]] auto enabled() const -> bool
+  {
+    return (r.read(ch_ccr, channel10) & ccr_en) != 0;
+  }
+
+  template <typename Done> [[nodiscard]] auto until(Done done) const -> bool
+  {
+    for(int step = 0; step < 4000; ++step)
+    {
+      if(done())
+      {
+        return true;
+      }
+      r.until(r.now() + r.cycle_ps());
+    }
+    return done();
+  }
+
+  void abort() const
+  {
+    r.write(ch_ccr, r.read(ch_ccr, channel10) | ccr_susp, channel10);
+    REQUIRE(until([&] { return (r.read(ch_csr, channel10) & csr_suspf) != 0; }));
+    r.write(ch_ccr, r.read(ch_ccr, channel10) | ccr_reset, channel10);
+    CHECK_FALSE(enabled());
+  }
+
+  hash_rig const& r;
+  std::uint32_t   beats{1};
+  std::uint32_t   first{};
+  std::uint32_t   count{};
+};
+
+struct suspend_case
+{
+  std::uint32_t beats;
+  std::uint32_t at;
+  std::uint32_t held;
+};
+}
+
+TEST_CASE("a DMA suspend per RM0456 51.4.8 completes the current block before DMAS drops")
+{
+  auto const message = pattern(300);
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    for(auto const s : {
+            suspend_case{1, 21, 33},
+            suspend_case{4, 21, 36},
+            suspend_case{1, 17, 17}
+    })
+    {
+      CAPTURE(algo);
+      CAPTURE(s.beats);
+      CAPTURE(s.at);
+      hash_rig const r;
+      dma_feed       d{r, s.beats};
+      auto const     control = (algo << 17) | (2u << 4);
+      d.stage(message);
+      r.write(str, 0);
+      r.write(cr, cr_init | cr_dmae | control);
+      d.start(0, 75);
+      REQUIRE(d.until([&] { return d.sent() >= s.at; }));
+      REQUIRE(d.sent() < 32);
+      if(s.at == s.held)
+      {
+        REQUIRE(d.sent() == s.at);
+      }
+      r.write(cr, control);
+      CHECK((r.read(sr) & sr_dmas) == (s.at == s.held ? 0u : sr_dmas));
+      REQUIRE(d.until([&] { return (r.read(sr) & sr_dmas) == 0; }));
+      CHECK(d.sent() == s.held);
+      r.until(r.now() + 200 * r.cycle_ps());
+      CHECK(d.sent() == s.held);
+      CHECK(d.enabled());
+      d.abort();
+      CHECK((r.read(sr) & sr_dcis) == 0);
+      REQUIRE(d.until([&] { return (r.read(sr) & sr_dinis) != 0; }));
+      auto const saved = r.save(hash_csrs);
+      CHECK(field(saved.csr[1], 8, 5) == s.held - 16 * ((s.held - 1) / 16));
+      auto const other = (algo + 1) % 4;
+      CHECK(r.hash(other, text("abc")) == abc(other));
+      r.restore(saved);
+      CHECK((r.read(sr) & sr_dmas) == 0);
+      d.start(s.held, 75 - s.held);
+      r.write(cr, saved.cr | cr_dmae);
+      r.settle();
+      CHECK_FALSE(d.enabled());
+      CHECK(r.digest(algo) == edge(algo, 300));
+      CHECK(r.logged.empty());
+    }
+  }
+}
+
+TEST_CASE("a snapshot taken while a DMA suspend holds or launched its block resumes elsewhere")
+{
+  auto const message = pattern(300);
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    for(auto const s : {
+            suspend_case{1, 21, 33},
+            suspend_case{4, 21, 36}
+    })
+    {
+      for(auto const launched : {false, true})
+      {
+        CAPTURE(algo);
+        CAPTURE(s.beats);
+        CAPTURE(launched);
+        hash_rig const r;
+        dma_feed       d{r, s.beats};
+        auto const     control = (algo << 17) | (2u << 4);
+        d.stage(message);
+        r.write(str, 0);
+        r.write(cr, cr_init | cr_dmae | control);
+        d.start(0, 75);
+        REQUIRE(d.until([&] { return d.sent() >= s.at; }));
+        REQUIRE(d.sent() < 32);
+        r.write(cr, control);
+        REQUIRE((r.read(sr) & sr_dmas) != 0);
+        if(launched)
+        {
+          REQUIRE(d.until([&] { return (r.read(sr) & sr_dmas) == 0; }));
+          REQUIRE((r.read(sr) & (sr_busy | sr_dinis)) == sr_busy);
+        }
+        auto const saved = r.f.target->snapshot();
+
+        hash_rig const other;
+        dma_feed       e{other, s.beats, 0, 75};
+        other.f.target->restore(
+            core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+        CHECK((other.read(sr) & sr_dmas) == (launched ? 0u : sr_dmas));
+        REQUIRE(e.until([&] { return (other.read(sr) & sr_dmas) == 0; }));
+        CHECK(e.sent() == s.held);
+        other.until(other.now() + 200 * other.cycle_ps());
+        CHECK(e.sent() == s.held);
+        e.abort();
+        REQUIRE(e.until([&] { return (other.read(sr) & sr_dinis) != 0; }));
+        auto const context = other.save(hash_csrs);
+        CHECK(other.hash((algo + 1) % 4, text("abc")) == abc((algo + 1) % 4));
+        other.restore(context);
+        e.start(s.held, 75 - s.held);
+        other.write(cr, context.cr | cr_dmae);
+        other.settle();
+        CHECK_FALSE(e.enabled());
+        CHECK(other.digest(algo) == edge(algo, 300));
+        CHECK(r.logged.empty());
+        CHECK(other.logged.empty());
+      }
+    }
+  }
+}
+
+TEST_CASE("an HMAC message phase fed by DMA suspends and resumes per RM0456 51.4.8")
+{
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    CAPTURE(algo);
+    auto const     c     = rfc_vector(algo, 7);
+    auto const     words = static_cast<std::uint32_t>((c.data.size() + 3) / 4);
+    hash_rig const r;
+    dma_feed       d{r};
+    auto const     control = cr_mode | cr_lkey | (algo << 17) | (2u << 4);
+    REQUIRE(words > 17);
+    d.stage(c.data);
+    r.hmac_begin(algo, true);
+    r.phase(c.key);
+    r.write(str, static_cast<std::uint32_t>(8 * (c.data.size() % 4)));
+    r.write(cr, control | cr_dmae);
+    d.start(0, words);
+    REQUIRE(d.until([&] { return d.sent() >= 5; }));
+    REQUIRE(d.sent() < 16);
+    r.write(cr, control);
+    CHECK((r.read(sr) & sr_dmas) != 0);
+    REQUIRE(d.until([&] { return (r.read(sr) & sr_dmas) == 0; }));
+    CHECK(d.sent() == 17);
+    d.abort();
+    CHECK((r.read(sr) & sr_dcis) == 0);
+    REQUIRE(d.until([&] { return (r.read(sr) & sr_dinis) != 0; }));
+    auto const saved = r.save(hmac_csrs);
+    auto const other = (algo + 2) % 4;
+    auto const o     = rfc_vector(other, 6);
+    CHECK(r.hmac(other, o.key, o.data, true) == unhex(o.digest));
+    r.restore(saved);
+    d.start(17, words - 17);
+    r.write(cr, saved.cr | cr_dmae);
+    r.settle();
+    CHECK_FALSE(d.enabled());
+    CHECK((r.read(sr) & sr_dcis) == 0);
+    r.phase(c.key);
+    CHECK(r.digest(algo) == unhex(c.digest));
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("a channel completing while a suspend holds the request drops it and ends the transfer")
+{
+  auto const message = pattern(300);
+  for(auto const algo : {sha1, md5, sha224, sha256})
+  {
+    for(auto const multiple : {false, true})
+    {
+      CAPTURE(algo);
+      CAPTURE(multiple);
+      hash_rig const r;
+      dma_feed       d{r};
+      auto const     control = (multiple ? cr_mdmat : 0u) | (algo << 17) | (2u << 4);
+      d.stage(message);
+      r.write(str, 0);
+      r.write(cr, cr_init | cr_dmae | control);
+      d.start(0, 75);
+      REQUIRE(d.until([&] { return d.sent() >= 68; }));
+      REQUIRE(d.sent() < 75);
+      r.write(cr, control);
+      CHECK((r.read(sr) & sr_dmas) != 0);
+      REQUIRE(d.until([&] { return (r.read(sr) & sr_dmas) == 0; }));
+      CHECK(d.sent() == 75);
+      CHECK_FALSE(d.enabled());
+      r.settle();
+      if(multiple)
+      {
+        CHECK((r.read(sr) & (sr_dcis | sr_dinis)) == 0);
+        r.write(str, str_dcal);
+        r.settle();
+      }
+      CHECK(r.digest(algo) == edge(algo, 300));
+      CHECK(r.logged.empty());
+    }
+  }
+}
+
+TEST_CASE("NBLW comes back with STR, not with the context")
+{
+  auto const     message = pattern(300);
+  hash_rig const reference;
+  reference.begin(sha256);
+  reference.feed(message);
+  reference.write(str, 24);
+  reference.write(str, str_dcal);
+  reference.settle();
+  auto const short_last = reference.digest(sha256);
+  REQUIRE(short_last != edge(sha256, 300));
+
+  for(std::uint32_t const nblw : {0u, 24u})
+  {
+    CAPTURE(nblw);
+    hash_rig const r;
+    r.begin(sha256);
+    r.write(str, nblw);
+    r.feed(bytes(message.begin(), message.begin() + 68));
+    r.settle();
+    auto const saved = r.save(hash_csrs);
+    CHECK(saved.str == nblw);
+    CHECK(r.hash(sha1, text("abc")) == abc(sha1));
+    REQUIRE(r.read(str) == 24);
+    r.write(str, 0);
+    r.restore(saved);
+    CHECK(r.read(str) == nblw);
+    r.feed(bytes(message.begin() + 68, message.end()));
+    r.write(str, str_dcal);
+    r.settle();
+    CHECK(r.digest(sha256) == (nblw == 0 ? edge(sha256, 300) : short_last));
+  }
+}
+
+TEST_CASE("a context restored under a CR it was not saved with is refused")
+{
+  auto const message = pattern(300);
+  auto const saved   = [&](hash_rig const& r, std::uint32_t algo, bool hmac) {
+    if(hmac)
+    {
+      r.hmac_begin(algo, false);
+      r.phase(rfc_vector(algo, 1).key);
+    }
+    else
+    {
+      r.begin(algo);
+    }
+    r.feed(bytes(message.begin(), message.begin() + 68));
+    r.settle();
+    return r.save(hmac_csrs);
+  };
+  auto const config = [](context c, std::uint32_t value) {
+    c.csr[1] = value;
+    return c;
+  };
+  auto const control = [](context c, std::uint32_t value) {
+    c.cr = value;
+    return c;
+  };
+  hash_rig const                              source;
+  auto const                                  plain = saved(source, sha256, false);
+  auto const                                  keyed = saved(source, sha256, true);
+  std::vector<std::pair<context, bool>> const bad{
+      {control(plain, sha224 << 17 | 2u << 4),                     false},
+      {control(plain, sha256 << 17 | cr_mode | 2u << 4),           false},
+      {control(keyed, sha256 << 17 | cr_mode | cr_lkey | 2u << 4), true },
+      {control(keyed, sha256 << 17 | 2u << 4),                     true },
+      {config(plain,  plain.csr[1] | 1u << 2),                     false},
+      {config(plain,  plain.csr[1] | 1u << 4),                     false},
+      {config(keyed,  (keyed.csr[1] & ~0x30u) | 3u << 4),          true },
+      {config(plain,  (plain.csr[1] & ~0x1F00u) | 17u << 8),       false},
+      {config(plain,  plain.csr[1] | 1u << 13),                    false},
+      {config(plain,  plain.csr[1] | 1u << 6),                     false},
+  };
+  for(std::size_t index = 0; index < bad.size(); ++index)
+  {
+    CAPTURE(index);
+    auto const& [wrong, hmac] = bad[index];
+    auto const& right         = hmac ? keyed : plain;
+    {
+      hash_rig const r;
+      r.reinit(wrong);
+      r.load(wrong, 0, 1);
+      auto const before = r.save(hmac_csrs);
+      CHECK_THROWS_AS(
+          static_cast<void>(r.f.target->mem().write(hash_base + csr0 + 4, 4, wrong.csr[1])),
+          popcorn::model_error);
+      CHECK(r.save(hmac_csrs).csr == before.csr);
+      CHECK(field(r.read(sr), 9, 5) == 0);
+      r.restore(right);
+      r.feed(bytes(message.begin() + 68, message.end()));
+      r.finish(8 * message.size());
+      r.settle();
+      if(not hmac)
+      {
+        CHECK(r.digest(sha256) == edge(sha256, 300));
+      }
+      else
+      {
+        CHECK(r.save(hmac_csrs).csr[1] == (sha256 | 1u << 2 | 2u << 4));
+      }
+    }
+    {
+      hash_rig const r{false};
+      r.reinit(wrong);
+      auto const fresh = r.save(hmac_csrs);
+      r.load(wrong, 0, wrong.csr.size());
+      CHECK(r.save(hmac_csrs).csr == fresh.csr);
+      r.load(wrong, 2, wrong.csr.size());
+      CHECK(r.save(hmac_csrs).csr == fresh.csr);
+      REQUIRE(r.logged.size() == 1);
+      CHECK(r.logged[0].kind == core::log_kind::model_warning);
+      CHECK(r.logged[0].reg == "CSR1");
+    }
+  }
+}
+
+TEST_CASE("a CSR0 other than the tag drops the CSR writes up to INIT or the tag")
+{
+  auto const     message = pattern(300);
+  hash_rig const source;
+  source.begin(md5);
+  source.feed(bytes(message.begin(), message.begin() + 132));
+  source.settle();
+  auto const saved = source.save(hash_csrs);
+  auto       wrong = saved;
+  wrong.csr[0] ^= 0x100;
+  {
+    hash_rig const r;
+    r.reinit(saved);
+    auto const fresh = r.save(hash_csrs);
+    CHECK_THROWS_AS(
+        static_cast<void>(r.f.target->mem().write(hash_base + csr0, 4, wrong.csr[0])),
+        popcorn::model_error);
+    r.load(saved, 0, hash_csrs);
+    CHECK(r.save(hash_csrs).csr == saved.csr);
+    CHECK(fresh.csr != saved.csr);
+    r.feed(bytes(message.begin() + 132, message.end()));
+    r.finish(8 * message.size());
+    r.settle();
+    CHECK(r.digest(md5) == edge(md5, 300));
+  }
+  hash_rig const r{false};
+  r.reinit(saved);
+  auto const fresh = r.save(hash_csrs);
+  r.load(wrong, 0, hash_csrs);
+  CHECK(r.save(hash_csrs).csr == fresh.csr);
+  r.load(wrong, 0, hash_csrs);
+  REQUIRE(r.logged.size() == 1);
+  CHECK(r.logged[0].reg == "CSR0");
+  r.load(saved, 0, hash_csrs);
+  CHECK(r.save(hash_csrs).csr == saved.csr);
+  r.load(wrong, 0, 1);
+  r.reinit(saved);
+  r.load(saved, 1, hash_csrs);
+  CHECK(r.save(hash_csrs).csr == saved.csr);
+  r.feed(bytes(message.begin() + 132, message.end()));
+  r.finish(8 * message.size());
+  r.settle();
+  CHECK(r.digest(md5) == edge(md5, 300));
+  CHECK(r.logged.size() == 1);
+}
+
+TEST_CASE("a snapshot taken during a restore keeps the words loaded and a refusal")
+{
+  auto const     message = pattern(300);
+  hash_rig const r{false};
+  r.begin(sha224);
+  r.feed(bytes(message.begin(), message.begin() + 196));
+  r.settle();
+  auto const saved = r.save(hash_csrs);
+  CHECK(r.hash(sha256, text("abc")) == abc(sha256));
+  r.reinit(saved);
+  r.load(saved, 0, 20);
+  auto const half   = r.f.target->snapshot();
+  auto const finish = [&](hash_rig const& at) {
+    at.load(saved, 20, hash_csrs);
+    CHECK(at.save(hash_csrs).csr == saved.csr);
+    at.feed(bytes(message.begin() + 196, message.end()));
+    at.finish(8 * message.size());
+    at.settle();
+    CHECK(at.digest(sha224) == edge(sha224, 300));
+  };
+  finish(r);
+  r.f.target->restore(half);
+  finish(r);
+  hash_rig const other{false};
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(half.data()))});
+  finish(other);
+  CHECK(other.logged.empty());
+
+  r.reinit(saved);
+  auto const fresh = r.save(hash_csrs);
+  r.write(csr0, 0);
+  auto const     refused = r.f.target->snapshot();
+  hash_rig const again{false};
+  again.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(refused.data()))});
+  again.load(saved, 1, hash_csrs);
+  CHECK(again.save(hash_csrs).csr == fresh.csr);
+  again.load(saved, 0, hash_csrs);
+  CHECK(again.save(hash_csrs).csr == saved.csr);
 }

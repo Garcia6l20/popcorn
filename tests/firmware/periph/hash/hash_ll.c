@@ -12,6 +12,16 @@
 #define HMAC_CASES         4u
 #define HMAC_RESULTS       16u
 #define HMAC_DMA_RESULTS   8u
+#define SWAP_RESULTS       32u
+#define SWAP_HASH_CSRS     38u
+#define SWAP_HMAC_CSRS     54u
+#define SWAP_KEY_BYTES     131u
+#define DMA_SWAP_CASES     8u
+#define DMA_SWAP_RESULTS   16u
+#define DMA_SWAP_AT        21u
+#define DMA_SWAP_TICKS     50u
+#define SWAP_CR_SAVED \
+  (HASH_CR_DMAE | HASH_CR_DATATYPE | HASH_CR_MODE | HASH_CR_ALGO | HASH_CR_LKEY | HASH_CR_MDMAT)
 
 volatile uint32_t hash_done;
 volatile uint32_t hash_count;
@@ -29,13 +39,21 @@ uint32_t          hmac_digest[HMAC_RESULTS][8];
 uint32_t          hmac_dinis_irqs[HMAC_RESULTS];
 volatile uint32_t hmac_dma_count;
 uint32_t          hmac_dma_digest[HMAC_DMA_RESULTS][8];
+volatile uint32_t swap_count;
+uint32_t          swap_digest[SWAP_RESULTS][8];
+volatile uint32_t dma_swap_count;
+uint32_t          dma_swap_digest[DMA_SWAP_RESULTS][8];
+uint32_t          dma_swap_flags[DMA_SWAP_CASES];
+uint32_t          dma_swap_words[DMA_SWAP_CASES];
 
 static uint32_t          message[HASH_MESSAGE_WORDS];
 static volatile uint32_t ticks;
 static uint32_t const    lengths[HASH_LENGTHS] = {0u, 3u, 64u, 68u, 300u};
 static uint32_t          hmac_key[HMAC_KEY_BYTES / 4u];
-static uint32_t const    hmac_keys[HMAC_CASES]     = {20u, 20u, 64u, 131u};
+static uint32_t const    hmac_keys[HMAC_CASES]     = {20u, 21u, 64u, 131u};
 static uint32_t const    hmac_messages[HMAC_CASES] = {0u, 68u, 300u, 50u};
+
+static uint32_t swap_context[3u + SWAP_HMAC_CSRS];
 
 static uint32_t const* volatile irq_words;
 static volatile uint32_t irq_left;
@@ -60,6 +78,8 @@ void hash_dma(void);
 void hmac_poll(void);
 void hmac_irq(void);
 void hmac_dma(void);
+void hash_swap(void);
+void hash_dma_swap(void);
 
 void SysTick_Handler(void)
 {
@@ -260,7 +280,7 @@ static void irq_one(uint32_t algo, uint32_t length)
   record(irq_cycles, since);
 }
 
-static void dma_words(uint32_t const* source, uint32_t bytes)
+static void dma_start(uint32_t const* source, uint32_t bytes)
 {
   DMA_Channel_TypeDef* const channel = GPDMA1_Channel10;
   channel->CFCR                      = 0x00007F00u;
@@ -271,6 +291,20 @@ static void dma_words(uint32_t const* source, uint32_t bytes)
   channel->CDAR                      = (uint32_t)&HASH->DIN;
   channel->CLLR                      = 0;
   channel->CCR                       = DMA_CCR_EN;
+}
+
+static void dma_wait(void)
+{
+  while((GPDMA1_Channel10->CCR & DMA_CCR_EN) != 0u)
+  {
+    __WFI();
+  }
+}
+
+static void dma_words(uint32_t const* source, uint32_t bytes)
+{
+  dma_start(source, bytes);
+  DMA_Channel_TypeDef* const channel = GPDMA1_Channel10;
   while((channel->CCR & DMA_CCR_EN) != 0u)
   {
     __WFI();
@@ -367,7 +401,7 @@ static void hmac_poll_phase(uint32_t const* words, uint32_t bytes)
   wait_not_busy();
 }
 
-static void hmac_poll_one(uint32_t algo, uint32_t key_bytes, uint32_t message_bytes)
+static void hmac_poll_run(uint32_t algo, uint32_t key_bytes, uint32_t message_bytes)
 {
   HASH->CR = HASH_CR_INIT | hmac_control(algo, key_bytes);
   hmac_poll_phase(hmac_key, key_bytes);
@@ -377,6 +411,11 @@ static void hmac_poll_one(uint32_t algo, uint32_t key_bytes, uint32_t message_by
   {
     __WFE();
   }
+}
+
+static void hmac_poll_one(uint32_t algo, uint32_t key_bytes, uint32_t message_bytes)
+{
+  hmac_poll_run(algo, key_bytes, message_bytes);
   hmac_record(0);
 }
 
@@ -442,6 +481,235 @@ static void hmac_dma_one(uint32_t algo, uint32_t key_bytes, uint32_t message_byt
     hmac_dma_digest[at][index] = HASH_DIGEST->HR[index];
   }
   hmac_dma_count = at + 1u;
+}
+
+static void swap_record(void)
+{
+  uint32_t const at = swap_count;
+  if(at >= SWAP_RESULTS)
+  {
+    FAIL(6);
+  }
+  for(uint32_t index = 0; index < 5u; ++index)
+  {
+    swap_digest[at][index] = HASH->HR[index];
+  }
+  for(uint32_t index = 5; index < 8u; ++index)
+  {
+    swap_digest[at][index] = HASH_DIGEST->HR[index];
+  }
+  swap_count = at + 1u;
+}
+
+static void context_save(uint32_t csrs)
+{
+  wait_not_busy();
+  while((HASH->SR & HASH_SR_DINIS) == 0u)
+  {
+    __WFE();
+  }
+  swap_context[0] = HASH->IMR & (HASH_IMR_DINIE | HASH_IMR_DCIE);
+  swap_context[1] = HASH->STR & HASH_STR_NBLW;
+  swap_context[2] = HASH->CR & SWAP_CR_SAVED;
+  for(uint32_t index = 0; index < csrs; ++index)
+  {
+    swap_context[3u + index] = HASH->CSR[index];
+  }
+}
+
+static void context_restore(uint32_t csrs)
+{
+  HASH->IMR = swap_context[0];
+  HASH->STR = swap_context[1];
+  HASH->CR  = swap_context[2];
+  HASH->CR |= HASH_CR_INIT;
+  for(uint32_t index = 0; index < csrs; ++index)
+  {
+    HASH->CSR[index] = swap_context[3u + index];
+  }
+}
+
+static void poll_hash(uint32_t algo, uint32_t length)
+{
+  begin(algo);
+  for(uint32_t index = 0; index < (length + 3u) / 4u; ++index)
+  {
+    wait_not_busy();
+    HASH->DIN = message[index];
+  }
+  HASH->STR = (length % 4u) * 8u;
+  HASH->STR |= HASH_STR_DCAL;
+  while((HASH->SR & HASH_SR_DCIS) == 0u || (HASH->SR & HASH_SR_BUSY) != 0u)
+  {
+    __WFE();
+  }
+}
+
+static void swap_poll(uint32_t algo, uint32_t length)
+{
+  poll_hash(algo, length);
+  swap_record();
+}
+
+static void swap_hash(uint32_t algo)
+{
+  uint32_t const length = 300u;
+  begin(algo);
+  for(uint32_t index = 0; index < length / 4u; ++index)
+  {
+    wait_not_busy();
+    HASH->DIN = message[index];
+    if(index == 32u)
+    {
+      context_save(SWAP_HASH_CSRS);
+      swap_poll((algo + 1u) % HASH_ALGOS, 68u);
+      context_restore(SWAP_HASH_CSRS);
+    }
+  }
+  HASH->STR = 0;
+  HASH->STR |= HASH_STR_DCAL;
+  while((HASH->SR & HASH_SR_DCIS) == 0u || (HASH->SR & HASH_SR_BUSY) != 0u)
+  {
+    __WFE();
+  }
+  swap_record();
+}
+
+static void swap_hmac(uint32_t algo, uint32_t suspended)
+{
+  HASH->CR = HASH_CR_INIT | hmac_control(algo, SWAP_KEY_BYTES);
+  for(uint32_t phase = 0; phase < 3u; ++phase)
+  {
+    uint32_t const* const words = phase == 1u ? message : hmac_key;
+    uint32_t const        bytes = phase == 1u ? 300u : SWAP_KEY_BYTES;
+    for(uint32_t index = 0; index < (bytes + 3u) / 4u; ++index)
+    {
+      wait_not_busy();
+      HASH->DIN = words[index];
+      if(phase == suspended && index == 16u)
+      {
+        context_save(SWAP_HMAC_CSRS);
+        hmac_poll_run((algo + 1u) % HASH_ALGOS, 21u, 68u);
+        swap_record();
+        context_restore(SWAP_HMAC_CSRS);
+      }
+    }
+    HASH->STR = (bytes % 4u) * 8u;
+    HASH->STR |= HASH_STR_DCAL;
+    wait_not_busy();
+  }
+  while((HASH->SR & HASH_SR_DCIS) == 0u)
+  {
+    __WFE();
+  }
+  swap_record();
+}
+
+static void dma_swap_record(void)
+{
+  while((HASH->SR & HASH_SR_DCIS) == 0u || (HASH->SR & HASH_SR_BUSY) != 0u)
+  {
+    __WFE();
+  }
+  uint32_t const at = dma_swap_count;
+  if(at >= DMA_SWAP_RESULTS)
+  {
+    FAIL(7);
+  }
+  for(uint32_t index = 0; index < 5u; ++index)
+  {
+    dma_swap_digest[at][index] = HASH->HR[index];
+  }
+  for(uint32_t index = 5; index < 8u; ++index)
+  {
+    dma_swap_digest[at][index] = HASH_DIGEST->HR[index];
+  }
+  dma_swap_count = at + 1u;
+}
+
+static uint32_t dma_remaining(void)
+{
+  DMA_Channel_TypeDef* const channel = GPDMA1_Channel10;
+  return (channel->CBR1 & DMA_CBR1_BNDT) / 4u
+       + ((channel->CSR & DMA_CSR_FIFOL) >> DMA_CSR_FIFOL_Pos);
+}
+
+static uint32_t wait_sr(uint32_t mask, uint32_t value)
+{
+  uint32_t const since = ticks;
+  while((HASH->SR & mask) != value)
+  {
+    if(ticks - since > DMA_SWAP_TICKS)
+    {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static uint32_t dma_suspend(uint32_t csrs, uint32_t words, uint32_t at)
+{
+  DMA_Channel_TypeDef* const channel = GPDMA1_Channel10;
+  while(dma_remaining() > words - DMA_SWAP_AT)
+  {
+  }
+  HASH->CR &= ~HASH_CR_DMAE;
+  uint32_t flags = (HASH->SR & HASH_SR_DMAS) != 0u ? 1u : 0u;
+  flags |= wait_sr(HASH_SR_DMAS, 0) << 1;
+  uint32_t const remaining = dma_remaining();
+  channel->CCR |= DMA_CCR_SUSP;
+  while((channel->CSR & DMA_CSR_SUSPF) == 0u)
+  {
+  }
+  channel->CCR |= DMA_CCR_RESET;
+  channel->CFCR = 0x00007F00u;
+  flags |= (HASH->SR & HASH_SR_DCIS) == 0u ? 4u : 0u;
+  flags |= wait_sr(HASH_SR_DINIS, HASH_SR_DINIS) << 3;
+  dma_swap_flags[at] = flags;
+  dma_swap_words[at] = words - remaining;
+  if(flags != 0xFu)
+  {
+    FAIL(8);
+  }
+  context_save(csrs);
+  return remaining;
+}
+
+static void dma_resume(uint32_t csrs, uint32_t const* words, uint32_t total, uint32_t remaining)
+{
+  context_restore(csrs);
+  dma_start(words + (total - remaining), 4u * remaining);
+  HASH->CR |= HASH_CR_DMAE;
+  dma_wait();
+}
+
+static void dma_swap_hash(uint32_t algo)
+{
+  uint32_t const words = 300u / 4u;
+  HASH->STR            = 0;
+  HASH->CR = HASH_CR_INIT | HASH_CR_DMAE | (algo << HASH_CR_ALGO_Pos) | HASH_CR_DATATYPE_1;
+  dma_start(message, 4u * words);
+  uint32_t const remaining = dma_suspend(SWAP_HASH_CSRS, words, 2u * algo);
+  poll_hash((algo + 1u) % HASH_ALGOS, 68u);
+  dma_swap_record();
+  dma_resume(SWAP_HASH_CSRS, message, words, remaining);
+  dma_swap_record();
+}
+
+static void dma_swap_hmac(uint32_t algo)
+{
+  uint32_t const words   = 300u / 4u;
+  uint32_t const control = hmac_control(algo, SWAP_KEY_BYTES);
+  hmac_dma_phase(hmac_key, SWAP_KEY_BYTES, control | HASH_CR_INIT);
+  HASH->STR = 0;
+  HASH->CR  = control | HASH_CR_DMAE;
+  dma_start(message, 4u * words);
+  uint32_t const remaining = dma_suspend(SWAP_HMAC_CSRS, words, 2u * algo + 1u);
+  hmac_poll_run((algo + 1u) % HASH_ALGOS, 21u, 68u);
+  dma_swap_record();
+  dma_resume(SWAP_HMAC_CSRS, message, words, remaining);
+  hmac_dma_phase(hmac_key, SWAP_KEY_BYTES, control);
+  dma_swap_record();
 }
 
 void idle(void)
@@ -544,6 +812,33 @@ void hmac_dma(void)
   {
     hmac_dma_one(algo, 20u, 68u);
     hmac_dma_one(algo, 131u, 300u);
+  }
+  finish();
+}
+
+void hash_swap(void)
+{
+  start();
+  for(uint32_t algo = 0; algo < HASH_ALGOS; ++algo)
+  {
+    swap_hash(algo);
+    for(uint32_t phase = 0; phase < 3u; ++phase)
+    {
+      swap_hmac(algo, phase);
+    }
+  }
+  finish();
+}
+
+void hash_dma_swap(void)
+{
+  start();
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPDMA1EN;
+  (void)RCC->AHB1ENR;
+  for(uint32_t algo = 0; algo < HASH_ALGOS; ++algo)
+  {
+    dma_swap_hash(algo);
+    dma_swap_hmac(algo);
   }
   finish();
 }
