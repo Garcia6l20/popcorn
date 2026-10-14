@@ -907,7 +907,7 @@ void usart::control_written(std::uint32_t, std::uint32_t)
   {
     resume_host();
   }
-  start_frame(ctx_.clock.time().ps);
+  start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
   flags();
 }
 
@@ -921,7 +921,7 @@ void usart::transmit_written(std::uint32_t, std::uint32_t now)
   {
     state_.tx_fifo.push_back(static_cast<std::uint16_t>(now & word_mask()));
     update(regs_, complete_, 0);
-    start_frame(ctx_.clock.time().ps);
+    start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
   }
   flags();
 }
@@ -945,7 +945,7 @@ void usart::request_written(std::uint32_t, std::uint32_t now)
   {
     update(regs_, break_flag_, 1);
     state_.break_pending = true;
-    start_frame(ctx_.clock.time().ps);
+    start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
   }
   if(flush_rx_.of(now) != 0)
   {

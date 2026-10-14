@@ -3033,3 +3033,42 @@ TEST_CASE("an RDR read releasing a held host frame within a frame time cancels t
   p->advance(start + 3 * frame + frame / 2 + flow_slack - p->now());
   CHECK((p->isr() & isr_idle) != 0);
 }
+
+TEST_CASE("a TDR write, a break request or a control write during a break's 2-bit hold waits")
+{
+  enum class second : std::uint8_t
+  {
+    tdr,
+    sbkrq,
+    control,
+  };
+  for(auto const how : {second::tdr, second::sbkrq, second::control})
+  {
+    CAPTURE(static_cast<int>(how));
+    auto const p     = flow_rig(0);
+    auto const frame = usart1_frame(*p);
+    p->t.cpu("USART1", "RQR", 1u << 1);
+    REQUIRE(p->box->posts.size() == 1);
+    auto const start = p->box->posts[0].frame.start.ps;
+    p->advance(start + frame + frame / 10 - p->now());
+    switch(how)
+    {
+      case second::tdr:
+        p->t.cpu("USART1", "TDR", 'x');
+        break;
+      case second::sbkrq:
+        p->t.cpu("USART1", "RQR", 1u << 1);
+        break;
+      case second::control:
+        p->t.cpu("RCC", "RCC_CCIPR1", 3);
+        p->t.cpu("USART1", "TDR", 'x');
+        p->t.cpu("RCC", "RCC_CCIPR1", 0);
+        REQUIRE(p->box->posts.size() == 1);
+        p->t.cpu("USART1", "CR1_enabled", cr1_of({}));
+        break;
+    }
+    p->advance(2 * frame);
+    REQUIRE(p->box->posts.size() == 2);
+    CHECK(p->box->posts[1].frame.start.ps == start + frame + frame / 5);
+  }
+}
