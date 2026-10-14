@@ -556,20 +556,26 @@ auto system_handle::resume(std::optional<std::int64_t> until_ps) -> host_future_
 }
 
 auto system_handle::post_goal(
-    std::size_t                     member,
-    std::optional<address>          until,
-    std::optional<std::uint64_t>    budget,
-    std::optional<std::uint64_t>    exact,
-    std::optional<std::int64_t>     until_ps,
-    std::optional<nb::object>       stop_when,
-    std::optional<native_predicate> gate,
-    bool                            open,
-    std::optional<std::int64_t>     cap_ps) -> host_future_handle
+    std::size_t                                       member,
+    std::optional<address>                            until,
+    std::optional<std::uint64_t>                      budget,
+    std::optional<std::uint64_t>                      exact,
+    std::optional<std::int64_t>                       until_ps,
+    std::optional<nb::object>                         stop_when,
+    std::optional<native_predicate>                   gate,
+    bool                                              open,
+    std::optional<std::int64_t>                       cap_ps,
+    std::optional<std::tuple<address, std::uint64_t>> until_return) -> host_future_handle
 {
   system_ref const ref{system()};
   auto&            sys = *ref;
   std::ignore          = member_index(member);
   core::member_goal goal{.until = until, .open = open};
+  if(until_return)
+  {
+    auto const [ret, sp] = *until_return;
+    goal.until_return    = core::frame_return{.ret = ret, .sp = sp};
+  }
   if(budget)
   {
     goal.budget = icount{*budget};

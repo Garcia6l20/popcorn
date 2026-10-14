@@ -988,7 +988,7 @@ class System:
             for index in range(len(self._names)):
                 goal = _Goal(
                     self._handle.post_goal(
-                        index, None, None, None, None, None, None, True, self._goal_cap
+                        index, None, None, None, None, None, None, True, self._goal_cap, None
                     ),
                     None,
                     releases=True,
@@ -1495,7 +1495,7 @@ class System:
             goal = _Goal(future, None, waits=waits)
         else:
             future = self._handle.post_goal(
-                index, None, None, None, None, None, None, True, self._goal_cap
+                index, None, None, None, None, None, None, True, self._goal_cap, None
             )
             goal = _Goal(future, None, releases=True)
         self._undecided.pop(index, None)
@@ -1554,10 +1554,12 @@ class System:
         stop_when: Callable[[], bool] | None = None,
         gate: _core.Predicate | None = None,
         run: bool = False,
+        returning: Callable[[], tuple[int, int]] | None = None,
     ) -> Stop:
         """Run a goal of member `machine`, parked at its stop once delivered: see the class.
         Inside the member's own `running()` it joins the run instead, `_join`, except a `run`,
-        refused there as on a lone machine's free run."""
+        refused there as on a lone machine's free run. `returning` resolves a frame-return
+        target, `(return address, sp)`, once the member is parked, right before the post."""
         index = self._index[machine.name]
         if index in self._opens:
             if run:
@@ -1585,6 +1587,7 @@ class System:
                 stop_when=stop_when,
                 gate=gate,
                 open_=False,
+                returning=returning,
             ),
         )
 
@@ -1602,6 +1605,7 @@ class System:
         gate: _core.Predicate | None,
         open_: bool,
         releases: bool = False,
+        returning: Callable[[], tuple[int, int]] | None = None,
     ) -> _Goal:
         self._admitting += 1
         try:
@@ -1617,6 +1621,7 @@ class System:
                 gate=gate,
                 open_=open_,
                 releases=releases,
+                returning=returning,
             )
         finally:
             self._admitting -= 1
@@ -1636,6 +1641,7 @@ class System:
         gate: _core.Predicate | None,
         open_: bool,
         releases: bool,
+        returning: Callable[[], tuple[int, int]] | None,
     ) -> _Goal:
         self._require_usable()
         if index not in self._withdrawals:
@@ -1647,6 +1653,7 @@ class System:
                 await asyncio.shield(flight)
             self._require_usable()
             self._refuse_goal(index)
+        until_return = None if returning is None else returning()
         task = asyncio.current_task()
         until_ps: int | None = None
         if for_ is not None:
@@ -1655,7 +1662,16 @@ class System:
             base = self._handle.time_of_ps(index) - machine.time.ps
             until_ps = base + deadline.ps
         future = self._handle.post_goal(
-            index, until, budget, exact, until_ps, stop_when, gate, open_, self._goal_cap
+            index,
+            until,
+            budget,
+            exact,
+            until_ps,
+            stop_when,
+            gate,
+            open_,
+            self._goal_cap,
+            until_return,
         )
         self._undecided.pop(index, None)
         goal = _Goal(future, task, releases)

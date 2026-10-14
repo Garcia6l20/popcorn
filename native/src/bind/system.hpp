@@ -162,6 +162,8 @@ public:
    *        holds, and without @p stop_when the goal stops when it holds.
    * @param open Whether a system IDLE leaves the goal open.
    * @param cap_ps Virtual time the goal may run from its start.
+   * @param until_return Stop with reason returned at this (return address or EXC_RETURN, stack
+   *        pointer), core::frame_return. None for none.
    * @return Resolves to a tuple (StopInfo, at_ps). Cancelling it requests a pause only: the
    *         caller withdraws the goal at that pause. From the post until the future completes,
    *         by its delivery, a withdraw(), finish() or an error, a parked access of the member
@@ -169,15 +171,16 @@ public:
    */
   [[= py::doc{"Post a member goal while paused, return a HostFuture of (StopInfo, at_ps)."}]] auto
       post_goal(
-          std::size_t                           member,
-          std::optional<address>                until,
-          std::optional<std::uint64_t>          budget,
-          std::optional<std::uint64_t>          exact,
-          std::optional<std::int64_t>           until_ps,
-          std::optional<reflex::py::nb::object> stop_when,
-          std::optional<native_predicate>       gate,
-          bool                                  open,
-          std::optional<std::int64_t>           cap_ps) -> host_future_handle;
+          std::size_t                                       member,
+          std::optional<address>                            until,
+          std::optional<std::uint64_t>                      budget,
+          std::optional<std::uint64_t>                      exact,
+          std::optional<std::int64_t>                       until_ps,
+          std::optional<reflex::py::nb::object>             stop_when,
+          std::optional<native_predicate>                   gate,
+          bool                                              open,
+          std::optional<std::int64_t>                       cap_ps,
+          std::optional<std::tuple<address, std::uint64_t>> until_return) -> host_future_handle;
 
   /**
    * @brief core::system::post_goal() of an open goal that serves several waits at once.

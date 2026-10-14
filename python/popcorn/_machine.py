@@ -457,6 +457,7 @@ class _Linked(Protocol):
         stop_when: Callable[[], bool] | None = None,
         gate: _core.Predicate | None = None,
         run: bool = False,
+        returning: Callable[[], tuple[int, int]] | None = None,
     ) -> Stop: ...
 
     def _halt_member(self, machine: Machine) -> None: ...
@@ -2348,8 +2349,6 @@ class Machine:
     ) -> Stop:
         self._last_stop = None
         system = self._linked()
-        if system is not None and returning is not None:
-            raise NotImplementedError("a frame-return goal of a linked member")
         if system is not None:
             stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
                 self,
@@ -2360,7 +2359,10 @@ class Machine:
                 deadline=deadline,
                 stop_when=None if stop_when is None else self._handler(stop_when),
                 run=run,
+                returning=returning,
             )
+            if returning is not None:
+                stop = returning.named(stop)
             self._last_stop = stop
             return stop
         until_return: tuple[int, int] | None = None

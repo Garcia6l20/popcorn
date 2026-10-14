@@ -407,7 +407,9 @@ public:
         return;
       }
     }
-    if((stopped.reason == stop_reason::address or stopped.reason == stop_reason::budget)
+    if((stopped.reason == stop_reason::address
+        or stopped.reason == stop_reason::budget
+        or stopped.reason == stop_reason::returned)
        and held_last_
        and stopped.time >= until_last_)
     {
@@ -572,6 +574,7 @@ private:
       auto const& goal           = one.goal->goal;
       request.until              = goal.until;
       request.until_also         = goal.until_also;
+      request.until_return       = goal.until_return;
       request.arrive_at          = goal.arrive_at;
       request.budget_left        = left(goal.budget, one.goal->executed);
       request.exact_instructions = left(goal.exact, one.goal->executed);

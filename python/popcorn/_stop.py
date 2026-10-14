@@ -83,7 +83,8 @@ class FrameReturn:
     instruction executes, as `until=` stops. Inner returns of a recursion pass the same
     address with a lower stack pointer and do not stop it. After a tail call the stop lands
     where the tail-calling function would have returned. For an exception handler it is the
-    exception return, after the core unstacked, at the interrupted context's pc.
+    exception return, after the core unstacked, at the interrupted context's pc. A linked
+    member takes it too, resolved once the system paused, before its goal is posted.
 
     The return point comes from the prologue or epilogue at pc when the run starts, the first
     frame `report.stop_report` shows. A function the unwinder cannot follow, where the report

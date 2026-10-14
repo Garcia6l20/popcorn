@@ -64,6 +64,8 @@ struct member_goal
   /** @brief Virtual time the goal may run from its start: a stop_reason::time stop with detail
    * `goal cap` when it is reached first. */
   std::optional<sys_time> cap{};
+  /** @brief Stop with stop_reason::returned at this return, slice_request::until_return. */
+  std::optional<frame_return> until_return{};
 };
 
 /** @brief A goal reached: the member's stop and its system time. */

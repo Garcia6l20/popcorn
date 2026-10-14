@@ -530,10 +530,18 @@ static void start_link(void)
   start_link_at(LINK_BAUD);
 }
 
+uint32_t wait_ticks(uint32_t us);
+
+__attribute__((noipa)) uint32_t wait_ticks(uint32_t us)
+{
+  return us * 160u;
+}
+
 static void wait_us(uint32_t us)
 {
-  uint32_t const from = DWT->CYCCNT;
-  while(DWT->CYCCNT - from < us * 160u)
+  uint32_t const from  = DWT->CYCCNT;
+  uint32_t const ticks = wait_ticks(us);
+  while(DWT->CYCCNT - from < ticks)
   {
   }
 }

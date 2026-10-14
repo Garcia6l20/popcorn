@@ -16,6 +16,7 @@ import pytest
 from popcorn import StopReason, System, SystemStop, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
+from .conftest import run_bounded
 from .linked import PING_BYTES, Ticker, logged, member, received, ticker
 
 L = us(20)
@@ -433,7 +434,7 @@ def test_a_cancel_while_waiting_for_the_last_pause_reaches_the_caller(ping: Buil
         return False
 
     handle = system._handle  # pyright: ignore[reportPrivateUsage]
-    goal = handle.post_goal(1, None, None, None, s(100).ps, held, None, False, None)
+    goal = handle.post_goal(1, None, None, None, s(100).ps, held, None, False, None, None)
 
     async def body() -> None:
         first = asyncio.create_task(system.run(for_=s(100)))
@@ -580,3 +581,155 @@ def test_a_link_between_two_uarts_of_one_member_runs_as_any_link(
         )
     ]
     assert results[1:] == results[:-1]
+
+
+STEP_BUDGET = 10_000_000
+
+
+def test_a_member_steps_out_while_the_other_member_runs_a_goal(ping: Build) -> None:
+    system = ping()
+    a, b = system.members["a"], system.members["b"]
+
+    async def both() -> tuple[int, int | float | None, popcorn.Stop]:
+        other = asyncio.create_task(b.run(for_=ms(2)))
+        reached = await a.run(until="wait_us", budget=STEP_BUDGET)
+        assert reached.reason is StopReason.ADDRESS
+        entry_sp = int(a.reg.sp)
+        value = await a.step_return(budget=STEP_BUDGET)
+        a.halt()
+        return entry_sp, value, await other
+
+    entry_sp, value, other = run_bounded(both(), 10)
+    assert value is None
+    assert other.reason is StopReason.TIME
+    stop = a.last_stop
+    assert stop is not None
+    assert stop.reason is StopReason.RETURNED
+    assert stop.detail == "wait_us returned"
+    assert stop.location.symbol == "link_ping"
+    assert int(a.reg.sp) == entry_sp
+
+
+def test_a_member_steps_out_of_a_function_with_its_value_as_a_lone_machine_calls_it(
+    u575: popcorn.PartDescription, ping: Build
+) -> None:
+    system = ping()
+    a, b = system.members["a"], system.members["b"]
+
+    async def both() -> tuple[int | float | None, popcorn.Stop]:
+        other = asyncio.create_task(b.run(for_=ms(2)))
+        reached = await a.run(until="wait_ticks", budget=STEP_BUDGET)
+        assert reached.reason is StopReason.ADDRESS
+        value = await a.step_return(budget=STEP_BUDGET)
+        a.halt()
+        return value, await other
+
+    value, other = run_bounded(both(), 10)
+    assert other.reason is StopReason.TIME
+    stop = a.last_stop
+    assert stop is not None
+    assert stop.reason is StopReason.RETURNED
+    assert stop.detail == "wait_ticks returned"
+    lone = member(u575, "idle", "lone")
+    called = asyncio.run(lone.call("wait_ticks", 30, budget=STEP_BUDGET))
+    assert value == called.value == 30 * 160
+
+
+def test_a_member_step_out_posted_during_another_members_run_resolves_once_paused(
+    ping: Build,
+) -> None:
+    system = ping()
+    a, b = system.members["a"], system.members["b"]
+
+    async def both() -> tuple[int | float | None, popcorn.Stop]:
+        warm = asyncio.create_task(b.run(for_=ms(1)))
+        reached = await a.run(until="wait_us", budget=STEP_BUDGET)
+        assert reached.reason is StopReason.ADDRESS
+        a.halt()
+        await warm
+        other = asyncio.create_task(b.run(for_=ms(2)))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        value = await a.step_return(budget=STEP_BUDGET)
+        a.halt()
+        return value, await other
+
+    value, other = run_bounded(both(), 10)
+    assert value is None
+    assert other.reason is StopReason.TIME
+    stop = a.last_stop
+    assert stop is not None
+    assert stop.detail == "wait_us returned"
+
+
+def test_a_member_frame_return_from_its_interrupt_handler(ping: Build) -> None:
+    system = ping()
+    a, b = system.members["a"], system.members["b"]
+
+    async def both() -> tuple[int, popcorn.Stop, popcorn.Stop]:
+        other = asyncio.create_task(b.run(for_=ms(2)))
+        reached = await a.run(until="USART1_IRQHandler", budget=STEP_BUDGET)
+        assert reached.reason is StopReason.ADDRESS
+        lr = int(a.reg.lr)
+        stop = await a.run(until=popcorn.FrameReturn(), budget=STEP_BUDGET)
+        a.halt()
+        return lr, stop, await other
+
+    lr, stop, other = run_bounded(both(), 10)
+    assert lr >> 24 == 0xFF
+    assert stop.reason is StopReason.RETURNED
+    assert stop.detail == "USART1_IRQHandler returned"
+    assert int(a.reg.xpsr) & 0x1FF == 0
+    assert other.reason is StopReason.TIME
+
+
+def test_a_member_step_out_inside_its_own_running_is_refused(ping: Build) -> None:
+    system = ping()
+    a = system.members["a"]
+
+    async def body() -> None:
+        async with a.running():
+            with pytest.raises(popcorn.MachineBusy, match="running"):
+                await a.step_return()
+            with pytest.raises(popcorn.MachineBusy, match="running"):
+                await a.run(until=popcorn.FrameReturn())
+
+    run_bounded(body(), 10)
+
+
+def test_a_member_step_out_with_no_return_point_posts_nothing(ping: Build) -> None:
+    system = ping()
+    a = system.members["a"]
+    pc, lr = int(a.reg.pc), int(a.reg.lr)
+    a.reg.pc = a.sym("wait_us") & ~1
+    a.reg.lr = 0
+    with pytest.raises(popcorn.EmulationError, match="wait_us: cannot find where"):
+        asyncio.run(a.step_return())
+    assert system._admitting == 0  # pyright: ignore[reportPrivateUsage]
+    assert not a.busy
+    a.reg.pc, a.reg.lr = pc, lr
+    assert asyncio.run(a.run(for_=us(10))).reason is StopReason.TIME
+
+
+def test_a_member_step_out_of_a_handler_does_not_depend_on_the_quantum(ping: Build) -> None:
+    def step_out(third: VirtualDuration | None) -> tuple[VirtualDuration, int, int, VirtualTime]:
+        system = ping(third=third)
+        a, b = system.members["a"], system.members["b"]
+
+        async def both() -> popcorn.Stop:
+            other = asyncio.create_task(b.run(for_=ms(2)))
+            reached = await a.run(until="USART1_IRQHandler", budget=STEP_BUDGET)
+            assert reached.reason is StopReason.ADDRESS
+            stop = await a.run(until=popcorn.FrameReturn(), budget=STEP_BUDGET)
+            a.halt()
+            await other
+            return stop
+
+        stop = run_bounded(both(), 10)
+        assert stop.reason is StopReason.RETURNED
+        return system.quantum, stop.pc, stop.instructions, stop.time
+
+    long, *one = step_out(None)
+    short, *other = step_out(us(3))
+    assert short < long
+    assert one == other
