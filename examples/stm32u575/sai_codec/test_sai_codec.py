@@ -90,9 +90,10 @@ async def test_channel_13_splits_each_received_frame_into_the_two_rows_of_captur
 ) -> None:
     await sai_codec.periph.SAI1.audio("B").write(RECEIVED)
     await stream_until_the_codec_stops(sai_codec)
-    count = len(sent(sai_codec))
-    last = [max(k for k in range(count) if k % FRAMES == j) for j in range(FRAMES)]
+    frames = sent(sai_codec)
+    last = [max(k for k in range(len(frames)) if k % FRAMES == j) for j in range(FRAMES)]
     assert rows(sai_codec, "capture") == [[0x1000 | k for k in last], [0x2000 | k for k in last]]
+    assert sai_codec.periph.SAI1.audio("B").receive_layout == frames[0].layout
 
 
 async def test_half_and_complete_callbacks_come_per_2d_block_of_64_frames(
@@ -119,8 +120,8 @@ async def test_half_and_complete_callbacks_come_per_2d_block_of_64_frames(
     }
     started = codec(sai_codec).started_ps
     for name, frames, earliest, latest in (
-        ("rx_half", FRAMES // 2, us(12.0), us(12.17)),
-        ("rx_complete", FRAMES, us(15.75), us(15.92)),
+        ("rx_half", FRAMES // 2, us(12.66), us(12.84)),
+        ("rx_complete", FRAMES, us(16.41), us(16.59)),
     ):
         due = [started + (frames + buffer * FRAMES) * FRAME_PS for buffer in range(BUFFERS)]
         late = [time - when for time, when in zip(seen[name], due, strict=True)]

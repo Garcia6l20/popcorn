@@ -339,6 +339,30 @@ TEST_CASE("an audio queue taken until a time takes the frames that ended by then
   CHECK(rest.front().at_ps == 64);
 }
 
+TEST_CASE("an audio queue keeps the layout of the frame its receiver took last until a discard")
+{
+  detail::audio_queue_endpoint queue;
+  CHECK_FALSE(queue.received(queue.lock()).has_value());
+  auto tdm        = stereo;
+  tdm.fs_offset   = true;
+  tdm.slot_count  = 2;
+  tdm.slot_starts = {1, 17};
+  std::array<std::uint32_t, 2> slots{};
+  queue.receive(slots, stereo, vtime{0});
+  queue.receive(slots, tdm, vtime{64});
+  queue.transmitted(slots, stereo, vtime{64}, vtime{128});
+  {
+    auto const held = queue.lock();
+    auto const last = queue.received(held);
+    REQUIRE(last.has_value());
+    CHECK(last->format == tdm);
+    CHECK(last->at_ps == 64);
+    CHECK(last->slots.empty());
+    queue.discard(held);
+    CHECK_FALSE(queue.received(held).has_value());
+  }
+}
+
 TEST_CASE("HID reports and microphone frames are taken by the time the host queued them")
 {
   constexpr std::array<std::uint8_t, 1> report{7};

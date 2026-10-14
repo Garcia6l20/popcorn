@@ -47,6 +47,9 @@ struct block_state
   std::uint32_t              bits{};
   std::uint32_t              position{};
   std::int8_t                resume_slot{no_slot};
+  std::int8_t                carry_slot{no_slot};
+  std::uint32_t              carry_at{};
+  std::uint32_t              carry_word{};
   bool                       ticking{};
   bool                       stalled{};
   bool                       active{};
@@ -91,8 +94,12 @@ struct block_fields
   field_ref                                    companding;
   field_ref                                    frame_length;
   field_ref                                    fs_definition;
+  field_ref                                    fs_offset;
+  field_ref                                    fs_polarity;
+  field_ref                                    fs_active_length;
   field_ref                                    slot_count;
   field_ref                                    slot_size;
+  field_ref                                    first_bit_offset;
   field_ref                                    slot_enable;
   field_ref                                    level;
   field_ref                                    request;
@@ -146,45 +153,51 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
 
 /**
  * @brief SAI1 and SAI2 of the STM32U5, RM0456 section 69 "Serial audio interface (SAI)", audio
- *        blocks A and B in free protocol. A master block's frame lasts
- *        MCKDIV x (OSR + 1) x 256 kernel clock cycles with NODIV = 0, MCKDIV x (FRL + 1) with
- *        NODIV = 1, MCKDIV 0 counting as 1, section 69.4.8. A slave block in asynchronous mode
- *        runs at the board's external frame rate, a slave block synchronous with the other block
- *        (SYNCEN = 01) frames with it from the other block's next frame on. The board's
- *        decimation stretches every frame. A frame has FRL + 1 bit times. Slots follow each other
- *        from bit 0, SLOTSZ bits each, the second half of the slots from the middle of the frame
- *        when FSDEF is set. A frame keeps the timing it started with across a clock change. A
- *        transmitter takes a FIFO word when each active slot starts, slot 0's word again for slot
- *        1 in mono mode with two slots, and hands the frame to its endpoint when it ends. A master
- *        transmitter starts its first frame when the FIFO first holds data, section 69.4.3. A
- *        receiver takes the frame from its endpoint when its first active slot ends, and stores
- *        each active slot's word when the slot ends, slot 0 only in mono mode. Endpoints get the
- *        frame's start time. A frame shorter than 8 bits never runs, logged once, section 69.4.6.
- *        Underrun and overrun set OVRUDR and keep the slot position, section 69.4.14: a
- *        transmitter sends 0 and a receiver drops words until the FIFO serves the slot where it
- *        happened. FLVL and FREQ follow the FIFO level against FTH for the block's direction,
- *        section 69.4.9, also while SAIEN is clear. Clearing SAIEN takes effect at the end of the
- *        frame in progress, section 69.4.15. A master with NODIV = 0 and FRL + 1 not a power of 2
- *        from 8 sets WCKCFG and stays disabled. FRCR.FSDEF is writable, as RM0456 69.6.4
- *        describes it and ST's HAL writes it, although the register map marks it read-only. The
- *        IRQ follows the status flags of both blocks with their enables. With CR1.DMAEN, the
- *        block's DMA request `<instance>_a_dma` or `<instance>_b_dma` follows FREQ, section
- *        69.4.16, through the GPDMA peer, also while SAIEN is clear, levels announced again in
- *        reset. Not modelled, logged once: SPDIF, AC'97, PDM, companding, mute, synchronization
- *        with another SAI. The frame and slot timing ignore FSOFF and FBOFF.
+ *        blocks A and B in free protocol. A master block's frame lasts MCKDIV x (OSR + 1) x 256
+ *        kernel clock cycles with NODIV = 0, MCKDIV x (FRL + 1) with NODIV = 1, MCKDIV 0 counting
+ *        as 1, section 69.4.8. A slave block in asynchronous mode runs at the board's external
+ *        frame rate, a slave block synchronous with the other block (SYNCEN = 01) frames with it
+ *        from the other block's next frame on. The board's decimation stretches every frame. A
+ *        frame has FRL + 1 bit times from its frame sync edge. Slots follow each other from bit 0,
+ *        or from bit 1 with FSOFF, SLOTSZ bits each, the second half of the slots from the middle
+ *        of the frame when FSDEF is set, section 69.4.6. Each slot carries its data from FBOFF bits
+ *        into the slot, section 69.4.7, which moves no FIFO access. A frame keeps the timing it
+ *        started with across a clock change. A transmitter takes a FIFO word when each active slot
+ *        starts, slot 0's word again for slot 1 in mono mode with two slots, and hands the frame to
+ *        its endpoint when it ends. A master transmitter starts its first frame when the FIFO first
+ *        holds data, section 69.4.3. A receiver takes the frame from its endpoint when its first
+ *        active slot ends, and stores each active slot's word when the slot ends, section 69.4.7,
+ *        slot 0 only in mono mode. A slot running past the frame end, the last slot of a full frame
+ *        with FSOFF, stores its word that many bit times into the next frame, or at the frame end
+ *        when no next frame starts, that frame ends first, or a later slot of the same frame also
+ *        runs past its end. A block enabled with slots breaking the rules of section 69.4.7, FBOFF
+ *        + DS above the slot size, the slots longer than the frame or an odd slot count with FSDEF,
+ *        logs it once and runs as configured. A synchronous follower is checked against the frame
+ *        of the block it follows, when both run. Endpoints get the frame's start time and its
+ *        layout, audio_format. A frame shorter than 8 bits never runs, logged once, section 69.4.6.
+ *        Underrun and overrun set OVRUDR and keep the slot position, section 69.4.14: a transmitter
+ *        sends 0 and a receiver drops words until the FIFO serves the slot where it happened. FLVL
+ *        and FREQ follow the FIFO level against FTH for the block's direction, section 69.4.9, also
+ *        while SAIEN is clear. Clearing SAIEN takes effect at the end of the frame in progress,
+ *        section 69.4.15. A master with NODIV = 0 and FRL + 1 not a power of 2 from 8 sets WCKCFG
+ *        and stays disabled. FRCR.FSDEF is writable, as RM0456 69.6.4 describes it and ST's HAL
+ *        writes it, although the register map marks it read-only. The IRQ follows the status flags
+ *        of both blocks with their enables. With CR1.DMAEN, the block's DMA request
+ *        `<instance>_a_dma` or `<instance>_b_dma` follows FREQ, section 69.4.16, through the GPDMA
+ *        peer, also while SAIEN is clear, levels announced again in reset. Not modelled, logged
+ *        once: SPDIF, AC'97, PDM, companding, mute, synchronization with another SAI.
  *
- *        The external clock of each block is board state saved in snapshots: a rate and the
- *        time of one of its frame boundaries since power-on. A power-on or brown-out reset powers
- *        the codec down, the clock returns to the board's wired rate with no phase. Other resets
- *        keep it running in phase. A clock started from stopped has a boundary at the start. A
- *        rate change or a stop takes effect at the clock's next frame boundary, whether a block
- *        runs on it or not, so a stop and a start within one frame keep the phase. A slave block
- *        enabled while its clock runs starts at the next boundary, at once on the first enable
- *        of a clock with no phase, which fixes it. The external clock is defined by its frame
- *        rate and always matches the block's frame, so AFSDET and LFSDET never rise, as with a
- *        correctly wired codec, and their interrupt enables log nothing. A state saved before the
- *        external clock existed loads with the clocks of the machine loading it, their phase
- *        taken again at the next enable.
+ *        The external clock of each block is board state saved in snapshots: a rate and the time of
+ *        one of its frame boundaries since power-on. A power-on or brown-out reset powers the codec
+ *        down, the clock returns to the board's wired rate with no phase. Other resets keep it
+ *        running in phase. A clock started from stopped has a boundary at the start. A rate change
+ *        or a stop takes effect at the clock's next frame boundary, whether a block runs on it or
+ *        not, so a stop and a start within one frame keep the phase. A slave block enabled while
+ *        its clock runs starts at the next boundary, at once on the first enable of a clock with no
+ *        phase, which fixes it. The external clock is defined by its frame rate and always matches
+ *        the block's frame, so AFSDET and LFSDET never rise, as with a correctly wired codec, and
+ *        their interrupt enables log nothing. A state saved before the external clock existed loads
+ *        with the clocks of the machine loading it, their phase taken again at the next enable.
  */
 class sai final : public dispatch_model<sai, sai_state>, public audio_port, public clock_listener
 {
@@ -233,26 +246,33 @@ private:
   [[nodiscard]] auto running(std::size_t b) const -> bool;
   [[nodiscard]] auto boundary(std::size_t b, std::uint64_t now) const -> grid_point;
   [[nodiscard]] auto clock_valid(std::size_t b) const -> bool;
-  [[nodiscard]] auto format(std::size_t b) const -> audio_format;
+  [[nodiscard]] auto format(std::size_t b, std::uint32_t bits) const -> audio_format;
   [[nodiscard]] auto too_short(std::size_t source) -> bool;
 
   void               enable(std::size_t b);
+  void               check_slots(std::size_t b);
   void               disable(std::size_t b);
   [[nodiscard]] auto frame_bits(std::size_t b) const -> std::uint32_t;
+  [[nodiscard]] auto slot_width(std::size_t b) const -> std::uint32_t;
   [[nodiscard]] auto slot_start(std::size_t b, std::size_t slot, std::uint32_t bits) const
       -> std::uint32_t;
   [[nodiscard]] auto slot_end(std::size_t b, std::size_t slot, std::uint32_t bits) const
       -> std::uint32_t;
   [[nodiscard]] auto time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t;
 
-  void start(std::size_t source, std::uint64_t from_ps);
-  void follow_clock(std::size_t b);
-  void open(std::size_t source);
-  void run(std::size_t source, std::uint32_t position);
-  void begin(std::size_t b);
-  void take(std::size_t b, std::size_t slot);
+  void               start(std::size_t source, std::uint64_t from_ps);
+  void               follow_clock(std::size_t b);
+  void               open(std::size_t source);
+  void               run(std::size_t source, std::uint32_t position);
+  void               begin(std::size_t b);
+  void               take(std::size_t b, std::size_t slot);
+  [[nodiscard]] auto received(std::size_t b, std::size_t slot, std::size_t source)
+      -> std::optional<std::uint32_t>;
   void store(std::size_t b, std::size_t slot, std::size_t source);
-  void finish(std::size_t b, std::uint64_t at_ps, std::uint64_t end_ps);
+  void carry(std::size_t b, std::size_t slot, std::size_t source, std::uint32_t at);
+  void flush_carry(std::size_t b);
+  void accept(std::size_t b, std::size_t slot, std::uint32_t word);
+  void finish(std::size_t b, std::uint32_t bits, std::uint64_t at_ps, std::uint64_t end_ps);
   void halt(std::size_t b);
   void push(std::size_t b, std::uint32_t word);
   void flags();
@@ -269,6 +289,7 @@ private:
   bool                                 no_clock_logged_{};
   bool                                 decimation_logged_{};
   bool                                 short_frame_logged_{};
+  bool                                 slot_rules_logged_{};
 };
 
 auto sai_writes() -> std::span<write_entry<sai> const>
@@ -315,34 +336,38 @@ auto sai::fields_of(char prefix) const -> block_fields
   auto const   im   = name("IM");
   auto const   clr  = name("CLRFR");
   block_fields out{
-      .mode          = field(cr1, "MODE"),
-      .protocol      = field(cr1, "PRTCFG"),
-      .size          = field(cr1, "DS"),
-      .sync          = field(cr1, "SYNCEN"),
-      .mono          = field(cr1, "MONO"),
-      .dma           = field(cr1, "DMAEN"),
-      .enable        = field(cr1, "SAIAEN"),
-      .no_divider    = field(cr1, "NODIV"),
-      .divider       = field(cr1, "MCKDIV"),
-      .oversampling  = field(cr1, "OSR"),
-      .threshold     = field(cr2, "FTH"),
-      .flush         = field(cr2, "FFLUSH"),
-      .mute          = field(cr2, "MUTE"),
-      .companding    = field(cr2, "COMP"),
-      .frame_length  = field(name("FRCR"), "FRL"),
-      .fs_definition = field(name("FRCR"), "FSDEF"),
-      .slot_count    = field(name("SLOTR"), "NBSLOT"),
-      .slot_size     = field(name("SLOTR"), "SLOTSZ"),
-      .slot_enable   = field(name("SLOTR"), "SLOTEN"),
-      .level         = field(sr, "FLVL"),
-      .request       = field(sr, "FREQ"),
-      .error         = field(sr, "OVRUDR"),
-      .clock_error   = field(sr, "WCKCFG"),
-      .frcr          = reg(name("FRCR")),
-      .data          = reg(name("DR")),
-      .clear         = reg(clr),
-      .interrupts    = {},
-      .clears        = {}};
+      .mode             = field(cr1, "MODE"),
+      .protocol         = field(cr1, "PRTCFG"),
+      .size             = field(cr1, "DS"),
+      .sync             = field(cr1, "SYNCEN"),
+      .mono             = field(cr1, "MONO"),
+      .dma              = field(cr1, "DMAEN"),
+      .enable           = field(cr1, "SAIAEN"),
+      .no_divider       = field(cr1, "NODIV"),
+      .divider          = field(cr1, "MCKDIV"),
+      .oversampling     = field(cr1, "OSR"),
+      .threshold        = field(cr2, "FTH"),
+      .flush            = field(cr2, "FFLUSH"),
+      .mute             = field(cr2, "MUTE"),
+      .companding       = field(cr2, "COMP"),
+      .frame_length     = field(name("FRCR"), "FRL"),
+      .fs_definition    = field(name("FRCR"), "FSDEF"),
+      .fs_offset        = field(name("FRCR"), "FSOFF"),
+      .fs_polarity      = field(name("FRCR"), "FSPOL"),
+      .fs_active_length = field(name("FRCR"), "FSALL"),
+      .slot_count       = field(name("SLOTR"), "NBSLOT"),
+      .slot_size        = field(name("SLOTR"), "SLOTSZ"),
+      .first_bit_offset = field(name("SLOTR"), "FBOFF"),
+      .slot_enable      = field(name("SLOTR"), "SLOTEN"),
+      .level            = field(sr, "FLVL"),
+      .request          = field(sr, "FREQ"),
+      .error            = field(sr, "OVRUDR"),
+      .clock_error      = field(sr, "WCKCFG"),
+      .frcr             = reg(name("FRCR")),
+      .data             = reg(name("DR")),
+      .clear            = reg(clr),
+      .interrupts       = {},
+      .clears           = {}};
   for(auto const& enable : describe(im).fields)
   {
     auto const flag = std::string_view{enable.name}.substr(0, enable.name.size() - 2);
@@ -404,13 +429,28 @@ auto sai::mono(std::size_t b) const -> bool
   return on(block_[b].mono) and slots(b) == 2;
 }
 
-auto sai::format(std::size_t b) const -> audio_format
+auto sai::format(std::size_t b, std::uint32_t bits) const -> audio_format
 {
-  auto const used = (1u << slots(b)) - 1u;
-  return {
-      .data_bits    = static_cast<std::uint8_t>(data_bits[get(regs_, block_[b].size)]),
-      .active_slots = static_cast<std::uint16_t>(get(regs_, block_[b].slot_enable) & used),
-      .mono         = mono(b)};
+  auto const   used = (1u << slots(b)) - 1u;
+  auto const&  f    = block_[b];
+  audio_format out{
+      .data_bits        = static_cast<std::uint8_t>(data_bits[get(regs_, f.size)]),
+      .active_slots     = static_cast<std::uint16_t>(get(regs_, f.slot_enable) & used),
+      .mono             = mono(b),
+      .frame_bits       = static_cast<std::uint16_t>(bits),
+      .slot_bits        = static_cast<std::uint8_t>(slot_width(b)),
+      .first_bit_offset = static_cast<std::uint8_t>(get(regs_, f.first_bit_offset)),
+      .fs_definition    = on(f.fs_definition),
+      .fs_offset        = on(f.fs_offset),
+      .fs_active_high   = on(f.fs_polarity),
+      .fs_active_bits   = static_cast<std::uint8_t>(get(regs_, f.fs_active_length) + 1u),
+      .slot_count       = static_cast<std::uint8_t>(slots(b)),
+      .slot_starts      = {}};
+  for(std::size_t slot = 0; slot < slots(b); ++slot)
+  {
+    out.slot_starts[slot] = static_cast<std::uint16_t>(slot_start(b, slot, bits));
+  }
+  return out;
 }
 
 auto sai::too_short(std::size_t source) -> bool
@@ -604,6 +644,10 @@ void sai::enable(std::size_t b)
     update(regs_, block_[b].enable, 0);
     return;
   }
+  if(not follows(b, 1 - b) or state_.block[1 - b].ticking)
+  {
+    check_slots(b);
+  }
   if(get(regs_, block_[b].sync) != 0)
   {
     return;
@@ -687,6 +731,13 @@ void sai::start(std::size_t source, std::uint64_t from_ps)
   block.cycles    = r.cycles;
   block.bits      = frame_bits(source);
   block.ticking   = true;
+  for(std::size_t b = 0; b < blocks; ++b)
+  {
+    if(follows(b, source) and enabled(b))
+    {
+      check_slots(b);
+    }
+  }
   if(auto const first = time_at(source, 0); first > ctx_.clock.time().ps)
   {
     block.position = 0;
@@ -736,25 +787,50 @@ auto sai::frame_bits(std::size_t b) const -> std::uint32_t
   return get(regs_, block_[b].frame_length) + 1u;
 }
 
+auto sai::slot_width(std::size_t b) const -> std::uint32_t
+{
+  auto const code = get(regs_, block_[b].slot_size);
+  return code == 1 ? 16u : (code == 2 ? 32u : data_bits[get(regs_, block_[b].size)]);
+}
+
 auto sai::slot_start(std::size_t b, std::size_t slot, std::uint32_t bits) const -> std::uint32_t
 {
-  auto const code  = get(regs_, block_[b].slot_size);
-  auto const width = code == 1 ? 16u : (code == 2 ? 32u : data_bits[get(regs_, block_[b].size)]);
-  auto const count = slots(b);
-  auto const index = static_cast<std::uint32_t>(slot);
+  auto const width  = slot_width(b);
+  auto const count  = slots(b);
+  auto const index  = static_cast<std::uint32_t>(slot);
+  auto const offset = on(block_[b].fs_offset) ? 1u : 0u;
   if(on(block_[b].fs_definition) and count >= 2)
   {
     auto const half = static_cast<std::uint32_t>(count / 2);
-    return index < half ? index * width : bits / 2 + (index - half) * width;
+    return offset + (index < half ? index * width : bits / 2 + (index - half) * width);
   }
-  return index * width;
+  return offset + index * width;
 }
 
 auto sai::slot_end(std::size_t b, std::size_t slot, std::uint32_t bits) const -> std::uint32_t
 {
-  auto const code  = get(regs_, block_[b].slot_size);
-  auto const width = code == 1 ? 16u : (code == 2 ? 32u : data_bits[get(regs_, block_[b].size)]);
-  return std::min(slot_start(b, slot, bits) + width, bits);
+  return slot_start(b, slot, bits) + slot_width(b);
+}
+
+void sai::check_slots(std::size_t b)
+{
+  auto const width = slot_width(b);
+  auto const data  = data_bits[get(regs_, block_[b].size)];
+  auto const first = get(regs_, block_[b].first_bit_offset);
+  auto const bits  = get(regs_, block_[b].sync) == 1 ? frame_bits(1 - b) : frame_bits(b);
+  auto const fits  = data <= width and first <= width - data;
+  auto const room  = slots(b) * width <= bits;
+  auto const even  = not on(block_[b].fs_definition) or slots(b) % 2 == 0;
+  if((fits and room and even) or std::exchange(slot_rules_logged_, true))
+  {
+    return;
+  }
+  warn(
+      std::format("{}SLOTR", b == 0 ? 'A' : 'B'),
+      std::format(
+          "slots break RM0456 69.4.7: FBOFF {} with {} data bits in {}-bit slots, {} slots in a "
+          "{}-bit frame, FSDEF {}",
+          first, data, width, slots(b), bits, on(block_[b].fs_definition) ? 1 : 0));
 }
 
 auto sai::time_at(std::size_t source, std::uint32_t bit) const -> std::uint64_t
@@ -780,6 +856,11 @@ void sai::run(std::size_t source, std::uint32_t position)
       {
         continue;
       }
+      auto const& member = state_.block[b];
+      if(member.carry_slot != no_slot and (member.carry_at == position or position == bits))
+      {
+        flush_carry(b);
+      }
       for(std::size_t slot = 0; slot < slots(b); ++slot)
       {
         auto const fits = slot_start(b, slot, bits) < bits;
@@ -787,9 +868,17 @@ void sai::run(std::size_t source, std::uint32_t position)
         {
           continue;
         }
-        if(receiver(b) and slot_end(b, slot, bits) == position)
+        if(receiver(b))
         {
-          store(b, slot, source);
+          auto const end = slot_end(b, slot, bits);
+          if(end > bits and position == bits)
+          {
+            carry(b, slot, source, end - bits);
+          }
+          else if(end == position)
+          {
+            store(b, slot, source);
+          }
         }
         else if(not receiver(b) and slot_start(b, slot, bits) == position)
         {
@@ -807,7 +896,7 @@ void sai::run(std::size_t source, std::uint32_t position)
     {
       if(members[b] and state_.block[b].active)
       {
-        finish(b, start_ps, end_ps);
+        finish(b, bits, start_ps, end_ps);
       }
     }
     for(std::size_t b = 0; b < blocks; ++b)
@@ -825,6 +914,13 @@ void sai::run(std::size_t source, std::uint32_t position)
     }
     if(not enabled(source) or r.hz == 0 or too_short(source))
     {
+      for(std::size_t b = 0; b < blocks; ++b)
+      {
+        if(members[b])
+        {
+          flush_carry(b);
+        }
+      }
       block.ticking = false;
       block.stalled = enabled(source) and r.hz == 0;
       return;
@@ -847,6 +943,10 @@ void sai::run(std::size_t source, std::uint32_t position)
       {
         begin(b);
       }
+      else if(members[b])
+      {
+        flush_carry(b);
+      }
     }
     position = 0;
   }
@@ -857,14 +957,19 @@ void sai::run(std::size_t source, std::uint32_t position)
     {
       continue;
     }
+    auto const& member = state_.block[b];
+    if(member.carry_slot != no_slot and member.carry_at > position and member.carry_at < next)
+    {
+      next = member.carry_at;
+    }
     for(std::size_t slot = 0; slot < slots(b); ++slot)
     {
       if(not slot_on(b, slot))
       {
         continue;
       }
-      auto const point =
-          receiver(b) ? slot_end(b, slot, block.bits) : slot_start(b, slot, block.bits);
+      auto const point = receiver(b) ? std::min(slot_end(b, slot, block.bits), block.bits)
+                                     : slot_start(b, slot, block.bits);
       if(point > position and point < next)
       {
         next = point;
@@ -912,7 +1017,8 @@ void sai::take(std::size_t b, std::size_t slot)
   block.fifo.erase(block.fifo.begin());
 }
 
-void sai::store(std::size_t b, std::size_t slot, std::size_t source)
+auto sai::received(std::size_t b, std::size_t slot, std::size_t source)
+    -> std::optional<std::uint32_t>
 {
   auto& block = state_.block[b];
   if(block.frame.empty())
@@ -920,14 +1026,54 @@ void sai::store(std::size_t b, std::size_t slot, std::size_t source)
     block.frame.assign(slots(b), 0);
     if(auto const far_end = wired_[b].endpoint)
     {
-      far_end->receive(block.frame, format(b), vtime{time_at(source, 0)});
+      far_end->receive(
+          block.frame, format(b, state_.block[source].bits), vtime{time_at(source, 0)});
     }
   }
   if(slot >= block.frame.size() or (slot == 1 and mono(b)))
   {
+    return std::nullopt;
+  }
+  return block.frame[slot];
+}
+
+void sai::store(std::size_t b, std::size_t slot, std::size_t source)
+{
+  if(auto const word = received(b, slot, source))
+  {
+    accept(b, slot, *word);
+  }
+}
+
+void sai::carry(std::size_t b, std::size_t slot, std::size_t source, std::uint32_t at)
+{
+  flush_carry(b);
+  if(auto const word = received(b, slot, source))
+  {
+    auto& block      = state_.block[b];
+    block.carry_slot = static_cast<std::int8_t>(slot);
+    block.carry_at   = at;
+    block.carry_word = *word;
+  }
+}
+
+void sai::flush_carry(std::size_t b)
+{
+  auto& block = state_.block[b];
+  if(block.carry_slot == no_slot)
+  {
     return;
   }
-  auto const here = static_cast<std::int8_t>(slot);
+  auto const slot = static_cast<std::size_t>(std::exchange(block.carry_slot, no_slot));
+  auto const word = std::exchange(block.carry_word, 0);
+  block.carry_at  = 0;
+  accept(b, slot, word);
+}
+
+void sai::accept(std::size_t b, std::size_t slot, std::uint32_t word)
+{
+  auto&      block = state_.block[b];
+  auto const here  = static_cast<std::int8_t>(slot);
   if(block.resume_slot != no_slot and block.resume_slot != here)
   {
     return;
@@ -939,10 +1085,10 @@ void sai::store(std::size_t b, std::size_t slot, std::size_t source)
     return;
   }
   block.resume_slot = no_slot;
-  block.fifo.push_back(block.frame[slot] & mask(b));
+  block.fifo.push_back(word & mask(b));
 }
 
-void sai::finish(std::size_t b, std::uint64_t at_ps, std::uint64_t end_ps)
+void sai::finish(std::size_t b, std::uint32_t bits, std::uint64_t at_ps, std::uint64_t end_ps)
 {
   auto& block        = state_.block[b];
   block.active       = false;
@@ -950,7 +1096,7 @@ void sai::finish(std::size_t b, std::uint64_t at_ps, std::uint64_t end_ps)
   auto const far_end = wired_[b].endpoint;
   if(not receiver(b) and far_end)
   {
-    far_end->transmitted(frame, format(b), vtime{at_ps}, vtime{end_ps});
+    far_end->transmitted(frame, format(b, bits), vtime{at_ps}, vtime{end_ps});
   }
 }
 

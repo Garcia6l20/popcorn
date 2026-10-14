@@ -16,7 +16,7 @@ from typing import Literal, cast
 import popcorn
 import pytest
 from popcorn import StopReason
-from popcorn.board import AudioFrame, AudioOptions, AudioStream, I2CTarget
+from popcorn.board import AudioFrame, AudioLayout, AudioOptions, AudioStream, I2CTarget
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .conftest import late_drained_read, run_bounded
@@ -31,6 +31,16 @@ SLAVE_FRAME = VirtualDuration(62_500_000)
 STEREO_FRAMES = 512
 CODEC_FRAMES = 1400
 TIM2_CNT = 0x4000_0024
+I2S_LAYOUT = AudioLayout(
+    frame_bits=32,
+    slot_bits=16,
+    first_bit_offset=0,
+    fs_definition=True,
+    fs_offset=True,
+    fs_active_high=False,
+    fs_active_bits=16,
+    slot_starts=(1, 17),
+)
 
 type Block = Literal["A", "B"]
 
@@ -90,6 +100,8 @@ def test_frames_a_block_sent_before_the_stream_was_taken_are_captured(
     assert all(
         (frame.data_bits, frame.active_slots, frame.mono) == (16, 0b11, False) for frame in frames
     )
+    assert frames[0].layout == I2S_LAYOUT
+    assert all(frame.layout is frames[0].layout for frame in frames)
     assert (stream.available, stream.dropped) == (0, 0)
 
 
@@ -106,6 +118,36 @@ def test_a_receiving_block_takes_the_words_written_in_slot_order(
     received = m.var("received")
     assert [received[index].value for index in range(FRAMES)] == words
     assert receiver.queued == 0
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_the_receive_layout_is_the_layout_of_the_frame_the_receiver_took_last(
+    u575: popcorn.PartDescription, running: bool
+) -> None:
+    m = sai_machine(u575)
+    receiver = m.periph.SAI1.audio("B")
+    saved = m.snapshot()
+    m.reg.pc = m.sym("duplex_irq") & ~1
+    before, after = m.time + us(1), m.time + ms(1)
+
+    async def free() -> list[AudioLayout | None]:
+        samples = [m.sample(lambda: receiver.receive_layout, at=at) for at in (before, after)]
+        async with m.running():
+            return [await sample for sample in samples]
+
+    async def parked() -> list[AudioLayout | None]:
+        seen: list[AudioLayout | None] = []
+        for at in (before, after):
+            await m.run(for_=at - m.time)
+            seen.append(receiver.receive_layout)
+        return seen
+
+    assert receiver.receive_layout is None
+    seen = run_bounded(free(), 10) if running else asyncio.run(parked())
+    assert seen == [None, I2S_LAYOUT]
+    assert receiver.receive_layout == I2S_LAYOUT
+    m.restore(saved)
+    assert receiver.receive_layout is None
 
 
 def test_decimation_stretches_every_frame(u575: popcorn.PartDescription) -> None:
@@ -653,5 +695,6 @@ def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
     assert first[-1].at + FRAME <= at + ms(2) < later[0].at + FRAME
     frames = first + later
     assert all(b.at - a.at == FRAME for a, b in itertools.pairwise(frames))
+    assert all(frame.layout == I2S_LAYOUT for frame in frames)
     m.restore(start)
     assert asyncio.run(reads(at)) == (first, later)

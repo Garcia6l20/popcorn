@@ -258,6 +258,39 @@ auto audio_link::queued() const -> std::uint64_t
       queue, [&](core::link_guard const& held) { return queue.queued(held); });
 }
 
+namespace
+{
+auto record_of(detail::queued_audio_frame&& frame) -> audio_record
+{
+  auto const& format = frame.format;
+  auto const  starts = std::span{format.slot_starts}.first(
+      std::min<std::size_t>(format.slot_count, format.slot_starts.size()));
+  return audio_record{
+      .slots            = std::move(frame.slots),
+      .data_bits        = format.data_bits,
+      .active_slots     = format.active_slots,
+      .mono             = format.mono,
+      .at_ps            = frame.at_ps,
+      .frame_bits       = format.frame_bits,
+      .slot_bits        = format.slot_bits,
+      .first_bit_offset = format.first_bit_offset,
+      .fs_definition    = format.fs_definition,
+      .fs_offset        = format.fs_offset,
+      .fs_active_high   = format.fs_active_high,
+      .fs_active_bits   = format.fs_active_bits,
+      .slot_starts      = {starts.begin(), starts.end()},
+  };
+}
+}
+
+auto audio_link::receive_layout() const -> std::optional<audio_record>
+{
+  auto& queue = endpoint();
+  return detail::link_locked(
+             queue, [&](core::link_guard const& held) { return queue.received(held); })
+      .transform([](detail::queued_audio_frame frame) { return record_of(std::move(frame)); });
+}
+
 auto audio_link::drain(std::uint64_t count) -> std::vector<audio_record>
 {
   return drain_until(count, std::numeric_limits<std::uint64_t>::max());
@@ -271,15 +304,7 @@ auto audio_link::drain_until(std::uint64_t count, std::uint64_t until_ps)
       queue, [&](core::link_guard const& held) { return queue.take(held, count, until_ps); });
   return taken
        | std::views::as_rvalue
-       | std::views::transform([](detail::queued_audio_frame&& frame) {
-           return audio_record{
-               .slots        = std::move(frame.slots),
-               .data_bits    = frame.format.data_bits,
-               .active_slots = frame.format.active_slots,
-               .mono         = frame.format.mono,
-               .at_ps        = frame.at_ps,
-           };
-         })
+       | std::views::transform(record_of)
        | std::ranges::to<std::vector>();
 }
 

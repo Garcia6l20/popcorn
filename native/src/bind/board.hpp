@@ -166,6 +166,22 @@ struct[[= py::rename{"AudioRecord"}]] audio_record
   [[= py::readonly]] bool mono{};
   /** @brief Virtual time the frame started, in picoseconds. */
   [[= py::readonly]] std::uint64_t at_ps{};
+  /** @brief Bit clocks per frame, FRL + 1. */
+  [[= py::readonly]] std::uint16_t frame_bits{};
+  /** @brief Bits per slot, SLOTSZ resolved. */
+  [[= py::readonly]] std::uint8_t slot_bits{};
+  /** @brief First data bit within a slot, FBOFF. */
+  [[= py::readonly]] std::uint8_t first_bit_offset{};
+  /** @brief Frame sync marks the start of frame and the channel side, FSDEF. */
+  [[= py::readonly]] bool fs_definition{};
+  /** @brief Frame sync asserted one bit clock before slot 0, FSOFF. */
+  [[= py::readonly]] bool fs_offset{};
+  /** @brief Frame sync active high, FSPOL. */
+  [[= py::readonly]] bool fs_active_high{};
+  /** @brief Frame sync active level length in bit clocks, FSALL + 1. */
+  [[= py::readonly]] std::uint8_t fs_active_bits{};
+  /** @brief Start of each slot in bit clocks from the frame sync edge, NBSLOT + 1 of them. */
+  [[= py::readonly]] std::vector<std::uint16_t> slot_starts{};
 };
 
 /**
@@ -205,6 +221,13 @@ public:
   [[= py::doc{"Words written and not served to the receiver yet."}]] [[nodiscard]] auto
       queued() const -> std::uint64_t;
   /**
+   * @brief Layout of the frame the receiving block took last, with no slot words and the
+   *        frame's start, none before the first frame or since the last discard.
+   */
+  [[= py::doc{
+      "Layout and start of the frame the receiver took last, None before any."}]] [[nodiscard]] auto
+      receive_layout() const -> std::optional<audio_record>;
+  /**
    * @brief Takes the oldest transmitted frames.
    * @param count Most frames taken.
    */
@@ -224,8 +247,13 @@ public:
    */
   [[= py::doc{"Queue words for a receiving block, one per slot in slot order."}]] void
       write(std::vector<std::uint32_t> const& words);
-  /** @brief Drops the kept frames and the words not served yet, and clears the drop count. */
-  [[= py::doc{"Drop kept frames and unserved words, clear the drop count."}]] void discard();
+  /**
+   * @brief Drops the kept frames, the words not served yet and the receiver's last layout, and
+   *        clears the drop count.
+   */
+  [[= py::doc{
+      "Drop kept frames, unserved words and the receive layout, clear the drop count."}]] void
+      discard();
   /**
    * @brief Sets the most transmitted frames the queue keeps, audio_frame_limit by default.
    * @param limit Frames, at least 1.

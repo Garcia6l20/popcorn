@@ -50,7 +50,8 @@ uv run pytest -q examples/stm32u575/sai_codec
   - the first frame starts at the codec's power-on byte, frames 1/48 kHz apart to the
     picosecond, the frame in progress at the power-off byte ends and nothing follows.
   - every frame block A sent is `(playback[0][k], playback[1][k])`, k counting modulo 64.
-  - `capture[0][k]` and `capture[1][k]` hold the two slots of the last frame k received.
+  - `capture[0][k]` and `capture[1][k]` hold the two slots of the last frame k received, and
+    block B's `receive_layout` equals the layout of block A's frames, both I2S.
   - four half and four complete callbacks per channel, 64 frames apart.
   - a snapshot mid-stream restored in place replays the same frames, capture and codec stop.
 - `stereocodec.py`: the codec and its snapshot state.
@@ -83,8 +84,9 @@ offset in `RepeatBlockConfig` sets the matching DEC bit:
 
 The transfer event mode is `DMA_TCEM_REPEATED_BLOCK_TRANSFER`. On channels 12 to 15 it raises
 the half transfer after the rounded-up half of BRC + 1 blocks and the complete at the end of the
-2D block. The receive callbacks run 12.0 to 12.17 us after the 32nd frame ends and 15.75 to
-15.92 us after the 64th, the time `HAL_DMA_IRQHandler` takes at 4 MHz.
+2D block. The receive callbacks run 12.67 to 12.83 us after the 32nd frame ends and 16.42 to
+16.58 us after the 64th: the time `HAL_DMA_IRQHandler` takes at 4 MHz, plus one 651 ns bit clock,
+since with FSOFF the right-channel word completes one bit into the next frame.
 
 ## Starting the streams without HAL_SAI_Transmit_DMA
 
@@ -112,7 +114,6 @@ modelled. The controller transfers are unaffected.
 - A destination burst left partial by a block end gets no DAO and no warning.
 - AFSDET and LFSDET never rise: an external clock always matches the block's frame. A codec with
   another frame length is not modelled.
-- FSOFF and FBOFF do not move the frame and slot timing.
 
 ## Rebuild the firmware
 

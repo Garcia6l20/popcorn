@@ -11,6 +11,7 @@
 #include <deque>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -174,8 +175,9 @@ struct queued_audio_frame
  * @brief Far end of an SAI audio block for Python: keeps transmitted frames flat, slot words
  *        back to back with one start and one end time per frame and one layout per run of
  *        frames, at most `limit` frames, a full queue dropping its oldest frame and counting it.
- *        Serves words Python wrote to a receiving block in slot order, then 0. The engine and the
- *        binding touch it under its link lock.
+ *        Serves words Python wrote to a receiving block in slot order, then 0, and keeps the
+ *        layout of the frame the block took last. The engine and the binding touch it under its
+ *        link lock.
  */
 class audio_queue_endpoint final : public periph::stm32::audio_endpoint
 {
@@ -211,9 +213,11 @@ public:
     ends_.push_back(end.ps);
   }
 
-  void receive(std::span<std::uint32_t> slots, periph::stm32::audio_format, vtime) override
+  void
+      receive(std::span<std::uint32_t> slots, periph::stm32::audio_format format, vtime at) override
   {
     auto const held = lock();
+    received_       = queued_audio_frame{.format = format, .at_ps = at.ps};
     for(auto& slot : slots)
     {
       if(pending_.empty())
@@ -238,6 +242,13 @@ public:
       pre(held.guards(mutex_))
   {
     return dropped_;
+  }
+
+  /** @brief Layout and start of the frame the receiver took last, none since the last discard. */
+  [[nodiscard]] auto received(core::link_guard const& held) const
+      -> std::optional<queued_audio_frame> pre(held.guards(mutex_))
+  {
+    return received_;
   }
 
   /** @brief Words written and not served to the receiver yet. */
@@ -285,9 +296,13 @@ public:
     pending_.insert(pending_.end(), words.begin(), words.end());
   }
 
-  /** @brief Drops the kept frames and the words not served yet, and clears the drop count. */
+  /**
+   * @brief Drops the kept frames, the words not served yet and the receiver's last layout, and
+   *        clears the drop count.
+   */
   void discard(core::link_guard const& held) pre(held.guards(mutex_))
   {
+    received_.reset();
     words_.clear();
     starts_.clear();
     ends_.clear();
@@ -329,13 +344,14 @@ private:
     }
   }
 
-  mutable std::mutex        mutex_;
-  std::deque<std::uint32_t> words_;
-  std::deque<std::uint64_t> starts_;
-  std::deque<std::uint64_t> ends_;
-  std::deque<format_run>    runs_;
-  std::deque<std::uint32_t> pending_;
-  std::uint64_t             limit_ = audio_frame_limit;
-  std::uint64_t             dropped_{};
+  mutable std::mutex                mutex_;
+  std::deque<std::uint32_t>         words_;
+  std::deque<std::uint64_t>         starts_;
+  std::deque<std::uint64_t>         ends_;
+  std::deque<format_run>            runs_;
+  std::deque<std::uint32_t>         pending_;
+  std::optional<queued_audio_frame> received_;
+  std::uint64_t                     limit_ = audio_frame_limit;
+  std::uint64_t                     dropped_{};
 };
 }

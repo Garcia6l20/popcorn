@@ -1017,7 +1017,7 @@ TEST_CASE("a snapshot keeps the phase of a running external clock no block uses 
 
 namespace
 {
-struct saved_block
+struct legacy_block
 {
   std::uint32_t              generation{};
   std::vector<std::uint32_t> fifo;
@@ -1037,6 +1037,57 @@ struct saved_block
   bool                       waiting{};
 };
 
+struct saved_block
+{
+  std::uint32_t              generation{};
+  std::vector<std::uint32_t> fifo;
+  std::vector<std::uint32_t> frame;
+  std::uint64_t              anchor_ps{};
+  std::uint64_t              frames{};
+  std::uint64_t              next_ps{};
+  std::uint64_t              hz{};
+  std::uint64_t              cycles{};
+  std::uint32_t              bits{};
+  std::uint32_t              position{};
+  std::int8_t                resume_slot{-1};
+  std::int8_t                carry_slot{-1};
+  std::uint32_t              carry_at{};
+  std::uint32_t              carry_word{};
+  bool                       ticking{};
+  bool                       stalled{};
+  bool                       active{};
+  bool                       stopping{};
+  bool                       waiting{};
+};
+
+auto legacy(std::array<saved_block, 2> const& blocks) -> std::array<legacy_block, 2>
+{
+  std::array<legacy_block, 2> out{};
+  for(std::size_t index = 0; index < blocks.size(); ++index)
+  {
+    auto const& in = blocks[index];
+    REQUIRE(in.carry_slot == -1);
+    out[index] = {
+        .generation  = in.generation,
+        .fifo        = in.fifo,
+        .frame       = in.frame,
+        .anchor_ps   = in.anchor_ps,
+        .frames      = in.frames,
+        .next_ps     = in.next_ps,
+        .hz          = in.hz,
+        .cycles      = in.cycles,
+        .bits        = in.bits,
+        .position    = in.position,
+        .resume_slot = in.resume_slot,
+        .ticking     = in.ticking,
+        .stalled     = in.stalled,
+        .active      = in.active,
+        .stopping    = in.stopping,
+        .waiting     = in.waiting};
+  }
+  return out;
+}
+
 struct saved_clock
 {
   std::uint32_t hz{};
@@ -1052,7 +1103,13 @@ struct new_sai_state
 
 struct old_sai_state
 {
-  std::array<saved_block, 2> block{};
+  std::array<legacy_block, 2> block{};
+};
+
+struct pre_carry_sai_state
+{
+  std::array<legacy_block, 2>               block{};
+  std::optional<std::array<saved_clock, 2>> clock{};
 };
 
 auto without_clock(core::snapshot const& saved) -> core::snapshot
@@ -1066,7 +1123,7 @@ auto without_clock(core::snapshot const& saved) -> core::snapshot
   REQUIRE(now.clock.has_value());
   REQUIRE(now.block[0].ticking);
   part->data.clear();
-  reflex::serde::bson::serializer{part->data}.dump(old_sai_state{.block = now.block});
+  reflex::serde::bson::serializer{part->data}.dump(old_sai_state{.block = legacy(now.block)});
   return core::snapshot{std::move(data)};
 }
 }
@@ -1248,7 +1305,16 @@ TEST_CASE("mono mode sends slot 0's word in both slots, the data size masks the 
   CHECK(r.a->frames[1].slots == std::vector<std::uint32_t>{0x56, 0x56});
   CHECK(
       r.a->frames[0].format
-      == stm32::audio_format{.data_bits = 8, .active_slots = 3, .mono = true});
+      == stm32::audio_format{
+          .data_bits      = 8,
+          .active_slots   = 3,
+          .mono           = true,
+          .frame_bits     = 32,
+          .slot_bits      = 8,
+          .fs_active_bits = 16,
+          .slot_count     = 2,
+          .slot_starts    = {0, 8}
+  });
   CHECK(b.get("ASR", "OVRUDR") == 0);
 }
 
@@ -1364,6 +1430,537 @@ TEST_CASE("FSDEF is writable and starts the second half of the slots mid-frame")
   CHECK(b.get("AFRCR", "FSDEF") == 0);
 }
 
+TEST_CASE("FSOFF starts every slot one bit clock after the frame sync edge, the layout says so")
+{
+  constexpr std::uint64_t bit_ps = 312'500;
+  for(auto const offset : {0u, 1u})
+  {
+    CAPTURE(offset);
+    rig r{"idle"};
+    bus b{*r.f};
+    b.clocks();
+    b.put(
+        "AFRCR", {
+                     {"FRL",   63    },
+                     {"FSALL", 31    },
+                     {"FSDEF", 1     },
+                     {"FSOFF", offset}
+    });
+    b.put(
+        "ASLOTR", {
+                      {"NBSLOT", 1},
+                      {"SLOTSZ", 2},
+                      {"SLOTEN", 3}
+    });
+    b.put(
+        "ACR1", {
+                    {"DS",     4},
+                    {"NODIV",  1},
+                    {"MCKDIV", 5}
+    });
+    b.push('A', ramp(0));
+    b.set("ACR1", "SAIAEN", 1);
+    auto const start = b.now();
+    CHECK(b.get("ASR", "FLVL") == offset);
+    b.run_until(start + bit_ps + bit_ps / 2);
+    CHECK(b.get("ASR", "FLVL") == 0);
+    b.run_until(start + (31 + offset) * bit_ps);
+    CHECK(b.get("ASR", "OVRUDR") == 0);
+    b.run_until(start + (32 + offset) * bit_ps + bit_ps / 2);
+    CHECK(b.get("ASR", "OVRUDR") == 1);
+    b.run_until(start + 65 * bit_ps);
+    REQUIRE(r.a->frames.size() == 1);
+    auto const& format = r.a->frames[0].format;
+    CHECK(
+        format
+        == stm32::audio_format{
+            .data_bits      = 16,
+            .active_slots   = 3,
+            .frame_bits     = 64,
+            .slot_bits      = 32,
+            .fs_definition  = true,
+            .fs_offset      = offset != 0,
+            .fs_active_bits = 32,
+            .slot_count     = 2,
+            .slot_starts    = {
+                               static_cast<std::uint16_t>(offset), static_cast<std::uint16_t>(32 + offset)}
+    });
+    auto other      = format;
+    other.fs_offset = not format.fs_offset;
+    CHECK(other != format);
+  }
+}
+
+TEST_CASE("a TDM frame of 8 slots of 16 bits lays its slots back to back from the edge")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.clocks();
+  b.put(
+      "AFRCR", {
+                   {"FRL",   127},
+                   {"FSALL", 0  },
+                   {"FSPOL", 1  }
+  });
+  b.put(
+      "ASLOTR", {
+                    {"NBSLOT", 7   },
+                    {"SLOTSZ", 1   },
+                    {"SLOTEN", 0xFF}
+  });
+  b.put(
+      "ACR1", {
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  for(std::uint32_t index = 0; index < 8; ++index)
+  {
+    b.push('A', ramp(index));
+  }
+  b.set("ACR1", "SAIAEN", 1);
+  auto const start = b.now();
+  b.run_until(start + 41 * us);
+  REQUIRE(r.a->frames.size() == 1);
+  CHECK(
+      r.a->frames[0].slots
+      == std::vector<std::uint32_t>{
+          ramp(0), ramp(1), ramp(2), ramp(3), ramp(4), ramp(5), ramp(6), ramp(7)});
+  CHECK(
+      r.a->frames[0].format
+      == stm32::audio_format{
+          .data_bits      = 16,
+          .active_slots   = 0xFF,
+          .frame_bits     = 128,
+          .slot_bits      = 16,
+          .fs_active_high = true,
+          .fs_active_bits = 1,
+          .slot_count     = 8,
+          .slot_starts    = {0, 16, 32, 48, 64, 80, 96, 112}
+  });
+}
+
+namespace
+{
+constexpr std::uint64_t bit_64 = 312'500;
+
+void receiver_b(bus const& b, std::uint32_t offset, std::uint32_t first)
+{
+  b.clocks();
+  b.put(
+      "BFRCR", {
+                   {"FRL",   63    },
+                   {"FSALL", 31    },
+                   {"FSDEF", 1     },
+                   {"FSOFF", offset}
+  });
+  b.put(
+      "BSLOTR", {
+                    {"NBSLOT", 1    },
+                    {"SLOTSZ", 2    },
+                    {"FBOFF",  first},
+                    {"SLOTEN", 3    }
+  });
+  b.put(
+      "BCR1", {
+                  {"MODE",   1},
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  b.set("BCR1", "SAIAEN", 1);
+}
+
+auto has_key(core::snapshot const& saved, std::string_view key) -> bool
+{
+  auto const data = core::decode_snapshot(core::encode_snapshot(saved.data()));
+  auto const part =
+      std::ranges::find(data.models, std::string{"SAI1"}, &core::snapshot_part::owner);
+  REQUIRE(part != data.models.end());
+  auto const bytes = std::as_bytes(std::span{key});
+  return not std::ranges::search(part->data, bytes).empty();
+}
+
+auto without_carry(core::snapshot const& saved) -> core::snapshot
+{
+  auto data = core::decode_snapshot(core::encode_snapshot(saved.data()));
+  auto part = std::ranges::find(data.models, std::string{"SAI1"}, &core::snapshot_part::owner);
+  REQUIRE(part != data.models.end());
+  auto const now = reflex::serde::bson::deserializer{
+      std::span<std::byte const>{
+          part->data}}.load<new_sai_state>();
+  part->data.clear();
+  reflex::serde::bson::serializer{part->data}.dump(
+      pre_carry_sai_state{.block = legacy(now.block), .clock = now.clock});
+  return core::snapshot{std::move(data)};
+}
+}
+
+TEST_CASE("a receiver stores each slot's word when the slot ends, FSOFF and FSDEF included")
+{
+  for(auto const offset : {0u, 1u})
+  {
+    for(auto const first : {0u, 16u})
+    {
+      CAPTURE(offset);
+      CAPTURE(first);
+      rig                           r{"idle"};
+      bus                           b{*r.f};
+      std::vector<core::log_record> logged;
+      auto const                    sink = r.f->target->add_log_sink(
+          [&](core::log_record const& record) { logged.push_back(record); });
+      receiver_b(b, offset, first);
+      auto const start = b.now();
+      b.run_until(start + (offset + 31) * bit_64);
+      CHECK(b.get("BSR", "FLVL") == 0);
+      b.run_until(start + (offset + 32) * bit_64 + bit_64 / 2);
+      CHECK(b.get("BSR", "FLVL") == 1);
+      b.run_until(start + (offset + 63) * bit_64);
+      CHECK(b.get("BSR", "FLVL") == 1);
+      b.run_until(start + (offset + 64) * bit_64 + bit_64 / 2);
+      CHECK(b.get("BSR", "FLVL") == 2);
+      CHECK(b.pop('B') == (source_words(2)[0] & 0xFFFFu));
+      CHECK(b.pop('B') == (source_words(2)[1] & 0xFFFFu));
+      CHECK(r.b->calls.size() == 1);
+      CHECK(std::ranges::none_of(logged, [](core::log_record const& record) {
+        return record.message.contains("69.4.7");
+      }));
+    }
+  }
+}
+
+TEST_CASE("a word carried past the frame end is stored at the frame end when no frame follows")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  receiver_b(b, 1, 0);
+  auto const start = b.now();
+  b.run_until(start + 40 * bit_64);
+  b.set("BCR1", "SAIAEN", 0);
+  b.run_until(start + 63 * bit_64);
+  CHECK(b.get("BSR", "FLVL") == 1);
+  b.run_until(start + 64 * bit_64 + bit_64 / 2);
+  CHECK(b.get("BCR1", "SAIAEN") == 0);
+  CHECK(b.get("BSR", "FLVL") == 2);
+  CHECK(b.pop('B') == (source_words(2)[0] & 0xFFFFu));
+  CHECK(b.pop('B') == (source_words(2)[1] & 0xFFFFu));
+}
+
+TEST_CASE("words carried past the whole next frame are stored at frame ends, none lost")
+{
+  for(auto const definition : {0u, 1u})
+  {
+    CAPTURE(definition);
+    rig r{"idle"};
+    bus b{*r.f};
+    b.clocks();
+    b.put(
+        "BFRCR", {
+                     {"FRL",   15        },
+                     {"FSALL", 7         },
+                     {"FSDEF", definition},
+                     {"FSOFF", 1         }
+    });
+    b.put(
+        "BSLOTR", {
+                      {"NBSLOT", 1},
+                      {"SLOTSZ", 2},
+                      {"SLOTEN", 3}
+    });
+    b.put(
+        "BCR1", {
+                    {"MODE",   1},
+                    {"DS",     4},
+                    {"NODIV",  1},
+                    {"MCKDIV", 5}
+    });
+    b.set("BCR1", "SAIAEN", 1);
+    auto const                 start = b.now();
+    auto const                 words = source_words(6);
+    std::vector<std::uint32_t> expected;
+    if(definition == 0)
+    {
+      b.run_until(start + 31 * bit_64);
+      CHECK(b.get("BSR", "FLVL") == 0);
+      b.run_until(start + 32 * bit_64 + bit_64 / 2);
+      CHECK(b.get("BSR", "FLVL") == 1);
+      b.run_until(start + 47 * bit_64);
+      CHECK(b.get("BSR", "FLVL") == 1);
+      expected = {words[0], words[2]};
+    }
+    else
+    {
+      expected = {words[0], words[1], words[2], words[3], words[4]};
+    }
+    b.run_until(start + 48 * bit_64 + bit_64 / 2);
+    std::vector<std::uint32_t> popped;
+    for(auto& word : expected)
+    {
+      word &= 0xFFFFu;
+      popped.push_back(b.pop('B'));
+    }
+    CHECK(popped == expected);
+    CHECK(b.get("BSR", "FLVL") == 0);
+  }
+}
+
+TEST_CASE("a follower's carried word is stored at the frame end when the follower stops")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  b.clocks();
+  for(auto const* block : {"A", "B"})
+  {
+    b.put(
+        std::string{
+            block
+    }
+            + "FRCR",
+        {{"FRL", 63}, {"FSALL", 31}, {"FSDEF", 1}, {"FSOFF", 1}});
+    b.put(
+        std::string{
+            block
+    }
+            + "SLOTR",
+        {{"NBSLOT", 1}, {"SLOTSZ", 2}, {"SLOTEN", 3}});
+  }
+  b.put(
+      "BCR1", {
+                  {"MODE",   3},
+                  {"DS",     4},
+                  {"SYNCEN", 1},
+                  {"SAIAEN", 1}
+  });
+  b.put(
+      "ACR1", {
+                  {"MODE",   1},
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  b.set("ACR1", "SAIAEN", 1);
+  auto const start = b.now();
+  b.run_until(start + 40 * bit_64);
+  b.set("BCR1", "SAIAEN", 0);
+  b.run_until(start + 63 * bit_64);
+  CHECK(b.get("BSR", "FLVL") == 1);
+  b.run_until(start + 64 * bit_64 + bit_64 / 2);
+  CHECK(b.get("BCR1", "SAIAEN") == 0);
+  CHECK(b.get("ACR1", "SAIAEN") == 1);
+  CHECK(b.get("BSR", "FLVL") == 2);
+  CHECK(b.get("ASR", "FLVL") == 1);
+}
+
+TEST_CASE("a snapshot with a carried word restores it, a state saved before carries loads")
+{
+  rig first{"idle"};
+  bus b{*first.f};
+  receiver_b(b, 1, 0);
+  auto const start = b.now();
+  b.run_until(start + 40 * bit_64);
+  auto const before = first.f->target->snapshot();
+  b.run_until(start + 64 * bit_64 + bit_64 / 2);
+  CHECK(b.get("BSR", "FLVL") == 1);
+  auto const carrying = first.f->target->snapshot();
+  b.run_until(start + 65 * bit_64 + bit_64 / 2);
+  REQUIRE(b.get("BSR", "FLVL") == 2);
+  std::vector<std::uint32_t> const words{b.pop('B'), b.pop('B')};
+  CHECK(
+      words
+      == std::vector<std::uint32_t>{source_words(2)[0] & 0xFFFFu, source_words(2)[1] & 0xFFFFu});
+
+  SUBCASE("the carried word")
+  {
+    rig other{"idle"};
+    bus o{*other.f};
+    other.f->target->restore(restored(carrying));
+    CHECK(o.get("BSR", "FLVL") == 1);
+    o.run_until(start + 65 * bit_64 + bit_64 / 2);
+    CHECK(o.get("BSR", "FLVL") == 2);
+    CHECK(std::vector<std::uint32_t>{o.pop('B'), o.pop('B')} == words);
+  }
+  SUBCASE("a state without the carry members")
+  {
+    REQUIRE(has_key(before, "carry_slot"));
+    auto const old = without_carry(before);
+    REQUIRE_FALSE(has_key(old, "carry_slot"));
+    rig other{"idle"};
+    bus o{*other.f};
+    other.f->target->restore(old);
+    o.run_until(start + 64 * bit_64 + bit_64 / 2);
+    CHECK(o.get("BSR", "FLVL") == 1);
+    o.run_until(start + 65 * bit_64 + bit_64 / 2);
+    CHECK(o.get("BSR", "FLVL") == 2);
+    CHECK(std::vector<std::uint32_t>{o.pop('B'), o.pop('B')} == words);
+  }
+}
+
+TEST_CASE("a synchronous follower lays out and checks its slots on the frame it follows")
+{
+  rig                           r{"idle"};
+  bus                           b{*r.f};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  b.clocks();
+  b.stereo16("A", 64, false);
+  b.put(
+      "BFRCR", {
+                   {"FRL",   31},
+                   {"FSALL", 15},
+                   {"FSDEF", 1 }
+  });
+  b.put(
+      "BSLOTR", {
+                    {"NBSLOT", 1},
+                    {"SLOTSZ", 2},
+                    {"SLOTEN", 3}
+  });
+  b.put(
+      "BCR1", {
+                  {"MODE",   2},
+                  {"DS",     4},
+                  {"SYNCEN", 1}
+  });
+  b.push('B', ramp(10));
+  b.push('B', ramp(11));
+  b.set("BCR1", "SAIAEN", 1);
+  b.put(
+      "ACR1", {
+                  {"DS",     4},
+                  {"NODIV",  1},
+                  {"MCKDIV", 5}
+  });
+  b.push('A', ramp(0));
+  b.push('A', ramp(1));
+  b.set("ACR1", "SAIAEN", 1);
+  auto const start = b.now();
+  b.run_until(start + 21 * us);
+  REQUIRE(r.b->frames.size() == 1);
+  CHECK(r.b->frames[0].slots == std::vector<std::uint32_t>{ramp(10), ramp(11)});
+  auto const& format = r.b->frames[0].format;
+  CHECK(format.frame_bits == 64);
+  CHECK(format.slot_starts[0] == 0);
+  CHECK(format.slot_starts[1] == 32);
+  CHECK(std::ranges::none_of(logged, [](core::log_record const& record) {
+    return record.message.contains("69.4.7");
+  }));
+}
+
+TEST_CASE("a follower enabled before its source is configured is checked when the source starts")
+{
+  for(auto const frame : {64u, 32u})
+  {
+    CAPTURE(frame);
+    rig                           r{"idle"};
+    bus                           b{*r.f};
+    std::vector<core::log_record> logged;
+    auto const                    sink = r.f->target->add_log_sink(
+        [&](core::log_record const& record) { logged.push_back(record); });
+    b.clocks();
+    b.put(
+        "BFRCR", {
+                     {"FRL",   63},
+                     {"FSALL", 31},
+                     {"FSDEF", 1 }
+    });
+    b.put(
+        "BSLOTR", {
+                      {"NBSLOT", 1},
+                      {"SLOTSZ", 2},
+                      {"SLOTEN", 3}
+    });
+    b.put(
+        "BCR1", {
+                    {"MODE",   2},
+                    {"DS",     4},
+                    {"SYNCEN", 1}
+    });
+    b.set("BCR1", "SAIAEN", 1);
+    b.stereo16("A", frame, false);
+    b.put(
+        "ACR1", {
+                    {"DS",     4},
+                    {"NODIV",  1},
+                    {"MCKDIV", 5}
+    });
+    b.push('A', ramp(0));
+    b.push('A', ramp(1));
+    b.set("ACR1", "SAIAEN", 1);
+    b.run_until(b.now() + 21 * us);
+    auto const warned = std::ranges::count_if(logged, [](core::log_record const& record) {
+      return record.reg == "BSLOTR" and record.message.contains("69.4.7");
+    });
+    CHECK(warned == (frame == 64 ? 0 : 1));
+  }
+}
+
+TEST_CASE("slots breaking the RM0456 slot rules log once across enables")
+{
+  struct broken
+  {
+    std::string_view name;
+    std::uint32_t    first{};
+    std::uint32_t    frame{};
+    std::uint32_t    count{2};
+    std::uint32_t    size{2};
+    std::uint32_t    definition{};
+  };
+  for(auto const& one : {
+          broken{.name = "FBOFF above SLOTSZ - DS", .first = 17, .frame = 64},
+          broken{.name = "slots longer than the frame", .first = 0, .frame = 48},
+          broken{
+                 .name       = "an odd slot count with FSDEF",
+                 .frame      = 64,
+                 .count      = 3,
+                 .size       = 1,
+                 .definition = 1}
+  })
+  {
+    CAPTURE(one.name);
+    rig                           r{"idle"};
+    bus                           b{*r.f};
+    std::vector<core::log_record> logged;
+    auto const                    sink = r.f->target->add_log_sink(
+        [&](core::log_record const& record) { logged.push_back(record); });
+    b.clocks();
+    b.put(
+        "AFRCR",
+        {
+            {"FRL",   one.frame - 1    },
+            {"FSALL", one.frame / 2 - 1},
+            {"FSDEF", one.definition   }
+    });
+    b.put(
+        "ASLOTR", {
+                      {"NBSLOT", one.count - 1         },
+                      {"SLOTSZ", one.size              },
+                      {"FBOFF",  one.first             },
+                      {"SLOTEN", (1u << one.count) - 1u}
+    });
+    b.put(
+        "ACR1", {
+                    {"MODE",   1},
+                    {"DS",     4},
+                    {"NODIV",  1},
+                    {"MCKDIV", 5}
+    });
+    b.set("ACR1", "SAIAEN", 1);
+    auto const start = b.now();
+    b.run_until(start + 21 * us);
+    b.set("ACR1", "SAIAEN", 0);
+    b.run_until(start + 41 * us);
+    REQUIRE(b.get("ACR1", "SAIAEN") == 0);
+    b.set("ACR1", "SAIAEN", 1);
+    b.run_until(start + 61 * us);
+    auto const warned = std::ranges::count_if(logged, [](core::log_record const& record) {
+      return record.reg == "ASLOTR" and record.message.contains("69.4.7");
+    });
+    CHECK(warned == 1);
+    CHECK(b.get("ASR", "FLVL") != 0);
+  }
+}
+
 TEST_CASE("endpoints attached through the audio port replace the board's, on SAI1 and SAI2")
 {
   rig   r{"idle"};
@@ -1406,9 +2003,16 @@ TEST_CASE("endpoints attached through the audio port replace the board's, on SAI
   CHECK(
       capture->frames[0]
       == stm32::captured_audio_frame{
-          .slots  = {ramp(0), 0},
-          .format = {.data_bits = 16, .active_slots = 1, .mono = false},
-          .at     = vtime{start}
+          .slots = {ramp(0), 0},
+          .format =
+              {.data_bits      = 16,
+                    .active_slots   = 1,
+                    .frame_bits     = 32,
+                    .slot_bits      = 16,
+                    .fs_active_bits = 16,
+                    .slot_count     = 2,
+                    .slot_starts    = {0, 16}},
+          .at = vtime{start}
   });
   CHECK(source->served() == 3);
   CHECK(b.pop('B') == 7);

@@ -21,6 +21,41 @@ BLOCKS: tuple[Block, ...] = ("A", "B")
 
 
 @dataclass(frozen=True, slots=True)
+class AudioLayout:
+    """Where the slots of an audio frame sit on the bus, as the block was configured for it.
+
+    Positions count bit clocks from the frame sync edge, RM0456 69.4.6 and 69.4.7. A slot's
+    data occupies bits `first_bit_offset` to `first_bit_offset + data_bits - 1` of the slot,
+    zeros around it on transmit. A firmware with the wrong FSDEF, FSOFF or slot order sends the
+    same slot words as a right one, the layout tells them apart. A transmitted frame carries
+    its layout in `AudioFrame.layout`. A receiving block's layout is
+    `AudioStream.receive_layout`.
+
+    Attributes:
+        frame_bits: Bit clocks per frame, FRL + 1.
+        slot_bits: Bits per slot, SLOTSZ resolved: the data size, 16 or 32.
+        first_bit_offset: First data bit within a slot, FBOFF.
+        fs_definition: Frame sync marks the start of frame and the channel side, FSDEF: the
+            second half of the slots starts at half the frame.
+        fs_offset: Frame sync asserted one bit clock before slot 0, FSOFF: every slot starts
+            one bit clock later.
+        fs_active_high: Frame sync active high, FSPOL.
+        fs_active_bits: Frame sync active level length in bit clocks, FSALL + 1.
+        slot_starts: Start of each slot, NBSLOT + 1 of them, FSOFF included. A start at or
+            past `frame_bits` is a slot that does not fit in the frame and carries no data.
+    """
+
+    frame_bits: int
+    slot_bits: int
+    first_bit_offset: int
+    fs_definition: bool
+    fs_offset: bool
+    fs_active_high: bool
+    fs_active_bits: int
+    slot_starts: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class AudioFrame:
     """One frame an SAI block transmitted.
 
@@ -35,6 +70,7 @@ class AudioFrame:
         mono: Mono mode with two slots.
         at: Virtual time the frame started. A UART frame carries its end, at its stop bit. An
             audio frame is defined by its frame sync edge, so it carries its start.
+        layout: Where the slots sit in the frame, in bit clocks from the frame sync edge.
     """
 
     slots: tuple[int, ...]
@@ -42,6 +78,7 @@ class AudioFrame:
     active_slots: int
     mono: bool
     at: VirtualTime
+    layout: AudioLayout
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +112,10 @@ class AudioStream:
     A full queue drops its oldest frame and counts it in `dropped`. The STM32U575 has four
     blocks: left unread, they hold at most 16 MiB of stereo, 72 MiB of 16-slot TDM.
 
-    `Machine.restore` drops the frames not read yet and resets `dropped`. It also drops the
-    words written and not served yet. Unlike the bytes written to a UART, which are UART model
-    state and rewind with a snapshot, they live outside the machine, so after a restore the
-    receiver sees 0 until the test writes again.
+    `Machine.restore` drops the frames not read yet, resets `dropped` and clears
+    `receive_layout`. It also drops the words written and not served yet. Unlike the bytes
+    written to a UART, which are UART model state and rewind with a snapshot, they live outside
+    the machine, so after a restore the receiver sees 0 until the test writes again.
     """
 
     __slots__ = ("_link", "_post", "_wait", "block", "name")
@@ -113,6 +150,22 @@ class AudioStream:
     def queued(self) -> int:
         """Words written and not served to the receiving block yet."""
         return self._link.queued()
+
+    @property
+    def receive_layout(self) -> AudioLayout | None:
+        """Layout of the last frame the receiving block took, as the block was configured for
+        it, None before the first one since power-on or the last `Machine.restore`.
+
+        The block takes a frame when its first active slot ends, at the latest at the frame
+        end, so this is the layout the firmware's receiver runs with: an FSDEF, FSOFF or slot
+        order that does not match the words written shows here. A synchronous follower reports
+        the frame length of the block it follows. A reset keeps it: the next frame the block
+        takes replaces it. Allowed parked and running, from any thread, as `available`. While
+        the machine runs it is the layout of the latest frame taken by then: read it from
+        `m.sample` or once the run stopped for a value that depends only on virtual time.
+        """
+        record = self._link.receive_layout()
+        return None if record is None else _layout_of(record)
 
     @property
     def external_frame_hz(self) -> int:
@@ -208,16 +261,34 @@ class AudioStream:
 
 
 def _audio_frames(records: Iterable[_core.AudioRecord]) -> list[AudioFrame]:
-    return [
-        AudioFrame(
-            tuple(record.slots),
-            record.data_bits,
-            record.active_slots,
-            record.mono,
-            VirtualTime(record.at_ps),
+    layouts: dict[AudioLayout, AudioLayout] = {}
+    frames: list[AudioFrame] = []
+    for record in records:
+        layout = _layout_of(record)
+        frames.append(
+            AudioFrame(
+                tuple(record.slots),
+                record.data_bits,
+                record.active_slots,
+                record.mono,
+                VirtualTime(record.at_ps),
+                layouts.setdefault(layout, layout),
+            )
         )
-        for record in records
-    ]
+    return frames
+
+
+def _layout_of(record: _core.AudioRecord) -> AudioLayout:
+    return AudioLayout(
+        record.frame_bits,
+        record.slot_bits,
+        record.first_bit_offset,
+        record.fs_definition,
+        record.fs_offset,
+        record.fs_active_high,
+        record.fs_active_bits,
+        tuple(record.slot_starts),
+    )
 
 
 def _is_frame_rate(value: object) -> bool:
@@ -287,6 +358,7 @@ class AudioPorts:
         return stream
 
     def discard(self) -> None:
-        """Drop kept frames, unserved words and the drop counts, at a restore."""
+        """Drop kept frames, unserved words, receive layouts and the drop counts, at a
+        restore."""
         for link in self._links.values():
             link.discard()

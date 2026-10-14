@@ -4,7 +4,7 @@ supply voltages."""
 
 from __future__ import annotations
 
-from popcorn._audio import AudioFrame, AudioOptions, AudioStream
+from popcorn._audio import AudioFrame, AudioLayout, AudioOptions, AudioStream
 from popcorn._devices import DeviceBoard, I2CTarget, SpiController, SpiTarget
 from popcorn._enums import I2CError, PinMode, UartError
 from popcorn._nvic import Irqs, Nvic
@@ -38,6 +38,7 @@ from popcorn._views import AnalogInput, Pin
 __all__ = [
     "AnalogInput",
     "AudioFrame",
+    "AudioLayout",
     "AudioOptions",
     "AudioStream",
     "Board",

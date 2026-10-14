@@ -2,6 +2,7 @@
 
 #include <popcorn/core/types.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,7 +21,13 @@ enum class audio_block : std::uint8_t
   b,
 };
 
-/** @brief Layout of the slot words of one audio frame, as the block was configured for it. */
+/** @brief Most slots an audio frame has, NBSLOT + 1 at its maximum. */
+inline constexpr std::size_t audio_max_slots = 16;
+
+/**
+ * @brief Layout of one audio frame, as the block was configured for it: the slot words and
+ *        where each slot sits on the bus, in bit clocks from the frame sync edge.
+ */
 struct audio_format
 {
   /** @brief Data size in bits, 8 to 32: the bits of each slot word that carry data. */
@@ -30,6 +37,28 @@ struct audio_format
   /** @brief Mono mode with two slots: slot 1 repeats slot 0 when sending, and is dropped when
    * receiving. */
   bool mono{};
+  /** @brief Bit clocks per frame, FRL + 1. */
+  std::uint16_t frame_bits{};
+  /** @brief Bits per slot, SLOTSZ resolved: the data size, 16 or 32. */
+  std::uint8_t slot_bits{};
+  /** @brief First data bit within a slot, FBOFF: the data occupies bits FBOFF to
+   * FBOFF + data_bits - 1 of the slot. */
+  std::uint8_t first_bit_offset{};
+  /** @brief Frame sync marks the start of frame and the channel side, FSDEF: the second half of
+   * the slots starts at half the frame. */
+  bool fs_definition{};
+  /** @brief Frame sync asserted one bit clock before slot 0, FSOFF. */
+  bool fs_offset{};
+  /** @brief Frame sync active high, FSPOL. */
+  bool fs_active_high{};
+  /** @brief Frame sync active level length in bit clocks, FSALL + 1. */
+  std::uint8_t fs_active_bits{};
+  /** @brief Slots per frame, NBSLOT + 1: the slot word count. */
+  std::uint8_t slot_count{};
+  /** @brief Start of each slot in bit clocks from the frame sync edge, FSOFF included. The first
+   * slot_count entries are used, the others are 0. A start at or past frame_bits is a slot that
+   * does not fit in the frame and carries no data. */
+  std::array<std::uint16_t, audio_max_slots> slot_starts{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(audio_format const&, audio_format const&) -> bool = default;
@@ -73,7 +102,7 @@ public:
 
   /**
    * @brief A receiving block takes a frame. Called when the frame's first active slot ends,
-   *        before that slot's word is stored.
+   *        before that slot's word is stored, at the latest at the frame end.
    * @param slots One word per slot to fill, all 0 on entry. Words of inactive slots are ignored,
    *        bits above the data size dropped.
    * @param format Layout of the words.
