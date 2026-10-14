@@ -5,6 +5,7 @@ from pcons import Project, Target, add_subdirectory, get_var
 
 from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, gcc_ar, project_dir, toolchain
+from popcorn_build.layering import misplaced_sources
 from popcorn_build.options import build_examples, build_tests
 from popcorn_build.python import (
     add_extension,
@@ -76,6 +77,9 @@ arch = add_subdirectory("native/src/arch")
 obs = add_subdirectory("native/src/obs")
 
 
+owned: dict[str, list[Path]] = {}
+
+
 def area_library(
     name: str, sources: Sequence[Path], links: Sequence[tuple[Target, Target]] = ()
 ) -> tuple[Target, Target, Target]:
@@ -85,7 +89,8 @@ def area_library(
     static, so a program reaches one flavour only. The static twin serves white-box tests and
     the build-time tools.
     """
-    objects = project.ObjectLibrary(f"popcorn_{name}_objects", env, sources=list(sources))
+    owned[name] = list(sources)
+    objects = project.ObjectLibrary(f"popcorn_{name}_objects", env, sources=owned[name])
     objects.link(core_headers)
     objects.private.compile_flags.extend(["-fvisibility=hidden", "-fno-semantic-interposition"])
     shared = project.SharedLibrary(f"popcorn_{name}", env, sources=[objects])
@@ -136,11 +141,28 @@ shared_libraries = [core, armv8m, usb, stm32, devices, popcorn_obs]
 static_libraries = [core_static, armv8m_static, usb_static, stm32_static, devices_static]
 static_libraries.append(popcorn_obs_static)
 
+tool_sources = {
+    "popcorn-describe-schema": project_dir / "native" / "src" / "tools" / "describe_schema.cpp",
+    "popcorn-regs-gen": project_dir / "native" / "src" / "tools" / "regs_gen.cpp",
+}
+bind_sources = add_subdirectory("native/src/bind").sources
+misplaced = misplaced_sources(
+    project_dir / "native",
+    {
+        **owned,
+        "_core": bind_sources,
+        "_obs": obs.extension_sources,
+        **{tool: [source] for tool, source in tool_sources.items()},
+    },
+)
+if misplaced:
+    raise SystemExit(f"popcorn: each native source belongs to one library: {'; '.join(misplaced)}")
+
 describe_schema = project.Program(
-    "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
+    "popcorn-describe-schema", env, sources=[tool_sources["popcorn-describe-schema"]]
 )
 describe_schema.link(core_static)
-regs_gen = project.Program("popcorn-regs-gen", env, sources=["native/src/tools/regs_gen.cpp"])
+regs_gen = project.Program("popcorn-regs-gen", env, sources=[tool_sources["popcorn-regs-gen"]])
 regs_gen.link(armv8m_static)
 regs_gen.link(core_static)
 
@@ -156,7 +178,7 @@ if build_examples:
         add_subdirectory(script.parent.relative_to(project_dir))
 
 if VARIANT not in ("asan", "tsan"):
-    ext = add_extension("popcorn", "_core", add_subdirectory("native/src/bind").sources)
+    ext = add_extension("popcorn", "_core", bind_sources)
     for library in shared_libraries:
         ext.link(library)
     if build_tests:

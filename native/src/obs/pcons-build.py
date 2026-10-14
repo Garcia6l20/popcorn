@@ -17,10 +17,11 @@ sources = [
     here / "pctr.cpp",
     here / "pctr_machine.cpp",
 ]
+extension_sources = [here / "bind.cpp"]
 
 
 def add_python(popcorn_obs: Target, after: list[Target]) -> list[Target]:
     """The popcorn._obs extension over @p popcorn_obs and its stub, generated after @p after."""
-    ext = add_extension("popcorn", "_obs", [here / "bind.cpp"])
+    ext = add_extension("popcorn", "_obs", extension_sources)
     ext.link(popcorn_obs)
     return [ext, add_stub(ext, "popcorn", "_obs", after=after)]
