@@ -133,6 +133,14 @@ struct[[= py::rename{"CallOutcome"}]] call_outcome
   [[= py::readonly]] std::uint32_t ipsr{};
   /** @brief Whether the call began, false when a from_thread wait stopped first. */
   [[= py::readonly]] bool began{};
+  /** @brief Exceptions pending and enabled when a BUDGET stop ended a call that masked
+   * interrupts, NMI, PendSV, SysTick and external interrupts as 16 + n, ascending, that the
+   * firmware's masks and active exceptions let preempt: a call with interrupts takes them. Read
+   * on the machine's thread at the stop. Empty otherwise. */
+  [[= py::readonly]] std::vector<std::uint32_t> pending_exceptions{};
+  /** @brief The other exceptions pending and enabled at that stop, which the firmware's
+   * PRIMASK, BASEPRI, FAULTMASK or an active exception holds back too. */
+  [[= py::readonly]] std::vector<std::uint32_t> held_exceptions{};
 };
 
 namespace detail

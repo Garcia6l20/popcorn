@@ -317,6 +317,17 @@ public:
   [[nodiscard]] virtual auto deliverable_now() const -> bool = 0;
 
   /**
+   * @brief Whether exception @p number, pending, would preempt now under the firmware's masks
+   *        and execution priority, a call's own masking aside: what a call with interrupts
+   *        would do with it. The default, for a core without priorities, says true.
+   * @param number Exception number, an external interrupt n as 16 + n on Arm.
+   */
+  [[nodiscard]] virtual auto would_preempt([[maybe_unused]] std::uint32_t number) const -> bool
+  {
+    return true;
+  }
+
+  /**
    * @brief Whether the core executes in thread mode: Arm IPSR 0, whatever other exceptions are
    *        still active.
    */

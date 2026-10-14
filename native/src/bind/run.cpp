@@ -10,6 +10,8 @@
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <chrono>
 #include <concepts>
 #include <exception>
@@ -90,6 +92,46 @@ auto exception_number(core::machine& target) -> std::uint32_t
 {
   auto const xpsr = target.regs().find("xpsr");
   return xpsr ? static_cast<std::uint32_t>(target.regs().read(*xpsr) & 0x1ffu) : 0;
+}
+
+auto pending_enabled_exceptions(core::machine& target) -> std::vector<std::uint32_t>
+{
+  constexpr address                                      icsr{0xe000'ed04u};
+  constexpr address                                      iser{0xe000'e100u};
+  constexpr address                                      ispr{0xe000'e200u};
+  constexpr std::array<std::pair<std::uint32_t, int>, 3> system{
+      {{2u, 31}, {14u, 28}, {15u, 26}}
+  };
+  std::vector<std::uint32_t> found;
+  if(auto const pending = target.mem().read(icsr, 4))
+  {
+    for(auto const& [number, bit] : system)
+    {
+      if(((*pending >> bit) & 1u) != 0u)
+      {
+        found.push_back(number);
+      }
+    }
+  }
+  std::uint32_t const count = target.description().core.num_irqs;
+  for(std::uint32_t word = 0; word * 32u < count; ++word)
+  {
+    auto const enabled = target.mem().read(iser + 4u * word, 4);
+    auto const pending = target.mem().read(ispr + 4u * word, 4);
+    if(not enabled or not pending)
+    {
+      break;
+    }
+    for(auto bits = *enabled & *pending; bits != 0u; bits &= bits - 1u)
+    {
+      auto const irq = word * 32u + static_cast<std::uint32_t>(std::countr_zero(bits));
+      if(irq < count)
+      {
+        found.push_back(16u + irq);
+      }
+    }
+  }
+  return found;
 }
 
 constexpr auto signal_check = std::chrono::milliseconds{50};
@@ -282,11 +324,23 @@ auto machine_handle::call_goal(
     std::optional<nb::object>    prepare,
     bool                         from_thread) -> host_future_handle
 {
-  auto           ended = std::make_shared<call_outcome>();
-  core::run_goal goal{.finish = [ended](core::machine& target, stop const* stopped) {
+  auto           ended  = std::make_shared<call_outcome>();
+  bool const     masked = not frame.interrupts;
+  core::run_goal goal{.finish = [ended, masked](core::machine& target, stop const* stopped) {
     if(not ended->began)
     {
       ended->ipsr = exception_number(target);
+    }
+    if(masked
+       and stopped != nullptr
+       and stopped->reason == stop_reason::budget
+       and target.in_call())
+    {
+      for(auto const number : pending_enabled_exceptions(target))
+      {
+        (target.would_preempt(number) ? ended->pending_exceptions : ended->held_exceptions)
+            .push_back(number);
+      }
     }
     if(stopped != nullptr and stopped->reason == stop_reason::fault and target.in_call())
     {

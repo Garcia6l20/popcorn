@@ -110,6 +110,11 @@ auto machine::in_call() const noexcept -> bool
   return run_->call.has_value();
 }
 
+auto machine::would_preempt(std::uint32_t number) const -> bool
+{
+  return arch_->would_preempt(number);
+}
+
 auto machine::call(arch::call_frame const& frame, icount budget) -> call_result
 {
   begin_call(frame);

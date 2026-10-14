@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn.trace import Irq
 
-from .conftest import CALLEE_ELF, run_bounded
+from .conftest import CALLEE_ELF, M33_JSON, run_bounded
 
 
 def call(
@@ -133,6 +133,134 @@ def test_interrupts_during_a_call_only_when_asked(callee: popcorn.Machine) -> No
     served = call(callee, "wait_flag", budget=20_000, interrupts=True)
     assert served.stop.reason is popcorn.StopReason.RETURNED
     assert served.value > 0
+
+
+MASKED = "interrupts masked by the call"
+HELD = (
+    "held by the firmware too: PRIMASK, BASEPRI, FAULTMASK or an active handler masks them,"
+    " call(interrupts=True) does not run them"
+)
+ICSR = 0xE000_ED04
+PENDSTSET = 1 << 26
+PENDSVSET = 1 << 28
+PENDSVCLR = 1 << 27
+NMIPENDSET = 1 << 31
+NVIC_IPR = 0xE000_E400
+
+
+def test_a_masked_call_spinning_to_its_budget_says_interrupts_were_masked(
+    callee: popcorn.Machine,
+) -> None:
+    asyncio.run(callee.run(budget=50_000))
+    stop = call(callee, "wait_flag", budget=20_000).stop
+    assert stop.reason is popcorn.StopReason.BUDGET
+    assert callee.mem.u32[ICSR] & PENDSTSET
+    assert stop.detail == f"{MASKED}, SysTick (15) is pending: call(interrupts=True) lets them run"
+    assert str(stop).endswith(stop.detail)
+
+
+def test_a_masked_budget_stop_names_the_pending_enabled_interrupts(
+    callee: popcorn.Machine,
+) -> None:
+    asyncio.run(callee.run(budget=50_000))
+    testdev = callee.irq.TESTDEV_IRQn
+    callee.nvic.enable(testdev)
+    callee.nvic.pend(testdev)
+    callee.nvic.pend(5)
+    callee.nvic.enable(6)
+    stop = call(callee, "forever", budget=1_000).stop
+    assert stop.reason is popcorn.StopReason.BUDGET
+    assert stop.detail == (
+        f"{MASKED}, SysTick (15), TESTDEV_IRQn (3) are pending:"
+        " call(interrupts=True) lets them run"
+    )
+    assert "interrupts=True" in str(stop)
+    for irq in range(8):
+        callee.nvic.enable(irq)
+        callee.nvic.pend(irq)
+    many = call(callee, "forever", budget=1_000).stop
+    assert many.detail == (
+        f"{MASKED}, SysTick (15), IRQ0 (0), IRQ1 (1), IRQ2 (2) and 5 more are pending:"
+        " call(interrupts=True) lets them run"
+    )
+
+
+def test_a_masked_budget_stop_names_nmi_and_pendsv_first(callee: popcorn.Machine) -> None:
+    callee.mem.u32[ICSR] = NMIPENDSET | PENDSVSET
+    callee.nvic.enable(callee.irq.TESTDEV_IRQn)
+    callee.nvic.pend(callee.irq.TESTDEV_IRQn)
+    stop = call(callee, "forever", budget=1_000).stop
+    assert stop.detail == (
+        f"{MASKED}, NMI (2), PendSV (14), TESTDEV_IRQn (3) are pending:"
+        " call(interrupts=True) lets them run"
+    )
+
+
+def test_a_masked_budget_stop_says_when_the_firmware_holds_the_interrupts_too(
+    callee: popcorn.Machine,
+) -> None:
+    testdev = callee.irq.TESTDEV_IRQn
+    callee.nvic.enable(testdev)
+    callee.nvic.pend(testdev)
+    callee.reg.primask = 1
+    held = call(callee, "forever", budget=1_000).stop
+    assert held.detail == f"{MASKED}, TESTDEV_IRQn (3) is pending, {HELD}"
+    retried = call(callee, "forever", budget=1_000, interrupts=True).stop
+    assert retried.reason is popcorn.StopReason.BUDGET
+    assert callee.nvic.pending(testdev)
+    callee.reg.primask = 0
+    callee.mem.u32[NVIC_IPR] = 0x80 << (8 * testdev)
+    callee.reg.basepri = 0x40
+    callee.mem.u32[ICSR] = PENDSVSET
+    split = call(callee, "forever", budget=1_000).stop
+    assert split.detail == (
+        f"{MASKED}, PendSV (14) is pending: call(interrupts=True) lets them run,"
+        f" TESTDEV_IRQn (3) is pending, {HELD}"
+    )
+    callee.mem.u32[ICSR] = PENDSVCLR
+    alone = call(callee, "forever", budget=1_000).stop
+    assert alone.detail == f"{MASKED}, TESTDEV_IRQn (3) is pending, {HELD}"
+
+
+def test_a_held_interrupt_is_named_beside_a_pending_systick(callee: popcorn.Machine) -> None:
+    asyncio.run(callee.run(budget=50_000))
+    testdev = callee.irq.TESTDEV_IRQn
+    callee.mem.u32[NVIC_IPR] = 0x60 << (8 * testdev)
+    callee.nvic.enable(testdev)
+    callee.nvic.pend(testdev)
+    callee.reg.basepri = 0x50
+    stop = call(callee, "forever", budget=1_000).stop
+    assert stop.reason is popcorn.StopReason.BUDGET
+    assert stop.detail == (
+        f"{MASKED}, SysTick (15) is pending: call(interrupts=True) lets them run,"
+        f" TESTDEV_IRQn (3) is pending, {HELD}"
+    )
+
+
+def test_an_interrupt_the_description_does_not_name_reads_as_its_number(tmp_path: Path) -> None:
+    data = json.loads(M33_JSON.read_text(encoding="utf-8"))
+    data["irqs"] = [irq for irq in data["irqs"] if irq["number"] != 5]
+    described = tmp_path / "unnamed.json"
+    described.write_text(json.dumps(data), encoding="utf-8")
+    m = popcorn.Machine(popcorn.load_description(described), image=popcorn.Image.elf(CALLEE_ELF))
+    m.reset()
+    m.nvic.enable(5)
+    m.nvic.pend(5)
+    stop = call(m, "forever", budget=1_000).stop
+    assert stop.detail == f"{MASKED}, IRQ5 (5) is pending: call(interrupts=True) lets them run"
+
+
+def test_only_a_masked_budget_stop_carries_the_hint(callee: popcorn.Machine) -> None:
+    asyncio.run(callee.run(budget=50_000))
+    unmasked = call(callee, "forever", budget=1_000, interrupts=True).stop
+    assert unmasked.reason is popcorn.StopReason.BUDGET
+    assert unmasked.detail == ""
+    returned = call(callee, "add", 1, 2).stop
+    assert returned.reason is popcorn.StopReason.RETURNED
+    assert returned.detail == ""
+    faulted = call(callee, "fault", budget=1_000).stop
+    assert faulted.reason is popcorn.StopReason.FAULT
+    assert MASKED not in faulted.detail
 
 
 def test_reset_restores_the_baseline_before_each_call(callee: popcorn.Machine) -> None:

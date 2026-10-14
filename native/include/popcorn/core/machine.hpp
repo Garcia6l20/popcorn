@@ -408,6 +408,13 @@ public:
   [[nodiscard]] auto in_call() const noexcept -> bool;
 
   /**
+   * @brief Whether pending exception @p number would preempt the core now, the firmware's
+   *        masks and active exceptions counted, a call's masking not, `arch::arch::would_preempt`.
+   * @param number Exception number, an external interrupt n as 16 + n on Arm.
+   */
+  [[nodiscard]] auto would_preempt(std::uint32_t number) const -> bool;
+
+  /**
    * @brief Whether the core is in thread mode, `arch::arch::thread_mode()`, and no exception is
    *        deliverable now, so its next instruction is a thread-mode one. A thread asleep with
    *        nothing deliverable is ready, also after a return with sleep-on-exit.

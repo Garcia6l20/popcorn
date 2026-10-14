@@ -250,6 +250,11 @@ auto cortex_m::deliverable_now() const -> bool
   return best and preempts(*best);
 }
 
+auto cortex_m::would_preempt(std::uint32_t number) const -> bool
+{
+  return preempts(number);
+}
+
 auto cortex_m::current_priority(bool ignore_primask) const -> int
 {
   std::array<int, 3>           ids{UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI, UC_ARM_REG_FAULTMASK};

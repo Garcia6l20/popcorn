@@ -248,6 +248,8 @@ _HANDLER_OF: contextvars.ContextVar[Machine | None] = contextvars.ContextVar(
 )
 
 _RUNNING = "the machine is running: await m.read() or m.write(), or halt() it first"
+_FIRST_IRQ = 16
+_SYSTEM_EXCEPTIONS = {2: "NMI", 14: "PendSV", 15: "SysTick"}
 
 atexit.register(_core.shutdown_hosts)
 
@@ -1490,7 +1492,12 @@ class Machine:
             privileged: Run in privileged thread mode.
             stack: The stack pointer the call runs on.
             stack_top: Initial value of that stack pointer, the current one when None.
-            interrupts: Whether interrupts stay enabled during the call.
+            interrupts: Whether interrupts stay enabled during the call. A masked call that
+                waits for its own interrupt spins to the budget: its BUDGET stop's `detail`
+                says interrupts were masked and names the exceptions pending and enabled,
+                NMI, PendSV, SysTick and external interrupts: up to 4 a call with interrupts
+                would take, then up to 4 the firmware's PRIMASK, BASEPRI, FAULTMASK or an
+                active handler also holds back, which interrupts=True does not run.
             reset: True restores the call baseline before the call. The first such call takes
                 the baseline from the machine as it is and restores nothing;
                 `set_call_baseline(m.snapshot())` chooses one explicitly. A Snapshot restores
@@ -1579,6 +1586,9 @@ class Machine:
             stop = replace(stop, registers=self._fault_context(outcome.registers))
         if not outcome.began and not stop.detail:
             stop = replace(stop, detail="before thread mode")
+        if stop.reason is StopReason.BUDGET and outcome.began and not interrupts:
+            hint = self._masked_hint(outcome.pending_exceptions, outcome.held_exceptions)
+            stop = replace(stop, detail=stop.detail or hint)
         self._last_stop = stop
         bits = outcome.bits
         value = decode(result_slot, bits) if stop.reason is StopReason.RETURNED else 0
@@ -1590,6 +1600,36 @@ class Machine:
                 stacklevel=2,
             )
         return CallResult(value, bits, stop, ipsr=outcome.ipsr, began=outcome.began)
+
+    def _masked_hint(self, pending: Sequence[int], held: Sequence[int]) -> str:
+        parts: list[str] = []
+        if pending:
+            parts.append(
+                f"{self._exception_list(pending)} pending: call(interrupts=True) lets them run"
+            )
+        if held:
+            parts.append(
+                f"{self._exception_list(held)} pending, held by the firmware too: PRIMASK,"
+                " BASEPRI, FAULTMASK or an active handler masks them, call(interrupts=True) does"
+                " not run them"
+            )
+        if not parts:
+            return "interrupts masked by the call: call(interrupts=True) lets them run"
+        return f"interrupts masked by the call, {', '.join(parts)}"
+
+    def _exception_list(self, numbers: Sequence[int]) -> str:
+        names = {irq.number: irq.name for irq in self._description.irqs}
+
+        def named(number: int) -> str:
+            if number < _FIRST_IRQ:
+                return f"{_SYSTEM_EXCEPTIONS.get(number, 'exception')} ({number})"
+            irq = number - _FIRST_IRQ
+            return f"{names.get(irq, f'IRQ{irq}')} ({irq})"
+
+        shown = ", ".join(named(n) for n in numbers[:4])
+        more = f" and {len(numbers) - 4} more" if len(numbers) > 4 else ""
+        verb = "is" if len(numbers) == 1 else "are"
+        return f"{shown}{more} {verb}"
 
     def _fault_context(self, values: Sequence[int]) -> Mapping[str, int]:
         read = dict(zip(self._handle.register_names(), values, strict=True))
