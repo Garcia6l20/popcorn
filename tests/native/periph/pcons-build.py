@@ -19,6 +19,7 @@ add_doctest(
     [core],
     env={"POPCORN_TOY_DESC": toy},
 )
+add_doctest("periph-bus-typeinfo", [here / "test_bus_typeinfo.cpp"], [core])
 add_doctest("periph-register-layer", [here / "test_register_layer.cpp"], [core_static])
 add_doctest("periph-usb-host", [here / "test_usb_host.cpp"], [core])
 calls_elf, calls_firmware = firmware("core", "calls")

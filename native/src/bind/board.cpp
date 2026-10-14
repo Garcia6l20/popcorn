@@ -3,8 +3,8 @@
 #include "machine.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
-#include <popcorn/periph/stm32/spi.hpp>
 
 #include <algorithm>
 #include <array>
@@ -603,7 +603,7 @@ auto machine_handle::command_spi_transfer(
     std::uint8_t                 bits,
     std::vector<std::uint32_t>   frames) const -> access_op
 {
-  auto* const port = dynamic_cast<periph::stm32::spi_controller_port*>(engine().model(peripheral));
+  auto* const port = dynamic_cast<periph::spi_controller_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw config_error(peripheral, 0, "devices", "a built-in SPI model");

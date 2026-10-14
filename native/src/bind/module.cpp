@@ -15,7 +15,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/core/version.hpp>
-#include <popcorn/periph/stm32/i2c.hpp>
+#include <popcorn/periph/i2c.hpp>
 
 #include <reflex/py.hpp>
 
@@ -70,7 +70,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind_enum<popcorn::core::condition_set::mode>("ConditionMode");
   m.bind<popcorn::core::condition_set>("ConditionSet");
   m.bind_enum<popcorn::periph::stm32::pin_mode>("PinMode");
-  m.bind_enum<popcorn::periph::stm32::i2c_error>("I2CError");
+  m.bind_enum<popcorn::periph::i2c_error>("I2CError");
   m.bind_enum<popcorn::periph::stm32::uart_error>("UartError");
   m.bind_enum<popcorn::periph::usb::device_state>("UsbDeviceState");
   m.bind_enum<popcorn::periph::usb::transfer_status>("UsbTransferStatus");

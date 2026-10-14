@@ -2,7 +2,9 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/export.hpp>
+#include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/stm32/caches.hpp>
 #include <popcorn/periph/stm32/flash.hpp>

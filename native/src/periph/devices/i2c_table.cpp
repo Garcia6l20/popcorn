@@ -76,7 +76,7 @@ auto table_target::address() const -> std::uint8_t
   return impl_->options.address;
 }
 
-auto table_target::start(bool read, vtime) -> stm32::i2c_reply
+auto table_target::start(bool read, vtime) -> i2c_reply
 {
   auto& self = *impl_;
   self.end_write();
@@ -96,7 +96,7 @@ auto table_target::start(bool read, vtime) -> stm32::i2c_reply
   return {.ack = true};
 }
 
-auto table_target::write(std::uint8_t byte, vtime) -> stm32::i2c_reply
+auto table_target::write(std::uint8_t byte, vtime) -> i2c_reply
 {
   auto& self = *impl_;
   if(self.state.writing == 0)
@@ -113,7 +113,7 @@ auto table_target::write(std::uint8_t byte, vtime) -> stm32::i2c_reply
   return {.ack = true};
 }
 
-auto table_target::read(vtime) -> stm32::i2c_read_reply
+auto table_target::read(vtime) -> i2c_read_reply
 {
   auto& self = *impl_;
   if(self.state.reading == 0)

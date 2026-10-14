@@ -2,7 +2,7 @@
 
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
-#include <popcorn/periph/stm32/spi.hpp>
+#include <popcorn/periph/spi.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -89,7 +89,7 @@ struct at25sf_options
  * dual, quad and QPI instructions, suspend and resume, the security registers, SFDP. Block
  * protection bits are stored, not enforced.
  */
-class POPCORN_API at25sf final : public stm32::spi_target
+class POPCORN_API at25sf final : public spi_target
 {
 public:
   /**

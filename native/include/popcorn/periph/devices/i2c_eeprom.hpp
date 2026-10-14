@@ -2,7 +2,7 @@
 
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
-#include <popcorn/periph/stm32/i2c.hpp>
+#include <popcorn/periph/i2c.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -45,7 +45,7 @@ struct eeprom_24xx_options
  *        identification pages, the chip address bits some small parts take from the word
  *        address.
  */
-class POPCORN_API eeprom_24xx final : public stm32::i2c_target
+class POPCORN_API eeprom_24xx final : public i2c_target
 {
 public:
   /**
@@ -59,9 +59,9 @@ public:
   ~eeprom_24xx() override;
 
   [[nodiscard]] auto address() const -> std::uint8_t override;
-  [[nodiscard]] auto start(bool read, vtime at) -> stm32::i2c_reply override;
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override;
-  [[nodiscard]] auto read(vtime at) -> stm32::i2c_read_reply override;
+  [[nodiscard]] auto start(bool read, vtime at) -> i2c_reply override;
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> i2c_reply override;
+  [[nodiscard]] auto read(vtime at) -> i2c_read_reply override;
   void               stop(vtime at) override;
   /**
    * @brief On power_on and brown_out: the write cycle ended, the page already written, the

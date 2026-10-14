@@ -1,6 +1,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/devices/i2c_eeprom.hpp>
 #include <popcorn/periph/devices/i2c_table.hpp>
+#include <popcorn/periph/i2c.hpp>
 
 #include <doctest/doctest.h>
 
@@ -31,8 +32,8 @@ auto small_eeprom() -> devices::eeprom_24xx_options
 
 struct host
 {
-  popcorn::periph::stm32::i2c_target& target;
-  std::uint64_t                       now{us};
+  popcorn::periph::i2c_target& target;
+  std::uint64_t                now{us};
 
   auto write(std::initializer_list<std::uint8_t> bytes) -> std::vector<bool>
   {

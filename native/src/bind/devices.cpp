@@ -6,8 +6,9 @@
 #include <popcorn/periph/devices/at25sf.hpp>
 #include <popcorn/periph/devices/i2c_eeprom.hpp>
 #include <popcorn/periph/devices/i2c_table.hpp>
+#include <popcorn/periph/i2c.hpp>
+#include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/board.hpp>
-#include <popcorn/periph/stm32/i2c.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 
 #include <nanobind/nanobind.h>
@@ -56,7 +57,7 @@ template <typename T> auto or_value(std::optional<nb::object> const& result, T n
   return result ? nb::cast<T>(*result) : neutral;
 }
 
-auto reply_of(std::optional<nb::object> const& result) -> stm32::i2c_reply
+auto reply_of(std::optional<nb::object> const& result) -> periph::i2c_reply
 {
   if(not result)
   {
@@ -64,10 +65,10 @@ auto reply_of(std::optional<nb::object> const& result) -> stm32::i2c_reply
   }
   auto const [ack, error, stretch] =
       nb::cast<std::tuple<bool, std::uint8_t, std::uint64_t>>(*result);
-  return {.ack = ack, .error = static_cast<stm32::i2c_error>(error), .stretch_ps = stretch};
+  return {.ack = ack, .error = static_cast<periph::i2c_error>(error), .stretch_ps = stretch};
 }
 
-auto read_reply_of(std::optional<nb::object> const& result) -> stm32::i2c_read_reply
+auto read_reply_of(std::optional<nb::object> const& result) -> periph::i2c_read_reply
 {
   if(not result)
   {
@@ -75,7 +76,7 @@ auto read_reply_of(std::optional<nb::object> const& result) -> stm32::i2c_read_r
   }
   auto const [byte, error, stretch] =
       nb::cast<std::tuple<std::uint8_t, std::uint8_t, std::uint64_t>>(*result);
-  return {.byte = byte, .error = static_cast<stm32::i2c_error>(error), .stretch_ps = stretch};
+  return {.byte = byte, .error = static_cast<periph::i2c_error>(error), .stretch_ps = stretch};
 }
 
 void append(std::optional<nb::object> const& result, std::vector<std::byte>& out)
@@ -90,7 +91,7 @@ void append(std::optional<nb::object> const& result, std::vector<std::byte>& out
 }
 
 /**
- * @brief nanobind trampoline letting a Python class implement stm32::i2c_target through the
+ * @brief nanobind trampoline letting a Python class implement periph::i2c_target through the
  *        private methods `_address`, `_start`, `_write`, `_read`, `_stop`, `_reset`, `_save` and
  *        `_load` that `popcorn.board.I2CTarget` defines, which check the values returned:
  *        `_start` and `_write` return (ack, error, stretch_ps), `_read` (byte, error,
@@ -99,10 +100,10 @@ void append(std::optional<nb::object> const& result, std::vector<std::byte>& out
  *        called: the run is asked to stop, the address matches nothing, `_start` and `_write`
  *        NACK, a read returns 0.
  */
-class python_i2c_target final : public stm32::i2c_target
+class python_i2c_target final : public periph::i2c_target
 {
 public:
-  NB_TRAMPOLINE(stm32::i2c_target, 8);
+  NB_TRAMPOLINE(periph::i2c_target, 8);
 
   [[nodiscard]] auto address() const -> std::uint8_t override
   {
@@ -110,19 +111,19 @@ public:
     return or_value<std::uint8_t>(call(nb_trampoline, cell, "_address"), no_address);
   }
 
-  [[nodiscard]] auto start(bool read, vtime at) -> stm32::i2c_reply override
+  [[nodiscard]] auto start(bool read, vtime at) -> periph::i2c_reply override
   {
     gil_entry const gil;
     return reply_of(call(nb_trampoline, cell, "_start", read, at.ps));
   }
 
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
   {
     gil_entry const gil;
     return reply_of(call(nb_trampoline, cell, "_write", byte, at.ps));
   }
 
-  [[nodiscard]] auto read(vtime at) -> stm32::i2c_read_reply override
+  [[nodiscard]] auto read(vtime at) -> periph::i2c_read_reply override
   {
     gil_entry const gil;
     return read_reply_of(call(nb_trampoline, cell, "_read", at.ps));
@@ -177,17 +178,17 @@ auto spi_mode_of(nb::handle mode) -> std::optional<std::uint8_t>
 }
 
 /**
- * @brief nanobind trampoline letting a Python class implement stm32::spi_target through the
+ * @brief nanobind trampoline letting a Python class implement periph::spi_target through the
  *        private methods `_select`, `_exchange`, `_reset`, `_save` and `_load` that
  *        `popcorn.board.SpiTarget` defines, which check the values returned. Every call takes
  *        the GIL, except mode(), the SPI mode given at construction. Times cross as picoseconds
  *        since power-on. Once its machine's Python side is collected no method is called: the
  *        run is asked to stop, an exchange returns 0.
  */
-class python_spi_target final : public stm32::spi_target
+class python_spi_target final : public periph::spi_target
 {
 public:
-  NB_TRAMPOLINE(stm32::spi_target, 5);
+  NB_TRAMPOLINE(periph::spi_target, 5);
 
   /** @brief A device declaring no SPI mode. */
   python_spi_target() = default;
@@ -254,16 +255,16 @@ private:
 };
 
 /**
- * @brief nanobind trampoline letting a Python class implement stm32::spi_controller_sink through
+ * @brief nanobind trampoline letting a Python class implement periph::spi_controller_sink through
  *        the private method `_frame` that `popcorn.board.SpiController` defines. Every call takes
  *        the GIL, one per frame, except mode(), the SPI mode given at construction. Times
  *        cross as picoseconds since reset. Once its machine's Python side is collected no method
  *        is called: the run is asked to stop.
  */
-class python_spi_controller final : public stm32::spi_controller_sink
+class python_spi_controller final : public periph::spi_controller_sink
 {
 public:
-  NB_TRAMPOLINE(stm32::spi_controller_sink, 1);
+  NB_TRAMPOLINE(periph::spi_controller_sink, 1);
 
   /** @brief A controller declaring no SPI mode. */
   python_spi_controller() = default;
@@ -310,7 +311,7 @@ private:
  *        new attachment, so an old engine still running never calls it in the new machine's
  *        context, and is refused once its own machine is gone.
  */
-class attached_i2c_target final : public stm32::i2c_target
+class attached_i2c_target final : public periph::i2c_target
 {
 public:
   /** @brief Attaches @p device. */
@@ -324,19 +325,19 @@ public:
     return or_value<std::uint8_t>(device_->via(cell, "_address"), no_address);
   }
 
-  [[nodiscard]] auto start(bool read, vtime at) -> stm32::i2c_reply override
+  [[nodiscard]] auto start(bool read, vtime at) -> periph::i2c_reply override
   {
     gil_entry const gil;
     return reply_of(device_->via(cell, "_start", read, at.ps));
   }
 
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
   {
     gil_entry const gil;
     return reply_of(device_->via(cell, "_write", byte, at.ps));
   }
 
-  [[nodiscard]] auto read(vtime at) -> stm32::i2c_read_reply override
+  [[nodiscard]] auto read(vtime at) -> periph::i2c_read_reply override
   {
     gil_entry const gil;
     return read_reply_of(device_->via(cell, "_read", at.ps));
@@ -374,7 +375,7 @@ private:
 };
 
 /** @brief One machine's attachment of a Python SPI target, as attached_i2c_target. */
-class attached_spi_target final : public stm32::spi_target
+class attached_spi_target final : public periph::spi_target
 {
 public:
   /** @brief Attaches @p device. */
@@ -426,7 +427,7 @@ private:
 };
 
 /** @brief One machine's attachment of a Python SPI controller, as attached_i2c_target. */
-class attached_spi_controller final : public stm32::spi_controller_sink
+class attached_spi_controller final : public periph::spi_controller_sink
 {
 public:
   /** @brief Attaches @p device. */
@@ -531,7 +532,7 @@ auto spi_attachment_of(
     device_cells&            cells,
     std::vector<nb::handle>& python_owned) -> stm32::spi_attachment
 {
-  std::shared_ptr<stm32::spi_target> target;
+  std::shared_ptr<periph::spi_target> target;
   if(not nb::try_cast(object, target) or not target)
   {
     throw refused(peripheral, "popcorn.board.SpiTarget instances");
@@ -551,15 +552,15 @@ auto spi_attachment_of(
 
 void bind_device_bases(nb::module_ scope)
 {
-  nb::class_<stm32::i2c_target, python_i2c_target>(
+  nb::class_<periph::i2c_target, python_i2c_target>(
       scope, "I2CTargetBase",
       "Native side of popcorn.board.I2CTarget: an I2C target implemented in Python.")
       .def(nb::init<>());
-  nb::class_<stm32::spi_target, python_spi_target>(
+  nb::class_<periph::spi_target, python_spi_target>(
       scope, "SpiTargetBase",
       "Native side of popcorn.board.SpiTarget: an SPI device implemented in Python.")
       .def(nb::init<nb::handle>(), nb::arg("mode") = nb::none());
-  nb::class_<stm32::spi_controller_sink, python_spi_controller>(
+  nb::class_<periph::spi_controller_sink, python_spi_controller>(
       scope, "SpiControllerBase",
       "Native side of popcorn.board.SpiController: an SPI controller implemented in Python.")
       .def(nb::init<nb::handle>(), nb::arg("mode") = nb::none());
@@ -589,7 +590,7 @@ auto device_factories(
     }
     for(auto const& object : objects)
     {
-      if(std::shared_ptr<stm32::i2c_target> target; nb::try_cast(object, target) and target)
+      if(std::shared_ptr<periph::i2c_target> target; nb::try_cast(object, target) and target)
       {
         adopt<python_i2c_target, attached_i2c_target>(
             target, object, peripheral, cells, python_owned);
@@ -600,7 +601,7 @@ auto device_factories(
         board.i2c[peripheral].push_back(std::move(target));
       }
       else if(
-          std::shared_ptr<stm32::spi_controller_sink> controller;
+          std::shared_ptr<periph::spi_controller_sink> controller;
           nb::try_cast(object, controller) and controller)
       {
         if(unit->ip != "SPI")
@@ -662,7 +663,7 @@ auto device_factories(
 void bind_native_devices(nb::module_ scope)
 {
   namespace devices = periph::devices;
-  nb::class_<devices::at25sf, stm32::spi_target>(
+  nb::class_<devices::at25sf, periph::spi_target>(
       scope, "At25sfBase", "Native side of popcorn.devices.At25sf: the native AT25SF flash.")
       .def(
           "__init__",
@@ -701,7 +702,7 @@ void bind_native_devices(nb::module_ scope)
       .def("_snapshot", &saved<devices::at25sf>)
       .def("_restore", &loaded<devices::at25sf>, nb::arg("data"));
 
-  nb::class_<devices::eeprom_24xx, stm32::i2c_target>(
+  nb::class_<devices::eeprom_24xx, periph::i2c_target>(
       scope, "Eeprom24xxBase",
       "Native side of popcorn.devices.Eeprom24xx: the native 24xx I2C EEPROM.")
       .def(
@@ -724,7 +725,7 @@ void bind_native_devices(nb::module_ scope)
       .def("_snapshot", &saved<devices::eeprom_24xx>)
       .def("_restore", &loaded<devices::eeprom_24xx>, nb::arg("data"));
 
-  nb::class_<devices::table_target, stm32::i2c_target>(
+  nb::class_<devices::table_target, periph::i2c_target>(
       scope, "TableTargetBase",
       "Native side of popcorn.devices.TableTarget: the native table-scripted I2C target.")
       .def(
