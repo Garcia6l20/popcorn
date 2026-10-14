@@ -835,6 +835,14 @@ struct machine::run_state
   /** @brief slice_request::until_thread of the running slice: an exception return to thread
    * mode ends the engine run. Cleared with the slice. */
   bool until_thread = false;
+  /** @brief slice_request::until_return of the running slice. */
+  std::optional<frame_return> until_return{};
+  /** @brief until_return's ret, the one value the block hook compares, 0 for none. */
+  address return_block{};
+  /** @brief The until_return an exception return met in on_interrupt, the stop taken by
+   * bound_reached once the core unstacked, again at each slice start of the same goal, as a
+   * block-path return is found again, until the first slice of the next goal drops it. */
+  std::optional<frame_return> returned_at{};
   /** @brief Whether an access in the engine run asked the engine to stop right after its
    * instruction, set by request_precise_exit() and taken by take_precise_exit(). */
   bool precise_exit = false;
@@ -875,6 +883,15 @@ struct machine::run_state
   std::vector<return_frame> frames{};
   /** @brief Return address of the innermost frame, what the block hook compares. */
   address return_watch{};
+  /** @brief Whether return_watch or until_return is armed, the one flag the block hook tests
+   * before either compare. */
+  bool block_watch = false;
+
+  /** @brief Recomputes block_watch after return_watch or until_return changed. */
+  void rewatch() noexcept
+  {
+    block_watch = return_watch != 0 or until_return.has_value();
+  }
   /** @brief Site address a stop left pc on and index of the entry after the stopping one: the
    * site resumes there once when the run restarts at that address. */
   std::optional<std::pair<address, std::size_t>> resume_past{};

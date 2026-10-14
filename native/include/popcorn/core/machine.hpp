@@ -93,6 +93,22 @@ struct machine_options
 };
 
 /**
+ * @brief A return a run stops at: the first block at ret entered with the stack pointer equal
+ *        to sp, or an exception return through an EXC_RETURN ret with the stack pointer equal to
+ *        sp before the core unstacks. Compared at each candidate, no state kept, so slicing and
+ *        a switch to another stack do not change where it stops.
+ */
+struct frame_return
+{
+  /** @brief Return address, Thumb bit clear, or an EXC_RETURN. */
+  address ret{};
+  /** @brief Stack pointer at the function's entry, the same at its return under AAPCS. */
+  std::uint64_t sp{};
+
+  friend auto operator==(frame_return const&, frame_return const&) -> bool = default;
+};
+
+/**
  * @brief Bounds of one native slice. The slice ends at the first block boundary at or past any
  *        bound, except exact_instructions. Only until, budget_left, exact_instructions,
  *        until_time and stop_when stop the run, the other bounds only end the slice so the
@@ -131,6 +147,9 @@ struct slice_request
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */
   std::function<bool()> stop_when{};
+  /** @brief Stop with stop_reason::returned at this return. A slice that starts at it stops at
+   * once, 0 instructions executed. */
+  std::optional<frame_return> until_return{};
   /** @brief A slice that starts at until, or at an address of until_also, executes at least one
    * instruction before that address may stop it, so a run resuming from its own until address
    * goes on to the next hit, unless the address is in arrive_at. The caller sets it until the run

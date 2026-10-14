@@ -6,6 +6,7 @@ import bisect
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 type Read32 = Callable[[int], int | None]
 """Reads a guest word, None when the address is not readable."""
@@ -280,6 +281,147 @@ def scan(read32: Read32, functions: Functions, sp: int, limit: int = SCAN_BYTES)
     return frames
 
 
+@dataclass(frozen=True, slots=True)
+class ReturnPoint:
+    """Where the function running at a stopped pc returns.
+
+    Attributes:
+        ret: The return address with its Thumb bit clear, or an EXC_RETURN as is.
+        sp: The stack pointer once the function's frame is popped, before any exception
+            unstacking: the stack pointer at its entry under AAPCS.
+        via: PROLOGUE when a decoded prologue or epilogue gave it, LR for a pc outside every
+            function, from the live lr.
+    """
+
+    ret: int
+    sp: int
+    via: Via
+
+
+@dataclass(frozen=True, slots=True)
+class _Popped:
+    """One frame popped by the walk: `outcome` "return" with the raw return value `ret`,
+    "end" when the walk stops, "scan" when the rest is a stack scan. `sp` is the stack pointer
+    the walk holds then."""
+
+    outcome: Literal["return", "end", "scan"]
+    sp: int
+    ret: int = 0
+    via: Via = Via.PROLOGUE
+
+
+def _pop_frame(
+    read32: Read32,
+    functions: Functions,
+    pc: int,
+    lr: int,
+    sp: int,
+    lr_valid: bool,
+    returned: bool,
+) -> _Popped:
+    function = functions.at(_caller(pc + 1) if returned else pc)
+    if function is None:
+        if not lr_valid:
+            return _Popped("end", sp)
+        if _is_exc_return(lr):
+            return _Popped("return", sp, lr, Via.LR)
+        if not _returns_into(functions, lr):
+            return _Popped("end", sp)
+        if not follows_call(read32, lr):
+            return _Popped("scan", sp)
+        return _Popped("return", sp, lr, Via.LR)
+    ending = epilogue(read32, pc)
+    if ending is None:
+        return _Popped("scan", sp)
+    if isinstance(ending, Epilogue):
+        size, lr_offset = ending.size, ending.lr_offset
+    else:
+        effect = prologue(read32, function, pc)
+        if effect is None:
+            return _Popped("scan", sp)
+        size, lr_offset = effect.size, effect.lr_offset
+    if lr_offset is not None:
+        saved = read32(sp + lr_offset)
+        if saved is None:
+            return _Popped("end", sp)
+        ret = saved
+    elif lr_valid:
+        ret = lr
+    else:
+        return _Popped("scan", sp)
+    sp += size
+    if _is_exc_return(ret):
+        return _Popped("return", sp, ret)
+    if not _returns_into(functions, ret):
+        return _Popped("end", sp)
+    if not follows_call(read32, ret):
+        return _Popped("scan", sp)
+    return _Popped("return", sp, ret)
+
+
+def _leaves_frame(read32: Read32, start: int, pc: int) -> bool:
+    """Whether the code from `start` up to `pc` holds a return or a stack pointer write the
+    prologue walk does not decode, so its depth at pc may not be the one the walk sums: a
+    shrink-wrapped early exit placed after the epilogue, or a stack allocation by register.
+    True when the code cannot be read."""
+    address = start
+    while address < pc:
+        first = _read16(read32, address)
+        if first is None:
+            return True
+        if first >> 11 in (0b11101, 0b11110, 0b11111):
+            second = _read16(read32, address + 2)
+            if second is None:
+                return True
+            to_sp = second >> 8 & 0xF == 0xD
+            if (
+                first == 0xE8BD
+                or first & 0xFFBF == 0xECBD
+                or (first == 0xF85D and second & 0x0FFF == 0x0B04)
+                or (first & 0xFBEF == 0xF10D and to_sp)
+                or (first & 0xFBFF == 0xF20D and to_sp)
+                or (first & 0xFFEF in (0xEBAD, 0xEB0D, 0xEA4F) and to_sp)
+            ):
+                return True
+            address += 4
+            continue
+        if (
+            first == 0x4770
+            or first & 0xFE00 == 0xBC00
+            or first & 0xFF80 == 0xB000
+            or first & 0xFF87 in (0x4485, 0x4685)
+        ):
+            return True
+        address += 2
+    return False
+
+
+def return_point(
+    read32: Read32, functions: Functions, pc: int, lr: int, sp: int
+) -> ReturnPoint | None:
+    """Where the function running at `pc` returns, the first step of `unwind`.
+
+    Returns:
+        The return point, None when `unwind` would go on with a stack scan or end there: an
+            epilogue or prologue it cannot follow, a return address outside every function or
+            not after a call. None too when pc is not on an epilogue and the code from the
+            function's start to pc holds a return or a stack pointer write the prologue walk
+            does not decode, where the walk's depth is a guess.
+    """
+    popped = _pop_frame(read32, functions, pc, lr, sp, True, False)
+    if popped.outcome != "return":
+        return None
+    function = functions.at(pc)
+    if (
+        function is not None
+        and not isinstance(epilogue(read32, pc), Epilogue)
+        and _leaves_frame(read32, function.start, pc)
+    ):
+        return None
+    ret = popped.ret if _is_exc_return(popped.ret) else popped.ret & ~1
+    return ReturnPoint(ret, popped.sp, popped.via)
+
+
 def unwind(
     read32: Read32,
     functions: Functions,
@@ -321,57 +463,21 @@ def unwind(
         return True
 
     while len(frames) < MAX_FRAMES:
-        function = functions.at(_caller(pc + 1) if returned else pc)
-        if function is None:
-            if not lr_valid:
-                break
-            if _is_exc_return(lr):
-                taken = exception_frame(lr)
-                if isinstance(taken, list):
-                    return taken
-                if not taken:
-                    break
-                continue
-            if not _returns_into(functions, lr):
-                break
-            if not follows_call(read32, lr):
-                return rest()
-            pc, lr_valid, returned = lr & ~1, False, True
-            frames.append(RawFrame(pc, Via.LR))
-            continue
-        ending = epilogue(read32, pc)
-        if ending is None:
+        popped = _pop_frame(read32, functions, pc, lr, sp, lr_valid, returned)
+        sp = popped.sp
+        if popped.outcome == "end":
+            break
+        if popped.outcome == "scan":
             return rest()
-        if isinstance(ending, Epilogue):
-            size, lr_offset = ending.size, ending.lr_offset
-        else:
-            effect = prologue(read32, function, pc)
-            if effect is None:
-                return rest()
-            size, lr_offset = effect.size, effect.lr_offset
-        if lr_offset is not None:
-            saved = read32(sp + lr_offset)
-            if saved is None:
-                break
-            ret = saved
-        elif lr_valid:
-            ret = lr
-        else:
-            return rest()
-        sp += size
-        if _is_exc_return(ret):
-            taken = exception_frame(ret)
+        if _is_exc_return(popped.ret):
+            taken = exception_frame(popped.ret)
             if isinstance(taken, list):
                 return taken
             if not taken:
                 break
             continue
-        if not _returns_into(functions, ret):
-            break
-        if not follows_call(read32, ret):
-            return rest()
-        pc, lr_valid, returned = ret & ~1, False, True
-        frames.append(RawFrame(pc, Via.PROLOGUE))
+        pc, lr_valid, returned = popped.ret & ~1, False, True
+        frames.append(RawFrame(pc, popped.via))
     return frames
 
 

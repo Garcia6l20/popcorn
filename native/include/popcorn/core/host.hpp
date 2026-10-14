@@ -187,6 +187,8 @@ struct run_goal
   std::optional<vtime> until_time{};
   /** @brief slice_request::stop_when of every slice, called on the host thread. */
   std::function<bool()> stop_when{};
+  /** @brief slice_request::until_return of every slice. */
+  std::optional<frame_return> until_return{};
   /** @brief Run one slice only, the goal completing when it ends, with or without a stop. Empty
    * for a goal over as many slices as it needs. */
   std::optional<single_slice> once{};
@@ -218,6 +220,7 @@ struct run_goal
        and not exact
        and not until_time
        and not stop_when
+       and not until_return
        and not once
        and not finish
        and not until_thread

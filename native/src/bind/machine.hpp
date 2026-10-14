@@ -27,6 +27,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -273,18 +274,23 @@ public:
    *        once when already reached. Exclusive with @p for_ps.
    * @param stop_when Predicate evaluated at event boundaries and slice ends, on the host thread
    *        in a copy of the caller's context, None for none.
+   * @param until_return Stop with reason returned at this return address, or EXC_RETURN, and
+   *        stack pointer, core::frame_return. None for none.
    * @return Resolves to the StopInfo.
    * @throws machine_busy while a goal or a free run is active.
    * @throws machine_running from a callback or a parked section.
    * @throws std::invalid_argument for both @p for_ps and @p deadline_ps.
    */
-  [[= py::doc{"Start a goal, return a HostFuture resolving to its StopInfo."}]] auto run_goal(
-      std::optional<address>                until,
-      std::optional<std::uint64_t>          budget,
-      std::optional<std::uint64_t>          exact,
-      std::optional<std::uint64_t>          for_ps,
-      std::optional<std::uint64_t>          deadline_ps,
-      std::optional<reflex::py::nb::object> stop_when) -> host_future_handle;
+  [[= py::doc{"Start a goal, return a HostFuture resolving to its StopInfo. until_return is "
+              "(return address or EXC_RETURN, stack pointer): stop with RETURNED there."}]] auto
+      run_goal(
+          std::optional<address>                            until,
+          std::optional<std::uint64_t>                      budget,
+          std::optional<std::uint64_t>                      exact,
+          std::optional<std::uint64_t>                      for_ps,
+          std::optional<std::uint64_t>                      deadline_ps,
+          std::optional<reflex::py::nb::object>             stop_when,
+          std::optional<std::tuple<address, std::uint64_t>> until_return) -> host_future_handle;
 
   /**
    * @brief Opens a free run on the host thread, until halt().

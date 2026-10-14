@@ -99,9 +99,10 @@ from popcorn._refs import (
     owner_of,
 )
 from popcorn._snapshot import Snapshot
-from popcorn._stop import Stop, stop_of
+from popcorn._stop import FrameReturn, Stop, stop_of
 from popcorn._streams import Board, Gated, PtyOpener, UartPorts, check_wait, deadline_ps
 from popcorn._supply import SupplyOptions
+from popcorn._unwind import Functions, Read32, return_point
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
@@ -296,6 +297,60 @@ def error_prefix(machine: Machine) -> str:
     """What starts the text of an error a machine raises: `<name>: ` when the machine has a
     name other than its part, empty otherwise."""
     return "" if machine.name == machine.description.part else f"{machine.name}: "
+
+
+def stack_access(machine: Machine) -> tuple[Read32, Functions]:
+    """A word reader for the unwinder, None outside the regions of `machine`'s description or
+    on an access error, and the function symbols of its loaded images."""
+    regions = [(r.start, r.start + r.size) for r in machine.description.regions]
+
+    def read32(address: int) -> int | None:
+        if not any(start <= address and address + 4 <= end for start, end in regions):
+            return None
+        try:
+            return machine.mem.u32[address]
+        except EmulationError:
+            return None
+
+    functions = Functions((s.name, s.value, s.size) for s in machine.symbols.values() if s.function)
+    return read32, functions
+
+
+@dataclass(frozen=True, slots=True)
+class _Returning:
+    """Where the function running at `pc` returns, a frame-return goal's target."""
+
+    ret: int
+    sp: int
+    name: str
+    start: int
+    pc: int
+
+    @property
+    def exception(self) -> bool:
+        """Whether the function is an exception handler, returning through EXC_RETURN."""
+        return self.ret >> 24 == 0xFF
+
+
+class _Resolver:
+    """Resolves a frame-return target once, when the goal is posted, and keeps it."""
+
+    __slots__ = ("_resolve", "target")
+
+    def __init__(self, resolve: Callable[[], _Returning]) -> None:
+        self._resolve = resolve
+        self.target: _Returning | None = None
+
+    def __call__(self) -> tuple[int, int]:
+        target = self._resolve()
+        self.target = target
+        return target.ret, target.sp
+
+    def named(self, stop: Stop) -> Stop:
+        """`stop` with the detail `<function> returned` when it is this goal's RETURNED."""
+        if self.target is None or stop.reason is not StopReason.RETURNED:
+            return stop
+        return replace(stop, detail=f"{self.target.name} returned")
 
 
 def _stop_error(
@@ -2125,7 +2180,7 @@ class Machine:
     async def run(
         self,
         *,
-        until: int | str | Symbol | None = None,
+        until: int | str | Symbol | FrameReturn | None = None,
         budget: int | None = None,
         for_: VirtualDuration | None = None,
         stop_when: Callable[[Machine], bool] | None = None,
@@ -2138,6 +2193,8 @@ class Machine:
                 `run(until=hook)` goes on to the next hit, as a debugger's continue. An
                 interrupt pending at the start runs its handler first: a handler returning to
                 this address stops the run there again.
+                `FrameReturn()` stops with RETURNED when the function running now returns,
+                detail `<function> returned`, see `FrameReturn`.
             budget: Stop with BUDGET at the first block boundary past this many instructions,
                 `default_budget` when None.
             for_: Stop with TIME after this much virtual time. An idle core, WFI with nothing
@@ -2156,10 +2213,13 @@ class Machine:
         Raises:
             MachineBusy: Another run, step, call, wait or free run is active, the member's own
                 `running()` of a linked system included.
+            EmulationError: `until` is `FrameReturn()` and the unwinder cannot find where the
+                function running now returns. Nothing ran.
             Exception: A kept log filter or handler error, as for `read`.
         """
         _check_duration(for_)
-        target = None if until is None else self.address_of(until)
+        returning = _Resolver(self._frame_return) if isinstance(until, FrameReturn) else None
+        target = None if until is None or isinstance(until, FrameReturn) else self.address_of(until)
         return await self._goal(
             until=target,
             budget=self._default_budget if budget is None else budget,
@@ -2167,7 +2227,22 @@ class Machine:
             stop_when=stop_when,
             exact=None,
             run=True,
+            returning=returning,
         )
+
+    def _frame_return(self) -> _Returning:
+        regs = self.reg
+        pc, lr, sp = int(regs.pc), int(regs.lr), int(regs.sp)
+        read32, functions = stack_access(self)
+        function = functions.at(pc)
+        name = f"{pc:#x}" if function is None else function.name
+        point = return_point(read32, functions, pc, lr, sp)
+        if point is None:
+            raise EmulationError(
+                f"{error_prefix(self)}{name}: cannot find where the function at {pc:#x} returns"
+            )
+        start = pc if function is None else function.start
+        return _Returning(point.ret, point.sp, name, start, pc)
 
     async def _bounded_run(
         self,
@@ -2208,9 +2283,12 @@ class Machine:
         exact: int | None,
         deadline: VirtualTime | None = None,
         run: bool = False,
+        returning: _Resolver | None = None,
     ) -> Stop:
         self._last_stop = None
         system = self._linked()
+        if system is not None and returning is not None:
+            raise NotImplementedError("a frame-return goal of a linked member")
         if system is not None:
             stop = await system._goal(  # pyright: ignore[reportPrivateUsage]
                 self,
@@ -2224,6 +2302,11 @@ class Machine:
             )
             self._last_stop = stop
             return stop
+        until_return: tuple[int, int] | None = None
+        if returning is not None:
+            if self.busy:
+                raise MachineBusy("the machine already runs a goal or a free run")
+            until_return = returning()
         stop = await awaited(
             self._handle.run_goal(
                 until=until,
@@ -2232,9 +2315,12 @@ class Machine:
                 for_ps=_ps(for_),
                 deadline_ps=deadline_ps(deadline),
                 stop_when=None if stop_when is None else self._handler(stop_when),
+                until_return=until_return,
             ),
             lambda raw: stop_of(cast(_core.StopInfo, raw)),
         )
+        if returning is not None:
+            stop = returning.named(stop)
         self._last_stop = stop
         return stop
 

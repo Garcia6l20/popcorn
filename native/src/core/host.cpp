@@ -1044,6 +1044,7 @@ struct host_core
         .until_time         = goal.goal.until_time,
         .stop_when    = goal.goal.stop_when ? std::function<bool()>{std::ref(goal.goal.stop_when)}
                                             : std::function<bool()>{},
+        .until_return = goal.goal.until_return,
         .leave_until  = once ? once->leave_until : goal.executed.value == 0,
         .until_thread = goal.goal.until_thread,
     };

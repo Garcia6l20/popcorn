@@ -499,7 +499,13 @@ def test_a_goal_future_is_awaited_from_two_loops_then_waited_without_one(
     def goal() -> _core.HostFuture:
         handle = m._handle  # pyright: ignore[reportPrivateUsage]
         return handle.run_goal(
-            until=None, budget=5_000, exact=None, for_ps=None, deadline_ps=None, stop_when=None
+            until=None,
+            budget=5_000,
+            exact=None,
+            for_ps=None,
+            deadline_ps=None,
+            stop_when=None,
+            until_return=None,
         )
 
     first = asyncio.run(awaited(goal(), stop_info))
@@ -521,7 +527,13 @@ def test_cancelling_the_awaiting_task_halts_the_goal(machines: Machines) -> None
 
     async def body() -> None:
         endless = m._handle.run_goal(  # pyright: ignore[reportPrivateUsage]
-            until=None, budget=10**15, exact=None, for_ps=None, deadline_ps=None, stop_when=None
+            until=None,
+            budget=10**15,
+            exact=None,
+            for_ps=None,
+            deadline_ps=None,
+            stop_when=None,
+            until_return=None,
         )
         task = asyncio.create_task(awaited(endless, stop_info))
         await asyncio.sleep(0.02)
@@ -833,7 +845,8 @@ for _ in range(3):
     ]
     trace = handle.open_trace({trace!r}, [0], [])
     goal = handle.run_goal(
-        until=None, budget=10**15, exact=None, for_ps=None, deadline_ps=None, stop_when=None
+        until=None, budget=10**15, exact=None, for_ps=None, deadline_ps=None, stop_when=None,
+            until_return=None,
     )
     time.sleep(0.02)
     del hooks, trace
@@ -1599,7 +1612,7 @@ try:
     if MODE == "asyncio":
         asyncio.run(goal())
     elif MODE == "result":
-        future = m._handle.run_goal(None, 10_000_000, None, None, None, None)
+        future = m._handle.run_goal(None, 10_000_000, None, None, None, None, None)
         assert entered.wait(10)
         threading.Thread(
             target=interrupt_inside, args=(_core.interruptible_waits(),), daemon=True
@@ -2752,7 +2765,13 @@ def test_a_goal_deadline_at_or_before_now_stops_with_time_at_once(machines: Mach
     for deadline in (m.time.ps, 0):
         before = m.instructions
         future = handle.run_goal(
-            until=None, budget=None, exact=None, for_ps=None, deadline_ps=deadline, stop_when=None
+            until=None,
+            budget=None,
+            exact=None,
+            for_ps=None,
+            deadline_ps=deadline,
+            stop_when=None,
+            until_return=None,
         )
         stop = asyncio.run(awaited(future, stop_info))
         assert stop.reason is popcorn.StopReason.TIME
@@ -2764,7 +2783,13 @@ def test_a_binding_refuses_both_a_duration_and_a_deadline(machines: Machines) ->
     handle = m._handle  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(ValueError, match="not both"):
         handle.run_goal(
-            until=None, budget=None, exact=None, for_ps=1, deadline_ps=1, stop_when=None
+            until=None,
+            budget=None,
+            exact=None,
+            for_ps=1,
+            deadline_ps=1,
+            stop_when=None,
+            until_return=None,
         )
     m.start()
     try:

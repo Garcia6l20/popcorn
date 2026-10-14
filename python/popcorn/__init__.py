@@ -64,7 +64,7 @@ from popcorn._part_description import (
 )
 from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any_of
 from popcorn._snapshot import Snapshot
-from popcorn._stop import Fault, Stop
+from popcorn._stop import Fault, FrameReturn, Stop
 from popcorn._system import (
     System,
     SystemDescription,
@@ -105,6 +105,7 @@ __all__ = [
     "FaultError",
     "FaultKind",
     "FloatAbi",
+    "FrameReturn",
     "HandlerCallWarning",
     "Hex",
     "Image",

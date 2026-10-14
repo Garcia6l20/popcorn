@@ -198,6 +198,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   bus_fault.reset();
   frames.clear();
   return_watch = 0;
+  rewatch();
   resume_past.reset();
   coverage.has_previous = false;
   spin.clear();
@@ -347,12 +348,25 @@ void machine::run_state::on_block(
     uc_emu_stop(engine);
     return;
   }
-  if(run.return_watch != 0 and addr == run.return_watch) [[unlikely]]
+  if(run.block_watch) [[unlikely]]
   {
-    run.guarded([&run, addr] {
-      run.on_return_block(static_cast<address>(addr));
-      return false;
-    });
+    if(run.return_watch != 0 and addr == run.return_watch)
+    {
+      run.guarded([&run, addr] {
+        run.on_return_block(static_cast<address>(addr));
+        return false;
+      });
+    }
+    if(addr == run.return_block and run.until_return and run.guarded([&run] {
+         return run.stack_pointer() == run.until_return->sp;
+       }))
+    {
+      run.end_cause           = engine_end::other;
+      run.boundary_stop       = true;
+      run.coverage.open_insns = 0;
+      uc_emu_stop(engine);
+      return;
+    }
   }
   run.block_size = size;
   if(not run.stepping)
@@ -423,7 +437,12 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
     }
     return false;
   });
+  auto const target         = run.until_return;
+  auto       met            = false;
   auto const stops          = run.guarded([&] {
+    met = target
+      and run.arch->interrupt_returns(intno, target->ret)
+      and run.stack_pointer() == target->sp;
     auto const result = run.owner.arch_->on_interrupt(intno);
     run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
@@ -431,6 +450,12 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
       run.spin.leave();
       if(failed)
       {
+        return true;
+      }
+      if(met)
+      {
+        run.returned_at   = target;
+        run.boundary_stop = true;
         return true;
       }
       if(run.until_thread and run.owner.arch_->thread_mode())
@@ -849,6 +874,16 @@ auto machine::run_state::bound_reached(slice_request const& request) -> std::opt
   {
     return slice_end{make_stop(stop_reason::address, {}, std::nullopt)};
   }
+  if(returned_at and returned_at == request.until_return)
+  {
+    return slice_end{make_stop(stop_reason::returned, {}, std::nullopt)};
+  }
+  if(request.until_return
+     and arch->pc() == request.until_return->ret
+     and stack_pointer() == request.until_return->sp)
+  {
+    return slice_end{make_stop(stop_reason::returned, {}, std::nullopt)};
+  }
   if(icount{executed.value + jumped.value} >= request.max_instructions)
   {
     return slice_end{};
@@ -1008,6 +1043,13 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   wall_expired   = false;
   wall_deadline  = std::chrono::steady_clock::now() + request.wall_budget;
   until_thread   = request.until_thread;
+  until_return   = request.until_return;
+  return_block   = until_return ? until_return->ret : address{};
+  rewatch();
+  if(request.leave_until)
+  {
+    returned_at.reset();
+  }
   set_exits(exit_list(request));
   for(;;)
   {

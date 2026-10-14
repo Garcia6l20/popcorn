@@ -73,6 +73,29 @@ class Stop:
         return text
 
 
+@dataclass(frozen=True, slots=True)
+class FrameReturn:
+    """Goal of `Machine.run(until=FrameReturn())`: the function running when the run starts
+    returns. A debugger's step out.
+
+    The run stops with RETURNED, detail `<function> returned`, at the first return to the
+    function's return address with the stack pointer it had at entry: before the caller's next
+    instruction executes, as `until=` stops. Inner returns of a recursion pass the same
+    address with a lower stack pointer and do not stop it. After a tail call the stop lands
+    where the tail-calling function would have returned. For an exception handler it is the
+    exception return, after the core unstacked, at the interrupted context's pc.
+
+    The return point comes from the prologue or epilogue at pc when the run starts, the first
+    frame `report.stop_report` shows. A function the unwinder cannot follow, where the report
+    falls back to a stack scan, is refused with EmulationError, never guessed. So is a pc not on
+    an epilogue whose function has a return or a stack pointer write the prologue walk does not
+    decode between its start and pc: a shrink-wrapped early exit placed after the epilogue, or
+    a stack allocation by register such as alloca. A `longjmp` past the frame, a reset or a
+    context switch that never resumes the frame leave the goal to its budget. Code whose return
+    address is its own next instruction, `bl 1f` then `1:`, stops at once.
+    """
+
+
 def stop_of(native: _core.StopInfo) -> Stop:
     """Python copy of a native stop."""
     fault = None

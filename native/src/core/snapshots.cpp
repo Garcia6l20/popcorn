@@ -379,6 +379,7 @@ void machine::restore(core::snapshot const& saved)
   run.spin.clear();
   run.instant_events = 0;
   run.return_watch   = 0;
+  run.rewatch();
   run.resume_past.reset();
   std::ignore = run.take_requested();
   run.reset_requested.reset();

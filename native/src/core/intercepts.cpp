@@ -190,6 +190,7 @@ void machine::run_state::trace_call(address at)
 void machine::run_state::refresh_return_watch() noexcept
 {
   return_watch = frames.empty() ? address{} : frames.back().ret;
+  rewatch();
 }
 
 void machine::run_state::on_return_block(address addr)

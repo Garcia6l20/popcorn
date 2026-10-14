@@ -137,6 +137,37 @@ __attribute__((noipa)) int32_t apply(int32_t (*fn)(int32_t), int32_t x)
   return fn(x);
 }
 
+__attribute__((noipa, optimize("no-optimize-sibling-calls"))) int32_t negated(int32_t a)
+{
+  return negate(a);
+}
+
+__attribute__((noipa)) float scaled(float a)
+{
+  return mulf(a, 2.0f) + 1.0f;
+}
+
+__attribute__((noipa)) double halved(double d)
+{
+  return half(d) + 1.0;
+}
+
+__attribute__((noipa)) void touch(void)
+{
+  flag = 2u;
+}
+
+__attribute__((noipa)) int32_t touched(void)
+{
+  touch();
+  return 1;
+}
+
+__attribute__((noipa, optimize("no-optimize-sibling-calls"))) int32_t depth(int32_t n)
+{
+  return n == 0 ? 0 : depth(n - 1) + 1;
+}
+
 __attribute__((noipa)) uint32_t ticks_now(void)
 {
   return ticks;

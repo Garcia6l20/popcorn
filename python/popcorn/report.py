@@ -29,11 +29,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from popcorn import _core
-from popcorn._errors import EmulationError
 from popcorn._image import Location
-from popcorn._machine import Machine
+from popcorn._machine import Machine, stack_access
 from popcorn._stop import Stop
-from popcorn._unwind import Functions, RawFrame, Read32, Via, source_address, unwind
+from popcorn._unwind import RawFrame, Read32, Via, source_address, unwind
 
 _CORE_REGISTERS = (
     "r0",
@@ -189,17 +188,7 @@ def stop_report(
     registers = {name: register(name) for name in _CORE_REGISTERS}
     psp = register("psp")
 
-    regions = [(r.start, r.start + r.size) for r in machine.description.regions]
-
-    def read32(address: int) -> int | None:
-        if not any(start <= address and address + 4 <= end for start, end in regions):
-            return None
-        try:
-            return machine.mem.u32[address]
-        except EmulationError:
-            return None
-
-    functions = Functions((s.name, s.value, s.size) for s in machine.symbols.values() if s.function)
+    read32, functions = stack_access(machine)
     raw = unwind(
         read32,
         functions,

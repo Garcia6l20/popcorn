@@ -283,15 +283,21 @@ auto machine_handle::lock_releasing() const -> core::held_lock
 }
 
 auto machine_handle::run_goal(
-    std::optional<address>       until,
-    std::optional<std::uint64_t> budget,
-    std::optional<std::uint64_t> exact,
-    std::optional<std::uint64_t> for_ps,
-    std::optional<std::uint64_t> deadline_ps,
-    std::optional<nb::object>    stop_when) -> host_future_handle
+    std::optional<address>                            until,
+    std::optional<std::uint64_t>                      budget,
+    std::optional<std::uint64_t>                      exact,
+    std::optional<std::uint64_t>                      for_ps,
+    std::optional<std::uint64_t>                      deadline_ps,
+    std::optional<nb::object>                         stop_when,
+    std::optional<std::tuple<address, std::uint64_t>> until_return) -> host_future_handle
 {
   refuse_both(for_ps, deadline_ps);
   core::run_goal goal{.until = until, .stop_when = predicate_of(std::move(stop_when))};
+  if(until_return)
+  {
+    auto const [ret, sp] = *until_return;
+    goal.until_return    = core::frame_return{.ret = ret, .sp = sp};
+  }
 
   if(budget)
   {

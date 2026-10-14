@@ -7,9 +7,11 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -372,4 +374,200 @@ TEST_CASE("an exception return completes the handler and the function it tail-ca
     CHECK(exits[index].value == (index + 1) * 10 + 2);
     CHECK(handlers[index].instructions.value > exits[index].instructions.value);
   }
+}
+
+namespace
+{
+auto frame_here(fixture const& f) -> core::frame_return
+{
+  return {.ret = static_cast<address>(f.reg("lr") & ~std::uint64_t{1}), .sp = f.reg("sp")};
+}
+
+void stopped_at(fixture const& f, std::string_view name)
+{
+  core::slice_request request{.until = fn(name)};
+  request.leave_until = true;
+  REQUIRE(f.run_to_stop(request).reason == stop_reason::address);
+  REQUIRE(f.reg("pc") == fn(name));
+}
+
+auto in_delay(core::machine_options options = {}) -> std::pair<fixture, core::frame_return>
+{
+  auto f = booted(std::move(options));
+  f.set("pc", fn("use_delay"));
+  f.set("lr", fn("halt") | 1);
+  stopped_at(f, "delay_ms");
+  auto const          target = frame_here(f);
+  core::slice_request step{.exact_instructions = icount{40}};
+  step.wall_budget = std::chrono::seconds{60};
+  REQUIRE(f.run(step).stopped->reason == stop_reason::budget);
+  return {std::move(f), target};
+}
+
+auto run_out(fixture const& f, core::slice_request request) -> std::pair<popcorn::stop, icount>
+{
+  request.wall_budget = std::chrono::seconds{60};
+  icount total{};
+  for(;;)
+  {
+    auto const result = f.run(request);
+    total.value += result.executed.value;
+    request.leave_until = false;
+    if(result.stopped)
+    {
+      return {*result.stopped, total};
+    }
+  }
+}
+}
+
+TEST_CASE("a frame-return goal stops at the return address with the entry stack pointer")
+{
+  auto [f, target] = in_delay();
+  auto [g, same]   = in_delay();
+  REQUIRE(same == target);
+  auto const [stop, executed] = run_out(f, {.until_return = target});
+  CHECK(stop.reason == stop_reason::returned);
+  CHECK(f.reg("pc") == target.ret);
+  CHECK(f.reg("sp") == target.sp);
+  CHECK(f.reg("r0") == 1000);
+  auto const [plain, plain_executed] = run_out(g, {.until = target.ret});
+  CHECK(plain.reason == stop_reason::address);
+  CHECK(executed == plain_executed);
+  CHECK(f.reg("r0") == g.reg("r0"));
+}
+
+TEST_CASE("a frame-return goal stops the same whatever the slice length")
+{
+  auto [f, target]          = in_delay();
+  auto const [whole, count] = run_out(f, {.until_return = target});
+  REQUIRE(whole.reason == stop_reason::returned);
+  for(auto const length : {std::uint64_t{1}, std::uint64_t{7}, count.value - 1, count.value})
+  {
+    CAPTURE(length);
+    auto [g, again] = in_delay();
+    auto const [stop, total] =
+        run_out(g, {.max_instructions = icount{length}, .until_return = again});
+    CHECK(stop.reason == stop_reason::returned);
+    CHECK(total == count);
+    CHECK(g.reg("pc") == target.ret);
+  }
+}
+
+TEST_CASE("a frame-return goal runs an on_return hook of the same function first")
+{
+  auto       f        = booted();
+  bool       returned = false;
+  auto const hook     = f.target->add_return_hook(
+      fn("delay_ms"), {arch::value_kind::i32}, arch::value_kind::i32,
+      [&](core::returned_call const&) { returned = true; });
+  f.set("pc", fn("use_delay"));
+  f.set("lr", fn("halt") | 1);
+  stopped_at(f, "delay_ms");
+  auto const target           = frame_here(f);
+  auto const [stop, executed] = run_out(f, {.until_return = target});
+  CHECK(stop.reason == stop_reason::returned);
+  CHECK(returned);
+}
+
+TEST_CASE("a frame-return goal with a budget below the return stops on the budget")
+{
+  auto [f, target]            = in_delay();
+  auto const [stop, executed] = run_out(f, {.budget_left = icount{50}, .until_return = target});
+  CHECK(stop.reason == stop_reason::budget);
+  CHECK(f.reg("pc") != target.ret);
+}
+
+TEST_CASE("a frame-return goal in a recursion stops at the targeted frame's return only")
+{
+  auto f = booted();
+  f.set("pc", fn("fib"));
+  f.set("r0", 5);
+  f.set("lr", fn("halt") | 1);
+  core::slice_request deeper{.until = fn("fib")};
+  deeper.leave_until = true;
+  REQUIRE(f.run_to_stop(deeper).reason == stop_reason::address);
+  REQUIRE(f.reg("r0") == 4);
+  auto const target = frame_here(f);
+  REQUIRE(target.ret > fn("fib"));
+  REQUIRE(target.ret < fn("fib") + 64);
+  auto const [stop, executed] = run_out(f, {.until_return = target});
+  CHECK(stop.reason == stop_reason::returned);
+  CHECK(f.reg("pc") == target.ret);
+  CHECK(f.reg("sp") == target.sp);
+  CHECK(f.reg("r0") == 3);
+}
+
+TEST_CASE("a frame-return goal through a tail call stops where the caller returns")
+{
+  auto f = booted();
+  f.set("pc", fn("call_tail"));
+  f.set("r0", 4);
+  f.set("lr", fn("halt") | 1);
+  stopped_at(f, "tail_f");
+  auto const target           = frame_here(f);
+  auto const [stop, executed] = run_out(f, {.until_return = target});
+  CHECK(stop.reason == stop_reason::returned);
+  CHECK(f.reg("pc") == target.ret);
+  CHECK(f.reg("r0") == 15);
+}
+
+namespace
+{
+auto in_handler() -> std::pair<fixture, core::frame_return>
+{
+  using popcorn::testing::test_arch;
+  auto f = booted();
+  REQUIRE(f.target->mem().write(0x0800'0000 + 4 * 16, 4, fn("isr_tail") | 1));
+  f.set("pc", fn("loop_nop"));
+  f.set("lr", fn("halt") | 1);
+  f.set("r4", 3000);
+  f.set("primask", 0);
+  f.module->write_system(test_arch::timer_period_offset, 300);
+  f.module->write_system(test_arch::timer_control_offset, 1);
+  stopped_at(f, "isr_tail");
+  REQUIRE((f.reg("xpsr") & 0x1ffu) != 0);
+  core::frame_return const target{.ret = static_cast<address>(f.reg("lr")), .sp = f.reg("sp")};
+  REQUIRE((target.ret >> 24) == 0xffu);
+  return {std::move(f), target};
+}
+}
+
+TEST_CASE("a frame-return goal in an exception handler stops after its exception return")
+{
+  using popcorn::testing::test_arch;
+  for(auto const length : {std::uint64_t{1'000'000}, std::uint64_t{1}, std::uint64_t{7}})
+  {
+    CAPTURE(length);
+    auto [f, target] = in_handler();
+    auto const [stop, executed] =
+        run_out(f, {.max_instructions = icount{length}, .until_return = target});
+    f.module->write_system(test_arch::timer_control_offset, 0);
+    CHECK(stop.reason == stop_reason::returned);
+    CHECK((f.reg("xpsr") & 0x1ffu) == 0);
+    CHECK(f.reg("pc") >= fn("loop_nop"));
+    CHECK(f.reg("pc") < fn("loop_nop") + 16);
+    CHECK(f.word(fn("isr_exits")) == 1);
+  }
+}
+
+TEST_CASE("an exception return met in a slice ended by its budget stops the next slice at once")
+{
+  auto [f, target]          = in_handler();
+  auto const [whole, count] = run_out(f, {.until_return = target});
+  REQUIRE(whole.reason == stop_reason::returned);
+  auto [g, again] = in_handler();
+  auto const [stop, executed] =
+      run_out(g, {.budget_left = icount{count.value - 1}, .until_return = again});
+  CHECK(stop.reason == stop_reason::budget);
+  CHECK(executed == count);
+  CHECK((g.reg("xpsr") & 0x1ffu) == 0);
+  auto const          pc = g.reg("pc");
+  core::slice_request next{.budget_left = icount{100'000}, .until_return = again};
+  next.wall_budget  = std::chrono::seconds{60};
+  auto const result = g.run(next);
+  REQUIRE(result.stopped);
+  CHECK(result.stopped->reason == stop_reason::returned);
+  CHECK(result.executed.value == 0);
+  CHECK(g.reg("pc") == pc);
 }
