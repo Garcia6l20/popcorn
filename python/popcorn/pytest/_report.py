@@ -280,7 +280,10 @@ def _machine_text(machine: Machine, stop: Stop | None, ring: int) -> str:
         report = stop_report(machine, stop, ring=ring > 0, ring_last=ring or None, collapse=True)
         lines = [report.text()]
     else:
-        lines = ["no stop since the test started", "registers:"]
+        lines = [
+            "no last stop: the machine stands where its last run, if any, left it",
+            "registers:",
+        ]
         values = {name: int(getattr(machine.reg, name)) for name in _REGISTERS}
         names = list(values)
         for row in range(0, len(names), 4):

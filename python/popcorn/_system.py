@@ -859,6 +859,10 @@ class System:
         ends the run there: the member waits at its stop, the others where the run left them,
         and the next `run` releases it.
 
+        Each member's `last_stop` becomes its stop in the result's `stops`, None for a member a
+        member stop left where it stood, and None for every member when the run ends without a
+        result, cancelled or raising.
+
         Cancelling the awaiting task pauses the system at its next barrier.
 
         Raises:
@@ -883,7 +887,16 @@ class System:
 
     async def _run_to(self, target: int) -> SystemStop:
         self._release_undecided()
-        return self._system_stop(await self._resume(target), target)
+        self._set_last_stops({})
+        stop = self._system_stop(await self._resume(target), target)
+        self._set_last_stops(stop.stops)
+        return stop
+
+    def _set_last_stops(self, stops: Mapping[str, Stop]) -> None:
+        """Each member's `last_stop` after a system run: its stop in `stops`, None for a member
+        the run left where it stood."""
+        for name, machine in self._machines.items():
+            machine._last_stop = stops.get(name)  # pyright: ignore[reportPrivateUsage]
 
     async def wait_for(
         self,
@@ -904,7 +917,8 @@ class System:
 
         With `for_`, the wait ends at `base + for_` with a TIME stop if `predicate` held at no
         check point before it, and is not asked there. A member stop or an IDLE pause on the way
-        ends the wait as it ends `run`.
+        ends the wait as it ends `run`. Each member's `last_stop` is its stop of the last run,
+        as after `run`: the TIME stop of the last check point, also when `predicate` raises.
 
         Raises:
             TypeError: `every` or `for_` is no VirtualDuration.
@@ -945,7 +959,9 @@ class System:
         Every member runs as inside its own `running()`, all started together at their
         positions, on the system's clock. A member stop, FAULT, a breakpoint or a reset under
         `on_member_reset="stop"`, ends that member's run: it is halted from its stop on, the
-        others go on, and `halt()` raises it. When every member sleeps with nothing due the
+        others go on, and `halt()` raises it, and that stop becomes its `last_stop`. Every
+        member's `last_stop` is None from the start on, until a member stop or one of its waits
+        gives it one. When every member sleeps with nothing due the
         system sleeps until a command, a stamp, an injection or a pty byte wakes a member.
         Inside, a member's `wait_for`, stream reads and `elapse` wait on the free run as inside
         its own `running()`, and return the stop that ended its run once it ended. A member's
@@ -985,6 +1001,7 @@ class System:
             self._goals.clear()
             self._opens.clear()
             raise
+        self._set_last_stops({})
         self._free = True
         self._loop = loop
         self._ends = []
@@ -1423,6 +1440,8 @@ class System:
             self._handle.release(index)
             if self._free:
                 self._ends.append((index, stop))
+                stopper = self._machines[self._names[index]]
+                stopper._last_stop = stop  # pyright: ignore[reportPrivateUsage]
         for wait in reached:
             if not wait.future.done():
                 wait.future.set_result(stop)

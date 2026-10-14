@@ -1223,7 +1223,10 @@ class Machine:
     def last_stop(self) -> Stop | None:
         """The stop that ended the most recent run, step, wait, call or `running()` background
         run. None after construction, `reset()`, `restore()`, and a run that ended without a
-        stop: cancelled, or ended by an exception of a handler or predicate.
+        stop: cancelled, or ended by an exception of a handler or predicate. A member of a
+        linked system takes its stop from each `System.run` and `System.wait_for`, None when
+        another member's stop ended the run or the run ended without a stop. A free run of the
+        system sets it to None, then to the member's own stop or that of its waits.
 
         Raises:
             MachineRunning: The machine is busy, outside its handlers.
@@ -2096,9 +2099,9 @@ class Machine:
         """Symbol, offset, file and line of the next instruction, `locate(pc)`.
 
         `pc` is the address stops report: on a core asleep in WFI it is past the WFI, where
-        `reg.pc` still holds the WFI. Right after a run, step or wait of this machine it equals
-        `last_stop.location`. Not after `call()`, which restores the pc. For a linked member
-        after `System.run`, compare with `SystemStop.stops[name].location`.
+        `reg.pc` still holds the WFI. Right after a run, step or wait of this machine, or a
+        `System.run` or `wait_for` that gave it a stop, it equals `last_stop.location`. Not
+        after `call()`, which restores the pc.
 
         Raises:
             MachineRunning: The machine is busy, outside its handlers.

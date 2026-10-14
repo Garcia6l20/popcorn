@@ -187,7 +187,13 @@ def test_a_machine_without_a_run_shows_registers_and_ring(pytester: pytest.Pytes
         """)
     result = run(pytester)
     result.stdout.fnmatch_lines(
-        [HEADER, "machine (*):", "  no stop since the test started", "  registers:", "      r0 *"]
+        [
+            HEADER,
+            "machine (*):",
+            "  no last stop: the machine stands where its last run, if any, left it",
+            "  registers:",
+            "      r0 *",
+        ]
     )
 
 
@@ -207,7 +213,12 @@ def test_a_cancelled_run_leaves_no_stop_but_its_ring(pytester: pytest.Pytester) 
         """)
     result = run(pytester, "--popcorn-ring=50")
     result.stdout.fnmatch_lines(
-        [HEADER, "  no stop since the test started", "  trace ring:", "* stop  BUDGET at *"]
+        [
+            HEADER,
+            "  no last stop: the machine stands where its last run, if any, left it",
+            "  trace ring:",
+            "* stop  BUDGET at *",
+        ]
     )
 
 
@@ -293,7 +304,12 @@ def test_a_running_machine_is_parked_then_reported(pytester: pytest.Pytester) ->
     result = run(pytester, "-W", "ignore")
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines(
-        [HEADER, "machine (*):", "*no stop since the test started*", "*registers:*"]
+        [
+            HEADER,
+            "machine (*):",
+            "*no last stop: the machine stands where its last run, if any, left it*",
+            "*registers:*",
+        ]
     )
     result.stdout.no_fnmatch_line("*still running*")
 
@@ -314,7 +330,7 @@ def test_two_machines_get_two_blocks(pytester: pytest.Pytester) -> None:
         [
             HEADER,
             "machine (config=- digest=* strict=False):",
-            "  no stop since the test started",
+            "  no last stop: the machine stands where its last run, if any, left it",
             "machine_factory #1 (config=- digest=* strict=False):",
             "  stop: BUDGET at *",
         ]
@@ -340,7 +356,7 @@ def test_the_machine_that_raised_is_marked(pytester: pytest.Pytester) -> None:
             "machine (config=- digest=* strict=False) (raised):",
             "  stop: FAULT at *",
             "machine_factory #1 (config=- digest=* strict=False):",
-            "  no stop since the test started",
+            "  no last stop: the machine stands where its last run, if any, left it",
         ]
     )
     result.stdout.no_fnmatch_line("exception stop:*")

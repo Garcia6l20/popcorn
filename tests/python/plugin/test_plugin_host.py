@@ -174,7 +174,7 @@ def test_a_failing_test_reports_its_running_machine_parked(pytester: pytest.Pyte
         [
             HEADER,
             "machine (*):",
-            "*no stop since the test started*",
+            "*no last stop: the machine stands where its last run, if any, left it*",
             "*registers:*",
             "*trace ring:*",
             "* stop  BUDGET at *",

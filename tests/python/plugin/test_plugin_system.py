@@ -303,6 +303,65 @@ def test_a_failing_system_test_reports_and_traces_each_member(
     assert not list(traces.glob("*.part"))
 
 
+def test_a_failure_report_shows_each_member_stop_of_the_last_system_run(
+    layout: Path, pytester: pytest.Pytester
+) -> None:
+    (layout / "test_stops.py").write_text(
+        "from popcorn import StopReason\n"
+        "from popcorn.units import VirtualTime, ms\n\n\n"
+        "async def test_stops(system):\n"
+        "    a, b1, b2 = system.members.values()\n"
+        "    a.reg.pc = a.sym('link_tx')\n"
+        "    b1.reg.pc = b1.sym('link_rx')\n"
+        "    b2.reg.pc = b2.sym('link_rx')\n"
+        "    first = await system.run(for_=ms(3))\n"
+        "    assert (first.reason, first.member) == (StopReason.USER, 'a')\n"
+        "    done = await system.run(until=VirtualTime(ms(3).ps))\n"
+        "    assert done.reason is StopReason.TIME\n"
+        "    assert False\n"
+    )
+    result = run(pytester, str(layout / "test_stops.py"))
+    result.assert_outcomes(failed=1)
+    for name in ("a", "b1", "b2"):
+        result.stdout.fnmatch_lines(
+            [
+                f"system member {name} (description=* config=- digest=* strict=False):",
+                "  stop: TIME at *",
+            ],
+            consecutive=True,
+        )
+    result.stdout.no_fnmatch_line("*no last stop*")
+
+
+def test_a_member_fault_report_shows_the_others_standing_where_the_run_left_them(
+    layout: Path, pytester: pytest.Pytester
+) -> None:
+    (layout / "test_fault.py").write_text(
+        "from popcorn import StopReason\n"
+        "from popcorn.units import ms\n\n\n"
+        "async def test_fault(system):\n"
+        "    a = system.members['a']\n"
+        "    a.reg.pc = 0xFFFF_FFF0\n"
+        "    stop = await system.run(for_=ms(1))\n"
+        "    assert (stop.reason, stop.member) == (StopReason.FAULT, 'a')\n"
+        "    assert False\n"
+    )
+    result = run(pytester, str(layout / "test_fault.py"))
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        ["system member a (description=* config=- digest=* strict=False):", "  stop: FAULT at *"],
+        consecutive=True,
+    )
+    for name in ("b1", "b2"):
+        result.stdout.fnmatch_lines(
+            [
+                f"system member {name} (description=* config=- digest=* strict=False):",
+                "  no last stop: the machine stands where its last run, if any, left it",
+            ],
+            consecutive=True,
+        )
+
+
 def test_a_free_run_left_started_is_halted_at_teardown(
     layout: Path, pytester: pytest.Pytester
 ) -> None:
