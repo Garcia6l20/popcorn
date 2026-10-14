@@ -620,14 +620,15 @@ def test_a_halt_from_another_thread_waits_for_a_stopped_loop_to_run_again(ping: 
 
 
 def test_a_member_stop_ending_a_wait_just_before_halt_is_raised(ping: Build) -> None:
-    system = ping()
-    a = system.members["a"]
-
-    async def body() -> None:
+    async def body(system: System) -> None:
+        a = system.members["a"]
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
         system.start()
         waiting = asyncio.create_task(a.wait_for(a.ref.var("log_len").ge(1_000_000)))
         opens = system._opens  # pyright: ignore[reportPrivateUsage]
         while not (opens.get(0) is not None and opens[0].waits and opens[0].done()):
+            if waiting.done():
+                pytest.fail("the member stopped before the goal serving the wait was posted")
             await asyncio.sleep(0)
         assert not waiting.done()
         with pytest.raises(popcorn.EmulationError, match="USER") as raised:
@@ -636,7 +637,8 @@ def test_a_member_stop_ending_a_wait_just_before_halt_is_raised(ping: Build) -> 
         assert raised.value.stop == stop
         assert clean(system)
 
-    asyncio.run(body())
+    for _ in range(2):
+        asyncio.run(body(ping()))
 
 
 def test_a_probe_on_a_member_of_a_running_system_counts_but_is_changed_outside_it(
