@@ -41,17 +41,25 @@ using popcorn::testing::u575;
 constexpr std::uint64_t ms = 1'000'000'000;
 constexpr std::uint64_t us = 1'000'000;
 
-auto entered(
-    std::string_view      entry,
-    core::machine_options options = popcorn::testing::stm32_options()) -> stm32_fixture
+auto entered_on(
+    popcorn::part_description desc,
+    std::string_view          entry,
+    core::machine_options     options = popcorn::testing::stm32_options()) -> stm32_fixture
 {
-  stm32_fixture f{u575(), "tim_ll", std::move(options)};
+  stm32_fixture f{std::move(desc), "tim_ll", std::move(options)};
   REQUIRE(
       f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("tim_ll", "main")})
           .reason
       == stop_reason::address);
   f.set("pc", sym("tim_ll", entry));
   return f;
+}
+
+auto entered(
+    std::string_view      entry,
+    core::machine_options options = popcorn::testing::stm32_options()) -> stm32_fixture
+{
+  return entered_on(u575(), entry, std::move(options));
 }
 
 struct entries
@@ -216,7 +224,13 @@ struct direct
   std::uint64_t start{};
 
   explicit direct(core::machine_options options = popcorn::testing::stm32_options())
-      : f{entered("idle", std::move(options))}
+      : direct{u575(), std::move(options)}
+  {}
+
+  explicit direct(
+      popcorn::part_description desc,
+      core::machine_options     options = popcorn::testing::stm32_options())
+      : f{entered_on(std::move(desc), "idle", std::move(options))}
   {
     b.set("RCC", "RCC_APB2ENR", "TIM1EN", 1);
   }
@@ -1148,10 +1162,10 @@ struct slaves
   std::vector<core::log_record> logged;
   core::hook_handle             sink;
 
-  slaves()
-      : f{entered("idle")}, sink{f.target->add_log_sink([this](core::log_record const& record) {
-          logged.push_back(record);
-        })}
+  explicit slaves(popcorn::part_description desc = u575())
+      : f{entered_on(std::move(desc), "idle")},
+        sink{f.target->add_log_sink(
+            [this](core::log_record const& record) { logged.push_back(record); })}
   {
     for(auto const* const bit : {"TIM1EN", "TIM15EN"})
     {
@@ -1544,6 +1558,104 @@ TEST_CASE("external clock mode 1 on ITR7, tim16_oc1, holds and logs once")
   t.at(100);
   CHECK(t.count("TIM3") == 0);
   CHECK(t.warnings() == 1);
+}
+
+namespace
+{
+auto svd_named_timers() -> popcorn::part_description
+{
+  auto desc = u575();
+  for(auto& unit : desc.peripherals)
+  {
+    auto const old_name = [&](std::string_view bare) -> std::string {
+      auto const found = popcorn::find_register(unit, bare);
+      return found != nullptr
+                 and found->aliases
+                 and not found->aliases->empty()
+                 and found->aliases->front().starts_with("TIM1_")
+               ? found->aliases->front()
+               : std::string{bare};
+    };
+    for(auto& rule : unit.cross_rules)
+    {
+      rule.reg        = old_name(rule.reg);
+      rule.target_reg = old_name(rule.target_reg);
+    }
+    std::vector<std::string> renamed;
+    for(auto const& reg : unit.registers)
+    {
+      renamed.push_back(old_name(reg.name));
+    }
+    for(auto& reg : unit.registers)
+    {
+      if(reg.alternate_of)
+      {
+        reg.alternate_of = old_name(*reg.alternate_of);
+      }
+    }
+    for(std::size_t index = 0; index < unit.registers.size(); ++index)
+    {
+      if(renamed[index] != unit.registers[index].name)
+      {
+        unit.registers[index].name    = renamed[index];
+        unit.registers[index].aliases = std::nullopt;
+      }
+    }
+  }
+  return desc;
+}
+
+auto last_warning(std::vector<core::log_record> const& logged) -> core::log_record const&
+{
+  auto const found =
+      std::ranges::find_last(logged, core::log_kind::model_warning, &core::log_record::kind);
+  REQUIRE(not found.empty());
+  return found.front();
+}
+}
+
+TEST_CASE("TIM1 and TIM8 warnings name registers by their bare names")
+{
+  for(auto const* const unit : {"TIM1", "TIM8"})
+  {
+    CAPTURE(unit);
+    direct                        t;
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        t.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    t.b.set("RCC", "RCC_APB2ENR", "TIM8EN", 1);
+    t.b.write(unit, "SMCR", smcr(sms_external, ts_itr7));
+    auto const& warning = last_warning(logged);
+    CHECK(warning.peripheral == unit);
+    CHECK(warning.reg == "SMCR");
+  }
+}
+
+TEST_CASE("a description with only SVD names TIM1_CR1 and so on still runs TIM1")
+{
+  auto       desc = svd_named_timers();
+  auto const tim1 = std::ranges::find(
+      desc.peripherals, std::string_view{"TIM1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(tim1 != desc.peripherals.end());
+  REQUIRE(popcorn::find_register(*tim1, "CR1") == nullptr);
+  REQUIRE(popcorn::find_register(*tim1, "TIM1_CR1") != nullptr);
+  direct                        t{std::move(desc)};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      t.f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  t.b.write("TIM1", "TIM1_PSC", 3);
+  t.b.write("TIM1", "TIM1_ARR", 99);
+  t.b.write("TIM1", "TIM1_CCR1", 50);
+  t.begin();
+  CHECK(t.b.bits("TIM1", "TIM1_CR1", "CEN") == 1);
+  t.at(4 * 50);
+  CHECK(t.count() == 50);
+  CHECK(t.flag("CC1IF") == 1);
+  t.at(4 * 100);
+  CHECK(t.count() == 0);
+  CHECK(t.flag("UIF") == 1);
+  t.b.write("TIM1", "TIM1_SMCR", smcr(sms_external, ts_itr7));
+  CHECK(last_warning(logged).reg == "TIM1_SMCR");
 }
 
 namespace
@@ -2696,7 +2808,7 @@ struct inputs : slaves
   bool              ti1{};
   bool              ti2{};
 
-  inputs()
+  explicit inputs(popcorn::part_description desc = u575()) : slaves{std::move(desc)}
   {
     b.set("RCC", "RCC_AHB2ENR1", "GPIOAEN", 1);
     porta = f.model_of<stm32::gpio_port>("GPIOA");
@@ -3389,6 +3501,47 @@ TEST_CASE("IC1PSC captures every fourth active edge, the count reset by CC1E 0")
   }
   t.settle();
   CHECK(t.read("TIM3", "CCR1") == ticks_at(t, rising[7]));
+}
+
+TEST_CASE("TIM1 IC1PSC on PA8 captures every fourth edge with SVD names and with bare names")
+{
+  auto const fourth_edge = [](popcorn::part_description desc) {
+    inputs t{std::move(desc)};
+    t.route(8, 1);
+    t.base("TIM1", 0, 0xffff);
+    t.write("TIM1", "CCMR1", 0x0001 | (2u << 2));
+    t.write("TIM1", "CCER", 0b0001);
+    t.enable("TIM1");
+    std::vector<std::uint64_t> rising;
+    for(int pulse = 0; pulse < 4; ++pulse)
+    {
+      t.edge(8, true);
+      rising.push_back(t.next);
+      t.edge(8, false);
+      if(pulse == 2)
+      {
+        t.settle();
+        CHECK(t.bits("TIM1", "SR", "CC1IF") == 0);
+      }
+    }
+    t.settle();
+    CHECK(t.bits("TIM1", "SR", "CC1IF") == 1);
+    CHECK(t.read("TIM1", "CCR1") == ticks_at(t, rising[3]));
+  };
+  SUBCASE("SVD names, a description written before bare names")
+  {
+    auto       desc = svd_named_timers();
+    auto const tim1 = std::ranges::find(
+        desc.peripherals, std::string_view{"TIM1"}, &popcorn::peripheral_desc::name);
+    REQUIRE(tim1 != desc.peripherals.end());
+    REQUIRE(popcorn::find_register(*tim1, "CCMR1") == nullptr);
+    REQUIRE(popcorn::find_register(*tim1, "TIM1_CCMR1") != nullptr);
+    fourth_edge(std::move(desc));
+  }
+  SUBCASE("bare names")
+  {
+    fourth_edge(u575());
+  }
 }
 
 TEST_CASE("capture polarity, the neighbour input and CC1E 0")

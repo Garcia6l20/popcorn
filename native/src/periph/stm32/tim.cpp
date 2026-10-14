@@ -320,7 +320,9 @@ auto lower(std::string_view name) -> std::string
  *        during the hold acts as if it came at the hold, and the counter resumes from that state at
  *        the release. A frozen timer dates the TRGO edges it gives during the hold at the current
  *        time, never at the hold, so a sink that runs on sees no edge in its past. A frozen sink
- *        clamps it to its own hold.
+ *        clamps it to its own hold. Registers are looked up by their bare names, `CR1` and so on,
+ *        and by `TIM1_CR1` and the other `TIM1_` names only on a description that has no `CR1`,
+ *        as one written by an older popcorn before TIM1 and TIM8 registers got bare names.
  */
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,
@@ -544,6 +546,13 @@ private:
   bool                                         index_logged_{};
 };
 
+auto tim_prefix(peripheral_desc const& desc) -> std::string_view
+{
+  return find_register(desc, "CR1") == nullptr and find_register(desc, "TIM1_CR1") != nullptr
+           ? std::string_view{"TIM1_"}
+           : std::string_view{};
+}
+
 template <std::size_t... Ch>
 auto compare_entries(std::string_view prefix, std::index_sequence<Ch...>)
     -> std::array<write_entry<tim>, sizeof...(Ch)>
@@ -597,10 +606,8 @@ auto tim_writes(peripheral_desc const& desc) -> std::vector<write_entry<tim>>
        {"TIM1_CCER", &tim::plain_written},
        }
   };
-  auto const has = [&](std::string_view reg) {
-    return std::ranges::contains(desc.registers, reg, &register_desc::name);
-  };
-  auto const                    prefix = has("TIM1_CR1") ? std::string_view{"TIM1_"} : "";
+  auto const has    = [&](std::string_view reg) { return find_register(desc, reg) != nullptr; };
+  auto const prefix = tim_prefix(desc);
   std::vector<write_entry<tim>> out;
   for(auto const& entry : prefix.empty() ? plain : prefixed)
   {
@@ -647,7 +654,7 @@ auto multiline_group(std::string_view base) -> std::string_view
 
 tim::tim(model_context& ctx, peripheral_desc const& desc)
     : dispatch_model{ctx, desc, "TIM", tim_writes(desc)}, regs_{ctx.regs},
-      prefix_{has_register("TIM1_CR1") ? "TIM1_" : ""}, enable_{field(name("CR1"), "CEN")},
+      prefix_{tim_prefix(desc)}, enable_{field(name("CR1"), "CEN")},
       no_update_{field(name("CR1"), "UDIS")}, update_source_{field(name("CR1"), "URS")},
       one_pulse_{field(name("CR1"), "OPM")}, reload_preload_{field(name("CR1"), "ARPE")},
       remap_{field(name("CR1"), "UIFREMAP")}, direction_{optional_field(name("CR1"), "DIR")},
@@ -720,8 +727,7 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
     std::optional<field_ref> preload;
     std::string              view;
     for(auto const& candidate :
-        {std::format("{}CCMR{}_Output", prefix_, mode),
-         std::format("{}CCMR{}_ALTERNATE1", prefix_, mode)})
+        {name(std::format("CCMR{}_Output", mode)), name(std::format("CCMR{}_ALTERNATE1", mode))})
     {
       if(has_register(candidate)
          and std::ranges::contains(describe(candidate).fields, pe, &field_desc::name))
@@ -733,7 +739,7 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
     }
     if(view.empty())
     {
-      missing(std::format("{}CCMR{}.{}", prefix_, mode, pe));
+      missing(std::format("{}.{}", name(std::format("CCMR{}", mode)), pe));
     }
     auto& c          = channels_.emplace_back();
     c.ccr            = reg(ccr);
@@ -749,7 +755,7 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
     c.polarity_n     = optional_field(name("CCER"), std::format("CC{}NP", n));
     c.capture_enable = optional_field(name("CCER"), std::format("CC{}E", n));
     for(auto const& input_view :
-        {std::format("{}CCMR{}_Input", prefix_, mode), std::format("{}CCMR{}", prefix_, mode)})
+        {name(std::format("CCMR{}_Input", mode)), name(std::format("CCMR{}", mode))})
     {
       if(not c.input_filter)
       {
