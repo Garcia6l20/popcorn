@@ -167,17 +167,42 @@ public:
   callback_cell cell;
 };
 
+auto spi_mode_of(nb::handle mode) -> std::optional<std::uint8_t>
+{
+  if(mode.is_none())
+  {
+    return std::nullopt;
+  }
+  return nb::cast<std::uint8_t>(mode);
+}
+
 /**
  * @brief nanobind trampoline letting a Python class implement stm32::spi_target through the
  *        private methods `_select`, `_exchange`, `_reset`, `_save` and `_load` that
  *        `popcorn.board.SpiTarget` defines, which check the values returned. Every call takes
- *        the GIL. Times cross as picoseconds since power-on. Once its machine's Python side is
- *        collected no method is called: the run is asked to stop, an exchange returns 0.
+ *        the GIL, except mode(), the SPI mode given at construction. Times cross as picoseconds
+ *        since power-on. Once its machine's Python side is collected no method is called: the
+ *        run is asked to stop, an exchange returns 0.
  */
 class python_spi_target final : public stm32::spi_target
 {
 public:
   NB_TRAMPOLINE(stm32::spi_target, 5);
+
+  /** @brief A device declaring no SPI mode. */
+  python_spi_target() = default;
+
+  /**
+   * @brief A device declaring SPI mode @p mode, fixed for its life.
+   * @param mode CPOL << 1 | CPHA, 0 to 3, or None for no check.
+   */
+  explicit python_spi_target(nb::handle mode) : declared_{spi_mode_of(mode)}
+  {}
+
+  [[nodiscard]] auto mode() const -> std::optional<std::uint8_t> override
+  {
+    return declared_;
+  }
 
   void select(bool selected, vtime at) override
   {
@@ -223,18 +248,37 @@ public:
 
   /** @brief The cell its calls run in. */
   callback_cell cell;
+
+private:
+  std::optional<std::uint8_t> declared_;
 };
 
 /**
  * @brief nanobind trampoline letting a Python class implement stm32::spi_controller_sink through
  *        the private method `_frame` that `popcorn.board.SpiController` defines. Every call takes
- *        the GIL, one per frame. Times cross as picoseconds since reset. Once its machine's
- *        Python side is collected no method is called: the run is asked to stop.
+ *        the GIL, one per frame, except mode(), the SPI mode given at construction. Times
+ *        cross as picoseconds since reset. Once its machine's Python side is collected no method
+ *        is called: the run is asked to stop.
  */
 class python_spi_controller final : public stm32::spi_controller_sink
 {
 public:
   NB_TRAMPOLINE(stm32::spi_controller_sink, 1);
+
+  /** @brief A controller declaring no SPI mode. */
+  python_spi_controller() = default;
+
+  /**
+   * @brief A controller declaring SPI mode @p mode, fixed for its life.
+   * @param mode CPOL << 1 | CPHA, 0 to 3, or None for no check.
+   */
+  explicit python_spi_controller(nb::handle mode) : declared_{spi_mode_of(mode)}
+  {}
+
+  [[nodiscard]] auto mode() const -> std::optional<std::uint8_t> override
+  {
+    return declared_;
+  }
 
   void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
   {
@@ -255,6 +299,9 @@ public:
 
   /** @brief The cell its calls run in. */
   callback_cell cell;
+
+private:
+  std::optional<std::uint8_t> declared_;
 };
 
 /**
@@ -348,6 +395,11 @@ public:
     return or_value<std::uint32_t>(device_->via(cell, "_exchange", out, bits, at.ps), 0);
   }
 
+  [[nodiscard]] auto mode() const -> std::optional<std::uint8_t> override
+  {
+    return device_->mode();
+  }
+
   void reset(reset_kind kind) override
   {
     gil_entry const gil;
@@ -386,6 +438,11 @@ public:
   {
     gil_entry const gil;
     device_->via(cell, "_frame", sent, received, at.ps);
+  }
+
+  [[nodiscard]] auto mode() const -> std::optional<std::uint8_t> override
+  {
+    return device_->mode();
   }
 
   /** @brief The cell of this attachment. */
@@ -501,11 +558,11 @@ void bind_device_bases(nb::module_ scope)
   nb::class_<stm32::spi_target, python_spi_target>(
       scope, "SpiTargetBase",
       "Native side of popcorn.board.SpiTarget: an SPI device implemented in Python.")
-      .def(nb::init<>());
+      .def(nb::init<nb::handle>(), nb::arg("mode") = nb::none());
   nb::class_<stm32::spi_controller_sink, python_spi_controller>(
       scope, "SpiControllerBase",
       "Native side of popcorn.board.SpiController: an SPI controller implemented in Python.")
-      .def(nb::init<>());
+      .def(nb::init<nb::handle>(), nb::arg("mode") = nb::none());
 }
 
 auto device_factories(

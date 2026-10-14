@@ -70,6 +70,8 @@ struct spi_state
   std::uint8_t                        host_taking{};
   std::uint8_t                        host_selected{};
   std::uint8_t                        host_synced{};
+  std::vector<std::uint8_t>           mode_checked;
+  std::uint8_t                        host_mode_checked{};
 
   friend auto operator==(spi_state const&, spi_state const&) -> bool = default;
 };
@@ -79,12 +81,35 @@ constexpr auto mask_of(std::uint32_t bits) -> std::uint32_t
   return bits >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << bits) - 1u;
 }
 
+constexpr auto reversed(std::uint32_t value, std::uint32_t bits) -> std::uint32_t
+{
+  auto out = std::uint32_t{};
+  for(std::uint32_t bit = 0; bit < bits; ++bit)
+  {
+    out = out << 1 | (value >> bit & 1u);
+  }
+  return out;
+}
+
+static_assert(reversed(0x01, 8) == 0x80);
+static_assert(reversed(0x001, 12) == 0x800);
+static_assert(reversed(0x1234'5678, 32) == 0x1E6A'2C48);
+
 struct heard_frame
 {
   std::uint32_t sent;
   std::uint32_t received;
   std::uint64_t at_ps;
 };
+
+auto pin_name(spi_attachment const& attached) -> std::string
+{
+  if(not attached.cs_pin or attached.cs_port.empty())
+  {
+    return "SS";
+  }
+  return std::format("P{}{}", attached.cs_port.back(), *attached.cs_pin);
+}
 
 auto lower(std::string_view name) -> std::string
 {
@@ -102,6 +127,18 @@ auto lower(std::string_view name) -> std::string
  *        rounded down to a whole picosecond, an error under 1 ps per frame. A frame keeps the
  *        duration it started with across a clock change, the new rate applies from the next frame.
  *        Each frame is exchanged with the selected devices at its end and lands in the RX FIFO.
+ *        Frames cross the bus in wire order, the first bit on the wire in bit DSIZE: the register
+ *        value with CFG2.LSBFRST 0, the value bit reversed over DSIZE + 1 bits with LSBFRST 1,
+ *        RM0456 68.4.9 "Data frame format", both ways and in both modes. A device or controller
+ *        declaring an SPI mode, spi_target::mode() or spi_controller_sink::mode(), is checked
+ *        against CFG2.CPOL << 1 | CFG2.CPHA once per transfer: a device at the end of the first
+ *        frame it exchanges after a select edge or CSTART, the controller at the start of the
+ *        first frame of each of its transfers the target takes part in. A mismatch fails the run
+ *        with config_error naming both modes, and every mismatching device of that frame, once
+ *        the model has handled that frame event: for a device after the frame it exchanged, for
+ *        the controller at the start of the frame, before its end. The model stays consistent
+ *        and a resumed run is not refused again for that transfer. Which checks a transfer has
+ *        run is saved with the model. A device declaring none is never checked.
  *        FIFOs of 16 bytes on SPI1 and SPI2, 8 on SPI3, a frame taking 1 to 4 bytes, packed by the
  *        access size. A 17 to 24-bit frame takes 3 FIFO bytes, as RM0456 68.4.12 "Data packet
  *        control" states. TSIZE frames per transfer, then EOT, CSTART cleared, and TXTF once TSIZE
@@ -194,6 +231,11 @@ private:
   [[nodiscard]] auto communication() const -> std::uint32_t;
   [[nodiscard]] auto frame_ps() -> std::uint64_t;
   [[nodiscard]] auto power_on_offset() const -> std::uint64_t;
+  [[nodiscard]] auto wire_frame(std::uint32_t value) const -> std::uint32_t;
+  [[nodiscard]] auto bus_mode() const -> std::uint8_t;
+  void               check_mode(std::optional<std::uint8_t> declared, auto const& who);
+  void               check_device(std::size_t index);
+  void               rethrow_refused();
 
   void               subscribe();
   void               start_frame(std::uint64_t from_ps);
@@ -263,6 +305,10 @@ private:
   field_ref                                    underrun_;
   field_ref                                    underrun_config_;
   field_ref                                    underrun_data_;
+  field_ref                                    lsb_first_;
+  field_ref                                    polarity_;
+  field_ref                                    phase_;
+  std::vector<std::string>                     mismatched_;
   bool                                         unsupported_logged_{};
   bool                                         no_clock_logged_{};
   bool                                         size_logged_{};
@@ -310,7 +356,9 @@ spi::spi(
       rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}, mode_fault_flag_{field("SPI_SR", "MODF")},
       software_select_{field("SPI_CFG2", "SSM")}, select_input_{field("SPI_CR1", "SSI")},
       select_polarity_{field("SPI_CFG2", "SSIOP")}, underrun_{field("SPI_SR", "UDR")},
-      underrun_config_{field("SPI_CFG1", "UDRCFG")}, underrun_data_{field("SPI_UDRDR", "UDRDR")}
+      underrun_config_{field("SPI_CFG1", "UDRCFG")}, underrun_data_{field("SPI_UDRDR", "UDRDR")},
+      lsb_first_{field("SPI_CFG2", "LSBFRST")}, polarity_{field("SPI_CFG2", "CPOL")},
+      phase_{field("SPI_CFG2", "CPHA")}
 {
   if(controller_ and not attachments_.empty())
   {
@@ -412,6 +460,55 @@ auto spi::power_on_offset() const -> std::uint64_t
   return ctx_.clock.since_power_on().ps - ctx_.clock.time().ps;
 }
 
+auto spi::wire_frame(std::uint32_t value) const -> std::uint32_t
+{
+  auto const frame = value & frame_mask();
+  return get(regs_, lsb_first_) != 0 ? reversed(frame, frame_bits()) : frame;
+}
+
+auto spi::bus_mode() const -> std::uint8_t
+{
+  return static_cast<std::uint8_t>(get(regs_, polarity_) << 1 | get(regs_, phase_));
+}
+
+void spi::check_mode(std::optional<std::uint8_t> declared, auto const& who)
+{
+  if(declared and *declared != bus_mode())
+  {
+    mismatched_.push_back(std::format("the SPI mode {} {} declares", *declared, who()));
+  }
+}
+
+void spi::check_device(std::size_t index)
+{
+  if(std::exchange(state_.mode_checked[index], 1) != 0)
+  {
+    return;
+  }
+  auto const& attached = attachments_[index];
+  check_mode(
+      attached.device->mode(), [&] { return std::format("the device on {}", pin_name(attached)); });
+}
+
+void spi::rethrow_refused()
+{
+  if(mismatched_.empty())
+  {
+    return;
+  }
+  auto declared = std::exchange(mismatched_, {});
+  auto joined   = std::string{};
+  for(auto const& one : declared)
+  {
+    joined += joined.empty() ? one : " and " + one;
+  }
+  throw config_error(
+      ctx_.part.part, 0, std::format("devices.{}", desc_.name),
+      std::format(
+          "{}, not mode {} the firmware set, CPOL {} CPHA {}", joined, bus_mode(),
+          get(regs_, polarity_), get(regs_, phase_)));
+}
+
 auto spi::frame_ps() -> std::uint64_t
 {
   auto const hz  = ctx_.clock.hz(kernel_);
@@ -456,7 +553,8 @@ void spi::subscribe()
       auto const selected = level ? 0 : 1;
       if(state_.selected[index] != selected)
       {
-        state_.selected[index] = static_cast<std::uint8_t>(selected);
+        state_.selected[index]     = static_cast<std::uint8_t>(selected);
+        state_.mode_checked[index] = 0;
         at.device->select(selected != 0, ctx_.clock.since_power_on());
       }
     }));
@@ -495,6 +593,7 @@ void spi::reset(register_file& regs, reset_kind kind)
   state_.host_generation     = host_generation;
   selected.resize(attachments_.size());
   state_.selected = selected;
+  state_.mode_checked.resize(attachments_.size());
   for(auto const& attached : attachments_)
   {
     attached.device->reset(kind);
@@ -557,22 +656,23 @@ void spi::start_frame(std::uint64_t from_ps)
 
 void spi::finish_frame()
 {
-  state_.busy   = 0;
-  auto const at = vtime{state_.frame_end_ps + power_on_offset()};
-  auto       in = frame_mask();
+  state_.busy    = 0;
+  auto const at  = vtime{state_.frame_end_ps + power_on_offset()};
+  auto const out = wire_frame(state_.shift);
+  auto       in  = frame_mask();
   for(std::size_t index = 0; index < attachments_.size(); ++index)
   {
     if(state_.selected[index] != 0)
     {
-      in &= attachments_[index].device->exchange(
-          state_.shift, static_cast<std::uint8_t>(frame_bits()), at);
+      check_device(index);
+      in &= attachments_[index].device->exchange(out, static_cast<std::uint8_t>(frame_bits()), at);
     }
   }
   if(communication() != simplex_tx)
   {
     if(state_.rx_fifo.size() < capacity())
     {
-      state_.rx_fifo.push_back(in & frame_mask());
+      state_.rx_fifo.push_back(wire_frame(in));
     }
     else
     {
@@ -746,6 +846,7 @@ void spi::control_written(std::uint32_t old, std::uint32_t now)
     }
     state_.running = 1;
     state_.done    = 0;
+    std::ranges::fill(state_.mode_checked, 0);
     hardware_select(true);
     start_frame(ctx_.clock.time().ps);
   }
@@ -838,6 +939,7 @@ void spi::on_event(std::uint32_t kind, std::uint64_t payload)
     if(payload == state_.host_generation)
     {
       host_edge_reached();
+      rethrow_refused();
     }
     return;
   }
@@ -847,6 +949,7 @@ void spi::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   finish_frame();
   flags();
+  rethrow_refused();
 }
 
 auto spi::transfer(
@@ -946,7 +1049,11 @@ void spi::begin_host_frame()
   }
   warn_unsupported();
   state_.host_taking = 1;
-  auto const comm    = communication();
+  if(std::exchange(state_.host_mode_checked, 1) == 0)
+  {
+    check_mode(controller_->mode(), [] { return "the controller"; });
+  }
+  auto const comm = communication();
   if(comm == simplex_rx)
   {
     return;
@@ -954,13 +1061,13 @@ void spi::begin_host_frame()
   if(get(regs_, underrun_) != 0 or state_.tx_fifo.empty())
   {
     update(regs_, underrun_, 1);
-    state_.host_shift = get(regs_, underrun_config_) == 0 ? get(regs_, underrun_data_)
-                      : comm == simplex_tx                ? 0u
-                                                          : state_.last_received;
-    state_.host_shift &= frame_mask();
+    state_.host_shift = wire_frame(
+        get(regs_, underrun_config_) == 0 ? get(regs_, underrun_data_)
+        : comm == simplex_tx              ? 0u
+                                          : state_.last_received);
     return;
   }
-  state_.host_shift = state_.tx_fifo.front();
+  state_.host_shift = wire_frame(state_.tx_fifo.front());
   state_.tx_fifo.erase(state_.tx_fifo.begin());
 }
 
@@ -981,7 +1088,7 @@ void spi::end_host_frame()
             "DSIZE + 1 bits",
             now.bits, frame_bits()));
   }
-  auto const in        = now.frames[state_.host_next] & frame_mask();
+  auto const in        = wire_frame(now.frames[state_.host_next]);
   state_.last_received = in;
   if(communication() != simplex_tx)
   {
@@ -1041,6 +1148,7 @@ void spi::host_edge_reached()
     auto const& now = state_.host.front();
     if(state_.host_next == 0)
     {
+      state_.host_mode_checked = 0;
       if(get(regs_, enable_) != 0 and faults_on_select())
       {
         update(regs_, mode_fault_flag_, 1);
@@ -1083,6 +1191,7 @@ void spi::load(std::span<std::byte const> in)
   }
   state_.devices.clear();
   state_.selected.resize(attachments_.size());
+  state_.mode_checked.resize(attachments_.size());
   subscribe();
 }
 }

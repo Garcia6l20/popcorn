@@ -30,8 +30,8 @@ ECHOED = [0xA0, 0xA1, 0x11, 0x12]
 
 
 class Stamped(SpiController):
-    def __init__(self, *, sck_hz: int = 1_000_000, bits: int = 8) -> None:
-        super().__init__(sck_hz=sck_hz, bits=bits)
+    def __init__(self, *, sck_hz: int = 1_000_000, bits: int = 8, mode: int | None = None) -> None:
+        super().__init__(sck_hz=sck_hz, bits=bits, mode=mode)
         self.frames: list[tuple[int, int, int]] = []
 
     def on_frame(self, sent: int, received: int, at: VirtualTime) -> None:
@@ -465,3 +465,58 @@ def test_a_controller_serves_its_second_machine_once_the_first_is_gone(
     asyncio.run(device.transfer([1, 2, 3, 4], at=at))
     assert finish(second) == ECHO_LOG
     check_frames(device, at)
+
+
+@pytest.mark.parametrize(
+    ("mode", "error"),
+    [(4, ValueError), (-1, ValueError), (True, TypeError), ("0", TypeError), (None, None)],
+)
+def test_a_controller_takes_an_spi_mode_0_to_3_or_none(
+    mode: object, error: type[Exception] | None
+) -> None:
+    if error is None:
+        SpiController(sck_hz=1_000_000, mode=cast(int | None, mode))
+        return
+    with pytest.raises(error, match="mode"):
+        SpiController(sck_hz=1_000_000, mode=cast(int | None, mode))
+
+
+def test_a_controller_declaring_the_firmware_spi_mode_clocks_as_one_declaring_none(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, device = echo_machine(u575, Stamped(mode=0))
+    before = gil_entries(m)
+    asyncio.run(device.transfer([1, 2, 3, 4], at=m.time + START))
+    assert finish(m) == ECHO_LOG
+    assert device.received == ECHOED
+    assert gil_entries(m) - before == 4
+
+
+def test_a_controller_declaring_another_spi_mode_fails_the_run_at_the_first_frame(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, device = echo_machine(u575, Stamped(mode=3))
+    asyncio.run(device.transfer([1, 2, 3, 4], at=m.time + START))
+    expected = (
+        r"devices\.SPI1, expected the SPI mode 3 the controller declares, "
+        r"not mode 0 the firmware set, CPOL 0 CPHA 0"
+    )
+    with pytest.raises(ConfigError, match=expected):
+        asyncio.run(m.run(budget=BUDGET))
+    assert device.received == []
+    assert finish(m) == ECHO_LOG
+    assert device.received == ECHOED
+
+
+def test_a_machine_restored_after_a_controller_mode_mismatch_resumes_without_a_second_error(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, device = echo_machine(u575, Stamped(mode=3))
+    asyncio.run(device.transfer([1, 2, 3, 4], at=m.time + START))
+    with pytest.raises(ConfigError, match="the SPI mode 3 the controller declares"):
+        asyncio.run(m.run(budget=BUDGET))
+    saved = popcorn.Snapshot.from_bytes(m.snapshot().to_bytes())
+    other, copy = echo_machine(u575, Stamped(mode=3))
+    other.restore(saved)
+    assert finish(other) == ECHO_LOG
+    assert copy.received == ECHOED

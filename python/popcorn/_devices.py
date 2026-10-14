@@ -173,6 +173,22 @@ def chip_select(cs: str | None) -> tuple[str, int | None]:
     return f"GPIO{matched[1]}", int(matched[2])
 
 
+def spi_mode(owner: str, mode: int | None) -> int | None:
+    """`mode` checked as an SPI mode of `owner`, CPOL << 1 | CPHA, None for no check.
+
+    Raises:
+        TypeError: `mode` is no int or None.
+        ValueError: `mode` is outside 0 to 3.
+    """
+    if mode is None:
+        return None
+    if isinstance(mode, bool) or not isinstance(cast(object, mode), int):
+        raise TypeError(f"{owner} takes mode as an int or None, not {mode!r}")
+    if not 0 <= mode <= 3:
+        raise ValueError(f"{owner} takes mode 0 to 3, not {mode}")
+    return mode
+
+
 def cs_of(device: _core.SpiTargetBase) -> str | None:
     """The chip select pin name of an SPI device, None for the hardware SS output."""
     return typing.cast("str | None", getattr(device, "cs", None))
@@ -415,20 +431,37 @@ class SpiTarget(_core.SpiTargetBase):
     pin from the machine's first reset or snapshot load on. None selects the device by the SPI
     hardware SS output, from the start to the end of each transfer.
 
+    Frame format: frames cross in wire order, the first bit on the wire in bit `bits - 1`. With
+    CFG2.LSBFRST 0 that is the value the firmware writes and reads. With LSBFRST 1 the device
+    sees the value bit reversed over `bits`, and its reply is reversed back before it reaches
+    the RX FIFO, as on silicon: a device written for one bit order gets garbled frames from
+    firmware using the other.
+
+    Mode: `mode`, CPOL << 1 | CPHA, 0 to 3, declares the SPI mode the device works in. At the
+    first frame the device exchanges after each chip select edge or transfer start, the SPI
+    model compares it with the firmware's CFG2.CPOL and CPHA. A mismatch ends the run with
+    `ConfigError` naming both modes and every mismatching device of that frame, after the frame.
+    A resumed or restored run is not refused again for that transfer. None, the default, is
+    never checked. The mode is kept natively at construction, the check takes no GIL.
+
     Projects: a class used in `Device(cls, cs=...)` takes `cs` as a keyword argument and passes
-    it to `super().__init__`.
+    it to `super().__init__`, and `mode` the same way when it declares one.
 
     Time, state, reset, board and lifetime: as `I2CTarget`.
     """
 
-    def __init__(self, cs: str | None = None) -> None:
-        """Select the device through GPIO pin `cs`, or the hardware SS output when None.
+    def __init__(self, cs: str | None = None, *, mode: int | None = None) -> None:
+        """Select the device through GPIO pin `cs`, or the hardware SS output when None, and
+        check the firmware's SPI mode against `mode` when not None.
 
         Raises:
-            ValueError: `cs` is not a pin name such as "PA4", pin 0 to 15.
+            TypeError: `mode` is no int or None.
+            ValueError: `cs` is not a pin name such as "PA4", pin 0 to 15, or `mode` is outside
+                0 to 3.
         """
         port, pin = chip_select(cs)
-        super().__init__()
+        checked = spi_mode("SpiTarget", mode)
+        super().__init__(checked)
         self._cs = cs
         self._cs_port = port
         self._cs_pin = pin
@@ -448,7 +481,8 @@ class SpiTarget(_core.SpiTargetBase):
 
     def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
         """Exchange one frame of `bits` bits, 4 to 32: `out` from the controller, the frame
-        returned to it. All ones by default, an idle MISO."""
+        returned to it, both in wire order, the first bit on the wire in bit `bits - 1`. All ones
+        by default, an idle MISO."""
         return (1 << bits) - 1
 
     def reset(self, kind: ResetKind) -> None:
@@ -495,6 +529,17 @@ class SpiController(_core.SpiControllerBase):
     frame per frame sent: the TX FIFO head, its underrun pattern, or all ones when it is not
     selected or not in target mode. `on_frame` hears each frame at its end.
 
+    Frame format: frames cross in wire order, the first bit on the wire in bit `bits - 1`, both
+    ways, as for `SpiTarget`. With CFG2.LSBFRST 1 the firmware reads each frame bit reversed
+    over its DSIZE + 1 bits, and the controller hears the firmware's frames reversed.
+
+    Mode: `mode`, CPOL << 1 | CPHA, 0 to 3, declares the SPI mode the controller clocks in. At
+    the first frame of each transfer the firmware's SPI takes part in, the SPI model compares it
+    with CFG2.CPOL and CPHA. A mismatch ends the run with `ConfigError` naming both modes, at
+    the start of that frame, before its `on_frame`. A resumed or restored run is not refused
+    again for that transfer. None, the default, is never checked. The mode is kept natively at
+    construction, the check takes no GIL.
+
     Time: `at` is the machine time since reset, as `Machine.time` and `transfer(at=)`, not the
     time since power-on an `SpiTarget` or `I2CTarget` hook gets: after a reset other than
     POWER_ON the two differ by the time before that reset.
@@ -513,12 +558,14 @@ class SpiController(_core.SpiControllerBase):
     """The frames the firmware sent, in order, as the default `on_frame` appends them. Frames a
     reset dropped are missing."""
 
-    def __init__(self, *, sck_hz: int, bits: int = 8) -> None:
-        """Clock frames of `bits` bits at `sck_hz`.
+    def __init__(self, *, sck_hz: int, bits: int = 8, mode: int | None = None) -> None:
+        """Clock frames of `bits` bits at `sck_hz`, checking the firmware's SPI mode against
+        `mode` when not None.
 
         Raises:
-            TypeError: `sck_hz` or `bits` is no int.
-            ValueError: `sck_hz` is outside 1 to 100 MHz, or `bits` outside 4 to 32.
+            TypeError: `sck_hz` or `bits` is no int, or `mode` no int or None.
+            ValueError: `sck_hz` is outside 1 to 100 MHz, `bits` outside 4 to 32, or `mode`
+                outside 0 to 3.
         """
         for name, value in (("sck_hz", sck_hz), ("bits", bits)):
             if isinstance(value, bool) or not isinstance(cast(object, value), int):
@@ -527,7 +574,8 @@ class SpiController(_core.SpiControllerBase):
             raise ValueError(f"an SPI clock is 1 Hz to 100 MHz, not {sck_hz} Hz")
         if not 4 <= bits <= 32:
             raise ValueError(f"an SPI frame is 4 to 32 bits, not {bits}")
-        super().__init__()
+        checked = spi_mode("SpiController", mode)
+        super().__init__(checked)
         self._sck_hz = sck_hz
         self._bits = bits
         self.received = []
@@ -545,13 +593,14 @@ class SpiController(_core.SpiControllerBase):
     def transfer(
         self, frames: Sequence[int], *, at: VirtualTime | None = None
     ) -> Pending[VirtualTime]:
-        """Shift `frames` into the SPI the controller serves, posted as one command as
-        `UartStream.write` is: at once while the machine is parked, at the next block boundary
-        while it runs. The transfer starts at exactly `at`, or at the time the command runs with
-        `at` None, which depends on that boundary while running, and in both cases not before
-        the end of the transfers queued before it. Each frame lasts `bits * 10**12 // sck_hz`
-        ps. `at` and the start are machine times since reset. A reset of the machine drops the
-        transfer if it has not finished. Await the result for the start.
+        """Shift `frames`, in wire order, into the SPI the controller serves, posted as one
+        command as `UartStream.write` is: at once while the machine is parked, at the next block
+        boundary while it runs. The transfer starts at exactly `at`, or at the time the command
+        runs with `at` None, which depends on that boundary while running, and in both cases not
+        before the end of the transfers queued before it. Each frame lasts
+        `bits * 10**12 // sck_hz` ps. `at` and the start are machine times since reset. A reset
+        of the machine drops the transfer if it has not finished. Await the result for the
+        start.
 
         Raises:
             TypeError: `frames` is no sequence of ints, or `at` no `VirtualTime`.
@@ -591,7 +640,8 @@ class SpiController(_core.SpiControllerBase):
 
     def on_frame(self, sent: int, received: int, at: VirtualTime) -> None:
         """One frame ended at `at`, machine time since reset: `sent` the controller's frame,
-        `received` the frame the firmware sent, all ones when its SPI did not take part.
+        `received` the frame the firmware sent, all ones when its SPI did not take part, both in
+        wire order.
         Appends `received` to `received` by default. Called on the machine's thread with the
         GIL, once per frame."""
         self.received.append(received)

@@ -46,7 +46,15 @@ public:
   std::vector<std::uint8_t>                     sizes;
   std::vector<popcorn::reset_kind>              resets;
   std::uint32_t                                 position{};
+  std::optional<std::uint8_t>                   declared;
+  mutable int                                   mode_calls{};
   static constexpr std::array<std::uint32_t, 4> replies{0xFF, 0x1F, 0x32, 0x17};
+
+  auto mode() const -> std::optional<std::uint8_t> override
+  {
+    ++mode_calls;
+    return declared;
+  }
 
   void select(bool selected, vtime at) override
   {
@@ -1296,11 +1304,19 @@ public:
     friend auto operator==(heard const&, heard const&) -> bool = default;
   };
 
-  std::vector<heard> frames;
+  std::vector<heard>          frames;
+  std::optional<std::uint8_t> declared;
+  mutable int                 mode_calls{};
 
   void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
   {
     frames.push_back({sent, received, at});
+  }
+
+  auto mode() const -> std::optional<std::uint8_t> override
+  {
+    ++mode_calls;
+    return declared;
   }
 
   [[nodiscard]] auto received() const -> std::vector<std::uint32_t>
@@ -1834,4 +1850,279 @@ TEST_CASE("an SPI instance with a controller and a device is refused at the buil
   auto options   = popcorn::testing::stm32_options();
   options.models = stm32::factories(board, u575());
   CHECK_THROWS_AS(stm32_fixture(u575(), "spi_ll", std::move(options)), popcorn::config_error);
+}
+
+namespace
+{
+auto refusal(bus const& b, std::uint64_t ps) -> std::string
+{
+  try
+  {
+    auto const stopped =
+        b.f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{ps}});
+    CHECK(stopped.reason == stop_reason::time);
+  }
+  catch(popcorn::config_error const& e)
+  {
+    return e.what();
+  }
+  return {};
+}
+
+void spi_mode(bus const& b, std::uint32_t cpol, std::uint32_t cpha)
+{
+  b.set("SPI_CFG2", "CPOL", cpol);
+  b.set("SPI_CFG2", "CPHA", cpha);
+}
+}
+
+TEST_CASE("LSBFRST puts the value bit reversed on the wire both ways in controller mode")
+{
+  SUBCASE("8-bit frames")
+  {
+    for(std::uint32_t const lsb_first : {0u, 1u})
+    {
+      CAPTURE(lsb_first);
+      rig r{"idle", true};
+      bus b{*r.f};
+      b.set("SPI_CFG2", "LSBFRST", lsb_first);
+      b.controller(7, 2);
+      b.send(0x01);
+      b.send(0x03);
+      b.set("SPI_CR1", "CSTART", 1);
+      b.run_until(b.now() + 2 * frame_ps + frame_ps / 2);
+      CHECK(
+          sent(*r.device)
+          == (lsb_first != 0 ? std::vector<std::uint32_t>{0x80, 0xC0}
+                             : std::vector<std::uint32_t>{0x01, 0x03}));
+      CHECK(b.receive() == 0xFF);
+      CHECK(b.receive() == (lsb_first != 0 ? 0xF8u : 0x1Fu));
+    }
+  }
+  SUBCASE("12-bit frames")
+  {
+    rig r{"idle", true};
+    bus b{*r.f};
+    b.set("SPI_CFG2", "LSBFRST", 1);
+    b.controller(11, 1);
+    b.send(0x001, 2);
+    b.set("SPI_CR1", "CSTART", 1);
+    b.run_until(b.now() + 2 * frame_ps);
+    CHECK(sent(*r.device) == std::vector<std::uint32_t>{0x800});
+    CHECK(r.device->sizes == std::vector<std::uint8_t>{12});
+    CHECK(b.receive(2) == 0xFF0);
+  }
+}
+
+TEST_CASE("LSBFRST puts the value bit reversed on the wire both ways in target mode")
+{
+  target_rig r;
+  bus        b{*r.f};
+  b.set("SPI_CFG2", "LSBFRST", 1);
+  b.set("SPI_CFG1", "UDRCFG", 0);
+  b.set("SPI_UDRDR", "UDRDR", 0x0E);
+  target(b, 7, 0);
+  b.send(0xA1);
+  auto const start = b.now() + us;
+  r.transfer(start, {0x01, 0x03});
+  b.run_until(start + 2 * mhz_frame);
+  CHECK(r.sink->received() == std::vector<std::uint32_t>{0x85, 0x70});
+  CHECK(drain(b) == std::vector<std::uint32_t>{0x80, 0xC0});
+}
+
+TEST_CASE("a device declaring another SPI mode fails the run at its first frame, both named")
+{
+  struct mode_case
+  {
+    std::optional<std::uint8_t> declared;
+    std::uint32_t               cpol;
+    std::uint32_t               cpha;
+    std::string                 refused;
+  };
+  for(auto const& c : {
+          mode_case{0,            1, 1, "the SPI mode 0 the device on SS declares, not mode 3"},
+          mode_case{3,            1, 1, ""                                                    },
+          mode_case{std::nullopt, 1, 1, ""                                                    },
+          mode_case{1,            1, 0, "the SPI mode 1 the device on SS declares, not mode 2"},
+          mode_case{2,            1, 0, ""                                                    },
+          mode_case{2,            0, 1, "the SPI mode 2 the device on SS declares, not mode 1"},
+  })
+  {
+    CAPTURE(c.declared);
+    CAPTURE(c.cpol);
+    CAPTURE(c.cpha);
+    rig r{"idle", true};
+    bus b{*r.f};
+    r.device->declared = c.declared;
+    spi_mode(b, c.cpol, c.cpha);
+    b.controller(7, 4);
+    for(std::uint32_t const frame : {1u, 2u, 3u, 4u})
+    {
+      b.send(frame);
+    }
+    b.set("SPI_CR1", "CSTART", 1);
+    auto const end     = b.now() + 4 * frame_ps + frame_ps / 2;
+    auto const refused = refusal(b, end);
+    if(c.refused.empty())
+    {
+      CHECK(refused.empty());
+    }
+    else
+    {
+      CHECK(refused.contains(c.refused));
+      CHECK(refused.contains(std::format("CPOL {} CPHA {}", c.cpol, c.cpha)));
+      CHECK(refused.contains("devices.SPI1"));
+      CHECK(r.device->frames.size() == 1);
+      CHECK(refusal(b, end).empty());
+    }
+    CHECK(sent(*r.device) == std::vector<std::uint32_t>{1, 2, 3, 4});
+    CHECK(b.get("SPI_SR", "EOT") == 1);
+    CHECK(r.device->mode_calls == 1);
+  }
+}
+
+TEST_CASE("every device declaring another SPI mode in the same frame is named")
+{
+  auto second      = std::make_shared<script_target>();
+  second->declared = 2;
+  stm32::board board{};
+  auto         first = std::make_shared<script_target>();
+  first->declared    = 1;
+  board.spi["SPI1"].push_back({.device = first, .cs_port = "GPIOA"});
+  board.spi["SPI1"].push_back({.device = second, .cs_port = "GPIOA"});
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories(board, u575());
+  stm32_fixture f{u575(), "spi_ll", std::move(options)};
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("spi_ll", "main")})
+          .reason
+      == stop_reason::address);
+  f.set("pc", sym("spi_ll", "idle"));
+  bus b{f};
+  spi_mode(b, 1, 1);
+  b.controller(7, 1);
+  b.send(1);
+  b.set("SPI_CR1", "CSTART", 1);
+  auto const refused = refusal(b, b.now() + frame_ps + frame_ps / 2);
+  CHECK(refused.contains(
+      "the SPI mode 1 the device on SS declares and the SPI mode 2 the device on SS declares, "
+      "not mode 3 the firmware set, CPOL 1 CPHA 1"));
+  CHECK(first->frames.size() == 1);
+  CHECK(second->frames.size() == 1);
+}
+
+TEST_CASE("the mode of a device is read once per transfer and after each chip select edge")
+{
+  SUBCASE("CSTART on the hardware SS output")
+  {
+    rig r{"idle", true};
+    bus b{*r.f};
+    r.device->declared = 0;
+    b.controller(7, 2);
+    for(int transfer = 1; transfer <= 2; ++transfer)
+    {
+      b.send(1);
+      b.send(2);
+      b.set("SPI_CR1", "CSTART", 1);
+      b.run_until(b.now() + 2 * frame_ps + frame_ps / 2);
+      b.set("SPI_IFCR", "EOTC", 1);
+      b.set("SPI_IFCR", "TXTFC", 1);
+      CHECK(r.device->mode_calls == transfer);
+    }
+    CHECK(r.device->frames.size() == 4);
+  }
+  SUBCASE("CSTART with the chip select held low")
+  {
+    rig r{"idle"};
+    bus b{*r.f};
+    r.device->declared = 0;
+    b.set("RCC", "RCC_AHB2ENR1", "GPIOAEN", 1);
+    b.set("GPIOA", "GPIO_BSRR", "BS4", 1);
+    b.set("GPIOA", "GPIO_MODER", "MODE4", 1);
+    b.set("GPIOA", "GPIO_BSRR", "BR4", 1);
+    b.controller(7, 2);
+    for(int transfer = 1; transfer <= 2; ++transfer)
+    {
+      b.send(1);
+      b.send(2);
+      b.set("SPI_CR1", "CSTART", 1);
+      b.run_until(b.now() + 2 * frame_ps + frame_ps / 2);
+      b.set("SPI_IFCR", "EOTC", 1);
+      b.set("SPI_IFCR", "TXTFC", 1);
+      CHECK(r.device->mode_calls == transfer);
+    }
+    CHECK(r.device->frames.size() == 4);
+    CHECK(r.device->selects.size() == 1);
+  }
+  SUBCASE("chip select edges within one CSTART")
+  {
+    rig r{"idle"};
+    bus b{*r.f};
+    r.device->declared = 0;
+    b.set("RCC", "RCC_AHB2ENR1", "GPIOAEN", 1);
+    b.set("GPIOA", "GPIO_BSRR", "BS4", 1);
+    b.set("GPIOA", "GPIO_MODER", "MODE4", 1);
+    b.set("GPIOA", "GPIO_BSRR", "BR4", 1);
+    b.controller(7, 0);
+    b.set("SPI_CR1", "CSTART", 1);
+    for(int selection = 1; selection <= 2; ++selection)
+    {
+      b.send(1);
+      b.send(2);
+      b.run_until(b.now() + 2 * frame_ps + frame_ps / 2);
+      CHECK(r.device->mode_calls == selection);
+      b.set("GPIOA", "GPIO_BSRR", "BS4", 1);
+      b.set("GPIOA", "GPIO_BSRR", "BR4", 1);
+    }
+    CHECK(r.device->frames.size() == 4);
+    CHECK(r.device->selects.size() == 5);
+    r.device->declared = 3;
+    b.send(3);
+    CHECK(refusal(b, b.now() + frame_ps + frame_ps / 2).contains("the device on PA4 declares"));
+  }
+}
+
+TEST_CASE("a controller declaring another SPI mode fails the run at each transfer's first frame")
+{
+  for(std::uint8_t const declared : {0, 3})
+  {
+    CAPTURE(declared);
+    target_rig r;
+    bus        b{*r.f};
+    r.sink->declared = declared;
+    spi_mode(b, 1, 1);
+    target(b, 7, 0);
+    for(int transfer = 1; transfer <= 2; ++transfer)
+    {
+      auto const start = b.now() + us;
+      r.transfer(start, {1, 2, 3, 4});
+      auto const refused = refusal(b, start + 4 * mhz_frame);
+      if(declared == 0)
+      {
+        CHECK(refused.contains("the SPI mode 0 the controller declares, not mode 3"));
+        CHECK(r.sink->frames.empty() == (transfer == 1));
+        CHECK(refusal(b, start + 4 * mhz_frame).empty());
+      }
+      else
+      {
+        CHECK(refused.empty());
+      }
+      CHECK(r.sink->frames.size() == static_cast<std::size_t>(4 * transfer));
+      CHECK(r.sink->mode_calls == transfer);
+    }
+    CHECK(drain(b) == std::vector<std::uint32_t>{1, 2, 3, 4, 1, 2, 3, 4});
+  }
+}
+
+TEST_CASE("a controller transfer the target ignores reads no mode")
+{
+  target_rig r;
+  bus        b{*r.f};
+  r.sink->declared = 0;
+  spi_mode(b, 1, 1);
+  b.set("RCC", "RCC_APB2ENR", "SPI1EN", 1);
+  auto const start = b.now() + us;
+  r.transfer(start, {1, 2});
+  CHECK(refusal(b, start + 2 * mhz_frame).empty());
+  CHECK(r.sink->mode_calls == 0);
 }

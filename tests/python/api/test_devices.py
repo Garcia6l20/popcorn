@@ -1237,3 +1237,144 @@ def test_a_hold_from_a_hook_is_refused_from_the_run(u575: popcorn.PartDescriptio
     enter(m, "eeprom_rw")
     with pytest.raises(RuntimeError, match="a handler accesses the machine directly"):
         asyncio.run(m.run(budget=BUDGET))
+
+
+class Moded(SpiTarget):
+    """Answers all ones and records each frame, declaring the SPI mode `mode`."""
+
+    def __init__(self, cs: str | None = None, *, mode: int | None = None) -> None:
+        super().__init__(cs, mode=mode)
+        self.frames: list[int] = []
+
+    def on_exchange(self, out: int, bits: int, at: VirtualTime) -> int:
+        self.frames.append(out)
+        return (1 << bits) - 1
+
+
+MODE_REFUSED = (
+    r"devices\.SPI1, expected the SPI mode 3 the device on PA4 declares, "
+    r"not mode 0 the firmware set, CPOL 0 CPHA 0"
+)
+
+
+@pytest.mark.parametrize(
+    ("mode", "error"),
+    [(4, ValueError), (-1, ValueError), (True, TypeError), ("0", TypeError), (1.0, TypeError)],
+)
+def test_an_spi_mode_outside_0_to_3_is_refused_at_construction(
+    mode: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error, match="mode"):
+        SpiTarget("PA4", mode=cast(int, mode))
+
+
+def test_a_device_declaring_the_firmware_spi_mode_runs_as_one_declaring_none(
+    u575: popcorn.PartDescription,
+) -> None:
+    logs: list[list[int]] = []
+    entries: list[int] = []
+    for mode in (None, 0):
+        device = Moded("PA4", mode=mode)
+        m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+        enter(m, "poll")
+        before = gil_entries(m)
+        logs.append(finish(m))
+        entries.append(gil_entries(m) - before)
+        assert device.frames == [0x9F, 0, 0, 0]
+    assert logs[0] == logs[1] == [0xFF] * 4
+    assert entries[0] == entries[1] == 6
+
+
+def test_a_device_declaring_another_spi_mode_fails_the_run_after_its_first_frame(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Moded("PA4", mode=3)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, "poll")
+    with pytest.raises(ConfigError, match=MODE_REFUSED) as raised:
+        asyncio.run(m.run(budget=BUDGET))
+    assert raised.value.key == "devices.SPI1"
+    assert device.frames == [0x9F]
+    assert finish(m) == [0xFF] * 4
+    assert device.frames == [0x9F, 0, 0, 0]
+
+
+def test_an_spi_mode_mismatch_inside_running_raises_at_the_next_wait(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Moded("PA4", mode=3)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, "poll")
+
+    async def scenario() -> None:
+        async with m.running():
+            await m.wait_for(popcorn.Reached("main"), for_=ms(100))
+
+    with pytest.raises(ConfigError, match=MODE_REFUSED):
+        run_bounded(scenario(), 30)
+    assert not m.busy
+    assert device.frames == [0x9F]
+
+
+def test_a_project_device_passes_its_spi_mode_through(u575: popcorn.PartDescription) -> None:
+    project = popcorn.MachineDescription(
+        part="STM32U575QGIx",
+        images=[popcorn.Elf(SPI_ELF)],
+        boot=popcorn.Boot(until="main", budget=BUDGET),
+        board={"SPI1": popcorn.Periph(devices=[popcorn.Device(Moded, cs="PA4", mode=3)])},
+    )
+    m = project.machine()
+    asyncio.run(project.boot_machine(m))
+    m.reg.pc = m.sym("poll")
+    with pytest.raises(ConfigError, match=MODE_REFUSED):
+        asyncio.run(m.run(budget=BUDGET))
+
+
+class Stateful(SpiTarget):
+    """A device keeping its own state in `_mode`, a name a subclass may well use."""
+
+    def __init__(self, cs: str | None = None) -> None:
+        super().__init__(cs)
+        self._mode = "idle"
+
+
+def test_a_subclass_attribute_named_mode_declares_no_spi_mode(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Stateful("PA4")
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, "poll")
+    assert finish(m) == [0xFF] * 4
+
+
+def test_a_machine_restored_after_a_mode_mismatch_resumes_without_a_second_error(
+    u575: popcorn.PartDescription,
+) -> None:
+    device = Moded("PA4", mode=3)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, "poll")
+    with pytest.raises(ConfigError, match=MODE_REFUSED):
+        asyncio.run(m.run(budget=BUDGET))
+    saved = popcorn.Snapshot.from_bytes(m.snapshot().to_bytes())
+    copy = Moded("PA4", mode=3)
+    other = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [copy]})
+    other.restore(saved)
+    assert finish(other) == [0xFF] * 4
+    assert copy.frames == [0, 0, 0]
+    assert finish(m) == [0xFF] * 4
+
+
+def test_a_mode_mismatch_on_a_linked_system_member_raises_from_the_system_run(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = popcorn.Machine(
+        u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [Moded("PA4", mode=3)]}, name="a"
+    )
+    b = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), name="b")
+    enter(a, "poll")
+    enter(b, "idle")
+    link = popcorn.UartLink("a.USART1", "b.USART1", latency=us(1), baud=115_200)
+    with popcorn.System({"a": a, "b": b}, [link]) as system:
+        with pytest.raises(ConfigError, match=MODE_REFUSED) as raised:
+            asyncio.run(system.run(for_=ms(5)))
+        assert raised.value.key == "devices.SPI1"
