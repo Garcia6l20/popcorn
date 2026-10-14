@@ -3,6 +3,7 @@
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/trace.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -61,7 +62,7 @@ struct pctr_names
  * Neither copyable nor movable: sink() captures it. close() reports write errors, the destructor
  * closes and loses them.
  */
-class pctr_writer
+class POPCORN_API pctr_writer
 {
 public:
   /**
@@ -108,7 +109,7 @@ public:
   [[nodiscard]] auto bytes() const noexcept -> std::uint64_t;
 
 private:
-  struct closer
+  struct POPCORN_HIDDEN closer
   {
     void operator()(std::FILE* file) const noexcept;
   };
@@ -138,6 +139,6 @@ private:
  * @return The writer.
  * @throws format_error when the file cannot be created.
  */
-auto pctr_writer_for(core::machine const& target, std::filesystem::path path)
+POPCORN_API auto pctr_writer_for(core::machine const& target, std::filesystem::path path)
     -> std::unique_ptr<pctr_writer>;
 }

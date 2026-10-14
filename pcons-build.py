@@ -1,4 +1,7 @@
-from pcons import Project, add_subdirectory, get_var
+from collections.abc import Sequence
+from pathlib import Path
+
+from pcons import Project, Target, add_subdirectory, get_var
 
 from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, gcc_ar, project_dir, toolchain
@@ -59,62 +62,90 @@ else:
     env.set_variant(VARIANT)
     env.ar.cmd = gcc_ar
 
-CORE_AREAS = ("core", "arch", "periph", "image")
+building_wheel = get_var("PCONS_BUILD_WHEEL", False)
+lto = get_var("POPCORN_ENABLE_LTO", building_wheel) and VARIANT not in ("asan", "tsan")
+LTO_LINK_FLAGS = ["-flto=2", "-Werror=lto-type-mismatch", "-Werror=odr"]
 
 core_headers = project.HeaderOnlyLibrary("popcorn_core_headers", include_dirs=["native/include"])
 core_headers.public.compile_flags.append("-fno-plt")
 core_headers.link(package("unicorn-headers"))
 core_headers.link(package("reflex-serde"))
 
-core_objects = project.ObjectLibrary(
-    "popcorn_core_objects",
-    env,
-    sources=[
-        source for area in CORE_AREAS for source in add_subdirectory(f"native/src/{area}").sources
+periph = add_subdirectory("native/src/periph")
+arch = add_subdirectory("native/src/arch")
+obs = add_subdirectory("native/src/obs")
+
+
+def area_library(
+    name: str, sources: Sequence[Path], links: Sequence[tuple[Target, Target]] = ()
+) -> tuple[Target, Target, Target]:
+    """Objects, shared libpopcorn_<name>.so in build/popcorn and its static twin.
+
+    Each library links the same flavour of every pair in @p links, shared to shared, static to
+    static, so a program reaches one flavour only. The static twin serves white-box tests and
+    the build-time tools.
+    """
+    objects = project.ObjectLibrary(f"popcorn_{name}_objects", env, sources=list(sources))
+    objects.link(core_headers)
+    objects.private.compile_flags.extend(["-fvisibility=hidden", "-fno-semantic-interposition"])
+    shared = project.SharedLibrary(f"popcorn_{name}", env, sources=[objects])
+    shared.output_prefix = "popcorn/lib"
+    shared.link(core_headers)
+    shared.private.link_flags.extend(
+        [f"-Wl,-soname,libpopcorn_{name}.so", "-Wl,-z,defs", "-Wl,-rpath,$$ORIGIN"]
+    )
+    static = project.StaticLibrary(f"popcorn_{name}_static", env, sources=[objects])
+    static.link(core_headers)
+    for linked_shared, linked_static in links:
+        shared.link(linked_shared)
+        static.link(linked_static)
+    if lto:
+        objects.private.compile_flags.append("-flto=auto")
+        shared.private.link_flags.extend(LTO_LINK_FLAGS)
+        static.public.link_flags.extend(LTO_LINK_FLAGS)
+    return objects, shared, static
+
+
+core_objects, core, core_static = area_library(
+    "core",
+    [
+        *add_subdirectory("native/src/core").sources,
+        *add_subdirectory("native/src/image").sources,
+        *arch.generic,
+        *periph.framework,
     ],
 )
-core_objects.link(core_headers)
 core_objects.private.defines.extend(
     [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit}"']
 )
-core_objects.private.compile_flags.extend(["-fvisibility=hidden", "-fno-semantic-interposition"])
-
-core = project.SharedLibrary("popcorn_core", env, sources=[core_objects])
-core.output_prefix = "popcorn/lib"
-core.link(core_headers)
 core.link_private(package("unicorn"))
 core_version_script = project_dir / "native" / "src" / "core" / "popcorn_core.map"
-core.private.link_flags.extend(
-    ["-Wl,-soname,libpopcorn_core.so", f"-Wl,--version-script={core_version_script}"]
-)
+core.private.link_flags.append(f"-Wl,--version-script={core_version_script}")
 core.depends(core_version_script)
-
-core_static = project.StaticLibrary("popcorn_core_static", env, sources=[core_objects])
-core_static.link(core_headers)
 core_static.link(package("unicorn"))
 
-building_wheel = get_var("PCONS_BUILD_WHEEL", False)
+_, armv8m, armv8m_static = area_library("armv8m", arch.armv8m, [(core, core_static)])
+_, usb, usb_static = area_library("usb", periph.usb, [(core, core_static)])
+_, stm32, stm32_static = area_library(
+    "stm32", periph.stm32, [(usb, usb_static), (core, core_static)]
+)
+_, devices, devices_static = area_library("devices", periph.devices, [(core, core_static)])
+_, popcorn_obs, popcorn_obs_static = area_library("obs", obs.sources, [(core, core_static)])
 
-if get_var("POPCORN_ENABLE_LTO", building_wheel) and VARIANT not in (
-    "asan",
-    "tsan",
-):
-    core_objects.private.compile_flags.append("-flto=auto")
-    lto_link_flags = ["-flto=2", "-Werror=lto-type-mismatch", "-Werror=odr"]
-    core.private.link_flags.extend(lto_link_flags)
-    core_static.public.link_flags.extend(lto_link_flags)
-
-obs = add_subdirectory("native/src/obs")
+shared_libraries = [core, armv8m, usb, stm32, devices, popcorn_obs]
+static_libraries = [core_static, armv8m_static, usb_static, stm32_static, devices_static]
+static_libraries.append(popcorn_obs_static)
 
 describe_schema = project.Program(
     "popcorn-describe-schema", env, sources=["native/src/tools/describe_schema.cpp"]
 )
 describe_schema.link(core_static)
 regs_gen = project.Program("popcorn-regs-gen", env, sources=["native/src/tools/regs_gen.cpp"])
+regs_gen.link(armv8m_static)
 regs_gen.link(core_static)
 
 if build_tests:
-    add_header_check("headers", project_dir / "native" / "include", [core])
+    add_header_check("headers", project_dir / "native" / "include", shared_libraries)
     smoke_support = add_subdirectory("tests/native/support").smoke_support
     for tree in ("tests/firmware", "tests/native"):
         for script in sorted((project_dir / tree).glob("*/pcons-build.py")):
@@ -126,8 +157,8 @@ if build_examples:
 
 if VARIANT not in ("asan", "tsan"):
     ext = add_extension("popcorn", "_core", add_subdirectory("native/src/bind").sources)
-    ext.link(core)
-    ext.link(obs.popcorn_obs)
+    for library in shared_libraries:
+        ext.link(library)
     if build_tests:
         smoke_ext = add_extension(
             "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]
@@ -152,17 +183,17 @@ if VARIANT not in ("asan", "tsan"):
     )
     regs.depends(regs_gen)
     regs.build_tier = "default"
-    obs_python = obs.add_python([*staged_sources, regs, ext])
+    obs_python = obs.add_python(popcorn_obs, [*staged_sources, regs, ext])
     stub = add_stub(ext, "popcorn", "_core", after=[*staged_sources, regs, obs_python[0]])
 
     if building_wheel:
         project.Alias(
             "wheel",
-            project.Install("popcorn", [ext, stub, core, *obs_python], name="install"),
+            project.Install("popcorn", [ext, stub, *shared_libraries, *obs_python], name="install"),
             project.InstallAs("popcorn/arm/_regs.py", regs, name="install-regs"),
             *add_package_install("popcorn", python_package, name="install"),
         )
 
-check_core_links(core, core_static)
+check_core_links(shared_libraries, static_libraries)
 check.register()
 schema.register()

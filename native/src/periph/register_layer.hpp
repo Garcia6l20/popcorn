@@ -231,13 +231,6 @@ void layer_reset(
     std::span<std::uint8_t const> claimed) pre(claimed.size() == layout.words());
 
 /**
- * @brief Matches a glob with `*` and `?` against a text, for the model registry.
- * @param pattern Glob.
- * @param text Text.
- */
-auto glob_match(std::string_view pattern, std::string_view text) noexcept -> bool;
-
-/**
  * @brief Factory the model registry holds for a peripheral: the latest registration whose IP
  *        equals the peripheral's and whose glob matches its IP version.
  * @param desc Peripheral.

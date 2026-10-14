@@ -1,4 +1,3 @@
-#include "../register_layer.hpp"
 #include "factories.hpp"
 
 #include <popcorn/periph/model.hpp>

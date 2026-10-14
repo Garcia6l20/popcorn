@@ -268,6 +268,15 @@ POPCORN_API void
     register_model(std::string_view ip, std::string_view ip_version_glob, model_factory factory);
 
 /**
+ * @brief Matches a glob with `*` and `?` against a text, as the model registry matches IP
+ *        versions.
+ * @param pattern Glob.
+ * @param text Text.
+ */
+[[nodiscard]] POPCORN_API auto glob_match(std::string_view pattern, std::string_view text) noexcept
+    -> bool;
+
+/**
  * @brief Glob of the registration that serves a peripheral of an IP and IP version: the latest
  *        whose IP equals @p ip and whose glob matches @p ip_version.
  * @param ip IP name.

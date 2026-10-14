@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/image/image.hpp>
 
 #include <reflex/enum.hpp>
@@ -112,8 +113,9 @@ struct coverage_set
  *         reports it, or for a size-0 symbol held by no executable segment and followed by no
  *         function symbol.
  */
-auto function_ranges(std::span<image::image const> images, std::span<std::string const> names)
-    -> std::vector<address_range>;
+POPCORN_API auto
+    function_ranges(std::span<image::image const> images, std::span<std::string const> names)
+        -> std::vector<address_range>;
 
 /** @brief What lcov() writes beyond line counts. */
 struct lcov_options
@@ -172,7 +174,7 @@ struct lcov_options
  * @param options Branch records and test name.
  * @return The tracefile text.
  */
-auto lcov(
+POPCORN_API auto lcov(
     coverage_set const&                        set,
     std::span<std::vector<image::image> const> images,
     lcov_options const& options) -> std::string pre(images.size() == set.groups.size());
@@ -187,7 +189,7 @@ auto lcov(
  * @param set Coverage.
  * @return The file bytes.
  */
-auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>;
+POPCORN_API auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>;
 
 /**
  * @brief Decodes a `.pcov` file.
@@ -198,7 +200,8 @@ auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>;
  *         version, a count past the end, an unsorted or repeated key, a zero hit, a block size
  *         outside 1 to 1024, an unknown image kind or a raw image with a path.
  */
-auto decode_pcov(std::span<std::byte const> bytes, std::string_view file = {}) -> coverage_set;
+POPCORN_API auto decode_pcov(std::span<std::byte const> bytes, std::string_view file = {})
+    -> coverage_set;
 
 /**
  * @brief Writes a `.pcov` file, through a temporary file `<path>.tmp.<pid>` in the same directory
@@ -207,7 +210,7 @@ auto decode_pcov(std::span<std::byte const> bytes, std::string_view file = {}) -
  * @param set Coverage.
  * @throws format_error when the file cannot be written.
  */
-void save_pcov(std::filesystem::path const& path, coverage_set const& set);
+POPCORN_API void save_pcov(std::filesystem::path const& path, coverage_set const& set);
 
 /**
  * @brief Reads a `.pcov` file.
@@ -215,7 +218,7 @@ void save_pcov(std::filesystem::path const& path, coverage_set const& set);
  * @return The set.
  * @throws format_error when the file cannot be read or is not a `.pcov` file.
  */
-auto load_pcov(std::filesystem::path const& path) -> coverage_set;
+POPCORN_API auto load_pcov(std::filesystem::path const& path) -> coverage_set;
 
 /**
  * @brief Sums coverage sets, canonical: groups with the same image digests add their block,
@@ -225,7 +228,7 @@ auto load_pcov(std::filesystem::path const& path) -> coverage_set;
  * @param sets Sets to sum, possibly none.
  * @return The sum, groups sorted by their digest lists.
  */
-auto merge(std::span<coverage_set const> sets) -> coverage_set;
+POPCORN_API auto merge(std::span<coverage_set const> sets) -> coverage_set;
 
 /**
  * @brief Adds a coverage set to a `.pcov` file, creating it when missing: what the machines of
@@ -236,7 +239,8 @@ auto merge(std::span<coverage_set const> sets) -> coverage_set;
  * @return The merged set now in the file.
  * @throws format_error when the existing file is not a `.pcov` file or cannot be written.
  */
-auto merge_into(std::filesystem::path const& path, coverage_set const& set) -> coverage_set;
+POPCORN_API auto merge_into(std::filesystem::path const& path, coverage_set const& set)
+    -> coverage_set;
 
 /**
  * @brief Loads the images of every group, for lcov().
@@ -246,7 +250,7 @@ auto merge_into(std::filesystem::path const& path, coverage_set const& set) -> c
  *         ELF changed since collect.
  * @throws image_error when an ELF cannot be loaded.
  */
-auto load_images(coverage_set const& set) -> std::vector<std::vector<image::image>>;
+POPCORN_API auto load_images(coverage_set const& set) -> std::vector<std::vector<image::image>>;
 
 /** @brief A drcov file and what it left out. */
 struct drcov_file
@@ -276,7 +280,7 @@ struct drcov_file
  * @return The file and the count of blocks left out.
  * @throws format_error when there are more than 65536 modules.
  */
-auto drcov(coverage_set const& set) -> drcov_file
+POPCORN_API auto drcov(coverage_set const& set) -> drcov_file
     pre(std::ranges::all_of(set.groups, [](coverage_group const& group) {
       return std::ranges::all_of(group.blocks, [](block_hit const& block) {
         return block.size > 0 and block.size <= 1024 and block.hits > 0;

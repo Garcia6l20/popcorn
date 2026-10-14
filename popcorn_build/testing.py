@@ -33,6 +33,16 @@ def alias_bare_name(target: Target) -> None:
         context.current_project.Alias(target.name, target)
 
 
+def popcorn_libraries(*areas: str, static: bool = False) -> list[Target]:
+    """The popcorn libraries of @p areas, such as "stm32" and "core", in one flavour.
+
+    @p static picks the static twins, for programs that reach internals. A program links one
+    flavour only, check_core_links refuses a mix.
+    """
+    suffix = "_static" if static else ""
+    return [context.current_project.get_target(f"popcorn_{area}{suffix}") for area in areas]
+
+
 def add_doctest(
     name: str,
     sources: Sequence[str | Path],
@@ -83,17 +93,24 @@ def add_header_check(name: str, include_root: Path, deps: Sequence[Target] = ())
     return add_doctest(name, sources, deps)
 
 
-def check_core_links(shared: Target, static: Target) -> None:
-    """Refuse a target that reaches both popcorn core flavours, give programs on @p shared an rpath.
+def check_core_links(shared: Sequence[Target], static: Sequence[Target]) -> None:
+    """Refuse a target reaching both popcorn library flavours, give programs on @p shared an rpath.
 
-    A program or library links @p shared or @p static, never both: one of each puts two cores,
-    two registries and two Unicorn copies in one process. Programs linking @p shared run from the
-    build tree, found through build/popcorn.
+    @p shared lists every popcorn shared library, @p static every static twin. A program or
+    library reaches libraries of one flavour only: one of each puts two cores, two registries
+    and two Unicorn copies in one process, also when the shared one comes in through another
+    library. Programs reaching a shared library run from the build tree, found through
+    build/popcorn.
     """
     targets = context.current_project.targets
     refused = both_flavours(targets, shared, static)
     if refused:
-        raise SystemExit(f"popcorn: {', '.join(refused)} link both {shared.name} and {static.name}")
+        raise SystemExit(
+            f"popcorn: {', '.join(refused)} link both shared and static popcorn libraries"
+        )
+    shared_ids = {id(item) for item in shared}
     for target in targets:
-        if target.target_type == "program" and any(item is shared for item in reached(target)):
+        if target.target_type == "program" and any(
+            id(item) in shared_ids for item in reached(target)
+        ):
             target.private.link_flags.append(f"-Wl,-rpath,{build_dir / 'popcorn'}")

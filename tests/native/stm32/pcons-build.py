@@ -5,12 +5,16 @@ from pcons import context
 from popcorn_build.config import VARIANT, project_dir
 from popcorn_build.firmware import firmware
 from popcorn_build.st_description import cached_st_description
-from popcorn_build.testing import add_doctest, alias_bare_name
+from popcorn_build.testing import add_doctest, alias_bare_name, popcorn_libraries
 
 here = Path(__file__).resolve().parent
 project = context.current_project
-core = project.get_target("popcorn_core")
-core_static = project.get_target("popcorn_core_static")
+areas = ("stm32", "usb", "armv8m", "core")
+shared = popcorn_libraries(*areas)
+static = popcorn_libraries(*areas, static=True)
+with_devices = popcorn_libraries("devices", *areas)
+core_static = popcorn_libraries("core", static=True)[0]
+static_with_devices = popcorn_libraries("devices", *areas, static=True)
 private_dir = project_dir / "native" / "src" / "periph" / "stm32"
 periph_data = project_dir / "tests" / "data" / "periph"
 
@@ -47,16 +51,22 @@ u575_env = {
 base = add_doctest(
     "stm32-base",
     [here / "test_base.cpp"],
-    [core_static],
+    static,
     env={"POPCORN_STM32_BASE_DESC": str(periph_data / "stm32_base.json")},
 )
 base.private.include_dirs.append(private_dir)
 
-add_doctest("stm32-at25sf", [here / "test_at25sf.cpp"], [core])
-add_doctest("stm32-i2c-devices", [here / "test_i2c_devices.cpp"], [core])
+add_doctest("stm32-at25sf", [here / "test_at25sf.cpp"], with_devices)
+add_doctest("stm32-i2c-devices", [here / "test_i2c_devices.cpp"], with_devices)
 
 u575_programs = [
-    add_doctest(name, [here / source], [core_static], env=u575_env, register=u575 is not None)
+    add_doctest(
+        name,
+        [here / source],
+        static_with_devices if name in ("stm32-spi", "stm32-i2c") else static,
+        env=u575_env,
+        register=u575 is not None,
+    )
     for name, source in (
         ("stm32-attach-u575", "test_attach_u575.cpp"),
         ("stm32-rcc", "test_rcc.cpp"),
@@ -93,14 +103,14 @@ for program in u575_programs:
 
 tsan_sources = [project_dir / "tests" / "native" / "tsan_longjmp.cpp"] if VARIANT == "tsan" else []
 link_queues = add_doctest(
-    "stm32-link-queues", [here / "test_link_queues.cpp", *tsan_sources], [core_static]
+    "stm32-link-queues", [here / "test_link_queues.cpp", *tsan_sources], static
 )
 link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")
 
 pty = add_doctest(
     "stm32-pty",
     [here / "test_pty.cpp", project_dir / "native" / "src" / "bind" / "pty.cpp", *tsan_sources],
-    [core_static],
+    static,
 )
 pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")
 
@@ -108,7 +118,8 @@ if u575 is not None:
     bench_irq = project.Program(
         "bench-irq", project.default_environment, sources=[here / "bench_irq.cpp"]
     )
-    bench_irq.link(core_static)
+    for library in static:
+        bench_irq.link(library)
     bench_irq.private.defines.extend(
         f'{variable}="{value}"' for variable, value in u575_env.items()
     )
@@ -122,7 +133,7 @@ if u575 is not None:
 uart_wire = add_doctest(
     "stm32-uart-wire",
     [here / "test_uart_wire.cpp", *tsan_sources],
-    [core_static],
+    static,
     env=u575_env,
     register=u575 is not None,
 )
@@ -134,7 +145,7 @@ for _, target in firmwares.values():
 system_uart = add_doctest(
     "stm32-system",
     [here / "test_system_uart.cpp", *tsan_sources],
-    [core_static],
+    static,
     env=u575_env,
     register=u575 is not None,
 )
@@ -147,7 +158,8 @@ if u575 is not None:
     bench_system = project.Program(
         "bench-system", project.default_environment, sources=[here / "bench_system.cpp"]
     )
-    bench_system.link(core)
+    for library in shared:
+        bench_system.link(library)
     bench_system.private.defines.extend(
         f'{variable}="{value}"' for variable, value in u575_env.items()
     )

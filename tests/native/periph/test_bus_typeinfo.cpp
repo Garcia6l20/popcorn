@@ -1,5 +1,6 @@
 #include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/spi.hpp>
+#include <popcorn/periph/stm32/uart.hpp>
 #include <popcorn/periph/uart.hpp>
 
 #include <doctest/doctest.h>
@@ -40,4 +41,9 @@ TEST_CASE("the UART interfaces' type info lives in libpopcorn_core.so")
   CHECK(library_of(typeid(periph::uart_endpoint)) == "libpopcorn_core.so");
   CHECK(library_of(typeid(periph::uart_port)) == "libpopcorn_core.so");
   CHECK(library_of(typeid(periph::capture_endpoint)) == "libpopcorn_core.so");
+}
+
+TEST_CASE("the USART's link port type info lives in libpopcorn_stm32.so")
+{
+  CHECK(library_of(typeid(periph::stm32::uart_link_port)) == "libpopcorn_stm32.so");
 }

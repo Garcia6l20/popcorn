@@ -255,7 +255,7 @@ test_host_pty = add_doctest(
         project_dir / "native" / "src" / "bind" / "pty.cpp",
         *tsan_sources,
     ],
-    [test_support_static, core_static],
+    [test_support_static, project.get_target("popcorn_usb_static"), core_static],
     env=m33_env,
 )
 test_host_pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")

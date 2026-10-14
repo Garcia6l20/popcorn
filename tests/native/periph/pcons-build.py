@@ -4,7 +4,7 @@ from pcons import context
 
 from popcorn_build.config import project_dir
 from popcorn_build.firmware import firmware
-from popcorn_build.testing import add_doctest
+from popcorn_build.testing import add_doctest, popcorn_libraries
 
 here = Path(__file__).resolve().parent
 project = context.current_project
@@ -19,9 +19,13 @@ add_doctest(
     [core],
     env={"POPCORN_TOY_DESC": toy},
 )
-add_doctest("periph-bus-typeinfo", [here / "test_bus_typeinfo.cpp"], [core])
+add_doctest(
+    "periph-bus-typeinfo",
+    [here / "test_bus_typeinfo.cpp"],
+    popcorn_libraries("stm32", "usb", "core"),
+)
 add_doctest("periph-register-layer", [here / "test_register_layer.cpp"], [core_static])
-add_doctest("periph-usb-host", [here / "test_usb_host.cpp"], [core])
+add_doctest("periph-usb-host", [here / "test_usb_host.cpp"], popcorn_libraries("usb", "core"))
 calls_elf, calls_firmware = firmware("core", "calls")
 test_registry = add_doctest(
     "periph-registry",

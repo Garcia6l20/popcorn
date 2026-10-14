@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/machine.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/obs/coverage.hpp>
 
 #include <span>
@@ -43,6 +44,6 @@ struct image_source
  * @throws config_error for an ELF source with an empty path or a raw source with a path.
  * @throws machine_running while a slice runs, outside its handlers.
  */
-auto collect(core::machine& target, std::span<image_source const> sources) -> coverage_set
-    pre(sources.size() == target.loaded_images().size());
+POPCORN_API auto collect(core::machine& target, std::span<image_source const> sources)
+    -> coverage_set pre(sources.size() == target.loaded_images().size());
 }

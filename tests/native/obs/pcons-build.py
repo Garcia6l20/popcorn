@@ -11,6 +11,7 @@ here = Path(__file__).resolve().parent
 core = project.get_target("popcorn_core")
 core_static = project.get_target("popcorn_core_static")
 obs = project.get_target("popcorn_obs")
+obs_static = project.get_target("popcorn_obs_static")
 obs_sources = str(project_dir / "native" / "src" / "obs")
 
 branches_elf, branches_firmware = firmware("core", "branches")
@@ -32,7 +33,7 @@ tb_firmware = {("obs", "tb"): firmware("obs", "tb")} | {
 test_tb_ranges = add_doctest(
     "obs-tb-ranges",
     [here / "test_tb_ranges.cpp"],
-    [obs, test_support_static, core_static],
+    [obs_static, test_support_static, core_static],
     env={
         "POPCORN_M33_DESC": str(core_data / "m33.json"),
         "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
@@ -51,7 +52,7 @@ cut_elf, cut_firmware = firmware("obs", "cut")
 test_lcov = add_doctest(
     "obs-lcov",
     [here / "test_lcov.cpp"],
-    [obs, test_support_static, core_static],
+    [obs_static, test_support_static, core_static],
     env={
         "POPCORN_M33_DESC": str(core_data / "m33.json"),
         "POPCORN_FW_LINES": str(lines_elf),

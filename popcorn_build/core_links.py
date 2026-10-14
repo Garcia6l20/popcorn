@@ -1,8 +1,8 @@
-"""Which popcorn core flavour each target reaches, free of the build's side effects."""
+"""Which popcorn library flavour each target reaches, free of the build's side effects."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import Protocol
 
 
@@ -37,13 +37,21 @@ def reached(target: Linked) -> list[Linked]:
     return found
 
 
-def both_flavours(targets: Iterable[Linked], shared: Linked, static: Linked) -> list[str]:
-    """Names of the programs and shared libraries among @p targets reaching both core flavours."""
+def both_flavours(
+    targets: Iterable[Linked], shared: Collection[Linked], static: Collection[Linked]
+) -> list[str]:
+    """Names of the programs and shared libraries among @p targets reaching both flavours.
+
+    @p shared and @p static hold every popcorn library of each flavour. Reaching one of each,
+    directly or through any library, puts two copies of an area in one process.
+    """
+    shared_ids = {id(item) for item in shared}
+    static_ids = {id(item) for item in static}
     refused: list[str] = []
     for target in targets:
-        if target.target_type not in ("program", "shared_library") or target is shared:
+        if target.target_type not in ("program", "shared_library"):
             continue
-        linked = reached(target)
-        if any(item is shared for item in linked) and any(item is static for item in linked):
+        linked = {id(item) for item in reached(target)}
+        if linked & shared_ids and linked & static_ids:
             refused.append(target.name)
     return refused
