@@ -5,12 +5,10 @@
 #include "models.hpp"
 #include "python_callable.hpp"
 
-#include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,29 +25,6 @@ namespace popcorn::bind
 {
 namespace
 {
-struct arch_module
-{
-  auto (*implements)(core_desc const& core) -> bool;
-  auto (*factory)() -> arch::arch_factory;
-};
-
-constexpr std::array arch_modules{
-    arch_module{.implements = &arch::armv8m::implements, .factory = &arch::armv8m::factory},
-};
-
-auto factory_for(part_description const& description) -> arch::arch_factory
-{
-  auto const found = std::ranges::find_if(
-      arch_modules, [&](arch_module const& module) { return module.implements(description.core); });
-  if(found == arch_modules.end())
-  {
-    throw config_error(
-        description.part, 0, "core.cpu",
-        std::format("a core an arch module implements, not {}", description.core.cpu));
-  }
-  return found->factory();
-}
-
 constexpr std::uint64_t hse_min_hz = 4'000'000;
 constexpr std::uint64_t hse_max_hz = 50'000'000;
 constexpr std::uint64_t lse_max_hz = 1'000'000;
@@ -374,7 +349,7 @@ machine_handle::machine_handle(part_description const& description, machine_conf
       hubs_.emplace(name, detail::usb_hubs{});
     }
     built = std::make_unique<core::machine>(
-        description, factory_for(description),
+        description, arch::find_arch(description),
         options_of(description, config, hubs_, *python_owned_));
   }
   engine_ = built.get();

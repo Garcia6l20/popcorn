@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -538,4 +539,30 @@ private:
  * @brief Creates the arch module for a core, chosen by the core name and features.
  */
 using arch_factory = std::function<std::unique_ptr<arch>(core_desc const& core)>;
+
+/** @brief One arch module: the cores it implements and how to build its arch for one. */
+struct arch_module
+{
+  /** @brief Module name for errors and listings, such as "armv8m". */
+  std::string name;
+  /** @brief Whether the module implements a core. Runs under the registry lock, so it must not
+   *         call the arch registry. */
+  std::function<bool(core_desc const& core)> implements;
+  /** @brief The factory, called once per machine. */
+  arch_factory factory;
+};
+
+/**
+ * @brief Registers an arch module. A module of the same name is replaced, and the new one
+ *        counts as the latest registered.
+ * @param module The module, `implements` and `factory` set.
+ */
+POPCORN_API void register_arch(arch_module module) pre(module.implements and module.factory);
+
+/**
+ * @brief The factory of the latest registered module implementing the core of @p description.
+ * @param description Part whose `core` selects the module.
+ * @throws config_error naming `core.cpu` when no module implements it.
+ */
+[[nodiscard]] POPCORN_API auto find_arch(part_description const& description) -> arch_factory;
 }

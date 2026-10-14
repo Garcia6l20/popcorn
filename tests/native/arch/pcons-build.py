@@ -16,6 +16,7 @@ core_data = project_dir / "tests" / "data" / "core"
 
 add_doctest("arch-interface", [here / "test_interface.cpp"], [core])
 add_doctest("arch-thumb", [here / "test_thumb.cpp"], [core])
+add_doctest("arch-registry", [here / "test_registry.cpp"], [core])
 
 arch_firmware = {
     name: firmware("arch", name)

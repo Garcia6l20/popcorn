@@ -132,6 +132,7 @@ def test_a_core_no_arch_module_implements_is_a_config_error(m33_json: Path) -> N
     with pytest.raises(popcorn.ConfigError) as caught:
         popcorn.Machine(popcorn.parse_description(json.dumps(raw), "cm0.json"))
     assert caught.value.key == "core.cpu"
+    assert caught.value.expected == "a core an arch module implements, not CM0"
 
 
 @pytest.mark.parametrize(

@@ -87,4 +87,10 @@ namespace popcorn::arch::armv8m
  *         not implement, or `core.revision` for a revision not spelled `rNpM`.
  */
 [[nodiscard]] POPCORN_API auto factory() -> arch_factory;
+
+/**
+ * @brief Registers this module with arch::register_arch under the name "armv8m", with
+ *        implements() and factory(). Only the first call registers.
+ */
+POPCORN_API void register_builtin();
 }
