@@ -1,9 +1,8 @@
 #pragma once
 
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
-
-#include <reflex/enum.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -46,14 +45,7 @@ struct insn
 POPCORN_API auto read(address at, std::span<std::byte const> bytes) noexcept -> std::optional<insn>;
 
 /** @brief How an instruction ends the translated block holding it. */
-enum class[[= reflex::derive{reflex::Format}]] ending
-{
-  none,
-  direct,
-  indirect,
-  exception,
-  system,
-};
+using ending = popcorn::arch::ending;
 
 /** @brief Control flow of one instruction, as far as translated block boundaries go. */
 struct flow

@@ -1,6 +1,7 @@
 #include "cortex_m.hpp"
 #include "tb.hpp"
 
+#include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/arch/armv8m/thumb.hpp>
 #include <popcorn/core/coverage.hpp>
 #include <popcorn/core/errors.hpp>
@@ -33,6 +34,13 @@ namespace
 {
 namespace core = popcorn::core;
 namespace obs  = popcorn::obs;
+
+[[maybe_unused]] auto const builtin_arch = (popcorn::arch::armv8m::register_builtin(), true);
+
+auto thumb_analysis() -> popcorn::arch::code_analysis const&
+{
+  return popcorn::arch::armv8m::analysis();
+}
 using popcorn::address;
 using popcorn::address_range;
 using popcorn::stop_reason;
@@ -73,7 +81,7 @@ auto memory_of(auto const& f) -> obs::memory_reader
 
 auto code_of(auto const& f) -> obs::code_bytes
 {
-  return obs::code_bytes{f.target->loaded_images(), memory_of(f)};
+  return obs::code_bytes{f.target->loaded_images(), memory_of(f), &thumb_analysis()};
 }
 
 auto insns_in(address start, std::uint32_t size, obs::code_bytes& code) -> std::uint32_t
@@ -487,7 +495,7 @@ TEST_CASE("image references carry kind, path, digest and the executable extent")
 TEST_CASE("hit split, loop: a backward branch to the block's own middle keeps one size")
 {
   std::array const images{synthetic(thumb_bytes({0x3001, 0x3001, 0x3001, 0x3001, 0x3001, 0xd1fb}))};
-  obs::code_bytes  code{images, {}};
+  obs::code_bytes  code{images, {}, &thumb_analysis()};
   core::coverage_data const data{
       .blocks = {counters_at(0x1000, 10)},
       .edges  = {{.from = 0x1000, .to = 0x1004, .hits = 9}},
@@ -504,7 +512,7 @@ TEST_CASE("hit split, loop: a backward branch to the block's own middle keeps on
 TEST_CASE("hit split, split: an edge into the block's middle splits its hits")
 {
   std::array const images{synthetic(thumb_bytes({0x3001, 0x3001, 0x3001, 0x3001, 0x3001, 0xe019}))};
-  obs::code_bytes  code{images, {}};
+  obs::code_bytes  code{images, {}, &thumb_analysis()};
   core::coverage_data const data{
       .blocks = {counters_at(0x1000,                        10)                                      },
       .edges =
@@ -523,7 +531,7 @@ TEST_CASE("hit split, split: an edge into the block's middle splits its hits")
 TEST_CASE("cuts: a cut at the start removes its hits, one inside sizes a block to what ran")
 {
   std::array const images{synthetic(thumb_bytes({0x3001, 0x3001, 0x3001, 0x3001, 0x3001, 0xe019}))};
-  obs::code_bytes  code{images, {}};
+  obs::code_bytes  code{images, {}, &thumb_analysis()};
   core::coverage_data const data{
       .blocks = {counters_at(0x1000, 10)},
       .edges  = {{.from = 0x1000, .to = 0x1008, .hits = 2}},
@@ -546,7 +554,7 @@ TEST_CASE("cuts: a cut at the start removes its hits, one inside sizes a block t
 TEST_CASE("cuts: a block every entry of which was cut at its start is left out, not split")
 {
   std::array const          images{synthetic(thumb_bytes({0x3001, 0x4770}))};
-  obs::code_bytes           code{images, {}};
+  obs::code_bytes           code{images, {}, &thumb_analysis()};
   core::coverage_data const data{
       .blocks = {counters_at(0x1000, 2)},
       .cuts   = {{.start = 0x1000, .at = 0x1000, .hits = 2}},
@@ -560,7 +568,7 @@ TEST_CASE("cuts: a block every entry of which was cut at its start is left out, 
 TEST_CASE("cuts: a cut past the decoded block or at another start changes nothing")
 {
   std::array const          images{synthetic(thumb_bytes({0x3001, 0x4770, 0x3001, 0x4770}))};
-  obs::code_bytes           code{images, {}};
+  obs::code_bytes           code{images, {}, &thumb_analysis()};
   core::coverage_data const data{
       .blocks = {counters_at(0x1000, 4)},
       .cuts =
@@ -580,7 +588,7 @@ TEST_CASE("cuts: a cut past the decoded block or at another start changes nothin
 TEST_CASE("overlapping counters of one start keep the largest, not the sum")
 {
   std::array const          images{synthetic(thumb_bytes({0x3001, 0x4770}))};
-  obs::code_bytes           code{images, {}};
+  obs::code_bytes           code{images, {}, &thumb_analysis()};
   core::coverage_data const data{
       .blocks = {counters_at(0x1000, 10), counters_at(0x1000, 4)}
   };
@@ -608,16 +616,35 @@ TEST_CASE("decode_tb stops before a 32-bit instruction in a page's last halfword
   put(0x402, 0x4770);
   code_image.segments[0].bytes = bytes;
   std::array const images{code_image};
-  obs::code_bytes  code{images, {}};
+  obs::code_bytes  code{images, {}, &thumb_analysis()};
   CHECK(obs::decode_tb(0x3fa, code).size == 4);
   CHECK(obs::decode_tb(0x3fe, code).size == 4);
   CHECK(obs::decode_tb(0x3fe, code).insns == 1);
 }
 
+TEST_CASE("decode_tb decodes nothing at an odd start whose page rest is 3 bytes of a 32-bit insn")
+{
+  auto bytes                         = std::vector<std::byte>(0x408, std::byte{0});
+  auto code_image                    = synthetic({});
+  code_image.segments[0].start       = 0x0;
+  code_image.segments[0].memory_size = 0x800;
+  bytes[0x3fd]                       = std::byte{0x00};
+  bytes[0x3fe]                       = std::byte{0xf1};
+  bytes[0x3ff]                       = std::byte{0x01};
+  bytes[0x400]                       = std::byte{0x00};
+  code_image.segments[0].bytes       = bytes;
+  std::array const images{code_image};
+  obs::code_bytes  code{images, {}, &thumb_analysis()};
+  auto const       block = obs::decode_tb(0x3fd, code);
+  CHECK(block.size == 0);
+  CHECK(block.insns == 0);
+}
+
 TEST_CASE("hits of a start that cannot be read are counted as dropped")
 {
   std::array const images{synthetic(thumb_bytes({0x3001, 0x4770}))};
-  obs::code_bytes  code{images, [](address, std::span<std::byte>) -> std::size_t { return 0; }};
+  obs::code_bytes  code{
+      images, [](address, std::span<std::byte>) -> std::size_t { return 0; }, &thumb_analysis()};
   core::coverage_data const data{.blocks = {counters_at(0x2000, 7, 0x2000)}};
   auto const                sized = obs::size_blocks(data, code);
   CHECK(sized.blocks.empty());
@@ -628,7 +655,7 @@ TEST_CASE("hits of a start that cannot be read are counted as dropped")
 TEST_CASE("a saturated counter gives way to the larger sum of early edges")
 {
   std::array const images{synthetic(thumb_bytes({0x3001, 0x3001, 0x3001, 0x3001, 0x3001, 0xe019}))};
-  obs::code_bytes  code{images, {}};
+  obs::code_bytes  code{images, {}, &thumb_analysis()};
   auto const       many = std::uint64_t{0xffff'ffff} + 5;
   core::coverage_data const data{
       .blocks = {counters_at(0x1000, 0xffff'ffff)},
@@ -660,7 +687,7 @@ TEST_CASE(
     }
     return out.size();
   };
-  obs::code_bytes code{{}, reader};
+  obs::code_bytes code{{}, reader, &thumb_analysis()};
   CHECK(obs::decode_tb(0x13f0, code).size == 14);
   REQUIRE(asked.size() == 1);
   CHECK(asked[0] == std::pair<address, std::size_t>{0x13f0, 0x10});
@@ -684,7 +711,7 @@ TEST_CASE("reads at the top of the address space stop at its end")
     std::ranges::fill(out, std::byte{0xf1});
     return out.size();
   };
-  obs::code_bytes code{{}, reader};
+  obs::code_bytes code{{}, reader, &thumb_analysis()};
   CHECK(obs::decode_tb(0xffff'fffe, code).size == 0);
   CHECK(
       asked

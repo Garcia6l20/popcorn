@@ -30,9 +30,11 @@ struct image_source
  * Known limits: while stepping every stepped instruction counts as a block start and decodes to
  * a full block, so stepped code over-counts. A block that ended early without a recorded edge,
  * at a stop or an exception entry, counts at full size. The hits of a block start whose first
- * instruction cannot be read are counted in coverage_group::dropped. Exceptions that depend on
- * CPU state end blocks the decoder cannot predict. Once a u32 counter saturates, a start's hits
- * over its sizes are the sum of its edges into the block's middle when that is larger.
+ * instruction cannot be read are counted in coverage_group::dropped, and so are all hits when no
+ * registered arch module implements the machine's core with a code analysis,
+ * arch::find_code_analysis. Exceptions that depend on CPU state end blocks the decoder cannot
+ * predict. Once a u32 counter saturates, a start's hits over its sizes are the sum of its edges
+ * into the block's middle when that is larger.
  *
  * @param target Machine, stopped or inside one of its handlers.
  * @param sources One source per loaded image, in load order. An ELF source's path is stored

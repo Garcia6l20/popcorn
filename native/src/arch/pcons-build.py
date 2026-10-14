@@ -14,6 +14,7 @@ sources = [
             "calls.cpp",
             "sleep.cpp",
             "thumb.cpp",
+            "analysis.cpp",
             "factory.cpp",
         )
     ),

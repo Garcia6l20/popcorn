@@ -167,7 +167,8 @@ struct lcov_options
  *
  * @param set Coverage, as collect() or a `.pcov` load gives it.
  * @param images Per group, its images in the order of coverage_group::images. A raw image
- *        contributes nothing.
+ *        contributes nothing. An ELF image whose `elf_machine` has no code analysis,
+ *        arch::find_code_analysis, contributes no branches.
  * @param options Branch records and test name.
  * @return The tracefile text.
  */

@@ -1,3 +1,4 @@
+#include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/image/image.hpp>
 #include <popcorn/obs/collect.hpp>
@@ -26,6 +27,8 @@ namespace
 {
 namespace image = popcorn::image;
 namespace obs   = popcorn::obs;
+
+[[maybe_unused]] auto const builtin_arch = (popcorn::arch::armv8m::register_builtin(), true);
 using popcorn::address;
 using popcorn::address_range;
 using popcorn::stop_reason;

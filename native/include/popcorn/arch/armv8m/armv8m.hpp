@@ -89,8 +89,16 @@ namespace popcorn::arch::armv8m
 [[nodiscard]] POPCORN_API auto factory() -> arch_factory;
 
 /**
+ * @brief The Thumb code analysis for coverage reports: the engine's 1 KiB page and 512
+ *        instruction block limits, IT predication, UDF as a trap.
+ * @return A static object, valid for the whole process.
+ */
+[[nodiscard]] POPCORN_API auto analysis() noexcept -> code_analysis const&;
+
+/**
  * @brief Registers this module with arch::register_arch under the name "armv8m", with
- *        implements() and factory(). Only the first call registers.
+ *        implements(), factory() and analysis() for ELF machine EM_ARM. Only the first call
+ *        registers.
  */
 POPCORN_API void register_builtin();
 }

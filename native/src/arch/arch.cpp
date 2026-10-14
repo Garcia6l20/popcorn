@@ -2,6 +2,7 @@
 #include <popcorn/core/errors.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <format>
 #include <iterator>
 #include <mutex>
@@ -13,6 +14,8 @@
 namespace popcorn::arch
 {
 arch::~arch() = default;
+
+code_analysis::~code_analysis() = default;
 
 namespace
 {
@@ -62,5 +65,37 @@ auto find_arch(part_description const& description) -> arch_factory
   throw config_error(
       description.part, 0, "core.cpu",
       std::format("a core an arch module implements, not {}", description.core.cpu));
+}
+
+auto find_code_analysis(core_desc const& core) -> code_analysis const*
+{
+  auto&                 entries = table();
+  std::lock_guard const lock{entries.guard};
+  for(auto const& module : entries.modules | std::views::reverse)
+  {
+    if(module.implements(core))
+    {
+      return module.analysis;
+    }
+  }
+  return nullptr;
+}
+
+auto find_code_analysis(std::uint16_t elf_machine) -> code_analysis const*
+{
+  if(elf_machine == 0)
+  {
+    return nullptr;
+  }
+  auto&                 entries = table();
+  std::lock_guard const lock{entries.guard};
+  for(auto const& module : entries.modules | std::views::reverse)
+  {
+    if(module.elf_machine == elf_machine and module.analysis != nullptr)
+    {
+      return module.analysis;
+    }
+  }
+  return nullptr;
 }
 }

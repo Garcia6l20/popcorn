@@ -295,10 +295,11 @@ auto load_elf(std::filesystem::path const& file) -> image
   detail::elf_file const elf{file};
 
   image img;
-  img.segments = load_segments(elf);
-  img.symbols  = load_symbols(elf);
-  img.entry    = elf.header().e_entry == 0 ? std::optional<address>{} : elf.header().e_entry;
-  img.abi      = load_abi(elf);
+  img.segments    = load_segments(elf);
+  img.symbols     = load_symbols(elf);
+  img.entry       = elf.header().e_entry == 0 ? std::optional<address>{} : elf.header().e_entry;
+  img.abi         = load_abi(elf);
+  img.elf_machine = elf.header().e_machine;
   load_lines(elf, img);
   img.digest = detail::digest_of(img.segments);
   return img;

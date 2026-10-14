@@ -128,6 +128,9 @@ struct POPCORN_API image
   arch::float_abi abi{arch::float_abi::soft};
   /** @brief SHA-256 of the loadable content, lower-case hex, what a saved snapshot checks. */
   std::string digest{};
+  /** @brief ELF `e_machine` of the file the image was loaded from, 0 for an image that is not
+   * an ELF. Selects the code analysis of coverage reports, see arch::find_code_analysis. */
+  std::uint16_t elf_machine{};
 
   /**
    * @brief Looks a symbol up by exact name.

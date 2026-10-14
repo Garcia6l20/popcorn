@@ -9,9 +9,9 @@ namespace popcorn::obs
 {
 namespace
 {
-constexpr auto page_start(address at) noexcept -> address
+constexpr auto page_start(address at, std::uint32_t page) noexcept -> address
 {
-  return at & ~(tb_page - 1);
+  return at & ~(page - 1);
 }
 
 auto segment_bytes(image::segment const& held, address start, std::uint64_t end)
@@ -29,16 +29,26 @@ auto segment_bytes(image::segment const& held, address start, std::uint64_t end)
 
 constexpr std::uint64_t address_space_end = std::uint64_t{1} << 32;
 
-auto ends_before(address page, address at, std::uint8_t size) noexcept -> bool
+auto ends_at_size_unit(
+    arch::code_analysis const& analysis,
+    std::span<std::byte const> rest) noexcept -> bool
 {
-  auto const offset = at - page;
-  return offset >= tb_page or (offset >= tb_page - 3 and size == 4);
-}
+  return not rest.empty() and not analysis.size(rest.first(rest.size() - 1));
 }
 
-code_bytes::code_bytes(std::span<image::image const> images, memory_reader fallback)
-    : images_{images}, fallback_{std::move(fallback)}
+}
+
+code_bytes::code_bytes(
+    std::span<image::image const> images,
+    memory_reader                 fallback,
+    arch::code_analysis const*    analysis)
+    : images_{images}, fallback_{std::move(fallback)}, analysis_{analysis}
 {}
+
+auto code_bytes::analysis() const noexcept -> arch::code_analysis const*
+{
+  return analysis_;
+}
 
 auto code_bytes::read(address start, std::uint32_t count) -> std::span<std::byte const>
 {
@@ -60,39 +70,44 @@ auto code_bytes::read(address start, std::uint32_t count) -> std::span<std::byte
 
 auto code_bytes::page(address start) -> std::span<std::byte const>
 {
-  return read(start, page_start(start) + tb_page - start);
+  auto const page = analysis_->limits().page;
+  return read(start, page_start(start, page) + page - start);
 }
 
 auto decode_tb(address start, code_bytes& code) -> tb_extent
 {
-  auto          bytes = code.page(start);
-  auto const    page  = page_start(start);
-  tb_extent     block{.start = start};
+  tb_extent         block{.start = start};
+  auto const* const analysis = code.analysis();
+  if(analysis == nullptr)
+  {
+    return block;
+  }
+  auto const    limits = analysis->limits();
+  auto          bytes  = code.page(start);
+  auto const    page   = page_start(start, limits.page);
   std::uint32_t offset = 0;
-  while(block.insns < tb_max_insns)
+  while(block.insns < limits.max_insns)
   {
     auto const at      = start + offset;
     auto const rest    = bytes.subspan(std::min<std::size_t>(offset, bytes.size()));
-    auto       decoded = thumb::read(at, rest);
-    if(not decoded
-       and block.insns == 0
-       and rest.size() == 2
-       and thumb::size(
-               static_cast<std::uint16_t>(
-                   std::to_integer<unsigned>(rest[0]) | std::to_integer<unsigned>(rest[1]) << 8))
-               == 4)
+    auto       decoded = analysis->decode(at, rest);
+    if(not decoded and block.insns == 0)
     {
-      decoded = thumb::read(at, code.read(at, 4));
-      bytes   = {};
+      if(auto const needed = analysis->size(rest);
+         needed and *needed > rest.size() and ends_at_size_unit(*analysis, rest))
+      {
+        decoded = analysis->decode(at, code.read(at, *needed));
+        bytes   = {};
+      }
     }
-    if(not decoded or (block.insns > 0 and ends_before(page, at, decoded->size)))
+    if(not decoded or (block.insns > 0 and analysis->crosses_page(at - page, decoded->size)))
     {
       break;
     }
-    block.last = thumb::classify(*decoded);
+    block.last = *decoded;
     offset += decoded->size;
     ++block.insns;
-    if(block.last.kind != thumb::ending::none)
+    if(block.last.kind != arch::ending::none)
     {
       break;
     }
