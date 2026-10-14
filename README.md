@@ -17,6 +17,19 @@ rcc = next(p for p in m.description.peripherals if p.name == "RCC")
 assert rcc.register("RCC_CR").name == "CR"
 ```
 
+## Address 0
+
+Nothing is mapped at address 0. A firmware load or store through a NULL pointer stops the run with a
+FAULT stop, `stop.fault.kind` `FaultKind.BUS` and `stop.fault.address` 0, PRECISERR and BFARVALID
+set in `stop.fault.cfsr` and BFAR 0. An instruction fetch at 0 stops it the same way with IBUSERR.
+`m.mem` at 0 raises `EmulationError`. On the STM32U5 this matches the hardware. 0x0000_0000 to
+0x07FF_FFFF is the code-region window the ICACHE remaps onto external memories, RM0456 2.3 Table 3
+and 8.4.7. Boot does not alias flash at 0: BOOT0 and the NSBOOTADDx and SECBOOTADD0 option bytes
+give the address the core takes its initial SP and PC from, RM0456 chapter 4, and flash stays at
+0x0800_0000. popcorn does not model the ICACHE remap: the ICACHE registers `CRR0` to `CRR3` store
+what the firmware writes and map nothing, so address 0 stays unmapped even with a remap region
+enabled. Parts that alias boot memory at 0, such as the STM32F4 and STM32L4, are not modelled.
+
 ## Install
 
 popcorn is installed from source, the native core is compiled on your machine.
