@@ -473,7 +473,7 @@ TEST_CASE("probe counts recorded on the host thread are read from another thread
   auto const probe  = member->add_probe(sym("alu", "alu_body") + 2);
   hosted     h{std::move(member)};
   h.start();
-  CHECK(settles([&] { return probe.hits->count() > 1'000; }));
+  CHECK(settles([&] { return probe.hits->first().has_value() && probe.hits->count() > 1'000; }));
   auto const first = probe.hits->first();
   REQUIRE(first.has_value());
   CHECK(first->ps > 0);
