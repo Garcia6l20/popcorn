@@ -395,3 +395,74 @@ def test_a_hit_during_a_run_awaited_elsewhere_is_refused_as_busy(machines: Machi
         await running
 
     run_bounded(scenario(), HANG)
+
+
+def test_a_reached_wait_in_a_free_run_sees_a_jump_made_once_mid_slice(machines: Machines) -> None:
+    m = machines("jump")
+    flag = m.ref.var("jump_flag")
+
+    async def scenario() -> tuple[popcorn.Stop, popcorn.Stop]:
+        async with m.running():
+            waiting = asyncio.create_task(m.wait_for(popcorn.Reached("app_entry"), for_=ms(2000)))
+            await asyncio.sleep(0)
+            ticked = await m.wait_for(popcorn.Reached("tick"), for_=ms(1))
+            await m.write((flag, 1))
+            return await waiting, ticked
+
+    reached_entry, ticked = run_bounded(scenario(), HANG)
+    assert reached_entry.reason is popcorn.StopReason.USER
+    assert ticked.reason is popcorn.StopReason.TIME
+    assert m.mem.u32[m.sym("alu_rounds")] == 1
+
+
+def test_a_reached_wait_in_a_free_run_counts_the_current_pc_at_its_next_execution(
+    machines: Machines,
+) -> None:
+    m = machines("jump")
+    assert asyncio.run(m.run(for_=us(10))).reason is popcorn.StopReason.TIME
+    spin = m.pc
+    flag = m.ref.var("jump_flag")
+
+    async def scenario() -> tuple[popcorn.Stop, popcorn.Stop, popcorn.Stop]:
+        async with m.running():
+            here = await m.wait_for(popcorn.Reached(spin), for_=ms(1))
+            await m.write((flag, 1))
+            entered = await m.wait_for(popcorn.Reached("tick"), for_=ms(1))
+            again = await m.wait_for(popcorn.Reached("app_entry"), for_=ms(1))
+            return here, entered, again
+
+    here, entered, again = run_bounded(scenario(), HANG)
+    assert here.reason is entered.reason is popcorn.StopReason.USER
+    assert again.reason is popcorn.StopReason.TIME
+    assert m.mem.u32[m.sym("alu_rounds")] == 1
+    assert m.remove_hooks() == 0
+
+
+def test_a_probe_is_added_and_removed_after_a_fault_ended_the_free_run(
+    machines: Machines,
+) -> None:
+    m = machines("fault")
+    ended: list[popcorn.Stop | BaseException] = []
+    active: list[bool] = []
+
+    async def scenario() -> None:
+        async with m.running():
+            try:
+                ended.append(await m.wait_for(popcorn.Reached("idle_main"), for_=ms(1000)))
+            except popcorn.FaultError as error:
+                ended.append(error)
+            with m.probe("idle_main") as inside:
+                active.append(inside.active)
+                with pytest.raises(popcorn.FaultError):
+                    await inside.hit(within=ms(1))
+            active.append(inside.active)
+
+    with pytest.raises(popcorn.FaultError):
+        run_bounded(scenario(), HANG)
+    assert len(ended) == 1
+    end = ended[0]
+    assert isinstance(end, popcorn.FaultError) or (
+        isinstance(end, popcorn.Stop) and end.reason is popcorn.StopReason.FAULT
+    )
+    assert active == [True, False]
+    assert m.remove_hooks() == 0

@@ -412,8 +412,11 @@ class Event(Protocol):
 class Reached:
     """The core reaching an address or symbol, before executing it.
 
-    `wait_for` stops exactly there, outside `running()`. Inside `running()` it is checked at slice
-    boundaries like any other event.
+    `wait_for` stops exactly there, outside `running()`. Inside `running()` and `start()` it is
+    exact too: a probe at the target, `Machine.probe`, sees the arrival at the instruction, also
+    one executed once in the middle of a slice, and the stop is the end of that slice, a USER
+    stop. There a target equal to the current pc counts at its next execution, where a parked
+    wait continues as `run(until=)` does.
     """
 
     target: int | str | Symbol
@@ -2582,15 +2585,19 @@ class Machine:
         the current pc continues as `run(until=)` does. Other events stop at the first event
         boundary or slice end after they became ready. Inside a free run, `start()` or
         `running()`, this waits on the free run instead of driving it, checking the event on the
-        machine's thread at slice ends only. The wait is registered at a slice boundary after
-        the post and first checked at the end of the slice after that one, never at the boundary
-        that registered it: the stop is the end of the first slice where the event held, up to
-        one slice after it became ready, two when it was ready at the post. With `for_`, posting
-        ends the running slice at its next block boundary, which registers the wait and starts
-        `for_`, and the event is still checked at the slice end where `for_` elapses: holding
-        there, it returns USER. It returns the stop that ended the free run, or raises the
-        exception a handler of it raised. Cancelling it then drops the wait only, the machine
-        runs on.
+        machine's thread at slice ends only. A `Reached` event there is exact all the same: a
+        probe installed at the next block boundary, the call waiting for it, sees every
+        execution of the target, and the wait ends with a USER stop at the end of the slice that
+        executed it. Its target counts from that boundary, at its next execution, also when it
+        is the current pc: an execution while the call waits for the boundary is not seen. The
+        wait is registered at a slice boundary after the post and first checked at the end of
+        the slice after that one, never at the boundary that registered it: the stop is the end
+        of the first slice where the event held, up to one slice after it became ready, two
+        when it was ready at the post. With `for_`, posting ends the running slice at its next
+        block boundary, which registers the wait and starts `for_`, and the event is still
+        checked at the slice end where `for_` elapses: holding there, it returns USER. It
+        returns the stop that ended the free run, or raises the exception a handler of it
+        raised. Cancelling it then drops the wait only, the machine runs on.
 
         A `Condition`, `m.ref.var("x").ge(3)`, or a `Conditions` from `any_of` or `all_of`, is
         evaluated natively inside a free run, no Python, after every event and at slice ends, so
@@ -2611,8 +2618,8 @@ class Machine:
         if isinstance(event, Condition | Conditions):
             return await self._wait_condition(event, for_, deadline)
         if self._handle.session_open():
-            if isinstance(event, Reached):
-                event = _Native(self._handle.predicate_pc_at(self.address_of(event.target)))
+            if isinstance(event, Reached) and not self._on_host():
+                return await self._reached_free(self.address_of(event.target), for_, deadline)
             return await self._waited(event, for_, deadline)
         if isinstance(event, Reached):
             return await self._bounded_run(until=event.target, for_=for_, deadline=deadline)
@@ -2621,6 +2628,20 @@ class Machine:
         if isinstance(event, _Ready) and event.gate is not None:
             return await self._run_gated(event.gate, event.ready, for_, deadline)
         return await self._bounded_run(for_=for_, deadline=deadline, stop_when=event.ready)
+
+    def _on_host(self) -> bool:
+        return _core.on_host_thread() or _core.host_locks_held() > 0
+
+    async def _reached_free(
+        self, address: int, for_: VirtualDuration | None, deadline: VirtualTime | None
+    ) -> Stop:
+        hook = self._handle.add_probe(address)
+        try:
+            return await self._waited(
+                _Native(self._handle.predicate_probe_hit(hook)), for_, deadline
+            )
+        finally:
+            self._handle.remove_probe(hook)
 
     async def _waited(
         self,
