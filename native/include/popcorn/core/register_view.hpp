@@ -3,6 +3,7 @@
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -30,7 +31,7 @@ constexpr auto fits_register(std::uint64_t value, std::uint8_t bits) noexcept ->
  * while a slice runs, except from a handler of that slice: handlers run while the core is paused
  * at an instruction boundary.
  */
-class register_view
+class POPCORN_API register_view
 {
 public:
   /**

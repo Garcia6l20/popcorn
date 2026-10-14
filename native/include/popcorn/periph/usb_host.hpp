@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/usb.hpp>
 
 #include <chrono>
@@ -157,7 +158,7 @@ struct association_info
 };
 
 /** @brief A configuration descriptor and everything wTotalLength covers, parsed. */
-struct configuration_info
+struct POPCORN_API configuration_info
 {
   /** @brief bConfigurationValue. */
   std::uint8_t value{};
@@ -199,7 +200,7 @@ struct configuration_info
  * @param bytes The descriptor, 18 bytes or more.
  * @return The descriptor, or nothing when @p bytes is shorter or not a device descriptor.
  */
-[[nodiscard]] auto parse_device_descriptor(std::span<std::uint8_t const> bytes)
+[[nodiscard]] POPCORN_API auto parse_device_descriptor(std::span<std::uint8_t const> bytes)
     -> std::optional<device_descriptor>;
 
 /**
@@ -209,7 +210,7 @@ struct configuration_info
  * @param bytes The wTotalLength bytes.
  * @return The configuration, or why it is malformed.
  */
-[[nodiscard]] auto parse_configuration(std::span<std::uint8_t const> bytes)
+[[nodiscard]] POPCORN_API auto parse_configuration(std::span<std::uint8_t const> bytes)
     -> std::expected<configuration_info, std::string>;
 
 /** @brief Pipe handle, unique for the life of a host, never reused. */
@@ -297,7 +298,7 @@ class host_context;
  *        that affects the bus, an OUT byte queue for instance, goes through save() and load().
  *        Results for Python, IN bytes for instance, stay outside them.
  */
-class class_driver
+class POPCORN_API class_driver
 {
 public:
   /** @brief Creates the driver. */
@@ -324,7 +325,7 @@ public:
    * instance, lives outside the driver, in an object that outlives the host, such as one its
    * factory captures.
    */
-  virtual ~class_driver() = default;
+  virtual ~class_driver();
 
   /**
    * @brief The device is configured: open pipes, send class requests.
@@ -438,7 +439,7 @@ struct enumeration_step
  *        SET_ADDRESS recovery as `hub_port_init` waits, device descriptor, configuration head
  *        then whole, languages, strings, SET_CONFIGURATION.
  */
-[[nodiscard]] auto default_enumeration() -> std::vector<enumeration_step>;
+[[nodiscard]] POPCORN_API auto default_enumeration() -> std::vector<enumeration_step>;
 
 /** @brief Behaviour of a host, fixed for its life and not saved. */
 struct host_options
@@ -478,7 +479,7 @@ struct bound_driver
  *        bound, also outside host callbacks, for instance from a binding with the machine
  *        stopped: what it submits then goes on the bus from the next frame.
  */
-class host_context
+class POPCORN_API host_context
 {
 public:
   /**
@@ -564,7 +565,7 @@ private:
  *        warning sink may take the GIL, which no thread takes under a link lock. A nested one
  *        hands its warnings to the one it nests in.
  */
-class deferred_warnings
+class POPCORN_API deferred_warnings
 {
 public:
   /** @brief Starts holding the warnings of the current thread. */
@@ -619,7 +620,7 @@ private:
  * The host acts only in host_side callbacks and through device_port::wake_at(). Its state,
  * drivers' included, is BSON in save(). The user control results and the request log are not.
  */
-class host final : public host_side
+class POPCORN_API host final : public host_side
 {
 public:
   /**
@@ -722,7 +723,7 @@ public:
 
 private:
   friend class host_context;
-  struct impl;
-  std::indirect<impl> impl_;
+  struct POPCORN_HIDDEN impl;
+  std::indirect<impl>   impl_;
 };
 }

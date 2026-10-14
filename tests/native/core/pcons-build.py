@@ -9,8 +9,10 @@ from popcorn_build.testing import add_doctest, alias_bare_name
 project = context.current_project
 here = Path(__file__).resolve().parent
 core = project.get_target("popcorn_core")
+core_static = project.get_target("popcorn_core_static")
 smoke_support = project.get_target("popcorn-test-smoke")
 test_support = project.get_target("popcorn-test-support")
+test_support_static = project.get_target("popcorn-test-support-static")
 toy = str(project_dir / "tests" / "data" / "desc" / "toy.json")
 core_data = project_dir / "tests" / "data" / "core"
 
@@ -91,14 +93,14 @@ if basic_firmware is not None:
 test_run_loop = add_doctest(
     "core-run-loop",
     [here / "test_run_loop.cpp", here / "test_precise_exit.cpp"],
-    [test_support, core],
+    [test_support_static, core_static],
     env=m33_env,
 )
 test_events = add_doctest(
-    "core-events", [here / "test_events_idle.cpp"], [test_support, core], env=m33_env
+    "core-events", [here / "test_events_idle.cpp"], [test_support_static, core_static], env=m33_env
 )
 test_calls = add_doctest("core-calls", [here / "test_calls.cpp"], [test_support, core], env=m33_env)
-add_doctest("core-bus", [here / "test_bus.cpp"], [core])
+add_doctest("core-bus", [here / "test_bus.cpp"], [core_static])
 test_intercepts = add_doctest(
     "core-intercepts", [here / "test_intercepts.cpp"], [test_support, core], env=m33_env
 )
@@ -126,8 +128,8 @@ for _, target in core_firmware.values():
 bench_mmio = project.Program(
     "bench-mmio", project.default_environment, sources=[here / "bench_mmio.cpp"]
 )
-bench_mmio.link(test_support)
-bench_mmio.link(core)
+bench_mmio.link(test_support_static)
+bench_mmio.link(core_static)
 bench_mmio.private.defines.extend(f'{variable}="{value}"' for variable, value in m33_env.items())
 alias_bare_name(bench_mmio)
 for _, target in core_firmware.values():
@@ -162,13 +164,15 @@ for _, target in core_firmware.values():
         test_trace_feed.depends(target)
 
 test_coverage = add_doctest(
-    "core-coverage", [here / "test_coverage.cpp"], [test_support, core], env=m33_env
+    "core-coverage", [here / "test_coverage.cpp"], [test_support_static, core_static], env=m33_env
 )
 for _, target in core_firmware.values():
     if target is not None:
         test_coverage.depends(target)
 
-test_spin = add_doctest("core-spin", [here / "test_spin.cpp"], [test_support, core], env=m33_env)
+test_spin = add_doctest(
+    "core-spin", [here / "test_spin.cpp"], [test_support_static, core_static], env=m33_env
+)
 for _, target in core_firmware.values():
     if target is not None:
         test_spin.depends(target)
@@ -180,6 +184,13 @@ test_host = add_doctest(
 for _, target in core_firmware.values():
     if target is not None:
         test_host.depends(target)
+
+test_shared_tls = add_doctest(
+    "core-shared-tls", [here / "test_shared_tls.cpp"], [test_support, core], env=m33_env
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_shared_tls.depends(target)
 
 test_host_concurrent = add_doctest(
     "core-host-concurrent",
@@ -217,12 +228,16 @@ for _, target in core_firmware.values():
         bench_window_barrier.depends(target)
 
 test_loop_waker = add_doctest(
-    "core-loop-waker", [here / "test_loop_waker.cpp", *tsan_sources], [test_support, core]
+    "core-loop-waker",
+    [here / "test_loop_waker.cpp", *tsan_sources],
+    [test_support_static, core_static],
 )
 test_loop_waker.private.include_dirs.append(project_dir / "native" / "src" / "core")
 
 test_log_queue = add_doctest(
-    "core-log-queue", [here / "test_log_queue.cpp", *tsan_sources], [test_support, core]
+    "core-log-queue",
+    [here / "test_log_queue.cpp", *tsan_sources],
+    [test_support_static, core_static],
 )
 test_log_queue.private.include_dirs.append(project_dir / "native" / "src" / "core")
 
@@ -240,7 +255,7 @@ test_host_pty = add_doctest(
         project_dir / "native" / "src" / "bind" / "pty.cpp",
         *tsan_sources,
     ],
-    [test_support, core],
+    [test_support_static, core_static],
     env=m33_env,
 )
 test_host_pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")

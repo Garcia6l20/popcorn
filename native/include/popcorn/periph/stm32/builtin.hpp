@@ -1,5 +1,7 @@
 #pragma once
 
+#include <popcorn/export.hpp>
+
 namespace popcorn::periph::stm32
 {
 /**
@@ -7,5 +9,5 @@ namespace popcorn::periph::stm32
  *        board. Only the first call registers, later calls do nothing, so a registration a
  *        caller replaced afterwards stays replaced.
  */
-void register_builtin_models();
+POPCORN_API void register_builtin_models();
 }

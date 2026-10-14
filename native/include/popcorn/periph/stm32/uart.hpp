@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -148,7 +149,7 @@ inline constexpr std::size_t max_pending_cts = 65536;
  *        the middle of a slice: it must not run the machine, takes no lock but a leaf, and never
  *        feeds another machine. It may feed the port's own receiver.
  */
-class uart_endpoint
+class POPCORN_API uart_endpoint
 {
 public:
   /** @brief Creates the endpoint. */
@@ -162,7 +163,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(uart_endpoint&&) -> uart_endpoint& = delete;
   /** @brief Destroys the endpoint. */
-  virtual ~uart_endpoint() = default;
+  virtual ~uart_endpoint();
 
   /**
    * @brief A frame left the transmitter.
@@ -194,7 +195,7 @@ public:
  * @brief The firmware side of a UART as a board sees it, implemented by the UART model. Reach it
  *        with `dynamic_cast<uart_port*>(machine.model("USART1"))`.
  */
-class uart_port
+class POPCORN_API uart_port
 {
 public:
   /** @brief Creates the interface. */
@@ -306,7 +307,7 @@ public:
 
 protected:
   /** @brief Destroys the interface, only through its model. */
-  ~uart_port() = default;
+  virtual ~uart_port();
 };
 
 /** @brief One frame a capture_endpoint kept. */
@@ -324,7 +325,7 @@ struct captured_frame
 };
 
 /** @brief Keeps every transmitted frame with its time. */
-class capture_endpoint final : public uart_endpoint
+class POPCORN_API capture_endpoint final : public uart_endpoint
 {
 public:
   /** @brief Frames received, in order. */
@@ -334,6 +335,9 @@ public:
   {
     frames.push_back({.data = data, .at = at, .brk = brk});
   }
+
+  /** @brief Destroys the endpoint. Declared out-of-line: the key function pins the vtable. */
+  ~capture_endpoint() override;
 };
 
 /**
@@ -343,7 +347,7 @@ public:
  *        host frame, while a break reaches it at its own end: a data frame and the break right
  *        after it land at the same count, the data frame first by lane.
  */
-class loopback_endpoint final : public uart_endpoint
+class POPCORN_API loopback_endpoint final : public uart_endpoint
 {
 public:
   /**
@@ -368,6 +372,9 @@ public:
       port_->receive_at(frame, 1);
     }
   }
+
+  /** @brief Destroys the endpoint. Declared out-of-line: the key function pins the vtable. */
+  ~loopback_endpoint() override;
 
 private:
   uart_port* port_;

@@ -9,6 +9,7 @@ from popcorn_build.testing import add_doctest, alias_bare_name
 project = context.current_project
 here = Path(__file__).resolve().parent
 core = project.get_target("popcorn_core")
+core_static = project.get_target("popcorn_core_static")
 obs = project.get_target("popcorn_obs")
 obs_sources = str(project_dir / "native" / "src" / "obs")
 
@@ -23,6 +24,7 @@ if branches_firmware is not None:
     test_ranges.depends(branches_firmware)
 
 test_support = project.get_target("popcorn-test-support")
+test_support_static = project.get_target("popcorn-test-support-static")
 core_data = project_dir / "tests" / "data" / "core"
 tb_firmware = {("obs", "tb"): firmware("obs", "tb")} | {
     ("core", name): firmware("core", name) for name in ("branches", "alu", "fnv")
@@ -30,7 +32,7 @@ tb_firmware = {("obs", "tb"): firmware("obs", "tb")} | {
 test_tb_ranges = add_doctest(
     "obs-tb-ranges",
     [here / "test_tb_ranges.cpp"],
-    [obs, test_support, core],
+    [obs, test_support_static, core_static],
     env={
         "POPCORN_M33_DESC": str(core_data / "m33.json"),
         "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
@@ -49,7 +51,7 @@ cut_elf, cut_firmware = firmware("obs", "cut")
 test_lcov = add_doctest(
     "obs-lcov",
     [here / "test_lcov.cpp"],
-    [obs, test_support, core],
+    [obs, test_support_static, core_static],
     env={
         "POPCORN_M33_DESC": str(core_data / "m33.json"),
         "POPCORN_FW_LINES": str(lines_elf),

@@ -5,6 +5,7 @@
 #include <popcorn/core/member_link.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/core/window_barrier.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -131,7 +132,7 @@ struct pause
 class system;
 
 /** @brief The system mutex, held by the current thread. Never moved to another thread. */
-class held_system
+class POPCORN_API held_system
 {
 public:
   /** @brief Whether this holds the mutex of @p of. */
@@ -159,7 +160,7 @@ private:
  *        Lock order: the system mutex first, taken only by threads that are not host threads,
  *        then at most one host mutex at a time. Host threads never take it.
  */
-class system
+class POPCORN_API system
 {
 public:
   /**
@@ -390,7 +391,7 @@ public:
       pre(held.holds(*this)) pre(member < members());
 
 private:
-  struct impl;
-  std::indirect<impl> impl_;
+  struct POPCORN_HIDDEN impl;
+  std::indirect<impl>   impl_;
 };
 }

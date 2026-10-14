@@ -3,6 +3,7 @@
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/services.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <array>
 #include <bit>
@@ -30,7 +31,7 @@ concept guest_scalar =
  * except from a handler of that slice: handlers run while the core is paused at an instruction
  * boundary.
  */
-class memory_view
+class POPCORN_API memory_view
 {
 public:
   /**

@@ -25,6 +25,8 @@
 
 namespace popcorn::periph::stm32
 {
+analog_port::~analog_port() = default;
+
 namespace
 {
 constexpr address       ts_cal1_address     = 0x0BFA'0710;

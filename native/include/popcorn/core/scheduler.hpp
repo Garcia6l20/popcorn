@@ -2,6 +2,7 @@
 
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -77,7 +78,7 @@ static_assert(std::is_trivially_copyable_v<event>);
  *        callables: the run loop pops due events and dispatches each to its owner model.
  *        Neither copyable nor movable: event ports hold references to it.
  */
-class scheduler
+class POPCORN_API scheduler
 {
 public:
   /** @brief Creates an empty queue whose first sequence number is 0. */

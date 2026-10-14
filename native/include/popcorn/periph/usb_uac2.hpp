@@ -2,6 +2,7 @@
 
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 #include <cstddef>
@@ -102,7 +103,7 @@ struct uac2_feature_unit
 };
 
 /** @brief One streaming direction of an audio function, as the driver found and runs it. */
-struct uac2_stream
+struct POPCORN_API uac2_stream
 {
   /** @brief Interface number of the audio streaming interface, empty before a driver bound or
    * when the function has none in this direction. It and the other fields the driver found keep
@@ -172,7 +173,7 @@ struct uac2_stream
  *        state: they outlive the drivers a detach, a bus reset or a restore destroys. Touched by
  *        the driver in model events and by the binding, each under the hub's link lock.
  */
-struct uac2_channel
+struct POPCORN_API uac2_channel
 {
   /** @brief Audio control interface of the bound driver, empty while none is bound. */
   std::optional<std::uint8_t> interface{};
@@ -216,7 +217,7 @@ struct uac2_channel
  *        control interface in the configuration's interface order. Created empty with the
  *        host's factories, its channels created on first use, by the driver or by the binding.
  */
-class uac2_hub
+class POPCORN_API uac2_hub
 {
 public:
   /** @brief Takes the hub's link lock, blocking. It covers the channel map and every channel. */
@@ -271,7 +272,7 @@ private:
  *         interfaces of that association, the control interface first, else empty, as Linux
  *         refuses a UAC2 function without one.
  */
-[[nodiscard]] auto
+[[nodiscard]] POPCORN_API auto
     uac2_claim(configuration_info const& configuration, interface_info const& interface)
         -> std::vector<std::uint8_t>;
 
@@ -280,7 +281,7 @@ private:
  *        the index of one is its function index.
  * @param configuration The configuration.
  */
-[[nodiscard]] auto uac2_functions(configuration_info const& configuration)
+[[nodiscard]] POPCORN_API auto uac2_functions(configuration_info const& configuration)
     -> std::vector<std::uint8_t>;
 
 /**
@@ -294,7 +295,7 @@ private:
  * @return The operation's handle, settled in the channel's results once SET_INTERFACE ended, or
  *         0 when no driver is bound, the function has no such stream, or the stream runs.
  */
-[[nodiscard]] auto
+[[nodiscard]] POPCORN_API auto
     uac2_start(host& owner, uac2_hub& hub, std::size_t function, uac2_direction direction)
         -> std::uint64_t;
 
@@ -309,7 +310,8 @@ private:
  * @param function Function index.
  * @param direction The stream.
  */
-void uac2_stop(host& owner, uac2_hub& hub, std::size_t function, uac2_direction direction);
+POPCORN_API void
+    uac2_stop(host& owner, uac2_hub& hub, std::size_t function, uac2_direction direction);
 
 /**
  * @brief Queues SET_CUR of a feature unit control through the driver bound to a function.
@@ -323,7 +325,7 @@ void uac2_stop(host& owner, uac2_hub& hub, std::size_t function, uac2_direction 
  * @return The operation's handle, or 0 when no driver is bound or the unit has no such
  *         channel.
  */
-[[nodiscard]] auto uac2_set_feature(
+[[nodiscard]] POPCORN_API auto uac2_set_feature(
     host&        owner,
     uac2_hub&    hub,
     std::size_t  function,
@@ -354,5 +356,5 @@ void uac2_stop(host& owner, uac2_hub& hub, std::size_t function, uac2_direction 
  * @param hub The channels, which the driver reaches by function index.
  * @return The factory, named uac2_name.
  */
-[[nodiscard]] auto uac2_factory(std::shared_ptr<uac2_hub> hub) -> driver_factory;
+[[nodiscard]] POPCORN_API auto uac2_factory(std::shared_ptr<uac2_hub> hub) -> driver_factory;
 }

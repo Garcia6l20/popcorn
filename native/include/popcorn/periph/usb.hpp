@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <array>
 #include <cstddef>
@@ -87,7 +88,7 @@ struct in_result
  *        the device model, during a register write or one of its events: it must not run the
  *        machine.
  */
-class host_side
+class POPCORN_API host_side
 {
 public:
   /** @brief Creates the interface. */
@@ -101,7 +102,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(host_side&&) -> host_side& = delete;
   /** @brief Destroys the host. */
-  virtual ~host_side() = default;
+  virtual ~host_side();
 
   /**
    * @brief The D+ pull-up of a full-speed device was switched.
@@ -143,7 +144,7 @@ public:
  *        they target: the device answers `none` to another address, as real hardware ignores
  *        them. Reach it with `dynamic_cast<device_port*>(machine.model("OTG_FS"))`.
  */
-class device_port
+class POPCORN_API device_port
 {
 public:
   /** @brief Creates the interface. */
@@ -245,6 +246,6 @@ public:
 
 protected:
   /** @brief Destroys the interface, only through its implementation. */
-  ~device_port() = default;
+  virtual ~device_port();
 };
 }

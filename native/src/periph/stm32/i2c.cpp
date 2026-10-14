@@ -22,6 +22,9 @@
 
 namespace popcorn::periph::stm32
 {
+i2c_target::~i2c_target() = default;
+i2c_bus::~i2c_bus()       = default;
+
 namespace
 {
 constexpr std::uint64_t ps_per_second  = 1'000'000'000'000;

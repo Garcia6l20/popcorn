@@ -10,6 +10,7 @@ from popcorn_build.testing import add_doctest, alias_bare_name
 here = Path(__file__).resolve().parent
 project = context.current_project
 core = project.get_target("popcorn_core")
+core_static = project.get_target("popcorn_core_static")
 private_dir = project_dir / "native" / "src" / "periph" / "stm32"
 periph_data = project_dir / "tests" / "data" / "periph"
 
@@ -46,7 +47,7 @@ u575_env = {
 base = add_doctest(
     "stm32-base",
     [here / "test_base.cpp"],
-    [core],
+    [core_static],
     env={"POPCORN_STM32_BASE_DESC": str(periph_data / "stm32_base.json")},
 )
 base.private.include_dirs.append(private_dir)
@@ -55,7 +56,7 @@ add_doctest("stm32-at25sf", [here / "test_at25sf.cpp"], [core])
 add_doctest("stm32-i2c-devices", [here / "test_i2c_devices.cpp"], [core])
 
 u575_programs = [
-    add_doctest(name, [here / source], [core], env=u575_env, register=u575 is not None)
+    add_doctest(name, [here / source], [core_static], env=u575_env, register=u575 is not None)
     for name, source in (
         ("stm32-attach-u575", "test_attach_u575.cpp"),
         ("stm32-rcc", "test_rcc.cpp"),
@@ -92,14 +93,14 @@ for program in u575_programs:
 
 tsan_sources = [project_dir / "tests" / "native" / "tsan_longjmp.cpp"] if VARIANT == "tsan" else []
 link_queues = add_doctest(
-    "stm32-link-queues", [here / "test_link_queues.cpp", *tsan_sources], [core]
+    "stm32-link-queues", [here / "test_link_queues.cpp", *tsan_sources], [core_static]
 )
 link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")
 
 pty = add_doctest(
     "stm32-pty",
     [here / "test_pty.cpp", project_dir / "native" / "src" / "bind" / "pty.cpp", *tsan_sources],
-    [core],
+    [core_static],
 )
 pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")
 
@@ -107,11 +108,11 @@ if u575 is not None:
     bench_irq = project.Program(
         "bench-irq", project.default_environment, sources=[here / "bench_irq.cpp"]
     )
-    bench_irq.link(core)
+    bench_irq.link(core_static)
     bench_irq.private.defines.extend(
         f'{variable}="{value}"' for variable, value in u575_env.items()
     )
-    lto = int(any(str(flag).startswith("-flto") for flag in core.public.link_flags))
+    lto = int("-flto=2" in core_static.public.link_flags)
     bench_irq.private.defines.append(f'POPCORN_BENCH_BUILD="variant={VARIANT} lto={lto}"')
     alias_bare_name(bench_irq)
     for _, target in firmwares.values():
@@ -121,7 +122,7 @@ if u575 is not None:
 uart_wire = add_doctest(
     "stm32-uart-wire",
     [here / "test_uart_wire.cpp", *tsan_sources],
-    [core],
+    [core_static],
     env=u575_env,
     register=u575 is not None,
 )
@@ -133,7 +134,7 @@ for _, target in firmwares.values():
 system_uart = add_doctest(
     "stm32-system",
     [here / "test_system_uart.cpp", *tsan_sources],
-    [core],
+    [core_static],
     env=u575_env,
     register=u575 is not None,
 )
@@ -150,7 +151,7 @@ if u575 is not None:
     bench_system.private.defines.extend(
         f'{variable}="{value}"' for variable, value in u575_env.items()
     )
-    lto = int("-flto=2" in core.public.link_flags)
+    lto = int("-flto=2" in core_static.public.link_flags)
     bench_system.private.defines.append(f'POPCORN_BENCH_BUILD="variant={VARIANT} lto={lto}"')
     alias_bare_name(bench_system)
     for _, target in firmwares.values():

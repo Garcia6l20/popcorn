@@ -2,6 +2,7 @@
 
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/description.hpp>
+#include <popcorn/export.hpp>
 
 namespace popcorn::arch::armv8m
 {
@@ -10,7 +11,7 @@ namespace popcorn::arch::armv8m
  *        release. CM0 and CM0PLUS are refused.
  * @param core Core of a part description.
  */
-[[nodiscard]] auto implements(core_desc const& core) -> bool;
+[[nodiscard]] POPCORN_API auto implements(core_desc const& core) -> bool;
 
 /**
  * @brief Factory of the Cortex-M arch module, for machine construction.
@@ -85,5 +86,5 @@ namespace popcorn::arch::armv8m
  * @return A factory whose call throws config_error naming `core.cpu` for a core the module does
  *         not implement, or `core.revision` for a revision not spelled `rNpM`.
  */
-[[nodiscard]] auto factory() -> arch_factory;
+[[nodiscard]] POPCORN_API auto factory() -> arch_factory;
 }

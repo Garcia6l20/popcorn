@@ -9,6 +9,7 @@ from popcorn_build.testing import add_doctest
 here = Path(__file__).resolve().parent
 project = context.current_project
 core = project.get_target("popcorn_core")
+core_static = project.get_target("popcorn_core_static")
 test_support = project.get_target("popcorn-test-support")
 toy = str(project_dir / "tests" / "data" / "desc" / "toy.json")
 
@@ -18,7 +19,7 @@ add_doctest(
     [core],
     env={"POPCORN_TOY_DESC": toy},
 )
-add_doctest("periph-register-layer", [here / "test_register_layer.cpp"], [core])
+add_doctest("periph-register-layer", [here / "test_register_layer.cpp"], [core_static])
 add_doctest("periph-usb-host", [here / "test_usb_host.cpp"], [core])
 calls_elf, calls_firmware = firmware("core", "calls")
 test_registry = add_doctest(

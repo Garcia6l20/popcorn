@@ -46,6 +46,11 @@ def _nanobind() -> Target:
     return _nanobind_runtime
 
 
+def _origin_of_core(package: str) -> str:
+    """The rpath from build/@p package, where an extension lands, to build/popcorn."""
+    return "$$ORIGIN" if package == "popcorn" else "$$ORIGIN/../popcorn"
+
+
 def add_extension(package: str, name: str, sources: Sequence[str | Path]) -> Target:
     """A CPython extension module importable as @p package.@p name, built into build/@p package."""
     project = context.current_project
@@ -54,6 +59,7 @@ def add_extension(package: str, name: str, sources: Sequence[str | Path]) -> Tar
     ext.output_prefix = f"{package}/"
     ext.output_suffix = ext_suffix
     ext.private.compile_flags.append("-fvisibility=hidden")
+    ext.private.link_flags.append(f"-Wl,-rpath,{_origin_of_core(package)}")
     ext.link(_nanobind())
     ext.link(fetched_package("reflex"))
     return ext

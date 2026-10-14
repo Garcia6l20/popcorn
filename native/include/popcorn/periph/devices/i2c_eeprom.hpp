@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 
 #include <chrono>
@@ -44,7 +45,7 @@ struct eeprom_24xx_options
  *        identification pages, the chip address bits some small parts take from the word
  *        address.
  */
-class eeprom_24xx final : public stm32::i2c_target
+class POPCORN_API eeprom_24xx final : public stm32::i2c_target
 {
 public:
   /**
@@ -82,7 +83,7 @@ public:
   [[nodiscard]] auto contents() const -> std::span<std::byte const>;
 
 private:
-  struct impl;
+  struct POPCORN_HIDDEN impl;
   std::unique_ptr<impl> impl_;
 };
 }

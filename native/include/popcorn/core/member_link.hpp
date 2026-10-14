@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <compare>
 #include <cstddef>
@@ -78,7 +79,7 @@ struct link_fault
  *        member arrives at every barrier: a member skipping a round would let a sender refill a
  *        mailbox its receiver has not drained.
  */
-class member_link
+class POPCORN_API member_link
 {
 public:
   /** @brief Creates the link. */
@@ -92,7 +93,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(member_link&&) -> member_link& = delete;
   /** @brief Destroys the link. */
-  virtual ~member_link() = default;
+  virtual ~member_link();
 
   /** @brief Index of the sending member. */
   [[nodiscard]] virtual auto sender() const noexcept -> std::size_t = 0;

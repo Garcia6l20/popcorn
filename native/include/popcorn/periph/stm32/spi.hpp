@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +20,7 @@ namespace popcorn::periph::stm32
  *        reversed with LSBFRST 1. Times are the machine's virtual time since power-on, which a
  *        system reset does not restart.
  */
-class spi_target
+class POPCORN_API spi_target
 {
 public:
   /** @brief Creates the device. */
@@ -33,7 +34,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(spi_target&&) -> spi_target& = delete;
   /** @brief Destroys the device. */
-  virtual ~spi_target() = default;
+  virtual ~spi_target();
 
   /**
    * @brief The chip select changed.
@@ -108,7 +109,7 @@ struct spi_attachment
  *        here. One per SPI instance, none next to spi_target devices. Frames cross in wire
  *        order, as for spi_target.
  */
-class spi_controller_sink
+class POPCORN_API spi_controller_sink
 {
 public:
   /** @brief Creates the controller. */
@@ -122,7 +123,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(spi_controller_sink&&) -> spi_controller_sink& = delete;
   /** @brief Destroys the controller. */
-  virtual ~spi_controller_sink() = default;
+  virtual ~spi_controller_sink();
 
   /**
    * @brief One frame of a transfer ended.
@@ -149,7 +150,7 @@ public:
 /**
  * @brief What the SPI model of an instance offers the spi_controller_sink attached to it.
  */
-class spi_controller_port
+class POPCORN_API spi_controller_port
 {
 public:
   /** @brief Most frames queued at once over every transfer not finished. */
@@ -177,6 +178,6 @@ public:
 
 protected:
   /** @brief Destroyed through its model only. */
-  ~spi_controller_port() = default;
+  virtual ~spi_controller_port();
 };
 }

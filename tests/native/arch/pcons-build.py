@@ -9,7 +9,9 @@ from popcorn_build.testing import add_doctest, alias_bare_name
 here = Path(__file__).resolve().parent
 project = context.current_project
 core = project.get_target("popcorn_core")
+core_static = project.get_target("popcorn_core_static")
 test_support = project.get_target("popcorn-test-support")
+test_support_static = project.get_target("popcorn-test-support-static")
 core_data = project_dir / "tests" / "data" / "core"
 
 add_doctest("arch-interface", [here / "test_interface.cpp"], [core])
@@ -40,7 +42,7 @@ arch_env = {
 
 private_dir = project_dir / "native" / "src" / "arch" / "armv8m"
 arch_tests = [
-    add_doctest(name, [here / source], [test_support, core], env=arch_env)
+    add_doctest(name, [here / source], [test_support_static, core_static], env=arch_env)
     for name, source in (
         ("arch-scs", "test_scs.cpp"),
         ("arch-exceptions", "test_exceptions.cpp"),
@@ -65,8 +67,8 @@ for test in arch_tests:
 bench_arch = project.Program(
     "bench-arch", project.default_environment, sources=[here / "bench_arch.cpp"]
 )
-bench_arch.link(test_support)
-bench_arch.link(core)
+bench_arch.link(test_support_static)
+bench_arch.link(core_static)
 bench_arch.private.include_dirs.append(private_dir)
 bench_arch.private.defines.extend(
     f'{variable}="{value}"'

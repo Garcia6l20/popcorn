@@ -3,6 +3,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -253,7 +254,7 @@ struct arch_context
  * hook honours. No member function unwinds through Unicorn: the machine catches at the hook
  * boundary. Neither copyable nor movable.
  */
-class arch
+class POPCORN_API arch
 {
 public:
   /** @brief Creates the module, detached. */

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -52,7 +53,7 @@ struct i2c_read_reply
  *        instance it is attached to. Each call happens at the end of its bus phase. Times are the
  *        machine's virtual time since power-on, which a system reset does not restart.
  */
-class i2c_target
+class POPCORN_API i2c_target
 {
 public:
   /** @brief Creates the target. */
@@ -66,7 +67,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(i2c_target&&) -> i2c_target& = delete;
   /** @brief Destroys the target. */
-  virtual ~i2c_target() = default;
+  virtual ~i2c_target();
 
   /** @brief The 7-bit address the target answers, 0x08 to 0x77. */
   [[nodiscard]] virtual auto address() const -> std::uint8_t = 0;
@@ -129,7 +130,7 @@ public:
  * @brief The bus side of a built-in I2C model, which a host drives as another controller would.
  *        Called on the machine's thread, as engine owner.
  */
-class i2c_bus
+class POPCORN_API i2c_bus
 {
 public:
   /**
@@ -147,6 +148,6 @@ public:
 
 protected:
   /** @brief Destroyed through its model only. */
-  ~i2c_bus() = default;
+  virtual ~i2c_bus();
 };
 }

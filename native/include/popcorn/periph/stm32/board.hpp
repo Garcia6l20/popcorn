@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/description.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/stm32/caches.hpp>
@@ -82,6 +83,6 @@ struct board
  * @param part Description the machine is built from.
  * @return Factories keyed by instance name, aliases excluded.
  */
-[[nodiscard]] auto factories(board const& b, part_description const& part)
+[[nodiscard]] POPCORN_API auto factories(board const& b, part_description const& part)
     -> std::map<std::string, model_factory, std::less<>>;
 }

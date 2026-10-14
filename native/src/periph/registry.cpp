@@ -12,6 +12,9 @@
 
 namespace popcorn::periph
 {
+model::~model()                   = default;
+peer_directory::~peer_directory() = default;
+
 namespace
 {
 struct registration

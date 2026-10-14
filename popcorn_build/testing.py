@@ -4,6 +4,7 @@ from pathlib import Path
 from pcons import Target, context, write_file
 
 from popcorn_build.config import build_dir, project_dir
+from popcorn_build.core_links import both_flavours, reached
 from popcorn_build.requirements import package
 
 _doctest_main: Target | None = None
@@ -80,3 +81,19 @@ def add_header_check(name: str, include_root: Path, deps: Sequence[Target] = ())
     )
     sources.append(write_file(generated / "all.cpp", together))
     return add_doctest(name, sources, deps)
+
+
+def check_core_links(shared: Target, static: Target) -> None:
+    """Refuse a target that reaches both popcorn core flavours, give programs on @p shared an rpath.
+
+    A program or library links @p shared or @p static, never both: one of each puts two cores,
+    two registries and two Unicorn copies in one process. Programs linking @p shared run from the
+    build tree, found through build/popcorn.
+    """
+    targets = context.current_project.targets
+    refused = both_flavours(targets, shared, static)
+    if refused:
+        raise SystemExit(f"popcorn: {', '.join(refused)} link both {shared.name} and {static.name}")
+    for target in targets:
+        if target.target_type == "program" and any(item is shared for item in reached(target)):
+            target.private.link_flags.append(f"-Wl,-rpath,{build_dir / 'popcorn'}")

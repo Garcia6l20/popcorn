@@ -2,6 +2,7 @@
 
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 #include <cstddef>
@@ -66,7 +67,7 @@ struct cdc_packet
  *        detach, a bus reset or a restore destroys. Touched by the driver in model events and by
  *        the binding, each under the hub's link lock.
  */
-struct cdc_channel
+struct POPCORN_API cdc_channel
 {
   /** @brief Packets received and not taken yet, oldest first. */
   std::deque<cdc_packet> in{};
@@ -158,7 +159,7 @@ struct cdc_channel
  *        factories, its channels created on first use, by the driver or by the binding, so a
  *        stream exists before the device is configured.
  */
-class cdc_hub
+class POPCORN_API cdc_hub
 {
 public:
   /** @brief Takes the hub's link lock, blocking. It covers the channel map and every channel. */
@@ -213,7 +214,7 @@ private:
  *         table 4 and PSTN 1.2 table 2, whose function has a data interface: the interfaces of
  *         its association, or else the interfaces its union functional descriptor names.
  */
-[[nodiscard]] auto
+[[nodiscard]] POPCORN_API auto
     cdc_acm_claim(configuration_info const& configuration, interface_info const& interface)
         -> std::vector<std::uint8_t>;
 
@@ -222,7 +223,7 @@ private:
  *        order: the index of one is its function index.
  * @param configuration The configuration.
  */
-[[nodiscard]] auto cdc_acm_functions(configuration_info const& configuration)
+[[nodiscard]] POPCORN_API auto cdc_acm_functions(configuration_info const& configuration)
     -> std::vector<std::uint8_t>;
 
 /**
@@ -238,6 +239,6 @@ private:
  * @param options What the driver sends at configuration.
  * @return The factory, named cdc_acm_name.
  */
-[[nodiscard]] auto cdc_acm_factory(std::shared_ptr<cdc_hub> hub, cdc_options options)
+[[nodiscard]] POPCORN_API auto cdc_acm_factory(std::shared_ptr<cdc_hub> hub, cdc_options options)
     -> driver_factory;
 }

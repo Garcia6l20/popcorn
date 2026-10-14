@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 
 #include <chrono>
@@ -88,7 +89,7 @@ struct at25sf_options
  * dual, quad and QPI instructions, suspend and resume, the security registers, SFDP. Block
  * protection bits are stored, not enforced.
  */
-class at25sf final : public stm32::spi_target
+class POPCORN_API at25sf final : public stm32::spi_target
 {
 public:
   /**
@@ -128,7 +129,7 @@ public:
   [[nodiscard]] auto contents() const -> std::span<std::byte const>;
 
 private:
-  struct impl;
+  struct POPCORN_HIDDEN impl;
   std::unique_ptr<impl> impl_;
 };
 }

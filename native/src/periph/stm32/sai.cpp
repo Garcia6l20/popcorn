@@ -23,6 +23,11 @@
 
 namespace popcorn::periph::stm32
 {
+audio_endpoint::~audio_endpoint()                 = default;
+audio_port::~audio_port()                         = default;
+audio_capture_endpoint::~audio_capture_endpoint() = default;
+audio_source_endpoint::~audio_source_endpoint()   = default;
+
 namespace
 {
 constexpr std::size_t   blocks        = 2;

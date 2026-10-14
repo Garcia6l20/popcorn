@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 
 #include <cstddef>
@@ -49,7 +50,7 @@ struct table_target_options
  *        addressing another target ends nothing here: the pending write is recorded at this
  *        target's own next START or STOP, and writes() misses it until then.
  */
-class table_target final : public stm32::i2c_target
+class POPCORN_API table_target final : public stm32::i2c_target
 {
 public:
   /**
@@ -81,7 +82,7 @@ public:
   [[nodiscard]] auto writes() const -> std::span<table_write const>;
 
 private:
-  struct impl;
+  struct POPCORN_HIDDEN impl;
   std::unique_ptr<impl> impl_;
 };
 }

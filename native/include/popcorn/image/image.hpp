@@ -2,6 +2,7 @@
 
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -103,7 +104,7 @@ struct debug_function
  *        Plain data, built by load_elf() and the other file loaders, or by the object linker. The
  * machine checks the segments against the description's regions when loading it.
  */
-struct image
+struct POPCORN_API image
 {
   /** @brief Loadable segments, in address order. */
   std::vector<segment> segments{};
@@ -156,7 +157,7 @@ struct image
  * @return The image.
  * @throws image_error when the file is not a loadable ELF32 for a supported machine.
  */
-auto load_elf(std::filesystem::path const& file) -> image;
+POPCORN_API auto load_elf(std::filesystem::path const& file) -> image;
 
 /** @brief One distinct macro definition and the compile units whose program ends with it. */
 struct macro_entry
@@ -198,5 +199,5 @@ struct macro_index
  *         holds an import cycle, more than 64 nested imports, more than 2^24 operations for one
  *         compile unit or 2^26 for the file, or an operation of a supplementary file.
  */
-auto read_macros(std::filesystem::path const& file) -> macro_index;
+POPCORN_API auto read_macros(std::filesystem::path const& file) -> macro_index;
 }

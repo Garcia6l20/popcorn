@@ -3,6 +3,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -28,35 +29,44 @@
 namespace popcorn::core
 {
 /** @brief The host closed before the request completed, or the request came after close(). */
-class machine_closed : public error
+class POPCORN_API machine_closed : public error
 {
 public:
   using error::error;
+
+  /** @brief Destroys the error. Declared out-of-line: the key function pins the vtable. */
+  ~machine_closed() override;
 };
 
 /** @brief The request was cancelled: a goal by host::cancel() or host::halt(), a waiter by
  * waiter_handle::drop() or host::halt(). */
-class operation_cancelled : public error
+class POPCORN_API operation_cancelled : public error
 {
 public:
   using error::error;
+
+  /** @brief Destroys the error. Declared out-of-line: the key function pins the vtable. */
+  ~operation_cancelled() override;
 };
 
 /**
  * @brief The host was built in the parent of a forked process: the child has no host thread and
  *        any host lock may stay held, so nothing in the child may use it.
  */
-class machine_forked : public error
+class POPCORN_API machine_forked : public error
 {
 public:
   using error::error;
+
+  /** @brief Destroys the error. Declared out-of-line: the key function pins the vtable. */
+  ~machine_forked() override;
 };
 
 /**
  * @brief A goal's finish failed while the goal ended by an error or a cancel: the finish error,
  *        with what the goal ended by, as Python's `__context__` chains them.
  */
-class chained_error final : public std::exception
+class POPCORN_API chained_error final : public std::exception
 {
 public:
   /**
@@ -122,7 +132,7 @@ struct single_slice
  * @brief Slices a goal for a scheduler that spans several hosts, one member per host. The host
  *        keeps serving the member's mail, stamps and boundary hook between slices.
  */
-class member_driver
+class POPCORN_API member_driver
 {
 public:
   /** @brief Reads the member's earliest pending stamp in local time, taking in the stamps
@@ -130,7 +140,7 @@ public:
    * call it holding no lock. */
   using earliest_stamp = std::function_ref<std::optional<vtime>()>;
 
-  virtual ~member_driver() = default;
+  virtual ~member_driver();
 
   /**
    * @brief Bounds of the next slice, or empty to end the goal. Called on the host thread as the
@@ -309,7 +319,7 @@ struct condition_set
  *        inside a handler of its slice.
  * @return Whether the comparison holds, false when the read fails.
  */
-[[nodiscard]] auto condition_holds(condition const& tested, machine& target) -> bool;
+[[nodiscard]] POPCORN_API auto condition_holds(condition const& tested, machine& target) -> bool;
 
 /** @brief A wait on a free-running machine. */
 struct waiter_spec
@@ -374,11 +384,11 @@ enum class fate : std::uint8_t;
 /** @brief The mutex of a host, timed so a cross-machine wait can check signals. */
 using host_mutex = std::timed_mutex;
 /** @brief Host mutexes the current thread holds through a held_lock. */
-inline thread_local int host_locks_held = 0;
+POPCORN_API extern constinit thread_local int host_locks_held;
 /** @brief Host whose engine the current thread owns. */
-inline thread_local host_core const* engine_owner = nullptr;
+POPCORN_API extern constinit thread_local host_core const* engine_owner;
 /** @brief Whether the current thread is the thread of some host. Never cleared. */
-inline thread_local bool on_host_thread = false;
+POPCORN_API extern constinit thread_local bool on_host_thread;
 
 /** @brief Shared state of a host_future. */
 template <typename T> struct future_state
@@ -552,7 +562,7 @@ auto detail::host_promise<T>::feeds(host_future<T> const& other) const noexcept 
  * @brief A host mutex held by the current thread, from host::lock() or host::try_lock(). Kept
  *        in detail::host_locks_held while owned. Never moved to another thread.
  */
-class held_lock
+class POPCORN_API held_lock
 {
 public:
   /** @brief Holds nothing. */
@@ -590,7 +600,7 @@ private:
  * @brief A thread's wait for a host mutex while it holds others, registered in the process lock
  *        graph until destroyed.
  */
-class lock_wait
+class POPCORN_API lock_wait
 {
 public:
   /** @brief Not copyable. */
@@ -611,7 +621,7 @@ private:
  *        an access from a callback of that section runs inline instead of locking the host
  *        mutex the thread already holds.
  */
-class owner_scope
+class POPCORN_API owner_scope
 {
 public:
   /** @brief Owns @p owner's engine while @p held keeps it parked. */
@@ -645,7 +655,7 @@ struct halt_ticket
 };
 
 /** @brief A wait registered by host::wait(). */
-class waiter_handle
+class POPCORN_API waiter_handle
 {
 public:
   /** @brief Completes with the waiter's stop, or with the free run's held end. */
@@ -707,7 +717,7 @@ private:
  * it. cancel(), halt() and close() take it themselves and may wait: they throw machine_running
  * when the thread holds any host mutex, and on any host thread they only request and return.
  */
-class host final
+class POPCORN_API host final
 {
 public:
   /**

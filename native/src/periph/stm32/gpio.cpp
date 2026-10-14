@@ -25,6 +25,9 @@
 
 namespace popcorn::periph::stm32
 {
+gpio_port::~gpio_port()   = default;
+exti_input::~exti_input() = default;
+
 namespace
 {
 constexpr std::size_t   pins     = 16;

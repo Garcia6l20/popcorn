@@ -27,6 +27,10 @@
 
 namespace popcorn::periph::stm32
 {
+spi_target::~spi_target()                   = default;
+spi_controller_sink::~spi_controller_sink() = default;
+spi_controller_port::~spi_controller_port() = default;
+
 namespace
 {
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;

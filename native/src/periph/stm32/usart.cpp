@@ -28,6 +28,11 @@
 
 namespace popcorn::periph::stm32
 {
+uart_endpoint::~uart_endpoint()         = default;
+uart_port::~uart_port()                 = default;
+capture_endpoint::~capture_endpoint()   = default;
+loopback_endpoint::~loopback_endpoint() = default;
+
 namespace
 {
 constexpr std::uint32_t transmit_done = 0;

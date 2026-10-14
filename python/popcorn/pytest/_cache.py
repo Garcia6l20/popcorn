@@ -37,6 +37,7 @@ from popcorn import (
 from popcorn._machine import AttachedDevice
 from popcorn._machine_description import check_inputs
 from popcorn._model_build import registered_classes
+from popcorn._native_digest import native_digest
 from popcorn.board import I2CTarget, SpiController, SpiTarget
 from popcorn.units import VirtualTime
 
@@ -45,10 +46,7 @@ FORMAT = "popcorn-boot-cache 1"
 
 @functools.cache
 def _extension_digest() -> str:
-    path = getattr(_core, "__file__", None)
-    if not isinstance(path, str):
-        return ""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return native_digest()
 
 
 def _file_digest(path: Path) -> str:

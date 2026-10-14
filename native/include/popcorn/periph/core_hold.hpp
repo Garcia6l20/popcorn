@@ -1,5 +1,7 @@
 #pragma once
 
+#include <popcorn/export.hpp>
+
 namespace popcorn::periph
 {
 /**
@@ -7,7 +9,7 @@ namespace popcorn::periph
  *        core::machine::hold_core(). The machine finds it among its models by dynamic_cast and
  *        calls it in description order.
  */
-class core_hold_listener
+class POPCORN_API core_hold_listener
 {
 public:
   /**
@@ -23,6 +25,6 @@ public:
   virtual void on_core_hold(bool held) = 0;
 
 protected:
-  ~core_hold_listener() = default;
+  virtual ~core_hold_listener();
 };
 }
