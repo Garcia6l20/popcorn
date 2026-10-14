@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -2498,4 +2499,537 @@ TEST_CASE("the RX DMA ring fed by another machine's USART gives the host-fed log
   CHECK(reference.second == expected_big_ring());
   CHECK(run(latency) == reference);
   CHECK(run(7 * us_ps) == reference);
+}
+
+namespace
+{
+constexpr std::uint32_t cr3_ctsie  = 1u << 10;
+constexpr std::uint32_t cr3_ctse   = 1u << 9;
+constexpr std::uint32_t cr3_rtse   = 1u << 8;
+constexpr std::uint32_t cr3_dem    = 1u << 14;
+constexpr std::uint32_t isr_cts    = 1u << 10;
+constexpr std::uint32_t isr_ctsif  = 1u << 9;
+constexpr std::uint32_t isr_tc     = 1u << 6;
+constexpr std::uint32_t isr_rxff   = 1u << 24;
+constexpr std::uint32_t icr_ctscf  = 1u << 9;
+constexpr std::uint32_t isr_sbkf   = 1u << 18;
+constexpr std::uint32_t lpuart_brr = 106'666;
+constexpr std::uint64_t flow_slack = 2 * us_ps;
+constexpr std::uint32_t lpuart_cr1 = ue | cr1_re | cr1_te;
+
+auto flow_rig(std::uint32_t cr3, std::uint32_t extra = 0) -> std::unique_ptr<parity_rig>
+{
+  auto p = std::make_unique<parity_rig>(line_config{}, 35, extra);
+  p->t.cpu("USART1", "CR1_enabled", 0);
+  p->t.cpu("USART1", "CR3", cr3);
+  p->t.cpu("USART1", "CR1_enabled", cr1_of({}) | extra);
+  return p;
+}
+
+auto usart1_frame(parity_rig const& p) -> std::uint64_t
+{
+  return frame_of(*p.t.r.f, "USART1", 4'000'000, false);
+}
+
+auto lpuart_pop(locked_rig const& t) -> std::uint32_t
+{
+  auto* const probe = t.r.f->model_of<bus_probe>("DAC1");
+  REQUIRE(probe != nullptr);
+  auto const word = probe->context.services.read(
+      address_of(*t.r.f, "LPUART1", "RDR"), 4, popcorn::initiator::cpu);
+  REQUIRE(word.has_value());
+  return static_cast<std::uint32_t>(*word);
+}
+
+void cts(parity_rig const& p, bool ready)
+{
+  p.t.r.port("USART1").set_cts(ready, vtime{p.now()});
+  p.advance(1);
+}
+
+void lpuart_flow(locked_rig const& t, std::uint32_t cr3)
+{
+  t.cpu("LPUART1", "CR1", 0);
+  t.cpu("LPUART1", "BRR", lpuart_brr);
+  t.cpu("LPUART1", "CR3", cr3);
+  t.cpu("LPUART1", "CR1", lpuart_cr1);
+}
+}
+
+TEST_CASE("without CTSE the CTS input holds nothing and sets no flag")
+{
+  auto const p = flow_rig(0);
+  cts(*p, false);
+  CHECK((p->isr() & (isr_cts | isr_ctsif)) == 0);
+  auto const start = p->now();
+  p->t.cpu("USART1", "TDR", 'a');
+  p->advance(2 * usart1_frame(*p));
+  REQUIRE(p->box->sent.size() == 1);
+  CHECK(p->box->sent[0].at.ps == start + usart1_frame(*p));
+  cts(*p, true);
+  CHECK((p->isr() & (isr_cts | isr_ctsif)) == 0);
+}
+
+TEST_CASE("with CTSE a frame written while CTS is not ready starts at the change to ready")
+{
+  auto const p     = flow_rig(cr3_ctse);
+  auto const frame = usart1_frame(*p);
+  cts(*p, false);
+  p->t.cpu("USART1", "TDR", 'a');
+  p->advance(3 * frame);
+  CHECK(p->box->posts.empty());
+  CHECK(p->box->sent.empty());
+  CHECK((p->isr() & isr_tc) == 0);
+  auto const ready = p->now();
+  cts(*p, true);
+  REQUIRE(p->box->posts.size() == 1);
+  CHECK(p->box->posts[0].frame.start.ps == ready);
+  p->advance(2 * frame);
+  REQUIRE(p->box->sent.size() == 1);
+  CHECK(p->box->sent[0].at.ps == ready + frame);
+  CHECK((p->isr() & isr_tc) != 0);
+}
+
+TEST_CASE("CTS going not ready during a frame lets it complete and holds the next one")
+{
+  auto const p     = flow_rig(cr3_ctse, cr1_fifoen);
+  auto const frame = usart1_frame(*p);
+  auto const start = p->now();
+  for(auto const byte : {'a', 'b', 'c'})
+  {
+    p->t.cpu("USART1", "TDR", static_cast<std::uint32_t>(byte));
+  }
+  p->advance(frame / 2);
+  cts(*p, false);
+  p->advance(4 * frame);
+  REQUIRE(p->box->sent.size() == 1);
+  CHECK(p->box->sent[0].data == 'a');
+  CHECK(p->box->sent[0].at.ps == start + frame);
+  CHECK((p->isr() & isr_tc) == 0);
+  auto const ready = p->now();
+  cts(*p, true);
+  CHECK((p->isr() & isr_tc) == 0);
+  p->advance(3 * frame);
+  CHECK((p->isr() & isr_tc) != 0);
+  REQUIRE(p->box->sent.size() == 3);
+  CHECK(p->box->sent[1].at.ps == ready + frame);
+  CHECK(p->box->sent[2].at.ps == ready + 2 * frame);
+}
+
+TEST_CASE("a held frame after a break keeps the break's 2-bit hold when CTS returns early")
+{
+  auto const p     = flow_rig(cr3_ctse);
+  auto const frame = usart1_frame(*p);
+  p->t.cpu("USART1", "RQR", 1u << 1);
+  p->t.cpu("USART1", "TDR", 'x');
+  cts(*p, false);
+  auto const start = p->box->posts.at(0).frame.start.ps;
+  p->advance(start + frame + frame / 10 - p->now());
+  CHECK((p->isr() & isr_tc) == 0);
+  cts(*p, true);
+  CHECK((p->isr() & isr_tc) == 0);
+  p->advance(3 * frame);
+  REQUIRE(p->box->posts.size() == 2);
+  CHECK(p->box->posts[1].frame.start.ps == start + frame + frame / 5);
+  CHECK((p->isr() & isr_tc) != 0);
+}
+
+TEST_CASE("a break requested while CTS is not ready is held and starts at the change to ready")
+{
+  auto const p     = flow_rig(cr3_ctse);
+  auto const frame = usart1_frame(*p);
+  cts(*p, false);
+  p->t.cpu("USART1", "RQR", 1u << 1);
+  p->advance(2 * frame);
+  CHECK(p->box->posts.empty());
+  CHECK((p->isr() & isr_sbkf) != 0);
+  auto const ready = p->now();
+  cts(*p, true);
+  REQUIRE(p->box->posts.size() == 1);
+  CHECK(p->box->posts[0].frame.kind == frame_kind::brk);
+  CHECK(p->box->posts[0].frame.start.ps == ready);
+}
+
+TEST_CASE("a CTS change at the instant a frame ends does not hold the next, one before does")
+{
+  for(auto const early : {std::uint64_t{0}, instruction_ps})
+  {
+    CAPTURE(early);
+    auto const p     = flow_rig(cr3_ctse, cr1_fifoen);
+    auto const frame = usart1_frame(*p);
+    auto const start = p->now();
+    p->t.cpu("USART1", "TDR", 'a');
+    p->t.cpu("USART1", "TDR", 'b');
+    p->t.r.port("USART1").set_cts(false, vtime{start + frame - early});
+    CHECK(p->t.r.port("USART1").pending_cts() == 1);
+    p->advance(3 * frame);
+    CHECK(p->t.r.port("USART1").pending_cts() == 0);
+    CHECK((p->isr() & isr_ctsif) != 0);
+    REQUIRE(p->box->posts.size() == (early == 0 ? 2u : 1u));
+    if(early == 0)
+    {
+      CHECK(p->box->posts[1].frame.start.ps == start + frame);
+    }
+  }
+}
+
+TEST_CASE("a TDR write at the instant of a change to not ready is sent, one instruction later held")
+{
+  for(auto const late : {std::uint64_t{0}, instruction_ps})
+  {
+    CAPTURE(late);
+    auto const p     = flow_rig(cr3_ctse);
+    auto const frame = usart1_frame(*p);
+    auto const at    = p->now();
+    p->t.r.port("USART1").set_cts(false, vtime{at});
+    p->advance(late);
+    REQUIRE(p->now() == at + late);
+    REQUIRE((p->isr() & isr_ctsif) != 0);
+    p->t.cpu("USART1", "TDR", 'a');
+    p->advance(2 * frame);
+    CHECK(p->box->posts.size() == (late == 0 ? 1u : 0u));
+  }
+}
+
+TEST_CASE("pending CTS changes keep their board instant across every reset kind")
+{
+  for(auto const kind :
+      {popcorn::reset_kind::power_on, popcorn::reset_kind::pin, popcorn::reset_kind::software,
+       popcorn::reset_kind::watchdog})
+  {
+    CAPTURE(kind);
+    auto const p       = flow_rig(cr3_ctse);
+    auto const restart = [&](popcorn::reset_kind how) {
+      p->t.r.f->target->reset(how);
+      p->t.r.f->set("pc", sym("usart_ll", "idle"));
+      p->t.set_bit("RCC", "RCC_APB2ENR", 14);
+      p->t.cpu("USART1", "CR1_enabled", 0);
+      p->t.cpu("USART1", "BRR", 35);
+      p->t.cpu("USART1", "CR3", cr3_ctse);
+      p->t.cpu("USART1", "CR1_enabled", cr1_of({}));
+    };
+    p->advance(300 * us_ps);
+    restart(popcorn::reset_kind::pin);
+    p->advance(700 * us_ps);
+    auto const due = p->now() + 500 * us_ps;
+    p->t.r.port("USART1").set_cts(false, vtime{due});
+    p->advance(200 * us_ps);
+    auto const reset_at = p->now();
+    restart(kind);
+    CHECK(p->now() == 0);
+    CHECK(p->t.r.port("USART1").pending_cts() == 1);
+    p->advance(due - reset_at - instruction_ps);
+    CHECK((p->isr() & isr_ctsif) == 0);
+    p->advance(2 * instruction_ps);
+    CHECK((p->isr() & isr_ctsif) != 0);
+    CHECK((p->isr() & isr_cts) == 0);
+  }
+}
+
+TEST_CASE("a pending CTS change survives a snapshot and applies at its time after each restore")
+{
+  auto const p     = flow_rig(cr3_ctse);
+  auto const frame = usart1_frame(*p);
+  auto const due   = p->now() + 2 * frame;
+  p->t.r.port("USART1").set_cts(false, vtime{due});
+  auto const saved = p->t.r.f->target->snapshot();
+  for(int index = 0; index < 100; ++index)
+  {
+    p->t.r.f->target->restore(saved);
+    REQUIRE(p->t.r.port("USART1").pending_cts() == 1);
+  }
+  p->advance(due - p->now() - instruction_ps);
+  CHECK((p->isr() & isr_ctsif) == 0);
+  p->advance(2 * instruction_ps);
+  CHECK((p->isr() & isr_ctsif) != 0);
+  CHECK(p->t.r.port("USART1").pending_cts() == 0);
+}
+
+TEST_CASE("set_cts refuses a past time and more than the pending limit, scheduling nothing")
+{
+  auto const p   = flow_rig(cr3_ctse);
+  auto&      out = p->t.r.port("USART1");
+  p->advance(10 * us_ps);
+  CHECK_THROWS_AS(out.set_cts(false, vtime{p->now() - 1}), std::invalid_argument);
+  CHECK(out.pending_cts() == 0);
+  auto const empty = p->t.r.f->target->snapshot();
+  auto const later = p->now() + ms_ps;
+  for(std::size_t index = 0; index < stm32::max_pending_cts; ++index)
+  {
+    out.set_cts(index % 2 == 0, vtime{later});
+  }
+  CHECK_THROWS_AS(out.set_cts(false, vtime{later}), popcorn::config_error);
+  CHECK(out.pending_cts() == stm32::max_pending_cts);
+  p->t.r.f->target->restore(empty);
+  CHECK(out.pending_cts() == 0);
+}
+
+TEST_CASE("the pending limit of CTS changes applies in time linear in their count")
+{
+  auto const p     = flow_rig(cr3_ctse);
+  auto&      out   = p->t.r.port("USART1");
+  auto const first = p->now() + 10 * us_ps;
+  auto const step  = 4 * instruction_ps;
+  auto const count = stm32::max_pending_cts;
+  for(std::size_t index = 0; index < count; ++index)
+  {
+    out.set_cts(index % 2 == 1, vtime{first + index * step});
+  }
+  REQUIRE(out.pending_cts() == count);
+  auto const started = std::clock();
+  p->advance(first + (count / 2) * step - p->now() - instruction_ps);
+  CHECK(out.pending_cts() == count / 2);
+  p->advance(first + count * step - p->now() + instruction_ps);
+  auto const seconds = static_cast<double>(std::clock() - started) / CLOCKS_PER_SEC;
+  MESSAGE("applying ", count, " CTS changes took ", seconds, " s of CPU");
+  CHECK(out.pending_cts() == 0);
+  CHECK((p->isr() & isr_cts) != 0);
+}
+
+TEST_CASE("each CTS change with CTSE sets CTSIF, CTS follows the input, CTSIE raises the IRQ")
+{
+  auto const p = flow_rig(cr3_ctse);
+  CHECK((p->isr() & (isr_cts | isr_ctsif)) == isr_cts);
+  p->unpend();
+  cts(*p, false);
+  CHECK((p->isr() & (isr_cts | isr_ctsif)) == isr_ctsif);
+  CHECK_FALSE(p->pending());
+  p->t.cpu("USART1", "ICR", icr_ctscf);
+  CHECK((p->isr() & (isr_cts | isr_ctsif)) == 0);
+  cts(*p, false);
+  CHECK((p->isr() & isr_ctsif) == 0);
+  cts(*p, true);
+  CHECK((p->isr() & (isr_cts | isr_ctsif)) == (isr_cts | isr_ctsif));
+  CHECK_FALSE(p->pending());
+  p->t.cpu("USART1", "CR3", cr3_ctse | cr3_ctsie);
+  CHECK(p->pending());
+  p->t.cpu("USART1", "ICR", icr_ctscf);
+  CHECK((p->isr() & (isr_cts | isr_ctsif)) == isr_cts);
+  p->unpend();
+  CHECK_FALSE(p->pending());
+  cts(*p, false);
+  CHECK(p->pending());
+}
+
+TEST_CASE("with RTSE and no FIFO RTS drops with RDR full and host frames wait for the read")
+{
+  auto const p     = flow_rig(cr3_rtse);
+  auto&      port  = p->t.r.port("USART1");
+  auto const frame = usart1_frame(*p);
+  CHECK(port.ready_to_receive());
+  std::vector<std::uint16_t> const bytes{'a', 'b', 'c'};
+  port.receive(bytes);
+  p->advance(4 * frame);
+  CHECK(p->rdr() == 'a');
+  CHECK((p->isr() & isr_ore) == 0);
+  CHECK(port.queued() == 2);
+  CHECK_FALSE(port.ready_to_receive());
+  auto const read = p->now();
+  CHECK(p->pop() == 'a');
+  CHECK(port.ready_to_receive());
+  p->advance(read + frame - flow_slack - p->now());
+  CHECK((p->isr() & isr_rxfne) == 0);
+  p->advance(2 * flow_slack);
+  CHECK(p->rdr() == 'b');
+  CHECK_FALSE(port.ready_to_receive());
+  p->advance(4 * frame);
+  CHECK(port.queued() == 1);
+  p->t.cpu("USART1", "RQR", rqr_rxfrq);
+  p->advance(2 * frame);
+  CHECK(p->rdr() == 'c');
+  CHECK((p->isr() & isr_ore) == 0);
+  CHECK(port.queued() == 0);
+}
+
+TEST_CASE("with RTSE in FIFO mode RTS drops only with the RX FIFO full")
+{
+  auto const                 p     = flow_rig(cr3_rtse, cr1_fifoen);
+  auto&                      port  = p->t.r.port("USART1");
+  auto const                 frame = usart1_frame(*p);
+  std::vector<std::uint16_t> bytes;
+  for(std::uint16_t value = 0; value < 10; ++value)
+  {
+    bytes.push_back(static_cast<std::uint16_t>('0' + value));
+  }
+  port.receive(bytes);
+  p->advance(7 * frame + frame / 2);
+  CHECK(port.ready_to_receive());
+  p->advance(4 * frame);
+  CHECK((p->isr() & isr_rxff) != 0);
+  CHECK_FALSE(port.ready_to_receive());
+  CHECK(port.queued() == 2);
+  CHECK((p->isr() & isr_ore) == 0);
+  CHECK(p->pop() == '0');
+  CHECK(port.ready_to_receive());
+  p->advance(4 * frame);
+  CHECK(port.queued() == 1);
+  std::vector<std::uint32_t> words;
+  while((p->isr() & isr_rxfne) != 0)
+  {
+    words.push_back(p->pop());
+    p->advance(2 * frame);
+  }
+  CHECK(words.size() == 9);
+  CHECK(words.back() == '9');
+  CHECK((p->isr() & isr_ore) == 0);
+}
+
+TEST_CASE("without RTSE, or with DEM, a host frame meeting RDR full still overruns")
+{
+  for(auto const cr3 : {0u, cr3_rtse | cr3_dem})
+  {
+    CAPTURE(cr3);
+    auto const                       p    = flow_rig(cr3);
+    auto&                            port = p->t.r.port("USART1");
+    std::vector<std::uint16_t> const bytes{'a', 'b'};
+    port.receive(bytes);
+    p->advance(3 * usart1_frame(*p));
+    CHECK(port.ready_to_receive());
+    CHECK(port.queued() == 0);
+    CHECK(p->rdr() == 'a');
+    CHECK((p->isr() & isr_ore) != 0);
+  }
+}
+
+TEST_CASE("with RTSE a linked frame meeting RDR full is not held and overruns")
+{
+  parity_rig a{{}};
+  a.send('a');
+  a.send('b');
+  REQUIRE(a.box->posts.size() == 2);
+  auto const b = flow_rig(cr3_rtse);
+  b->linked(a.box->posts[0].frame);
+  CHECK_FALSE(b->t.r.port("USART1").ready_to_receive());
+  b->linked(a.box->posts[1].frame);
+  CHECK(b->rdr() == 'a');
+  CHECK((b->isr() & isr_ore) != 0);
+}
+
+TEST_CASE("LPUART1 holds a frame on CTS and host frames on RTS")
+{
+  locked_rig t;
+  auto&      port = t.r.port("LPUART1");
+  lpuart_flow(t, cr3_ctse | cr3_rtse);
+  auto const run = [&](std::uint64_t ps) {
+    auto const until = t.r.f->target->virtual_clock().time().ps + ps;
+    auto const done  = t.r.f->run(
+        {.max_instructions = icount{1'000'000'000},
+         .wall_budget      = std::chrono::seconds{60},
+         .until_time       = vtime{until}});
+    REQUIRE(done.stopped);
+    REQUIRE(done.stopped->reason == stop_reason::time);
+  };
+  port.set_cts(false, t.r.f->target->virtual_clock().time());
+  run(1);
+  CHECK((t.read("LPUART1", "ISR") & isr_ctsif) != 0);
+  t.cpu("LPUART1", "TDR", 'a');
+  run(5 * ms_ps);
+  CHECK(t.r.lpuart->frames.empty());
+  auto const ready = t.r.f->target->virtual_clock().time();
+  port.set_cts(true, ready);
+  run(5 * ms_ps);
+  REQUIRE(t.r.lpuart->frames.size() == 1);
+  CHECK(t.r.lpuart->frames[0].at.ps == ready.ps + frame_of(*t.r.f, "LPUART1", 4'000'000, true));
+
+  std::vector<std::uint16_t> const bytes{'x', 'y'};
+  port.receive(bytes);
+  run(10 * ms_ps);
+  CHECK_FALSE(port.ready_to_receive());
+  CHECK(port.queued() == 1);
+  CHECK(lpuart_pop(t) == 'x');
+  run(5 * ms_ps);
+  CHECK(lpuart_pop(t) == 'y');
+  CHECK((t.read("LPUART1", "ISR") & isr_ore) == 0);
+}
+
+TEST_CASE("a USART state saved before flow control loads with CTS ready and nothing pending")
+{
+  auto const  p     = flow_rig(cr3_ctse);
+  auto* const usart = p->t.r.f->model_of<popcorn::periph::model>("USART1");
+  REQUIRE(usart != nullptr);
+  std::vector<std::byte> saved;
+  reflex::serde::bson::serializer{saved}.dump(untagged_usart_state{.rx_fifo = {}, .host = {0x43}});
+  cts(*p, false);
+  usart->load(saved);
+  CHECK(p->t.r.port("USART1").pending_cts() == 0);
+  auto const start = p->now();
+  p->t.cpu("USART1", "TDR", 'a');
+  p->advance(2 * usart1_frame(*p));
+  REQUIRE(p->box->sent.size() == 1);
+  CHECK(p->box->sent[0].at.ps == start + usart1_frame(*p));
+}
+
+TEST_CASE("a CTS level survives a snapshot, its restores and a power-on reset")
+{
+  auto const p     = flow_rig(cr3_ctse);
+  auto const frame = usart1_frame(*p);
+  cts(*p, false);
+  p->t.cpu("USART1", "TDR", 'a');
+  p->advance(2 * frame);
+  auto const saved = p->t.r.f->target->snapshot();
+  cts(*p, true);
+  p->advance(2 * frame);
+  CHECK(p->box->sent.size() == 1);
+  for(int index = 0; index < 100; ++index)
+  {
+    p->t.r.f->target->restore(saved);
+  }
+  p->advance(3 * frame);
+  CHECK(p->box->sent.size() == 1);
+  CHECK((p->isr() & isr_cts) == 0);
+  cts(*p, true);
+  p->advance(2 * frame);
+  CHECK(p->box->sent.size() == 2);
+
+  cts(*p, false);
+  p->t.r.f->target->reset(popcorn::reset_kind::power_on);
+  p->t.r.f->set("pc", sym("usart_ll", "idle"));
+  p->t.set_bit("RCC", "RCC_APB2ENR", 14);
+  p->t.cpu("USART1", "CR1_enabled", 0);
+  p->t.cpu("USART1", "BRR", 35);
+  p->t.cpu("USART1", "CR3", cr3_ctse);
+  p->t.cpu("USART1", "CR1_enabled", cr1_of({}));
+  CHECK((p->isr() & isr_cts) == 0);
+  p->t.cpu("USART1", "TDR", 'b');
+  p->advance(3 * frame);
+  CHECK(p->box->sent.size() == 2);
+  cts(*p, true);
+  p->advance(2 * frame);
+  CHECK(p->box->sent.size() == 3);
+}
+
+TEST_CASE("a host frame held by RTS after a host break keeps the break's 2-bit hold")
+{
+  auto const                      p     = flow_rig(cr3_rtse);
+  auto const                      frame = usart1_frame(*p);
+  auto const                      start = p->now();
+  std::array<host_frame, 2> const frames{
+      {{.kind = frame_kind::brk}, {.data = 'x'}}
+  };
+  p->tagged(frames);
+  p->advance(start + frame + flow_slack - p->now());
+  CHECK_FALSE(p->t.r.port("USART1").ready_to_receive());
+  CHECK(p->pop() == 0);
+  p->advance(start + 2 * frame + frame / 5 - flow_slack - p->now());
+  CHECK((p->isr() & isr_rxfne) == 0);
+  p->advance(2 * flow_slack);
+  CHECK(p->rdr() == 'x');
+}
+
+TEST_CASE("an RDR read releasing a held host frame within a frame time cancels the IDLE")
+{
+  auto const                       p     = flow_rig(cr3_rtse);
+  auto const                       frame = usart1_frame(*p);
+  auto const                       start = p->now();
+  std::vector<std::uint16_t> const bytes{'a', 'b'};
+  p->t.r.port("USART1").receive(bytes);
+  p->advance(start + frame + frame / 2 - p->now());
+  CHECK(p->pop() == 'a');
+  p->advance(start + 2 * frame + flow_slack - p->now());
+  CHECK((p->isr() & isr_idle) == 0);
+  p->advance(start + 2 * frame + frame / 2 + flow_slack - p->now());
+  CHECK(p->rdr() == 'b');
+  CHECK((p->isr() & isr_idle) == 0);
+  p->advance(start + 3 * frame + frame / 2 + flow_slack - p->now());
+  CHECK((p->isr() & isr_idle) != 0);
 }

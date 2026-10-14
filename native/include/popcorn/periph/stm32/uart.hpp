@@ -139,6 +139,9 @@ struct line_frame
   friend auto operator==(line_frame const&, line_frame const&) -> bool = default;
 };
 
+/** @brief Most CTS changes a UART keeps pending, uart_port::set_cts. */
+inline constexpr std::size_t max_pending_cts = 65536;
+
 /**
  * @brief The far end of a UART line. Receives what the firmware transmits, one frame at a time.
  *        Called from the UART model's events and register writes, on the machine's host thread in
@@ -215,7 +218,8 @@ public:
    *        uart_error::noise NE with the frame's data. A break reads as 0 with FE and holds the
    *        line one frame time plus 2 bit times before the next frame. In FIFO mode as without
    *        it, a frame's flags rise when it reaches RDR. A frame finding the RX FIFO full is
-   *        dropped with its tag and sets ORE.
+   *        dropped with its tag and sets ORE. While ready_to_receive() is false the next frame
+   *        waits, and starts at the RDR read or flush that frees space.
    * @param frames Frames, with their tags.
    */
   virtual void receive_frames(std::span<host_frame const> frames) = 0;
@@ -237,6 +241,36 @@ public:
 
   /** @brief Host frames still queued by receive_frames(), not yet delivered to the receiver. */
   [[nodiscard]] virtual auto queued() const -> std::size_t = 0;
+
+  /**
+   * @brief Schedules a change of the port's nCTS input at @p at, RM0456 66.5.21: @p ready is
+   *        nCTS low, clear to send, the level at power-on. It applies through an event on
+   *        core::host_lane at exactly @p at. With CR3.CTSE 1 a frame starts only while the input
+   *        is ready, a frame in flight completes, and a held frame starts at the change to ready.
+   *        A frame starting at the instant of a change to not ready is not held, whatever the
+   *        order of that instant's events, as on the chip, where CTS must change 3 kernel clocks
+   *        before a frame end to hold the next frame. With CTSE 1 each change of the level sets
+   *        ISR.CTSIF. The level and the pending changes are board state: saved in snapshots and
+   *        kept across every MCU reset kind, each pending change at its board instant, see
+   *        core::clock::board_time.
+   * @param ready Whether the far end is ready to receive.
+   * @param at Virtual time of the change, the machine's time or later.
+   * @throws std::invalid_argument when @p at is before the machine's time or leaves the 64-bit
+   *         picosecond range of board time.
+   * @throws config_error when max_pending_cts changes are already pending.
+   */
+  virtual void set_cts(bool ready, vtime at) = 0;
+
+  /** @brief Number of changes set_cts() scheduled that have not applied yet. */
+  [[nodiscard]] virtual auto pending_cts() const -> std::size_t = 0;
+
+  /**
+   * @brief The port's RTS output as clear-to-send for the far end, RM0456 66.5.21: false only
+   *        with CR3.RTSE 1, CR3.DEM 0 and RDR full, or the RX FIFO full in FIFO mode. While it is
+   *        false, frames of receive_frames() wait before their start bit.
+   * @return Whether the receiver is ready for another frame.
+   */
+  [[nodiscard]] virtual auto ready_to_receive() const -> bool = 0;
 
   /**
    * @brief Queues a frame from another machine. Its data reaches the receiver at @p frame.end,

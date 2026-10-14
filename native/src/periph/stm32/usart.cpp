@@ -3,6 +3,8 @@
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/errors.hpp>
+#include <popcorn/core/scheduler.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
@@ -14,9 +16,11 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -30,6 +34,7 @@ constexpr std::uint32_t transmit_done = 0;
 constexpr std::uint32_t receive_due   = 1;
 constexpr std::uint32_t idle_due      = 2;
 constexpr std::uint32_t linked_due    = 3;
+constexpr std::uint32_t cts_due       = 4;
 constexpr std::size_t   fifo_depth    = 8;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
@@ -132,6 +137,15 @@ struct linked_frame
   friend auto operator==(linked_frame const&, linked_frame const&) -> bool = default;
 };
 
+struct cts_change
+{
+  std::uint64_t board_ps{};
+  std::uint64_t id{};
+  bool          ready{};
+
+  friend auto operator==(cts_change const&, cts_change const&) -> bool = default;
+};
+
 struct rx_entry
 {
   std::uint16_t data{};
@@ -163,6 +177,11 @@ struct usart_state
   [[= reflex::serde::rename{"rx_fifo"}]] std::vector<std::uint16_t> legacy_rx;
   /** @brief Host queue of a state saved before tagged frames, moved into host by usart::load(). */
   [[= reflex::serde::rename{"host"}]] std::vector<std::uint16_t> legacy_host;
+  bool                                                           cts_ready{true};
+  std::uint64_t                                                  cts_hold_from_ps{};
+  std::vector<cts_change>                                        cts_changes;
+  std::uint64_t                                                  next_cts{};
+  std::uint32_t                                                  cts_fired{};
 
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
@@ -247,6 +266,26 @@ struct lock
  *        and sends a break after the frame in flight, ahead of the TX FIFO: a frame time low,
  *        then 2 bits high before the next frame, SBKF clearing as the low part ends. A break from
  *        another machine reads as 0 with FE and never sets PE, LBDF is LIN only and not modelled.
+ *        RS232 flow control, RM0456 66.5.21: with CR3.CTSE a frame, a break included, starts only
+ *        while the nCTS input the far end drives, `uart_port::set_cts`, says ready, a frame in
+ *        flight completes, and a held frame starts at the change to ready, a break's 2-bit hold
+ *        kept. TC stays 0 while a frame is held. Changes apply through events on
+ *        core::host_lane at their own time, kept in the state with their board time and
+ *        rescheduled at every reset at the same instant. A frame starting at the instant of a
+ *        change to not ready is not held, whatever the event order of that instant. A change
+ *        runs at the first block boundary at or after its time: a frame a TDR or SBKRQ write
+ *        queued in that block, after the change, starts at the change, up to one block before
+ *        the write. Each change of the input with CTSE sets ISR.CTSIF, raising the IRQ with
+ *        CTSIE, ICR.CTSCF clears it. ISR.CTS reads the input while CTSE is 1 and 0 while it is
+ *        0: an unrouted CTS input reads 0, the reset value of USART_ISR and LPUART_ISR in
+ *        RM0456 66.8.10 and 67.7.8, and CTSE stands for the pin being routed as CTS. With
+ *        CR3.RTSE and DEM 0, RTS
+ *        says not ready while RDR is full, or the RX FIFO in FIFO mode,
+ *        `uart_port::ready_to_receive`: the next host frame waits before its start bit and
+ *        starts at the RDR read or the RXFRQ flush that frees space, so host frames never
+ *        overrun. With DEM the pin carries DE and the host is not held. Frames from another
+ *        machine are not held: the wire carries no flow control and they overrun as without
+ *        RTSE.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_port
 {
@@ -268,6 +307,9 @@ public:
 
   void               receive_frames(std::span<host_frame const> frames) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
+  void               set_cts(bool ready, vtime at) override;
+  [[nodiscard]] auto pending_cts() const -> std::size_t override;
+  [[nodiscard]] auto ready_to_receive() const -> bool override;
   void               attach(std::shared_ptr<uart_endpoint> far_end) override;
   void               receive_at(line_frame const& frame, std::uint32_t lane) override;
   void               cancel_in_flight(vtime at, std::uint32_t lane) override;
@@ -294,6 +336,11 @@ private:
   void expose();
   [[nodiscard]] auto next_host_frame() -> std::optional<host_frame>;
   [[nodiscard]] auto entry_of(host_frame const& frame) -> rx_entry;
+  [[nodiscard]] auto rx_space() const -> bool;
+  [[nodiscard]] auto clear_to_send(std::uint64_t start_ps) const -> bool;
+  [[nodiscard]] auto board_base() const -> std::uint64_t;
+  void               apply_cts(bool ready, std::uint64_t at_ps);
+  void               resume_host();
   void               schedule_linked();
   void               idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
@@ -358,6 +405,12 @@ private:
   field_ref                                    parity_odd_;
   field_ref                                    break_request_;
   field_ref                                    break_flag_;
+  field_ref                                    cts_enable_;
+  field_ref                                    rts_enable_;
+  field_ref                                    driver_enable_;
+  field_ref                                    cts_ie_;
+  field_ref                                    cts_;
+  field_ref                                    cts_flag_;
   std::optional<field_ref>                     one_bit_;
   std::vector<std::pair<field_ref, field_ref>> clears_;
   std::vector<field_ref>                       unsupported_;
@@ -444,6 +497,9 @@ usart::usart(
       flush_rx_{field("RQR", "RXFRQ")}, flush_tx_{field("RQR", "TXFRQ")},
       parity_enable_{field(cr1_, "PCE")}, parity_odd_{field(cr1_, "PS")},
       break_request_{field("RQR", "SBKRQ")}, break_flag_{field(isr_, "SBKF")},
+      cts_enable_{field("CR3", "CTSE")}, rts_enable_{field("CR3", "RTSE")},
+      driver_enable_{field("CR3", "DEM")}, cts_ie_{field("CR3", "CTSIE")}, cts_{field(isr_, "CTS")},
+      cts_flag_{field(isr_, "CTSIF")},
       one_bit_{
           std::ranges::contains(
               describe("CR3").fields,
@@ -455,7 +511,9 @@ usart::usart(
 {
   for(auto const& clear : describe("ICR").fields)
   {
-    auto const target = std::string_view{clear.name}.substr(0, clear.name.size() - 2);
+    auto const target = clear.name == "CTSCF"
+                          ? std::string_view{"CTSIF"}
+                          : std::string_view{clear.name}.substr(0, clear.name.size() - 2);
     if(clear.name.ends_with("CF")
        and std::ranges::contains(describe(isr_).fields, target, &field_desc::name))
     {
@@ -581,12 +639,20 @@ void usart::reset(register_file& regs, reset_kind)
   state_.rx_fifo.clear();
   state_.host.clear();
   state_.linked.clear();
-  state_.break_pending  = false;
-  state_.break_shifting = false;
-  state_.shifting       = false;
-  state_.receiving      = false;
-  state_.rx_due_ps      = 0;
-  state_.idle_pending   = false;
+  state_.break_pending    = false;
+  state_.break_shifting   = false;
+  state_.shifting         = false;
+  state_.receiving        = false;
+  state_.rx_due_ps        = 0;
+  state_.tx_end_ps        = 0;
+  state_.idle_pending     = false;
+  state_.cts_hold_from_ps = 0;
+  auto const base         = board_base();
+  for(auto const& change : std::span{state_.cts_changes}.subspan(state_.cts_fired))
+  {
+    auto const due = change.board_ps > base ? change.board_ps - base : 0;
+    ctx_.events.schedule_at(vtime{due}, cts_due, change.id, core::host_lane, ctx_.clock);
+  }
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
@@ -696,7 +762,11 @@ void usart::warn_unsupported()
 void usart::start_frame(std::uint64_t from_ps)
 {
   auto const queued = state_.break_pending or not state_.tx_fifo.empty();
-  if(state_.shifting or not queued or not enabled() or get(regs_, transmit_) == 0)
+  if(state_.shifting
+     or not queued
+     or not enabled()
+     or get(regs_, transmit_) == 0
+     or not clear_to_send(from_ps))
   {
     return;
   }
@@ -769,6 +839,7 @@ void usart::flags()
   update(regs_, busy_, state_.receiving ? 1 : 0);
   update(regs_, tx_ack_, enabled() and get(regs_, transmit_) != 0 ? 1 : 0);
   update(regs_, rx_ack_, enabled() and get(regs_, receive_) != 0 ? 1 : 0);
+  update(regs_, cts_, get(regs_, cts_enable_) != 0 and state_.cts_ready ? 1 : 0);
   regs_.poke(rdr_.offset, state_.rx_fifo.empty() ? 0 : state_.rx_fifo.front().data);
   interrupts();
   auto const up        = enabled();
@@ -792,6 +863,7 @@ void usart::interrupts()
                   or on(rx_full_, rx_full_ie_)
                   or on(idle_, idle_ie_)
                   or on(parity_, parity_ie_)
+                  or on(cts_flag_, cts_ie_)
                   or on(overrun_, rx_not_empty_ie_)
                   or on(tx_threshold_flag_, tx_threshold_ie_)
                   or on(rx_threshold_flag_, rx_threshold_ie_)
@@ -826,17 +898,13 @@ void usart::control_written(std::uint32_t, std::uint32_t)
     state_.idle_pending   = false;
     state_.break_pending  = false;
     state_.break_shifting = false;
+    state_.tx_end_ps      = 0;
     update(regs_, break_flag_, 0);
     update(regs_, complete_, 1);
   }
-  else if(get(regs_, receive_) != 0 and not state_.receiving and not state_.host.empty())
+  else if(get(regs_, receive_) != 0)
   {
-    if(auto const ps = frame_ps(); ps != 0)
-    {
-      state_.receiving = true;
-      state_.rx_due_ps =
-          schedule(receive_due, std::max(ctx_.clock.time().ps, state_.rx_due_ps), ps);
-    }
+    resume_host();
   }
   start_frame(ctx_.clock.time().ps);
   flags();
@@ -881,6 +949,7 @@ void usart::request_written(std::uint32_t, std::uint32_t now)
   if(flush_rx_.of(now) != 0)
   {
     state_.rx_fifo.clear();
+    resume_host();
   }
   if(flush_tx_.of(now) != 0)
   {
@@ -903,6 +972,7 @@ auto usart::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
   auto const value = state_.rx_fifo.front().data;
   state_.rx_fifo.erase(state_.rx_fifo.begin());
   expose();
+  resume_host();
   flags();
   return read_lanes(value, offset, size);
 }
@@ -963,6 +1033,33 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     flags();
     return;
   }
+  if(kind == cts_due)
+  {
+    auto&      changes = state_.cts_changes;
+    auto const live    = changes.begin() + state_.cts_fired;
+    auto const found   = std::ranges::find(live, changes.end(), payload, &cts_change::id);
+    if(found != changes.end())
+    {
+      auto const change = *found;
+      if(found == live)
+      {
+        ++state_.cts_fired;
+        if(state_.cts_fired * 2 >= changes.size())
+        {
+          changes.erase(changes.begin(), changes.begin() + state_.cts_fired);
+          state_.cts_fired = 0;
+        }
+      }
+      else
+      {
+        changes.erase(found);
+      }
+      auto const base = board_base();
+      auto const at   = change.board_ps > base ? change.board_ps - base : 0;
+      apply_cts(change.ready, std::min(at, ctx_.clock.time().ps));
+    }
+    return;
+  }
   if(kind > idle_due or payload != state_.generation[kind])
   {
     return;
@@ -981,9 +1078,11 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     {
       update(regs_, break_flag_, 0);
       next += 4 * frame_ps() / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)]);
+      state_.tx_end_ps = next;
     }
     start_frame(next);
-    if(not state_.shifting)
+    auto const held = state_.break_pending or not state_.tx_fifo.empty();
+    if(not state_.shifting and not(held and not clear_to_send(next)))
     {
       update(regs_, complete_, 1);
     }
@@ -1012,7 +1111,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
   auto const hold = frame->kind == frame_kind::brk
                       ? 4 * ps / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)])
                       : 0;
-  if(ps != 0 and not state_.host.empty())
+  if(ps != 0 and not state_.host.empty() and ready_to_receive())
   {
     state_.receiving = true;
     state_.rx_due_ps = schedule(receive_due, state_.rx_due_ps + hold, ps);
@@ -1023,7 +1122,7 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     ++state_.generation[idle_due];
     state_.idle_due_ps = schedule(idle_due, state_.rx_due_ps, ps);
   }
-  if(state_.host.empty())
+  if(not state_.receiving)
   {
     state_.rx_due_ps += hold;
   }
@@ -1192,7 +1291,20 @@ void usart::cancel_in_flight(vtime at, std::uint32_t lane)
 void usart::receive_frames(std::span<host_frame const> frames)
 {
   state_.host.insert(state_.host.end(), frames.begin(), frames.end());
-  if(state_.receiving or state_.host.empty())
+  if(state_.receiving)
+  {
+    return;
+  }
+  resume_host();
+  if(state_.receiving)
+  {
+    flags();
+  }
+}
+
+void usart::resume_host()
+{
+  if(state_.receiving or state_.host.empty() or not ready_to_receive())
   {
     return;
   }
@@ -1202,8 +1314,77 @@ void usart::receive_frames(std::span<host_frame const> frames)
     ++state_.generation[idle_due];
     state_.idle_pending = false;
     state_.rx_due_ps = schedule(receive_due, std::max(ctx_.clock.time().ps, state_.rx_due_ps), ps);
-    flags();
   }
+}
+
+auto usart::rx_space() const -> bool
+{
+  return state_.rx_fifo.size() < (fifo() ? fifo_depth : 1);
+}
+
+auto usart::ready_to_receive() const -> bool
+{
+  return get(regs_, rts_enable_) == 0 or get(regs_, driver_enable_) != 0 or rx_space();
+}
+
+auto usart::clear_to_send(std::uint64_t start_ps) const -> bool
+{
+  return get(regs_, cts_enable_) == 0 or state_.cts_ready or start_ps < state_.cts_hold_from_ps;
+}
+
+auto usart::board_base() const -> std::uint64_t
+{
+  return ctx_.clock.board_time().ps - ctx_.clock.time().ps;
+}
+
+void usart::set_cts(bool ready, vtime at)
+{
+  auto const now  = ctx_.clock.time().ps;
+  auto const base = board_base();
+  if(at.ps < now)
+  {
+    throw std::invalid_argument(
+        std::format("a CTS change at {} ps lies before the machine time {} ps", at.ps, now));
+  }
+  if(at.ps > std::numeric_limits<std::uint64_t>::max() - base)
+  {
+    throw std::invalid_argument("a CTS change time leaves the 64-bit picosecond range");
+  }
+  if(pending_cts() >= max_pending_cts)
+  {
+    throw config_error(
+        desc_.name, 0, "cts", std::format("at most {} pending CTS changes", max_pending_cts));
+  }
+  auto const change = cts_change{.board_ps = base + at.ps, .id = ++state_.next_cts, .ready = ready};
+  state_.cts_changes.insert(
+      std::ranges::upper_bound(
+          state_.cts_changes.begin() + state_.cts_fired, state_.cts_changes.end(), change.board_ps,
+          {}, &cts_change::board_ps),
+      change);
+  ctx_.events.schedule_at(at, cts_due, change.id, core::host_lane, ctx_.clock);
+}
+
+auto usart::pending_cts() const -> std::size_t
+{
+  return state_.cts_changes.size() - state_.cts_fired;
+}
+
+void usart::apply_cts(bool ready, std::uint64_t at_ps)
+{
+  if(std::exchange(state_.cts_ready, ready) == ready)
+  {
+    return;
+  }
+  if(not ready)
+  {
+    state_.cts_hold_from_ps = at_ps + 1;
+  }
+  if(get(regs_, cts_enable_) != 0)
+  {
+    update(regs_, cts_flag_, 1);
+  }
+  start_frame(std::max(at_ps, state_.tx_end_ps));
+  flags();
 }
 
 auto usart::queued() const -> std::size_t
