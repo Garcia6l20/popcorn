@@ -213,8 +213,8 @@ struct machine::peripheral_slot
 class flat_edge_table
 {
 public:
-  /** @brief Adds one to the count of the edge from @p from to @p to. */
-  void count(address from, address to);
+  /** @brief Adds one to the count of an edge. @p key is `from << 32 | to`. */
+  void count(std::uint64_t key);
 
   /** @brief Edges with a non-zero count, ordered by from then to. */
   [[nodiscard]] auto edges() const -> std::vector<edge_counter>;
@@ -225,8 +225,7 @@ public:
 private:
   struct slot
   {
-    address       from{};
-    address       to{};
+    std::uint64_t key{};
     std::uint64_t hits{};
   };
 
@@ -251,8 +250,10 @@ struct coverage_state
   std::size_t last_range = 0;
   /** @brief Edge counters. */
   flat_edge_table edges{};
-  /** @brief Start of the previous counted block. */
-  address previous{};
+  /** @brief Start of the previous counted block, the high half of the next edge key. Kept in
+   * 64 bits: a 32-bit spill of it reloaded as the 64-bit key fails store forwarding once per
+   * block. */
+  std::uint64_t previous{};
   /** @brief Whether previous starts an edge: false after a block outside every range or a
    * control transfer that is no branch. */
   bool has_previous = false;
