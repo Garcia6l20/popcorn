@@ -6,6 +6,7 @@
 
 #include <reflex/enum.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -15,12 +16,12 @@
 
 namespace popcorn::core
 {
-/** @brief Table of a machine's intercepts, return hooks, watches, trace sinks and log sinks,
- * private to the machine. */
+/** @brief Table of a machine's intercepts, return hooks, probes, watches, trace sinks and log
+ * sinks, private to the machine. */
 class hook_registry;
 
 /**
- * @brief Owner of one intercept, return hook, watch, trace sink or log sink: removes it on
+ * @brief Owner of one intercept, return hook, probe, watch, trace sink or log sink: removes it on
  *        destruction or reset(). Move-only. Outliving the machine is safe, the removal is then a
  *        no-op. Removing a hook changes the translated code of a running slice, so reset()
  *        refuses it while a slice runs, handlers included. Destruction and move assignment
@@ -72,6 +73,59 @@ using intercept_handle = hook_handle;
 
 /** @brief Owner of one watch. */
 using watch_handle = hook_handle;
+
+/**
+ * @brief Arrivals a probe counted at its address, written by the thread that runs the machine and
+ *        read from any thread, with no lock.
+ */
+class probe_hits
+{
+public:
+  /** @brief Arrivals so far. */
+  [[nodiscard]] auto count() const noexcept -> std::uint64_t
+  {
+    return count_.load(std::memory_order_acquire);
+  }
+
+  /** @brief Virtual time since reset at the first arrival, before the instruction executed,
+   * empty before it. */
+  [[nodiscard]] auto first() const noexcept -> std::optional<vtime>
+  {
+    if(count() == 0)
+    {
+      return std::nullopt;
+    }
+    return vtime{first_ps_.load(std::memory_order_relaxed)};
+  }
+
+  /**
+   * @brief Counts one arrival, keeping @p at when it is the first. Called by the one thread that
+   *        runs the machine.
+   * @param at Virtual time of the arrival.
+   */
+  void record(vtime at) noexcept
+  {
+    auto const seen = count_.load(std::memory_order_relaxed);
+    if(seen == 0)
+    {
+      first_ps_.store(at.ps, std::memory_order_relaxed);
+    }
+    count_.store(seen + 1, std::memory_order_release);
+  }
+
+private:
+  std::atomic<std::uint64_t> count_{};
+  std::atomic<std::uint64_t> first_ps_{};
+};
+
+/** @brief A probe added with machine::add_probe(): its owner and the arrivals it counts. */
+struct probe_handle
+{
+  /** @brief Removes the probe. The counts stay readable after. */
+  hook_handle hook;
+  /** @brief Arrivals counted, shared with the machine while the probe is installed. */
+  std::shared_ptr<probe_hits const> hits;
+};
 
 /** @brief What the run loop does after an intercept handler returned. */
 enum class[[= reflex::derive{reflex::Format}]] intercept_action

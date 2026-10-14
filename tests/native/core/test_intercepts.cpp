@@ -571,3 +571,195 @@ TEST_CASE("an exception return met in a slice ended by its budget stops the next
   CHECK(result.executed.value == 0);
   CHECK(g.reg("pc") == pc);
 }
+
+namespace
+{
+constexpr std::uint64_t six_calls = 100;
+
+auto in_loop_six() -> fixture
+{
+  auto f = booted();
+  f.set("pc", fn("loop_six"));
+  f.set("r4", six_calls);
+  return f;
+}
+
+auto loop_to_end(fixture const& f, core::slice_request request = {}) -> popcorn::stop
+{
+  auto const [stop, executed] = run_out(f, request);
+  REQUIRE(stop.reason == stop_reason::user);
+  return stop;
+}
+
+auto stepped_to_end(fixture const& f) -> popcorn::stop
+{
+  for(;;)
+  {
+    auto const stop = f.run_to_stop({.exact_instructions = icount{1}});
+    if(stop.reason != stop_reason::budget)
+    {
+      REQUIRE(stop.reason == stop_reason::user);
+      return stop;
+    }
+  }
+}
+
+auto reached_at(address at) -> popcorn::vtime
+{
+  auto f                      = in_loop_six();
+  auto const [stop, executed] = run_out(f, {.until = at});
+  REQUIRE(stop.reason == stop_reason::address);
+  return stop.time;
+}
+}
+
+TEST_CASE("a probe counts every arrival and keeps the time before the first, however run")
+{
+  for(auto const at : {fn("six"), fn("six") + 2})
+  {
+    CAPTURE(at);
+    auto const first = reached_at(at);
+    for(auto const length : {std::uint64_t{1'000'000}, std::uint64_t{1}, std::uint64_t{7}})
+    {
+      CAPTURE(length);
+      auto       f     = in_loop_six();
+      auto const probe = f.target->add_probe(at);
+      CHECK(probe.hits->count() == 0);
+      CHECK_FALSE(probe.hits->first().has_value());
+      std::ignore = loop_to_end(f, {.max_instructions = icount{length}});
+      CHECK(probe.hits->count() == six_calls);
+      CHECK(probe.hits->first() == first);
+    }
+    auto       f     = in_loop_six();
+    auto const probe = f.target->add_probe(at);
+    std::ignore      = stepped_to_end(f);
+    CHECK(probe.hits->count() == six_calls);
+    CHECK(probe.hits->first() == first);
+  }
+}
+
+TEST_CASE("a probe added after its code was translated counts from then on, and never stops")
+{
+  auto f = in_loop_six();
+  f.set("r4", 3);
+  std::ignore      = loop_to_end(f);
+  auto const probe = f.target->add_probe(fn("six") + 2);
+  f.set("pc", fn("loop_six"));
+  f.set("r4", six_calls);
+  auto const [stop, executed] = run_out(f, {.budget_left = icount{200}});
+  CHECK(stop.reason == stop_reason::budget);
+  auto const counted = probe.hits->count();
+  CHECK(counted > 0);
+  CHECK(counted < six_calls);
+  std::ignore = loop_to_end(f);
+  CHECK(probe.hits->count() == six_calls);
+}
+
+TEST_CASE("a probe counts each arrival once beside intercepts, whatever the add order")
+{
+  for(auto const probe_first : {true, false})
+  {
+    CAPTURE(probe_first);
+    auto                              f = in_loop_six();
+    std::optional<core::probe_handle> probe;
+    if(probe_first)
+    {
+      probe = f.target->add_probe(fn("six"));
+    }
+    int        calls = 0;
+    auto const skip  = f.target->add_intercept(fn("six"), [&](core::intercept_call const&) {
+      ++calls;
+      return core::intercept_result::returns(i32(0));
+    });
+    if(not probe_first)
+    {
+      probe = f.target->add_probe(fn("six"));
+    }
+    std::ignore = loop_to_end(f);
+    CHECK(calls == six_calls);
+    CHECK(probe->hits->count() == six_calls);
+  }
+  auto       f       = in_loop_six();
+  auto const probe   = f.target->add_probe(fn("six"));
+  int        stops   = 0;
+  auto const stopper = f.target->add_intercept(fn("six"), [&](core::intercept_call const&) {
+    ++stops;
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  auto const after   = f.target->add_probe(fn("six"));
+  auto const stop    = f.run_to_stop();
+  REQUIRE(stop.reason == stop_reason::user);
+  CHECK(f.reg("pc") == fn("six"));
+  CHECK(probe.hits->count() == 1);
+  CHECK(after.hits->count() == 1);
+  core::slice_request step{.exact_instructions = icount{1}};
+  CHECK(f.run_to_stop(step).reason == stop_reason::budget);
+  CHECK(stops == 1);
+  CHECK(probe.hits->count() == 1);
+  CHECK(after.hits->count() == 1);
+}
+
+TEST_CASE("a removed probe counts no more and keeps its counts, a restore keeps it installed")
+{
+  auto       f     = in_loop_six();
+  auto const saved = f.target->snapshot();
+  auto       probe = f.target->add_probe(fn("six"));
+  std::ignore      = loop_to_end(f);
+  REQUIRE(probe.hits->count() == six_calls);
+  auto const first = probe.hits->first();
+  f.target->restore(saved);
+  std::ignore = loop_to_end(f);
+  CHECK(probe.hits->count() == 2 * six_calls);
+  CHECK(probe.hits->first() == first);
+  probe.hook.reset();
+  CHECK_FALSE(probe.hook.active());
+  f.set("pc", fn("loop_six"));
+  f.set("r4", six_calls);
+  std::ignore = loop_to_end(f);
+  CHECK(probe.hits->count() == 2 * six_calls);
+  f.target->restore(saved);
+  std::ignore = loop_to_end(f);
+  CHECK(probe.hits->count() == 2 * six_calls);
+}
+
+TEST_CASE("a probe counts an arrival once when the intercept that stopped there is removed")
+{
+  auto       f       = in_loop_six();
+  auto const probe   = f.target->add_probe(fn("six"));
+  auto       stopper = f.target->add_intercept(fn("six"), [](core::intercept_call const&) {
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(probe.hits->count() == 1);
+  stopper.reset();
+  core::slice_request step{.exact_instructions = icount{1}};
+  CHECK(f.run_to_stop(step).reason == stop_reason::budget);
+  CHECK(probe.hits->count() == 1);
+  std::ignore = loop_to_end(f);
+  CHECK(probe.hits->count() == six_calls);
+}
+
+TEST_CASE("an intercept and a return hook run once per arrival when stepped")
+{
+  for(auto const at : {fn("six"), fn("six") + 2})
+  {
+    CAPTURE(at);
+    auto          f       = in_loop_six();
+    std::uint64_t calls   = 0;
+    auto const    counter = f.target->add_intercept(at, [&](core::intercept_call const&) {
+      ++calls;
+      return core::intercept_result::proceed();
+    });
+    std::ignore           = stepped_to_end(f);
+    CHECK(calls == six_calls);
+  }
+  auto          f       = in_loop_six();
+  std::uint64_t returns = 0;
+  auto const    hook    = f.target->add_return_hook(
+      fn("six"), {}, arch::value_kind::i32, [&](core::returned_call const& r) {
+        CHECK(r.value == 5);
+        ++returns;
+      });
+  std::ignore = stepped_to_end(f);
+  CHECK(returns == six_calls);
+}

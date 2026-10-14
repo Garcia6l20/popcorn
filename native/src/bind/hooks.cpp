@@ -69,6 +69,46 @@ auto hook::active() const noexcept -> bool
   return handle_.active();
 }
 
+auto hook::take() noexcept -> core::hook_handle
+{
+  return std::exchange(handle_, core::hook_handle{});
+}
+
+void hook::give_back(core::hook_handle handle) noexcept
+{
+  handle_ = std::move(handle);
+}
+
+probe_hook::probe_hook(core::probe_handle handle, detail::host_ref host)
+    : hook_{std::make_shared<hook>(std::move(handle.hook), std::move(host))},
+      hits_{std::move(handle.hits)}
+{}
+
+auto probe_hook::count() const noexcept -> std::uint64_t
+{
+  return hits_->count();
+}
+
+auto probe_hook::first_ps() const noexcept -> std::optional<std::uint64_t>
+{
+  return hits_->first().transform([](vtime at) { return at.ps; });
+}
+
+auto probe_hook::active() const noexcept -> bool
+{
+  return hook_->active();
+}
+
+auto probe_hook::removal() const noexcept -> std::shared_ptr<hook> const&
+{
+  return hook_;
+}
+
+auto probe_hook::hits() const noexcept -> std::shared_ptr<core::probe_hits const> const&
+{
+  return hits_;
+}
+
 call_view::call_view(core::intercept_call const& call, detail::alive_flag alive) noexcept
     : call_{&call}, alive_{std::move(alive)}
 {}
@@ -118,6 +158,49 @@ auto machine_handle::add_intercept(address at, nb::object handler, bool once) ->
         once ? core::intercept_mode::once : core::intercept_mode::every);
   });
   return hook{std::move(handle), slot_};
+}
+
+auto machine_handle::add_probe(address at) -> probe_hook
+{
+  auto made = std::make_shared<std::optional<probe_hook>>();
+  at_boundary([made, at, slot = slot_](core::machine& target) {
+    made->emplace(target.add_probe(at), slot);
+  });
+  return std::move(**made);
+}
+
+void machine_handle::remove_probe(probe_hook const& probe)
+{
+  if(not probe.active())
+  {
+    return;
+  }
+  if(host_->owns_engine())
+  {
+    probe.removal()->remove();
+    return;
+  }
+  require_boundary_caller();
+  auto const removal = std::make_shared<hook>(probe.removal()->take(), slot_);
+  try
+  {
+    at_boundary([removal](core::machine&) { removal->remove(); });
+  }
+  catch(nb::python_error const&)
+  {
+    throw;
+  }
+  catch(...)
+  {
+    probe.removal()->give_back(removal->take());
+    throw;
+  }
+}
+
+auto machine_handle::predicate_probe_hit(probe_hook const& probe) const -> native_predicate
+{
+  return native_predicate{[hits = probe.hits()] { return hits->count() > 0; }, slot_}.described(
+      "the core to reach a probed address");
 }
 
 auto machine_handle::add_return_hook(

@@ -1583,6 +1583,15 @@ auto waiter_handle::ended() const noexcept -> bool
   return waiter_->ended.load(std::memory_order_relaxed);
 }
 
+auto waiter_handle::deadline() const noexcept -> std::optional<vtime>
+{
+  if(waiter_->spec.after and not waiter_->since)
+  {
+    return std::nullopt;
+  }
+  return waiter_->spec.deadline;
+}
+
 auto waiter_handle::holders() const noexcept -> long
 {
   return waiter_.use_count();

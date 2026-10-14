@@ -313,6 +313,15 @@ public:
   }
 
   /**
+   * @brief Virtual time of an instruction count of the current epoch, at the current rate.
+   * @param count Instruction count, raised to the epoch's start when below it.
+   */
+  [[nodiscard]] auto time_at(icount count) const -> vtime
+  {
+    return clock_.time_at(std::max(count, clock_.state_.epoch_icount));
+  }
+
+  /**
    * @brief Moves time to a deadline while the core idles, as a tickless WFI does.
    * @param deadline Instruction count to move to, not before now.
    */

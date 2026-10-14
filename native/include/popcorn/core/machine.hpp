@@ -527,9 +527,9 @@ public:
    *   carry them.
    * - restore() does not undo load(): images loaded since the snapshot stay listed in
    *   loaded_images() and in the image digests of later snapshots, while their bytes revert.
-   * - Not restored: the intercept, return hook, watch and sink tables, which are configuration,
-   *   the trace ring and coverage counters, which are cumulative, and host bridges, which are
-   *   outside the machine.
+   * - Not restored: the intercept, return hook, probe, watch and sink tables, which are
+   *   configuration, the trace ring, coverage counters and probe counts, which are cumulative,
+   *   and host bridges, which are outside the machine.
    *
    * @param saved Snapshot to restore.
    * @throws machine_running while a slice runs, handlers included.
@@ -555,6 +555,18 @@ public:
       address           at,
       intercept_handler handler,
       intercept_mode    mode = intercept_mode::every) -> intercept_handle pre(is_enumerator(mode));
+
+  /**
+   * @brief Counts arrivals at a code address without stopping or calling anything: the same
+   *        code hook as add_intercept(), sharing its site, with the time of the first arrival.
+   *        An arrival counts once, before the instruction executes and before every intercept
+   *        of the address, whatever their add order, also when an intercept then skips the
+   *        function or stops the run: resuming from that stop does not count it again.
+   * @param at Code address, any instruction, not only a block start.
+   * @return The handle removing the probe, and the counts, which outlive it.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto add_probe(address at) -> probe_handle;
 
   /**
    * @brief Calls a handler when a function returns: captures the arguments at entry and the

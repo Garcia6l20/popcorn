@@ -53,9 +53,63 @@ public:
   [[= py::doc{"Whether the hook is still installed."}]] [[nodiscard]] auto active() const noexcept
       -> bool;
 
+  /**
+   * @brief Moves the native handle out, leaving this hook inactive, on the caller's thread so
+   *        that a removal posted to the machine's thread never writes the handle other threads
+   *        read.
+   * @return The handle.
+   */
+  [[= py::skip]] [[nodiscard]] auto take() noexcept -> core::hook_handle;
+
+  /**
+   * @brief Takes back a handle take() moved out, when its removal was refused before it was
+   *        posted.
+   * @param handle The handle take() returned.
+   */
+  [[= py::skip]] void give_back(core::hook_handle handle) noexcept;
+
 private:
   core::hook_handle handle_;
   detail::host_ref  host_;
+};
+
+/**
+ * @brief A probe: the hook that removes it and the arrivals it counted, readable from any thread
+ *        while the machine runs, and after the removal.
+ */
+class[[= py::rename{"ProbeHook"}]] probe_hook
+{
+public:
+  /**
+   * @brief Owns a native probe.
+   * @param handle The probe.
+   * @param host The machine's host, through which a removal reaches the engine.
+   */
+  [[= py::skip]] probe_hook(core::probe_handle handle, detail::host_ref host);
+
+  /** @brief Arrivals counted so far. */
+  [[= py::doc{"Arrivals counted so far."}]] [[nodiscard]] auto count() const noexcept
+      -> std::uint64_t;
+
+  /** @brief Virtual time of the first arrival in picoseconds, since reset, None before it. */
+  [[= py::doc{
+      "Virtual time of the first arrival in picoseconds, None before it."}]] [[nodiscard]] auto
+      first_ps() const noexcept -> std::optional<std::uint64_t>;
+
+  /** @brief Whether the probe is still installed. */
+  [[= py::doc{"Whether the probe is still installed."}]] [[nodiscard]] auto active() const noexcept
+      -> bool;
+
+  /** @brief The hook that removes the probe. */
+  [[= py::skip]] [[nodiscard]] auto removal() const noexcept -> std::shared_ptr<hook> const&;
+
+  /** @brief The counts, shared with the machine. */
+  [[= py::skip]] [[nodiscard]] auto hits() const noexcept
+      -> std::shared_ptr<core::probe_hits const> const&;
+
+private:
+  std::shared_ptr<hook>                   hook_;
+  std::shared_ptr<core::probe_hits const> hits_;
 };
 
 /** @brief A call arriving at an intercepted address, valid only while its handler runs. */

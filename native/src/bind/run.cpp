@@ -534,6 +534,12 @@ auto machine_handle::wait_predicate_ended(
   return waiting_on({.ready = ready.test()}, for_ps, deadline_ps, wait_shape::ended);
 }
 
+auto machine_handle::wait_predicate_timed(native_predicate const& ready, std::uint64_t for_ps)
+    -> host_future_handle
+{
+  return waiting_on({.ready = ready.test()}, for_ps, std::nullopt, wait_shape::timed);
+}
+
 auto machine_handle::wait_gated(
     native_predicate const&      gate,
     nb::object                   ready,
@@ -676,6 +682,10 @@ auto machine_handle::waiting_on(
                 return nb::object{nb::make_tuple(record(stopped), waiting.fired())};
               case wait_shape::ended:
                 return nb::object{nb::make_tuple(record(stopped), waiting.ended())};
+              case wait_shape::timed:
+                return nb::object{nb::make_tuple(
+                    record(stopped), waiting.ended(),
+                    waiting.deadline().transform([](vtime at) { return at.ps; }))};
               case wait_shape::stop:
                 break;
             }
@@ -726,6 +736,65 @@ auto machine_handle::session_open() const -> bool
   }
   auto const held = lock_releasing();
   return host_->session_open(held, core::member_id{});
+}
+
+void machine_handle::require_boundary_caller() const
+{
+  detail::raise_kept_log_error(*slot_->logs);
+  if(core::detail::on_host_thread or core::detail::host_locks_held > 0)
+  {
+    throw std::runtime_error("a handler accesses the machine directly");
+  }
+  if(host_->abandoned())
+  {
+    throw core::machine_closed("the host was abandoned");
+  }
+}
+
+void machine_handle::at_boundary(std::move_only_function<void(core::machine&)> body)
+{
+  if(host_->owns_engine())
+  {
+    access(body);
+    return;
+  }
+  require_boundary_caller();
+  std::optional<core::host_future<vtime>> posted;
+  {
+    auto const held = lock_releasing();
+    if(host_->busy(held, core::member_id{}))
+    {
+      posted = host_->post(held, core::member_id{}, std::move(body));
+    }
+  }
+  if(not posted)
+  {
+    access(body);
+    return;
+  }
+  detail::count_interruptible_wait();
+  for(;;)
+  {
+    auto done = false;
+    {
+      nb::gil_scoped_release const released;
+      done = posted->wait_for(std::chrono::milliseconds{50});
+    }
+    if(done)
+    {
+      break;
+    }
+    if(PyErr_CheckSignals() != 0)
+    {
+      nb::python_error const raised;
+      if(auto const held = detail::try_lock_releasing_gil(*host_); held.owns_lock())
+      {
+        std::ignore = host_->withdraw(held, core::member_id{}, *posted);
+      }
+      throw raised;
+    }
+  }
+  std::ignore = posted->get();
 }
 
 auto machine_handle::submit(nb::object body, std::optional<std::uint64_t> at_ps)

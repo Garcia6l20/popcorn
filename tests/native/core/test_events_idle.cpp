@@ -997,6 +997,19 @@ TEST_CASE("a lane event posted after a held slice fires as if posted before it")
   CHECK(order == std::vector<std::uint64_t>{1, 2, 50, 3});
 }
 
+TEST_CASE("a probe after a CPU rate change in its block keeps the time of its instruction")
+{
+  auto const at = scratch_code + 2 * (rate_change_nth + 50);
+  lanes      reference{true, true};
+  auto const stop = reference.f.run_to_stop({.until = at});
+  REQUIRE(stop.reason == stop_reason::address);
+  lanes      l{true, true};
+  auto const probe = l.f.target->add_probe(at);
+  std::ignore      = l.f.run_to_stop({.budget_left = icount{long_block - 1}});
+  REQUIRE(probe.hits->count() == 1);
+  CHECK(probe.hits->first() == stop.time);
+}
+
 TEST_CASE("a rate change in the held block gives the same order to early and late lane posts")
 {
   for(auto const exact_epoch : {false, true})

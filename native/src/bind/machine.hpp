@@ -450,6 +450,19 @@ public:
           std::optional<std::uint64_t> deadline_ps) -> host_future_handle;
 
   /**
+   * @brief wait_predicate_ended() also returning when the wait would have ended on time.
+   * @param ready The predicate.
+   * @param for_ps As wait().
+   * @return A HostFuture of a (StopInfo, ended, deadline_ps) tuple, deadline_ps the virtual time
+   *         in picoseconds @p for_ps past the boundary that registered the wait, None when the
+   *         free run ended before one did.
+   * @throws std::runtime_error without an open free run.
+   */
+  [[= py::doc{"wait_predicate_ended() returning (StopInfo, ended, deadline_ps)."}]] auto
+      wait_predicate_timed(native_predicate const& ready, std::uint64_t for_ps)
+          -> host_future_handle;
+
+  /**
    * @brief Starts a goal that stops when a native predicate holds, evaluated after every event
    *        and at slice ends with no GIL, or after @p for_ps.
    * @param ready The predicate.
@@ -915,6 +928,34 @@ public:
       add_intercept(address at, reflex::py::nb::object handler, bool once) -> hook;
 
   /**
+   * @brief Counts arrivals at an address with no handler and no GIL, as core::machine::add_probe.
+   *        Parked or from a callback of this machine between slices, it is added at once. While
+   *        the machine runs, it is added on the machine's thread at the next block boundary and
+   *        this call waits for it, without the GIL.
+   * @param at Code address.
+   * @throws machine_running from a handler of this machine during a slice.
+   * @throws std::runtime_error from a callback of another machine.
+   */
+  [[= py::doc{"Count arrivals at an address, added at the next boundary while running."}]] auto
+      add_probe(address at) -> probe_hook;
+
+  /**
+   * @brief Removes a probe as add_probe() adds one: at once while parked, at the next block
+   *        boundary while the machine runs, this call waiting for it. Its counts stay readable.
+   *        While the machine runs the probe turns inactive at the call, and a signal that
+   *        interrupts the wait still removes it at the next boundary.
+   * @param probe The probe.
+   * @throws machine_running from a handler of this machine during a slice.
+   * @throws std::runtime_error from a callback of another machine.
+   */
+  [[= py::doc{"Remove a probe, at the next boundary while running."}]] void
+      remove_probe(probe_hook const& probe);
+
+  /** @brief A predicate true once a probe counted an arrival. */
+  [[= py::doc{"Predicate: the probe counted an arrival."}]] [[nodiscard]] auto
+      predicate_probe_hit(probe_hook const& probe) const -> native_predicate;
+
+  /**
    * @brief Calls a handler when a function returns.
    * @param at Function entry.
    * @param args Kind of each argument captured at entry.
@@ -1252,7 +1293,17 @@ private:
     stop,
     fired,
     ended,
+    timed,
   };
+
+  /**
+   * @brief Refuses a caller at_boundary() cannot serve once it does not own the engine.
+   * @throws std::runtime_error from a callback of another machine.
+   * @throws core::machine_closed when the host was abandoned.
+   */
+  void require_boundary_caller() const;
+
+  void at_boundary(std::move_only_function<void(core::machine&)> body);
 
   auto run_test(
       std::function<bool()>        test,

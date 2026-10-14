@@ -50,9 +50,7 @@ constexpr auto size_mask(std::uint32_t size) noexcept -> std::uint32_t
 }
 }
 
-void machine::run_state::add_to_site(
-    address                                       at,
-    std::variant<intercept_entry*, return_entry*> entry)
+auto machine::run_state::site_at(address at) -> code_site&
 {
   auto& site = sites[at];
   if(not site)
@@ -70,12 +68,50 @@ void machine::run_state::add_to_site(
         uc_ctl_remove_cache(engine, at, std::uint64_t{at} + 4),
         std::format("removing translated code at {:#010x}", at));
   }
-  site->entries.push_back(entry);
+  return *site;
+}
+
+void machine::run_state::add_to_site(
+    address                                       at,
+    std::variant<intercept_entry*, return_entry*> entry)
+{
+  site_at(at).entries.push_back(entry);
+}
+
+void machine::run_state::add_probe_to_site(address at, probe_entry entry)
+{
+  site_at(at).probes.push_back(std::move(entry));
+}
+
+auto machine::run_state::arrival_time(address addr) const -> vtime
+{
+  auto const now = owner.clock_driver_.exact_now();
+  if(stepping)
+  {
+    return owner.clock_driver_.time_at(now);
+  }
+  auto const inside = addr - block_pc < max_insn_bytes * block_size;
+  auto const before = inside ? arch->instructions_between(block_pc, addr) : std::nullopt;
+  auto const ahead  = before and *before < block_size ? block_size - *before : 0;
+  return owner.clock_driver_.time_at(icount{now.value - std::min<std::uint64_t>(ahead, now.value)});
 }
 
 void machine::run_state::remove_hook(std::uint64_t id) noexcept
 {
-  auto const drop_from_site = [this](address at, auto* entry) {
+  auto const drop_site_when_empty = [this](auto found) {
+    auto const at = found->first;
+    if(found->second->entries.empty() and found->second->probes.empty())
+    {
+      uc_hook_del(engine, found->second->hook);
+      uc_ctl_remove_cache(engine, at, std::uint64_t{at} + 4);
+      sites.erase(found);
+      if(resume_past and resume_past->first == at)
+      {
+        resume_past.reset();
+      }
+    }
+  };
+  auto const drop_from_site = [this, &drop_site_when_empty](address at, auto* entry) {
     auto const found = sites.find(at);
     if(found == sites.end())
     {
@@ -97,17 +133,18 @@ void machine::run_state::remove_hook(std::uint64_t id) noexcept
       --resume_past->second;
     }
     site.entries.erase(index);
-    if(site.entries.empty())
-    {
-      uc_hook_del(engine, site.hook);
-      uc_ctl_remove_cache(engine, at, std::uint64_t{at} + 4);
-      sites.erase(found);
-      if(resume_past and resume_past->first == at)
-      {
-        resume_past.reset();
-      }
-    }
+    drop_site_when_empty(found);
   };
+  if(auto const found = probes.find(id); found != probes.end())
+  {
+    if(auto const site = sites.find(found->second); site != sites.end())
+    {
+      std::erase_if(site->second->probes, [id](probe_entry const& held) { return held.id == id; });
+      drop_site_when_empty(site);
+    }
+    probes.erase(found);
+    return;
+  }
   if(sinks.contains(id))
   {
     remove_sink(id);
@@ -254,14 +291,23 @@ void machine::run_state::on_code_site(
     std::uint32_t,
     void* user) noexcept
 {
-  auto&       site  = *static_cast<code_site*>(user);
-  auto&       run   = *site.run;
-  std::size_t first = 0;
-  if(run.resume_past and run.resume_past->first == site.at)
+  auto& site = *static_cast<code_site*>(user);
+  auto& run  = *site.run;
+  if(run.stepping and run.step_ends(run.owner.clock_driver_.exact_now()))
   {
-    first = std::exchange(run.resume_past, std::nullopt)->second;
+    return;
   }
-  auto const stops = run.guarded([&] {
+  auto const        resumed = run.resume_past and run.resume_past->first == site.at;
+  std::size_t const first   = resumed ? std::exchange(run.resume_past, std::nullopt)->second : 0;
+  auto const        stops   = run.guarded([&] {
+    if(not resumed and not site.probes.empty())
+    {
+      auto const at = run.arrival_time(static_cast<address>(addr));
+      for(auto const& probe : site.probes)
+      {
+        probe.hits->record(at);
+      }
+    }
     for(auto index = first; index < site.entries.size(); ++index)
     {
       auto const held = site.entries[index];
@@ -481,6 +527,19 @@ auto machine::add_intercept(address at, intercept_handler handler, intercept_mod
   run_->add_to_site(at, entry.get());
   run_->intercepts.emplace(id, std::move(entry));
   return hook_handle{hooks_, id};
+}
+
+auto machine::add_probe(address at) -> probe_handle
+{
+  require_stopped(*this);
+  auto const id   = ++hooks_->last_id;
+  auto       hits = std::make_shared<probe_hits>();
+  run_->add_probe_to_site(at, {.id = id, .hits = hits});
+  run_->probes.emplace(id, at);
+  return {
+      .hook = hook_handle{hooks_, id},
+        .hits = std::move(hits)
+  };
 }
 
 auto machine::add_return_hook(

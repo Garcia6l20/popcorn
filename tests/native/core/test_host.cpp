@@ -467,6 +467,19 @@ TEST_CASE("a command posted while running completes after the lock is dropped")
   CHECK_FALSE(h.on->halt(0).has_value());
 }
 
+TEST_CASE("probe counts recorded on the host thread are read from another thread")
+{
+  auto       member = alu(0);
+  auto const probe  = member->add_probe(sym("alu", "alu_body") + 2);
+  hosted     h{std::move(member)};
+  h.start();
+  CHECK(settles([&] { return probe.hits->count() > 1'000; }));
+  auto const first = probe.hits->first();
+  REQUIRE(first.has_value());
+  CHECK(first->ps > 0);
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
 TEST_CASE("halt from another thread parks a free run within 10 ms")
 {
   hosted h{alu(0)};

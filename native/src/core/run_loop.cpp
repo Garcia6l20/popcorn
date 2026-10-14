@@ -413,7 +413,7 @@ void machine::run_state::on_step(
 {
   auto&      run = *static_cast<run_state*>(user);
   auto const now = run.owner.clock_driver_.exact_now();
-  if(run.stop_pending() or now >= run.deadline or now >= run.owner.scheduler_.earliest())
+  if(run.step_ends(now))
   {
     run.end_cause = run.failure            ? engine_end::other
                   : not run.stop_pending() ? engine_end::event

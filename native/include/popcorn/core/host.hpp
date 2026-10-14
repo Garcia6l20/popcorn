@@ -666,6 +666,15 @@ public:
    */
   [[nodiscard]] auto ended() const noexcept -> bool;
 
+  /**
+   * @brief When the waiter completes with a time stop: waiter_spec::deadline, or
+   *        waiter_spec::after past the boundary that registered it. Read it after future()
+   *        completed, which orders the read.
+   * @return The deadline, empty without either, or when the free run ended before a boundary
+   *         registered the waiter.
+   */
+  [[nodiscard]] auto deadline() const noexcept -> std::optional<vtime>;
+
   /** @brief Owners of the waiter, this handle included: the host's bookkeeping, for tests. */
   [[nodiscard]] auto holders() const noexcept -> long;
 

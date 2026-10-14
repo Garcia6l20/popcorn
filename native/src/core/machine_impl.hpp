@@ -622,6 +622,16 @@ struct machine::run_state
     std::uint64_t calls{};
   };
 
+  /** @brief A probe added with machine::add_probe(), held by its code site. */
+  struct probe_entry
+  {
+    /** @brief Handle id. */
+    std::uint64_t id{};
+    /** @brief Arrivals counted, shared with the handle, so a probe left in its site after
+     * removal still counts through a live object. */
+    std::shared_ptr<probe_hits> hits{};
+  };
+
   /** @brief A watch added with machine::add_watch(). */
   struct watch_entry
   {
@@ -652,7 +662,8 @@ struct machine::run_state
     }
   };
 
-  /** @brief One engine code hook serving every intercept and return hook of an address. */
+  /** @brief One engine code hook serving every intercept, return hook and probe of an
+   * address. */
   struct code_site
   {
     /** @brief Run state serving the calls. */
@@ -663,6 +674,9 @@ struct machine::run_state
     uc_hook hook{};
     /** @brief Intercepts and return hooks of the address, in add order. */
     std::vector<std::variant<intercept_entry*, return_entry*>> entries{};
+    /** @brief Probes of the address, counted before the entries, outside their indices so
+     * that resume_past never counts an arrival twice. */
+    std::vector<probe_entry> probes{};
   };
 
   /** @brief dt stamping of one sink's record stream, as trace_ring::append() stamps the ring. */
@@ -817,6 +831,8 @@ struct machine::run_state
   std::map<std::uint64_t, std::unique_ptr<intercept_entry>> intercepts{};
   /** @brief Return hooks by handle id. */
   std::map<std::uint64_t, std::unique_ptr<return_entry>> return_hooks{};
+  /** @brief Probed address by handle id. */
+  std::map<std::uint64_t, address> probes{};
   /** @brief Watches by handle id. */
   std::map<std::uint64_t, std::unique_ptr<watch_entry>> watches{};
   /** @brief Trace sinks by handle id. */
@@ -1085,6 +1101,34 @@ struct machine::run_state
    * @throws emulation_error when the engine refuses the hook.
    */
   void add_to_site(address at, std::variant<intercept_entry*, return_entry*> entry);
+
+  /**
+   * @brief Adds a probe to the code site of its address, as add_to_site() does.
+   * @throws emulation_error when the engine refuses the hook.
+   */
+  void add_probe_to_site(address at, probe_entry entry);
+
+  /**
+   * @brief The code site of @p at, created with its engine hook and the translated code there
+   *        removed when it does not exist yet.
+   * @throws emulation_error when the engine refuses the hook.
+   */
+  auto site_at(address at) -> code_site&;
+
+  /** @brief Whether the stepping hook ends the engine run before the instruction it sees at
+   * instruction count @p now. */
+  [[nodiscard]] auto step_ends(icount now) const noexcept -> bool
+  {
+    return stop_pending() or now >= deadline or now >= owner.scheduler_.earliest();
+  }
+
+  /** @brief Virtual time at the start of the instruction at @p addr, which the code hook of
+   * the running block reports. A clock rate write does not end the block. A CPU write to a
+   * model that drives the core clock starts the new epoch inside the block, before any later
+   * arrival in it, so the arrival takes the time a parked run to @p addr stops at. A rate
+   * change by another initiator during the block starts the epoch at the block's charged end:
+   * an arrival before that is raised to the epoch start, at most one block late. */
+  [[nodiscard]] auto arrival_time(address addr) const -> vtime;
 
   /** @brief Removes the engine side and the entry of a hook by handle id, between slices. */
   void remove_hook(std::uint64_t id) noexcept;
