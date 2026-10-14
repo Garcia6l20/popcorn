@@ -416,6 +416,11 @@ auto system_handle::add_wire(
     throw std::logic_error("wires are added before start()");
   }
   check_shape(spec, members_.size());
+  auto* const into = dynamic_cast<periph::stm32::uart_link_port*>(&receiver.native_port());
+  if(into == nullptr)
+  {
+    throw config_error(spec.receiver_unit, 0, "wire", "a UART model that takes frames from a wire");
+  }
   auto const index   = wires_.size();
   auto const lane    = static_cast<std::uint32_t>(2 * index + 1);
   auto*      machine = &members_[spec.receiver].handle->native();
@@ -428,9 +433,9 @@ auto system_handle::add_wire(
           .baud       = spec.baud,
           .word_bits  = spec.word_bits,
           .half_stops = spec.half_stops,
-          .parity     = static_cast<periph::stm32::line_parity>(spec.parity)},
+          .parity     = static_cast<periph::line_parity>(spec.parity)},
       periph::stm32::wire_receiver{
-          .port   = &receiver.native_port(),
+          .port   = into,
           .unit   = spec.receiver_unit,
           .log    = [machine](core::log_record record) { machine->log(std::move(record)); },
           .strict = spec.strict},

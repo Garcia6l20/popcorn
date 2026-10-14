@@ -1,5 +1,6 @@
 #include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/spi.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <doctest/doctest.h>
 
@@ -32,4 +33,11 @@ TEST_CASE("the SPI interfaces' type info lives in libpopcorn_core.so")
 TEST_CASE("the I2C target's type info lives in libpopcorn_core.so")
 {
   CHECK(library_of(typeid(periph::i2c_target)) == "libpopcorn_core.so");
+}
+
+TEST_CASE("the UART interfaces' type info lives in libpopcorn_core.so")
+{
+  CHECK(library_of(typeid(periph::uart_endpoint)) == "libpopcorn_core.so");
+  CHECK(library_of(typeid(periph::uart_port)) == "libpopcorn_core.so");
+  CHECK(library_of(typeid(periph::capture_endpoint)) == "libpopcorn_core.so");
 }

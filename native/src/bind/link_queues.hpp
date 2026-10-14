@@ -3,7 +3,7 @@
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
-#include <popcorn/periph/stm32/uart.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -36,7 +36,7 @@ struct queued_uart_frame
  *        of them: a full queue drops its oldest frame and counts it. The engine fills it, the
  *        binding drains it, each under the queue's link lock.
  */
-class queue_endpoint final : public periph::stm32::uart_endpoint
+class queue_endpoint final : public periph::uart_endpoint
 {
 public:
   /** @brief Takes the link lock, blocking. */

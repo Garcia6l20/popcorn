@@ -11,6 +11,7 @@
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 #include <popcorn/periph/stm32/uart_wire.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <doctest/doctest.h>
 
@@ -33,8 +34,9 @@
 
 namespace
 {
-namespace core  = popcorn::core;
-namespace stm32 = popcorn::periph::stm32;
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
@@ -51,18 +53,18 @@ constexpr std::uint32_t link_byte  = 1;
 
 struct node
 {
-  std::shared_ptr<stm32::capture_endpoint> own   = std::make_shared<stm32::capture_endpoint>();
-  std::shared_ptr<stm32::capture_endpoint> spare = std::make_shared<stm32::capture_endpoint>();
-  std::shared_ptr<stm32::capture_endpoint> third = std::make_shared<stm32::capture_endpoint>();
-  stm32::board                             board{};
-  std::unique_ptr<stm32_fixture>           f;
-  core::machine*                           target{};
-  std::int64_t                             origin{};
-  stm32::uart_port*                        port{};
-  stm32::uart_port*                        spare_port{};
-  stm32::uart_port*                        third_port{};
-  std::vector<core::log_record>            warnings;
-  core::hook_handle                        sink;
+  std::shared_ptr<periph::capture_endpoint> own   = std::make_shared<periph::capture_endpoint>();
+  std::shared_ptr<periph::capture_endpoint> spare = std::make_shared<periph::capture_endpoint>();
+  std::shared_ptr<periph::capture_endpoint> third = std::make_shared<periph::capture_endpoint>();
+  stm32::board                              board{};
+  std::unique_ptr<stm32_fixture>            f;
+  core::machine*                            target{};
+  std::int64_t                              origin{};
+  stm32::uart_link_port*                    port{};
+  stm32::uart_link_port*                    spare_port{};
+  stm32::uart_link_port*                    third_port{};
+  std::vector<core::log_record>             warnings;
+  core::hook_handle                         sink;
 
   node(std::string_view entry, std::int64_t start_ps, bool strict)
   {
@@ -89,9 +91,9 @@ struct node
     }
     f->set("pc", sym("usart_ll", entry));
     origin     = static_cast<std::int64_t>(target->virtual_clock().time().ps);
-    port       = f->model_of<stm32::uart_port>("USART1");
-    spare_port = f->model_of<stm32::uart_port>("USART2");
-    third_port = f->model_of<stm32::uart_port>("USART3");
+    port       = f->model_of<stm32::uart_link_port>("USART1");
+    spare_port = f->model_of<stm32::uart_link_port>("USART2");
+    third_port = f->model_of<stm32::uart_link_port>("USART3");
     REQUIRE(port != nullptr);
     REQUIRE(spare_port != nullptr);
     REQUIRE(third_port != nullptr);
@@ -103,13 +105,13 @@ struct node
     });
   }
 
-  [[nodiscard]] auto port_of(std::string_view unit) const -> stm32::uart_port*
+  [[nodiscard]] auto port_of(std::string_view unit) const -> stm32::uart_link_port*
   {
     return unit == "USART1" ? port : unit == "USART2" ? spare_port : third_port;
   }
 
   [[nodiscard]] auto endpoint_of(std::string_view unit) const
-      -> std::shared_ptr<stm32::capture_endpoint>
+      -> std::shared_ptr<periph::capture_endpoint>
   {
     return unit == "USART1" ? own : unit == "USART2" ? spare : third;
   }

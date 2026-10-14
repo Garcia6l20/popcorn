@@ -13,8 +13,8 @@
 #include <popcorn/periph/stm32/rcc.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
-#include <popcorn/periph/stm32/uart.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <chrono>
 #include <functional>

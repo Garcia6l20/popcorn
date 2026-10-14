@@ -65,7 +65,7 @@ struct wire_lanes
 struct wire_receiver
 {
   /** @brief The receiver's UART, which must outlive the wire's drains. */
-  uart_port* port{};
+  uart_link_port* port{};
   /** @brief Name of the receiver's UART in warnings. */
   std::string unit;
   /** @brief The receiver machine's log, called on its host thread between slices. Decision

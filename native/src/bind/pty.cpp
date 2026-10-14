@@ -219,7 +219,7 @@ auto remove_bridge(pty_bridges& ptys, std::unique_lock<std::mutex> const&, pty_b
 }
 
 uart_pty_link::uart_pty_link(
-    periph::stm32::uart_port&       port,
+    periph::uart_port&              port,
     std::shared_ptr<queue_endpoint> endpoint) noexcept
     : port_{&port}, endpoint_{std::move(endpoint)}
 {}

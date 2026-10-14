@@ -7,6 +7,7 @@
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <doctest/doctest.h>
 #include <reflex/serde/bson.hpp>
@@ -28,8 +29,9 @@
 
 namespace
 {
-namespace core  = popcorn::core;
-namespace stm32 = popcorn::periph::stm32;
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
@@ -83,11 +85,11 @@ public:
 
 struct rig
 {
-  std::shared_ptr<stm32::capture_endpoint> usart1 = std::make_shared<stm32::capture_endpoint>();
-  std::shared_ptr<stm32::capture_endpoint> uart4  = std::make_shared<stm32::capture_endpoint>();
-  std::shared_ptr<stm32::capture_endpoint> lpuart = std::make_shared<stm32::capture_endpoint>();
-  stm32::board                             board{};
-  std::unique_ptr<stm32_fixture>           f;
+  std::shared_ptr<periph::capture_endpoint> usart1 = std::make_shared<periph::capture_endpoint>();
+  std::shared_ptr<periph::capture_endpoint> uart4  = std::make_shared<periph::capture_endpoint>();
+  std::shared_ptr<periph::capture_endpoint> lpuart = std::make_shared<periph::capture_endpoint>();
+  stm32::board                              board{};
+  std::unique_ptr<stm32_fixture>            f;
 
   explicit rig(std::string_view entry, bool strict = false)
   {
@@ -113,9 +115,9 @@ struct rig
     }
   }
 
-  auto port(std::string_view name) const -> stm32::uart_port&
+  auto port(std::string_view name) const -> stm32::uart_link_port&
   {
-    auto* const found = f->model_of<stm32::uart_port>(name);
+    auto* const found = f->model_of<stm32::uart_link_port>(name);
     REQUIRE(found != nullptr);
     return *found;
   }
@@ -129,7 +131,7 @@ struct rig
   }
 };
 
-auto text(stm32::capture_endpoint const& capture) -> std::string
+auto text(periph::capture_endpoint const& capture) -> std::string
 {
   std::string out;
   for(auto const& frame : capture.frames)
@@ -139,7 +141,7 @@ auto text(stm32::capture_endpoint const& capture) -> std::string
   return out;
 }
 
-void spaced(stm32::capture_endpoint const& capture, std::uint64_t frame_ps)
+void spaced(periph::capture_endpoint const& capture, std::uint64_t frame_ps)
 {
   REQUIRE(capture.frames.size() > 1);
   for(std::size_t index = 1; index < capture.frames.size(); ++index)
@@ -165,8 +167,8 @@ auto frame_of(
 
 TEST_CASE("the USART factory copies the board's endpoints when it is made")
 {
-  auto         first  = std::make_shared<stm32::capture_endpoint>();
-  auto         second = std::make_shared<stm32::capture_endpoint>();
+  auto         first  = std::make_shared<periph::capture_endpoint>();
+  auto         second = std::make_shared<periph::capture_endpoint>();
   stm32::board board{};
   board.uarts.emplace("USART1", first);
   auto options             = popcorn::testing::stm32_options();
@@ -326,13 +328,13 @@ TEST_CASE("a snapshot mid-transmission restores to the same remaining frames")
   auto const saved = r.f->target->snapshot();
   auto const mark  = r.usart1->frames.size();
   r.finish();
-  std::vector<stm32::captured_frame> const rest{
+  std::vector<periph::captured_frame> const rest{
       r.usart1->frames.begin() + static_cast<long>(mark), r.usart1->frames.end()};
   r.usart1->frames.resize(mark);
   r.f->target->restore(saved);
   r.finish();
   CHECK(
-      std::vector<stm32::captured_frame>{
+      std::vector<periph::captured_frame>{
           r.usart1->frames.begin() + static_cast<long>(mark), r.usart1->frames.end()}
       == rest);
 }
@@ -458,13 +460,13 @@ TEST_CASE("a snapshot mid-DMA transmission restores to the same remaining frames
   auto const saved = r.f->target->snapshot();
   auto const mark  = r.usart1->frames.size();
   r.finish();
-  std::vector<stm32::captured_frame> const rest{
+  std::vector<periph::captured_frame> const rest{
       r.usart1->frames.begin() + static_cast<long>(mark), r.usart1->frames.end()};
   r.usart1->frames.resize(mark);
   r.f->target->restore(saved);
   r.finish();
   CHECK(
-      std::vector<stm32::captured_frame>{
+      std::vector<periph::captured_frame>{
           r.usart1->frames.begin() + static_cast<long>(mark), r.usart1->frames.end()}
       == rest);
 }
@@ -663,17 +665,17 @@ constexpr std::uint64_t cycles_per_us = 160;
 
 struct line_post
 {
-  bool              abort{};
-  stm32::line_frame frame{};
-  vtime             at{};
+  bool               abort{};
+  periph::line_frame frame{};
+  vtime              at{};
 };
 
-class mailbox final : public stm32::uart_endpoint
+class mailbox final : public periph::uart_endpoint
 {
 public:
-  std::vector<line_post>             posts;
-  std::vector<stm32::captured_frame> sent;
-  int                                transmissions = 0;
+  std::vector<line_post>              posts;
+  std::vector<periph::captured_frame> sent;
+  int                                 transmissions = 0;
 
   void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
@@ -681,7 +683,7 @@ public:
     sent.push_back({.data = data, .at = at, .brk = brk});
   }
 
-  void started(stm32::line_frame const& frame) override
+  void started(periph::line_frame const& frame) override
   {
     posts.push_back({.frame = frame});
   }
@@ -715,9 +717,9 @@ struct member
     origin = f->target->virtual_clock().time().ps;
   }
 
-  auto port() const -> stm32::uart_port&
+  auto port() const -> stm32::uart_link_port&
   {
-    auto* const found = f->model_of<stm32::uart_port>("USART1");
+    auto* const found = f->model_of<stm32::uart_link_port>("USART1");
     REQUIRE(found != nullptr);
     return *found;
   }
@@ -751,7 +753,7 @@ void deliver(
     std::uint64_t    latency,
     std::string_view unit = "USART1")
 {
-  auto* const port = into.f->model_of<stm32::uart_port>(unit);
+  auto* const port = into.f->model_of<stm32::uart_link_port>(unit);
   REQUIRE(port != nullptr);
   if(post.abort)
   {
@@ -999,7 +1001,7 @@ TEST_CASE("a frame queued ahead of the head becomes the head, both arrive at the
   REQUIRE(b.to(2 * ms_ps) == stop_reason::time);
   auto const base  = b.f->target->virtual_clock().time().ps;
   auto const frame = [&](std::uint16_t data, std::uint64_t end_us) {
-    return stm32::line_frame{
+    return periph::line_frame{
         .data     = data,
         .frame_ps = 21 * us_ps,
         .start    = vtime{base + (end_us - 21) * us_ps},
@@ -1562,21 +1564,21 @@ constexpr std::uint32_t usart1_irq = 1u << (61 - 32);
 
 struct line_config
 {
-  std::uint32_t      bits{8};
-  stm32::line_parity parity{};
+  std::uint32_t       bits{8};
+  periph::line_parity parity{};
 };
 
 constexpr std::array<line_config, 9> line_configs{
     {
-     {.bits = 9, .parity = stm32::line_parity::even},
-     {.bits = 9, .parity = stm32::line_parity::odd},
-     {.bits = 8, .parity = stm32::line_parity::even},
-     {.bits = 8, .parity = stm32::line_parity::odd},
-     {.bits = 7, .parity = stm32::line_parity::even},
-     {.bits = 7, .parity = stm32::line_parity::odd},
-     {.bits = 9, .parity = stm32::line_parity::none},
-     {.bits = 8, .parity = stm32::line_parity::none},
-     {.bits = 7, .parity = stm32::line_parity::none},
+     {.bits = 9, .parity = periph::line_parity::even},
+     {.bits = 9, .parity = periph::line_parity::odd},
+     {.bits = 8, .parity = periph::line_parity::even},
+     {.bits = 8, .parity = periph::line_parity::odd},
+     {.bits = 7, .parity = periph::line_parity::even},
+     {.bits = 7, .parity = periph::line_parity::odd},
+     {.bits = 9, .parity = periph::line_parity::none},
+     {.bits = 8, .parity = periph::line_parity::none},
+     {.bits = 7, .parity = periph::line_parity::none},
      }
 };
 
@@ -1586,9 +1588,9 @@ auto cr1_of(line_config config) -> std::uint32_t
 {
   std::uint32_t out = ue | cr1_re | cr1_te;
   out |= config.bits == 9 ? cr1_m0 : (config.bits == 7 ? cr1_m1 : 0u);
-  if(config.parity != stm32::line_parity::none)
+  if(config.parity != periph::line_parity::none)
   {
-    out |= cr1_pce | (config.parity == stm32::line_parity::odd ? cr1_ps : 0u);
+    out |= cr1_pce | (config.parity == periph::line_parity::odd ? cr1_ps : 0u);
   }
   return out;
 }
@@ -1605,17 +1607,17 @@ auto ones_of(std::uint32_t word) -> std::uint32_t
 
 auto data_bits(line_config config) -> std::uint32_t
 {
-  return config.parity == stm32::line_parity::none ? config.bits : config.bits - 1;
+  return config.parity == periph::line_parity::none ? config.bits : config.bits - 1;
 }
 
 auto expected_word(std::uint32_t value, line_config config) -> std::uint32_t
 {
   auto const data = value & ((1u << data_bits(config)) - 1u);
-  if(config.parity == stm32::line_parity::none)
+  if(config.parity == periph::line_parity::none)
   {
     return data;
   }
-  auto const odd = config.parity == stm32::line_parity::odd ? 1u : 0u;
+  auto const odd = config.parity == periph::line_parity::odd ? 1u : 0u;
   return data | (((ones_of(data) % 2) ^ odd) << (config.bits - 1));
 }
 
@@ -1672,7 +1674,7 @@ struct parity_rig
     advance(200 * us_ps);
   }
 
-  void linked(stm32::line_frame frame) const
+  void linked(periph::line_frame frame) const
   {
     auto const start = now() + 10 * us_ps;
     frame.end        = vtime{start + (frame.end.ps - frame.start.ps)};
@@ -1701,7 +1703,7 @@ struct parity_rig
     return static_cast<std::uint32_t>(*word);
   }
 
-  void tagged(std::span<stm32::host_frame const> frames) const
+  void tagged(std::span<periph::host_frame const> frames) const
   {
     t.r.port("USART1").receive_frames(frames);
   }
@@ -1782,9 +1784,9 @@ TEST_CASE("TX frames carry the parity bit in their word and the endpoint gets th
       CHECK(p.box->posts[index].frame.parity == config.parity);
       CHECK(p.box->posts[index].frame.word_bits == config.bits);
       CHECK(p.box->sent[index].data == (word & ((1u << data_bits(config)) - 1u)));
-      if(config.parity != stm32::line_parity::none)
+      if(config.parity != periph::line_parity::none)
       {
-        CHECK(ones_of(word) % 2 == (config.parity == stm32::line_parity::odd ? 1u : 0u));
+        CHECK(ones_of(word) % 2 == (config.parity == periph::line_parity::odd ? 1u : 0u));
       }
     }
   }
@@ -1793,7 +1795,7 @@ TEST_CASE("TX frames carry the parity bit in their word and the endpoint gets th
 TEST_CASE("PCE 0 sends the TDR word unchanged in the M bits")
 {
   parity_rig p{
-      {.bits = 9, .parity = stm32::line_parity::none}
+      {.bits = 9, .parity = periph::line_parity::none}
   };
   for(auto const value : {0x000u, 0x0ffu, 0x100u, 0x1ffu, 0x2a5u})
   {
@@ -1823,10 +1825,10 @@ TEST_CASE("an 8E1 frame takes the time of a 9N1 frame and 11 bit times")
     CHECK(p.box->sent[0].at == frame.end);
     return frame.frame_ps;
   };
-  auto const even = frame_of({.bits = 9, .parity = stm32::line_parity::even});
-  auto const odd  = frame_of({.bits = 9, .parity = stm32::line_parity::odd});
-  auto const nine = frame_of({.bits = 9, .parity = stm32::line_parity::none});
-  auto const n81  = frame_of({.bits = 8, .parity = stm32::line_parity::none});
+  auto const even = frame_of({.bits = 9, .parity = periph::line_parity::even});
+  auto const odd  = frame_of({.bits = 9, .parity = periph::line_parity::odd});
+  auto const nine = frame_of({.bits = 9, .parity = periph::line_parity::none});
+  auto const n81  = frame_of({.bits = 8, .parity = periph::line_parity::none});
   CHECK(even == nine);
   CHECK(odd == nine);
   CHECK(even * 10 + 10 >= n81 * 11);
@@ -1838,7 +1840,7 @@ TEST_CASE("host frames reach RDR with the receiver's parity bit and never set PE
   parity_rig p{line_configs[0]};
   for(auto const config : line_configs)
   {
-    if(config.parity == stm32::line_parity::none)
+    if(config.parity == periph::line_parity::none)
     {
       continue;
     }
@@ -1855,7 +1857,7 @@ TEST_CASE("host frames reach RDR with the receiver's parity bit and never set PE
       p.clear_rx();
     }
   }
-  p.configure({.bits = 8, .parity = stm32::line_parity::none});
+  p.configure({.bits = 8, .parity = periph::line_parity::none});
   p.host(0xc1);
   CHECK(p.rdr() == 0xc1);
 }
@@ -1863,16 +1865,16 @@ TEST_CASE("host frames reach RDR with the receiver's parity bit and never set PE
 TEST_CASE("a host byte is masked to the M-bit word without a parity")
 {
   parity_rig p{
-      {.bits = 7, .parity = stm32::line_parity::none}
+      {.bits = 7, .parity = periph::line_parity::none}
   };
   p.host(0xff);
   CHECK(p.rdr() == 0x7f);
   p.clear_rx();
-  p.configure({.bits = 8, .parity = stm32::line_parity::none});
+  p.configure({.bits = 8, .parity = periph::line_parity::none});
   p.host(0xc1);
   CHECK(p.rdr() == 0xc1);
   p.clear_rx();
-  p.configure({.bits = 9, .parity = stm32::line_parity::none});
+  p.configure({.bits = 9, .parity = periph::line_parity::none});
   p.host(0x1ff);
   CHECK(p.rdr() == 0x1ff);
 }
@@ -1883,8 +1885,8 @@ TEST_CASE(
   for(auto const bits : {9u, 8u, 7u})
   {
     CAPTURE(bits);
-    line_config const     even{.bits = bits, .parity = stm32::line_parity::even};
-    line_config const     odd{.bits = bits, .parity = stm32::line_parity::odd};
+    line_config const     even{.bits = bits, .parity = periph::line_parity::even};
+    line_config const     odd{.bits = bits, .parity = periph::line_parity::odd};
     std::vector<received> same;
     std::vector<received> crossed;
     for(auto const value : parity_values)
@@ -1907,15 +1909,15 @@ TEST_CASE("a 9N1 sender on an 8E1 receiver sets PE on words with an odd count of
   }
   CHECK(
       across(
-          {.bits = 9, .parity = stm32::line_parity::none},
-          {.bits = 9, .parity = stm32::line_parity::even}, words)
+          {.bits = 9, .parity = periph::line_parity::none},
+          {.bits = 9, .parity = periph::line_parity::even}, words)
       == expected);
 }
 
 TEST_CASE("a sampled linked frame is checked as sampled: same parity clean and the other one PE")
 {
-  line_config const     even{.bits = 9, .parity = stm32::line_parity::even};
-  line_config const     odd{.bits = 9, .parity = stm32::line_parity::odd};
+  line_config const     even{.bits = 9, .parity = periph::line_parity::even};
+  line_config const     odd{.bits = 9, .parity = periph::line_parity::odd};
   std::vector<received> same;
   std::vector<received> crossed;
   for(auto const value : parity_values)
@@ -1929,9 +1931,9 @@ TEST_CASE("a sampled linked frame is checked as sampled: same parity clean and t
 
 TEST_CASE("PE raises USART1_IRQn with PEIE only and PECF clears it")
 {
-  line_config const even{.bits = 9, .parity = stm32::line_parity::even};
+  line_config const even{.bits = 9, .parity = periph::line_parity::even};
   parity_rig        a{
-      {.bits = 9, .parity = stm32::line_parity::odd}
+      {.bits = 9, .parity = periph::line_parity::odd}
   };
   parity_rig b{even};
   a.send(0x41);
@@ -1964,7 +1966,7 @@ TEST_CASE("PCE under strict peripherals runs without a model_error or a warning"
 TEST_CASE("a snapshot between host frames under 7E1 restores to the same RDR words")
 {
   parity_rig p{
-      {.bits = 8, .parity = stm32::line_parity::even},
+      {.bits = 8, .parity = periph::line_parity::even},
       35, cr1_fifoen
   };
   std::vector<std::uint16_t> const bytes{0x41, 0xc3, 0x7f, 0x80, 0x55};
@@ -1994,9 +1996,9 @@ TEST_CASE("a snapshot between host frames under 7E1 restores to the same RDR wor
 
 namespace
 {
-using stm32::frame_kind;
-using stm32::host_frame;
-using stm32::uart_error;
+using periph::frame_kind;
+using periph::host_frame;
+using periph::uart_error;
 
 struct rx_view
 {
@@ -2027,7 +2029,7 @@ TEST_CASE("in FIFO mode a tagged host frame's flag rises when it reaches RDR, no
     line_config   config{};
     std::uint32_t flag{};
   };
-  line_config const even{.bits = 9, .parity = stm32::line_parity::even};
+  line_config const even{.bits = 9, .parity = periph::line_parity::even};
   for(auto const [error, config, flag] : std::array<tagged_case, 3>{
           {{uart_error::framing, {}, isr_fe},
            {uart_error::noise, {}, isr_ne},
@@ -2177,7 +2179,7 @@ TEST_CASE("in FIFO mode a linked frame sampled with NE behind a good byte raises
 
 TEST_CASE("tagged host frames still queued survive a snapshot and 1000 restores with their tags")
 {
-  line_config const               even{.bits = 9, .parity = stm32::line_parity::even};
+  line_config const               even{.bits = 9, .parity = periph::line_parity::even};
   parity_rig                      p{even, 35, cr1_fifoen};
   std::array<host_frame, 5> const frames{
       {{.data = 'a'},
@@ -2260,7 +2262,7 @@ TEST_CASE("SBKRQ sends a break after the frame in flight, SBKF set until its low
   auto const& posts = a.box->posts;
   REQUIRE(posts.size() == 3);
   CHECK(posts[0].frame.data == 'a');
-  CHECK(posts[1].frame.kind == stm32::frame_kind::brk);
+  CHECK(posts[1].frame.kind == periph::frame_kind::brk);
   CHECK(posts[2].frame.data == 'b');
   auto const frame = posts[1].frame.frame_ps;
   CHECK(posts[1].frame.start == posts[0].frame.end);
@@ -2301,7 +2303,7 @@ TEST_CASE("a break requested with the TX FIFO full goes ahead of the queued data
   std::vector<std::uint32_t> order;
   for(auto const& post : a.box->posts)
   {
-    order.push_back(post.frame.kind == stm32::frame_kind::brk ? 0xbbu : post.frame.data);
+    order.push_back(post.frame.kind == periph::frame_kind::brk ? 0xbbu : post.frame.data);
   }
   CHECK(order == std::vector<std::uint32_t>{'0', 0xbb, '1', '2', '3', '4', '5', '6', '7'});
 }

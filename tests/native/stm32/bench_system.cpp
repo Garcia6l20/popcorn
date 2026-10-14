@@ -11,6 +11,7 @@
 #include <popcorn/periph/stm32/builtin.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 #include <popcorn/periph/stm32/uart_wire.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <algorithm>
 #include <array>
@@ -36,8 +37,9 @@
 
 namespace
 {
-namespace core  = popcorn::core;
-namespace stm32 = popcorn::periph::stm32;
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::vtime;
 using clock_type = std::chrono::steady_clock;
@@ -81,7 +83,7 @@ struct fnv
   }
 };
 
-class hashing_endpoint final : public stm32::uart_endpoint
+class hashing_endpoint final : public periph::uart_endpoint
 {
 public:
   std::uint64_t frames{};
@@ -102,7 +104,7 @@ struct node
       std::make_shared<hashing_endpoint>(), std::make_shared<hashing_endpoint>()};
   std::unique_ptr<core::machine>              target;
   std::int64_t                                origin{};
-  std::array<stm32::uart_port*, 2>            ports{};
+  std::array<stm32::uart_link_port*, 2>       ports{};
   std::shared_ptr<std::atomic<std::uint64_t>> warnings =
       std::make_shared<std::atomic<std::uint64_t>>(0);
   core::hook_handle sink;
@@ -130,8 +132,8 @@ struct node
     }
     target->regs().write(*target->regs().find("pc"), symbol(entry));
     origin   = static_cast<std::int64_t>(target->virtual_clock().time().ps);
-    ports[0] = dynamic_cast<stm32::uart_port*>(target->model("USART1"));
-    ports[1] = dynamic_cast<stm32::uart_port*>(target->model("USART2"));
+    ports[0] = dynamic_cast<stm32::uart_link_port*>(target->model("USART1"));
+    ports[1] = dynamic_cast<stm32::uart_link_port*>(target->model("USART2"));
     if(ports[0] == nullptr or ports[1] == nullptr)
     {
       throw std::runtime_error{"member has no USART1 or USART2 port"};

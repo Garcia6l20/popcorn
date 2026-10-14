@@ -9,6 +9,7 @@
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 #include <popcorn/periph/stm32/uart_wire.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <reflex/serde/bson.hpp>
 
@@ -36,8 +37,9 @@
 
 namespace
 {
-namespace core  = popcorn::core;
-namespace stm32 = popcorn::periph::stm32;
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
@@ -70,18 +72,18 @@ struct fault_seen
 
 struct node
 {
-  std::shared_ptr<stm32::capture_endpoint> own = std::make_shared<stm32::capture_endpoint>();
-  stm32::board                             board{};
-  std::unique_ptr<stm32_fixture>           f;
-  std::uint64_t                            origin{};
-  std::int64_t                             base{};
-  stm32::uart_port*                        port{};
-  std::vector<core::log_record>            warnings;
-  std::vector<fault_seen>                  faults;
-  core::hook_handle                        sink;
-  bool                                     done{};
-  std::int64_t                             reset_at{-1};
-  bool                                     failed{};
+  std::shared_ptr<periph::capture_endpoint> own = std::make_shared<periph::capture_endpoint>();
+  stm32::board                              board{};
+  std::unique_ptr<stm32_fixture>            f;
+  std::uint64_t                             origin{};
+  std::int64_t                              base{};
+  stm32::uart_link_port*                    port{};
+  std::vector<core::log_record>             warnings;
+  std::vector<fault_seen>                   faults;
+  core::hook_handle                         sink;
+  bool                                      done{};
+  std::int64_t                              reset_at{-1};
+  bool                                      failed{};
 
   explicit node(std::string_view entry, std::uint64_t start_ps = 0)
   {
@@ -104,7 +106,7 @@ struct node
     f->set("pc", sym("usart_ll", entry));
     origin = f->target->virtual_clock().time().ps;
     base   = -static_cast<std::int64_t>(origin);
-    port   = f->model_of<stm32::uart_port>("USART1");
+    port   = f->model_of<stm32::uart_link_port>("USART1");
     REQUIRE(port != nullptr);
     sink = f->target->add_log_sink([this](core::log_record const& record) {
       if(record.kind == core::log_kind::model_warning and record.peripheral == "USART1")
@@ -1577,7 +1579,7 @@ TEST_CASE("a 7E1 link taps data bits and gives edited and injected frames their 
   r.add("idle");
   auto& wire = r.link(
       0, 1, latency_20,
-      {.baud = 114'286, .word_bits = 8, .half_stops = 2, .parity = stm32::line_parity::even});
+      {.baud = 114'286, .word_bits = 8, .half_stops = 2, .parity = periph::line_parity::even});
   for(auto const& one : r.nodes)
   {
     even_7e1(*one);
@@ -1611,7 +1613,7 @@ TEST_CASE("a 7N1 link masks edited and injected frames to 7 bits")
   r.add("idle");
   auto& wire = r.link(
       0, 1, latency_20,
-      {.baud = 114'286, .word_bits = 7, .half_stops = 2, .parity = stm32::line_parity::none});
+      {.baud = 114'286, .word_bits = 7, .half_stops = 2, .parity = periph::line_parity::none});
   for(auto const& one : r.nodes)
   {
     line_7n1(*one);
@@ -1638,7 +1640,7 @@ TEST_CASE("a 7N1 link masks edited and injected frames to 7 bits")
   lone.add("idle");
   auto& only = lone.link(
       0, 1, latency_20,
-      {.baud = 114'286, .word_bits = 7, .half_stops = 2, .parity = stm32::line_parity::none});
+      {.baud = 114'286, .word_bits = 7, .half_stops = 2, .parity = periph::line_parity::none});
   for(auto const& one : lone.nodes)
   {
     line_7n1(*one);
