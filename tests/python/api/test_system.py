@@ -95,6 +95,18 @@ def test_a_run_reaches_its_target_on_every_member(ping: Build) -> None:
     assert system.time >= VirtualTime(ms(3).ps)
 
 
+def test_a_parked_member_is_where_its_stop_left_it(ping: Build) -> None:
+    system = ping()
+    first = asyncio.run(system.run(for_=ms(3)))
+    assert first.member == "a"
+    assert first.stop is not None
+    assert system.members["a"].where() == first.stop.location
+    done = asyncio.run(system.run(until=VirtualTime(ms(3).ps)))
+    assert set(done.stops) == {"a", "b"}
+    for name, stop in done.stops.items():
+        assert system.members[name].where() == stop.location
+
+
 async def _to(system: System, until: VirtualDuration) -> list[SystemStop]:
     """Run to system time `until`, again after each member stop, until the TIME stop."""
     stops = [await system.run(until=VirtualTime(until.ps))]

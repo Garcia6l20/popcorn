@@ -11,6 +11,8 @@ import popcorn
 import pytest
 from popcorn.units import ms
 
+from .conftest import Machines
+
 
 def test_machine_builds_loads_and_resets(
     m33: popcorn.PartDescription, basic: popcorn.Image, core_firmware: Path
@@ -47,6 +49,65 @@ def test_machine_locates_like_its_image(m33: popcorn.PartDescription, basic: pop
     address = basic.lookup("Reset_Handler").value + 2
     assert m.locate(address) == basic.locate(address)
     assert m.locate(0x2000_1000) == popcorn.Location(0x2000_1000)
+
+
+def test_where_locates_the_pc_of_a_stopped_machine(
+    m33: popcorn.PartDescription, basic: popcorn.Image
+) -> None:
+    m = popcorn.Machine(m33, image=basic)
+    m.reset()
+    stop = asyncio.run(m.run(until="patched", budget=100_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS
+    where = m.where()
+    assert (where.symbol, where.offset) == ("patched", 0)
+    assert where == m.locate(m.pc) == m.locate(m.reg.pc)
+    assert m.last_stop is not None
+    assert where == stop.location == m.last_stop.location
+    assert asyncio.run(m.step()).reason is popcorn.StopReason.BUDGET
+    assert m.where().offset > 0
+
+
+def test_where_on_an_idle_core_is_its_stop_location(machines: Machines) -> None:
+    m = machines("idle")
+    stop = asyncio.run(m.run())
+    assert stop.reason is popcorn.StopReason.IDLE
+    assert m.where() == stop.location
+    assert m.where().symbol == "idle_main"
+    assert m.where() != m.locate(m.reg.pc)
+
+
+def test_where_after_a_call_is_the_restored_pc(hooked: popcorn.Machine) -> None:
+    before = hooked.where()
+    result = asyncio.run(hooked.call("use_delay", budget=1_000_000))
+    assert result.stop.reason is popcorn.StopReason.RETURNED
+    assert hooked.where() == before
+    assert hooked.last_stop is not None
+    assert hooked.where() != hooked.last_stop.location
+
+
+def test_where_inside_a_handler_locates_the_intercepted_function(
+    hooked: popcorn.Machine,
+) -> None:
+    seen: list[popcorn.Location] = []
+
+    def handler(c: popcorn.Call) -> popcorn.Return:
+        seen.append(hooked.where())
+        return c.returns()
+
+    hooked.intercept("hal_delay", handler)
+    asyncio.run(hooked.call("use_delay", budget=1_000_000))
+    assert [(w.symbol, w.offset) for w in seen] == [("hal_delay", 0)]
+
+
+def test_where_outside_a_free_run_is_machine_running(machines: Machines) -> None:
+    m = machines(slice_instructions=1_000)
+
+    async def scenario() -> None:
+        async with m.running():
+            with pytest.raises(popcorn.MachineRunning, match=r"await m\.read"):
+                m.where()
+
+    asyncio.run(scenario())
 
 
 def test_bin_image_loads_at_its_address(tmp_path: Path, m33: popcorn.PartDescription) -> None:

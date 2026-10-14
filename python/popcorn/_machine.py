@@ -2045,8 +2045,25 @@ class Machine:
         return snapshot
 
     def locate(self, address: int) -> Location:
-        """Symbol, offset, file and line of an address, the rule stops use."""
+        """Symbol, offset, file and line of an address, the rule stops use.
+
+        Raises:
+            MachineRunning: The machine is busy, outside its handlers.
+        """
         return location_of(self._handle.locate(address))
+
+    def where(self) -> Location:
+        """Symbol, offset, file and line of the next instruction, `locate(pc)`.
+
+        `pc` is the address stops report: on a core asleep in WFI it is past the WFI, where
+        `reg.pc` still holds the WFI. Right after a run, step or wait of this machine it equals
+        `last_stop.location`. Not after `call()`, which restores the pc. For a linked member
+        after `System.run`, compare with `SystemStop.stops[name].location`.
+
+        Raises:
+            MachineRunning: The machine is busy, outside its handlers.
+        """
+        return self.locate(self.pc)
 
     def address_of(self, target: int | str | Symbol) -> int:
         """Address of a target: an address as is, a symbol, or a symbol name.
