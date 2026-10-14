@@ -378,6 +378,12 @@
         "acc": {
           "$ref": "#/$defs/access"
         },
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "alternate_of": {
           "type": "string"
         },

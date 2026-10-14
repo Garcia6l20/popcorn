@@ -117,10 +117,9 @@ void idle_for(stm32_fixture const& f, std::chrono::nanoseconds span)
 
 void write(stm32_fixture const& f, std::string_view reg, std::uint32_t value)
 {
-  auto&      regs = f.target->peripheral("GPDMA1");
-  auto const found =
-      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != regs.description().registers.end());
+  auto&      regs  = f.target->peripheral("GPDMA1");
+  auto const found = popcorn::find_register(regs.description(), reg);
+  REQUIRE(found != nullptr);
   REQUIRE(
       f.target->model("GPDMA1")
           ->on_write(
@@ -132,7 +131,7 @@ auto bit(std::string_view reg, std::string_view field) -> std::uint32_t
 {
   auto const& unit = *std::ranges::find(
       u575().peripherals, std::string_view{"GPDMA1"}, &popcorn::peripheral_desc::name);
-  auto const found = std::ranges::find(unit.registers, reg, &popcorn::register_desc::name);
+  auto const found = popcorn::find_register(unit, reg);
   auto const bits  = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
   REQUIRE(bits != found->fields.end());
   return std::uint32_t{1} << bits->lsb;
@@ -462,10 +461,7 @@ TEST_CASE("a signal restored into a fresh machine that was never reset routes on
                    .until_time       = vtime{now.ps + 40'000'000}})
               .stopped.has_value());
   auto& regs = fresh.peripheral("GPDMA1");
-  auto  bndt = std::ranges::find(
-                   regs.description().registers, std::string_view{"GPDMA_C0BR1"},
-                   &popcorn::register_desc::name)
-                   ->offset;
+  auto  bndt = popcorn::find_register(regs.description(), std::string_view{"GPDMA_C0BR1"})->offset;
   CHECK(part > 0);
   CHECK((regs.peek(bndt) & 0xffffu) == 0);
 }

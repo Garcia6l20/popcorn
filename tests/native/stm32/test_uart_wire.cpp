@@ -1538,16 +1538,16 @@ namespace
 void poke(node const& one, std::string_view peripheral, std::string_view reg, std::uint32_t value)
 {
   auto const& desc  = one.f->target->peripheral(peripheral).description();
-  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != desc.registers.end());
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
   REQUIRE(one.f->target->mem().write(desc.base + found->offset, 4, value).has_value());
 }
 
 auto peek(node const& one, std::string_view peripheral, std::string_view reg) -> std::uint32_t
 {
   auto const& desc  = one.f->target->peripheral(peripheral).description();
-  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != desc.registers.end());
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
   auto const value = one.f->target->mem().read(desc.base + found->offset, 4);
   REQUIRE(value.has_value());
   return static_cast<std::uint32_t>(*value);

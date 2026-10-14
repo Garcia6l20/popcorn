@@ -80,8 +80,9 @@ public:
    * @param desc Peripheral, which must outlive the layout.
    * @throws config_error naming the peripheral and register or rule the flat storage cannot hold:
    *         a register outside one word, two registers of one name or at one offset without
-   *         `alternate_of`, alternates with different write effects on shared bits, more than
-   *         65535 words with registers, an unknown cross rule register or field.
+   *         `alternate_of`, an alias another register uses as its name or alias, alternates
+   *         with different write effects on shared bits, more than 65535 words with registers,
+   *         an unknown cross rule register or field.
    */
   explicit register_layout(peripheral_desc const& desc);
 
@@ -97,7 +98,7 @@ public:
 
   /**
    * @brief Storage word of a register.
-   * @param name Register name, as the description spells it.
+   * @param name Register name or alias, as the description spells it.
    * @return The word, empty when the peripheral has no such register.
    */
   [[nodiscard]] auto word_of(std::string_view name) const -> std::optional<std::uint32_t>;

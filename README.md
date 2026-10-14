@@ -5,6 +5,18 @@ Python. A test loads the firmware ELF, calls single functions or boots the whole
 emulated peripherals, drives inputs and asserts on outputs, memory, registers and peripheral
 state. A pytest plugin boots once and restores a snapshot per test.
 
+Peripheral registers carry their bare names, `m.periph.TIM1.CR1` and `m.periph.RCC.CR`. The
+prefixed names ST's SVD gives them, `TIM1_CR1` and `RCC_CR`, stay valid as aliases through
+`m.periph`, `m.ref.periph`, Python models and the built-in models. In the description itself,
+`RegisterDesc.name` is the bare name and `RegisterDesc.aliases` holds the SVD name. Each
+`m.description.peripherals` entry has `register(name)`, which finds a register by either name
+and raises `KeyError` for neither:
+
+```python
+rcc = next(p for p in m.description.peripherals if p.name == "RCC")
+assert rcc.register("RCC_CR").name == "CR"
+```
+
 ## Install
 
 popcorn is installed from source, the native core is compiled on your machine.

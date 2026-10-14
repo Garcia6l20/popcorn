@@ -54,10 +54,9 @@ auto finished(stm32_fixture const& f) -> std::vector<std::uint32_t>
 
 void write(stm32_fixture const& f, std::string_view reg, std::uint32_t value)
 {
-  auto&      regs = f.target->peripheral("GPIOA");
-  auto const found =
-      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != regs.description().registers.end());
+  auto&      regs  = f.target->peripheral("GPIOA");
+  auto const found = popcorn::find_register(regs.description(), reg);
+  REQUIRE(found != nullptr);
   REQUIRE(
       f.target->model("GPIOA")
           ->on_write(
@@ -192,8 +191,7 @@ TEST_CASE("EXTI keeps a masked line off the NVIC and ignores edges it does not s
   auto       f      = at_breakpoint();
   auto&      exti   = f.target->peripheral("EXTI");
   auto const offset = [&](std::string_view reg) {
-    return std::ranges::find(exti.description().registers, reg, &popcorn::register_desc::name)
-        ->offset;
+    return popcorn::find_register(exti.description(), reg)->offset;
   };
   auto const pending = [&] {
     auto const word = f.target->mem().read(0xe000'e200u, 4);
@@ -229,10 +227,9 @@ void write_port(
     std::string_view     reg,
     std::uint32_t        value)
 {
-  auto&      regs = f.target->peripheral(name);
-  auto const found =
-      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != regs.description().registers.end());
+  auto&      regs  = f.target->peripheral(name);
+  auto const found = popcorn::find_register(regs.description(), reg);
+  REQUIRE(found != nullptr);
   REQUIRE(
       f.target->model(name)
           ->on_write(
@@ -332,8 +329,8 @@ void exti_falling_pc13(stm32_fixture const& f)
 {
   auto const& desc = f.target->peripheral("EXTI").description();
   auto const  at   = [&](std::string_view reg) {
-    auto const found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     return desc.base + found->offset;
   };
   REQUIRE(f.target->mem().write(at("EXTI_EXTICR4"), 4, 2u << 8).has_value());

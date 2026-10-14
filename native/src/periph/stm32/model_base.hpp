@@ -151,7 +151,7 @@ protected:
 
   /**
    * @brief Register of the peripheral by name, its word offset and its bits within the word.
-   * @param name Register name as the description spells it, such as `RCC_CR`.
+   * @param name Register name or alias as the description spells it, such as `RCC_CR`.
    * @throws config_error naming the part, the register and the model when the peripheral has
    *         no such register.
    */
@@ -164,7 +164,7 @@ protected:
   /**
    * @brief Field of a register of the peripheral by name, its bit position counted from the
    *        storage word, so a field of a register at offset 2 starts at bit 16 or above.
-   * @param reg Register name as the description spells it.
+   * @param reg Register name or alias as the description spells it.
    * @param field Field name as the description spells it.
    * @throws config_error naming the part, the register, the field and the model when the
    *         peripheral has no such register or field.
@@ -185,22 +185,22 @@ protected:
 
   /**
    * @brief Whether the peripheral has a register of that name.
-   * @param name Register name as the description spells it.
+   * @param name Register name or alias as the description spells it.
    */
   [[nodiscard]] auto has_register(std::string_view name) const -> bool
   {
-    return std::ranges::contains(desc_.registers, name, &register_desc::name);
+    return find_register(desc_, name) != nullptr;
   }
 
   /**
    * @brief Description of a register of the peripheral by name.
-   * @param name Register name as the description spells it.
+   * @param name Register name or alias as the description spells it.
    * @throws config_error as reg() does.
    */
   [[nodiscard]] auto describe(std::string_view name) const -> register_desc const&
   {
-    auto const found = std::ranges::find(desc_.registers, name, &register_desc::name);
-    if(found == desc_.registers.end())
+    auto const* found = find_register(desc_, name);
+    if(found == nullptr)
     {
       missing(name);
     }

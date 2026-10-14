@@ -305,20 +305,24 @@ class RegisterView:
 
 
 class PeripheralView:
-    """One peripheral: its registers by name."""
+    """One peripheral: its registers by name, or by alias, such as the SVD name `TIM1_CR1` the
+    register `CR1` of TIM1 answers to."""
 
-    __slots__ = ("_access", "_base", "_name", "_registers")
+    __slots__ = ("_access", "_base", "_name", "_names", "_registers")
 
     def __init__(self, access: ViewAccess, peripheral: _core.PeripheralDesc) -> None:
         self._access = access
         self._name = peripheral.name
         self._base = peripheral.base
-        self._registers = {r.name: r for r in peripheral.registers}
+        self._names = tuple(r.name for r in peripheral.registers)
+        aliases = {alias: r for r in peripheral.registers for alias in r.aliases or ()}
+        self._registers = aliases | {r.name: r for r in peripheral.registers}
 
     @property
     def registers(self) -> tuple[str, ...]:
-        """Register names."""
-        return tuple(self._registers)
+        """Register names. Aliases, such as the SVD name `TIM1_CR1` of `CR1`, are left out,
+        and look the register up as its name does."""
+        return self._names
 
     @property
     def port(self) -> UartStream:
@@ -392,7 +396,7 @@ class PeripheralView:
         return self.__getattr__(name)
 
     def __dir__(self) -> list[str]:
-        return [*self._registers]
+        return [*self._names]
 
 
 class Pin:

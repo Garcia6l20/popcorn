@@ -87,6 +87,9 @@ traces. The machine is named after the fixture in logs and errors.
 - `Periph(devices=[Device(cls, address=0x50, **params)])` attaches a bus device, `Periph(model=Use(cls, **params))` replaces a peripheral model, as in `i2c_mock` and `python_model`.
 - `rcc=RccOptions(...)` and `supply=SupplyOptions(...)` set the board clock and supply, as in `rcc` and `adc_watchdog`.
 
+Registers go by their bare names, `m.periph.GPIOA.MODER`. The SVD names, `GPIO_MODER`, answer as
+aliases, so examples written either way run.
+
 ## Configs
 
 Named variants of a description come from `with_configs`. The config is chosen on the decorator,

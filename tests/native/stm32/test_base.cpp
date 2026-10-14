@@ -14,6 +14,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -163,6 +164,23 @@ TEST_CASE("registers and fields resolve by name from the description")
   CHECK(sws.bits.lsb == 2);
   CHECK(sws.bits.width == 2);
   CHECK(sws.bits.mask() == 0xcu);
+}
+
+TEST_CASE("a model resolves a register by its bare name and by its SVD alias")
+{
+  bench b;
+  auto& cr = *std::ranges::find(
+      b.part.peripherals.front().registers, std::string_view{"RCC_CR"},
+      &popcorn::register_desc::name);
+  cr.name    = "CR";
+  cr.aliases = std::vector<std::string>{"RCC_CR"};
+  probe_model const bare{b.ctx, b.rcc, "CR", "HSION"};
+  probe_model const aliased{b.ctx, b.rcc, "RCC_CR", "HSION"};
+  CHECK(bare.word.offset == 0);
+  CHECK(aliased.word.offset == 0);
+  CHECK(aliased.bits.lsb == 8);
+  CHECK(aliased.bits.mask() == bare.bits.mask());
+  CHECK(error_of(b, "RCC_CTRL", "HSION").key() == "peripherals.RCC.registers.RCC_CTRL");
 }
 
 TEST_CASE("a register in the upper half of its word resolves to that half's bits")

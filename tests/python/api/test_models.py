@@ -6,6 +6,7 @@ import asyncio
 import functools
 import gc
 import itertools
+import json
 import logging
 import traceback
 import warnings
@@ -752,3 +753,66 @@ def test_a_model_error_inside_running_raises_at_the_next_wait(failing: type[Time
     with pytest.raises(LookupError, match="failed"):
         run_bounded(scenario())
     assert not m.busy
+
+
+def test_a_model_answers_to_the_aliases_of_its_registers(tmp_path: Path) -> None:
+    data = json.loads(MODEL_JSON.read_text(encoding="utf-8"))
+    timer = next(p for p in data["peripherals"] if p["name"] == "TIMER")
+    for register in timer["registers"]:
+        register["aliases"] = [f"TIMER_{register['name']}"]
+    described = tmp_path / "aliased.json"
+    described.write_text(json.dumps(data), encoding="utf-8")
+
+    class Aliased(Model):
+        def __init__(self) -> None:
+            super().__init__()
+            self.writes: list[tuple[int, int]] = []
+
+        @on_write("TIMER_CR")
+        def _cr(self, old: int, new: int) -> None:
+            self.writes.append((old, self.regs.TIMER_ARR))
+
+    m = popcorn.Machine(
+        popcorn.load_description(described),
+        image=popcorn.Image.elf(MODEL_ELF),
+        models={"TIMER": Aliased},
+    )
+    m.reset()
+    assert asyncio.run(m.run(until=m.sym("ready"), budget=10_000)).reason is (
+        popcorn.StopReason.ADDRESS
+    )
+    call(m, "start_timer", 25)
+    model = m.model("TIMER")
+    assert isinstance(model, Aliased)
+    assert model.writes == [(0, 25)]
+    assert model.regs.ARR == model.regs.TIMER_ARR == 25
+    assert model.fields.TIMER_CR.EN == model.fields.CR.EN
+    assert "CR" in dir(model.regs) and "TIMER_CR" not in dir(model.regs)
+    assert "TIMER_CR" not in dir(model.fields)
+    assert m.periph.TIMER.TIMER_ARR.value == 25
+
+
+def test_a_model_error_names_the_register_an_alias_reached(tmp_path: Path) -> None:
+    data = json.loads(MODEL_JSON.read_text(encoding="utf-8"))
+    timer = next(p for p in data["peripherals"] if p["name"] == "TIMER")
+    for register in timer["registers"]:
+        register["aliases"] = [f"TIMER_{register['name']}"]
+    described = tmp_path / "aliased.json"
+    described.write_text(json.dumps(data), encoding="utf-8")
+
+    class Wrong(Model):
+        @on_read("TIMER_CNT")
+        def _cnt(self) -> int:
+            return "three"  # pyright: ignore[reportReturnType]
+
+    m = popcorn.Machine(
+        popcorn.load_description(described),
+        image=popcorn.Image.elf(MODEL_ELF),
+        models={"TIMER": Wrong},
+    )
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
+    with pytest.raises(popcorn.ModelError) as caught:
+        call(m, "read_timer_count")
+    assert caught.value.register == "CNT"
+    assert str(caught.value).startswith("TIMER.CNT: read handler _cnt")

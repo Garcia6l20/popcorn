@@ -161,6 +161,29 @@ register_layout::register_layout(peripheral_desc const& desc) : desc_{&desc}
       fail("registers." + reg.name, "one register per offset, others naming it in alternate_of");
     }
   }
+  std::map<std::string, placed_register const*, std::less<>> aliased;
+  for(auto const& reg : desc.registers | std::views::filter([](register_desc const& reg) {
+                          return reg.aliases.has_value();
+                        }))
+  {
+    for(auto const& alias : *reg.aliases)
+    {
+      if(placed.contains(alias) or not aliased.emplace(alias, &placed.at(reg.name)).second)
+      {
+        fail(
+            "registers." + reg.name + ".aliases",
+            "names no other register of the peripheral uses as its name or alias");
+      }
+    }
+  }
+  auto const placed_named = [&](std::string_view name) -> placed_register const* {
+    if(auto const found = placed.find(name); found != placed.end())
+    {
+      return &found->second;
+    }
+    auto const found = aliased.find(name);
+    return found == aliased.end() ? nullptr : found->second;
+  };
 
   auto const rules_for = [this, &fail](std::uint32_t word) -> word_rules& {
     if(rule_of_word_[word] == 0)
@@ -181,12 +204,12 @@ register_layout::register_layout(peripheral_desc const& desc) : desc_{&desc}
     auto        word = at.word;
     if(reg.alternate_of)
     {
-      auto const primary = placed.find(*reg.alternate_of);
-      if(primary == placed.end())
+      auto const* primary = placed_named(*reg.alternate_of);
+      if(primary == nullptr)
       {
         fail("registers." + reg.name + ".alternate_of", "the name of a register of the peripheral");
       }
-      word = primary->second.word;
+      word = primary->word;
     }
     word_rules own{};
     if(not reg.alternate_of)
@@ -235,17 +258,16 @@ register_layout::register_layout(peripheral_desc const& desc) : desc_{&desc}
 
   auto const field_bits = [&](std::string const& reg_name, std::string const& field_name,
                               std::string const& what) -> std::pair<std::uint32_t, std::uint32_t> {
-    auto const reg = placed.find(reg_name);
-    if(reg != placed.end())
+    auto const* reg = placed_named(reg_name);
+    if(reg != nullptr)
     {
-      auto const& fields = reg->second.desc->fields;
+      auto const& fields = reg->desc->fields;
       auto const  field  = std::ranges::find(fields, field_name, &field_desc::name);
       if(field != fields.end())
       {
-        auto const word = reg->second.desc->alternate_of
-                            ? placed.at(*reg->second.desc->alternate_of).word
-                            : reg->second.word;
-        return {word, (low_bits(field->width) << field->lsb) << reg->second.shift};
+        auto const word =
+            reg->desc->alternate_of ? placed_named(*reg->desc->alternate_of)->word : reg->word;
+        return {word, (low_bits(field->width) << field->lsb) << reg->shift};
       }
     }
     fail(what, "a register and field of the peripheral");
@@ -290,9 +312,8 @@ auto register_layout::crosses(std::uint32_t word) const -> std::span<cross_targe
 
 auto register_layout::word_of(std::string_view name) const -> std::optional<std::uint32_t>
 {
-  auto const& registers = desc_->registers;
-  auto const  reg       = std::ranges::find(registers, name, &register_desc::name);
-  if(reg == registers.end())
+  auto const* reg = find_register(*desc_, name);
+  if(reg == nullptr)
   {
     return std::nullopt;
   }

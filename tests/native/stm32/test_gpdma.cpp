@@ -200,8 +200,8 @@ auto bit(std::string_view reg, std::string_view field) -> std::uint32_t
 {
   auto const& unit = *std::ranges::find(
       u575().peripherals, std::string_view{"GPDMA1"}, &popcorn::peripheral_desc::name);
-  auto const found = std::ranges::find(unit.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != unit.registers.end());
+  auto const found = popcorn::find_register(unit, reg);
+  REQUIRE(found != nullptr);
   auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
   REQUIRE(bits != found->fields.end());
   return std::uint32_t{1} << bits->lsb;
@@ -209,10 +209,9 @@ auto bit(std::string_view reg, std::string_view field) -> std::uint32_t
 
 void write(stm32_fixture const& f, std::string_view reg, std::uint32_t value)
 {
-  auto&      regs = f.target->peripheral("GPDMA1");
-  auto const found =
-      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != regs.description().registers.end());
+  auto&      regs  = f.target->peripheral("GPDMA1");
+  auto const found = popcorn::find_register(regs.description(), reg);
+  REQUIRE(found != nullptr);
   REQUIRE(
       f.target->model("GPDMA1")
           ->on_write(
@@ -534,10 +533,9 @@ auto llr(std::string_view field) -> std::uint32_t
 
 auto reg_value(stm32_fixture const& f, std::string_view reg) -> std::uint32_t
 {
-  auto const& regs = f.target->peripheral("GPDMA1");
-  auto const  found =
-      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != regs.description().registers.end());
+  auto const& regs  = f.target->peripheral("GPDMA1");
+  auto const  found = popcorn::find_register(regs.description(), reg);
+  REQUIRE(found != nullptr);
   return regs.peek(found->offset);
 }
 
@@ -2006,8 +2004,8 @@ void set_field(
     std::uint32_t        value)
 {
   auto const& desc  = f.target->peripheral("GPDMA1").description();
-  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != desc.registers.end());
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
   auto const field = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
   REQUIRE(field != found->fields.end());
   auto const at  = desc.base + found->offset;

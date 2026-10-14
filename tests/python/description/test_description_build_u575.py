@@ -7,8 +7,19 @@ from typing import cast
 import jsonschema.validators
 import pytest
 from popcorn.stm32.description._binder import dump_json, load_json
-from popcorn.stm32.description._builder import build_description, resolve_ip
-from popcorn.stm32.description._model import AlternateDesc
+from popcorn.stm32.description._builder import (
+    bare_register_names,
+    build_description,
+    resolve_ip,
+)
+from popcorn.stm32.description._model import (
+    Access,
+    AlternateDesc,
+    CrossEffect,
+    CrossRule,
+    PeripheralDesc,
+    RegisterDesc,
+)
 from popcorn.stm32.description._sources import Sources
 
 SCHEMA_PATH = Path(__file__).parents[3] / "data" / "schema" / "part_description.schema.json"
@@ -124,3 +135,150 @@ def test_resolve_ip_prefers_matched_db_ip() -> None:
     ip, ip_version = resolve_ip("FOO1", "FOO", "FOO", "1.0", {"FOO"})
     assert ip == "FOO"
     assert ip_version == "1.0"
+
+
+BARE_NAMES = {
+    "EXTI": (14, "EXTI_"),
+    "FLASH": (62, "FLASH_"),
+    "GPIOA": (13, "GPIO_"),
+    "GPIOB": (13, "GPIO_"),
+    "GPIOC": (13, "GPIO_"),
+    "GPIOD": (13, "GPIO_"),
+    "GPIOE": (13, "GPIO_"),
+    "GPIOF": (13, "GPIO_"),
+    "GPIOG": (13, "GPIO_"),
+    "GPIOH": (13, "GPIO_"),
+    "GPIOI": (13, "GPIO_"),
+    "I2C1": (1, "I2C_"),
+    "I2C2": (1, "I2C_"),
+    "I2C3": (1, "I2C_"),
+    "I2C4": (1, "I2C_"),
+    "ICache": (10, "ICACHE_"),
+    "DCACHE": (10, "DCACHE_"),
+    "GTZC1_MPCBB1": (107, "MPCBB1_"),
+    "GTZC1_MPCBB2": (107, "MPCBB2_"),
+    "GTZC1_MPCBB3": (107, "MPCBB3_"),
+    "GTZC1_TZSC": (23, "TZSC_"),
+    "GTZC2_MPCBB4": (4, "MPCBB4_"),
+    "GTZC2_TZSC": (3, "TZSC_"),
+    "PWR": (38, "PWR_"),
+    "RCC": (52, "RCC_"),
+    "GPDMA1": (173, "GPDMA_"),
+    "LPDMA1": (45, "LPDMA_"),
+    "SPI1": (14, "SPI_"),
+    "SPI2": (14, "SPI_"),
+    "SPI3": (14, "SPI_"),
+    "TIM1": (30, "TIM1_"),
+    "TIM8": (30, "TIM1_"),
+    "SYSCFG": (13, "SYSCFG_"),
+    "DBGMCU": (3, "DBGMCU_"),
+    "VREFBUF": (2, "VREFBUF_"),
+    "UCPD1": (15, "UCPD_"),
+    "FDCAN1_RAM": (37, "FDCAN_"),
+    "FDCAN1": (37, "FDCAN_"),
+    "TAMP": (49, "TAMP_"),
+    "MDF1": (96, "MDF_"),
+    "ADF1": (15, "ADF_"),
+    "LPGPIO1": (5, "LPGPIO_"),
+    "ADC1": (34, "ADC_"),
+    "ADC4": (18, "ADC_"),
+    "ADC12": (1, "ADC12_"),
+    "DAC1": (21, "DAC_"),
+    "SDMMC1": (5, "SDMMC_"),
+    "SDMMC2": (5, "SDMMC_"),
+    "DLYBOS1": (2, "DLYB_"),
+    "DLYBOS2": (2, "DLYB_"),
+    "DLYBSD1": (2, "DLYB_"),
+    "DLYBSD2": (2, "DLYB_"),
+}
+
+
+def test_build_u575_strips_the_peripheral_prefix_of_register_names(u575_sources: Sources) -> None:
+    description = build_description(u575_sources)
+    by_name = {p.name: p for p in description.peripherals}
+    renamed: dict[str, tuple[int, str]] = {}
+    for peripheral in description.peripherals:
+        aliased = [r for r in peripheral.registers if r.aliases]
+        if aliased and peripheral.alias_of is None:
+            prefixes = {r.aliases[0].removesuffix(r.name) for r in aliased if r.aliases}
+            assert len(prefixes) == 1, peripheral.name
+            renamed[peripheral.name] = (len(aliased), prefixes.pop())
+        if peripheral.alias_of is not None:
+            target = by_name[peripheral.alias_of]
+            assert [(r.name, r.aliases) for r in peripheral.registers] == [
+                (r.name, r.aliases) for r in target.registers
+            ]
+    assert renamed == BARE_NAMES
+    assert [r.name for r in by_name["COMP"].registers] == ["COMP1_CSR", "COMP2_CSR"]
+    assert [r.name for r in by_name["OPAMP"].registers][:2] == ["OPAMP1_CSR", "OPAMP1_OTR"]
+
+
+def _register(name: str, offset: int, alternate_of: str | None = None) -> RegisterDesc:
+    return RegisterDesc(
+        name=name,
+        offset=offset,
+        width=32,
+        reset=0,
+        reset_mask=0,
+        acc=Access.READ_WRITE,
+        fields=[],
+        alternate_of=alternate_of,
+    )
+
+
+def _peripheral(name: str, ip: str, registers: list[RegisterDesc]) -> PeripheralDesc:
+    return PeripheralDesc(
+        name=name,
+        ip=ip,
+        ip_version="",
+        base=0,
+        size=0x400,
+        registers=registers,
+        cross_rules=[],
+        irqs=[],
+    )
+
+
+def test_bare_names_follow_alternates_and_cross_rules() -> None:
+    timer = _peripheral(
+        "TIM8",
+        "TIM1_8U5",
+        [
+            _register("TIM1_CCMR1_Output", 0x18),
+            _register("TIM1_CCMR1_Input", 0x18, "TIM1_CCMR1_Output"),
+            _register("TIM1_SR", 0x10),
+            _register("TIM1_EGR", 0x14),
+        ],
+    )
+    timer.cross_rules = [
+        CrossRule(
+            reg="TIM1_EGR",
+            field="UG",
+            target_reg="TIM1_SR",
+            target_field="UIF",
+            effect=CrossEffect.SET,
+        )
+    ]
+    renames = bare_register_names(timer, ["TIM1"])
+    assert renames["TIM1_SR"] == "SR"
+    assert [(r.name, r.aliases, r.alternate_of) for r in timer.registers] == [
+        ("CCMR1_Output", ["TIM1_CCMR1_Output"], None),
+        ("CCMR1_Input", ["TIM1_CCMR1_Input"], "CCMR1_Output"),
+        ("SR", ["TIM1_SR"], None),
+        ("EGR", ["TIM1_EGR"], None),
+    ]
+    assert (timer.cross_rules[0].reg, timer.cross_rules[0].target_reg) == ("EGR", "SR")
+
+
+def test_a_bare_name_that_collides_keeps_the_svd_name() -> None:
+    comp = _peripheral("COMP", "COMP", [_register("COMP1_CSR", 0), _register("COMP2_CSR", 4)])
+    assert bare_register_names(comp, []) == {}
+    clash = _peripheral(
+        "UNIT", "UNIT", [_register("CR", 0), _register("UNIT_CR", 4), _register("UNIT_SR", 8)]
+    )
+    assert bare_register_names(clash, []) == {"UNIT_SR": "SR"}
+    assert [r.name for r in clash.registers] == ["CR", "UNIT_CR", "SR"]
+    twice = _peripheral("ADC1", "ADC", [_register("ADC1_ISR", 0), _register("ADC_ISR", 4)])
+    assert bare_register_names(twice, []) == {"ADC1_ISR": "ISR"}
+    digit = _peripheral("UNIT", "UNIT", [_register("UNIT_1CR", 0)])
+    assert bare_register_names(digit, []) == {}

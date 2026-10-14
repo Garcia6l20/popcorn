@@ -2,7 +2,7 @@
 
 Table format, one line per item, in description order (already deterministic, spec 04):
   P name base size ip
-  R periph reg offset width access reset mask nfields alternate_of
+  R periph reg offset width access reset mask nfields alternate_of aliases
   F periph reg field lsb width access on_write on_read
   I number name
   A periph pin af signal
@@ -10,7 +10,8 @@ Table format, one line per item, in description order (already deterministic, sp
   C cpu revision fpu fpu_double mpu mpu_regions mpu_regions_secure sau_regions trustzone dsp
     nvic_prio_bits num_irqs vendor_systick_config reset_clock_hz
 Addresses, offsets, resets and masks are lower-case hex; every other number is decimal; a missing
-optional value is "-". Region content is offset:hexbytes pieces joined by commas.
+optional value is "-". Register aliases are joined by commas. Region content is offset:hexbytes
+pieces joined by commas.
 """
 
 import hashlib
@@ -64,9 +65,10 @@ def _dump_registers(description: PartDescription) -> str:
     for p in description.peripherals:
         for r in p.registers:
             alt = r.alternate_of if r.alternate_of is not None else "-"
+            aliases = ",".join(r.aliases) if r.aliases else "-"
             lines.append(
                 f"R {p.name} {r.name} {r.offset:#06x} {r.width} {r.acc.value} "
-                f"{r.reset:#010x} {r.reset_mask:#010x} {len(r.fields)} {alt}"
+                f"{r.reset:#010x} {r.reset_mask:#010x} {len(r.fields)} {alt} {aliases}"
             )
     return "\n".join(lines) + "\n"
 

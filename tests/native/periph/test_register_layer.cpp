@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <format>
 #include <meta>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,7 +54,8 @@ auto reg(
       .reset_mask   = 0xffff'ffff,
       .acc          = acc,
       .fields       = std::move(fields),
-      .alternate_of = std::nullopt};
+      .alternate_of = std::nullopt,
+      .aliases      = std::nullopt};
 }
 
 auto unit(
@@ -294,6 +296,64 @@ TEST_CASE("layouts refuse duplicate names, shared offsets and conflicting altern
   CHECK_THROWS_AS(
       periph::register_layout{unit({reg("MAIN", 0, access::read_write, {}), alternate})},
       popcorn::config_error);
+}
+
+TEST_CASE("a register answers to its aliases in word_of, alternate_of and cross rules")
+{
+  auto isr    = reg("ISR", 0, access::read_only, {field("TC", 6, 1, access::read_only)}, 0xc0);
+  isr.aliases = std::vector<std::string>{"UNIT_ISR"};
+  auto icr =
+      reg("ICR", 4, access::write_only,
+          {field("TCCF", 6, 1, access::write_only, write_effect::one_to_clear)});
+  icr.aliases = std::vector<std::string>{"UNIT_ICR", "UNIT_CLEAR"};
+  auto alternate =
+      reg("ICR_VIEW", 4, access::write_only,
+          {field("TCCF", 6, 1, access::write_only, write_effect::one_to_clear)});
+  alternate.alternate_of = "UNIT_ICR";
+  bench b{
+      unit(
+          {isr, icr, alternate},
+          {{.reg          = "UNIT_CLEAR",
+                                   .field        = "TCCF",
+                                   .target_reg   = "UNIT_ISR",
+                                   .target_field = "TC",
+                                   .effect       = popcorn::cross_effect::clear}}
+          )
+  };
+  CHECK(b.layout.word_of("ISR") == 0u);
+  CHECK(b.layout.word_of("UNIT_ISR") == 0u);
+  CHECK(b.layout.word_of("UNIT_CLEAR") == 1u);
+  CHECK(b.layout.word_of("ICR_VIEW") == 1u);
+  CHECK(b.layout.word_of("UNIT") == std::nullopt);
+  periph::layer_write(b.layout, b.regs, b.state, 4, 4, 1u << 6);
+  CHECK(b.regs.peek(0) == 0x80);
+}
+
+TEST_CASE("layouts refuse an alias another register uses as its name or alias")
+{
+  auto const refusal = [](std::vector<popcorn::register_desc> registers) -> std::string {
+    try
+    {
+      periph::register_layout const layout{unit(std::move(registers))};
+    }
+    catch(popcorn::config_error const& e)
+    {
+      return std::string{e.key()};
+    }
+    return "accepted";
+  };
+  auto a    = reg("A", 0, access::read_write, {});
+  auto b    = reg("B", 4, access::read_write, {});
+  a.aliases = std::vector<std::string>{"X"};
+  CHECK(refusal({a, b}) == "accepted");
+  b.aliases = std::vector<std::string>{"A"};
+  CHECK(refusal({a, b}) == "peripherals.UNIT.registers.B.aliases");
+  b.aliases = std::vector<std::string>{"X"};
+  CHECK(refusal({a, b}) == "peripherals.UNIT.registers.B.aliases");
+  b.aliases = std::vector<std::string>{"Y", "Y"};
+  CHECK(refusal({a, b}) == "peripherals.UNIT.registers.B.aliases");
+  b.aliases = std::vector<std::string>{"B"};
+  CHECK(refusal({a, b}) == "peripherals.UNIT.registers.B.aliases");
 }
 
 TEST_CASE("write-once locks exist only for layouts with write-once bits, per word")

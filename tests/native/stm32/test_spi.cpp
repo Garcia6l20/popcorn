@@ -134,8 +134,8 @@ struct bus
       -> popcorn::register_desc const&
   {
     auto const& desc  = f.target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, name, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, name);
+    REQUIRE(found != nullptr);
     return *found;
   }
 

@@ -99,6 +99,7 @@ class RegisterDesc:
     reset_mask: int = field(metadata={"minimum": 0, "maximum": 4294967295})
     acc: Access
     fields: list[FieldDesc]
+    aliases: list[str] | None = None
     alternate_of: str | None = None
 
 

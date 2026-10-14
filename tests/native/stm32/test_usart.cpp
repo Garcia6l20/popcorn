@@ -242,9 +242,8 @@ TEST_CASE("a frame in flight across a core clock change arrives at its virtual t
           .reason
       == stop_reason::time);
   auto&      rcc    = r.f->target->peripheral("RCC");
-  auto const icscr1 = std::ranges::find(
-      rcc.description().registers, std::string_view{"RCC_ICSCR1"}, &popcorn::register_desc::name);
-  REQUIRE(icscr1 != rcc.description().registers.end());
+  auto const icscr1 = popcorn::find_register(rcc.description(), std::string_view{"RCC_ICSCR1"});
+  REQUIRE(icscr1 != nullptr);
   auto const at  = rcc.description().base + icscr1->offset;
   auto const old = r.f->target->mem().read(at, 4);
   REQUIRE(old.has_value());
@@ -300,9 +299,8 @@ TEST_CASE("a zero BRR transmits nothing and logs once")
       r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
   auto&      regs  = r.f->target->peripheral("USART1");
   auto const write = [&](std::string_view reg, std::uint32_t value) {
-    auto const found =
-        std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != regs.description().registers.end());
+    auto const found = popcorn::find_register(regs.description(), reg);
+    REQUIRE(found != nullptr);
     REQUIRE(r.f->target->model("USART1")
                 ->on_write(
                     regs, found->offset, 4, regs.peek(found->offset), value,
@@ -345,9 +343,8 @@ TEST_CASE("the transmit buffer holds one frame without FIFO mode and eight with 
     rig        r{"idle"};
     auto&      regs  = r.f->target->peripheral("USART1");
     auto const write = [&](std::string_view reg, std::uint32_t value) {
-      auto const found =
-          std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-      REQUIRE(found != regs.description().registers.end());
+      auto const found = popcorn::find_register(regs.description(), reg);
+      REQUIRE(found != nullptr);
       REQUIRE(r.f->target->model("USART1")
                   ->on_write(
                       regs, found->offset, 4, regs.peek(found->offset), value,
@@ -355,9 +352,7 @@ TEST_CASE("the transmit buffer holds one frame without FIFO mode and eight with 
                   .has_value());
     };
     auto&      rcc    = r.f->target->peripheral("RCC");
-    auto const enable = std::ranges::find(
-        rcc.description().registers, std::string_view{"RCC_APB2ENR"},
-        &popcorn::register_desc::name);
+    auto const enable = popcorn::find_register(rcc.description(), std::string_view{"RCC_APB2ENR"});
     auto const usart1 =
         std::ranges::find(enable->fields, std::string_view{"USART1EN"}, &popcorn::field_desc::name);
     REQUIRE(r.f->target->model("RCC")
@@ -406,9 +401,8 @@ TEST_CASE("RXFT rises at the RX FIFO threshold and queued() counts host frames n
   rig        r{"idle"};
   auto&      regs  = r.f->target->peripheral("USART1");
   auto const write = [&](std::string_view reg, std::uint32_t value) {
-    auto const found =
-        std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != regs.description().registers.end());
+    auto const found = popcorn::find_register(regs.description(), reg);
+    REQUIRE(found != nullptr);
     REQUIRE(r.f->target->model("USART1")
                 ->on_write(
                     regs, found->offset, 4, regs.peek(found->offset), value,
@@ -416,8 +410,7 @@ TEST_CASE("RXFT rises at the RX FIFO threshold and queued() counts host frames n
                 .has_value());
   };
   auto&      rcc    = r.f->target->peripheral("RCC");
-  auto const enable = std::ranges::find(
-      rcc.description().registers, std::string_view{"RCC_APB2ENR"}, &popcorn::register_desc::name);
+  auto const enable = popcorn::find_register(rcc.description(), std::string_view{"RCC_APB2ENR"});
   auto const usart1 =
       std::ranges::find(enable->fields, std::string_view{"USART1EN"}, &popcorn::field_desc::name);
   REQUIRE(r.f->target->model("RCC")
@@ -504,8 +497,8 @@ auto address_of(stm32_fixture const& f, std::string_view peripheral, std::string
     -> popcorn::address
 {
   auto const& desc  = f.target->peripheral(peripheral).description();
-  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != desc.registers.end());
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
   return desc.base + found->offset;
 }
 

@@ -34,7 +34,7 @@ async def run_to(machine: Machine, marker: str) -> None:
 
 def field_mask(machine: Machine, peripheral: str, register: str, field: str) -> int:
     unit = next(p for p in machine.description.peripherals if p.name == peripheral)
-    reg = next(r for r in unit.registers if r.name == register)
+    reg = unit.register(register)
     bits = next(f for f in reg.fields if f.name == field)
     return ((1 << bits.width) - 1) << bits.lsb
 

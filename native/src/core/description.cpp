@@ -322,4 +322,18 @@ auto register_at(part_description const& description, std::uint32_t id)
   }
   return std::nullopt;
 }
+
+auto find_register(peripheral_desc const& peripheral, std::string_view name) -> register_desc const*
+{
+  auto const& registers = peripheral.registers;
+  if(auto const named = std::ranges::find(registers, name, &register_desc::name);
+     named != registers.end())
+  {
+    return &*named;
+  }
+  auto const aliased = std::ranges::find_if(registers, [name](register_desc const& reg) {
+    return reg.aliases and std::ranges::contains(*reg.aliases, name);
+  });
+  return aliased == registers.end() ? nullptr : &*aliased;
+}
 }

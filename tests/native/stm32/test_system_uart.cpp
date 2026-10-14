@@ -945,10 +945,8 @@ TEST_CASE(
           held_host, 0,
           [](core::machine& m) {
             auto&      usart = m.peripheral("USART1");
-            auto const found = std::ranges::find(
-                usart.description().registers, std::string_view{"TDR"},
-                &popcorn::register_desc::name);
-            REQUIRE(found != usart.description().registers.end());
+            auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+            REQUIRE(found != nullptr);
             REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
           },
           vtime{static_cast<std::uint64_t>(local)});

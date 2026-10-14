@@ -92,8 +92,8 @@ struct bus
   [[nodiscard]] auto at(std::string_view peripheral, std::string_view reg) const -> address
   {
     auto const& desc  = f.target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     return desc.base + found->offset;
   }
 
@@ -114,8 +114,8 @@ struct bus
       -> std::uint32_t
   {
     auto const& desc  = f.target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     auto const field = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
     REQUIRE(field != found->fields.end());
     return (read(peripheral, reg) >> field->lsb) & ((std::uint32_t{1} << field->width) - 1u);
@@ -128,8 +128,8 @@ struct bus
           std::uint32_t    value) const
   {
     auto const& desc  = f.target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     auto const field = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
     REQUIRE(field != found->fields.end());
     auto const mask = ((std::uint32_t{1} << field->width) - 1u) << field->lsb;
@@ -3518,10 +3518,9 @@ namespace
 {
 auto model_read(inputs const& t, std::string_view reg, popcorn::initiator by) -> std::uint32_t
 {
-  auto&      regs = t.f.target->peripheral("TIM3");
-  auto const found =
-      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != regs.description().registers.end());
+  auto&      regs  = t.f.target->peripheral("TIM3");
+  auto const found = popcorn::find_register(regs.description(), reg);
+  REQUIRE(found != nullptr);
   auto const value = t.f.target->model("TIM3")->on_read(
       regs, found->offset, 4, {.pc = 0, .now = icount{0}, .by = by});
   REQUIRE(value.has_value());

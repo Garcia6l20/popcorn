@@ -105,6 +105,9 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] register_desc
   std::vector<field_desc> fields;
   /** @brief Register this one shares its storage word with, when it is an alternate view. */
   std::optional<std::string> alternate_of;
+  /** @brief Other names the register answers to in lookups, such as the SVD name `TIM1_CR1`
+   * of `CR1`. Unique within the peripheral, among register names and aliases. */
+  std::optional<std::vector<std::string>> aliases;
 
   /** @brief Member-wise equality. */
   friend auto operator==(register_desc const&, register_desc const&) -> bool = default;
@@ -376,4 +379,13 @@ auto flat_register_id(part_description const& description, register_ref ref) -> 
  */
 auto register_at(part_description const& description, std::uint32_t id)
     -> std::optional<register_ref>;
+
+/**
+ * @brief Register of a peripheral by name, or by one of its aliases.
+ * @param peripheral Peripheral to search.
+ * @param name Register name or alias, such as `CR1` or `TIM1_CR1`.
+ * @return The register, null when no register has that name or alias.
+ */
+[[nodiscard]] auto find_register(peripheral_desc const& peripheral, std::string_view name)
+    -> register_desc const*;
 }

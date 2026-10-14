@@ -146,8 +146,8 @@ auto lsb(std::string_view peripheral, std::string_view reg, std::string_view fie
 {
   auto const& unit =
       *std::ranges::find(u575().peripherals, peripheral, &popcorn::peripheral_desc::name);
-  auto const found = std::ranges::find(unit.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != unit.registers.end());
+  auto const found = popcorn::find_register(unit, reg);
+  REQUIRE(found != nullptr);
   auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
   REQUIRE(bits != found->fields.end());
   return bits->lsb;
@@ -161,10 +161,9 @@ auto bit(std::size_t ch, std::string_view reg, std::string_view field) -> std::u
 auto offset_of(stm32_fixture const& f, std::string_view peripheral, std::string_view reg)
     -> std::uint32_t
 {
-  auto const& regs = f.target->peripheral(peripheral);
-  auto const  found =
-      std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != regs.description().registers.end());
+  auto const& regs  = f.target->peripheral(peripheral);
+  auto const  found = popcorn::find_register(regs.description(), reg);
+  REQUIRE(found != nullptr);
   return found->offset;
 }
 

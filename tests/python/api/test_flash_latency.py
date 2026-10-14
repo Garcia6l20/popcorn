@@ -19,7 +19,7 @@ SW_HSI16 = 0b01
 
 def register(description: popcorn.PartDescription, peripheral: str, name: str) -> int:
     unit = next(p for p in description.peripherals if p.name == peripheral)
-    return unit.base + next(r.offset for r in unit.registers if r.name == name)
+    return unit.base + unit.register(name).offset
 
 
 def test_lowering_the_range_under_16_mhz_raises_model_error_from_the_run(

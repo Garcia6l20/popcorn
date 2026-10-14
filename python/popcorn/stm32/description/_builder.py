@@ -1,9 +1,10 @@
 """Assembles an PartDescription from Sources: expand the SVD, read the db and rzone, apply every
-patch, build the IRQ table, then assemble core, regions and peripherals, GPIO alternate functions
-included."""
+patch, strip the peripheral prefix of register names, build the IRQ table, then assemble core,
+regions and peripherals, GPIO alternate functions included."""
 
 import logging
 import re
+from collections.abc import Mapping, Sequence
 
 from popcorn.stm32.description._cubemx import (
     instance_ips,
@@ -19,6 +20,7 @@ from popcorn.stm32.description._svd import expand_svd
 
 _LOG = logging.getLogger("popcorn")
 _GPIO_PORT_RE = re.compile(r"GPIO([A-Z])")
+_DIGITS = "0123456789"
 
 
 def resolve_ip(
@@ -34,6 +36,52 @@ def resolve_ip(
     if fallback in real_ip_names:
         return name, ""
     return fallback, ""
+
+
+def _name_prefixes(name: str) -> set[str]:
+    parts = [name, *name.split("_")]
+    return {*parts, *(part.rstrip(_DIGITS) for part in parts)}
+
+
+def bare_register_names(peripheral: PeripheralDesc, ancestors: Sequence[str]) -> dict[str, str]:
+    """Strips the prefix SVD names carry, such as `TIM1_` in `TIM1_CR1`, from the registers of
+    @p peripheral in place, keeping the SVD name as an alias. A prefix is the IP name, or the
+    instance name, one of its `_` parts, either without trailing digits, of the peripheral, of
+    the peripheral it aliases or of one of @p ancestors, the instances it derives from. A
+    register keeps its name when the bare one is no identifier or names another register.
+    `alternate_of` and cross rules follow. Returns the renames, SVD name to bare name."""
+    owners = [peripheral.name, *ancestors, *([peripheral.alias_of] if peripheral.alias_of else [])]
+    candidates = {peripheral.ip}.union(*(_name_prefixes(owner) for owner in owners)) - {""}
+    prefixes = sorted(candidates, key=lambda prefix: (-len(prefix), prefix))
+    taken = {register.name for register in peripheral.registers}
+    renames: dict[str, str] = {}
+    for register in peripheral.registers:
+        for prefix in prefixes:
+            bare = register.name.removeprefix(f"{prefix}_")
+            if bare != register.name and bare.isidentifier() and bare not in taken:
+                renames[register.name] = bare
+                taken.add(bare)
+                break
+    for register in peripheral.registers:
+        bare = renames.get(register.name)
+        if bare is not None:
+            register.aliases = [*(register.aliases or []), register.name]
+            register.name = bare
+        if register.alternate_of is not None:
+            register.alternate_of = renames.get(register.alternate_of, register.alternate_of)
+    for rule in peripheral.cross_rules:
+        rule.reg = renames.get(rule.reg, rule.reg)
+        rule.target_reg = renames.get(rule.target_reg, rule.target_reg)
+    return renames
+
+
+def _ancestors(name: str, derived_from: Mapping[str, str | None]) -> list[str]:
+    chain: list[str] = []
+    parent = derived_from.get(name)
+    while parent is not None and parent not in chain:
+        chain.append(parent)
+        parent = derived_from.get(parent)
+    return chain
 
 
 def build_description(sources: Sources) -> PartDescription:
@@ -116,6 +164,10 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
     )
     loaded_patches = load_patches(sources.patches, part=sources.part, svd_name=sources.svd.name)
     report = apply_patches(loaded_patches, target)
+
+    derived_from = {sp.name: sp.derived_from for sp in svd.peripherals}
+    for peripheral in target.peripherals:
+        bare_register_names(peripheral, _ancestors(peripheral.name, derived_from))
 
     patch_irqs = [loaded.patch.irqs for loaded in loaded_patches if loaded.patch.irqs is not None]
     irq_table = build_irq_table(svd, cmsis, patch_irqs, rzone.processor.num_interrupts)

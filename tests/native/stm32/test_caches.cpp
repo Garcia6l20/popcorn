@@ -48,8 +48,8 @@ auto offset_of(std::string_view peripheral, std::string_view reg) -> std::uint32
 {
   auto const& unit =
       *std::ranges::find(u575().peripherals, peripheral, &popcorn::peripheral_desc::name);
-  auto const found = std::ranges::find(unit.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != unit.registers.end());
+  auto const found = popcorn::find_register(unit, reg);
+  REQUIRE(found != nullptr);
   return found->offset;
 }
 
@@ -58,7 +58,7 @@ auto bit_of(std::string_view peripheral, std::string_view reg, std::string_view 
 {
   auto const& unit =
       *std::ranges::find(u575().peripherals, peripheral, &popcorn::peripheral_desc::name);
-  auto const found = std::ranges::find(unit.registers, reg, &popcorn::register_desc::name);
+  auto const found = popcorn::find_register(unit, reg);
   auto const bits  = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
   REQUIRE(bits != found->fields.end());
   return std::uint32_t{1} << bits->lsb;

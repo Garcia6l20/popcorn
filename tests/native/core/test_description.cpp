@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
@@ -161,6 +162,45 @@ TEST_CASE("GPIO alternate functions round-trip")
   CHECK(popcorn::parse_description(text, "dump") == description);
 }
 
+TEST_CASE("register aliases round-trip")
+{
+  popcorn::part_description description;
+  description.schema_version = popcorn::description_schema_version;
+  description.part           = "ALIAS";
+  popcorn::peripheral_desc timer;
+  timer.name = "TIM1";
+  popcorn::register_desc cr1;
+  cr1.name    = "CR1";
+  cr1.width   = 32;
+  cr1.aliases = std::vector<std::string>{"TIM1_CR1"};
+  timer.registers.push_back(cr1);
+  description.peripherals.push_back(timer);
+
+  auto const text = popcorn::dump_description(description);
+  CHECK(text.contains("\"aliases\":[\"TIM1_CR1\"]"));
+  CHECK(popcorn::parse_description(text, "dump") == description);
+}
+
+TEST_CASE("find_register resolves a name, then an alias, and null for neither")
+{
+  popcorn::peripheral_desc timer;
+  timer.name = "TIM1";
+  popcorn::register_desc cr1;
+  cr1.name    = "CR1";
+  cr1.aliases = std::vector<std::string>{"TIM1_CR1", "CONTROL"};
+  popcorn::register_desc sr;
+  sr.name         = "SR";
+  sr.offset       = 0x10;
+  timer.registers = {cr1, sr};
+
+  CHECK(popcorn::find_register(timer, "CR1") == &timer.registers[0]);
+  CHECK(popcorn::find_register(timer, "TIM1_CR1") == &timer.registers[0]);
+  CHECK(popcorn::find_register(timer, "CONTROL") == &timer.registers[0]);
+  CHECK(popcorn::find_register(timer, "SR") == &timer.registers[1]);
+  CHECK(popcorn::find_register(timer, "TIM1_SR") == nullptr);
+  CHECK(popcorn::find_register(timer, "") == nullptr);
+}
+
 TEST_CASE("absent optional members are omitted from the output")
 {
   auto const text =
@@ -168,6 +208,7 @@ TEST_CASE("absent optional members are omitted from the output")
   CHECK_FALSE(text.contains("alias_of"));
   CHECK_FALSE(text.contains("alternates"));
   CHECK_FALSE(text.contains("alternate_of"));
+  CHECK_FALSE(text.contains("aliases"));
   CHECK_FALSE(text.contains("physical"));
   CHECK_FALSE(text.contains("controller"));
   CHECK_FALSE(text.contains("content"));

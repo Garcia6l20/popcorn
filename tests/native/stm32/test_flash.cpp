@@ -151,8 +151,8 @@ struct flash_rig
       -> address
   {
     auto const& desc  = f.target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     return desc.base + found->offset;
   }
 
@@ -834,8 +834,8 @@ TEST_CASE("a DMA store held while BSY is set takes the PG of the time BSY clears
   auto const buffer = sym("flash_ll", "words");
   auto const bit    = [&](std::string_view reg, std::string_view name) {
     auto const& unit = rig.f.target->peripheral("GPDMA1").description();
-    auto const  regd = std::ranges::find(unit.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(regd != unit.registers.end());
+    auto const  regd = popcorn::find_register(unit, reg);
+    REQUIRE(regd != nullptr);
     auto const bits = std::ranges::find(regd->fields, name, &popcorn::field_desc::name);
     REQUIRE(bits != regd->fields.end());
     return std::uint32_t{1} << bits->lsb;

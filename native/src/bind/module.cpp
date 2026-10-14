@@ -28,8 +28,10 @@
 #include <popcorn/periph/stm32/builtin.hpp>
 #endif
 
+#include <format>
 #include <string>
 
+namespace nb = nanobind;
 namespace py = reflex::py;
 
 namespace popcorn::bind
@@ -81,7 +83,21 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::field_desc>("FieldDesc");
   m.bind<popcorn::register_desc>("RegisterDesc");
   m.bind<popcorn::cross_rule>("CrossRule");
-  m.bind<popcorn::peripheral_desc>("PeripheralDesc");
+  m.bind<popcorn::peripheral_desc>("PeripheralDesc")
+      .def(
+          "register",
+          [](popcorn::peripheral_desc const& self,
+             std::string const&              name) -> popcorn::register_desc {
+            auto const* const found = popcorn::find_register(self, name);
+            if(found == nullptr)
+            {
+              throw nb::key_error(std::format("{} has no register {}", self.name, name).c_str());
+            }
+            return *found;
+          },
+          nb::arg("name"),
+          "The register with this bare name, such as \"CR1\", or this SVD alias, such as "
+          "\"TIM1_CR1\". KeyError when no register has either.");
   m.bind<popcorn::region_access>("RegionAccess");
   m.bind<popcorn::region_content>("RegionContent");
   m.bind<popcorn::region_desc>("RegionDesc");

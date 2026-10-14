@@ -85,8 +85,8 @@ struct adc_fixture : stm32_fixture
   [[nodiscard]] auto at(std::string_view peripheral, std::string_view reg) const -> popcorn::address
   {
     auto const& desc  = target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     return desc.base + found->offset;
   }
 
@@ -102,7 +102,7 @@ struct adc_fixture : stm32_fixture
           std::uint32_t    value) const
   {
     auto const& desc  = target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
+    auto const  found = popcorn::find_register(desc, reg);
     auto const  bits  = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
     REQUIRE(bits != found->fields.end());
     auto const mask    = ((std::uint64_t{1} << bits->width) - 1u) << bits->lsb;
@@ -134,8 +134,8 @@ struct adc_fixture : stm32_fixture
   [[nodiscard]] auto at_offset(std::string_view reg) const -> std::uint32_t
   {
     auto const& desc  = target->peripheral("ADC1").description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     return found->offset;
   }
 

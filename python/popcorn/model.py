@@ -19,7 +19,9 @@ peripheral keeps its described storage semantics natively, without a Python call
 
     m = popcorn.Machine(description, models={"TIM2": Timer})
 
-Handlers are sync and run with the core paused at an instruction boundary.
+Handlers are sync and run with the core paused at an instruction boundary. A register answers
+to its name and to its aliases, `CR1` and its SVD name `TIM1_CR1` on TIM1, in `on_write`,
+`on_read`, `self.regs` and `self.fields`.
 """
 
 from __future__ import annotations
@@ -100,6 +102,7 @@ class IrqLine:
 
 @dataclass(frozen=True, slots=True)
 class _Register:
+    name: str
     word: int
     shift: int
     mask: int
@@ -110,9 +113,11 @@ class _Register:
 
 def _registers(description: _core.PeripheralDesc) -> dict[str, _Register]:
     out: dict[str, _Register] = {}
+    aliases: dict[str, _Register] = {}
     for reg in description.registers:
         width = max(reg.width, 8)
         out[reg.name] = _Register(
+            name=reg.name,
             word=reg.offset & ~3,
             shift=(reg.offset & 3) * 8,
             mask=(1 << width) - 1,
@@ -120,7 +125,12 @@ def _registers(description: _core.PeripheralDesc) -> dict[str, _Register]:
             end=reg.offset + width // 8,
             fields={f.name: ((1 << f.width) - 1) << f.lsb for f in reg.fields},
         )
-    return out
+        aliases |= dict.fromkeys(reg.aliases or (), out[reg.name])
+    return aliases | out
+
+
+def _names(registers: dict[str, _Register]) -> list[str]:
+    return [name for name, reg in registers.items() if reg.name == name]
 
 
 class RegisterStore:
@@ -152,7 +162,7 @@ class RegisterStore:
         self._context.poke(reg.word, (word & ~(reg.mask << reg.shift)) | (value << reg.shift))
 
     def __dir__(self) -> list[str]:
-        return [*self._registers]
+        return _names(self._registers)
 
     def _register(self, name: str) -> _Register:
         reg = self._registers.get(name)
@@ -177,7 +187,7 @@ class FieldMasks:
         return RegisterFields(name, reg.fields)
 
     def __dir__(self) -> list[str]:
-        return [*self._registers]
+        return _names(self._registers)
 
 
 class RegisterFields:
@@ -203,6 +213,7 @@ class RegisterFields:
 @dataclass(frozen=True, slots=True)
 class _Handler:
     register: str
+    name: str
     shift: int
     mask: int
     first: int
@@ -453,7 +464,9 @@ class Model(_core.ModelBase):
                 reg = registers.get(register)
                 if reg is not None:
                     words.setdefault(reg.word, []).append(
-                        _Handler(register, reg.shift, reg.mask, reg.first, reg.end, method)
+                        _Handler(
+                            register, reg.name, reg.shift, reg.mask, reg.first, reg.end, method
+                        )
                     )
         return {word: tuple(handlers) for word, handlers in words.items()}
 
@@ -480,10 +493,10 @@ class Model(_core.ModelBase):
                 return None
             if not isinstance(value, int):
                 raise ModelError(
-                    f"{self.peripheral}.{handler.register}: read handler {handler.method} "
+                    f"{self.peripheral}.{handler.name}: read handler {handler.method} "
                     f"returned a {type(value).__name__}, not an int",
                     peripheral=self.peripheral,
-                    register=handler.register,
+                    register=handler.name,
                     offset=offset,
                 )
             mask = handler.mask << handler.shift

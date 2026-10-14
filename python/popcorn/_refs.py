@@ -1164,7 +1164,8 @@ class PeripheralRef:
         return self._view._name  # pyright: ignore[reportPrivateUsage]
 
     def __getattr__(self, name: str) -> RegisterRef:
-        return RegisterRef(self._owner, f"periph.{self._name}.{name}", getattr(self._view, name))
+        view = getattr(self._view, name)
+        return RegisterRef(self._owner, f"periph.{self._name}.{view.name}", view)
 
     def __getitem__(self, name: str) -> RegisterRef:
         return self.__getattr__(name)

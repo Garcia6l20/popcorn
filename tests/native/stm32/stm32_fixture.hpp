@@ -80,8 +80,8 @@ struct stm32_fixture
       -> std::uint32_t
   {
     auto const& regs  = target->peripheral(peripheral);
-    auto const  found = std::ranges::find(regs.description().registers, reg, &register_desc::name);
-    REQUIRE(found != regs.description().registers.end());
+    auto const  found = popcorn::find_register(regs.description(), reg);
+    REQUIRE(found != nullptr);
     auto const bits = std::ranges::find(found->fields, field, &field_desc::name);
     REQUIRE(bits != found->fields.end());
     auto const mask = bits->width >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << bits->width) - 1u;

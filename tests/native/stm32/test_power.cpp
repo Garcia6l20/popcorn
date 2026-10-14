@@ -136,13 +136,10 @@ TEST_CASE("FLASH_NSCR ignores writes while locked and clears STRT once unlocked"
 {
   stm32_fixture f{u575(), "flash_ll"};
   auto&         regs = f.target->peripheral("FLASH");
-  auto const    nscr = std::ranges::find(
-      regs.description().registers, std::string_view{"FLASH_NSCR"}, &popcorn::register_desc::name);
-  auto const nskeyr = std::ranges::find(
-      regs.description().registers, std::string_view{"FLASH_NSKEYR"},
-      &popcorn::register_desc::name);
-  auto* const model = f.target->model("FLASH");
-  auto const  write = [&](std::uint32_t offset, std::uint32_t value) {
+  auto const    nscr = popcorn::find_register(regs.description(), std::string_view{"FLASH_NSCR"});
+  auto const  nskeyr = popcorn::find_register(regs.description(), std::string_view{"FLASH_NSKEYR"});
+  auto* const model  = f.target->model("FLASH");
+  auto const  write  = [&](std::uint32_t offset, std::uint32_t value) {
     return model->on_write(regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}});
   };
   REQUIRE(write(nscr->offset, 1u).has_value());
@@ -165,10 +162,9 @@ TEST_CASE("PWR logs what v1 does not model, once")
   auto const                    sink =
       f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
   auto const write = [&](std::string_view peripheral, std::string_view reg, std::uint32_t value) {
-    auto&      regs = f.target->peripheral(peripheral);
-    auto const found =
-        std::ranges::find(regs.description().registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != regs.description().registers.end());
+    auto&      regs  = f.target->peripheral(peripheral);
+    auto const found = popcorn::find_register(regs.description(), reg);
+    REQUIRE(found != nullptr);
     REQUIRE(f.target->model(peripheral)
                 ->on_write(
                     regs, found->offset, 4, regs.peek(found->offset), value,
@@ -187,12 +183,10 @@ TEST_CASE("PWR logs what v1 does not model, once")
 TEST_CASE("a snapshot between the two FLASH keys restores the half-done sequence")
 {
   stm32_fixture f{u575(), "flash_ll"};
-  auto&         regs   = f.target->peripheral("FLASH");
-  auto const    nskeyr = std::ranges::find(
-      regs.description().registers, std::string_view{"FLASH_NSKEYR"},
-      &popcorn::register_desc::name);
-  auto* const model = f.target->model("FLASH");
-  auto const  key   = [&](std::uint32_t value) {
+  auto&         regs = f.target->peripheral("FLASH");
+  auto const  nskeyr = popcorn::find_register(regs.description(), std::string_view{"FLASH_NSKEYR"});
+  auto* const model  = f.target->model("FLASH");
+  auto const  key    = [&](std::uint32_t value) {
     return model->on_write(regs, nskeyr->offset, 4, 0, value, {.pc = 0, .now = icount{0}});
   };
   REQUIRE(key(0x4567'0123u).has_value());
@@ -210,8 +204,7 @@ TEST_CASE("the first PWR_CR1 write logs its LPMS mode, Stop 0 included")
   auto const                    sink =
       f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
   auto&      regs = f.target->peripheral("PWR");
-  auto const cr1  = std::ranges::find(
-      regs.description().registers, std::string_view{"PWR_CR1"}, &popcorn::register_desc::name);
+  auto const cr1  = popcorn::find_register(regs.description(), std::string_view{"PWR_CR1"});
   REQUIRE(
       f.target->model("PWR")->on_write(regs, cr1->offset, 4, 0, 0, {.pc = 0, .now = icount{0}}));
   REQUIRE(logged.size() == 1);

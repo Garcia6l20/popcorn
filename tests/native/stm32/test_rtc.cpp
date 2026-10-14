@@ -78,8 +78,8 @@ auto read(stm32_fixture const& f, std::string_view peripheral, std::string_view 
     -> std::uint32_t
 {
   auto const& desc  = f.target->peripheral(peripheral).description();
-  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != desc.registers.end());
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
   auto const value = f.target->mem().read(desc.base + found->offset, 4);
   REQUIRE(value.has_value());
   return static_cast<std::uint32_t>(*value);
@@ -92,8 +92,8 @@ void write(
     std::uint32_t        value)
 {
   auto const& desc  = f.target->peripheral(peripheral).description();
-  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != desc.registers.end());
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
   REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
 }
 
@@ -101,8 +101,8 @@ auto cpu_read(stm32_fixture& f, std::string_view reg) -> std::uint32_t
 {
   auto&       regs  = f.target->peripheral("RTC");
   auto const& desc  = regs.description();
-  auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-  REQUIRE(found != desc.registers.end());
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
   auto const value = f.target->model("RTC")->on_read(
       regs, found->offset, 4, {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
   REQUIRE(value.has_value());

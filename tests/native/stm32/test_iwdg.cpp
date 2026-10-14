@@ -67,8 +67,8 @@ struct bus
   [[nodiscard]] auto at(std::string_view peripheral, std::string_view reg) const -> address
   {
     auto const& desc  = f.target->peripheral(peripheral).description();
-    auto const  found = std::ranges::find(desc.registers, reg, &popcorn::register_desc::name);
-    REQUIRE(found != desc.registers.end());
+    auto const  found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
     return desc.base + found->offset;
   }
 
