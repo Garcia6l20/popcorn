@@ -168,6 +168,23 @@ __attribute__((noipa, optimize("no-optimize-sibling-calls"))) int32_t depth(int3
   return n == 0 ? 0 : depth(n - 1) + 1;
 }
 
+struct pair
+{
+  int32_t a;
+  int32_t b;
+};
+
+__attribute__((noipa)) struct pair make_pair(int32_t a)
+{
+  struct pair made = {a, -a};
+  return made;
+}
+
+__attribute__((noipa, optimize("no-optimize-sibling-calls"))) int32_t use_pair(int32_t a)
+{
+  return make_pair(a).b;
+}
+
 __attribute__((noipa)) uint32_t ticks_now(void)
 {
   return ticks;

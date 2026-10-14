@@ -127,6 +127,7 @@ class Signature:
     returns: Slot
     void: bool = False
     unsupported: str | None = None
+    returns_unsupported: str | None = None
 
 
 def signature_of(info: DebugInfo, function: Function) -> Signature:
@@ -135,7 +136,7 @@ def signature_of(info: DebugInfo, function: Function) -> Signature:
     try:
         returns = slot_of(info, function.returns, function.name)
     except NotImplementedError as error:
-        return Signature(function.name, None, I32_SLOT, False, str(error))
+        return Signature(function.name, None, I32_SLOT, False, str(error), str(error))
     try:
         params = tuple(
             slot_of(info, p.type, f"parameter {p.name or index} of {function.name}")

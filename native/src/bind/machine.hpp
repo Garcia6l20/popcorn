@@ -1221,6 +1221,17 @@ public:
       -> std::uint64_t;
 
   /**
+   * @brief The value a function returning now leaves in its result registers,
+   *        core::machine::returned_value().
+   * @param returns Kind of the value.
+   * @param abi Float ABI of the function.
+   * @throws machine_running while a slice runs, outside its handlers.
+   */
+  [[= py::doc{
+      "Bits of the value a function returning now leaves, of kind returns."}]] [[nodiscard]] auto
+      result_bits(arch::value_kind returns, arch::float_abi abi) const -> std::uint64_t;
+
+  /**
    * @brief Address of the next instruction.
    * @throws machine_running while a slice runs, outside its handlers.
    */

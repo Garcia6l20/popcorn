@@ -423,6 +423,17 @@ public:
    */
   auto end_call() -> std::uint64_t pre(in_call());
 
+  /**
+   * @brief The value a function returning now leaves in its result registers,
+   *        `arch::arch::call_result()`: for a stop at its return address.
+   * @param returns Kind of the value.
+   * @param abi Float ABI of the function.
+   * @return Value bits of @p returns.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto returned_value(arch::value_kind returns, arch::float_abi abi) const
+      -> std::uint64_t;
+
   /** @brief Whether a call begun by begin_call() has not been ended yet. */
   [[nodiscard]] auto in_call() const noexcept -> bool;
 

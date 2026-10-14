@@ -110,6 +110,12 @@ auto machine::in_call() const noexcept -> bool
   return run_->call.has_value();
 }
 
+auto machine::returned_value(arch::value_kind returns, arch::float_abi abi) const -> std::uint64_t
+{
+  require_stopped(*this);
+  return arch_->call_result(arch::call_frame{.returns = returns, .abi = abi});
+}
+
 auto machine::would_preempt(std::uint32_t number) const -> bool
 {
   return arch_->would_preempt(number);

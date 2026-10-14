@@ -335,14 +335,21 @@ class _Returning:
 class _Resolver:
     """Resolves a frame-return target once, when the goal is posted, and keeps it."""
 
-    __slots__ = ("_resolve", "target")
+    __slots__ = ("_check", "_resolve", "target")
 
-    def __init__(self, resolve: Callable[[], _Returning]) -> None:
+    def __init__(
+        self,
+        resolve: Callable[[], _Returning],
+        check: Callable[[_Returning], None] | None = None,
+    ) -> None:
         self._resolve = resolve
+        self._check = check
         self.target: _Returning | None = None
 
     def __call__(self) -> tuple[int, int]:
         target = self._resolve()
+        if self._check is not None:
+            self._check(target)
         self.target = target
         return target.ret, target.sp
 
@@ -2229,6 +2236,60 @@ class Machine:
             run=True,
             returning=returning,
         )
+
+    async def step_return(self, *, budget: int | None = None) -> int | float | None:
+        """Run until the function running now returns, and give its return value. A debugger's
+        step out, `run(until=FrameReturn())` with the value decoded.
+
+            value = await m.step_return()
+
+        The value has the function's DWARF return type, None for a void function or an
+        exception handler, the I32 value of r0 when the image has no DWARF for the function.
+        `last_stop` holds the RETURNED stop at the caller's return address, detail
+        `<function> returned`. Refused inside the machine's free run, as `run` is.
+
+        Args:
+            budget: Instructions the whole step out may take, `default_budget` when None.
+
+        Raises:
+            MachineBusy: A run, step, call, wait or free run is active.
+            EmulationError: The return point cannot be found, nothing ran, or another stop
+                ended the run, such as a reset or a handler's USER stop.
+            NotImplementedError: The function returns a type popcorn cannot decode, a struct
+                or a union, as `call` refuses it. Nothing ran.
+            BudgetExceeded: The budget ran out first.
+            FaultError: The function faulted.
+        """
+        returning = _Resolver(self._frame_return, self._check_returns)
+        stop = await self._goal(
+            until=None,
+            budget=self._default_budget if budget is None else budget,
+            for_=None,
+            stop_when=None,
+            exact=None,
+            run=True,
+            returning=returning,
+        )
+        target = returning.target
+        if target is None:
+            raise EmulationError(f"{error_prefix(self)}the step out resolved no return point")
+        if stop.reason is not StopReason.RETURNED:
+            raise _stop_error(stop, f"the step out of {target.name}", error_prefix(self))
+        if target.exception:
+            return None
+        signature = self._signature(target.name, target.start)
+        if signature.void:
+            return None
+        slot = signature.returns
+        abi = _core.FloatAbi(self._abi_at(target.start).value)
+        return decode(slot, self._handle.result_bits(slot.kind, abi))
+
+    def _check_returns(self, target: _Returning) -> None:
+        if target.exception:
+            return
+        unsupported = self._signature(target.name, target.start).returns_unsupported
+        if unsupported is not None:
+            raise NotImplementedError(unsupported)
 
     def _frame_return(self) -> _Returning:
         regs = self.reg

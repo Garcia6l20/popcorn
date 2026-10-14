@@ -905,6 +905,13 @@ auto machine_handle::time_ps() const -> std::uint64_t
   return access([](core::machine& target) { return target.virtual_clock().time().ps; });
 }
 
+auto machine_handle::result_bits(arch::value_kind returns, arch::float_abi abi) const
+    -> std::uint64_t
+{
+  return access(
+      [returns, abi](core::machine& target) { return target.returned_value(returns, abi); });
+}
+
 auto machine_handle::pc() const -> address
 {
   return access([](core::machine& target) { return target.regs().pc(); });

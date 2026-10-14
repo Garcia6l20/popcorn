@@ -47,6 +47,7 @@ CALLED = (
     "halved",
     "touched",
     "depth",
+    "use_pair",
 )
 _, callee = add_firmware("api", "callee", [here / "callee.c"])
 if callee is not None:
