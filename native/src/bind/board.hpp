@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -87,6 +88,29 @@ public:
   /** @brief A command of MachineHandle.submit_ops() queueing one break frame. */
   [[= py::doc{"Command queueing one break frame towards the firmware."}]] [[nodiscard]] auto
       command_break() const -> access_op;
+
+  /**
+   * @brief A command of MachineHandle.submit_ops() scheduling a change of the UART's nCTS
+   *        input, see periph::stm32::uart_port::set_cts.
+   * @param ready Whether the host is ready to receive.
+   * @param at_ps Virtual time of the change in picoseconds, empty for the time the command runs.
+   */
+  [[= py::doc{"Command scheduling the UART's CTS input at at_ps, True for clear to send."}]]
+      [[nodiscard]] auto command_set_cts(bool ready, std::optional<std::uint64_t> at_ps) const
+      -> access_op;
+
+  /**
+   * @brief Whether the UART's nCTS input is ready with no change pending, see
+   *        uart_port::cts_ready and uart_port::pending_cts.
+   * @throws machine_running while the machine runs, outside its handlers.
+   */
+  [[= py::doc{
+      "Whether the UART's CTS input is clear to send with no change pending."}]] [[nodiscard]] auto
+      cts_settled_ready() const -> bool;
+
+  /** @brief The UART's RTS output as ready to receive, see uart_port::ready_to_receive. */
+  [[= py::doc{"Whether the UART's RTS output says ready to receive."}]] [[nodiscard]] auto
+      rts_ready() const -> bool;
 
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto

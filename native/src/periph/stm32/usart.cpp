@@ -309,6 +309,7 @@ public:
   [[nodiscard]] auto queued() const -> std::size_t override;
   void               set_cts(bool ready, vtime at) override;
   [[nodiscard]] auto pending_cts() const -> std::size_t override;
+  [[nodiscard]] auto cts_ready() const -> bool override;
   [[nodiscard]] auto ready_to_receive() const -> bool override;
   void               attach(std::shared_ptr<uart_endpoint> far_end) override;
   void               receive_at(line_frame const& frame, std::uint32_t lane) override;
@@ -1367,6 +1368,11 @@ void usart::set_cts(bool ready, vtime at)
 auto usart::pending_cts() const -> std::size_t
 {
   return state_.cts_changes.size() - state_.cts_fired;
+}
+
+auto usart::cts_ready() const -> bool
+{
+  return state_.cts_ready;
 }
 
 void usart::apply_cts(bool ready, std::uint64_t at_ps)

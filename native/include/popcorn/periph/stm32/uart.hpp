@@ -264,6 +264,9 @@ public:
   /** @brief Number of changes set_cts() scheduled that have not applied yet. */
   [[nodiscard]] virtual auto pending_cts() const -> std::size_t = 0;
 
+  /** @brief The nCTS input level the last applied set_cts() change left, true at power-on. */
+  [[nodiscard]] virtual auto cts_ready() const -> bool = 0;
+
   /**
    * @brief The port's RTS output as clear-to-send for the far end, RM0456 66.5.21: false only
    *        with CR3.RTSE 1, CR3.DEM 0 and RDR full, or the RX FIFO full in FIFO mode. While it is

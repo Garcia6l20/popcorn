@@ -15,6 +15,8 @@ from popcorn._errors import ConfigError
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.units import VirtualDuration, VirtualTime
 
+_MAX_PS = (1 << 64) - 1
+
 if TYPE_CHECKING:
     from popcorn._refs import Pending
     from popcorn._usb import UsbHosts
@@ -298,7 +300,8 @@ class UartStream:
         or after `at`. They arrive one frame time apart as the machine runs. Await the result
         for the virtual time the bytes were queued at. With a parity configured, each byte
         arrives with the parity bit the receiver expects in the MSB of its M-bit word, so bit 7
-        of a byte sent to a 7E1 receiver is replaced, and none sets PE unless tagged.
+        of a byte sent to a 7E1 receiver is replaced, and none sets PE unless tagged. With
+        CR3.RTSE the bytes also wait for the firmware's RTS, see `set_cts`.
 
         `error` tags every byte of this write: `UartError.FRAMING` sets ISR.FE and `NOISE`
         ISR.NE with the byte's data, `PARITY` inverts its parity bit so ISR.PE rises, or logs
@@ -335,6 +338,65 @@ class UartStream:
         """
         self._check_writable()
         return written(self._post(self._link.command_break(), at))
+
+    def set_cts(self, ready: bool, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
+        """Drive the firmware's nCTS input to `ready` at exactly `at`, or when the command runs
+        without `at`. `ready` True is nCTS low, clear to send, the level at power-on. Posted as
+        one command as `Pin.drive_edges` is, at once while the machine is parked, at the next
+        block boundary while it runs, and applied through a UART model event at its own time,
+        whatever the boundary the command ran at. A change at the time the command runs applies
+        at the next event dispatch, before the next instruction.
+
+        With CR3.CTSE 1 the firmware's transmitter starts no frame while the input is False,
+        completes the frame in flight, and starts a held frame at the time of the change to
+        True. ISR.TC stays 0 while a frame is held. A frame starting at the very instant of a
+        change to False is not held, whatever the order of the events of that instant, as on
+        the chip, where CTS must change 3 kernel clocks before a frame ends to hold the next.
+        With CTSE each change sets ISR.CTSIF, and ISR.CTS reads the level. The level and the
+        changes still pending are board state: a snapshot saves them, and an MCU reset of any
+        kind keeps the level and each pending change at its instant, so a change due at
+        `m.time` T before a reset at R applies at `m.time` T - R after it. A `System` refuses to
+        link the UART while the level is False or a change is pending, since the link offers no
+        way to release it. Await the result for the time the command ran at.
+
+        The stream also honours the firmware's RTS without being asked: with CR3.RTSE 1 and
+        CR3.DEM 0, a written byte waits before its start bit while RDR is full, or the RX FIFO in
+        FIFO mode, and starts at the read or flush that frees space. Such a firmware never
+        overruns on written bytes. See `rts_ready`.
+
+        Raises:
+            TypeError: `ready` is no bool or `at` no `VirtualTime`, at the call.
+            ValueError: `at` is outside 0 to 2**64 - 1 ps, at the call. From the await, `at` is
+                already past when the command runs.
+            ConfigError: From the await, the UART would keep more than 65536 pending changes.
+            RuntimeError: Called from a handler or a model, or the UART is linked to another
+                member of a `System`: the link carries no flow control.
+        """
+        level = cast(object, ready)
+        if not isinstance(level, bool):
+            raise TypeError(f"ready must be a bool, not {type(level).__name__}")
+        when = cast(object, at)
+        if not isinstance(when, VirtualTime | None):
+            raise TypeError(f"at must be a VirtualTime or None, not {type(when).__name__}")
+        if at is not None and not 0 <= at.ps <= _MAX_PS:
+            raise ValueError(f"a CTS change at {at} leaves the 64-bit picosecond range")
+        if self.name in self._linked:
+            raise RuntimeError(
+                f"{self.name} is linked in a System: the link carries no flow control"
+            )
+        command = self._link.command_set_cts(level, None if at is None else at.ps)
+        return written(self._post(command))
+
+    @property
+    def rts_ready(self) -> bool:
+        """Whether the firmware's RTS output says ready to receive. False only with CR3.RTSE 1,
+        CR3.DEM 0 and RDR full, or the RX FIFO full in FIFO mode. While it is False, bytes from
+        `write` wait before their start bit.
+
+        Raises:
+            MachineRunning: The machine is busy, read outside its callbacks.
+        """
+        return self._link.rts_ready()
 
     def _check_writable(self) -> None:
         if self.name in self._linked:

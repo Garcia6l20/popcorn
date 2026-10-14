@@ -13,6 +13,7 @@ from typing import cast
 import popcorn
 import pytest
 from popcorn import EmulationError, StopReason, System, TapFrame, UartLink, UartTap, _core
+from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import LINK_BYTE, logged, member
@@ -275,6 +276,8 @@ def test_a_linked_uart_s_stream_refuses_writes_and_reads_its_own_transmissions(
         a.periph.USART1.port.write(b"x")
     with pytest.raises(RuntimeError, match="inject through the system's tap"):
         a.periph.USART1.port.write_break()
+    with pytest.raises(RuntimeError, match="the link carries no flow control"):
+        a.periph.USART1.port.set_cts(False)
     assert asyncio.run(a.periph.USART1.port.read(4)) == bytes(TX_BYTES[:4])
     a.halt()
     system.close()
@@ -455,3 +458,28 @@ def test_frames_taken_by_two_threads_at_once_keep_each_direction_in_order(pair: 
     holding.join(30)
     every = first + tap.frames(towards="b.USART1")
     assert [f.index for f in every] == list(range(64))
+
+
+def test_a_uart_whose_cts_is_held_or_pending_is_refused_a_link(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = member(u575, "link_tx", "a")
+    b = member(u575, "link_rx", "b")
+    port = a.periph.USART1.port
+    asyncio.run(settle(port.set_cts(False)))
+    asyncio.run(a.run(for_=us(10)))
+    with pytest.raises(popcorn.ConfigError, match=r"links\[0\]\.a: a\.USART1 has its CTS"):
+        System({"a": a, "b": b}, links(None))
+    asyncio.run(settle(port.set_cts(True)))
+    asyncio.run(a.run(for_=us(10)))
+    asyncio.run(settle(port.set_cts(True, at=a.time + ms(1))))
+    with pytest.raises(popcorn.ConfigError, match="a set_cts change pending"):
+        System({"a": a, "b": b}, links(None))
+    asyncio.run(a.run(for_=ms(2)))
+    system = System({"a": a, "b": b}, links(None))
+    asyncio.run(to(system, at(100)))
+    system.close()
+
+
+async def settle(pending: Pending[VirtualTime]) -> VirtualTime:
+    return await pending

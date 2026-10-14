@@ -88,6 +88,28 @@ auto uart_queue::command_break() const -> access_op
   });
 }
 
+auto uart_queue::command_set_cts(bool ready, std::optional<std::uint64_t> at_ps) const -> access_op
+{
+  std::ignore = port();
+  auto link   = *this;
+  link.host_.reset();
+  return detail::machine_op([link = std::move(link), ready, at_ps](core::machine& target) {
+    link.port().set_cts(ready, at_ps ? vtime{*at_ps} : target.virtual_clock().time());
+  });
+}
+
+auto uart_queue::cts_settled_ready() const -> bool
+{
+  auto& uart = port();
+  return detail::host_access(host_, [&] { return uart.cts_ready() and uart.pending_cts() == 0; });
+}
+
+auto uart_queue::rts_ready() const -> bool
+{
+  auto& uart = port();
+  return detail::host_access(host_, [&] { return uart.ready_to_receive(); });
+}
+
 namespace
 {
 template <typename Port>

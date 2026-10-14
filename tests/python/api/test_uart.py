@@ -997,3 +997,159 @@ def test_a_break_reaches_a_pty_as_a_zero_byte(u575: popcorn.PartDescription) -> 
         assert got == b"a\x00b"
     finally:
         os.close(fd)
+
+
+BAUD_115200_FRAME_PS = 10 * 10**12 // (4_000_000 // 35)
+
+
+def flow_controlled(board: popcorn.Machine, rtse: bool) -> None:
+    usart = board.periph.USART1
+    usart.CR1_disabled.UE = 0
+    usart.CR3.CTSE = 1
+    usart.CR3.RTSE = int(rtse)
+    usart.CR1_disabled.UE = 1
+
+
+def frames_after(at: VirtualTime, frames: float) -> VirtualTime:
+    return at + VirtualDuration(int(frames * FRAME_PS))
+
+
+@pytest.mark.parametrize("rtse", [True, False], ids=["rts", "no-rts"])
+def test_cts_holds_the_echo_and_rts_holds_the_host_the_same_parked_and_running(
+    board: popcorn.Machine, rtse: bool
+) -> None:
+    uart = board.periph.USART1.port
+    flow_controlled(board, rtse)
+    start = board.snapshot()
+    changes: list[Pending[VirtualTime]] = []
+    rts: list[Pending[bool]] = []
+
+    def post(at: VirtualTime) -> None:
+        changes.clear()
+        rts.clear()
+        sent = at + ms(1)
+        uart.write(b"abcdefgh", at=sent)
+        changes.append(uart.set_cts(False, at=frames_after(sent, 2.5)))
+        changes.append(uart.set_cts(True, at=frames_after(sent, 12)))
+        rts.append(board.sample(lambda: uart.rts_ready, at=frames_after(sent, 8)))
+
+    async def reads(at: VirtualTime) -> tuple[list[Frame], bool]:
+        frames = await uart.read_frames(8, deadline=at + ms(4))
+        for change in changes:
+            await change
+        return frames, await rts[0]
+
+    async def running() -> tuple[VirtualTime, tuple[list[Frame], bool]]:
+        async with board.running():
+            return await late_drained_read(board, post, reads, ms(8))
+
+    at, (frames, ready) = run_bounded(running(), 20)
+    stop = frames_after(at + ms(1), 2.5)
+    go = frames_after(at + ms(1), 12)
+    isr = board.periph.USART1.ISR_disabled
+    assert isr.CTSIF == 1
+    assert isr.CTS == 1
+    assert sum(1 for f in frames if f.at < go) == 2
+    assert frames[1].at > stop
+    assert frames[2].at == go + VirtualDuration(BAUD_115200_FRAME_PS)
+    assert all(b.at.ps - a.at.ps >= FRAME_PS for a, b in itertools.pairwise(frames))
+    if rtse:
+        assert bytes(f.data for f in frames) == b"abcdefgh"
+        assert isr.ORE == 0
+        assert ready is False
+    else:
+        assert bytes(f.data for f in frames) == b"abcde"
+        assert isr.ORE == 1
+        assert ready is True
+    assert uart.rts_ready
+    board.restore(start)
+    post(at)
+    assert asyncio.run(reads(at)) == (frames, ready)
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_set_cts_refuses_a_level_that_is_no_bool_at_the_call(
+    board: popcorn.Machine, running: bool
+) -> None:
+    uart = board.periph.USART1.port
+    flow_controlled(board, True)
+
+    def refused() -> None:
+        with pytest.raises(TypeError, match="ready must be a bool, not str"):
+            uart.set_cts(cast(Any, "x"))
+        with pytest.raises(TypeError, match="not int"):
+            uart.set_cts(cast(Any, 0))
+        with pytest.raises(TypeError, match="at must be a VirtualTime or None, not int"):
+            uart.set_cts(False, at=cast(Any, 5))
+        with pytest.raises(ValueError, match="64-bit picosecond range"):
+            uart.set_cts(False, at=VirtualTime(1 << 64))
+
+    async def inside() -> None:
+        async with board.running():
+            refused()
+
+    if running:
+        run_bounded(inside(), 10)
+    else:
+        refused()
+    assert board.periph.USART1.ISR_disabled.CTSIF == 0
+    assert board.periph.USART1.ISR_disabled.CTS == 1
+
+
+def test_a_held_and_released_transfer_takes_no_gil(u575: popcorn.PartDescription) -> None:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    asyncio.run(m.run(until=m.sym("ready"), budget=1_000_000))
+    flow_controlled(m, True)
+    port = m.periph.USART1.port
+    held = asyncio.run(settled(port.set_cts(False)))
+    asyncio.run(settled(port.write(b"abcdefgh")))
+    asyncio.run(settled(port.set_cts(True, at=held + ms(2))))
+
+    async def scenario() -> bytes:
+        async with m.running():
+            return await port.read(8, for_=ms(10))
+
+    assert asyncio.run(scenario()) == b"abcdefgh"
+    assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
+
+
+async def settled[T](pending: Pending[T]) -> T:
+    return await pending
+
+
+def test_a_cts_change_already_past_when_its_command_runs_raises_from_the_await(
+    board: popcorn.Machine,
+) -> None:
+    uart = board.periph.USART1.port
+    flow_controlled(board, True)
+    asyncio.run(board.run(for_=ms(1)))
+    with pytest.raises(ValueError, match="before the machine time"):
+        asyncio.run(settled(uart.set_cts(False, at=VirtualTime(0))))
+    assert board.periph.USART1.ISR_disabled.CTSIF == 0
+
+
+def test_a_cts_change_pending_across_a_reset_applies_at_its_instant(
+    board: popcorn.Machine,
+) -> None:
+    uart = board.periph.USART1.port
+    flow_controlled(board, True)
+    asyncio.run(board.run(for_=ms(1)))
+    due = board.time + ms(5)
+    asyncio.run(settled(uart.set_cts(False, at=due)))
+    reset_at = board.time
+    board.reset()
+    stop = asyncio.run(board.run(until=board.sym("ready"), budget=1_000_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS
+    flow_controlled(board, True)
+    assert board.periph.USART1.ISR_disabled.CTSIF == 0
+    after = VirtualTime(due.ps - reset_at.ps)
+
+    def flag() -> int:
+        return board.periph.USART1.ISR_disabled.CTSIF
+
+    before_it = board.sample(flag, at=after - us(1))
+    past_it = board.sample(flag, at=after + us(1))
+    asyncio.run(board.run(for_=ms(6)))
+    assert asyncio.run(settled(before_it)) == 0
+    assert asyncio.run(settled(past_it)) == 1

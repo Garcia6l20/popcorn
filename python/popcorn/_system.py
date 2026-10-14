@@ -579,7 +579,9 @@ class System:
         Raises:
             ConfigError: A member named apart from its key, `members.<name>`, already in a
                 linked system, or no link, `links`, or a link end that is not a UART of a
-                member, a UART in two links or bridged to a pty, `links[i].a` or `links[i].b`,
+                member, a UART in two links or bridged to a pty, or whose CTS input
+                `UartStream.set_cts` left not ready or with a change pending, `links[i].a` or
+                `links[i].b`,
                 a value out of range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits`
                 or `.parity`, or an offset of no member or below 0, `offsets.<name>`.
             MachineBusy: A member is busy.
@@ -726,6 +728,13 @@ class System:
         if serving in ports.bridges:
             raise ConfigError(
                 f"{key}: {name}.{serving} is bridged to a pty", key=key, expected="a free UART"
+            )
+        if not native.cts_settled_ready():
+            raise ConfigError(
+                f"{key}: {name}.{serving} has its CTS input not ready or a set_cts change"
+                " pending, which a link could never release",
+                key=key,
+                expected="a UART whose CTS input is ready, with no change pending",
             )
         used.add((name, serving))
         return self._index[name], native, serving
