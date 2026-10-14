@@ -4,7 +4,7 @@ from popcorn_build.firmware import add_firmware
 
 here = Path(__file__).resolve().parent
 
-VECTOR_TABLES = ("vt_idle", "vt_fault", "vt_reset", "vt_spin", "vt_bkpt")
+VECTOR_TABLES = ("vt_idle", "vt_fault", "vt_reset", "vt_spin", "vt_bkpt", "vt_jump")
 SECTION_BOUNDS = (
     "-Wl,--defsym=_sidata=LOADADDR(.data),--defsym=_sdata=ADDR(.data),"
     "--defsym=_edata=ADDR(.data)+SIZEOF(.data),--defsym=_sbss=ADDR(.bss),"

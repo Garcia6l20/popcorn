@@ -637,3 +637,30 @@ def test_a_member_stop_ending_a_wait_just_before_halt_is_raised(ping: Build) -> 
         assert clean(system)
 
     asyncio.run(body())
+
+
+def test_a_probe_on_a_member_of_a_running_system_counts_but_is_changed_outside_it(
+    ping: Build,
+) -> None:
+    system = ping()
+    a = system.members["a"]
+    irq = a.probe("USART1_IRQHandler")
+
+    async def body() -> int:
+        async with system.running():
+            with pytest.raises(MachineBusy):
+                await irq.hit(within=ms(1))
+            with pytest.raises(popcorn.MachineRunning):
+                a.probe("idle")
+            with pytest.raises(popcorn.MachineRunning):
+                irq.remove()
+            assert irq.active
+            await a.wait_until(lambda _: irq.count > 0, for_=ms(10))
+            return irq.count
+
+    counted = asyncio.run(body())
+    assert counted > 0
+    assert asyncio.run(irq.hit(within=ms(1)))
+    irq.remove()
+    assert not irq.active
+    assert clean(system)

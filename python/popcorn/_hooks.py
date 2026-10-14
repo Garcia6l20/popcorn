@@ -1,4 +1,4 @@
-"""Intercepts, return hooks and watches: what their handlers see and return."""
+"""Intercepts, return hooks, probes and watches: what their handlers see and return."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ import enum
 import itertools
 import threading
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from popcorn import _core
 from popcorn._errors import MachineRunning
-from popcorn.units import VirtualTime
+from popcorn.units import VirtualDuration, VirtualTime
 
 
 class CallbackTable:
@@ -498,6 +498,110 @@ class Watch:
         self._table.drop(self._key)
 
     def __enter__(self) -> Watch:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.remove()
+
+
+class Probe:
+    """Arrivals of the core at an address, counted natively with no handler and no GIL, and the
+    time of the first. It never stops the run. `Machine.probe` builds it.
+
+        boot = m.probe("app_entry")
+        await flasher.run()
+        assert await boot.hit(within=ms(2000))
+
+    An arrival counts once, before the instruction executes, also when an intercept of the
+    address then skips the function or stops the run. `remove()` it, or use it as a context
+    manager. The counts stay readable after the removal, and a restore does not rewind them.
+    """
+
+    __slots__ = ("__weakref__", "_hook", "_remove", "_wait", "address")
+
+    def __init__(
+        self,
+        hook: _core.ProbeHook,
+        address: int,
+        wait: Callable[[_core.ProbeHook, VirtualDuration], Awaitable[bool]],
+        remove: Callable[[_core.ProbeHook], None],
+    ) -> None:
+        """Own a native probe. `Machine.probe` builds it."""
+        self._hook = hook
+        self._wait = wait
+        self._remove = remove
+        self.address = address
+
+    @property
+    def count(self) -> int:
+        """Arrivals counted so far, read at any time, also while the machine runs."""
+        return self._hook.count()
+
+    @property
+    def first_at(self) -> VirtualTime | None:
+        """Virtual time of the first arrival, before its instruction executed, None before it.
+        In `m.time`'s base at the arrival: a later reset does not move it."""
+        first = self._hook.first_ps()
+        return None if first is None else VirtualTime(first)
+
+    @property
+    def active(self) -> bool:
+        """Whether the probe is still installed."""
+        return self._hook.active()
+
+    async def hit(self, *, within: VirtualDuration) -> bool:
+        """Whether the core arrived at the address before `within` from now elapsed.
+
+        True at once when an arrival was already counted, without waiting on the machine. A
+        removed probe answers from its counts at once. Otherwise it waits up to `within`
+        virtual time and answers whether the first arrival's exact time is before the start
+        plus `within`. The end is exclusive: a run stopped at it has not executed the
+        instruction there, so an arrival exactly at the end answers False wherever the block
+        boundaries fall, even when it was counted. Parked, the start is `m.time`, and it drives
+        the run as `wait_until` does, stopping at the first event boundary or slice end after
+        the arrival or when `within` elapsed. Inside a free run, `start()` or `running()`, it
+        waits on the free run and the start is the block boundary that registers the wait, as
+        `wait_until`'s `for_`: the wake may come up to one slice after the arrival, the answer
+        does not depend on it.
+        Cancelling it while parked halts the run, inside a free run it drops the wait only.
+
+        Returns:
+            Whether the first arrival came within the time.
+
+        Raises:
+            TypeError: `within` is no `VirtualDuration`.
+            ValueError: `within` is negative.
+            MachineBusy: A run, step, call or wait is active outside a free run, or the machine
+                is a member of a linked system that runs.
+            RuntimeError: Called from a handler, a model, a predicate or a posted body.
+            EmulationError: The run stopped for another reason: FaultError for FAULT,
+                BudgetExceeded for BUDGET, EmulationError otherwise, USER included when an
+                intercept's `call.stop()` stopped a parked run. Inside a free run, the stop
+                that ended it.
+            BaseException: What a handler of the free run raised.
+        """
+        if not isinstance(within, VirtualDuration):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError("within is a VirtualDuration, a span of virtual time")
+        if within.ps < 0:
+            raise ValueError(f"within must not be negative, got {within}")
+        if self._hook.count() > 0 or not self._hook.active():
+            return self._hook.count() > 0
+        return await self._wait(self._hook, within)
+
+    def remove(self) -> None:
+        """Remove the probe: at once while parked, at the next block boundary while the machine
+        runs, this call waiting for it there. Arrivals after it do not count. While the machine
+        runs, `active` turns False at the call, and a KeyboardInterrupt that ends the wait still
+        removes the probe at the next boundary.
+
+        Raises:
+            MachineRunning: Called from a handler of this machine during a slice, or the machine
+                is a member of a linked system that runs. The probe stays installed.
+            RuntimeError: Called from a callback of another machine.
+        """
+        self._remove(self._hook)
+
+    def __enter__(self) -> Probe:
         return self
 
     def __exit__(self, *_: object) -> None:

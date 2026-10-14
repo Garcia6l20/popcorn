@@ -70,6 +70,31 @@ __attribute__((noipa)) void alu_mark(void)
   }
 }
 
+volatile uint32_t jump_flag;
+volatile uint32_t ticks;
+
+__attribute__((noipa)) void app_entry(void)
+{
+  alu_rounds = alu_rounds + 1u;
+}
+
+__attribute__((noipa)) void tick(void)
+{
+  ticks = ticks + 1u;
+}
+
+[[noreturn]] void jump_main(void)
+{
+  while(jump_flag == 0u)
+  {
+  }
+  app_entry();
+  for(;;)
+  {
+    tick();
+  }
+}
+
 #define VECTORS(name, entry) \
   __attribute__((aligned(128), used)) const void* const name[2] = {&_estack, (const void*)entry}
 
@@ -82,3 +107,4 @@ VECTORS(vt_fault, fault_main);
 VECTORS(vt_reset, reset_main);
 VECTORS(vt_spin, spin_main);
 VECTORS(vt_bkpt, bkpt_main);
+VECTORS(vt_jump, jump_main);

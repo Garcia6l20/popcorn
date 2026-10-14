@@ -62,6 +62,7 @@ from popcorn._hooks import (
     LogEntry,
     NativeReturns,
     PostedBodies,
+    Probe,
     Recording,
     Relay,
     Return,
@@ -795,7 +796,7 @@ class Machine:
         self._parked_ends: list[BaseException] = []
         self._default_budget: int | None = None
         self._logs: dict[int, list[LogEntry]] = {}
-        self._installed: list[Intercept | Watch] = []
+        self._installed: list[Intercept | Probe | Watch] = []
         self._sentinel = (
             self._arena.sentinel if self._arena is not None else _free_sentinel(description)
         )
@@ -1312,8 +1313,8 @@ class Machine:
         self._default_budget = _checked_budget(budget)
 
     def remove_hooks(self) -> int:
-        """Remove every intercept, return hook and watch of this machine, as `remove()` on each.
-        Also empties every intercept log.
+        """Remove every intercept, return hook, probe and watch of this machine, as `remove()`
+        on each. Also empties every intercept log. A removed probe keeps its counts.
 
         Returns:
             How many were still installed.
@@ -1905,6 +1906,78 @@ class Machine:
         watch = self._keep(Watch(hook, self._callback_table, keys[0]))
         return watch
 
+    def probe(self, target: int | str | Symbol) -> Probe:
+        """Count the core's arrivals at an address or symbol, natively, with no handler and no
+        GIL: `Probe.count`, `Probe.first_at`, `await Probe.hit(within=)`. It never stops the
+        run.
+
+            boot = m.probe("app_entry")
+            await flasher.run()
+            assert await boot.hit(within=ms(2000))
+
+            with m.probe("app_entry") as boot:
+                ...
+
+        Armed when this returns, so an arrival before the first await counts. Parked, or from a
+        posted body of this machine, it is installed at once. While the machine runs, inside
+        `start()`, `running()` or a run awaited elsewhere, it is installed on the machine's
+        thread at the next block boundary and this call blocks until then, without the GIL.
+        Arrivals count from that boundary. The probe shares the code hook `intercept` uses:
+        exact at the instruction, also inside a translated block, and kept across `restore()`
+        like every hook. `remove_hooks()` removes it.
+
+        On a member of a linked system, add it before the system's `running()` or `start()`.
+        While the system runs, the member counts and `wait_until` or `wait_for(Reached)` on the
+        member wait for an arrival, but `hit()` cannot read its start.
+
+        Raises:
+            SymbolError: `target` names no symbol.
+            MachineRunning: Called from a handler of this machine during a slice, or the machine
+                is a member of a linked system that runs.
+            RuntimeError: Called from a callback of another machine.
+        """
+        address = self.address_of(target)
+        hook = self._handle.add_probe(address)
+        return self._keep(Probe(hook, address, self._probe_hit, self._handle.remove_probe))
+
+    async def _probe_hit(self, hook: _core.ProbeHook, within: VirtualDuration) -> bool:
+        self._refuse_on_host()
+        ready = self._handle.predicate_probe_hit(hook)
+        if self._handle.session_open():
+            try:
+                raw, ended, deadline = cast(
+                    tuple[_core.StopInfo, bool, int | None],
+                    await awaited(
+                        self._handle.wait_predicate_timed(ready, within.ps), lambda got: got
+                    ),
+                )
+            except BaseException as error:
+                self._surfaced = error
+                raise
+            stop = stop_of(raw)
+            self._surfaced = stop
+            if ended:
+                raise _stop_error(
+                    stop, "the free run, while waiting for a probe hit", error_prefix(self)
+                )
+            first = hook.first_ps()
+            return first is not None and deadline is not None and first < deadline
+        try:
+            start = self.time
+        except MachineRunning as error:
+            where = (
+                "is a member of a running linked system"
+                if self._linked() is not None
+                else "runs a goal outside a free run"
+            )
+            raise MachineBusy(f"{self._name} {where}: await a probe hit outside it") from error
+        stop = await self.wait_for(_Native(ready), for_=within)
+        first = hook.first_ps()
+        missed = stop.reason is StopReason.USER and first is None
+        if missed or stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
+            raise _stop_error(stop, "the run waiting for a probe hit", error_prefix(self))
+        return first is not None and first < start.ps + within.ps
+
     def stub_libc(self) -> list[Intercept]:
         """Replace memcpy, memmove, memset, strlen and the `__aeabi_mem*` helpers the images
         define with Python doing the work through `m.mem`, for fast calls and object mode."""
@@ -1963,7 +2036,7 @@ class Machine:
         keys.append(key)
         return Relay(self._callback_table, key)
 
-    def _keep[H: (Intercept, Watch)](self, hook: H) -> H:
+    def _keep[H: (Intercept, Probe, Watch)](self, hook: H) -> H:
         self._installed = [h for h in self._installed if h.active]
         self._installed.append(hook)
         return hook
