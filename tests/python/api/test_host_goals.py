@@ -425,9 +425,10 @@ def test_a_chained_exception_whose_frame_still_runs_keeps_its_traceback(
         assert stored.__traceback__.tb_next.tb_frame.f_locals["marker"] == "kept"
 
 
-def test_a_command_error_on_the_machine_thread_drops_its_frame_locals(
-    machines: Machines,
-) -> None:
+def failed_command(machines: Machines) -> weakref.ref[popcorn.Machine]:
+    """Run a command whose body raises on the machine's thread and check the error's body frame
+    has no locals. The future is passed inline: a local holding it in a frame the error passes
+    through would close a cycle through the native future the collector cannot see."""
     m = machines(slice_instructions=1_000)
 
     def failing_body() -> None:
@@ -436,12 +437,21 @@ def test_a_command_error_on_the_machine_thread_drops_its_frame_locals(
 
     async def scenario() -> None:
         async with m.running():
-            posted = m._handle.submit(failing_body, None)  # pyright: ignore[reportPrivateUsage]
-            await awaited(posted, lambda raw: raw)
+            handle = m._handle  # pyright: ignore[reportPrivateUsage]
+            await awaited(handle.submit(failing_body, None), lambda raw: raw)
 
     with pytest.raises(ValueError, match="boom") as raised:
         run_bounded(scenario(), HANG)
     assert dict(raised_by(raised.value, "failing_body").f_locals) == {}
+    return weakref.ref(m)
+
+
+def test_a_command_error_on_the_machine_thread_drops_its_frame_locals_and_its_machine(
+    machines: Machines,
+) -> None:
+    probe = failed_command(machines)
+    gc.collect()
+    assert probe() is None
 
 
 def test_a_machine_with_a_python_model_runs_under_a_loop_that_yields_for_real() -> None:
