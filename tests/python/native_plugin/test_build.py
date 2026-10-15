@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import os
 import shutil
@@ -16,7 +17,7 @@ from elftools.elf.elffile import ELFFile
 from popcorn import ConfigError, _core
 from popcorn.plugin import Plugin, _build_cache
 from popcorn.plugin._records import constructed
-from popcorn.plugin._sdk import Sdk, sdk
+from popcorn.plugin._sdk import sdk
 
 from .support import copied, entries, run_python
 
@@ -241,16 +242,7 @@ def test_another_compiler_is_refused_naming_both(
     )
     fake.chmod(0o755)
     real = sdk()
-    toolkit = Sdk(
-        root=real.root,
-        compiler=str(fake),
-        compiler_version=real.compiler_version,
-        compiler_ident=real.compiler_ident,
-        cxx_flags=real.cxx_flags,
-        defines=real.defines,
-        link_flags=real.link_flags,
-        ext_suffix=real.ext_suffix,
-    )
+    toolkit = dataclasses.replace(real, compiler=str(fake))
     monkeypatch.setattr(_build_cache, "sdk", lambda: toolkit)
     monkeypatch.setattr(_build_cache, "run_build", no_build)
     with pytest.raises(ConfigError, match="same GCC build") as raised:

@@ -232,6 +232,18 @@ def test_a_python_subclass_of_a_plugin_base_needs_its_plugin(kit: Plugin) -> Non
     assert described(kit).machine(devices={"SPI1": [kit_instance(device, "PA4")]}) is not None
 
 
+def test_a_python_subclass_copying_a_base_new_is_not_bound_natively() -> None:
+    class FromObject(SpiTarget):
+        __new__ = object.__new__
+
+    class FromBase(SpiTarget):
+        __new__ = _core.SpiTargetBase.__new__
+
+    for cls in (FromObject, FromBase):
+        board = popcorn.Periph(devices=[popcorn.Device(cls, cs="PA4")])
+        assert described(SPI1=board).board["SPI1"].devices[0].cls is cls
+
+
 def test_a_plugin_device_reads_back_typed_without_a_cast(kit: Plugin) -> None:
     device = kit_device(kit)
     m = described(kit, SPI1=popcorn.Periph(devices=[popcorn.Device(device, cs="PA4")])).machine()
@@ -444,20 +456,19 @@ def test_the_digest_holds_the_plugin_code_not_its_path(tmp_path: Path) -> None:
     assert after.stdout.strip() != before.stdout.strip()
 
 
-def test_an_installed_plugin_digest_covers_its_library_and_bindings(tmp_path: Path) -> None:
+def test_an_installed_plugin_digest_without_bindings_covers_its_library(tmp_path: Path) -> None:
     library = tmp_path / "libkit.so"
     library.write_bytes(b"library one")
     plugin = Plugin("kit", library=library)
     first = described(plugin).digest
     (tmp_path / "_native.cpython-314-x86_64-linux-gnu.so").write_bytes(b"bindings")
-    second = described(plugin).digest
+    assert described(plugin).digest == first
     library.write_bytes(b"library two")
     third = described(plugin).digest
     moved = tmp_path / "elsewhere"
     moved.mkdir()
-    for path in tmp_path.glob("*.so"):
-        shutil.copy2(path, moved / path.name)
-    assert len({first, second, third}) == 3
+    shutil.copy2(library, moved / library.name)
+    assert third != first
     assert described(Plugin("kit", library=moved / "libkit.so")).digest == third
     lone = tmp_path / "lone"
     lone.mkdir()

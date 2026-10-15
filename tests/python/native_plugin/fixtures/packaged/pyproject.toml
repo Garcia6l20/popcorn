@@ -1,0 +1,14 @@
+[build-system]
+requires = [
+    "pcons @ git+https://github.com/Garcia6l20/pcons.git@d5be306ae23109cf0b5729da19ebd265308bd4c1",
+    "popcorn==0.1.0.dev0",
+]
+build-backend = "pcons.pyproject"
+
+[project]
+name = "fixture-plugin"
+version = "0.1.0"
+dependencies = ["popcorn==0.1.0.dev0"]
+
+[project.entry-points."popcorn.plugins"]
+fixture_plugin = "fixture_plugin:PLUGIN"

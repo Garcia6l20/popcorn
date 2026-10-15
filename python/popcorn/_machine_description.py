@@ -6,9 +6,11 @@ import copy
 import dataclasses
 import functools
 import hashlib
+import importlib.util
 import inspect
 import json
 import math
+import types
 from collections.abc import Buffer, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -966,19 +968,42 @@ def _kind(periph: Periph) -> str:
     return "plugin" if isinstance(periph.model, PluginModel) else "Python"
 
 
+_NANOBIND_TYPE = type(_core.SpiTargetBase)
+_NANOBIND_FUNCTION = type(_core.version)
+
+
+def _bound_natively(cls: type) -> bool:
+    """Whether a nanobind module of popcorn's domain bound @p cls, not a Python class deriving
+    from one.
+
+    nanobind gives every type it binds a `__new__` of its own: the slot wrapper, or an nb_func
+    for a class bound with `nb::new_`. A Python subclass inherits `__new__`, defines a static
+    method, or copies a base's, such as `__new__ = object.__new__`, which is accepted since
+    that object belongs to the base."""
+    if type(cls) is not _NANOBIND_TYPE:
+        return False
+    own = vars(cls).get("__new__")
+    if not isinstance(own, types.BuiltinFunctionType | _NANOBIND_FUNCTION):
+        return False
+    return all(vars(base).get("__new__") is not own for base in cls.__mro__[1:])
+
+
 def _device_plugin_refusal(cls: type, plugins: Sequence[Plugin]) -> str | None:
-    """What a device of class @p cls needs and lacks, None when every class of its MRO that
-    comes from a plugin's bindings module names a plugin of @p plugins."""
-    prefix = f"{_records.MODULE_PREFIX}."
+    """What a device of class @p cls needs and lacks, None when every class of its MRO that a
+    nanobind module bound comes from popcorn or from a bindings module `Plugin.module()`
+    imported, or a submodule of one, of a plugin of @p plugins.
+
+    A natively bound class from any other module is refused, whatever the module is called:
+    its library was mapped without the loader's checks."""
     for base in cls.__mro__:
         module = base.__module__
-        if not module.startswith(prefix):
-            continue
         plugin = _records.recorded(module)
         if plugin is None:
+            if not _bound_natively(base) or module.partition(".")[0] == "popcorn":
+                continue
             return (
-                f"a device class of a bindings module Plugin.module() imported, not"
-                f" {_reference(cls)} from {module}"
+                f"a device class of popcorn or of a bindings module Plugin.module() imported,"
+                f" not {_reference(cls)} from {module}"
             )
         if plugin not in plugins:
             return (
@@ -996,15 +1021,32 @@ def _plugin_identity(plugin: Plugin) -> dict[str, object]:
         return {"$": "Plugin", "name": plugin.name, "key": key}
     assert plugin.library is not None
     digest = hashlib.sha256()
-    files = [plugin.library, *sorted(plugin.library.parent.glob("_native*.so"))]
+    files: list[Path | None] = [plugin.library]
+    if plugin.bindings is not None:
+        files.append(_bindings_file(plugin.bindings))
     for path in files:
-        if not path.is_file():
-            digest.update(f"{path.name}\0absent\0".encode())
+        if path is None or not path.is_file():
+            digest.update(f"{'' if path is None else path.name}\0absent\0".encode())
             continue
         content = path.read_bytes()
         digest.update(f"{path.name}\0{len(content)}\0".encode())
         digest.update(content)
-    return {"$": "Plugin", "name": plugin.name, "sha256": digest.hexdigest()}
+    return {
+        "$": "Plugin",
+        "name": plugin.name,
+        "bindings": plugin.bindings,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _bindings_file(module_name: str) -> Path | None:
+    """The file `import` @p module_name would load, None when it finds none. The parent package
+    is imported, an installed plugin's package loads nothing native."""
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except ImportError, ValueError:
+        return None
+    return None if spec is None or spec.origin is None else Path(spec.origin)
 
 
 def _canonical(value: object) -> object:

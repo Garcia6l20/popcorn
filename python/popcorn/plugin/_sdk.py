@@ -23,6 +23,7 @@ class Sdk:
 
     Attributes:
         root: The SDK directory, `popcorn/sdk`.
+        version: The popcorn version the SDK belongs to.
         compiler: Absolute path of the C++ compiler.
         compiler_version: Its `-dumpfullversion`.
         compiler_ident: Its `__VERSION__`.
@@ -33,6 +34,7 @@ class Sdk:
     """
 
     root: Path
+    version: str
     compiler: str
     compiler_version: str
     compiler_ident: str
@@ -86,7 +88,7 @@ def sdk(path: Path | None = None) -> Sdk:
         )
     fields = cast(dict[str, object], data)
     text: dict[str, str] = {}
-    for key in ("compiler", "compiler_version", "compiler_ident", "ext_suffix"):
+    for key in ("popcorn", "compiler", "compiler_version", "compiler_ident", "ext_suffix"):
         value = fields.get(key)
         if not isinstance(value, str):
             raise ConfigError(
@@ -95,6 +97,7 @@ def sdk(path: Path | None = None) -> Sdk:
         text[key] = value
     return Sdk(
         root=path.parent,
+        version=text["popcorn"],
         compiler=text["compiler"],
         compiler_version=text["compiler_version"],
         compiler_ident=text["compiler_ident"],
