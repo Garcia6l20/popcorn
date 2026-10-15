@@ -726,7 +726,7 @@ def test_an_absolute_path_param_is_kept_as_given() -> None:
         part="X", images=[], board={"TESTDEV": popcorn.Periph(model=use)}
     )
     model = project.board["TESTDEV"].model
-    assert model is not None and model.params["data"] is linked
+    assert isinstance(model, popcorn.Use) and model.params["data"] is linked
 
 
 def test_missing_image_raises_missing_input(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/member_link.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
 #include <cstddef>
@@ -20,7 +21,7 @@
 namespace popcorn::periph::stm32
 {
 /** @brief The line a UART link declares: baud and frame format. */
-struct line_shape
+struct POPCORN_API line_shape
 {
   /** @brief Baud, above 0. */
   std::uint32_t baud{};
@@ -64,7 +65,7 @@ struct wire_lanes
 struct wire_receiver
 {
   /** @brief The receiver's UART, which must outlive the wire's drains. */
-  uart_port* port{};
+  uart_link_port* port{};
   /** @brief Name of the receiver's UART in warnings. */
   std::string unit;
   /** @brief The receiver machine's log, called on its host thread between slices. Decision
@@ -116,7 +117,7 @@ struct tap_frame
  * @brief Frames of a wire for observers, any thread. A link lock guards it. Holds at most a
  *        capacity of frames, the oldest dropped and counted.
  */
-class tap_queue
+class POPCORN_API tap_queue
 {
 public:
   /** @param capacity Frames kept, above 0. */
@@ -265,7 +266,7 @@ struct wire_state
  *        on the line at r or starting before r plus L never reach the receiver, the tap still
  *        shows them.
  */
-class uart_wire final : public uart_endpoint, public core::member_link
+class POPCORN_API uart_wire final : public uart_endpoint, public core::member_link
 {
 public:
   /**

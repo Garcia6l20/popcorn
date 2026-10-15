@@ -5,8 +5,9 @@ after RM0456 Rev 6 section 48. Setting RNGEN starts a conversion, which sets SR.
 `CONVERSION` later. A DR read while DRDY is set returns the next word of a seeded xorshift32
 sequence, clears DRDY and starts the next conversion. Clearing RNGEN stops production and
 keeps DRDY and DR valid (48.7.2, 48.7.3). A CR write with CONDRST set cancels the conversion
-in progress and clears SR (48.7.1). The RNG interrupt line follows DRDY while CR.IE is set.
-Every other RNG register keeps its described storage.
+in progress and clears SR. The write that clears CONDRST with RNGEN set starts a conversion,
+as the seed error recovery of 48.3.7 expects (48.7.1). The RNG interrupt line follows DRDY
+while CR.IE is set. Every other RNG register keeps its described storage.
 
 Simplifications: one word per conversion, where the RNG fills a four-word output buffer
 (48.3.5). Not modelled: the seed and clock error flags SEIS and CEIS, which IE also covers on
@@ -70,12 +71,13 @@ class Rng(Model):
     @on_write("CR")
     def _cr(self, old: int, new: int) -> None:
         enable = self.fields.CR.RNGEN
-        if new & self.fields.CR.CONDRST:
+        condrst = self.fields.CR.CONDRST
+        if new & condrst:
             self._stop()
             self.regs.SR = 0
         elif not new & enable:
             self._stop()
-        elif not old & enable and not self.regs.SR & self.fields.SR.DRDY:
+        elif (not old & enable or old & condrst) and not self.regs.SR & self.fields.SR.DRDY:
             self._start()
         self._follow()
 

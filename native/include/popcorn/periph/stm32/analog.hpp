@@ -1,5 +1,7 @@
 #pragma once
 
+#include <popcorn/export.hpp>
+
 #include <cstdint>
 
 namespace popcorn::periph::stm32
@@ -8,7 +10,7 @@ namespace popcorn::periph::stm32
  * @brief The analog inputs of an ADC as a board sees them, implemented by the ADC1 model. Reach
  *        it with `dynamic_cast<analog_port*>(machine.model("ADC1"))`.
  */
-class analog_port
+class POPCORN_API analog_port
 {
 public:
   /** @brief Creates the interface. */
@@ -43,6 +45,6 @@ public:
 
 protected:
   /** @brief Destroys the interface, only through its model. */
-  ~analog_port() = default;
+  virtual ~analog_port();
 };
 }

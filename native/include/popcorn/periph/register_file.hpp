@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/description.hpp>
+#include <popcorn/export.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -16,7 +17,7 @@ namespace popcorn::periph
  * and snapshots read, so a model keeps the storage of its claimed registers current.
  * Neither copyable nor movable: models and bindings hold references to it.
  */
-class register_file
+class POPCORN_API register_file
 {
 public:
   /**

@@ -20,6 +20,10 @@
 
 namespace popcorn::periph::usb
 {
+host_side::~host_side()       = default;
+device_port::~device_port()   = default;
+class_driver::~class_driver() = default;
+
 namespace
 {
 constexpr std::uint64_t ps_per_ns           = 1000;

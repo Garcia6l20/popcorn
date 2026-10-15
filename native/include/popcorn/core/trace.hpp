@@ -2,6 +2,7 @@
 
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -230,7 +231,7 @@ using trace_sink = std::function<void(std::span<trace_record const> records)>;
  *        `machine_services::trace`, read by stop reports and ring dumps. Neither copyable nor
  *        movable.
  */
-class trace_ring
+class POPCORN_API trace_ring
 {
 public:
   /**

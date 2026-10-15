@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/export.hpp>
 
 #include <cstdint>
 #include <string>
@@ -9,7 +10,7 @@ namespace popcorn::obs
 {
 /** @brief A `.pcov` or `.pctr` file, or a coverage set, is malformed or does not match its
  * images. */
-class format_error : public error
+class POPCORN_API format_error : public error
 {
 public:
   /**

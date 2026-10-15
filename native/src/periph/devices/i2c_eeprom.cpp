@@ -150,7 +150,7 @@ auto eeprom_24xx::address() const -> std::uint8_t
   return impl_->options.address;
 }
 
-auto eeprom_24xx::start(bool read, vtime at) -> stm32::i2c_reply
+auto eeprom_24xx::start(bool read, vtime at) -> i2c_reply
 {
   auto& self = *impl_;
   self.state.buffer.clear();
@@ -171,7 +171,7 @@ auto eeprom_24xx::start(bool read, vtime at) -> stm32::i2c_reply
   return {.ack = true};
 }
 
-auto eeprom_24xx::write(std::uint8_t byte, vtime) -> stm32::i2c_reply
+auto eeprom_24xx::write(std::uint8_t byte, vtime) -> i2c_reply
 {
   auto& self = *impl_;
   switch(self.step())
@@ -196,7 +196,7 @@ auto eeprom_24xx::write(std::uint8_t byte, vtime) -> stm32::i2c_reply
   return {.ack = false};
 }
 
-auto eeprom_24xx::read(vtime) -> stm32::i2c_read_reply
+auto eeprom_24xx::read(vtime) -> i2c_read_reply
 {
   auto& self = *impl_;
   if(self.step() != phase::reading)

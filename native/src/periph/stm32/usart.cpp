@@ -28,6 +28,9 @@
 
 namespace popcorn::periph::stm32
 {
+uart_link_port::~uart_link_port()       = default;
+loopback_endpoint::~loopback_endpoint() = default;
+
 namespace
 {
 constexpr std::uint32_t transmit_done = 0;
@@ -285,9 +288,9 @@ struct lock
  *        starts at the RDR read or the RXFRQ flush that frees space, so host frames never
  *        overrun. With DEM the pin carries DE and the host is not held. Frames from another
  *        machine are not held: the wire carries no flow control and they overrun as without
- *        RTSE.
+ *        RTSE. At most max_pending_cts CTS changes wait at once.
  */
-class usart final : public dispatch_model<usart, usart_state>, public uart_port
+class usart final : public dispatch_model<usart, usart_state>, public uart_link_port
 {
 public:
   usart(model_context& ctx, peripheral_desc const& desc, std::shared_ptr<uart_endpoint> far_end);

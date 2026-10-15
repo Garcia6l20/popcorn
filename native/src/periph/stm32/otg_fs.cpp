@@ -22,6 +22,8 @@
 
 namespace popcorn::periph::stm32
 {
+usb_host_port::~usb_host_port() = default;
+
 namespace
 {
 constexpr std::size_t   endpoints        = 6;

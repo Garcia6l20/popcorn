@@ -22,7 +22,8 @@ if not (python_include / "Python.h").is_file():
 _nanobind_runtime: Target | None = None
 
 
-def _nanobind() -> Target:
+def nanobind_runtime() -> Target:
+    """The static nanobind runtime, built once and linked into every extension and the SDK."""
     global _nanobind_runtime
     if _nanobind_runtime is None:
         project = context.current_project
@@ -46,23 +47,49 @@ def _nanobind() -> Target:
     return _nanobind_runtime
 
 
+def _package_dir(package: str) -> str:
+    """The directory of the dotted @p package under build/, such as popcorn/devices."""
+    return package.replace(".", "/")
+
+
+def _origin_of_core(package: str) -> str:
+    """The rpath from build/@p package, where an extension lands, to build/popcorn."""
+    top, *rest = package.split(".")
+    up = "/.." * len(rest)
+    return f"$$ORIGIN{up}" if top == "popcorn" else f"$$ORIGIN{up}/../popcorn"
+
+
 def add_extension(package: str, name: str, sources: Sequence[str | Path]) -> Target:
-    """A CPython extension module importable as @p package.@p name, built into build/@p package."""
+    """A CPython extension module importable as @p package.@p name, built into build/@p package.
+
+    @p package is dotted, a subpackage lands in its directory, such as build/popcorn/devices.
+    """
     project = context.current_project
     ext = project.SharedLibrary(f"{package}.{name}", project.default_environment, sources=sources)
     ext.output_name = name
-    ext.output_prefix = f"{package}/"
+    ext.output_prefix = f"{_package_dir(package)}/"
     ext.output_suffix = ext_suffix
     ext.private.compile_flags.append("-fvisibility=hidden")
-    ext.link(_nanobind())
+    ext.private.link_flags.append(f"-Wl,-rpath,{_origin_of_core(package)}")
+    ext.link(nanobind_runtime())
     ext.link(fetched_package("reflex"))
     return ext
 
 
-def add_stub(extension: Target, package: str, name: str, after: Sequence[Target] = ()) -> Target:
-    """Generate build/@p package/@p name.pyi with nanobind's stubgen from the built extension."""
+def add_stub(
+    extension: Target,
+    package: str,
+    name: str,
+    after: Sequence[Target] = (),
+    include_private: bool = False,
+) -> Target:
+    """Generate build/@p package/@p name.pyi with nanobind's stubgen from the built extension.
+
+    @p include_private keeps names with one leading or trailing underscore, so Python code type
+    checks against the real signatures of private bindings.
+    """
     project = context.current_project
-    stub_path = build_dir / package / f"{name}.pyi"
+    stub_path = build_dir / _package_dir(package) / f"{name}.pyi"
     stub = project.Command(
         project.default_environment,
         name=f"{package}.{name}-stub",
@@ -77,6 +104,7 @@ def add_stub(extension: Target, package: str, name: str, after: Sequence[Target]
             str(stub_path),
             "-i",
             str(build_dir),
+            *(["--include-private"] if include_private else []),
         ],
     )
     stub.depends(extension, *after)

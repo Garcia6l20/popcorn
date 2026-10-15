@@ -1,7 +1,10 @@
 #pragma once
 
 #include <popcorn/core/description.hpp>
+#include <popcorn/export.hpp>
+#include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/stm32/caches.hpp>
 #include <popcorn/periph/stm32/flash.hpp>
@@ -10,8 +13,8 @@
 #include <popcorn/periph/stm32/rcc.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
-#include <popcorn/periph/stm32/uart.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <chrono>
 #include <functional>
@@ -82,6 +85,6 @@ struct board
  * @param part Description the machine is built from.
  * @return Factories keyed by instance name, aliases excluded.
  */
-[[nodiscard]] auto factories(board const& b, part_description const& part)
+[[nodiscard]] POPCORN_API auto factories(board const& b, part_description const& part)
     -> std::map<std::string, model_factory, std::less<>>;
 }

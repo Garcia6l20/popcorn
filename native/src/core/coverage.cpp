@@ -15,9 +15,9 @@ namespace
 {
 constexpr std::size_t first_edge_slots = 1024;
 
-auto edge_hash(address from, address to) noexcept -> std::uint64_t
+auto edge_hash(std::uint64_t key) noexcept -> std::uint64_t
 {
-  return (std::uint64_t{from} << 32 | to) * 0x9e37'79b9'7f4a'7c15;
+  return key * 0x9e37'79b9'7f4a'7c15;
 }
 
 auto holds(address_range const& range, address addr) noexcept -> bool
@@ -35,23 +35,23 @@ void bump(block_counters& counters, address addr) noexcept
 }
 }
 
-void flat_edge_table::count(address from, address to)
+void flat_edge_table::count(std::uint64_t key)
 {
   if(2 * (used_ + 1) > slots_.size())
   {
     grow();
   }
   auto const mask = slots_.size() - 1;
-  for(auto at = edge_hash(from, to) >> 32 & mask;; at = (at + 1) & mask)
+  for(auto at = edge_hash(key) >> 32 & mask;; at = (at + 1) & mask)
   {
     auto& held = slots_[at];
     if(held.hits == 0)
     {
-      held = {.from = from, .to = to, .hits = 1};
+      held = {.key = key, .hits = 1};
       ++used_;
       return;
     }
-    if(held.from == from and held.to == to)
+    if(held.key == key)
     {
       ++held.hits;
       return;
@@ -71,7 +71,7 @@ void flat_edge_table::grow()
     {
       continue;
     }
-    auto at = edge_hash(held.from, held.to) >> 32 & mask;
+    auto at = edge_hash(held.key) >> 32 & mask;
     while(slots_[at].hits != 0)
     {
       at = (at + 1) & mask;
@@ -86,7 +86,10 @@ auto flat_edge_table::edges() const -> std::vector<edge_counter>
   auto found = slots_
              | std::views::filter([](slot const& held) { return held.hits != 0; })
              | std::views::transform([](slot const& held) {
-                 return edge_counter{.from = held.from, .to = held.to, .hits = held.hits};
+                 return edge_counter{
+                     .from = static_cast<address>(held.key >> 32),
+                     .to   = static_cast<address>(held.key),
+                     .hits = held.hits};
                })
              | std::ranges::to<std::vector>();
   std::ranges::sort(
@@ -132,7 +135,7 @@ void coverage_state::count(address addr, std::uint32_t insns)
   }
   if(has_previous)
   {
-    edges.count(previous, addr);
+    edges.count(previous << 32 | addr);
   }
   previous     = addr;
   has_previous = true;
@@ -142,20 +145,21 @@ void coverage_state::count(address addr, std::uint32_t insns)
 void coverage_state::leave(arch::arch const& core, address pc, bool at_exit)
 {
   auto const insns = std::exchange(open_insns, 0u);
-  if(pc - previous > max_insn_bytes * insns)
+  auto const from  = static_cast<address>(previous);
+  if(pc - from > max_insn_bytes * insns)
   {
     return;
   }
-  auto const ran = core.instructions_between(previous, pc);
+  auto const ran = core.instructions_between(from, pc);
   if(not ran or *ran > insns)
   {
     return;
   }
-  if(*ran == insns and not(at_exit and core.ends_block_before(previous, pc) == false))
+  if(*ran == insns and not(at_exit and core.ends_block_before(from, pc) == false))
   {
     return;
   }
-  ++cuts[{previous, pc}];
+  ++cuts[{from, pc}];
 }
 
 void machine::enable_coverage(std::vector<address_range> ranges)

@@ -15,6 +15,10 @@ integers.
 serves parked, or a call from one of its callbacks: while it is busy they raise
 `MachineRunning`. A device that serves no machine has no such limit. `restore()` on an attached
 device sets its state behind the bus model, which keeps its own transfer state.
+
+`SpiTargetBase`, `I2CTargetBase` and `SpiControllerBase` are the native bases a plugin's device
+classes derive from. `chip_select` gives an SPI device class a native plugin binds its chip
+select.
 """
 
 from __future__ import annotations
@@ -25,11 +29,38 @@ from dataclasses import dataclass
 from operator import attrgetter
 
 from popcorn import _core
-from popcorn._devices import BusDevice, check_address, chip_select, parked
+from popcorn._devices import BusDevice, check_address, parked
+from popcorn._devices import chip_select as _chip_select
 from popcorn._errors import ConfigError
+from popcorn.devices import _native
 from popcorn.units import VirtualDuration, ms, s, us
 
-__all__ = ["At25sf", "Eeprom24xx", "TableTarget", "TableWrite"]
+__all__ = [
+    "At25sf",
+    "Eeprom24xx",
+    "I2CTargetBase",
+    "SpiControllerBase",
+    "SpiTargetBase",
+    "TableTarget",
+    "TableWrite",
+    "chip_select",
+]
+
+SpiTargetBase = _core.SpiTargetBase
+"""The base to subclass for a native plugin's SPI device: the class a plugin binds on
+`popcorn::periph::spi_target` derives from it, and a `TYPE_CHECKING` declaration of that class
+names it as its base. A device written in Python subclasses `popcorn.board.SpiTarget`."""
+
+I2CTargetBase = _core.I2CTargetBase
+"""The base to subclass for a native plugin's I2C target: the class a plugin binds on
+`popcorn::periph::i2c_target` derives from it, and a `TYPE_CHECKING` declaration of that class
+names it as its base. A target written in Python subclasses `popcorn.board.I2CTarget`."""
+
+SpiControllerBase = _core.SpiControllerBase
+"""The base to subclass for a native plugin's SPI controller: the class a plugin binds on
+`popcorn::periph::spi_controller_sink` derives from it, and a `TYPE_CHECKING` declaration of that
+class names it as its base. A controller written in Python subclasses
+`popcorn.board.SpiController`."""
 
 _T_PP = us(600)
 _T_SE = ms(60)
@@ -61,14 +92,14 @@ def _path(image: str | os.PathLike[str] | None) -> str:
     return "" if image is None else os.fspath(image)
 
 
-def _native(build: Callable[[], None], keys: Mapping[str, str]) -> None:
+def _built(build: Callable[[], None], keys: Mapping[str, str]) -> None:
     try:
         build()
     except ConfigError as error:
         raise ValueError(f"{keys.get(error.key, error.key)}: {error.expected}") from error
 
 
-def _contents(device: _core.At25sfBase | _core.Eeprom24xxBase) -> bytes:
+def _contents(device: _native.At25sfBase | _native.Eeprom24xxBase) -> bytes:
     read: Callable[[], bytes] = attrgetter("_contents")(device)
     return parked(device, read)
 
@@ -83,7 +114,36 @@ def _restore(device: BusDevice, data: bytes) -> None:
     parked(device, lambda: load(data))
 
 
-class At25sf(_core.At25sfBase):
+def chip_select(cs: str | None) -> tuple[str, int | None]:
+    """The chip select of an SPI device whose class a native plugin binds.
+
+    An SPI device attached to a machine carries its chip select in two attributes, which the
+    machine reads when it attaches the device: `_cs_port`, the GPIO port name such as "GPIOB",
+    and `_cs_pin`, the pin number. `_cs_port` "" with `_cs_pin` None selects the SPI hardware
+    SS output. The machine also derives the pin name `clocked_by` matches, such as "SPI1:PB0",
+    from these two attributes. `popcorn.board.SpiTarget` and `At25sf` set them. A Python
+    subclass of a plugin's device base sets them from this function in its `__init__`:
+
+    ```python
+    class Adc(PLUGIN.module().AdcBase):
+        def __init__(self, cs: str | None = None) -> None:
+            super().__init__()
+            self._cs_port, self._cs_pin = chip_select(cs)
+    ```
+
+    Args:
+        cs: Chip select pin such as "PB0", active low, None for the hardware SS output.
+
+    Returns:
+        `(port, pin)`, `("GPIOB", 0)` for "PB0", `("", None)` for None.
+
+    Raises:
+        ValueError: `cs` is not a pin name such as "PA4", pin 0 to 15.
+    """
+    return _chip_select(cs)
+
+
+class At25sf(_native.At25sfBase):
     """An AT25SF serial NOR flash on an SPI bus, the native model.
 
     Standard SPI instructions: reads, page program, 4, 32 and 64 KB and chip erases, status
@@ -127,7 +187,7 @@ class At25sf(_core.At25sfBase):
             ValueError: A value is out of range, `image` and `initial` are both given, the
                 image cannot be read, or a duration is not a whole number of nanoseconds.
         """
-        port, pin = chip_select(cs)
+        port, pin = _chip_select(cs)
         ids = tuple(jedec)
         if len(ids) != 3:
             raise ValueError(f"jedec: 3 bytes, not {ids!r}")
@@ -144,7 +204,7 @@ class At25sf(_core.At25sfBase):
             "reset": _ns("reset", reset),
         }
         first = bytes(b"" if initial is None else initial)
-        _native(
+        _built(
             lambda: super(At25sf, self).__init__(
                 manufacturer,
                 memory_type,
@@ -196,7 +256,7 @@ class At25sf(_core.At25sfBase):
         return f"<{type(self).__qualname__} on {self._cs or 'SS'}>"
 
 
-class Eeprom24xx(_core.Eeprom24xxBase):
+class Eeprom24xx(_native.Eeprom24xxBase):
     """A 24xx serial EEPROM on an I2C bus, the native model.
 
     A write sends the word address, then data within its page, wrapping in the page. The STOP
@@ -232,7 +292,7 @@ class Eeprom24xx(_core.Eeprom24xxBase):
         """
         check_address(address)
         cycle = _ns("write_cycle", write_cycle)
-        _native(
+        _built(
             lambda: super(Eeprom24xx, self).__init__(
                 address,
                 _uint("size", size, 32),
@@ -293,7 +353,7 @@ class TableWrite:
     data: bytes
 
 
-class TableTarget(_core.TableTargetBase):
+class TableTarget(_native.TableTargetBase):
     """An I2C target scripted by a table of replies, the native model.
 
     A write transfer starts with the register address, and each one with data bytes is
@@ -328,7 +388,7 @@ class TableTarget(_core.TableTargetBase):
             _uint("replies", reg, 32): [_uint("replies", value, 8) for value in reply]
             for reg, reply in (replies or {}).items()
         }
-        _native(
+        _built(
             lambda: super(TableTarget, self).__init__(
                 address, _uint("register_bytes", register_bytes, 8), table, bool(nack_unknown)
             ),

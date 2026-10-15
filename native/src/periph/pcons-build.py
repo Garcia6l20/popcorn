@@ -1,10 +1,11 @@
 from pathlib import Path
 
 here = Path(__file__).resolve().parent
-sources = [
-    here / name for name in ("lines.cpp", "register_file.cpp", "register_layer.cpp", "registry.cpp")
+framework = [
+    here / name
+    for name in ("bus.cpp", "lines.cpp", "register_file.cpp", "register_layer.cpp", "registry.cpp")
 ]
-sources += [
+stm32 = [
     here / "stm32" / name
     for name in (
         "models.cpp",
@@ -30,5 +31,7 @@ sources += [
         "hash.cpp",
     )
 ]
-sources += [here / "usb" / name for name in ("host.cpp", "cdc_acm.cpp", "hid.cpp", "uac2.cpp")]
-sources += [here / "devices" / name for name in ("at25sf.cpp", "i2c_eeprom.cpp", "i2c_table.cpp")]
+stm32_entry = here / "stm32" / "plugin.cpp"
+usb = [here / "usb" / name for name in ("host.cpp", "cdc_acm.cpp", "hid.cpp", "uac2.cpp")]
+devices = [here / "devices" / name for name in ("at25sf.cpp", "i2c_eeprom.cpp", "i2c_table.cpp")]
+devices_extension = [here / "devices" / "bind.cpp"]

@@ -3,6 +3,7 @@
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -30,7 +31,7 @@ class hook_registry;
  *        that slice, so whatever the handler captures must outlive the slice. A restore keeps
  *        hooks: the hook table is configuration, not machine state.
  */
-class hook_handle
+class POPCORN_API hook_handle
 {
 public:
   /** @brief A handle owning nothing. */
@@ -215,7 +216,7 @@ private:
  *        the first instruction of the function, so arguments are still in place. Valid only
  *        during the handler.
  */
-class intercept_call
+class POPCORN_API intercept_call
 {
 public:
   /** @brief Intercepted address. */

@@ -1,0 +1,4 @@
+{
+  global: *;
+  local: machine_initialize; reg_read_arm; reg_write_arm;
+};

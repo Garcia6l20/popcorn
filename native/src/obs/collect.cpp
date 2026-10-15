@@ -1,6 +1,7 @@
 #include "refs.hpp"
 #include "tb.hpp"
 
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/obs/collect.hpp>
@@ -37,11 +38,14 @@ auto collect(core::machine& target, std::span<image_source const> sources) -> co
   }
   auto const data = target.coverage();
 
-  code_bytes code{images, [&target](address at, std::span<std::byte> out) -> std::size_t {
-                    auto const read = target.mem().read_block(at, out);
-                    return read ? out.size() : read.error().at - at;
-                  }};
-  auto       sized = size_blocks(data, code);
+  code_bytes code{
+      images,
+      [&target](address at, std::span<std::byte> out) -> std::size_t {
+        auto const read = target.mem().read_block(at, out);
+        return read ? out.size() : read.error().at - at;
+      },
+      arch::find_code_analysis(target.description().core)};
+  auto sized = size_blocks(data, code);
 
   coverage_group group{
       .images  = std::views::zip_transform(

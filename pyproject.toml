@@ -10,6 +10,15 @@ dependencies = [
     "pyelftools",
 ]
 
+[project.optional-dependencies]
+pytest = [
+    "pytest>=9.1",
+]
+plugin = [
+    "pcons==0.30.0",
+    "ninja",
+]
+
 [project.entry-points.pytest11]
 "popcorn.pytest" = "popcorn.pytest"
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <popcorn/export.hpp>
+
 #include <cstdint>
 
 namespace popcorn::core
@@ -13,7 +15,7 @@ namespace popcorn::periph
 class line_bus;
 
 /** @brief Interrupt request line from a peripheral to the interrupt controller, level-driven. */
-class irq_line
+class POPCORN_API irq_line
 {
 public:
   /** @brief Creates a line connected to nothing, which only keeps its level. */
@@ -35,7 +37,7 @@ private:
 };
 
 /** @brief DMA request line from a peripheral to a DMA controller, level-driven. */
-class dma_request
+class POPCORN_API dma_request
 {
 public:
   /** @brief Creates a request line connected to nothing, which only keeps its level. */

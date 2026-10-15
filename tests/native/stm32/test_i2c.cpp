@@ -6,6 +6,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/devices/i2c_eeprom.hpp>
 #include <popcorn/periph/devices/i2c_table.hpp>
+#include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 
@@ -36,6 +37,7 @@ namespace
 {
 namespace core    = popcorn::core;
 namespace devices = popcorn::periph::devices;
+namespace periph  = popcorn::periph;
 namespace stm32   = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::stop_reason;
@@ -58,36 +60,36 @@ struct bus_event
   friend auto operator==(bus_event const&, bus_event const&) -> bool = default;
 };
 
-class recorded_target final : public stm32::i2c_target
+class recorded_target final : public periph::i2c_target
 {
 public:
-  explicit recorded_target(std::shared_ptr<stm32::i2c_target> target) : inner{std::move(target)}
+  explicit recorded_target(std::shared_ptr<periph::i2c_target> target) : inner{std::move(target)}
   {}
 
-  std::shared_ptr<stm32::i2c_target>                                                     inner;
-  std::vector<bus_event>                                                                 events;
-  std::shared_ptr<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>> resets;
+  std::shared_ptr<periph::i2c_target>                                                     inner;
+  std::vector<bus_event>                                                                  events;
+  std::shared_ptr<std::vector<std::pair<periph::i2c_target const*, popcorn::reset_kind>>> resets;
 
   [[nodiscard]] auto address() const -> std::uint8_t override
   {
     return inner->address();
   }
 
-  auto start(bool read, vtime at) -> stm32::i2c_reply override
+  auto start(bool read, vtime at) -> periph::i2c_reply override
   {
     auto const reply = inner->start(read, at);
     events.push_back({reply.ack ? (read ? 'R' : 'W') : 'N', 0, at.ps});
     return reply;
   }
 
-  auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
+  auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
   {
     auto const reply = inner->write(byte, at);
     events.push_back({reply.ack ? 'w' : 'n', byte, at.ps});
     return reply;
   }
 
-  auto read(vtime at) -> stm32::i2c_read_reply override
+  auto read(vtime at) -> periph::i2c_read_reply override
   {
     auto const reply = inner->read(at);
     events.push_back({'r', reply.byte, at.ps});
@@ -120,7 +122,7 @@ public:
   }
 };
 
-class picky_target final : public stm32::i2c_target
+class picky_target final : public periph::i2c_target
 {
 public:
   std::uint32_t written{};
@@ -130,18 +132,18 @@ public:
     return 0x21;
   }
 
-  auto start(bool, vtime) -> stm32::i2c_reply override
+  auto start(bool, vtime) -> periph::i2c_reply override
   {
     written = 0;
     return {.ack = true};
   }
 
-  auto write(std::uint8_t, vtime) -> stm32::i2c_reply override
+  auto write(std::uint8_t, vtime) -> periph::i2c_reply override
   {
     return {.ack = written++ == 0};
   }
 
-  auto read(vtime) -> stm32::i2c_read_reply override
+  auto read(vtime) -> periph::i2c_read_reply override
   {
     return {.byte = 0};
   }
@@ -160,10 +162,10 @@ public:
   }
 };
 
-class faulty_target final : public stm32::i2c_target
+class faulty_target final : public periph::i2c_target
 {
 public:
-  stm32::i2c_error       error{};
+  periph::i2c_error      error{};
   std::uint32_t          at_call{};
   std::uint32_t          shots{1};
   std::uint32_t          calls{};
@@ -176,21 +178,21 @@ public:
     return 0x33;
   }
 
-  auto start(bool read, vtime at) -> stm32::i2c_reply override
+  auto start(bool read, vtime at) -> periph::i2c_reply override
   {
     calls = 0;
     events.push_back({read ? 'R' : 'W', 0, at.ps});
     return {.ack = true, .error = pick(), .stretch_ps = stretch()};
   }
 
-  auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override
+  auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
   {
     ++calls;
     events.push_back({'w', byte, at.ps});
     return {.ack = true, .error = pick(), .stretch_ps = stretch()};
   }
 
-  auto read(vtime at) -> stm32::i2c_read_reply override
+  auto read(vtime at) -> periph::i2c_read_reply override
   {
     ++calls;
     events.push_back({'r', 0x5A, at.ps});
@@ -223,11 +225,11 @@ private:
     return calls == stretch_call ? stretch_ps : 0;
   }
 
-  auto pick() -> stm32::i2c_error
+  auto pick() -> periph::i2c_error
   {
     if(calls != at_call or shots == 0)
     {
-      return stm32::i2c_error::none;
+      return periph::i2c_error::none;
     }
     --shots;
     return error;
@@ -351,8 +353,8 @@ struct rig
   std::shared_ptr<recorded_target> picky =
       std::make_shared<recorded_target>(std::make_shared<picky_target>());
   std::shared_ptr<faulty_target> faulty = std::make_shared<faulty_target>();
-  std::shared_ptr<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>> resets =
-      std::make_shared<std::vector<std::pair<stm32::i2c_target const*, popcorn::reset_kind>>>();
+  std::shared_ptr<std::vector<std::pair<periph::i2c_target const*, popcorn::reset_kind>>> resets =
+      std::make_shared<std::vector<std::pair<periph::i2c_target const*, popcorn::reset_kind>>>();
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
@@ -450,7 +452,7 @@ TEST_CASE("every machine reset reaches each target once, in attachment order, wi
   using popcorn::reset_kind;
   rig        r{"eeprom_rw"};
   auto const expect = [&](reset_kind kind) {
-    return std::vector<std::pair<stm32::i2c_target const*, reset_kind>>{
+    return std::vector<std::pair<periph::i2c_target const*, reset_kind>>{
         {r.memory.get(), kind},
         {r.table.get(),  kind},
         {r.picky.get(),  kind}
@@ -1221,17 +1223,17 @@ namespace
 {
 struct injected
 {
-  stm32::i2c_error error;
-  std::string_view flag;
-  std::string_view clear;
-  std::uint32_t    bit;
+  periph::i2c_error error;
+  std::string_view  flag;
+  std::string_view  clear;
+  std::uint32_t     bit;
 };
 
 constexpr std::array<injected, 3> injections{
     {
-     {stm32::i2c_error::bus_error, "BERR", "BERRCF", 1u << 8},
-     {stm32::i2c_error::arbitration_lost, "ARLO", "ARLOCF", 1u << 9},
-     {stm32::i2c_error::overrun, "OVR", "OVRCF", 1u << 10},
+     {periph::i2c_error::bus_error, "BERR", "BERRCF", 1u << 8},
+     {periph::i2c_error::arbitration_lost, "ARLO", "ARLOCF", 1u << 9},
+     {periph::i2c_error::overrun, "OVR", "OVRCF", 1u << 10},
      }
 };
 
@@ -1289,7 +1291,7 @@ TEST_CASE("a target's BERR, ARLO or OVR sets its ISR flag at the end of the byte
         CHECK(pending(*r.f, error_irq));
         unpend(*r.f, error_irq);
         CHECK(pending(*r.f, error_irq));
-        if(kind.error == stm32::i2c_error::arbitration_lost)
+        if(kind.error == periph::i2c_error::arbitration_lost)
         {
           CHECK(b.get("CR2", "START") == 0);
           CHECK(b.get("ISR", "BUSY") == 1);
@@ -1339,7 +1341,7 @@ TEST_CASE("a START written while a lost arbitration holds BUSY is sent at the ot
   rig r{"idle"};
   bus b{*r.f};
   b.controller();
-  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  r.faulty->error = periph::i2c_error::arbitration_lost;
   b.command(0x33, 1, true, true);
   auto const end = b.now() + address_ps;
   b.run_until(end + period_ps / 2);
@@ -1360,7 +1362,7 @@ TEST_CASE("clearing PE inside a lost arbitration gives the target its STOP")
   rig r{"idle"};
   bus b{*r.f};
   b.controller();
-  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  r.faulty->error = periph::i2c_error::arbitration_lost;
   b.command(0x33, 1, true, true);
   auto const end = b.now() + address_ps;
   b.run_until(end + period_ps / 2);
@@ -1381,7 +1383,7 @@ TEST_CASE("CR2.STOP set inside a lost arbitration is cleared at its end")
   rig r{"idle"};
   bus b{*r.f};
   b.controller();
-  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  r.faulty->error = periph::i2c_error::arbitration_lost;
   b.command(0x33, 1, true, true);
   auto const end = b.now() + address_ps;
   b.run_until(end + period_ps / 2);
@@ -1414,7 +1416,7 @@ TEST_CASE("the DMA requests after an injected error follow TXIS and RXNE as with
   for(auto const& kind : injections)
   {
     CAPTURE(kind.flag);
-    auto const lost = kind.error == stm32::i2c_error::arbitration_lost;
+    auto const lost = kind.error == periph::i2c_error::arbitration_lost;
     {
       rig r{"idle", true};
       bus b{*r.f};
@@ -1463,7 +1465,7 @@ TEST_CASE("a snapshot before the erring byte or inside the lost BUSY restores th
     {
       CAPTURE(kind.flag);
       CAPTURE(inside);
-      if(inside and kind.error != stm32::i2c_error::arbitration_lost)
+      if(inside and kind.error != periph::i2c_error::arbitration_lost)
       {
         continue;
       }
@@ -1530,7 +1532,7 @@ TEST_CASE("firmware serves each injected error in I2C1_ER_IRQHandler, clears it 
       CHECK(log[0] == 2);
       CHECK(log[1] == 1);
       CHECK(log[2] == kind.bit);
-      CHECK(log[3] == (kind.error == stm32::i2c_error::arbitration_lost ? 0u : 1u));
+      CHECK(log[3] == (kind.error == periph::i2c_error::arbitration_lost ? 0u : 1u));
       CHECK(log[4] == 0);
       CHECK(log[5] == 0);
       auto const& events = r.faulty->events;
@@ -1920,7 +1922,7 @@ TEST_CASE("a hold due inside a lost arbitration starts at the other controller's
   rig r{"idle"};
   bus b{*r.f};
   b.controller();
-  r.faulty->error = stm32::i2c_error::arbitration_lost;
+  r.faulty->error = periph::i2c_error::arbitration_lost;
   b.command(0x33, 1, true, true);
   auto const end = b.now() + address_ps;
   hold(r, end + period_ps / 2, end + hold_ps);

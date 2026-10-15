@@ -1,12 +1,10 @@
 from pathlib import Path
 
-from pcons import Target, context
+from pcons import Target
 
 from popcorn_build.python import add_extension, add_stub
 
-project = context.current_project
 here = Path(__file__).resolve().parent
-core = project.get_target("popcorn_core")
 
 sources = [
     here / "ranges.cpp",
@@ -19,12 +17,11 @@ sources = [
     here / "pctr.cpp",
     here / "pctr_machine.cpp",
 ]
-popcorn_obs = project.StaticLibrary("popcorn_obs", project.default_environment, sources=sources)
-popcorn_obs.link(core)
+extension_sources = [here / "bind.cpp"]
 
 
-def add_python(after: list[Target]) -> list[Target]:
-    """The popcorn._obs extension and its stub, the stub generated after @p after."""
-    ext = add_extension("popcorn", "_obs", [here / "bind.cpp"])
+def add_python(popcorn_obs: Target, after: list[Target]) -> list[Target]:
+    """The popcorn._obs extension over @p popcorn_obs and its stub, generated after @p after."""
+    ext = add_extension("popcorn", "_obs", extension_sources)
     ext.link(popcorn_obs)
     return [ext, add_stub(ext, "popcorn", "_obs", after=after)]

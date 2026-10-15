@@ -9,7 +9,17 @@
 
 namespace popcorn
 {
-error::~error() = default;
+error::~error()                     = default;
+config_error::~config_error()       = default;
+image_error::~image_error()         = default;
+symbol_error::~symbol_error()       = default;
+emulation_error::~emulation_error() = default;
+fault_error::~fault_error()         = default;
+budget_exceeded::~budget_exceeded() = default;
+model_error::~model_error()         = default;
+machine_running::~machine_running() = default;
+machine_busy::~machine_busy()       = default;
+not_implemented::~not_implemented() = default;
 
 namespace
 {

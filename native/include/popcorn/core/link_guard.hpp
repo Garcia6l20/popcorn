@@ -1,5 +1,7 @@
 #pragma once
 
+#include <popcorn/export.hpp>
+
 #include <mutex>
 
 namespace popcorn::core
@@ -7,7 +9,7 @@ namespace popcorn::core
 namespace detail
 {
 /** @brief Link locks the current thread holds through a link_guard. */
-inline thread_local int link_locks_held = 0;
+POPCORN_API extern constinit thread_local int link_locks_held;
 }
 
 /**

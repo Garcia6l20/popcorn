@@ -1,8 +1,8 @@
 #pragma once
 
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/core/types.hpp>
-
-#include <reflex/enum.hpp>
+#include <popcorn/export.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -42,17 +42,10 @@ struct insn
  * @param bytes Code from @p at on.
  * @return The instruction, empty when @p bytes ends inside it.
  */
-auto read(address at, std::span<std::byte const> bytes) noexcept -> std::optional<insn>;
+POPCORN_API auto read(address at, std::span<std::byte const> bytes) noexcept -> std::optional<insn>;
 
 /** @brief How an instruction ends the translated block holding it. */
-enum class[[= reflex::derive{reflex::Format}]] ending
-{
-  none,
-  direct,
-  indirect,
-  exception,
-  system,
-};
+using ending = popcorn::arch::ending;
 
 /** @brief Control flow of one instruction, as far as translated block boundaries go. */
 struct flow
@@ -103,7 +96,7 @@ struct block_end_row
 };
 
 /** @brief The block-end table classify() searches, in match order. */
-auto block_end_rows() noexcept -> std::span<block_end_row const>;
+POPCORN_API auto block_end_rows() noexcept -> std::span<block_end_row const>;
 
 /**
  * @brief Classifies an instruction by whether the engine ends a translated block after it on an
@@ -113,7 +106,7 @@ auto block_end_rows() noexcept -> std::span<block_end_row const>;
  * @param i Instruction.
  * @return Its ending kind, the target of a direct branch, and whether it is conditional.
  */
-auto classify(insn const& i) noexcept -> flow;
+POPCORN_API auto classify(insn const& i) noexcept -> flow;
 
 /**
  * @brief Whether the last instruction of a run of code ends its translated block, see classify().
@@ -122,13 +115,14 @@ auto classify(insn const& i) noexcept -> flow;
  * @return Whether it ends its block, empty when @p bytes is empty or its end is not an
  *         instruction boundary from @p at.
  */
-auto last_ends_block(address at, std::span<std::byte const> bytes) noexcept -> std::optional<bool>;
+POPCORN_API auto last_ends_block(address at, std::span<std::byte const> bytes) noexcept
+    -> std::optional<bool>;
 
 /**
  * @brief Whether an instruction is an IT instruction.
  * @param i Instruction.
  */
-auto is_it(insn const& i) noexcept -> bool;
+POPCORN_API auto is_it(insn const& i) noexcept -> bool;
 
 /** @brief A conditional branch by encoding: B T1, B T3, CBZ or CBNZ. */
 struct cond_branch
@@ -152,19 +146,19 @@ struct cond_branch
  * @param i Instruction.
  * @return The branch, empty for any other instruction.
  */
-auto conditional_branch(insn const& i) noexcept -> std::optional<cond_branch>;
+POPCORN_API auto conditional_branch(insn const& i) noexcept -> std::optional<cond_branch>;
 
 /**
  * @brief Whether an instruction is a call, BL or BLX register, after which execution resumes at
  *        the next instruction.
  * @param i Instruction.
  */
-auto is_call(insn const& i) noexcept -> bool;
+POPCORN_API auto is_call(insn const& i) noexcept -> bool;
 
 /**
  * @brief Instructions an IT instruction makes conditional, from its mask.
  * @param i An IT instruction, see is_it().
  * @return 1 to 4.
  */
-auto it_length(insn const& i) noexcept -> std::uint8_t;
+POPCORN_API auto it_length(insn const& i) noexcept -> std::uint8_t;
 }

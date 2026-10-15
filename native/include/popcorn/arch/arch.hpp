@@ -3,6 +3,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -13,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -253,7 +255,7 @@ struct arch_context
  * hook honours. No member function unwinds through Unicorn: the machine catches at the hook
  * boundary. Neither copyable nor movable.
  */
-class arch
+class POPCORN_API arch
 {
 public:
   /** @brief Creates the module, detached. */
@@ -533,8 +535,169 @@ private:
   bool pending_ = false;
 };
 
+/** @brief How an instruction ends the translated block holding it. */
+enum class[[= reflex::derive{reflex::Format}]] ending
+{
+  none,
+  direct,
+  indirect,
+  exception,
+  system,
+};
+
+/** @brief One instruction decoded from code bytes, as coverage reports need it. */
+struct decoded_insn
+{
+  /** @brief Address of its first byte. */
+  address at{};
+  /** @brief Size in bytes. */
+  std::uint8_t size{};
+  /** @brief Whether and how it ends its translated block. */
+  ending kind{ending::none};
+  /** @brief Target of a direct branch. */
+  std::optional<address> target{};
+  /** @brief Whether the branch is conditional by its encoding. */
+  bool conditional{};
+  /** @brief Whether it is a call, after which execution resumes at the next instruction. */
+  bool call{};
+  /** @brief Whether it is a permanently undefined instruction, which never falls through. */
+  bool trap{};
+  /** @brief Instructions after it that it makes conditional, 0 for none. */
+  std::uint8_t predicates{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(decoded_insn const&, decoded_insn const&) -> bool = default;
+};
+
+/** @brief Limits the engine puts on one translated block. */
+struct block_limits
+{
+  /** @brief Page size in bytes, a power of two. Whether a block ends before an instruction at
+   *         or near the end of the page of its start is code_analysis::crosses_page. */
+  std::uint32_t page{};
+  /** @brief Most instructions in one block. */
+  std::uint32_t max_insns{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(block_limits const&, block_limits const&) -> bool = default;
+};
+
+/**
+ * @brief Stateless decoder of an arch's code bytes for coverage reports: block sizing at collect
+ *        time and branch discovery for lcov. Runs at report time, never in the run loop. One
+ *        instance per arch module, shared by every thread, so every member is const and
+ *        thread-safe.
+ */
+class POPCORN_API code_analysis
+{
+public:
+  /** @brief Creates the decoder. */
+  code_analysis() = default;
+  /** @brief Not copyable. */
+  code_analysis(code_analysis const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(code_analysis const&) -> code_analysis& = delete;
+  /** @brief Not movable. */
+  code_analysis(code_analysis&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(code_analysis&&) -> code_analysis& = delete;
+  /** @brief Destroys the decoder. */
+  virtual ~code_analysis();
+
+  /**
+   * @brief Size of the instruction starting at the first of @p first.
+   * @param first Code bytes from the instruction's start, as many as are at hand.
+   * @return Its size in bytes, empty when @p first is too short to tell.
+   */
+  [[nodiscard]] virtual auto size(std::span<std::byte const> first) const noexcept
+      -> std::optional<std::uint8_t> = 0;
+
+  /**
+   * @brief Decodes the instruction at the start of @p bytes.
+   * @param at Guest address of the first byte.
+   * @param bytes Code from @p at on.
+   * @return The instruction, empty when @p bytes ends inside it.
+   */
+  [[nodiscard]] virtual auto decode(address at, std::span<std::byte const> bytes) const noexcept
+      -> std::optional<decoded_insn> = 0;
+
+  /**
+   * @brief How many instructions from @p at on an instruction before it may make conditional,
+   *        judged from the bytes before @p at alone, with no instruction boundary known.
+   * @param at Guest address of an instruction.
+   * @param base Guest address of the first byte of @p code.
+   * @param code Code bytes from @p base on, which may end before @p at.
+   * @return The most instructions from @p at on that may be conditional, 0 when none can.
+   */
+  [[nodiscard]] virtual auto
+      predicated_at_most(address at, address base, std::span<std::byte const> code) const noexcept
+      -> std::uint8_t = 0;
+
+  /**
+   * @brief Whether the engine ends a block before this instruction, by the engine's page rule,
+   *        which may let an instruction straddle the page end. The next block then starts at
+   *        the instruction.
+   * @param offset Offset of the instruction from the start of the page of the block's start,
+   *        possibly past the page.
+   * @param width Its size in bytes.
+   */
+  [[nodiscard]] virtual auto crosses_page(std::uint32_t offset, std::uint8_t width) const noexcept
+      -> bool = 0;
+
+  /** @brief The engine's translated block limits. */
+  [[nodiscard]] virtual auto limits() const noexcept -> block_limits = 0;
+};
+
 /**
  * @brief Creates the arch module for a core, chosen by the core name and features.
  */
 using arch_factory = std::function<std::unique_ptr<arch>(core_desc const& core)>;
+
+/** @brief One arch module: the cores it implements and how to build its arch for one. */
+struct arch_module
+{
+  /** @brief Module name for errors and listings, such as "armv8m". */
+  std::string name;
+  /** @brief Whether the module implements a core. Runs under the registry lock, so it must not
+   *         call the arch registry. */
+  std::function<bool(core_desc const& core)> implements;
+  /** @brief The factory, called once per machine. */
+  arch_factory factory;
+  /** @brief Decoder of the module's code for coverage reports, null for none. It must outlive
+   *         every lookup, a static object of the module. */
+  code_analysis const* analysis{};
+  /** @brief ELF `e_machine` of the module's images, which selects its analysis for an ELF
+   *         image, 0 for none. */
+  std::uint16_t elf_machine{};
+};
+
+/**
+ * @brief Registers an arch module. A module of the same name is replaced, and the new one
+ *        counts as the latest registered.
+ * @param module The module, `implements` and `factory` set.
+ */
+POPCORN_API void register_arch(arch_module module) pre(module.implements and module.factory);
+
+/**
+ * @brief The factory of the latest registered module implementing the core of @p description.
+ * @param description Part whose `core` selects the module.
+ * @throws config_error naming `core.cpu` when no module implements it.
+ */
+[[nodiscard]] POPCORN_API auto find_arch(part_description const& description) -> arch_factory;
+
+/**
+ * @brief The code analysis of the latest registered module implementing @p core.
+ * @param core Core of a machine.
+ * @return The analysis, null when no module implements the core or that module has none.
+ */
+[[nodiscard]] POPCORN_API auto find_code_analysis(core_desc const& core) -> code_analysis const*;
+
+/**
+ * @brief The code analysis of the latest registered module that has one for ELF images of
+ *        machine @p elf_machine.
+ * @param elf_machine ELF `e_machine`, 0 for an image that is not an ELF.
+ * @return The analysis, null for 0 or when no module has one for that machine.
+ */
+[[nodiscard]] POPCORN_API auto find_code_analysis(std::uint16_t elf_machine)
+    -> code_analysis const*;
 }

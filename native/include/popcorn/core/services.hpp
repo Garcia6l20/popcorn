@@ -3,6 +3,7 @@
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -79,7 +80,7 @@ struct block_error
  * memory, instruction and interrupt hooks. Neither copyable nor movable, contexts hold
  * references to it.
  */
-class machine_services
+class POPCORN_API machine_services
 {
 public:
   /** @brief Creates the services. */

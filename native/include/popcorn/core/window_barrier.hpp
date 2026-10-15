@@ -1,5 +1,7 @@
 #pragma once
 
+#include <popcorn/export.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -19,7 +21,7 @@ struct wait_policy
 };
 
 /** @brief CPUs the calling thread may run on, from its affinity mask, at least 1. */
-[[nodiscard]] auto usable_cpus() noexcept -> std::size_t;
+[[nodiscard]] POPCORN_API auto usable_cpus() noexcept -> std::size_t;
 
 /**
  * @brief The wait policy for @p parties threads: @p base, or a spin of 0 when the parties
@@ -27,8 +29,8 @@ struct wait_policy
  * @param parties Threads that arrive each round.
  * @param base Policy used while every party can have its own CPU.
  */
-[[nodiscard]] auto default_wait_policy(std::size_t parties, wait_policy base = {}) noexcept
-    -> wait_policy;
+[[nodiscard]] POPCORN_API auto
+    default_wait_policy(std::size_t parties, wait_policy base = {}) noexcept -> wait_policy;
 
 /**
  * @brief Reusable barrier for a fixed number of threads. The last party to arrive runs the
@@ -38,7 +40,7 @@ struct wait_policy
  *        outlive the return of every arrive_and_wait() and abort() call: a released party may
  *        return before the last arriver or the aborting thread is done with the barrier.
  */
-class window_barrier
+class POPCORN_API window_barrier
 {
 public:
   /**

@@ -3,6 +3,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/lines.hpp>
 #include <popcorn/periph/register_file.hpp>
 
@@ -47,7 +48,7 @@ struct access_ctx
  * snapshots read. Access values are right-aligned to the access size: a 1-byte read at offset 5
  * returns bits 15:8 of the word at offset 4 in bits 7:0. Neither copyable nor movable.
  */
-class model
+class POPCORN_API model
 {
 public:
   /** @brief Creates a model. */
@@ -61,7 +62,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(model&&) -> model& = delete;
   /** @brief Destroys the model. */
-  virtual ~model() = default;
+  virtual ~model();
 
   /**
    * @brief Names of the registers the model serves, as the description spells them. Called once,
@@ -179,7 +180,7 @@ public:
  *        models, factories and model::claims() included, filled once every model is attached.
  *        Never used from a model destructor.
  */
-class peer_directory
+class POPCORN_API peer_directory
 {
 public:
   /** @brief Creates the directory. */
@@ -210,14 +211,14 @@ public:
 
 protected:
   /** @brief Destroys the directory, only through its implementation. */
-  ~peer_directory() = default;
+  virtual ~peer_directory();
 };
 
 /**
  * @brief What a model factory hands a new model. The context and everything it references
  *        outlive the model, so the model may keep the reference.
  */
-struct model_context
+struct POPCORN_API model_context
 {
   /** @brief Storage of the peripheral. */
   register_file& regs;
@@ -263,7 +264,17 @@ using model_factory =
  * @param ip_version_glob Glob over the description's `ip_version`, `*` matches any.
  * @param factory Factory called once per matching peripheral instance.
  */
-void register_model(std::string_view ip, std::string_view ip_version_glob, model_factory factory);
+POPCORN_API void
+    register_model(std::string_view ip, std::string_view ip_version_glob, model_factory factory);
+
+/**
+ * @brief Matches a glob with `*` and `?` against a text, as the model registry matches IP
+ *        versions.
+ * @param pattern Glob.
+ * @param text Text.
+ */
+[[nodiscard]] POPCORN_API auto glob_match(std::string_view pattern, std::string_view text) noexcept
+    -> bool;
 
 /**
  * @brief Glob of the registration that serves a peripheral of an IP and IP version: the latest
@@ -272,6 +283,6 @@ void register_model(std::string_view ip, std::string_view ip_version_glob, model
  * @param ip_version IP version.
  * @return The glob, empty when no registration matches.
  */
-[[nodiscard]] auto registered_glob(std::string_view ip, std::string_view ip_version)
+[[nodiscard]] POPCORN_API auto registered_glob(std::string_view ip, std::string_view ip_version)
     -> std::optional<std::string>;
 }

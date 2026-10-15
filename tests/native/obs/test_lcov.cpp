@@ -9,6 +9,8 @@
 
 #include <doctest/doctest.h>
 
+#include <elf.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -31,6 +33,8 @@ namespace core  = popcorn::core;
 namespace image = popcorn::image;
 namespace obs   = popcorn::obs;
 namespace thumb = popcorn::arch::armv8m::thumb;
+
+[[maybe_unused]] auto const builtin_arch = (popcorn::arch::armv8m::register_builtin(), true);
 using popcorn::address;
 using popcorn::stop_reason;
 using popcorn::testing::firmware;
@@ -60,6 +64,7 @@ auto synthetic(
     std::uint32_t              function_size) -> image::image
 {
   image::image made;
+  made.elf_machine = EM_ARM;
   made.segments.push_back(
       {.name        = "code",
        .start       = 0x100,
@@ -460,6 +465,30 @@ TEST_CASE(
       {{0x100, 3}, {0x108, 0}}, 8);
   CHECK(
       starting(lcov_of(returning, {group_of({})}), "BRDA:")
+      == std::vector<std::string>{"BRDA:3,0,0,-", "BRDA:3,0,1,-"});
+}
+
+TEST_CASE("a UDF ends descent, an SVC falls through to the branch after it")
+{
+  auto const narrow = synthetic(
+      code({
+          0xde00, 0xd1fd, 0x4770
+  }),
+      {{0x100, 3}, {0x106, 0}}, 6);
+  CHECK(starting(lcov_of(narrow, {group_of({})}), "BRDA:").empty());
+  auto const wide = synthetic(
+      code({
+          0xf7f0, 0xa000, 0xd1fc, 0x4770
+  }),
+      {{0x100, 3}, {0x108, 0}}, 8);
+  CHECK(starting(lcov_of(wide, {group_of({})}), "BRDA:").empty());
+  auto const call = synthetic(
+      code({
+          0xdf00, 0xd1fd, 0x4770
+  }),
+      {{0x100, 3}, {0x106, 0}}, 6);
+  CHECK(
+      starting(lcov_of(call, {group_of({})}), "BRDA:")
       == std::vector<std::string>{"BRDA:3,0,0,-", "BRDA:3,0,1,-"});
 }
 

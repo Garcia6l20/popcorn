@@ -3,6 +3,7 @@
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -198,7 +199,7 @@ class engine_context;
  *        engine's own CPU context for the same-engine fast path. Copies share the immutable
  *        context.
  */
-class snapshot
+class POPCORN_API snapshot
 {
 public:
   /**
@@ -236,7 +237,7 @@ private:
  * @param data Content to serialize.
  * @return Bytes that decode_snapshot() reads back to a value equal to @p data.
  */
-auto encode_snapshot(snapshot_data const& data) -> std::vector<std::byte>;
+POPCORN_API auto encode_snapshot(snapshot_data const& data) -> std::vector<std::byte>;
 
 /**
  * @brief Reads back bytes encode_snapshot() wrote.
@@ -250,5 +251,5 @@ auto encode_snapshot(snapshot_data const& data) -> std::vector<std::byte>;
  * @throws config_error when @p bytes is malformed or its format is not
  *         snapshot_format_version, 4, 3 or 2.
  */
-auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data;
+POPCORN_API auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data;
 }

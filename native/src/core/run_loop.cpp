@@ -342,31 +342,12 @@ void machine::run_state::on_block(
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {
-    run.end_cause           = run.boundary_cause(now);
-    run.boundary_stop       = true;
-    run.coverage.open_insns = 0;
-    uc_emu_stop(engine);
+    run.stop_at_block(engine, run.boundary_cause(now));
     return;
   }
-  if(run.block_watch) [[unlikely]]
+  if(run.block_watch and run.watch_block(engine)) [[unlikely]]
   {
-    if(run.return_watch != 0 and addr == run.return_watch)
-    {
-      run.guarded([&run, addr] {
-        run.on_return_block(static_cast<address>(addr));
-        return false;
-      });
-    }
-    if(addr == run.return_block and run.until_return and run.guarded([&run] {
-         return run.stack_pointer() == run.until_return->sp;
-       }))
-    {
-      run.end_cause           = engine_end::other;
-      run.boundary_stop       = true;
-      run.coverage.open_insns = 0;
-      uc_emu_stop(engine);
-      return;
-    }
+    return;
   }
   run.block_size = size;
   if(not run.stepping)
@@ -375,34 +356,76 @@ void machine::run_state::on_block(
   }
   if(run.spin_on) [[unlikely]]
   {
-    run.guarded([&run, addr] {
-      run.spin_block(static_cast<address>(addr));
-      return false;
-    });
+    run.spin_at_block();
   }
   if(run.coverage_on) [[unlikely]]
   {
-    run.guarded([&run, addr, size] {
-      run.coverage.count(static_cast<address>(addr), size);
-      return false;
-    });
-    if(run.stepping)
-    {
-      run.coverage.has_previous = false;
-    }
+    run.count_block();
   }
   if(run.block_records) [[unlikely]]
   {
-    run.guarded([&run, addr, size] {
-      auto const   pc = static_cast<address>(addr);
-      trace_record record{
-          .kind = trace_kind::block, .payload = {pc, 0, 0}
-      };
-      record.aux = static_cast<std::uint16_t>(std::min<std::uint32_t>(size, 0xffff));
-      run.emit(record, pc, run.ring_blocks);
+    run.record_block();
+  }
+}
+
+void machine::run_state::stop_at_block(uc_struct* engine, engine_end cause) noexcept
+{
+  end_cause           = cause;
+  boundary_stop       = true;
+  coverage.open_insns = 0;
+  uc_emu_stop(engine);
+}
+
+auto machine::run_state::watch_block(uc_struct* engine) noexcept -> bool
+{
+  auto const addr = block_pc;
+  if(return_watch != 0 and addr == return_watch)
+  {
+    guarded([this, addr] {
+      on_return_block(addr);
       return false;
     });
   }
+  if(addr == return_block and until_return and guarded([this] {
+       return stack_pointer() == until_return->sp;
+     }))
+  {
+    stop_at_block(engine, engine_end::other);
+    return true;
+  }
+  return false;
+}
+
+void machine::run_state::spin_at_block() noexcept
+{
+  guarded([this] {
+    spin_block(block_pc);
+    return false;
+  });
+}
+
+void machine::run_state::count_block() noexcept
+{
+  guarded([this] {
+    coverage.count(block_pc, block_size);
+    return false;
+  });
+  if(stepping)
+  {
+    coverage.has_previous = false;
+  }
+}
+
+void machine::run_state::record_block() noexcept
+{
+  guarded([this] {
+    trace_record record{
+        .kind = trace_kind::block, .payload = {block_pc, 0, 0}
+    };
+    record.aux = static_cast<std::uint16_t>(std::min<std::uint32_t>(block_size, 0xffff));
+    emit(record, block_pc, ring_blocks);
+    return false;
+  });
 }
 
 void machine::run_state::on_step(

@@ -213,8 +213,8 @@ struct machine::peripheral_slot
 class flat_edge_table
 {
 public:
-  /** @brief Adds one to the count of the edge from @p from to @p to. */
-  void count(address from, address to);
+  /** @brief Adds one to the count of an edge. @p key is `from << 32 | to`. */
+  void count(std::uint64_t key);
 
   /** @brief Edges with a non-zero count, ordered by from then to. */
   [[nodiscard]] auto edges() const -> std::vector<edge_counter>;
@@ -225,8 +225,7 @@ public:
 private:
   struct slot
   {
-    address       from{};
-    address       to{};
+    std::uint64_t key{};
     std::uint64_t hits{};
   };
 
@@ -251,8 +250,10 @@ struct coverage_state
   std::size_t last_range = 0;
   /** @brief Edge counters. */
   flat_edge_table edges{};
-  /** @brief Start of the previous counted block. */
-  address previous{};
+  /** @brief Start of the previous counted block, the high half of the next edge key. Kept in
+   * 64 bits: a 32-bit spill of it reloaded as the 64-bit key fails store forwarding once per
+   * block. */
+  std::uint64_t previous{};
   /** @brief Whether previous starts an edge: false after a block outside every range or a
    * control transfer that is no branch. */
   bool has_previous = false;
@@ -1360,6 +1361,26 @@ struct machine::run_state
   /** @brief Asks the arch whether a pending interrupt is deliverable, under the guard, off the
    * block hook's hot path. */
   [[gnu::noinline]] auto deliverable() noexcept -> bool;
+
+  /** @brief Ends the engine run at the block starting at block_pc, before it runs, for
+   * @p cause. Off the block hook's hot path. */
+  [[gnu::noinline]] void stop_at_block(uc_struct* engine, engine_end cause) noexcept;
+
+  /** @brief Completes the watched returns at block_pc and stops the engine when the until
+   * return is reached there. Off the block hook's hot path.
+   * @return Whether the engine was stopped. */
+  [[gnu::noinline]] auto watch_block(uc_struct* engine) noexcept -> bool;
+
+  /** @brief spin_block for the block at block_pc, under the guard, off the hot path. */
+  [[gnu::noinline]] void spin_at_block() noexcept;
+
+  /** @brief Counts the block at block_pc of block_size instructions into coverage, under the
+   * guard, off the hot path. */
+  [[gnu::noinline]] void count_block() noexcept;
+
+  /** @brief Emits the block record of the block at block_pc, under the guard, off the hot
+   * path. */
+  [[gnu::noinline]] void record_block() noexcept;
 
   /** @brief After a trap hook resumed: whether it left a deliverable exception pending, then
    * marked as a block-boundary stop so the loop enters the handler. A fetch abort forms no

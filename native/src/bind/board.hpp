@@ -9,7 +9,7 @@
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
-#include <popcorn/periph/stm32/uart.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <reflex/py.hpp>
 
@@ -49,9 +49,9 @@ public:
    * @param host The machine's host, through which send() and queued() reach the UART.
    */
   [[= py::skip]] uart_queue(
-      periph::stm32::uart_port& port,
-      detail::alive_flag        alive,
-      detail::host_ref          host);
+      periph::uart_port& port,
+      detail::alive_flag alive,
+      detail::host_ref   host);
 
   /**
    * @brief Queues frames towards the firmware, one frame time apart.
@@ -78,7 +78,7 @@ public:
   /**
    * @brief send() as a command of MachineHandle.submit_ops(), every frame tagged with @p error.
    * @param data Frames, one per byte.
-   * @param error A periph::stm32::uart_error value, 0 for clean frames.
+   * @param error A periph::uart_error value, 0 for clean frames.
    * @throws config_error when @p error is no uart_error, before anything is posted.
    */
   [[= py::doc{
@@ -91,7 +91,7 @@ public:
 
   /**
    * @brief A command of MachineHandle.submit_ops() scheduling a change of the UART's nCTS
-   *        input, see periph::stm32::uart_port::set_cts.
+   *        input, see periph::uart_port::set_cts.
    * @param ready Whether the host is ready to receive.
    * @param at_ps Virtual time of the change in picoseconds, empty for the time the command runs.
    */
@@ -163,16 +163,16 @@ public:
    * @brief The UART, for a linked system that attaches a wire to it.
    * @throws config_error once the machine is destroyed.
    */
-  [[= py::skip]] [[nodiscard]] auto native_port() const -> periph::stm32::uart_port&;
+  [[= py::skip]] [[nodiscard]] auto native_port() const -> periph::uart_port&;
 
   /** @brief The queue endpoint attached to the UART, which a wire forwards to. */
   [[= py::skip]] [[nodiscard]] auto endpoint() const noexcept
       -> std::shared_ptr<detail::queue_endpoint> const&;
 
 private:
-  [[nodiscard]] auto port() const -> periph::stm32::uart_port&;
+  [[nodiscard]] auto port() const -> periph::uart_port&;
 
-  periph::stm32::uart_port*               port_;
+  periph::uart_port*                      port_;
   std::shared_ptr<detail::queue_endpoint> endpoint_;
   detail::alive_flag                      alive_;
   detail::host_ref                        host_;

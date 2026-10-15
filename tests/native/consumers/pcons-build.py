@@ -3,10 +3,9 @@ from pathlib import Path
 from pcons import context
 
 from popcorn_build.config import project_dir
-from popcorn_build.testing import add_doctest
+from popcorn_build.testing import add_doctest, popcorn_libraries
 
 here = Path(__file__).resolve().parent
-core = context.current_project.get_target("popcorn_core")
 test_support = context.current_project.get_target("popcorn-test-support")
 toy = str(project_dir / "tests" / "data" / "desc" / "toy.json")
 
@@ -24,6 +23,6 @@ add_doctest(
             "object_linker.cpp",
         )
     ],
-    [test_support, core],
+    [test_support, *popcorn_libraries("obs", "devices", "stm32", "usb", "armv8m", "core")],
     env={"POPCORN_TOY_DESC": toy},
 )

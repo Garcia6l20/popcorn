@@ -7,7 +7,7 @@
 #include <popcorn/image/image.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
-#include <popcorn/periph/stm32/uart.hpp>
+#include <popcorn/periph/uart.hpp>
 
 #include <sched.h>
 
@@ -38,8 +38,9 @@
 
 namespace
 {
-namespace core  = popcorn::core;
-namespace stm32 = popcorn::periph::stm32;
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::vtime;
 using clock_type = std::chrono::steady_clock;
@@ -82,7 +83,7 @@ struct fnv
   }
 };
 
-class hashing_endpoint final : public stm32::uart_endpoint
+class hashing_endpoint final : public periph::uart_endpoint
 {
 public:
   std::uint64_t frames{};

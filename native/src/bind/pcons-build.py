@@ -21,4 +21,5 @@ sources = [
     here / "host_future.cpp",
     here / "pty.cpp",
     here / "system.cpp",
+    here / "plugins.cpp",
 ]

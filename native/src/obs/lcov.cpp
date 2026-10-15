@@ -1,4 +1,4 @@
-#include <popcorn/arch/armv8m/thumb.hpp>
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/obs/coverage.hpp>
 
 #include <algorithm>
@@ -19,8 +19,6 @@
 
 namespace popcorn::obs
 {
-namespace thumb = arch::armv8m::thumb;
-
 namespace
 {
 using count = std::uint64_t;
@@ -113,24 +111,35 @@ auto row_at(image::image const& source, address at) -> image::line_row const*
   return row.line == 0 ? nullptr : &row;
 }
 
-auto is_trap(thumb::insn const& i) noexcept -> bool
+struct cond_branch
 {
-  return (i.size == 2 and (i.bits & 0xff00) == 0xde00)
-      or (i.size == 4 and (i.bits & 0xfff0'f000) == 0xf7f0'a000);
+  address      at{};
+  std::uint8_t size{};
+  address      taken{};
+  address      fallthrough{};
+};
+
+auto conditional_branch(arch::decoded_insn const& i) noexcept -> std::optional<cond_branch>
+{
+  if(i.kind != arch::ending::direct or not i.conditional or not i.target)
+  {
+    return std::nullopt;
+  }
+  return cond_branch{.at = i.at, .size = i.size, .taken = *i.target, .fallthrough = i.at + i.size};
 }
 
-auto stops_fallthrough(thumb::insn const& i, thumb::flow const& control) noexcept -> bool
+auto stops_fallthrough(arch::decoded_insn const& i) noexcept -> bool
 {
-  switch(control.kind)
+  switch(i.kind)
   {
-    case thumb::ending::none:
-    case thumb::ending::system:
+    case arch::ending::none:
+    case arch::ending::system:
       return false;
-    case thumb::ending::exception:
-      return is_trap(i);
-    case thumb::ending::direct:
-    case thumb::ending::indirect:
-      return not control.conditional and not thumb::is_call(i);
+    case arch::ending::exception:
+      return i.trap;
+    case arch::ending::direct:
+    case arch::ending::indirect:
+      return not i.conditional and not i.call;
   }
   std::unreachable();
 }
@@ -138,15 +147,21 @@ auto stops_fallthrough(thumb::insn const& i, thumb::flow const& control) noexcep
 class branch_finder
 {
 public:
-  branch_finder(image::segment const& code, address low, address high)
-      : code_{code}, low_{low}, high_{high}
+  branch_finder(
+      image::segment const&      code,
+      address                    low,
+      address                    high,
+      arch::code_analysis const& analysis)
+      : code_{code}, low_{low}, high_{high}, analysis_{analysis}
   {}
 
   void walk(address root, bool known)
   {
-    known = known or not after_it(root);
     pending_.push_back(
-        {.at = root, .it_left = 0, .unknown_left = static_cast<std::uint8_t>(known ? 0 : 4)});
+        {.at           = root,
+         .it_left      = 0,
+         .unknown_left = known ? std::uint8_t{0}
+                               : analysis_.predicated_at_most(root, code_.start, code_.bytes)});
     while(not pending_.empty())
     {
       auto const item = pending_.back();
@@ -155,35 +170,12 @@ public:
     }
   }
 
-  [[nodiscard]] auto found() const -> std::map<address, thumb::cond_branch> const&
+  [[nodiscard]] auto found() const -> std::map<address, cond_branch> const&
   {
     return found_;
   }
 
 private:
-  [[nodiscard]] auto after_it(address root) const noexcept -> bool
-  {
-    for(address back = 2; back <= 16; back += 2)
-    {
-      if(root < code_.start + back)
-      {
-        break;
-      }
-      auto const offset = root - back - code_.start;
-      if(offset + 1 >= code_.bytes.size())
-      {
-        continue;
-      }
-      auto const low  = std::to_integer<unsigned>(code_.bytes[offset]);
-      auto const high = std::to_integer<unsigned>(code_.bytes[offset + 1]);
-      if(high == 0xbf and (low & 0xf) != 0)
-      {
-        return true;
-      }
-    }
-    return false;
-  }
-
   struct item
   {
     address      at{};
@@ -209,7 +201,7 @@ private:
     {
       return;
     }
-    auto const decoded = thumb::read(current.at, std::span{code_.bytes}.subspan(offset));
+    auto const decoded = analysis_.decode(current.at, std::span{code_.bytes}.subspan(offset));
     if(not decoded)
     {
       return;
@@ -217,37 +209,37 @@ private:
     auto const predicated = current.it_left > 0 or current.unknown_left > 0;
     if(not predicated)
     {
-      if(auto const branch = thumb::conditional_branch(*decoded))
+      if(auto const branch = conditional_branch(*decoded))
       {
         found_.emplace(branch->at, *branch);
       }
     }
-    auto const control = thumb::classify(*decoded);
-    auto const opens   = thumb::is_it(*decoded);
-    auto const next    = item{
+    auto const opens = decoded->predicates > 0;
+    auto const next  = item{
         .at      = current.at + decoded->size,
-        .it_left = opens ? thumb::it_length(*decoded)
+        .it_left = opens ? decoded->predicates
                          : static_cast<std::uint8_t>(current.it_left > 0 ? current.it_left - 1 : 0),
         .unknown_left = opens ? std::uint8_t{0}
                               : static_cast<std::uint8_t>(
                                     current.unknown_left > 0 ? current.unknown_left - 1 : 0),
     };
-    if(control.kind == thumb::ending::direct and control.target and not thumb::is_call(*decoded))
+    if(decoded->kind == arch::ending::direct and decoded->target and not decoded->call)
     {
-      pending_.push_back({.at = *control.target, .it_left = 0, .unknown_left = 0});
+      pending_.push_back({.at = *decoded->target, .it_left = 0, .unknown_left = 0});
     }
-    if(predicated or not stops_fallthrough(*decoded, control))
+    if(predicated or not stops_fallthrough(*decoded))
     {
       pending_.push_back(next);
     }
   }
 
-  image::segment const&                 code_;
-  address                               low_;
-  address                               high_;
-  std::vector<item>                     pending_;
-  std::map<address, bool>               visited_;
-  std::map<address, thumb::cond_branch> found_;
+  image::segment const&          code_;
+  address                        low_;
+  address                        high_;
+  arch::code_analysis const&     analysis_;
+  std::vector<item>              pending_;
+  std::map<address, bool>        visited_;
+  std::map<address, cond_branch> found_;
 };
 
 auto function_end(
@@ -307,7 +299,7 @@ public:
     return total;
   }
 
-  [[nodiscard]] auto outcome(thumb::cond_branch const& branch) const -> branch_count
+  [[nodiscard]] auto outcome(cond_branch const& branch) const -> branch_count
   {
     auto const end       = std::uint64_t{branch.at} + branch.size;
     auto       ran       = false;
@@ -495,7 +487,11 @@ void add_functions(group_view const& view, image::image const& source, file_reco
   }
 }
 
-void add_branches(group_view const& view, image::image const& source, file_records& out)
+void add_branches(
+    group_view const&          view,
+    image::image const&        source,
+    arch::code_analysis const& analysis,
+    file_records&              out)
 {
   for(auto const& function : source.symbols)
   {
@@ -510,7 +506,7 @@ void add_branches(group_view const& view, image::image const& source, file_recor
     }
     auto const    low  = function.value;
     auto const    high = function_end(source, function, *code);
-    branch_finder finder{*code, low, high};
+    branch_finder finder{*code, low, high, analysis};
     finder.walk(low, true);
     auto const first_row = std::ranges::lower_bound(source.lines, low, {}, &image::line_row::addr);
     auto const last_row  = std::ranges::lower_bound(source.lines, high, {}, &image::line_row::addr);
@@ -675,7 +671,10 @@ auto lcov(
       }
       add_lines(view, source, records);
       add_functions(view, source, records);
-      add_branches(view, source, records);
+      if(auto const* const analysis = arch::find_code_analysis(source.elf_machine))
+      {
+        add_branches(view, source, *analysis, records);
+      }
     }
     merge_group(records, total);
   }

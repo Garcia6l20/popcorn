@@ -13,6 +13,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/core/trace.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/image/image.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
@@ -244,7 +245,7 @@ struct call_result
  *
  * Neither copyable nor movable: contexts and views hold references to it.
  */
-class machine final : private machine_services
+class POPCORN_API machine final : private machine_services
 {
 public:
   /**
@@ -702,9 +703,9 @@ private:
   {
     void operator()(uc_struct* engine) const noexcept;
   };
-  struct mapped_region;
-  struct peripheral_slot;
-  struct run_state;
+  struct POPCORN_HIDDEN mapped_region;
+  struct POPCORN_HIDDEN peripheral_slot;
+  struct POPCORN_HIDDEN run_state;
 
   void require_view_access() const;
 

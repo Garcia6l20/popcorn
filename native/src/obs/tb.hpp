@@ -1,6 +1,6 @@
 #pragma once
 
-#include <popcorn/arch/armv8m/thumb.hpp>
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/core/coverage.hpp>
 #include <popcorn/image/image.hpp>
 #include <popcorn/obs/coverage.hpp>
@@ -13,14 +13,6 @@
 
 namespace popcorn::obs
 {
-namespace thumb = arch::armv8m::thumb;
-
-/** @brief Engine page size bounding a translated block, 1 KiB for M-profile cores. */
-inline constexpr std::uint32_t tb_page = 1024;
-
-/** @brief Most instructions the engine puts in one translated block. */
-inline constexpr std::uint32_t tb_max_insns = 512;
-
 /** @brief Byte range of one decoded translated block. */
 struct tb_extent
 {
@@ -30,8 +22,8 @@ struct tb_extent
   std::uint32_t size{};
   /** @brief Instructions. */
   std::uint32_t insns{};
-  /** @brief Control flow of the last instruction. */
-  thumb::flow last{};
+  /** @brief The last instruction. */
+  arch::decoded_insn last{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(tb_extent const&, tb_extent const&) -> bool = default;
@@ -51,8 +43,16 @@ public:
    * @brief Creates the source.
    * @param images Loaded images, in load order. The last one holding an address wins.
    * @param fallback Reader for addresses no image segment holds.
+   * @param analysis Decoder of the code, null when the arch has none: every block then decodes
+   *        to size 0.
    */
-  code_bytes(std::span<image::image const> images, memory_reader fallback);
+  code_bytes(
+      std::span<image::image const> images,
+      memory_reader                 fallback,
+      arch::code_analysis const*    analysis);
+
+  /** @brief The decoder, null for none. */
+  [[nodiscard]] auto analysis() const noexcept -> arch::code_analysis const*;
 
   /**
    * @brief Bytes from an address on, as many as are readable up to @p count, never past the end
@@ -68,11 +68,12 @@ public:
    * @param start First address.
    * @return The bytes, shorter where the source ends. Valid until the next call.
    */
-  auto page(address start) -> std::span<std::byte const>;
+  auto page(address start) -> std::span<std::byte const> pre(analysis() != nullptr);
 
 private:
   std::span<image::image const> images_;
   memory_reader                 fallback_;
+  arch::code_analysis const*    analysis_;
   std::vector<std::byte>        scratch_;
 };
 
@@ -80,7 +81,8 @@ private:
  * @brief Decodes the translated block the engine builds at an address.
  * @param start Block start.
  * @param code Code source.
- * @return The block, size 0 when its first instruction cannot be read.
+ * @return The block, size 0 when its first instruction cannot be read or @p code has no
+ *         decoder.
  */
 auto decode_tb(address start, code_bytes& code) -> tb_extent;
 

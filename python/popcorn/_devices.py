@@ -190,8 +190,16 @@ def spi_mode(owner: str, mode: int | None) -> int | None:
 
 
 def cs_of(device: _core.SpiTargetBase) -> str | None:
-    """The chip select pin name of an SPI device, None for the hardware SS output."""
-    return typing.cast("str | None", getattr(device, "cs", None))
+    """The chip select pin name of an SPI device, such as "PB0", None for the hardware SS output.
+
+    Read from `_cs_port` and `_cs_pin`, the attributes the machine attaches the device by, and
+    spelled as the SPI model names the pin.
+    """
+    port: object = getattr(device, "_cs_port", "")
+    pin: object = getattr(device, "_cs_pin", None)
+    if not isinstance(port, str) or not port or not isinstance(pin, int):
+        return None
+    return f"P{port[-1]}{pin}"
 
 
 def check_address(address: int) -> None:

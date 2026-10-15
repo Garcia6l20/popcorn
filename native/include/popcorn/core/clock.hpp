@@ -2,6 +2,7 @@
 
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -65,7 +66,7 @@ struct clock_state
  *        vtime_from_instructions() of the instructions since its start. Never reads wall time.
  *        Neither copyable nor movable: models and the clock_driver hold references to it.
  */
-class clock
+class POPCORN_API clock
 {
 public:
   /**
@@ -252,7 +253,7 @@ private:
  * @brief Moves a clock forward and saves or restores it for the run loop. Owned by the machine
  *        and never given to models, which only read time and set frequencies through clock.
  */
-class clock_driver
+class POPCORN_API clock_driver
 {
 public:
   /**

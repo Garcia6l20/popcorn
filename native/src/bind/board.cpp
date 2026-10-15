@@ -3,8 +3,8 @@
 #include "machine.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
-#include <popcorn/periph/stm32/spi.hpp>
 
 #include <algorithm>
 #include <array>
@@ -21,17 +21,14 @@
 
 namespace popcorn::bind
 {
-uart_queue::uart_queue(
-    periph::stm32::uart_port& port,
-    detail::alive_flag        alive,
-    detail::host_ref          host)
+uart_queue::uart_queue(periph::uart_port& port, detail::alive_flag alive, detail::host_ref host)
     : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>()}, alive_{std::move(alive)},
       host_{std::move(host)}
 {
   port.attach(endpoint_);
 }
 
-auto uart_queue::port() const -> periph::stm32::uart_port&
+auto uart_queue::port() const -> periph::uart_port&
 {
   if(not detail::is_alive(alive_))
   {
@@ -59,7 +56,7 @@ void uart_queue::send(reflex::py::nb::bytes const& data)
 auto uart_queue::command_send(reflex::py::nb::bytes const& data, std::uint8_t error) const
     -> access_op
 {
-  auto const tag = static_cast<periph::stm32::uart_error>(error);
+  auto const tag = static_cast<periph::uart_error>(error);
   if(not is_enumerator(tag))
   {
     throw config_error("uart", 0, "error", "a UartError value");
@@ -69,7 +66,7 @@ auto uart_queue::command_send(reflex::py::nb::bytes const& data, std::uint8_t er
   link.host_.reset();
   auto frames = frames_of(data)
               | std::views::transform([tag](std::uint16_t word) {
-                  return periph::stm32::host_frame{.data = word, .error = tag};
+                  return periph::host_frame{.data = word, .error = tag};
                 })
               | std::ranges::to<std::vector>();
   return detail::link_op(
@@ -82,8 +79,7 @@ auto uart_queue::command_break() const -> access_op
   auto link   = *this;
   link.host_.reset();
   return detail::link_op([link = std::move(link)] {
-    std::array<periph::stm32::host_frame, 1> const frame{
-        {{.kind = periph::stm32::frame_kind::brk}}};
+    std::array<periph::host_frame, 1> const frame{{{.kind = periph::frame_kind::brk}}};
     link.port().receive_frames(frame);
   });
 }
@@ -187,7 +183,7 @@ auto uart_queue::bridged_link() const -> std::unique_ptr<detail::pty_link>
   return std::make_unique<detail::uart_pty_link>(port(), endpoint_);
 }
 
-auto uart_queue::native_port() const -> periph::stm32::uart_port&
+auto uart_queue::native_port() const -> periph::uart_port&
 {
   return port();
 }
@@ -404,8 +400,7 @@ auto machine_handle::uart_names() const -> std::vector<std::string>
   std::vector<std::string> names;
   for(auto const& unit : engine().description().peripherals)
   {
-    if(not unit.alias_of
-       and dynamic_cast<periph::stm32::uart_port*>(engine().model(unit.name)) != nullptr)
+    if(not unit.alias_of and dynamic_cast<periph::uart_port*>(engine().model(unit.name)) != nullptr)
     {
       names.push_back(unit.name);
     }
@@ -415,7 +410,7 @@ auto machine_handle::uart_names() const -> std::vector<std::string>
 
 auto machine_handle::attach_uart(std::string const& peripheral) -> uart_queue
 {
-  auto* const port = dynamic_cast<periph::stm32::uart_port*>(engine().model(peripheral));
+  auto* const port = dynamic_cast<periph::uart_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw model_error(peripheral, "", 0);
@@ -603,7 +598,7 @@ auto machine_handle::command_spi_transfer(
     std::uint8_t                 bits,
     std::vector<std::uint32_t>   frames) const -> access_op
 {
-  auto* const port = dynamic_cast<periph::stm32::spi_controller_port*>(engine().model(peripheral));
+  auto* const port = dynamic_cast<periph::spi_controller_port*>(engine().model(peripheral));
   if(port == nullptr)
   {
     throw config_error(peripheral, 0, "devices", "a built-in SPI model");

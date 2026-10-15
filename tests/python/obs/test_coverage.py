@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import random
 import struct
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,6 +82,33 @@ def test_eight_workers_merge_to_the_sum_in_any_order(tmp_path: Path) -> None:
     shuffled = list(files)
     random.Random(7).shuffle(shuffled)
     assert merge(shuffled).to_bytes() == expected.to_bytes()
+
+
+def test_lcov_in_a_fresh_interpreter_importing_only_popcorn_coverage(tmp_path: Path) -> None:
+    image = ImageRef.from_elf(LINES_ELF)
+    coverage = Coverage.from_parts(
+        [
+            CoverageGroup(
+                images=(image,),
+                ranges=(CodeRange("clamp", 0x0800_0008, 0x10),),
+                blocks=(BlockHit(0x0800_0008, 4, 2), BlockHit(0x0800_0014, 4, 1)),
+                edges=(EdgeHit(0x0800_0008, 0x0800_0014, 1),),
+            )
+        ]
+    )
+    saved = tmp_path / "cov.pcov"
+    coverage.save(saved)
+    here = tmp_path / "here.info"
+    coverage.export_lcov(here)
+    fresh = tmp_path / "fresh.info"
+    script = (
+        "import sys\n"
+        "import popcorn.coverage\n"
+        "popcorn.coverage.Coverage.load(sys.argv[1]).export_lcov(sys.argv[2])\n"
+    )
+    subprocess.run([sys.executable, "-c", script, str(saved), str(fresh)], check=True)
+    assert "BRDA:9,0,0,1" in fresh.read_text().splitlines()
+    assert fresh.read_text() == here.read_text()
 
 
 def test_lcov_of_the_lines_firmware(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <popcorn/export.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 namespace popcorn::periph::stm32
@@ -21,7 +22,7 @@ struct usb_host_options
  *        the cable in its snapshots. Reach it with
  *        `dynamic_cast<usb_host_port*>(machine.model("OTG_FS"))`.
  */
-class usb_host_port
+class POPCORN_API usb_host_port
 {
 public:
   /** @brief Creates the interface. */
@@ -53,6 +54,6 @@ public:
 
 protected:
   /** @brief Destroys the interface, only through its model. */
-  ~usb_host_port() = default;
+  virtual ~usb_host_port();
 };
 }

@@ -18,6 +18,7 @@ sources = [
         "hooks.cpp",
         "host.cpp",
         "intercepts.cpp",
+        "link_guard.cpp",
         "machine.cpp",
         "memory_map.cpp",
         "mmio.cpp",

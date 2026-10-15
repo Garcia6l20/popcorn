@@ -8,6 +8,7 @@ from popcorn_build.testing import add_doctest, alias_bare_name
 
 here = Path(__file__).resolve().parent
 core = context.current_project.get_target("popcorn_core")
+core_static = context.current_project.get_target("popcorn_core_static")
 
 prebuilt_dir = project_dir / "tests" / "firmware" / "image" / "prebuilt"
 scratch = build_dir / "test-image-scratch"
@@ -45,7 +46,7 @@ test_image = add_doctest(
         here / "test_macros.cpp",
         here / "test_robustness.cpp",
     ],
-    [core],
+    [core_static],
     env=env,
 )
 test_image.private.include_dirs.append(str(project_dir / "native" / "src" / "image"))

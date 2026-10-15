@@ -26,6 +26,18 @@ namespace popcorn::core
 {
 namespace detail
 {
+constinit thread_local int              host_locks_held = 0;
+constinit thread_local host_core const* engine_owner    = nullptr;
+constinit thread_local bool             on_host_thread  = false;
+}
+
+machine_closed::~machine_closed()           = default;
+operation_cancelled::~operation_cancelled() = default;
+machine_forked::~machine_forked()           = default;
+member_driver::~member_driver()             = default;
+
+namespace detail
+{
 struct waiter
 {
   waiter_spec              spec;

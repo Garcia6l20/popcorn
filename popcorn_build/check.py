@@ -92,6 +92,7 @@ def stages(asan: bool, jobs: int | None = None) -> list[Stage]:
         ("ruff", _python_tool("ruff", "check", ".")),
         ("black", _python_tool("black", "--check", "-q", ".")),
         ("clang-format", _clang_format()),
+        ("layering", _python_tool("popcorn_build.layering")),
     ]
 
 

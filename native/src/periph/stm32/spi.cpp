@@ -4,6 +4,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
+#include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/spi.hpp>

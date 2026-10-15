@@ -1,3 +1,4 @@
+#include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/image/image.hpp>
@@ -142,6 +143,7 @@ auto probe_collect(std::span<char const* const> args) -> int
 
 auto main(int argc, char** argv) -> int
 {
+  popcorn::arch::armv8m::register_builtin();
   std::span<char const* const> const args{argv, static_cast<std::size_t>(argc)};
   try
   {

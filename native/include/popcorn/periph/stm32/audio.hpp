@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <array>
 #include <cstddef>
@@ -71,7 +72,7 @@ struct audio_format
  *        an endpoint is outside the machine: restoring a snapshot does not rewind it, and a
  *        source goes on from where it is.
  */
-class audio_endpoint
+class POPCORN_API audio_endpoint
 {
 public:
   /** @brief Creates the endpoint. */
@@ -85,7 +86,7 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(audio_endpoint&&) -> audio_endpoint& = delete;
   /** @brief Destroys the endpoint. */
-  virtual ~audio_endpoint() = default;
+  virtual ~audio_endpoint();
 
   /**
    * @brief A transmitting block sent a frame. Called when the frame ends.
@@ -133,7 +134,7 @@ struct audio_attachment
  * @brief The firmware side of an SAI as a board sees it, implemented by the SAI model. Reach it
  *        with `dynamic_cast<audio_port*>(machine.model("SAI1"))`.
  */
-class audio_port
+class POPCORN_API audio_port
 {
 public:
   /** @brief Creates the interface. */
@@ -180,7 +181,7 @@ public:
 
 protected:
   /** @brief Destroys the interface, only through its model. */
-  ~audio_port() = default;
+  virtual ~audio_port();
 };
 
 /** @brief One frame an audio_capture_endpoint kept. */
@@ -199,7 +200,7 @@ struct captured_audio_frame
 };
 
 /** @brief Keeps every transmitted frame with its time, and receives silence. */
-class audio_capture_endpoint final : public audio_endpoint
+class POPCORN_API audio_capture_endpoint final : public audio_endpoint
 {
 public:
   /** @brief Frames received, in order. */
@@ -216,10 +217,13 @@ public:
 
   void receive(std::span<std::uint32_t>, audio_format, vtime) override
   {}
+
+  /** @brief Destroys the endpoint. Declared out-of-line: the key function pins the vtable. */
+  ~audio_capture_endpoint() override;
 };
 
 /** @brief Serves given words to a receiving block in slot order, then 0. Drops what it is sent. */
-class audio_source_endpoint final : public audio_endpoint
+class POPCORN_API audio_source_endpoint final : public audio_endpoint
 {
 public:
   /**
@@ -245,6 +249,9 @@ public:
   {
     return next_;
   }
+
+  /** @brief Destroys the endpoint. Declared out-of-line: the key function pins the vtable. */
+  ~audio_source_endpoint() override;
 
 private:
   std::vector<std::uint32_t> words_;

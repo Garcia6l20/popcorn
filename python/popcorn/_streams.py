@@ -9,15 +9,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from popcorn import _core
-from popcorn._devices import BusDevice, I2CTarget, SpiController, SpiTarget
+from popcorn._devices import BusDevice
 from popcorn._enums import UartError
 from popcorn._errors import ConfigError
-from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.units import VirtualDuration, VirtualTime
 
 _MAX_PS = (1 << 64) - 1
 
 if TYPE_CHECKING:
+    from popcorn._machine import AttachedDevice
     from popcorn._refs import Pending
     from popcorn._usb import UsbHosts
 
@@ -716,19 +716,15 @@ class Board:
         self._part = part
         self._peripherals = frozenset(peripherals)
 
-    def devices(
-        self, peripheral: str
-    ) -> tuple[I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget, ...]:
-        """The devices on bus `peripheral`, in attachment order, empty for none. An alias, such
-        as a secure address window, names the bus it serves."""
+    def devices(self, peripheral: str) -> tuple[AttachedDevice, ...]:
+        """The devices on bus `peripheral`, in attachment order, empty for none, a plugin's
+        devices included. An alias, such as a secure address window, names the bus it
+        serves."""
         return cast(
-            "tuple[I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget, ...]",
-            self._devices.get(self._ports.serving(peripheral), ()),
+            "tuple[AttachedDevice, ...]", self._devices.get(self._ports.serving(peripheral), ())
         )
 
-    def device[D: I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget](
-        self, peripheral: str, cls: type[D]
-    ) -> D:
+    def device[D: AttachedDevice](self, peripheral: str, cls: type[D]) -> D:
         """The one device of class `cls` on bus `peripheral`, typed. A subclass instance
         matches. An alias, such as a secure address window, names the bus it serves.
 

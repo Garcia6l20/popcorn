@@ -1,5 +1,6 @@
 #pragma once
 
+#include <popcorn/export.hpp>
 #include <popcorn/image/image.hpp>
 #include <popcorn/obs/coverage.hpp>
 
@@ -14,5 +15,6 @@ namespace popcorn::obs
  * @param kind What it was loaded from.
  * @param path Its file, empty for a raw image.
  */
-auto reference_of(image::image const& loaded, image_kind kind, std::string_view path) -> image_ref;
+POPCORN_API auto reference_of(image::image const& loaded, image_kind kind, std::string_view path)
+    -> image_ref;
 }

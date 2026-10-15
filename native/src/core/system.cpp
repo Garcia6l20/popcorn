@@ -17,6 +17,8 @@
 
 namespace popcorn::core
 {
+member_link::~member_link() = default;
+
 namespace
 {
 enum class entry_kind : std::uint8_t

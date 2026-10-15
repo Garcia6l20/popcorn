@@ -8,25 +8,23 @@
 #include "image.hpp"
 #include "machine.hpp"
 #include "models.hpp"
+#include "plugins.hpp"
 #include "system.hpp"
 
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/core/version.hpp>
-#include <popcorn/periph/stm32/i2c.hpp>
+#include <popcorn/periph/i2c.hpp>
 
 #include <reflex/py.hpp>
 
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
-
-#if __has_include(<popcorn/periph/stm32/builtin.hpp>)
-#include <popcorn/periph/stm32/builtin.hpp>
-#endif
 
 #include <format>
 #include <string>
@@ -45,9 +43,7 @@ namespace popcorn::bind
 REFLEX_PY_MODULE(_core, m)
 {
   popcorn::bind::detail::register_error_translator();
-#if __has_include(<popcorn/periph/stm32/builtin.hpp>)
-  popcorn::periph::stm32::register_builtin_models();
-#endif
+  popcorn::bind::detail::load_builtin_plugins();
   m.bind_enum<popcorn::stop_reason>("StopReason");
   m.bind_enum<popcorn::fault_kind>("FaultKind");
   m.bind_enum<popcorn::reset_kind>("ResetKind");
@@ -68,8 +64,8 @@ REFLEX_PY_MODULE(_core, m)
   m.bind_enum<popcorn::core::condition_set::mode>("ConditionMode");
   m.bind<popcorn::core::condition_set>("ConditionSet");
   m.bind_enum<popcorn::periph::stm32::pin_mode>("PinMode");
-  m.bind_enum<popcorn::periph::stm32::i2c_error>("I2CError");
-  m.bind_enum<popcorn::periph::stm32::uart_error>("UartError");
+  m.bind_enum<popcorn::periph::i2c_error>("I2CError");
+  m.bind_enum<popcorn::periph::uart_error>("UartError");
   m.bind_enum<popcorn::periph::usb::device_state>("UsbDeviceState");
   m.bind_enum<popcorn::periph::usb::transfer_status>("UsbTransferStatus");
   m.bind_enum<popcorn::core::log_kind>("LogKind");
@@ -106,6 +102,6 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::part_description>("PartDescription");
   popcorn::bind::detail::bind_model_base(m.handle);
   popcorn::bind::detail::bind_device_bases(m.handle);
-  popcorn::bind::detail::bind_native_devices(m.handle);
+  popcorn::bind::detail::bind_plugins(m.handle);
   m.bind<^^popcorn::bind>();
 }

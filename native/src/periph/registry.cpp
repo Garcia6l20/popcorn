@@ -1,3 +1,4 @@
+#include "../plugin/guard.hpp"
 #include "register_layer.hpp"
 
 #include <popcorn/core/services.hpp>
@@ -12,6 +13,9 @@
 
 namespace popcorn::periph
 {
+model::~model()                   = default;
+peer_directory::~peer_directory() = default;
+
 namespace
 {
 struct registration
@@ -64,6 +68,10 @@ auto glob_match(std::string_view pattern, std::string_view text) noexcept -> boo
 
 void register_model(std::string_view ip, std::string_view ip_version_glob, model_factory factory)
 {
+  if(plugin::guard::refuses("periph::register_model"))
+  {
+    return;
+  }
   auto&                 entries = table();
   std::lock_guard const lock{entries.guard};
   std::erase_if(entries.entries, [&](registration const& entry) {

@@ -1,7 +1,8 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
-#include <popcorn/periph/stm32/i2c.hpp>
+#include <popcorn/export.hpp>
+#include <popcorn/periph/i2c.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -49,7 +50,7 @@ struct table_target_options
  *        addressing another target ends nothing here: the pending write is recorded at this
  *        target's own next START or STOP, and writes() misses it until then.
  */
-class table_target final : public stm32::i2c_target
+class POPCORN_API table_target final : public i2c_target
 {
 public:
   /**
@@ -63,9 +64,9 @@ public:
   ~table_target() override;
 
   [[nodiscard]] auto address() const -> std::uint8_t override;
-  [[nodiscard]] auto start(bool read, vtime at) -> stm32::i2c_reply override;
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> stm32::i2c_reply override;
-  [[nodiscard]] auto read(vtime at) -> stm32::i2c_read_reply override;
+  [[nodiscard]] auto start(bool read, vtime at) -> i2c_reply override;
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> i2c_reply override;
+  [[nodiscard]] auto read(vtime at) -> i2c_read_reply override;
   void               stop(vtime at) override;
   /**
    * @brief On power_on and brown_out: the transfer in progress dropped, unrecorded. writes()
@@ -81,7 +82,7 @@ public:
   [[nodiscard]] auto writes() const -> std::span<table_write const>;
 
 private:
-  struct impl;
+  struct POPCORN_HIDDEN impl;
   std::unique_ptr<impl> impl_;
 };
 }

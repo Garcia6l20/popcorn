@@ -37,6 +37,7 @@ from popcorn import (
 from popcorn._machine import AttachedDevice
 from popcorn._machine_description import check_inputs
 from popcorn._model_build import registered_classes
+from popcorn._native_digest import native_digest
 from popcorn.board import I2CTarget, SpiController, SpiTarget
 from popcorn.units import VirtualTime
 
@@ -45,10 +46,7 @@ FORMAT = "popcorn-boot-cache 1"
 
 @functools.cache
 def _extension_digest() -> str:
-    path = getattr(_core, "__file__", None)
-    if not isinstance(path, str):
-        return ""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return native_digest()
 
 
 def _file_digest(path: Path) -> str:
@@ -253,7 +251,10 @@ def cache_key(project: MachineDescription, strict: bool, devices: str | None = N
     model. A registration that serves no such peripheral is left out. Modules of popcorn, of
     the Python installation and of site-packages are left out: the popcorn version, the
     extension digest and installed versions cover them. A module imported only by those
-    modules is not covered: `--cache-clear` drops the cache.
+    modules is not covered: `--cache-clear` drops the cache. A plugin's code, of a
+    `PluginModel` on the board or of a device class from its bindings module, is covered by
+    `project.digest` through `plugins`: a dev plugin by its cache key over its sources, an
+    installed one by the SHA-256 of its library and bindings module.
 
     Raises:
         MissingInput: An input file of `project` does not exist, as `MachineDescription.machine`
@@ -273,7 +274,7 @@ def cache_key(project: MachineDescription, strict: bool, devices: str | None = N
     if devices is not None:
         lines.append(f"devices {devices}")
     for name, periph in sorted(project.board.items()):
-        uses: list[Use] = [] if periph.model is None else [periph.model]
+        uses: list[Use] = [periph.model] if isinstance(periph.model, Use) else []
         for use in [*uses, *periph.devices]:
             cls, params = use.cls, use.params
             lines.append(f"{name} {_class_source(cls)}")

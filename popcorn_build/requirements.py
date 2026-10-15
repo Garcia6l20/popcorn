@@ -120,6 +120,7 @@ prefixes["reflex"] = prefixes["reflex-serde"] = _submodule("reflex", "core/inclu
 prefixes["unicorn"], unicorn_commit = _submodule_cmake_package(
     "unicorn", unicorn_cmake_options, "libunicorn.a"
 )
+prefixes["unicorn-headers"] = prefixes["unicorn"]
 
 
 def _describe(name: str) -> PackageDescription:
@@ -144,8 +145,9 @@ def _describe(name: str) -> PackageDescription:
                 system_include_dirs=[str(prefix / "include")],
                 library_dirs=[str(prefix / "lib")],
                 libraries=["unicorn", "m", "pthread"],
-                link_flags=["-Wl,--exclude-libs,ALL"],
             )
+        case "unicorn-headers":
+            return PackageDescription(name=name, system_include_dirs=[str(prefix / "include")])
         case _:
             raise KeyError(f"popcorn: no imported target for fetched package {name!r}")
 
@@ -159,7 +161,7 @@ def package(name: str) -> ImportedTarget:
         description = _describe(name)
         description.prefix = str(prefixes[name])
         description.found_by = (
-            "git-submodule" if name.startswith("reflex") or name == "unicorn" else "pcons-fetch"
+            "git-submodule" if name.startswith(("reflex", "unicorn")) else "pcons-fetch"
         )
         _imported[name] = ImportedTarget.from_package(description)
     return _imported[name]

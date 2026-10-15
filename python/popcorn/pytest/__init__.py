@@ -205,6 +205,7 @@ pytest_plugins = [
     "popcorn.pytest._fixtures",
     "popcorn.pytest._report",
     "popcorn.pytest._coverage",
+    "popcorn.pytest._plugins",
 ]
 
 pytest.register_assert_rewrite(*pytest_plugins)

@@ -2,6 +2,7 @@
 
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 #include <cstddef>
@@ -69,7 +70,7 @@ struct hid_reply
  *        detach, a bus reset or a restore destroys. Touched by the driver in model events and by
  *        the binding, each under the hub's link lock.
  */
-struct hid_channel
+struct POPCORN_API hid_channel
 {
   /** @brief Input reports received and not taken yet, oldest first. */
   std::deque<hid_report> in{};
@@ -148,7 +149,7 @@ struct hid_channel
  *        interface in the configuration's interface order. Created empty with the host's
  *        factories, its channels created on first use, by the driver or by the binding.
  */
-class hid_hub
+class POPCORN_API hid_hub
 {
 public:
   /** @brief Takes the hub's link lock, blocking. It covers the channel map and every channel. */
@@ -203,7 +204,7 @@ private:
  * @return Empty when the HID descriptor is missing or malformed, its first class descriptor is
  *         not a report descriptor, or the length is 0 or above 4096.
  */
-[[nodiscard]] auto hid_report_descriptor_length(interface_info const& interface)
+[[nodiscard]] POPCORN_API auto hid_report_descriptor_length(interface_info const& interface)
     -> std::optional<std::uint16_t>;
 
 /**
@@ -213,7 +214,7 @@ private:
  * @return @p interface alone when it is of class 0x03 with an interrupt IN endpoint and a
  *         report descriptor length, else empty.
  */
-[[nodiscard]] auto
+[[nodiscard]] POPCORN_API auto
     hid_claim(configuration_info const& configuration, interface_info const& interface)
         -> std::vector<std::uint8_t>;
 
@@ -222,7 +223,7 @@ private:
  *        one is its function index.
  * @param configuration The configuration.
  */
-[[nodiscard]] auto hid_functions(configuration_info const& configuration)
+[[nodiscard]] POPCORN_API auto hid_functions(configuration_info const& configuration)
     -> std::vector<std::uint8_t>;
 
 /**
@@ -237,5 +238,5 @@ private:
  * @param hub The channels, which the driver reaches by function index.
  * @return The factory, named hid_name.
  */
-[[nodiscard]] auto hid_factory(std::shared_ptr<hid_hub> hub) -> driver_factory;
+[[nodiscard]] POPCORN_API auto hid_factory(std::shared_ptr<hid_hub> hub) -> driver_factory;
 }

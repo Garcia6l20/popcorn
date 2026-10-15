@@ -125,6 +125,7 @@ public:
    * @throws std::logic_error after start().
    * @throws std::invalid_argument for a member index out of range, a latency or baud of 0, or a
    *         shape outside the UART's.
+   * @throws config_error when the receiving UART's model takes no frames from a wire.
    */
   [[= py::doc{"Add a wire before start(), return its index."}]] auto
       add_wire(wire_spec const& spec, uart_queue const& sender, uart_queue const& receiver)
@@ -351,10 +352,10 @@ private:
 
   struct wire_entry
   {
-    std::shared_ptr<periph::stm32::uart_wire>     wire;
-    periph::stm32::uart_port*                     sender_port{};
-    std::shared_ptr<periph::stm32::uart_endpoint> own;
-    std::size_t                                   sender{};
+    std::shared_ptr<periph::stm32::uart_wire> wire;
+    periph::uart_port*                        sender_port{};
+    std::shared_ptr<periph::uart_endpoint>    own;
+    std::size_t                               sender{};
   };
 
   [[nodiscard]] auto system() const -> std::shared_ptr<core::system>;

@@ -4,6 +4,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
+#include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 
@@ -22,6 +23,8 @@
 
 namespace popcorn::periph::stm32
 {
+i2c_bus::~i2c_bus() = default;
+
 namespace
 {
 constexpr std::uint64_t ps_per_second  = 1'000'000'000'000;

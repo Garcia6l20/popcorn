@@ -6,6 +6,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/devices/at25sf.hpp>
+#include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 
@@ -27,8 +28,9 @@
 
 namespace
 {
-namespace core  = popcorn::core;
-namespace stm32 = popcorn::periph::stm32;
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
@@ -38,7 +40,7 @@ using popcorn::testing::u575;
 
 constexpr std::uint64_t frame_ps = 4'000'000;
 
-class script_target final : public stm32::spi_target
+class script_target final : public periph::spi_target
 {
 public:
   std::vector<std::pair<bool, vtime>>           selects;
@@ -856,7 +858,7 @@ TEST_CASE("24-bit frames take 3 FIFO bytes, 5 frames fill the 16-byte FIFO")
 
 namespace
 {
-class recorded_flash final : public stm32::spi_target
+class recorded_flash final : public periph::spi_target
 {
 public:
   explicit recorded_flash(std::shared_ptr<popcorn::periph::devices::at25sf> device)
@@ -1190,7 +1192,7 @@ TEST_CASE("the SPI1 DMA requests follow TXP, RXP and a partial last packet after
 
 namespace
 {
-class page_program_injector final : public stm32::spi_target
+class page_program_injector final : public periph::spi_target
 {
 public:
   std::shared_ptr<popcorn::periph::devices::at25sf> flash =
@@ -1292,7 +1294,7 @@ TEST_CASE("the SPI IRQ stays low while SPE is clear, except for MODF")
 
 namespace
 {
-class controller_probe final : public stm32::spi_controller_sink
+class controller_probe final : public periph::spi_controller_sink
 {
 public:
   struct heard
@@ -1363,9 +1365,9 @@ struct target_rig
         [this](core::log_record const& record) { logged.push_back(record); });
   }
 
-  [[nodiscard]] auto port() const -> stm32::spi_controller_port&
+  [[nodiscard]] auto port() const -> periph::spi_controller_port&
   {
-    auto* const found = dynamic_cast<stm32::spi_controller_port*>(f->target->model("SPI1"));
+    auto* const found = dynamic_cast<periph::spi_controller_port*>(f->target->model("SPI1"));
     REQUIRE(found != nullptr);
     return *found;
   }

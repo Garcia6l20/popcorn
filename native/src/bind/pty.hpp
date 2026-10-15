@@ -3,7 +3,7 @@
 #include "link_queues.hpp"
 
 #include <popcorn/core/machine.hpp>
-#include <popcorn/periph/stm32/uart.hpp>
+#include <popcorn/periph/uart.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
 
 #include <atomic>
@@ -168,13 +168,13 @@ public:
    * @param port The UART, reached only by the engine owner.
    * @param endpoint Its far end, drained under its link lock.
    */
-  uart_pty_link(periph::stm32::uart_port& port, std::shared_ptr<queue_endpoint> endpoint) noexcept;
+  uart_pty_link(periph::uart_port& port, std::shared_ptr<queue_endpoint> endpoint) noexcept;
 
   void send(std::span<std::uint8_t const> bytes) override;
   void drain(std::vector<std::uint8_t>& out) override;
 
 private:
-  periph::stm32::uart_port*       port_;
+  periph::uart_port*              port_;
   std::shared_ptr<queue_endpoint> endpoint_;
 };
 

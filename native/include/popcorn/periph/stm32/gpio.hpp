@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -85,7 +86,7 @@ inline constexpr std::size_t max_pending_edges = 65536;
  * @brief One GPIO port as a board sees it, implemented by the GPIO model. Reach it with
  *        `dynamic_cast<gpio_port*>(machine.model("GPIOA"))`.
  */
-class gpio_port
+class POPCORN_API gpio_port
 {
 public:
   /** @brief Creates the interface. */
@@ -166,11 +167,11 @@ public:
 
 protected:
   /** @brief Destroys the interface, only through its model. */
-  ~gpio_port() = default;
+  virtual ~gpio_port();
 };
 
 /** @brief Input of the EXTI model from the GPIO models of the same machine. */
-class exti_input
+class POPCORN_API exti_input
 {
 public:
   /** @brief Creates the interface. */
@@ -194,6 +195,6 @@ public:
 
 protected:
   /** @brief Destroys the interface, only through its model. */
-  ~exti_input() = default;
+  virtual ~exti_input();
 };
 }

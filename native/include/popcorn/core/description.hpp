@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/export.hpp>
 
 #include <reflex/enum.hpp>
 #include <reflex/serde/annotations.hpp>
@@ -311,7 +312,8 @@ struct part_description
  * @throws config_error when @p json is malformed, does not match the schema, carries no
  *         schema_version, or carries one other than description_schema_version, naming both.
  */
-auto parse_description(std::string_view json, std::string_view source) -> part_description;
+POPCORN_API auto parse_description(std::string_view json, std::string_view source)
+    -> part_description;
 
 /**
  * @brief Loads a JSON part description file.
@@ -319,7 +321,7 @@ auto parse_description(std::string_view json, std::string_view source) -> part_d
  * @return The description.
  * @throws config_error when @p file cannot be read, or as parse_description().
  */
-auto load_description(std::filesystem::path const& file) -> part_description;
+POPCORN_API auto load_description(std::filesystem::path const& file) -> part_description;
 
 /**
  * @brief Serializes a part description to compact JSON, stamped with the current format.
@@ -328,13 +330,13 @@ auto load_description(std::filesystem::path const& file) -> part_description;
  *         @p description carries, which parse_description() reads back to a value equal to
  *         @p description in every other member.
  */
-auto dump_description(part_description const& description) -> std::string;
+POPCORN_API auto dump_description(part_description const& description) -> std::string;
 
 /**
  * @brief JSON Schema of the part description format, derived from the aggregates by reflection.
  * @return Compact JSON Schema (draft 2020-12) text.
  */
-auto description_json_schema() -> std::string;
+POPCORN_API auto description_json_schema() -> std::string;
 
 /**
  * @brief Digest identifying a description: SHA-256 of dump_description() output, lower-case hex.
@@ -343,7 +345,7 @@ auto description_json_schema() -> std::string;
  * @param description Description to digest.
  * @return 64 hex digits.
  */
-auto description_digest(part_description const& description) -> std::string;
+POPCORN_API auto description_digest(part_description const& description) -> std::string;
 
 /**
  * @brief Position of a register in a description: index of its peripheral in
@@ -367,8 +369,8 @@ struct register_ref
  * @param description Description the reference points into.
  * @param ref Register position, within the description.
  */
-auto flat_register_id(part_description const& description, register_ref ref) -> std::uint32_t
-    pre(ref.peripheral < description.peripherals.size())
+POPCORN_API auto flat_register_id(part_description const& description, register_ref ref)
+    -> std::uint32_t pre(ref.peripheral < description.peripherals.size())
         pre(ref.reg < description.peripherals[ref.peripheral].registers.size());
 
 /**
@@ -377,7 +379,7 @@ auto flat_register_id(part_description const& description, register_ref ref) -> 
  * @param id Flat register id.
  * @return Its position, empty when the description has fewer registers.
  */
-auto register_at(part_description const& description, std::uint32_t id)
+POPCORN_API auto register_at(part_description const& description, std::uint32_t id)
     -> std::optional<register_ref>;
 
 /**
@@ -386,6 +388,6 @@ auto register_at(part_description const& description, std::uint32_t id)
  * @param name Register name or alias, such as `CR1` or `TIM1_CR1`.
  * @return The register, null when no register has that name or alias.
  */
-[[nodiscard]] auto find_register(peripheral_desc const& peripheral, std::string_view name)
-    -> register_desc const*;
+[[nodiscard]] POPCORN_API auto
+    find_register(peripheral_desc const& peripheral, std::string_view name) -> register_desc const*;
 }
