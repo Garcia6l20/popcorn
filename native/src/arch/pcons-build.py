@@ -17,3 +17,4 @@ armv8m = [
         "factory.cpp",
     )
 ]
+armv8m_entry = here / "armv8m" / "plugin.cpp"

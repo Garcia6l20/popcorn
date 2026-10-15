@@ -9,7 +9,7 @@ from popcorn_build.testing import add_doctest, popcorn_libraries
 here = Path(__file__).resolve().parent
 project = context.current_project
 fixture_dir = build_dir / "tests" / "native" / "plugin" / "plugin-fixtures"
-core, stm32 = popcorn_libraries("core", "stm32")
+core, armv8m, stm32 = popcorn_libraries("core", "armv8m", "stm32")
 (core_static,) = popcorn_libraries("core", static=True)
 CASE_TIMEOUT = 60.0
 
@@ -80,6 +80,19 @@ loader = add_doctest(
     "plugin-loader", [here / "test_loader.cpp"], [core], env=fixture_env, timeout=CASE_TIMEOUT
 )
 loader.depends(*core_fixtures, plugin_fixture("no_init_stm32", [stm32, good, core]))
+
+builtin = add_doctest(
+    "plugin-builtin", [here / "test_builtin.cpp"], [core], env=fixture_env, timeout=CASE_TIMEOUT
+)
+builtin.depends(armv8m, stm32)
+
+add_doctest(
+    "plugin-builtin-twice",
+    [here / "test_builtin_twice.cpp"],
+    [stm32, armv8m, core],
+    env=fixture_env,
+    timeout=CASE_TIMEOUT,
+)
 
 elf_scan = add_doctest(
     "plugin-elf-scan",

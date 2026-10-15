@@ -55,10 +55,12 @@ struct loaded;
  * @throws config_error naming `abi_tag` with both tags when the plugin was built for another
  *         popcorn, or naming the missing entry symbol, such as `popcorn_plugin_init`, when the
  *         library is not a popcorn plugin, or naming `dlopen` with the dlerror text when it
- *         cannot be opened, or when the library was mapped into the process other than by
- *         load, or naming `scope` when it was loaded before with the other scope, or when a
- *         declared plugin calls a global registration, or when called from inside a plugin's
- *         static constructors or init. Exceptions of the plugin's init propagate.
+ *         cannot be opened, or, for scope::declared, when the library was mapped into the
+ *         process other than by a declared load, or naming `scope` when it was loaded before
+ *         with the other scope, or when a declared plugin calls a global registration, or when
+ *         called from inside a plugin's static constructors or init. Exceptions of the plugin's
+ *         init propagate. A scope::builtin library may be mapped before, by a program linking
+ *         it.
  */
 [[gnu::no_dangling]] POPCORN_API auto load(std::filesystem::path const& path, scope where)
     -> loaded const&;
@@ -113,6 +115,17 @@ struct loaded
  */
 [[nodiscard]] POPCORN_API auto find_model(loaded const& plugin, std::string_view name)
     -> periph::model_factory;
+
+/**
+ * @brief The directory of `libpopcorn_core.so`, where the built-in plugins
+ *        `libpopcorn_armv8m.so` and `libpopcorn_stm32.so` sit beside it. In a program linking
+ *        the static core, the dynamic loader names the program by its `argv[0]`: the result is
+ *        the program's directory only when `argv[0]` is a path to it, and a bare name found
+ *        through `PATH` resolves against the current directory.
+ * @throws config_error naming `library_directory` when the dynamic loader cannot name it, or
+ *         when the name it gives does not resolve.
+ */
+[[nodiscard]] POPCORN_API auto library_directory() -> std::filesystem::path;
 
 /** @brief This build's ABI tag, the string every plugin must embed. */
 [[nodiscard]] POPCORN_API auto host_abi_tag() noexcept -> std::string_view;

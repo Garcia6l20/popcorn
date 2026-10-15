@@ -31,5 +31,6 @@ stm32 = [
         "hash.cpp",
     )
 ]
+stm32_entry = here / "stm32" / "plugin.cpp"
 usb = [here / "usb" / name for name in ("host.cpp", "cdc_acm.cpp", "hid.cpp", "uac2.cpp")]
 devices = [here / "devices" / name for name in ("at25sf.cpp", "i2c_eeprom.cpp", "i2c_table.cpp")]

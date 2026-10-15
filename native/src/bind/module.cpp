@@ -12,7 +12,6 @@
 #include "system.hpp"
 
 #include <popcorn/arch/arch.hpp>
-#include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/core/version.hpp>
@@ -25,10 +24,6 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
-
-#if __has_include(<popcorn/periph/stm32/builtin.hpp>)
-#include <popcorn/periph/stm32/builtin.hpp>
-#endif
 
 #include <format>
 #include <string>
@@ -47,10 +42,7 @@ namespace popcorn::bind
 REFLEX_PY_MODULE(_core, m)
 {
   popcorn::bind::detail::register_error_translator();
-  popcorn::arch::armv8m::register_builtin();
-#if __has_include(<popcorn/periph/stm32/builtin.hpp>)
-  popcorn::periph::stm32::register_builtin_models();
-#endif
+  popcorn::bind::detail::load_builtin_plugins();
   m.bind_enum<popcorn::stop_reason>("StopReason");
   m.bind_enum<popcorn::fault_kind>("FaultKind");
   m.bind_enum<popcorn::reset_kind>("ResetKind");

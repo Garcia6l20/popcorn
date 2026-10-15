@@ -14,6 +14,15 @@ namespace popcorn::bind::detail
 {
 namespace nb = reflex::py::nb;
 
+void load_builtin_plugins()
+{
+  auto const directory = plugin::library_directory();
+  for(auto const* const name : {"libpopcorn_armv8m.so", "libpopcorn_stm32.so"})
+  {
+    static_cast<void>(plugin::load(directory / name, plugin::scope::builtin));
+  }
+}
+
 void bind_plugins(nb::module_ scope)
 {
   nb::class_<plugin::loaded>(scope, "_Plugin", "A loaded native plugin, never unloaded.")

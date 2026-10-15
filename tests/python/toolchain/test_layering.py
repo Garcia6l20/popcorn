@@ -82,8 +82,17 @@ def test_the_plugin_guard_is_private_to_core(tree: Path) -> None:
     assert include_violations(tree) == []
     write(tree, "src/periph/stm32/models.cpp", '#include "../../plugin/guard.hpp"\n')
     assert include_violations(tree) == [
-        "native/src/periph/stm32/models.cpp:1: stm32 includes plugin"
+        "native/src/periph/stm32/models.cpp:1: stm32 includes a private header of core"
     ]
+
+
+def test_the_builtin_plugins_include_the_public_plugin_header(tree: Path) -> None:
+    write(tree, "include/popcorn/plugin/plugin.hpp", "")
+    write(tree, "src/periph/stm32/plugin.cpp", "#include <popcorn/plugin/plugin.hpp>\n")
+    write(tree, "src/arch/armv8m/plugin.cpp", "#include <popcorn/plugin/plugin.hpp>\n")
+    assert include_violations(tree) == []
+    write(tree, "src/periph/usb/host.cpp", "#include <popcorn/plugin/plugin.hpp>\n")
+    assert include_violations(tree) == ["native/src/periph/usb/host.cpp:1: usb includes plugin"]
 
 
 def test_bind_may_include_anything_and_nothing_may_include_bind(tree: Path) -> None:

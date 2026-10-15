@@ -50,6 +50,8 @@ auto plugins_table() -> plugins&
 
 using init_function = void (*)(registrar&);
 
+char const anchor{};
+
 auto refusal(std::filesystem::path const& path, std::string key, std::string expected)
     -> config_error
 {
@@ -182,7 +184,7 @@ auto earlier_load(plugins& table, std::filesystem::path const& path, file_id id,
   {
     return &checked_scope(*found->second, path, where);
   }
-  if(table.opened.contains(probe))
+  if(where == scope::builtin or table.opened.contains(probe))
   {
     return nullptr;
   }
@@ -231,6 +233,21 @@ void registrar::add_model(std::string_view name, periph::model_factory factory)
 auto registrar::plugin_name() const noexcept -> std::string_view
 {
   return name_;
+}
+
+auto library_directory() -> std::filesystem::path
+{
+  Dl_info         info{};
+  std::error_code error;
+  if(dladdr(&anchor, &info) != 0 and info.dli_fname != nullptr)
+  {
+    if(auto found = std::filesystem::canonical(info.dli_fname, error); not error)
+    {
+      return found.parent_path();
+    }
+  }
+  throw config_error(
+      "plugin", 0, "library_directory", "the dynamic loader to name popcorn core's object");
 }
 
 auto host_abi_tag() noexcept -> std::string_view

@@ -114,20 +114,36 @@ plugin = add_subdirectory("native/src/plugin")
 owned: dict[str, list[Path]] = {}
 
 
+def area_objects(name: str, sources: Sequence[Path], lto: bool) -> Target:
+    """The object library @p name of an area library, hidden and, with @p lto, LTO'd."""
+    objects = project.ObjectLibrary(name, env, sources=list(sources))
+    objects.link(core_headers)
+    objects.private.compile_flags.extend(["-fvisibility=hidden", "-fno-semantic-interposition"])
+    if lto:
+        objects.private.compile_flags.append("-flto=auto")
+    return objects
+
+
 def area_library(
-    name: str, sources: Sequence[Path], links: Sequence[tuple[Target, Target]] = ()
+    name: str,
+    sources: Sequence[Path],
+    links: Sequence[tuple[Target, Target]] = (),
+    entry: Path | None = None,
 ) -> tuple[Target, Target, Target]:
     """Objects, shared libpopcorn_<name>.so in build/popcorn and its static twin.
 
     Each library links the same flavour of every pair in @p links, shared to shared, static to
     static, so a program reaches one flavour only. The static twin serves white-box tests and
-    the build-time tools.
+    the build-time tools. @p entry, the built-in plugin entry point, goes into the shared
+    library only, the static twin has no entry. A duplicate in two archives does not fail a
+    static link, nothing pulls the members, so only the archive check catches it.
     """
-    owned[name] = list(sources)
-    objects = project.ObjectLibrary(f"popcorn_{name}_objects", env, sources=owned[name])
-    objects.link(core_headers)
-    objects.private.compile_flags.extend(["-fvisibility=hidden", "-fno-semantic-interposition"])
-    shared = project.SharedLibrary(f"popcorn_{name}", env, sources=[objects])
+    owned[name] = [*sources, *([entry] if entry is not None else [])]
+    objects = area_objects(f"popcorn_{name}_objects", sources, lto)
+    shared_sources = [objects]
+    if entry is not None:
+        shared_sources.append(area_objects(f"popcorn_{name}_entry", [entry], lto))
+    shared = project.SharedLibrary(f"popcorn_{name}", env, sources=shared_sources)
     shared.output_prefix = "popcorn/lib"
     shared.link(core_headers)
     shared.private.link_flags.extend(
@@ -139,7 +155,6 @@ def area_library(
         shared.link(linked_shared)
         static.link(linked_static)
     if lto:
-        objects.private.compile_flags.append("-flto=auto")
         shared.private.link_flags.extend(LTO_LINK_FLAGS)
         static.public.link_flags.extend(LTO_LINK_FLAGS)
     return objects, shared, static
@@ -164,10 +179,12 @@ core.private.link_flags.append(f"-Wl,--version-script={core_version_script}")
 core.depends(core_version_script)
 core_static.link(package("unicorn"))
 
-_, armv8m, armv8m_static = area_library("armv8m", arch.armv8m, [(core, core_static)])
+_, armv8m, armv8m_static = area_library(
+    "armv8m", arch.armv8m, [(core, core_static)], arch.armv8m_entry
+)
 _, usb, usb_static = area_library("usb", periph.usb, [(core, core_static)])
 _, stm32, stm32_static = area_library(
-    "stm32", periph.stm32, [(usb, usb_static), (core, core_static)]
+    "stm32", periph.stm32, [(usb, usb_static), (core, core_static)], periph.stm32_entry
 )
 _, devices, devices_static = area_library("devices", periph.devices, [(core, core_static)])
 _, popcorn_obs, popcorn_obs_static = area_library("obs", obs.sources, [(core, core_static)])
@@ -220,7 +237,9 @@ if build_examples:
 if VARIANT not in ("asan", "tsan"):
     ext = add_extension("popcorn", "_core", bind_sources)
     for library in shared_libraries:
-        ext.link(library)
+        if library is not armv8m:
+            ext.link(library)
+    ext.depends(armv8m)
     if build_tests:
         smoke_ext = add_extension(
             "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]

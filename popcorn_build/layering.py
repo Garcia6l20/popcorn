@@ -28,9 +28,9 @@ AREA_LIBRARY: dict[str, str] = {
 
 ALLOWED: dict[str, set[str]] = {
     "core": {"core", "image", "arch", "periph", "plugin"},
-    "armv8m": {"core", "image", "arch", "periph", "armv8m"},
+    "armv8m": {"core", "image", "arch", "periph", "plugin", "armv8m"},
     "usb": {"core", "periph", "usb"},
-    "stm32": {"core", "periph", "usb", "stm32"},
+    "stm32": {"core", "periph", "plugin", "usb", "stm32"},
     "devices": {"core", "periph", "devices"},
     "obs": {"core", "image", "arch", "periph", "obs"},
 }
