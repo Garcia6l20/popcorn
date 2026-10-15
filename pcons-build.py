@@ -1,3 +1,5 @@
+import json
+import shutil
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -8,11 +10,14 @@ from popcorn_build import check, schema
 from popcorn_build.config import POPCORN_VERSION, VARIANT, build_dir, gcc_ar, project_dir, toolchain
 from popcorn_build.layering import misplaced_sources
 from popcorn_build.options import build_examples, build_tests
+from popcorn_build.plugin_sdk import SDK, sdk_headers
 from popcorn_build.python import (
     add_extension,
     add_package_install,
     add_stub,
+    ext_suffix,
     interpreter,
+    nanobind_runtime,
 )
 from popcorn_build.requirements import package, prefixes, unicorn_commit
 from popcorn_build.sdk import reflex_include_dirs, sdk_inputs
@@ -278,6 +283,62 @@ if VARIANT not in ("asan", "tsan"):
     devices_stub = add_stub(
         devices_ext, "popcorn.devices", "_native", after=[stub], include_private=True
     )
+    sdk_json_path = build_dir / SDK / "sdk.json"
+    sdk_compiler = shutil.which(env.cxx.cmd) or env.cxx.cmd
+    sdk_fields = {
+        "version": POPCORN_VERSION,
+        "variant": VARIANT,
+        "compiler": sdk_compiler,
+        "cxx_flags": [
+            *(flag for flag in env.cxx.flags if flag not in WARNINGS and "max-errors" not in flag),
+            "-fno-plt",
+        ],
+        "defines": list(env.cxx.defines),
+        "link_flags": list(env.link.flags),
+        "ext_suffix": ext_suffix,
+    }
+    sdk_json = project.Command(
+        env,
+        name="popcorn-sdk-json",
+        target=sdk_json_path,
+        source=[project_dir / "popcorn_build" / "plugin_sdk.py", sdk_compiler],
+        command=[
+            interpreter,
+            "-m",
+            "popcorn_build.plugin_sdk",
+            str(sdk_json_path),
+            json.dumps(sdk_fields, sort_keys=True),
+        ],
+        cwd=project_dir,
+        restat=True,
+    )
+    sdk_files = [
+        *(
+            (f"{SDK}/include/{relative}", source)
+            for relative, source in sdk_headers(
+                native_include, reflex_root, prefixes["nanobind"], prefixes["robin-map"]
+            )
+        ),
+        (f"{SDK}/include/popcorn/plugin/build_info.hpp", build_info),
+        (f"{SDK}/nanobind/libnanobind-runtime.a", nanobind_runtime()),
+    ]
+
+    def sdk_install(prefix: str, no_prefix: bool) -> list[Target]:
+        """One InstallAs per SDK file, each target named @p prefix-<path with dashes>."""
+        return [
+            project.InstallAs(
+                destination,
+                source,
+                name=f"{prefix}-{destination.replace('/', '-')}",
+                no_prefix=no_prefix,
+            )
+            for destination, source in sdk_files
+        ]
+
+    staged_sdk = sdk_install("stage-sdk", no_prefix=True)
+    for staged in staged_sdk:
+        staged.build_tier = "default"
+    project.Alias("stage-sdk", sdk_json, *staged_sdk)
     if build_tests:
         xmod_ext = add_extension(
             "popcorn_testing", "_xmod", ["tests/native/support/xmod_module.cpp"]
@@ -300,6 +361,8 @@ if VARIANT not in ("asan", "tsan"):
             project.Install("popcorn", [ext, stub, *shared_libraries, *obs_python], name="install"),
             project.InstallAs("popcorn/arm/_regs.py", regs, name="install-regs"),
             project.Install("popcorn/devices", [devices_ext, devices_stub], name="install-devices"),
+            project.InstallAs(f"{SDK}/sdk.json", sdk_json, name="install-sdk-json"),
+            *sdk_install("install-sdk", no_prefix=False),
             *add_package_install("popcorn", python_package, name="install"),
         )
 

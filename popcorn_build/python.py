@@ -22,7 +22,8 @@ if not (python_include / "Python.h").is_file():
 _nanobind_runtime: Target | None = None
 
 
-def _nanobind() -> Target:
+def nanobind_runtime() -> Target:
+    """The static nanobind runtime, built once and linked into every extension and the SDK."""
     global _nanobind_runtime
     if _nanobind_runtime is None:
         project = context.current_project
@@ -70,7 +71,7 @@ def add_extension(package: str, name: str, sources: Sequence[str | Path]) -> Tar
     ext.output_suffix = ext_suffix
     ext.private.compile_flags.append("-fvisibility=hidden")
     ext.private.link_flags.append(f"-Wl,-rpath,{_origin_of_core(package)}")
-    ext.link(_nanobind())
+    ext.link(nanobind_runtime())
     ext.link(fetched_package("reflex"))
     return ext
 
