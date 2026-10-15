@@ -4,6 +4,7 @@ A dev-mode plugin is a source directory holding `popcorn-plugin.py`, a pcons scr
 `popcorn.plugin.build.PluginProject`. It builds on first use into a content-addressed cache,
 `$POPCORN_PLUGIN_CACHE`, else `$XDG_CACHE_HOME/popcorn/plugins`, else
 `~/.cache/popcorn/plugins`. Building needs pcons, ninja and the GCC build popcorn was built with.
+The `popcorn[plugin]` extra installs pcons and ninja.
 
 ```python
 PLUGIN = Plugin.dev(Path(__file__).parent / "plugin")

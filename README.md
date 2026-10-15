@@ -47,6 +47,14 @@ Prerequisites on Linux x86_64:
 uv pip install git+<repository-url>
 ```
 
+Two extras add optional dependencies. `pytest` installs pytest for the `popcorn.pytest` plugin,
+`plugin` installs pcons and ninja for dev-mode native plugins, `popcorn.plugin`:
+
+```sh
+uv pip install "popcorn[pytest] @ git+<repository-url>"
+uv pip install "popcorn[pytest,plugin] @ git+<repository-url>"
+```
+
 For local development, clone with `--recurse-submodules`: Unicorn and reflex under `third_party/`
 are git submodules, and the build reads the Unicorn commit from git. A copy of the tree without its
 git metadata is not supported.

@@ -32,7 +32,8 @@ Every example has the same layout:
 - `firmware/` the C sources, as a CubeMX project would have them
 - `prebuilt/<name>.elf` the committed firmware, used as is without arm-none-eabi-gcc
 - `conftest.py` the machine fixtures: chip, image, boot, board devices
-- `test_*.py` the tests. pytest loads the `popcorn.pytest` plugin by its entry point
+- `test_*.py` the tests. pytest loads the `popcorn.pytest` plugin by its entry point, installed
+  with the `popcorn[pytest]` extra
 - `pytest.ini` makes the example directory the pytest rootdir, so a copied example stands alone
 
 `linked_uart` runs two firmware images on three machines. It declares both descriptions, three
