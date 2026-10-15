@@ -1362,6 +1362,26 @@ struct machine::run_state
    * block hook's hot path. */
   [[gnu::noinline]] auto deliverable() noexcept -> bool;
 
+  /** @brief Ends the engine run at the block starting at block_pc, before it runs, for
+   * @p cause. Off the block hook's hot path. */
+  [[gnu::noinline]] void stop_at_block(uc_struct* engine, engine_end cause) noexcept;
+
+  /** @brief Completes the watched returns at block_pc and stops the engine when the until
+   * return is reached there. Off the block hook's hot path.
+   * @return Whether the engine was stopped. */
+  [[gnu::noinline]] auto watch_block(uc_struct* engine) noexcept -> bool;
+
+  /** @brief spin_block for the block at block_pc, under the guard, off the hot path. */
+  [[gnu::noinline]] void spin_at_block() noexcept;
+
+  /** @brief Counts the block at block_pc of block_size instructions into coverage, under the
+   * guard, off the hot path. */
+  [[gnu::noinline]] void count_block() noexcept;
+
+  /** @brief Emits the block record of the block at block_pc, under the guard, off the hot
+   * path. */
+  [[gnu::noinline]] void record_block() noexcept;
+
   /** @brief After a trap hook resumed: whether it left a deliverable exception pending, then
    * marked as a block-boundary stop so the loop enters the handler. A fetch abort forms no
    * block, so no block hook would ever see the pending exception.
