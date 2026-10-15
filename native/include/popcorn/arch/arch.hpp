@@ -345,6 +345,16 @@ public:
   virtual void set_irq_line(std::uint32_t source, bool active) = 0;
 
   /**
+   * @brief Drives the non-maskable interrupt input, `periph::model_context::nmi`. Level-sensitive
+   *        as set_irq_line(): an active level pends the NMI, and an NMI whose input is still
+   *        active when its handler returns pends again. The default ignores it, for an
+   *        architecture without an NMI input.
+   * @param active Input level.
+   */
+  virtual void set_nmi_line([[maybe_unused]] bool active)
+  {}
+
+  /**
    * @brief Handles an exception the engine reports through its interrupt hook, such as Arm
    *        EXC_RETURN or SVC, or RISC-V `ecall` and `ebreak`.
    * @param intno Engine exception number, architecture-specific.

@@ -152,6 +152,17 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
 }
 
 /**
+ * @brief Whether exception @p number follows an input level, pending again while the level stays
+ *        active: the NMI and every IRQ. ARMv8-M B12.2 RGYCN and IWTFS cover IRQs only. The NMI
+ *        is level-sensitive by RM0456 7.9.11 and 11.4.11, an STM32U5 NMI runs until its flag is
+ *        cleared.
+ */
+[[nodiscard]] constexpr auto level_sensitive(std::uint32_t number) noexcept -> bool
+{
+  return number == exc_nmi or number >= exc_irq0;
+}
+
+/**
  * @brief Pending and enabled exception taken first: lowest priority value, subpriority
  *        included, then lowest number. System exceptions 2-15 are always enabled, IRQs by ISER.
  * @param exceptions Exception state.

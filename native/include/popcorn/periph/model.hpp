@@ -235,6 +235,10 @@ struct POPCORN_API model_context
   register_file& regs;
   /** @brief IRQ lines of the peripheral, in description order. */
   std::span<irq_line> irqs;
+  /** @brief Line to the core's non-maskable interrupt, level-sensitive and shared by every
+   * model: the input is active while any model holds its line active. An NMI still active when
+   * its handler returns is taken again. Ignored by an architecture without an NMI input. */
+  irq_line& nmi;
   /** @brief DMA request lines of the peripheral, in description order. */
   std::span<dma_request> dma;
   /** @brief The model's own access to the event queue, stamped with its index. */

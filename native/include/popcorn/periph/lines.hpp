@@ -14,6 +14,9 @@ namespace popcorn::periph
 /** @brief Receiver of line level changes, implemented by the machine. */
 class line_bus;
 
+/** @brief Source of the line to the non-maskable interrupt, model_context::nmi. */
+inline constexpr std::uint32_t nmi_source = 0xffff'ffff;
+
 /** @brief Interrupt request line from a peripheral to the interrupt controller, level-driven. */
 class POPCORN_API irq_line
 {

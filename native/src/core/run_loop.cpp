@@ -206,6 +206,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   remove_step_hook();
   owner.arch_->reset(reset_vector);
   std::ranges::fill(lines.active, 0u);
+  lines.nmi_active = 0;
   for(auto const& slot : owner.peripherals_)
   {
     if(slot)
@@ -214,6 +215,7 @@ void machine::run_state::reset_machine(reset_kind kind)
       {
         line.level_ = false;
       }
+      slot->nmi.level_ = false;
       for(auto& line : slot->dma)
       {
         line.level_ = false;

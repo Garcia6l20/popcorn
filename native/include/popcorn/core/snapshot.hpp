@@ -61,7 +61,7 @@ struct register_value
 
 /**
  * @brief Machine-held state of one peripheral: the storage words of its `periph::register_file`,
- *        as `peek()` shows them, and the levels of its IRQ and DMA request lines.
+ *        as `peek()` shows them, and the levels of its IRQ, NMI and DMA request lines.
  */
 struct peripheral_image
 {
@@ -73,6 +73,9 @@ struct peripheral_image
   std::vector<std::uint8_t> irq_levels{};
   /** @brief Level of each `periph::dma_request`, in description order, 1 when active. */
   std::vector<std::uint8_t> dma_levels{};
+  /** @brief Level of the peripheral's `periph::model_context::nmi` line, 1 when active. A save
+   * from before the NMI line loads it as 0. */
+  std::uint8_t nmi_level{};
   /** @brief Write-once lock bit of each word, bit `i % 32` of element `i / 32` for word `i`, set
    * after the first write since reset. Empty for a peripheral without write-once registers. */
   std::vector<std::uint32_t> write_locked{};

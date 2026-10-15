@@ -425,7 +425,7 @@ auto cortex_m::exception_return() -> trap_result
   (returning.process_stack ? target.psp : target.msp) = popped;
   target.ge                                           = words[7] & xpsr_ge;
   set_context(engine, target, stack_limits());
-  if(number >= exc_irq0 and test_bit(state_.exceptions.level, number))
+  if(level_sensitive(number) and test_bit(state_.exceptions.level, number))
   {
     note_pending(number);
     put_bit(state_.exceptions.pending, number, true);

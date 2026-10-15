@@ -312,6 +312,16 @@ void cortex_m::set_irq_line(std::uint32_t source, bool active)
 {
   auto const number = 16 + source;
   contract_assert(number < exception_count());
+  drive_line(number, active);
+}
+
+void cortex_m::set_nmi_line(bool active)
+{
+  drive_line(exc_nmi, active);
+}
+
+void cortex_m::drive_line(std::uint32_t number, bool active)
+{
   auto&      exceptions = state_.exceptions;
   auto const was        = test_bit(exceptions.level, number);
   put_bit(exceptions.level, number, active);
@@ -450,9 +460,9 @@ void cortex_m::load(std::span<std::byte const> in)
     state_.scs             = std::move(live.scs);
     state_.systick         = live.systick;
     state_.cyccnt          = live.cyccnt;
-    for(auto number = exc_irq0; number < exception_count(); ++number)
+    for(auto number = exc_nmi; number < exception_count(); ++number)
     {
-      if(test_bit(state_.exceptions.level, number))
+      if(level_sensitive(number) and test_bit(state_.exceptions.level, number))
       {
         put_bit(state_.exceptions.pending, number, true);
       }

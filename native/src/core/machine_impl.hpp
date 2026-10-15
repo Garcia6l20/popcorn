@@ -102,9 +102,26 @@ public:
   arch::arch* arch{};
   /** @brief Active lines per interrupt source. */
   std::vector<std::uint32_t> active{};
+  /** @brief Active lines on periph::nmi_source. */
+  std::uint32_t nmi_active{};
 
   void set_irq(std::uint32_t source, bool level) override
   {
+    if(source == periph::nmi_source)
+    {
+      if(level)
+      {
+        if(nmi_active++ == 0)
+        {
+          arch->set_nmi_line(true);
+        }
+      }
+      else if(nmi_active > 0 and --nmi_active == 0)
+      {
+        arch->set_nmi_line(false);
+      }
+      return;
+    }
     if(source >= active.size())
     {
       active.resize(source + 1);
@@ -172,6 +189,8 @@ struct machine::peripheral_slot
   periph::layer_state layer{};
   /** @brief IRQ lines, one per `irqs` entry, frozen before the context spans them. */
   std::vector<periph::irq_line> irqs{};
+  /** @brief Line to the non-maskable interrupt, model_context::nmi. */
+  periph::irq_line nmi{};
   /** @brief DMA request lines, none until the description names them. */
   std::vector<periph::dma_request> dma{};
   /** @brief The model's event port. */

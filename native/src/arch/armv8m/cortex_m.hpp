@@ -46,6 +46,7 @@ public:
   [[nodiscard]] auto would_preempt(std::uint32_t number) const -> bool override;
   [[nodiscard]] auto thread_mode() const -> bool override;
   void               set_irq_line(std::uint32_t source, bool active) override;
+  void               set_nmi_line(bool active) override;
   auto               on_interrupt(std::uint32_t intno) -> trap_result override;
   [[nodiscard]] auto interrupt_returns(std::uint32_t intno, address frame_return) const
       -> bool override;
@@ -141,6 +142,7 @@ private:
   [[nodiscard]] auto wake_event() const -> bool;
   void               wake_if_due();
   void               note_pending(std::uint32_t number) noexcept;
+  void               drive_line(std::uint32_t number, bool active);
   auto               hint() -> bool;
   [[nodiscard]] auto halfword(address at) const -> std::uint32_t;
   [[nodiscard]] auto privileged() const -> bool;

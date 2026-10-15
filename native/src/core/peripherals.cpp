@@ -75,10 +75,12 @@ void machine::run_state::attach_peripherals()
     {
       slot->irqs.push_back(periph::irq_line{lines, source});
     }
+    slot->nmi = periph::irq_line{lines, periph::nmi_source};
     slot->context.emplace(
         periph::model_context{
             .regs               = slot->regs,
             .irqs               = slot->irqs,
+            .nmi                = slot->nmi,
             .dma                = slot->dma,
             .events             = slot->events,
             .clock              = owner.clock_,

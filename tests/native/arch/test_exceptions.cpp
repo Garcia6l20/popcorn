@@ -15,6 +15,7 @@
 
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -146,12 +147,12 @@ public:
     ++reads;
     if(offset == data_offset and repulse and reads == 1)
     {
-      context_.irqs.front().raise();
-      context_.irqs.front().lower();
+      line().raise();
+      line().lower();
     }
     if(offset == data_offset and not repulse and reads == 3)
     {
-      context_.irqs.front().lower();
+      line().lower();
     }
     return 0u;
   }
@@ -166,10 +167,10 @@ public:
   {
     if(offset == ctrl_offset)
     {
-      context_.irqs.front().raise();
+      line().raise();
       if(value == 1)
       {
-        context_.irqs.front().lower();
+        line().lower();
       }
     }
     return {};
@@ -184,8 +185,14 @@ public:
   void load(std::span<std::byte const>) override
   {}
 
+  [[nodiscard]] auto line() const -> periph::irq_line&
+  {
+    return nmi ? context_.nmi : context_.irqs.front();
+  }
+
   int  reads   = 0;
   bool repulse = false;
+  bool nmi     = false;
 
 private:
   periph::model_context& context_;
@@ -206,6 +213,94 @@ auto saved_special(arch_fixture const& f) -> armv8m::special_registers
   std::vector<std::byte> bytes;
   f.module->save(bytes);
   return reflex::serde::bson::deserializer{bytes}.load<armv8m::state>().special;
+}
+
+class nmi_holder final : public periph::model
+{
+public:
+  explicit nmi_holder(periph::model_context& ctx) noexcept : context_{ctx}
+  {}
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  [[nodiscard]] auto line() const -> periph::irq_line&
+  {
+    return context_.nmi;
+  }
+
+private:
+  periph::model_context& context_;
+};
+
+auto with_nmi_models() -> core::machine_options
+{
+  core::machine_options options;
+  for(auto const name : {"TESTDEV", "UNMODELLED"})
+  {
+    options.models.emplace(
+        name,
+        [](periph::model_context& ctx, popcorn::peripheral_desc const&)
+            -> std::shared_ptr<periph::model> { return std::make_shared<nmi_holder>(ctx); });
+  }
+  return options;
+}
+
+auto nmi_mode(arch_fixture const& f) -> line_model&
+{
+  auto& model = dynamic_cast<line_model&>(*f.target->model("TESTDEV"));
+  model.nmi   = true;
+  return model;
+}
+
+auto holder(arch_fixture const& f, std::string_view name) -> periph::irq_line&
+{
+  return dynamic_cast<nmi_holder&>(*f.target->model(name)).line();
+}
+
+auto nmi_input(arch_fixture const& f) -> bool
+{
+  std::vector<std::byte> bytes;
+  f.module->save(bytes);
+  auto const level =
+      reflex::serde::bson::deserializer{bytes}.load<armv8m::state>().exceptions.level;
+  return (level.front() & 1u << armv8m::exc_nmi) != 0;
+}
+
+auto nmi_entries(arch_fixture const& f, std::size_t before) -> std::ptrdiff_t
+{
+  return std::ranges::count(log_of(f) | std::views::drop(before), 0x340u);
 }
 }
 
@@ -377,6 +472,136 @@ TEST_CASE("ICPR leaves an IRQ pending while its line is high")
   CHECK(f.target->mem().read(0xE000'E200, 4) == 1u << 3);
   REQUIRE(f.target->mem().write(0xE000'E280, 4, 1u << 3));
   CHECK(f.target->mem().read(0xE000'E200, 4) == 1u << 3);
+}
+
+TEST_CASE("the NMI line latches a pulse once and re-enters while held high")
+{
+  SUBCASE("pulse")
+  {
+    auto f = booted(with_line_model());
+    REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
+    nmi_mode(f);
+    auto const before = log_of(f).size();
+    REQUIRE(run_to(f, "latch_pulse").reason == stop_reason::user);
+    CHECK(nmi_entries(f, before) == 1);
+    CHECK(std::ranges::count(log_of(f) | std::views::drop(before), 0x330u) == 0);
+  }
+  SUBCASE("held")
+  {
+    auto f = booted(with_line_model());
+    REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
+    nmi_mode(f);
+    auto const before = log_of(f).size();
+    REQUIRE(run_to(f, "latch_held").reason == stop_reason::user);
+    CHECK(nmi_entries(f, before) == 3);
+    CHECK_FALSE(nmi_input(f));
+    CHECK_FALSE(f.module->pending());
+  }
+}
+
+TEST_CASE("the NMI line preempts with PRIMASK and FAULTMASK set")
+{
+  auto f = booted(with_line_model());
+  REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
+  nmi_mode(f);
+  auto const before = log_of(f).size();
+  REQUIRE(run_to(f, "nmi_masked").reason == stop_reason::user);
+  auto const log = log_of(f);
+  CHECK(
+      std::vector(log.begin() + static_cast<std::ptrdiff_t>(before), log.end())
+      == std::vector<std::uint32_t>{0x340, 0x341});
+}
+
+TEST_CASE("the NMI input stays active until every model lowers its line")
+{
+  auto  f     = booted(with_nmi_models());
+  auto& first = holder(f, "TESTDEV");
+  auto& other = holder(f, "UNMODELLED");
+  first.raise();
+  other.raise();
+  CHECK(nmi_input(f));
+  first.lower();
+  CHECK(nmi_input(f));
+  other.lower();
+  CHECK_FALSE(nmi_input(f));
+  CHECK(f.module->is_pending(armv8m::exc_nmi));
+}
+
+TEST_CASE("a snapshot taken with the NMI line high restores its level and count")
+{
+  auto f = booted(with_line_model());
+  REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
+  auto& model = nmi_mode(f);
+  REQUIRE(f.target->mem().write(0x4001'005C, 4, 2));
+  REQUIRE(nmi_input(f));
+  auto const saved = f.target->snapshot();
+  CHECK(saved.data().peripherals.front().nmi_level == 1);
+  model.line().lower();
+  REQUIRE_FALSE(nmi_input(f));
+  f.target->restore(saved);
+  REQUIRE(model.line().level());
+  CHECK(nmi_input(f));
+  CHECK(f.module->is_pending(armv8m::exc_nmi));
+  auto const before = log_of(f).size();
+  f.set("pc", fn("probe_setup") | 1u);
+  REQUIRE(
+      f.run_to_stop({.max_instructions = popcorn::icount{1'000'000}}).reason == stop_reason::user);
+  CHECK(nmi_entries(f, before) == 3);
+  CHECK_FALSE(model.line().level());
+  CHECK_FALSE(nmi_input(f));
+  CHECK_FALSE(f.module->pending());
+}
+
+TEST_CASE("an NMI line raised during a host call is pending after end_call")
+{
+  auto f = booted(with_line_model());
+  REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
+  nmi_mode(f);
+  auto const hook = f.target->add_intercept(fn("nmi_handler"), [](core::intercept_call const&) {
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  f.target->begin_call(
+      {.entry           = fn("latch_held"),
+       .args            = {},
+       .returns         = popcorn::arch::value_kind::i32,
+       .abi             = popcorn::arch::float_abi::hard_double,
+       .return_sentinel = 0x3000'0000,
+       .interrupts      = true});
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE((f.reg("xpsr") & 0x1ff) == armv8m::exc_nmi);
+  REQUIRE_FALSE(f.module->is_pending(armv8m::exc_nmi));
+  std::ignore = f.target->end_call();
+  CHECK(nmi_input(f));
+  CHECK(f.module->is_pending(armv8m::exc_nmi));
+}
+
+TEST_CASE("a power-on reset lowers the NMI line and a later raise drives the input again")
+{
+  auto f = booted(with_line_model());
+  REQUIRE(run_to(f, "probe_setup").reason == stop_reason::user);
+  auto& model = nmi_mode(f);
+  REQUIRE(f.target->mem().write(0x4001'005C, 4, 2));
+  REQUIRE(nmi_input(f));
+  f.target->reset(popcorn::reset_kind::power_on);
+  CHECK_FALSE(model.line().level());
+  CHECK_FALSE(nmi_input(f));
+  CHECK_FALSE(f.module->is_pending(armv8m::exc_nmi));
+  REQUIRE(f.target->mem().write(0x4001'005C, 4, 2));
+  CHECK(nmi_input(f));
+  CHECK(f.module->is_pending(armv8m::exc_nmi));
+}
+
+TEST_CASE("ICSR PENDNMICLR leaves the NMI pending while its line is high")
+{
+  auto f = booted(with_line_model());
+  nmi_mode(f);
+  REQUIRE(f.target->mem().write(0x4001'005C, 4, 2));
+  REQUIRE(f.module->is_pending(armv8m::exc_nmi));
+  REQUIRE(f.target->mem().write(0xE000'ED04, 4, 1u << 30));
+  CHECK(f.module->is_pending(armv8m::exc_nmi));
+  REQUIRE(f.target->mem().write(0x4001'005C, 4, 1));
+  REQUIRE(f.target->mem().write(0xE000'ED04, 4, 1u << 30));
+  CHECK_FALSE(f.module->is_pending(armv8m::exc_nmi));
 }
 
 TEST_CASE("ICSR reports the pending vector, pending IRQs and a return to base")
