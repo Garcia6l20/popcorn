@@ -198,6 +198,21 @@ async def test_condrst_cancels_the_conversion_and_clears_sr(native_plugin: Machi
     assert rng.SR.value == 0
 
 
+async def test_clearing_condrst_with_rngen_set_restarts_the_rng(native_plugin: Machine) -> None:
+    await run_to_done(native_plugin)
+    rng = native_plugin.periph.RNG
+    rng.CR.write(rng.CR.value | 1 << RNGEN_BIT)
+    stop = await native_plugin.run(for_=2 * CONVERSION)
+    assert stop.reason is StopReason.TIME, stop
+    assert rng.SR.DRDY == 1
+    rng.CR.write(rng.CR.value | 1 << CONDRST_BIT)
+    rng.CR.write(rng.CR.value & ~(1 << CONDRST_BIT))
+    assert rng.SR.value == 0
+    stop = await native_plugin.run(for_=2 * CONVERSION)
+    assert stop.reason is StopReason.TIME, stop
+    assert rng.SR.DRDY == 1
+
+
 async def test_the_adc_buffer_follows_a_ramp_in_virtual_time(native_plugin: Machine) -> None:
     await run_to_adc_done(native_plugin)
     assert native_plugin.var("adc_result").conversions.value == CONVERSIONS

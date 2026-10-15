@@ -131,7 +131,9 @@ auto rng::on_write(
   {
     stop();
   }
-  else if((before & rngen_) == 0 and (regs.peek(sr_->offset) & drdy_) == 0)
+  else if(
+      ((before & rngen_) == 0 or (before & condrst_) != 0)
+      and (regs.peek(sr_->offset) & drdy_) == 0)
   {
     start();
   }

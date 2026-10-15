@@ -18,8 +18,9 @@ inline constexpr std::uint64_t conversion_ps = 40'000'000;
 
 /**
  * @brief The STM32U575 RNG of the python_model example's `rngmodel.Rng`, in C++: a seeded
- *        xorshift32 sequence on DR, DRDY one conversion after RNGEN or a DR read, CONDRST
- *        cancelling the conversion, the interrupt line following DRDY while IE is set.
+ *        xorshift32 sequence on DR, DRDY one conversion after RNGEN, a DR read or the write
+ *        clearing CONDRST, CONDRST cancelling the conversion, the interrupt line following
+ *        DRDY while IE is set.
  */
 class rng final : public popcorn::periph::model
 {

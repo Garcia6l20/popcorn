@@ -15,7 +15,8 @@ conversion.
   conversion of 40 us of virtual time, DRDY and the RNG interrupt follow, each DR read returns
   the next xorshift32 word. A conversion puts its word in DR, a read empties DR again, so a
   debugger peek of DR shows what the next guest read returns. A CONDRST write cancels the
-  conversion in progress and clears SR and DR.
+  conversion in progress and clears SR and DR, and clearing CONDRST with RNGEN set starts a
+  new one.
 - `plugin/adc.cpp` answers as `spiadc.Adc` with its default ramp: channel 0 rises
   `counts_per_ms` counts per millisecond of virtual time, channel 1 is its mirror.
 
@@ -102,6 +103,7 @@ compiler changes.
     warning is logged
   - each later word comes one conversion after the last
   - a CONDRST write clears SR and cancels the conversion in progress
+  - CONDRST written at 1 and then at 0, RNGEN kept set, gives a new DRDY one conversion later
   - the ADC samples follow the ramp in virtual time, channel 1 its mirror
   - one select and one deselect per conversion, each holding two 16-bit frames.
 - `firmware/main.c`: the RNG requests, then the chip select and the two-frame conversion.
