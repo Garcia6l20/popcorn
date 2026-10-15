@@ -1,13 +1,17 @@
 """A device type bound in another nanobind module than `_core`, derived from `_core`'s base.
 
 Each test imports `popcorn_testing._xmod` itself, so a module that cannot find its base fails
-the tests that import it rather than the collection. nanobind then aborts the process with
-"base type ... not known to nanobind", and pytest-xdist reports each test whose worker crashed.
+the tests that import it rather than the collection. `plugin::require_core` turns a module
+linking its own core or built in another nanobind domain into an ImportError, the variants under
+`popcorn_testing/xmod_static/` and `popcorn_testing/xmod_domain/` prove both.
 """
 
 from __future__ import annotations
 
 import gc
+import subprocess
+import sys
+import sysconfig
 import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -115,3 +119,39 @@ def test_the_module_sees_the_registry_of_core() -> None:
     from popcorn_testing._xmod import registered_glob
 
     assert registered_glob("RCC", "STM32U5_rcc_x") == "STM32U5_rcc_*"
+
+
+def variant(package: str) -> subprocess.CompletedProcess[str]:
+    """Import the `_xmod` built as build/popcorn_testing/@p package, exit 3 with an ImportError."""
+    import popcorn_testing._xmod
+
+    directory = Path(popcorn_testing._xmod.__file__).resolve().parent / package
+    path = directory / f"_xmod{sysconfig.get_config_var('EXT_SUFFIX')}"
+    assert path.is_file(), path
+    name = f"popcorn_testing.{package}._xmod"
+    probe = (
+        "import importlib.util, sys\n"
+        "import popcorn._core\n"
+        f"spec = importlib.util.spec_from_file_location({name!r}, {str(path)!r})\n"
+        "try:\n"
+        "    module = importlib.util.module_from_spec(spec)\n"
+        "    spec.loader.exec_module(module)\n"
+        "except ImportError as error:\n"
+        "    print(error)\n"
+        "    raise SystemExit(3)\n"
+    )
+    return subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+
+
+def test_a_module_linking_its_own_core_fails_its_import() -> None:
+    ran = variant("xmod_static")
+    assert ran.returncode == 3, ran.stderr
+    assert "links its own copy of popcorn core" in ran.stdout
+    assert "libpopcorn_core.so" in ran.stdout
+
+
+def test_a_module_in_another_nanobind_domain_fails_its_import() -> None:
+    ran = variant("xmod_domain")
+    assert ran.returncode == 3, ran.stderr
+    assert "does not share popcorn._core's nanobind types" in ran.stdout
+    assert "Critical nanobind error" not in ran.stderr

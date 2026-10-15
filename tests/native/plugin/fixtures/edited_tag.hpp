@@ -14,7 +14,7 @@
                                                                              " " POPCORN_NANOBIND_VERSION                             \
                                                                              ";nb-"                                                   \
                                                                              "domain"                                                 \
-                                                                             " " POPCORN_NB_DOMAIN                                    \
+                                                                             " " POPCORN_ABI_NB_DOMAIN                                \
                                                                              ";variant"                                               \
                                                                              " " POPCORN_VARIANT                                      \
                                                                              ";sdk " SDK                                              \

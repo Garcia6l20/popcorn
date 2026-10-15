@@ -151,6 +151,6 @@ void bind_devices(nb::module_ scope)
 
 NB_MODULE(_native, m)
 {
-  nb::module_::import_("popcorn._core");
+  popcorn::plugin::require_core(m);
   bind_devices(m);
 }

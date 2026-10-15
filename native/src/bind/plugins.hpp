@@ -11,6 +11,7 @@ namespace popcorn::bind::detail
  */
 void load_builtin_plugins();
 
-/** @brief Binds the private plugin loader: `_load_plugin`, `_Plugin` and `_host_abi_tag`. */
+/** @brief Binds the private plugin loader: `_load_plugin`, `_Plugin`, `_registry_anchor` and
+ *         `_host_abi_tag`. */
 void bind_plugins(reflex::py::nb::module_ scope);
 }

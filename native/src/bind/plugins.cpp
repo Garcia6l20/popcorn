@@ -1,5 +1,6 @@
 #include "plugins.hpp"
 
+#include <popcorn/plugin/bindings.hpp>
 #include <popcorn/plugin/plugin.hpp>
 
 #include <nanobind/nanobind.h>
@@ -51,6 +52,9 @@ void bind_plugins(nb::module_ scope)
       nb::arg("path"), nb::rv_policy::reference,
       "Load the native plugin at path as a declared plugin, once per library file. ConfigError "
       "when it was built for another popcorn, is not a plugin, or registers globally.");
+  scope.def(
+      "_registry_anchor", [] { return plugin::registry_anchor(); },
+      "Address of popcorn core's registry as _core links it, compared by plugin::require_core.");
   scope.def(
       "_host_abi_tag", [] { return std::string{plugin::host_abi_tag()}; },
       "The ABI tag every plugin must embed.");

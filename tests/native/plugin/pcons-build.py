@@ -60,12 +60,19 @@ core_fixtures = [
             "ctor_registers",
             "init_swallows",
             "nested_load",
+            "defines_glob",
+            "defines_register",
         )
     ),
 ]
 glibcxx_debug = plugin_fixture("glibcxx_debug", [core])
 glibcxx_debug.private.compile_flags.append("-D_GLIBCXX_DEBUG")
 core_fixtures.append(glibcxx_debug)
+nb_domain = plugin_fixture("nb_domain", [core])
+nb_domain.private.compile_flags.append("-DNB_DOMAIN=other")
+static_core_hidden = plugin_fixture("static_core_hidden", [core_static])
+static_core_hidden.private.link_flags.append("-Wl,--exclude-libs,ALL")
+core_fixtures.extend([nb_domain, plugin_fixture("static_core", [core_static]), static_core_hidden])
 fixture_env = {
     "POPCORN_PLUGIN_FIXTURES": str(fixture_dir),
     "POPCORN_PLUGIN_CORE": str(build_dir / "popcorn" / "libpopcorn_core.so"),
@@ -102,7 +109,7 @@ elf_scan = add_doctest(
     timeout=CASE_TIMEOUT,
 )
 elf_scan.private.include_dirs.append(project_dir / "native" / "src" / "plugin")
-elf_scan.depends(good)
+elf_scan.depends(good, stripped, core)
 
 if VARIANT not in ("asan", "tsan"):
     add_extension("popcorn_testing", "_plugin_bindings_check", [here / "bindings_check.cpp"]).link(

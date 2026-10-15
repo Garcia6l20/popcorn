@@ -53,14 +53,16 @@ struct loaded;
  * @param where scope::declared for a user plugin, scope::builtin for popcorn's own.
  * @return The record, valid for the life of the process.
  * @throws config_error naming `abi_tag` with both tags when the plugin was built for another
- *         popcorn, or naming the missing entry symbol, such as `popcorn_plugin_init`, when the
- *         library is not a popcorn plugin, or naming `dlopen` with the dlerror text when it
- *         cannot be opened, or, for scope::declared, when the library was mapped into the
- *         process other than by a declared load, or naming `scope` when it was loaded before
- *         with the other scope, or when a declared plugin calls a global registration, or when
- *         called from inside a plugin's static constructors or init. Exceptions of the plugin's
- *         init propagate. A scope::builtin library may be mapped before, by a program linking
- *         it.
+ *         popcorn, or naming `link` when the library has no `DT_NEEDED` on libpopcorn_core.so
+ *         or defines periph::registered_glob or periph::register_model itself, a copy of core,
+ *         both checked before `dlopen`, or naming the missing entry symbol, such as
+ *         `popcorn_plugin_init`, when the library is not a popcorn plugin, or naming `dlopen`
+ *         with the dlerror text when it cannot be opened, or, for scope::declared, when the
+ *         library was mapped into the process other than by a declared load, or naming `scope`
+ *         when it was loaded before with the other scope, or when a declared plugin calls a
+ *         global registration, or when called from inside a plugin's static constructors or
+ *         init. Exceptions of the plugin's init propagate. A scope::builtin library may be
+ *         mapped before, by a program linking it.
  */
 [[gnu::no_dangling]] POPCORN_API auto load(std::filesystem::path const& path, scope where)
     -> loaded const&;

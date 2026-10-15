@@ -70,7 +70,7 @@ private:
 
 NB_MODULE(_xmod, m)
 {
-  nb::module_::import_("popcorn._core");
+  popcorn::plugin::require_core(m);
   nb::class_<echo_target, popcorn::periph::spi_target>(
       m, "EchoTarget", "An SPI target bound outside _core: each frame back plus one.")
       .def(nb::init<>())

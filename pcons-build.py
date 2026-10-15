@@ -284,6 +284,15 @@ if VARIANT not in ("asan", "tsan"):
         )
         xmod_ext.link(core)
         add_stub(xmod_ext, "popcorn_testing", "_xmod", after=[stub])
+        xmod_static = add_extension(
+            "popcorn_testing.xmod_static", "_xmod", ["tests/native/support/xmod_module.cpp"]
+        )
+        xmod_static.link(core_static)
+        xmod_domain = add_extension(
+            "popcorn_testing.xmod_domain", "_xmod", ["tests/native/support/xmod_domain.cpp"]
+        )
+        xmod_domain.private.compile_flags.append("-DNB_DOMAIN=other")
+        xmod_domain.link(core)
 
     if building_wheel:
         project.Alias(

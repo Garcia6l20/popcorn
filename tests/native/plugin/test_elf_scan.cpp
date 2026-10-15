@@ -6,14 +6,20 @@
 
 #include <elf.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -60,6 +66,73 @@ auto scan(plugin_test::copies& files, bytes const& file) -> std::optional<std::s
     out.write(file.data(), static_cast<std::streamsize>(file.size()));
   }
   return popcorn::plugin::read_abi_section(path);
+}
+
+auto index_of(bytes const& file, std::uint32_t type) -> std::size_t
+{
+  auto const header = header_of(file);
+  for(std::size_t index = 0; index < header.e_shnum; ++index)
+  {
+    if(section_at(file, index).sh_type == type)
+    {
+      return index;
+    }
+  }
+  FAIL("no section of type " << type);
+  return 0;
+}
+
+void point_at(bytes& file, std::size_t index, bytes const& contents)
+{
+  while(file.size() % 8 != 0)
+  {
+    file.push_back('\0');
+  }
+  put(file, shdr_field(file, index, offsetof(Elf64_Shdr, sh_offset)), Elf64_Off{file.size()});
+  put(file, shdr_field(file, index, offsetof(Elf64_Shdr, sh_size)), Elf64_Xword{contents.size()});
+  file.insert(file.end(), contents.begin(), contents.end());
+}
+
+auto as_bytes_of(auto const& entries) -> bytes
+{
+  bytes out(entries.size() * sizeof(entries[0]));
+  std::memcpy(out.data(), entries.data(), out.size());
+  return out;
+}
+
+struct long_names
+{
+  bytes         file;
+  std::uint32_t at;
+  std::uint32_t registry;
+};
+
+auto with_long_name(std::uint64_t run) -> long_names
+{
+  auto             file    = good_bytes();
+  auto const       strtab  = section_at(file, section_at(file, index_of(file, SHT_DYNSYM)).sh_link);
+  auto const       strings = file.begin() + static_cast<long>(strtab.sh_offset);
+  bytes            table(strings, strings + static_cast<long>(strtab.sh_size));
+  auto const       registry = static_cast<std::uint32_t>(table.size());
+  std::string_view mangled{"_ZN7popcorn6periph14register_modelESt17basic_string_view"};
+  table.insert(table.end(), mangled.begin(), mangled.end());
+  table.push_back('\0');
+  auto const at = static_cast<std::uint32_t>(table.size());
+  table.insert(table.end(), run, 'x');
+  table.push_back('\0');
+  point_at(file, section_at(file, index_of(file, SHT_DYNSYM)).sh_link, table);
+  return {std::move(file), at, registry};
+}
+
+auto links_of(plugin_test::copies& files, bytes const& file)
+    -> std::optional<popcorn::plugin::dynamic_links>
+{
+  auto const path = files.dir() / "linked.so";
+  {
+    std::ofstream out{path, std::ios::binary | std::ios::trunc};
+    out.write(file.data(), static_cast<std::streamsize>(file.size()));
+  }
+  return popcorn::plugin::read_dynamic_links(path);
 }
 }
 
@@ -172,4 +245,94 @@ TEST_CASE("random flips in the ELF header and section table end the scan cleanly
     static_cast<void>(scan(files, file));
   }
   CHECK(scan(files, good));
+}
+
+TEST_CASE("the links of a plugin name libpopcorn_core.so and no registry definition")
+{
+  for(auto const* const name : {"good", "good-stripped"})
+  {
+    CAPTURE(name);
+    auto const links = popcorn::plugin::read_dynamic_links(plugin_test::fixture(name));
+    REQUIRE(links);
+    CHECK(std::ranges::contains(links->needed, std::string_view{"libpopcorn_core.so"}));
+    CHECK(links->registry_definitions.empty());
+  }
+}
+
+TEST_CASE("the links of popcorn core list both registry functions it defines")
+{
+  auto const links = popcorn::plugin::read_dynamic_links(
+      std::filesystem::path{std::getenv("POPCORN_PLUGIN_CORE")});
+  REQUIRE(links);
+  CHECK_FALSE(std::ranges::contains(links->needed, std::string_view{"libpopcorn_core.so"}));
+  CHECK(
+      std::ranges::contains(
+          links->registry_definitions, std::string_view{"popcorn::periph::registered_glob"}));
+  CHECK(
+      std::ranges::contains(
+          links->registry_definitions, std::string_view{"popcorn::periph::register_model"}));
+}
+
+TEST_CASE("a truncated or flipped plugin ends the links scan cleanly")
+{
+  plugin_test::copies files;
+  auto const          good  = good_bytes();
+  auto const          shoff = header_of(good).e_shoff;
+  for(auto const size : {std::size_t{0}, std::size_t{64}, std::size_t{shoff}, good.size() - 1})
+  {
+    CAPTURE(size);
+    CHECK_FALSE(links_of(files, bytes(good.begin(), good.begin() + static_cast<long>(size))));
+  }
+  auto const      header = header_of(good);
+  std::mt19937_64 random{20261016};
+  auto const      span = std::uint64_t{header.e_shnum} * sizeof(Elf64_Shdr);
+  for(int round = 0; round < 500; ++round)
+  {
+    auto file  = good;
+    auto flips = 1 + random() % 6;
+    for(std::uint64_t flip = 0; flip < flips; ++flip)
+    {
+      auto const at = shoff + random() % span;
+      file[at]      = static_cast<char>(file[at] ^ static_cast<char>(1u << (random() % 8)));
+    }
+    static_cast<void>(links_of(files, file));
+  }
+  CHECK(links_of(files, good));
+}
+
+TEST_CASE("many symbols naming one long string are scanned once each, not to its end")
+{
+  plugin_test::copies files;
+  auto [file, at, registry] = with_long_name(std::uint64_t{12} << 20);
+  std::vector<Elf64_Sym> symbols(
+      600'000,
+      Elf64_Sym{
+          .st_name = at, .st_info = 0, .st_other = 0, .st_shndx = 1, .st_value = 0, .st_size = 0});
+  symbols.back().st_name = registry;
+  point_at(file, index_of(file, SHT_DYNSYM), as_bytes_of(symbols));
+  auto const start = std::chrono::steady_clock::now();
+  auto const links = links_of(files, file);
+  auto const spent = std::chrono::steady_clock::now() - start;
+  REQUIRE(links);
+  CHECK(
+      links->registry_definitions
+      == std::vector<std::string>{std::string{"popcorn::periph::register_model"}});
+  CHECK(spent < std::chrono::seconds{5});
+}
+
+TEST_CASE("DT_NEEDED names longer together than their string table are refused")
+{
+  plugin_test::copies files;
+  auto [file, at, registry] = with_long_name(std::uint64_t{1} << 20);
+  std::vector<Elf64_Dyn> dynamic(1000, Elf64_Dyn{.d_tag = DT_NEEDED, .d_un = {.d_val = at}});
+  dynamic.push_back(Elf64_Dyn{.d_tag = DT_NULL, .d_un = {.d_val = 0}});
+  point_at(file, index_of(file, SHT_DYNAMIC), as_bytes_of(dynamic));
+  CHECK_FALSE(links_of(files, file));
+  dynamic.resize(1);
+  dynamic.push_back(Elf64_Dyn{.d_tag = DT_NULL, .d_un = {.d_val = 0}});
+  point_at(file, index_of(file, SHT_DYNAMIC), as_bytes_of(dynamic));
+  auto const links = links_of(files, file);
+  REQUIRE(links);
+  REQUIRE(links->needed.size() == 1);
+  CHECK(links->needed[0].size() == std::size_t{1} << 20);
 }

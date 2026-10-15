@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace
 {
@@ -244,6 +245,55 @@ TEST_CASE("a mismatched plugin is refused before its static constructors run")
 {
   copies files;
   CHECK(refusal(files.of("ctor_aborts")).contains("abi_tag"));
+}
+
+TEST_CASE("a plugin built in another nanobind domain is refused naming both tags")
+{
+  copies     files;
+  auto const host = std::string{popcorn::plugin::host_abi_tag()};
+  REQUIRE(host.contains(";nb-domain ;"));
+  auto const message = refusal(files.of("nb_domain"));
+  CHECK(message.contains("abi_tag"));
+  CHECK(message.contains(host));
+  CHECK(message.contains(replaced_field(host, "nb-domain", "other")));
+}
+
+TEST_CASE("a plugin linking the static core is refused before its static constructors run")
+{
+  copies files;
+  for(auto const* const name : {"static_core", "static_core_hidden"})
+  {
+    CAPTURE(name);
+    auto const path    = files.of(name);
+    auto const message = refusal(path);
+    CHECK(message.contains("link"));
+    CHECK(message.contains("libpopcorn_core.so"));
+    CHECK_FALSE(plugin_test::is_loaded(path));
+    CHECK(refusal(path, scope::builtin).contains("libpopcorn_core.so"));
+  }
+}
+
+TEST_CASE("a plugin hiding a static core is refused for its missing link to libpopcorn_core.so")
+{
+  copies files;
+  CHECK(refusal(files.of("static_core_hidden")).contains("a plugin linking libpopcorn_core.so"));
+}
+
+TEST_CASE("a plugin defining core's registry functions is refused before dlopen")
+{
+  copies files;
+  for(auto const& [name, function] : {
+          std::pair{"defines_glob",     "popcorn::periph::registered_glob"},
+          std::pair{"defines_register", "popcorn::periph::register_model" }
+  })
+  {
+    CAPTURE(name);
+    auto const path    = files.of(name);
+    auto const message = refusal(path);
+    CHECK(message.contains("link"));
+    CHECK(message.contains(function));
+    CHECK_FALSE(plugin_test::is_loaded(path));
+  }
 }
 
 TEST_CASE("an init that throws records nothing and throws again on the next load")

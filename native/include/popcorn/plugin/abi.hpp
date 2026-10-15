@@ -38,6 +38,13 @@
 #define POPCORN_ABI_GLIBCXX_DEBUG "0"
 #endif
 
+#if defined(NB_DOMAIN)
+/** @brief The nanobind domain field of the tag, this unit's own `NB_DOMAIN`, empty without one. */
+#define POPCORN_ABI_NB_DOMAIN POPCORN_ABI_STR(NB_DOMAIN)
+#else
+#define POPCORN_ABI_NB_DOMAIN ""
+#endif
+
 #if defined(__SANITIZE_ADDRESS__)
 /** @brief The sanitizer field of the tag, empty without one. */
 #define POPCORN_ABI_SANITIZER ";asan"
@@ -58,7 +65,7 @@
                                                                              " " POPCORN_NANOBIND_VERSION                             \
                                                                              ";nb-"                                                   \
                                                                              "domain"                                                 \
-                                                                             " " POPCORN_NB_DOMAIN                                    \
+                                                                             " " POPCORN_ABI_NB_DOMAIN                                \
                                                                              ";variant"                                               \
                                                                              " " POPCORN_VARIANT                                      \
                                                                              ";sdk"                                                   \

@@ -16,6 +16,7 @@
 #include <ranges>
 #include <set>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -51,6 +52,8 @@ auto plugins_table() -> plugins&
 using init_function = void (*)(registrar&);
 
 char const anchor{};
+
+constexpr std::string_view core_soname = "libpopcorn_core.so";
 
 auto refusal(std::filesystem::path const& path, std::string key, std::string expected)
     -> config_error
@@ -97,6 +100,30 @@ void check_tag(std::filesystem::path const& path, std::string_view tag)
     throw refusal(
         path, "abi_tag",
         std::format("the tag of this popcorn \"{}\", not \"{}\"", host_abi_tag(), tag));
+  }
+}
+
+void check_links(std::filesystem::path const& path)
+{
+  auto const links = read_dynamic_links(path);
+  if(not links)
+  {
+    throw refusal(path, "link", "a plugin library with a readable dynamic section");
+  }
+  if(not std::ranges::contains(links->needed, core_soname))
+  {
+    throw refusal(
+        path, "link",
+        std::format(
+            "a plugin linking {}, the library links its own copy of popcorn core", core_soname));
+  }
+  if(not links->registry_definitions.empty())
+  {
+    throw refusal(
+        path, "link",
+        std::format(
+            "a plugin calling popcorn core's registry in {}, the library defines {}", core_soname,
+            links->registry_definitions.front()));
   }
 }
 
@@ -168,6 +195,7 @@ auto earlier_load(plugins& table, std::filesystem::path const& path, file_id id,
         path, "abi_tag", "a popcorn plugin, the library has no .popcorn_abi section with a tag");
   }
   check_tag(path, *tag);
+  check_links(path);
   auto* const probe = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
   if(probe == nullptr)
   {
