@@ -65,8 +65,18 @@ def add_extension(package: str, name: str, sources: Sequence[str | Path]) -> Tar
     return ext
 
 
-def add_stub(extension: Target, package: str, name: str, after: Sequence[Target] = ()) -> Target:
-    """Generate build/@p package/@p name.pyi with nanobind's stubgen from the built extension."""
+def add_stub(
+    extension: Target,
+    package: str,
+    name: str,
+    after: Sequence[Target] = (),
+    include_private: bool = False,
+) -> Target:
+    """Generate build/@p package/@p name.pyi with nanobind's stubgen from the built extension.
+
+    @p include_private keeps names with one leading or trailing underscore, so Python code type
+    checks against the real signatures of private bindings.
+    """
     project = context.current_project
     stub_path = build_dir / package / f"{name}.pyi"
     stub = project.Command(
@@ -83,6 +93,7 @@ def add_stub(extension: Target, package: str, name: str, after: Sequence[Target]
             str(stub_path),
             "-i",
             str(build_dir),
+            *(["--include-private"] if include_private else []),
         ],
     )
     stub.depends(extension, *after)

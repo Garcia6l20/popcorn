@@ -246,7 +246,13 @@ if VARIANT not in ("asan", "tsan"):
     regs.depends(regs_gen)
     regs.build_tier = "default"
     obs_python = obs.add_python(popcorn_obs, [*staged_sources, regs, ext])
-    stub = add_stub(ext, "popcorn", "_core", after=[*staged_sources, regs, obs_python[0]])
+    stub = add_stub(
+        ext,
+        "popcorn",
+        "_core",
+        after=[*staged_sources, regs, obs_python[0]],
+        include_private=True,
+    )
 
     if building_wheel:
         project.Alias(
