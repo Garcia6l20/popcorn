@@ -45,9 +45,12 @@ extend-exclude = "^/(local|build[^/]*|third_party)/"
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
-include = ["python", "tests/python", "examples"]
+include = ["python", "tests/python", "examples", "popcorn_build"]
 venvPath = "."
 venv = ".venv"
+executionEnvironments = [
+    { root = "popcorn_build", extraPaths = ["."], reportMissingTypeStubs = false },
+]
 
 [tool.uv]
 no-build-isolation-package = ["popcorn"]

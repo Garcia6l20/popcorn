@@ -1,6 +1,8 @@
 import sys
+from collections.abc import Callable
+from importlib import import_module
 
-from pcons import get_var
+get_var: Callable[[str, str], str] = import_module("pcons").get_var
 
 SWITCH_VALUES = {"on": True, "1": True, "off": False, "0": False}
 
