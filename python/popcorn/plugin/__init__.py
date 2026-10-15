@@ -8,7 +8,7 @@ The `popcorn[plugin]` extra installs pcons and ninja.
 
 ```python
 PLUGIN = Plugin.dev(Path(__file__).parent / "plugin")
-EchoFlash = PLUGIN.module().EchoFlashBase
+AdcBase = PLUGIN.module().AdcBase
 ```
 
 A packaged plugin is a wheel pinning `popcorn==<version>` exactly, whose package defines an

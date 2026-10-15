@@ -89,6 +89,43 @@ uv run --no-sync pcons -B build POPCORN_BUILD_TESTS=ON POPCORN_BUILD_EXAMPLES=ON
 
 `pcons run check` passes both `ON` itself.
 
+## Native plugins
+
+A native plugin adds C++ peripheral models and C++ bus devices, built against popcorn's C++ API
+and loaded at run time. A machine description declares it and selects its models by name:
+
+```python
+from popcorn.plugin import Plugin
+
+PLUGIN = Plugin.dev(HERE / "plugin")
+popcorn.MachineDescription(
+    ...,
+    plugins=[PLUGIN],
+    board={"RNG": popcorn.Periph(model=PLUGIN.model("rng"))},
+)
+```
+
+A guest access to a plugin model stays native. Measured on an AMD Ryzen AI 7 PRO 350, Python 3.14.8, GCC 16.2.1, release `-O2` build,
+a guest loop of 10^6 RNG DR reads with DRDY clear, the cheapest model path, three sessions of
+11 runs, session medians: 53.5 to 54.8 ns per read with the plugin model, 1150 to 1179 ns with
+the Python model, 38.4 to 39.5 ns for an RNG register no model claims. A whole run of the
+python_model firmware to its 8th word took 0.63 to 0.72 ms with the plugin model, 0.89 to
+1.11 ms with the Python model.
+
+Of the 37 ns every guest MMIO access pays, the access trace record takes most. A plugin read
+adds 15 ns of dispatch. A Python model read adds about 110 ns to take and release the GIL,
+80 ns to enter Python and about 870 ns of interpreted code: `Model` dispatch, then the
+handler's `regs` and `fields` lookups. A whole run gains less because Unicorn translating the
+firmware into a fresh machine takes half of it, and each of the run's 56 Python calls costs
+about 3 us on a machine thread that starts with cold caches. The bench
+[tests/python/native_plugin/bench_native_model.py](tests/python/native_plugin/bench_native_model.py)
+measures both, run it with `POPCORN_BENCH=1 uv run python -m pytest -s` on that file.
+
+`Plugin.dev` builds a source directory on first use, which needs the `popcorn[plugin]` extra
+and the GCC 16 build popcorn was built with. `popcorn.plugin.find` returns a plugin installed
+from a wheel. [examples/stm32u575/native_plugin](examples/stm32u575/native_plugin) shows a model
+and a device, and documents dev and packaged builds and the rules a plugin follows.
+
 ## License
 
 MIT, see `LICENSE`. Third-party components and their licences are listed in `NOTICE`.
