@@ -130,10 +130,13 @@ def test_the_plugin_package_imports_without_pytest(tmp_path: Path) -> None:
         f"""
         import sys
         sys.modules["pytest"] = None
+        import popcorn
         from popcorn.plugin import Plugin
-        print(Plugin.dev({str(source)!r}).built().name)
+        plugin = Plugin.dev({str(source)!r})
+        print(plugin.built().name)
+        print(len(popcorn.MachineDescription(part="X", images=[], plugins=[plugin]).digest))
         """,
         tmp_path / "cache",
     )
     assert ran.returncode == 0, ran.stderr
-    assert ran.stdout.strip() == "libnobind.so"
+    assert ran.stdout.split() == ["libnobind.so", "64"]

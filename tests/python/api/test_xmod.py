@@ -14,7 +14,7 @@ import sys
 import sysconfig
 import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import popcorn
 import pytest
@@ -41,8 +41,7 @@ def echo(cs: str | None = "PA4") -> EchoTarget:
 
 
 def echo_machine(u575: popcorn.PartDescription, device: EchoTarget) -> popcorn.Machine:
-    devices = cast(Any, {"SPI1": [device]})
-    return popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices=devices)
+    return popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
 
 
 def test_the_type_derives_from_the_core_base() -> None:

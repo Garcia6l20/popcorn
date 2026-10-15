@@ -15,6 +15,7 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/plugin/plugin.hpp>
 
 #include <reflex/py.hpp>
 
@@ -29,6 +30,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
@@ -63,6 +65,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief Python model maker per peripheral name, called with the ModelContext, returning a
    * popcorn.model.Model. Overrides the registered models of that peripheral. */
   std::map<std::string, reflex::py::nb::object> python_models{};
+  /** @brief Plugin model per peripheral name: the loaded plugin and the name of the model its
+   * init records. Overrides the registered models of that peripheral, as python_models does. */
+  std::map<std::string, std::pair<plugin::loaded const*, std::string>> plugin_models{};
   /** @brief HSE frequency in Hz the board gives the RCC model, from 4 to 50 MHz, empty for the
    * model's default. */
   std::optional<std::uint64_t> rcc_hse_hz{};

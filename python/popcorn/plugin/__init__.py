@@ -24,12 +24,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from popcorn import _core
 from popcorn._errors import ConfigError
 
 from . import _build_cache, _records
 
-__all__ = ["Plugin"]
+__all__ = ["Plugin", "PluginModel"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +74,18 @@ class Plugin:
         where = Path(origin).resolve() if isinstance(origin, str) else None
         _records.note_constructed(plugin, where)
         return plugin
+
+    def model(self, name: str) -> PluginModel:
+        """The model this plugin registers under @p name, for `Periph(model=)`.
+
+        Nothing builds or loads here: a machine description naming it can be declared before
+        the plugin builds. `MachineDescription.machine` checks the name against the models the
+        loaded plugin registers.
+
+        Raises:
+            ConfigError: @p name is not a non-empty str.
+        """
+        return PluginModel(self, name)
 
     def built(self) -> Path:
         """The library to load, building a dev-mode plugin first if its cache entry is missing.
@@ -124,15 +135,7 @@ class Plugin:
                 key="bindings",
                 expected="a plugin whose popcorn-plugin.py calls PluginProject.bindings()",
             )
-        loaded = _core._load_plugin(str(built.library))  # pyright: ignore[reportPrivateUsage]
-        if loaded.name != self.name:
-            raise ConfigError(
-                f"plugin {self.name}: its library {built.library} is POPCORN_PLUGIN"
-                f" {loaded.name}, not {self.name}",
-                file=str(built.library),
-                key="name",
-                expected=f"POPCORN_PLUGIN({self.name}, ...)",
-            )
+        _records.load(self, built.library)
         spec = importlib.util.spec_from_file_location(module_name, built.bindings)
         if spec is None or spec.loader is None:
             raise ConfigError(
@@ -150,3 +153,36 @@ class Plugin:
             raise
         _records.note_imported(module_name, self, module)
         return module
+
+
+@dataclass(frozen=True, slots=True)
+class PluginModel:
+    """One named model of a plugin, for `Periph(model=)`: `PLUGIN.model("rng")`.
+
+    Attributes:
+        plugin: The plugin, which the machine description must list in `plugins`.
+        name: The name the plugin's init registers the model under.
+
+    Raises:
+        ConfigError: `plugin` is not a `Plugin`, key `plugin`, or `name` is not a non-empty
+            `str`, key `model`.
+    """
+
+    plugin: Plugin
+    name: str
+
+    def __post_init__(self) -> None:
+        plugin = cast(object, self.plugin)
+        if not isinstance(plugin, Plugin):
+            raise ConfigError(
+                f"plugin model {self.name!r}: plugin {plugin!r} is not a Plugin",
+                key="plugin",
+                expected="a popcorn.plugin.Plugin",
+            )
+        name = cast(object, self.name)
+        if not isinstance(name, str) or not name:
+            raise ConfigError(
+                f"plugin {self.plugin.name}: model name {name!r} is not a non-empty str",
+                key="model",
+                expected="the name of a model the plugin registers",
+            )

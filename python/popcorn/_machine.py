@@ -109,6 +109,7 @@ from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
 from popcorn.devices import At25sf, Eeprom24xx, TableTarget
 from popcorn.model import Model
+from popcorn.plugin._records import Loaded
 from popcorn.trace import TraceKind
 from popcorn.units import VirtualDuration, VirtualTime
 
@@ -619,18 +620,13 @@ class Machine:
         arena_base: int | None = DEFAULT_ARENA_BASE,
         arena_size: int = DEFAULT_ARENA_SIZE,
         models: Mapping[str, Callable[[], Model]] | None = None,
-        devices: (
-            Mapping[
-                str,
-                Sequence[I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget],
-            ]
-            | None
-        ) = None,
+        devices: Mapping[str, Sequence[AttachedDevice]] | None = None,
         rcc: RccOptions | None = None,
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
         usb: Mapping[str, UsbHostOptions] | None = None,
         supply: SupplyOptions | None = None,
         name: str | None = None,
+        _plugin_models: Mapping[str, tuple[Loaded, str]] | None = None,
     ) -> None:
         """Build a machine from a description or the path of its JSON, then load `image`.
 
@@ -655,10 +651,11 @@ class Machine:
             models: Python model per peripheral name, a `popcorn.model.Model` subclass or a
                 callable building one, such as `functools.partial(Timer, period=5)`. It
                 replaces the registered model of that peripheral.
-            devices: Bus devices per I2C or SPI peripheral name, `popcorn.board` targets or
-                `popcorn.devices` devices of one bus kind, in attachment order, or one
-                `popcorn.board.SpiController` alone on an SPI. The built-in bus model of the
-                peripheral serves them. A device serves one live machine at a time.
+            devices: Bus devices per I2C or SPI peripheral name, `popcorn.board` targets,
+                `popcorn.devices` devices or native plugin devices derived from the same bases,
+                of one bus kind, in attachment order, or one `popcorn.board.SpiController`
+                alone on an SPI. The built-in bus model of the peripheral serves them. A device
+                serves one live machine at a time.
             rcc: Clock sources the board gives the built-in RCC model, None for its defaults,
                 a 16 MHz HSE and a 32.768 kHz LSE.
             audio: Options of SAI audio blocks by SAI instance and block, such as
@@ -672,11 +669,13 @@ class Machine:
                 the reference of every conversion of the built-in ADC model.
             name: Name of the machine in its log records and errors, the description's part
                 when None. Not part of any configuration digest or snapshot.
+            _plugin_models: Private, set by `MachineDescription.machine`: the loaded plugin and
+                the model name per peripheral name, a board model as `models` is.
 
         Raises:
             ConfigError: No arch module implements the core, an option is out of range, a
                 models key names no peripheral, a model is refused, or devices are refused:
-                a peripheral that is not a built-in bus of their kind or has a Python model,
+                a peripheral that is not a built-in bus of their kind or has a board model,
                 a chip select pin the description lacks, a device already serving a live
                 machine or listed twice, an `SpiController` next to another device on its SPI.
                 With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz or above 1 MHz, an RCC
@@ -707,7 +706,9 @@ class Machine:
         config.arena_start = arena_base
         config.arena_size = arena_size if arena_base is not None else 0
         config.python_models = _model_makers(description, models or {})
-        attached = _checked_devices(description, devices or {}, models or {})
+        chosen = _chosen_plugin_models(description, models or {}, _plugin_models or {})
+        config.plugin_models = chosen
+        attached = _checked_devices(description, devices or {}, models or {}, chosen)
         config.python_devices = {name: list(targets) for name, targets in attached.items()}
         if rcc is not None:
             config.rcc_hse_hz = rcc.hse_hz
@@ -3103,6 +3104,26 @@ def _model_makers(
     return {name: functools.partial(build_model, maker) for name, maker in models.items()}
 
 
+def _chosen_plugin_models(
+    description: PartDescription,
+    models: Mapping[str, object],
+    plugin_models: Mapping[str, tuple[Loaded, str]],
+) -> dict[str, tuple[Loaded, str]]:
+    served = {p.name for p in description.peripherals if p.alias_of is None}
+    for name in plugin_models:
+        if name not in served or name in models:
+            expected = (
+                "a peripheral of the description" if name not in served else "one board model"
+            )
+            raise ConfigError(
+                f"_plugin_models.{name}: {expected}",
+                file=description.part,
+                key=f"_plugin_models.{name}",
+                expected=expected,
+            )
+    return dict(plugin_models)
+
+
 _FAULT_CONTEXT = (
     *(f"r{n}" for n in range(13)),
     "sp",
@@ -3117,8 +3138,19 @@ _FAULT_CONTEXT = (
     "control",
 )
 
-type AttachedDevice = I2CTarget | SpiTarget | SpiController | At25sf | Eeprom24xx | TableTarget
-"""A device `Machine(devices=)` takes, of `popcorn.board` or `popcorn.devices`."""
+type AttachedDevice = (
+    I2CTarget
+    | SpiTarget
+    | SpiController
+    | At25sf
+    | Eeprom24xx
+    | TableTarget
+    | _core.I2CTargetBase
+    | _core.SpiTargetBase
+    | _core.SpiControllerBase
+)
+"""A device `Machine(devices=)` takes, of `popcorn.board`, of `popcorn.devices`, or of a native
+plugin, derived from the bases the native bus models serve."""
 
 _BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI", SpiController: "SPI"}
 
@@ -3220,6 +3252,7 @@ def _checked_devices(
     description: PartDescription,
     devices: Mapping[str, Sequence[BusDevice]],
     models: Mapping[str, object],
+    plugin_models: Mapping[str, object],
 ) -> dict[str, tuple[BusDevice, ...]]:
     peripherals = {p.name: p for p in description.peripherals if p.alias_of is None}
     seen: set[int] = set()
@@ -3241,6 +3274,8 @@ def _checked_devices(
             raise refuse(name, "an I2C or SPI peripheral")
         if name in models:
             raise refuse(name, "a peripheral without a Python model")
+        if name in plugin_models:
+            raise refuse(name, "a peripheral without a plugin model")
         listed: list[BusDevice] = []
         for candidate in cast(Sequence[object], targets):
             if not isinstance(

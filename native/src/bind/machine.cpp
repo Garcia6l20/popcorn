@@ -18,6 +18,7 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <variant>
 
@@ -170,6 +171,35 @@ auto options_of(
   {
     options.models.emplace(name, detail::python_model_factory(maker));
   }
+  for(auto const& [name, chosen] : config.plugin_models)
+  {
+    auto const& [record, model] = chosen;
+    auto const key              = std::format("board.{}.model", name);
+    if(record == nullptr)
+    {
+      throw config_error("plugin", 0, key, "a loaded plugin");
+    }
+    auto factory = plugin::find_model(*record, model);
+    if(not factory)
+    {
+      throw config_error(
+          record->path.string(), 0, key,
+          std::format(
+              "a model plugin {} registers, one of {}", record->name,
+              record->models.empty() ? std::string{"none"}
+                                     : record->models
+                                           | std::views::transform(&plugin::model_entry::name)
+                                           | std::views::join_with(std::string_view{", "})
+                                           | std::ranges::to<std::string>()));
+    }
+    if(not options.models.emplace(name, std::move(factory)).second)
+    {
+      throw config_error("plugin", 0, key, "one board model per peripheral");
+    }
+  }
+  auto const kind = [&config](std::string const& name) {
+    return config.plugin_models.contains(name) ? "plugin" : "Python";
+  };
   auto const rcc = rcc_options_of(config);
   if(not config.python_devices.empty() or rcc)
   {
@@ -180,10 +210,11 @@ auto options_of(
       {
         if(not config.python_devices.contains(name))
         {
-          throw config_error("rcc", 0, "rcc", "an RCC without a Python model");
+          throw config_error("rcc", 0, "rcc", std::format("an RCC without a {} model", kind(name)));
         }
         throw config_error(
-            "devices", 0, std::format("devices.{}", name), "a peripheral without a Python model");
+            "devices", 0, std::format("devices.{}", name),
+            std::format("a peripheral without a {} model", kind(name)));
       }
     }
   }
@@ -191,7 +222,9 @@ auto options_of(
   {
     if(not options.models.emplace(name, std::move(factory)).second)
     {
-      throw config_error("usb", 0, key_of(name), "a USB device controller without a Python model");
+      throw config_error(
+          "usb", 0, key_of(name),
+          std::format("a USB device controller without a {} model", kind(name)));
     }
   }
   if(config.vdda_mv)

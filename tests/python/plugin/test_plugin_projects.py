@@ -207,6 +207,22 @@ def test_a_missing_input_skips_with_missing_skip(
     assert sum(int(line[len("SKIPPED [") :].split("]")[0]) for line in reasons) == 4
 
 
+def test_a_missing_plugin_library_skips_with_missing_skip(pytester: pytest.Pytester) -> None:
+    absent = pytester.path / "libkit.so"
+    write_conftest(pytester)
+    pytester.makeini("[pytest]\n")
+    write_project(
+        pytester,
+        extra=f'missing="skip", plugins=[Plugin("kit", library=Path({str(absent)!r}))],',
+        imports="from popcorn.plugin import Plugin",
+    )
+    pytester.makepyfile(test_missing=MISSING_TESTS)
+    result = run(pytester, "-rs")
+    result.assert_outcomes(skipped=4)
+    reasons = [line for line in result.outlines if line.startswith("SKIPPED [")]
+    assert reasons and all(line.endswith(f": missing input: {absent}") for line in reasons)
+
+
 def test_a_missing_input_skips_under_workers(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     missing_project(pytester, 'missing="skip",')

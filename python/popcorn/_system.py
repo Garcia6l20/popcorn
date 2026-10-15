@@ -580,8 +580,9 @@ class System:
             ConfigError: A member named apart from its key, `members.<name>`, already in a
                 linked system, or no link, `links`, or a link end that is not a UART of a
                 member, a UART in two links or bridged to a pty, or whose CTS input
-                `UartStream.set_cts` left not ready or with a change pending, `links[i].a` or
-                `links[i].b`,
+                `UartStream.set_cts` left not ready or with a change pending, or whose model
+                takes no frames from a wire, such as a plugin UART implementing only
+                `periph::uart_port`, `links[i].a` or `links[i].b`,
                 a value out of range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits`
                 or `.parity`, or an offset of no member or below 0, `offsets.<name>`.
             MachineBusy: A member is busy.
@@ -662,9 +663,9 @@ class System:
         word_bits = _check_line(index, link)
         ends = [self._end(index, side, end, used) for side, end in (("a", link.a), ("b", link.b))]
         wires: list[int] = []
-        for (sender, sender_link, _), (receiver, receiver_link, unit) in (
-            (ends[0], ends[1]),
-            (ends[1], ends[0]),
+        for side, (sender, sender_link, _), (receiver, receiver_link, unit) in (
+            ("b", ends[0], ends[1]),
+            ("a", ends[1], ends[0]),
         ):
             spec = _core.WireSpec()
             spec.sender = sender
@@ -678,7 +679,19 @@ class System:
             spec.strict = self._machines[
                 self._names[receiver]
             ]._strict_peripherals  # pyright: ignore[reportPrivateUsage]
-            wires.append(self._handle.add_wire(spec, sender_link, receiver_link))
+            try:
+                wires.append(self._handle.add_wire(spec, sender_link, receiver_link))
+            except ConfigError as error:
+                if error.key != "wire":
+                    raise
+                key = f"links[{index}].{side}"
+                end = f"{self._names[receiver]}.{unit}"
+                raise ConfigError(
+                    f"{key}: {end} is not {error.expected}",
+                    file=error.file,
+                    key=key,
+                    expected=error.expected,
+                ) from error
         self._links.append(
             _LinkWires(
                 (

@@ -43,6 +43,7 @@ from popcorn._stop import Stop
 from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions
 from popcorn.model import Model
+from popcorn.plugin import Plugin, PluginModel, _build_cache, _records
 from popcorn.units import VirtualDuration
 
 type Param = (
@@ -252,7 +253,9 @@ class Periph:
     """What the board does with one peripheral.
 
     Attributes:
-        model: A `popcorn.model.Model` class replacing the built-in model.
+        model: The board model replacing the built-in model: a `Use` of a `popcorn.model.Model`
+            class, or a `popcorn.plugin.PluginModel`, `PLUGIN.model("rng")`, of a plugin the
+            machine description lists in `plugins`.
         devices: Devices on the bus of an I2C or SPI peripheral.
         connect: "pty" bridges a UART, or the first CDC ACM function of a USB device controller
             with a `host`, to a pseudo terminal on every machine built.
@@ -260,7 +263,7 @@ class Periph:
         host: The virtual host of a USB device controller with the built-in model.
     """
 
-    model: Use | None = None
+    model: Use | PluginModel | None = None
     devices: Sequence[Device] = ()
     connect: Literal["pty"] | None = None
     audio: Mapping[Block, AudioOptions] = field(default_factory=_FrozenMap[Block, AudioOptions])
@@ -360,6 +363,12 @@ class MachineDescription:
         rcc: Clock sources of the built-in RCC model, None for its defaults.
         supply: Supply voltages, None for the defaults.
         board: What the board does with each peripheral, by name.
+        plugins: The native plugins the board's models and devices come from, at most one per
+            name. A `PluginModel` on the board and a device class of a plugin's bindings module,
+            or derived from one, need their plugin listed here. Each one is loaded by
+            `machine`. In `digest` by name and code, a dev plugin by its cache key and an
+            installed one by the SHA-256 of its library and bindings module, never by path, and
+            left out when empty.
         strict: Whether an unmodelled peripheral access raises ModelError. Not in `digest`.
         missing: What the pytest plugin does with a test whose machine description raises
             MissingInput: "fail" it, or "skip" it with the missing path as the reason. Not in
@@ -380,6 +389,7 @@ class MachineDescription:
     rcc: RccOptions | None = None
     supply: SupplyOptions | None = None
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
+    plugins: Sequence[Plugin] = ()
     strict: bool = False
     missing: Literal["fail", "skip"] = "fail"
     configs: Mapping[str, MachineDescription] = field(
@@ -389,8 +399,10 @@ class MachineDescription:
     def __post_init__(self) -> None:
         object.__setattr__(self, "images", tuple(self.images))
         object.__setattr__(self, "board", _FrozenMap(self.board))
+        object.__setattr__(self, "plugins", tuple(self.plugins))
         object.__setattr__(self, "configs", _FrozenMap(self.configs))
         self._check_kinds()
+        self._check_plugins()
         if self.missing not in ("fail", "skip"):
             raise _plain_error("missing", f'"fail" or "skip", not {self.missing!r}')
         if not (math.isfinite(self.cpi) and self.cpi > 0.0):
@@ -401,10 +413,13 @@ class MachineDescription:
             key = f"board.{name}"
             if periph.model is not None and periph.devices:
                 raise _plain_error(
-                    f"{key}.devices", "no devices on a peripheral that has a Python model"
+                    f"{key}.devices", f"no devices on a peripheral that has a {_kind(periph)} model"
                 )
             for index, device in enumerate(periph.devices):
                 at = f"{key}.devices[{index}]"
+                refused = _device_plugin_refusal(device.cls, self.plugins)
+                if refused is not None:
+                    raise _plain_error(at, refused)
                 if device.address is not None and device.cs is not None:
                     raise _plain_error(
                         f"{at}.cs",
@@ -432,9 +447,11 @@ class MachineDescription:
             if not isinstance(periph, Periph):
                 raise _plain_error(key, f"a Periph, not {type(periph).__qualname__}")
             model = cast(object, periph.model)
-            if model is not None and not isinstance(model, Use):
-                raise _plain_error(f"{key}.model", f"a Use, not {type(model).__qualname__}")
-            if model is not None:
+            if model is not None and not isinstance(model, Use | PluginModel):
+                raise _plain_error(
+                    f"{key}.model", f"a Use or a PluginModel, not {type(model).__qualname__}"
+                )
+            if isinstance(model, Use):
                 self._check_param_paths(f"{key}.model", model.params)
             for index, device in enumerate(cast(tuple[object, ...], periph.devices)):
                 if not isinstance(device, Device):
@@ -442,10 +459,32 @@ class MachineDescription:
                         f"{key}.devices[{index}]", f"a Device, not {type(device).__qualname__}"
                     )
                 self._check_param_paths(f"{key}.devices[{index}]", device.params)
+        for index, plugin in enumerate(cast(tuple[object, ...], self.plugins)):
+            if not isinstance(plugin, Plugin):
+                raise _plain_error(
+                    f"plugins[{index}]",
+                    f"a popcorn.plugin.Plugin, not {type(plugin).__qualname__}",
+                )
         for name, config in cast(Mapping[object, object], self.configs).items():
             if not isinstance(config, MachineDescription):
                 raise _plain_error(
                     f"configs.{name}", f"a MachineDescription, not {type(config).__qualname__}"
+                )
+
+    def _check_plugins(self) -> None:
+        names: set[str] = set()
+        for index, plugin in enumerate(self.plugins):
+            if plugin.name in names:
+                raise _plain_error(
+                    f"plugins[{index}]", f"one plugin named {plugin.name}, not a second one"
+                )
+            names.add(plugin.name)
+        for name, periph in self.board.items():
+            model = periph.model
+            if isinstance(model, PluginModel) and model.plugin not in self.plugins:
+                raise _plain_error(
+                    f"board.{name}.model",
+                    f"a model of a plugin in plugins, not of plugin {model.plugin.name}",
                 )
 
     def _check_param_paths(self, key: str, value: object) -> None:
@@ -505,10 +544,12 @@ class MachineDescription:
 
     @property
     def digest(self) -> str:
-        """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`.
+        """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`,
+        and without `plugins` when it is empty.
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
-        mappings with sorted keys. It is what snapshots record as their config digest.
+        mappings with sorted keys, plugins by name and code, never by path. It is what
+        snapshots record as their config digest.
         """
         text = json.dumps(_canonical(self), sort_keys=True, separators=(",", ":"), allow_nan=False)
         return hashlib.sha256(text.encode()).hexdigest()
@@ -538,9 +579,10 @@ class MachineDescription:
         name: str | None = None,
     ) -> Machine:
         """Build the machine: description, images in order, clock, vector table, strictness,
-        board models, bus devices, RCC clock sources, SAI audio blocks, USB hosts, supply
-        voltages, `connect="pty"` bridges, `boot.memory_init` written. Not reset. Each call
-        builds new model and device instances, so two machines never share one.
+        plugins loaded in order, board models, bus devices, RCC clock sources, SAI audio blocks,
+        USB hosts, supply voltages, `connect="pty"` bridges, `boot.memory_init` written. Not
+        reset. Each call builds new model and device instances, so two machines never share
+        one.
 
         `connect="pty"` bridges through `Board.pty`, so the pty owns what the firmware sends:
         reads of that UART's `port`, or of that USB controller's first CDC ACM function through
@@ -562,14 +604,17 @@ class MachineDescription:
             ConfigError: As `part_description`, a model is not a `popcorn.model.Model` or a
                 device not a `popcorn.board.I2CTarget`, `SpiTarget` or `SpiController`, a class
                 refuses its parameters, a model replaces no peripheral of the description, a
+                plugin fails to build or load or its library names another plugin, as
+                `plugins[i]`, a `PluginModel` names no model its plugin registers, a device of
+                `devices` comes from a plugin not in `plugins`, as `devices.<P>[i]`, a
                 memory_init symbol or range is invalid, an I2C target sits on a peripheral that
                 is not an I2C bus or an SPI device or controller on one that is not an SPI bus,
                 an SPI controller has an address or a cs, two `devices` keys name
                 one peripheral, `Machine(devices=)` refuses them, `audio` is on a peripheral
                 that is not an SAI with the built-in model, or `host` on one that is not a USB
                 device controller with the built-in model.
-            MissingInput: An image, `svd` or `description` file does not exist, or the ST
-                install the description is built from.
+            MissingInput: An image, `svd` or `description` file, a plugin's source directory
+                or library does not exist, or the ST install the description is built from.
             ImageError: An image cannot be read or does not fit the memory map.
             ModelError: A `connect` peripheral is neither a UART nor a USB device controller
                 with a `host`.
@@ -579,20 +624,15 @@ class MachineDescription:
         description = self.part_description()
         served = {p.name for p in description.peripherals if p.alias_of is None}
         given = _given_devices(description, devices or {})
+        for key, targets in (devices or {}).items():
+            for index, target in enumerate(targets):
+                refused = _device_plugin_refusal(type(target), self.plugins)
+                if refused is not None:
+                    raise _plain_error(f"devices.{key}[{index}]", refused)
         self._check_board()
-        models: dict[str, Callable[[], Model]] = {}
         for periph_name, periph in self.board.items():
-            if periph.model is None:
-                continue
-            if periph_name not in served:
+            if periph.model is not None and periph_name not in served:
                 raise _plain_error(f"board.{periph_name}", f"a peripheral of {description.part}")
-            models[periph_name] = functools.partial(_built_model, periph.model)
-        attached = {
-            periph_name: self._devices(periph_name, periph, description)
-            for periph_name, periph in self.board.items()
-            if periph.devices and periph_name not in given
-        }
-        attached.update(given)
         ips = {p.name: p.ip for p in description.peripherals}
         audio: dict[str, dict[Block, AudioOptions]] = {}
         for periph_name, periph in self.board.items():
@@ -612,6 +652,28 @@ class MachineDescription:
                     f"board.{periph_name}.host", "a USB device controller with the built-in model"
                 )
             usb[periph_name] = periph.host
+        loaded = self._loaded_plugins()
+        models: dict[str, Callable[[], Model]] = {}
+        plugin_models: dict[str, tuple[_records.Loaded, str]] = {}
+        for periph_name, periph in self.board.items():
+            model = periph.model
+            if isinstance(model, Use):
+                models[periph_name] = functools.partial(_built_model, model)
+            elif isinstance(model, PluginModel):
+                record = loaded[model.plugin.name]
+                if model.name not in record.models:
+                    known = ", ".join(record.models) or "none"
+                    raise _plain_error(
+                        f"board.{periph_name}.model",
+                        f"a model plugin {model.plugin.name} registers, one of {known}",
+                    )
+                plugin_models[periph_name] = (record, model.name)
+        attached = {
+            periph_name: self._devices(periph_name, periph, description)
+            for periph_name, periph in self.board.items()
+            if periph.devices and periph_name not in given
+        }
+        attached.update(given)
         boot = self.boot
         m = Machine(
             description,
@@ -624,6 +686,7 @@ class MachineDescription:
             arena_base=_arena_base(boot.arena_base),
             arena_size=DEFAULT_ARENA_SIZE if boot.arena_size is None else boot.arena_size,
             models=models,
+            _plugin_models=plugin_models,
             devices=attached,
             rcc=self.rcc,
             audio=audio,
@@ -689,10 +752,26 @@ class MachineDescription:
             raise BudgetExceeded(message, budget=boot.budget or 0, pc=pc, symbol=symbol, stop=stop)
         raise EmulationError(message, reason=stop.reason, pc=pc, symbol=symbol, stop=stop)
 
+    def _loaded_plugins(self) -> dict[str, _records.Loaded]:
+        loaded: dict[str, _records.Loaded] = {}
+        for index, plugin in enumerate(self.plugins):
+            key = f"plugins[{index}]"
+            try:
+                record = _records.load(plugin, plugin.built())
+            except ConfigError as error:
+                raise ConfigError(
+                    f"{key}: {error}",
+                    file=error.file,
+                    key=key,
+                    expected=error.expected,
+                ) from error
+            loaded[plugin.name] = record
+        return loaded
+
     def _check_board(self) -> None:
         for name, periph in self.board.items():
             key = f"board.{name}"
-            if periph.model is not None:
+            if isinstance(periph.model, Use):
                 model = periph.model.cls
                 if not issubclass(model, Model):
                     raise _plain_error(
@@ -803,9 +882,9 @@ class MachineDescription:
 
 
 def check_inputs(description: MachineDescription) -> None:
-    """Raise for the first file of `description` that does not exist: an image, `description`, or
-    `svd` when no `description` replaces it. A file that exists but cannot be read is left to
-    its reader.
+    """Raise for the first file of `description` that does not exist: an image, `description`,
+    `svd` when no `description` replaces it, a plugin's source directory or library. A file that
+    exists but cannot be read is left to its reader.
 
     Raises:
         MissingInput: That file, with its key.
@@ -816,6 +895,11 @@ def check_inputs(description: MachineDescription) -> None:
     if description.description is None:
         paths.append(("svd", description.svd))
     paths.append(("description", description.description))
+    for index, plugin in enumerate(description.plugins):
+        if plugin.source is not None:
+            paths.append((f"plugins[{index}].source", plugin.source))
+        else:
+            paths.append((f"plugins[{index}].library", plugin.library))
     for key, path in paths:
         if path is not None and absent(path):
             raise MissingInput(f"{key}: no file at {path}", path=path, key=key)
@@ -878,6 +962,51 @@ def _reference(cls: type) -> str:
     return f"{cls.__module__}:{cls.__qualname__}"
 
 
+def _kind(periph: Periph) -> str:
+    return "plugin" if isinstance(periph.model, PluginModel) else "Python"
+
+
+def _device_plugin_refusal(cls: type, plugins: Sequence[Plugin]) -> str | None:
+    """What a device of class @p cls needs and lacks, None when every class of its MRO that
+    comes from a plugin's bindings module names a plugin of @p plugins."""
+    prefix = f"{_records.MODULE_PREFIX}."
+    for base in cls.__mro__:
+        module = base.__module__
+        if not module.startswith(prefix):
+            continue
+        plugin = _records.recorded(module)
+        if plugin is None:
+            return (
+                f"a device class of a bindings module Plugin.module() imported, not"
+                f" {_reference(cls)} from {module}"
+            )
+        if plugin not in plugins:
+            return (
+                f"a device of a plugin in plugins, {_reference(cls)} derives from"
+                f" {_reference(base)} of plugin {plugin.name}"
+            )
+    return None
+
+
+def _plugin_identity(plugin: Plugin) -> dict[str, object]:
+    if plugin.source is not None:
+        key = _build_cache.known_key(plugin.name, plugin.source)
+        if key is None:
+            key = _build_cache.key_of(plugin.source)
+        return {"$": "Plugin", "name": plugin.name, "key": key}
+    assert plugin.library is not None
+    digest = hashlib.sha256()
+    files = [plugin.library, *sorted(plugin.library.parent.glob("_native*.so"))]
+    for path in files:
+        if not path.is_file():
+            digest.update(f"{path.name}\0absent\0".encode())
+            continue
+        content = path.read_bytes()
+        digest.update(f"{path.name}\0{len(content)}\0".encode())
+        digest.update(content)
+    return {"$": "Plugin", "name": plugin.name, "sha256": digest.hexdigest()}
+
+
 def _canonical(value: object) -> object:
     if value is None or isinstance(value, bool | int | float | str):
         return value
@@ -889,12 +1018,18 @@ def _canonical(value: object) -> object:
         return {"class": _reference(value)}
     if isinstance(value, MachineDescription):
         skipped = {"name", "strict", "missing", "configs"}
+        if not value.plugins:
+            skipped.add("plugins")
         fields = {
             f.name: _canonical(getattr(value, f.name))
             for f in dataclasses.fields(value)
             if f.name not in skipped
         }
         return {"$": "MachineDescription", **fields, "cpi": float(value.cpi)}
+    if isinstance(value, Plugin):
+        return _plugin_identity(value)
+    if isinstance(value, PluginModel):
+        return {"$": "PluginModel", "plugin": value.plugin.name, "model": value.name}
     if dataclasses.is_dataclass(value):
         fields = {f.name: _canonical(getattr(value, f.name)) for f in dataclasses.fields(value)}
         return {"$": type(value).__qualname__, **fields}
