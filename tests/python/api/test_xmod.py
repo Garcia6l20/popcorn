@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import popcorn
 import pytest
 from popcorn import ConfigError, _core
-from popcorn._devices import chip_select
+from popcorn.devices import chip_select
 
 from .test_devices import SPI_ELF, enter, finish
 

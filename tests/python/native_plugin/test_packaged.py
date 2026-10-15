@@ -215,7 +215,7 @@ def test_a_device_from_plugin_module_attaches_and_runs(installed: Installed) -> 
             import struct
             import popcorn
             from popcorn import ResetKind, StopReason
-            from popcorn._devices import chip_select
+            from popcorn.devices import chip_select
             from popcorn.plugin import find
 
             plugin = find("{NAME}")

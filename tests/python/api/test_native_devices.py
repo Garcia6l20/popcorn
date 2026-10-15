@@ -517,12 +517,12 @@ def bare_at25sf() -> _native.At25sfBase:
 
 
 def test_a_bare_native_spi_base_is_refused_not_crashed(u575: popcorn.PartDescription) -> None:
-    with pytest.raises(ConfigError, match="At25sf instances") as refused:
+    with pytest.raises(ConfigError, match="chip_select set them") as refused:
         popcorn.Machine(u575, devices={"SPI1": [cast(At25sf, bare_at25sf())]})
     assert refused.value.key == "devices.SPI1"
     config = _core.MachineConfig()
     config.python_devices = {"SPI1": [bare_at25sf()]}
-    with pytest.raises(ConfigError, match="At25sf instances") as native:
+    with pytest.raises(ConfigError, match="chip_select set them") as native:
         _core.MachineHandle(u575, config)
     assert native.value.key == "devices.SPI1"
 

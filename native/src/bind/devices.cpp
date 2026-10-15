@@ -507,7 +507,9 @@ auto spi_attachment_of(
   adopt<python_spi_target, attached_spi_target>(target, object, peripheral, cells, python_owned);
   if(not nb::hasattr(object, "_cs_port") or not nb::hasattr(object, "_cs_pin"))
   {
-    throw refused(peripheral, "popcorn.board.SpiTarget or popcorn.devices.At25sf instances");
+    throw refused(
+        peripheral, "an SPI device with _cs_port and _cs_pin, as popcorn.board.SpiTarget, "
+                    "popcorn.devices.At25sf or popcorn.devices.chip_select set them");
   }
   auto const pin = nb::cast<std::optional<std::uint8_t>>(object.attr("_cs_pin"));
   return {

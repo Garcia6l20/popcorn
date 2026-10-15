@@ -107,7 +107,14 @@ from popcorn._unwind import Functions, Read32, return_point
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
 from popcorn._views import Memory, Peripherals, ViewAccess
 from popcorn.arm import Registers
-from popcorn.devices import At25sf, Eeprom24xx, TableTarget
+from popcorn.devices import (
+    At25sf,
+    Eeprom24xx,
+    I2CTargetBase,
+    SpiControllerBase,
+    SpiTargetBase,
+    TableTarget,
+)
 from popcorn.model import Model
 from popcorn.plugin._records import Loaded
 from popcorn.trace import TraceKind
@@ -3145,9 +3152,9 @@ type AttachedDevice = (
     | At25sf
     | Eeprom24xx
     | TableTarget
-    | _core.I2CTargetBase
-    | _core.SpiTargetBase
-    | _core.SpiControllerBase
+    | I2CTargetBase
+    | SpiTargetBase
+    | SpiControllerBase
 )
 """A device `Machine(devices=)` takes, of `popcorn.board`, of `popcorn.devices`, or of a native
 plugin, derived from the bases the native bus models serve."""

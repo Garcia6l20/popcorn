@@ -25,8 +25,8 @@ import popcorn
 import pytest
 from popcorn import ConfigError, ModelError, _core
 from popcorn import _machine_description as machine_description
-from popcorn._devices import chip_select
 from popcorn.board import AudioOptions, RccOptions, SpiTarget, UsbHostOptions
+from popcorn.devices import chip_select
 from popcorn.model import Model, on_read
 from popcorn.plugin import Plugin, PluginModel, _records
 from popcorn.pytest._cache import cache_key
@@ -549,7 +549,7 @@ def test_a_plugin_device_subclass_alive_at_exit_leaks_nothing(kit: Plugin) -> No
     ran = run_python(
         f"""
         import popcorn
-        from popcorn._devices import chip_select
+        from popcorn.devices import chip_select
         from popcorn.plugin import Plugin
 
         PLUGIN = Plugin.dev({str(FIXTURES / "kit")!r})
