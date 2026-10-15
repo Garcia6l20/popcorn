@@ -101,7 +101,6 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::part_description>("PartDescription");
   popcorn::bind::detail::bind_model_base(m.handle);
   popcorn::bind::detail::bind_device_bases(m.handle);
-  popcorn::bind::detail::bind_native_devices(m.handle);
   popcorn::bind::detail::bind_plugins(m.handle);
   m.bind<^^popcorn::bind>();
 }

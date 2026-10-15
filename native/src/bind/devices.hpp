@@ -18,12 +18,6 @@ namespace popcorn::bind::detail
 void bind_device_bases(reflex::py::nb::module_ scope);
 
 /**
- * @brief Binds `At25sfBase`, `Eeprom24xxBase` and `TableTargetBase`, the native bus devices,
- *        derived from `SpiTargetBase` and `I2CTargetBase`. Call after bind_device_bases().
- */
-void bind_native_devices(reflex::py::nb::module_ scope);
-
-/**
  * @brief Factories of the built-in bus models serving the peripherals that have Python devices,
  *        and of the RCC model when the board sets its clock sources.
  * @param description The MCU.

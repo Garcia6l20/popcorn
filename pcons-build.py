@@ -204,6 +204,7 @@ misplaced = misplaced_sources(
         **owned,
         "_core": bind_sources,
         "_obs": obs.extension_sources,
+        "popcorn.devices._native": periph.devices_extension,
         **{tool: [source] for tool, source in tool_sources.items()},
     },
 )
@@ -237,9 +238,11 @@ if build_examples:
 if VARIANT not in ("asan", "tsan"):
     ext = add_extension("popcorn", "_core", bind_sources)
     for library in shared_libraries:
-        if library is not armv8m:
+        if library is not armv8m and library is not devices:
             ext.link(library)
     ext.depends(armv8m)
+    devices_ext = add_extension("popcorn.devices", "_native", periph.devices_extension)
+    devices_ext.link(devices)
     if build_tests:
         smoke_ext = add_extension(
             "popcorn_testing", "_smoke", ["tests/native/support/smoke_module.cpp"]
@@ -264,13 +267,16 @@ if VARIANT not in ("asan", "tsan"):
     )
     regs.depends(regs_gen)
     regs.build_tier = "default"
-    obs_python = obs.add_python(popcorn_obs, [*staged_sources, regs, ext])
+    obs_python = obs.add_python(popcorn_obs, [*staged_sources, regs, ext, devices_ext])
     stub = add_stub(
         ext,
         "popcorn",
         "_core",
-        after=[*staged_sources, regs, obs_python[0]],
+        after=[*staged_sources, regs, obs_python[0], devices_ext],
         include_private=True,
+    )
+    devices_stub = add_stub(
+        devices_ext, "popcorn.devices", "_native", after=[stub], include_private=True
     )
     if build_tests:
         xmod_ext = add_extension(
@@ -284,6 +290,7 @@ if VARIANT not in ("asan", "tsan"):
             "wheel",
             project.Install("popcorn", [ext, stub, *shared_libraries, *obs_python], name="install"),
             project.InstallAs("popcorn/arm/_regs.py", regs, name="install-regs"),
+            project.Install("popcorn/devices", [devices_ext, devices_stub], name="install-devices"),
             *add_package_install("popcorn", python_package, name="install"),
         )
 

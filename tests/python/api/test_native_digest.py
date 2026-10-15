@@ -10,21 +10,36 @@ from pathlib import Path
 import pytest
 from popcorn import _core
 from popcorn._native_digest import native_digest, native_libraries
+from popcorn.devices import _native
 
 AREAS = ("armv8m", "core", "devices", "obs", "stm32", "usb")
 
 
-def test_the_libraries_are_core_and_every_popcorn_library_beside_it() -> None:
-    names = [path.name for path in native_libraries()]
-    assert names == [Path(str(_core.__file__)).name, *(f"libpopcorn_{area}.so" for area in AREAS)]
+CORE = Path(str(_core.__file__))
+DEVICES = Path(str(_native.__file__))
 
 
-@pytest.mark.parametrize("area", AREAS)
+def test_the_libraries_are_core_the_devices_module_and_every_popcorn_library_beside_core() -> None:
+    names = [path.relative_to(CORE.parent).as_posix() for path in native_libraries()]
+    assert names == [
+        CORE.name,
+        f"devices/{DEVICES.name}",
+        *(f"libpopcorn_{area}.so" for area in AREAS),
+    ]
+
+
+@pytest.mark.parametrize("area", [*AREAS, "devices-module"])
 def test_a_change_to_one_library_alone_changes_the_digest(tmp_path: Path, area: str) -> None:
     for path in native_libraries():
-        shutil.copy2(path, tmp_path / path.name)
-    library = tmp_path / f"libpopcorn_{area}.so"
-    extension = tmp_path / Path(str(_core.__file__)).name
+        copy = tmp_path / path.relative_to(CORE.parent)
+        copy.parent.mkdir(exist_ok=True)
+        shutil.copy2(path, copy)
+    library = (
+        tmp_path / "devices" / DEVICES.name
+        if area == "devices-module"
+        else tmp_path / f"libpopcorn_{area}.so"
+    )
+    extension = tmp_path / CORE.name
     before = native_digest(tmp_path)
     extension_bytes = extension.read_bytes()
     data = bytearray(library.read_bytes())

@@ -46,17 +46,27 @@ def _nanobind() -> Target:
     return _nanobind_runtime
 
 
+def _package_dir(package: str) -> str:
+    """The directory of the dotted @p package under build/, such as popcorn/devices."""
+    return package.replace(".", "/")
+
+
 def _origin_of_core(package: str) -> str:
     """The rpath from build/@p package, where an extension lands, to build/popcorn."""
-    return "$$ORIGIN" if package == "popcorn" else "$$ORIGIN/../popcorn"
+    top, *rest = package.split(".")
+    up = "/.." * len(rest)
+    return f"$$ORIGIN{up}" if top == "popcorn" else f"$$ORIGIN{up}/../popcorn"
 
 
 def add_extension(package: str, name: str, sources: Sequence[str | Path]) -> Target:
-    """A CPython extension module importable as @p package.@p name, built into build/@p package."""
+    """A CPython extension module importable as @p package.@p name, built into build/@p package.
+
+    @p package is dotted, a subpackage lands in its directory, such as build/popcorn/devices.
+    """
     project = context.current_project
     ext = project.SharedLibrary(f"{package}.{name}", project.default_environment, sources=sources)
     ext.output_name = name
-    ext.output_prefix = f"{package}/"
+    ext.output_prefix = f"{_package_dir(package)}/"
     ext.output_suffix = ext_suffix
     ext.private.compile_flags.append("-fvisibility=hidden")
     ext.private.link_flags.append(f"-Wl,-rpath,{_origin_of_core(package)}")
@@ -78,7 +88,7 @@ def add_stub(
     checks against the real signatures of private bindings.
     """
     project = context.current_project
-    stub_path = build_dir / package / f"{name}.pyi"
+    stub_path = build_dir / _package_dir(package) / f"{name}.pyi"
     stub = project.Command(
         project.default_environment,
         name=f"{package}.{name}-stub",

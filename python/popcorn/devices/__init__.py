@@ -24,9 +24,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from operator import attrgetter
 
-from popcorn import _core
 from popcorn._devices import BusDevice, check_address, chip_select, parked
 from popcorn._errors import ConfigError
+from popcorn.devices import _native
 from popcorn.units import VirtualDuration, ms, s, us
 
 __all__ = ["At25sf", "Eeprom24xx", "TableTarget", "TableWrite"]
@@ -61,14 +61,14 @@ def _path(image: str | os.PathLike[str] | None) -> str:
     return "" if image is None else os.fspath(image)
 
 
-def _native(build: Callable[[], None], keys: Mapping[str, str]) -> None:
+def _built(build: Callable[[], None], keys: Mapping[str, str]) -> None:
     try:
         build()
     except ConfigError as error:
         raise ValueError(f"{keys.get(error.key, error.key)}: {error.expected}") from error
 
 
-def _contents(device: _core.At25sfBase | _core.Eeprom24xxBase) -> bytes:
+def _contents(device: _native.At25sfBase | _native.Eeprom24xxBase) -> bytes:
     read: Callable[[], bytes] = attrgetter("_contents")(device)
     return parked(device, read)
 
@@ -83,7 +83,7 @@ def _restore(device: BusDevice, data: bytes) -> None:
     parked(device, lambda: load(data))
 
 
-class At25sf(_core.At25sfBase):
+class At25sf(_native.At25sfBase):
     """An AT25SF serial NOR flash on an SPI bus, the native model.
 
     Standard SPI instructions: reads, page program, 4, 32 and 64 KB and chip erases, status
@@ -144,7 +144,7 @@ class At25sf(_core.At25sfBase):
             "reset": _ns("reset", reset),
         }
         first = bytes(b"" if initial is None else initial)
-        _native(
+        _built(
             lambda: super(At25sf, self).__init__(
                 manufacturer,
                 memory_type,
@@ -196,7 +196,7 @@ class At25sf(_core.At25sfBase):
         return f"<{type(self).__qualname__} on {self._cs or 'SS'}>"
 
 
-class Eeprom24xx(_core.Eeprom24xxBase):
+class Eeprom24xx(_native.Eeprom24xxBase):
     """A 24xx serial EEPROM on an I2C bus, the native model.
 
     A write sends the word address, then data within its page, wrapping in the page. The STOP
@@ -232,7 +232,7 @@ class Eeprom24xx(_core.Eeprom24xxBase):
         """
         check_address(address)
         cycle = _ns("write_cycle", write_cycle)
-        _native(
+        _built(
             lambda: super(Eeprom24xx, self).__init__(
                 address,
                 _uint("size", size, 32),
@@ -293,7 +293,7 @@ class TableWrite:
     data: bytes
 
 
-class TableTarget(_core.TableTargetBase):
+class TableTarget(_native.TableTargetBase):
     """An I2C target scripted by a table of replies, the native model.
 
     A write transfer starts with the register address, and each one with data bytes is
@@ -328,7 +328,7 @@ class TableTarget(_core.TableTargetBase):
             _uint("replies", reg, 32): [_uint("replies", value, 8) for value in reply]
             for reg, reply in (replies or {}).items()
         }
-        _native(
+        _built(
             lambda: super(TableTarget, self).__init__(
                 address, _uint("register_bytes", register_bytes, 8), table, bool(nack_unknown)
             ),

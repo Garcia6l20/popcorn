@@ -1,4 +1,5 @@
-"""Digest of the native code a session runs: `_core` and the popcorn libraries it loads.
+"""Digest of the native code a session runs: `_core`, the popcorn libraries it loads and the
+native devices module `popcorn.devices._native`.
 
 Kept free of pytest: the boot cache uses it, and so does code that runs without the pytest plugin.
 """
@@ -17,7 +18,8 @@ def _core_directory() -> Path | None:
 
 
 def native_libraries(directory: Path | None = None) -> list[Path]:
-    """The `_core` extension and every `libpopcorn_*.so` in `directory`, sorted by name.
+    """The `_core` extension, every `libpopcorn_*.so` in `directory` and the
+    `devices/_native` extension below it, sorted by path.
 
     `directory` defaults to the one `_core` was loaded from. Empty when `_core` has no file.
     These are the files beside `_core`, not necessarily the ones loaded: `_core` finds
@@ -28,7 +30,13 @@ def native_libraries(directory: Path | None = None) -> list[Path]:
     where = directory if directory is not None else _core_directory()
     if where is None:
         return []
-    return sorted([*where.glob("_core.*.so"), *where.glob("libpopcorn_*.so")])
+    return sorted(
+        [
+            *where.glob("_core.*.so"),
+            *where.glob("libpopcorn_*.so"),
+            *where.glob("devices/_native.*.so"),
+        ]
+    )
 
 
 def native_digest(directory: Path | None = None) -> str:

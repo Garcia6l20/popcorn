@@ -12,7 +12,7 @@ from typing import cast
 import popcorn
 import pytest
 from popcorn import ConfigError, StopReason, _core
-from popcorn.devices import At25sf, Eeprom24xx, TableTarget, TableWrite
+from popcorn.devices import At25sf, Eeprom24xx, TableTarget, TableWrite, _native
 from popcorn.units import VirtualDuration, ms, ns, ps, us
 
 from .devices_example import Eeprom24
@@ -464,8 +464,8 @@ def test_a_project_declares_native_i2c_devices(u575: popcorn.PartDescription) ->
     assert device.contents()[0x10:0x24] == PATTERN
 
 
-def bare_at25sf() -> _core.At25sfBase:
-    return _core.At25sfBase(
+def bare_at25sf() -> _native.At25sfBase:
+    return _native.At25sfBase(
         0x1F, 0x32, 0x17, 0x16, 64 << 10, "", b"", 600_000, 1, 1, 1, 1, 1, 1, 1, 1
     )
 

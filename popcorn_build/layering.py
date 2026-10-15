@@ -31,7 +31,7 @@ ALLOWED: dict[str, set[str]] = {
     "armv8m": {"core", "image", "arch", "periph", "plugin", "armv8m"},
     "usb": {"core", "periph", "usb"},
     "stm32": {"core", "periph", "plugin", "usb", "stm32"},
-    "devices": {"core", "periph", "devices"},
+    "devices": {"core", "periph", "plugin", "devices"},
     "obs": {"core", "image", "arch", "periph", "obs"},
 }
 
