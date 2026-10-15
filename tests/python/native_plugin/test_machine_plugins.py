@@ -521,6 +521,59 @@ def test_a_machine_with_a_plugin_model_is_collected(kit: Plugin) -> None:
     assert dead() is None
 
 
+def collected_with_its_device(m: popcorn.Machine) -> None:
+    """Make the SPI1 device of @p m, the only reference to it, reach @p m, then drop both."""
+    attached = m.board.devices("SPI1")[0]
+    vars(attached)["owner"] = m
+    machine, held = weakref.ref(m), weakref.ref(attached)
+    del m, attached
+    gc.collect()
+    assert machine() is None
+    assert held() is None
+
+
+def test_a_plugin_device_that_reaches_its_machine_is_collected(kit: Plugin) -> None:
+    device = kit_device(kit)
+    board = popcorn.Periph(devices=[popcorn.Device(device, cs="PA4")])
+    collected_with_its_device(described(kit, SPI1=board).machine())
+
+
+def test_a_plugin_device_given_to_machine_that_reaches_it_is_collected(kit: Plugin) -> None:
+    device = kit_device(kit)
+    collected_with_its_device(
+        described(kit).machine(devices={"SPI1": [kit_instance(device, "PA4")]})
+    )
+
+
+def test_a_plugin_device_subclass_alive_at_exit_leaks_nothing(kit: Plugin) -> None:
+    ran = run_python(
+        f"""
+        import popcorn
+        from popcorn._devices import chip_select
+        from popcorn.plugin import Plugin
+
+        PLUGIN = Plugin.dev({str(FIXTURES / "kit")!r})
+
+        class Device(PLUGIN.module().KitTargetBase):
+            def __init__(self):
+                super().__init__()
+                self._cs_port, self._cs_pin = chip_select("PA4")
+
+        m = popcorn.MachineDescription(
+            part="{PART}",
+            images=[],
+            plugins=[PLUGIN],
+            board={{"SPI1": popcorn.Periph(devices=[popcorn.Device(Device)])}},
+        ).machine()
+        print(type(m.board.devices("SPI1")[0]).__name__)
+        """,
+        Path(os.environ["POPCORN_PLUGIN_CACHE"]),
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.split() == ["Device"]
+    assert "nanobind: leaked" not in ran.stderr
+
+
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
 DRIVER_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "driver.elf"
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import subprocess
+import sys
+import textwrap
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -348,6 +351,49 @@ def test_the_machine_keeps_its_native_devices_alive(u575: popcorn.PartDescriptio
     del m
     gc.collect()
     assert held() is None
+
+
+def collected_with_its_device(m: popcorn.Machine, bus: str) -> None:
+    """Make the @p bus device of @p m, the only reference to it, reach @p m, then drop both."""
+    attached = m.board.devices(bus)[0]
+    vars(attached)["owner"] = m
+    machine, held = weakref.ref(m), weakref.ref(attached)
+    del m, attached
+    gc.collect()
+    assert machine() is None
+    assert held() is None
+
+
+def test_an_at25sf_that_reaches_its_machine_is_collected(u575: popcorn.PartDescription) -> None:
+    collected_with_its_device(spi_machine(u575, At25sf("PA4")), "SPI1")
+
+
+def test_an_eeprom24xx_that_reaches_its_machine_is_collected(
+    u575: popcorn.PartDescription,
+) -> None:
+    collected_with_its_device(machine(u575, I2C_ELF, "I2C1", eeprom()), "I2C1")
+
+
+@pytest.mark.usefixtures("u575")
+def test_a_native_device_subclass_alive_at_exit_leaks_nothing() -> None:
+    code = textwrap.dedent("""
+        import popcorn
+        from popcorn.devices import At25sf
+        from popcorn.stm32 import mcu
+
+        class Flash(At25sf):
+            def described(self):
+                return "flash"
+
+        m = popcorn.Machine(mcu("STM32U575QGIx"), devices={"SPI1": [Flash("PA4")]})
+        print(m.board.devices("SPI1")[0].described())
+        """)
+    ran = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False, timeout=240
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.split() == ["flash"]
+    assert "nanobind: leaked" not in ran.stderr
 
 
 def test_a_project_declares_a_custom_at25sf_on_the_hardware_ss(

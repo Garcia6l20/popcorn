@@ -464,6 +464,7 @@ void adopt(
     device_cells&            cells,
     std::vector<nb::handle>& python_owned)
 {
+  python_owned.push_back(object);
   auto device = std::dynamic_pointer_cast<Python>(target);
   if(not device)
   {
@@ -472,7 +473,6 @@ void adopt(
   auto attached = std::make_shared<Attached>(std::move(device));
   attached->cell.run_in(building_context(), building_alive(), building_collected());
   cells[peripheral].push_back(std::shared_ptr<callback_cell>(attached, &attached->cell));
-  python_owned.push_back(object);
   target = std::move(attached);
 }
 
