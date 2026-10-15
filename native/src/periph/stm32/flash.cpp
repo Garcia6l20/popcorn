@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -66,6 +67,8 @@ struct flash_state
   std::uint32_t                          length{};
   std::uint32_t                          generation{};
   std::vector<held_store>                held{};
+  std::uint64_t                          due_ps{};
+  std::vector<std::uint32_t>             torn{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -187,6 +190,19 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * fetches from a bank being erased or programmed also stall on silicon, RM0456 7.3.10, the model
  * keeps executing without a stall. STRT written while BSY is set, which RM0456 leaves undefined, is
  * ignored: STRT stays set and no flag is raised.
+ *
+ * Power cut: RM0456 7.3.11 leaves the contents of a program or erase cut in flight undefined. The
+ * model applies a deterministic stand-in that depends only on the virtual time of the cut, not
+ * a behaviour of silicon. Of the `n` quad-words of the operation, the first
+ * `floor(n * elapsed / duration)` are done. For a program the next quad-word is torn: its first
+ * 8 data bytes are ANDed into the old bytes, its last 8 keep theirs, the rest keep their old
+ * bytes. A program that would set PROGERR at its end changes nothing. For an erase the done
+ * quad-words read 0xFF, the next one keeps its old bytes and is torn unless they are all 0xFF,
+ * the rest keep theirs. Torn quad-words are kept across every reset and in the snapshot, and only
+ * an erase that covers one clears it. A program into a range holding a torn quad-word sets
+ * PROGERR, RM0456 7.3.12. A partly filled write buffer is dropped. A reset of any kind outside
+ * `power_cycle()`, a power-on reset or one a model requests included, still drops the operation
+ * in flight.
  */
 class flash final : public dispatch_model<flash, flash_state>,
                     public clock_listener,
@@ -196,6 +212,7 @@ public:
   flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void power_cut() override;
   void load(std::span<std::byte const> in) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_write(
@@ -229,6 +246,16 @@ private:
   void               store(held_store const& one);
   void               start(operation which, std::uint32_t target, std::uint32_t length);
   void               start_erase(std::uint32_t control);
+  [[nodiscard]] auto duration_of(operation which, std::uint32_t length) const
+      -> std::chrono::nanoseconds;
+  [[nodiscard]] auto refused(
+      std::uint32_t              at,
+      std::span<std::byte const> target,
+      std::span<std::byte const> data) const -> bool;
+  [[nodiscard]] auto buffered() const -> std::array<std::byte, burst_size>;
+  void               tear_program(std::uint32_t full);
+  void               tear_erase(std::uint32_t full);
+  void               forget_torn(std::uint32_t from, std::uint32_t length);
   void               program();
   void               hold_hsi16(bool held);
   void               note_unmodelled_protection();
@@ -322,9 +349,139 @@ void flash::reset(register_file& regs, reset_kind)
     regs.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation = state_.generation;
+  auto       torn       = std::move(state_.torn);
   state_                = {};
   state_.generation     = generation + 1;
+  state_.torn           = std::move(torn);
   line_.lower();
+}
+
+void flash::power_cut()
+{
+  auto const which = static_cast<operation>(state_.running);
+  if(which == operation::none)
+  {
+    return;
+  }
+  state_.running   = static_cast<std::uint8_t>(operation::none);
+  auto const now   = ctx_.clock.since_power_on().ps;
+  auto const total = static_cast<std::uint64_t>(duration_of(which, state_.length).count()) * 1000u;
+  auto const left  = state_.due_ps > now ? state_.due_ps - now : 0;
+  auto const lines = state_.length / quad_word;
+  auto const full =
+      total == 0
+          ? lines
+          : static_cast<std::uint32_t>(
+                static_cast<unsigned __int128>(lines) * (total - std::min(total, left)) / total);
+  if(which == operation::program)
+  {
+    tear_program(full);
+  }
+  else
+  {
+    tear_erase(full);
+  }
+}
+
+auto flash::duration_of(operation which, std::uint32_t length) const -> std::chrono::nanoseconds
+{
+  switch(which)
+  {
+    case operation::program:
+      return length == quad_word ? options_.quad_word_program : options_.burst_program;
+    case operation::page_erase:
+      return options_.page_erase;
+    case operation::bank_erase:
+      return options_.bank_erase;
+    case operation::mass_erase:
+    case operation::none:
+      break;
+  }
+  return options_.mass_erase;
+}
+
+auto flash::refused(
+    std::uint32_t              at,
+    std::span<std::byte const> target,
+    std::span<std::byte const> data) const -> bool
+{
+  for(std::size_t line = 0; line < data.size(); line += quad_word)
+  {
+    auto const old       = target.subspan(line, quad_word);
+    auto const zero_data = all_of_byte(data.subspan(line, quad_word), std::byte{0});
+    if(all_of_byte(old, std::byte{0}) or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
+    {
+      return true;
+    }
+  }
+  auto const first = std::ranges::lower_bound(state_.torn, at);
+  return first != state_.torn.end() and *first < at + data.size();
+}
+
+auto flash::buffered() const -> std::array<std::byte, burst_size>
+{
+  std::array<std::byte, burst_size> data{};
+  for(std::size_t i = 0; i < data.size(); ++i)
+  {
+    data[i] = static_cast<std::byte>(state_.buffer[i / 4] >> (8 * (i % 4)));
+  }
+  return data;
+}
+
+void flash::tear_program(std::uint32_t full)
+{
+  std::array<std::byte, burst_size> target_bytes{};
+  auto const                        target     = std::span{target_bytes}.first(state_.length);
+  auto                              data_bytes = buffered();
+  auto const                        data       = std::span{data_bytes}.first(state_.length);
+  if(not ctx_.services.read_block(state_.target, target, initiator::debugger)
+     or refused(state_.target, target, data))
+  {
+    return;
+  }
+  auto const done = full * quad_word;
+  if(done < data.size())
+  {
+    for(std::size_t i = done; i < done + quad_word / 2; ++i)
+    {
+      data[i] &= target[i];
+    }
+    std::ranges::copy(target.subspan(done + quad_word / 2), data.begin() + done + quad_word / 2);
+    auto const line = state_.target + done;
+    state_.torn.insert(std::ranges::upper_bound(state_.torn, line), line);
+  }
+  static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
+}
+
+void flash::tear_erase(std::uint32_t full)
+{
+  auto const                   done = full * quad_word;
+  std::vector<std::byte> const erased(done, std::byte{0xff});
+  static_cast<void>(ctx_.services.write_block(state_.target, erased, initiator::debugger));
+  forget_torn(state_.target, done);
+  if(done >= state_.length)
+  {
+    return;
+  }
+  std::array<std::byte, quad_word> old{};
+  auto const                       line = state_.target + done;
+  if(not ctx_.services.read_block(line, old, initiator::debugger)
+     or all_of_byte(old, std::byte{0xff}))
+  {
+    return;
+  }
+  auto const at = std::ranges::lower_bound(state_.torn, line);
+  if(at == state_.torn.end() or *at != line)
+  {
+    state_.torn.insert(at, line);
+  }
+}
+
+void flash::forget_torn(std::uint32_t from, std::uint32_t length)
+{
+  auto const first = std::ranges::lower_bound(state_.torn, from);
+  auto const last  = std::ranges::lower_bound(state_.torn, from + length);
+  state_.torn.erase(first, last);
 }
 
 auto flash::busy() const -> bool
@@ -494,21 +651,9 @@ void flash::start(operation which, std::uint32_t target, std::uint32_t length)
   state_.target  = target;
   state_.length  = length;
   update(regs_, busy_, 1);
-  auto const delay = [&] {
-    switch(which)
-    {
-      case operation::program:
-        return length == quad_word ? options_.quad_word_program : options_.burst_program;
-      case operation::page_erase:
-        return options_.page_erase;
-      case operation::bank_erase:
-        return options_.bank_erase;
-      case operation::mass_erase:
-      case operation::none:
-        break;
-    }
-    return options_.mass_erase;
-  }();
+  auto const delay = duration_of(which, length);
+  state_.due_ps =
+      ctx_.clock.since_power_on().ps + static_cast<std::uint64_t>(delay.count()) * 1000u;
   schedule_in(delay, operation_end, ++state_.generation);
 }
 
@@ -554,28 +699,15 @@ void flash::start_erase(std::uint32_t control)
 void flash::program()
 {
   std::array<std::byte, burst_size> target_bytes{};
-  std::array<std::byte, burst_size> data_bytes{};
-  auto const                        target = std::span{target_bytes}.first(state_.length);
-  auto const                        data   = std::span{data_bytes}.first(state_.length);
-  for(std::size_t i = 0; i < data.size(); ++i)
-  {
-    data[i] = static_cast<std::byte>(state_.buffer[i / 4] >> (8 * (i % 4)));
-  }
-  state_.filled = 0;
-  if(not ctx_.services.read_block(state_.target, target, initiator::debugger))
+  auto const                        target     = std::span{target_bytes}.first(state_.length);
+  auto const                        data_bytes = buffered();
+  auto const                        data       = std::span{data_bytes}.first(state_.length);
+  state_.filled                                = 0;
+  if(not ctx_.services.read_block(state_.target, target, initiator::debugger)
+     or refused(state_.target, target, data))
   {
     fail(program_error_);
     return;
-  }
-  for(std::size_t line = 0; line < data.size(); line += quad_word)
-  {
-    auto const old       = target.subspan(line, quad_word);
-    auto const zero_data = all_of_byte(data.subspan(line, quad_word), std::byte{0});
-    if(all_of_byte(old, std::byte{0}) or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
-    {
-      fail(program_error_);
-      return;
-    }
   }
   static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
 }
@@ -594,6 +726,7 @@ void flash::finish()
   {
     std::vector<std::byte> const erased(state_.length, std::byte{0xff});
     static_cast<void>(ctx_.services.write_block(state_.target, erased, initiator::debugger));
+    forget_torn(state_.target, state_.length);
     update(regs_, start_, 0);
   }
   if(errors_pending() == errors and get(regs_, end_irq_) != 0)
