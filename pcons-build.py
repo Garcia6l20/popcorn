@@ -272,6 +272,12 @@ if VARIANT not in ("asan", "tsan"):
         after=[*staged_sources, regs, obs_python[0]],
         include_private=True,
     )
+    if build_tests:
+        xmod_ext = add_extension(
+            "popcorn_testing", "_xmod", ["tests/native/support/xmod_module.cpp"]
+        )
+        xmod_ext.link(core)
+        add_stub(xmod_ext, "popcorn_testing", "_xmod", after=[stub])
 
     if building_wheel:
         project.Alias(
