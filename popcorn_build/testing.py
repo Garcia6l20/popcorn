@@ -9,6 +9,10 @@ from popcorn_build.requirements import package
 
 _doctest_main: Target | None = None
 
+DEFAULT_CASE_TIMEOUT = 300.0
+"""Seconds a native test case may run before it is killed and failed, unless its suite sets
+another limit. The longest case under the full gate takes about 15 s."""
+
 
 def _doctest_with_main() -> Target:
     global _doctest_main
@@ -50,13 +54,13 @@ def add_doctest(
     group: str = "native",
     env: Mapping[str, str] | None = None,
     register: bool = True,
-    timeout: float | None = None,
+    timeout: float | None = DEFAULT_CASE_TIMEOUT,
 ) -> Target:
     """Build a doctest program and register one test per case under @p group, run with @p env.
 
     With @p register false the program is built but no test is registered, for tests whose
     inputs this machine lacks. @p timeout, in seconds, kills a case that runs longer and fails
-    it, None for no limit.
+    it, so a deadlock fails the gate instead of hanging it. None for no limit.
     """
     project = context.current_project
     program = project.Program(f"test-{name}", project.default_environment, sources=list(sources))
