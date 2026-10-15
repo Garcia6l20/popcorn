@@ -9,8 +9,9 @@ popcorn has no RNG model. Without one, the RNG registers are plain storage: DRDY
 and a strict machine stops on the first RNG access. `rngmodel.Rng` is a `popcorn.model.Model`
 written next to the test that serves CR and DR: RNGEN starts a conversion of 40 us of virtual
 time, DRDY and the RNG interrupt follow, and each DR read returns the next word of a seeded
-xorshift32 sequence. A CONDRST write cancels the conversion in progress and clears SR,
-clearing RNGEN stops production and keeps DRDY. The model docstring lists what it simplifies
+xorshift32 sequence. A CONDRST write cancels the conversion in progress and clears SR, and
+clearing CONDRST with RNGEN set starts a new one. Clearing RNGEN stops production and keeps
+DRDY. The model docstring lists what it simplifies
 and leaves out.
 
 ## Run
@@ -38,6 +39,8 @@ uv run pytest -q examples/stm32u575/python_model
     adds, so no unmodelled-register warning is logged;
   - an intercept on `HAL_RNG_ReadyDataCallback` shows each later word one conversion after
     the last;
+  - CONDRST written at 1 and then at 0, RNGEN kept set, clears SR and gives a new DRDY one
+    conversion later;
   - the `seeded` config gives another sequence.
 - `firmware/main.c`: the HSI48 and RNG init, the interrupt-driven requests.
 

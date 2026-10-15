@@ -27,6 +27,8 @@ pytestmark = pytest.mark.popcorn(budget=BUDGET)
 
 COUNT = 8
 RNG_NSCR_NIST_VALUE = 0x17CBB
+CONDRST_BIT = 30
+RNGEN_BIT = 2
 
 
 async def run_to_done(machine: Machine) -> None:
@@ -82,6 +84,21 @@ async def test_each_later_word_waits_one_conversion(python_model: Machine) -> No
     assert len(callbacks) == COUNT
     for earlier, later in itertools.pairwise(callbacks):
         assert CONVERSION <= later - earlier < 2 * CONVERSION
+
+
+async def test_clearing_condrst_with_rngen_set_restarts_the_rng(python_model: Machine) -> None:
+    await run_to_done(python_model)
+    rng = python_model.periph.RNG
+    rng.CR.write(rng.CR.value | 1 << RNGEN_BIT)
+    stop = await python_model.run(for_=2 * CONVERSION)
+    assert stop.reason is StopReason.TIME, stop
+    assert rng.SR.DRDY == 1
+    rng.CR.write(rng.CR.value | 1 << CONDRST_BIT)
+    rng.CR.write(rng.CR.value & ~(1 << CONDRST_BIT))
+    assert rng.SR.value == 0
+    stop = await python_model.run(for_=2 * CONVERSION)
+    assert stop.reason is StopReason.TIME, stop
+    assert rng.SR.DRDY == 1
 
 
 @pytest.mark.popcorn(budget=BUDGET)
