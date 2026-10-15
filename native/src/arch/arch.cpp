@@ -1,3 +1,5 @@
+#include "../plugin/guard.hpp"
+
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/errors.hpp>
 
@@ -37,6 +39,10 @@ auto table() -> registry&
 
 void register_arch(arch_module module)
 {
+  if(plugin::guard::refuses("arch::register_arch"))
+  {
+    return;
+  }
   auto&                 entries = table();
   std::lock_guard const lock{entries.guard};
   auto const            found = std::ranges::find(entries.modules, module.name, &arch_module::name);

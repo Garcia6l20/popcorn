@@ -50,11 +50,13 @@ def add_doctest(
     group: str = "native",
     env: Mapping[str, str] | None = None,
     register: bool = True,
+    timeout: float | None = None,
 ) -> Target:
     """Build a doctest program and register one test per case under @p group, run with @p env.
 
     With @p register false the program is built but no test is registered, for tests whose
-    inputs this machine lacks.
+    inputs this machine lacks. @p timeout, in seconds, kills a case that runs longer and fails
+    it, None for no limit.
     """
     project = context.current_project
     program = project.Program(f"test-{name}", project.default_environment, sources=list(sources))
@@ -62,21 +64,34 @@ def add_doctest(
         program.link(dep)
     if register:
         project.Test(
-            f"{group}.{name}", program, discover="doctest", labels=[group], env=dict(env or {})
+            f"{group}.{name}",
+            program,
+            discover="doctest",
+            labels=[group],
+            env=dict(env or {}),
+            timeout=timeout,
         )
     project.Alias(f"test-{group}", program)
     alias_bare_name(program)
     return program
 
 
-def add_header_check(name: str, include_root: Path, deps: Sequence[Target] = ()) -> Target:
+def add_header_check(
+    name: str, include_root: Path, deps: Sequence[Target] = (), exclude: Sequence[str] = ()
+) -> Target:
     """Compile every header under @p include_root alone in its own TU, and all of them in one.
 
     The TUs are generated into the build directory, one per header, so a new header is checked
     without editing a list. The TU with every header carries the program's only test case.
+    @p exclude lists headers, relative to @p include_root, that need more than @p deps, each
+    checked by its own TU elsewhere.
     """
     headers = sorted(
-        path.relative_to(include_root).as_posix() for path in include_root.rglob("*.hpp")
+        relative
+        for relative in (
+            path.relative_to(include_root).as_posix() for path in include_root.rglob("*.hpp")
+        )
+        if relative not in exclude
     )
     generated = build_dir / "header-check" / name
     sources: list[Path] = []

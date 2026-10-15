@@ -75,6 +75,17 @@ def test_a_relative_include_of_another_library_private_header_is_refused(tree: P
     ]
 
 
+def test_the_plugin_guard_is_private_to_core(tree: Path) -> None:
+    write(tree, "src/plugin/guard.hpp", "")
+    write(tree, "src/periph/registry.cpp", '#include "../plugin/guard.hpp"\n')
+    write(tree, "src/arch/arch.cpp", '#include "../plugin/guard.hpp"\n')
+    assert include_violations(tree) == []
+    write(tree, "src/periph/stm32/models.cpp", '#include "../../plugin/guard.hpp"\n')
+    assert include_violations(tree) == [
+        "native/src/periph/stm32/models.cpp:1: stm32 includes plugin"
+    ]
+
+
 def test_bind_may_include_anything_and_nothing_may_include_bind(tree: Path) -> None:
     write(tree, "src/bind/gil_locks.hpp", "")
     write(tree, "src/obs/tb.hpp", '#include "../bind/gil_locks.hpp"\n')

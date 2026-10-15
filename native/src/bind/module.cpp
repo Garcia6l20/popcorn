@@ -8,6 +8,7 @@
 #include "image.hpp"
 #include "machine.hpp"
 #include "models.hpp"
+#include "plugins.hpp"
 #include "system.hpp"
 
 #include <popcorn/arch/arch.hpp>
@@ -109,5 +110,6 @@ REFLEX_PY_MODULE(_core, m)
   popcorn::bind::detail::bind_model_base(m.handle);
   popcorn::bind::detail::bind_device_bases(m.handle);
   popcorn::bind::detail::bind_native_devices(m.handle);
+  popcorn::bind::detail::bind_plugins(m.handle);
   m.bind<^^popcorn::bind>();
 }

@@ -1,3 +1,4 @@
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -11,8 +12,10 @@ from popcorn_build.python import (
     add_extension,
     add_package_install,
     add_stub,
+    interpreter,
 )
-from popcorn_build.requirements import package, unicorn_commit
+from popcorn_build.requirements import package, prefixes, unicorn_commit
+from popcorn_build.sdk import reflex_include_dirs, sdk_inputs
 from popcorn_build.testing import add_header_check, check_core_links
 
 WARNINGS = [
@@ -67,7 +70,37 @@ building_wheel = get_var("PCONS_BUILD_WHEEL", False)
 lto = get_var("POPCORN_ENABLE_LTO", building_wheel) and VARIANT not in ("asan", "tsan")
 LTO_LINK_FLAGS = ["-flto=2", "-Werror=lto-type-mismatch", "-Werror=odr"]
 
-core_headers = project.HeaderOnlyLibrary("popcorn_core_headers", include_dirs=["native/include"])
+reflex_root = prefixes["reflex"]
+nanobind_version = tomllib.loads((project_dir / "deps.toml").read_text())["packages"]["nanobind"][
+    "version"
+]
+generated_include = build_dir / "generated" / "include"
+build_info_path = generated_include / "popcorn" / "plugin" / "build_info.hpp"
+native_include = project_dir / "native" / "include"
+build_info = project.Command(
+    env,
+    name="popcorn-build-info",
+    target=build_info_path,
+    source=sdk_inputs(native_include, reflex_include_dirs(reflex_root)),
+    command=[
+        interpreter,
+        "-m",
+        "popcorn_build.sdk",
+        str(build_info_path),
+        POPCORN_VERSION,
+        nanobind_version,
+        VARIANT,
+        str(native_include),
+        str(reflex_root),
+    ],
+    cwd=project_dir,
+    restat=True,
+)
+
+core_headers = project.HeaderOnlyLibrary(
+    "popcorn_core_headers", include_dirs=["native/include", str(generated_include)]
+)
+core_headers.depends(build_info)
 core_headers.public.compile_flags.append("-fno-plt")
 core_headers.link(package("unicorn-headers"))
 core_headers.link(package("reflex-serde"))
@@ -75,6 +108,7 @@ core_headers.link(package("reflex-serde"))
 periph = add_subdirectory("native/src/periph")
 arch = add_subdirectory("native/src/arch")
 obs = add_subdirectory("native/src/obs")
+plugin = add_subdirectory("native/src/plugin")
 
 
 owned: dict[str, list[Path]] = {}
@@ -118,6 +152,7 @@ core_objects, core, core_static = area_library(
         *add_subdirectory("native/src/image").sources,
         *arch.generic,
         *periph.framework,
+        *plugin.sources,
     ],
 )
 core_objects.private.defines.extend(
@@ -167,7 +202,12 @@ regs_gen.link(armv8m_static)
 regs_gen.link(core_static)
 
 if build_tests:
-    add_header_check("headers", project_dir / "native" / "include", shared_libraries)
+    add_header_check(
+        "headers",
+        project_dir / "native" / "include",
+        shared_libraries,
+        exclude=["popcorn/plugin/bindings.hpp"],
+    )
     smoke_support = add_subdirectory("tests/native/support").smoke_support
     for tree in ("tests/firmware", "tests/native"):
         for script in sorted((project_dir / tree).glob("*/pcons-build.py")):
