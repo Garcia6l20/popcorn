@@ -10,11 +10,11 @@ import popcorn
 import pytest
 from popcorn import ResetKind, StopReason, System, UartLink
 from popcorn.devices import At25sf
-from popcorn.units import VirtualTime, us
+from popcorn.units import VirtualTime, ms, us
 
 from .conftest import BOARD_ELF
 from .linked import member
-from .test_devices import SPI_ELF, enter, finish
+from .test_devices import BUDGET, SPI_ELF, enter, finish
 
 pytest_plugins = ["pytester"]
 
@@ -24,6 +24,9 @@ SRAM_SECURE = 0x3000_0000
 BKPSRAM = 0x4003_6400
 TAG = SRAM + 0x4_0000
 FLASH_WORD = 0x080F_0000
+GPIOA_BSRR = 0x4202_0018
+CS_PIN = 1 << 4
+ERASE_4K = ms(2)
 
 
 def to_ready(m: popcorn.Machine) -> None:
@@ -96,6 +99,61 @@ def test_an_at25sf_keeps_its_array_and_loses_wel(u575: popcorn.PartDescription) 
     m.power_cycle()
     assert flash.snapshot() == fresh
     assert flash.contents() == written
+
+
+def erase_cut_halfway(
+    u575: popcorn.PartDescription, running: bool, software_reset: bool
+) -> tuple[VirtualTime, VirtualTime, bytes]:
+    """Run the SPI firmware's 4 KB erase of 0x1000 over zeros to the first status poll past half
+    its time, parked or in a free run, then power cycle. After a software reset, `m.time` runs
+    behind the time since power-on. Returns the CS rise that launched the erase, the cut time and
+    the sector after the cycle."""
+    flash = At25sf("PA4", initial=bytes(0x2000), erase_4k=ERASE_4K)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [flash]})
+    if software_reset:
+        m.reset()
+        asyncio.run(m.run(for_=us(50)))
+    enter(m, "erase", ResetKind.SOFTWARE if software_reset else ResetKind.POWER_ON)
+    raised: list[VirtualTime] = []
+    launched: list[VirtualTime] = []
+
+    def deselected(hit: popcorn.WatchHit) -> None:
+        if hit.value & CS_PIN:
+            raised.append(m.time)
+
+    def halfway(call: popcorn.Call) -> popcorn.Return:
+        if call.occurrence == 2:
+            launched.append(raised[-1])
+        if launched and m.time >= launched[0] + ERASE_4K // 2:
+            return call.stop()
+        return call.proceed()
+
+    async def free() -> popcorn.Stop:
+        with pytest.raises(popcorn.EmulationError, match="stopped with USER") as ended:
+            async with m.running():
+                await m.wait_for(popcorn.Reached("main"), for_=ERASE_4K)
+        assert ended.value.stop is not None
+        return ended.value.stop
+
+    with m.watch(GPIOA_BSRR, handler=deselected), m.intercepted("flash_command", halfway):
+        stop = asyncio.run(free()) if running else asyncio.run(m.run(budget=BUDGET))
+    assert stop.reason is StopReason.USER
+    assert m.pc == m.sym("flash_command")
+    cut_at = m.time
+    assert cut_at == stop.time
+    m.power_cycle()
+    return launched[0], cut_at, flash.contents()[0x1000:0x2000]
+
+
+@pytest.mark.parametrize("software_reset", [False, True], ids=["power_on", "software_reset"])
+def test_an_at25sf_erase_cut_halfway_keeps_a_prefix_parked_and_running(
+    u575: popcorn.PartDescription, software_reset: bool
+) -> None:
+    launch, cut_at, sector = erase_cut_halfway(u575, False, software_reset)
+    kept = 0x1000 * (cut_at - launch).ps // ERASE_4K.ps
+    assert 0x800 <= kept < 0x880
+    assert sector == b"\xff" * kept + bytes(0x1000 - kept)
+    assert erase_cut_halfway(u575, True, software_reset) == (launch, cut_at, sector)
 
 
 def test_probes_and_intercepts_stay_installed(board: popcorn.Machine) -> None:
