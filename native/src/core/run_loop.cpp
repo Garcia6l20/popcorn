@@ -240,6 +240,44 @@ void machine::run_state::reset_machine(reset_kind kind)
   }
 }
 
+auto machine::run_state::power_cut_models() noexcept -> std::exception_ptr
+{
+  handler_scope const scope{in_handler};
+  std::exception_ptr  first;
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(not slot or not slot->model)
+    {
+      continue;
+    }
+    try
+    {
+      slot->model->power_cut();
+    }
+    catch(...)
+    {
+      if(not first)
+      {
+        first = std::current_exception();
+      }
+    }
+  }
+  return first;
+}
+
+void machine::run_state::zero_ram()
+{
+  for(auto const& region : owner.memory_)
+  {
+    if(region->owned or region->desc->kind != region_kind::ram or region->desc->physical)
+    {
+      continue;
+    }
+    std::ranges::fill_n(region->host(region->desc->start), region->desc->size, std::byte{0});
+    region->host_wrote(*this, region->desc->start, region->desc->size);
+  }
+}
+
 void machine::run_state::notify_core_hold(bool held)
 {
   owner.arch_->hold_core(held);

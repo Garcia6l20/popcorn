@@ -114,6 +114,18 @@ public:
   {}
 
   /**
+   * @brief The supply was cut. The I2C model calls it for every attached target, in
+   *        attachment order, from its own power_cut(), before the power-on reset of
+   *        `core::machine::power_cycle()`. The default does nothing. A target holding a
+   *        non-volatile array applies what the cut leaves of an operation in flight. When a
+   *        target throws, every later target is still cut, and the first exception is rethrown
+   *        after.
+   * @param at Virtual time since power-on of the cut.
+   */
+  virtual void power_cut([[maybe_unused]] vtime at)
+  {}
+
+  /**
    * @brief Appends the target state to a snapshot.
    * @param out Snapshot bytes, appended to.
    */

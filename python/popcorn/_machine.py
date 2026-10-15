@@ -988,6 +988,35 @@ class Machine:
         self._handle.reset(_core.ResetKind(kind.value))
         self._last_stop = None
 
+    def power_cycle(self) -> None:
+        """Cut the supply and power the machine again, as on a board.
+
+        Every RAM region reads 0, image segments and `memory_init` bytes placed in RAM
+        included. Flash, OTP and the arrays of bus devices such as `At25sf` keep their contents,
+        the call arena too. A flash program or erase in flight at the cut leaves what the
+        model leaves of it, see the FLASH model and `At25sf`. Peripherals and the backup domain
+        reset as by `reset(ResetKind.POWER_ON)`, and the clock restarts at 0. Intercepts,
+        probes, watches and host-driven board state stay, as across that reset. Python models
+        and Python bus devices see only the reset.
+
+        Raises:
+            MachineRunning: The machine is busy, outside its handlers, or the call comes from
+                one of its handlers, as for `reset`.
+            MachineBusy: The machine is a member of a linked system.
+            ModelError: A model failed at the cut under strict peripherals. The cycle still
+                completed: RAM reads 0 and the machine was reset.
+            Exception: Any other error a native or plugin model or device raised at the cut,
+                such as RuntimeError for a C++ `std::runtime_error`. Raised after the cycle
+                completed, as for ModelError.
+        """
+        if self._linked() is not None:
+            raise MachineBusy(
+                f"{self._name} is a member of a linked system: no power_cycle of a member"
+            )
+        self._require_stopped()
+        self._handle.power_cycle()
+        self._last_stop = None
+
     @property
     def mem(self) -> Memory:
         """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`.

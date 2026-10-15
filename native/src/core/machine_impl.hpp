@@ -1323,6 +1323,20 @@ struct machine::run_state
    */
   void reset_machine(reset_kind kind);
 
+  /**
+   * @brief Calls every model's `power_cut()` in description order, inside a handler scope,
+   *        going on past a throw.
+   * @return The first exception a model threw, null when none did.
+   */
+  [[nodiscard]] auto power_cut_models() noexcept -> std::exception_ptr;
+
+  /**
+   * @brief Zeroes every RAM region without `physical`, its aliases with it, and drops the
+   *        translated code over it. The scratch region is kept.
+   * @throws emulation_error when the engine refuses the removal of translated code.
+   */
+  void zero_ram();
+
   /** @brief Removes the translated code of every stale range, then clears the flag when nothing
    * else is pending. */
   void drain_stale_code();

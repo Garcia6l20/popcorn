@@ -481,6 +481,11 @@ void machine_handle::reset(reset_kind kind)
   access([kind](core::machine& target) { target.reset(kind); });
 }
 
+void machine_handle::power_cycle()
+{
+  access([](core::machine& target) { target.power_cycle(); });
+}
+
 auto machine_handle::image_digests() const -> std::vector<std::string>
 {
   return access([](core::machine& target) {

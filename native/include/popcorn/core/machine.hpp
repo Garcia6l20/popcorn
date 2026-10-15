@@ -357,6 +357,25 @@ public:
   void reset(reset_kind kind = reset_kind::power_on) pre(is_enumerator(kind));
 
   /**
+   * @brief Cuts the supply and powers the machine again: every model's `power_cut()` in
+   *        description order, at the time of the cut, then every RAM region without
+   *        `physical` zeroed with its translated code dropped, then reset(reset_kind::power_on).
+   *        Flash, OTP and every other rom region keep their bytes, the scratch region of
+   *        machine_options::scratch too. Hooks, probes, watches and host bridges stay, as across
+   *        a reset. A cut cannot be refused once begun: when a model's `power_cut()` throws,
+   *        every later model's still runs, RAM is zeroed, the reset runs, then the first
+   *        exception is rethrown. An exception from the zeroing or from a model's reset is
+   *        kept the same way: the reset still runs after a zeroing failure, and the first
+   *        exception of the whole cycle is the one rethrown.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy while a call begun by begin_call() is in progress.
+   * @throws Any exception the first failing `power_cut()`, zeroing or model reset threw, such
+   *         as model_error under machine_options::strict_peripherals, after the cycle ran to
+   *         its end.
+   */
+  void power_cycle();
+
+  /**
    * @brief Holds or releases the core. While held, the run loop never executes guest code and
    *        never delivers an exception: every slice takes the idle path, so the clock, events and
    *        DMA keep following virtual time, and the arch and the models freeze what a core held

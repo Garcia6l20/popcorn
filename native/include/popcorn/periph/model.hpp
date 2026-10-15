@@ -93,6 +93,17 @@ public:
   virtual void reset(register_file& regs, reset_kind kind) = 0;
 
   /**
+   * @brief The supply was cut. Called on every model, in description order, before the
+   *        power-on reset of `core::machine::power_cycle()`, while the model's state and the
+   *        clock are still those of the cut, so `model_context::clock` gives its time. The
+   *        default does nothing. A model holding a non-volatile array applies what the cut
+   *        leaves of an operation in flight. Never called by reset() nor by a reset a model
+   *        requests.
+   */
+  virtual void power_cut()
+  {}
+
+  /**
    * @brief Serves a guest read of a claimed register.
    * @param regs Storage of the peripheral.
    * @param offset Byte offset of the access within the peripheral.
