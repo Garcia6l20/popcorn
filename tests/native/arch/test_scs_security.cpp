@@ -44,6 +44,7 @@ constexpr address shpr1  = 0xE000'ED18;
 constexpr address shcsr  = 0xE000'ED24;
 constexpr address cpacr  = 0xE000'ED88;
 constexpr address fpccr  = 0xE000'EF34;
+constexpr address nsacr  = 0xE000'ED8C;
 constexpr address iser0  = 0xE000'E100;
 constexpr address ipr0   = 0xE000'E400;
 constexpr address itns0  = 0xE000'E380;
@@ -519,6 +520,83 @@ TEST_CASE("the Secure CPACR reaches the engine, so VLSTM stores the frame, B3.36
   auto const refused = run_vlstm(f);
   REQUIRE(refused.reason == stop_reason::fault);
   CHECK(refused.fault->kind == fault_kind::usage);
+}
+
+auto nonsecure_msr_control_fpca(arch_fixture const& f) -> std::uint32_t
+{
+  poke(f, sau, sau_allns);
+  engine_write(f, UC_ARM_REG_SECURE, 0);
+  f.set("control", 0);
+  f.set("r0", control_fpca);
+  put(f, code_at, {0xf380, 0x8814, 0xbe01});
+  REQUIRE(run_at(f, code_at, 2).reason == stop_reason::user);
+  return engine_read(f, UC_ARM_REG_CONTROL_S) & control_fpca;
+}
+
+TEST_CASE(
+    "the Secure NSACR reaches the engine, so a Non-secure MSR CONTROL sets FPCA, D1.2.181 "
+    "and D1.2.13")
+{
+  SUBCASE("NSACR CP10 and CP11")
+  {
+    auto f = booted();
+    poke(f, nsacr, 0x0C00);
+    CHECK(engine_read(f, UC_ARM_REG_NSACR) == 0x0C00);
+    CHECK(nonsecure_msr_control_fpca(f) == control_fpca);
+  }
+  SUBCASE("NSACR 0")
+  {
+    auto f = booted();
+    CHECK(engine_read(f, UC_ARM_REG_NSACR) == 0);
+    CHECK(nonsecure_msr_control_fpca(f) == 0);
+  }
+  SUBCASE("a Secure store of NSACR, then BXNS to MSR CONTROL in the same run")
+  {
+    auto f = booted();
+    poke(f, sau_rn, 0);
+    poke(f, sau_rb, code_at);
+    poke(f, sau_rl, (code_at + 0x1fe0) | sau_enable);
+    poke(f, sau, sau_enable);
+    f.set("control", 0);
+    f.set("r0", control_fpca);
+    f.set("r1", nsacr);
+    f.set("r2", 0x0C00);
+    f.set("r3", code_at);
+    put(f, secure_code, {0x600a, 0x471c});
+    put(f, code_at, {0xf380, 0x8814, 0xbe01});
+    REQUIRE(run_at(f, secure_code, 4).reason == stop_reason::user);
+    CHECK(engine_read(f, UC_ARM_REG_SECURE) == 0);
+    CHECK(f.word(nsacr) == 0x0C00);
+    CHECK((engine_read(f, UC_ARM_REG_CONTROL_S) & control_fpca) == control_fpca);
+  }
+  SUBCASE("Non-secure stores leave NSACR and the engine value unchanged")
+  {
+    auto f = booted();
+    nonsecure_write(f, nsacr, 0x0C00);
+    nonsecure_write(f, nsacr + scs_ns, 0x0C00);
+    CHECK(f.word(nsacr) == 0);
+    CHECK(engine_read(f, UC_ARM_REG_NSACR) == 0);
+    CHECK(nonsecure_msr_control_fpca(f) == 0);
+  }
+  SUBCASE("a restore into a fresh machine")
+  {
+    auto f = booted();
+    poke(f, nsacr, 0x0C00);
+    auto const taken = reread(f.target->snapshot());
+    auto       fresh = booted();
+    CHECK(engine_read(fresh, UC_ARM_REG_NSACR) == 0);
+    fresh.target->restore(taken);
+    CHECK(engine_read(fresh, UC_ARM_REG_NSACR) == 0x0C00);
+    CHECK(nonsecure_msr_control_fpca(fresh) == control_fpca);
+  }
+  SUBCASE("a reset")
+  {
+    auto f = booted();
+    poke(f, nsacr, 0x0C00);
+    f.target->reset();
+    CHECK(f.word(nsacr) == 0);
+    CHECK(engine_read(f, UC_ARM_REG_NSACR) == 0);
+  }
 }
 
 TEST_CASE("FPCCR writes reach the engine by the D1.2.100 table, LSPEN forced 0, LSPACT RAZ/WI")

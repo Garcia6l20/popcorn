@@ -161,6 +161,7 @@ private:
   void               apply_security(bool restored);
   void               mirror_sau();
   void               mirror_cpacr() const;
+  void               mirror_nsacr() const;
   void               mirror_fpccr(bool s_bit) const;
   [[nodiscard]] auto engine_fpccr_s() const -> bool;
   [[nodiscard]] auto read_fpccr(security view) const -> std::uint32_t;

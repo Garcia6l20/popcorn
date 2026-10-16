@@ -140,6 +140,7 @@ void cortex_m::apply_security(bool restored)
       engine, state_.current == security::secure ? security::nonsecure : security::secure,
       state_.other);
   mirror_sau();
+  mirror_nsacr();
   if(core_.fpu)
   {
     mirror_cpacr();
@@ -173,6 +174,11 @@ void cortex_m::mirror_sau()
 void cortex_m::mirror_cpacr() const
 {
   write(UC_ARM_REG_CPACR_S, state_.scs.cpacr);
+}
+
+void cortex_m::mirror_nsacr() const
+{
+  write(UC_ARM_REG_NSACR, state_.scs.nsacr);
 }
 
 auto cortex_m::engine_fpccr_s() const -> bool

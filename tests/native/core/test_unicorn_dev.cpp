@@ -10,7 +10,7 @@
 
 TEST_CASE("version names the pinned Unicorn commit")
 {
-  CHECK(popcorn::core::version().find("f3ec5cd") != std::string_view::npos);
+  CHECK(popcorn::core::version().find("7a9c1a3") != std::string_view::npos);
 }
 
 TEST_CASE("open_m33 opens a Cortex-M33 engine")

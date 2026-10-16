@@ -969,6 +969,7 @@ void system_space::write_scs(
       if(secure_tz)
       {
         scs.nsacr = merge(scs.nsacr, value, mask & nsacr_writable);
+        core_.mirror_nsacr();
       }
       return;
     case 0xd94:
