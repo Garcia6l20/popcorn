@@ -27,7 +27,7 @@ struct builtin
   std::string_view instance_glob = "*";
 };
 
-constexpr std::array<builtin, 26> builtins{
+constexpr std::array<builtin, 27> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
@@ -55,6 +55,7 @@ constexpr std::array<builtin, 26> builtins{
      {"DBGMCU", "", [](board const&) { return dbgmcu_factory(); }},
      {"CRC", "integtest1_v2_0", [](board const&) { return crc_factory(); }},
      {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
+     {"GTZC", "tzsc1_v2_2*", [](board const&) { return gtzc_factory(); }},
      }
 };
 
@@ -92,6 +93,44 @@ struct idau_family
 constexpr std::array<idau_family, 1> idau_maps{
     {
      {"STM32U5*", u5_idau},
+     }
+};
+
+constexpr std::array<sram_blocks, 4> u575_mpcbb{
+    {
+     {.controller        = "GTZC1_MPCBB1",
+         .start             = 0x2000'0000,
+         .size              = 0x3'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC1_MPCBB2",
+         .start             = 0x2003'0000,
+         .size              = 0x1'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC1_MPCBB3",
+         .start             = 0x2004'0000,
+         .size              = 0x8'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC2_MPCBB4",
+         .start             = 0x2800'0000,
+         .size              = 0x4000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     }
+};
+
+struct mpcbb_family
+{
+  std::string_view             part_glob;
+  std::span<sram_blocks const> controllers;
+};
+
+constexpr std::array<mpcbb_family, 2> mpcbb_maps{
+    {
+     {"STM32U575*", u575_mpcbb},
+     {"STM32U585*", u575_mpcbb},
      }
 };
 
@@ -144,6 +183,24 @@ auto idau_map(part_description const& part) -> std::optional<std::span<idau_regi
     if(glob_match(family.part_glob, part.part))
     {
       return family.ranges;
+    }
+  }
+  return std::nullopt;
+}
+
+auto mpcbb_geometry(part_description const& part, std::string_view controller)
+    -> std::optional<sram_blocks>
+{
+  for(auto const& family : mpcbb_maps)
+  {
+    if(glob_match(family.part_glob, part.part))
+    {
+      auto const found =
+          std::ranges::find(family.controllers, controller, &sram_blocks::controller);
+      if(found != family.controllers.end())
+      {
+        return *found;
+      }
     }
   }
   return std::nullopt;

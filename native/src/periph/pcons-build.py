@@ -29,6 +29,7 @@ stm32 = [
         "dbgmcu.cpp",
         "crc.cpp",
         "hash.cpp",
+        "gtzc.cpp",
     )
 ]
 stm32_entry = here / "stm32" / "plugin.cpp"

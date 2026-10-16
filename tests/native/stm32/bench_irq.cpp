@@ -104,6 +104,7 @@ struct row
   std::uint32_t rate{};
   std::uint32_t stores{};
   std::int64_t  divisor = 1;
+  bool          trustzone{};
 };
 
 struct options
@@ -144,6 +145,9 @@ auto rows() -> std::vector<row>
     }
   }
   out.push_back({.name = "uart_tx", .entry = "uart_tx"});
+  out.push_back({.name = "poll/100k", .entry = "irq_unmask", .rate = 100'000u});
+  out.push_back(
+      {.name = "poll/100k/tz", .entry = "irq_unmask", .rate = 100'000u, .trustzone = true});
   return out;
 }
 
@@ -164,7 +168,15 @@ struct lone
     options.faults         = popcorn::arch::fault_policy::stop;
     options.spin_threshold = 0;
     options.models         = stm32::factories(board, u575());
-    target                 = std::make_unique<core::machine>(
+    if(r.trustzone)
+    {
+      options.models.erase("FLASH");
+      if(not stm32::configure_option_bytes(u575(), {.tzen = true}, options))
+      {
+        throw std::runtime_error{"the U575 refused TZEN=1"};
+      }
+    }
+    target = std::make_unique<core::machine>(
         u575(), popcorn::arch::armv8m::factory(), std::move(options));
     target->load(firmware());
     target->reset();

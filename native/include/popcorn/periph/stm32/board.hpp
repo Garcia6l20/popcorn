@@ -18,6 +18,7 @@
 #include <popcorn/periph/uart.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <map>
@@ -25,6 +26,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -120,6 +122,40 @@ struct option_refusal
  */
 [[nodiscard]] POPCORN_API auto idau_map(part_description const& part)
     -> std::optional<std::span<idau_region const>>;
+
+/**
+ * @brief SRAM a block-based memory protection controller covers, such as an STM32 GTZC MPCBB:
+ *        `size` bytes from `start`, in blocks of `block_size` bytes, `superblock_blocks` blocks
+ *        per super-block, one SECCFGR and one PRIVCFGR word each.
+ */
+struct sram_blocks
+{
+  /** @brief Controller instance, as the description spells it, such as `GTZC1_MPCBB1`. */
+  std::string_view controller;
+  /** @brief First address of the SRAM, in its Non-secure alias. */
+  address start{};
+  /** @brief Size of the SRAM in bytes. */
+  std::uint32_t size{};
+  /** @brief Bytes per block. */
+  std::uint32_t block_size{};
+  /** @brief Blocks per super-block. */
+  std::uint32_t superblock_blocks{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(sram_blocks const&, sram_blocks const&) -> bool = default;
+};
+
+/**
+ * @brief Geometry of a block-based memory protection controller of @p part, from the board
+ *        data of its family, which follows the CubeMX rzone `mpc` rows of the part.
+ * @param part Description the machine is built from.
+ * @param controller Controller instance, such as `GTZC1_MPCBB1`.
+ * @return The geometry, std::nullopt when the family has no table or the table no row for
+ *         @p controller.
+ */
+[[nodiscard]] POPCORN_API auto
+    mpcbb_geometry(part_description const& part, std::string_view controller)
+        -> std::optional<sram_blocks>;
 
 /**
  * @brief Sets up a machine to boot with @p wanted, so the FLASH model, the boot address and

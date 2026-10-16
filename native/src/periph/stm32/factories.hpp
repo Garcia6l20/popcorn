@@ -117,4 +117,8 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the HASH model, RM0456 section 51. */
 [[nodiscard]] auto hash_factory() -> model_factory;
+
+/** @brief Factory of the GTZC TZSC, TZIC and MPCBB models, RM0456 section 5. Returns no model
+ * without TrustZone: the GTZC registers then stay storage at their description reset values. */
+[[nodiscard]] auto gtzc_factory() -> model_factory;
 }
