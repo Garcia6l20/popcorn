@@ -925,3 +925,32 @@ TEST_CASE("a save whose old bytes do not fit in the array loads with none")
   other.flash.power_cut(vtime{state.busy_until - 1});
   CHECK(all_are(other.flash.contents().subspan(0x3000, 16), 0x00));
 }
+
+TEST_CASE("a save during a chip erase carries the whole array as its undo copy")
+{
+  host                   h;
+  std::vector<std::byte> idle;
+  h.flash.save(idle);
+  h.command({0x06});
+  auto const launch = std::chrono::steady_clock::now();
+  h.command({0x60});
+  auto const             copied = std::chrono::steady_clock::now();
+  std::vector<std::byte> saved;
+  h.flash.save(saved);
+  auto const done  = std::chrono::steady_clock::now();
+  auto const array = h.flash.contents().size();
+  CHECK(state_of(h.flash).undo.size() == array);
+  CHECK(saved.size() >= idle.size() + array);
+  MESSAGE(
+      "array "
+      << array
+      << " B, idle save "
+      << idle.size()
+      << " B, save while BUSY "
+      << saved.size()
+      << " B, launch with undo copy "
+      << std::chrono::duration_cast<std::chrono::microseconds>(copied - launch).count()
+      << " us, save "
+      << std::chrono::duration_cast<std::chrono::microseconds>(done - copied).count()
+      << " us");
+}

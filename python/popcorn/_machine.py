@@ -224,6 +224,10 @@ class Call:
     def stop(self, reason: StopReason = StopReason.USER) -> Return:
         """Stop the run at the function, before its body.
 
+        A parked `run` returns the stop. In a free run the stop ends it: a pending `wait_for`
+        returns it, and `halt()` or leaving `running()` raises EmulationError carrying it. A test
+        that cuts power at a function stops there, then calls `power_cycle()`.
+
         Raises:
             ValueError: `reason` is FAULT, which only the core raises.
         """
@@ -973,8 +977,8 @@ class Machine:
     def reset(self, kind: ResetKind = ResetKind.POWER_ON) -> None:
         """Reset: clock to 0, core from its vector table, peripherals to reset values.
 
-        Memory is kept. A member of a linked system resets through `System.reset`, its
-        system time running on unchanged.
+        Memory is kept. `power_cycle` is the supply cut that loses RAM. A member of a linked
+        system resets through `System.reset`, its system time running on unchanged.
 
         Raises:
             MachineRunning: The machine is busy, outside its handlers. For a member: the system
@@ -994,11 +998,14 @@ class Machine:
 
         Every RAM region reads 0, image segments and `memory_init` bytes placed in RAM
         included. Flash, OTP and the arrays of bus devices such as `At25sf` keep their contents,
-        the call arena too. A flash program or erase in flight at the cut leaves what the
-        model leaves of it, see the FLASH model and `At25sf`. Peripherals and the backup domain
-        reset as by `reset(ResetKind.POWER_ON)`, and the clock restarts at 0. Intercepts,
-        probes, watches and host-driven board state stay, as across that reset. Python models
-        and Python bus devices see only the reset.
+        the call arena too. On the STM32U5 FLASH a program or erase in flight keeps a prefix of
+        its quad-words by the virtual time of the cut, and the next quad-word is torn. Every CPU
+        or DMA load of a torn quad-word sets FLASH_ECCR.ECCD and raises the NMI once ECCD and
+        ECCC are clear, `m.mem` reads never do. A handler that returns with ECCD set is entered
+        again before the next instruction. For the AT25SF see `At25sf`. Peripherals and the
+        backup domain reset as by `reset(ResetKind.POWER_ON)`, and the clock restarts at 0.
+        Intercepts, probes, watches and host-driven board state stay, as across that reset.
+        Python models and Python bus devices see only the reset.
 
         Raises:
             MachineRunning: The machine is busy, outside its handlers, or the call comes from
