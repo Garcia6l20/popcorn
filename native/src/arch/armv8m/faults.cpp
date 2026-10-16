@@ -143,9 +143,9 @@ auto cortex_m::engine_fault(std::uint32_t intno) -> trap_result
       if((read(UC_ARM_REG_FAULT_STATUS) & fsr_status_mask) == fsr_alignment)
       {
         return raise_fault(
-            {.kind      = fault_kind::bus,
-             .target    = exc_busfault,
-             .cfsr_bits = cfsr::preciserr,
+            {.kind      = fault_kind::usage,
+             .target    = exc_usagefault,
+             .cfsr_bits = cfsr::unaligned,
              .reported  = at});
       }
       auto const accessed = read(UC_ARM_REG_FAULT_ADDRESS);

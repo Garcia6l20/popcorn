@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -472,11 +473,13 @@ TEST_CASE("ID registers, MVFR, CPACR and the M7 cache bits follow the profile")
   }
 }
 
-TEST_CASE("an unaligned LDREX on CM33 and CM4 keeps its fault address at the pc, no BFAR")
+TEST_CASE("an unaligned LDREX on CM33 and CM4 is a UsageFault UNALIGNED at the pc, no BFAR, B3.27")
 {
-  constexpr address       code_at  = 0x2008'0000;
-  constexpr address       at       = 0x2008'1001;
-  constexpr std::uint32_t bfar_set = 1u << 15;
+  constexpr address       code_at        = 0x2008'0000;
+  constexpr address       at             = 0x2008'1001;
+  constexpr std::uint32_t bfar_set       = 1u << 15;
+  constexpr std::uint32_t ufsr_unaligned = 1u << 24;
+  constexpr address       cfsr_at        = 0xE000'ED28;
   for(auto const* const variant : {"CM33", "CM4"})
   {
     CAPTURE(variant);
@@ -499,10 +502,65 @@ TEST_CASE("an unaligned LDREX on CM33 and CM4 keeps its fault address at the pc,
     auto const stopped = f.run_to_stop({.max_instructions = icount{2}});
     REQUIRE(stopped.reason == stop_reason::fault);
     REQUIRE(stopped.fault.has_value());
-    CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+    CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
     CHECK(stopped.fault->fault_address == code_at);
-    CHECK(stopped.fault->status == 0x0000'0200);
+    CHECK(stopped.fault->status == ufsr_unaligned);
     CHECK((stopped.fault->status & bfar_set) == 0);
+    CHECK(f.word(cfsr_at) == ufsr_unaligned);
     CHECK(f.reg("r1") == 0x77);
+  }
+}
+
+TEST_CASE("under enter_handler an unaligned LDREX takes the UsageFault, or HardFault FORCED, B3.27")
+{
+  constexpr address       code_at        = 0x2008'0000;
+  constexpr address       at             = 0x2008'1001;
+  constexpr std::uint32_t ufsr_unaligned = 1u << 24;
+  constexpr std::uint32_t bfarvalid      = 1u << 15;
+  constexpr std::uint32_t usgfaultena    = 1u << 18;
+  constexpr std::uint32_t busfaultena    = 1u << 17;
+  constexpr std::uint32_t hfsr_forced    = 1u << 30;
+  constexpr address       shcsr_at       = 0xE000'ED24;
+  constexpr address       cfsr_at        = 0xE000'ED28;
+  constexpr address       hfsr_at        = 0xE000'ED2C;
+  core::machine_options   enter;
+  enter.faults = arch::fault_policy::enter_handler;
+  for(auto const* const variant : {"CM33", "CM4"})
+  {
+    for(auto const usage_enabled : {true, false})
+    {
+      std::string const core{variant};
+      CAPTURE(core);
+      CAPTURE(usage_enabled);
+      auto f = std::string_view{variant} == "CM4" ? booted("faults", cm4, enter) : [&] {
+        arch_fixture booted_m33{m33(), "faults", enter};
+        REQUIRE(booted_m33.run_to_stop().reason == stop_reason::user);
+        return booted_m33;
+      }();
+      for(auto const& [offset, half] : {
+              std::pair{0u, 0xe850u},
+              {2u, 0x1f00u},
+              {4u, 0xbe01u}
+      })
+      {
+        REQUIRE(f.target->mem().write(code_at + offset, 2, half));
+      }
+      REQUIRE(f.target->mem().write(shcsr_at, 4, usage_enabled ? usgfaultena : busfaultena));
+      REQUIRE(f.target->mem().write(cfsr_at, 4, 0xffff'ffff));
+      REQUIRE(f.target->mem().write(hfsr_at, 4, 0xffff'ffff));
+      f.set("r0", at);
+      f.set("r1", 0x77);
+      f.set("pc", code_at | 1u);
+      auto const msp = static_cast<address>(f.reg("msp"));
+      std::ignore    = f.run({.max_instructions = icount{1}});
+      std::ignore    = f.run({.max_instructions = icount{1}});
+      CHECK((f.reg("xpsr") & 0x1ff) == (usage_enabled ? 6u : 3u));
+      CHECK(f.reg("msp") <= msp - 0x20);
+      CHECK(f.word(msp - 0x20 + 0x18) == code_at);
+      CHECK(f.word(cfsr_at) == ufsr_unaligned);
+      CHECK((f.word(cfsr_at) & bfarvalid) == 0);
+      CHECK(((f.word(hfsr_at) & hfsr_forced) != 0) == not usage_enabled);
+      CHECK(f.reg("r1") == 0x77);
+    }
   }
 }

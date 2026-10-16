@@ -467,3 +467,91 @@ TEST_CASE("Secure load and store loop timing on the TLB fast path" * doctest::sk
       "median %.3f spread %.3f\n", ns_per_iteration[runs / 2],
       ns_per_iteration.back() - ns_per_iteration.front());
 }
+
+namespace
+{
+struct alignment_probe
+{
+  int           intno{-1};
+  std::uint32_t status{};
+  std::uint32_t pc{};
+  uc_err        status_read{UC_ERR_OK};
+  uc_err        pc_read{UC_ERR_OK};
+  uc_err        stopped{UC_ERR_OK};
+};
+
+void on_alignment_abort(uc_engine* uc, std::uint32_t intno, void* user)
+{
+  auto& probe       = *static_cast<alignment_probe*>(user);
+  probe.intno       = static_cast<int>(intno);
+  probe.status_read = uc_reg_read(uc, UC_ARM_REG_FAULT_STATUS, &probe.status);
+  probe.pc_read     = uc_reg_read(uc, UC_ARM_REG_PC, &probe.pc);
+  probe.stopped     = uc_emu_stop(uc);
+}
+
+auto run_unaligned(uc_cpu_arm model, bool mclass, std::initializer_list<std::uint16_t> code)
+    -> alignment_probe
+{
+  uc_engine* raw  = nullptr;
+  auto const mode = mclass ? static_cast<uc_mode>(UC_MODE_THUMB | UC_MODE_MCLASS) : UC_MODE_THUMB;
+  REQUIRE(uc_open(UC_ARCH_ARM, mode, &raw) == UC_ERR_OK);
+  std::unique_ptr<uc_engine, engine_closer> const owned{raw};
+  REQUIRE(uc_ctl_set_cpu_model(raw, model) == UC_ERR_OK);
+  REQUIRE(uc_mem_map(raw, code_base, code_size, UC_PROT_ALL) == UC_ERR_OK);
+  REQUIRE(uc_mem_map(raw, sram_base, sram_size, UC_PROT_ALL) == UC_ERR_OK);
+  std::vector<std::uint16_t> const words{code};
+  REQUIRE(uc_mem_write(raw, code_base, words.data(), words.size() * 2) == UC_ERR_OK);
+  alignment_probe probe;
+  uc_hook         hook{};
+  REQUIRE(
+      uc_hook_add(
+          raw, &hook, UC_HOOK_INTR, reinterpret_cast<void*>(&on_alignment_abort), &probe, 1, 0)
+      == UC_ERR_OK);
+  std::uint32_t const at = sram_base + 0x101;
+  REQUIRE(uc_reg_write(raw, UC_ARM_REG_R0, &at) == UC_ERR_OK);
+  REQUIRE(
+      uc_emu_start(raw, code_base | 1, code_base + 2 * words.size(), 0, step_bound) == UC_ERR_OK);
+  CHECK(probe.status_read == UC_ERR_OK);
+  CHECK(probe.pc_read == UC_ERR_OK);
+  CHECK(probe.stopped == UC_ERR_OK);
+  return probe;
+}
+}
+
+TEST_CASE("the engine raises an alignment data abort, status 0x1, on every core model")
+{
+  constexpr std::uint32_t excp_data_abort = 4;
+  constexpr std::uint16_t ldr             = 0x6801;
+  struct row
+  {
+    std::string_view                     cpu;
+    uc_cpu_arm                           model;
+    bool                                 mclass;
+    std::initializer_list<std::uint16_t> code;
+    std::uint32_t                        status;
+  };
+  for(auto const& one : std::initializer_list<row>{
+          {"CM0 ldr",     UC_CPU_ARM_CORTEX_M0,  false, {ldr},            0x1},
+          {"CM3 ldrex",   UC_CPU_ARM_CORTEX_M3,  false, {0xe850, 0x1f00}, 0x1},
+          {"CM4 ldrex",   UC_CPU_ARM_CORTEX_M4,  false, {0xe850, 0x1f00}, 0x1},
+          {"CM7 ldrex",   UC_CPU_ARM_CORTEX_M7,  false, {0xe850, 0x1f00}, 0x1},
+          {"CM33 ldrex",  UC_CPU_ARM_CORTEX_M33, true,  {0xe850, 0x1f00}, 0x1},
+          {"CM33 ldrexh", UC_CPU_ARM_CORTEX_M33, true,  {0xe8d0, 0x1f5f}, 0x1},
+  })
+  {
+    CAPTURE(one.cpu);
+    auto const probe = run_unaligned(one.model, one.mclass, one.code);
+    CHECK(probe.intno == static_cast<int>(excp_data_abort));
+    CHECK((probe.status & 0x40f) == 0x1);
+    CHECK(probe.status == one.status);
+    CHECK(probe.pc == code_base);
+  }
+  for(auto const& [model, mclass] : {
+          std::pair{UC_CPU_ARM_CORTEX_M4,  false},
+          std::pair{UC_CPU_ARM_CORTEX_M33, true }
+  })
+  {
+    CAPTURE(model);
+    CHECK(run_unaligned(model, mclass, {ldr}).intno == -1);
+  }
+}
