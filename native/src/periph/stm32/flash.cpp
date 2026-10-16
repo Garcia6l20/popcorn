@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -89,6 +90,18 @@ auto all_of_byte(std::span<std::byte const> bytes, std::byte value) -> bool
 {
   return std::ranges::all_of(bytes, [value](std::byte b) { return b == value; });
 }
+
+auto physical(region_desc const& region, address addr) -> std::uint32_t
+{
+  return region.physical ? static_cast<std::uint32_t>(*region.physical + (addr - region.start))
+                         : static_cast<std::uint32_t>(addr);
+}
+
+struct bank_geometry
+{
+  std::uint32_t base{};
+  std::uint32_t size{};
+};
 
 constexpr std::uint64_t mhz = 1'000'000;
 
@@ -203,6 +216,19 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * PROGERR, RM0456 7.3.12. A partly filled write buffer is dropped. A reset of any kind outside
  * `power_cycle()`, a power-on reset or one a model requests included, still drops the operation
  * in flight.
+ *
+ * ECC, RM0456 7.3.2 and 7.9.11: a CPU or DMA load that reaches a torn quad-word, through either
+ * flash alias, is a double error. With ECCD and ECCC clear it sets ECCD, BK_ECC to the bank
+ * and ADDR_ECC to the quad-word's offset in its bank, and drives the NMI input. Once ECCD or
+ * ECCC is set, a new error updates nothing. The NMI input stays active while ECCD is set, so a
+ * handler that never clears ECCD is entered again on its return. Writing 1 to ECCD or ECCC
+ * clears it, ECCIE is stored, the other fields are read-only. Every reset kind clears
+ * FLASH_ECCR and lowers the NMI input, the torn quad-words stay. Deviations: host and debugger
+ * reads, instruction fetches and vector table reads never detect an error, where silicon
+ * raises the NMI on a debugger read too. ECCC is never set, as no single error is modelled, and
+ * ECCIE has no effect. The model keeps no read buffer, so every load of a torn quad-word reports
+ * once the flags are clear, where the 7.3.2 note lets a repeated read of a buffered line report
+ * nothing.
  */
 class flash final : public dispatch_model<flash, flash_state>,
                     public clock_listener,
@@ -228,6 +254,8 @@ public:
       std::uint8_t       size,
       std::uint32_t      value,
       access_ctx         ctx) -> std::expected<void, bus_error> override;
+  void on_memory_read(region_desc const& region, address addr, std::uint8_t size, access_ctx ctx)
+      override;
 
   void on_clock_change() override;
   void on_voltage_range_change() override;
@@ -236,6 +264,7 @@ public:
   void key_written(std::uint32_t old, std::uint32_t now);
   void control_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
+  void ecc_written(std::uint32_t old, std::uint32_t now);
 
 private:
   [[nodiscard]] auto busy() const -> bool;
@@ -256,6 +285,11 @@ private:
   void               tear_program(std::uint32_t full);
   void               tear_erase(std::uint32_t full);
   void               forget_torn(std::uint32_t from, std::uint32_t length);
+  void               sync_watches();
+  void               report_double_error(std::uint32_t line);
+  [[nodiscard]] auto banks() const -> bank_geometry;
+  [[nodiscard]] auto bank_of(std::uint32_t at) const -> std::uint32_t;
+  [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
   void               program();
   void               hold_hsi16(bool held);
   void               note_unmodelled_protection();
@@ -289,23 +323,30 @@ private:
   field_ref                                                         option_error_;
   field_ref                                                         busy_;
   field_ref                                                         waiting_;
+  field_ref                                                         ecc_detect_;
+  field_ref                                                         ecc_correct_;
+  field_ref                                                         ecc_bank_;
+  field_ref                                                         ecc_address_;
   irq_line&                                                         line_;
   field_ref                                                         latency_;
   field_ref                                                         low_power_read_;
   core::clock_domain                                                hclk_;
   std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> latency_logged_;
+  std::vector<std::uint32_t>                                        watched_;
   std::uint32_t                                                     clearable_{};
+  std::uint32_t                                                     written_{};
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
   bool                                                              protection_logged_{};
 };
 
-constexpr std::array<write_entry<flash>, 4> flash_writes{
+constexpr std::array<write_entry<flash>, 5> flash_writes{
     {
      {"FLASH_ACR", &flash::access_written},
      {"FLASH_NSKEYR", &flash::key_written},
      {"FLASH_NSCR", &flash::control_written},
      {"FLASH_NSSR", &flash::status_written},
+     {"FLASH_ECCR", &flash::ecc_written},
      }
 };
 
@@ -324,6 +365,8 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
       alignment_error_{field("FLASH_NSSR", "PGAERR")}, size_error_{field("FLASH_NSSR", "SIZERR")},
       sequence_error_{field("FLASH_NSSR", "PGSERR")}, option_error_{field("FLASH_NSSR", "OPTWERR")},
       busy_{field("FLASH_NSSR", "BSY")}, waiting_{field("FLASH_NSSR", "WDW")},
+      ecc_detect_{field("FLASH_ECCR", "ECCD")}, ecc_correct_{field("FLASH_ECCR", "ECCC")},
+      ecc_bank_{field("FLASH_ECCR", "BK_ECC")}, ecc_address_{field("FLASH_ECCR", "ADDR_ECC")},
       line_{irq("FLASH_IRQn")}, latency_{field("FLASH_ACR", "LATENCY")},
       low_power_read_{field("FLASH_ACR", "LPM")}, hclk_{ctx.clock.domain("hclk")}
 {
@@ -354,6 +397,7 @@ void flash::reset(register_file& regs, reset_kind)
   state_.generation     = generation + 1;
   state_.torn           = std::move(torn);
   line_.lower();
+  ctx_.nmi.lower();
 }
 
 void flash::power_cut()
@@ -381,6 +425,7 @@ void flash::power_cut()
   {
     tear_erase(full);
   }
+  sync_watches();
 }
 
 auto flash::duration_of(operation which, std::uint32_t length) const -> std::chrono::nanoseconds
@@ -484,6 +529,67 @@ void flash::forget_torn(std::uint32_t from, std::uint32_t length)
   state_.torn.erase(first, last);
 }
 
+void flash::sync_watches()
+{
+  std::vector<std::uint32_t> gone;
+  std::vector<std::uint32_t> added;
+  std::ranges::set_difference(watched_, state_.torn, std::back_inserter(gone));
+  std::ranges::set_difference(state_.torn, watched_, std::back_inserter(added));
+  for(auto const line : gone)
+  {
+    ctx_.services.watch_reads(line, quad_word, false);
+  }
+  for(auto const line : added)
+  {
+    ctx_.services.watch_reads(line, quad_word, true);
+  }
+  watched_ = state_.torn;
+}
+
+auto flash::banks() const -> bank_geometry
+{
+  contract_assert(storage_ != nullptr);
+  return {.base = static_cast<std::uint32_t>(storage_->start), .size = storage_->size / 2};
+}
+
+auto flash::bank_of(std::uint32_t at) const -> std::uint32_t
+{
+  auto const [base, size] = banks();
+  return (at - base) / size;
+}
+
+auto flash::bank_base(std::uint32_t at) const -> std::uint32_t
+{
+  auto const [base, size] = banks();
+  return base + bank_of(at) * size;
+}
+
+void flash::on_memory_read(region_desc const& region, address addr, std::uint8_t size, access_ctx)
+{
+  auto const at    = physical(region, addr);
+  auto const first = at & ~(quad_word - 1);
+  auto const last  = (at + size - 1) & ~(quad_word - 1);
+  for(auto line = first; line <= last; line += quad_word)
+  {
+    if(std::ranges::binary_search(state_.torn, line))
+    {
+      report_double_error(line);
+    }
+  }
+}
+
+void flash::report_double_error(std::uint32_t line)
+{
+  if(get(regs_, ecc_detect_) != 0 or get(regs_, ecc_correct_) != 0)
+  {
+    return;
+  }
+  update(regs_, ecc_address_, line - bank_base(line));
+  update(regs_, ecc_bank_, bank_of(line));
+  update(regs_, ecc_detect_, 1);
+  ctx_.nmi.raise();
+}
+
 auto flash::busy() const -> bool
 {
   return static_cast<operation>(state_.running) != operation::none;
@@ -560,6 +666,7 @@ auto flash::on_write(
     std::uint32_t  value,
     access_ctx     ctx) -> std::expected<void, bus_error>
 {
+  written_        = merge_write(0, offset, size, value);
   auto const done = dispatch_model::on_write(regs, offset, size, old, value, ctx);
   if(std::exchange(rejected_, false))
   {
@@ -575,11 +682,8 @@ auto flash::on_memory_write(
     std::uint32_t      value,
     access_ctx         ctx) -> std::expected<void, bus_error>
 {
-  auto const       at = region.physical
-                          ? static_cast<std::uint32_t>(*region.physical + (addr - region.start))
-                          : static_cast<std::uint32_t>(addr);
   held_store const one{
-      .addr    = at,
+      .addr    = physical(region, addr),
       .size    = size,
       .value   = value,
       .control = regs_.peek(program_.offset),
@@ -664,8 +768,7 @@ void flash::start_erase(std::uint32_t control)
     warn("FLASH_NSCR", "erase requested, but no flash region names FLASH as its controller");
     return;
   }
-  auto const bank_size = storage_->size / 2;
-  auto const base      = static_cast<std::uint32_t>(storage_->start);
+  auto const [base, bank_size] = banks();
   if(page_erase_.of(control) != 0)
   {
     auto const pages = bank_size / page_size;
@@ -727,6 +830,7 @@ void flash::finish()
     std::vector<std::byte> const erased(state_.length, std::byte{0xff});
     static_cast<void>(ctx_.services.write_block(state_.target, erased, initiator::debugger));
     forget_torn(state_.target, state_.length);
+    sync_watches();
     update(regs_, start_, 0);
   }
   if(errors_pending() == errors and get(regs_, end_irq_) != 0)
@@ -793,6 +897,7 @@ void flash::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
   latency_logged_.clear();
+  sync_watches();
 }
 
 void flash::on_clock_change()
@@ -905,6 +1010,16 @@ void flash::status_written(std::uint32_t old, std::uint32_t now)
 {
   regs_.poke(status_.offset, old & ~(now & clearable_));
   interrupt();
+}
+
+void flash::ecc_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const flags = ecc_detect_.mask() | ecc_correct_.mask();
+  regs_.poke(ecc_detect_.offset, (now & ~flags) | (old & flags & ~written_));
+  if(get(regs_, ecc_detect_) == 0)
+  {
+    ctx_.nmi.lower();
+  }
 }
 }
 
