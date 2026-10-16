@@ -568,7 +568,8 @@ public:
    * @throws emulation_error when @p saved was taken by another machine.
    * @throws config_error when a snapshot read back from bytes names another description, other
    *         images or another `machine_options::config_digest`, or has another format, or when its
-   * memory regions, the scratch region included, are not this machine's.
+   * memory regions, the scratch region included, are not this machine's, and keyed
+   *         `trustzone` when its `machine_options::trustzone` or `machine_options::idau` differs.
    */
   void restore(core::snapshot const& saved);
 

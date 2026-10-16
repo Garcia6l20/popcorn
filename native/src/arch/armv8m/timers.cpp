@@ -15,7 +15,8 @@ namespace popcorn::arch::armv8m
 {
 namespace
 {
-constexpr std::uint32_t systick_event     = 1;
+constexpr std::uint32_t systick_event           = 1;
+constexpr std::uint32_t systick_nonsecure_event = 2;
 constexpr std::uint32_t syst_csr_writable = systick::enable | systick::tickint | systick::clksource;
 constexpr std::uint32_t syst_rvr_writable = 0x00ff'ffff;
 constexpr std::uint32_t dwt_cyccntena     = 1u << 0;
@@ -40,9 +41,14 @@ auto cortex_m::timer_now() const -> std::uint64_t
   return state_.held_at.value_or(context_->clock.now().value);
 }
 
-auto cortex_m::systick_ticks() const -> std::uint64_t
+auto cortex_m::systick_of(security bank) noexcept -> systick_state&
 {
-  return systick::ticks(state_.systick, timer_now(), context_->clock.cpi());
+  return bank == security::secure ? state_.systick : state_.systick_nonsecure;
+}
+
+auto cortex_m::systick_ticks(systick_state const& s) const -> std::uint64_t
+{
+  return systick::ticks(s, timer_now(), context_->clock.cpi());
 }
 
 void cortex_m::hold_core(bool held)
@@ -61,14 +67,15 @@ void cortex_m::hold_core(bool held)
   auto const span = now - *state_.held_at;
   state_.held_at.reset();
   state_.systick.anchor += span;
+  state_.systick_nonsecure.anchor += span;
   state_.cyccnt.anchor += span;
-  arm_systick();
+  arm_systicks();
 }
 
-auto cortex_m::read_systick(std::uint32_t offset) -> std::uint32_t
+auto cortex_m::read_systick(std::uint32_t offset, security bank) -> std::uint32_t
 {
-  auto&      s = state_.systick;
-  auto const t = systick_ticks();
+  auto&      s = systick_of(bank);
+  auto const t = systick_ticks(s);
   take_passed_reload(s, t);
   switch(offset)
   {
@@ -88,11 +95,15 @@ auto cortex_m::read_systick(std::uint32_t offset) -> std::uint32_t
   }
 }
 
-void cortex_m::write_systick(std::uint32_t offset, std::uint32_t value, std::uint32_t mask)
+void cortex_m::write_systick(
+    std::uint32_t offset,
+    std::uint32_t value,
+    std::uint32_t mask,
+    security      bank)
 {
-  auto&      s   = state_.systick;
+  auto&      s   = systick_of(bank);
   auto const now = timer_now();
-  auto const t   = systick_ticks();
+  auto const t   = systick_ticks(s);
   take_passed_reload(s, t);
   auto const csr     = s.csr;
   auto const current = systick::value_at(s, t);
@@ -100,7 +111,14 @@ void cortex_m::write_systick(std::uint32_t offset, std::uint32_t value, std::uin
   auto const pending = t < systick::start_tick(s) ? s.reload : std::nullopt;
   if(systick::interrupting(s) and systick::crossings_through(s, t) > s.fired)
   {
-    set_exception_pending(exc_systick, true);
+    if(bank == security::secure)
+    {
+      set_exception_pending(exc_systick, true);
+    }
+    else
+    {
+      set_nonsecure_pending(exc_systick, true);
+    }
   }
   if(offset == 0x010)
   {
@@ -125,12 +143,21 @@ void cortex_m::write_systick(std::uint32_t offset, std::uint32_t value, std::uin
   s.flag_since = 0;
   s.fired      = 0;
   ++generation_;
-  arm_systick();
+  arm_systicks();
 }
 
-void cortex_m::arm_systick()
+void cortex_m::arm_systicks()
 {
-  auto const& s = state_.systick;
+  arm_systick(security::secure);
+  if(trustzone())
+  {
+    arm_systick(security::nonsecure);
+  }
+}
+
+void cortex_m::arm_systick(security bank)
+{
+  auto const& s = systick_of(bank);
   if(not systick::interrupting(s) or state_.held_at)
   {
     return;
@@ -142,19 +169,32 @@ void cortex_m::arm_systick()
   }
   auto const& clock = context_->clock;
   auto const  at    = std::max(systick::expiry(s, *next, clock.cpi()), clock.now().value);
-  std::ignore       = context_->events.schedule(icount{at}, systick_event, generation_);
+  std::ignore       = context_->events.schedule(
+      icount{at}, bank == security::secure ? systick_event : systick_nonsecure_event, generation_);
 }
 
 void cortex_m::on_event(std::uint32_t kind, std::uint64_t payload)
 {
-  auto& s = state_.systick;
-  if(kind != systick_event or payload != generation_ or not systick::interrupting(s))
+  if((kind != systick_event and kind != systick_nonsecure_event) or payload != generation_)
   {
     return;
   }
-  s.fired = systick::crossings_through(s, systick_ticks());
-  set_exception_pending(exc_systick, true);
-  arm_systick();
+  auto const bank = kind == systick_event ? security::secure : security::nonsecure;
+  auto&      s    = systick_of(bank);
+  if(not systick::interrupting(s))
+  {
+    return;
+  }
+  s.fired = systick::crossings_through(s, systick_ticks(s));
+  if(bank == security::secure)
+  {
+    set_exception_pending(exc_systick, true);
+  }
+  else
+  {
+    set_nonsecure_pending(exc_systick, true);
+  }
+  arm_systick(bank);
 }
 
 auto cortex_m::cyccnt_counting() const noexcept -> bool

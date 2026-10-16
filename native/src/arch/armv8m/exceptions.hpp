@@ -173,6 +173,14 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
     -> std::optional<std::uint32_t>;
 
 /**
+ * @brief best_pending() as a plain number, 0 when nothing is pending, exception 0 never being
+ *        one. The hot path of delivery: no optional crosses the call.
+ */
+[[nodiscard]] auto
+    best_pending_number(exception_state const& exceptions, bool synchronous_only = false) noexcept
+    -> std::uint32_t;
+
+/**
  * @brief Whether any exception from 2 below @p count is pending and enabled, as best_pending
  *        counts them.
  * @param exceptions Exception state.
@@ -204,4 +212,31 @@ void set_context(uc_struct* engine, special_registers const& target, bool stack_
  * @throws emulation_error when the engine refuses a read or write.
  */
 [[nodiscard]] auto read_special(uc_struct* engine, bool stack_limits) -> special_registers;
+
+/**
+ * @brief Reads the security state of a core with the Security Extension.
+ * @throws emulation_error when the engine refuses the read.
+ */
+[[nodiscard]] auto read_security(uc_struct* engine) -> security;
+
+/**
+ * @brief Switches the security state as BXNS does, the stack pointers moving between the banks.
+ *        Called only while the engine is stopped.
+ * @throws emulation_error when the engine refuses the write.
+ */
+void write_security(uc_struct* engine, security state);
+
+/**
+ * @brief Reads the special registers of one security state, in any state and mode.
+ * @throws emulation_error when the engine refuses a read.
+ */
+[[nodiscard]] auto read_bank(uc_struct* engine, security bank) -> special_bank;
+
+/**
+ * @brief Writes the special registers of the security state the core is not in. Written after
+ *        set_context() of the current state: a CONTROL_S write then restores SFPA and FPCA, which
+ *        a Non-secure CONTROL write cannot reach.
+ * @throws emulation_error when the engine refuses a write.
+ */
+void write_bank(uc_struct* engine, security bank, special_bank const& values);
 }

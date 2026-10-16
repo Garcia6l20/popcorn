@@ -7,6 +7,7 @@ armv8m = [
     for name in (
         "cortex_m.cpp",
         "system_space.cpp",
+        "security.cpp",
         "exceptions.cpp",
         "timers.cpp",
         "faults.cpp",

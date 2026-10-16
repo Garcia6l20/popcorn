@@ -510,6 +510,42 @@ void summary(std::vector<row> const& chosen, std::map<std::string, collected> co
   std::fflush(stdout);
 }
 
+constexpr std::size_t snapshot_cycles = 200;
+constexpr auto        snapshot_row    = std::string_view{"snapshot"};
+
+auto measure_snapshot(options const& how) -> double
+{
+  lone m{
+      {.name = std::string{snapshot_row}, .entry = "irq_rate"}
+  };
+  m.run_to(how.warmup_ms * ms_ps);
+  auto const from = clock_type::now();
+  for(std::size_t cycle = 0; cycle < snapshot_cycles; ++cycle)
+  {
+    auto const bytes = core::encode_snapshot(m.target->snapshot().data());
+    m.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  }
+  auto const wall = std::chrono::duration<double, std::micro>(clock_type::now() - from).count();
+  return wall / static_cast<double>(snapshot_cycles);
+}
+
+void bench_snapshot(options const& how)
+{
+  std::vector<double> samples;
+  for(std::int64_t run = 0; run < how.runs; ++run)
+  {
+    samples.push_back(measure_snapshot(how));
+    std::println("run={} row={} us_per_cycle={:.3f}", run, snapshot_row, samples.back());
+    std::fflush(stdout);
+  }
+  std::println(
+      "\n| row | median us/cycle | min | max |\n|---|---|---|---|\n| {} | {:.3f} | {:.3f} | {:.3f} "
+      "|",
+      snapshot_row, median(samples), *std::ranges::min_element(samples),
+      *std::ranges::max_element(samples));
+  std::fflush(stdout);
+}
+
 auto bench(options const& how) -> int
 {
   std::println(
@@ -521,18 +557,30 @@ auto bench(options const& how) -> int
   {
     std::filesystem::create_directories(*how.dump_dir);
   }
+  auto const named = [&](std::string_view name) {
+    return how.only
+       and std::ranges::contains(
+               std::views::split(*how.only, ',') | std::views::transform([](auto part) {
+                 return std::string_view{part.begin(), part.end()};
+               }),
+               name);
+  };
+  if(named(snapshot_row))
+  {
+    bench_snapshot(how);
+  }
   std::vector<row> chosen;
   for(auto const& r : rows())
   {
-    if(not how.only
-       or std::ranges::contains(
-           std::views::split(*how.only, ',') | std::views::transform([](auto part) {
-             return std::string_view{part.begin(), part.end()};
-           }),
-           std::string_view{r.name}))
+    if(not how.only or named(r.name))
     {
       chosen.push_back(r);
     }
+  }
+  if(chosen.empty())
+  {
+    env_line();
+    return 0;
   }
   std::map<std::string, collected>   results;
   std::map<std::string, std::string> references;

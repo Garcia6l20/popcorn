@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <print>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -58,14 +59,43 @@ auto symbol(std::string_view name) -> address
   return rtos_image().lookup(name).value;
 }
 
+bool trustzone = false;
+
+auto description() -> popcorn::part_description
+{
+  auto desc = popcorn::load_description(POPCORN_M33_DESC);
+  if(trustzone)
+  {
+    desc.core.trustzone          = true;
+    desc.core.sau_regions        = 8;
+    desc.core.mpu_regions_secure = 8;
+  }
+  return desc;
+}
+
+auto options() -> core::machine_options
+{
+  core::machine_options out;
+  if(trustzone)
+  {
+    out.trustzone = true;
+    out.idau      = {
+        {.start = 0x0000'0000, .end = 0x0C00'0000, .nsc = false, .exempt = false},
+        {.start = 0x0C00'0000, .end = 0x1000'0000, .nsc = true,  .exempt = false},
+        {.start = 0x1000'0000, .end = 0xE000'0000, .nsc = false, .exempt = false},
+    };
+  }
+  return out;
+}
+
 auto booted() -> std::unique_ptr<core::machine>
 {
   auto target = std::make_unique<core::machine>(
-      popcorn::load_description(POPCORN_M33_DESC),
+      description(),
       [](popcorn::core_desc const& core) -> std::unique_ptr<popcorn::arch::arch> {
         return std::make_unique<popcorn::arch::armv8m::cortex_m>(core);
       },
-      core::machine_options{});
+      options());
   target->load(rtos_image());
   target->reset();
   auto const boot = target->run_slice({.wall_budget = std::chrono::seconds{10}});
@@ -143,8 +173,9 @@ auto reps_from(std::span<char*> args) -> int
 
 auto main(int argc, char** argv) -> int
 {
-  auto const            args = std::span{argv, static_cast<std::size_t>(argc)};
-  auto const            reps = reps_from(args);
+  auto const args = std::span{argv, static_cast<std::size_t>(argc)};
+  auto const reps = reps_from(args);
+  trustzone       = std::ranges::contains(args | std::views::drop(1), std::string_view{"--tz"});
   std::vector<scenario> scenarios{
       {"alu",            [] { return entry_run("bench_loop", alu_loops); }      },
       {"irq-rate",       [] { return entry_run("bench_irq_rate", alu_loops); }  },

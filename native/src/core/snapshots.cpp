@@ -71,6 +71,8 @@ auto machine::snapshot() const -> core::snapshot
       .image_digests      = digests(images_),
       .config_digest      = options_.config_digest,
       .generation         = generation_,
+      .trustzone          = options_.trustzone,
+      .idau               = options_.idau,
   };
   for(auto const& region : memory_)
   {
@@ -192,6 +194,13 @@ void machine::restore(core::snapshot const& saved)
           "config_digest",
           std::format("the config digest of this machine, {}", options_.config_digest));
     }
+  }
+  if(data.trustzone != options_.trustzone or data.idau != options_.idau)
+  {
+    refuse(
+        "trustzone", std::format(
+                         "a snapshot of a machine with trustzone {} and the same IDAU ranges",
+                         options_.trustzone));
   }
 
   auto const holds = [](memory_image const* image, region_desc const& region) {

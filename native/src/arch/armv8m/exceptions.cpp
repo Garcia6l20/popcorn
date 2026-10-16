@@ -187,12 +187,12 @@ auto scanned_words(exception_state const& exceptions, std::uint32_t count) noexc
 }
 }
 
-auto best_pending(exception_state const& exceptions, bool synchronous_only) noexcept
-    -> std::optional<std::uint32_t>
+auto best_pending_number(exception_state const& exceptions, bool synchronous_only) noexcept
+    -> std::uint32_t
 {
-  auto const                   count = static_cast<std::uint32_t>(exceptions.priority.size());
-  std::optional<std::uint32_t> best;
-  auto                         best_priority = 0;
+  auto const    count         = static_cast<std::uint32_t>(exceptions.priority.size());
+  std::uint32_t best          = 0;
+  auto          best_priority = 0;
   for(std::size_t word = 0; word < scanned_words(exceptions, count); ++word)
   {
     for(auto bits = candidates(exceptions, word, count, synchronous_only); bits != 0;
@@ -201,7 +201,7 @@ auto best_pending(exception_state const& exceptions, bool synchronous_only) noex
       auto const number   = static_cast<std::uint32_t>(word * 32)
                           + static_cast<std::uint32_t>(std::countr_zero(bits));
       auto const priority = priority_of(exceptions, number);
-      if(not best or priority < best_priority)
+      if(best == 0 or priority < best_priority)
       {
         best          = number;
         best_priority = priority;
@@ -209,6 +209,13 @@ auto best_pending(exception_state const& exceptions, bool synchronous_only) noex
     }
   }
   return best;
+}
+
+auto best_pending(exception_state const& exceptions, bool synchronous_only) noexcept
+    -> std::optional<std::uint32_t>
+{
+  auto const best = best_pending_number(exceptions, synchronous_only);
+  return best == 0 ? std::nullopt : std::optional{best};
 }
 
 auto any_pending(
@@ -275,6 +282,67 @@ auto read_special(uc_struct* engine, bool stack_limits) -> special_registers
     write(engine, UC_ARM_REG_IPSR, 0, "IPSR");
   }
   return out;
+}
+
+namespace
+{
+struct bank_ids
+{
+  uc_arm_reg control, primask, basepri, faultmask, msp, psp, msplim, psplim;
+};
+
+constexpr std::array<bank_ids, 2> banked_ids{
+    bank_ids{
+             UC_ARM_REG_CONTROL_NS, UC_ARM_REG_PRIMASK_NS, UC_ARM_REG_BASEPRI_NS,
+             UC_ARM_REG_FAULTMASK_NS,                                                                     UC_ARM_REG_MSP_NS, UC_ARM_REG_PSP_NS, UC_ARM_REG_MSPLIM_NS,
+             UC_ARM_REG_PSPLIM_NS                                                                                                                                                        },
+    bank_ids{
+             UC_ARM_REG_CONTROL_S,  UC_ARM_REG_PRIMASK_S,  UC_ARM_REG_BASEPRI_S,  UC_ARM_REG_FAULTMASK_S,
+             UC_ARM_REG_MSP_S,                                                                                               UC_ARM_REG_PSP_S,  UC_ARM_REG_MSPLIM_S,  UC_ARM_REG_PSPLIM_S},
+};
+
+auto ids_of(security bank) noexcept -> bank_ids const&
+{
+  return banked_ids[static_cast<std::size_t>(bank)];
+}
+}
+
+auto read_security(uc_struct* engine) -> security
+{
+  return read(engine, UC_ARM_REG_SECURE, "SECURE") != 0 ? security::secure : security::nonsecure;
+}
+
+void write_security(uc_struct* engine, security state)
+{
+  write(engine, UC_ARM_REG_SECURE, state == security::secure ? 1u : 0u, "SECURE");
+}
+
+auto read_bank(uc_struct* engine, security bank) -> special_bank
+{
+  auto const& ids = ids_of(bank);
+  return {
+      .control   = read(engine, ids.control, "CONTROL of a bank"),
+      .primask   = read(engine, ids.primask, "PRIMASK of a bank"),
+      .basepri   = read(engine, ids.basepri, "BASEPRI of a bank"),
+      .faultmask = read(engine, ids.faultmask, "FAULTMASK of a bank"),
+      .msp       = read(engine, ids.msp, "MSP of a bank"),
+      .psp       = read(engine, ids.psp, "PSP of a bank"),
+      .msplim    = read(engine, ids.msplim, "MSPLIM of a bank"),
+      .psplim    = read(engine, ids.psplim, "PSPLIM of a bank"),
+  };
+}
+
+void write_bank(uc_struct* engine, security bank, special_bank const& values)
+{
+  auto const& ids = ids_of(bank);
+  write(engine, ids.control, values.control, "CONTROL of a bank");
+  write(engine, ids.msp, values.msp, "MSP of a bank");
+  write(engine, ids.psp, values.psp, "PSP of a bank");
+  write(engine, ids.primask, values.primask, "PRIMASK of a bank");
+  write(engine, ids.basepri, values.basepri, "BASEPRI of a bank");
+  write(engine, ids.faultmask, values.faultmask, "FAULTMASK of a bank");
+  write(engine, ids.msplim, values.msplim, "MSPLIM of a bank");
+  write(engine, ids.psplim, values.psplim, "PSPLIM of a bank");
 }
 
 auto cortex_m::enter(std::uint32_t number) -> trap_result

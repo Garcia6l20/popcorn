@@ -115,6 +115,16 @@ private:
     window    which{};
   };
 
+  struct mpu_bank
+  {
+    std::uint32_t&              ctrl;
+    std::uint32_t&              rnr;
+    std::uint32_t&              mair0;
+    std::uint32_t&              mair1;
+    std::vector<std::uint32_t>& rbar;
+    std::vector<std::uint32_t>& rlar;
+  };
+
   struct context_free
   {
     void operator()(uc_context* saved) const noexcept;
@@ -134,11 +144,37 @@ private:
       uc_mem_attrs  attrs,
       void*         user) noexcept;
 
+  static void idau_lookup(
+      void*         user,
+      std::uint32_t address,
+      int*          region,
+      bool*         exempt,
+      bool*         ns,
+      bool*         nsc) noexcept;
+
+  [[nodiscard]] auto trustzone() const noexcept -> bool;
+  [[nodiscard]] auto view_of(window which) const noexcept -> std::optional<security>;
+  [[nodiscard]] auto mpu_of(security view) noexcept -> mpu_bank;
+  [[nodiscard]] auto mpu_regions_of(security view) const noexcept -> std::uint8_t;
+  [[nodiscard]] auto nonsecure_cpacr_mask() const noexcept -> std::uint32_t;
+  void               attach_security();
+  void               apply_security(bool restored);
+  void               mirror_sau();
+  void               mirror_cpacr() const;
+  void               mirror_fpccr(bool s_bit) const;
+  [[nodiscard]] auto engine_fpccr_s() const -> bool;
+  [[nodiscard]] auto read_fpccr(security view) const -> std::uint32_t;
+  void               write_fpccr(std::uint32_t value, std::uint32_t mask, security view);
+  void               sau_changed();
+  void               set_nonsecure_pending(std::uint32_t number, bool value) noexcept;
+
   [[nodiscard]] auto timer_now() const -> std::uint64_t;
-  [[nodiscard]] auto systick_ticks() const -> std::uint64_t;
-  auto               read_systick(std::uint32_t offset) -> std::uint32_t;
-  void               write_systick(std::uint32_t offset, std::uint32_t value, std::uint32_t mask);
-  void               arm_systick();
+  [[nodiscard]] auto systick_of(security bank) noexcept -> systick_state&;
+  [[nodiscard]] auto systick_ticks(systick_state const& s) const -> std::uint64_t;
+  auto               read_systick(std::uint32_t offset, security bank) -> std::uint32_t;
+  void write_systick(std::uint32_t offset, std::uint32_t value, std::uint32_t mask, security bank);
+  void arm_systick(security bank);
+  void arm_systicks();
   [[nodiscard]] auto cyccnt_counting() const noexcept -> bool;
   [[nodiscard]] auto read_cyccnt() const -> std::uint32_t;
   void               rebase_cyccnt(std::uint32_t value);
@@ -179,7 +215,7 @@ private:
   std::optional<arch_context>               context_{};
   state                                     state_{};
   std::unique_ptr<uc_context, context_free> pristine_{};
-  std::array<window_user, 4>                windows_{};
+  std::array<window_user, 5>                windows_{};
   uc_mem_attrs                              access_{};
   mutable std::exception_ptr                failure_{};
   std::uint64_t                             generation_{};

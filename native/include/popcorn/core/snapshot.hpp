@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/description.hpp>
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
@@ -164,6 +165,14 @@ struct snapshot_data
   std::string config_digest{};
   /** @brief Machine generation when the snapshot was taken. */
   std::uint64_t generation{};
+  /** @brief `machine_options::trustzone` of the machine that took the snapshot. Absent from saves
+   * before it existed, which load as false. A restore into a machine with another value is
+   * refused. */
+  bool trustzone{};
+  /** @brief `machine_options::idau` of the machine that took the snapshot, empty without
+   * TrustZone and in saves before it existed. A restore into a machine with other ranges is
+   * refused. */
+  std::vector<idau_region> idau{};
   /** @brief Every mapped RAM and flash region, in description order, then the scratch region of
    * `machine_options::scratch`. MMIO is not memory. */
   std::vector<memory_image> memory{};
