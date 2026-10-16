@@ -543,7 +543,7 @@ TEST_CASE("a snapshot taken with the NMI line high restores its level and count"
   CHECK(nmi_input(f));
   CHECK(f.module->is_pending(armv8m::exc_nmi));
   auto const before = log_of(f).size();
-  f.set("pc", fn("probe_setup") | 1u);
+  f.set("pc", fn("probe_setup"));
   REQUIRE(
       f.run_to_stop({.max_instructions = popcorn::icount{1'000'000}}).reason == stop_reason::user);
   CHECK(nmi_entries(f, before) == 3);

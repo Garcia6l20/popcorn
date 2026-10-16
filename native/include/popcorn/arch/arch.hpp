@@ -489,6 +489,22 @@ public:
   {}
 
   /**
+   * @brief Value the engine receives for a host write of a register through
+   *        core::register_view, a debugger write. The default passes @p value through. The
+   *        Cortex-M module keeps EPSR.T on a pc write, DDI0553B.z RXCCB: writing bit 0 of a
+   *        DebugReturnAddress does not affect EPSR.T.
+   * @param reg Register written.
+   * @param value Value the host wrote.
+   * @return Value written to the engine register.
+   */
+  [[nodiscard]] virtual auto
+      host_register_value([[maybe_unused]] cpu_register const& reg, std::uint64_t value) const
+      -> std::uint64_t
+  {
+    return value;
+  }
+
+  /**
    * @brief Reads the return value of a call that reached its sentinel.
    * @param frame Frame given to prepare_call().
    * @return Value bits of type `frame.returns`, a float as its IEEE 754 bit pattern.

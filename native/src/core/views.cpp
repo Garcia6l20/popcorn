@@ -87,6 +87,7 @@ void register_view::write(arch::cpu_register const& reg, std::uint64_t value) co
   machine_->run_->coverage.has_previous = false;
   auto* const engine                    = machine_->engine_.get();
   auto const  what                      = std::format("writing register {}", reg.name);
+  value                                 = machine_->arch_->host_register_value(reg, value);
   if(reg.bits > 32)
   {
     check(uc_reg_write(engine, reg.engine_id, &value), what);

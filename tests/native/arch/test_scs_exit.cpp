@@ -247,3 +247,51 @@ TEST_CASE("the SCS asks for an exit only when a store makes an exception deliver
   store(shpr3, 0);
   CHECK(services.instruction_ends == 1);
 }
+
+TEST_CASE("an even pc written by the host keeps the Thumb state when an IRQ is taken first")
+{
+  auto const f = booted();
+  REQUIRE(f.target->mem().write(ispr0, 4, 1u << testdev_irq));
+  auto const resume = sym("irq", "scs_raise_next");
+  REQUIRE(resume % 2 == 0);
+  f.set("pc", resume);
+  f.set("r1", 1);
+  f.set("r2", testdev);
+  f.set("r3", handler_value);
+  for(auto const name : {"r4", "r5", "r6", "r7"})
+  {
+    f.set(name, 0);
+  }
+  CHECK(f.reg("pc") == resume);
+  CHECK((f.reg("xpsr") & 0x0100'0000u) != 0);
+  auto const stop = f.run_to_stop({.max_instructions = popcorn::icount{100}});
+  CHECK(stop.reason == stop_reason::user);
+  CHECK(f.reg("r4") == 1);
+  CHECK(f.reg("r5") == 0);
+  CHECK(data_writes(f) == std::vector<std::uint32_t>{handler_value, 1});
+}
+
+TEST_CASE("a host pc write leaves a clear Thumb state clear, whatever bit 0")
+{
+  auto const f      = booted();
+  auto const resume = sym("irq", "scs_raise_next");
+  f.set("xpsr", 0);
+  f.set("pc", resume | 1u);
+  CHECK((f.reg("xpsr") & 0x0100'0000u) == 0);
+  CHECK(f.reg("pc") == resume);
+}
+
+TEST_CASE("a run resumed with the Thumb state cleared by the host faults at once")
+{
+  auto const f      = booted();
+  auto const resume = sym("irq", "scs_raise_next");
+  f.set("pc", resume);
+  f.set("r1", 1);
+  f.set("r2", testdev);
+  f.set("r4", 0);
+  f.set("xpsr", 0);
+  auto const stop = f.run_to_stop({.max_instructions = popcorn::icount{100}});
+  REQUIRE(stop.reason == stop_reason::fault);
+  CHECK(stop.fault->kind == popcorn::fault_kind::usage);
+  CHECK(f.reg("r4") == 0);
+}

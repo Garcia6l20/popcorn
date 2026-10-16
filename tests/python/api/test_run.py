@@ -10,9 +10,11 @@ import popcorn
 import pytest
 from popcorn.units import MHz, VirtualDuration, VirtualTime, ms
 
-from .conftest import CALLEE_ELF, Machines
+from .conftest import CALLEE_ELF, ISR_ELF, Machines, run_bounded
 
 M33_RESET_CLOCK = MHz(4)
+NVIC_ISPR0 = 0xE000_E200
+ISR_FIRST_IRQ = 1
 
 
 def test_until_a_symbol_stops_exactly_before_it_with_its_source_line(
@@ -418,3 +420,19 @@ def test_the_parked_pre_check_of_wait_until_may_request(machines: Machines) -> N
 
     held, requested = asyncio.run(scenario())
     assert held == requested == m.time
+
+
+def test_an_even_pc_written_with_an_irq_pending_returns_to_it_in_thumb_state(
+    m33: popcorn.PartDescription,
+) -> None:
+    m = popcorn.Machine(m33, image=popcorn.Image.elf(ISR_ELF))
+    m.reset()
+    stop = run_bounded(m.run(until="run_rounds", budget=10_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS
+    m.mem.write(NVIC_ISPR0, (1 << ISR_FIRST_IRQ).to_bytes(4, "little"))
+    m.reg.pc = m.sym("run_rounds")
+    assert m.reg.pc % 2 == 0
+    stop = run_bounded(m.run(until="irq_exit", budget=10_000))
+    assert stop.reason is popcorn.StopReason.ADDRESS
+    assert int(m.var("first_entries").value) == 1
+    assert int(m.var("tail_entries").value) == 1

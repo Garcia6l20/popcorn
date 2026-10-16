@@ -1030,6 +1030,9 @@ class Machine:
     def reg(self) -> Registers:
         """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`.
 
+        Writing `pc` keeps the Thumb state whatever bit 0 of the value, as a debugger's write
+        does on Cortex-M, so `m.sym(f)` and `m.fn_ptr(f)` give the same state.
+
         Reads and writes raise MachineRunning while the machine is busy, outside its callbacks:
         `m.read(m.ref.reg.r0)` and `m.write` access them then.
         """

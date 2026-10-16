@@ -422,7 +422,19 @@ auto cortex_m::ends_block_before(address from, address to) const -> std::optiona
 
 auto cortex_m::resume_address() const -> address
 {
-  return pc() | 1u;
+  return static_cast<address>(
+      host_register_value({.name = "pc", .engine_id = UC_ARM_REG_PC, .bits = 32}, pc()));
+}
+
+auto cortex_m::host_register_value(cpu_register const& reg, std::uint64_t value) const
+    -> std::uint64_t
+{
+  if(reg.engine_id != UC_ARM_REG_PC)
+  {
+    return value;
+  }
+  auto const thumb = (read(UC_ARM_REG_XPSR) & xpsr_thumb) != 0 ? 1u : 0u;
+  return (value & ~std::uint64_t{1}) | thumb;
 }
 
 auto cortex_m::registers() const -> std::span<cpu_register const>
