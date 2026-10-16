@@ -345,6 +345,16 @@ public:
   virtual void set_irq_line(std::uint32_t source, bool active) = 0;
 
   /**
+   * @brief Drives the non-maskable interrupt input, `periph::model_context::nmi`. Level-sensitive
+   *        as set_irq_line(): an active level pends the NMI, and an NMI whose input is still
+   *        active when its handler returns pends again. The default ignores it, for an
+   *        architecture without an NMI input.
+   * @param active Input level.
+   */
+  virtual void set_nmi_line([[maybe_unused]] bool active)
+  {}
+
+  /**
    * @brief Handles an exception the engine reports through its interrupt hook, such as Arm
    *        EXC_RETURN or SVC, or RISC-V `ecall` and `ebreak`.
    * @param intno Engine exception number, architecture-specific.
@@ -479,6 +489,22 @@ public:
   {}
 
   /**
+   * @brief Value the engine receives for a host write of a register through
+   *        core::register_view, a debugger write. The default passes @p value through. The
+   *        Cortex-M module keeps EPSR.T on a pc write, DDI0553B.z RXCCB: writing bit 0 of a
+   *        DebugReturnAddress does not affect EPSR.T.
+   * @param reg Register written.
+   * @param value Value the host wrote.
+   * @return Value written to the engine register.
+   */
+  [[nodiscard]] virtual auto
+      host_register_value([[maybe_unused]] cpu_register const& reg, std::uint64_t value) const
+      -> std::uint64_t
+  {
+    return value;
+  }
+
+  /**
    * @brief Reads the return value of a call that reached its sentinel.
    * @param frame Frame given to prepare_call().
    * @return Value bits of type `frame.returns`, a float as its IEEE 754 bit pattern.
@@ -506,6 +532,21 @@ public:
    * @param abi Floating-point calling convention of the image.
    */
   virtual void return_to_caller(std::optional<call_arg> const& value, float_abi abi) = 0;
+
+  /**
+   * @brief Engine exception that completes a return_to_caller() whose return address is an
+   *        exception return, which the engine takes only from a branch instruction and never
+   *        from a pc write: on Arm, a 0xFF-prefixed value in handler mode, valid or not. The
+   *        machine calls it right after return_to_caller() and handles the result as if the
+   *        engine had raised it, through on_interrupt(), so the handler's exception is left, or
+   *        an invalid value faults, as a return in its body would.
+   * @return Engine exception number, as on_interrupt() gets it, or empty for a plain function
+   *         return. The default reports none.
+   */
+  [[nodiscard]] virtual auto return_interrupt() const -> std::optional<std::uint32_t>
+  {
+    return std::nullopt;
+  }
 
   /**
    * @brief Appends the module state to a snapshot: interrupt controller, system timer, nesting,

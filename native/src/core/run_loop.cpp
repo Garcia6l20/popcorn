@@ -206,6 +206,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   remove_step_hook();
   owner.arch_->reset(reset_vector);
   std::ranges::fill(lines.active, 0u);
+  lines.nmi_active = 0;
   for(auto const& slot : owner.peripherals_)
   {
     if(slot)
@@ -214,6 +215,7 @@ void machine::run_state::reset_machine(reset_kind kind)
       {
         line.level_ = false;
       }
+      slot->nmi.level_ = false;
       for(auto& line : slot->dma)
       {
         line.level_ = false;
@@ -237,6 +239,44 @@ void machine::run_state::reset_machine(reset_kind kind)
   if(core_held)
   {
     notify_core_hold(true);
+  }
+}
+
+auto machine::run_state::power_cut_models() noexcept -> std::exception_ptr
+{
+  handler_scope const scope{in_handler};
+  std::exception_ptr  first;
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(not slot or not slot->model)
+    {
+      continue;
+    }
+    try
+    {
+      slot->model->power_cut();
+    }
+    catch(...)
+    {
+      if(not first)
+      {
+        first = std::current_exception();
+      }
+    }
+  }
+  return first;
+}
+
+void machine::run_state::zero_ram()
+{
+  for(auto const& region : owner.memory_)
+  {
+    if(region->owned or region->desc->kind != region_kind::ram or region->desc->physical)
+    {
+      continue;
+    }
+    std::ranges::fill_n(region->host(region->desc->start), region->desc->size, std::byte{0});
+    region->host_wrote(*this, region->desc->start, region->desc->size);
   }
 }
 
@@ -956,8 +996,9 @@ auto machine::run_state::engine_run() -> uc_err
 {
   engine_scope const scope{in_engine};
   ++counters.engine_runs;
-  end_cause      = engine_end::exit;
-  auto const err = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  end_cause              = engine_end::exit;
+  auto const err         = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  controller_guard.armed = false;
   if(err != UC_ERR_OK)
   {
     end_cause = engine_end::other;

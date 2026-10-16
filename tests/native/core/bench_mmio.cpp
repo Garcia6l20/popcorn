@@ -38,6 +38,7 @@ constexpr address       data_offset = popcorn::testing::test_model::data_offset;
 constexpr address       ctrl_offset = popcorn::testing::test_model::ctrl_offset;
 constexpr address       sram_data   = 0x2008'0000;
 constexpr std::uint64_t mmio_base   = 0x4001'0000;
+constexpr address       flash_load  = 0x0800'8000;
 
 struct measured
 {
@@ -243,6 +244,39 @@ auto dma_writes(bool executable) -> measured
   return per_access(start, loops);
 }
 
+auto flash_loads(std::vector<address> const& watched, std::size_t hooks, std::uint32_t size = 16)
+    -> measured
+{
+  auto desc                  = popcorn::load_description(POPCORN_M33_DESC);
+  desc.regions[0].controller = "TESTDEV";
+  bench_machine m{std::move(desc)};
+  for(auto const at : watched)
+  {
+    m.module->attached_services().watch_reads(at, size, true);
+  }
+  if(m.target->controller_watch_hooks() != hooks)
+  {
+    throw std::runtime_error{
+        std::format("{} hooks, {} expected", m.target->controller_watch_hooks(), hooks)};
+  }
+  m.set("pc", symbol("read_entry"));
+  m.set("r0", loops);
+  m.set("r2", flash_load);
+  auto const start = clock_type::now();
+  m.run_until(symbol("read_done"));
+  return per_access(start, loops);
+}
+
+auto spaced_ranges(std::uint32_t count) -> measured
+{
+  std::vector<address> watched;
+  for(std::uint32_t slot = 0; slot < count; ++slot)
+  {
+    watched.push_back(flash_load + 8 + 16 * slot);
+  }
+  return flash_loads(watched, 2, 4);
+}
+
 auto percentile(std::vector<double> samples, double fraction) -> double
 {
   std::ranges::sort(samples);
@@ -321,6 +355,13 @@ auto main(int argc, char** argv) -> int
        [acquire] { return raw_loop("store_entry", "store_done", sram_data, acquire, true); }            },
       {"store-released-warm",
        [cycle] { return raw_loop("store_entry", "store_done", sram_data, cycle, true); }                },
+      {"load-no-hook",        [] { return flash_loads({}, 0); }                                         },
+      {"load-read-hook",      [] { return flash_loads({flash_load}, 4); }                               },
+      {"load-read-hook-miss", [] { return flash_loads({flash_load + 0x100}, 2); }                       },
+      {"load-read-hook-far",  [] { return flash_loads({flash_load + 0x1'0000}, 4); }                    },
+      {"load-ranges-1",       [] { return spaced_ranges(1); }                                           },
+      {"load-ranges-8",       [] { return spaced_ranges(8); }                                           },
+      {"load-ranges-64",      [] { return spaced_ranges(64); }                                          },
   };
   if(auto const only = option(args, "--only"))
   {

@@ -119,9 +119,11 @@ struct bench
   core::event_port                events{queue, 0};
   popcorn::testing::fake_services services;
   no_peers                        peers;
+  periph::irq_line                nmi;
   periph::model_context           ctx{
       .regs     = regs,
       .irqs     = {},
+      .nmi      = nmi,
       .dma      = {},
       .events   = events,
       .clock    = clock,

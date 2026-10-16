@@ -117,8 +117,10 @@ public:
    * handler mode. */
   [[nodiscard]] auto interrupt_returns(std::uint32_t intno, address frame_return) const
       -> bool override;
-  auto on_invalid_insn() -> popcorn::arch::trap_result override;
-  auto on_unmapped(address addr, popcorn::arch::memory_op op)
+  /** @brief The exception exit for a 0xFF-prefixed pc in handler mode, valid or not. */
+  [[nodiscard]] auto return_interrupt() const -> std::optional<std::uint32_t> override;
+  auto               on_invalid_insn() -> popcorn::arch::trap_result override;
+  auto               on_unmapped(address addr, popcorn::arch::memory_op op)
       -> popcorn::arch::trap_result override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto idle() const -> bool override;

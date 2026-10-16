@@ -26,6 +26,8 @@ ENTRIES = {
         "probe_setup",
         "latch_pulse",
         "latch_held",
+        "nmi_handler",
+        "nmi_masked",
         "it_irq_label",
         "regs_thread_msp",
         "regs_thread_msp_fp",

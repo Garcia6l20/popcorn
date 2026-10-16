@@ -599,17 +599,101 @@ TEST_CASE("an IRQ line raised during a masked call is taken after end_call")
 TEST_CASE("an intercept returning from the SysTick handler keeps Thread running and spin detection")
 {
   core::machine_options options;
-  options.spin_threshold = 1000;
+  options.spin_threshold = 5000;
   auto       f           = booted(std::move(options));
-  auto const hook = f.target->add_intercept(fn("SysTick_Handler"), [](core::intercept_call const&) {
-    return core::intercept_result::returns(std::nullopt);
-  });
+  auto       entries     = 0;
+  auto       returns     = 0;
+  auto const return_hook = f.target->add_return_hook(
+      fn("SysTick_Handler"), {}, value_kind::i32,
+      [&returns](core::returned_call const&) { ++returns; });
+  auto const hook =
+      f.target->add_intercept(fn("SysTick_Handler"), [&entries](core::intercept_call const&) {
+        ++entries;
+        return core::intercept_result::returns(std::nullopt);
+      });
   f.set("pc", fn("poll_stat"));
   auto const stopped = f.run_to_stop();
+  CHECK(entries >= 2);
+  CHECK(returns == entries);
   CHECK(stopped.reason == stop_reason::spin);
   CHECK(stopped.detail.find("UNMODELLED.STAT") != std::string::npos);
   CHECK(f.word(fn("ticks")) == 0);
   CHECK((f.reg("xpsr") & 0x1ff) == 0);
+}
+
+TEST_CASE("an intercept returning from an exception handler leaves the exception")
+{
+  constexpr address nvic_iser0 = 0xe000'e100;
+  constexpr address nvic_ispr0 = 0xe000'e200;
+  constexpr address scb_icsr   = 0xe000'ed04;
+  constexpr address scb_vtor   = 0xe000'ed08;
+  constexpr auto    irq        = 5u;
+  auto              f          = booted();
+  auto              entries    = 0;
+  auto              handler    = fn("Default_Handler");
+  SUBCASE("a pended IRQ in Default_Handler")
+  {
+    REQUIRE(f.target->mem().write(nvic_iser0, 4, 1u << irq).has_value());
+    REQUIRE(f.target->mem().write(nvic_ispr0, 4, 1u << irq).has_value());
+  }
+  SUBCASE("a pended NMI in Default_Handler")
+  {
+    REQUIRE(f.target->mem().write(scb_icsr, 4, 1u << 31).has_value());
+  }
+  SUBCASE("a pended IRQ through a vector table in RAM")
+  {
+    auto const table = (fn("psp_stack") + 127) & ~address{127};
+    auto const from  = f.word(scb_vtor);
+    for(std::uint32_t index = 0; index < 24; ++index)
+    {
+      REQUIRE(f.target->mem().write(table + 4 * index, 4, f.word(from + 4 * index)).has_value());
+    }
+    handler = fn("SysTick_Handler");
+    REQUIRE(f.target->mem().write(table + 4 * (16 + irq), 4, handler | 1).has_value());
+    REQUIRE(f.target->mem().write(scb_vtor, 4, table).has_value());
+    REQUIRE(f.target->mem().write(nvic_iser0, 4, 1u << irq).has_value());
+    REQUIRE(f.target->mem().write(nvic_ispr0, 4, 1u << irq).has_value());
+  }
+  auto       returns     = 0;
+  auto const return_hook = f.target->add_return_hook(
+      handler, {}, value_kind::i32, [&returns](core::returned_call const&) { ++returns; });
+  auto const hook = f.target->add_intercept(handler, [&entries](core::intercept_call const&) {
+    ++entries;
+    return core::intercept_result::returns(std::nullopt);
+  });
+  auto       one  = frame("add", {i32(40), i32(2)});
+  one.interrupts  = true;
+  auto const done = call(f, one);
+  CHECK(done.stopped.reason == stop_reason::returned);
+  CHECK(done.value == 42);
+  CHECK(entries == 1);
+  CHECK(returns == 1);
+  CHECK(f.word(fn("ticks")) == 0);
+  CHECK((f.reg("xpsr") & 0x1ff) == 0);
+  CHECK_FALSE(f.module->pending());
+}
+
+TEST_CASE("an intercept returning from a handler through an invalid EXC_RETURN faults INVPC")
+{
+  constexpr address       nvic_iser0 = 0xe000'e100;
+  constexpr address       nvic_ispr0 = 0xe000'e200;
+  constexpr std::uint32_t invpc      = 1u << 18;
+  constexpr auto          irq        = 5u;
+  auto                    f          = booted();
+  auto const              hook =
+      f.target->add_intercept(fn("Default_Handler"), [&f](core::intercept_call const&) {
+        f.set("lr", 0xffff'fff5u);
+        return core::intercept_result::returns(std::nullopt);
+      });
+  REQUIRE(f.target->mem().write(nvic_iser0, 4, 1u << irq).has_value());
+  REQUIRE(f.target->mem().write(nvic_ispr0, 4, 1u << irq).has_value());
+  auto one        = frame("add", {i32(40), i32(2)});
+  one.interrupts  = true;
+  auto const done = call(f, one);
+  REQUIRE(done.stopped.reason == stop_reason::fault);
+  REQUIRE(done.stopped.fault.has_value());
+  CHECK(done.stopped.fault->kind == popcorn::fault_kind::usage);
+  CHECK((done.stopped.fault->status & invpc) != 0);
 }
 
 TEST_CASE("an IRQ pended before an unmasked call runs once, during the call")

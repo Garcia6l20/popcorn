@@ -314,6 +314,82 @@ auto machine::run_state::dispatch_controller_write(
   return done;
 }
 
+void machine::run_state::note_controller_read(
+    mapped_region const& region,
+    address              addr,
+    std::uint8_t         size,
+    initiator            by)
+{
+  auto const  first      = region.offset + (addr - region.desc->start);
+  auto* const controller = controller_read_hit(region.buffer.get(), first, first + size - 1);
+  if(controller == nullptr)
+  {
+    return;
+  }
+  auto const hz = owner.clock_.instruction_hz();
+  {
+    handler_scope const scope{in_handler};
+    controller->on_memory_read(
+        *region.desc, addr, size,
+        {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = region.desc->secure});
+  }
+  after_model(hz);
+}
+
+void machine::run_state::on_controller_read(
+    uc_struct*,
+    uc_mem_type,
+    std::uint64_t addr,
+    int           size,
+    std::int64_t,
+    void* user) noexcept
+{
+  auto const& hook  = *static_cast<controller_hook const*>(user);
+  auto&       run   = *hook.owner;
+  auto&       guard = run.controller_guard;
+  if(guard.armed)
+  {
+    guard.armed = false;
+    if(hook.serial == guard.serial and guard.addr == addr and guard.size == size)
+    {
+      return;
+    }
+  }
+  run.guarded([&] {
+    auto const  first = static_cast<std::size_t>(static_cast<std::int64_t>(addr) + hook.to_buffer);
+    auto const  last  = first + static_cast<std::size_t>(size) - 1;
+    auto* const controller = run.controller_read_hit(hook.buffer, first, last);
+    if(controller == nullptr)
+    {
+      return false;
+    }
+    auto const* const mapped = hook.region;
+    auto const* const buffer = hook.buffer;
+    auto const&       region = *mapped->desc;
+    auto const        at     = static_cast<address>(addr);
+    auto const        bytes  = static_cast<std::uint8_t>(size);
+    return run.raising_access([&] {
+      auto const hz     = run.owner.clock_.instruction_hz();
+      auto const before = run.controller_hook_serial;
+      {
+        handler_scope const scope{run.in_handler};
+        controller->on_memory_read(
+            region, at, bytes,
+            {.pc     = run.arch->pc(),
+             .now    = run.owner.clock_.now(),
+             .by     = initiator::cpu,
+             .secure = region.secure});
+      }
+      if(run.controller_hook_serial != before)
+      {
+        run.arm_controller_guard(buffer, mapped, first, before, addr, size);
+      }
+      run.after_model(hz);
+      return false;
+    });
+  });
+}
+
 void machine::run_state::after_model(std::uint64_t instruction_hz)
 {
   deadline = std::min(deadline, owner.scheduler_.earliest());

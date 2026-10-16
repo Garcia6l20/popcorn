@@ -60,7 +60,8 @@ public:
   [[nodiscard]] auto read(arch::cpu_register const& reg) const -> std::uint64_t;
 
   /**
-   * @brief Writes a register.
+   * @brief Writes a register as a debugger does, through arch::arch::host_register_value: on
+   *        Cortex-M a pc write keeps the Thumb state whatever bit 0 of @p value.
    * @param reg Register from list() or find().
    * @param value Value right-aligned to `reg.bits`.
    * @throws machine_running while a slice runs, outside its handlers.

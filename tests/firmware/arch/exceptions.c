@@ -199,9 +199,16 @@ static void latch_irq(void)
   (void)REG32(0x40010058u);
 }
 
+__attribute__((noipa)) void nmi_handler(void)
+{
+  LOG(0x340);
+  (void)REG32(0x40010058u);
+}
+
 __attribute__((noipa)) void probe_setup(void)
 {
   setup_vectors();
+  set_vec(2, nmi_handler);
   set_vec(16 + 11, clobber_irq);
   set_vec(16 + 12, nested_body);
 #ifndef POPCORN_NO_FPU
@@ -232,6 +239,15 @@ __attribute__((noipa)) void latch_held(void)
 {
   REG32(0x4001005Cu) = 2u;
   __asm__ volatile("dsb\nisb\nnop\nnop\nbkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void nmi_masked(void)
+{
+  __asm__ volatile("cpsid i\ncpsid f" ::: "memory");
+  REG32(0x4001005Cu) = 1u;
+  __asm__ volatile("dsb\nisb\nnop\nnop" ::: "memory");
+  LOG(0x341);
+  __asm__ volatile("cpsie f\ncpsie i\nbkpt #1" ::: "memory");
 }
 
 uint32_t icsr_seen[2];

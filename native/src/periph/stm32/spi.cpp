@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <format>
 #include <limits>
@@ -198,6 +199,7 @@ public:
       std::shared_ptr<spi_controller_sink> controller);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void power_cut() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -611,6 +613,30 @@ void spi::reset(register_file& regs, reset_kind kind)
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
+}
+
+void spi::power_cut()
+{
+  auto const         at = ctx_.clock.since_power_on();
+  std::exception_ptr first;
+  for(auto const& attached : attachments_)
+  {
+    try
+    {
+      attached.device->power_cut(at);
+    }
+    catch(...)
+    {
+      if(not first)
+      {
+        first = std::current_exception();
+      }
+    }
+  }
+  if(first)
+  {
+    std::rethrow_exception(first);
+  }
 }
 
 void spi::start_frame(std::uint64_t from_ps)

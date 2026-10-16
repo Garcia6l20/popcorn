@@ -46,6 +46,7 @@ public:
   [[nodiscard]] auto would_preempt(std::uint32_t number) const -> bool override;
   [[nodiscard]] auto thread_mode() const -> bool override;
   void               set_irq_line(std::uint32_t source, bool active) override;
+  void               set_nmi_line(bool active) override;
   auto               on_interrupt(std::uint32_t intno) -> trap_result override;
   [[nodiscard]] auto interrupt_returns(std::uint32_t intno, address frame_return) const
       -> bool override;
@@ -60,6 +61,8 @@ public:
   [[nodiscard]] auto ends_block_before(address from, address to) const
       -> std::optional<bool> override;
   [[nodiscard]] auto resume_address() const -> address override;
+  [[nodiscard]] auto host_register_value(cpu_register const& reg, std::uint64_t value) const
+      -> std::uint64_t override;
   [[nodiscard]] auto registers() const -> std::span<cpu_register const> override;
   void               prepare_call(call_frame const& frame) override;
   void               check_call(call_frame const& frame) const override;
@@ -67,6 +70,7 @@ public:
   void               read_args(call_frame& frame) const override;
   [[nodiscard]] auto return_address() const -> address override;
   void               return_to_caller(std::optional<call_arg> const& value, float_abi abi) override;
+  [[nodiscard]] auto return_interrupt() const -> std::optional<std::uint32_t> override;
   void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;
 
@@ -141,6 +145,7 @@ private:
   [[nodiscard]] auto wake_event() const -> bool;
   void               wake_if_due();
   void               note_pending(std::uint32_t number) noexcept;
+  void               drive_line(std::uint32_t number, bool active);
   auto               hint() -> bool;
   [[nodiscard]] auto halfword(address at) const -> std::uint32_t;
   [[nodiscard]] auto privileged() const -> bool;

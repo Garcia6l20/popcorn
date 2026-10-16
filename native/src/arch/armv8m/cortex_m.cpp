@@ -312,6 +312,16 @@ void cortex_m::set_irq_line(std::uint32_t source, bool active)
 {
   auto const number = 16 + source;
   contract_assert(number < exception_count());
+  drive_line(number, active);
+}
+
+void cortex_m::set_nmi_line(bool active)
+{
+  drive_line(exc_nmi, active);
+}
+
+void cortex_m::drive_line(std::uint32_t number, bool active)
+{
   auto&      exceptions = state_.exceptions;
   auto const was        = test_bit(exceptions.level, number);
   put_bit(exceptions.level, number, active);
@@ -339,6 +349,15 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
     return trap_result::stop(stop_reason::user);
   }
   return engine_fault(intno);
+}
+
+auto cortex_m::return_interrupt() const -> std::optional<std::uint32_t>
+{
+  if(thread_mode() or (read(UC_ARM_REG_PC) & 0xff00'0000u) != 0xff00'0000u)
+  {
+    return std::nullopt;
+  }
+  return excp_exception_exit;
 }
 
 auto cortex_m::interrupt_returns(std::uint32_t intno, address frame_return) const -> bool
@@ -412,7 +431,19 @@ auto cortex_m::ends_block_before(address from, address to) const -> std::optiona
 
 auto cortex_m::resume_address() const -> address
 {
-  return pc() | 1u;
+  return static_cast<address>(
+      host_register_value({.name = "pc", .engine_id = UC_ARM_REG_PC, .bits = 32}, pc()));
+}
+
+auto cortex_m::host_register_value(cpu_register const& reg, std::uint64_t value) const
+    -> std::uint64_t
+{
+  if(reg.engine_id != UC_ARM_REG_PC)
+  {
+    return value;
+  }
+  auto const thumb = (read(UC_ARM_REG_XPSR) & xpsr_thumb) != 0 ? 1u : 0u;
+  return (value & ~std::uint64_t{1}) | thumb;
 }
 
 auto cortex_m::registers() const -> std::span<cpu_register const>
@@ -450,9 +481,9 @@ void cortex_m::load(std::span<std::byte const> in)
     state_.scs             = std::move(live.scs);
     state_.systick         = live.systick;
     state_.cyccnt          = live.cyccnt;
-    for(auto number = exc_irq0; number < exception_count(); ++number)
+    for(auto number = exc_nmi; number < exception_count(); ++number)
     {
-      if(test_bit(state_.exceptions.level, number))
+      if(level_sensitive(number) and test_bit(state_.exceptions.level, number))
       {
         put_bit(state_.exceptions.pending, number, true);
       }

@@ -248,6 +248,13 @@ for _, target in core_firmware.values():
     if target is not None:
         test_facade_support.depends(target)
 
+test_power_cycle = add_doctest(
+    "core-power-cycle", [here / "test_power_cycle.cpp"], [test_support, core], env=m33_env
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_power_cycle.depends(target)
+
 test_host_pty = add_doctest(
     "core-host-pty",
     [

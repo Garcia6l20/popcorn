@@ -88,6 +88,11 @@ struct at25sf_state
   std::uint8_t            status_in2{};
   std::vector<std::byte>  buffer;
   std::vector<saved_page> pages;
+  std::uint64_t           busy_from{};
+  std::uint32_t           undo_at{};
+  std::uint32_t           undo_first{};
+  std::uint32_t           undo_count{};
+  std::vector<std::byte>  undo;
 
   friend auto operator==(at25sf_state const&, at25sf_state const&) -> bool = default;
 };
@@ -269,11 +274,47 @@ struct at25sf::impl
     state.busy_until = at + ps_of(span);
   }
 
+  void keep_undo(
+      std::uint64_t at,
+      std::uint32_t first,
+      std::uint32_t length,
+      std::uint32_t order_first,
+      std::uint32_t order_count)
+  {
+    auto const from = array.begin() + first;
+    state.undo.assign(from, from + length);
+    state.busy_from  = at;
+    state.undo_at    = first;
+    state.undo_first = order_first;
+    state.undo_count = order_count;
+  }
+
+  void drop_undo()
+  {
+    state.busy_from  = 0;
+    state.undo_at    = 0;
+    state.undo_first = 0;
+    state.undo_count = 0;
+    state.undo       = std::vector<std::byte>{};
+  }
+
+  [[nodiscard]] auto undo_valid() const -> bool
+  {
+    auto const size = state.undo.size();
+    return size != 0
+       and state.undo_at <= array.size()
+       and size <= array.size() - state.undo_at
+       and state.undo_first < size
+       and state.undo_count <= size;
+  }
+
   void erase(std::uint64_t at, std::uint32_t block, std::chrono::nanoseconds span)
   {
     auto const first = (state.address & ~(block - 1)) % static_cast<std::uint32_t>(array.size());
-    std::fill_n(
-        array.begin() + first, std::min<std::size_t>(block, array.size() - first), std::byte{0xFF});
+    auto const length =
+        static_cast<std::uint32_t>(std::min<std::size_t>(block, array.size() - first));
+    keep_undo(at, first, length, 0, length);
+    std::fill_n(array.begin() + first, length, std::byte{0xFF});
     finish_write(at, span);
   }
 
@@ -300,12 +341,17 @@ struct at25sf::impl
         state.volatile_write = 0;
         state.busy_until     = std::min(state.busy_until, at);
         state.ready_from     = at + ps_of(options.reset);
+        drop_undo();
         break;
       case page_program:
         if(write_enabled() and count > 4)
         {
           auto const base =
               (state.address & ~(page_size - 1)) % static_cast<std::uint32_t>(array.size());
+          auto const sent    = count - 4;
+          auto const written = std::min(sent, page_size);
+          keep_undo(
+              at, base, page_size, ((state.address & 0xFFu) + sent - written) % page_size, written);
           for(std::uint32_t offset = 0; offset < page_size; ++offset)
           {
             array[base + offset] &= state.buffer[offset];
@@ -331,6 +377,8 @@ struct at25sf::impl
       case chip_erase_alt:
         if(write_enabled() and count == 1)
         {
+          auto const size = static_cast<std::uint32_t>(array.size());
+          keep_undo(at, 0, size, 0, size);
           std::ranges::fill(array, std::byte{0xFF});
           finish_write(at, options.chip_erase);
         }
@@ -408,6 +456,10 @@ void at25sf::select(bool selected, vtime at)
     state.count    = 0;
     state.address  = 0;
     state.buffer.assign(page_size, std::byte{0xFF});
+    if(not state.undo.empty() and not impl_->busy(at.ps))
+    {
+      impl_->drop_undo();
+    }
     return;
   }
   if(state.selected != 0 and state.count != 0 and state.active != 0)
@@ -466,6 +518,27 @@ void at25sf::reset(reset_kind kind)
   state.buffer.assign(page_size, std::byte{0xFF});
 }
 
+void at25sf::power_cut(vtime at)
+{
+  auto& state = impl_->state;
+  if(not state.undo.empty() and impl_->busy(at.ps))
+  {
+    auto const total = state.busy_until - state.busy_from;
+    auto const done  = at.ps - std::min(at.ps, state.busy_from);
+    auto const kept  = total == 0
+                         ? state.undo_count
+                         : static_cast<std::uint32_t>(
+                               static_cast<unsigned __int128>(state.undo_count) * done / total);
+    auto const size  = state.undo.size();
+    for(auto index = kept; index < state.undo_count; ++index)
+    {
+      auto const offset                    = (state.undo_first + index) % size;
+      impl_->array[state.undo_at + offset] = state.undo[offset];
+    }
+  }
+  impl_->drop_undo();
+}
+
 void at25sf::save(std::vector<std::byte>& out) const
 {
   auto copy         = impl_->state;
@@ -509,6 +582,10 @@ void at25sf::load(std::span<std::byte const> in)
     state.buffer.assign(page_size, std::byte{0xFF});
   }
   impl_->state = std::move(state);
+  if(not impl_->undo_valid())
+  {
+    impl_->drop_undo();
+  }
 }
 
 auto at25sf::contents() const -> std::span<std::byte const>

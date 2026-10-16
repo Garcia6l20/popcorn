@@ -103,6 +103,7 @@ auto machine::snapshot() const -> core::snapshot
         .words        = {},
         .irq_levels   = levels(slot->irqs),
         .dma_levels   = levels(slot->dma),
+        .nmi_level    = slot->nmi.level_ ? std::uint8_t{1} : std::uint8_t{0},
         .write_locked = slot->layer.write_locked,
     };
     for(std::uint32_t offset = 0; offset < slot->desc.size; offset += 4)
@@ -321,7 +322,8 @@ void machine::restore(core::snapshot const& saved)
   run.rebase_sinks(clock_.now());
   arch_->load(data.arch.data);
   std::ranges::fill(run.lines.active, 0u);
-  auto next = plan.peripherals.begin();
+  run.lines.nmi_active = 0;
+  auto next            = plan.peripherals.begin();
   for(auto const& slot : peripherals_)
   {
     if(not slot)
@@ -353,6 +355,8 @@ void machine::restore(core::snapshot const& saved)
         ++run.lines.active[line.source_];
       }
     }
+    slot->nmi.level_ = image.nmi_level != 0;
+    run.lines.nmi_active += slot->nmi.level_ ? 1u : 0u;
     for(auto const& [line, level] : std::views::zip(slot->dma, image.dma_levels))
     {
       line.level_ = level != 0;

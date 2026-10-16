@@ -9,6 +9,7 @@
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +19,7 @@
 #include <expected>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -56,11 +58,68 @@ constexpr std::uint32_t hsion      = 1u << 8;
 constexpr std::uint32_t sw_hsi16   = 1;
 constexpr std::uint32_t vos_range1 = 3u << 16;
 constexpr std::uint32_t lpm        = 1u << 11;
+constexpr std::uint32_t eccd       = 1u << 31;
+constexpr std::uint32_t eccc       = 1u << 30;
+constexpr std::uint32_t eccie      = 1u << 24;
+constexpr std::uint32_t bk_ecc     = 1u << 21;
+constexpr std::uint32_t exc_nmi    = 2;
+constexpr address       torn_line  = last_page + 0x30;
+constexpr address       secure     = 0x0400'0000;
 
 auto pnb(std::uint32_t page) -> std::uint32_t
 {
   return page << 3;
 }
+
+auto ps(std::chrono::nanoseconds time) -> std::uint64_t
+{
+  return static_cast<std::uint64_t>(time.count()) * 1000u;
+}
+
+struct held_store
+{
+  std::uint32_t addr{};
+  std::uint8_t  size{};
+  std::uint32_t value{};
+  std::uint32_t control{};
+  bool          dma{};
+
+  friend auto operator==(held_store const&, held_store const&) -> bool = default;
+};
+
+struct old_flash_state
+{
+  bool                          first_key{};
+  bool                          locked_up{};
+  std::array<std::uint32_t, 32> buffer{};
+  std::uint32_t                 filled{};
+  bool                          burst{};
+  std::uint32_t                 buffer_addr{};
+  std::uint8_t                  running{};
+  std::uint32_t                 target{};
+  std::uint32_t                 length{};
+  std::uint32_t                 generation{};
+  std::vector<held_store>       held{};
+};
+
+struct new_flash_state
+{
+  bool                          first_key{};
+  bool                          locked_up{};
+  std::array<std::uint32_t, 32> buffer{};
+  std::uint32_t                 filled{};
+  bool                          burst{};
+  std::uint32_t                 buffer_addr{};
+  std::uint8_t                  running{};
+  std::uint32_t                 target{};
+  std::uint32_t                 length{};
+  std::uint32_t                 generation{};
+  std::vector<held_store>       held{};
+  std::uint64_t                 due_ps{};
+  std::vector<std::uint32_t>    torn{};
+
+  friend auto operator==(new_flash_state const&, new_flash_state const&) -> bool = default;
+};
 
 class services_probe final : public periph::model
 {
@@ -285,7 +344,169 @@ struct flash_rig
     REQUIRE(word.has_value());
     return (*word >> flash_irq & 1u) != 0;
   }
+
+  [[nodiscard]] auto state() const -> new_flash_state
+  {
+    std::vector<std::byte> saved;
+    f.target->model("FLASH")->save(saved);
+    auto const state = reflex::serde::bson::deserializer{
+        std::span<std::byte const>{
+            saved}}.load<new_flash_state>();
+    std::vector<std::byte> redumped;
+    reflex::serde::bson::serializer{redumped}.dump(state);
+    REQUIRE(redumped == saved);
+    return state;
+  }
+
+  [[nodiscard]] auto torn() const -> std::vector<std::uint32_t>
+  {
+    return state().torn;
+  }
+
+  void cycle() const
+  {
+    f.target->power_cycle();
+    write("FLASH_NSKEYR", 0x4567'0123u);
+    write("FLASH_NSKEYR", 0xcdef'89abu);
+    REQUIRE(field("FLASH_NSCR", "LOCK") == 0);
+  }
+
+  void run_sliced(icount slice, std::optional<popcorn::vtime> until, stop_reason reason) const
+  {
+    for(;;)
+    {
+      auto const result = f.target->run_slice(
+          {.max_instructions = slice,
+           .wall_budget      = std::chrono::seconds{60},
+           .until_time       = until});
+      if(result.stopped)
+      {
+        REQUIRE(result.stopped->reason == reason);
+        return;
+      }
+    }
+  }
+
+  void store_words_sliced(address to, std::vector<std::uint32_t> const& values, icount slice) const
+  {
+    auto const buffer = sym("flash_ll", "words");
+    for(std::size_t i = 0; i < values.size(); ++i)
+    {
+      REQUIRE(f.target->mem().write(buffer + 4 * i, 4, values[i]).has_value());
+    }
+    f.set("r0", static_cast<std::uint32_t>(to));
+    f.set("r1", static_cast<std::uint32_t>(buffer));
+    f.set("r2", static_cast<std::uint32_t>(values.size()));
+    f.set("pc", sym("flash_ll", "copy_words"));
+    run_sliced(slice, std::nullopt, stop_reason::user);
+  }
+
+  void run_into(
+      std::chrono::nanoseconds total,
+      std::chrono::nanoseconds elapsed,
+      icount                   slice = icount{100'000'000}) const
+  {
+    constexpr std::uint64_t launch_slack_ps = 10'000'000;
+    REQUIRE(status("BSY") == 1);
+    auto const& clock  = f.target->virtual_clock();
+    auto const  launch = clock.since_power_on().ps;
+    auto const  base   = launch - clock.time().ps;
+    auto const  due    = state().due_ps;
+    REQUIRE(due <= launch + ps(total));
+    REQUIRE(due + launch_slack_ps >= launch + ps(total));
+    f.set("pc", sym("flash_ll", "wait_idle"));
+    run_sliced(slice, popcorn::vtime{launch + ps(elapsed) - base}, stop_reason::time);
+    REQUIRE(status("BSY") == 1);
+  }
+
+  void cut_after(std::chrono::nanoseconds total, std::chrono::nanoseconds elapsed) const
+  {
+    run_into(total, elapsed);
+    cycle();
+  }
+
+  void tear(address line, icount slice = icount{100'000'000}) const
+  {
+    constexpr periph::stm32::flash_options timing{};
+    control(pg);
+    store_words_sliced(line, {1, 2, 3, 4}, slice);
+    run_into(timing.quad_word_program, timing.quad_word_program / 2, slice);
+    cycle();
+    control(0);
+    REQUIRE(std::ranges::contains(torn(), static_cast<std::uint32_t>(line)));
+  }
+
+  [[nodiscard]] auto eccr() const -> std::uint32_t
+  {
+    return read("FLASH_ECCR");
+  }
+
+  [[nodiscard]] auto nmi_level() const -> bool
+  {
+    auto const  saved  = f.target->snapshot();
+    auto const& images = saved.data().peripherals;
+    auto const  found =
+        std::ranges::find(images, std::string_view{"FLASH"}, &core::peripheral_image::peripheral);
+    REQUIRE(found != images.end());
+    return found->nmi_level != 0;
+  }
+
+  [[nodiscard]] auto core_reg(std::string_view name) const -> std::uint64_t
+  {
+    return f.target->regs().read(*f.target->regs().find(name));
+  }
+
+  void handle_nmi()
+  {
+    nmi_hook = f.target->add_intercept(
+        sym("flash_ll", "NMI_Handler"), [this](core::intercept_call const&) {
+          nmi_eccr.push_back(eccr());
+          if(not clear_nmi)
+          {
+            return core::intercept_result::stop(stop_reason::user);
+          }
+          write("FLASH_ECCR", eccd);
+          return core::intercept_result::returns(std::nullopt);
+        });
+  }
+
+  void load(address from, icount slice = icount{100'000'000}) const
+  {
+    REQUIRE(f.target->mem().write(sym("flash_ll", "words"), 4, 0xdead'beefu).has_value());
+    f.set("r0", sym("flash_ll", "words"));
+    f.set("r1", from);
+    f.set("r2", 1);
+    f.set("pc", sym("flash_ll", "copy_words"));
+    for(icount ran{}; ran.value < 10'000; ran.value += slice.value)
+    {
+      auto const result = f.target->run_slice(
+          {.max_instructions = icount{std::min(slice.value, 10'000 - ran.value)},
+           .wall_budget      = std::chrono::seconds{60}});
+      if(result.stopped)
+      {
+        INFO(result.stopped->where.pc);
+        REQUIRE(result.stopped->reason == stop_reason::user);
+        return;
+      }
+    }
+    FAIL("no stop within 10000 instructions");
+  }
+
+  [[nodiscard]] auto dma_load(address from) const -> bool
+  {
+    return probe->services().read(from, 4, initiator::dma).has_value();
+  }
+
+  std::vector<std::uint32_t> nmi_eccr{};
+  core::intercept_handle     nmi_hook{};
+  bool                       clear_nmi{true};
 };
+
+auto reported(address line) -> std::uint32_t
+{
+  auto const offset = static_cast<std::uint32_t>(line - 0x0800'0000);
+  return line >= bank2 ? eccd | bk_ecc | (offset - 0x8'0000) : eccd | offset;
+}
 
 auto erased(std::size_t count) -> std::vector<std::uint32_t>
 {
@@ -483,6 +704,43 @@ TEST_CASE("a VSTR.64 into flash programs two words of the quad-word, low word fi
   CHECK(
       rig.words(last_page, 4)
       == std::vector<std::uint32_t>{0x1111'1111u, 0x2222'2222u, 0x3333'3333u, 0x4444'4444u});
+}
+
+TEST_CASE("a sub-word FLASH_NSSR write clears flags only in the lanes it writes")
+{
+  flash_rig rig;
+  rig.store_words(last_page, {1});
+  REQUIRE(rig.status("PGSERR") == 1);
+  auto const status = rig.at("FLASH_NSSR");
+  REQUIRE(rig.f.target->mem().write(status + 1, 1, 0xff).has_value());
+  CHECK(rig.status("PGSERR") == 1);
+  REQUIRE(rig.f.target->mem().write(status + 2, 2, 0xffff).has_value());
+  CHECK(rig.status("PGSERR") == 1);
+  REQUIRE(rig.f.target->mem().write(status, 1, 0x7f).has_value());
+  CHECK(rig.status("PGSERR") == 1);
+  REQUIRE(rig.f.target->mem().write(status, 1, 0x80).has_value());
+  CHECK(rig.status("PGSERR") == 0);
+  constexpr std::uint32_t pgserr   = 1u << 7;
+  constexpr std::uint32_t optwerr  = 1u << 13;
+  auto&                   regs     = rig.f.target->peripheral("FLASH");
+  auto const              offset   = static_cast<std::uint32_t>(status - regs.description().base);
+  auto const              set_both = [&] {
+    regs.poke(offset, regs.peek(offset) | pgserr | optwerr);
+    REQUIRE(rig.status("PGSERR") == 1);
+    REQUIRE(rig.status("OPTWERR") == 1);
+  };
+  set_both();
+  REQUIRE(rig.f.target->mem().write(status, 2, 0x2000).has_value());
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.status("PGSERR") == 1);
+  set_both();
+  REQUIRE(rig.f.target->mem().write(status + 1, 1, 0x20).has_value());
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.status("PGSERR") == 1);
+  set_both();
+  REQUIRE(rig.f.target->mem().write(status, 4, all_errors).has_value());
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.status("PGSERR") == 0);
 }
 
 TEST_CASE("every PGSERR case of RM0456 7.3.9 sets it and starts nothing")
@@ -1075,4 +1333,490 @@ TEST_CASE("under strict_peripherals each latency violation raises model_error")
   CHECK_THROWS_AS(
       static_cast<void>(late.f.target->run_slice({.max_instructions = icount{100'000}})),
       popcorn::model_error);
+}
+
+TEST_CASE("a power cut during a BWR burst programs the quad-words its elapsed time reached")
+{
+  constexpr periph::stm32::flash_options timing{};
+  flash_rig                              rig;
+  auto const                             data = burst_data(0x300);
+  rig.control(pg | bwr);
+  SUBCASE("cut at 3.5 quad-word times tears quad-word 3")
+  {
+    rig.store_words(last_page, data);
+    rig.cut_after(timing.burst_program, std::chrono::microseconds{168});
+    CHECK(rig.status("BSY") == 0);
+    CHECK(rig.words(last_page, 14) == std::vector<std::uint32_t>(data.begin(), data.begin() + 14));
+    CHECK(rig.words(last_page + 56, 26) == erased(26));
+    CHECK(rig.torn() == std::vector<std::uint32_t>{last_page + 48});
+  }
+  SUBCASE("cut right after the 32nd word tears quad-word 0")
+  {
+    rig.store_words(last_page, data);
+    REQUIRE(rig.status("BSY") == 1);
+    rig.cycle();
+    CHECK(rig.words(last_page, 2) == std::vector<std::uint32_t>(data.begin(), data.begin() + 2));
+    CHECK(rig.words(last_page + 8, 30) == erased(30));
+    CHECK(rig.torn() == std::vector<std::uint32_t>{last_page});
+  }
+  SUBCASE("cut after BSY cleared keeps the whole burst")
+  {
+    rig.store_words(last_page, data);
+    rig.wait_idle();
+    rig.cycle();
+    CHECK(rig.words(last_page, 32) == data);
+    CHECK(rig.torn().empty());
+  }
+  SUBCASE("a burst into a programmed quad-word changes nothing")
+  {
+    rig.program(last_page + 112, {1, 2, 3, 4});
+    rig.control(pg | bwr);
+    rig.store_words(last_page, data);
+    rig.cut_after(timing.burst_program, std::chrono::microseconds{192});
+    CHECK(rig.words(last_page, 28) == erased(28));
+    CHECK(rig.words(last_page + 112, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+    CHECK(rig.torn().empty());
+    CHECK((rig.read("FLASH_NSSR") & all_errors) == 0);
+  }
+  SUBCASE("a partly filled write buffer is dropped")
+  {
+    rig.store_words(last_page, std::vector<std::uint32_t>(data.begin(), data.begin() + 16));
+    REQUIRE(rig.status("WDW") == 1);
+    rig.cycle();
+    CHECK(rig.status("WDW") == 0);
+    CHECK(rig.words(last_page, 32) == erased(32));
+    CHECK(rig.torn().empty());
+  }
+}
+
+TEST_CASE("a power cut at half a quad-word program tears it")
+{
+  constexpr periph::stm32::flash_options timing{};
+  for(bool const after_reset : {false, true})
+  {
+    CAPTURE(after_reset);
+    flash_rig rig;
+    if(after_reset)
+    {
+      rig.spin();
+      rig.f.target->reset(popcorn::reset_kind::software);
+      rig.write("FLASH_NSKEYR", 0x4567'0123u);
+      rig.write("FLASH_NSKEYR", 0xcdef'89abu);
+      REQUIRE(
+          rig.f.target->virtual_clock().since_power_on() > rig.f.target->virtual_clock().time());
+    }
+    rig.control(pg);
+    rig.store_words(last_page, {1, 2, 3, 4});
+    rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
+    CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 0xffff'ffffu, 0xffff'ffffu});
+    CHECK(rig.torn() == std::vector<std::uint32_t>{last_page});
+  }
+}
+
+TEST_CASE("a power cut at half a page erase erases its first half and tears the boundary")
+{
+  constexpr periph::stm32::flash_options timing{};
+  flash_rig                              rig;
+  auto const line = [](std::uint32_t index) { return last_page + 16 * index; };
+  SUBCASE("a programmed boundary is torn")
+  {
+    for(std::uint32_t const index : {0u, 255u, 256u, 257u, 511u})
+    {
+      rig.program(line(index), {index, 2, 3, 4});
+    }
+    rig.control(0);
+    rig.control(per | bker | pnb(63) | strt);
+    rig.cut_after(timing.page_erase, timing.page_erase / 2);
+    CHECK(rig.words(line(0), 4) == erased(4));
+    CHECK(rig.words(line(255), 4) == erased(4));
+    for(std::uint32_t const index : {256u, 257u, 511u})
+    {
+      CAPTURE(index);
+      CHECK(rig.words(line(index), 4) == std::vector<std::uint32_t>{index, 2, 3, 4});
+    }
+    CHECK(rig.torn() == std::vector<std::uint32_t>{line(256)});
+    CHECK(rig.field("FLASH_NSCR", "STRT") == 0);
+  }
+  SUBCASE("a blank boundary is never torn")
+  {
+    rig.program(line(0), {1, 2, 3, 4});
+    rig.program(line(257), {5, 6, 7, 8});
+    rig.control(0);
+    rig.control(per | bker | pnb(63) | strt);
+    rig.cut_after(timing.page_erase, timing.page_erase / 2);
+    CHECK(rig.words(line(0), 4) == erased(4));
+    CHECK(rig.words(line(257), 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+    CHECK(rig.torn().empty());
+  }
+}
+
+TEST_CASE("a power cut at a quarter of a bank 2 erase erases its first quarter")
+{
+  constexpr periph::stm32::flash_options timing{};
+  constexpr address                      boundary = bank2 + 0x2'0000;
+  flash_rig                              rig;
+  auto const                             code = rig.words(0x0800'0000, 4);
+  rig.program(bank2, {1, 2, 3, 4});
+  rig.program(boundary - 16, {5, 6, 7, 8});
+  rig.program(boundary, {9, 10, 11, 12});
+  rig.program(boundary + 16, {13, 14, 15, 16});
+  rig.control(0);
+  rig.control(mer2 | strt);
+  rig.cut_after(timing.bank_erase, timing.bank_erase / 4);
+  CHECK(rig.words(bank2, 4) == erased(4));
+  CHECK(rig.words(boundary - 16, 4) == erased(4));
+  CHECK(rig.words(boundary, 4) == std::vector<std::uint32_t>{9, 10, 11, 12});
+  CHECK(rig.words(boundary + 16, 4) == std::vector<std::uint32_t>{13, 14, 15, 16});
+  CHECK(rig.words(0x0800'0000, 4) == code);
+  CHECK(rig.torn() == std::vector<std::uint32_t>{boundary});
+}
+
+TEST_CASE("torn quad-words survive every reset and a restore into a fresh machine")
+{
+  constexpr periph::stm32::flash_options timing{};
+  flash_rig                              rig;
+  auto const                             before = rig.f.target->snapshot();
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4});
+  rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
+  auto const torn = std::vector<std::uint32_t>{last_page};
+  REQUIRE(rig.torn() == torn);
+  rig.f.target->reset(popcorn::reset_kind::power_on);
+  CHECK(rig.torn() == torn);
+  rig.f.target->reset(popcorn::reset_kind::software);
+  CHECK(rig.torn() == torn);
+  auto const saved = rig.f.target->snapshot();
+  flash_rig  other;
+  REQUIRE(other.torn().empty());
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.torn() == torn);
+  rig.f.target->restore(before);
+  CHECK(rig.torn().empty());
+  CHECK(rig.words(last_page, 4) == erased(4));
+}
+
+TEST_CASE("a program into a torn quad-word sets PROGERR until an erase of its page")
+{
+  constexpr periph::stm32::flash_options timing{};
+  flash_rig                              rig;
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4});
+  rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
+  auto const torn = std::vector<std::uint32_t>{1, 2, 0xffff'ffffu, 0xffff'ffffu};
+  rig.program(last_page, {0, 0, 0, 0});
+  CHECK(rig.status("PROGERR") == 1);
+  CHECK(rig.words(last_page, 4) == torn);
+  rig.clear_errors();
+  rig.control(pg | bwr);
+  rig.store_words(last_page, std::vector<std::uint32_t>(32, 0));
+  rig.wait_idle();
+  CHECK(rig.status("PROGERR") == 1);
+  CHECK(rig.words(last_page, 4) == torn);
+  rig.clear_errors();
+  rig.control(0);
+  rig.erase_page(last_page - page_bytes);
+  CHECK(rig.torn() == std::vector<std::uint32_t>{last_page});
+  rig.erase_page(last_page);
+  CHECK(rig.torn().empty());
+  rig.program(last_page, {0, 0, 0, 0});
+  CHECK((rig.read("FLASH_NSSR") & all_errors) == 0);
+  CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{0, 0, 0, 0});
+}
+
+TEST_CASE("a cut reached in one slice or in many small slices leaves the same torn state")
+{
+  constexpr periph::stm32::flash_options timing{};
+  auto const                             data = burst_data(0x500);
+  auto const                             cut  = [&](icount slice) {
+    auto rig = std::make_unique<flash_rig>();
+    rig->control(pg | bwr);
+    rig->store_words_sliced(last_page, data, slice);
+    rig->run_into(timing.burst_program, std::chrono::microseconds{250}, slice);
+    rig->cycle();
+    return rig;
+  };
+  auto const parked = cut(icount{100'000'000});
+  CHECK(parked->torn() == std::vector<std::uint32_t>{last_page + 80});
+  for(auto const slice : {icount{1}, icount{7}})
+  {
+    CAPTURE(slice.value);
+    auto const running = cut(slice);
+    CHECK(running->words(last_page, 32) == parked->words(last_page, 32));
+    CHECK(running->state() == parked->state());
+  }
+}
+
+TEST_CASE("a FLASH save made before the power-cut fields loads with no torn quad-word")
+{
+  flash_rig rig;
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4});
+  rig.store_words(last_page + 16, {5, 6});
+  REQUIRE(rig.status("BSY") == 1);
+  auto const now = rig.state();
+  REQUIRE(now.due_ps != 0);
+  old_flash_state const old{
+      .first_key   = now.first_key,
+      .locked_up   = now.locked_up,
+      .buffer      = now.buffer,
+      .filled      = now.filled,
+      .burst       = now.burst,
+      .buffer_addr = now.buffer_addr,
+      .running     = now.running,
+      .target      = now.target,
+      .length      = now.length,
+      .generation  = now.generation,
+      .held        = now.held,
+  };
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(old);
+  rig.f.target->model("FLASH")->load(bytes);
+  auto expected   = now;
+  expected.due_ps = 0;
+  CHECK(rig.state() == expected);
+  rig.cycle();
+  CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+  CHECK(rig.words(last_page + 16, 4) == erased(4));
+  CHECK(rig.torn().empty());
+}
+
+TEST_CASE("a CPU load of a torn quad-word sets ECCD, BK_ECC and ADDR_ECC and takes the NMI")
+{
+  for(address const line : {torn_line, address{0x0807'e030}})
+  {
+    for(address const alias : {address{0}, secure})
+    {
+      CAPTURE(line);
+      CAPTURE(alias);
+      flash_rig rig;
+      rig.tear(line);
+      REQUIRE(rig.eccr() == 0);
+      REQUIRE_FALSE(rig.nmi_level());
+      rig.clear_nmi = false;
+      rig.handle_nmi();
+      rig.load(line + alias);
+      REQUIRE(rig.nmi_eccr.size() == 1);
+      CHECK(rig.eccr() == reported(line));
+      CHECK(rig.nmi_eccr.front() == reported(line));
+      CHECK(rig.nmi_level());
+      CHECK((rig.core_reg("xpsr") & 0x1ff) == exc_nmi);
+      CHECK(rig.word(sym("flash_ll", "words")) == 0xdead'beefu);
+    }
+  }
+  CHECK(reported(torn_line) == (eccd | bk_ecc | 0x7'e030u));
+  CHECK(reported(0x0807'e030) == (eccd | 0x7'e030u));
+}
+
+TEST_CASE("loads of the quad-words around a torn one report nothing")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  rig.handle_nmi();
+  for(address const from : {torn_line - 16, torn_line - 4, torn_line + 16, torn_line + 28})
+  {
+    CAPTURE(from);
+    rig.load(from);
+    CHECK(rig.word(sym("flash_ll", "words")) == 0xffff'ffffu);
+  }
+  CHECK(rig.nmi_eccr.empty());
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  rig.load(torn_line + 12);
+  CHECK(rig.nmi_eccr == std::vector<std::uint32_t>{reported(torn_line)});
+}
+
+TEST_CASE("two loads of one torn quad-word with ECCD cleared between report twice")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  rig.handle_nmi();
+  rig.load(torn_line);
+  CHECK(rig.word(sym("flash_ll", "words")) == 1);
+  rig.load(torn_line + 4);
+  CHECK(rig.word(sym("flash_ll", "words")) == 2);
+  CHECK(rig.nmi_eccr == std::vector<std::uint32_t>(2, reported(torn_line)));
+  CHECK((rig.eccr() & (eccd | eccc)) == 0);
+  CHECK_FALSE(rig.nmi_level());
+  CHECK((rig.core_reg("xpsr") & 0x1ff) == 0);
+}
+
+TEST_CASE("a second torn load before ECCD is cleared changes nothing")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  rig.tear(0x0807'e030);
+  REQUIRE(rig.dma_load(torn_line));
+  REQUIRE(rig.eccr() == reported(torn_line));
+  CHECK(rig.dma_load(0x0807'e030));
+  CHECK(rig.eccr() == reported(torn_line));
+  CHECK(rig.nmi_level());
+  rig.write("FLASH_ECCR", eccd);
+  CHECK(rig.dma_load(0x0807'e030));
+  CHECK(rig.eccr() == reported(0x0807'e030));
+}
+
+TEST_CASE("FLASH_ECCR clears ECCD and ECCC on a 1, stores ECCIE and keeps its read-only fields")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  rig.write("FLASH_ECCR", ~std::uint32_t{0});
+  CHECK(rig.eccr() == eccie);
+  CHECK_FALSE(rig.nmi_level());
+  CHECK(rig.dma_load(torn_line));
+  CHECK(rig.eccr() == (reported(torn_line) | eccie));
+  CHECK(rig.nmi_level());
+  rig.write("FLASH_ECCR", 0);
+  CHECK(rig.eccr() == reported(torn_line));
+  CHECK(rig.nmi_level());
+  REQUIRE(rig.f.target->mem().write(rig.at("FLASH_ECCR"), 1, 0xff).has_value());
+  CHECK(rig.eccr() == reported(torn_line));
+  CHECK(rig.nmi_level());
+  rig.write("FLASH_ECCR", eccc);
+  CHECK(rig.eccr() == reported(torn_line));
+  CHECK(rig.nmi_level());
+  rig.write("FLASH_ECCR", eccd);
+  CHECK(rig.eccr() == (reported(torn_line) & ~eccd));
+  CHECK_FALSE(rig.nmi_level());
+  CHECK(rig.dma_load(torn_line));
+  CHECK(rig.eccr() == reported(torn_line));
+  CHECK(rig.nmi_level());
+}
+
+TEST_CASE("a byte or half-word write of ECCD in its lane clears it")
+{
+  for(std::uint8_t const size : {std::uint8_t{1}, std::uint8_t{2}})
+  {
+    CAPTURE(size);
+    flash_rig rig;
+    rig.tear(torn_line);
+    REQUIRE(rig.dma_load(torn_line));
+    REQUIRE(rig.nmi_level());
+    auto const offset = size == 1 ? 3u : 2u;
+    auto const value  = size == 1 ? 0x80u : 0x8000u;
+    REQUIRE(rig.f.target->mem().write(rig.at("FLASH_ECCR") + offset, size, value).has_value());
+    CHECK(rig.eccr() == (reported(torn_line) & ~eccd));
+    CHECK_FALSE(rig.nmi_level());
+  }
+}
+
+TEST_CASE("a load that ends where a torn quad-word starts reports nothing")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  auto const& regions = rig.f.target->description().regions;
+  auto const found = std::ranges::find(regions, address{0x0800'0000}, &popcorn::region_desc::start);
+  REQUIRE(found != regions.end());
+  auto* const model = rig.f.target->model("FLASH");
+  REQUIRE(model != nullptr);
+  model->on_memory_read(*found, torn_line - 4, 4, {.pc = 0, .now = {}, .by = initiator::cpu});
+  model->on_memory_read(*found, torn_line - 8, 8, {.pc = 0, .now = {}, .by = initiator::cpu});
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  model->on_memory_read(*found, torn_line - 4, 8, {.pc = 0, .now = {}, .by = initiator::cpu});
+  CHECK(rig.eccr() == reported(torn_line));
+}
+
+TEST_CASE("a DMA load of a torn quad-word reports, a host or debugger read does not")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  CHECK(rig.f.target->mem().read(torn_line, 4) == 1);
+  CHECK(rig.probe->services().read(torn_line, 4, initiator::debugger) == 1);
+  std::array<std::byte, 16> block{};
+  CHECK(rig.probe->services().read_block(torn_line, block, initiator::debugger));
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  CHECK(rig.dma_load(torn_line + secure + 8));
+  CHECK(rig.eccr() == reported(torn_line));
+  CHECK(rig.nmi_level());
+}
+
+TEST_CASE("an erase of a torn quad-word's page drops its watch and its reports")
+{
+  constexpr periph::stm32::flash_options timing{};
+  flash_rig                              rig;
+  rig.tear(torn_line);
+  CHECK(rig.f.target->controller_watches() == 1);
+  rig.tear(torn_line + 16);
+  CHECK(rig.f.target->controller_watches() == 2);
+  rig.erase_page(last_page - page_bytes);
+  CHECK(rig.f.target->controller_watches() == 2);
+  rig.erase_page(last_page);
+  CHECK(rig.torn().empty());
+  CHECK(rig.f.target->controller_watches() == 0);
+  CHECK(rig.f.target->controller_watch_hooks() == 0);
+  CHECK(rig.dma_load(torn_line));
+  CHECK(rig.eccr() == 0);
+  rig.program(torn_line, {1, 2, 3, 4});
+  rig.control(0);
+  rig.control(per | bker | pnb(63) | strt);
+  rig.cut_after(timing.page_erase, timing.page_erase * 3 / 512 + timing.page_erase / 1024);
+  REQUIRE(rig.torn() == std::vector<std::uint32_t>{torn_line});
+  CHECK(rig.f.target->controller_watches() == 1);
+  CHECK(rig.dma_load(torn_line));
+  CHECK(rig.eccr() == reported(torn_line));
+}
+
+TEST_CASE("a restore watches the torn quad-words of the snapshot")
+{
+  flash_rig  rig;
+  auto const before = rig.f.target->snapshot();
+  rig.tear(torn_line);
+  auto const after = rig.f.target->snapshot();
+  rig.f.target->restore(before);
+  CHECK(rig.f.target->controller_watches() == 0);
+  CHECK(rig.dma_load(torn_line));
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  flash_rig other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(after.data()))});
+  CHECK(other.f.target->controller_watches() == 1);
+  CHECK(other.dma_load(torn_line));
+  CHECK(other.eccr() == reported(torn_line));
+  CHECK(other.nmi_level());
+  auto const reporting = other.f.target->snapshot();
+  flash_rig  third;
+  third.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(reporting.data()))});
+  CHECK(third.eccr() == reported(torn_line));
+  CHECK(third.nmi_level());
+}
+
+TEST_CASE("a software reset clears FLASH_ECCR and lowers the NMI, the torn line still reports")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  REQUIRE(rig.dma_load(torn_line));
+  REQUIRE(rig.nmi_level());
+  rig.f.target->reset(popcorn::reset_kind::software);
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  CHECK(rig.torn() == std::vector<std::uint32_t>{torn_line});
+  rig.handle_nmi();
+  rig.load(torn_line);
+  CHECK(rig.nmi_eccr == std::vector<std::uint32_t>{reported(torn_line)});
+}
+
+TEST_CASE("a torn load in one slice or in small slices reports the same")
+{
+  auto const run = [](icount slice) {
+    auto rig = std::make_unique<flash_rig>();
+    rig->tear(torn_line, slice);
+    rig->handle_nmi();
+    rig->load(torn_line + 4, slice);
+    return rig;
+  };
+  auto const parked = run(icount{100'000'000});
+  REQUIRE(parked->nmi_eccr == std::vector<std::uint32_t>{reported(torn_line)});
+  for(auto const slice : {icount{1}, icount{7}})
+  {
+    CAPTURE(slice.value);
+    auto const running = run(slice);
+    CHECK(running->nmi_eccr == parked->nmi_eccr);
+    CHECK(running->word(sym("flash_ll", "words")) == parked->word(sym("flash_ll", "words")));
+    CHECK(running->eccr() == parked->eccr());
+    CHECK(running->state() == parked->state());
+  }
 }

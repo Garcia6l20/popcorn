@@ -25,9 +25,11 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -69,6 +71,8 @@ public:
   std::shared_ptr<periph::i2c_target>                                                     inner;
   std::vector<bus_event>                                                                  events;
   std::shared_ptr<std::vector<std::pair<periph::i2c_target const*, popcorn::reset_kind>>> resets;
+  std::shared_ptr<std::vector<std::tuple<periph::i2c_target const*, vtime, std::size_t>>> cuts;
+  bool throw_at_cut{};
 
   [[nodiscard]] auto address() const -> std::uint8_t override
   {
@@ -118,6 +122,19 @@ public:
     if(resets)
     {
       resets->emplace_back(this, kind);
+    }
+  }
+
+  void power_cut(vtime at) override
+  {
+    inner->power_cut(at);
+    if(cuts)
+    {
+      cuts->emplace_back(this, at, resets ? resets->size() : 0);
+    }
+    if(throw_at_cut)
+    {
+      throw std::runtime_error{"cut"};
     }
   }
 };
@@ -355,6 +372,8 @@ struct rig
   std::shared_ptr<faulty_target> faulty = std::make_shared<faulty_target>();
   std::shared_ptr<std::vector<std::pair<periph::i2c_target const*, popcorn::reset_kind>>> resets =
       std::make_shared<std::vector<std::pair<periph::i2c_target const*, popcorn::reset_kind>>>();
+  std::shared_ptr<std::vector<std::tuple<periph::i2c_target const*, vtime, std::size_t>>> cuts =
+      std::make_shared<std::vector<std::tuple<periph::i2c_target const*, vtime, std::size_t>>>();
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
@@ -363,6 +382,9 @@ struct rig
     memory->resets    = resets;
     table->resets     = resets;
     picky->resets     = resets;
+    memory->cuts      = cuts;
+    table->cuts       = cuts;
+    picky->cuts       = cuts;
     board.i2c["I2C1"] = {memory, table, picky, faulty};
     auto options      = popcorn::testing::stm32_options();
     options.models    = stm32::factories(board, u575());
@@ -462,6 +484,44 @@ TEST_CASE("every machine reset reaches each target once, in attachment order, wi
   r.resets->clear();
   r.f->target->reset(reset_kind::watchdog);
   CHECK(*r.resets == expect(reset_kind::watchdog));
+  CHECK(r.cuts->empty());
+}
+
+TEST_CASE("a power cycle cuts each target in attachment order, then resets each at power-on")
+{
+  using popcorn::reset_kind;
+  rig r{"eeprom_rw"};
+  r.f->target->reset(reset_kind::software);
+  auto const at = r.f->target->virtual_clock().since_power_on();
+  REQUIRE(at > r.f->target->virtual_clock().time());
+  r.resets->clear();
+  r.f->target->power_cycle();
+  CHECK(
+      *r.cuts
+      == std::vector<std::tuple<periph::i2c_target const*, vtime, std::size_t>>{
+          {r.memory.get(), at, 0},
+          {r.table.get(),  at, 0},
+          {r.picky.get(),  at, 0}
+  });
+  CHECK(
+      *r.resets
+      == std::vector<std::pair<periph::i2c_target const*, reset_kind>>{
+          {r.memory.get(), reset_kind::power_on},
+          {r.table.get(),  reset_kind::power_on},
+          {r.picky.get(),  reset_kind::power_on}
+  });
+}
+
+TEST_CASE("a target that throws at the cut does not stop the cut of the later ones")
+{
+  using popcorn::reset_kind;
+  rig r{"eeprom_rw"};
+  r.memory->throw_at_cut = true;
+  r.resets->clear();
+  CHECK_THROWS_AS(r.f->target->power_cycle(), std::runtime_error);
+  REQUIRE(r.cuts->size() == 3);
+  CHECK(std::get<0>((*r.cuts)[2]) == r.picky.get());
+  CHECK(r.resets->size() == 3);
 }
 
 TEST_CASE("a power-on reset during tWR lets the EEPROM answer at once in the new timeline")

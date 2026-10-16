@@ -161,7 +161,18 @@ TEST_CASE(
   }
   CHECK(back.format == core::snapshot_format_version);
   CHECK_FALSE(back.core_held);
+  CHECK(back.peripherals.front().nmi_level == 0);
   CHECK(back == filled());
+}
+
+TEST_CASE("an NMI line level survives the saved form")
+{
+  auto data                          = filled();
+  data.peripherals.front().nmi_level = 1;
+  auto const back                    = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.peripherals.front().nmi_level == 1);
+  CHECK(back == data);
+  CHECK(back != filled());
 }
 
 TEST_CASE("an event's lane survives the saved form")

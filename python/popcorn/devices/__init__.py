@@ -150,6 +150,14 @@ class At25sf(_native.At25sfBase):
     registers, deep power down, the JEDEC, manufacturer and device IDs, reset. A program, erase
     or status write keeps BUSY set for its time in virtual time. The defaults describe the
     AT25SF641, 8 MiB, JEDEC ID 1F 32 17, with the typical times of its datasheet.
+
+    `Machine.power_cycle()` while BUSY tears a program or erase: the first part of its bytes
+    keeps the result in proportion to the time elapsed, the rest keeps the old bytes, in block
+    order for an erase and in the order the data was sent for a program, from its start address
+    and wrapping inside the page. This prefix rule is the model's deterministic choice, not
+    datasheet behaviour. A program or erase keeps a copy of its range, up to the whole array for
+    a chip erase, until the next selection after BUSY ends, a 66h 99h reset or a power cut. A
+    snapshot taken before then carries it.
     """
 
     def __init__(

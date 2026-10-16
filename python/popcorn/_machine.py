@@ -209,7 +209,8 @@ class Call:
         self, value: int | float | I64 | F32 | None = None, abi: FloatAbi | None = None
     ) -> Return:
         """Skip the function and return `value` to the caller, of the DWARF return type when
-        known, under the image's calling convention or `abi`. None for a void function."""
+        known, under the image's calling convention or `abi`. None for a void function. From an
+        exception handler, the return is an exception return, as BX LR would be."""
         if value is None:
             return Return(_core.InterceptResult.returns(None))
         slot = self._result_slot(value)
@@ -222,6 +223,10 @@ class Call:
 
     def stop(self, reason: StopReason = StopReason.USER) -> Return:
         """Stop the run at the function, before its body.
+
+        A parked `run` returns the stop. In a free run the stop ends it: a pending `wait_for`
+        returns it, and `halt()` or leaving `running()` raises EmulationError carrying it. A test
+        that cuts power at a function stops there, then calls `power_cycle()`.
 
         Raises:
             ValueError: `reason` is FAULT, which only the core raises.
@@ -972,8 +977,8 @@ class Machine:
     def reset(self, kind: ResetKind = ResetKind.POWER_ON) -> None:
         """Reset: clock to 0, core from its vector table, peripherals to reset values.
 
-        Memory is kept. A member of a linked system resets through `System.reset`, its
-        system time running on unchanged.
+        Memory is kept. `power_cycle` is the supply cut that loses RAM. A member of a linked
+        system resets through `System.reset`, its system time running on unchanged.
 
         Raises:
             MachineRunning: The machine is busy, outside its handlers. For a member: the system
@@ -988,6 +993,38 @@ class Machine:
         self._handle.reset(_core.ResetKind(kind.value))
         self._last_stop = None
 
+    def power_cycle(self) -> None:
+        """Cut the supply and power the machine again, as on a board.
+
+        Every RAM region reads 0, image segments and `memory_init` bytes placed in RAM
+        included. Flash, OTP and the arrays of bus devices such as `At25sf` keep their contents,
+        the call arena too. On the STM32U5 FLASH a program or erase in flight keeps a prefix of
+        its quad-words by the virtual time of the cut, and the next quad-word is torn. Every CPU
+        or DMA load of a torn quad-word sets FLASH_ECCR.ECCD and raises the NMI once ECCD and
+        ECCC are clear, `m.mem` reads never do. A handler that returns with ECCD set is entered
+        again before the next instruction. For the AT25SF see `At25sf`. Peripherals and the
+        backup domain reset as by `reset(ResetKind.POWER_ON)`, and the clock restarts at 0.
+        Intercepts, probes, watches and host-driven board state stay, as across that reset.
+        Python models and Python bus devices see only the reset.
+
+        Raises:
+            MachineRunning: The machine is busy, outside its handlers, or the call comes from
+                one of its handlers, as for `reset`.
+            MachineBusy: The machine is a member of a linked system.
+            ModelError: A model failed at the cut under strict peripherals. The cycle still
+                completed: RAM reads 0 and the machine was reset.
+            Exception: Any other error a native or plugin model or device raised at the cut,
+                such as RuntimeError for a C++ `std::runtime_error`. Raised after the cycle
+                completed, as for ModelError.
+        """
+        if self._linked() is not None:
+            raise MachineBusy(
+                f"{self._name} is a member of a linked system: no power_cycle of a member"
+            )
+        self._require_stopped()
+        self._handle.power_cycle()
+        self._last_stop = None
+
     @property
     def mem(self) -> Memory:
         """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`.
@@ -1000,6 +1037,9 @@ class Machine:
     @property
     def reg(self) -> Registers:
         """Core registers as typed attributes, `m.reg.r0`, or by `popcorn.arm.Reg`.
+
+        Writing `pc` keeps the Thumb state whatever bit 0 of the value, as a debugger's write
+        does on Cortex-M, so `m.sym(f)` and `m.fn_ptr(f)` give the same state.
 
         Reads and writes raise MachineRunning while the machine is busy, outside its callbacks:
         `m.read(m.ref.reg.r0)` and `m.write` access them then.

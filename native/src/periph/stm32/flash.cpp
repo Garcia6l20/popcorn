@@ -8,10 +8,12 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -66,6 +68,8 @@ struct flash_state
   std::uint32_t                          length{};
   std::uint32_t                          generation{};
   std::vector<held_store>                held{};
+  std::uint64_t                          due_ps{};
+  std::vector<std::uint32_t>             torn{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -86,6 +90,18 @@ auto all_of_byte(std::span<std::byte const> bytes, std::byte value) -> bool
 {
   return std::ranges::all_of(bytes, [value](std::byte b) { return b == value; });
 }
+
+auto physical(region_desc const& region, address addr) -> std::uint32_t
+{
+  return region.physical ? static_cast<std::uint32_t>(*region.physical + (addr - region.start))
+                         : static_cast<std::uint32_t>(addr);
+}
+
+struct bank_geometry
+{
+  std::uint32_t base{};
+  std::uint32_t size{};
+};
 
 constexpr std::uint64_t mhz = 1'000'000;
 
@@ -187,6 +203,32 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * fetches from a bank being erased or programmed also stall on silicon, RM0456 7.3.10, the model
  * keeps executing without a stall. STRT written while BSY is set, which RM0456 leaves undefined, is
  * ignored: STRT stays set and no flag is raised.
+ *
+ * Power cut: RM0456 7.3.11 leaves the contents of a program or erase cut in flight undefined. The
+ * model applies a deterministic stand-in that depends only on the virtual time of the cut, not
+ * a behaviour of silicon. Of the `n` quad-words of the operation, the first
+ * `floor(n * elapsed / duration)` are done. For a program the next quad-word is torn: its first
+ * 8 data bytes are ANDed into the old bytes, its last 8 keep theirs, the rest keep their old
+ * bytes. A program that would set PROGERR at its end changes nothing. For an erase the done
+ * quad-words read 0xFF, the next one keeps its old bytes and is torn unless they are all 0xFF,
+ * the rest keep theirs. Torn quad-words are kept across every reset and in the snapshot, and only
+ * an erase that covers one clears it. A program into a range holding a torn quad-word sets
+ * PROGERR, RM0456 7.3.12. A partly filled write buffer is dropped. A reset of any kind outside
+ * `power_cycle()`, a power-on reset or one a model requests included, still drops the operation
+ * in flight.
+ *
+ * ECC, RM0456 7.3.2 and 7.9.11: a CPU or DMA load that reaches a torn quad-word, through either
+ * flash alias, is a double error. With ECCD and ECCC clear it sets ECCD, BK_ECC to the bank
+ * and ADDR_ECC to the quad-word's offset in its bank, and drives the NMI input. Once ECCD or
+ * ECCC is set, a new error updates nothing. The NMI input stays active while ECCD is set, so a
+ * handler that never clears ECCD is entered again on its return. Writing 1 to ECCD or ECCC
+ * clears it, ECCIE is stored, the other fields are read-only. Every reset kind clears
+ * FLASH_ECCR and lowers the NMI input, the torn quad-words stay. Deviations: host and debugger
+ * reads, instruction fetches and vector table reads never detect an error, where silicon
+ * raises the NMI on a debugger read too. ECCC is never set, as no single error is modelled, and
+ * ECCIE has no effect. The model keeps no read buffer, so every load of a torn quad-word reports
+ * once the flags are clear, where the 7.3.2 note lets a repeated read of a buffered line report
+ * nothing.
  */
 class flash final : public dispatch_model<flash, flash_state>,
                     public clock_listener,
@@ -196,6 +238,7 @@ public:
   flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void power_cut() override;
   void load(std::span<std::byte const> in) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_write(
@@ -211,6 +254,8 @@ public:
       std::uint8_t       size,
       std::uint32_t      value,
       access_ctx         ctx) -> std::expected<void, bus_error> override;
+  void on_memory_read(region_desc const& region, address addr, std::uint8_t size, access_ctx ctx)
+      override;
 
   void on_clock_change() override;
   void on_voltage_range_change() override;
@@ -219,6 +264,7 @@ public:
   void key_written(std::uint32_t old, std::uint32_t now);
   void control_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
+  void ecc_written(std::uint32_t old, std::uint32_t now);
 
 private:
   [[nodiscard]] auto busy() const -> bool;
@@ -229,6 +275,21 @@ private:
   void               store(held_store const& one);
   void               start(operation which, std::uint32_t target, std::uint32_t length);
   void               start_erase(std::uint32_t control);
+  [[nodiscard]] auto duration_of(operation which, std::uint32_t length) const
+      -> std::chrono::nanoseconds;
+  [[nodiscard]] auto refused(
+      std::uint32_t              at,
+      std::span<std::byte const> target,
+      std::span<std::byte const> data) const -> bool;
+  [[nodiscard]] auto buffered() const -> std::array<std::byte, burst_size>;
+  void               tear_program(std::uint32_t full);
+  void               tear_erase(std::uint32_t full);
+  void               forget_torn(std::uint32_t from, std::uint32_t length);
+  void               sync_watches();
+  void               report_double_error(std::uint32_t line);
+  [[nodiscard]] auto banks() const -> bank_geometry;
+  [[nodiscard]] auto bank_of(std::uint32_t at) const -> std::uint32_t;
+  [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
   void               program();
   void               hold_hsi16(bool held);
   void               note_unmodelled_protection();
@@ -262,23 +323,30 @@ private:
   field_ref                                                         option_error_;
   field_ref                                                         busy_;
   field_ref                                                         waiting_;
+  field_ref                                                         ecc_detect_;
+  field_ref                                                         ecc_correct_;
+  field_ref                                                         ecc_bank_;
+  field_ref                                                         ecc_address_;
   irq_line&                                                         line_;
   field_ref                                                         latency_;
   field_ref                                                         low_power_read_;
   core::clock_domain                                                hclk_;
   std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> latency_logged_;
+  std::vector<std::uint32_t>                                        watched_;
   std::uint32_t                                                     clearable_{};
+  std::uint32_t                                                     written_{};
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
   bool                                                              protection_logged_{};
 };
 
-constexpr std::array<write_entry<flash>, 4> flash_writes{
+constexpr std::array<write_entry<flash>, 5> flash_writes{
     {
      {"FLASH_ACR", &flash::access_written},
      {"FLASH_NSKEYR", &flash::key_written},
      {"FLASH_NSCR", &flash::control_written},
      {"FLASH_NSSR", &flash::status_written},
+     {"FLASH_ECCR", &flash::ecc_written},
      }
 };
 
@@ -297,6 +365,8 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
       alignment_error_{field("FLASH_NSSR", "PGAERR")}, size_error_{field("FLASH_NSSR", "SIZERR")},
       sequence_error_{field("FLASH_NSSR", "PGSERR")}, option_error_{field("FLASH_NSSR", "OPTWERR")},
       busy_{field("FLASH_NSSR", "BSY")}, waiting_{field("FLASH_NSSR", "WDW")},
+      ecc_detect_{field("FLASH_ECCR", "ECCD")}, ecc_correct_{field("FLASH_ECCR", "ECCC")},
+      ecc_bank_{field("FLASH_ECCR", "BK_ECC")}, ecc_address_{field("FLASH_ECCR", "ADDR_ECC")},
       line_{irq("FLASH_IRQn")}, latency_{field("FLASH_ACR", "LATENCY")},
       low_power_read_{field("FLASH_ACR", "LPM")}, hclk_{ctx.clock.domain("hclk")}
 {
@@ -322,9 +392,202 @@ void flash::reset(register_file& regs, reset_kind)
     regs.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation = state_.generation;
+  auto       torn       = std::move(state_.torn);
   state_                = {};
   state_.generation     = generation + 1;
+  state_.torn           = std::move(torn);
   line_.lower();
+  ctx_.nmi.lower();
+}
+
+void flash::power_cut()
+{
+  auto const which = static_cast<operation>(state_.running);
+  if(which == operation::none)
+  {
+    return;
+  }
+  state_.running   = static_cast<std::uint8_t>(operation::none);
+  auto const now   = ctx_.clock.since_power_on().ps;
+  auto const total = static_cast<std::uint64_t>(duration_of(which, state_.length).count()) * 1000u;
+  auto const left  = state_.due_ps > now ? state_.due_ps - now : 0;
+  auto const lines = state_.length / quad_word;
+  auto const full =
+      total == 0
+          ? lines
+          : static_cast<std::uint32_t>(
+                static_cast<unsigned __int128>(lines) * (total - std::min(total, left)) / total);
+  if(which == operation::program)
+  {
+    tear_program(full);
+  }
+  else
+  {
+    tear_erase(full);
+  }
+  sync_watches();
+}
+
+auto flash::duration_of(operation which, std::uint32_t length) const -> std::chrono::nanoseconds
+{
+  switch(which)
+  {
+    case operation::program:
+      return length == quad_word ? options_.quad_word_program : options_.burst_program;
+    case operation::page_erase:
+      return options_.page_erase;
+    case operation::bank_erase:
+      return options_.bank_erase;
+    case operation::mass_erase:
+    case operation::none:
+      break;
+  }
+  return options_.mass_erase;
+}
+
+auto flash::refused(
+    std::uint32_t              at,
+    std::span<std::byte const> target,
+    std::span<std::byte const> data) const -> bool
+{
+  for(std::size_t line = 0; line < data.size(); line += quad_word)
+  {
+    auto const old       = target.subspan(line, quad_word);
+    auto const zero_data = all_of_byte(data.subspan(line, quad_word), std::byte{0});
+    if(all_of_byte(old, std::byte{0}) or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
+    {
+      return true;
+    }
+  }
+  auto const first = std::ranges::lower_bound(state_.torn, at);
+  return first != state_.torn.end() and *first < at + data.size();
+}
+
+auto flash::buffered() const -> std::array<std::byte, burst_size>
+{
+  std::array<std::byte, burst_size> data{};
+  for(std::size_t i = 0; i < data.size(); ++i)
+  {
+    data[i] = static_cast<std::byte>(state_.buffer[i / 4] >> (8 * (i % 4)));
+  }
+  return data;
+}
+
+void flash::tear_program(std::uint32_t full)
+{
+  std::array<std::byte, burst_size> target_bytes{};
+  auto const                        target     = std::span{target_bytes}.first(state_.length);
+  auto                              data_bytes = buffered();
+  auto const                        data       = std::span{data_bytes}.first(state_.length);
+  if(not ctx_.services.read_block(state_.target, target, initiator::debugger)
+     or refused(state_.target, target, data))
+  {
+    return;
+  }
+  auto const done = full * quad_word;
+  if(done < data.size())
+  {
+    for(std::size_t i = done; i < done + quad_word / 2; ++i)
+    {
+      data[i] &= target[i];
+    }
+    std::ranges::copy(target.subspan(done + quad_word / 2), data.begin() + done + quad_word / 2);
+    auto const line = state_.target + done;
+    state_.torn.insert(std::ranges::upper_bound(state_.torn, line), line);
+  }
+  static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
+}
+
+void flash::tear_erase(std::uint32_t full)
+{
+  auto const                   done = full * quad_word;
+  std::vector<std::byte> const erased(done, std::byte{0xff});
+  static_cast<void>(ctx_.services.write_block(state_.target, erased, initiator::debugger));
+  forget_torn(state_.target, done);
+  if(done >= state_.length)
+  {
+    return;
+  }
+  std::array<std::byte, quad_word> old{};
+  auto const                       line = state_.target + done;
+  if(not ctx_.services.read_block(line, old, initiator::debugger)
+     or all_of_byte(old, std::byte{0xff}))
+  {
+    return;
+  }
+  auto const at = std::ranges::lower_bound(state_.torn, line);
+  if(at == state_.torn.end() or *at != line)
+  {
+    state_.torn.insert(at, line);
+  }
+}
+
+void flash::forget_torn(std::uint32_t from, std::uint32_t length)
+{
+  auto const first = std::ranges::lower_bound(state_.torn, from);
+  auto const last  = std::ranges::lower_bound(state_.torn, from + length);
+  state_.torn.erase(first, last);
+}
+
+void flash::sync_watches()
+{
+  std::vector<std::uint32_t> gone;
+  std::vector<std::uint32_t> added;
+  std::ranges::set_difference(watched_, state_.torn, std::back_inserter(gone));
+  std::ranges::set_difference(state_.torn, watched_, std::back_inserter(added));
+  for(auto const line : gone)
+  {
+    ctx_.services.watch_reads(line, quad_word, false);
+  }
+  for(auto const line : added)
+  {
+    ctx_.services.watch_reads(line, quad_word, true);
+  }
+  watched_ = state_.torn;
+}
+
+auto flash::banks() const -> bank_geometry
+{
+  contract_assert(storage_ != nullptr);
+  return {.base = static_cast<std::uint32_t>(storage_->start), .size = storage_->size / 2};
+}
+
+auto flash::bank_of(std::uint32_t at) const -> std::uint32_t
+{
+  auto const [base, size] = banks();
+  return (at - base) / size;
+}
+
+auto flash::bank_base(std::uint32_t at) const -> std::uint32_t
+{
+  auto const [base, size] = banks();
+  return base + bank_of(at) * size;
+}
+
+void flash::on_memory_read(region_desc const& region, address addr, std::uint8_t size, access_ctx)
+{
+  auto const at    = physical(region, addr);
+  auto const first = at & ~(quad_word - 1);
+  auto const last  = (at + size - 1) & ~(quad_word - 1);
+  for(auto line = first; line <= last; line += quad_word)
+  {
+    if(std::ranges::binary_search(state_.torn, line))
+    {
+      report_double_error(line);
+    }
+  }
+}
+
+void flash::report_double_error(std::uint32_t line)
+{
+  if(get(regs_, ecc_detect_) != 0 or get(regs_, ecc_correct_) != 0)
+  {
+    return;
+  }
+  update(regs_, ecc_address_, line - bank_base(line));
+  update(regs_, ecc_bank_, bank_of(line));
+  update(regs_, ecc_detect_, 1);
+  ctx_.nmi.raise();
 }
 
 auto flash::busy() const -> bool
@@ -403,6 +666,7 @@ auto flash::on_write(
     std::uint32_t  value,
     access_ctx     ctx) -> std::expected<void, bus_error>
 {
+  written_        = merge_write(0, offset, size, value);
   auto const done = dispatch_model::on_write(regs, offset, size, old, value, ctx);
   if(std::exchange(rejected_, false))
   {
@@ -418,11 +682,8 @@ auto flash::on_memory_write(
     std::uint32_t      value,
     access_ctx         ctx) -> std::expected<void, bus_error>
 {
-  auto const       at = region.physical
-                          ? static_cast<std::uint32_t>(*region.physical + (addr - region.start))
-                          : static_cast<std::uint32_t>(addr);
   held_store const one{
-      .addr    = at,
+      .addr    = physical(region, addr),
       .size    = size,
       .value   = value,
       .control = regs_.peek(program_.offset),
@@ -494,21 +755,9 @@ void flash::start(operation which, std::uint32_t target, std::uint32_t length)
   state_.target  = target;
   state_.length  = length;
   update(regs_, busy_, 1);
-  auto const delay = [&] {
-    switch(which)
-    {
-      case operation::program:
-        return length == quad_word ? options_.quad_word_program : options_.burst_program;
-      case operation::page_erase:
-        return options_.page_erase;
-      case operation::bank_erase:
-        return options_.bank_erase;
-      case operation::mass_erase:
-      case operation::none:
-        break;
-    }
-    return options_.mass_erase;
-  }();
+  auto const delay = duration_of(which, length);
+  state_.due_ps =
+      ctx_.clock.since_power_on().ps + static_cast<std::uint64_t>(delay.count()) * 1000u;
   schedule_in(delay, operation_end, ++state_.generation);
 }
 
@@ -519,8 +768,7 @@ void flash::start_erase(std::uint32_t control)
     warn("FLASH_NSCR", "erase requested, but no flash region names FLASH as its controller");
     return;
   }
-  auto const bank_size = storage_->size / 2;
-  auto const base      = static_cast<std::uint32_t>(storage_->start);
+  auto const [base, bank_size] = banks();
   if(page_erase_.of(control) != 0)
   {
     auto const pages = bank_size / page_size;
@@ -554,28 +802,15 @@ void flash::start_erase(std::uint32_t control)
 void flash::program()
 {
   std::array<std::byte, burst_size> target_bytes{};
-  std::array<std::byte, burst_size> data_bytes{};
-  auto const                        target = std::span{target_bytes}.first(state_.length);
-  auto const                        data   = std::span{data_bytes}.first(state_.length);
-  for(std::size_t i = 0; i < data.size(); ++i)
-  {
-    data[i] = static_cast<std::byte>(state_.buffer[i / 4] >> (8 * (i % 4)));
-  }
-  state_.filled = 0;
-  if(not ctx_.services.read_block(state_.target, target, initiator::debugger))
+  auto const                        target     = std::span{target_bytes}.first(state_.length);
+  auto const                        data_bytes = buffered();
+  auto const                        data       = std::span{data_bytes}.first(state_.length);
+  state_.filled                                = 0;
+  if(not ctx_.services.read_block(state_.target, target, initiator::debugger)
+     or refused(state_.target, target, data))
   {
     fail(program_error_);
     return;
-  }
-  for(std::size_t line = 0; line < data.size(); line += quad_word)
-  {
-    auto const old       = target.subspan(line, quad_word);
-    auto const zero_data = all_of_byte(data.subspan(line, quad_word), std::byte{0});
-    if(all_of_byte(old, std::byte{0}) or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
-    {
-      fail(program_error_);
-      return;
-    }
   }
   static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
 }
@@ -594,6 +829,8 @@ void flash::finish()
   {
     std::vector<std::byte> const erased(state_.length, std::byte{0xff});
     static_cast<void>(ctx_.services.write_block(state_.target, erased, initiator::debugger));
+    forget_torn(state_.target, state_.length);
+    sync_watches();
     update(regs_, start_, 0);
   }
   if(errors_pending() == errors and get(regs_, end_irq_) != 0)
@@ -660,6 +897,7 @@ void flash::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
   latency_logged_.clear();
+  sync_watches();
 }
 
 void flash::on_clock_change()
@@ -768,10 +1006,20 @@ void flash::control_written(std::uint32_t old, std::uint32_t now)
   interrupt();
 }
 
-void flash::status_written(std::uint32_t old, std::uint32_t now)
+void flash::status_written(std::uint32_t old, std::uint32_t)
 {
-  regs_.poke(status_.offset, old & ~(now & clearable_));
+  regs_.poke(status_.offset, old & ~(written_ & clearable_));
   interrupt();
+}
+
+void flash::ecc_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const flags = ecc_detect_.mask() | ecc_correct_.mask();
+  regs_.poke(ecc_detect_.offset, (now & ~flags) | (old & flags & ~written_));
+  if(get(regs_, ecc_detect_) == 0)
+  {
+    ctx_.nmi.lower();
+  }
 }
 }
 

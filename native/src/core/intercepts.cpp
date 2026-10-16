@@ -10,7 +10,10 @@
 #include <format>
 #include <functional>
 #include <ranges>
+#include <set>
 #include <string>
+#include <tuple>
+#include <vector>
 
 namespace popcorn::core
 {
@@ -299,7 +302,8 @@ void machine::run_state::on_code_site(
   }
   auto const        resumed = run.resume_past and run.resume_past->first == site.at;
   std::size_t const first   = resumed ? std::exchange(run.resume_past, std::nullopt)->second : 0;
-  auto const        stops   = run.guarded([&] {
+  std::optional<std::uint32_t> exit;
+  auto const                   stops = run.guarded([&] {
     if(not resumed and not site.probes.empty())
     {
       auto const at = run.arrival_time(static_cast<address>(addr));
@@ -357,6 +361,7 @@ void machine::run_state::on_code_site(
           }
           run.arch->return_to_caller(result.value(), result.abi().value_or(run.abi_at(entry.at)));
           run.coverage.has_previous = false;
+          exit                      = run.arch->return_interrupt();
           return false;
         case intercept_action::stop:
           run.trap        = arch::trap_result::stop(*result.reason());
@@ -371,6 +376,10 @@ void machine::run_state::on_code_site(
   {
     run.end_cause = engine_end::other;
     uc_emu_stop(engine);
+  }
+  else if(exit)
+  {
+    on_interrupt(engine, *exit, &run);
   }
 }
 
@@ -619,6 +628,248 @@ auto machine::add_watch(address at, std::uint32_t size, watch_kind kind, watch_h
   }
   run_->watches.emplace(id, std::move(entry));
   return hook_handle{hooks_, id};
+}
+
+void machine::do_watch_reads(address at, std::uint32_t size, bool on)
+{
+  auto const* const region = mapped_region::find(memory_, at, size);
+  if(region == nullptr or region->controller == nullptr)
+  {
+    throw config_error(
+        description_.part, 0, std::format("watch_reads at {:#010x}, {} bytes", at, size),
+        "a range inside one region with a controller model");
+  }
+  auto& run = *run_;
+  if(run.controller_page_bytes == 0)
+  {
+    std::uint32_t page = 0;
+    check(uc_ctl_get_page_size(engine_.get(), &page), "reading the engine page size");
+    run.controller_page_bytes = page;
+  }
+  auto const* const buffer = region->buffer.get();
+  auto const        first  = region->offset + (at - region->desc->start);
+  auto const        key    = std::tuple{buffer, first, first + size - 1};
+  if(on)
+  {
+    auto const [entry, added] = run.controller_ranges.emplace(key, region->controller);
+    if(not added)
+    {
+      return;
+    }
+    try
+    {
+      run.sync_controller_runs(buffer);
+    }
+    catch(...)
+    {
+      run.controller_ranges.erase(entry);
+      throw;
+    }
+    return;
+  }
+  auto const entry = run.controller_ranges.find(key);
+  if(entry == run.controller_ranges.end())
+  {
+    return;
+  }
+  auto const controller = entry->second;
+  run.controller_ranges.erase(entry);
+  try
+  {
+    run.sync_controller_runs(buffer);
+  }
+  catch(...)
+  {
+    run.controller_ranges.emplace(key, controller);
+    throw;
+  }
+}
+
+auto machine::controller_watches() const noexcept -> std::size_t
+{
+  return run_->controller_ranges.size();
+}
+
+auto machine::controller_watch_hooks() const noexcept -> std::size_t
+{
+  return std::ranges::fold_left(
+      run_->controller_pages, std::size_t{0},
+      [](std::size_t sum, auto const& entry) { return sum + entry.second.hooks.size(); });
+}
+
+void machine::run_state::sync_controller_runs(host_buffer const* buffer)
+{
+  std::map<std::pair<host_buffer const*, std::size_t>, controller_run> runs;
+  std::set<std::size_t>                                                pages;
+  controller_run*                                                      open = nullptr;
+  for(auto entry =
+          controller_ranges.lower_bound(std::tuple{buffer, std::size_t{0}, std::size_t{0}});
+      entry != controller_ranges.end() and std::get<0>(entry->first) == buffer; ++entry)
+  {
+    auto const [_, from, to] = entry->first;
+    auto const lead          = from - std::min(from, controller_lead);
+    if(open == nullptr or lead > open->last)
+    {
+      open =
+          &runs.emplace(
+                   std::pair{buffer, lead}, controller_run{.last = to, .controller = entry->second})
+               .first->second;
+    }
+    open->last = std::max(open->last, to);
+    open->ranges.emplace_back(from, to);
+    open->reach.push_back(std::max(open->reach.empty() ? to : open->reach.back(), to));
+    for(auto page = lead / controller_page_bytes; page <= to / controller_page_bytes; ++page)
+    {
+      pages.insert(page);
+    }
+  }
+  std::vector<std::pair<std::size_t, controller_page>> fresh;
+  try
+  {
+    for(auto const page : pages)
+    {
+      if(not controller_pages.contains({buffer, page}))
+      {
+        fresh.emplace_back(page, new_controller_page(*buffer, page));
+      }
+    }
+  }
+  catch(...)
+  {
+    for(auto& [page, made] : fresh)
+    {
+      drop_controller_hooks(made);
+    }
+    throw;
+  }
+  for(auto entry = controller_pages.lower_bound({buffer, std::size_t{0}});
+      entry != controller_pages.end() and entry->first.first == buffer;)
+  {
+    if(pages.contains(entry->first.second))
+    {
+      ++entry;
+      continue;
+    }
+    drop_controller_hooks(entry->second);
+    entry = controller_pages.erase(entry);
+  }
+  for(auto& [page, made] : fresh)
+  {
+    controller_pages.emplace(std::pair{buffer, page}, std::move(made));
+  }
+  std::erase_if(
+      controller_runs, [buffer](auto const& entry) { return entry.first.first == buffer; });
+  controller_runs.merge(runs);
+}
+
+auto machine::run_state::new_controller_page(host_buffer const& buffer, std::size_t page)
+    -> controller_page
+{
+  controller_page made;
+  auto const      low  = page * controller_page_bytes;
+  auto const      high = std::min(low + controller_page_bytes, buffer.size) - 1;
+  try
+  {
+    for(auto const& mapping : buffer.mappings)
+    {
+      auto const from = std::max(low, mapping.offset);
+      auto const to   = std::min(high, mapping.offset + mapping.size - 1);
+      if(from > to)
+      {
+        continue;
+      }
+      auto const        guest  = std::uint64_t{mapping.start} + (from - mapping.offset);
+      auto const* const region = mapped_region::find(owner.memory_, static_cast<address>(guest), 1);
+      if(region == nullptr)
+      {
+        continue;
+      }
+      auto hook = std::make_unique<controller_hook>(controller_hook{
+          .owner     = this,
+          .buffer    = &buffer,
+          .region    = region,
+          .to_buffer = static_cast<std::int64_t>(from) - static_cast<std::int64_t>(guest),
+          .serial    = controller_hook_serial + 1,
+          .hook      = 0});
+      check(
+          uc_hook_add(
+              engine, &hook->hook, UC_HOOK_MEM_READ, reinterpret_cast<void*>(&on_controller_read),
+              hook.get(), guest, guest + (to - from)),
+          std::format("adding the controller read hook at {:#010x}", guest));
+      ++controller_hook_serial;
+      made.hooks.push_back(std::move(hook));
+    }
+  }
+  catch(...)
+  {
+    drop_controller_hooks(made);
+    throw;
+  }
+  return made;
+}
+
+void machine::run_state::drop_controller_hooks(controller_page& page) noexcept
+{
+  for(auto const& hook : page.hooks)
+  {
+    uc_hook_del(engine, hook->hook);
+  }
+  page.hooks.clear();
+}
+
+void machine::run_state::arm_controller_guard(
+    host_buffer const*   buffer,
+    mapped_region const* region,
+    std::size_t          first,
+    std::uint64_t        before,
+    std::uint64_t        addr,
+    int                  size) noexcept
+{
+  auto const page = controller_pages.find({buffer, first / controller_page_bytes});
+  if(page == controller_pages.end())
+  {
+    return;
+  }
+  auto const fresh = std::ranges::find_if(page->second.hooks, [&](auto const& hook) {
+    return hook->region == region and hook->serial > before;
+  });
+  if(fresh != page->second.hooks.end())
+  {
+    controller_guard = {.addr = addr, .size = size, .serial = (*fresh)->serial, .armed = true};
+  }
+}
+
+auto machine::run_state::controller_read_hit(
+    host_buffer const* buffer,
+    std::size_t        first,
+    std::size_t        last) const noexcept -> periph::model*
+{
+  auto const after = controller_runs.upper_bound({buffer, first});
+  if(after == controller_runs.begin())
+  {
+    return nullptr;
+  }
+  auto const& [key, run] = *std::prev(after);
+  return key.first == buffer and first <= run.last and run.overlaps(first, last) ? run.controller
+                                                                                 : nullptr;
+}
+
+auto machine::run_state::controller_block_hit(
+    host_buffer const* buffer,
+    std::size_t        first,
+    std::size_t        last) const noexcept -> bool
+{
+  auto const next = controller_runs.lower_bound({buffer, first});
+  if(next != controller_runs.end() and next->first.first == buffer and next->first.second <= last)
+  {
+    return true;
+  }
+  if(next == controller_runs.begin())
+  {
+    return false;
+  }
+  auto const& [key, run] = *std::prev(next);
+  return key.first == buffer and run.last >= first;
 }
 
 auto intercept_call::args(

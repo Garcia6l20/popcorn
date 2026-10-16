@@ -19,3 +19,9 @@ add_ll_firmware(
         "burst_program",
     ],
 )
+
+add_ll_firmware(
+    "power_cut_ll",
+    [here / "power_cut_ll.c"],
+    entries=["nmi_count", "ecc_address", "append", "stored", "erase_log", "erasing", "scan"],
+)

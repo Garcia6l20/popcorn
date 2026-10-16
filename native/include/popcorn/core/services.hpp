@@ -74,11 +74,12 @@ struct block_error
  *        `periph::model_context` or `arch::arch_context`.
  *
  * The public functions check their contracts and forward to the private virtual ones, which an
- * implementation overrides: a virtual function cannot carry a contract. Every request is
- * deferred: it only records, the next block hook ends the slice at an instruction boundary, and
- * nothing calls `uc_emu_stop` from the caller's callback, so every function is safe from MMIO,
- * memory, instruction and interrupt hooks. Neither copyable nor movable, contexts hold
- * references to it.
+ * implementation overrides: a virtual function cannot carry a contract. Every request but
+ * watch_reads() is deferred: it only records, the next block hook ends the slice at an
+ * instruction boundary, and nothing calls `uc_emu_stop` from the caller's callback, so every
+ * function is safe from MMIO, memory, instruction and interrupt hooks. watch_reads() takes
+ * effect at once and is safe from the same callbacks. Neither copyable nor movable, contexts
+ * hold references to it.
  */
 class POPCORN_API machine_services
 {
@@ -210,6 +211,31 @@ public:
   }
 
   /**
+   * @brief Starts or stops reporting CPU and DMA loads of [@p at, @p at + @p size) to the
+   *        controller model of the region holding it, through periph::model::on_memory_read.
+   *        Covers every alias of the bytes. Idempotent per range. Host and debugger reads are
+   *        never reported, nor are instruction fetches, vector reads and exception stacking.
+   *        Unlike the other requests it is not deferred: it takes effect at once, and is safe
+   *        from model events and memory hooks, an on_memory_read call included. Each range
+   *        spans from 7 bytes before it to its end. Every engine page a span touches gets one
+   *        engine read hook per alias of the page, shared by every range on it, so a page costs
+   *        the same whatever the number of ranges. Every load starting on such a page takes
+   *        the slow path and calls the hook. Every slow-path load of the machine, MMIO reads
+   *        included, walks every engine read hook, about 1 ns each. A DMA block read copies at
+   *        once unless it reaches a watched range. Other loads and every fetch are unaffected.
+   * @param at First address, inside a region with a controller.
+   * @param size Bytes, the range inside that region.
+   * @param on Start or stop.
+   * @throws config_error when the range is not inside one region with a controller model, and
+   *         from an implementation without controller regions.
+   */
+  void watch_reads(address const at, std::uint32_t const size, bool on) pre(size > 0)
+      pre(fits_address_space(at, size))
+  {
+    do_watch_reads(at, size, on);
+  }
+
+  /**
    * @brief Appends a record to the machine's always-on trace ring.
    * @param record Record to append.
    */
@@ -244,5 +270,6 @@ private:
       -> std::expected<void, block_error>           = 0;
   virtual void do_trace(trace_record const& record) = 0;
   virtual void do_log(log_record record)            = 0;
+  virtual void do_watch_reads(address at, std::uint32_t size, bool on);
 };
 }

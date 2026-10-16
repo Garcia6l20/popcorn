@@ -47,6 +47,8 @@ public:
   std::vector<std::pair<std::uint32_t, vtime>>  frames;
   std::vector<std::uint8_t>                     sizes;
   std::vector<popcorn::reset_kind>              resets;
+  std::vector<std::pair<vtime, std::size_t>>    cuts;
+  bool                                          throw_at_cut{};
   std::uint32_t                                 position{};
   std::optional<std::uint8_t>                   declared;
   mutable int                                   mode_calls{};
@@ -86,6 +88,15 @@ public:
   void reset(popcorn::reset_kind kind) override
   {
     resets.push_back(kind);
+  }
+
+  void power_cut(vtime at) override
+  {
+    cuts.emplace_back(at, resets.size());
+    if(throw_at_cut)
+    {
+      throw std::runtime_error{"cut"};
+    }
   }
 };
 
@@ -363,6 +374,45 @@ TEST_CASE("every machine reset reaches the device once with its kind")
       == std::vector{
           reset_kind::power_on, reset_kind::power_on, reset_kind::power_on, reset_kind::software,
           reset_kind::brown_out});
+  CHECK(r.device->cuts.empty());
+}
+
+TEST_CASE("a power cycle cuts the device at the time since power-on, then resets it at power-on")
+{
+  using popcorn::reset_kind;
+  rig r{"poll"};
+  r.f->target->reset(reset_kind::software);
+  auto const at = r.f->target->virtual_clock().since_power_on();
+  REQUIRE(at > r.f->target->virtual_clock().time());
+  auto const seen = r.device->resets.size();
+  r.f->target->power_cycle();
+  CHECK(
+      r.device->cuts
+      == std::vector{
+          std::pair{at, seen}
+  });
+  REQUIRE(r.device->resets.size() == seen + 1);
+  CHECK(r.device->resets.back() == reset_kind::power_on);
+  CHECK(r.f->target->virtual_clock().since_power_on() == vtime{});
+}
+
+TEST_CASE("a device that throws at the cut does not stop the cut of the next one on the bus")
+{
+  using popcorn::reset_kind;
+  auto const   first  = std::make_shared<script_target>();
+  auto const   second = std::make_shared<script_target>();
+  stm32::board board{};
+  first->throw_at_cut = true;
+  board.spi["SPI1"].push_back({.device = first, .cs_port = "GPIOA", .cs_pin = 4});
+  board.spi["SPI1"].push_back({.device = second, .cs_port = "GPIOB", .cs_pin = 0});
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories(board, u575());
+  stm32_fixture const f{u575(), "spi_ll", std::move(options)};
+  CHECK_THROWS_AS(f.target->power_cycle(), std::runtime_error);
+  CHECK(first->cuts.size() == 1);
+  CHECK(second->cuts.size() == 1);
+  CHECK(first->resets.back() == reset_kind::power_on);
+  CHECK(second->resets.back() == reset_kind::power_on);
 }
 
 TEST_CASE("a snapshot mid-transfer restores the device and the remaining frames")

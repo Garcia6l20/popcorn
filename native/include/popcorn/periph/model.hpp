@@ -93,6 +93,17 @@ public:
   virtual void reset(register_file& regs, reset_kind kind) = 0;
 
   /**
+   * @brief The supply was cut. Called on every model, in description order, before the
+   *        power-on reset of `core::machine::power_cycle()`, while the model's state and the
+   *        clock are still those of the cut, so `model_context::clock` gives its time. The
+   *        default does nothing. A model holding a non-volatile array applies what the cut
+   *        leaves of an operation in flight. Never called by reset() nor by a reset a model
+   *        requests.
+   */
+  virtual void power_cut()
+  {}
+
+  /**
    * @brief Serves a guest read of a claimed register.
    * @param regs Storage of the peripheral.
    * @param offset Byte offset of the access within the peripheral.
@@ -154,6 +165,24 @@ public:
   {
     return std::unexpected{bus_error::denied};
   }
+
+  /**
+   * @brief A CPU or DMA load overlapped a range the model watches through
+   *        core::machine_services::watch_reads. Called once per load, also when the call
+   *        changes the model's watches, before the load reads its bytes, on the machine thread
+   *        with the engine running and the GIL released. An interrupt the call makes
+   *        deliverable is taken before the next instruction. The default does nothing.
+   * @param region Region the load hit, an alias included.
+   * @param addr Address loaded, as the instruction or channel spelled it.
+   * @param size Load size in bytes, 8 for a 64-bit load.
+   * @param ctx Where, when and by whom the load happened.
+   */
+  virtual void on_memory_read(
+      [[maybe_unused]] region_desc const& region,
+      [[maybe_unused]] address            addr,
+      [[maybe_unused]] std::uint8_t       size,
+      [[maybe_unused]] access_ctx         ctx)
+  {}
 
   /**
    * @brief Handles an event the model scheduled, when virtual time reaches it.
@@ -224,6 +253,10 @@ struct POPCORN_API model_context
   register_file& regs;
   /** @brief IRQ lines of the peripheral, in description order. */
   std::span<irq_line> irqs;
+  /** @brief Line to the core's non-maskable interrupt, level-sensitive and shared by every
+   * model: the input is active while any model holds its line active. An NMI still active when
+   * its handler returns is taken again. Ignored by an architecture without an NMI input. */
+  irq_line& nmi;
   /** @brief DMA request lines of the peripheral, in description order. */
   std::span<dma_request> dma;
   /** @brief The model's own access to the event queue, stamped with its index. */

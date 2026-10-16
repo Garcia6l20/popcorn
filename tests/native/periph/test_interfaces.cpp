@@ -193,9 +193,11 @@ TEST_CASE("the context forwards a stop request to the machine services")
   popcorn::testing::fake_services services;
   no_peers                        peers;
   popcorn::part_description const part{};
+  popcorn::periph::irq_line       nmi;
   popcorn::periph::model_context  ctx{
       .regs     = regs,
       .irqs     = {},
+      .nmi      = nmi,
       .dma      = {},
       .events   = events,
       .clock    = clock,

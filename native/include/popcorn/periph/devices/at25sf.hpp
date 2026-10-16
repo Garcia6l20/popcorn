@@ -87,7 +87,13 @@ struct at25sf_options
  * any multiple of 8 bits are split into bytes, most significant first; another frame size ends the
  * instruction. The device drives MISO only with data, all ones otherwise. Not modelled, ignored:
  * dual, quad and QPI instructions, suspend and resume, the security registers, SFDP. Block
- * protection bits are stored, not enforced.
+ * protection bits are stored, not enforced. A power cut while BUSY keeps the first part of the
+ * operation's bytes in proportion to the time elapsed and the old bytes after it, in block order
+ * for an erase and in the order the data was sent for a program, from its start address and
+ * wrapping inside the page. This prefix rule is the model's deterministic choice, not datasheet
+ * behaviour. A program or erase keeps a copy of its range, up to the whole array for a chip erase,
+ * until the next selection after BUSY ends, a 66h 99h reset or a power cut. A snapshot taken
+ * before then carries it.
  */
 class POPCORN_API at25sf final : public spi_target
 {
@@ -115,8 +121,15 @@ public:
    */
   void reset(reset_kind kind) override;
   /**
-   * @brief Appends the state: status, timings, the instruction in progress and the pages that
-   *        differ from the initial image.
+   * @brief Tears a page program or erase still BUSY at @p at: of the `n` bytes of its range in
+   *        tear order, the first `floor(n * elapsed / time)` keep the result, the rest return to
+   *        their old bytes. Status writes and an operation already ended keep their result.
+   * @param at Virtual time since power-on of the cut.
+   */
+  void power_cut(vtime at) override;
+  /**
+   * @brief Appends the state: status, timings, the instruction in progress, the pages that
+   *        differ from the initial image and, while BUSY, the old bytes of the operation's range.
    */
   void save(std::vector<std::byte>& out) const override;
   /**

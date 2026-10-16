@@ -33,6 +33,10 @@ auto machine::do_read(address addr, std::uint8_t size, initiator by)
 {
   if(auto const* const region = mapped_region::find(memory_, addr, size))
   {
+    if(by == initiator::dma and not run_->controller_runs.empty())
+    {
+      run_->note_controller_read(*region, addr, size, by);
+    }
     auto const value = read_host(region->host(addr), size);
     run_->note_watched(addr, size, value, false, by);
     return value;
@@ -91,7 +95,14 @@ auto machine::do_read_block(address addr, std::span<std::byte> out, initiator by
   {
     auto const        at     = static_cast<address>(addr + done);
     auto const* const region = mapped_region::find(memory_, at, 1);
-    if(region != nullptr and (run_->watches.empty() or by == initiator::debugger))
+    auto const        misses = [&] {
+      auto const first = region->offset + (at - region->desc->start);
+      auto const bytes = std::min(out.size() - done, region->remaining(at));
+      return by != initiator::dma
+          or run_->controller_runs.empty()
+          or not run_->controller_block_hit(region->buffer.get(), first, first + bytes - 1);
+    };
+    if(region != nullptr and (by == initiator::debugger or (run_->watches.empty() and misses())))
     {
       auto const run = std::min(out.size() - done, region->remaining(at));
       std::memcpy(out.data() + done, region->host(at), run);

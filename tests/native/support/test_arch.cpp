@@ -245,6 +245,15 @@ auto test_arch::interrupt_returns(std::uint32_t intno, address frame_return) con
      and exc_return(read(UC_ARM_REG_PC));
 }
 
+auto test_arch::return_interrupt() const -> std::optional<std::uint32_t>
+{
+  if(read(UC_ARM_REG_IPSR) == 0 or (read(UC_ARM_REG_PC) & 0xff00'0000u) != 0xff00'0000u)
+  {
+    return std::nullopt;
+  }
+  return excp_exception_exit;
+}
+
 auto test_arch::on_invalid_insn() -> popcorn::arch::trap_result
 {
   return popcorn::arch::trap_result::fault({.kind = fault_kind::usage, .fault_address = pc()});

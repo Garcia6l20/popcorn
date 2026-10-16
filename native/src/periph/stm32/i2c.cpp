@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <span>
@@ -141,6 +142,7 @@ public:
       std::vector<std::shared_ptr<i2c_target>> targets);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void power_cut() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -718,6 +720,30 @@ void i2c::reset(register_file& regs, reset_kind kind)
     target->reset(kind);
   }
   flags();
+}
+
+void i2c::power_cut()
+{
+  auto const         at = ctx_.clock.since_power_on();
+  std::exception_ptr first;
+  for(auto const& target : targets_)
+  {
+    try
+    {
+      target->power_cut(at);
+    }
+    catch(...)
+    {
+      if(not first)
+      {
+        first = std::current_exception();
+      }
+    }
+  }
+  if(first)
+  {
+    std::rethrow_exception(first);
+  }
 }
 
 void i2c::flags()

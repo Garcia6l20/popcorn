@@ -478,7 +478,7 @@ void system_space::write_scs(std::uint32_t offset, std::uint32_t value, std::uin
       {
         core_.set_exception_pending(exc_nmi, true);
       }
-      if(bit(bits, 30))
+      if(bit(bits, 30) and not test_bit(core_.state_.exceptions.level, exc_nmi))
       {
         core_.set_exception_pending(exc_nmi, false);
       }

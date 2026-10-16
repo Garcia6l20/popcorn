@@ -28,6 +28,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -102,9 +103,26 @@ public:
   arch::arch* arch{};
   /** @brief Active lines per interrupt source. */
   std::vector<std::uint32_t> active{};
+  /** @brief Active lines on periph::nmi_source. */
+  std::uint32_t nmi_active{};
 
   void set_irq(std::uint32_t source, bool level) override
   {
+    if(source == periph::nmi_source)
+    {
+      if(level)
+      {
+        if(nmi_active++ == 0)
+        {
+          arch->set_nmi_line(true);
+        }
+      }
+      else if(nmi_active > 0 and --nmi_active == 0)
+      {
+        arch->set_nmi_line(false);
+      }
+      return;
+    }
     if(source >= active.size())
     {
       active.resize(source + 1);
@@ -172,6 +190,8 @@ struct machine::peripheral_slot
   periph::layer_state layer{};
   /** @brief IRQ lines, one per `irqs` entry, frozen before the context spans them. */
   std::vector<periph::irq_line> irqs{};
+  /** @brief Line to the non-maskable interrupt, model_context::nmi. */
+  periph::irq_line nmi{};
   /** @brief DMA request lines, none until the description names them. */
   std::vector<periph::dma_request> dma{};
   /** @brief The model's event port. */
@@ -663,6 +683,74 @@ struct machine::run_state
     }
   };
 
+  /** @brief Engine read hook over one guest span of a watched engine page of a host buffer,
+   * the region's own mapping or an alias. */
+  struct controller_hook
+  {
+    /** @brief Run state serving the hits. */
+    run_state* owner{};
+    /** @brief Buffer holding the page. */
+    host_buffer const* buffer{};
+    /** @brief Region the span lies in, an alias included. */
+    mapped_region const* region{};
+    /** @brief Buffer offset of the span's first byte, less its guest address. */
+    std::int64_t to_buffer{};
+    /** @brief Order of creation, from controller_hook_serial. */
+    std::uint64_t serial{};
+    /** @brief Engine hook. */
+    uc_hook hook{};
+  };
+
+  /** @brief Hooks of one watched engine page, one per guest span mapping it. */
+  struct controller_page
+  {
+    /** @brief The hooks. */
+    std::vector<std::unique_ptr<controller_hook>> hooks{};
+  };
+
+  /** @brief Watched ranges of one host buffer whose spans overlap, each span starting
+   * controller_lead bytes before its range, merged so that a load start lies in one run only.
+   * Keyed by its first span offset. */
+  struct controller_run
+  {
+    /** @brief Last offset of the run. */
+    std::size_t last{};
+    /** @brief Model reported to, the controller of the region the run's first range was named
+     * in. */
+    periph::model* controller{};
+    /** @brief Watched ranges of the run, inclusive buffer offsets, sorted. */
+    std::vector<std::pair<std::size_t, std::size_t>> ranges{};
+    /** @brief Largest last offset of ranges up to each index. */
+    std::vector<std::size_t> reach{};
+
+    /** @brief Whether buffer offsets [@p from, @p to] overlap a range. */
+    [[nodiscard]] auto overlaps(std::size_t from, std::size_t to) const noexcept -> bool
+    {
+      auto const after =
+          std::ranges::upper_bound(ranges, to, {}, [](auto const& range) { return range.first; });
+      return after != ranges.begin()
+         and reach[static_cast<std::size_t>(after - ranges.begin()) - 1] >= from;
+    }
+  };
+
+  /** @brief A load whose on_memory_read call rehooked the page holding it: the new hook of
+   * that span, which the same pass of the engine's hook list reaches, skips that load. */
+  struct controller_reentry
+  {
+    /** @brief Address of the load. */
+    std::uint64_t addr{};
+    /** @brief Size of the load. */
+    int size{};
+    /** @brief Serial of the new hook over the load. */
+    std::uint64_t serial{};
+    /** @brief Whether the guard applies to the next hook call. */
+    bool armed{};
+  };
+
+  /** @brief Bytes a controller span starts before its range: Unicorn matches a hook on the
+   * access start only, and a load is at most 8 bytes. */
+  static constexpr std::size_t controller_lead = 7;
+
   /** @brief One engine code hook serving every intercept, return hook and probe of an
    * address. */
   struct code_site
@@ -836,6 +924,20 @@ struct machine::run_state
   std::map<std::uint64_t, address> probes{};
   /** @brief Watches by handle id. */
   std::map<std::uint64_t, std::unique_ptr<watch_entry>> watches{};
+  /** @brief Ranges watched by machine_services::watch_reads, by buffer and inclusive offsets,
+   * with the controller model of the region each was named in. */
+  std::map<std::tuple<host_buffer const*, std::size_t, std::size_t>, periph::model*>
+      controller_ranges{};
+  /** @brief Runs of controller_ranges, by buffer and first span offset. */
+  std::map<std::pair<host_buffer const*, std::size_t>, controller_run> controller_runs{};
+  /** @brief Hooked engine pages, every page a run's span touches, by buffer and page index. */
+  std::map<std::pair<host_buffer const*, std::size_t>, controller_page> controller_pages{};
+  /** @brief Engine page size in bytes, read on the first watch_reads(). */
+  std::size_t controller_page_bytes{};
+  /** @brief Serial of the last controller hook added. */
+  std::uint64_t controller_hook_serial{};
+  /** @brief Guard against a hook added during an on_memory_read call reporting its load. */
+  controller_reentry controller_guard{};
   /** @brief Trace sinks by handle id. */
   std::map<std::uint64_t, std::unique_ptr<sink_entry>> sinks{};
   /** @brief Address of the block the engine runs, the pc MMIO callbacks see without the exact
@@ -1261,9 +1363,76 @@ struct machine::run_state
   /** @brief Calls a watch handler and records a deferred watchpoint stop when it asks. */
   void hit_watch(watch_entry& watch, watch_hit const& hit);
 
+  /**
+   * @brief Controller model of the run holding buffer offset @p first of @p buffer when one of
+   *        its ranges overlaps [@p first, @p last], null otherwise.
+   */
+  [[nodiscard]] auto controller_read_hit(
+      host_buffer const* buffer,
+      std::size_t        first,
+      std::size_t        last) const noexcept -> periph::model*;
+
+  /**
+   * @brief Reports a DMA load to the controller model watching its bytes, if any.
+   * @param region Region holding every byte of the load.
+   * @param addr Address loaded.
+   * @param size Load size in bytes.
+   * @param by Bus master making the load.
+   */
+  void note_controller_read(
+      mapped_region const& region,
+      address              addr,
+      std::uint8_t         size,
+      initiator            by);
+
+  /**
+   * @brief Rebuilds the runs of @p buffer from controller_ranges, hooks every engine page a
+   *        run touches that has no hooks yet, then removes the hooks of the pages no run
+   *        touches. Nothing changes when a hook is refused.
+   * @throws emulation_error when the engine refuses a hook.
+   */
+  void sync_controller_runs(host_buffer const* buffer);
+
+  /**
+   * @brief Hooks engine page @p page of @p buffer, one hook per guest span mapping it.
+   * @throws emulation_error when the engine refuses a hook, every hook of the page removed.
+   */
+  auto new_controller_page(host_buffer const& buffer, std::size_t page) -> controller_page;
+
+  /** @brief Removes the engine hooks of a page. */
+  void drop_controller_hooks(controller_page& page) noexcept;
+
+  /**
+   * @brief After an on_memory_read call that added hooks, arms controller_guard with the hook
+   *        made during the call over the span of @p region holding buffer offset @p first, if
+   *        any.
+   */
+  void arm_controller_guard(
+      host_buffer const*   buffer,
+      mapped_region const* region,
+      std::size_t          first,
+      std::uint64_t        before,
+      std::uint64_t        addr,
+      int                  size) noexcept;
+
+  /**
+   * @brief Whether a run of @p buffer reaches buffer offsets [@p first, @p last].
+   */
+  [[nodiscard]] auto controller_block_hit(
+      host_buffer const* buffer,
+      std::size_t        first,
+      std::size_t        last) const noexcept -> bool;
+
   static void
       on_code_site(uc_struct* engine, std::uint64_t addr, std::uint32_t size, void* user) noexcept;
   static void on_watch_access(
+      uc_struct*    engine,
+      uc_mem_type   type,
+      std::uint64_t addr,
+      int           size,
+      std::int64_t  value,
+      void*         user) noexcept;
+  static void on_controller_read(
       uc_struct*    engine,
       uc_mem_type   type,
       std::uint64_t addr,
@@ -1322,6 +1491,20 @@ struct machine::run_state
    *        execution the reset discards: refused access, trap, stepping.
    */
   void reset_machine(reset_kind kind);
+
+  /**
+   * @brief Calls every model's `power_cut()` in description order, inside a handler scope,
+   *        going on past a throw.
+   * @return The first exception a model threw, null when none did.
+   */
+  [[nodiscard]] auto power_cut_models() noexcept -> std::exception_ptr;
+
+  /**
+   * @brief Zeroes every RAM region without `physical`, its aliases with it, and drops the
+   *        translated code over it. The scratch region is kept.
+   * @throws emulation_error when the engine refuses the removal of translated code.
+   */
+  void zero_ram();
 
   /** @brief Removes the translated code of every stale range, then clears the flag when nothing
    * else is pending. */

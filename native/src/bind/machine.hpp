@@ -257,6 +257,9 @@ public:
    */
   [[= py::doc{"Reset the machine as kind."}]] void reset(reset_kind kind);
 
+  /** @brief Cuts the supply and powers the machine again, core::machine::power_cycle(). */
+  [[= py::doc{"Cut the supply and power the machine again."}]] void power_cycle();
+
   /** @brief Digest of each loaded image, in load order. */
   [[= py::doc{"Digest of each loaded image, in load order."}]] [[nodiscard]] auto
       image_digests() const -> std::vector<std::string>;

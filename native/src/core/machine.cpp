@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <format>
 #include <ranges>
 #include <string>
@@ -226,6 +227,42 @@ void machine::reset(reset_kind kind)
     throw machine_busy("a reset would lose the frame of the call in progress");
   }
   run_->reset_machine(kind);
+}
+
+void machine::power_cycle()
+{
+  require_stopped(*this);
+  if(in_call())
+  {
+    throw machine_busy("a power cycle would lose the frame of the call in progress");
+  }
+  auto       failure = run_->power_cut_models();
+  auto const keep    = [&failure] {
+    if(not failure)
+    {
+      failure = std::current_exception();
+    }
+  };
+  try
+  {
+    run_->zero_ram();
+  }
+  catch(...)
+  {
+    keep();
+  }
+  try
+  {
+    run_->reset_machine(reset_kind::power_on);
+  }
+  catch(...)
+  {
+    keep();
+  }
+  if(failure)
+  {
+    std::rethrow_exception(failure);
+  }
 }
 
 void machine::hold_core(bool held)

@@ -357,6 +357,25 @@ public:
   void reset(reset_kind kind = reset_kind::power_on) pre(is_enumerator(kind));
 
   /**
+   * @brief Cuts the supply and powers the machine again: every model's `power_cut()` in
+   *        description order, at the time of the cut, then every RAM region without
+   *        `physical` zeroed with its translated code dropped, then reset(reset_kind::power_on).
+   *        Flash, OTP and every other rom region keep their bytes, the scratch region of
+   *        machine_options::scratch too. Hooks, probes, watches and host bridges stay, as across
+   *        a reset. A cut cannot be refused once begun: when a model's `power_cut()` throws,
+   *        every later model's still runs, RAM is zeroed, the reset runs, then the first
+   *        exception is rethrown. An exception from the zeroing or from a model's reset is
+   *        kept the same way: the reset still runs after a zeroing failure, and the first
+   *        exception of the whole cycle is the one rethrown.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy while a call begun by begin_call() is in progress.
+   * @throws Any exception the first failing `power_cut()`, zeroing or model reset threw, such
+   *         as model_error under machine_options::strict_peripherals, after the cycle ran to
+   *         its end.
+   */
+  void power_cycle();
+
+  /**
    * @brief Holds or releases the core. While held, the run loop never executes guest code and
    *        never delivers an exception: every slice takes the idle path, so the clock, events and
    *        DMA keep following virtual time, and the arch and the models freeze what a core held
@@ -607,6 +626,20 @@ public:
       add_watch(address at, std::uint32_t size, watch_kind kind, watch_handler handler)
           -> watch_handle pre(size > 0) pre(fits_address_space(at, size)) pre(is_enumerator(kind));
 
+  /**
+   * @brief Diagnostics: ranges watched through machine_services::watch_reads, one per distinct
+   *        range of bytes, whichever alias named it. Models own the table: reset() and
+   *        restore() keep it, a model rebuilds what it needs in its own load().
+   */
+  [[nodiscard]] auto controller_watches() const noexcept -> std::size_t;
+
+  /**
+   * @brief Diagnostics: engine read hooks behind controller_watches(), one per alias of each
+   *        engine page a watched range or the 7 bytes before it touches, the region's own
+   *        mapping included.
+   */
+  [[nodiscard]] auto controller_watch_hooks() const noexcept -> std::size_t;
+
   /** @brief Always-on trace ring. */
   [[nodiscard]] auto trace() noexcept -> trace_ring&;
 
@@ -723,6 +756,7 @@ private:
       -> std::expected<void, block_error> override;
   void do_trace(trace_record const& record) override;
   void do_log(log_record record) override;
+  void do_watch_reads(address at, std::uint32_t size, bool on) override;
 
   friend class memory_view;
   friend class register_view;

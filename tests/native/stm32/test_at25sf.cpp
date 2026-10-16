@@ -2,14 +2,18 @@
 #include <popcorn/periph/devices/at25sf.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -21,13 +25,140 @@ using popcorn::vtime;
 constexpr std::uint64_t us = 1'000'000;
 constexpr std::uint64_t ms = 1'000 * us;
 
+auto ps_of(std::chrono::nanoseconds span) -> std::uint64_t
+{
+  return static_cast<std::uint64_t>(span.count()) * 1000u;
+}
+
+auto all_are(std::span<std::byte const> bytes, std::uint8_t value) -> bool
+{
+  return std::ranges::all_of(bytes, [value](std::byte b) { return b == std::byte{value}; });
+}
+
+struct mirror_page
+{
+  std::uint32_t          index{};
+  std::vector<std::byte> bytes;
+
+  friend auto operator==(mirror_page const&, mirror_page const&) -> bool = default;
+};
+
+struct old_at25sf_state
+{
+  std::uint32_t            size{};
+  std::uint64_t            image_digest{};
+  std::uint8_t             status1{};
+  std::uint8_t             status2{};
+  std::uint8_t             stored1{};
+  std::uint8_t             stored2{};
+  std::uint64_t            busy_until{};
+  std::uint64_t            ready_from{};
+  std::uint64_t            asleep_from{};
+  std::uint8_t             asleep{};
+  std::uint8_t             volatile_write{};
+  std::uint8_t             reset_enabled{};
+  std::uint8_t             selected{};
+  std::uint8_t             active{};
+  std::uint8_t             opcode{};
+  std::uint32_t            count{};
+  std::uint32_t            address{};
+  std::uint8_t             status_in1{};
+  std::uint8_t             status_in2{};
+  std::vector<std::byte>   buffer;
+  std::vector<mirror_page> pages;
+};
+
+struct new_at25sf_state
+{
+  std::uint32_t            size{};
+  std::uint64_t            image_digest{};
+  std::uint8_t             status1{};
+  std::uint8_t             status2{};
+  std::uint8_t             stored1{};
+  std::uint8_t             stored2{};
+  std::uint64_t            busy_until{};
+  std::uint64_t            ready_from{};
+  std::uint64_t            asleep_from{};
+  std::uint8_t             asleep{};
+  std::uint8_t             volatile_write{};
+  std::uint8_t             reset_enabled{};
+  std::uint8_t             selected{};
+  std::uint8_t             active{};
+  std::uint8_t             opcode{};
+  std::uint32_t            count{};
+  std::uint32_t            address{};
+  std::uint8_t             status_in1{};
+  std::uint8_t             status_in2{};
+  std::vector<std::byte>   buffer;
+  std::vector<mirror_page> pages;
+  std::uint64_t            busy_from{};
+  std::uint32_t            undo_at{};
+  std::uint32_t            undo_first{};
+  std::uint32_t            undo_count{};
+  std::vector<std::byte>   undo;
+
+  friend auto operator==(new_at25sf_state const&, new_at25sf_state const&) -> bool = default;
+};
+
+auto state_of(devices::at25sf const& flash) -> new_at25sf_state
+{
+  std::vector<std::byte> saved;
+  flash.save(saved);
+  auto const state =
+      reflex::serde::bson::deserializer{std::span<std::byte const>{saved}}.load<new_at25sf_state>();
+  std::vector<std::byte> redumped;
+  reflex::serde::bson::serializer{redumped}.dump(state);
+  REQUIRE(redumped == saved);
+  return state;
+}
+
 struct host
 {
-  devices::at25sf flash;
-  std::uint64_t   now{us};
+  devices::at25sf_options options;
+  devices::at25sf         flash;
+  std::uint64_t           now{us};
 
-  explicit host(devices::at25sf_options options = {}) : flash{std::move(options)}
+  explicit host(devices::at25sf_options opts = {}) : options{std::move(opts)}, flash{options}
   {}
+
+  void check_due(std::uint64_t launch, std::chrono::nanoseconds span) const
+  {
+    devices::at25sf        copy{options};
+    std::vector<std::byte> saved;
+    flash.save(saved);
+    copy.load(saved);
+    auto const busy_at = [&copy](std::uint64_t at) {
+      copy.select(true, vtime{at});
+      (void)copy.exchange(0x05, 8, vtime{at});
+      auto const status = copy.exchange(0, 8, vtime{at});
+      copy.select(false, vtime{at});
+      return (status & 1u) != 0;
+    };
+    CHECK(busy_at(launch + ps_of(span) - 1));
+    CHECK_FALSE(busy_at(launch + ps_of(span)));
+  }
+
+  auto erase_4k(std::uint32_t address) -> std::uint64_t
+  {
+    command({0x06});
+    command({0x20, address >> 16 & 0xFF, address >> 8 & 0xFF, address & 0xFF});
+    check_due(now, options.erase_4k);
+    return now;
+  }
+
+  auto program_zeros(std::uint32_t address, std::size_t count) -> std::uint64_t
+  {
+    command({0x06});
+    program(address, std::vector<std::uint32_t>(count, 0x00));
+    check_due(now, options.page_program);
+    return now;
+  }
+
+  void
+      cut(std::uint64_t launch, std::chrono::nanoseconds span, std::uint64_t num, std::uint64_t den)
+  {
+    flash.power_cut(vtime{launch + ps_of(span) * num / den});
+  }
 
   auto command(std::initializer_list<std::uint32_t> out, std::size_t extra = 0)
       -> std::vector<std::uint32_t>
@@ -601,4 +732,225 @@ TEST_CASE("a power-on reset reloads the stored status and drops the instruction 
   h.command({0x99});
   h.wait(30 * us);
   CHECK(h.status() == 0x1C);
+}
+
+TEST_CASE("a power cut at 40 % of a 4 KB erase keeps its first 1638 bytes erased")
+{
+  host       h{{.initial = std::vector<std::byte>(0x2000, std::byte{0x00})}};
+  auto const launch = h.erase_4k(0x000123);
+  h.cut(launch, h.options.erase_4k, 2, 5);
+  auto const array = h.flash.contents();
+  CHECK(all_are(array.subspan(0, 1638), 0xFF));
+  CHECK(all_are(array.subspan(1638, 0x2000 - 1638), 0x00));
+  CHECK(state_of(h.flash).undo.empty());
+}
+
+TEST_CASE("a power cut during a page program keeps a prefix of the bytes in the order sent")
+{
+  SUBCASE("a whole page cut at 25 %")
+  {
+    host       h;
+    auto const launch = h.program_zeros(0x3000, 256);
+    h.cut(launch, h.options.page_program, 1, 4);
+    CHECK(all_are(h.flash.contents().subspan(0x3000, 64), 0x00));
+    CHECK(all_are(h.flash.contents().subspan(0x3040, 192), 0xFF));
+  }
+  SUBCASE("16 bytes at page offset 240 cut at 50 %")
+  {
+    host       h;
+    auto const launch = h.program_zeros(0x40F0, 16);
+    h.cut(launch, h.options.page_program, 1, 2);
+    CHECK(all_are(h.flash.contents().subspan(0x4000, 0xF0), 0xFF));
+    CHECK(all_are(h.flash.contents().subspan(0x40F0, 8), 0x00));
+    CHECK(all_are(h.flash.contents().subspan(0x40F8, 8), 0xFF));
+  }
+  SUBCASE("16 bytes at page offset 248 wrapping, cut at 50 %")
+  {
+    host       h;
+    auto const launch = h.program_zeros(0x50F8, 16);
+    h.cut(launch, h.options.page_program, 1, 2);
+    CHECK(all_are(h.flash.contents().subspan(0x50F8, 8), 0x00));
+    CHECK(all_are(h.flash.contents().subspan(0x5000, 0xF8), 0xFF));
+  }
+  SUBCASE("260 bytes from page offset 0, the last 256 win, cut at 50 %")
+  {
+    host       h;
+    auto const launch = h.program_zeros(0x6000, 260);
+    h.cut(launch, h.options.page_program, 1, 2);
+    CHECK(all_are(h.flash.contents().subspan(0x6000, 4), 0xFF));
+    CHECK(all_are(h.flash.contents().subspan(0x6004, 128), 0x00));
+    CHECK(all_are(h.flash.contents().subspan(0x6084, 124), 0xFF));
+  }
+}
+
+TEST_CASE("a power cut 1 ps before the end of BUSY tears the last byte, at the end none")
+{
+  host       before;
+  auto const started = before.program_zeros(0x7000, 16);
+  before.flash.power_cut(vtime{started + ps_of(before.options.page_program) - 1});
+  CHECK(all_are(before.flash.contents().subspan(0x7000, 15), 0x00));
+  CHECK(before.at(0x700F) == 0xFF);
+
+  host       after;
+  auto const launch = after.program_zeros(0x7000, 16);
+  after.flash.power_cut(vtime{launch + ps_of(after.options.page_program)});
+  CHECK(all_are(after.flash.contents().subspan(0x7000, 16), 0x00));
+}
+
+TEST_CASE("a power cut long after BUSY ended keeps the whole program")
+{
+  host       h;
+  auto const launch = h.program_zeros(0x3000, 256);
+  h.flash.power_cut(vtime{launch + ps_of(h.options.page_program) * (std::uint64_t{1} << 24)});
+  CHECK(all_are(h.flash.contents().subspan(0x3000, 256), 0x00));
+}
+
+TEST_CASE("after a power cut while BUSY and the power-on reset, the torn bytes hold")
+{
+  host       h{{.initial = std::vector<std::byte>(0x2000, std::byte{0x00})}};
+  auto const launch = h.erase_4k(0x001000);
+  h.cut(launch, h.options.erase_4k, 1, 2);
+  h.flash.reset(reset_kind::power_on);
+  h.now = us;
+  CHECK(h.status() == 0x00);
+  CHECK(h.read(0x0017FF, 2) == std::vector<std::uint32_t>{0xFF, 0x00});
+  CHECK(h.read(0x000FFF, 2) == std::vector<std::uint32_t>{0x00, 0xFF});
+  CHECK(all_are(h.flash.contents().subspan(0x1000, 0x800), 0xFF));
+  CHECK(all_are(h.flash.contents().subspan(0x1800, 0x800), 0x00));
+}
+
+TEST_CASE("a snapshot taken while BUSY tears the same way after a restore")
+{
+  host                   h{{.initial = std::vector<std::byte>(0x2000, std::byte{0x00})}};
+  auto const             launch = h.erase_4k(0);
+  std::vector<std::byte> saved;
+  h.flash.save(saved);
+  host other{h.options};
+  other.flash.load(saved);
+  h.cut(launch, h.options.erase_4k, 2, 5);
+  other.cut(launch, other.options.erase_4k, 2, 5);
+  CHECK(std::ranges::equal(other.flash.contents(), h.flash.contents()));
+  CHECK(other.at(1637) == 0xFF);
+  CHECK(other.at(1638) == 0x00);
+}
+
+TEST_CASE("the old bytes are dropped at the first selection past BUSY")
+{
+  host       h{{.initial = std::vector<std::byte>(0x2000, std::byte{0x00})}};
+  auto const launch = h.erase_4k(0x001000);
+  auto const busy   = state_of(h.flash);
+  CHECK(busy.undo.size() == 0x1000);
+  CHECK(busy.undo_at == 0x1000);
+  CHECK(busy.undo_count == 0x1000);
+  CHECK(busy.busy_from == launch);
+  h.now = launch + ps_of(h.options.erase_4k) - 3 * us;
+  CHECK(h.status() == 0x01);
+  CHECK(state_of(h.flash).undo.size() == 0x1000);
+  h.now = launch + ps_of(h.options.erase_4k);
+  CHECK(h.status() == 0x00);
+  auto const ended = state_of(h.flash);
+  CHECK(ended.undo.empty());
+  CHECK(ended.undo_count == 0);
+  CHECK(ended.busy_from == 0);
+}
+
+TEST_CASE("a 66h 99h reset while BUSY keeps the data and leaves nothing to tear")
+{
+  host       h;
+  auto const launch = h.program_zeros(0x3000, 16);
+  h.command({0x66});
+  h.command({0x99});
+  CHECK(state_of(h.flash).undo.empty());
+  h.cut(launch, h.options.page_program, 1, 2);
+  CHECK(all_are(h.flash.contents().subspan(0x3000, 16), 0x00));
+}
+
+TEST_CASE("a save without the old bytes of a power cut loads with none and tears nothing")
+{
+  host h{{.initial = std::vector<std::byte>(0x2000, std::byte{0x00})}};
+  (void)h.erase_4k(0x001000);
+  auto const now = state_of(h.flash);
+  REQUIRE_FALSE(now.undo.empty());
+  REQUIRE(now.undo_at == 0x1000);
+  old_at25sf_state const old{
+      .size           = now.size,
+      .image_digest   = now.image_digest,
+      .status1        = now.status1,
+      .status2        = now.status2,
+      .stored1        = now.stored1,
+      .stored2        = now.stored2,
+      .busy_until     = now.busy_until,
+      .ready_from     = now.ready_from,
+      .asleep_from    = now.asleep_from,
+      .asleep         = now.asleep,
+      .volatile_write = now.volatile_write,
+      .reset_enabled  = now.reset_enabled,
+      .selected       = now.selected,
+      .active         = now.active,
+      .opcode         = now.opcode,
+      .count          = now.count,
+      .address        = now.address,
+      .status_in1     = now.status_in1,
+      .status_in2     = now.status_in2,
+      .buffer         = now.buffer,
+      .pages          = now.pages,
+  };
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(old);
+  host other{h.options};
+  other.flash.load(bytes);
+  auto expected       = now;
+  expected.busy_from  = 0;
+  expected.undo_at    = 0;
+  expected.undo_first = 0;
+  expected.undo_count = 0;
+  expected.undo.clear();
+  CHECK(state_of(other.flash) == expected);
+  other.flash.power_cut(vtime{now.busy_until - 1});
+  CHECK(all_are(other.flash.contents().subspan(0x1000, 0x1000), 0xFF));
+}
+
+TEST_CASE("a save whose old bytes do not fit in the array loads with none")
+{
+  host h;
+  (void)h.program_zeros(0x3000, 16);
+  auto state = state_of(h.flash);
+  REQUIRE(state.undo.size() == 256);
+  state.undo_at = static_cast<std::uint32_t>(h.flash.contents().size()) - 16;
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(state);
+  host other{h.options};
+  other.flash.load(bytes);
+  REQUIRE(state_of(other.flash).undo.empty());
+  other.flash.power_cut(vtime{state.busy_until - 1});
+  CHECK(all_are(other.flash.contents().subspan(0x3000, 16), 0x00));
+}
+
+TEST_CASE("a save during a chip erase carries the whole array as its undo copy")
+{
+  host                   h;
+  std::vector<std::byte> idle;
+  h.flash.save(idle);
+  h.command({0x06});
+  auto const launch = std::chrono::steady_clock::now();
+  h.command({0x60});
+  auto const             copied = std::chrono::steady_clock::now();
+  std::vector<std::byte> saved;
+  h.flash.save(saved);
+  auto const done  = std::chrono::steady_clock::now();
+  auto const array = h.flash.contents().size();
+  CHECK(state_of(h.flash).undo.size() == array);
+  CHECK(saved.size() >= idle.size() + array);
+  MESSAGE(
+      "array "
+      << array
+      << " B, idle save "
+      << idle.size()
+      << " B, save while BUSY "
+      << saved.size()
+      << " B, launch with undo copy "
+      << std::chrono::duration_cast<std::chrono::microseconds>(copied - launch).count()
+      << " us, save "
+      << std::chrono::duration_cast<std::chrono::microseconds>(done - copied).count()
+      << " us");
 }
