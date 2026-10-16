@@ -88,13 +88,22 @@ void machine::run_state::attach_peripherals()
             .peers              = peers,
             .part               = owner.description_,
             .strict_peripherals = owner.options_.strict_peripherals,
+            .trustzone          = owner.options_.trustzone,
         });
     auto const configured = owner.options_.models.find(unit.name);
     auto const factory =
         configured != owner.options_.models.end() ? configured->second : periph::find_model(unit);
     if(factory)
     {
-      slot->model = factory(*slot->context, unit);
+      auto* const installed = firewall;
+      building              = &unit;
+      slot->model           = factory(*slot->context, unit);
+      building              = nullptr;
+      if(not slot->model and firewall != installed)
+      {
+        firewall = installed;
+        throw model_error(unit.name, "firewall", 0);
+      }
     }
     if(slot->model)
     {

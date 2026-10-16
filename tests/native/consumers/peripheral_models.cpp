@@ -3,6 +3,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/services.hpp>
+#include <popcorn/periph/firewall.hpp>
 #include <popcorn/periph/lines.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
@@ -95,6 +96,51 @@ public:
   std::uint64_t          pending{};
 };
 
+class timer_guard final : public periph::model, public periph::bus_firewall
+{
+public:
+  explicit timer_guard(periph::model_context& ctx)
+  {
+    ctx.install_firewall(*this);
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+
+  auto check_peripheral(std::size_t, bus_attrs attrs, arch::memory_op op)
+      -> periph::bus_verdict override
+  {
+    return attrs.by == initiator::debugger and op == arch::memory_op::write
+             ? periph::bus_verdict::read_zero_write_ignore
+             : periph::bus_verdict::allow;
+  }
+};
+
 auto factory() -> periph::model_factory
 {
   return [](periph::model_context& ctx, peripheral_desc const&) -> std::shared_ptr<periph::model> {
@@ -116,4 +162,19 @@ TEST_CASE("peripheral model consumer wires a model by registry and by explicit o
   CHECK(target.model("UART1") != nullptr);
   CHECK_NOTHROW(target.reset(popcorn::reset_kind::pin));
   popcorn::periph::register_model("usart", "*", {});
+}
+
+TEST_CASE("peripheral model consumer installs a bus firewall that ignores debugger writes")
+{
+  popcorn::core::machine_options options;
+  options.models.emplace(
+      "TIMER1",
+      [](popcorn::periph::model_context& ctx,
+         popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+        return std::make_shared<popcorn::consumers::models::timer_guard>(ctx);
+      });
+  popcorn::core::machine target{
+      popcorn::testing::toy_description(), popcorn::testing::test_arch_factory(), options};
+  REQUIRE(target.mem().write(0x4000'2000, 4, 5).has_value());
+  CHECK(target.mem().read(0x4000'2000, 4) == std::uint32_t{0});
 }

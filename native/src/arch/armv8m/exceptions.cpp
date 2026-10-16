@@ -379,7 +379,12 @@ auto cortex_m::enter(std::uint32_t number) -> trap_result
   {
     read_batch(engine, fp_frame_ids, std::span{words}.subspan(8, fp_frame_ids.size()));
   }
-  if(not services.write_block(frame_at, std::as_bytes(std::span{words}), initiator::cpu))
+  auto const stacking = bus_attrs{
+      .by         = initiator::cpu,
+      .secure     = not trustzone() or read_security(engine) == security::secure,
+      .privileged = not thread or (special.control & control_npriv) == 0,
+  };
+  if(not services.write_block(frame_at, std::as_bytes(std::span{words}), stacking))
   {
     state_.scs.cfsr |= cfsr::stkerr;
     return trap_result::fault(
@@ -455,7 +460,12 @@ auto cortex_m::exception_return() -> trap_result
   auto const                 size = returning.basic_frame ? basic_frame_size : extended_frame_size;
   auto const                 frame_at = returning.process_stack ? special.psp : special.msp;
   std::vector<std::uint32_t> words(size / 4, 0);
-  if(not services.read_block(frame_at, std::as_writable_bytes(std::span{words}), initiator::cpu))
+  auto const                 unstacking = bus_attrs{
+      .by         = initiator::cpu,
+      .secure     = not trustzone() or read_security(engine) == security::secure,
+      .privileged = not returning.thread or (special.control & control_npriv) == 0,
+  };
+  if(not services.read_block(frame_at, std::as_writable_bytes(std::span{words}), unstacking))
   {
     state_.scs.cfsr |= cfsr::unstkerr;
     return trap_result::fault(

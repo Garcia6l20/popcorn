@@ -594,7 +594,8 @@ auto machine::run_state::on_bad_access(
       run.guarded([&] {
         auto const done = run.dispatch_controller_write(
             *region, static_cast<address>(addr), static_cast<std::uint8_t>(size),
-            static_cast<std::uint64_t>(value), initiator::cpu);
+            static_cast<std::uint64_t>(value),
+            {.by = initiator::cpu, .secure = region->desc->secure});
         if(not done)
         {
           run.record_bus_fault(static_cast<address>(addr), arch::memory_op::write);

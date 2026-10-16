@@ -13,4 +13,10 @@ void machine_services::do_watch_reads(address at, std::uint32_t size, bool)
       "machine_services", 0, std::format("watch_reads at {:#010x}, {} bytes", at, size),
       "an implementation with controller regions");
 }
+
+void machine_services::do_install_firewall(periph::bus_firewall&)
+{
+  throw config_error(
+      "machine_services", 0, "install_firewall", "an implementation with a bus firewall");
+}
 }

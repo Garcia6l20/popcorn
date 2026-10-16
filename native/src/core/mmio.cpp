@@ -22,6 +22,11 @@ constexpr auto size_mask(std::uint32_t size) noexcept -> std::uint32_t
   return size >= 4 ? 0xffff'ffffu : (std::uint32_t{1} << (8 * size)) - 1;
 }
 
+constexpr auto cpu_attrs(uc_mem_attrs attrs) noexcept -> bus_attrs
+{
+  return {.by = initiator::cpu, .secure = attrs.secure, .privileged = attrs.privileged};
+}
+
 auto register_name(peripheral_desc const& unit, std::uint32_t word) -> std::string
 {
   auto const found = std::ranges::find_if(unit.registers, [word](register_desc const& reg) {
@@ -48,11 +53,12 @@ void machine::run_state::map_peripherals()
     }
     windows.push_back(
         std::make_unique<mmio_window>(mmio_window{
-            .run    = this,
-            .slot   = owner.peripherals_[serving].get(),
-            .unit   = &unit,
-            .base   = unit.base,
-            .secure = unit.alias_of.has_value(),
+            .run          = this,
+            .slot         = owner.peripherals_[serving].get(),
+            .unit         = &unit,
+            .base         = unit.base,
+            .secure_alias = unit.alias_of.has_value(),
+            .serving      = serving,
         }));
   }
   std::ranges::sort(windows, {}, [](auto const& window) { return window->base; });
@@ -177,14 +183,74 @@ auto machine::run_state::window_at(address addr, std::uint8_t size) const noexce
                                                                                   : nullptr;
 }
 
+auto machine::run_state::seen(bus_attrs attrs) const noexcept -> bus_attrs
+{
+  attrs.secure = attrs.secure and owner.options_.trustzone;
+  return attrs;
+}
+
+auto machine::run_state::context_of(bus_attrs attrs, bool via_secure_alias) const
+    -> periph::access_ctx
+{
+  return {
+      .pc               = arch->pc(),
+      .now              = owner.clock_.now(),
+      .by               = attrs.by,
+      .secure           = attrs.secure,
+      .privileged       = attrs.privileged,
+      .via_secure_alias = via_secure_alias,
+  };
+}
+
+void machine::run_state::install_firewall(periph::bus_firewall& installed)
+{
+  if(building == nullptr)
+  {
+    throw model_error({}, "firewall", 0);
+  }
+  if(firewall != nullptr)
+  {
+    throw model_error(building->name, "firewall", 0);
+  }
+  firewall = &installed;
+}
+
+void machine::do_install_firewall(periph::bus_firewall& firewall)
+{
+  run_->install_firewall(firewall);
+}
+
 auto machine::run_state::dispatch_read(
     mmio_window const& window,
     std::uint32_t      offset,
     std::uint8_t       size,
-    initiator          by) -> std::expected<std::uint32_t, bus_error>
+    bus_attrs          attrs) -> std::expected<std::uint32_t, bus_error>
 {
+  attrs           = seen(attrs);
+  auto const by   = attrs.by;
   auto&      slot = *window.slot;
   auto const word = offset / 4;
+  if(firewall != nullptr) [[unlikely]]
+  {
+    auto verdict = periph::bus_verdict::allow;
+    {
+      handler_scope const scope{in_handler};
+      verdict = firewall->check_peripheral(window.serving, attrs, arch::memory_op::read);
+    }
+    if(verdict == periph::bus_verdict::bus_error)
+    {
+      return std::unexpected(bus_error::denied);
+    }
+    if(verdict == periph::bus_verdict::read_zero_write_ignore)
+    {
+      if(word < slot.layout.words())
+      {
+        trace_mmio(slot, window.base + offset, offset, size, 0, false, by);
+      }
+      note_watched(window.base + offset, size, 0, false, by);
+      return 0u;
+    }
+  }
   if(word >= slot.layout.words())
   {
     warn_unregistered(window, offset, false, by);
@@ -197,9 +263,7 @@ auto machine::run_state::dispatch_read(
     std::expected<std::uint32_t, bus_error> value{};
     {
       handler_scope const scope{in_handler};
-      value = slot.model->on_read(
-          slot.regs, offset, size,
-          {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = window.secure});
+      value = slot.model->on_read(slot.regs, offset, size, context_of(attrs, window.secure_alias));
     }
     after_model(hz);
     if(value)
@@ -239,10 +303,33 @@ auto machine::run_state::dispatch_write(
     std::uint32_t      offset,
     std::uint8_t       size,
     std::uint32_t      value,
-    initiator          by) -> std::expected<void, bus_error>
+    bus_attrs          attrs) -> std::expected<void, bus_error>
 {
+  attrs           = seen(attrs);
+  auto const by   = attrs.by;
   auto&      slot = *window.slot;
   auto const word = offset / 4;
+  if(firewall != nullptr) [[unlikely]]
+  {
+    auto verdict = periph::bus_verdict::allow;
+    {
+      handler_scope const scope{in_handler};
+      verdict = firewall->check_peripheral(window.serving, attrs, arch::memory_op::write);
+    }
+    if(verdict == periph::bus_verdict::bus_error)
+    {
+      return std::unexpected(bus_error::denied);
+    }
+    if(verdict == periph::bus_verdict::read_zero_write_ignore)
+    {
+      if(word < slot.layout.words())
+      {
+        trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
+      }
+      note_watched(window.base + offset, size, value, true, by);
+      return {};
+    }
+  }
   if(word >= slot.layout.words())
   {
     warn_unregistered(window, offset, true, by);
@@ -259,7 +346,7 @@ auto machine::run_state::dispatch_write(
       exact_write = by == initiator::cpu and slot.model->drives_core_clock();
       done        = slot.model->on_write(
           slot.regs, offset, size, old, value & size_mask(size),
-          {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = window.secure});
+          context_of(attrs, window.secure_alias));
       exact_write = false;
     }
     after_model(hz);
@@ -292,14 +379,15 @@ auto machine::run_state::dispatch_controller_write(
     address              addr,
     std::uint8_t         size,
     std::uint64_t        value,
-    initiator            by) -> std::expected<void, bus_error>
+    bus_attrs            attrs) -> std::expected<void, bus_error>
 {
+  attrs           = seen(attrs);
+  auto const by   = attrs.by;
   auto const hz   = owner.clock_.instruction_hz();
   auto const word = [&](address at, std::uint8_t bytes, std::uint32_t data) {
     handler_scope const scope{in_handler};
     return region.controller->on_memory_write(
-        *region.desc, at, bytes, data,
-        {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = region.desc->secure});
+        *region.desc, at, bytes, data, context_of(attrs, region.desc->secure));
   };
   auto done = size == 8 ? word(addr, 4, static_cast<std::uint32_t>(value))
                         : word(addr, size, static_cast<std::uint32_t>(value) & size_mask(size));
@@ -319,7 +407,7 @@ void machine::run_state::note_controller_read(
     mapped_region const& region,
     address              addr,
     std::uint8_t         size,
-    initiator            by)
+    bus_attrs            attrs)
 {
   auto const  first      = region.offset + (addr - region.desc->start);
   auto* const controller = controller_read_hit(region.buffer.get(), first, first + size - 1);
@@ -331,8 +419,7 @@ void machine::run_state::note_controller_read(
   {
     handler_scope const scope{in_handler};
     controller->on_memory_read(
-        *region.desc, addr, size,
-        {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = region.desc->secure});
+        *region.desc, addr, size, context_of(seen(attrs), region.desc->secure));
   }
   after_model(hz);
 }
@@ -376,10 +463,8 @@ void machine::run_state::on_controller_read(
         handler_scope const scope{run.in_handler};
         controller->on_memory_read(
             region, at, bytes,
-            {.pc     = run.arch->pc(),
-             .now    = run.owner.clock_.now(),
-             .by     = initiator::cpu,
-             .secure = region.secure});
+            run.context_of(
+                run.seen({.by = initiator::cpu, .secure = region.secure}), region.secure));
       }
       if(run.controller_hook_serial != before)
       {
@@ -534,7 +619,7 @@ auto machine::run_state::on_mmio_read(
     auto const read = run.raising_access([&] {
       return run.dispatch_read(
           window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
-          initiator::cpu);
+          cpu_attrs(attrs));
     });
     if(read)
     {
@@ -564,7 +649,7 @@ void machine::run_state::on_mmio_write(
     auto const done = run.raising_access([&] {
       return run.dispatch_write(
           window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
-          static_cast<std::uint32_t>(value), initiator::cpu);
+          static_cast<std::uint32_t>(value), cpu_attrs(attrs));
     });
     if(not done)
     {
@@ -597,7 +682,7 @@ auto machine::run_state::on_shared_read(
   run.guarded([&] {
     auto const read = run.raising_access([&] {
       return run.dispatch_read(
-          window, addr - window.base, static_cast<std::uint8_t>(size), initiator::cpu);
+          window, addr - window.base, static_cast<std::uint8_t>(size), cpu_attrs(attrs));
     });
     if(read)
     {
@@ -629,7 +714,7 @@ void machine::run_state::on_shared_write(
     auto const done = run.raising_access([&] {
       return run.dispatch_write(
           window, addr - window.base, static_cast<std::uint8_t>(size),
-          static_cast<std::uint32_t>(value), initiator::cpu);
+          static_cast<std::uint32_t>(value), cpu_attrs(attrs));
     });
     if(not done)
     {

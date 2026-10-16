@@ -345,7 +345,9 @@ TEST_CASE("an event a model schedules from an MMIO write fires on time inside th
   CHECK(m.fired_at->value <= due + 2);
 }
 
-TEST_CASE("an access through the SEC_ alias window is secure, through the peripheral's own not")
+TEST_CASE(
+    "an access through the SEC_ alias window is via_secure_alias, neither is secure without "
+    "TrustZone")
 {
   auto  f = booted();
   auto& m = model(f);
@@ -354,8 +356,10 @@ TEST_CASE("an access through the SEC_ alias window is secure, through the periph
   REQUIRE(services.read(testdev + test_model::data_offset, 4, initiator::cpu));
   REQUIRE(services.read(0x5001'0000 + test_model::data_offset, 4, initiator::cpu));
   REQUIRE(m.accesses.size() == 2);
+  CHECK_FALSE(m.accesses[0].ctx.via_secure_alias);
+  CHECK(m.accesses[1].ctx.via_secure_alias);
   CHECK_FALSE(m.accesses[0].ctx.secure);
-  CHECK(m.accesses[1].ctx.secure);
+  CHECK_FALSE(m.accesses[1].ctx.secure);
 }
 
 TEST_CASE("a model bus error reaches every services caller, the CPU initiator included")

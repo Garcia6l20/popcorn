@@ -12,7 +12,10 @@ namespace popcorn::core
 {
 namespace
 {
-constexpr uc_mem_attrs host_attrs{.secure = true, .privileged = true};
+constexpr auto engine_attrs(bus_attrs attrs) noexcept -> uc_mem_attrs
+{
+  return {.secure = attrs.secure, .privileged = attrs.privileged};
+}
 
 auto writable_by(region_desc const& region, initiator by) noexcept -> bool
 {
@@ -30,14 +33,15 @@ auto read_host(std::byte const* bytes, std::uint8_t size) noexcept -> std::uint3
 }
 }
 
-auto machine::do_read(address addr, std::uint8_t size, initiator by)
+auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
     -> std::expected<std::uint32_t, bus_error>
 {
+  auto const by = attrs.by;
   if(auto const* const region = mapped_region::find(memory_, addr, size))
   {
     if(by == initiator::dma and not run_->controller_runs.empty())
     {
-      run_->note_controller_read(*region, addr, size, by);
+      run_->note_controller_read(*region, addr, size, attrs);
     }
     auto const value = read_host(region->host(addr), size);
     run_->note_watched(addr, size, value, false, by);
@@ -45,26 +49,27 @@ auto machine::do_read(address addr, std::uint8_t size, initiator by)
   }
   if(auto const* const window = run_->window_at(addr, size))
   {
-    return run_->dispatch_read(*window, addr - window->base, size, by);
+    return run_->dispatch_read(*window, addr - window->base, size, attrs);
   }
   std::uint32_t value = 0;
-  if(uc_mem_read_attrs(engine_.get(), addr, &value, size, host_attrs) != UC_ERR_OK)
+  if(uc_mem_read_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
   {
     return std::unexpected(bus_error::unmapped);
   }
   return value;
 }
 
-auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)
+auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
     -> std::expected<void, bus_error>
 {
+  auto const by = attrs.by;
   if(auto const* const region = mapped_region::find(memory_, addr, size))
   {
     if(not writable_by(*region->desc, by))
     {
       if(region->controller != nullptr)
       {
-        return run_->dispatch_controller_write(*region, addr, size, value, by);
+        return run_->dispatch_controller_write(*region, addr, size, value, attrs);
       }
       return std::unexpected(bus_error::denied);
     }
@@ -80,18 +85,19 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, ini
   }
   if(auto const* const window = run_->window_at(addr, size))
   {
-    return run_->dispatch_write(*window, addr - window->base, size, value, by);
+    return run_->dispatch_write(*window, addr - window->base, size, value, attrs);
   }
-  if(uc_mem_write_attrs(engine_.get(), addr, &value, size, host_attrs) != UC_ERR_OK)
+  if(uc_mem_write_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
   {
     return std::unexpected(bus_error::unmapped);
   }
   return {};
 }
 
-auto machine::do_read_block(address addr, std::span<std::byte> out, initiator by)
+auto machine::do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)
     -> std::expected<void, block_error>
 {
+  auto const  by   = attrs.by;
   std::size_t done = 0;
   while(done < out.size())
   {
@@ -112,7 +118,7 @@ auto machine::do_read_block(address addr, std::span<std::byte> out, initiator by
       continue;
     }
     auto const size  = block_access_size(at, out.size() - done);
-    auto const value = do_read(at, size, by);
+    auto const value = do_read(at, size, attrs);
     if(not value)
     {
       return std::unexpected(block_error{.error = value.error(), .at = at});
@@ -126,9 +132,10 @@ auto machine::do_read_block(address addr, std::span<std::byte> out, initiator by
   return {};
 }
 
-auto machine::do_write_block(address addr, std::span<std::byte const> in, initiator by)
+auto machine::do_write_block(address addr, std::span<std::byte const> in, bus_attrs attrs)
     -> std::expected<void, block_error>
 {
+  auto const  by   = attrs.by;
   std::size_t done = 0;
   while(done < in.size())
   {
@@ -151,7 +158,7 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, initia
       continue;
     }
     auto const size       = block_access_size(at, in.size() - done);
-    auto const done_write = do_write(at, size, read_host(in.data() + done, size), by);
+    auto const done_write = do_write(at, size, read_host(in.data() + done, size), attrs);
     if(not done_write)
     {
       return std::unexpected(block_error{.error = done_write.error(), .at = at});

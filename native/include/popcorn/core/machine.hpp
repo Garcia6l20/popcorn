@@ -237,9 +237,11 @@ struct call_result
  *
  * Construction order: the arch module from the factory, the engine it asks for with
  * `arch::engine()`, memory map, `arch_context{engine, description, clock, arch events, *this,
- * options.faults, options.trustzone, options.idau}` then `arch::attach`, then one model_context and
- * model per peripheral, then the engine hooks. Events of owner `arch::arch_event_owner` go to
- * `arch::on_event`, other owners to the model of that peripheral index.
+ * options.faults, options.trustzone, options.idau}` then `arch::attach`, then one model_context,
+ * with options.strict_peripherals and options.trustzone, and model per peripheral, the bus
+ * firewall a model installs included, then the engine hooks. Events of owner
+ * `arch::arch_event_owner` go to `arch::on_event`, other owners to the model of that peripheral
+ * index.
  *
  * Running. Only run_slice(), call() and the slices of a call begun by begin_call() execute guest
  * code. While a slice runs, running() is true and a second run_slice() throws machine_busy. The
@@ -758,17 +760,18 @@ private:
   void do_request_reset(reset_kind kind) override;
   void do_end_slice() override;
   void do_end_after_instruction() override;
-  auto do_read(address addr, std::uint8_t size, initiator by)
+  auto do_read(address addr, std::uint8_t size, bus_attrs attrs)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)
+  auto do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
       -> std::expected<void, bus_error> override;
-  auto do_read_block(address addr, std::span<std::byte> out, initiator by)
+  auto do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)
       -> std::expected<void, block_error> override;
-  auto do_write_block(address addr, std::span<std::byte const> in, initiator by)
+  auto do_write_block(address addr, std::span<std::byte const> in, bus_attrs attrs)
       -> std::expected<void, block_error> override;
   void do_trace(trace_record const& record) override;
   void do_log(log_record record) override;
   void do_watch_reads(address at, std::uint32_t size, bool on) override;
+  void do_install_firewall(periph::bus_firewall& firewall) override;
 
   friend class memory_view;
   friend class register_view;

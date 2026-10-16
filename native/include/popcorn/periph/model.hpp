@@ -20,6 +20,9 @@
 
 namespace popcorn::periph
 {
+/** @brief Bus firewall of a machine, defined in `popcorn/periph/firewall.hpp`. */
+struct bus_firewall;
+
 /** @brief Where, when and by whom a guest register access happened. */
 struct access_ctx
 {
@@ -33,9 +36,17 @@ struct access_ctx
   icount now;
   /** @brief Bus master that made the access. */
   initiator by{initiator::cpu};
-  /** @brief Whether the access came through a secure alias window, a peripheral description
-   * with `secure` set. */
+  /** @brief Security attribute of the transaction, AHB HNONSEC inverted, whatever window it
+   * came through. False for every access, CPU, DMA or debugger, on a machine without TrustZone,
+   * `core::machine_options::trustzone` unset. */
   bool secure{};
+  /** @brief Whether the transaction is privileged, AHB HPROT[1]: an unprivileged CPU access
+   * reads false. Debugger and DMA accesses are privileged unless their master says otherwise. */
+  bool privileged{true};
+  /** @brief Whether the access came through a secure alias window, a `SEC_` peripheral
+   * description with `alias_of` set, or for a memory region access a region with `secure`
+   * set. Independent of TrustZone. */
+  bool via_secure_alias{};
 };
 
 /**
@@ -273,6 +284,20 @@ struct POPCORN_API model_context
    * the machine's life, so a model may cache it: a model may raise model_error where it would
    * only warn. */
   bool strict_peripherals{};
+  /** @brief Whether the machine runs with `core::machine_options::trustzone`, TZEN=1 on an STM32,
+   * fixed for the machine's life. */
+  bool trustzone{};
+
+  /**
+   * @brief Installs the machine's bus firewall, forwarding to services. Only from the model's
+   *        factory or constructor: the machine asks it before every access to a peripheral
+   *        window from then on.
+   * @param firewall Firewall, which must live as long as the model.
+   * @throws model_error naming the peripheral being built when the machine already has a
+   *         firewall, or when the machine no longer builds its models. The machine also raises
+   *         it, naming the peripheral, when a factory installs a firewall and returns no model.
+   */
+  void install_firewall(bus_firewall& firewall);
 
   /**
    * @brief Asks the run loop to stop, forwarding to services. Deferred: it only records the

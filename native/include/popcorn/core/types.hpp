@@ -101,6 +101,24 @@ enum class[[= reflex::derive{reflex::Format}]] initiator
 };
 
 /**
+ * @brief Attributes of one bus transaction: the master that made it, its security attribute,
+ *        AHB HNONSEC inverted, and its privilege, AHB HPROT[1]. The defaults are what every
+ *        access means when the master names no attribute: Secure and privileged.
+ */
+struct bus_attrs
+{
+  /** @brief Bus master that made the access. */
+  initiator by{initiator::cpu};
+  /** @brief Whether the transaction is Secure. */
+  bool secure{true};
+  /** @brief Whether the transaction is privileged. */
+  bool privileged{true};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(bus_attrs, bus_attrs) -> bool = default;
+};
+
+/**
  * @brief Cause of a reset. Backup-domain state, such as an RTC and its backup registers,
  *        survives every kind except power_on.
  */

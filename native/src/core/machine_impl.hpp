@@ -8,6 +8,7 @@
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/trace.hpp>
+#include <popcorn/periph/firewall.hpp>
 
 #include <unicorn/unicorn.h>
 
@@ -604,9 +605,12 @@ struct machine::run_state
      * page, or in a page shared with other windows, up to the next window's base or the end of
      * the shared pages. */
     std::uint32_t size{};
-    /** @brief Whether accesses through the window are secure: an alias window, a `SEC_`
-     * instance of the peripheral it aliases. */
-    bool secure{};
+    /** @brief Whether the window is a secure alias window, a `SEC_` instance of the
+     * peripheral it aliases. */
+    bool secure_alias{};
+    /** @brief Index in the description of the peripheral the window reaches, the aliased one
+     * for an alias window. */
+    std::size_t serving{};
   };
 
   /** @brief An intercept added with machine::add_intercept(). */
@@ -1063,6 +1067,34 @@ struct machine::run_state
   std::vector<std::pair<std::string_view, std::uint32_t>> peripheral_index{};
   /** @brief Models of the machine for model contexts, empty until attach_peripherals ends. */
   machine_peers peers{};
+  /** @brief Bus firewall a model installed, asked before every peripheral window access, null
+   * when none. Set only while attach_peripherals runs. */
+  periph::bus_firewall* firewall{};
+  /** @brief Peripheral whose model attach_peripherals is building, the only time a firewall may
+   * be installed, null otherwise. */
+  peripheral_desc const* building{};
+
+  /**
+   * @brief Installs the machine's bus firewall.
+   * @param installed Firewall.
+   * @throws model_error naming the peripheral being built when a firewall is installed already,
+   *         and naming no peripheral outside attach_peripherals.
+   */
+  void install_firewall(periph::bus_firewall& installed);
+
+  /**
+   * @brief Attributes of an access as models and the firewall see them: not Secure on a machine
+   *        without TrustZone, unchanged otherwise.
+   * @param attrs Attributes the master gave.
+   */
+  [[nodiscard]] auto seen(bus_attrs attrs) const noexcept -> bus_attrs;
+
+  /**
+   * @brief Context a model sees for an access.
+   * @param attrs Attributes of the access, as seen() returns them.
+   * @param via_secure_alias Whether the access came through a secure alias.
+   */
+  [[nodiscard]] auto context_of(bus_attrs attrs, bool via_secure_alias) const -> periph::access_ctx;
 
   /**
    * @brief Builds one slot per peripheral of the description, aliases excepted, its lines, its
@@ -1092,16 +1124,16 @@ struct machine::run_state
    * @param window Window accessed.
    * @param offset Byte offset in the window, aligned to @p size.
    * @param size Access size in bytes, 1, 2 or 4.
-   * @param by Bus master.
-   * @return Value right-aligned to @p size, or the model's bus error for a DMA or debugger
-   *         access. A CPU access records the error and reads 0.
+   * @param attrs Bus master and attributes of the access, as the master gave them.
+   * @return Value right-aligned to @p size, or the firewall's or the model's bus error for a DMA
+   *         or debugger access. A CPU access records the error and reads 0.
    * @throws model_error on every unmodelled access under strict_peripherals.
    */
   auto dispatch_read(
       mmio_window const& window,
       std::uint32_t      offset,
       std::uint8_t       size,
-      initiator          by) -> std::expected<std::uint32_t, bus_error>;
+      bus_attrs          attrs) -> std::expected<std::uint32_t, bus_error>;
 
   /**
    * @brief Serves a write of a peripheral window, as dispatch_read().
@@ -1112,7 +1144,7 @@ struct machine::run_state
       std::uint32_t      offset,
       std::uint8_t       size,
       std::uint32_t      value,
-      initiator          by) -> std::expected<void, bus_error>;
+      bus_attrs          attrs) -> std::expected<void, bus_error>;
 
   /**
    * @brief Hands a store into a read-only region to the model of its controller, a 64-bit store
@@ -1123,15 +1155,15 @@ struct machine::run_state
    * @param addr Address of the store.
    * @param size Store size in bytes, 1, 2, 4 or 8.
    * @param value Value stored, right-aligned to @p size.
-   * @param by Bus master of the store, never the debugger.
+   * @param attrs Bus master and attributes of the store, never the debugger.
    */
   auto dispatch_controller_write(
       mapped_region const& region,
       address              addr,
       std::uint8_t         size,
       std::uint64_t        value,
-      initiator            by) -> std::expected<void, bus_error> pre(region.controller != nullptr)
-      pre(by != initiator::debugger) pre(size == 1 or size == 2 or size == 4 or size == 8);
+      bus_attrs attrs) -> std::expected<void, bus_error> pre(region.controller != nullptr)
+      pre(attrs.by != initiator::debugger) pre(size == 1 or size == 2 or size == 4 or size == 8);
 
   /** @brief Lowers the engine deadline to the earliest event after a model call, and ends the
    * engine run when the call changed the instruction rate. */
@@ -1387,13 +1419,13 @@ struct machine::run_state
    * @param region Region holding every byte of the load.
    * @param addr Address loaded.
    * @param size Load size in bytes.
-   * @param by Bus master making the load.
+   * @param attrs Bus master and attributes of the load.
    */
   void note_controller_read(
       mapped_region const& region,
       address              addr,
       std::uint8_t         size,
-      initiator            by);
+      bus_attrs            attrs);
 
   /**
    * @brief Rebuilds the runs of @p buffer from controller_ranges, hooks every engine page a

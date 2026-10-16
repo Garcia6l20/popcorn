@@ -37,6 +37,7 @@ ALLOWED: dict[str, set[str]] = {
 
 FRAMEWORK_HEADERS = {
     "model.hpp",
+    "firewall.hpp",
     "lines.hpp",
     "register_file.hpp",
     "core_hold.hpp",

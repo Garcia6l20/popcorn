@@ -497,6 +497,12 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
   {
     return;
   }
+  if(options_.option_bytes->tzen != ctx.trustzone)
+  {
+    throw config_error(
+        desc.name, 0, "option_bytes.tzen",
+        std::format("TZEN {}, as machine_options::trustzone", ctx.trustzone ? 1 : 0));
+  }
   if(storage_ == nullptr)
   {
     throw config_error(

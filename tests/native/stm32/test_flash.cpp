@@ -160,6 +160,11 @@ public:
     return ctx_.services;
   }
 
+  [[nodiscard]] auto trustzone() const -> bool
+  {
+    return ctx_.trustzone;
+  }
+
 private:
   periph::model_context& ctx_;
 };
@@ -171,6 +176,7 @@ auto board_options(
 {
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = strict;
+  options.trustzone          = board.flash.option_bytes and board.flash.option_bytes->tzen;
   for(auto& [name, factory] : periph::stm32::factories(board, u575()))
   {
     options.models.emplace(name, std::move(factory));
@@ -1942,6 +1948,32 @@ TEST_CASE("a FLASH model given option bytes its family refuses throws config_err
             u575(), popcorn::arch::armv8m::factory(), board_options(option_board(wanted), false)),
         popcorn::config_error);
   }
+}
+
+TEST_CASE(
+    "model_context::trustzone follows machine_options::trustzone, FLASH refuses a TZEN that "
+    "differs")
+{
+  periph::stm32::register_builtin_models();
+  CHECK(flash_rig{option_board({.tzen = true})}.probe->trustzone());
+  CHECK_FALSE(flash_rig{option_board({})}.probe->trustzone());
+  CHECK_FALSE(flash_rig{}.probe->trustzone());
+  auto const refusal = [](bool tzen, bool trustzone) -> std::string {
+    auto options      = board_options(option_board({.tzen = tzen}), false);
+    options.trustzone = trustzone;
+    try
+    {
+      core::machine const built{u575(), popcorn::arch::armv8m::factory(), std::move(options)};
+    }
+    catch(popcorn::config_error const& error)
+    {
+      return error.key();
+    }
+    return {};
+  };
+  CHECK(refusal(true, false) == "option_bytes.tzen");
+  CHECK(refusal(false, true) == "option_bytes.tzen");
+  CHECK(refusal(true, true).empty());
 }
 
 TEST_CASE("check_option_bytes returns the boot address and the refusal of each field")
