@@ -23,7 +23,7 @@ add_doctest("arch-unicorn-security", [here / "test_unicorn_security.cpp"], [core
 
 arch_firmware = {
     name: firmware("arch", name)
-    for name in ("scs", "exceptions", "svc", "timers", "faults", "rtos")
+    for name in ("scs", "exceptions", "svc", "timers", "faults", "rtos", "cmse")
 }
 arch_firmware["abi"] = firmware("abi", "abi")
 arch_firmware["rom_store"] = firmware("core", "rom_store")

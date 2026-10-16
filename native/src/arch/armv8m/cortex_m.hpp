@@ -219,6 +219,7 @@ private:
   auto               attribution_fault(address at) -> trap_result;
   void               clear_caller_registers(uc_struct* engine, bool callee) const;
   [[nodiscard]] auto nonsecure_address(address at) const noexcept -> bool;
+  [[nodiscard]] auto secure_fp_context() const noexcept -> bool;
   [[nodiscard]] auto first_secure_word(address from, address to) const noexcept
       -> std::optional<address>;
   [[nodiscard]] auto valid_return(std::uint32_t exc_return) const noexcept -> bool;

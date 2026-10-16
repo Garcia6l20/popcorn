@@ -8,6 +8,9 @@ namespace popcorn::arch::armv8m
 inline constexpr std::uint32_t basic_frame_size = 0x20;
 /** @brief Bytes of an extended frame: the basic words, s0-s15, FPSCR and a reserved word. */
 inline constexpr std::uint32_t extended_frame_size = 0x68;
+/** @brief Bytes of s16-s31 that an extended frame of a Secure background holds after its
+ *         basic and FP words when FPCCR_S.TS is set, PushStack(). */
+inline constexpr std::uint32_t fp_callee_frame_size = 0x40;
 /** @brief Bytes of the additional state context: the integrity signature, a reserved word and
  *         r4-r11, B3.19. */
 inline constexpr std::uint32_t callee_frame_size = 0x28;

@@ -22,29 +22,32 @@ constexpr std::uint32_t ccr_read_one      = 0x0000'0201;
 constexpr std::uint32_t ccr_writable = (1u << 1) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 10);
 constexpr std::uint32_t ccr_v7_writable =
     (1u << 0) | (1u << 1) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 9);
-constexpr std::uint32_t rbar_valid         = 1u << 4;
-constexpr std::uint32_t scr_writable       = (1u << 1) | (1u << 2) | (1u << 4);
-constexpr std::uint32_t vtor_writable      = 0xffff'ff80;
-constexpr std::uint32_t syst_calib         = 0x4000'0000;
-constexpr std::uint32_t cpacr_writable     = 0x00f0'0000;
-constexpr std::uint32_t dwt_numcomp        = 4u << 28;
-constexpr std::uint32_t shcsr_enables      = 0x0007'0000;
-constexpr std::uint32_t aircr_bfhfnmins    = 1u << 13;
-constexpr std::uint32_t aircr_pris         = 1u << 14;
-constexpr std::uint32_t aircr_sysresetreqs = 1u << 3;
-constexpr std::uint32_t scr_sleepdeep      = 1u << 2;
-constexpr std::uint32_t scr_sleepdeeps     = 1u << 3;
-constexpr std::uint32_t scr_banked         = (1u << 1) | (1u << 4);
-constexpr std::uint32_t ccr_bfhfnmign      = 1u << 8;
-constexpr std::uint32_t shcsr_memfaultena  = 1u << 16;
-constexpr std::uint32_t shcsr_busfaultena  = 1u << 17;
-constexpr std::uint32_t shcsr_usgfaultena  = 1u << 18;
-constexpr std::uint32_t cfsr_bfsr          = 0x0000'ff00;
-constexpr std::uint32_t nsacr_writable     = 0x0000'0cff;
-constexpr std::uint32_t demcr_sdme         = 1u << 20;
-constexpr std::uint32_t sau_ctrl_writable  = 0x3;
-constexpr std::uint32_t sau_rbar_writable  = 0xffff'ffe0;
-constexpr std::uint32_t sau_rlar_writable  = 0xffff'ffe3;
+constexpr std::uint32_t rbar_valid              = 1u << 4;
+constexpr std::uint32_t scr_writable            = (1u << 1) | (1u << 2) | (1u << 4);
+constexpr std::uint32_t vtor_writable           = 0xffff'ff80;
+constexpr std::uint32_t syst_calib              = 0x4000'0000;
+constexpr std::uint32_t cpacr_writable          = 0x00f0'0000;
+constexpr std::uint32_t dwt_numcomp             = 4u << 28;
+constexpr std::uint32_t shcsr_enables           = 0x0007'0000;
+constexpr std::uint32_t aircr_bfhfnmins         = 1u << 13;
+constexpr std::uint32_t aircr_pris              = 1u << 14;
+constexpr std::uint32_t aircr_sysresetreqs      = 1u << 3;
+constexpr std::uint32_t scr_sleepdeep           = 1u << 2;
+constexpr std::uint32_t scr_sleepdeeps          = 1u << 3;
+constexpr std::uint32_t scr_banked              = (1u << 1) | (1u << 4);
+constexpr std::uint32_t ccr_bfhfnmign           = 1u << 8;
+constexpr std::uint32_t shcsr_memfaultena       = 1u << 16;
+constexpr std::uint32_t shcsr_busfaultena       = 1u << 17;
+constexpr std::uint32_t shcsr_usgfaultena       = 1u << 18;
+constexpr std::uint32_t shcsr_securefaultena    = 1u << 19;
+constexpr std::uint32_t shcsr_securefaultpended = 1u << 20;
+constexpr std::uint32_t shcsr_securefaultact    = 1u << 4;
+constexpr std::uint32_t cfsr_bfsr               = 0x0000'ff00;
+constexpr std::uint32_t nsacr_writable          = 0x0000'0cff;
+constexpr std::uint32_t demcr_sdme              = 1u << 20;
+constexpr std::uint32_t sau_ctrl_writable       = 0x3;
+constexpr std::uint32_t sau_rbar_writable       = 0xffff'ffe0;
+constexpr std::uint32_t sau_rlar_writable       = 0xffff'ffe3;
 
 constexpr std::array<bool, 16> system_priority_implemented{false, false, false, false, true,  true,
                                                            true,  false, false, false, false, true,
@@ -317,6 +320,11 @@ auto system_space::read_shcsr(security view) const -> std::uint32_t
     for(auto const& entry : shcsr_pended)
     {
       shcsr |= core_.is_pending(entry.exception) ? 1u << entry.bit : 0u;
+    }
+    if(core_.trustzone())
+    {
+      shcsr |= core_.is_active(exc_securefault) ? shcsr_securefaultact : 0u;
+      shcsr |= core_.is_pending(exc_securefault) ? shcsr_securefaultpended : 0u;
     }
     return shcsr;
   }
@@ -678,13 +686,19 @@ void system_space::write_shcsr(std::uint32_t value, std::uint32_t mask, security
   auto& scs = core_.state_.scs;
   if(view == security::secure)
   {
-    scs.shcsr_enables = merge(scs.shcsr_enables, value, mask & shcsr_enables);
+    auto const trustzone = core_.trustzone();
+    scs.shcsr_enables    = merge(
+        scs.shcsr_enables, value, mask & (shcsr_enables | (trustzone ? shcsr_securefaultena : 0u)));
     for(auto const& entry : shcsr_pended)
     {
       if(bit(mask, entry.bit))
       {
         core_.set_exception_pending(entry.exception, bit(value, entry.bit));
       }
+    }
+    if(trustzone and (mask & shcsr_securefaultpended) != 0)
+    {
+      core_.set_exception_pending(exc_securefault, (value & shcsr_securefaultpended) != 0);
     }
     return;
   }

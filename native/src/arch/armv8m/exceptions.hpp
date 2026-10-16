@@ -83,14 +83,22 @@ inline constexpr std::uint32_t divbyzero = 1u << 25;
 /** @brief SFSR bits, D1.2.232. */
 namespace sfsr
 {
+/** @brief SFSR.INVEP, a Non-secure branch to a Secure address that is not an entry point. */
+inline constexpr std::uint32_t invep = 1u << 0;
 /** @brief SFSR.INVIS, an exception return found a bad integrity signature. */
 inline constexpr std::uint32_t invis = 1u << 1;
 /** @brief SFSR.INVER, an invalid exception return from Non-secure state. */
 inline constexpr std::uint32_t inver = 1u << 2;
 /** @brief SFSR.AUVIOL, a Non-secure access to Secure memory. */
 inline constexpr std::uint32_t auviol = 1u << 3;
+/** @brief SFSR.INVTRAN, a branch from Secure to Non-secure memory not flagged as such. */
+inline constexpr std::uint32_t invtran = 1u << 4;
+/** @brief SFSR.LSPERR, a fault of the lazy FP state preservation. */
+inline constexpr std::uint32_t lsperr = 1u << 5;
 /** @brief SFSR.SFARVALID. */
 inline constexpr std::uint32_t sfarvalid = 1u << 6;
+/** @brief SFSR.LSERR, VLSTM, VLLDM or an exception found LSPACT set with FP state active. */
+inline constexpr std::uint32_t lserr = 1u << 7;
 }
 
 /** @brief A configurable fault to raise: its class, target handler and status. */
@@ -98,13 +106,13 @@ struct fault_cause
 {
   /** @brief Class reported when the fault stops the run. */
   fault_kind kind{};
-  /** @brief MemManage, BusFault or UsageFault. */
+  /** @brief MemManage, BusFault, UsageFault or SecureFault. */
   std::uint32_t target{};
-  /** @brief CFSR bits the fault sets. */
+  /** @brief CFSR bits the fault sets, SFSR bits for a SecureFault. */
   std::uint32_t cfsr_bits{};
   /** @brief Address reported when the fault stops the run. */
   address reported{};
-  /** @brief Faulting data address, recorded in BFAR or MMFAR by target. */
+  /** @brief Faulting data address, recorded in BFAR, MMFAR or SFAR by target. */
   std::optional<address> data_address{};
   /** @brief Whether the fault is synchronous: it escalates when it cannot preempt. */
   bool synchronous{true};

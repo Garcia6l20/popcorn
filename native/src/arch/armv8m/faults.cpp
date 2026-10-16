@@ -16,6 +16,7 @@ constexpr std::uint32_t excp_prefetch_abort = 3;
 constexpr std::uint32_t excp_data_abort     = 4;
 constexpr std::uint32_t excp_nocp           = 17;
 constexpr std::uint32_t excp_stkof          = 19;
+constexpr std::uint32_t excp_lserr          = 21;
 constexpr std::uint32_t excp_unaligned      = 22;
 constexpr std::uint32_t excp_divbyzero      = 23;
 constexpr std::uint32_t epsr_thumb          = 1u << 24;
@@ -35,11 +36,18 @@ auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
   auto const config = priority_config();
   auto const state  = exception_target(state_.exceptions, config, cause.target, current_security());
   auto const nonsecure = state == security::nonsecure and banked(cause.target);
-  auto&      cfsr      = nonsecure ? scs.nonsecure.cfsr : scs.cfsr;
+  auto&      cfsr      = cause.target == exc_securefault ? scs.sfsr
+                       : nonsecure                       ? scs.nonsecure.cfsr
+                                                         : scs.cfsr;
   cfsr |= cause.cfsr_bits;
   if(cause.data_address)
   {
-    if(cause.target == exc_busfault)
+    if(cause.target == exc_securefault)
+    {
+      scs.sfar = static_cast<std::uint32_t>(*cause.data_address);
+      scs.sfsr |= sfsr::sfarvalid;
+    }
+    else if(cause.target == exc_busfault)
     {
       scs.bfar = static_cast<std::uint32_t>(*cause.data_address);
       scs.cfsr |= cfsr::bfarvalid;
@@ -67,7 +75,10 @@ auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
   if(target == exc_hardfault and cause.synchronous and not preempts(exc_hardfault, bank))
   {
     return trap_result::fault(
-        {.kind = fault_kind::hard, .fault_address = pc(), .status = cfsr, .detail = scs.hfsr});
+        {.kind          = fault_kind::hard,
+         .fault_address = pc(),
+         .status        = cause.target == exc_securefault ? scs.cfsr : cfsr,
+         .detail        = scs.hfsr});
   }
   if(context_->faults == fault_policy::stop)
   {
@@ -187,6 +198,12 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
           {.kind      = fault_kind::usage,
            .target    = exc_usagefault,
            .cfsr_bits = cfsr::unaligned,
+           .reported  = at});
+    case excp_lserr:
+      return raise_fault(
+          {.kind      = fault_kind::secure,
+           .target    = exc_securefault,
+           .cfsr_bits = sfsr::lserr,
            .reported  = at});
     case excp_divbyzero:
       return raise_fault(

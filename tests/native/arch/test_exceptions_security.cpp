@@ -14,11 +14,13 @@
 
 #include <unicorn/unicorn.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <format>
 #include <initializer_list>
 #include <random>
+#include <ranges>
 #include <tuple>
 #include <vector>
 
@@ -53,6 +55,9 @@ constexpr address icsr   = 0xE000'ED04;
 constexpr address scr    = 0xE000'ED10;
 constexpr address sfsr   = 0xE000'EDE4;
 constexpr address sfar   = 0xE000'EDE8;
+constexpr address shcsr  = 0xE000'ED24;
+constexpr address cpacr  = 0xE000'ED88;
+constexpr address fpccr  = 0xE000'EF34;
 constexpr address itns0  = 0xE000'E380;
 constexpr address cfsr   = 0xE000'ED28;
 constexpr address hfsr   = 0xE000'ED2C;
@@ -74,11 +79,12 @@ constexpr std::uint32_t control_spsel = 1u << 1;
 constexpr std::uint32_t control_fpca  = 1u << 2;
 constexpr std::uint32_t fill          = 0xA5A5'A5A5;
 
-auto booted(fault_policy policy = fault_policy::enter_handler) -> arch_fixture
+auto booted(fault_policy policy = fault_policy::enter_handler, char const* firmware = "scs")
+    -> arch_fixture
 {
   auto options   = trustzone_options();
   options.faults = policy;
-  arch_fixture f{m33_trustzone(), "scs", options};
+  arch_fixture f{m33_trustzone(), firmware, options};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   return f;
 }
@@ -884,6 +890,263 @@ TEST_CASE("sleep-on-exit reads the SCR of the state returned to, B3.22 Exception
     CHECK(f.module->idle() == nonsecure_scr);
   }
 }
+
+namespace
+{
+constexpr std::uint32_t fpccr_ts        = 1u << 26;
+constexpr std::uint32_t fpccr_s         = 1u << 2;
+constexpr std::uint32_t fpccr_lspact    = 1u << 0;
+constexpr std::uint32_t cpacr_cp10_cp11 = 0x00F0'0000;
+constexpr std::uint32_t sfsr_lserr      = 1u << 7;
+constexpr std::uint32_t ufsr_nocp       = 1u << 19;
+
+auto pattern(int n) -> std::uint32_t
+{
+  return 0x4100'0000u + static_cast<std::uint32_t>(n);
+}
+
+void load_s_registers(arch_fixture const& f)
+{
+  for(int n = 0; n < 32; ++n)
+  {
+    f.set(std::format("s{}", n), pattern(n));
+  }
+}
+
+auto vmov_s_r0(int n) -> std::array<std::uint16_t, 2>
+{
+  return {
+      static_cast<std::uint16_t>(0xee00u | static_cast<unsigned>(n >> 1)),
+      static_cast<std::uint16_t>(0x0a10u | (static_cast<unsigned>(n & 1) << 7))};
+}
+
+void put_clobber(arch_fixture const& f, address at)
+{
+  for(int n = 0; n < 32; ++n)
+  {
+    auto const insn = vmov_s_r0(n);
+    put(f, at + 4 * static_cast<address>(n), {insn[0], insn[1]});
+  }
+  put(f, at + 0x80, {bkpt});
+}
+
+constexpr std::uint16_t vmov_s0_r2  = 0xee00;
+constexpr std::uint16_t vmov_s0_r2b = 0x2a10;
+constexpr std::uint16_t sub_sp_0x88 = 0xb0a2;
+constexpr std::uint16_t vlstm_sp    = 0xec2d;
+constexpr std::uint16_t vlxxm_tail  = 0x0a00;
+constexpr std::uint16_t blxns_r3    = 0x479c;
+constexpr std::uint16_t vlldm_sp    = 0xec3d;
+
+void fill_below(arch_fixture const& f, address top, std::uint32_t bytes)
+{
+  for(address at = top - bytes; at < top; at += 4)
+  {
+    poke(f, at, fill);
+  }
+}
+}
+
+TEST_CASE(
+    "SHCSR_S.SECUREFAULTENA and SECUREFAULTPENDED are Secure-only under TrustZone, D1.2 SHCSR")
+{
+  auto f = booted();
+  poke(f, shcsr, (1u << 19) | (1u << 20));
+  CHECK((f.word(shcsr) & ((1u << 19) | (1u << 20))) == ((1u << 19) | (1u << 20)));
+  CHECK((f.word(shcsr + scs_ns) & ((1u << 19) | (1u << 20))) == 0);
+  CHECK(saved(f).scs.shcsr_enables == 1u << 19);
+  CHECK(armv8m::test_bit(saved(f).exceptions.pending, armv8m::exc_securefault));
+  poke(f, shcsr, 0);
+  CHECK_FALSE(armv8m::test_bit(saved(f).exceptions.pending, armv8m::exc_securefault));
+  arch_fixture plain{popcorn::testing::m33(), "scs", core::machine_options{}};
+  REQUIRE(plain.run_to_stop().reason == stop_reason::user);
+  poke(plain, shcsr, (1u << 19) | (1u << 20));
+  CHECK((plain.word(shcsr) & ((1u << 19) | (1u << 20))) == 0);
+}
+
+TEST_CASE(
+    "a VLSTM with LSPACT set in the bank FPCCR_S.S selects is a SecureFault LSERR, C2.4.368 "
+    "lines 12-16, escalated to HardFault_S without SECUREFAULTENA, B3.12")
+{
+  for(auto const policy : {fault_policy::stop, fault_policy::enter_handler})
+  {
+    for(auto const enabled : {false, true})
+    {
+      CAPTURE(policy == fault_policy::stop);
+      CAPTURE(enabled);
+      auto f = booted(policy);
+      poke(f, aircr, bfhfnmins);
+      poke(f, cpacr, cpacr_cp10_cp11);
+      tables(f, armv8m::exc_hardfault);
+      tables(f, armv8m::exc_securefault);
+      if(enabled)
+      {
+        poke(f, shcsr, 1u << 19);
+      }
+      put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, bkpt});
+      REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+      engine_write(
+          f, UC_ARM_REG_FPCCR_S, engine_read(f, UC_ARM_REG_FPCCR_S) | fpccr_s | fpccr_lspact);
+      constexpr address after = secure_code + 0x10;
+      put(f, after, {vlstm_sp, vlxxm_tail, bkpt});
+      auto const stopped = run_secure(f, after, 2);
+      CHECK((f.word(sfsr) & sfsr_lserr) != 0);
+      if(policy == fault_policy::stop)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        CHECK(stopped.fault->kind == popcorn::fault_kind::secure);
+        CHECK((stopped.fault->status & sfsr_lserr) != 0);
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(secure_now(f));
+      CHECK(f.reg("pc") == secure_handler + 2);
+      CHECK(ipsr(f) == (enabled ? armv8m::exc_securefault : armv8m::exc_hardfault));
+      CHECK((f.word(hfsr) >> 30 & 1u) == (enabled ? 0u : 1u));
+      CHECK(f.module->would_preempt(armv8m::exc_nmi) == enabled);
+    }
+  }
+}
+
+TEST_CASE(
+    "VLSTM before a BLXNS saves S0-S15 and FPSCR, S16-S31 with FPCCR_S.TS, and clears them, "
+    "C2.4.368 and B3.19")
+{
+  for(auto const ts : {false, true})
+  {
+    CAPTURE(ts);
+    auto f = booted();
+    open_nonsecure_region(f);
+    poke(f, cpacr, cpacr_cp10_cp11);
+    if(ts)
+    {
+      poke(f, fpccr, f.word(fpccr) | fpccr_ts);
+    }
+    auto const sp   = engine_read(f, UC_ARM_REG_MSP_S);
+    auto const area = sp - 0x88;
+    fill_below(f, sp, 0x88);
+    put_clobber(f, ns_code);
+    put(f, secure_code,
+        {vmov_s0_r2, vmov_s0_r2b, sub_sp_0x88, vlstm_sp, vlxxm_tail, bkpt, blxns_r3, vlldm_sp,
+         vlxxm_tail, bkpt});
+    load_s_registers(f);
+    f.set("r2", pattern(0));
+    f.set("r3", ns_code);
+    f.set("r0", 0xDEAD'0000);
+    engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+    REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+    for(int n = 0; n < 32; ++n)
+    {
+      CAPTURE(n);
+      CHECK(f.reg(std::format("s{}", n)) == (ts ? 0u : pattern(n)));
+    }
+    REQUIRE(resume(f, 40).reason == stop_reason::user);
+    REQUIRE(f.reg("pc") == ns_code + 0x82);
+    CHECK_FALSE(secure_now(f));
+    auto const saved_area = popcorn::testing::words_at(*f.target, area, 0x88 / 4);
+    for(int n = 0; n < 16; ++n)
+    {
+      CAPTURE(n);
+      CHECK(saved_area[static_cast<std::size_t>(n)] == pattern(n));
+    }
+    for(int n = 0; n < 16; ++n)
+    {
+      CAPTURE(n);
+      CHECK(saved_area[static_cast<std::size_t>(0x12 + n)] == (ts ? pattern(16 + n) : fill));
+    }
+  }
+}
+
+TEST_CASE(
+    "a hard-float cmse_nonsecure_call saves d8-d15 with VPUSH on the Secure stack only, "
+    "B3.19 and C2.4.368")
+{
+  auto f = booted(fault_policy::enter_handler, "cmse");
+  open_nonsecure_region(f);
+  poke(f, cpacr, cpacr_cp10_cp11);
+  put_clobber(f, ns_code);
+  fill_below(f, ns_stack, 0x100);
+  engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+  poke(f, popcorn::testing::sym("cmse", "cmse_callee"), ns_code | 1u);
+  load_s_registers(f);
+  f.set("r0", 0xDEAD'0000);
+  REQUIRE(
+      run_secure(f, popcorn::testing::sym("cmse", "cmse_call") & ~1u, 80).reason
+      == stop_reason::user);
+  REQUIRE(f.reg("pc") == ns_code + 0x82);
+  CHECK_FALSE(secure_now(f));
+  auto const        msp_s   = armv8m::read_bank(engine_of(f), security::secure).msp;
+  constexpr address ram_end = 0x200C'0000;
+  REQUIRE(msp_s < ram_end);
+  auto const stack = popcorn::testing::words_at(
+      *f.target, msp_s, std::min<std::size_t>(0x40, (ram_end - msp_s) / 4));
+  auto const found = std::ranges::search(
+      stack, std::views::iota(16, 32) | std::views::transform([](int n) { return pattern(n); }));
+  CHECK_FALSE(found.empty());
+  auto const ns_words = popcorn::testing::words_at(*f.target, ns_stack - 0x100, 0x40);
+  CHECK(std::ranges::all_of(ns_words, [](std::uint32_t word) { return word == fill; }));
+  CHECK(f.reg("s16") == f.reg("r0"));
+}
+
+TEST_CASE(
+    "a VLSTM with CPACR_S CP10 0 is a Secure UsageFault NOCP, frame untouched, the Secure FP "
+    "instruction before it not faulting, a deviation from C2.4.368 line 6 and B3.36")
+{
+  auto       f  = booted(fault_policy::stop);
+  auto const sp = engine_read(f, UC_ARM_REG_MSP_S);
+  fill_below(f, sp, 0x88);
+  put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, sub_sp_0x88, vlstm_sp, vlxxm_tail, bkpt});
+  auto const stopped = run_secure(f, secure_code, 4);
+  REQUIRE(stopped.reason == stop_reason::fault);
+  CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+  CHECK(f.reg("pc") == secure_code + 6);
+  CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+  CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+  auto const area = popcorn::testing::words_at(*f.target, sp - 0x88, 0x88 / 4);
+  CHECK(std::ranges::all_of(area, [](std::uint32_t word) { return word == fill; }));
+}
+
+TEST_CASE(
+    "a Secure FP background with FPCCR_S.TS stacks S16-S31 after the extended frame and clears "
+    "the FP registers, PushStack lines 9-80")
+{
+  auto f = booted();
+  open_nonsecure_region(f);
+  tables(f, 16);
+  put(f, ns_handler, {bkpt, bx_lr});
+  put(f, secure_code, {bkpt});
+  poke(f, itns0, 1);
+  poke(f, iser0, 1);
+  poke(f, fpccr, f.word(fpccr) | fpccr_ts);
+  engine_write(f, UC_ARM_REG_CONTROL_S, engine_read(f, UC_ARM_REG_CONTROL_S) | control_fpca);
+  load_s_registers(f);
+  auto const msp      = engine_read(f, UC_ARM_REG_MSP_S);
+  auto const frame_at = msp - 0xA8;
+  poke(f, ispr0, 1);
+  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+  CHECK(engine_read(f, UC_ARM_REG_MSP_S) == frame_at - 0x28);
+  auto const frame = popcorn::testing::words_at(*f.target, frame_at, 0xA8 / 4);
+  for(int n = 0; n < 16; ++n)
+  {
+    CAPTURE(n);
+    CHECK(frame[static_cast<std::size_t>(8 + n)] == pattern(n));
+    CHECK(frame[static_cast<std::size_t>(26 + n)] == pattern(16 + n));
+  }
+  for(int n = 0; n < 32; ++n)
+  {
+    CAPTURE(n);
+    CHECK(f.reg(std::format("s{}", n)) == 0);
+  }
+  REQUIRE(resume(f, 2).reason == stop_reason::user);
+  CHECK(f.reg("pc") == secure_code + 2);
+  CHECK(engine_read(f, UC_ARM_REG_MSP_S) == msp);
+  for(int n = 0; n < 32; ++n)
+  {
+    CAPTURE(n);
+    CHECK(f.reg(std::format("s{}", n)) == pattern(n));
+  }
+}
+
 TEST_CASE(
     "a Secure IRQ preempting a Non-secure handler records CONTROL_S.SPSEL in EXC_RETURN with "
     "Mode 0 and returns, ExceptionTaken lines 30-35")
@@ -912,4 +1175,51 @@ TEST_CASE(
   CHECK_FALSE(secure_now(f));
   CHECK(f.reg("pc") == ns_code + 2);
   CHECK((engine_read(f, UC_ARM_REG_CONTROL_S) & control_spsel) != 0);
+}
+
+TEST_CASE(
+    "a Non-secure IRQ over Non-secure code with FPCA set and NSACR.CP10 0 stops with UFSR_S.NOCP "
+    "before any store, PushStack lines 15 and 52-54")
+{
+  auto f = booted(fault_policy::stop);
+  open_nonsecure_region(f);
+  tables(f, 16);
+  put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
+  put(f, ns_code, {bkpt, 0xe7fe});
+  fill_below(f, ns_stack, 0x80);
+  engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+  poke(f, itns0, 1);
+  poke(f, iser0, 1);
+  f.set("r3", ns_code);
+  REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+  REQUIRE_FALSE(secure_now(f));
+  REQUIRE((f.reg("control") & control_fpca) != 0);
+  poke(f, ispr0, 1);
+  auto const stopped = resume(f, 2);
+  REQUIRE(stopped.reason == stop_reason::fault);
+  CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+  CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+  CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+  CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
+  auto const stack = popcorn::testing::words_at(*f.target, ns_stack - 0x80, 0x20);
+  CHECK(std::ranges::all_of(stack, [](std::uint32_t word) { return word == fill; }));
+}
+
+TEST_CASE("a SecureFault that cannot preempt stops as hard with CFSR as status, SFSR kept apart")
+{
+  auto f = booted();
+  poke(f, cpacr, cpacr_cp10_cp11);
+  poke(f, shcsr, 1u << 19);
+  put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, bkpt});
+  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+  engine_write(f, UC_ARM_REG_FPCCR_S, engine_read(f, UC_ARM_REG_FPCCR_S) | fpccr_s | fpccr_lspact);
+  engine_write(f, UC_ARM_REG_FAULTMASK_S, 1);
+  constexpr address after = secure_code + 0x10;
+  put(f, after, {vlstm_sp, vlxxm_tail, bkpt});
+  auto const stopped = run_secure(f, after, 2);
+  REQUIRE(stopped.reason == stop_reason::fault);
+  CHECK(stopped.fault->kind == popcorn::fault_kind::hard);
+  CHECK(stopped.fault->status == f.word(cfsr));
+  CHECK((stopped.fault->status & sfsr_lserr) == 0);
+  CHECK((f.word(sfsr) & sfsr_lserr) != 0);
 }

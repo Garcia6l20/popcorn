@@ -76,7 +76,17 @@ constexpr auto fp_frame_ids = [] consteval {
   }
   return out;
 }();
-constexpr std::uint32_t xpsr_ge = 0x000f'0000;
+constexpr auto fp_callee_ids = [] consteval {
+  std::array<int, 16> out{};
+  for(std::size_t index = 0; index < 16; ++index)
+  {
+    out[index] = engine_register(fp_register_names[16 + index]);
+  }
+  return out;
+}();
+constexpr std::uint32_t xpsr_ge    = 0x000f'0000;
+constexpr std::uint32_t fpccr_ts   = 1u << 26;
+constexpr std::uint32_t nsacr_cp10 = 1u << 10;
 
 void write(uc_struct* engine, uc_arm_reg id, std::uint32_t value, std::string_view what)
 {
@@ -528,15 +538,18 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto const  thread     = special.ipsr == 0;
   auto const  use_psp    = thread and (special.control & control_spsel) != 0;
   auto const  fp         = core_.fpu and (special.control & control_fpca) != 0;
-  auto const  size       = fp ? extended_frame_size : basic_frame_size;
-  auto const  sp         = use_psp ? special.psp : special.msp;
-  auto const  align      = not v7() or (state_.scs.ccr & ccr_stkalign) != 0;
-  auto const  frame_at   = align ? (sp - size) & ~4u : sp - size;
-  auto const  callee = extension and background == security::secure and state == security::nonsecure
-                         ? callee_frame_size
-                         : 0u;
-  auto const  lowest = frame_at - callee;
-  auto&       cfsr =
+  auto const  fp_callee =
+      extension and fp and background == security::secure and secure_fp_context();
+  auto const size =
+      fp ? extended_frame_size + (fp_callee ? fp_callee_frame_size : 0u) : basic_frame_size;
+  auto const sp       = use_psp ? special.psp : special.msp;
+  auto const align    = not v7() or (state_.scs.ccr & ccr_stkalign) != 0;
+  auto const frame_at = align ? (sp - size) & ~4u : sp - size;
+  auto const callee = extension and background == security::secure and state == security::nonsecure
+                        ? callee_frame_size
+                        : 0u;
+  auto const lowest = frame_at - callee;
+  auto&      cfsr =
       extension and background == security::nonsecure ? state_.scs.nonsecure.cfsr : state_.scs.cfsr;
   if(lowest < (use_psp ? special.psplim : special.msplim))
   {
@@ -554,6 +567,15 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
       if(auto const denied = first_secure_word(lowest, frame_at + size))
       {
         return attribution_fault(*denied);
+      }
+      if(fp and (state_.scs.nsacr & nsacr_cp10) == 0)
+      {
+        state_.scs.cfsr |= cfsr::nocp;
+        return trap_result::fault(
+            {.kind          = fault_kind::usage,
+             .fault_address = pc(),
+             .status        = state_.scs.cfsr,
+             .detail        = state_.scs.hfsr});
       }
     }
   }
@@ -573,6 +595,11 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   }
   if constexpr(extension)
   {
+    if(fp_callee)
+    {
+      read_batch(
+          engine, fp_callee_ids, frame.subspan(extended_frame_size / 4, fp_callee_ids.size()));
+    }
     if(callee != 0)
     {
       words[0] = integrity_signature(core_.fpu, not fp);
@@ -646,6 +673,12 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
     {
       write(UC_ARM_REG_CONTROL_S, read(UC_ARM_REG_CONTROL_S) & ~(control_fpca | control_sfpa));
       clear_caller_registers(engine, callee != 0);
+    }
+    if(fp_callee)
+    {
+      std::array<std::uint32_t, 17> zeros{};
+      write_batch(engine, fp_frame_ids, std::span{zeros});
+      write_batch(engine, fp_callee_ids, std::span{zeros}.first(fp_callee_ids.size()));
     }
     write(UC_ARM_REG_EPSR, (*vector & 1u) << 24);
     write(UC_ARM_REG_LR, exc_return);
@@ -867,7 +900,11 @@ auto cortex_m::exception_return() -> trap_result
       back == security::secure and (exception == security::nonsecure or not fields.default_callee)
           ? callee_frame_size
           : 0u;
-  auto const size = returning.basic_frame ? basic_frame_size : extended_frame_size;
+  auto const fp_callee =
+      not returning.basic_frame and back == security::secure and secure_fp_context();
+  auto const size = returning.basic_frame
+                      ? basic_frame_size
+                      : extended_frame_size + (fp_callee ? fp_callee_frame_size : 0u);
   if(back == security::nonsecure)
   {
     if(auto const denied = first_secure_word(frame_at, frame_at + callee + size))
@@ -925,6 +962,11 @@ auto cortex_m::exception_return() -> trap_result
   {
     write_batch(engine, fp_frame_ids, frame.subspan(8, fp_frame_ids.size()));
   }
+  if(fp_callee)
+  {
+    write_batch(
+        engine, fp_callee_ids, frame.subspan(extended_frame_size / 4, fp_callee_ids.size()));
+  }
   write(UC_ARM_REG_PC, frame[6] | 1u);
   write(UC_ARM_REG_XPSR_NZCVQG, frame[7] & ~(stacked_align_bit | stacked_sfpa_bit));
   if(back != current)
@@ -951,6 +993,11 @@ auto cortex_m::exception_return() -> trap_result
   return returned(
       number, stacked_ipsr, frame[6] & ~1u,
       back == security::nonsecure ? state_.scs.nonsecure.scr : state_.scs.scr);
+}
+
+auto cortex_m::secure_fp_context() const noexcept -> bool
+{
+  return trustzone() and (state_.scs.fpccr & fpccr_ts) != 0;
 }
 
 auto cortex_m::security_fault(std::uint32_t bits, address at) -> trap_result
