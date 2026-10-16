@@ -96,7 +96,8 @@ void machine::run_state::map_peripherals()
     if(group.size() == 1)
     {
       check(
-          uc_mmio_map(engine, lead.base, lead.size, &on_mmio_read, &lead, &on_mmio_write, &lead),
+          uc_mmio_map_attrs(
+              engine, lead.base, lead.size, &on_mmio_read, &lead, &on_mmio_write, &lead),
           std::format("mapping peripheral {}", lead.unit->name));
     }
     else
@@ -119,7 +120,7 @@ void machine::run_state::map_peripherals()
                    | std::ranges::to<std::vector>(),
       });
       check(
-          uc_mmio_map(
+          uc_mmio_map_attrs(
               engine, lead.base, end - lead.base, &on_shared_read, shared.get(), &on_shared_write,
               shared.get()),
           std::format("mapping peripherals {} to {}", lead.unit->name, group.back()->unit->name));
@@ -522,11 +523,13 @@ auto machine::run_state::on_mmio_read(
     uc_struct*,
     std::uint64_t offset,
     unsigned      size,
+    uc_mem_attrs  attrs,
     void*         user) noexcept -> std::uint64_t
 {
-  auto const&   window = *static_cast<mmio_window const*>(user);
-  auto&         run    = *window.run;
-  std::uint32_t value  = 0;
+  auto const& window  = *static_cast<mmio_window const*>(user);
+  auto&       run     = *window.run;
+  run.access          = attrs;
+  std::uint32_t value = 0;
   run.guarded([&] {
     auto const read = run.raising_access([&] {
       return run.dispatch_read(
@@ -551,10 +554,12 @@ void machine::run_state::on_mmio_write(
     std::uint64_t offset,
     unsigned      size,
     std::uint64_t value,
+    uc_mem_attrs  attrs,
     void*         user) noexcept
 {
   auto const& window = *static_cast<mmio_window const*>(user);
   auto&       run    = *window.run;
+  run.access         = attrs;
   run.guarded([&] {
     auto const done = run.raising_access([&] {
       return run.dispatch_write(
@@ -580,10 +585,12 @@ auto machine::run_state::on_shared_read(
     uc_struct*,
     std::uint64_t offset,
     unsigned      size,
+    uc_mem_attrs  attrs,
     void*         user) noexcept -> std::uint64_t
 {
-  auto const&   shared = *static_cast<mmio_page const*>(user);
-  auto&         run    = *shared.run;
+  auto const& shared   = *static_cast<mmio_page const*>(user);
+  auto&       run      = *shared.run;
+  run.access           = attrs;
   auto const    addr   = static_cast<address>(shared.base + offset);
   auto const&   window = shared.member_at(addr);
   std::uint32_t value  = 0;
@@ -610,10 +617,12 @@ void machine::run_state::on_shared_write(
     std::uint64_t offset,
     unsigned      size,
     std::uint64_t value,
+    uc_mem_attrs  attrs,
     void*         user) noexcept
 {
   auto const& shared = *static_cast<mmio_page const*>(user);
   auto&       run    = *shared.run;
+  run.access         = attrs;
   auto const  addr   = static_cast<address>(shared.base + offset);
   auto const& window = shared.member_at(addr);
   run.guarded([&] {

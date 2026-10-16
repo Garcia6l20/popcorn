@@ -84,10 +84,15 @@ auto bit_words(std::uint32_t count) -> std::vector<std::uint32_t>
 
 }
 
-auto cortex_m::mmio_read(uc_struct*, std::uint64_t offset, unsigned size, void* user) noexcept
-    -> std::uint64_t
+auto cortex_m::mmio_read(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned      size,
+    uc_mem_attrs  attrs,
+    void*         user) noexcept -> std::uint64_t
 {
-  auto const& access = *static_cast<window_user const*>(user);
+  auto const& access   = *static_cast<window_user const*>(user);
+  access.self->access_ = attrs;
   try
   {
     return access.self->space_.read(access.which, static_cast<std::uint32_t>(offset), size);
@@ -104,9 +109,11 @@ void cortex_m::mmio_write(
     std::uint64_t offset,
     unsigned      size,
     std::uint64_t value,
+    uc_mem_attrs  attrs,
     void*         user) noexcept
 {
-  auto const& access = *static_cast<window_user const*>(user);
+  auto const& access   = *static_cast<window_user const*>(user);
+  access.self->access_ = attrs;
   try
   {
     auto&      self = *access.self;
@@ -169,7 +176,7 @@ void cortex_m::attach(arch_context const& ctx)
     auto& user = windows_[static_cast<std::size_t>(index)];
     user       = {.self = this, .which = static_cast<window>(index)};
     require(
-        uc_mmio_map(ctx.engine, base, window_size, &mmio_read, &user, &mmio_write, &user),
+        uc_mmio_map_attrs(ctx.engine, base, window_size, &mmio_read, &user, &mmio_write, &user),
         std::format("mapping the system space at {:#010x}", base));
   }
   uc_hook wfi = 0;
@@ -504,6 +511,11 @@ auto cortex_m::stack_limits() const noexcept -> bool
 auto cortex_m::v7() const noexcept -> bool
 {
   return profile_.arch == architecture::v7m;
+}
+
+auto cortex_m::access_attrs() const noexcept -> uc_mem_attrs
+{
+  return access_;
 }
 
 auto cortex_m::cpuid() const noexcept -> std::uint32_t

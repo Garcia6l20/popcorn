@@ -74,6 +74,10 @@ public:
   void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;
 
+  /** @brief Bus attributes of the last access to the system space through the engine, by the
+   * CPU or by the host. */
+  [[nodiscard]] auto access_attrs() const noexcept -> uc_mem_attrs;
+
   /** @brief CPUID of the core. */
   [[nodiscard]] auto cpuid() const noexcept -> std::uint32_t;
 
@@ -116,13 +120,18 @@ private:
     void operator()(uc_context* saved) const noexcept;
   };
 
-  static auto mmio_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
-      -> std::uint64_t;
+  static auto mmio_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
   static void mmio_write(
       uc_struct*    engine,
       std::uint64_t offset,
       unsigned      size,
       std::uint64_t value,
+      uc_mem_attrs  attrs,
       void*         user) noexcept;
 
   [[nodiscard]] auto timer_now() const -> std::uint64_t;
@@ -171,6 +180,7 @@ private:
   state                                     state_{};
   std::unique_ptr<uc_context, context_free> pristine_{};
   std::array<window_user, 4>                windows_{};
+  uc_mem_attrs                              access_{};
   mutable std::exception_ptr                failure_{};
   std::uint64_t                             generation_{};
   mutable std::vector<std::uint64_t>        exits_{};

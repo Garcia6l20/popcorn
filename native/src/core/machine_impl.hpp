@@ -948,6 +948,8 @@ struct machine::run_state
   /** @brief Whether the MMIO write being served comes from the CPU through a window whose model
    * drives the core clock, so that pc is exact. */
   bool exact_write = false;
+  /** @brief Bus attributes of the CPU access the MMIO callbacks serve, kept after it. */
+  uc_mem_attrs access{};
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
@@ -1161,14 +1163,18 @@ struct machine::run_state
   /** @brief Logs the first access to an offset without register. */
   void warn_unregistered(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 
-  static auto
-      on_mmio_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
-      -> std::uint64_t;
+  static auto on_mmio_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
   static void on_mmio_write(
       uc_struct*    engine,
       std::uint64_t offset,
       unsigned      size,
       std::uint64_t value,
+      uc_mem_attrs  attrs,
       void*         user) noexcept;
 
   /** @brief Engine pages several windows share, mapped once and dispatched by address. */
@@ -1188,14 +1194,18 @@ struct machine::run_state
   /** @brief Shared pages, each mapped once. */
   std::vector<std::unique_ptr<mmio_page>> shared_pages{};
 
-  static auto
-      on_shared_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
-      -> std::uint64_t;
+  static auto on_shared_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
   static void on_shared_write(
       uc_struct*    engine,
       std::uint64_t offset,
       unsigned      size,
       std::uint64_t value,
+      uc_mem_attrs  attrs,
       void*         user) noexcept;
 
   /**
@@ -1657,6 +1667,12 @@ struct machine_internals
   [[nodiscard]] static auto engine(machine const& target) noexcept -> uc_struct*
   {
     return target.engine_.get();
+  }
+
+  /** @brief Bus attributes of the last CPU access to a peripheral window of @p target. */
+  [[nodiscard]] static auto access(machine const& target) noexcept -> uc_mem_attrs
+  {
+    return target.run_->access;
   }
 };
 

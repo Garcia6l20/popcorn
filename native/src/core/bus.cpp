@@ -12,6 +12,8 @@ namespace popcorn::core
 {
 namespace
 {
+constexpr uc_mem_attrs host_attrs{.secure = true, .privileged = true};
+
 auto writable_by(region_desc const& region, initiator by) noexcept -> bool
 {
   return by == initiator::debugger or (region.acc.write and region.kind != region_kind::rom);
@@ -46,7 +48,7 @@ auto machine::do_read(address addr, std::uint8_t size, initiator by)
     return run_->dispatch_read(*window, addr - window->base, size, by);
   }
   std::uint32_t value = 0;
-  if(uc_mem_read(engine_.get(), addr, &value, size) != UC_ERR_OK)
+  if(uc_mem_read_attrs(engine_.get(), addr, &value, size, host_attrs) != UC_ERR_OK)
   {
     return std::unexpected(bus_error::unmapped);
   }
@@ -80,7 +82,7 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, ini
   {
     return run_->dispatch_write(*window, addr - window->base, size, value, by);
   }
-  if(uc_mem_write(engine_.get(), addr, &value, size) != UC_ERR_OK)
+  if(uc_mem_write_attrs(engine_.get(), addr, &value, size, host_attrs) != UC_ERR_OK)
   {
     return std::unexpected(bus_error::unmapped);
   }
