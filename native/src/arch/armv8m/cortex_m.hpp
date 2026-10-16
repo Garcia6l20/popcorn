@@ -168,6 +168,9 @@ private:
   void               write_fpccr(std::uint32_t value, std::uint32_t mask, security view);
   void               sau_changed();
   void               set_nonsecure_pending(std::uint32_t number, bool value) noexcept;
+  [[nodiscard]] auto priority_config() const noexcept -> security_config;
+  [[nodiscard]] auto current_security() const -> security;
+  void               pend(std::uint32_t number, security state);
 
   [[nodiscard]] auto timer_now() const -> std::uint64_t;
   [[nodiscard]] auto systick_of(security bank) noexcept -> systick_state&;
@@ -182,6 +185,10 @@ private:
   [[nodiscard]] auto stack_limits() const noexcept -> bool;
   [[nodiscard]] auto v7() const noexcept -> bool;
   [[nodiscard]] auto current_priority(bool ignore_primask = false) const -> int;
+  [[nodiscard]] auto banked_priority(bool ignore_primask) const -> int;
+  [[nodiscard]] auto one_bank_priority(bool ignore_primask) const -> int;
+  auto               deliver_banked() -> trap_result;
+  [[nodiscard]] auto banked_deliverable() const -> bool;
   static auto        wfi_hook(uc_struct* engine, void* user) noexcept -> int;
   void               wait_for_interrupt();
   [[nodiscard]] auto raw_pc() const -> address;
@@ -196,10 +203,11 @@ private:
   [[nodiscard]] auto halfword(address at) const -> std::uint32_t;
   [[nodiscard]] auto privileged() const -> bool;
   [[nodiscard]] auto preempts(std::uint32_t number) const -> bool;
+  [[nodiscard]] auto preempts(std::uint32_t number, security state) const -> bool;
   auto               raise(std::uint32_t number, address at) -> trap_result;
   auto               raise_fault(fault_cause const& cause) -> trap_result;
   auto               engine_fault(std::uint32_t intno) -> trap_result;
-  auto               enter(std::uint32_t number) -> trap_result;
+  auto               enter(std::uint32_t number, security state) -> trap_result;
   auto               exception_return() -> trap_result;
   [[nodiscard]] auto valid_return(std::uint32_t exc_return) const noexcept -> bool;
 
@@ -222,6 +230,7 @@ private:
   std::uint64_t                             generation_{};
   mutable std::vector<std::uint64_t>        exits_{};
   bool                                      in_call_{};
+  bool                                      trustzone_{};
   system_space                              space_{*this};
 };
 }

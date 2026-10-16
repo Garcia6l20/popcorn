@@ -7,6 +7,7 @@
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <format>
 #include <iterator>
@@ -44,7 +45,6 @@ constexpr std::uint32_t nsacr_cp10      = 1u << 10;
 constexpr std::uint32_t nsacr_cp11      = 1u << 11;
 constexpr std::uint32_t cpacr_cp10      = 0x0030'0000;
 constexpr std::uint32_t cpacr_cp11      = 0x00c0'0000;
-constexpr std::uint32_t nonsecure_bank  = 0x0000'c858u;
 
 auto nonsecure_ready(scs_state const& scs) noexcept -> std::uint32_t
 {
@@ -88,7 +88,23 @@ void cortex_m::idau_lookup(
 
 auto cortex_m::trustzone() const noexcept -> bool
 {
-  return context_ and context_->trustzone;
+  return trustzone_;
+}
+
+[[gnu::noinline]] auto cortex_m::deliver_banked() -> trap_result
+{
+  auto const best = best_pending(state_.exceptions, priority_config(), state_.call_masked);
+  if(best.number == 0 or not preempts(best.number, best.state))
+  {
+    return trap_result::resume();
+  }
+  return enter(best.number, best.state);
+}
+
+[[gnu::noinline]] auto cortex_m::banked_deliverable() const -> bool
+{
+  auto const best = best_pending(state_.exceptions, priority_config(), state_.call_masked);
+  return best.number != 0 and preempts(best.number, best.state);
 }
 
 auto cortex_m::view_of(window which) const noexcept -> std::optional<security>
@@ -247,11 +263,63 @@ void cortex_m::sau_changed()
 
 void cortex_m::set_nonsecure_pending(std::uint32_t number, bool value) noexcept
 {
-  if((nonsecure_bank >> number & 1u) == 0)
+  if(not banked(number))
   {
     return;
   }
   auto& bits = state_.exceptions.nonsecure_pending;
-  bits       = value ? bits | 1u << number : bits & ~(1u << number);
+  if(value and (state_.scs.nonsecure.scr & scr_sevonpend) != 0 and (bits >> number & 1u) == 0)
+  {
+    state_.event_register = true;
+  }
+  bits = value ? bits | 1u << number : bits & ~(1u << number);
+  refresh_pending();
+}
+
+auto cortex_m::priority_config() const noexcept -> security_config
+{
+  auto const& scs = state_.scs;
+  return {
+      .trustzone          = trustzone(),
+      .bfhfnmins          = scs.aircr_bfhfnmins,
+      .pris               = scs.aircr_pris,
+      .sdme               = (scs.demcr & demcr_sdme) != 0,
+      .prigroup           = scs.prigroup,
+      .prigroup_nonsecure = scs.nonsecure.prigroup,
+  };
+}
+
+auto cortex_m::current_security() const -> security
+{
+  return trustzone() ? read_security(engine_handle()) : security::secure;
+}
+
+void cortex_m::pend(std::uint32_t number, security state)
+{
+  if(state == security::nonsecure and banked(number))
+  {
+    set_nonsecure_pending(number, true);
+    return;
+  }
+  set_exception_pending(number, true);
+}
+
+[[gnu::noinline]] auto cortex_m::banked_priority(bool ignore_primask) const -> int
+{
+  std::array<int, 6> ids{UC_ARM_REG_PRIMASK_S,  UC_ARM_REG_BASEPRI_S,  UC_ARM_REG_FAULTMASK_S,
+                         UC_ARM_REG_PRIMASK_NS, UC_ARM_REG_BASEPRI_NS, UC_ARM_REG_FAULTMASK_NS};
+  std::array<std::uint32_t, 6> held{};
+  std::array<void*, 6>         out{&held[0], &held[1], &held[2], &held[3], &held[4], &held[5]};
+  require(
+      uc_reg_read_batch(engine_handle(), ids.data(), out.data(), static_cast<int>(ids.size())),
+      "reading the banked priority masks");
+  auto const of = [&](std::size_t at) {
+    return masks{
+        .primask   = not ignore_primask and (held[at] & 1u) != 0,
+        .basepri   = static_cast<std::uint8_t>(held[at + 1]),
+        .faultmask = (held[at + 2] & 1u) != 0,
+    };
+  };
+  return execution_priority(state_.exceptions, priority_config(), of(0), of(3));
 }
 }

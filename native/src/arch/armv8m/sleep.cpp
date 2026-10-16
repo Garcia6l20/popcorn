@@ -124,6 +124,13 @@ auto cortex_m::wake_event() const -> bool
   {
     return true;
   }
+  if(trustzone())
+  {
+    auto const best = best_pending(state_.exceptions, priority_config());
+    return best.number != 0
+       and exception_priority(state_.exceptions, priority_config(), best.number, best.state, true)
+               < current_priority(not wfe);
+  }
   auto const best = best_pending(state_.exceptions);
   return best
      and group_priority(priority_of(state_.exceptions, *best), state_.scs.prigroup)

@@ -240,6 +240,7 @@ TEST_CASE("NVIC_ITNS hides Secure IRQs from Non-secure ISER and IPR, D1.2 NVIC_I
 TEST_CASE("SysTick_S and SysTick_NS count apart, each with its own event, B3.11 RJQMQ")
 {
   auto f = booted();
+  engine_write(f, UC_ARM_REG_PRIMASK_S, 1);
   put(f, code_at, {0xe7fe});
   poke(f, syst + 4, 999);
   poke(f, syst + 8, 0);

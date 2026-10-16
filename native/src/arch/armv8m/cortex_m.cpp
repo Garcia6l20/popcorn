@@ -173,6 +173,7 @@ void cortex_m::attach(arch_context const& ctx)
     }
   }
   context_.emplace(ctx);
+  trustzone_     = ctx.trustzone;
   auto const map = [&](window which, address base) {
     auto& user = windows_[static_cast<std::size_t>(which)];
     user       = {.self = this, .which = which};
@@ -271,18 +272,30 @@ auto cortex_m::deliver_pending() -> trap_result
 {
   rethrow_failure();
   wake_if_due();
+  if(trustzone())
+  {
+    return deliver_banked();
+  }
   auto const best = best_pending_number(state_.exceptions, state_.call_masked);
-  if(best == 0 or not preempts(best))
+  if(best == 0
+     or group_priority(priority_of(state_.exceptions, best), state_.scs.prigroup)
+            >= one_bank_priority(false))
   {
     return trap_result::resume();
   }
-  return enter(best);
+  return enter(best, security::secure);
 }
 
 auto cortex_m::deliverable_now() const -> bool
 {
+  if(trustzone())
+  {
+    return banked_deliverable();
+  }
   auto const best = best_pending_number(state_.exceptions, state_.call_masked);
-  return best != 0 and preempts(best);
+  return best != 0
+     and group_priority(priority_of(state_.exceptions, best), state_.scs.prigroup)
+             < one_bank_priority(false);
 }
 
 auto cortex_m::would_preempt(std::uint32_t number) const -> bool
@@ -291,6 +304,11 @@ auto cortex_m::would_preempt(std::uint32_t number) const -> bool
 }
 
 auto cortex_m::current_priority(bool ignore_primask) const -> int
+{
+  return trustzone() ? banked_priority(ignore_primask) : one_bank_priority(ignore_primask);
+}
+
+auto cortex_m::one_bank_priority(bool ignore_primask) const -> int
 {
   std::array<int, 3>           ids{UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI, UC_ARM_REG_FAULTMASK};
   std::array<std::uint32_t, 3> held{};
@@ -317,22 +335,36 @@ auto cortex_m::privileged() const -> bool
 
 auto cortex_m::preempts(std::uint32_t number) const -> bool
 {
+  if(trustzone())
+  {
+    return preempts(
+        number, exception_target(state_.exceptions, priority_config(), number, current_security()));
+  }
   return group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup)
+       < one_bank_priority(false);
+}
+
+auto cortex_m::preempts(std::uint32_t number, security state) const -> bool
+{
+  return exception_priority(state_.exceptions, priority_config(), number, state, true)
        < current_priority();
 }
 
 auto cortex_m::raise(std::uint32_t number, address at) -> trap_result
 {
+  auto const config  = priority_config();
   auto const current = current_priority();
-  if(group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup) < current)
+  auto const state   = exception_target(state_.exceptions, config, number, current_security());
+  if(exception_priority(state_.exceptions, config, number, state, true) < current)
   {
-    set_exception_pending(number, true);
+    pend(number, state);
     return trap_result::resume();
   }
-  if(group_priority(priority_of(state_.exceptions, exc_hardfault), state_.scs.prigroup) < current)
+  auto const escalated = exception_target(state_.exceptions, config, exc_hardfault, state);
+  if(exception_priority(state_.exceptions, config, exc_hardfault, escalated, true) < current)
   {
     state_.scs.hfsr |= hfsr_forced;
-    set_exception_pending(exc_hardfault, true);
+    pend(exc_hardfault, escalated);
     return trap_result::resume();
   }
   write(UC_ARM_REG_PC, at | 1u);
@@ -638,7 +670,9 @@ void cortex_m::write(int engine_id, std::uint32_t value) const
 
 void cortex_m::refresh_pending() noexcept
 {
-  set_pending(any_pending(state_.exceptions, exception_count(), state_.call_masked));
+  set_pending(
+      any_pending(state_.exceptions, exception_count(), state_.call_masked)
+      or any_nonsecure_pending(state_.exceptions, state_.call_masked));
 }
 
 void cortex_m::rethrow_failure() const

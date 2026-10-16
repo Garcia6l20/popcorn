@@ -27,21 +27,47 @@ struct exc_return
   friend constexpr auto operator==(exc_return, exc_return) -> bool = default;
 };
 
+/** @brief The security fields of an EXC_RETURN value, B3.19. The defaults are the values of a
+ *         Secure exception taken from Secure state, the only ones without TrustZone. */
+struct exc_return_security
+{
+  /** @brief The background state was Secure, S bit 6. */
+  bool secure_background{true};
+  /** @brief The default rules for the callee registers were followed, DCRS bit 5. */
+  bool default_callee{true};
+  /** @brief The exception is Secure, ES bit 0. */
+  bool secure_exception{true};
+
+  /** @brief Member-wise equality. */
+  friend constexpr auto operator==(exc_return_security, exc_return_security) -> bool = default;
+};
+
 /**
  * @brief EXC_RETURN value of an entry.
  * @param frame What the return selects.
- *        Bits 6 and 5 are set on every profile: S and DCRS on the Secure M33 engine, ones on
- *        armv7m. ES, bit 0, is set.
+ * @param security S, DCRS and ES. The defaults set all three, as the Secure M33 engine without
+ *        TrustZone and armv7m, whose bits 6, 5 and 0 read as ones, need.
  */
-constexpr auto encode_exc_return(exc_return frame) noexcept -> std::uint32_t
+constexpr auto encode_exc_return(exc_return frame, exc_return_security security = {}) noexcept
+    -> std::uint32_t
 {
   return 0xffff'ff80u
-       | 1u << 6
-       | 1u << 5
+       | (security.secure_background ? 1u << 6 : 0u)
+       | (security.default_callee ? 1u << 5 : 0u)
        | (frame.basic_frame ? 1u << 4 : 0u)
        | (frame.thread ? 1u << 3 : 0u)
        | (frame.process_stack ? 1u << 2 : 0u)
-       | 1u;
+       | (security.secure_exception ? 1u : 0u);
+}
+
+/** @brief The S, DCRS and ES fields of an EXC_RETURN value. */
+constexpr auto decode_exc_security(std::uint32_t value) noexcept -> exc_return_security
+{
+  return {
+      .secure_background = (value & (1u << 6)) != 0,
+      .default_callee    = (value & (1u << 5)) != 0,
+      .secure_exception  = (value & 1u) != 0,
+  };
 }
 
 /** @brief Whether @p value is an EXC_RETURN value the core can return through. */
@@ -72,8 +98,9 @@ constexpr auto valid_v7_exc_return(std::uint32_t value) noexcept -> bool
 }
 
 /**
- * @brief What an EXC_RETURN value selects. S, DCRS and ES are ignored: the M33 engine runs
- *        Secure, so firmware built for Non-secure values returns.
+ * @brief What an EXC_RETURN value selects. S, DCRS and ES are left to decode_exc_security(): the
+ *        M33 engine runs Secure without TrustZone, so firmware built for Non-secure values
+ *        returns there.
  */
 constexpr auto decode_exc_return(std::uint32_t value) noexcept -> exc_return
 {

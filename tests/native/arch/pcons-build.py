@@ -62,6 +62,7 @@ arch_tests = [
         ("arch-scs-security", "test_scs_security.cpp"),
         ("arch-pending-scan", "test_pending_scan.cpp"),
         ("arch-bus-attrs", "test_bus_attrs.cpp"),
+        ("arch-exceptions-security", "test_exceptions_security.cpp"),
     )
 ]
 for test in arch_tests:

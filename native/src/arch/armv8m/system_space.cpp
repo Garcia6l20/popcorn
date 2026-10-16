@@ -45,7 +45,6 @@ constexpr std::uint32_t demcr_sdme         = 1u << 20;
 constexpr std::uint32_t sau_ctrl_writable  = 0x3;
 constexpr std::uint32_t sau_rbar_writable  = 0xffff'ffe0;
 constexpr std::uint32_t sau_rlar_writable  = 0xffff'ffe3;
-constexpr std::uint32_t exc_securefault    = 7;
 
 constexpr std::array<bool, 16> system_priority_implemented{false, false, false, false, true,  true,
                                                            true,  false, false, false, false, true,

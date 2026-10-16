@@ -31,8 +31,12 @@ auto enable_bit(std::uint32_t target) noexcept -> std::uint32_t
 
 auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
 {
-  auto& scs = state_.scs;
-  scs.cfsr |= cause.cfsr_bits;
+  auto&      scs    = state_.scs;
+  auto const config = priority_config();
+  auto const state  = exception_target(state_.exceptions, config, cause.target, current_security());
+  auto const nonsecure = state == security::nonsecure and banked(cause.target);
+  auto&      cfsr      = nonsecure ? scs.nonsecure.cfsr : scs.cfsr;
+  cfsr |= cause.cfsr_bits;
   if(cause.data_address)
   {
     if(cause.target == exc_busfault)
@@ -42,34 +46,35 @@ auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
     }
     else if(cause.target == exc_memmanage)
     {
-      scs.mmfar = static_cast<std::uint32_t>(*cause.data_address);
-      scs.cfsr |= cfsr::mmarvalid;
+      (nonsecure ? scs.nonsecure.mmfar : scs.mmfar) =
+          static_cast<std::uint32_t>(*cause.data_address);
+      cfsr |= cfsr::mmarvalid;
     }
   }
   auto const current  = current_priority();
-  auto const preempts = [&](std::uint32_t number) {
-    return group_priority(priority_of(state_.exceptions, number), scs.prigroup) < current;
+  auto const preempts = [&](std::uint32_t number, security target) {
+    return exception_priority(state_.exceptions, config, number, target, true) < current;
   };
-  auto target = cause.target;
-  if((scs.shcsr_enables & enable_bit(target)) == 0 or (cause.synchronous and not preempts(target)))
+  auto const enables = nonsecure ? scs.nonsecure.shcsr_enables : scs.shcsr_enables;
+  auto       target  = cause.target;
+  auto       bank    = state;
+  if((enables & enable_bit(target)) == 0 or (cause.synchronous and not preempts(target, bank)))
   {
     target = exc_hardfault;
+    bank   = exception_target(state_.exceptions, config, exc_hardfault, state);
     scs.hfsr |= hfsr_forced;
   }
-  if(target == exc_hardfault and cause.synchronous and not preempts(exc_hardfault))
+  if(target == exc_hardfault and cause.synchronous and not preempts(exc_hardfault, bank))
   {
     return trap_result::fault(
-        {.kind = fault_kind::hard, .fault_address = pc(), .status = scs.cfsr, .detail = scs.hfsr});
+        {.kind = fault_kind::hard, .fault_address = pc(), .status = cfsr, .detail = scs.hfsr});
   }
   if(context_->faults == fault_policy::stop)
   {
     return trap_result::fault(
-        {.kind          = cause.kind,
-         .fault_address = cause.reported,
-         .status        = scs.cfsr,
-         .detail        = scs.hfsr});
+        {.kind = cause.kind, .fault_address = cause.reported, .status = cfsr, .detail = scs.hfsr});
   }
-  set_exception_pending(target, true);
+  pend(target, bank);
   return trap_result::resume();
 }
 

@@ -23,11 +23,13 @@ namespace popcorn::arch::armv8m
 {
 namespace
 {
-constexpr std::uint32_t control_npriv = 1u << 0;
-constexpr std::uint32_t control_spsel = 1u << 1;
-constexpr std::uint32_t control_fpca  = 1u << 2;
-constexpr std::uint32_t control_sfpa  = 1u << 3;
-constexpr std::uint32_t ipsr_mask     = 0x1ffu;
+constexpr std::uint32_t control_npriv        = 1u << 0;
+constexpr std::uint32_t control_spsel        = 1u << 1;
+constexpr std::uint32_t control_fpca         = 1u << 2;
+constexpr std::uint32_t control_sfpa         = 1u << 3;
+constexpr std::uint32_t ipsr_mask            = 0x1ffu;
+constexpr int           restricted_nonsecure = 0x80;
+constexpr std::uint32_t xpsr_thumb           = 1u << 24;
 
 constexpr std::array<int, 8> frame_ids{UC_ARM_REG_R0, UC_ARM_REG_R1,  UC_ARM_REG_R2,
                                        UC_ARM_REG_R3, UC_ARM_REG_R12, UC_ARM_REG_LR,
@@ -148,6 +150,120 @@ auto execution_priority(
   return priority;
 }
 
+auto exception_target(
+    exception_state const& exceptions,
+    security_config const& config,
+    std::uint32_t          number,
+    security               origin) noexcept -> security
+{
+  if(not config.trustzone)
+  {
+    return security::secure;
+  }
+  auto const secure_if = [](bool secure) {
+    return secure ? security::secure : security::nonsecure;
+  };
+  switch(number)
+  {
+    case exc_nmi:
+    case exc_busfault:
+      return secure_if(not config.bfhfnmins);
+    case exc_hardfault:
+      return secure_if(not config.bfhfnmins or origin == security::secure);
+    case exc_securefault:
+      return security::secure;
+    case exc_debugmon:
+      return secure_if(config.sdme);
+    default:
+      break;
+  }
+  if(number >= exc_irq0)
+  {
+    return secure_if(not test_bit(exceptions.targets_nonsecure, number));
+  }
+  return origin;
+}
+
+auto exception_priority(
+    exception_state const& exceptions,
+    security_config const& config,
+    std::uint32_t          number,
+    security               state,
+    bool                   group) noexcept -> int
+{
+  auto const nonsecure = config.trustzone and state == security::nonsecure;
+  if(number == exc_hardfault)
+  {
+    return config.trustzone and config.bfhfnmins and not nonsecure ? -3 : -1;
+  }
+  auto result = nonsecure and banked(number) ? int{exceptions.nonsecure_priority[number]}
+                                             : priority_of(exceptions, number);
+  if(result < 0)
+  {
+    return result;
+  }
+  if(group)
+  {
+    result = group_priority(result, nonsecure ? config.prigroup_nonsecure : config.prigroup);
+  }
+  return nonsecure and config.pris ? (result >> 1) + restricted_nonsecure : result;
+}
+
+auto execution_priority(
+    exception_state const& exceptions,
+    security_config const& config,
+    masks                  secure,
+    masks                  nonsecure) noexcept -> int
+{
+  auto raw = 256;
+  for(std::uint32_t number = 1; number < exceptions.priority.size(); ++number)
+  {
+    if(test_bit(exceptions.active, number))
+    {
+      auto const state = banked(number)
+                           ? security::secure
+                           : exception_target(exceptions, config, number, security::secure);
+      raw              = std::min(raw, exception_priority(exceptions, config, number, state, true));
+    }
+  }
+  auto boosted = 256;
+  if(config.trustzone)
+  {
+    for(auto bits = exceptions.nonsecure_active & banked_exceptions; bits != 0; bits &= bits - 1)
+    {
+      auto const number = static_cast<std::uint32_t>(std::countr_zero(bits));
+      raw =
+          std::min(raw, exception_priority(exceptions, config, number, security::nonsecure, true));
+    }
+    if(nonsecure.basepri != 0)
+    {
+      auto const group = group_priority(nonsecure.basepri, config.prigroup_nonsecure);
+      boosted          = config.pris ? (group >> 1) + restricted_nonsecure : group;
+    }
+  }
+  if(secure.basepri != 0)
+  {
+    boosted = std::min(boosted, group_priority(secure.basepri, config.prigroup));
+  }
+  if(config.trustzone and nonsecure.primask)
+  {
+    boosted = std::min(boosted, config.pris ? restricted_nonsecure : 0);
+  }
+  if(secure.primask)
+  {
+    boosted = std::min(boosted, 0);
+  }
+  if(config.trustzone and nonsecure.faultmask)
+  {
+    boosted = config.bfhfnmins ? -1 : std::min(boosted, config.pris ? restricted_nonsecure : 0);
+  }
+  if(secure.faultmask)
+  {
+    boosted = config.trustzone and config.bfhfnmins ? -3 : -1;
+  }
+  return std::min(boosted, raw);
+}
+
 namespace
 {
 constexpr std::uint32_t system_enabled = 0x0000'fffcu;
@@ -161,7 +277,7 @@ constexpr std::uint32_t synchronous_bits = [] consteval {
   return out;
 }();
 
-auto candidates(
+[[gnu::always_inline]] inline auto candidates(
     exception_state const& exceptions,
     std::size_t            word,
     std::uint32_t          count,
@@ -184,6 +300,14 @@ auto candidates(
 auto scanned_words(exception_state const& exceptions, std::uint32_t count) noexcept -> std::size_t
 {
   return std::min<std::size_t>(exceptions.pending.size(), (std::size_t{count} + 31) / 32);
+}
+
+auto nonsecure_candidates(exception_state const& exceptions, bool synchronous_only) noexcept
+    -> std::uint32_t
+{
+  return exceptions.nonsecure_pending
+       & banked_exceptions
+       & (synchronous_only ? synchronous_bits : ~0u);
 }
 }
 
@@ -231,6 +355,52 @@ auto any_pending(
     }
   }
   return false;
+}
+
+auto best_pending(
+    exception_state const& exceptions,
+    security_config const& config,
+    bool                   synchronous_only) noexcept -> pending_exception
+{
+  auto const        count = static_cast<std::uint32_t>(exceptions.priority.size());
+  pending_exception best{};
+  auto              best_priority = 0;
+  auto const        consider      = [&](std::uint32_t number, security state) {
+    auto const priority = exception_priority(exceptions, config, number, state, false);
+    if(best.number == 0
+       or priority < best_priority
+       or (priority == best_priority and number < best.number))
+    {
+      best          = {.number = number, .state = state};
+      best_priority = priority;
+    }
+  };
+  for(std::size_t word = 0; word < scanned_words(exceptions, count); ++word)
+  {
+    for(auto bits = candidates(exceptions, word, count, synchronous_only); bits != 0;
+        bits &= bits - 1)
+    {
+      auto const number = static_cast<std::uint32_t>(word * 32)
+                        + static_cast<std::uint32_t>(std::countr_zero(bits));
+      consider(
+          number, banked(number) ? security::secure
+                                 : exception_target(exceptions, config, number, security::secure));
+    }
+  }
+  if(config.trustzone)
+  {
+    for(auto bits = nonsecure_candidates(exceptions, synchronous_only); bits != 0; bits &= bits - 1)
+    {
+      consider(static_cast<std::uint32_t>(std::countr_zero(bits)), security::nonsecure);
+    }
+  }
+  return best;
+}
+
+auto any_nonsecure_pending(exception_state const& exceptions, bool synchronous_only) noexcept
+    -> bool
+{
+  return nonsecure_candidates(exceptions, synchronous_only) != 0;
 }
 
 void set_context(uc_struct* engine, special_registers const& target, bool stack_limits)
@@ -345,7 +515,7 @@ void write_bank(uc_struct* engine, security bank, special_bank const& values)
   write(engine, ids.psplim, values.psplim, "PSPLIM of a bank");
 }
 
-auto cortex_m::enter(std::uint32_t number) -> trap_result
+auto cortex_m::enter(std::uint32_t number, security state) -> trap_result
 {
   auto* const engine   = engine_handle();
   auto&       services = context_->services;
@@ -410,11 +580,21 @@ auto cortex_m::enter(std::uint32_t number) -> trap_result
   set_context(engine, target, stack_limits());
   write(UC_ARM_REG_EPSR, (*vector & 1u) << 24);
   write(
-      UC_ARM_REG_LR,
-      encode_exc_return({.thread = thread, .process_stack = use_psp, .basic_frame = not fp}));
+      UC_ARM_REG_LR, encode_exc_return(
+                         {.thread = thread, .process_stack = use_psp, .basic_frame = not fp},
+                         {.secure_background = current_security() == security::secure,
+                          .secure_exception  = state == security::secure}));
   write(UC_ARM_REG_PC, *vector);
-  put_bit(state_.exceptions.pending, number, false);
-  put_bit(state_.exceptions.active, number, true);
+  if(state == security::nonsecure and banked(number))
+  {
+    state_.exceptions.nonsecure_pending &= ~(1u << number);
+    state_.exceptions.nonsecure_active |= 1u << number;
+  }
+  else
+  {
+    put_bit(state_.exceptions.pending, number, false);
+    put_bit(state_.exceptions.active, number, true);
+  }
   refresh_pending();
   state_.event_register = true;
   services.trace(
@@ -431,10 +611,11 @@ auto cortex_m::exception_return() -> trap_result
 {
   auto* const engine   = engine_handle();
   auto&       services = context_->services;
-  auto const  value    = read(UC_ARM_REG_PC) | 1u;
-  auto        special  = read_special(engine, stack_limits());
-  auto const  number   = special.ipsr;
-  auto const  invalid  = [&] {
+  auto const  value =
+      read(UC_ARM_REG_PC) | (trustzone() ? (read(UC_ARM_REG_XPSR) & xpsr_thumb) >> 24 : 1u);
+  auto       special = read_special(engine, stack_limits());
+  auto const number  = special.ipsr;
+  auto const invalid = [&] {
     state_.scs.cfsr |= cfsr::invpc;
     return trap_result::fault(
         {.kind          = fault_kind::usage,
@@ -479,7 +660,14 @@ auto cortex_m::exception_return() -> trap_result
   {
     return invalid();
   }
-  put_bit(state_.exceptions.active, number, false);
+  if(trustzone() and not decode_exc_security(value).secure_exception and banked(number))
+  {
+    state_.exceptions.nonsecure_active &= ~(1u << number);
+  }
+  else
+  {
+    put_bit(state_.exceptions.active, number, false);
+  }
   if(number != exc_nmi)
   {
     special.faultmask = 0;
