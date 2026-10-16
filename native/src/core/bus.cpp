@@ -49,7 +49,9 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
   }
   if(auto const* const window = run_->window_at(addr, size))
   {
-    return run_->dispatch_read(*window, addr - window->base, size, attrs);
+    auto read              = run_->dispatch_read(*window, addr - window->base, size, attrs);
+    run_->firewall_refused = false;
+    return read;
   }
   std::uint32_t value = 0;
   if(uc_mem_read_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
@@ -85,7 +87,9 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus
   }
   if(auto const* const window = run_->window_at(addr, size))
   {
-    return run_->dispatch_write(*window, addr - window->base, size, value, attrs);
+    auto done              = run_->dispatch_write(*window, addr - window->base, size, value, attrs);
+    run_->firewall_refused = false;
+    return done;
   }
   if(uc_mem_write_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
   {

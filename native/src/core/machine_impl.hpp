@@ -954,6 +954,9 @@ struct machine::run_state
   bool exact_write = false;
   /** @brief Bus attributes of the CPU access the MMIO callbacks serve, kept after it. */
   uc_mem_attrs access{};
+  /** @brief Whether the firewall refused the CPU access being dispatched, until its MMIO
+   * callback reads it or the host access that dispatched it returns. */
+  bool firewall_refused = false;
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
@@ -1183,6 +1186,15 @@ struct machine::run_state
 
   /** @brief Records the first model bus error of a CPU access in the engine run. */
   void record_bus_fault(address addr, arch::memory_op op) noexcept;
+
+  /**
+   * @brief Answers a CPU access a dispatch failed, from its engine MMIO callback: a firewall
+   *        refusal refuses the engine access, which faults precisely at the instruction, any
+   *        other bus error is recorded with record_bus_fault().
+   * @param addr Address of the access.
+   * @param op Kind of the access.
+   */
+  void cpu_bus_error(address addr, arch::memory_op op);
 
   /**
    * @brief Logs the first access to a register of a peripheral without model, once per machine

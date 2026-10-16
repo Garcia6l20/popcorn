@@ -239,6 +239,7 @@ auto machine::run_state::dispatch_read(
     }
     if(verdict == periph::bus_verdict::bus_error)
     {
+      firewall_refused = by == initiator::cpu;
       return std::unexpected(bus_error::denied);
     }
     if(verdict == periph::bus_verdict::read_zero_write_ignore)
@@ -318,6 +319,7 @@ auto machine::run_state::dispatch_write(
     }
     if(verdict == periph::bus_verdict::bus_error)
     {
+      firewall_refused = by == initiator::cpu;
       return std::unexpected(bus_error::denied);
     }
     if(verdict == periph::bus_verdict::read_zero_write_ignore)
@@ -540,6 +542,16 @@ auto machine::run_state::raising_access(Access access) -> decltype(access())
   return result;
 }
 
+void machine::run_state::cpu_bus_error(address addr, arch::memory_op op)
+{
+  if(std::exchange(firewall_refused, false))
+  {
+    check(uc_ctl_refuse_mmio(engine), "refusing the engine access");
+    return;
+  }
+  record_bus_fault(addr, op);
+}
+
 void machine::run_state::record_bus_fault(address addr, arch::memory_op op) noexcept
 {
   if(not bus_fault)
@@ -627,7 +639,7 @@ auto machine::run_state::on_mmio_read(
     }
     else
     {
-      run.record_bus_fault(window.base + static_cast<address>(offset), arch::memory_op::read);
+      run.cpu_bus_error(window.base + static_cast<address>(offset), arch::memory_op::read);
     }
     return false;
   });
@@ -653,7 +665,7 @@ void machine::run_state::on_mmio_write(
     });
     if(not done)
     {
-      run.record_bus_fault(window.base + static_cast<address>(offset), arch::memory_op::write);
+      run.cpu_bus_error(window.base + static_cast<address>(offset), arch::memory_op::write);
     }
     return false;
   });
@@ -690,7 +702,7 @@ auto machine::run_state::on_shared_read(
     }
     else
     {
-      run.record_bus_fault(addr, arch::memory_op::read);
+      run.cpu_bus_error(addr, arch::memory_op::read);
     }
     return false;
   });
@@ -718,7 +730,7 @@ void machine::run_state::on_shared_write(
     });
     if(not done)
     {
-      run.record_bus_fault(addr, arch::memory_op::write);
+      run.cpu_bus_error(addr, arch::memory_op::write);
     }
     return false;
   });

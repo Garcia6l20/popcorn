@@ -14,8 +14,10 @@ namespace popcorn::periph
  *        access reach the model or the register layer. `read_zero_write_ignore` makes a read
  *        return 0 and drops a write: neither reaches the model nor the register layer, the trace
  *        and the watches still see the access, with 0 for a read and the written value for a
- *        write. `bus_error` fails the access with bus_error::denied, a BusFault for a CPU access
- *        and a transfer error for a DMA access.
+ *        write. `bus_error` fails the access with bus_error::denied: for a CPU access a precise
+ *        BusFault at the instruction, the access not done, with the access address in BFAR, a
+ *        transfer error for a DMA access, the error itself for a debugger access. A model's own
+ *        bus error stays an imprecise BusFault at the next block boundary.
  */
 enum class[[= reflex::derive{reflex::Format}]] bus_verdict : std::uint8_t
 {
@@ -29,7 +31,8 @@ enum class[[= reflex::derive{reflex::Format}]] bus_verdict : std::uint8_t
  *        SoC bus firewall such as the STM32 GTZC TZSC. At most one per machine, installed by a
  *        model through model_context::install_firewall while the machine builds its models. It
  *        is called on the machine thread for every CPU, DMA and debugger access to a peripheral
- *        window, before the model and the register layer, so it must not take the GIL.
+ *        window, before the model and the register layer, so it must not take the GIL. It must
+ *        not schedule events: the call skips the deadline update a model call makes.
  */
 struct POPCORN_API bus_firewall
 {

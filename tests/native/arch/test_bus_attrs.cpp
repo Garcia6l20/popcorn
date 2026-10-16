@@ -69,6 +69,13 @@ constexpr std::uint32_t exc_return_thread_msp  = 0xFFFF'FFF9;
 constexpr std::uint32_t exc_return_handler_msp = 0xFFFF'FFF1;
 
 constexpr std::uint32_t cfsr_impreciserr = 1u << 10;
+constexpr std::uint32_t cfsr_preciserr   = 1u << 9;
+constexpr std::uint32_t cfsr_bfarvalid   = 1u << 15;
+constexpr address       cfsr             = 0xE000'ED28;
+constexpr address       bfar             = 0xE000'ED38;
+constexpr address       hfsr             = 0xE000'ED2C;
+constexpr address       shcsr            = 0xE000'ED24;
+constexpr std::uint32_t hfsr_forced      = 1u << 30;
 
 class probe_firewall final : public periph::model, public periph::bus_firewall
 {
@@ -147,10 +154,14 @@ auto unit_of(std::string_view name) -> std::size_t
   return static_cast<std::size_t>(found - desc.peripherals.begin());
 }
 
-auto booted(bool trustzone, bool firewall) -> rig
+auto booted(
+    bool                        trustzone,
+    bool                        firewall,
+    popcorn::arch::fault_policy faults = popcorn::arch::fault_policy::stop) -> rig
 {
   rig  out;
-  auto options = trustzone ? trustzone_options() : core::machine_options{};
+  auto options   = trustzone ? trustzone_options() : core::machine_options{};
+  options.faults = faults;
   options.models.emplace(
       "TESTDEV",
       [&out](periph::model_context& ctx, popcorn::peripheral_desc const&)
@@ -274,7 +285,9 @@ TEST_CASE("a Non-secure CPU store to a SEC_ window is refused before MMIO, B10.4
   auto const before = r.model->accesses.size();
   auto const stopped =
       run_cpu(r, {.insn = store, .at = sec_testdev + data, .value = 7, .nonsecure = true});
-  CHECK(stopped.reason == stop_reason::fault);
+  REQUIRE(stopped.reason == stop_reason::fault);
+  REQUIRE(stopped.fault.has_value());
+  CHECK(stopped.fault->fault_address == sec_testdev + data);
   CHECK(r.model->accesses.size() == before);
 }
 
@@ -335,19 +348,92 @@ TEST_CASE("the firewall is asked first, read_zero_write_ignore keeps the model o
   CHECK(r.model->accesses.size() == before + 1);
 }
 
-TEST_CASE("a firewall bus_error is the BusFault of a model bus error, imprecise as today, B3.27")
+TEST_CASE("a firewall bus_error is a precise BusFault at the access, BFAR its address, B3.27")
 {
-  auto r              = booted(false, true);
+  auto r = booted(false, true);
+  REQUIRE(r.f->target->mem().write(testdev + data, 4, 0x1234));
   r.firewall->verdict = bus_verdict::bus_error;
   auto const before   = r.model->accesses.size();
+  for(auto const insn : {load, store})
+  {
+    CAPTURE(insn);
+    auto const stopped = run_cpu(r, {.insn = insn, .at = testdev + data, .value = 0x77});
+    REQUIRE(stopped.reason == stop_reason::fault);
+    REQUIRE(stopped.fault.has_value());
+    CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+    CHECK(stopped.fault->fault_address == testdev + data);
+    CHECK(stopped.fault->status == (cfsr_preciserr | cfsr_bfarvalid));
+    CHECK(r.f->word(bfar) == testdev + data);
+    CHECK(r.f->reg("pc") == code_at);
+    CHECK(r.f->reg("r1") == 0x77);
+    CHECK(r.model->accesses.size() == before);
+    REQUIRE(r.f->target->mem().write(cfsr, 4, 0xffff'ffff));
+  }
+  CHECK_FALSE(r.f->target->mem().read(testdev + data, 4).has_value());
+  r.firewall->verdict = bus_verdict::allow;
+  CHECK(r.f->word(testdev + data) == 0x1234);
+}
+
+TEST_CASE("under enter_handler a firewall bus_error stacks the pc of the faulting access")
+{
+  auto r              = booted(false, true, popcorn::arch::fault_policy::enter_handler);
+  r.firewall->verdict = bus_verdict::bus_error;
+  REQUIRE(r.f->target->mem().write(code_at, 2, load));
+  REQUIRE(r.f->target->mem().write(code_at + 2, 2, bkpt));
+  r.f->set("r0", testdev + data);
+  r.f->set("pc", code_at | 1u);
+  auto const msp = static_cast<address>(r.f->reg("msp"));
+  std::ignore    = r.f->run({.max_instructions = icount{1}});
+  CHECK(r.f->reg("pc") == code_at);
+  std::ignore = r.f->run({.max_instructions = icount{1}});
+  CHECK((r.f->reg("xpsr") & 0x1ff) == 3);
+  CHECK((r.f->word(hfsr) & hfsr_forced) != 0);
+  CHECK(r.f->reg("msp") <= msp - 0x20);
+  CHECK(r.f->word(msp - 0x20 + 0x18) == code_at);
+  CHECK((r.f->word(cfsr) & (cfsr_preciserr | cfsr_bfarvalid)) == (cfsr_preciserr | cfsr_bfarvalid));
+  CHECK(r.f->word(bfar) == testdev + data);
+}
+
+TEST_CASE("a model bus error behind an allowing firewall stays imprecise, the control leg")
+{
+  auto r              = booted(false, true);
+  r.model->fail_reads = true;
   auto const stopped  = run_cpu(r, {.insn = load, .at = testdev + data});
   REQUIRE(stopped.reason == stop_reason::fault);
   REQUIRE(stopped.fault.has_value());
   CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
   CHECK(stopped.fault->fault_address == testdev + data);
   CHECK(stopped.fault->status == cfsr_impreciserr);
-  CHECK(r.model->accesses.size() == before);
-  CHECK_FALSE(r.f->target->mem().read(testdev + data, 4).has_value());
+}
+
+TEST_CASE(
+    "a refused host CPU access, stacking or a read, leaves no refusal for the next model bus error")
+{
+  auto r              = booted(false, true);
+  r.firewall->verdict = bus_verdict::bus_error;
+  r.f->set("msp", testdev + 0x200);
+  auto const stacked = run_cpu(r, {.insn = svc, .unprivileged = true});
+  REQUIRE(stacked.reason == stop_reason::fault);
+  r.firewall->verdict = bus_verdict::allow;
+  r.model->fail_reads = true;
+  REQUIRE(r.f->target->mem().write(cfsr, 4, 0xffff'ffff));
+  r.f->set("msp", 0x2008'4000);
+  REQUIRE(r.f->target->mem().write(shcsr, 4, 0));
+  auto const stopped = run_cpu(r, {.insn = load, .at = testdev + data});
+  REQUIRE(stopped.reason == stop_reason::fault);
+  REQUIRE(stopped.fault.has_value());
+  CHECK(stopped.fault->status == cfsr_impreciserr);
+
+  auto  read_leg             = booted(false, true);
+  auto& services             = read_leg.model->context().services;
+  read_leg.firewall->verdict = bus_verdict::bus_error;
+  CHECK_FALSE(services.read(testdev + data, 4, initiator::cpu).has_value());
+  read_leg.firewall->verdict = bus_verdict::allow;
+  read_leg.model->fail_reads = true;
+  auto const after_read      = run_cpu(read_leg, {.insn = load, .at = testdev + data});
+  REQUIRE(after_read.reason == stop_reason::fault);
+  REQUIRE(after_read.fault.has_value());
+  CHECK(after_read.fault->status == cfsr_impreciserr);
 }
 
 TEST_CASE("a DMA access reaches the firewall and the model with the attributes it names")

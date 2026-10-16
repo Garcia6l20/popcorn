@@ -398,8 +398,10 @@ public:
    * @brief Handles a slice that ended on an unmapped or protected access, pc at the faulting
    *        instruction. Also called for a bus error a peripheral model returned on a CPU access:
    *        that access completed, the call comes at the next block boundary with the pc there, an
-   *        imprecise bus fault, and @p addr lies in a described peripheral. Called between
-   *        slices, never from the hook.
+   *        imprecise bus fault, and @p addr lies in a described peripheral. A CPU access the bus
+   *        firewall refuses with periph::bus_verdict::bus_error never reaches it: the engine
+   *        fails that access, the module sees the engine's precise data abort with the access
+   *        address. Called between slices, never from the hook.
    * @param addr Address of the access.
    * @param op Kind of the access.
    * @return Resume after fault entry, or a stop.

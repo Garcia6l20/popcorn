@@ -19,6 +19,8 @@ constexpr std::uint32_t excp_stkof          = 19;
 constexpr std::uint32_t excp_unaligned      = 22;
 constexpr std::uint32_t excp_divbyzero      = 23;
 constexpr std::uint32_t epsr_thumb          = 1u << 24;
+constexpr std::uint32_t fsr_status_mask     = 0x40f;
+constexpr std::uint32_t fsr_alignment       = 0x1;
 
 auto enable_bit(std::uint32_t target) noexcept -> std::uint32_t
 {
@@ -137,11 +139,23 @@ auto cortex_m::engine_fault(std::uint32_t intno) -> trap_result
            .cfsr_bits = cfsr::iaccviol,
            .reported  = at});
     case excp_data_abort:
+    {
+      if((read(UC_ARM_REG_FAULT_STATUS) & fsr_status_mask) == fsr_alignment)
+      {
+        return raise_fault(
+            {.kind      = fault_kind::bus,
+             .target    = exc_busfault,
+             .cfsr_bits = cfsr::preciserr,
+             .reported  = at});
+      }
+      auto const accessed = read(UC_ARM_REG_FAULT_ADDRESS);
       return raise_fault(
-          {.kind      = fault_kind::bus,
-           .target    = exc_busfault,
-           .cfsr_bits = cfsr::preciserr,
-           .reported  = at});
+          {.kind         = fault_kind::bus,
+           .target       = exc_busfault,
+           .cfsr_bits    = cfsr::preciserr,
+           .reported     = accessed,
+           .data_address = accessed});
+    }
     case excp_nocp:
       return raise_fault(
           {.kind      = fault_kind::usage,

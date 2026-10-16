@@ -471,3 +471,38 @@ TEST_CASE("ID registers, MVFR, CPACR and the M7 cache bits follow the profile")
     CHECK(f.target->mem().read(0xE000'ED88, 4) == 0x00F0'0000u);
   }
 }
+
+TEST_CASE("an unaligned LDREX on CM33 and CM4 keeps its fault address at the pc, no BFAR")
+{
+  constexpr address       code_at  = 0x2008'0000;
+  constexpr address       at       = 0x2008'1001;
+  constexpr std::uint32_t bfar_set = 1u << 15;
+  for(auto const* const variant : {"CM33", "CM4"})
+  {
+    CAPTURE(variant);
+    auto f = std::string_view{variant} == "CM4" ? booted("faults", cm4) : [] {
+      arch_fixture booted_m33{m33(), "faults", {}};
+      REQUIRE(booted_m33.run_to_stop().reason == stop_reason::user);
+      return booted_m33;
+    }();
+    for(auto const& [offset, half] : {
+            std::pair{0u, 0xe850u},
+            {2u, 0x1f00u},
+            {4u, 0xbe01u}
+    })
+    {
+      REQUIRE(f.target->mem().write(code_at + offset, 2, half));
+    }
+    f.set("r0", at);
+    f.set("r1", 0x77);
+    f.set("pc", code_at | 1u);
+    auto const stopped = f.run_to_stop({.max_instructions = icount{2}});
+    REQUIRE(stopped.reason == stop_reason::fault);
+    REQUIRE(stopped.fault.has_value());
+    CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+    CHECK(stopped.fault->fault_address == code_at);
+    CHECK(stopped.fault->status == 0x0000'0200);
+    CHECK((stopped.fault->status & bfar_set) == 0);
+    CHECK(f.reg("r1") == 0x77);
+  }
+}
