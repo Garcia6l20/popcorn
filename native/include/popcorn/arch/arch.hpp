@@ -239,6 +239,11 @@ struct arch_context
   /** @brief Whether a fault stops the run, trap_result::fault(), or enters the firmware
    * handler, trap_result::resume() after entry. */
   fault_policy faults{fault_policy::stop};
+  /** @brief Whether the security extension is enabled, `core::machine_options::trustzone`. */
+  bool trustzone{};
+  /** @brief IDAU of the part, `core::machine_options::idau`, valid while the module is
+   * attached. */
+  std::span<idau_region const> idau{};
 };
 
 /**

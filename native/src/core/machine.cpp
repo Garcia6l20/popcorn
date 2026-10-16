@@ -23,6 +23,33 @@ auto next_machine_id() -> std::uint64_t
   return ++last;
 }
 
+void check_trustzone(part_description const& description, machine_options const& options)
+{
+  if(options.trustzone and not description.core.trustzone)
+  {
+    throw config_error(
+        description.part, 0, "trustzone",
+        std::format("a core with a security extension, {} has none", description.core.cpu));
+  }
+  if(not options.trustzone and not options.idau.empty())
+  {
+    throw config_error(description.part, 0, "idau", "no IDAU ranges without trustzone");
+  }
+  std::uint64_t after = 0;
+  for(auto const& [index, range] : std::views::enumerate(options.idau))
+  {
+    if(range.start >= range.end or range.end > std::uint64_t{1} << 32 or range.start < after)
+    {
+      throw config_error(
+          description.part, 0, std::format("idau[{}]", index),
+          std::format(
+              "a range with start below end, sorted and not overlapping, not {:#010x} to {:#010x}",
+              range.start, range.end));
+    }
+    after = range.end;
+  }
+}
+
 auto reset_vector_of(part_description const& description, machine_options const& options) -> address
 {
   if(options.vector_table)
@@ -74,6 +101,7 @@ machine::machine(part_description description, arch::arch_factory factory, machi
       arch_events_{scheduler_, arch::arch_event_owner}, trace_{options_.trace_capacity},
       hooks_{std::make_shared<hook_registry>()}, run_{std::make_unique<run_state>(*this)}
 {
+  check_trustzone(description_, options_);
   run_->reset_vector       = reset_vector_of(description_, options_);
   run_->description_digest = description_digest(description_);
   run_->spin_on            = options_.spin_threshold != 0;
@@ -94,7 +122,7 @@ machine::machine(part_description description, arch::arch_factory factory, machi
   {
     arch_->attach(run_->arch_context.emplace(
         engine_.get(), description_, clock_, arch_events_, static_cast<machine_services&>(*this),
-        options_.faults));
+        options_.faults, options_.trustzone, options_.idau));
     run_->attach_peripherals();
     run_->map_peripherals();
     run_->install_hooks();

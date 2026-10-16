@@ -20,7 +20,9 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace popcorn::bind
 {
@@ -88,6 +90,61 @@ auto supply_factories(part_description const& description, std::uint32_t vdda_mv
     }
   }
   return out;
+}
+
+auto option_bytes_of(option_bytes_config const& config) -> periph::stm32::option_bytes
+{
+  using periph::stm32::no_area;
+  using periph::stm32::page_range;
+  using periph::stm32::watermark;
+  using periph::stm32::whole_bank;
+  auto const range = [](std::pair<std::uint32_t, std::uint32_t> const& pages) {
+    return page_range{.first = pages.first, .last = pages.second};
+  };
+  auto const area =
+      [&range](
+          bool                                                          all,
+          std::optional<std::pair<std::uint32_t, std::uint32_t>> const& pages) -> watermark {
+    if(all)
+    {
+      return whole_bank{};
+    }
+    if(pages)
+    {
+      return range(*pages);
+    }
+    return no_area{};
+  };
+  return {
+      .tzen      = config.tzen,
+      .secwm1    = area(config.secwm1_all, config.secwm1),
+      .secwm2    = area(config.secwm2_all, config.secwm2),
+      .hdp1      = config.hdp1.transform(range),
+      .hdp2      = config.hdp2.transform(range),
+      .secboot   = config.secboot,
+      .nsboot    = config.nsboot,
+      .swap_bank = config.swap_bank,
+      .dualbank  = config.dualbank,
+  };
+}
+
+void refuse_replaced_flash(part_description const& description, machine_config const& config)
+{
+  auto const unit = std::ranges::find_if(description.peripherals, [](peripheral_desc const& p) {
+    return p.ip == "flash" and not p.alias_of;
+  });
+  if(unit == description.peripherals.end())
+  {
+    return;
+  }
+  if(config.python_models.contains(unit->name) or config.plugin_models.contains(unit->name))
+  {
+    throw config_error(
+        "option_bytes", 0, "option_bytes",
+        std::format(
+            "the built-in model of {}, not a {} model", unit->name,
+            config.plugin_models.contains(unit->name) ? "plugin" : "Python"));
+  }
 }
 
 auto key_of(std::string const& usb) -> std::string
@@ -159,6 +216,11 @@ auto options_of(
   {
     throw config_error(description.part, 0, "trace_capacity", "a trace capacity above 0");
   }
+  auto const option_bytes = config.option_bytes.transform(option_bytes_of);
+  if(option_bytes)
+  {
+    refuse_replaced_flash(description, config);
+  }
   core::machine_options options;
   options.core_hz            = config.core_hz;
   options.cpi                = config.cpi;
@@ -167,6 +229,15 @@ auto options_of(
   options.strict_peripherals = config.strict_peripherals;
   options.vector_table       = config.vector_table;
   options.config_digest      = config.config_digest;
+  if(option_bytes)
+  {
+    auto const configured =
+        periph::stm32::configure_option_bytes(description, *option_bytes, options);
+    if(not configured)
+    {
+      throw config_error("option_bytes", 0, configured.error().key, configured.error().expected);
+    }
+  }
   for(auto const& [name, maker] : config.python_models)
   {
     options.models.emplace(name, detail::python_model_factory(maker));

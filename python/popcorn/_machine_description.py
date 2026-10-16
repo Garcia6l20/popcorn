@@ -39,6 +39,7 @@ from popcorn._machine import (
     check_machine_name,
     error_prefix,
 )
+from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._stop import Stop
@@ -364,6 +365,10 @@ class MachineDescription:
         cpi: Core cycles per instruction, above 0.
         rcc: Clock sources of the built-in RCC model, None for its defaults.
         supply: Supply voltages, None for the defaults.
+        option_bytes: User option bytes the built-in FLASH model encodes, None for the
+            description's option registers. With `tzen` the core boots from the secure boot
+            address, without it from the non-secure one, and `boot.vtor` wins over both. In
+            `digest`, left out when None.
         board: What the board does with each peripheral, by name.
         plugins: The native plugins the board's models and devices come from, at most one per
             name. A `PluginModel` on the board and a device class of a plugin's bindings module,
@@ -390,6 +395,7 @@ class MachineDescription:
     cpi: float = 1.0
     rcc: RccOptions | None = None
     supply: SupplyOptions | None = None
+    option_bytes: OptionBytes | None = None
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
     plugins: Sequence[Plugin] = ()
     strict: bool = False
@@ -411,6 +417,11 @@ class MachineDescription:
             raise _plain_error("cpi", "a finite number of cycles per instruction above 0")
         if self.core_hz is not None and self.core_hz <= 0:
             raise _plain_error("core_hz", "a core clock above 0 Hz")
+        option_bytes = cast(object, self.option_bytes)
+        if option_bytes is not None and not isinstance(option_bytes, OptionBytes):
+            raise _plain_error(
+                "option_bytes", f"an OptionBytes or None, not {type(option_bytes).__qualname__}"
+            )
         for name, periph in self.board.items():
             key = f"board.{name}"
             if periph.model is not None and periph.devices:
@@ -547,7 +558,7 @@ class MachineDescription:
     @property
     def digest(self) -> str:
         """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`,
-        and without `plugins` when it is empty.
+        without `plugins` when it is empty and without `option_bytes` when it is None.
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys, plugins by name and code, never by path. It is what
@@ -614,7 +625,8 @@ class MachineDescription:
                 an SPI controller has an address or a cs, two `devices` keys name
                 one peripheral, `Machine(devices=)` refuses them, `audio` is on a peripheral
                 that is not an SAI with the built-in model, or `host` on one that is not a USB
-                device controller with the built-in model.
+                device controller with the built-in model. `Machine(option_bytes=)` refuses
+                `option_bytes`.
             MissingInput: An image, `svd` or `description` file, a plugin's source directory
                 or library does not exist, or the ST install the description is built from.
             ImageError: An image cannot be read or does not fit the memory map.
@@ -694,6 +706,7 @@ class MachineDescription:
             audio=audio,
             usb=usb,
             supply=self.supply,
+            option_bytes=self.option_bytes,
             name=name,
         )
         for periph_name, periph in self.board.items():
@@ -1062,6 +1075,8 @@ def _canonical(value: object) -> object:
         skipped = {"name", "strict", "missing", "configs"}
         if not value.plugins:
             skipped.add("plugins")
+        if value.option_bytes is None:
+            skipped.add("option_bytes")
         fields = {
             f.name: _canonical(getattr(value, f.name))
             for f in dataclasses.fields(value)

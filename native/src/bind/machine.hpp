@@ -40,6 +40,33 @@ namespace py = reflex::py;
 /** @brief Bit set in every log token, so it never equals a request token. */
 inline constexpr std::uint64_t log_token_bit = std::uint64_t{1} << 63;
 
+/** @brief Option bytes of the built-in FLASH model, the fields of `popcorn.OptionBytes`. */
+struct[[= py::rename{"OptionBytesConfig"}]] option_bytes_config
+{
+  /** @brief Global TrustZone enable. */
+  bool tzen{};
+  /** @brief Whether the secure area of bank 1 is the whole bank, secwm1 then ignored. */
+  bool secwm1_all{true};
+  /** @brief First and last page of the secure area of bank 1, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> secwm1{};
+  /** @brief Whether the secure area of bank 2 is the whole bank, secwm2 then ignored. */
+  bool secwm2_all{true};
+  /** @brief First and last page of the secure area of bank 2, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> secwm2{};
+  /** @brief First and last page of the hide-protection area of bank 1, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> hdp1{};
+  /** @brief First and last page of the hide-protection area of bank 2, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> hdp2{};
+  /** @brief Secure boot address, empty for the family default. */
+  std::optional<std::uint32_t> secboot{};
+  /** @brief Non-secure boot address, empty for the family default. */
+  std::optional<std::uint32_t> nsboot{};
+  /** @brief Bank 1 and bank 2 addresses swapped. */
+  bool swap_bank{};
+  /** @brief Dual-bank organization, empty for the family default. */
+  std::optional<bool> dualbank{};
+};
+
 /** @brief Machine options the facade exposes, the subset of core::machine_options Python sets. */
 struct[[= py::rename{"MachineConfig"}]] machine_config
 {
@@ -77,6 +104,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief VDDA in millivolts the board gives the ADC model, from 1620 to 3600, empty for the
    * model's default of 3000. */
   std::optional<std::uint32_t> vdda_mv{};
+  /** @brief Option bytes the built-in FLASH model encodes, which also give the boot address
+   * and TrustZone, empty for the description's option registers and today's boot. */
+  std::optional<option_bytes_config> option_bytes{};
   /** @brief Python bus targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
    * instances in attachment order, served by the built-in bus model of that peripheral. */
   std::map<std::string, std::vector<reflex::py::nb::object>> python_devices{};

@@ -86,6 +86,7 @@ from popcorn._observe import (
     TraceRecording,
     open_trace,
 )
+from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
@@ -637,6 +638,7 @@ class Machine:
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
         usb: Mapping[str, UsbHostOptions] | None = None,
         supply: SupplyOptions | None = None,
+        option_bytes: OptionBytes | None = None,
         name: str | None = None,
         _plugin_models: Mapping[str, tuple[Loaded, str]] | None = None,
     ) -> None:
@@ -679,6 +681,10 @@ class Machine:
                 not listed has no host: it sees no VBUS and never enumerates.
             supply: Supply voltages of the board, None for its defaults, a 3.0 V VDDA. VDDA is
                 the reference of every conversion of the built-in ADC model.
+            option_bytes: User option bytes the built-in FLASH model encodes into its option
+                registers, None for the description's registers. With `tzen` the core boots
+                from the secure boot address and the machine has TrustZone, without it from the
+                non-secure one. `vector_table` wins over both.
             name: Name of the machine in its log records and errors, the description's part
                 when None. Not part of any configuration digest or snapshot.
             _plugin_models: Private, set by `MachineDescription.machine`: the loaded plugin and
@@ -698,8 +704,15 @@ class Machine:
                 `audio.<SAI>.<block>`. With `usb`: a key that is not a USB device
                 controller with the built-in model, two keys naming one controller, a bus reset
                 or a timeout not above 0, named as `usb.<NAME>`. With `supply`: a VDDA outside 1620
-                to 3600 mV.
+                to 3600 mV. With `option_bytes`, before anything is built: `tzen` on a part
+                without a security extension or whose family has no IDAU table, as
+                `option_bytes.tzen`, a part whose FLASH has no built-in model encoding option
+                bytes or has a Python or plugin model, as `option_bytes`, a value the family
+                refuses, as `option_bytes.<field>`: a page past the bank, an HDP area that does
+                not start at its secure area's first page or ends past its last, a boot address
+                not aligned to 128 bytes, `dualbank=False`.
             ImageError: An image does not fit the memory map.
+            TypeError: `option_bytes` is not an `OptionBytes`.
             ValueError: `name` is empty or holds whitespace or a dot.
         """
         if slice_instructions <= 0 or not slice_wall_budget > 0:
@@ -727,6 +740,8 @@ class Machine:
             config.rcc_lse_hz = rcc.lse_hz
         if supply is not None:
             config.vdda_mv = supply.vdda_mv
+        if option_bytes is not None:
+            config.option_bytes = _option_bytes_config(option_bytes)
         aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
         config.usb_hosts = checked_usb(usb or {}, aliases)
         config.slice_instructions = slice_instructions
@@ -3132,6 +3147,26 @@ def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
         return handle.open_uart_pty(name, link)
 
     return opened
+
+
+def _option_bytes_config(option_bytes: OptionBytes) -> _core.OptionBytesConfig:
+    if not isinstance(cast(object, option_bytes), OptionBytes):
+        raise TypeError(
+            f"option_bytes: expected an OptionBytes, not {type(option_bytes).__qualname__}"
+        )
+    config = _core.OptionBytesConfig()
+    config.tzen = option_bytes.tzen
+    config.secwm1_all = option_bytes.secwm1 == "all"
+    config.secwm1 = option_bytes.secwm1 if isinstance(option_bytes.secwm1, tuple) else None
+    config.secwm2_all = option_bytes.secwm2 == "all"
+    config.secwm2 = option_bytes.secwm2 if isinstance(option_bytes.secwm2, tuple) else None
+    config.hdp1 = option_bytes.hdp1
+    config.hdp2 = option_bytes.hdp2
+    config.secboot = option_bytes.secboot
+    config.nsboot = option_bytes.nsboot
+    config.swap_bank = option_bytes.swap_bank
+    config.dualbank = option_bytes.dualbank
+    return config
 
 
 def _model_makers(

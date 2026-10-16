@@ -82,6 +82,15 @@ struct machine_options
    * region containing address 0, otherwise of the first region in description order with execute
    * access. */
   std::optional<address> vector_table{};
+  /** @brief Whether the part boots with its security extension enabled, TZEN = 1 on an STM32.
+   * Passed to the arch module in `arch::arch_context::trustzone`. The machine refuses it with
+   * config_error keyed `trustzone` on a core without `core_desc::trustzone`. */
+  bool trustzone{};
+  /** @brief IDAU of the part, used while trustzone is set. Passed to the arch module in
+   * `arch::arch_context::idau`. The machine refuses with config_error keyed `idau` ranges
+   * without trustzone, and keyed `idau[i]` a range whose start is not below its end or below
+   * the end of the range before it. */
+  std::vector<idau_region> idau{};
   /** @brief RAM region mapped read-write and not executable outside the description, such as a
    * call argument arena. Part of snapshot memory, so a restore resets it. Named by its `name`,
    * `scratch` when empty. Must stay clear of the description's regions and peripherals, which
@@ -228,9 +237,9 @@ struct call_result
  *
  * Construction order: the arch module from the factory, the engine it asks for with
  * `arch::engine()`, memory map, `arch_context{engine, description, clock, arch events, *this,
- * options.faults}` then `arch::attach`, then one model_context and model per peripheral, then
- * the engine hooks. Events of owner `arch::arch_event_owner` go to `arch::on_event`, other
- * owners to the model of that peripheral index.
+ * options.faults, options.trustzone, options.idau}` then `arch::attach`, then one model_context and
+ * model per peripheral, then the engine hooks. Events of owner `arch::arch_event_owner` go to
+ * `arch::on_event`, other owners to the model of that peripheral index.
  *
  * Running. Only run_slice(), call() and the slices of a call begun by begin_call() execute guest
  * code. While a slice runs, running() is true and a second run_slice() throws machine_busy. The
@@ -260,6 +269,8 @@ public:
    *         peripheral.
    * @throws config_error when options.vector_table is empty and the description has no region
    *         with execute access.
+   * @throws config_error when options.trustzone or options.idau is refused, as their
+   *         documentation states, before the engine opens.
    * @throws emulation_error when the engine cannot be opened, or is not the pinned dev build.
    */
   machine(part_description description, arch::arch_factory factory, machine_options options)

@@ -1820,3 +1820,244 @@ TEST_CASE("a torn load in one slice or in small slices reports the same")
     CHECK(running->state() == parked->state());
   }
 }
+
+auto option_board(periph::stm32::option_bytes const& wanted) -> periph::stm32::board
+{
+  periph::stm32::board board;
+  board.flash.option_bytes = wanted;
+  board.flash.bank_erase   = std::chrono::microseconds{200};
+  return board;
+}
+
+constexpr std::array<std::string_view, 8> option_registers{
+    "FLASH_OPTR",     "FLASH_NSBOOTADD0R", "FLASH_NSBOOTADD1R", "FLASH_SECBOOTADD0R",
+    "FLASH_SECWM1R1", "FLASH_SECWM1R2",    "FLASH_SECWM2R1",    "FLASH_SECWM2R2",
+};
+
+auto option_readback(flash_rig const& rig) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(auto const name : option_registers)
+  {
+    out.push_back(rig.read(name));
+  }
+  return out;
+}
+
+TEST_CASE("option bytes load into the option registers at each reset, RM0456 7.9.13 to 7.9.22")
+{
+  flash_rig const rig{
+      option_board({
+                    .tzen    = true,
+                    .secwm1  = periph::stm32::page_range{.first = 2, .last = 9},
+                    .secwm2  = periph::stm32::no_area{},
+                    .hdp1    = periph::stm32::page_range{.first = 2, .last = 5},
+                    .secboot = 0x3000'0000,
+                    .nsboot  = 0x2000'0000,
+                    }
+      )
+  };
+  std::vector<std::uint32_t> const expected{
+      0x9fef'f8aa, 0x2000'007f, 0x0bf9'007f, 0x3000'007c,
+      0xff89'ff82, 0xff85'7f80, 0xff80'ffff, 0x7f80'7f80,
+  };
+  CHECK(option_readback(rig) == expected);
+  for(auto const name : option_registers)
+  {
+    CAPTURE(name);
+    rig.write(name, 0);
+    REQUIRE(rig.f.target->mem().write(rig.at(name) + 2, 1, 0x55).has_value());
+  }
+  CHECK(option_readback(rig) == expected);
+  rig.f.target->reset(popcorn::reset_kind::software);
+  CHECK(option_readback(rig) == expected);
+}
+
+TEST_CASE("with TZEN = 0 the secure option registers read as zero, RM0456 7.5.1")
+{
+  flash_rig const rig{
+      option_board({.secwm1 = periph::stm32::page_range{.first = 1, .last = 3}}
+      )
+  };
+  CHECK(
+      option_readback(rig)
+      == std::vector<std::uint32_t>{0x1fef'f8aa, 0x0800'007f, 0x0bf9'007f, 0, 0, 0, 0, 0});
+}
+
+TEST_CASE("without option bytes the option registers are the description's storage")
+{
+  flash_rig const rig;
+  CHECK(rig.read("FLASH_OPTR") == 0);
+  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  CHECK(rig.read("FLASH_SECWM1R1") == 0x0005'0003);
+}
+
+TEST_CASE("SWAP_BANK puts bank 1 at half the flash for BKER, MER1, MER2 and BK_ECC, RM0456 7.9.13")
+{
+  flash_rig         rig{option_board({.swap_bank = true})};
+  constexpr address low_page = 0x0800'0000 + 63 * page_bytes;
+  rig.program(bank2, {1, 2, 3, 4});
+  rig.control(0);
+  rig.program(low_page, {5, 6, 7, 8});
+  rig.control(0);
+  rig.control(per | pnb(0) | strt);
+  rig.wait_idle();
+  rig.control(0);
+  CHECK(rig.words(bank2, 4) == erased(4));
+  CHECK(rig.words(low_page, 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+  rig.control(per | bker | pnb(63) | strt);
+  rig.wait_idle();
+  rig.control(0);
+  CHECK(rig.words(low_page, 4) == erased(4));
+  rig.program(bank2, {1, 2, 3, 4});
+  rig.control(0);
+  rig.program(low_page, {5, 6, 7, 8});
+  rig.control(0);
+  rig.control(mer1 | strt);
+  rig.wait_idle();
+  rig.control(0);
+  CHECK(rig.words(bank2, 4) == erased(4));
+  CHECK(rig.words(low_page, 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+  rig.tear(torn_line);
+  REQUIRE(rig.dma_load(torn_line));
+  CHECK(rig.eccr() == (eccd | static_cast<std::uint32_t>(torn_line - bank2)));
+  rig.control(mer2 | strt);
+  CHECK(rig.status("BSY") == 1);
+  CHECK(rig.state().target == 0x0800'0000);
+  CHECK(rig.state().length == bank2 - 0x0800'0000);
+}
+
+TEST_CASE("a FLASH model given option bytes its family refuses throws config_error")
+{
+  periph::stm32::register_builtin_models();
+  for(auto const& wanted : std::vector<periph::stm32::option_bytes>{
+          {.secwm2 = periph::stm32::page_range{.first = 0, .last = 64}},
+          {.hdp1 = periph::stm32::page_range{.first = 1, .last = 2}},
+          {.secboot = 0x0c00'0001},
+          {.dualbank = false},
+      })
+  {
+    CHECK_THROWS_AS(
+        core::machine(
+            u575(), popcorn::arch::armv8m::factory(), board_options(option_board(wanted), false)),
+        popcorn::config_error);
+  }
+}
+
+TEST_CASE("check_option_bytes returns the boot address and the refusal of each field")
+{
+  using periph::stm32::check_option_bytes;
+  CHECK(check_option_bytes(u575(), {}) == address{0x0800'0000});
+  CHECK(check_option_bytes(u575(), {.tzen = true}) == address{0x0c00'0000});
+  CHECK(check_option_bytes(u575(), {.tzen = true, .secboot = 0x0c00'0080}) == address{0x0c00'0080});
+  CHECK(check_option_bytes(u575(), {.nsboot = 0x0800'4000}) == address{0x0800'4000});
+  auto const refused = [](periph::stm32::option_bytes const& wanted) {
+    auto const result = check_option_bytes(u575(), wanted);
+    REQUIRE_FALSE(result.has_value());
+    return result.error().key;
+  };
+  CHECK(
+      refused({
+          .secwm1 = periph::stm32::page_range{.first = 0, .last = 0x80}
+  })
+      == "option_bytes.secwm1");
+  CHECK(
+      refused({
+          .secwm1 = periph::stm32::page_range{.first = 3, .last = 2}
+  })
+      == "option_bytes.secwm1");
+  CHECK(
+      refused({.secwm1 = periph::stm32::no_area{}, .hdp1 = periph::stm32::page_range{}})
+      == "option_bytes.hdp1");
+  CHECK(
+      refused({
+          .secwm2 = periph::stm32::page_range{.first = 2, .last = 9 },
+          .hdp2   = periph::stm32::page_range{.first = 2, .last = 10}
+  })
+      == "option_bytes.hdp2");
+  CHECK(refused({.nsboot = 0x0800'0040}) == "option_bytes.nsboot");
+  CHECK(refused({.dualbank = false}) == "option_bytes.dualbank");
+  CHECK(check_option_bytes(u575(), {.dualbank = true}).has_value());
+  auto other        = u575();
+  other.part        = "STM32H573IIKx";
+  auto const result = check_option_bytes(other, {});
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().key == "option_bytes");
+}
+
+TEST_CASE("the U5 IDAU map is RM0456 2.2 Table 3, other families have none")
+{
+  auto const map = periph::stm32::idau_map(u575());
+  REQUIRE(map.has_value());
+  std::vector<popcorn::idau_region> const expected{
+      {.start = 0x0000'0000, .end = 0x0c00'0000,   .nsc = false, .exempt = false},
+      {.start = 0x0c00'0000, .end = 0x1000'0000,   .nsc = true,  .exempt = false},
+      {.start = 0x1000'0000, .end = 0x3000'0000,   .nsc = false, .exempt = false},
+      {.start = 0x3000'0000, .end = 0x4000'0000,   .nsc = true,  .exempt = false},
+      {.start = 0x4000'0000, .end = 0x5000'0000,   .nsc = false, .exempt = false},
+      {.start = 0x5000'0000, .end = 0x6000'0000,   .nsc = true,  .exempt = false},
+      {.start = 0x6000'0000, .end = 0xe000'0000,   .nsc = false, .exempt = false},
+      {.start = 0xe000'0000, .end = 0xe004'0000,   .nsc = false, .exempt = false},
+      {.start = 0xe004'0000, .end = 0xe010'0000,   .nsc = false, .exempt = true },
+      {.start = 0xe010'0000, .end = 0x1'0000'0000, .nsc = false, .exempt = false},
+  };
+  CHECK(std::ranges::equal(*map, expected));
+  auto other = u575();
+  other.part = "STM32H573IIKx";
+  CHECK_FALSE(periph::stm32::idau_map(other).has_value());
+}
+
+TEST_CASE("configure_option_bytes wires the FLASH model, the boot address and TrustZone")
+{
+  using periph::stm32::configure_option_bytes;
+  core::machine_options options;
+  REQUIRE(configure_option_bytes(u575(), {.tzen = true}, options).has_value());
+  CHECK(options.models.contains("FLASH"));
+  CHECK(options.vector_table == address{0x0c00'0000});
+  CHECK(options.trustzone);
+  CHECK(std::ranges::equal(options.idau, *periph::stm32::idau_map(u575())));
+  core::machine_options given;
+  given.vector_table = 0x0800'4000;
+  REQUIRE(configure_option_bytes(u575(), {.nsboot = 0x0800'2000}, given).has_value());
+  CHECK(given.vector_table == address{0x0800'4000});
+  CHECK_FALSE(given.trustzone);
+  CHECK(given.idau.empty());
+}
+
+TEST_CASE("configure_option_bytes refuses before it changes the options")
+{
+  using periph::stm32::configure_option_bytes;
+  auto const refused = [](popcorn::part_description const&   part,
+                          periph::stm32::option_bytes const& wanted,
+                          core::machine_options&             options) {
+    auto const result = configure_option_bytes(part, wanted, options);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(options.models.size() <= 1);
+    CHECK_FALSE(options.trustzone);
+    CHECK(options.idau.empty());
+    return result.error().key;
+  };
+  core::machine_options options;
+  auto                  no_extension = u575();
+  no_extension.core.trustzone        = false;
+  CHECK(refused(no_extension, {.tzen = true}, options) == "option_bytes.tzen");
+  CHECK(options.models.empty());
+  CHECK_FALSE(options.vector_table);
+  auto other_family = u575();
+  other_family.part = "STM32H573IIKx";
+  CHECK(refused(other_family, {.tzen = true}, options) == "option_bytes.tzen");
+  CHECK(refused(other_family, {}, options) == "option_bytes");
+  CHECK(
+      refused(
+          u575(),
+          {
+              .secwm1 = periph::stm32::page_range{.first = 0, .last = 64}
+  },
+          options)
+      == "option_bytes.secwm1");
+  CHECK(options.models.empty());
+  options.models.emplace("FLASH", periph::model_factory{});
+  CHECK(refused(u575(), {.tzen = true}, options) == "option_bytes");
+  CHECK_FALSE(options.vector_table);
+  CHECK(configure_option_bytes(no_extension, {}, (options = {})).has_value());
+}

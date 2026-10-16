@@ -4,6 +4,7 @@
 #include "voltage_range.hpp"
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <algorithm>
 #include <array>
@@ -16,11 +17,14 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <span>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -103,6 +107,57 @@ struct bank_geometry
   std::uint32_t size{};
 };
 
+struct option_words
+{
+  std::uint32_t optr{};
+  std::uint32_t nsbootadd0r{};
+  std::uint32_t nsbootadd1r{};
+  std::uint32_t secbootadd0r{};
+  std::uint32_t secwm1r1{};
+  std::uint32_t secwm1r2{};
+  std::uint32_t secwm2r1{};
+  std::uint32_t secwm2r2{};
+  address       boot{};
+};
+
+constexpr std::array<std::string_view, 8> option_registers{
+    "FLASH_OPTR",     "FLASH_NSBOOTADD0R", "FLASH_NSBOOTADD1R", "FLASH_SECBOOTADD0R",
+    "FLASH_SECWM1R1", "FLASH_SECWM1R2",    "FLASH_SECWM2R1",    "FLASH_SECWM2R2",
+};
+
+constexpr std::uint32_t optr_production        = 0x1fef'f8aa;
+constexpr std::uint32_t optr_tzen              = 1u << 31;
+constexpr std::uint32_t optr_dualbank          = 1u << 21;
+constexpr std::uint32_t optr_swap_bank         = 1u << 20;
+constexpr std::uint32_t nsbootadd1_production  = 0x0bf9'007f;
+constexpr std::uint32_t secure_boot_default    = 0x0c00'0000;
+constexpr std::uint32_t nonsecure_boot_default = 0x0800'0000;
+constexpr std::uint32_t boot_granule           = 128;
+constexpr std::uint32_t nsboot_reserved        = 0x7f;
+constexpr std::uint32_t secboot_reserved       = 0x7c;
+constexpr std::uint32_t secwm_r1_reserved      = 0xff00'ff00;
+constexpr std::uint32_t secwm_r2_reserved      = 0x7f00'7f00;
+constexpr std::uint32_t hdp_enable             = 1u << 31;
+
+auto watermark_bits(std::string_view part) -> std::uint32_t
+{
+  for(std::string_view const line : {"STM32U535", "STM32U545"})
+  {
+    if(part.starts_with(line))
+    {
+      return 5;
+    }
+  }
+  for(std::string_view const line : {"STM32U59", "STM32U5A", "STM32U5F", "STM32U5G"})
+  {
+    if(part.starts_with(line))
+    {
+      return 8;
+    }
+  }
+  return 7;
+}
+
 constexpr std::uint64_t mhz = 1'000'000;
 
 constexpr std::array<std::array<std::uint64_t, 5>, 4> normal_read_max_mhz{
@@ -170,11 +225,32 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * undefined: the mode of the first word holds until the buffer launches or is flushed. Erase,
  * RM0456 7.3.6: STRT with PER erases the page PNB of the bank BKER, with MER1 and MER2 one or both
  * banks, BSY set for the flash_options time, then the range reads 0xFF and STRT clears. EOP is set
- * at the end only with EOPIE. Geometry: option bytes are not modelled, so the model uses the
- * production FLASH_OPTR value 0x1FEFF8AA, RM0456 7.9.13: DUALBANK = 1, SWAP_BANK = 0, bank 2 at the
- * flash base plus half its size, 8 Kbyte pages. A PNB at or above the pages of a bank, which RM0456
- * leaves undefined, erases nothing, sets no flag and logs a model_warning once, and raises
- * model_error under strict_peripherals.
+ * at the end only with EOPIE. Geometry: without option bytes the model uses the production
+ * FLASH_OPTR value 0x1FEFF8AA, RM0456 7.9.13: DUALBANK = 1, SWAP_BANK = 0, bank 2 at the flash
+ * base plus half its size, 8 Kbyte pages. With flash_options::option_bytes, SWAP_BANK = 1 puts
+ * bank 2 at the flash base and bank 1 at half its size, for BKER, MER1, MER2 and BK_ECC. A PNB at
+ * or above the pages of a bank, which RM0456 leaves undefined, erases nothing, sets no flag and
+ * logs a model_warning once, and raises model_error under strict_peripherals.
+ *
+ * Option bytes, RM0456 7.9.13 to 7.9.22: without flash_options::option_bytes, FLASH_OPTR,
+ * FLASH_NSBOOTADDxR, FLASH_SECBOOTADD0R and FLASH_SECWMxRy are the description's registers, which
+ * firmware writes as storage. With them, every reset loads the encoded option bytes into those
+ * registers, and writes are ignored, as OPTLOCK stays set. FLASH_OPTR reads the production value
+ * with TZEN, DUALBANK and SWAP_BANK replaced. FLASH_NSBOOTADD1R reads its production value
+ * 0x0BF9007F. Reserved bits read their production values, and so do the bits of a SECWMx_PSTRT,
+ * SECWMx_PEND or HDPx_PEND field above the part's 7 bits, 5 on the STM32U535 and U545, 8 on the
+ * U59x, U5Ax, U5Fx and U5Gx: FLASH_SECWM1R1 reads 0xFFFFFF80 for the whole bank on the U575.
+ * Deviation on the U535 and U545: FLASH_SECWMxR1 reads 0xFFFFFFE0 for the whole bank, bits 7:5
+ * set above the 5-bit fields, where RM0456 7.9.17 and 7.9.21 give 0xFFFFFF80. The CMSIS header
+ * masks the fields with 0x1F, and every other U535 row of those registers sets bits 7:5, so the
+ * RM0456 value reads as the U575 row repeated. A whole-bank area encodes PSTRT = 0 and PEND = the
+ * field maximum, RM0456 Table 58, no area PSTRT = the field maximum and PEND = 0, Table 61. With
+ * TZEN = 0, FLASH_SECBOOTADD0R and FLASH_SECWMxRy are secure registers and read as zero,
+ * RM0456 7.5.1. The checks, all made before the machine is built: watermark and HDP pages inside
+ * the bank, an HDP area starting at the first page of its secure area and ending inside it, RM0456
+ * Table 60, boot addresses aligned to 128 bytes. RM0456 Table 27 allows any boot address at RDP
+ * level 0, so no range is checked. DUALBANK = 0, the single-bank organization, is not modelled and
+ * refused.
  *
  * Errors, RM0456 7.3.9: PGSERR, SIZERR, PGAERR and PROGERR as its list states. For PROGERR the
  * 7.3.9 list wins over the FLASH_NSSR bit text, which accepts all-zero data over an all-zero
@@ -265,6 +341,22 @@ public:
   void control_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
   void ecc_written(std::uint32_t old, std::uint32_t now);
+  void option_written(std::uint32_t old, std::uint32_t now);
+
+  auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
+      -> std::expected<std::uint32_t, bus_error> override;
+
+  /**
+   * @brief Encodes option bytes into the U5 option registers, after the checks of the class
+   *        documentation.
+   * @param part Part name, which selects the width of the page fields.
+   * @param flash_size Size of the flash, both banks.
+   * @param wanted Option bytes to encode.
+   * @return The register values and the boot address, or the first refusal in field order.
+   */
+  [[nodiscard]] static auto
+      encode_options(std::string_view part, std::uint32_t flash_size, option_bytes const& wanted)
+          -> std::expected<option_words, option_refusal>;
 
 private:
   [[nodiscard]] auto busy() const -> bool;
@@ -290,6 +382,7 @@ private:
   [[nodiscard]] auto banks() const -> bank_geometry;
   [[nodiscard]] auto bank_of(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
+  [[nodiscard]] auto bank_start(std::uint32_t bank) const -> std::uint32_t;
   void               program();
   void               hold_hsi16(bool held);
   void               note_unmodelled_protection();
@@ -338,28 +431,45 @@ private:
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
   bool                                                              protection_logged_{};
+  std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
+  bool                                                              swapped_{};
 };
 
-constexpr std::array<write_entry<flash>, 5> flash_writes{
-    {
-     {"FLASH_ACR", &flash::access_written},
-     {"FLASH_NSKEYR", &flash::key_written},
-     {"FLASH_NSCR", &flash::control_written},
-     {"FLASH_NSSR", &flash::status_written},
-     {"FLASH_ECCR", &flash::ecc_written},
-     }
+constexpr std::size_t flash_operation_writes = 5;
+
+constexpr std::array<write_entry<flash>, flash_operation_writes + option_registers.size()>
+    flash_writes{
+        {
+         {"FLASH_ACR", &flash::access_written},
+         {"FLASH_NSKEYR", &flash::key_written},
+         {"FLASH_NSCR", &flash::control_written},
+         {"FLASH_NSSR", &flash::status_written},
+         {"FLASH_ECCR", &flash::ecc_written},
+         {option_registers[0], &flash::option_written},
+         {option_registers[1], &flash::option_written},
+         {option_registers[2], &flash::option_written},
+         {option_registers[3], &flash::option_written},
+         {option_registers[4], &flash::option_written},
+         {option_registers[5], &flash::option_written},
+         {option_registers[6], &flash::option_written},
+         {option_registers[7], &flash::option_written},
+         }
 };
 
 flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options)
-    : dispatch_model{ctx, desc, "FLASH", flash_writes}, options_{options}, regs_{ctx.regs},
-      key_{reg("FLASH_NSKEYR")}, status_{reg("FLASH_NSSR")}, lock_{field("FLASH_NSCR", "LOCK")},
-      option_lock_{field("FLASH_NSCR", "OPTLOCK")}, start_{field("FLASH_NSCR", "STRT")},
-      option_start_{field("FLASH_NSCR", "OPTSTRT")}, program_{field("FLASH_NSCR", "PG")},
-      page_erase_{field("FLASH_NSCR", "PER")}, bank1_erase_{field("FLASH_NSCR", "MER1")},
-      bank2_erase_{field("FLASH_NSCR", "MER2")}, page_{field("FLASH_NSCR", "PNB")},
-      bank_{field("FLASH_NSCR", "BKER")}, burst_{field("FLASH_NSCR", "BWR")},
-      end_irq_{field("FLASH_NSCR", "EOPIE")}, error_irq_{field("FLASH_NSCR", "ERRIE")},
-      end_{field("FLASH_NSSR", "EOP")}, operation_error_{field("FLASH_NSSR", "OPERR")},
+    : dispatch_model{
+          ctx, desc, "FLASH",
+          std::span{flash_writes}.first(
+              options.option_bytes ? flash_writes.size() : flash_operation_writes)},
+      options_{options}, regs_{ctx.regs}, key_{reg("FLASH_NSKEYR")}, status_{reg("FLASH_NSSR")},
+      lock_{field("FLASH_NSCR", "LOCK")}, option_lock_{field("FLASH_NSCR", "OPTLOCK")},
+      start_{field("FLASH_NSCR", "STRT")}, option_start_{field("FLASH_NSCR", "OPTSTRT")},
+      program_{field("FLASH_NSCR", "PG")}, page_erase_{field("FLASH_NSCR", "PER")},
+      bank1_erase_{field("FLASH_NSCR", "MER1")}, bank2_erase_{field("FLASH_NSCR", "MER2")},
+      page_{field("FLASH_NSCR", "PNB")}, bank_{field("FLASH_NSCR", "BKER")},
+      burst_{field("FLASH_NSCR", "BWR")}, end_irq_{field("FLASH_NSCR", "EOPIE")},
+      error_irq_{field("FLASH_NSCR", "ERRIE")}, end_{field("FLASH_NSSR", "EOP")},
+      operation_error_{field("FLASH_NSSR", "OPERR")},
       program_error_{field("FLASH_NSSR", "PROGERR")},
       protection_error_{field("FLASH_NSSR", "WRPERR")},
       alignment_error_{field("FLASH_NSSR", "PGAERR")}, size_error_{field("FLASH_NSSR", "SIZERR")},
@@ -383,6 +493,165 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
   {
     storage_ = &*own;
   }
+  if(not options_.option_bytes)
+  {
+    return;
+  }
+  if(storage_ == nullptr)
+  {
+    throw config_error(
+        desc.name, 0, "option_bytes", "a flash region that names FLASH as its controller");
+  }
+  auto const words = encode_options(ctx.part.part, storage_->size, *options_.option_bytes);
+  if(not words)
+  {
+    throw config_error(desc.name, 0, words.error().key, words.error().expected);
+  }
+  for(auto const [name, value] : std::views::zip(
+          option_registers,
+          std::array{
+              words->optr, words->nsbootadd0r, words->nsbootadd1r, words->secbootadd0r,
+              words->secwm1r1, words->secwm1r2, words->secwm2r1, words->secwm2r2}))
+  {
+    option_words_.emplace_back(reg(name).offset, value);
+  }
+  swapped_ = options_.option_bytes->swap_bank;
+}
+
+auto flash::encode_options(
+    std::string_view    part,
+    std::uint32_t       flash_size,
+    option_bytes const& wanted) -> std::expected<option_words, option_refusal>
+{
+  auto const refuse = [](std::string_view field, std::string expected) {
+    return std::unexpected{
+        option_refusal{
+                       .key = std::format("option_bytes.{}", field), .expected = std::move(expected)}
+    };
+  };
+  auto const pages  = flash_size / 2 / page_size;
+  auto const top    = (1u << watermark_bits(part)) - 1;
+  auto const unused = 0xffu & ~top;
+  struct area
+  {
+    std::uint32_t first{};
+    std::uint32_t last{};
+    std::uint32_t encoded_last{};
+  };
+  auto const area_of =
+      [&](watermark const& wanted_area,
+          std::string_view field) -> std::expected<std::optional<area>, option_refusal> {
+    if(std::holds_alternative<no_area>(wanted_area))
+    {
+      return std::nullopt;
+    }
+    if(std::holds_alternative<whole_bank>(wanted_area))
+    {
+      return area{.first = 0, .last = pages - 1, .encoded_last = top};
+    }
+    auto const range = std::get<page_range>(wanted_area);
+    if(range.first > range.last or range.last >= pages)
+    {
+      return refuse(
+          field, std::format(
+                     "a first and a last page from 0 to {}, the {} pages of a bank, not {} to {}",
+                     pages - 1, pages, range.first, range.last));
+    }
+    return area{.first = range.first, .last = range.last, .encoded_last = range.last};
+  };
+  auto const first_word = [&](std::optional<area> const& secure) {
+    auto const [start, end] =
+        secure ? std::pair{secure->first, secure->encoded_last} : std::pair{top, std::uint32_t{0}};
+    return secwm_r1_reserved | unused << 16 | unused | end << 16 | start;
+  };
+  auto const second_word =
+      [&](std::optional<area> const& secure, std::optional<page_range> const& hidden,
+          std::string_view field) -> std::expected<std::uint32_t, option_refusal> {
+    auto const word = secwm_r2_reserved | unused << 16 | unused;
+    if(not hidden)
+    {
+      return word;
+    }
+    if(not secure)
+    {
+      return refuse(field, "a hide-protection area inside a secure area, RM0456 Table 60");
+    }
+    if(hidden->first != secure->first
+       or hidden->last < hidden->first
+       or hidden->last > secure->last)
+    {
+      return refuse(
+          field, std::format(
+                     "a hide-protection area from page {}, the first of its secure area, to at "
+                     "most page {}, RM0456 Table 60, not {} to {}",
+                     secure->first, secure->last, hidden->first, hidden->last));
+    }
+    return word | hdp_enable | hidden->last << 16;
+  };
+  auto const boot_of =
+      [&](std::optional<std::uint32_t> given, std::uint32_t fallback, std::string_view field,
+          std::string_view section) -> std::expected<std::uint32_t, option_refusal> {
+    auto const at = given.value_or(fallback);
+    if(at % boot_granule != 0)
+    {
+      return refuse(
+          field,
+          std::format("an address aligned to 128 bytes, RM0456 {}, not {:#010x}", section, at));
+    }
+    return at;
+  };
+  auto const secure1 = area_of(wanted.secwm1, "secwm1");
+  if(not secure1)
+  {
+    return std::unexpected{secure1.error()};
+  }
+  auto const secure2 = area_of(wanted.secwm2, "secwm2");
+  if(not secure2)
+  {
+    return std::unexpected{secure2.error()};
+  }
+  auto const hidden1 = second_word(*secure1, wanted.hdp1, "hdp1");
+  if(not hidden1)
+  {
+    return std::unexpected{hidden1.error()};
+  }
+  auto const hidden2 = second_word(*secure2, wanted.hdp2, "hdp2");
+  if(not hidden2)
+  {
+    return std::unexpected{hidden2.error()};
+  }
+  auto const secboot = boot_of(wanted.secboot, secure_boot_default, "secboot", "7.9.16");
+  if(not secboot)
+  {
+    return std::unexpected{secboot.error()};
+  }
+  auto const nsboot = boot_of(wanted.nsboot, nonsecure_boot_default, "nsboot", "7.9.14");
+  if(not nsboot)
+  {
+    return std::unexpected{nsboot.error()};
+  }
+  if(not wanted.dualbank.value_or(true))
+  {
+    return refuse(
+        "dualbank", "a dual-bank flash: the single-bank organization of DUALBANK = 0 is not "
+                    "modelled");
+  }
+  auto const optr        = (optr_production & ~(optr_tzen | optr_swap_bank))
+                         | (wanted.tzen ? optr_tzen : 0)
+                         | optr_dualbank
+                         | (wanted.swap_bank ? optr_swap_bank : 0);
+  auto const secure_word = [&wanted](std::uint32_t word) { return wanted.tzen ? word : 0; };
+  return option_words{
+      .optr         = optr,
+      .nsbootadd0r  = *nsboot | nsboot_reserved,
+      .nsbootadd1r  = nsbootadd1_production,
+      .secbootadd0r = secure_word(*secboot | secboot_reserved),
+      .secwm1r1     = secure_word(first_word(*secure1)),
+      .secwm1r2     = secure_word(*hidden1),
+      .secwm2r1     = secure_word(first_word(*secure2)),
+      .secwm2r2     = secure_word(*hidden2),
+      .boot         = wanted.tzen ? *secboot : *nsboot,
+  };
 }
 
 void flash::reset(register_file& regs, reset_kind)
@@ -396,8 +665,31 @@ void flash::reset(register_file& regs, reset_kind)
   state_                = {};
   state_.generation     = generation + 1;
   state_.torn           = std::move(torn);
+  for(auto const [offset, value] : option_words_)
+  {
+    regs.poke(offset, value);
+  }
   line_.lower();
   ctx_.nmi.lower();
+}
+
+auto flash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
+    -> std::expected<std::uint32_t, bus_error>
+{
+  auto const word = offset & ~3u;
+  if(std::ranges::contains(option_words_ | std::views::keys, word))
+  {
+    return read_lanes(regs.peek(word), offset, size);
+  }
+  return dispatch_model::on_read(regs, offset, size, ctx);
+}
+
+void flash::option_written(std::uint32_t, std::uint32_t)
+{
+  for(auto const [offset, value] : option_words_)
+  {
+    regs_.poke(offset, value);
+  }
 }
 
 void flash::power_cut()
@@ -555,13 +847,19 @@ auto flash::banks() const -> bank_geometry
 auto flash::bank_of(std::uint32_t at) const -> std::uint32_t
 {
   auto const [base, size] = banks();
-  return (at - base) / size;
+  return ((at - base) / size) ^ (swapped_ ? 1u : 0u);
 }
 
 auto flash::bank_base(std::uint32_t at) const -> std::uint32_t
 {
   auto const [base, size] = banks();
-  return base + bank_of(at) * size;
+  return base + (at - base) / size * size;
+}
+
+auto flash::bank_start(std::uint32_t bank) const -> std::uint32_t
+{
+  auto const [base, size] = banks();
+  return base + (bank ^ (swapped_ ? 1u : 0u)) * size;
 }
 
 void flash::on_memory_read(region_desc const& region, address addr, std::uint8_t size, access_ctx)
@@ -788,15 +1086,16 @@ void flash::start_erase(std::uint32_t control)
       }
       return;
     }
-    start(
-        operation::page_erase, base + bank_.of(control) * bank_size + page * page_size, page_size);
+    start(operation::page_erase, bank_start(bank_.of(control)) + page * page_size, page_size);
     return;
   }
   auto const first = bank1_erase_.of(control) != 0;
-  auto const both  = first and bank2_erase_.of(control) != 0;
-  start(
-      both ? operation::mass_erase : operation::bank_erase, first ? base : base + bank_size,
-      both ? storage_->size : bank_size);
+  if(first and bank2_erase_.of(control) != 0)
+  {
+    start(operation::mass_erase, base, storage_->size);
+    return;
+  }
+  start(operation::bank_erase, bank_start(first ? 0 : 1), bank_size);
 }
 
 void flash::program()
@@ -1021,6 +1320,31 @@ void flash::ecc_written(std::uint32_t old, std::uint32_t now)
     ctx_.nmi.lower();
   }
 }
+}
+
+auto check_option_bytes(part_description const& part, option_bytes const& wanted)
+    -> std::expected<address, option_refusal>
+{
+  auto const unit    = std::ranges::find_if(part.peripherals, [](peripheral_desc const& candidate) {
+    return candidate.ip == "flash" and not candidate.alias_of;
+  });
+  auto const storage = unit == part.peripherals.end()
+                         ? part.regions.end()
+                         : std::ranges::find_if(part.regions, [&unit](region_desc const& region) {
+                             return region.controller == unit->name and not region.physical;
+                           });
+  if(not part.part.starts_with("STM32U5") or storage == part.regions.end())
+  {
+    return std::unexpected{
+        option_refusal{
+                       .key      = "option_bytes",
+                       .expected = std::format(
+                "a part whose built-in FLASH model encodes option bytes, an STM32U5 with a flash "
+                "region its FLASH controls, not {}", part.part)}
+    };
+  }
+  return flash::encode_options(part.part, storage->size, wanted)
+      .transform([](option_words const& words) { return words.boot; });
 }
 
 auto flash_factory(flash_options options) -> model_factory

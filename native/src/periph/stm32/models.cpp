@@ -1,12 +1,19 @@
 #include "factories.hpp"
 
+#include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
 
 #include <array>
+#include <expected>
+#include <format>
 #include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -51,6 +58,43 @@ constexpr std::array<builtin, 26> builtins{
      }
 };
 
+constexpr auto u5_idau = std::to_array<idau_region>({
+    // Code area, Non-secure flash and SRAM aliases, RM0456 2.2 Table 3.
+    {.start = 0x0000'0000, .end = 0x0c00'0000,   .nsc = false, .exempt = false},
+    // Code area, Secure flash alias, Non-secure callable, RM0456 2.2 Table 3.
+    {.start = 0x0c00'0000, .end = 0x1000'0000,   .nsc = true,  .exempt = false},
+    // SRAM area, Non-secure SRAM aliases, RM0456 2.2 Table 3.
+    {.start = 0x1000'0000, .end = 0x3000'0000,   .nsc = false, .exempt = false},
+    // SRAM area, Secure SRAM aliases, Non-secure callable, RM0456 2.2 Table 3.
+    {.start = 0x3000'0000, .end = 0x4000'0000,   .nsc = true,  .exempt = false},
+    // Peripherals, Non-secure aliases, RM0456 2.2 Table 3.
+    {.start = 0x4000'0000, .end = 0x5000'0000,   .nsc = false, .exempt = false},
+    // Peripherals, Secure aliases, Non-secure callable, RM0456 2.2 Table 3.
+    {.start = 0x5000'0000, .end = 0x6000'0000,   .nsc = true,  .exempt = false},
+    // External memories, Non-secure, RM0456 2.2 Table 3.
+    {.start = 0x6000'0000, .end = 0xe000'0000,   .nsc = false, .exempt = false},
+    // Cortex-M33 private peripheral bus, Non-secure, RM0456 2.2 Figures 3 to 6.
+    {.start = 0xe000'0000, .end = 0xe004'0000,   .nsc = false, .exempt = false},
+    // External PPB, exempt: a board's Non-secure access to the CTI at 0xE0042000 with no SAU
+    // region works, QEMU's SSE-200 IDAU exempts the same range, ARMv8-M B10.2 exempts only
+    // TPIU, ETM and the ROM table.
+    {.start = 0xe004'0000, .end = 0xe010'0000,   .nsc = false, .exempt = true },
+    // System area up to the top of the address space, Non-secure, RM0456 2.2 Figures 3 to 6.
+    {.start = 0xe010'0000, .end = 0x1'0000'0000, .nsc = false, .exempt = false},
+});
+
+struct idau_family
+{
+  std::string_view             part_glob;
+  std::span<idau_region const> ranges;
+};
+
+constexpr std::array<idau_family, 1> idau_maps{
+    {
+     {"STM32U5*", u5_idau},
+     }
+};
+
 auto default_board() -> board const&
 {
   static board const instance{};
@@ -91,5 +135,73 @@ auto factories(board const& b, part_description const& part)
     }
   }
   return out;
+}
+
+auto idau_map(part_description const& part) -> std::optional<std::span<idau_region const>>
+{
+  for(auto const& family : idau_maps)
+  {
+    if(glob_match(family.part_glob, part.part))
+    {
+      return family.ranges;
+    }
+  }
+  return std::nullopt;
+}
+
+auto configure_option_bytes(
+    part_description const& part,
+    option_bytes const&     wanted,
+    core::machine_options&  options) -> std::expected<void, option_refusal>
+{
+  auto const refuse = [](std::string key, std::string expected) {
+    return std::unexpected{
+        option_refusal{.key = std::move(key), .expected = std::move(expected)}
+    };
+  };
+  if(wanted.tzen and not part.core.trustzone)
+  {
+    return refuse(
+        "option_bytes.tzen",
+        std::format("a part with a security extension, {} has none", part.part));
+  }
+  auto const map = idau_map(part);
+  if(wanted.tzen and not map)
+  {
+    return refuse(
+        "option_bytes.tzen",
+        std::format("a part whose family has an IDAU table, {} has none", part.part));
+  }
+  auto const boot = check_option_bytes(part, wanted);
+  if(not boot)
+  {
+    return std::unexpected{boot.error()};
+  }
+  auto const unit = std::ranges::find_if(part.peripherals, [](peripheral_desc const& p) {
+    return p.ip == "flash" and not p.alias_of;
+  });
+  if(options.models.contains(unit->name))
+  {
+    return refuse(
+        "option_bytes",
+        std::format(
+            "the built-in model of {}, not a model of machine_options::models", unit->name));
+  }
+  board with_options;
+  with_options.flash.option_bytes = wanted;
+  auto all                        = factories(with_options, part);
+  auto found                      = all.find(unit->name);
+  if(found == all.end())
+  {
+    return refuse("option_bytes", std::format("a {} the built-in FLASH model serves", unit->name));
+  }
+  options.models.emplace(unit->name, std::move(found->second));
+  if(not options.vector_table)
+  {
+    options.vector_table = *boot;
+  }
+  options.trustzone = wanted.tzen;
+  options.idau = wanted.tzen ? *map | std::ranges::to<std::vector>() : std::vector<idau_region>{};
+  return {};
 }
 }

@@ -57,6 +57,7 @@ from popcorn._machine_description import (
     Use,
 )
 from popcorn._observe import MachineCoverage, Ring, TraceRecording
+from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import (
     PartDescription,
     description_digest,
@@ -127,6 +128,7 @@ __all__ = [
     "MemoryRef",
     "MissingInput",
     "ModelError",
+    "OptionBytes",
     "Param",
     "PartDescription",
     "Periph",
