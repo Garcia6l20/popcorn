@@ -19,6 +19,7 @@ add_doctest("arch-interface", [here / "test_interface.cpp"], [armv8m, core])
 add_doctest("arch-thumb", [here / "test_thumb.cpp"], [armv8m, core])
 add_doctest("arch-registry", [here / "test_registry.cpp"], [armv8m, core])
 add_doctest("arch-code-analysis", [here / "test_code_analysis.cpp"], [armv8m, core])
+add_doctest("arch-unicorn-security", [here / "test_unicorn_security.cpp"], [core])
 
 arch_firmware = {
     name: firmware("arch", name)
