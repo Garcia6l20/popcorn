@@ -626,6 +626,20 @@ public:
       add_watch(address at, std::uint32_t size, watch_kind kind, watch_handler handler)
           -> watch_handle pre(size > 0) pre(fits_address_space(at, size)) pre(is_enumerator(kind));
 
+  /**
+   * @brief Diagnostics: ranges watched through machine_services::watch_reads, one per distinct
+   *        range of bytes, whichever alias named it. Models own the table: reset() and
+   *        restore() keep it, a model rebuilds what it needs in its own load().
+   */
+  [[nodiscard]] auto controller_watches() const noexcept -> std::size_t;
+
+  /**
+   * @brief Diagnostics: engine read hooks behind controller_watches(), one per alias of each
+   *        engine page a watched range or the 7 bytes before it touches, the region's own
+   *        mapping included.
+   */
+  [[nodiscard]] auto controller_watch_hooks() const noexcept -> std::size_t;
+
   /** @brief Always-on trace ring. */
   [[nodiscard]] auto trace() noexcept -> trace_ring&;
 
@@ -742,6 +756,7 @@ private:
       -> std::expected<void, block_error> override;
   void do_trace(trace_record const& record) override;
   void do_log(log_record record) override;
+  void do_watch_reads(address at, std::uint32_t size, bool on) override;
 
   friend class memory_view;
   friend class register_view;

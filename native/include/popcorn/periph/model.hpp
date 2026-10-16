@@ -167,6 +167,24 @@ public:
   }
 
   /**
+   * @brief A CPU or DMA load overlapped a range the model watches through
+   *        core::machine_services::watch_reads. Called once per load, also when the call
+   *        changes the model's watches, before the load reads its bytes, on the machine thread
+   *        with the engine running and the GIL released. An interrupt the call makes
+   *        deliverable is taken before the next instruction. The default does nothing.
+   * @param region Region the load hit, an alias included.
+   * @param addr Address loaded, as the instruction or channel spelled it.
+   * @param size Load size in bytes, 8 for a 64-bit load.
+   * @param ctx Where, when and by whom the load happened.
+   */
+  virtual void on_memory_read(
+      [[maybe_unused]] region_desc const& region,
+      [[maybe_unused]] address            addr,
+      [[maybe_unused]] std::uint8_t       size,
+      [[maybe_unused]] access_ctx         ctx)
+  {}
+
+  /**
    * @brief Handles an event the model scheduled, when virtual time reaches it.
    * @param kind Event kind the model chose when scheduling, the `kind` of the event id.
    * @param payload Payload the model passed when scheduling.

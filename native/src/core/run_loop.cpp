@@ -996,8 +996,9 @@ auto machine::run_state::engine_run() -> uc_err
 {
   engine_scope const scope{in_engine};
   ++counters.engine_runs;
-  end_cause      = engine_end::exit;
-  auto const err = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  end_cause              = engine_end::exit;
+  auto const err         = uc_emu_start(engine, owner.arch_->resume_address(), 0, 0, 0);
+  controller_guard.armed = false;
   if(err != UC_ERR_OK)
   {
     end_cause = engine_end::other;
