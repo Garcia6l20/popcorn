@@ -1006,9 +1006,9 @@ void flash::control_written(std::uint32_t old, std::uint32_t now)
   interrupt();
 }
 
-void flash::status_written(std::uint32_t old, std::uint32_t now)
+void flash::status_written(std::uint32_t old, std::uint32_t)
 {
-  regs_.poke(status_.offset, old & ~(now & clearable_));
+  regs_.poke(status_.offset, old & ~(written_ & clearable_));
   interrupt();
 }
 

@@ -706,6 +706,43 @@ TEST_CASE("a VSTR.64 into flash programs two words of the quad-word, low word fi
       == std::vector<std::uint32_t>{0x1111'1111u, 0x2222'2222u, 0x3333'3333u, 0x4444'4444u});
 }
 
+TEST_CASE("a sub-word FLASH_NSSR write clears flags only in the lanes it writes")
+{
+  flash_rig rig;
+  rig.store_words(last_page, {1});
+  REQUIRE(rig.status("PGSERR") == 1);
+  auto const status = rig.at("FLASH_NSSR");
+  REQUIRE(rig.f.target->mem().write(status + 1, 1, 0xff).has_value());
+  CHECK(rig.status("PGSERR") == 1);
+  REQUIRE(rig.f.target->mem().write(status + 2, 2, 0xffff).has_value());
+  CHECK(rig.status("PGSERR") == 1);
+  REQUIRE(rig.f.target->mem().write(status, 1, 0x7f).has_value());
+  CHECK(rig.status("PGSERR") == 1);
+  REQUIRE(rig.f.target->mem().write(status, 1, 0x80).has_value());
+  CHECK(rig.status("PGSERR") == 0);
+  constexpr std::uint32_t pgserr   = 1u << 7;
+  constexpr std::uint32_t optwerr  = 1u << 13;
+  auto&                   regs     = rig.f.target->peripheral("FLASH");
+  auto const              offset   = static_cast<std::uint32_t>(status - regs.description().base);
+  auto const              set_both = [&] {
+    regs.poke(offset, regs.peek(offset) | pgserr | optwerr);
+    REQUIRE(rig.status("PGSERR") == 1);
+    REQUIRE(rig.status("OPTWERR") == 1);
+  };
+  set_both();
+  REQUIRE(rig.f.target->mem().write(status, 2, 0x2000).has_value());
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.status("PGSERR") == 1);
+  set_both();
+  REQUIRE(rig.f.target->mem().write(status + 1, 1, 0x20).has_value());
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.status("PGSERR") == 1);
+  set_both();
+  REQUIRE(rig.f.target->mem().write(status, 4, all_errors).has_value());
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.status("PGSERR") == 0);
+}
+
 TEST_CASE("every PGSERR case of RM0456 7.3.9 sets it and starts nothing")
 {
   flash_rig  rig;
