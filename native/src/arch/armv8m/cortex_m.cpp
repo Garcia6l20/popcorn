@@ -283,7 +283,7 @@ auto cortex_m::deliver_pending() -> trap_result
   {
     return trap_result::resume();
   }
-  return enter(best, security::secure);
+  return enter_as<false>(best, security::secure);
 }
 
 auto cortex_m::deliverable_now() const -> bool
@@ -350,7 +350,7 @@ auto cortex_m::preempts(std::uint32_t number, security state) const -> bool
        < current_priority();
 }
 
-auto cortex_m::raise(std::uint32_t number, address at) -> trap_result
+[[gnu::noinline]] auto cortex_m::raise(std::uint32_t number, address at) -> trap_result
 {
   auto const config  = priority_config();
   auto const current = current_priority();

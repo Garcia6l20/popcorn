@@ -8,6 +8,9 @@ namespace popcorn::arch::armv8m
 inline constexpr std::uint32_t basic_frame_size = 0x20;
 /** @brief Bytes of an extended frame: the basic words, s0-s15, FPSCR and a reserved word. */
 inline constexpr std::uint32_t extended_frame_size = 0x68;
+/** @brief Bytes of the additional state context: the integrity signature, a reserved word and
+ *         r4-r11, B3.19. */
+inline constexpr std::uint32_t callee_frame_size = 0x28;
 /** @brief xPSR bit 9 of a stacked xPSR: the frame was aligned down by 4 bytes. */
 inline constexpr std::uint32_t stacked_align_bit = 1u << 9;
 /** @brief xPSR bit 20 of a stacked xPSR on a Secure core: CONTROL.SFPA at entry. */
@@ -68,6 +71,16 @@ constexpr auto decode_exc_security(std::uint32_t value) noexcept -> exc_return_s
       .default_callee    = (value & (1u << 5)) != 0,
       .secure_exception  = (value & 1u) != 0,
   };
+}
+
+/**
+ * @brief Integrity signature at the base of the additional state context, PushCalleeStack():
+ *        0xFEFA125A with the FType bit as bit 0 on a core with the FP extension, 0xFEFA125B
+ *        without one.
+ */
+constexpr auto integrity_signature(bool fpu, bool basic_frame) noexcept -> std::uint32_t
+{
+  return not fpu or basic_frame ? 0xFEFA'125Bu : 0xFEFA'125Au;
 }
 
 /** @brief Whether @p value is an EXC_RETURN value the core can return through. */

@@ -30,6 +30,7 @@ class FaultKind(enum.Enum):
     USAGE = 3
     UNMAPPED = 4
     INVALID = 5
+    SECURE = 6
 
 
 class ResetKind(enum.Enum):

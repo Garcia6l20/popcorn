@@ -515,6 +515,135 @@ TEST_CASE(
   }
 }
 
+TEST_CASE(
+    "Non-secure exception stacking and unstacking carry the Non-secure attribute and CONTROL_NS "
+    "privilege, B3.19 Stack and PopStack")
+{
+  constexpr std::uint32_t exc_return_ns_thread  = 0xFFFF'FFB8;
+  constexpr std::uint32_t exc_return_ns_handler = 0xFFFF'FFB0;
+  struct leg
+  {
+    std::uint32_t exc_return;
+    bool          privileged;
+  };
+  for(auto const& one : {
+          leg{exc_return_ns_thread,  false},
+          leg{exc_return_ns_handler, true },
+  })
+  {
+    CAPTURE(one.exc_return);
+    auto r              = booted(true, true);
+    r.firewall->verdict = bus_verdict::read_zero_write_ignore;
+    REQUIRE(r.f->target->mem().write(sau_ctrl, 4, sau_allns));
+    engine_secure(r, false);
+    r.f->set("msp", testdev + 0x200);
+    r.f->set("control", 1);
+    REQUIRE(r.f->target->mem().write(code_at, 2, svc));
+    REQUIRE(r.f->target->mem().write(code_at + 2, 2, bkpt));
+    r.f->set("pc", code_at | 1u);
+    r.firewall->calls.clear();
+    std::ignore = r.f->run({.max_instructions = icount{2}});
+    auto const pushes =
+        r.firewall->calls
+        | std::views::filter([](auto const& call) { return call.op == memory_op::write; })
+        | std::ranges::to<std::vector>();
+    REQUIRE(pushes.size() == 8);
+    for(auto const& push : pushes)
+    {
+      CHECK(push.unit == unit_of("TESTDEV"));
+      CHECK(push.attrs == bus_attrs{.by = initiator::cpu, .secure = false, .privileged = false});
+    }
+    REQUIRE((r.f->reg("xpsr") & 0x1ffu) == 11);
+    REQUIRE(r.f->target->mem().write(code_at + 0x10, 2, bx_lr));
+    r.f->set("control", 1);
+    r.f->set("msp", testdev + 0x1e0);
+    r.f->set("lr", one.exc_return);
+    r.f->set("pc", (code_at + 0x10) | 1u);
+    r.firewall->calls.clear();
+    std::ignore = r.f->run({.max_instructions = icount{1}});
+    auto const pops =
+        r.firewall->calls
+        | std::views::filter([](auto const& call) { return call.op == memory_op::read; })
+        | std::ranges::to<std::vector>();
+    REQUIRE(pops.size() == 8);
+    for(auto const& pop : pops)
+    {
+      CHECK(pop.unit == unit_of("TESTDEV"));
+      CHECK(
+          pop.attrs
+          == bus_attrs{.by = initiator::cpu, .secure = false, .privileged = one.privileged});
+    }
+  }
+}
+
+TEST_CASE(
+    "cross-state entry stacks with the background's attribute and reads the vector with the "
+    "target's, B3.19 Stack and Vector[]")
+{
+  constexpr address vector_table = testdev + 0x100;
+  struct leg
+  {
+    char const* name;
+    bool        secure_background;
+    std::size_t pushes;
+  };
+  for(auto const& one : {
+          leg{"Non-secure thread, Secure IRQ", false, 8 },
+          leg{"Secure thread, Non-secure IRQ", true,  18},
+  })
+  {
+    CAPTURE(one.name);
+    auto r              = booted(true, true);
+    r.firewall->verdict = bus_verdict::read_zero_write_ignore;
+    auto* const engine  = core::machine_internals::engine(*r.f->target);
+    auto const  write   = [&](int id, std::uint32_t value) {
+      REQUIRE(uc_reg_write(engine, id, &value) == UC_ERR_OK);
+    };
+    REQUIRE(r.f->target->mem().write(sau_ctrl, 4, sau_allns));
+    REQUIRE(r.f->target->mem().write(0xE000'E100, 4, 1));
+    if(one.secure_background)
+    {
+      REQUIRE(r.f->target->mem().write(0xE000'E380, 4, 1));
+      REQUIRE(r.f->target->mem().write(0xE002'ED08, 4, vector_table));
+      write(UC_ARM_REG_MSP_S, testdev + 0x200);
+    }
+    else
+    {
+      REQUIRE(r.f->target->mem().write(0xE000'ED08, 4, vector_table));
+      write(UC_ARM_REG_MSP_NS, testdev + 0x200);
+      write(UC_ARM_REG_CONTROL_NS, 1);
+      engine_secure(r, false);
+    }
+    REQUIRE(r.f->target->mem().write(code_at, 2, bkpt));
+    r.f->set("pc", code_at | 1u);
+    REQUIRE(r.f->target->mem().write(0xE000'E200, 4, 1));
+    r.firewall->calls.clear();
+    std::ignore   = r.f->run({.max_instructions = icount{1}});
+    auto const of = [&](memory_op op) {
+      return r.firewall->calls
+           | std::views::filter([op](auto const& call) { return call.op == op; })
+           | std::ranges::to<std::vector>();
+    };
+    auto const pushes = of(memory_op::write);
+    REQUIRE(pushes.size() == one.pushes);
+    for(auto const& push : pushes)
+    {
+      CHECK(
+          push.attrs
+          == bus_attrs{
+              .by         = initiator::cpu,
+              .secure     = one.secure_background,
+              .privileged = one.secure_background});
+    }
+    auto const reads = of(memory_op::read);
+    REQUIRE(reads.size() == 1);
+    CHECK(
+        reads.front().attrs
+        == bus_attrs{
+            .by = initiator::cpu, .secure = not one.secure_background, .privileged = true});
+  }
+}
+
 TEST_CASE("a second firewall is refused at machine build, and install_firewall after it")
 {
   auto options = core::machine_options{};

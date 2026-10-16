@@ -22,7 +22,7 @@ class Fault:
     Attributes:
         kind: Class of the fault.
         address: Faulting data or instruction address, 0 when the fault has none.
-        cfsr: Configurable fault status register, raw.
+        cfsr: Configurable fault status register, raw, or SFSR for a FaultKind.SECURE fault.
         hfsr: HardFault status register, raw.
     """
 

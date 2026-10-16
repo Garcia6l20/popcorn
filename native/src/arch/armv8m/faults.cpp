@@ -133,7 +133,7 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
        .data_address = addr});
 }
 
-auto cortex_m::engine_fault(std::uint32_t intno) -> trap_result
+[[gnu::noinline]] auto cortex_m::engine_fault(std::uint32_t intno) -> trap_result
 {
   auto const at = pc();
   switch(intno)

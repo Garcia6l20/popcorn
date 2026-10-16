@@ -86,6 +86,72 @@ void cortex_m::idau_lookup(
   *nsc             = found->nsc;
 }
 
+auto cortex_m::nonsecure_address(address at) const noexcept -> bool
+{
+  auto const exempt = [](address a) {
+    return (a >= 0xE000'0000 and a <= 0xE000'3FFF)
+        or (a >= 0xE000'5000 and a <= 0xE000'5FFF)
+        or (a >= 0xE000'E000 and a <= 0xE000'EFFF)
+        or (a >= 0xE002'E000 and a <= 0xE002'EFFF)
+        or (a >= 0xE004'0000 and a <= 0xE004'1FFF)
+        or (a >= 0xE00F'F000 and a <= 0xE00F'FFFF);
+  };
+  if(exempt(at))
+  {
+    return true;
+  }
+  auto const& scs = state_.scs;
+  auto        ns  = false;
+  auto        nsc = false;
+  if((scs.sau_ctrl & 1u) != 0)
+  {
+    auto hits = 0;
+    for(std::size_t region = 0; region < scs.sau_rbar.size(); ++region)
+    {
+      auto const limit = scs.sau_rlar[region];
+      if((limit & 1u) != 0
+         and at >= (scs.sau_rbar[region] & ~0x1fu)
+         and at <= ((limit & ~0x1fu) | 0x1fu)
+         and ++hits == 1)
+      {
+        nsc = (limit & 2u) != 0;
+        ns  = not nsc;
+      }
+    }
+    if(hits > 1)
+    {
+      ns  = false;
+      nsc = false;
+    }
+  }
+  else
+  {
+    ns = (scs.sau_ctrl & 2u) != 0;
+  }
+  auto const& ranges   = context_->idau;
+  auto const  after    = std::ranges::upper_bound(ranges, at, {}, &idau_region::start);
+  auto const  found    = after != ranges.begin() and at < std::prev(after)->end;
+  auto const  idau_ns  = found and not std::prev(after)->nsc;
+  auto const  idau_nsc = found and std::prev(after)->nsc;
+  if(not idau_ns and (ns or (not idau_nsc and nsc)))
+  {
+    ns = false;
+  }
+  return ns;
+}
+
+auto cortex_m::first_secure_word(address from, address to) const noexcept -> std::optional<address>
+{
+  for(auto at = from; at < to; at += 4)
+  {
+    if(not nonsecure_address(at))
+    {
+      return at;
+    }
+  }
+  return std::nullopt;
+}
+
 auto cortex_m::trustzone() const noexcept -> bool
 {
   return trustzone_;
@@ -98,7 +164,7 @@ auto cortex_m::trustzone() const noexcept -> bool
   {
     return trap_result::resume();
   }
-  return enter(best.number, best.state);
+  return enter_as<true>(best.number, best.state);
 }
 
 [[gnu::noinline]] auto cortex_m::banked_deliverable() const -> bool

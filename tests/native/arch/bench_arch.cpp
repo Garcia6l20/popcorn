@@ -1,9 +1,12 @@
+#include "../../../native/src/core/machine_impl.hpp"
 #include "cortex_m.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/image/image.hpp>
+
+#include <unicorn/unicorn.h>
 
 #include <algorithm>
 #include <charconv>
@@ -132,6 +135,37 @@ auto entry_run(std::string_view entry, std::uint32_t argument) -> measured
   return timed(*target, {.max_instructions = icount{1'000'000'000}}, stop_reason::user);
 }
 
+auto nonsecure_irq_run(std::uint32_t count) -> measured
+{
+  constexpr address flash   = 0x0800'0000;
+  constexpr address ns_ram  = 0x200B'0000;
+  constexpr address sau     = 0xE000'EDD0;
+  constexpr address vtor_ns = 0xE002'ED08;
+  constexpr address itns0   = 0xE000'E380;
+  auto              target  = booted();
+  auto const        poke    = [&](address at, std::uint32_t value) {
+    if(not target->mem().write(at, 4, value))
+    {
+      throw std::runtime_error{"a Non-secure IRQ setup write failed"};
+    }
+  };
+  poke(sau + 8, 0);
+  poke(sau + 0xc, 0);
+  poke(sau + 0x10, 0x0001'FFE0 | 1u);
+  poke(sau + 8, 1);
+  poke(sau + 0xc, ns_ram);
+  poke(sau + 0x10, (ns_ram + 0xFE0) | 1u);
+  poke(sau, 1);
+  poke(itns0, 1u << 3);
+  poke(vtor_ns, ns_ram);
+  poke(ns_ram + 4 * (16 + 3), (symbol("bench_empty") - flash) | 1u);
+  std::uint32_t stack = ns_ram + 0x1000;
+  uc_reg_write(core::machine_internals::engine(*target), UC_ARM_REG_MSP_NS, &stack);
+  set(*target, "pc", symbol("bench_plain_irq"));
+  set(*target, "r0", count);
+  return timed(*target, {.max_instructions = icount{1'000'000'000}}, stop_reason::user);
+}
+
 auto rtos_run(std::string_view entry, std::uint64_t virtual_ms) -> measured
 {
   auto target = booted();
@@ -185,9 +219,15 @@ auto main(int argc, char** argv) -> int
       {"rtos-idle",      [] { return rtos_run("rtos_idle", 10'000); }           },
       {"rtos-busy",      [] { return rtos_run("rtos_busy", 1'000); }            },
   };
+  if(trustzone)
+  {
+    std::erase_if(scenarios, [](scenario const& entry) { return entry.name.starts_with("rtos-"); });
+    scenarios.push_back({"ns-irq", [] { return nonsecure_irq_run(irq_count); }});
+  }
   if(auto const only = option(args, "--only"))
   {
-    auto const base = *only == "plain-irq" or *only == "tail-chain" ? "plain-irq" : "alu";
+    auto const base =
+        *only == "plain-irq" or *only == "tail-chain" or *only == "ns-irq" ? "plain-irq" : "alu";
     std::erase_if(scenarios, [&](scenario const& entry) {
       return entry.name != *only and entry.name != base;
     });

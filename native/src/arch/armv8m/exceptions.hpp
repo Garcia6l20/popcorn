@@ -80,6 +80,19 @@ inline constexpr std::uint32_t unaligned = 1u << 24;
 inline constexpr std::uint32_t divbyzero = 1u << 25;
 }
 
+/** @brief SFSR bits, D1.2.232. */
+namespace sfsr
+{
+/** @brief SFSR.INVIS, an exception return found a bad integrity signature. */
+inline constexpr std::uint32_t invis = 1u << 1;
+/** @brief SFSR.INVER, an invalid exception return from Non-secure state. */
+inline constexpr std::uint32_t inver = 1u << 2;
+/** @brief SFSR.AUVIOL, a Non-secure access to Secure memory. */
+inline constexpr std::uint32_t auviol = 1u << 3;
+/** @brief SFSR.SFARVALID. */
+inline constexpr std::uint32_t sfarvalid = 1u << 6;
+}
+
 /** @brief A configurable fault to raise: its class, target handler and status. */
 struct fault_cause
 {
