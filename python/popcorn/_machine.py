@@ -209,7 +209,8 @@ class Call:
         self, value: int | float | I64 | F32 | None = None, abi: FloatAbi | None = None
     ) -> Return:
         """Skip the function and return `value` to the caller, of the DWARF return type when
-        known, under the image's calling convention or `abi`. None for a void function."""
+        known, under the image's calling convention or `abi`. None for a void function. From an
+        exception handler, the return is an exception return, as BX LR would be."""
         if value is None:
             return Return(_core.InterceptResult.returns(None))
         slot = self._result_slot(value)

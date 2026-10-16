@@ -70,6 +70,7 @@ public:
   void               read_args(call_frame& frame) const override;
   [[nodiscard]] auto return_address() const -> address override;
   void               return_to_caller(std::optional<call_arg> const& value, float_abi abi) override;
+  [[nodiscard]] auto return_interrupt() const -> std::optional<std::uint32_t> override;
   void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;
 

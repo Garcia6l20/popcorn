@@ -376,6 +376,36 @@ TEST_CASE("an exception return completes the handler and the function it tail-ca
   }
 }
 
+TEST_CASE("an intercept returning from a handler leaves the exception through the run loop")
+{
+  using popcorn::testing::test_arch;
+  auto f = booted();
+  REQUIRE(f.target->mem().write(0x0800'0000 + 4 * 16, 4, fn("isr_tail") | 1));
+  std::uint32_t returns     = 0;
+  std::uint32_t entries     = 0;
+  auto const    return_hook = f.target->add_return_hook(
+      fn("isr_tail"), {}, arch::value_kind::i32,
+      [&returns](core::returned_call const&) { ++returns; });
+  auto const intercept =
+      f.target->add_intercept(fn("isr_tail"), [&entries](core::intercept_call const&) {
+        ++entries;
+        return core::intercept_result::returns(std::nullopt);
+      });
+  f.set("pc", fn("loop_nop"));
+  f.set("lr", fn("halt") | 1);
+  f.set("r4", 3000);
+  f.set("primask", 0);
+  f.module->write_system(test_arch::timer_period_offset, 300);
+  f.module->write_system(test_arch::timer_control_offset, 1);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  f.module->write_system(test_arch::timer_control_offset, 0);
+  CHECK(entries >= 10);
+  CHECK(returns == entries);
+  CHECK(f.word(fn("isr_entries")) == 0);
+  CHECK(f.word(fn("isr_exits")) == 0);
+  CHECK((f.reg("xpsr") & 0x1ff) == 0);
+}
+
 namespace
 {
 auto frame_here(fixture const& f) -> core::frame_return

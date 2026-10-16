@@ -302,7 +302,8 @@ void machine::run_state::on_code_site(
   }
   auto const        resumed = run.resume_past and run.resume_past->first == site.at;
   std::size_t const first   = resumed ? std::exchange(run.resume_past, std::nullopt)->second : 0;
-  auto const        stops   = run.guarded([&] {
+  std::optional<std::uint32_t> exit;
+  auto const                   stops = run.guarded([&] {
     if(not resumed and not site.probes.empty())
     {
       auto const at = run.arrival_time(static_cast<address>(addr));
@@ -360,6 +361,7 @@ void machine::run_state::on_code_site(
           }
           run.arch->return_to_caller(result.value(), result.abi().value_or(run.abi_at(entry.at)));
           run.coverage.has_previous = false;
+          exit                      = run.arch->return_interrupt();
           return false;
         case intercept_action::stop:
           run.trap        = arch::trap_result::stop(*result.reason());
@@ -374,6 +376,10 @@ void machine::run_state::on_code_site(
   {
     run.end_cause = engine_end::other;
     uc_emu_stop(engine);
+  }
+  else if(exit)
+  {
+    on_interrupt(engine, *exit, &run);
   }
 }
 

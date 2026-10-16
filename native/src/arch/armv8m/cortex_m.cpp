@@ -351,6 +351,15 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
   return engine_fault(intno);
 }
 
+auto cortex_m::return_interrupt() const -> std::optional<std::uint32_t>
+{
+  if(thread_mode() or (read(UC_ARM_REG_PC) & 0xff00'0000u) != 0xff00'0000u)
+  {
+    return std::nullopt;
+  }
+  return excp_exception_exit;
+}
+
 auto cortex_m::interrupt_returns(std::uint32_t intno, address frame_return) const -> bool
 {
   return intno == excp_exception_exit

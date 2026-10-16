@@ -150,7 +150,8 @@ public:
   }
 
   /**
-   * @brief Skip the function body and return to the caller.
+   * @brief Skip the function body and return to the caller. From an exception handler, the
+   *        return is an exception return, as BX LR would be.
    * @param value Return value, none for a void function.
    * @param abi Calling convention the value is placed under, empty for the image's. For a
    *        function whose `pcs` attribute differs from the image, which DWARF does not record.

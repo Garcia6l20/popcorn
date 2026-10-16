@@ -534,6 +534,21 @@ public:
   virtual void return_to_caller(std::optional<call_arg> const& value, float_abi abi) = 0;
 
   /**
+   * @brief Engine exception that completes a return_to_caller() whose return address is an
+   *        exception return, which the engine takes only from a branch instruction and never
+   *        from a pc write: on Arm, a 0xFF-prefixed value in handler mode, valid or not. The
+   *        machine calls it right after return_to_caller() and handles the result as if the
+   *        engine had raised it, through on_interrupt(), so the handler's exception is left, or
+   *        an invalid value faults, as a return in its body would.
+   * @return Engine exception number, as on_interrupt() gets it, or empty for a plain function
+   *         return. The default reports none.
+   */
+  [[nodiscard]] virtual auto return_interrupt() const -> std::optional<std::uint32_t>
+  {
+    return std::nullopt;
+  }
+
+  /**
    * @brief Appends the module state to a snapshot: interrupt controller, system timer, nesting,
    *        idle state. The engine registers are saved by the machine.
    * @param out Snapshot bytes, appended to.
