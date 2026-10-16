@@ -33,9 +33,16 @@ constexpr std::uint32_t excp_nocp           = 17;
 constexpr std::uint32_t control_fpca = 1u << 2;
 constexpr std::uint32_t control_sfpa = 1u << 3;
 
-constexpr std::uint32_t tt_r  = 1u << 18;
-constexpr std::uint32_t tt_rw = 1u << 19;
-constexpr std::uint32_t tt_s  = 1u << 22;
+constexpr std::uint32_t tt_srvalid = 1u << 17;
+constexpr std::uint32_t tt_r       = 1u << 18;
+constexpr std::uint32_t tt_rw      = 1u << 19;
+constexpr std::uint32_t tt_s       = 1u << 22;
+
+constexpr std::uint32_t sau_enable = 1u << 0;
+constexpr std::uint32_t sau_allns  = 1u << 1;
+
+constexpr std::uint32_t cpacr_cp10_cp11 = 0x00f0'0000;
+constexpr std::uint32_t fpccr_s_eager   = 0x8000'0004;
 
 struct engine_closer
 {
@@ -144,6 +151,15 @@ private:
   std::optional<trap>                       trap_;
 };
 
+void secure_first_page(void*, std::uint32_t address, int*, bool*, bool* ns, bool* nsc)
+{
+  if(address >= code_base and address < code_base + 0x400)
+  {
+    *ns  = false;
+    *nsc = false;
+  }
+}
+
 auto fnc_return_trap(std::span<std::uint16_t const> code, std::uint32_t r0) -> std::optional<trap>
 {
   engine e;
@@ -188,6 +204,33 @@ TEST_CASE("BXNS to an even address switches to Non-secure, then the fetch faults
   CHECK(trapped->intno == excp_prefetch_abort);
   CHECK(trapped->pc == code_base + 0x100);
   CHECK(e.get(UC_ARM_REG_SP) == 0);
+}
+
+TEST_CASE("BXNS to an even address clears CONTROL_S.SFPA, RFVTL")
+{
+  engine e;
+  e.load(code_base, {0xee00, 0x2a10, 0x470c});
+  e.set(UC_ARM_REG_R1, static_cast<std::uint32_t>(code_base + 0x100));
+  e.set(UC_ARM_REG_R2, 0x3f80'0000);
+  auto const trapped = e.run(code_base, code_base + 6);
+  REQUIRE(trapped.has_value());
+  CHECK(trapped->intno == excp_prefetch_abort);
+  CHECK(e.get(UC_ARM_REG_SECURE) == 0);
+  CHECK(e.get(UC_ARM_REG_CONTROL_S) == control_fpca);
+}
+
+TEST_CASE("BXNS fetches its Non-secure target with the lookup on, SAU ALLNS, B3.15 RPQHT")
+{
+  engine e;
+  e.load(code_base, {0x470c});
+  e.load(code_base + 0x800, {0x205a});
+  e.set(UC_ARM_REG_R1, static_cast<std::uint32_t>(code_base + 0x800));
+  REQUIRE(uc_ctl_arm_idau(e.raw(), &secure_first_page, nullptr) == UC_ERR_OK);
+  REQUIRE(uc_ctl_arm_security(e.raw(), 1) == UC_ERR_OK);
+  e.set(UC_ARM_REG_SAU_CTRL, sau_allns);
+  CHECK_FALSE(e.run(code_base, code_base + 0x802).has_value());
+  CHECK(e.get(UC_ARM_REG_R0) == 0x5a);
+  CHECK(e.get(UC_ARM_REG_SECURE) == 0);
 }
 
 TEST_CASE("BLXNS from a Secure handler pushes ReturnAddress and partial RETPSR, B3.16 RGVBB")
@@ -253,7 +296,7 @@ TEST_CASE("SG executed in Secure state is a NOP, C2.4.180")
   CHECK(e.get(UC_ARM_REG_PC) == code_base + 6);
 }
 
-TEST_CASE("TT, TTT and TTA with the security lookup compiled out, C2.4.254")
+TEST_CASE("TT, TTT and TTA with the security lookup off, or on with SAU_CTRL 0, C2.4.254")
 {
   struct form
   {
@@ -266,20 +309,43 @@ TEST_CASE("TT, TTT and TTA with the security lookup compiled out, C2.4.254")
       form{"TTA", 0xf080},
   };
   auto const targets = std::array<std::uint32_t, 3>{0x0800'0000, 0x2000'0000, 0x3000'0000};
-  for(auto const& one : forms)
+  for(auto const lookup : {0, 1})
   {
-    for(auto const target : targets)
+    for(auto const& one : forms)
     {
-      CAPTURE(one.name);
-      CAPTURE(target);
-      engine e;
-      e.load(code_base, {0xe841, one.second});
-      e.set(UC_ARM_REG_R1, target);
-      e.set(UC_ARM_REG_R0, 0xdead'beef);
-      CHECK_FALSE(e.run(code_base, code_base + 4).has_value());
-      CHECK(e.get(UC_ARM_REG_R0) == (tt_r | tt_rw | tt_s));
+      for(auto const target : targets)
+      {
+        CAPTURE(lookup);
+        CAPTURE(one.name);
+        CAPTURE(target);
+        engine e;
+        REQUIRE(uc_ctl_arm_security(e.raw(), lookup) == UC_ERR_OK);
+        e.load(code_base, {0xe841, one.second});
+        e.set(UC_ARM_REG_R1, target);
+        e.set(UC_ARM_REG_R0, 0xdead'beef);
+        CHECK_FALSE(e.run(code_base, code_base + 4).has_value());
+        CHECK(e.get(UC_ARM_REG_R0) == (tt_r | tt_rw | tt_s));
+      }
     }
   }
+}
+
+TEST_CASE("TT from Secure reports SRVALID and the SAU region, C2.4.254 and B10.3 RKRSC")
+{
+  engine e;
+  REQUIRE(uc_ctl_arm_security(e.raw(), 1) == UC_ERR_OK);
+  e.set(UC_ARM_REG_SAU_RNR, 3);
+  e.set(UC_ARM_REG_SAU_RBAR, static_cast<std::uint32_t>(sram_base));
+  e.set(UC_ARM_REG_SAU_RLAR, static_cast<std::uint32_t>(sram_base + 0x3e0) | sau_enable);
+  e.set(UC_ARM_REG_SAU_RNR, 5);
+  e.set(UC_ARM_REG_SAU_CTRL, sau_enable);
+  e.load(code_base, {0xe841, 0xf000});
+  e.set(UC_ARM_REG_R1, static_cast<std::uint32_t>(sram_base + 0x100));
+  CHECK_FALSE(e.run(code_base, code_base + 4).has_value());
+  auto const result = e.get(UC_ARM_REG_R0);
+  CHECK((result & tt_srvalid) != 0);
+  CHECK(((result >> 8) & 0xffu) == 3);
+  CHECK((result & tt_s) == 0);
 }
 
 TEST_CASE("an FP instruction in Secure state sets CONTROL.FPCA and CONTROL_S.SFPA, B3.4")
@@ -330,6 +396,27 @@ TEST_CASE("VLSTM and VLLDM with CONTROL_S.SFPA clear do nothing, C2.4.368 and C2
   }
 }
 
+TEST_CASE("VLSTM with CPACR_S CP10 set and FPCCR_S.LSPEN 0 saves the FP context, C2.4.368")
+{
+  engine e;
+  e.load(code_base, {0xee00, 0x2a10, 0xeee1, 0x3a10, 0xec20, 0x0a00});
+  for(std::uint64_t at = fp_frame; at < fp_frame + 0x88; at += 4)
+  {
+    e.put_word(at, untouched);
+  }
+  e.set(UC_ARM_REG_R0, static_cast<std::uint32_t>(fp_frame));
+  e.set(UC_ARM_REG_R2, 0x3f80'0000);
+  e.set(UC_ARM_REG_R3, 0x00c0'0000);
+  e.set(UC_ARM_REG_CPACR_S, cpacr_cp10_cp11);
+  e.set(UC_ARM_REG_FPCCR_S, fpccr_s_eager);
+  CHECK_FALSE(e.run(code_base, code_base + 12).has_value());
+  CHECK(e.word(fp_frame) == 0x3f80'0000);
+  CHECK(e.word(fp_frame + 0x40) == 0x00c0'0000);
+  CHECK(e.word(fp_frame + 0x44) == untouched);
+  CHECK((e.get(UC_ARM_REG_CONTROL) & control_fpca) == 0);
+  CHECK(e.get(UC_ARM_REG_FPCCR_S) == fpccr_s_eager);
+}
+
 TEST_CASE("VLSTM and VLLDM with CONTROL_S.SFPA set raise NOCP, C2.4.368 and C2.4.367")
 {
   for(auto const& one : fp_context_forms)
@@ -342,6 +429,7 @@ TEST_CASE("VLSTM and VLLDM with CONTROL_S.SFPA set raise NOCP, C2.4.368 and C2.4
       e.load(code_base, {one.first, 0x0a00});
       e.put_word(fp_frame, untouched);
       e.set(UC_ARM_REG_R0, static_cast<std::uint32_t>(fp_frame));
+      e.set(UC_ARM_REG_CPACR_S, 0);
       e.set(UC_ARM_REG_CONTROL, control_sfpa | fpca);
       auto const trapped = e.run(code_base, code_base + 4);
       REQUIRE(trapped.has_value());
