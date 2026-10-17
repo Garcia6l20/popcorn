@@ -21,10 +21,12 @@
 #include <exception>
 #include <expected>
 #include <functional>
+#include <limits>
 #include <map>
 #include <meta>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <span>
 #include <string>
@@ -235,7 +237,7 @@ class flat_edge_table
 {
 public:
   /** @brief Adds one to the count of an edge. @p key is `from << 32 | to`. */
-  void count(std::uint64_t key);
+  [[gnu::always_inline]] inline void count(std::uint64_t key);
 
   /** @brief Edges with a non-zero count, ordered by from then to. */
   [[nodiscard]] auto edges() const -> std::vector<edge_counter>;
@@ -250,11 +252,40 @@ private:
     std::uint64_t hits{};
   };
 
+  static auto hash(std::uint64_t key) noexcept -> std::uint64_t
+  {
+    return key * 0x9e37'79b9'7f4a'7c15;
+  }
+
   void grow();
 
   std::vector<slot> slots_{};
   std::size_t       used_ = 0;
 };
+
+void flat_edge_table::count(std::uint64_t key)
+{
+  if(2 * (used_ + 1) > slots_.size())
+  {
+    grow();
+  }
+  auto const mask = slots_.size() - 1;
+  for(auto at = hash(key) >> 32 & mask;; at = (at + 1) & mask)
+  {
+    auto& held = slots_[at];
+    if(held.hits == 0)
+    {
+      held = {.key = key, .hits = 1};
+      ++used_;
+      return;
+    }
+    if(held.key == key)
+    {
+      ++held.hits;
+      return;
+    }
+  }
+}
 
 /** @brief Largest instruction of the supported cores in bytes, the bound of every decode from
  * a block start: a block of n instructions spans at most n times this. */
@@ -289,7 +320,7 @@ struct coverage_state
    * @param addr Block start.
    * @param insns Instructions of the block, as the engine translated it.
    */
-  void count(address addr, std::uint32_t insns);
+  [[gnu::always_inline]] inline void count(address addr, std::uint32_t insns);
 
   /**
    * @brief Closes the block counted last as execution leaves it: a cut at @p pc when @p pc is one
@@ -302,7 +333,61 @@ struct coverage_state
    * @param at_exit Whether the engine stopped at @p pc because it is one of its exits.
    */
   void leave(arch::arch const& core, address pc, bool at_exit);
+
+private:
+  static auto holds(address_range const& range, address addr) noexcept -> bool
+  {
+    return range.start <= addr and std::uint64_t{addr} < std::uint64_t{range.start} + range.size;
+  }
+
+  static void bump(block_counters& counters, address addr) noexcept
+  {
+    auto& hits = counters.hits[(addr - counters.range.start) >> 1];
+    if(hits != std::numeric_limits<std::uint32_t>::max())
+    {
+      ++hits;
+    }
+  }
 };
+
+void coverage_state::count(address addr, std::uint32_t insns)
+{
+  auto inside = false;
+  if(last_range < blocks.size() and holds(blocks[last_range].range, addr) and not overlapping)
+  {
+    bump(blocks[last_range], addr);
+    inside = true;
+  }
+  else
+  {
+    for(auto const& [index, counters] : std::views::enumerate(blocks))
+    {
+      if(holds(counters.range, addr))
+      {
+        bump(counters, addr);
+        last_range = static_cast<std::size_t>(index);
+        inside     = true;
+        if(not overlapping)
+        {
+          break;
+        }
+      }
+    }
+  }
+  if(not inside)
+  {
+    has_previous = false;
+    open_insns   = 0;
+    return;
+  }
+  if(has_previous)
+  {
+    edges.count(previous << 32 | addr);
+  }
+  previous     = addr;
+  has_previous = true;
+  open_insns   = insns;
+}
 
 /** @brief Loop tracking of spin detection, active while machine_options::spin_threshold is set.
  * One loop is tracked per exception depth, so a handler's loops never restart the tracking of
