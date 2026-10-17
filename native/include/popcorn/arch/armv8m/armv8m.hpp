@@ -64,7 +64,8 @@ namespace popcorn::arch::armv8m
  * - Lockup, and the INVPC, UNSTKERR, STKERR, STKOF on entry, VECTTBL and INVSTATE faults, stop
  *   the run under every fault policy.
  * - With TrustZone and fault_policy::enter_handler, the integrity faults of an exception return,
- *   SFSR.INVER, SFSR.INVIS, UFSR.INVPC, SFSR.AUVIOL and BFSR.UNSTKERR on the frame, are taken as
+ *   SFSR.INVER, SFSR.INVIS, UFSR.INVPC, SFSR.AUVIOL and BFSR.UNSTKERR on the frame, and the
+ *   UFSR_S.NOCP of a return to Non-secure with EXC_RETURN.FType 0 and NSACR.CP10 0, are taken as
  *   exceptions on the frame left in place, the returning exception deactivated first. The entry
  *   faults SFSR.AUVIOL and UFSR.STKOF of the stacked frame set the stack pointer to the frame or to
  *   the limit, store nothing, and are taken as derived exceptions, the higher of the derived and

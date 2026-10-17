@@ -1081,6 +1081,18 @@ auto cortex_m::exception_return() -> trap_result
          .cfsr_bits = cfsr::invpc,
          .reported  = value});
   }
+  if(back == security::nonsecure
+     and not returning.basic_frame
+     and (state_.scs.nsacr & nsacr_cp10) == 0)
+  {
+    return return_fault(
+        value, number, exception, back,
+        {.kind      = fault_kind::usage,
+         .target    = exc_usagefault,
+         .cfsr_bits = cfsr::nocp,
+         .reported  = value,
+         .origin    = security::secure});
+  }
   if(banked_number)
   {
     state_.exceptions.nonsecure_active &= ~(1u << number);
@@ -1250,7 +1262,7 @@ auto cortex_m::return_fault(
     write_security(engine, to);
   }
   auto from         = cause;
-  from.origin       = to;
+  from.origin       = cause.origin.value_or(to);
   auto const raised = create_exception(from);
   if(not raised)
   {

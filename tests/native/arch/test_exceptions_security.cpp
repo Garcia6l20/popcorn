@@ -1963,6 +1963,94 @@ TEST_CASE(
   CHECK(std::ranges::all_of(ns_words, [](std::uint32_t word) { return word == fill; }));
 }
 
+TEST_CASE(
+    "a return to Non-secure with FType 0 and NSACR.CP10 0 takes UsageFault_S NOCP on the frame "
+    "left in place after the outranking IRQ of a derived NOCP, PopStack lines 109-112 and "
+    "IsCPEnabled lines 20-24")
+{
+  constexpr std::uint32_t secret = 0x5EC0'0001;
+  constexpr address       stack  = ns_stack - 0x100;
+  auto                    f      = booted();
+  open_nonsecure_region(f);
+  tables(f, 16);
+  tables(f, armv8m::exc_usagefault);
+  poke(f, shcsr, usagefault_ena);
+  poke(f, shpr1, 0x0080'0000u);
+  put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
+  put(f, ns_code, {bkpt, 0xe7fe});
+  put(f, ns_handler, {bkpt, bx_lr});
+  engine_write(f, UC_ARM_REG_MSP_NS, stack);
+  poke(f, itns0, 1);
+  poke(f, iser0, 1);
+  f.set("r2", secret);
+  f.set("r3", ns_code);
+  REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+  REQUIRE_FALSE(secure_now(f));
+  f.set("r2", 0);
+  poke(f, ispr0, 1);
+  REQUIRE(resume(f, 2).reason == stop_reason::user);
+  REQUIRE(ipsr(f) == 16);
+  REQUIRE(f.module->is_pending(armv8m::exc_usagefault));
+  REQUIRE(engine_read(f, UC_ARM_REG_MSP_NS) == stack - 0x20);
+  REQUIRE((f.reg("lr") & 1u << 4) == 0);
+  poke(f, cfsr, ufsr_nocp);
+  REQUIRE((f.word(cfsr) & ufsr_nocp) == 0);
+  REQUIRE(resume(f, 2).reason == stop_reason::user);
+  CHECK(secure_now(f));
+  CHECK(ipsr(f) == armv8m::exc_usagefault);
+  CHECK((f.word(hfsr) & hfsr_forced) == 0);
+  CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+  CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+  CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == stack - 0x20);
+  CHECK_FALSE(f.module->is_active(16));
+  CHECK(f.reg("lr") == 0xFFFF'FFA9u);
+  CHECK(f.reg("s0") == secret);
+}
+
+TEST_CASE(
+    "a return to Non-secure from an extended frame after NSACR.CP10 is cleared takes UsageFault_S "
+    "NOCP, or HardFault_S FORCED without USGFAULTENA_S, the frame left in place, PopStack lines "
+    "109-112")
+{
+  for(auto const enabled : {true, false})
+  {
+    CAPTURE(enabled);
+    auto f = booted();
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_usagefault);
+    tables(f, armv8m::exc_hardfault);
+    if(enabled)
+    {
+      poke(f, shcsr, usagefault_ena);
+    }
+    poke(f, nsacr, nsacr_cp10_cp11);
+    put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
+    put(f, ns_code, {bkpt, 0xe7fe});
+    put(f, ns_handler, {bkpt, bx_lr});
+    engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    f.set("r3", ns_code);
+    REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+    REQUIRE_FALSE(secure_now(f));
+    poke(f, ispr0, 1);
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    REQUIRE(ipsr(f) == 16);
+    REQUIRE(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack - 0x68);
+    REQUIRE((f.reg("lr") & 1u << 4) == 0);
+    poke(f, nsacr, 0);
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == (enabled ? armv8m::exc_usagefault : armv8m::exc_hardfault));
+    CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
+    CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+    CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack - 0x68);
+    CHECK_FALSE(f.module->is_active(16));
+  }
+}
+
 TEST_CASE("a SecureFault that cannot preempt stops as hard with CFSR as status, SFSR kept apart")
 {
   auto f = booted();
