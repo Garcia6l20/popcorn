@@ -107,11 +107,12 @@ struct ns_region
 
 struct store_loop
 {
-  popcorn::address         code{};
-  popcorn::address         store{};
-  bool                     nonsecure{};
-  std::uint32_t            seccfgr0 = 0xffff'ffffu;
-  std::optional<ns_region> sau{};
+  popcorn::address                code{};
+  popcorn::address                store{};
+  bool                            nonsecure{};
+  std::uint32_t                   seccfgr0 = 0xffff'ffffu;
+  std::optional<ns_region>        sau{};
+  std::optional<popcorn::address> hop{};
 };
 
 struct row
@@ -131,6 +132,11 @@ constexpr popcorn::address             sau_rnr   = 0xe000'edd8;
 constexpr popcorn::address             sau_rbar  = 0xe000'eddc;
 constexpr popcorn::address             sau_rlar  = 0xe000'ede0;
 constexpr std::uint32_t                sau_allns = 2;
+
+constexpr auto thumb_branch(popcorn::address from, popcorn::address to) -> std::uint16_t
+{
+  return static_cast<std::uint16_t>(0xe000u | (((to - (from + 4)) >> 1) & 0x7ffu));
+}
 
 struct options
 {
@@ -206,6 +212,14 @@ auto rows() -> std::vector<row>
   loop(
       "store/tz-mixed-code", true,
       {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 3});
+  loop(
+      "store/tz-subpage-hop", true,
+      {
+          .code  = 0x3000'0400,
+          .store = 0x3000'2000,
+          .sau   = ns_region{.base = 0x3000'0780, .limit = 0x3000'079f},
+          .hop   = 0x3000'07c0
+  });
   return out;
 }
 
@@ -293,6 +307,11 @@ struct lone
     for(auto const& [index, insn] : std::views::enumerate(store_loop_code))
     {
       write(how.code + 2 * static_cast<popcorn::address>(index), insn, 2);
+    }
+    if(how.hop)
+    {
+      write(how.code + 4, thumb_branch(how.code + 4, *how.hop), 2);
+      write(*how.hop, thumb_branch(*how.hop, how.code), 2);
     }
     auto regs = target->regs();
     regs.write(*regs.find("primask"), 1);
