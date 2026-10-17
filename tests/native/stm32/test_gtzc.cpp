@@ -3,6 +3,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
@@ -123,12 +124,17 @@ struct rig
 
   explicit rig(
       bool                        trustzone,
-      stm32::option_bytes         wanted = {.tzen = true},
-      popcorn::arch::fault_policy faults = popcorn::arch::fault_policy::stop)
+      stm32::option_bytes         wanted       = {.tzen = true},
+      popcorn::arch::fault_policy faults       = popcorn::arch::fault_policy::stop,
+      bool                        debug_blocks = true)
   {
     stm32::register_builtin_models();
     auto options   = popcorn::testing::stm32_options();
     options.faults = faults;
+    if(debug_blocks)
+    {
+      options.raz_wi = stm32::raz_wi_map(u575());
+    }
     if(trustzone)
     {
       wanted.tzen = true;
@@ -671,7 +677,8 @@ TEST_CASE("RM0456 5.4.2: CPU accesses to a Secure and privileged TIM2 from each 
   CHECK(r.peek("GTZC1_TZIC", "SR1") == 0);
 }
 
-auto nonsecure_load(rig const& r, address at, bool sau_over) -> popcorn::stop
+auto nonsecure_load(rig const& r, address at, bool sau_over, std::uint16_t insn = ldr_r2_r0)
+    -> popcorn::stop
 {
   constexpr address code    = 0x2000'2000;
   constexpr address sau_rnr = 0xe000'edd8;
@@ -687,7 +694,7 @@ auto nonsecure_load(rig const& r, address at, bool sau_over) -> popcorn::stop
     region(1, at & ~0x1fu, at & ~0x1fu);
   }
   REQUIRE(r.target->mem().write(sau_ctrl, 4, 1));
-  REQUIRE(r.target->mem().write(code, 2, ldr_r2_r0));
+  REQUIRE(r.target->mem().write(code, 2, insn));
   REQUIRE(r.target->mem().write(code + 2, 2, bkpt));
   engine_secure(r, false);
   set(r, "r0", at);
@@ -724,6 +731,126 @@ TEST_CASE(
     REQUIRE(closed.reason == popcorn::stop_reason::fault);
     CHECK(closed.fault->kind == popcorn::fault_kind::secure);
   }
+}
+
+auto debug_warnings(std::vector<core::log_record> const& logged, std::string_view block)
+    -> std::vector<core::log_record>
+{
+  return logged
+       | std::views::filter([&](core::log_record const& record) {
+           return record.kind == core::log_kind::model_warning and record.peripheral == block;
+         })
+       | std::ranges::to<std::vector>();
+}
+
+TEST_CASE("RM0456 75.5: the U5 debug blocks without a model are RAZ/WI with one warning, TZEN=0")
+{
+  rig const                     r{false};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const blocks = stm32::raz_wi_map(u575());
+  REQUIRE(
+      (blocks
+       | std::views::transform(&popcorn::address_range::name)
+       | std::ranges::to<std::vector>())
+      == std::vector<std::string>{"TPIU", "ETM", "CTI", "MCU_ROM_TABLE", "CPU_ROM_TABLE"});
+  for(auto const& block : blocks)
+  {
+    CAPTURE(block.name);
+    CHECK(block.size == 0x1000);
+    auto const at = block.start + 4;
+    run_cpu(r, {.insn = str_r1_r0}, at, 0x1234'5678);
+    run_cpu(r, {.insn = ldr_r2_r0}, at, 0);
+    CHECK(get(r, "r2") == 0);
+    run_cpu(r, {.insn = ldr_r2_r0}, block.start + block.size - 4, 0);
+    CHECK(get(r, "r2") == 0);
+    auto const warned = debug_warnings(logged, block.name);
+    REQUIRE(warned.size() == 1);
+    CHECK(warned.front().write);
+    CHECK(warned.front().offset == 4);
+  }
+  constexpr address dbgmcu_cr = 0xe004'4004;
+  run_cpu(r, {.insn = str_r1_r0}, dbgmcu_cr, 0x6);
+  CHECK(r.target->mem().read(dbgmcu_cr, 4) == 0x6u);
+}
+
+TEST_CASE("without the RAZ/WI ranges a CTI load is a precise BusFault, TZEN=0")
+{
+  rig const r{false, {}, popcorn::arch::fault_policy::stop, false};
+  set(r, "r0", 0xe004'2004);
+  REQUIRE(r.target->mem().write(code_at, 2, ldr_r2_r0));
+  REQUIRE(r.target->mem().write(code_at + 2, 2, bkpt));
+  set(r, "pc", code_at | 1u);
+  auto const result = r.target->run_slice({.max_instructions = icount{2}});
+  REQUIRE(result.stopped.has_value());
+  REQUIRE(result.stopped->reason == popcorn::stop_reason::fault);
+  CHECK(result.stopped->fault->kind == popcorn::fault_kind::bus);
+  CHECK(result.stopped->fault->status == 0x8200);
+}
+
+TEST_CASE("a Non-secure load and store of the CTI with no SAU region over it are RAZ/WI, TZEN=1")
+{
+  constexpr address cti = 0xe004'2004;
+  {
+    rig const                     r{true};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    auto const loaded = nonsecure_load(r, cti, false);
+    CHECK(loaded.reason == popcorn::stop_reason::user);
+    CHECK(get(r, "r2") == 0);
+    auto const stored = nonsecure_load(r, cti, false, str_r1_r0);
+    CHECK(stored.reason == popcorn::stop_reason::user);
+    auto const warned = debug_warnings(logged, "CTI");
+    REQUIRE(warned.size() == 1);
+    CHECK_FALSE(warned.front().write);
+  }
+  {
+    rig const  r{true, {.tzen = true}, popcorn::arch::fault_policy::stop, false};
+    auto const faulted = nonsecure_load(r, cti, false);
+    REQUIRE(faulted.reason == popcorn::stop_reason::fault);
+    CHECK(faulted.fault->kind == popcorn::fault_kind::bus);
+  }
+}
+
+TEST_CASE("machine_options::raz_wi refuses a range over a peripheral, unaligned or overlapping")
+{
+  auto const refused = [](std::vector<popcorn::address_range> ranges, std::string_view key) {
+    auto options   = popcorn::testing::stm32_options();
+    options.raz_wi = std::move(ranges);
+    CAPTURE(key);
+    try
+    {
+      core::machine{u575(), popcorn::arch::armv8m::factory(), std::move(options)};
+      FAIL("accepted");
+    }
+    catch(popcorn::config_error const& error)
+    {
+      CHECK(error.key() == key);
+    }
+  };
+  refused(
+      {
+          {.name = "OVER", .start = 0xe004'4000, .size = 0x1000}
+  },
+      "raz_wi[0]");
+  refused(
+      {
+          {.name = "ODD", .start = 0xe004'0200, .size = 0x1000}
+  },
+      "raz_wi[0]");
+  refused(
+      {
+          {.name = "EMPTY", .start = 0xe004'0000, .size = 0}
+  },
+      "raz_wi[0]");
+  refused(
+      {
+          {.name = "A", .start = 0xe004'0000, .size = 0x2000},
+          {.name = "B", .start = 0xe004'1000, .size = 0x1000}
+  },
+      "raz_wi[1]");
 }
 
 TEST_CASE("every peripheral with a Secure alias has a SEC rule, except the TrustZone-aware ones")

@@ -1266,6 +1266,45 @@ struct machine::run_state
   /** @brief Shared pages, each mapped once. */
   std::vector<std::unique_ptr<mmio_page>> shared_pages{};
 
+  /** @brief A machine_options::raz_wi range, mapped as engine MMIO. */
+  struct raz_window
+  {
+    /** @brief Run state serving the accesses. */
+    run_state* run{};
+    /** @brief The range. */
+    address_range const* range{};
+    /** @brief Whether its first access was logged. */
+    bool warned{};
+  };
+
+  /** @brief The machine_options::raz_wi windows, in option order. */
+  std::vector<std::unique_ptr<raz_window>> raz_windows{};
+
+  /**
+   * @brief Maps every machine_options::raz_wi range as engine MMIO.
+   * @return The ranges, first and last address each, for the exact pc hook.
+   * @throws config_error keyed `raz_wi[i]` for a range machine_options::raz_wi refuses.
+   * @throws emulation_error when the engine refuses a mapping.
+   */
+  auto map_raz_wi(std::uint32_t page) -> std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+
+  /** @brief Logs the first access to @p window. */
+  void note_raz(raz_window& window, std::uint32_t offset, bool write);
+
+  static auto on_raz_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
+  static void on_raz_write(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      std::uint64_t value,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept;
+
   static auto on_shared_read(
       uc_struct*    engine,
       std::uint64_t offset,

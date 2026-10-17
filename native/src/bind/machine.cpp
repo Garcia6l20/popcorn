@@ -229,6 +229,7 @@ auto options_of(
   options.strict_peripherals = config.strict_peripherals;
   options.vector_table       = config.vector_table;
   options.config_digest      = config.config_digest;
+  options.raz_wi             = periph::stm32::raz_wi_map(description);
   if(option_bytes)
   {
     auto const configured =

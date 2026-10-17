@@ -12,6 +12,7 @@
 #include <optional>
 #include <ranges>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -93,6 +94,35 @@ struct idau_family
 constexpr std::array<idau_family, 1> idau_maps{
     {
      {"STM32U5*", u5_idau},
+     }
+};
+
+struct debug_block
+{
+  std::string_view name;
+  address          start{};
+  std::uint32_t    size{};
+};
+
+// External PPB CoreSight blocks without a model, RM0456 75.5 Tables 797 and 798, 4 KB each.
+// DBGMCU at 0xE0044000 has its own model. 0xE0043000 is reserved and stays unmapped.
+constexpr auto u5_debug_blocks = std::to_array<debug_block>({
+    {.name = "TPIU",          .start = 0xe004'0000, .size = 0x1000},
+    {.name = "ETM",           .start = 0xe004'1000, .size = 0x1000},
+    {.name = "CTI",           .start = 0xe004'2000, .size = 0x1000},
+    {.name = "MCU_ROM_TABLE", .start = 0xe00f'e000, .size = 0x1000},
+    {.name = "CPU_ROM_TABLE", .start = 0xe00f'f000, .size = 0x1000},
+});
+
+struct debug_family
+{
+  std::string_view             part_glob;
+  std::span<debug_block const> blocks;
+};
+
+constexpr std::array<debug_family, 1> debug_maps{
+    {
+     {"STM32U5*", u5_debug_blocks},
      }
 };
 
@@ -186,6 +216,22 @@ auto idau_map(part_description const& part) -> std::optional<std::span<idau_regi
     }
   }
   return std::nullopt;
+}
+
+auto raz_wi_map(part_description const& part) -> std::vector<address_range>
+{
+  auto const family = std::ranges::find_if(
+      debug_maps, [&](debug_family const& f) { return glob_match(f.part_glob, part.part); });
+  if(family == debug_maps.end())
+  {
+    return {};
+  }
+  return family->blocks
+       | std::views::transform([](debug_block const& block) {
+           return address_range{
+               .name = std::string{block.name}, .start = block.start, .size = block.size};
+         })
+       | std::ranges::to<std::vector>();
 }
 
 auto mpcbb_geometry(part_description const& part, std::string_view controller)

@@ -124,6 +124,16 @@ struct option_refusal
     -> std::optional<std::span<idau_region const>>;
 
 /**
+ * @brief Debug blocks of the family of @p part that no model serves, as data for
+ *        core::machine_options::raz_wi: on the STM32U5 the TPIU, the ETM, the CTI and both ROM
+ *        tables of the external PPB, RM0456 75.5. DBGMCU has its own model.
+ * @param part Description the machine is built from.
+ * @return The ranges, empty when the family has no table.
+ */
+[[nodiscard]] POPCORN_API auto raz_wi_map(part_description const& part)
+    -> std::vector<address_range>;
+
+/**
  * @brief SRAM a block-based memory protection controller covers, such as an STM32 GTZC MPCBB:
  *        `size` bytes from `start`, in blocks of `block_size` bytes, `superblock_blocks` blocks
  *        per super-block, one SECCFGR and one PRIVCFGR word each.

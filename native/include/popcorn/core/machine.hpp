@@ -97,6 +97,14 @@ struct machine_options
    * the machine refuses with config_error, and of the arch module's system space, which the arch
    * module's attach refuses. A description alias never targets it. */
   std::optional<address_range> scratch{};
+  /** @brief Ranges outside the description that read as zero and ignore writes, such as debug
+   * blocks a part has and no model serves. No storage, nothing in snapshots. The first access to
+   * each range is logged as log_kind::model_warning, once per machine life. Each range must be
+   * non-empty, start and size multiples of the engine page, and stay clear of the description's
+   * regions and peripherals, of scratch and of the other ranges, which the machine refuses with
+   * config_error keyed `raz_wi[i]`. The engine refuses a range over the arch module's system
+   * space with emulation_error. */
+  std::vector<address_range> raz_wi{};
   /** @brief Digest of the configuration the machine was built from, such as a project digest,
    * stored in every snapshot as `snapshot_data::config_digest`. Opaque to the core. */
   std::string config_digest{};

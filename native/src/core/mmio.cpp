@@ -12,6 +12,7 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <utility>
 
 namespace popcorn::core
 {
@@ -139,6 +140,8 @@ void machine::run_state::map_peripherals()
   {
     contract_assert(std::uint64_t{before->base} + before->size <= after->base);
   }
+  ranges.append_range(map_raz_wi(page));
+  std::ranges::sort(ranges);
   if(not ranges.empty())
   {
     auto const first        = ranges.front().first;
@@ -168,6 +171,111 @@ void machine::run_state::map_peripherals()
     clock_pc.configure(engine, std::move(clock_ranges), UC_HOOK_MEM_WRITE);
     clock_pc.acquire();
   }
+}
+
+auto machine::run_state::map_raz_wi(std::uint32_t page)
+    -> std::vector<std::pair<std::uint64_t, std::uint64_t>>
+{
+  auto const& options     = owner.options_;
+  auto const& description = owner.description_;
+  auto const  overlaps    = [](std::uint64_t start, std::uint64_t end, address other,
+                               std::uint64_t size) { return start < other + size and other < end; };
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> mapped;
+  for(auto const& [index, range] : std::views::enumerate(options.raz_wi))
+  {
+    auto const refuse = [&](std::string expected) {
+      throw config_error(
+          "machine_options", 0, std::format("raz_wi[{}]", index), std::move(expected));
+    };
+    auto const start = std::uint64_t{range.start};
+    auto const end   = start + range.size;
+    if(range.size == 0 or start % page != 0 or range.size % page != 0)
+    {
+      refuse(std::format("a non-empty range, start and size multiples of {} bytes", page));
+    }
+    for(auto const& region : description.regions)
+    {
+      if(overlaps(start, end, region.start, region.size))
+      {
+        refuse(std::format("a range outside region {}", region.name));
+      }
+    }
+    for(auto const& unit : description.peripherals)
+    {
+      if(overlaps(start, end, unit.base, unit.size))
+      {
+        refuse(std::format("a range outside peripheral {}", unit.name));
+      }
+    }
+    if(options.scratch and overlaps(start, end, options.scratch->start, options.scratch->size))
+    {
+      refuse("a range outside the scratch region");
+    }
+    for(auto const& [other, before] :
+        std::views::enumerate(options.raz_wi | std::views::take(index)))
+    {
+      if(overlaps(start, end, before.start, before.size))
+      {
+        refuse(std::format("a range outside raz_wi[{}]", other));
+      }
+    }
+    auto& window = *raz_windows.emplace_back(
+        std::make_unique<raz_window>(raz_window{.run = this, .range = &range}));
+    check(
+        uc_mmio_map_attrs(
+            engine, range.start, range.size, &on_raz_read, &window, &on_raz_write, &window),
+        std::format("mapping the read-as-zero range {}", range.name));
+    mapped.emplace_back(start, end - 1);
+  }
+  return mapped;
+}
+
+void machine::run_state::note_raz(raz_window& window, std::uint32_t offset, bool write)
+{
+  if(std::exchange(window.warned, true))
+  {
+    return;
+  }
+  owner.hooks_->log(
+      {.kind       = log_kind::model_warning,
+       .pc         = arch->pc(),
+       .peripheral = window.range->name,
+       .reg        = {},
+       .offset     = offset,
+       .write      = write,
+       .message    = std::format(
+           "{} of {} at offset {:#x}, no model: it reads as zero and ignores writes",
+           write ? "write" : "read", window.range->name, offset)});
+}
+
+auto machine::run_state::on_raz_read(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned,
+    uc_mem_attrs,
+    void* user) noexcept -> std::uint64_t
+{
+  auto& window = *static_cast<raz_window*>(user);
+  window.run->guarded([&] {
+    window.run->note_raz(window, static_cast<std::uint32_t>(offset), false);
+    return false;
+  });
+  return 0;
+}
+
+void machine::run_state::on_raz_write(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned,
+    std::uint64_t,
+    uc_mem_attrs,
+    void* user) noexcept
+{
+  auto& window = *static_cast<raz_window*>(user);
+  window.run->guarded([&] {
+    window.run->note_raz(window, static_cast<std::uint32_t>(offset), true);
+    return false;
+  });
 }
 
 auto machine::run_state::window_at(address addr, std::uint8_t size) const noexcept -> mmio_window*
