@@ -1267,6 +1267,8 @@ constexpr std::uint32_t fpccr_ts        = 1u << 26;
 constexpr std::uint32_t fpccr_s         = 1u << 2;
 constexpr std::uint32_t fpccr_lspact    = 1u << 0;
 constexpr std::uint32_t cpacr_cp10_cp11 = 0x00F0'0000;
+constexpr address       nsacr           = 0xE000'ED8C;
+constexpr std::uint32_t nsacr_cp10_cp11 = 0x0C00;
 constexpr std::uint32_t sfsr_lserr      = 1u << 7;
 constexpr std::uint32_t ufsr_nocp       = 1u << 19;
 
@@ -1388,6 +1390,7 @@ TEST_CASE(
     auto f = booted();
     open_nonsecure_region(f);
     poke(f, cpacr, cpacr_cp10_cp11);
+    poke(f, nsacr, nsacr_cp10_cp11);
     if(ts)
     {
       poke(f, fpccr, f.word(fpccr) | fpccr_ts);
@@ -1442,6 +1445,7 @@ TEST_CASE(
   auto f = booted(fault_policy::enter_handler, "cmse");
   open_nonsecure_region(f);
   poke(f, cpacr, cpacr_cp10_cp11);
+  poke(f, nsacr, nsacr_cp10_cp11);
   put_clobber(f, ns_code);
   fill_below(f, ns_stack, 0x100);
   engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
@@ -1614,6 +1618,42 @@ TEST_CASE(
     CHECK(stack[0x18 + 6] == ns_code + 2);
     CHECK(f.reg("lr") == 0xFFFF'FFA9u);
   }
+}
+
+TEST_CASE(
+    "a Non-secure handler that outranks the derived NOCP and reads S0 with NSACR.CP10 0 takes "
+    "NOCP to UsageFault_S, escalated to HardFault_S, and never sees the Secure value, B3.11 "
+    "RDXYK and CheckCPEnabled()")
+{
+  constexpr std::uint32_t secret     = 0x5EC0'0001;
+  constexpr std::uint16_t vmov_r0_s0 = 0xee10;
+  auto                    f          = booted();
+  open_nonsecure_region(f);
+  tables(f, 16);
+  tables(f, armv8m::exc_usagefault);
+  tables(f, armv8m::exc_hardfault);
+  poke(f, shcsr, usagefault_ena);
+  poke(f, shpr1, 0x0080'0000u);
+  put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
+  put(f, ns_code, {bkpt, 0xe7fe});
+  put(f, ns_handler, {vmov_r0_s0, 0x0a10, bkpt});
+  engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+  poke(f, itns0, 1);
+  poke(f, iser0, 1);
+  f.set("r2", secret);
+  f.set("r3", ns_code);
+  REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+  REQUIRE_FALSE(secure_now(f));
+  f.set("r2", 0);
+  poke(f, ispr0, 1);
+  REQUIRE(resume(f, 4).reason == stop_reason::user);
+  CHECK(secure_now(f));
+  CHECK(ipsr(f) == armv8m::exc_hardfault);
+  CHECK((f.word(hfsr) & hfsr_forced) != 0);
+  CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+  CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+  CHECK(f.reg("r0") != secret);
+  CHECK(f.module->is_active(16));
 }
 
 TEST_CASE(

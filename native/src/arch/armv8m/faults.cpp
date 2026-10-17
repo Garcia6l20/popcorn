@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <expected>
+#include <optional>
 
 namespace popcorn::arch::armv8m
 {
@@ -26,6 +27,7 @@ constexpr std::uint32_t fsr_alignment       = 0x1;
 constexpr std::uint32_t fsr_external        = 0x8;
 constexpr std::uint32_t fsr_secure          = UC_ARM_FAULT_SECURE;
 constexpr std::uint32_t fsr_nsc_exec        = UC_ARM_FAULT_NSC_EXEC;
+constexpr std::uint32_t nsacr_cp10          = 1u << 10;
 
 auto enable_bit(std::uint32_t target) noexcept -> std::uint32_t
 {
@@ -159,6 +161,13 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
        .data_address = addr});
 }
 
+auto cortex_m::nonsecure_fp_denied() const -> bool
+{
+  return trustzone()
+     and current_security() == security::nonsecure
+     and (state_.scs.nsacr & nsacr_cp10) == 0;
+}
+
 [[gnu::noinline]] auto cortex_m::engine_fault(std::uint32_t intno) -> trap_result
 {
   auto const at = pc();
@@ -226,7 +235,8 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
           {.kind      = fault_kind::usage,
            .target    = exc_usagefault,
            .cfsr_bits = cfsr::nocp,
-           .reported  = at});
+           .reported  = at,
+           .origin    = nonsecure_fp_denied() ? std::optional{security::secure} : std::nullopt});
     case excp_stkof:
       return raise_fault(
           {.kind      = fault_kind::usage,

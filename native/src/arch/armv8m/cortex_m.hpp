@@ -218,6 +218,7 @@ private:
   [[nodiscard]] auto preempts(std::uint32_t number, security state) const -> bool;
   auto               raise(std::uint32_t number, address at) -> trap_result;
   auto               raise_fault(fault_cause const& cause) -> trap_result;
+  [[nodiscard]] auto nonsecure_fp_denied() const -> bool;
   auto create_exception(fault_cause const& cause) -> std::expected<pending_exception, trap_result>;
   auto derived_entry(
       pending_exception  original,

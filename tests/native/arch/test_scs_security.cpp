@@ -639,6 +639,7 @@ TEST_CASE("FPCCR writes reach the engine by the D1.2.100 table, LSPEN forced 0, 
     REQUIRE(run_at(f, secure_code, 2).reason == stop_reason::user);
     CHECK((engine_read(f, UC_ARM_REG_CONTROL_S) & control_fpca) == 0);
     poke(f, sau, sau_allns);
+    poke(f, nsacr, 0x0C00);
     engine_write(f, UC_ARM_REG_SECURE, 0);
     put(f, code_at, {0xee00, 0x2a10, 0xbe01});
     REQUIRE(run_at(f, code_at, 2).reason == stop_reason::user);

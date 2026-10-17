@@ -70,10 +70,12 @@ namespace popcorn::arch::armv8m
  *   the limit, store nothing, and are taken as derived exceptions, the higher of the derived and
  *   the original exception first, the other pended. BFSR.STKERR and the UFSR_S.NOCP of a Non-secure
  *   entry with NSACR.CP10 0 are derived the same way, NOCP after a basic frame with no floating-
- *   point registers. A failed vector fetch takes HFSR.VECTTBL HardFault on the stacked frame,
- *   Secure for a Non-secure slot in Secure memory, else in the state of the exception being
- *   fetched. Lockup, a STKOF of the additional state context alone and a fault while taking the
- *   derived exception still stop. The registers keep their values from before the faulting return.
+ *   point registers. A Non-secure floating-point instruction with NSACR.CP10 0 raises UFSR_S.NOCP,
+ *   UsageFault_S. CPACR does not gate floating-point instructions. A failed vector fetch takes
+ *   HFSR.VECTTBL HardFault on the stacked frame, Secure for a Non-secure slot in Secure memory,
+ *   else in the state of the exception being fetched. Lockup, a STKOF of the additional state
+ *   context alone and a fault while taking the derived exception still stop. The registers keep
+ *   their values from before the faulting return.
  * - The floating-point context is stacked at exception entry, never lazily: FPCCR and FPCAR are
  *   storage. FPDSCR is storage too, the engine builds new floating-point contexts from its own
  *   defaults.
