@@ -84,6 +84,17 @@ consteval auto names_every_role(std::span<named_field<Role> const> table) -> boo
 }
 
 /**
+ * @brief names_every_role() over an array table, so @p Role is deduced.
+ * @param table Name table of one family.
+ */
+template <typename Role, std::size_t N>
+  requires std::is_enum_v<Role>
+consteval auto names_every_role(std::array<named_field<Role>, N> const& table) -> bool
+{
+  return names_every_role<Role>(std::span<named_field<Role> const>{table});
+}
+
+/**
  * @brief Whether a capability flag and the roles it needs agree in @p table: the flag is set
  *        and each of @p roles has a name, or the flag is clear and none of them has one.
  * @param table Name table of one family.
@@ -102,6 +113,22 @@ consteval auto flag_matches_roles(
     return found != table.end() and not found->name.reg.empty();
   };
   return flag ? std::ranges::all_of(roles, named) : std::ranges::none_of(roles, named);
+}
+
+/**
+ * @brief flag_matches_roles() over an array table, so @p Role is deduced.
+ * @param table Name table of one family.
+ * @param flag Capability flag of the family.
+ * @param roles Roles that exist exactly when the flag is set.
+ */
+template <typename Role, std::size_t N>
+  requires std::is_enum_v<Role>
+consteval auto flag_matches_roles(
+    std::array<named_field<Role>, N> const& table,
+    bool                                    flag,
+    std::initializer_list<Role>             roles) -> bool
+{
+  return flag_matches_roles<Role>(std::span<named_field<Role> const>{table}, flag, roles);
 }
 
 /**
