@@ -61,8 +61,9 @@ namespace popcorn::arch::armv8m
  *   Exception entry stacking below the limit of the stack it pushes to, MSPLIM in Handler mode or
  *   Thread mode on MSP, PSPLIM in Thread mode on PSP, stops with a UsageFault STKOF and leaves
  *   the exception pending, where hardware stacks down to the limit and takes the UsageFault.
- * - Lockup, and the INVPC, UNSTKERR, STKERR, STKOF on entry, VECTTBL and INVSTATE faults, stop
- *   the run under every fault policy.
+ * - Lockup and the INVSTATE fault stop the run under every fault policy. Without TrustZone, or
+ *   under fault_policy::stop, the INVPC, UNSTKERR, STKERR, STKOF on entry and VECTTBL faults stop
+ *   it too.
  * - With TrustZone and fault_policy::enter_handler, the integrity faults of an exception return,
  *   SFSR.INVER, SFSR.INVIS, UFSR.INVPC, SFSR.AUVIOL and BFSR.UNSTKERR on the frame, and the
  *   UFSR_S.NOCP of a return to Non-secure with EXC_RETURN.FType 0 and NSACR.CP10 0, are taken as
