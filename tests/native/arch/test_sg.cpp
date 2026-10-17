@@ -629,6 +629,52 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "a FNC_RETURN frame that cannot be read is a BusFault UNSTKERR, or HardFault_S FORCED without "
+    "BUSFAULTENA, raised with the branch, FunctionReturn lines 14-15")
+{
+  constexpr address       unreadable    = 0x6000'0000;
+  constexpr std::uint32_t busfault_ena  = 1u << 17;
+  constexpr std::uint32_t bfsr_unstkerr = 1u << 11;
+  for(auto const policy : {fault_policy::stop, fault_policy::enter_handler})
+  {
+    for(auto const enabled : {true, false})
+    {
+      CAPTURE(policy == fault_policy::stop);
+      CAPTURE(enabled);
+      auto f = booted(policy);
+      open_regions(f);
+      tables(f, armv8m::exc_busfault);
+      tables(f, armv8m::exc_hardfault);
+      if(enabled)
+      {
+        poke(f, shcsr, busfault_ena);
+      }
+      put(f, ns_code, {bx_lr, bkpt});
+      engine_write(f, UC_ARM_REG_MSP_S, unreadable);
+      f.set("lr", fnc_return);
+      auto const stopped = run_from(f, ns_code, false, 4);
+      CHECK((f.word(cfsr) & bfsr_unstkerr) != 0);
+      CHECK(engine_read(f, UC_ARM_REG_MSP_S) == unreadable);
+      if(policy == fault_policy::stop)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+        CHECK_FALSE(secure_now(f));
+        CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(secure_now(f));
+      CHECK(ipsr(f) == (enabled ? armv8m::exc_busfault : armv8m::exc_hardfault));
+      CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
+      CHECK(f.reg("pc") == secure_handler + 2);
+      CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack - 0x20);
+      CHECK(f.reg("lr") == 0xFFFF'FFB9u);
+    }
+  }
+}
+
+TEST_CASE(
     "BLXNS with MSPLIM_S above its frame is a Secure UsageFault STKOF, B3.21 RCCSC, whose entry "
     "takes it with MSP_S at the limit, DerivedLateArrival lines 38-50")
 {

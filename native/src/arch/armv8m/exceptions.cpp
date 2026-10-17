@@ -1188,12 +1188,11 @@ auto cortex_m::function_return() -> trap_result
   };
   if(not context_->services.read_block(sp, std::as_writable_bytes(std::span{words}), unstacking))
   {
-    state_.scs.cfsr |= cfsr::unstkerr;
-    return trap_result::fault(
-        {.kind          = fault_kind::bus,
-         .fault_address = sp,
-         .status        = state_.scs.cfsr,
-         .detail        = state_.scs.hfsr});
+    return raise_fault(
+        {.kind      = fault_kind::bus,
+         .target    = exc_busfault,
+         .cfsr_bits = cfsr::unstkerr,
+         .reported  = sp});
   }
   auto const [target, retpsr] = words;
   auto const exception        = retpsr & ipsr_mask;
