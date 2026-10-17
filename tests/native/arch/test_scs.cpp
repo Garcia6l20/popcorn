@@ -516,6 +516,10 @@ TEST_CASE("instructions_between counts Thumb instructions of 16 and 32 bits")
   CHECK_FALSE(f.module->instructions_between(at + 2, at).has_value());
   CHECK_FALSE(f.module->instructions_between(at, at + 3).has_value());
   CHECK_FALSE(f.module->instructions_between(0xF000'0000, 0xF000'0004).has_value());
+  CHECK(f.module->instructions_between(at, at + 2) == 1u);
+  CHECK(f.module->instructions_between(at, at + 8) == 3u);
+  CHECK(f.module->instructions_between(at, at + 6) == 2u);
+  CHECK(f.module->instructions_between(at, at) == 0u);
 }
 
 TEST_CASE("ends_block_before tells a block-ending instruction from one the block runs past")

@@ -108,7 +108,7 @@ private:
   friend class system_space;
 
   [[nodiscard]] auto halfwords(address from, address to) const
-      -> std::optional<std::vector<std::uint16_t>>;
+      -> std::optional<std::span<std::uint16_t const>>;
 
   /** @brief SAU and IDAU attribution of an address, SecurityCheck() without the exemptions. */
   struct attribution
@@ -274,6 +274,7 @@ private:
   mutable std::exception_ptr                failure_{};
   std::uint64_t                             generation_{};
   mutable std::vector<std::uint64_t>        exits_{};
+  mutable std::vector<std::uint16_t>        halfwords_{};
   bool                                      in_call_{};
   bool                                      trustzone_{};
   system_space                              space_{*this};
