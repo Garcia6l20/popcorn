@@ -1993,6 +1993,7 @@ TEST_CASE(
   tables(f, 16);
   tables(f, armv8m::exc_usagefault);
   poke(f, shcsr, usagefault_ena);
+  poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
   poke(f, shpr1, 0x0080'0000u);
   put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
   put(f, ns_code, {bkpt, 0xe7fe});
@@ -2042,6 +2043,7 @@ TEST_CASE(
     {
       poke(f, shcsr, usagefault_ena);
     }
+    poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
     poke(f, nsacr, nsacr_cp10_cp11);
     put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
     put(f, ns_code, {bkpt, 0xe7fe});
