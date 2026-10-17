@@ -750,14 +750,16 @@ TEST_CASE("every banked and Secure-only register round trips through a TZEN=1 sn
   CHECK(reads() == saved);
 }
 
-TEST_CASE("a TZEN=1 snapshot at a Non-secure probe after BLXNS runs on in a fresh machine")
+TEST_CASE(
+    "a TZEN=1 snapshot at a Non-secure probe after BLXNS runs on in a fresh machine and returns "
+    "through FNC_RETURN to the stacked Secure address")
 {
   auto f = booted();
   poke(f, sau_rn, 0);
   poke(f, sau_rb, code_at);
   poke(f, sau_rl, (code_at + 0x3e0) | 1u);
   poke(f, sau, sau_enable);
-  put(f, code_at, {0xbe01, 0x6801, 0xe840, 0xf200, 0xbe01});
+  put(f, code_at, {0xbe01, 0x6801, 0xe840, 0xf200, 0xbe01, 0x4770});
   poke(f, code_at + 0x100, 0x1234'5678);
   put(f, secure_code, {0x47a4, 0xbe01});
   f.set("r4", code_at);
@@ -783,6 +785,14 @@ TEST_CASE("a TZEN=1 snapshot at a Non-secure probe after BLXNS runs on in a fres
     CHECK(machine->reg("r1") == 0x1234'5678);
   }
   CHECK(fresh.reg("r2") == f.reg("r2"));
+  for(auto* const machine : {&f, &fresh})
+  {
+    auto const stopped = machine->run_to_stop({.max_instructions = icount{3}});
+    CHECK(stopped.reason == stop_reason::user);
+    CHECK(engine_read(*machine, UC_ARM_REG_SECURE) == 1);
+    CHECK(machine->reg("pc") == secure_code + 4);
+  }
+  CHECK(engine_read(fresh, UC_ARM_REG_MSP_S) == engine_read(f, UC_ARM_REG_MSP_S));
 }
 
 TEST_CASE("a TZEN=1 snapshot is refused by a TZEN=0 machine of the same description, key trustzone")

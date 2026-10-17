@@ -244,6 +244,9 @@ struct arch_context
   /** @brief IDAU of the part, `core::machine_options::idau`, valid while the module is
    * attached. */
   std::span<idau_region const> idau{};
+  /** @brief The machine's scratch region, `core::machine_options::scratch`, such as the call
+   * arena. */
+  std::optional<address_range> scratch{};
 };
 
 /**
@@ -472,13 +475,17 @@ public:
    *        registers() and save() bytes, and restores both afterwards.
    * @param frame Call to set up.
    * @throws config_error when the core has no such floating-point convention, privilege or stack
-   *         pointer.
+   *         pointer, or on an Arm core with TrustZone when the entry is in memory of the other
+   *         security state than the core's, or a Non-secure call's scratch region has Secure
+   *         parts.
    */
   virtual void prepare_call(call_frame const& frame) = 0;
 
   /**
    * @brief Refuses a call frame for what prepare_call() checks before touching any state: the
-   *        floating-point convention and the return sentinel. The default refuses nothing.
+   *        floating-point convention and the return sentinel, and on an Arm core with TrustZone
+   *        in thread mode the security state of the entry and of a Non-secure call's scratch
+   *        region. The default refuses nothing.
    * @param frame Call to check.
    * @throws config_error when prepare_call() would refuse the frame for those.
    */
@@ -543,7 +550,8 @@ public:
   /**
    * @brief Engine exception that completes a return_to_caller() whose return address is an
    *        exception return, which the engine takes only from a branch instruction and never
-   *        from a pc write: on Arm, a 0xFF-prefixed value in handler mode, valid or not. The
+   *        from a pc write: on Arm, a 0xFF-prefixed value in handler mode, valid or not, and
+   *        with TrustZone a FNC_RETURN value, 0xFEFFFFFE or 0xFEFFFFFF, in either mode. The
    *        machine calls it right after return_to_caller() and handles the result as if the
    *        engine had raised it, through on_interrupt(), so the handler's exception is left, or
    *        an invalid value faults, as a return in its body would.

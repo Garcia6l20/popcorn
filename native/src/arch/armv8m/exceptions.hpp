@@ -116,6 +116,10 @@ struct fault_cause
   std::optional<address> data_address{};
   /** @brief Whether the fault is synchronous: it escalates when it cannot preempt. */
   bool synchronous{true};
+  /** @brief State the fault is raised from, which picks the bank of a banked fault and of its
+   * HardFault escalation, the current state when empty. Secure for the integrity faults the
+   * ARMv8-M ARM raises with `CreateException(..., TRUE, TRUE)`. */
+  std::optional<security> origin{};
 };
 
 /** @brief HFSR.FORCED, a configurable fault or SVC escalated to HardFault. */

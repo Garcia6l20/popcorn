@@ -1644,7 +1644,9 @@ class Machine:
                 unbegun, `began` False, its stop in the result. Thread mode is IPSR 0: a return
                 to thread mode with other exceptions still active counts, and so does a thread
                 put to sleep on exit, SCR.SLEEPONEXIT. A ConfigError for a stack that does not
-                fit can come after the wait ran, the ABI and sentinel are checked before.
+                fit can come after the wait ran, the ABI and sentinel are checked before. So
+                can one for the security state of a TrustZone core, checked before only when
+                the core is in thread mode.
                 Cancelling the task during the wait parks the machine where the wait reached,
                 no call begun. False calls at once wherever the core is. None calls at once and
                 warns with `HandlerCallWarning` when a handler is active.
@@ -1663,6 +1665,10 @@ class Machine:
             MachineBusy: A run, step, wait or call is active.
             ModelError: A model failed during the call, or the call touched an unmodelled
                 register under strict_peripherals.
+            ConfigError: On a TrustZone core, the function is in memory of the other security
+                state than the core's current one, key `entry`, or a Non-secure call's arena
+                has Secure parts, key `arena`. A call never switches state. A Secure call may
+                use a Non-secure arena, and returns to its sentinel in either state.
 
         Warns:
             HandlerCallWarning: `from_thread` is None and the call began with a handler active.

@@ -28,6 +28,7 @@ constexpr std::uint32_t excp_swi            = 2;
 constexpr std::uint32_t excp_bkpt           = 7;
 constexpr std::uint32_t excp_exception_exit = 8;
 constexpr std::uint32_t reset_lr            = 0xffff'ffff;
+constexpr std::uint32_t fnc_return          = 0xfeff'ffff;
 constexpr std::uint32_t xpsr_thumb          = 0x0100'0000;
 constexpr std::uint32_t ccr_reset           = 0x0000'0201;
 constexpr std::uint32_t fpccr_reset         = 0xc000'0000;
@@ -420,7 +421,12 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
 
 auto cortex_m::return_interrupt() const -> std::optional<std::uint32_t>
 {
-  if(thread_mode() or (read(UC_ARM_REG_PC) & 0xff00'0000u) != 0xff00'0000u)
+  auto const value = read(UC_ARM_REG_PC);
+  if(trustzone() and (value | 1u) == fnc_return)
+  {
+    return excp_exception_exit;
+  }
+  if(thread_mode() or (value & 0xff00'0000u) != 0xff00'0000u)
   {
     return std::nullopt;
   }

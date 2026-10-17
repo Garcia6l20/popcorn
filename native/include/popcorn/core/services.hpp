@@ -74,6 +74,22 @@ struct block_error
 };
 
 /**
+ * @brief What the machine decided at an instruction the arch module emulates,
+ *        machine_services::emulated_instruction(). `proceed`: counted, probed and covered, the
+ *        module applies the instruction. `returned`: an intercept returned to the caller
+ *        through arch::return_to_caller(), the module skips the instruction and completes
+ *        arch::return_interrupt() itself, nothing counted. `stopped`: the run ends before the
+ *        instruction, at a slice boundary or an intercept stop, the module leaves the core at
+ *        it and resumes, then the trap hook ends the engine run, nothing counted.
+ */
+enum class emulated_arrival : std::uint8_t
+{
+  proceed,
+  returned,
+  stopped,
+};
+
+/**
  * @brief What the machine offers the arch module and every peripheral model beyond the clock and
  *        their event port: deferred stop, reset and slice end, guest bus access and the trace
  *        ring. Implemented by the machine, and by fakes in tests. Callers reach it through
@@ -81,11 +97,11 @@ struct block_error
  *
  * The public functions check their contracts and forward to the private virtual ones, which an
  * implementation overrides: a virtual function cannot carry a contract. Every request but
- * watch_reads() is deferred: it only records, the next block hook ends the slice at an
- * instruction boundary, and nothing calls `uc_emu_stop` from the caller's callback, so every
- * function is safe from MMIO, memory, instruction and interrupt hooks. watch_reads() takes
- * effect at once and is safe from the same callbacks. Neither copyable nor movable, contexts
- * hold references to it.
+ * watch_reads() and emulated_instruction() is deferred: it only records, the next block hook
+ * ends the slice at an instruction boundary, and nothing calls `uc_emu_stop` from the caller's
+ * callback, so every function is safe from MMIO, memory, instruction and interrupt hooks.
+ * watch_reads() takes effect at once and is safe from the same callbacks. Neither copyable nor
+ * movable, contexts hold references to it.
  */
 class POPCORN_API machine_services
 {
@@ -343,6 +359,21 @@ public:
     do_log(std::move(record));
   }
 
+  /**
+   * @brief From the arch module's trap callback, for an instruction it emulates with no engine
+   *        block, such as the Arm SG of a Non-secure call: first ends the run there when the
+   *        block hook would end it before an instruction, then runs the probes, intercepts and
+   *        return hooks of @p at as the engine code hook would, then counts one instruction and
+   *        its coverage. Not deferred. Call it once per arrival, with the pc at @p at.
+   * @param at Address of the instruction.
+   * @return What the module does with the instruction. The default counts nothing and
+   *         proceeds.
+   */
+  auto emulated_instruction(address at) -> emulated_arrival
+  {
+    return do_emulated_instruction(at);
+  }
+
 private:
   virtual void do_request_stop(stop_reason reason, std::string detail) = 0;
   virtual void do_request_reset(reset_kind kind)                       = 0;
@@ -361,5 +392,6 @@ private:
   virtual void do_watch_reads(address at, std::uint32_t size, bool on);
   virtual void do_install_firewall(periph::bus_firewall& firewall);
   virtual void do_memory_policy_changed();
+  virtual auto do_emulated_instruction(address at) -> emulated_arrival;
 };
 }

@@ -497,25 +497,32 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
   auto& run                 = *static_cast<run_state*>(user);
   run.coverage.has_previous = false;
   run.spin.previous         = {};
-  auto const failed         = run.return_watch != 0 and run.guarded([&run, intno] {
+  if(run.call
+     and run.guarded([&run] { return run.owner.arch_->pc() == run.call->frame.return_sentinel; }))
+  {
+    uc_emu_stop(engine);
+    return;
+  }
+  auto const failed = run.return_watch != 0 and run.guarded([&run, intno] {
     if(run.arch->interrupt_returns(intno, run.return_watch))
     {
       run.on_exception_return(intno);
     }
     return false;
   });
-  auto const target         = run.until_return;
-  auto       met            = false;
-  auto const stops          = run.guarded([&] {
+  auto const target = run.until_return;
+  auto       met    = false;
+  auto const stops  = run.guarded([&] {
     met = target
       and run.arch->interrupt_returns(intno, target->ret)
       and run.stack_pointer() == target->sp;
-    auto const result = run.owner.arch_->on_interrupt(intno);
-    run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
+    auto const result  = run.owner.arch_->on_interrupt(intno);
+    auto const arrived = std::exchange(run.arrival_stopped, false);
+    run.deadline       = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
     {
       run.spin.leave();
-      if(failed)
+      if(failed or arrived)
       {
         return true;
       }
@@ -1195,6 +1202,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       spin.previous         = {};
     }
     boundary_stop      = false;
+    arrival_stopped    = false;
     auto const leaving = leaving_until(request);
     if(leaving)
     {

@@ -109,6 +109,17 @@ private:
   [[nodiscard]] auto halfwords(address from, address to) const
       -> std::optional<std::vector<std::uint16_t>>;
 
+  /** @brief SAU and IDAU attribution of an address, SecurityCheck() without the exemptions. */
+  struct attribution
+  {
+    /** @brief Non-secure. */
+    bool ns{};
+    /** @brief Secure and Non-secure callable. */
+    bool nsc{};
+    /** @brief Exempt by the IDAU: an access there takes the security of its requester. */
+    bool exempt{};
+  };
+
   struct window_user
   {
     cortex_m* self{};
@@ -215,9 +226,13 @@ private:
       std::uint32_t stacked_ipsr,
       address       resume_at,
       std::uint32_t scr) -> trap_result;
+  auto               function_return() -> trap_result;
+  auto               secure_entry(address at) -> trap_result;
   auto               security_fault(std::uint32_t bits, address at) -> trap_result;
   auto               attribution_fault(address at) -> trap_result;
   void               clear_caller_registers(uc_struct* engine, bool callee) const;
+  [[nodiscard]] auto attribution_of(address at) const noexcept -> attribution;
+  void               check_call_state(call_frame const& frame) const;
   [[nodiscard]] auto nonsecure_address(address at) const noexcept -> bool;
   [[nodiscard]] auto secure_fp_context() const noexcept -> bool;
   [[nodiscard]] auto first_secure_word(address from, address to) const noexcept

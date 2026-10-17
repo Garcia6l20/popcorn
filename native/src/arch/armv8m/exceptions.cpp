@@ -30,6 +30,7 @@ constexpr std::uint32_t control_sfpa         = 1u << 3;
 constexpr std::uint32_t ipsr_mask            = 0x1ffu;
 constexpr int           restricted_nonsecure = 0x80;
 constexpr std::uint32_t xpsr_thumb           = 1u << 24;
+constexpr std::uint32_t fnc_return           = 0xFEFF'FFFFu;
 
 constexpr std::array<int, 8> frame_ids{UC_ARM_REG_R0, UC_ARM_REG_R1,  UC_ARM_REG_R2,
                                        UC_ARM_REG_R3, UC_ARM_REG_R12, UC_ARM_REG_LR,
@@ -848,9 +849,13 @@ auto cortex_m::exception_return() -> trap_result
   auto* const engine   = engine_handle();
   auto&       services = context_->services;
   auto const  value    = read(UC_ARM_REG_PC) | (read(UC_ARM_REG_XPSR) & xpsr_thumb) >> 24;
-  auto const  number   = read(UC_ARM_REG_IPSR) & ipsr_mask;
-  auto const  current  = read_security(engine);
-  auto const  invalid  = [&](security bank) {
+  if((value | 1u) == fnc_return)
+  {
+    return function_return();
+  }
+  auto const number  = read(UC_ARM_REG_IPSR) & ipsr_mask;
+  auto const current = read_security(engine);
+  auto const invalid = [&](security bank) {
     auto& cfsr = bank == security::nonsecure ? state_.scs.nonsecure.cfsr : state_.scs.cfsr;
     cfsr |= cfsr::invpc;
     return trap_result::fault(
@@ -993,6 +998,60 @@ auto cortex_m::exception_return() -> trap_result
   return returned(
       number, stacked_ipsr, frame[6] & ~1u,
       back == security::nonsecure ? state_.scs.nonsecure.scr : state_.scs.scr);
+}
+
+auto cortex_m::function_return() -> trap_result
+{
+  auto* const engine  = engine_handle();
+  auto const  number  = read(UC_ARM_REG_IPSR) & ipsr_mask;
+  auto const  bank    = read_bank(engine, security::secure);
+  auto const  process = number == 0 and (bank.control & control_spsel) != 0;
+  auto const  sp      = process ? bank.psp : bank.msp;
+  auto const  invalid = [&] {
+    return raise_fault(
+        {.kind      = fault_kind::usage,
+         .target    = exc_usagefault,
+         .cfsr_bits = cfsr::invpc,
+         .reported  = pc(),
+         .origin    = security::secure});
+  };
+  if(sp % 8 != 0)
+  {
+    return invalid();
+  }
+  std::array<std::uint32_t, 2> words{};
+  auto const                   unstacking = bus_attrs{
+      .by         = initiator::cpu,
+      .secure     = true,
+      .privileged = number != 0 or (bank.control & control_npriv) == 0,
+  };
+  if(not context_->services.read_block(sp, std::as_writable_bytes(std::span{words}), unstacking))
+  {
+    state_.scs.cfsr |= cfsr::unstkerr;
+    return trap_result::fault(
+        {.kind          = fault_kind::bus,
+         .fault_address = sp,
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
+  }
+  auto const [target, retpsr] = words;
+  auto const exception        = retpsr & ipsr_mask;
+  if(not((number == 0 and exception == 0) or (number == 1 and exception != 0)))
+  {
+    return invalid();
+  }
+  if(read_security(engine) != security::secure)
+  {
+    write_security(engine, security::secure);
+  }
+  write(process ? UC_ARM_REG_PSP_S : UC_ARM_REG_MSP_S, sp + 8);
+  write(UC_ARM_REG_IPSR, exception);
+  write(
+      UC_ARM_REG_CONTROL_S, (read(UC_ARM_REG_CONTROL_S) & ~control_sfpa)
+                                | ((retpsr & stacked_sfpa_bit) != 0 ? control_sfpa : 0u));
+  write(UC_ARM_REG_EPSR, (target & 1u) << 24);
+  write(UC_ARM_REG_PC, target);
+  return trap_result::resume();
 }
 
 auto cortex_m::secure_fp_context() const noexcept -> bool

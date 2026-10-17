@@ -671,6 +671,61 @@ TEST_CASE("RM0456 5.4.2: CPU accesses to a Secure and privileged TIM2 from each 
   CHECK(r.peek("GTZC1_TZIC", "SR1") == 0);
 }
 
+auto nonsecure_load(rig const& r, address at, bool sau_over) -> popcorn::stop
+{
+  constexpr address code    = 0x2000'2000;
+  constexpr address sau_rnr = 0xe000'edd8;
+  auto const        region  = [&r](std::uint32_t number, address base, address limit) {
+    REQUIRE(r.target->mem().write(sau_rnr, 4, number));
+    REQUIRE(r.target->mem().write(sau_rnr + 4, 4, base));
+    REQUIRE(r.target->mem().write(sau_rnr + 8, 4, (limit & ~0x1fu) | 1u));
+  };
+  block_bits(r, code, false, true);
+  region(0, code, code + 0x1e0);
+  if(sau_over)
+  {
+    region(1, at & ~0x1fu, at & ~0x1fu);
+  }
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, 1));
+  REQUIRE(r.target->mem().write(code, 2, ldr_r2_r0));
+  REQUIRE(r.target->mem().write(code + 2, 2, bkpt));
+  engine_secure(r, false);
+  set(r, "r0", at);
+  set(r, "r2", 0xdead'beef);
+  set(r, "pc", code | 1u);
+  auto const result = r.target->run_slice({.max_instructions = icount{2}});
+  REQUIRE(result.stopped.has_value());
+  return *result.stopped;
+}
+
+TEST_CASE(
+    "the U5 IDAU makes 0xE0000000-0xFFFFFFFF Non-secure and exempts the external PPB, RM0456 "
+    "Figures 3 to 6 and B10.4 RMVCM")
+{
+  constexpr address dbgmcu_idcode = 0xe004'4000;
+  constexpr address past_ppb      = 0xe010'0000;
+  {
+    rig const  r{true};
+    auto const id = r.target->mem().read(dbgmcu_idcode, 4);
+    REQUIRE(id.has_value());
+    auto const exempt = nonsecure_load(r, dbgmcu_idcode, false);
+    CHECK(exempt.reason == popcorn::stop_reason::user);
+    CHECK(get(r, "r2") == *id);
+  }
+  {
+    rig const  r{true};
+    auto const opened = nonsecure_load(r, past_ppb, true);
+    REQUIRE(opened.reason == popcorn::stop_reason::fault);
+    CHECK(opened.fault->kind == popcorn::fault_kind::bus);
+  }
+  {
+    rig const  r{true};
+    auto const closed = nonsecure_load(r, past_ppb, false);
+    REQUIRE(closed.reason == popcorn::stop_reason::fault);
+    CHECK(closed.fault->kind == popcorn::fault_kind::secure);
+  }
+}
+
 TEST_CASE("every peripheral with a Secure alias has a SEC rule, except the TrustZone-aware ones")
 {
   std::set<std::size_t> ruled;

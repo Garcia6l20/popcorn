@@ -22,4 +22,9 @@ void machine_services::do_install_firewall(periph::bus_firewall&)
 
 void machine_services::do_memory_policy_changed()
 {}
+
+auto machine_services::do_emulated_instruction(address) -> emulated_arrival
+{
+  return emulated_arrival::proceed;
+}
 }

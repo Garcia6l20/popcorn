@@ -23,6 +23,8 @@ constexpr std::uint32_t epsr_thumb          = 1u << 24;
 constexpr std::uint32_t fsr_status_mask     = 0x40f;
 constexpr std::uint32_t fsr_alignment       = 0x1;
 constexpr std::uint32_t fsr_external        = 0x8;
+constexpr std::uint32_t fsr_secure          = UC_ARM_FAULT_SECURE;
+constexpr std::uint32_t fsr_nsc_exec        = UC_ARM_FAULT_NSC_EXEC;
 
 auto enable_bit(std::uint32_t target) noexcept -> std::uint32_t
 {
@@ -34,7 +36,8 @@ auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
 {
   auto&      scs    = state_.scs;
   auto const config = priority_config();
-  auto const state  = exception_target(state_.exceptions, config, cause.target, current_security());
+  auto const state  = exception_target(
+      state_.exceptions, config, cause.target, cause.origin.value_or(current_security()));
   auto const nonsecure = state == security::nonsecure and banked(cause.target);
   auto&      cfsr      = cause.target == exc_securefault ? scs.sfsr
                        : nonsecure                       ? scs.nonsecure.cfsr
@@ -150,7 +153,21 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
   switch(intno)
   {
     case excp_prefetch_abort:
-      if((read(UC_ARM_REG_FAULT_STATUS) & fsr_status_mask) == fsr_external)
+    {
+      auto const status = read(UC_ARM_REG_FAULT_STATUS) & fsr_status_mask;
+      if(status == fsr_nsc_exec)
+      {
+        return secure_entry(at);
+      }
+      if(status == fsr_secure)
+      {
+        return raise_fault(
+            {.kind      = fault_kind::secure,
+             .target    = exc_securefault,
+             .cfsr_bits = current_security() == security::secure ? sfsr::invtran : sfsr::invep,
+             .reported  = at});
+      }
+      if(status == fsr_external)
       {
         return raise_fault(
             {.kind      = fault_kind::bus,
@@ -163,9 +180,11 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
            .target    = exc_memmanage,
            .cfsr_bits = cfsr::iaccviol,
            .reported  = at});
+    }
     case excp_data_abort:
     {
-      if((read(UC_ARM_REG_FAULT_STATUS) & fsr_status_mask) == fsr_alignment)
+      auto const status = read(UC_ARM_REG_FAULT_STATUS) & fsr_status_mask;
+      if(status == fsr_alignment)
       {
         return raise_fault(
             {.kind      = fault_kind::usage,
@@ -174,6 +193,15 @@ auto cortex_m::on_unmapped(address addr, memory_op op) -> trap_result
              .reported  = at});
       }
       auto const accessed = read(UC_ARM_REG_FAULT_ADDRESS);
+      if(status == fsr_secure)
+      {
+        return raise_fault(
+            {.kind         = fault_kind::secure,
+             .target       = exc_securefault,
+             .cfsr_bits    = sfsr::auviol,
+             .reported     = accessed,
+             .data_address = accessed});
+      }
       return raise_fault(
           {.kind         = fault_kind::bus,
            .target       = exc_busfault,

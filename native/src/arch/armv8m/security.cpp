@@ -45,6 +45,9 @@ constexpr std::uint32_t nsacr_cp10      = 1u << 10;
 constexpr std::uint32_t nsacr_cp11      = 1u << 11;
 constexpr std::uint32_t cpacr_cp10      = 0x0030'0000;
 constexpr std::uint32_t cpacr_cp11      = 0x00c0'0000;
+constexpr std::uint32_t sg_halfword     = 0xe97f;
+constexpr std::uint32_t xpsr_thumb      = 1u << 24;
+constexpr std::uint32_t control_sfpa    = 1u << 3;
 
 auto nonsecure_ready(scs_state const& scs) noexcept -> std::uint32_t
 {
@@ -86,23 +89,10 @@ void cortex_m::idau_lookup(
   *nsc             = found->nsc;
 }
 
-auto cortex_m::nonsecure_address(address at) const noexcept -> bool
+auto cortex_m::attribution_of(address at) const noexcept -> attribution
 {
-  auto const exempt = [](address a) {
-    return (a >= 0xE000'0000 and a <= 0xE000'3FFF)
-        or (a >= 0xE000'5000 and a <= 0xE000'5FFF)
-        or (a >= 0xE000'E000 and a <= 0xE000'EFFF)
-        or (a >= 0xE002'E000 and a <= 0xE002'EFFF)
-        or (a >= 0xE004'0000 and a <= 0xE004'1FFF)
-        or (a >= 0xE00F'F000 and a <= 0xE00F'FFFF);
-  };
-  if(exempt(at))
-  {
-    return true;
-  }
   auto const& scs = state_.scs;
-  auto        ns  = false;
-  auto        nsc = false;
+  attribution sau{};
   if((scs.sau_ctrl & 1u) != 0)
   {
     auto hits = 0;
@@ -114,30 +104,81 @@ auto cortex_m::nonsecure_address(address at) const noexcept -> bool
          and at <= ((limit & ~0x1fu) | 0x1fu)
          and ++hits == 1)
       {
-        nsc = (limit & 2u) != 0;
-        ns  = not nsc;
+        sau.nsc = (limit & 2u) != 0;
+        sau.ns  = not sau.nsc;
       }
     }
     if(hits > 1)
     {
-      ns  = false;
-      nsc = false;
+      sau = {};
     }
   }
   else
   {
-    ns = (scs.sau_ctrl & 2u) != 0;
+    sau.ns = (scs.sau_ctrl & 2u) != 0;
   }
   auto const& ranges   = context_->idau;
   auto const  after    = std::ranges::upper_bound(ranges, at, {}, &idau_region::start);
   auto const  found    = after != ranges.begin() and at < std::prev(after)->end;
   auto const  idau_ns  = found and not std::prev(after)->nsc;
   auto const  idau_nsc = found and std::prev(after)->nsc;
-  if(not idau_ns and (ns or (not idau_nsc and nsc)))
+  if(found and std::prev(after)->exempt)
   {
-    ns = false;
+    return {.ns = false, .nsc = false, .exempt = true};
   }
-  return ns;
+  if(not idau_ns and (sau.ns or (not idau_nsc and sau.nsc)))
+  {
+    return {.ns = false, .nsc = idau_nsc, .exempt = false};
+  }
+  return sau;
+}
+
+auto cortex_m::nonsecure_address(address at) const noexcept -> bool
+{
+  auto const exempt = [](address a) {
+    return (a >= 0xE000'0000 and a <= 0xE000'2FFF)
+        or (a >= 0xE000'E000 and a <= 0xE000'EFFF)
+        or (a >= 0xE002'E000 and a <= 0xE002'EFFF)
+        or (a >= 0xE004'0000 and a <= 0xE004'1FFF)
+        or (a >= 0xE00F'F000 and a <= 0xE00F'FFFF);
+  };
+  auto const attributed = attribution_of(at);
+  return exempt(at) or attributed.exempt or attributed.ns;
+}
+
+auto cortex_m::secure_entry(address at) -> trap_result
+{
+  auto const thumb = (read(UC_ARM_REG_XPSR) & xpsr_thumb) != 0;
+  if(not thumb
+     or halfword(at) != sg_halfword
+     or halfword(at + 2) != sg_halfword
+     or not attribution_of(at + 2).nsc)
+  {
+    return raise_fault(
+        {.kind      = fault_kind::secure,
+         .target    = exc_securefault,
+         .cfsr_bits = sfsr::invep,
+         .reported  = at});
+  }
+  switch(context_->services.emulated_instruction(at))
+  {
+    case core::emulated_arrival::stopped:
+      return trap_result::resume();
+    case core::emulated_arrival::returned:
+      if(auto const exit = return_interrupt())
+      {
+        return on_interrupt(*exit);
+      }
+      return trap_result::resume();
+    case core::emulated_arrival::proceed:
+      break;
+  }
+  write(UC_ARM_REG_LR, read(UC_ARM_REG_LR) & ~1u);
+  write(UC_ARM_REG_CONTROL_S, read(UC_ARM_REG_CONTROL_S) & ~control_sfpa);
+  write_security(engine_handle(), security::secure);
+  write(UC_ARM_REG_EPSR, xpsr_thumb);
+  write(UC_ARM_REG_PC, (at + 4) | 1u);
+  return trap_result::resume();
 }
 
 auto cortex_m::first_secure_word(address from, address to) const noexcept -> std::optional<address>

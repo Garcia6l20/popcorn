@@ -960,6 +960,9 @@ struct machine::run_state
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
+  /** @brief Whether arrive_emulated() in the running trap ended the run before the emulated
+   * instruction, so on_interrupt stops the engine once the arch resumes. */
+  bool arrival_stopped = false;
   /** @brief slice_request::until_thread of the running slice: an exception return to thread
    * mode ends the engine run. Cleared with the slice. */
   bool until_thread = false;
@@ -1296,6 +1299,28 @@ struct machine::run_state
    * @throws emulation_error when the engine refuses the hook.
    */
   auto site_at(address at) -> code_site&;
+
+  /** @brief How a visit of a code site ended: on to the instruction, returned by an intercept,
+   * or stopped by one. */
+  enum class site_visit : std::uint8_t
+  {
+    proceed,
+    returned,
+    stopped,
+  };
+
+  /**
+   * @brief Runs the probes, intercepts and return hooks of @p site, arrived at @p addr, as its
+   *        code hook does. An intercept return calls arch::return_to_caller() and leaves
+   *        arch::return_interrupt() to the caller. A stop records the trap and the resume point.
+   * @param site Site of @p addr.
+   * @param addr Address reached.
+   * @param in_block Whether a counted block holds @p addr, so a return closes its coverage.
+   */
+  auto visit_site(code_site& site, address addr, bool in_block) -> site_visit;
+
+  /** @brief machine_services::emulated_instruction() during a run. */
+  auto arrive_emulated(address at) -> emulated_arrival;
 
   /** @brief Whether the stepping hook ends the engine run before the instruction it sees at
    * instruction count @p now. */

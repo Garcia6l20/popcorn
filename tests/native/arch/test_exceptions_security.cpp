@@ -927,7 +927,7 @@ void put_clobber(arch_fixture const& f, address at)
     auto const insn = vmov_s_r0(n);
     put(f, at + 4 * static_cast<address>(n), {insn[0], insn[1]});
   }
-  put(f, at + 0x80, {bkpt});
+  put(f, at + 0x80, {bkpt, bx_lr});
 }
 
 constexpr std::uint16_t vmov_s0_r2  = 0xee00;
@@ -1010,7 +1010,7 @@ TEST_CASE(
 
 TEST_CASE(
     "VLSTM before a BLXNS saves S0-S15 and FPSCR, S16-S31 with FPCCR_S.TS, and clears them, "
-    "C2.4.368 and B3.19")
+    "VLLDM after FNC_RETURN restores them, C2.4.368, C2.4.367 and B3.19")
 {
   for(auto const ts : {false, true})
   {
@@ -1054,12 +1054,20 @@ TEST_CASE(
       CAPTURE(n);
       CHECK(saved_area[static_cast<std::size_t>(0x12 + n)] == (ts ? pattern(16 + n) : fill));
     }
+    REQUIRE(resume(f, 6).reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(f.reg("pc") == secure_code + 20);
+    for(int n = 0; n < 32; ++n)
+    {
+      CAPTURE(n);
+      CHECK(f.reg(std::format("s{}", n)) == (n < 16 or ts ? pattern(n) : 0xDEAD'0000u));
+    }
   }
 }
 
 TEST_CASE(
-    "a hard-float cmse_nonsecure_call saves d8-d15 with VPUSH on the Secure stack only, "
-    "B3.19 and C2.4.368")
+    "a hard-float cmse_nonsecure_call saves d8-d15 with VPUSH on the Secure stack only and "
+    "restores them with VPOP after FNC_RETURN, B3.19 and C2.4.368")
 {
   auto f = booted(fault_policy::enter_handler, "cmse");
   open_nonsecure_region(f);
@@ -1086,6 +1094,14 @@ TEST_CASE(
   auto const ns_words = popcorn::testing::words_at(*f.target, ns_stack - 0x100, 0x40);
   CHECK(std::ranges::all_of(ns_words, [](std::uint32_t word) { return word == fill; }));
   CHECK(f.reg("s16") == f.reg("r0"));
+  REQUIRE(resume(f, 40).reason == stop_reason::user);
+  CHECK(secure_now(f));
+  CHECK(f.reg("pc") == (popcorn::testing::sym("cmse", "cmse_call") & ~1u) + 0x58);
+  for(int n = 16; n < 32; ++n)
+  {
+    CAPTURE(n);
+    CHECK(f.reg(std::format("s{}", n)) == pattern(n));
+  }
 }
 
 TEST_CASE(

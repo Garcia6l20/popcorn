@@ -438,7 +438,8 @@ public:
    * @brief Begins a guest function call: saves the engine registers of `arch::arch::registers()`
    *        and the `arch::arch::save()` bytes, then `arch::arch::prepare_call()`. The slices that
    *        follow run the call. Reaching `frame.return_sentinel` stops with
-   *        stop_reason::returned.
+   *        stop_reason::returned, also when the engine faults the fetch there, as a security
+   *        lookup does for a sentinel of the other security state.
    * @param frame Call to make, its entry and sentinel set.
    * @throws machine_busy when a call is already in progress, or the core is held, see
    *         hold_core().
@@ -773,6 +774,7 @@ private:
   void do_watch_reads(address at, std::uint32_t size, bool on) override;
   void do_install_firewall(periph::bus_firewall& firewall) override;
   void do_memory_policy_changed() override;
+  auto do_emulated_instruction(address at) -> emulated_arrival override;
 
   friend class memory_view;
   friend class register_view;

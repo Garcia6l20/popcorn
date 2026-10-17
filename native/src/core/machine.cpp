@@ -122,7 +122,7 @@ machine::machine(part_description description, arch::arch_factory factory, machi
   {
     arch_->attach(run_->arch_context.emplace(
         engine_.get(), description_, clock_, arch_events_, static_cast<machine_services&>(*this),
-        options_.faults, options_.trustzone, options_.idau));
+        options_.faults, options_.trustzone, options_.idau, options_.scratch));
     run_->attach_peripherals();
     run_->map_peripherals();
     run_->install_hooks();
@@ -355,6 +355,11 @@ void machine::do_end_after_instruction()
   {
     run_->request_precise_exit();
   }
+}
+
+auto machine::do_emulated_instruction(address at) -> emulated_arrival
+{
+  return run_->in_engine ? run_->arrive_emulated(at) : emulated_arrival::proceed;
 }
 
 void machine::do_trace(trace_record const& record)
