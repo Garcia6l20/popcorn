@@ -405,6 +405,13 @@ constexpr std::array<named_field<three>, 3> lacking_extra{
      {three::extra, {}},
      }
 };
+constexpr std::array<named_field<three>, 3> optional_present{
+    {
+     {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
+     {three::sws, {.reg = "RCC_CFGR1", .field = "SWS"}},
+     {three::extra, {.reg = "RCC_CR", .field = "HSION", .optional = true}},
+     }
+};
 constexpr std::array<named_field<three>, 3> required_absent{
     {
      {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
@@ -427,7 +434,9 @@ static_assert(not flag_matches_roles<three>(complete, false, {three::extra}));
 static_assert(not flag_matches_roles<three>(lacking_extra, true, {three::hsion, three::extra}));
 }
 
-TEST_CASE("a field table resolves required names, leaves absent optional and unnamed roles empty")
+TEST_CASE(
+    "a field table resolves required and present optional names, leaves absent optional and "
+    "unnamed roles empty")
 {
   bench       b;
   probe_model model{b.ctx, b.rcc, "RCC_CR", "HSION"};
@@ -442,6 +451,9 @@ TEST_CASE("a field table resolves required names, leaves absent optional and unn
   CHECK(same(*fields.find(three::sws), sws.bits));
   CHECK_FALSE(fields.find(three::extra).has_value());
   CHECK_FALSE(model.table<three>(lacking_extra).find(three::extra).has_value());
+  auto const present = model.table<three>(optional_present).find(three::extra);
+  REQUIRE(present.has_value());
+  CHECK(same(*present, model.bits));
   try
   {
     std::ignore = model.table<three>(required_absent);
