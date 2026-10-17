@@ -886,6 +886,7 @@ constexpr std::uint32_t cfsr_ibuserr = 1u << 8;
 constexpr std::uint32_t hfsr_forced  = 1u << 30;
 constexpr std::uint16_t adds_r3_1    = 0x3301;
 constexpr std::uint16_t nop          = 0xbf00;
+constexpr std::uint16_t bx_lr        = 0x4770;
 
 auto sram_flag(rig const& r) -> bool
 {
@@ -1341,5 +1342,136 @@ TEST_CASE("MPCWM4: BKPSRAM is Secure and privileged outside its enabled sub-regi
   r.write("GTZC1_TZSC", config, bit("GTZC1_TZSC", config, "SREN"), secure_priv);
   CHECK(r.peek("GTZC1_TZSC", config) == 0);
   CHECK(ns_read(backup_ns + 0x20) == 0u);
+}
+
+constexpr address       shcsr          = 0xe000'ed24;
+constexpr address       shpr1          = 0xe000'ed18;
+constexpr address       nonsecure_cfsr = 0xe002'ed28;
+constexpr address       iser0          = 0xe000'e100;
+constexpr address       ispr0          = 0xe000'e200;
+constexpr address       ipr0           = 0xe000'e400;
+constexpr std::uint32_t busfault_ena   = 1u << 17;
+constexpr std::uint32_t sau_enable     = 1;
+
+auto nonsecure_blocks(rig const& r) -> void
+{
+  REQUIRE(r.target->mem().write(sau_rnr, 4, 0));
+  REQUIRE(r.target->mem().write(sau_rbar, 4, block_1));
+  REQUIRE(r.target->mem().write(sau_rlar, 4, (block_3 + block_512 - 32) | 1u));
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, sau_enable));
+  block_bits(r, block_2, false, true);
+  std::uint32_t stack = block_2 + 0x1f0;
+  REQUIRE(
+      uc_reg_write(core::machine_internals::engine(*r.target), UC_ARM_REG_MSP_NS, &stack)
+      == UC_ERR_OK);
+}
+
+auto secure_vectors(rig const& r, std::initializer_list<std::uint32_t> numbers) -> void
+{
+  put_code(r, handler_at, {bkpt});
+  REQUIRE(r.target->mem().write(vectors_at, 4, stack_top));
+  for(auto const number : numbers)
+  {
+    REQUIRE(r.target->mem().write(vectors_at + 4 * number, 4, handler_at | 1u));
+  }
+  REQUIRE(r.target->mem().write(vtor, 4, vectors_at));
+  set(r, "msp", stack_top);
+}
+
+auto nonsecure_fetch_fault(address code, address entry, bool enabled) -> void
+{
+  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  nonsecure_blocks(r);
+  secure_vectors(r, {3, 5});
+  if(code == block_2)
+  {
+    block_bits(r, block_3, true, true);
+    put_code(r, block_2 + block_512 - 4, {adds_r3_1, adds_r3_1});
+  }
+  else
+  {
+    put_code(r, code, {nop, bkpt});
+  }
+  if(enabled)
+  {
+    REQUIRE(r.target->mem().write(shcsr, 4, busfault_ena));
+  }
+  engine_secure(r, false);
+  auto const run = run_from(r, entry, icount{8}, icount{8});
+  CHECK(run.stopped.reason == popcorn::stop_reason::user);
+  CHECK(get(r, "pc") == handler_at + 2);
+  CHECK((get(r, "xpsr") & 0x1ff) == (enabled ? 5u : 3u));
+  CHECK((word(r, hfsr) & hfsr_forced) == (enabled ? 0u : hfsr_forced));
+  CHECK((word(r, cfsr) & cfsr_ibuserr) != 0);
+  CHECK((word(r, nonsecure_cfsr) & cfsr_ibuserr) == 0);
+}
+
+TEST_CASE(
+    "a Non-secure fetch the MPCBB refuses is a Secure BusFault with BFHFNMINS 0, escalated to "
+    "HardFault_S without BUSFAULTENA, B3.11 RJQMQ and RDXYK")
+{
+  for(auto const enabled : {false, true})
+  {
+    CAPTURE(enabled);
+    nonsecure_fetch_fault(block_1, block_1, enabled);
+    nonsecure_fetch_fault(block_2, block_2 + block_512 - 4, enabled);
+  }
+}
+
+TEST_CASE(
+    "a Secure IRQ handler that makes the running Non-secure loop's block Secure faults the loop's "
+    "next fetch after the return")
+{
+  rig const r{true};
+  nonsecure_blocks(r);
+  block_bits(r, block_3, false, true);
+  std::uint32_t stack = block_3 + 0x1f0;
+  REQUIRE(
+      uc_reg_write(core::machine_internals::engine(*r.target), UC_ARM_REG_MSP_NS, &stack)
+      == UC_ERR_OK);
+  secure_vectors(r, {});
+  auto const seccfgr0 = address_of("GTZC1_MPCBB1", "SECCFGR0");
+  put_code(r, handler_at, {0x4802, 0x4903, str_r1_r0, bx_lr, nop, nop});
+  REQUIRE(r.target->mem().write(handler_at + 12, 4, seccfgr0));
+  REQUIRE(r.target->mem().write(handler_at + 16, 4, r.peek("GTZC1_MPCBB1", "SECCFGR0") | 4u));
+  REQUIRE(r.target->mem().write(vectors_at + 4 * 16, 4, handler_at | 1u));
+  put_code(r, block_2, {adds_r3_1, 0xe7fd});
+  set(r, "r3", 0);
+  engine_secure(r, false);
+  set(r, "pc", block_2 | 1u);
+  auto const warm = r.target->run_slice({.max_instructions = icount{40}});
+  REQUIRE_FALSE(warm.stopped.has_value());
+  REQUIRE(get(r, "r3") == 20);
+  REQUIRE(r.target->mem().write(iser0, 4, 1));
+  REQUIRE(r.target->mem().write(ispr0, 4, 1));
+  auto const run = run_from(r, get(r, "pc") & ~1u, icount{200}, icount{200});
+  expect_fetch_fault(run);
+  CHECK((get(r, "pc") & ~1u) >= block_2);
+  CHECK((get(r, "pc") & ~1u) < block_2 + 4);
+  CHECK(get(r, "r3") == 20);
+  CHECK(sram_flag(r) == false);
+}
+
+TEST_CASE(
+    "a Secure fetch of a Non-secure block with GTZC_IRQn above BusFault runs the GTZC handler "
+    "first, the fault after it")
+{
+  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  block_bits(r, block_1, false, true);
+  constexpr address gtzc_handler = handler_at + 0x40;
+  put_code(r, block_1, {nop, bkpt});
+  secure_vectors(r, {5});
+  put_code(r, gtzc_handler, {bkpt});
+  REQUIRE(r.target->mem().write(vectors_at + 4 * (16 + gtzc_irq), 4, gtzc_handler | 1u));
+  REQUIRE(r.target->mem().write(ipr0 + gtzc_irq, 1, 0));
+  REQUIRE(r.target->mem().write(iser0, 4, 1u << gtzc_irq));
+  REQUIRE(r.target->mem().write(shpr1 + 1, 1, 0x80));
+  REQUIRE(r.target->mem().write(shcsr, 4, busfault_ena));
+  r.write("GTZC1_TZIC", "IER4", ~0u, secure_priv);
+  auto const first = run_from(r, block_1, icount{8}, icount{8});
+  CHECK(first.stopped.reason == popcorn::stop_reason::user);
+  CHECK(get(r, "pc") == gtzc_handler + 2);
+  CHECK((get(r, "xpsr") & 0x1ff) == 16 + gtzc_irq);
+  CHECK(sram_flag(r));
 }
 }
