@@ -14,6 +14,7 @@
 #include <array>
 #include <bit>
 #include <format>
+#include <inplace_vector>
 #include <ranges>
 #include <span>
 #include <string_view>
@@ -39,9 +40,36 @@ constexpr std::array<int, 8> callee_ids{UC_ARM_REG_R4,  UC_ARM_REG_R5, UC_ARM_RE
                                         UC_ARM_REG_R7,  UC_ARM_REG_R8, UC_ARM_REG_R9,
                                         UC_ARM_REG_R10, UC_ARM_REG_R11};
 
+constexpr auto fp_callee_first = static_cast<std::size_t>(
+    std::ranges::find(fp_register_names, std::string_view{"s16"}) - fp_register_names.begin());
+constexpr auto fpscr_index = static_cast<std::size_t>(
+    std::ranges::find(fp_register_names, std::string_view{"fpscr"}) - fp_register_names.begin());
+
+constexpr auto fp_frame_ids = [] consteval {
+  std::array<int, fp_callee_first + 1> out{};
+  for(std::size_t index = 0; index < fp_callee_first; ++index)
+  {
+    out[index] = engine_register(fp_register_names[index]);
+  }
+  out[fp_callee_first] = engine_register(fp_register_names[fpscr_index]);
+  return out;
+}();
+constexpr auto fp_callee_ids = [] consteval {
+  std::array<int, fpscr_index - fp_callee_first> out{};
+  for(std::size_t index = 0; index < out.size(); ++index)
+  {
+    out[index] = engine_register(fp_register_names[fp_callee_first + index]);
+  }
+  return out;
+}();
+constexpr auto max_batch_ids = std::ranges::max(
+    {frame_ids.size(), callee_ids.size(), fp_frame_ids.size(), fp_callee_ids.size()});
+constexpr auto max_frame_words =
+    (callee_frame_size + extended_frame_size + fp_callee_frame_size) / sizeof(std::uint32_t);
+
 void read_batch(uc_struct* engine, std::span<int const> ids, std::span<std::uint32_t> out)
 {
-  std::vector<void*> pointers;
+  std::inplace_vector<void*, max_batch_ids> pointers;
   for(auto& value : out)
   {
     pointers.push_back(&value);
@@ -56,7 +84,7 @@ void read_batch(uc_struct* engine, std::span<int const> ids, std::span<std::uint
 
 void write_batch(uc_struct* engine, std::span<int const> ids, std::span<std::uint32_t> values)
 {
-  std::vector<void*> pointers;
+  std::inplace_vector<void*, max_batch_ids> pointers;
   for(auto& value : values)
   {
     pointers.push_back(&value);
@@ -69,22 +97,6 @@ void write_batch(uc_struct* engine, std::span<int const> ids, std::span<std::uin
   }
 }
 
-constexpr auto fp_frame_ids = [] consteval {
-  std::array<int, 17> out{};
-  for(std::size_t index = 0; index < 17; ++index)
-  {
-    out[index] = engine_register(fp_register_names[index == 16 ? 32 : index]);
-  }
-  return out;
-}();
-constexpr auto fp_callee_ids = [] consteval {
-  std::array<int, 16> out{};
-  for(std::size_t index = 0; index < 16; ++index)
-  {
-    out[index] = engine_register(fp_register_names[16 + index]);
-  }
-  return out;
-}();
 constexpr std::uint32_t xpsr_ge    = 0x000f'0000;
 constexpr std::uint32_t fpccr_ts   = 1u << 26;
 constexpr std::uint32_t nsacr_cp10 = 1u << 10;
@@ -594,7 +606,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
     }
   };
   auto const invalidate_fp = [&] {
-    std::array<std::uint32_t, 17> zeros{};
+    std::array<std::uint32_t, fp_frame_ids.size()> zeros{};
     write_batch(engine, fp_frame_ids, std::span{zeros});
     write_batch(engine, fp_callee_ids, std::span{zeros}.first(fp_callee_ids.size()));
   };
@@ -649,8 +661,8 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
       }
     }
   }
-  std::vector<std::uint32_t> words((callee + size) / 4, 0);
-  auto const                 frame = std::span{words}.subspan(callee / 4);
+  std::inplace_vector<std::uint32_t, max_frame_words> words((callee + size) / 4, 0);
+  auto const                                          frame = std::span{words}.subspan(callee / 4);
   read_batch(engine, frame_ids, frame.first(frame_ids.size()));
   frame[6] = pc() & ~1u;
   frame[7] = (frame[7] & ~(stacked_align_bit | stacked_sfpa_bit))
@@ -919,11 +931,11 @@ auto cortex_m::exception_return() -> trap_result
   {
     return invalid();
   }
-  auto const                 returning = decode_exc_return(value);
-  auto const                 size = returning.basic_frame ? basic_frame_size : extended_frame_size;
-  auto const                 frame_at = returning.process_stack ? special.psp : special.msp;
-  std::vector<std::uint32_t> words(size / 4, 0);
-  auto const                 unstacking = bus_attrs{
+  auto const returning = decode_exc_return(value);
+  auto const size      = returning.basic_frame ? basic_frame_size : extended_frame_size;
+  auto const frame_at  = returning.process_stack ? special.psp : special.msp;
+  std::inplace_vector<std::uint32_t, max_frame_words> words(size / 4, 0);
+  auto const                                          unstacking = bus_attrs{
       .by         = initiator::cpu,
       .secure     = not trustzone() or read_security(engine) == security::secure,
       .privileged = not returning.thread or (special.control & control_npriv) == 0,
@@ -1066,8 +1078,8 @@ auto cortex_m::exception_return() -> trap_result
            .data_address = *denied});
     }
   }
-  std::vector<std::uint32_t> words((callee + size) / 4, 0);
-  auto const                 unstacking = bus_attrs{
+  std::inplace_vector<std::uint32_t, max_frame_words> words((callee + size) / 4, 0);
+  auto const                                          unstacking = bus_attrs{
       .by         = initiator::cpu,
       .secure     = back == security::secure,
       .privileged = not returning.thread or (bank.control & control_npriv) == 0,
@@ -1428,7 +1440,7 @@ auto cortex_m::enter_with_frame(pending_exception taken, std::uint32_t exc_retur
 
 void cortex_m::clear_caller_registers(uc_struct* engine, bool callee) const
 {
-  std::array<std::uint32_t, 8> zeros{};
+  std::array<std::uint32_t, callee_ids.size()> zeros{};
   write_batch(engine, std::span{frame_ids}.first(5), std::span{zeros}.first(5));
   if(callee)
   {
