@@ -777,6 +777,17 @@ TEST_CASE("RM0456 75.5: the U5 debug blocks without a model are RAZ/WI with one 
   CHECK(r.target->mem().read(dbgmcu_cr, 4) == 0x6u);
 }
 
+TEST_CASE(
+    "RM0481 66.5 Tables 870 and 871: an STM32H5 part gets the U5 debug blocks, other families none")
+{
+  auto h5 = u575();
+  h5.part = "STM32H573IIKx";
+  CHECK(stm32::raz_wi_map(h5) == stm32::raz_wi_map(u575()));
+  auto l4 = u575();
+  l4.part = "STM32L476RGTx";
+  CHECK(stm32::raz_wi_map(l4).empty());
+}
+
 TEST_CASE("without the RAZ/WI ranges a CTI load is a precise BusFault, TZEN=0")
 {
   rig const r{false, {}, popcorn::arch::fault_policy::stop, false};

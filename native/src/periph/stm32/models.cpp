@@ -120,9 +120,12 @@ struct debug_family
   std::span<debug_block const> blocks;
 };
 
-constexpr std::array<debug_family, 1> debug_maps{
+// The H5 has the same blocks at the same addresses, RM0481 66.5 Tables 870 and 871. Its DBGMCU
+// sits at 0xE00E4000 for the debugger and 0x44024000 for the CPU, outside these ranges.
+constexpr std::array<debug_family, 2> debug_maps{
     {
      {"STM32U5*", u5_debug_blocks},
+     {"STM32H5*", u5_debug_blocks},
      }
 };
 

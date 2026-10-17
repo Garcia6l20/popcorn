@@ -125,8 +125,9 @@ struct option_refusal
 
 /**
  * @brief Debug blocks of the family of @p part that no model serves, as data for
- *        core::machine_options::raz_wi: on the STM32U5 the TPIU, the ETM, the CTI and both ROM
- *        tables of the external PPB, RM0456 75.5. DBGMCU has its own model.
+ *        core::machine_options::raz_wi: on the STM32U5 and the STM32H5 the TPIU, the ETM, the
+ *        CTI and both ROM tables of the external PPB, RM0456 75.5 and RM0481 66.5. DBGMCU has its
+ *        own model.
  * @param part Description the machine is built from.
  * @return The ranges, empty when the family has no table.
  */
