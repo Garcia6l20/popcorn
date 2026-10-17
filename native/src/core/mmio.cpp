@@ -829,6 +829,42 @@ void machine::run_state::note_unmodelled(
   }
 }
 
+void machine::run_state::refuse_unmodelled(address addr, std::size_t size) const
+{
+  auto       at  = std::uint64_t{addr};
+  auto const end = at + size;
+  while(at < end)
+  {
+    auto const here = static_cast<address>(at);
+    if(auto const* const region = mapped_region::find(owner.memory_, here, 1))
+    {
+      at += region->remaining(here);
+      continue;
+    }
+    if(auto const* const window = window_at(here, 1))
+    {
+      auto const  offset = here - window->base;
+      auto const& slot   = *window->slot;
+      auto const  word   = offset / 4;
+      auto const* rules  = word < slot.layout.words() ? slot.layout.find(word) : nullptr;
+      auto const  served = word < slot.layout.words() and slot.claimed[word] != 0;
+      if(not served and (rules == nullptr or not slot.model))
+      {
+        throw model_error(
+            window->unit->name, rules == nullptr ? std::string{} : register_name(slot.desc, word),
+            offset & ~3u);
+      }
+      at = (at & ~std::uint64_t{3}) + 4;
+      continue;
+    }
+    if(auto const* const raz = raz_at(here, 1))
+    {
+      throw model_error(raz->range->name, "", here - raz->range->start);
+    }
+    return;
+  }
+}
+
 void machine::run_state::warn_unregistered(
     mmio_window const& window,
     std::uint32_t      offset,

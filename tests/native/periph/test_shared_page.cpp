@@ -5,6 +5,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -54,7 +55,8 @@ auto booted(bool strict = false) -> fixture
 
 auto word(fixture const& f, address at) -> std::uint32_t
 {
-  auto const value = f.target->mem().read(at, 4);
+  auto const value = popcorn::core::machine_internals::services(*f.target).read(
+      at, 4, popcorn::initiator::debugger);
   REQUIRE(value.has_value());
   return *value;
 }
@@ -124,8 +126,9 @@ TEST_CASE("the debugger reaches the same storage as the CPU in a shared page")
   CHECK(word(f, common_ccr) == 0x44);
   CHECK(word(f, wide_tail) == 0x66);
   CHECK(word(f, last_dr) == 0x77);
-  REQUIRE(f.target->mem().write(sec_ccr, 4, 0x1234));
-  REQUIRE(f.target->mem().write(sec_dr, 4, 0x5678));
+  auto& bus = popcorn::core::machine_internals::services(*f.target);
+  REQUIRE(bus.write(sec_ccr, 4, 0x1234, popcorn::initiator::debugger));
+  REQUIRE(bus.write(sec_dr, 4, 0x5678, popcorn::initiator::debugger));
   CHECK(word(f, common_ccr) == 0x1234);
   CHECK(word(f, second_dr) == 0x5678);
   CHECK(word(f, pair_cr) == 0x11);
@@ -269,7 +272,9 @@ TEST_CASE("a snapshot round trip restores every peripheral of a shared page")
   auto const saved = f.target->snapshot();
   for(auto const at : {pair_cr, second_dr, common_ccr, wide_tail, last_dr})
   {
-    REQUIRE(f.target->mem().write(at, 4, 0xdead));
+    REQUIRE(
+        popcorn::core::machine_internals::services(*f.target).write(
+            at, 4, 0xdead, popcorn::initiator::debugger));
   }
   f.target->restore(saved);
   CHECK(word(f, pair_cr) == 0xa1);

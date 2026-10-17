@@ -16,7 +16,7 @@ from popcorn.coverage import Coverage, ImageKind
 from popcorn.trace import ALL, Block, Mmio, Stop, TraceKind, read
 from popcorn.units import ms
 
-from .conftest import CORE_FIRMWARE, M33_JSON, ROOT, run_bounded
+from .conftest import CORE_FIRMWARE, M33_JSON, ROOT, load_each, run_bounded
 from .models_example import Timer
 
 BRANCHES_ELF = CORE_FIRMWARE / "branches.elf"
@@ -412,18 +412,18 @@ def test_a_renamed_machine_logs_and_raises_under_its_new_name(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     m = modelled("old")
-    base = next(p.base for p in m.description.peripherals if p.name == "UNMODELLED")
+    timer = next(p.base for p in m.description.peripherals if p.name == "TIMER")
     (before,) = unmodelled_records(caplog, [m])
     m._rename("new")  # pyright: ignore[reportPrivateUsage]
     assert m.name == "new"
     assert repr(m) == "Machine(new, POPCORN-M33-TEST, images=1)"
     with caplog.at_level(logging.WARNING, logger="popcorn"):
-        asyncio.run(m.read(m.ref.mem.u32[base + 4]))
-    records = [r for r in caplog.records if getattr(r, "popcorn_peripheral", None) == "UNMODELLED"]
-    assert [vars(r)["popcorn_machine"] for r in records] == ["old", "new"]
-    assert records[0] is before
+        asyncio.run(m.run(budget=load_each(m, [timer + 0x10])))
+    hole = [r for r in caplog.records if getattr(r, "popcorn_peripheral", None) == "TIMER"]
+    assert [vars(r)["popcorn_machine"] for r in hole] == ["new"]
+    assert vars(before)["popcorn_machine"] == "old"
     assert before.getMessage().startswith("old: read of UNMODELLED")
-    assert records[1].getMessage().startswith("new: read of UNMODELLED")
+    assert hole[0].getMessage().startswith("new: read of TIMER")
     m.reg.pc = 0x3000_0000
     with pytest.raises(popcorn.FaultError, match=r"^new: the run letting time pass stopped"):
         asyncio.run(m.elapse(ms(1)))
@@ -442,23 +442,20 @@ def test_a_renamed_machine_is_collected() -> None:
 
 def test_concurrent_machines_keep_their_records_apart(caplog: pytest.LogCaptureFixture) -> None:
     machines = [modelled("a"), modelled("b")]
-    base = next(p.base for p in machines[0].description.peripherals if p.name == "UNMODELLED")
-    offsets = range(4, 4 + 4 * 50, 4)
+    base = next(p.base for p in machines[0].description.peripherals if p.name == "TIMER")
+    offsets = range(0x10, 0x10 + 4 * 50, 4)
 
-    async def reads(m: popcorn.Machine) -> None:
-        for offset in offsets:
-            await m.read(m.ref.mem.u32[base + offset])
+    budgets = [load_each(m, [base + offset for offset in offsets]) for m in machines]
 
     async def body() -> None:
-        async with machines[0].running(), machines[1].running():
-            await asyncio.gather(*(reads(m) for m in machines))
+        await asyncio.gather(*(m.run(budget=b) for m, b in zip(machines, budgets, strict=True)))
 
     with caplog.at_level(logging.WARNING, logger="popcorn"):
         asyncio.run(body())
     for m in machines:
         mine = [r for r in caplog.records if vars(r).get("popcorn_machine") == m.name]
         assert [vars(r)["popcorn_offset"] for r in mine] == list(offsets)
-        assert all(r.getMessage().startswith(f"{m.name}: read of UNMODELLED") for r in mine)
+        assert all(r.getMessage().startswith(f"{m.name}: read of TIMER") for r in mine)
 
 
 def test_closing_a_trace_on_a_full_disk_raises() -> None:

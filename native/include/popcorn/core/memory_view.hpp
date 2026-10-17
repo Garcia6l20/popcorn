@@ -27,6 +27,14 @@ concept guest_scalar =
  * `machine_services::read` and its siblings: MMIO dispatch and watches see it, a model may treat a
  * debugger access as free of side effects. Bus errors are values.
  *
+ * An access touching data no model serves throws model_error before any byte moves, whatever
+ * machine_options::strict_peripherals says, and logs nothing: a register of a peripheral
+ * without a model, named with its register, an offset of any peripheral no register covers,
+ * with an empty register, and a machine_options::raz_wi range, named by the range with an empty
+ * register. The arch module's and the models' own debugger accesses, through machine_services,
+ * are not refused. Peripheral storage stays reachable without the bus, as the Python register
+ * views' peek and poke do.
+ *
  * Valid while its machine lives. Every function throws machine_running while a slice runs,
  * except from a handler of that slice: handlers run while the core is paused at an instruction
  * boundary.
@@ -47,6 +55,7 @@ public:
    * @param size Access size in bytes, 1, 2 or 4.
    * @return Value right-aligned to @p size, or why the bus refused the access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   [[nodiscard]] auto read(address addr, std::uint8_t size) const
       -> std::expected<std::uint32_t, bus_error> pre(size == 1 or size == 2 or size == 4)
@@ -59,6 +68,7 @@ public:
    * @param value Value right-aligned to @p size.
    * @return Nothing, or why the bus refused the access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   auto write(address addr, std::uint8_t size, std::uint32_t value) const
       -> std::expected<void, bus_error> pre(size == 1 or size == 2 or size == 4)
@@ -70,6 +80,7 @@ public:
    * @param out Bytes read, in address order.
    * @return Nothing, or the failing access. The bytes of @p out before `at` are valid.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   auto read_block(address addr, std::span<std::byte> out) const
       -> std::expected<void, block_error> pre(fits_address_space(addr, out.size()));
@@ -80,6 +91,7 @@ public:
    * @param in Bytes to write, in address order.
    * @return Nothing, or the failing access. The bytes before `at` were written.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   auto write_block(address addr, std::span<std::byte const> in) const
       -> std::expected<void, block_error> pre(fits_address_space(addr, in.size()));
@@ -100,6 +112,7 @@ public:
    * @param addr First guest address, unaligned allowed.
    * @return The value, or the failing access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   template <guest_scalar T>
   [[nodiscard]] auto load(address addr) const
@@ -117,6 +130,7 @@ public:
    * @param value Value to write.
    * @return Nothing, or the failing access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   template <guest_scalar T>
   auto store(address addr, T value) const

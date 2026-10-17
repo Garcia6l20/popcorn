@@ -487,13 +487,18 @@ def test_a_log_error_kept_by_an_await_does_not_break_the_report_or_the_teardown(
     conftest = pytester.path / "conftest.py"
     conftest.write_text(conftest.read_text() + KEPT_LOG_ERROR)
     pytester.makepyfile("""
-        def unmodelled(machine):
+        import struct
+
+        def load_a_hole(machine):
             found = next(p for p in machine.description.peripherals if p.name == "TESTDEV")
-            return machine.ref.mem.u32[found.base]
+            machine.mem.write(0x2008_0000, struct.pack("<2H", 0x7803, 0xBE01))
+            machine.reg.r0 = found.base + 0x100
+            machine.reg.pc = 0x2008_0000
 
         async def test_fails_after_a_kept_error(machine):
             machine.intercept("alu_mark", lambda call: call.proceed())
-            await machine.read(unmodelled(machine))
+            load_a_hole(machine)
+            await machine.run(budget=2)
             assert False, "the body"
 
         def test_next_is_clean(machine):

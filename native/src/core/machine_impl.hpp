@@ -1226,14 +1226,26 @@ struct machine::run_state
 
   /**
    * @brief Logs the first access to a register of a peripheral without model, once per machine
-   *        life, restore included. A debugger access under strict_peripherals is neither logged
-   *        nor refused.
+   *        life, restore included. An arch or model debugger access under strict_peripherals is
+   *        neither logged nor refused.
    * @throws model_error under strict_peripherals, on every CPU or DMA access.
    */
   void note_unmodelled(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 
   /** @brief Logs the first access to an offset without register. */
   void warn_unregistered(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
+
+  /**
+   * @brief Refuses a host view access, memory_view, to data no model serves: a register of a
+   *        peripheral without a model, an offset no register covers, a raz_wi range. Logs
+   *        nothing. Scans up to the first byte outside
+   * every region, window and range, where the access itself fails.
+   * @param addr First guest address of the access.
+   * @param size Bytes of the access.
+   * @throws model_error naming the peripheral, the register when there is one, and the offset,
+   *         or the range with an empty register.
+   */
+  void refuse_unmodelled(address addr, std::size_t size) const;
 
   static auto on_mmio_read(
       uc_struct*    engine,
@@ -1829,6 +1841,13 @@ struct machine_internals
   [[nodiscard]] static auto access(machine const& target) noexcept -> uc_mem_attrs
   {
     return target.run_->access;
+  }
+
+  /** @brief The services of @p target, whose debugger accesses are the arch module's and the
+   * models' own, not a host view's. */
+  [[nodiscard]] static auto services(machine& target) noexcept -> machine_services&
+  {
+    return target;
   }
 };
 

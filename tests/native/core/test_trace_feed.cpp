@@ -5,6 +5,7 @@
 #include <popcorn/core/services.hpp>
 #include <popcorn/core/trace.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
@@ -156,7 +157,9 @@ TEST_CASE("debugger and DMA accesses reach sinks with pc 0, not the ring")
   collector  seen;
   auto const sink   = f.target->add_trace_sink({trace_kind::mmio}, seen.sink());
   auto const before = f.target->trace().appended();
-  REQUIRE(f.target->mem().write(0x4001'0008, 4, 5));
+  REQUIRE(
+      core::machine_internals::services(*f.target).write(
+          0x4001'0008, 4, 5, popcorn::initiator::debugger));
   REQUIRE(f.module->attached_services().write(0x4001'0008, 4, 6, popcorn::initiator::dma));
   CHECK(f.target->trace().appended() == before);
   f.set("pc", sym("periph", "unmodelled_reads"));

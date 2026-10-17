@@ -170,7 +170,9 @@ class RegisterView:
     description's write effects act: `.value = v` writes the word, `.FIELD = v` writes the word
     with the field's bits and every sibling field at the value its write effect ignores. Reads
     are storage peeks, so `.value` and a field getter never fire a read effect such as
-    clear-on-read: `read()` is the bus read. `poke()` stores without any effect. Every access
+    clear-on-read: `read()` is the bus read. `poke()` stores without any effect. On a
+    peripheral without a model, `read()` and every write raise ModelError, as `m.mem` does,
+    while `.value`, the field getters and `poke()` still reach the storage. Every access
     raises MachineRunning while the machine is busy, outside its callbacks: `m.ref` refs reach
     the register then.
     """

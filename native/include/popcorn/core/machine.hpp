@@ -75,9 +75,10 @@ struct machine_options
    * are dispatched at one instruction count, detail 'events repeat without time passing: <owner>
    * kind <n>'. */
   std::uint32_t spin_threshold{};
-  /** @brief Whether every access to a register of an unmodelled peripheral, or to a raz_wi
-   * range, fails the run with model_error. A debugger access is neither refused nor logged. The
-   * log keeps one record per register and per range. */
+  /** @brief Whether every CPU or DMA access to a register of an unmodelled peripheral, or to a
+   * raz_wi range, fails the run with model_error. The arch module's and the models' own debugger
+   * accesses are neither refused nor logged. A memory_view access to either throws model_error
+   * whatever this flag says. The log keeps one record per register and per range. */
   bool strict_peripherals{};
   /** @brief Address of the vector table the arch module's reset reads. Empty: the start of the
    * region containing address 0, otherwise of the first region in description order with execute
@@ -102,7 +103,8 @@ struct machine_options
    * blocks a part has and no model serves. No storage, nothing in snapshots. The first access to
    * each range is logged as log_kind::model_warning, once per machine life. Under
    * strict_peripherals every CPU or DMA access to a range raises model_error naming the range,
-   * with an empty register, and a debugger access reads zero unlogged. Each range must be
+   * with an empty register, and an arch or model debugger access reads zero unlogged. A
+   * memory_view access raises model_error, strict or not. Each range must be
    * non-empty, start and size multiples of the engine page, and stay clear of the description's
    * regions and peripherals, of scratch and of the other ranges, which the machine refuses with
    * config_error keyed `raz_wi[i]`. The engine refuses a range over the arch module's system

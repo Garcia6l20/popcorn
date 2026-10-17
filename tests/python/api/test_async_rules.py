@@ -20,7 +20,7 @@ import popcorn
 import pytest
 from popcorn.units import VirtualTime, ms, us
 
-from .conftest import Machines, run_bounded
+from .conftest import Machines, StorageModel, run_bounded
 
 NVIC_ISPR0 = 0xE000_E200
 HANG = 10.0
@@ -420,7 +420,7 @@ def test_reads_from_another_thread_during_a_run_are_machine_running(machines: Ma
 def test_sync_writes_and_bus_reads_inside_running_raise_and_async_ones_land(
     machines: Machines,
 ) -> None:
-    m = machines(slice_instructions=1_000)
+    m = machines(slice_instructions=1_000, models={"TESTDEV": StorageModel})
     value = m.var("alu_value")
     address = m.sym("alu_value")
     testdev = m.description.peripherals[0].base

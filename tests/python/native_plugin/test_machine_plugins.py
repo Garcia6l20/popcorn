@@ -151,7 +151,9 @@ def test_a_plugin_model_serves_only_the_peripheral_the_board_names(kit: Plugin) 
     plain = described().machine()
     assert rng_reads(named, 3) == [RNG_BASE, RNG_BASE + 1, RNG_BASE + 2]
     for m in (declared, plain):
-        assert rng_reads(m, 3) == [0, 0, 0]
+        with pytest.raises(popcorn.ModelError):
+            rng_reads(m, 1)
+        assert m.periph.RNG.DR.value == 0
     assert rng_reads(named, 1) == [RNG_BASE + 3]
 
 

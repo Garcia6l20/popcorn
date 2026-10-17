@@ -651,8 +651,10 @@ class Machine:
             cpi: Core cycles per instruction, above 0.
             trace_capacity: Records the always-on trace ring keeps, above 0.
             spin_threshold: Iterations of a loop making no progress before a SPIN stop, 0 off.
-            strict_peripherals: Whether an unmodelled register access raises ModelError, an
-                access to an STM32U5 or STM32H5 debug block without a model too, such as the CTI.
+            strict_peripherals: Whether a firmware or DMA access to an unmodelled register raises
+                ModelError, an access to an STM32U5 or STM32H5 debug block without a model too,
+                such as the CTI. A host access through `m.mem`, `m.ref.mem` or a register's
+                bus `read()` and writes raises ModelError for both whatever this flag says.
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice of the machine's thread serves
                 its requests and checks its waiters.
@@ -1046,7 +1048,12 @@ class Machine:
         """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`.
 
         Reads and writes raise MachineRunning while the machine is busy, outside its callbacks:
-        `m.read(m.ref.mem.u32[addr])` and `m.write` access it then.
+        `m.read(m.ref.mem.u32[addr])` and `m.write` access it then. An access that touches a
+        register of a peripheral without a model, an offset of a peripheral no register
+        covers, or a debug block without a model such as the STM32U5 CTI, raises ModelError
+        naming it, strict_peripherals or not, and logs nothing: Python does not read or write
+        unmodelled data. `m.periph.<name>.<reg>.value`, the field getters and `poke()` stay the
+        way to the stored registers of a peripheral without a model.
         """
         return self._memory
 

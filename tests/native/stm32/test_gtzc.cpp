@@ -778,6 +778,44 @@ TEST_CASE("RM0456 75.5: the U5 debug blocks without a model are RAZ/WI with one 
 }
 
 TEST_CASE(
+    "a host view access to a debug block is a model_error naming the range, strict or not, logs "
+    "nothing and leaves the firmware's first access logged, TZEN=0")
+{
+  constexpr address cti = 0xe004'2004;
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig const                     r{false, {}, popcorn::arch::fault_policy::stop, true, strict};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    auto const               view = r.target->mem();
+    std::array<std::byte, 8> bytes{};
+    CHECK_THROWS_AS(std::ignore = view.read(cti, 4), popcorn::model_error);
+    CHECK_THROWS_AS(std::ignore = view.write(cti, 4, 1), popcorn::model_error);
+    CHECK_THROWS_AS(std::ignore = view.read_block(cti, bytes), popcorn::model_error);
+    CHECK_THROWS_AS(std::ignore = view.write_block(cti, bytes), popcorn::model_error);
+    try
+    {
+      std::ignore = view.read(cti, 4);
+    }
+    catch(popcorn::model_error const& error)
+    {
+      CHECK(error.peripheral() == "CTI");
+      CHECK(error.reg().empty());
+      CHECK(error.offset() == 4);
+    }
+    CHECK(logged.empty());
+    if(strict)
+    {
+      continue;
+    }
+    run_cpu(r, {.insn = ldr_r2_r0}, cti, 0);
+    CHECK(debug_warnings(logged, "CTI").size() == 1);
+  }
+}
+
+TEST_CASE(
     "the RAZ/WI warning names the firmware pc and stays once per machine life across a restore")
 {
   rig const                     r{false};
@@ -846,7 +884,9 @@ TEST_CASE("a Non-secure load and store of the CTI with no SAU region over it are
   }
 }
 
-TEST_CASE("under strict_peripherals a CPU or DMA access of a debug block is a model_error")
+TEST_CASE(
+    "under strict_peripherals a CPU or DMA access of a debug block is a model_error, an arch "
+    "debugger read reads zero")
 {
   constexpr address             cti = 0xe004'2004;
   rig const                     r{false, {}, popcorn::arch::fault_policy::stop, true, true};
@@ -877,8 +917,8 @@ TEST_CASE("under strict_peripherals a CPU or DMA access of a debug block is a mo
       std::ignore = bus.read(cti, 4, bus_attrs{.by = initiator::dma}), popcorn::model_error);
   CHECK_THROWS_AS(
       std::ignore = bus.write(cti, 4, 1, bus_attrs{.by = initiator::dma}), popcorn::model_error);
-  CHECK(r.target->mem().read(0xe004'0004, 4) == 0u);
-  CHECK(r.target->mem().write(0xe004'0004, 4, 1).has_value());
+  CHECK(bus.read(0xe004'0004, 2, initiator::debugger) == 0u);
+  CHECK(bus.write(0xe004'0004, 4, 1, initiator::debugger).has_value());
   CHECK(debug_warnings(logged, "CTI").size() == 1);
   CHECK(debug_warnings(logged, "TPIU").empty());
 }

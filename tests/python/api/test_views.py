@@ -12,7 +12,7 @@ import popcorn
 import pytest
 from popcorn.arm import Reg
 
-from .conftest import M33_JSON, Machines
+from .conftest import M33_JSON, Machines, StorageModel
 
 SRAM = 0x2000_8000
 
@@ -123,7 +123,7 @@ def test_symbols_resolve_across_images(machines: Machines, driver: popcorn.Image
 def test_views_refuse_access_from_another_task_during_a_run_and_refs_reach_it(
     machines: Machines,
 ) -> None:
-    m = machines()
+    m = machines(models={"TESTDEV": StorageModel})
     word, r0, rw = m.ref.mem.u32[SRAM], m.ref.reg.r0, m.ref.periph.TESTDEV.RW
 
     async def scenario() -> None:

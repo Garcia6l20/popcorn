@@ -24,6 +24,7 @@ auto memory_view::read(address addr, std::uint8_t size) const
     -> std::expected<std::uint32_t, bus_error>
 {
   machine_->require_view_access();
+  machine_->run_->refuse_unmodelled(addr, size);
   return machine_->do_read(addr, size, bus_attrs{.by = initiator::debugger});
 }
 
@@ -36,6 +37,7 @@ auto memory_view::write(address addr, std::uint8_t size, std::uint32_t value) co
     -> std::expected<void, bus_error>
 {
   machine_->require_view_access();
+  machine_->run_->refuse_unmodelled(addr, size);
   return machine_->do_write(addr, size, value, bus_attrs{.by = initiator::debugger});
 }
 
@@ -43,6 +45,7 @@ auto memory_view::read_block(address addr, std::span<std::byte> out) const
     -> std::expected<void, block_error>
 {
   machine_->require_view_access();
+  machine_->run_->refuse_unmodelled(addr, out.size());
   return machine_->do_read_block(addr, out, bus_attrs{.by = initiator::debugger});
 }
 
@@ -50,6 +53,7 @@ auto memory_view::write_block(address addr, std::span<std::byte const> in) const
     -> std::expected<void, block_error>
 {
   machine_->require_view_access();
+  machine_->run_->refuse_unmodelled(addr, in.size());
   return machine_->do_write_block(addr, in, bus_attrs{.by = initiator::debugger});
 }
 
