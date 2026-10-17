@@ -1849,6 +1849,12 @@ struct machine_internals
   {
     return target;
   }
+
+  /** @brief The bus firewall a model of @p target installed, or null. */
+  [[nodiscard]] static auto firewall(machine const& target) noexcept -> periph::bus_firewall*
+  {
+    return target.run_->firewall;
+  }
 };
 
 /**

@@ -38,10 +38,17 @@ struct page_verdict
   bool filter_data{};
   /** @brief An instruction fetch at the address that mapped the page is a BusFault. */
   bool deny_fetch{};
-  /** @brief The page keeps no fetch verdict: each instruction fetch asks
-   * bus_firewall::memory_page again with its own address, and runs one instruction at a time.
-   * For a page whose parts give different fetch verdicts. */
+  /** @brief The page keeps no fetch verdict: each instruction fetch that misses the engine's
+   * translated code asks bus_firewall::memory_page again with its own address. For a page whose
+   * parts give different fetch verdicts. The engine translates code of the page per fetch
+   * window, see fetch_window_shift. */
   bool fetch_each{};
+  /** @brief With fetch_each, log2 of the size of the naturally aligned fetch window around the
+   * mapping address, clipped to the page: every byte of it has the fetch verdict of that address
+   * for these attributes. The engine then keeps translated code of the page, each block inside
+   * the window of its first instruction, until the next memory_policy_changed. 0 runs the page one
+   * instruction at a time. Values above 31 are clipped to 31. */
+  std::uint8_t fetch_window_shift{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(page_verdict, page_verdict) -> bool = default;

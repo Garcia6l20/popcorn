@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -593,6 +594,10 @@ public:
     }
     auto const rule    = rule_at(*window, at);
     verdict.deny_fetch = fetch_denied(rule, attrs);
+    if(verdict.fetch_each)
+    {
+      verdict.fetch_window_shift = fetch_window_shift(page, size, at, step, attrs);
+    }
     if(verdict.deny_fetch
        and op == arch::memory_op::fetch
        and attrs.secure
@@ -769,6 +774,37 @@ private:
         return watermark_rule(at - window.start);
     }
     return {};
+  }
+
+  [[nodiscard]] auto fetch_denied_at(address at, bus_attrs attrs) const -> bool
+  {
+    auto const* const window = window_at(at);
+    return window != nullptr and fetch_denied(rule_at(*window, at), attrs);
+  }
+
+  [[nodiscard]] auto fetch_window_shift(
+      address       page,
+      std::uint32_t size,
+      address       at,
+      std::uint32_t step,
+      bus_attrs     attrs) const -> std::uint8_t
+  {
+    auto const denied = fetch_denied_at(at, attrs);
+    auto       shift  = std::countr_zero(step);
+    for(auto span = step; span < size; span *= 2)
+    {
+      auto const block   = page + ((at - page) & ~(2 * span - 1));
+      auto const sibling = block + ((at - block) < span ? span : 0);
+      for(auto part = sibling; part < sibling + span; part += step)
+      {
+        if(fetch_denied_at(part, attrs) != denied)
+        {
+          return static_cast<std::uint8_t>(shift);
+        }
+      }
+      ++shift;
+    }
+    return static_cast<std::uint8_t>(shift);
   }
 
   [[nodiscard]] auto window_at(address at) const -> memory_window const*

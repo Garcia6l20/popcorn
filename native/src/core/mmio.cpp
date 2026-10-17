@@ -406,9 +406,10 @@ auto machine::run_state::on_bus_page(
           static_cast<address>(page), run.filter_page_bytes, static_cast<address>(addr),
           cpu_attrs(attrs), op);
     }
+    auto const window = std::min<unsigned>(verdict.fetch_window_shift, 31);
     bits = (verdict.filter_data ? unsigned{UC_BUS_FILTER_DATA} : 0u)
          | (verdict.deny_fetch ? unsigned{UC_BUS_DENY_FETCH} : 0u)
-         | (verdict.fetch_each ? unsigned{UC_BUS_FETCH_EACH} : 0u);
+         | (verdict.fetch_each ? unsigned{UC_BUS_FETCH_EACH} | UC_BUS_FETCH_WINDOW(window) : 0u);
     return false;
   });
   return bits;

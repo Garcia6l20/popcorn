@@ -179,3 +179,100 @@ def test_a_tzen_1_save_is_refused_by_a_tzen_0_machine_with_the_same_config_diges
     plain.reg.pc = pc + 0x40
     plain.restore(own)
     assert plain.pc == pc
+
+
+SPLIT_CODE = 0x2000_2000
+SPLIT_HOLE = SPLIT_CODE + 0x300
+SPLIT_LOOP = (0x3001, 0x3B01, 0xD1FC, 0xBE02)
+SPLIT_ITERATIONS = 100_000
+MPCBB1_SECCFGR0 = 0x5003_2D00
+
+SplitState = tuple[tuple[int, ...], int, bytes, int]
+
+
+def split_page_machine(u575: popcorn.PartDescription) -> popcorn.Machine:
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(RCC_ELF),
+        option_bytes=OptionBytes(tzen=True),
+        slice_instructions=1_000_000,
+        slice_wall_budget=1.0,
+    )
+    m.reset()
+    return m
+
+
+def split_page_state(m: popcorn.Machine) -> SplitState:
+    return (
+        tuple(int(getattr(m.reg, name)) for name in CORE_REGISTERS),
+        m.instructions,
+        m.mem.read(SPLIT_CODE, 0x400),
+        m.mem.u32[MPCBB1_SECCFGR0],
+    )
+
+
+def to_breakpoint(m: popcorn.Machine, running: bool) -> None:
+    async def free() -> None:
+        with pytest.raises(popcorn.EmulationError, match="stopped with USER"):
+            async with m.running():
+                await m.wait_for(popcorn.Reached(SPLIT_HOLE), for_=ms(100))
+
+    if running:
+        asyncio.run(free())
+    else:
+        assert asyncio.run(m.run(budget=1_000_000)).reason is StopReason.USER
+
+
+def split_page_restore(
+    u575: popcorn.PartDescription, running: bool
+) -> tuple[SplitState, SplitState]:
+    """A Secure loop in a page an SAU region splits runs from its cached block, is saved, then
+    its code and its MPCBB block change and the changed loop runs before the restore. Returns the
+    state at the loop's breakpoint after the restore, parked or free, and that of a fresh machine
+    restored from the save's bytes, parked."""
+    m = split_page_machine(u575)
+    m.mem.write(SPLIT_CODE, struct.pack(f"<{len(SPLIT_LOOP)}H", *SPLIT_LOOP))
+    m.mem.u32[SAU_RNR] = 0
+    m.mem.u32[SAU_RBAR] = SPLIT_HOLE
+    m.mem.u32[SAU_RLAR] = SPLIT_HOLE | 1
+    m.mem.u32[SAU_CTRL] = 1
+    m.reg.r0 = 0
+    m.reg.r3 = SPLIT_ITERATIONS
+    m.reg.pc = SPLIT_CODE
+    assert asyncio.run(m.run(budget=3_000)).reason is StopReason.BUDGET
+    saved = m.snapshot()
+    m.mem.u16[SPLIT_CODE] = 0x3002
+    m.mem.u32[MPCBB1_SECCFGR0] &= ~(1 << ((SPLIT_CODE + 0x200 - 0x2000_0000) // 0x200))
+    assert asyncio.run(m.run(budget=300)).reason is StopReason.BUDGET
+    m.restore(saved)
+    to_breakpoint(m, running)
+    fresh = split_page_machine(u575)
+    fresh.restore(Snapshot.from_bytes(saved.to_bytes()))
+    to_breakpoint(fresh, False)
+    return split_page_state(m), split_page_state(fresh)
+
+
+@pytest.fixture(scope="module")
+def parked_split_page_restore(u575: popcorn.PartDescription) -> tuple[SplitState, SplitState]:
+    return split_page_restore(u575, False)
+
+
+def test_a_restore_over_a_changed_split_page_runs_as_a_fresh_machine_from_the_save(
+    parked_split_page_restore: tuple[SplitState, SplitState],
+) -> None:
+    """The restore drops the code translated in the split page and the policy that changed after
+    the save: the loop runs its saved code under the saved MPCBB bits to its breakpoint."""
+    restored, fresh = parked_split_page_restore
+    assert restored == fresh
+    assert restored[0][0] == SPLIT_ITERATIONS
+    assert restored[0][1] == 0
+
+
+@pytest.mark.parametrize("repeat", range(20))
+def test_a_restore_over_a_changed_split_page_runs_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+    parked_split_page_restore: tuple[SplitState, SplitState],
+    repeat: int,
+) -> None:
+    del repeat
+    assert split_page_restore(u575, True) == parked_split_page_restore

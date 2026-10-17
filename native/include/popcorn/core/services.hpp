@@ -306,8 +306,11 @@ public:
    *        so the next access of each page asks the firewall again. A data verdict then holds
    *        from the next access. Code already running inside a page whose fetch verdict changed
    *        runs on until the engine run ends, so the owner also calls end_after_instruction()
-   *        after a fetch-verdict change. Every page refills after it, so call it only when a
-   *        verdict changes. Safe from a register access during a run and between slices.
+   *        after a fetch-verdict change. It also retires the code the engine translated in pages
+   *        whose fetch verdict is per fetch window, page_verdict::fetch_window_shift: without it
+   *        such code keeps running under the old verdicts. Every page refills after it, so call
+   *        it only when a verdict changes. Safe from a register access during a run and between
+   *        slices.
    */
   void memory_policy_changed()
   {

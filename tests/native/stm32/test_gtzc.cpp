@@ -1720,4 +1720,189 @@ TEST_CASE(
   CHECK((get(r, "xpsr") & 0x1ff) == 16 + gtzc_irq);
   CHECK(sram_flag(r));
 }
+
+TEST_CASE("memory_page gives the fetch window: 9 in a mixed MPCBB page, 5 at a 32-byte MPCWM4 edge")
+{
+  rig const r{true};
+  auto*     firewall = core::machine_internals::firewall(*r.target);
+  REQUIRE(firewall != nullptr);
+  constexpr bus_attrs secure_fetch{.by = initiator::cpu, .secure = true, .privileged = true};
+  constexpr bus_attrs nonsecure_fetch{.by = initiator::cpu, .secure = false, .privileged = true};
+  auto const          fetch = popcorn::arch::memory_op::fetch;
+  block_bits(r, block_3, false, true);
+  for(auto const at : {block_2, block_2 + 0x1fe, block_3, block_3 + 0x100})
+  {
+    CAPTURE(at);
+    auto const verdict = firewall->memory_page(block_2, 0x400, at, secure_fetch, fetch);
+    CHECK(verdict.fetch_each);
+    CHECK(verdict.fetch_window_shift == 9);
+    CHECK(verdict.deny_fetch == (at >= block_3));
+  }
+  auto const uniform = firewall->memory_page(sram1, 0x400, sram1 + 0x10, secure_fetch, fetch);
+  CHECK_FALSE(uniform.fetch_each);
+  CHECK(uniform.fetch_window_shift == 0);
+
+  r.write("GTZC1_TZSC", "TZSC_MPCWM4AR", 2u << 16 | 1u, secure_priv);
+  r.write(
+      "GTZC1_TZSC", "TZSC_MPCWM4ACFGR", bit("GTZC1_TZSC", "TZSC_MPCWM4ACFGR", "SREN"), secure_priv);
+  auto const page = backup_ns & ~address{0x3ff};
+  for(auto const& [at, shift] : std::initializer_list<std::pair<address, unsigned>>{
+          {backup_ns + 0x20,  5},
+          {backup_ns + 0x40,  5},
+          {backup_ns + 0x10,  5},
+          {backup_ns + 0x60,  5},
+          {backup_ns + 0x80,  7},
+          {backup_ns + 0x200, 9}
+  })
+  {
+    CAPTURE(at);
+    auto const verdict = firewall->memory_page(page, 0x400, at, nonsecure_fetch, fetch);
+    CHECK(verdict.fetch_each);
+    CHECK(verdict.fetch_window_shift == shift);
+  }
+}
+
+constexpr address       hard_handler = handler_at + 0x40;
+constexpr address       sfsr         = 0xe000'ede4;
+constexpr std::uint32_t sfsr_invtran = 1u << 4;
+constexpr std::uint16_t svc_0        = 0xdf00;
+
+auto hard_fault_vector(rig const& r) -> void
+{
+  put_code(r, hard_handler, {bkpt});
+  REQUIRE(r.target->mem().write(vectors_at, 4, stack_top));
+  REQUIRE(r.target->mem().write(vectors_at + 4 * 3, 4, hard_handler | 1u));
+  REQUIRE(r.target->mem().write(vtor, 4, vectors_at));
+  set(r, "msp", stack_top);
+}
+
+auto put_split_loop(rig const& r, address at, std::uint16_t change) -> void
+{
+  put_code(r, at, {0x3b01, 0x42a3, 0xd100, change, 0x2b00, 0xd1f9, bkpt});
+  set(r, "r3", 100);
+  set(r, "r4", 50);
+}
+
+auto expect_escalated_fetch_fault(rig const& r, fetched const& run, address at) -> void
+{
+  CHECK(run.stopped.reason == popcorn::stop_reason::user);
+  CHECK(get(r, "pc") == hard_handler + 2);
+  CHECK((get(r, "xpsr") & 0x1ff) == 3);
+  CHECK((word(r, hfsr) & hfsr_forced) != 0);
+  CHECK(word(r, static_cast<address>(get(r, "msp")) + 24) == at);
+  CHECK(get(r, "r3") == 50);
+}
+
+TEST_CASE(
+    "a SECCFGR store that makes the running loop's window of a split page Non-secure faults its "
+    "next cached fetch, RM0456 5.4.2, B3.11 RJQMQ")
+{
+  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  block_bits(r, block_3, false, true);
+  hard_fault_vector(r);
+  put_split_loop(r, block_2, str_r1_r0);
+  set(r, "r0", address_of("GTZC1_MPCBB1", "SECCFGR0"));
+  set(r, "r1", (r.peek("GTZC1_MPCBB1", "SECCFGR0") & ~4u) | 8u);
+  auto const run = run_from(r, block_2, icount{2000}, icount{2000});
+  expect_escalated_fetch_fault(r, run, block_2 + 8);
+  CHECK((word(r, cfsr) & cfsr_ibuserr) != 0);
+}
+
+TEST_CASE(
+    "a PRIVCFGR store from an SVCall handler that makes the unprivileged loop's window of a split "
+    "page privileged faults its next cached fetch after the return, RM0456 5.4.2")
+{
+  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  block_bits(r, block_2, true, false);
+  block_bits(r, stack_top - block_512, true, false);
+  hard_fault_vector(r);
+  auto const privcfgr0 = address_of("GTZC1_MPCBB1", "PRIVCFGR0");
+  put_code(r, handler_at, {0x4802, 0x4903, str_r1_r0, bx_lr, nop, nop});
+  REQUIRE(r.target->mem().write(handler_at + 12, 4, privcfgr0));
+  REQUIRE(r.target->mem().write(handler_at + 16, 4, r.peek("GTZC1_MPCBB1", "PRIVCFGR0") | 4u));
+  REQUIRE(r.target->mem().write(vectors_at + 4 * 11, 4, handler_at | 1u));
+  put_split_loop(r, block_2, svc_0);
+  set(r, "control", 1);
+  auto const run = run_from(r, block_2, icount{2000}, icount{2000});
+  expect_escalated_fetch_fault(r, run, block_2 + 8);
+  CHECK((word(r, cfsr) & cfsr_ibuserr) != 0);
+  CHECK((r.peek("GTZC1_MPCBB1", "PRIVCFGR0") & 4u) != 0);
+}
+
+TEST_CASE(
+    "an SAU_RLAR store that makes the running loop's window of a split page Non-secure faults its "
+    "next cached fetch as SecureFault INVTRAN, B3.15 RXWPC")
+{
+  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  hard_fault_vector(r);
+  put_split_loop(r, block_2, str_r1_r0);
+  REQUIRE(r.target->mem().write(sau_rnr, 4, 0));
+  REQUIRE(r.target->mem().write(sau_rbar, 4, block_3 + 0x100));
+  REQUIRE(r.target->mem().write(sau_rlar, 4, (block_3 + 0x100) | 1u));
+  REQUIRE(r.target->mem().write(sau_rnr, 4, 1));
+  REQUIRE(r.target->mem().write(sau_rbar, 4, block_2));
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, sau_enable));
+  set(r, "r0", sau_rlar);
+  set(r, "r1", block_2 | 1u);
+  auto const run = run_from(r, block_2, icount{2000}, icount{2000});
+  expect_escalated_fetch_fault(r, run, block_2 + 8);
+  CHECK((word(r, sfsr) & sfsr_invtran) != 0);
+}
+
+TEST_CASE(
+    "a Secure IRQ handler that makes the Non-secure loop's window of a split page Secure faults "
+    "its "
+    "next cached fetch after the return, RM0456 5.4.2")
+{
+  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  nonsecure_blocks(r);
+  block_bits(r, block_1, false, true);
+  std::uint32_t stack = block_1 + 0x1f0;
+  REQUIRE(
+      uc_reg_write(core::machine_internals::engine(*r.target), UC_ARM_REG_MSP_NS, &stack)
+      == UC_ERR_OK);
+  hard_fault_vector(r);
+  constexpr address irq_handler = handler_at + 0x80;
+  auto const        seccfgr0    = address_of("GTZC1_MPCBB1", "SECCFGR0");
+  put_code(r, irq_handler, {0x4802, 0x4903, str_r1_r0, bx_lr, nop, nop});
+  REQUIRE(r.target->mem().write(irq_handler + 12, 4, seccfgr0));
+  REQUIRE(r.target->mem().write(irq_handler + 16, 4, r.peek("GTZC1_MPCBB1", "SECCFGR0") | 4u));
+  REQUIRE(r.target->mem().write(vectors_at + 4 * 16, 4, irq_handler | 1u));
+  put_code(r, block_2, {adds_r3_1, 0xe7fd});
+  set(r, "r3", 0);
+  engine_secure(r, false);
+  set(r, "pc", block_2 | 1u);
+  auto const warm = r.target->run_slice({.max_instructions = icount{40}});
+  REQUIRE_FALSE(warm.stopped.has_value());
+  REQUIRE(get(r, "r3") == 20);
+  REQUIRE(r.target->mem().write(iser0, 4, 1));
+  REQUIRE(r.target->mem().write(ispr0, 4, 1));
+  auto const run = run_from(r, get(r, "pc") & ~1u, icount{200}, icount{200});
+  CHECK(run.stopped.reason == popcorn::stop_reason::user);
+  CHECK(get(r, "pc") == hard_handler + 2);
+  CHECK((get(r, "xpsr") & 0x1ff) == 3);
+  CHECK((word(r, hfsr) & hfsr_forced) != 0);
+  CHECK((word(r, cfsr) & cfsr_ibuserr) != 0);
+  CHECK(get(r, "r3") == 20);
+}
+
+TEST_CASE(
+    "an MPCWM4 store that makes a BKPSRAM sub-region Non-secure holds for the next Secure load "
+    "of a cached loop, RM0456 5.6.8")
+{
+  rig const r{true};
+  REQUIRE(r.target->mem().write(backup_ns + 0x20, 4, 0x2020'2020));
+  r.write("GTZC1_TZSC", "TZSC_MPCWM4AR", 2u << 16 | 1u, secure_priv);
+  put_code(r, loop_at, {0x3b01, 0x42a3, 0xd100, str_r1_r0, 0x682a, 0x2b00, 0xd1f8, bkpt});
+  set(r, "r0", address_of("GTZC1_TZSC", "TZSC_MPCWM4ACFGR"));
+  set(r, "r1", bit("GTZC1_TZSC", "TZSC_MPCWM4ACFGR", "SREN"));
+  set(r, "r5", backup_s + 0x20);
+  set(r, "r3", 100);
+  set(r, "r4", 50);
+  auto const run = run_from(r, loop_at, icount{2000}, icount{2000});
+  CHECK(run.stopped.reason == popcorn::stop_reason::user);
+  CHECK(get(r, "r3") == 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK((r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "BKPSRAMF")) != 0);
+}
 }
