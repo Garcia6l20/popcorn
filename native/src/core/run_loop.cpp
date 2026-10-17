@@ -371,7 +371,7 @@ auto machine::run_state::deliverable() noexcept -> bool
   return guarded([this] { return arch->deliverable_now(); });
 }
 
-void machine::run_state::on_block(
+[[gnu::hot]] void machine::run_state::on_block(
     uc_struct*    engine,
     std::uint64_t addr,
     std::uint32_t size,

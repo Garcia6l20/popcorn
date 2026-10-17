@@ -234,7 +234,7 @@ struct data_decision
   bool        event{};
 };
 
-auto decide_data(memory_rule rule, bus_attrs attrs) -> data_decision
+[[gnu::hot]] auto decide_data(memory_rule rule, bus_attrs attrs) -> data_decision
 {
   if(attrs.secure and not rule.secure and not rule.secure_data)
   {
@@ -566,7 +566,7 @@ public:
     return true;
   }
 
-  [[nodiscard]] auto
+  [[gnu::hot, nodiscard]] auto
       memory_page(address page, std::uint32_t size, address at, bus_attrs attrs, arch::memory_op op)
           -> page_verdict override
   {
@@ -758,7 +758,7 @@ private:
     return {.secure = true, .privileged = true};
   }
 
-  [[nodiscard]] auto rule_at(memory_window const& window, address at) const -> memory_rule
+  [[gnu::hot, nodiscard]] auto rule_at(memory_window const& window, address at) const -> memory_rule
   {
     auto const physical = window.physical + (at - window.start);
     switch(window.kind)

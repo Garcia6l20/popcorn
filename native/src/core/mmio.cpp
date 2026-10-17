@@ -385,7 +385,7 @@ auto machine::run_state::check_memory(
   return firewall->check_memory(addr, size, seen(attrs), op);
 }
 
-auto machine::run_state::on_bus_page(
+[[gnu::hot]] auto machine::run_state::on_bus_page(
     uc_struct*,
     std::uint64_t page,
     std::uint64_t addr,

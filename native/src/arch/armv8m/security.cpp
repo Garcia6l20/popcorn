@@ -64,7 +64,7 @@ void require(uc_err err, std::string_view what)
 }
 }
 
-void cortex_m::idau_lookup(
+[[gnu::hot]] void cortex_m::idau_lookup(
     void*         user,
     std::uint32_t address,
     int*          region,
