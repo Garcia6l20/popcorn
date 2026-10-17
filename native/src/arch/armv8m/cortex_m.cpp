@@ -309,7 +309,7 @@ auto cortex_m::current_priority(bool ignore_primask) const -> int
   return trustzone() ? banked_priority(ignore_primask) : one_bank_priority(ignore_primask);
 }
 
-auto cortex_m::one_bank_priority(bool ignore_primask) const -> int
+[[gnu::aligned(64)]] auto cortex_m::one_bank_priority(bool ignore_primask) const -> int
 {
   std::array<int, 3>           ids{UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI, UC_ARM_REG_FAULTMASK};
   std::array<std::uint32_t, 3> held{};
