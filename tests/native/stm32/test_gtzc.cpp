@@ -1762,6 +1762,25 @@ TEST_CASE("memory_page gives the fetch window: 9 in a mixed MPCBB page, 5 at a 3
   }
 }
 
+TEST_CASE("memory_page leaves the fetch window 0 for a data access to a mixed page")
+{
+  rig const r{true};
+  auto*     firewall = core::machine_internals::firewall(*r.target);
+  REQUIRE(firewall != nullptr);
+  constexpr bus_attrs secure_data{.by = initiator::cpu, .secure = true, .privileged = true};
+  block_bits(r, block_3, false, true);
+  for(auto const op : {popcorn::arch::memory_op::read, popcorn::arch::memory_op::write})
+  {
+    CAPTURE(op);
+    auto const verdict = firewall->memory_page(block_2, 0x400, block_2 + 0x10, secure_data, op);
+    CHECK(verdict.fetch_each);
+    CHECK(verdict.fetch_window_shift == 0);
+  }
+  auto const fetch = firewall->memory_page(
+      block_2, 0x400, block_2 + 0x10, secure_data, popcorn::arch::memory_op::fetch);
+  CHECK(fetch.fetch_window_shift == 9);
+}
+
 constexpr address       hard_handler = handler_at + 0x40;
 constexpr address       sfsr         = 0xe000'ede4;
 constexpr std::uint32_t sfsr_invtran = 1u << 4;

@@ -47,7 +47,8 @@ struct page_verdict
    * mapping address, clipped to the page: every byte of it has the fetch verdict of that address
    * for these attributes. The engine then keeps translated code of the page, each block inside
    * the window of its first instruction, until the next memory_policy_changed. 0 runs the page one
-   * instruction at a time. Values above 31 are clipped to 31. */
+   * instruction at a time. Values above 31 are clipped to 31. Read for an instruction fetch
+   * only, a firewall leaves it 0 for a data access. */
   std::uint8_t fetch_window_shift{};
 
   /** @brief Member-wise equality. */

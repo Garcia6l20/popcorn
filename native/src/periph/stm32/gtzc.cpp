@@ -594,7 +594,7 @@ public:
     }
     auto const rule    = rule_at(*window, at);
     verdict.deny_fetch = fetch_denied(rule, attrs);
-    if(verdict.fetch_each)
+    if(verdict.fetch_each and op == arch::memory_op::fetch)
     {
       verdict.fetch_window_shift = fetch_window_shift(page, size, at, step, attrs);
     }
