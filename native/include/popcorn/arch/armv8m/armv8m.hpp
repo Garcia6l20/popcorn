@@ -64,15 +64,16 @@ namespace popcorn::arch::armv8m
  * - Lockup, and the INVPC, UNSTKERR, STKERR, STKOF on entry, VECTTBL and INVSTATE faults, stop
  *   the run under every fault policy.
  * - With TrustZone and fault_policy::enter_handler, the integrity faults of an exception return,
- *   SFSR.INVER, SFSR.INVIS, UFSR.INVPC and SFSR.AUVIOL on the frame, are taken as exceptions on the
- *   frame left in place, the returning exception deactivated first. The entry faults SFSR.AUVIOL
- *   and UFSR.STKOF of the stacked frame set the stack pointer to the frame or to the limit, store
- *   nothing, and are taken as derived exceptions, the higher of the derived and the original
- *   exception first, the other pended. A failed vector fetch takes HFSR.VECTTBL HardFault on the
- *   stacked frame, Secure for a Non-secure slot in Secure memory, else in the state of the
- *   exception being fetched. Lockup, a STKOF of the additional state context alone, a fault while
- *   taking the derived exception, UNSTKERR, STKERR and the NOCP of a Non-secure entry still stop.
- *   The registers keep their values from before the faulting return.
+ *   SFSR.INVER, SFSR.INVIS, UFSR.INVPC, SFSR.AUVIOL and BFSR.UNSTKERR on the frame, are taken as
+ *   exceptions on the frame left in place, the returning exception deactivated first. The entry
+ *   faults SFSR.AUVIOL and UFSR.STKOF of the stacked frame set the stack pointer to the frame or to
+ *   the limit, store nothing, and are taken as derived exceptions, the higher of the derived and
+ *   the original exception first, the other pended. BFSR.STKERR and the UFSR_S.NOCP of a Non-secure
+ *   entry with NSACR.CP10 0 are derived the same way, NOCP after a basic frame with no floating-
+ *   point registers. A failed vector fetch takes HFSR.VECTTBL HardFault on the stacked frame,
+ *   Secure for a Non-secure slot in Secure memory, else in the state of the exception being
+ *   fetched. Lockup, a STKOF of the additional state context alone and a fault while taking the
+ *   derived exception still stop. The registers keep their values from before the faulting return.
  * - The floating-point context is stacked at exception entry, never lazily: FPCCR and FPCAR are
  *   storage. FPDSCR is storage too, the engine builds new floating-point contexts from its own
  *   defaults.

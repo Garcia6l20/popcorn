@@ -563,10 +563,14 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto const  fp         = core_.fpu and (special.control & control_fpca) != 0;
   auto const  fp_callee =
       extension and fp and background == security::secure and secure_fp_context();
-  auto const size =
-      fp ? extended_frame_size + (fp_callee ? fp_callee_frame_size : 0u) : basic_frame_size;
-  auto const sp       = use_psp ? special.psp : special.msp;
-  auto const align    = not v7() or (state_.scs.ccr & ccr_stkalign) != 0;
+  auto const nocp = extension
+                and fp
+                and background == security::nonsecure
+                and (state_.scs.nsacr & nsacr_cp10) == 0;
+  auto const size  = fp and not nocp ? extended_frame_size + (fp_callee ? fp_callee_frame_size : 0u)
+                                     : basic_frame_size;
+  auto const sp    = use_psp ? special.psp : special.msp;
+  auto const align = not v7() or (state_.scs.ccr & ccr_stkalign) != 0;
   auto const frame_at = align ? (sp - size) & ~4u : sp - size;
   auto const callee = extension and background == security::secure and state == security::nonsecure
                         ? callee_frame_size
@@ -621,7 +625,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
              .data_address = *denied},
             partial(), sp_id(), lowest);
       }
-      if(fp and (state_.scs.nsacr & nsacr_cp10) == 0)
+      if(nocp and context_->faults == fault_policy::stop)
       {
         state_.scs.cfsr |= cfsr::nocp;
         return trap_result::fault(
@@ -642,7 +646,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   {
     frame[7] |= stacked_sfpa_bit;
   }
-  if(fp)
+  if(fp and not nocp)
   {
     read_batch(engine, fp_frame_ids, frame.subspan(8, fp_frame_ids.size()));
   }
@@ -666,12 +670,37 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   };
   if(not services.write_block(lowest, std::as_bytes(std::span{words}), stacking))
   {
+    if constexpr(extension)
+    {
+      return derived_entry(
+          original(),
+          {.kind      = fault_kind::bus,
+           .target    = exc_busfault,
+           .cfsr_bits = cfsr::stkerr,
+           .reported  = lowest,
+           .origin    = background},
+          partial(), sp_id(), lowest);
+    }
     state_.scs.cfsr |= cfsr::stkerr;
     return trap_result::fault(
         {.kind          = fault_kind::bus,
          .fault_address = lowest,
          .status        = state_.scs.cfsr,
          .detail        = state_.scs.hfsr});
+  }
+  if constexpr(extension)
+  {
+    if(nocp)
+    {
+      return derived_entry(
+          original(),
+          {.kind      = fault_kind::usage,
+           .target    = exc_usagefault,
+           .cfsr_bits = cfsr::nocp,
+           .reported  = pc(),
+           .origin    = security::secure},
+          partial(), sp_id(), lowest);
+    }
   }
   auto const table =
       extension and state == security::nonsecure ? state_.scs.nonsecure.vtor : state_.scs.vtor;
@@ -1018,12 +1047,12 @@ auto cortex_m::exception_return() -> trap_result
   };
   if(not services.read_block(frame_at, std::as_writable_bytes(std::span{words}), unstacking))
   {
-    state_.scs.cfsr |= cfsr::unstkerr;
-    return trap_result::fault(
-        {.kind          = fault_kind::bus,
-         .fault_address = frame_at,
-         .status        = state_.scs.cfsr,
-         .detail        = state_.scs.hfsr});
+    return return_fault(
+        value, number, exception, back,
+        {.kind      = fault_kind::bus,
+         .target    = exc_busfault,
+         .cfsr_bits = cfsr::unstkerr,
+         .reported  = frame_at});
   }
   if(callee != 0 and words[0] != integrity_signature(core_.fpu, returning.basic_frame))
   {

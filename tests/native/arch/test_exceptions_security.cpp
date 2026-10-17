@@ -90,6 +90,9 @@ constexpr std::uint32_t ufsr_invpc      = 1u << 18;
 constexpr std::uint32_t ufsr_stkof      = 1u << 20;
 constexpr std::uint32_t hfsr_vecttbl    = 1u << 1;
 constexpr std::uint32_t hfsr_forced     = 1u << 30;
+constexpr std::uint32_t busfault_ena    = 1u << 17;
+constexpr std::uint32_t bfsr_unstkerr   = 1u << 11;
+constexpr std::uint32_t bfsr_stkerr     = 1u << 12;
 
 auto booted(fault_policy policy = fault_policy::enter_handler, char const* firmware = "scs")
     -> arch_fixture
@@ -1561,31 +1564,146 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a Non-secure IRQ over Non-secure code with FPCA set and NSACR.CP10 0 stops with UFSR_S.NOCP "
-    "before any store, PushStack lines 15 and 52-54")
+    "a Non-secure IRQ over Non-secure code with FPCA set and NSACR.CP10 0 stacks a basic frame "
+    "and takes the derived UsageFault_S NOCP, no Secure FP register on the Non-secure stack, "
+    "PushStack lines 15 and 52-54")
 {
-  auto f = booted(fault_policy::stop);
-  open_nonsecure_region(f);
-  tables(f, 16);
-  put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
-  put(f, ns_code, {bkpt, 0xe7fe});
-  fill_below(f, ns_stack, 0x80);
-  engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
-  poke(f, itns0, 1);
-  poke(f, iser0, 1);
-  f.set("r3", ns_code);
-  REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
-  REQUIRE_FALSE(secure_now(f));
-  REQUIRE((f.reg("control") & control_fpca) != 0);
-  poke(f, ispr0, 1);
-  auto const stopped = resume(f, 2);
-  REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
-  CHECK((f.word(cfsr) & ufsr_nocp) != 0);
-  CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
-  CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
-  auto const stack = popcorn::testing::words_at(*f.target, ns_stack - 0x80, 0x20);
-  CHECK(std::ranges::all_of(stack, [](std::uint32_t word) { return word == fill; }));
+  constexpr std::uint32_t secret = 0x5EC0'0001;
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    CAPTURE(policy == fault_policy::stop);
+    auto f = booted(policy);
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_usagefault);
+    poke(f, shcsr, usagefault_ena);
+    put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
+    put(f, ns_code, {bkpt, 0xe7fe});
+    fill_below(f, ns_stack, 0x80);
+    engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    f.set("r2", secret);
+    f.set("r3", ns_code);
+    REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+    REQUIRE_FALSE(secure_now(f));
+    REQUIRE((f.reg("control") & control_fpca) != 0);
+    f.set("r2", 0);
+    poke(f, ispr0, 1);
+    auto const stopped = resume(f, 2);
+    CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+    CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+    auto const stack = popcorn::testing::words_at(*f.target, ns_stack - 0x80, 0x20);
+    CHECK(std::ranges::none_of(stack, [](std::uint32_t word) { return word == secret; }));
+    CHECK(std::ranges::all_of(std::span{stack}.first(0x18), [](std::uint32_t word) {
+      return word == fill;
+    }));
+    if(policy == fault_policy::stop)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+      CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
+      CHECK(std::ranges::all_of(stack, [](std::uint32_t word) { return word == fill; }));
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == armv8m::exc_usagefault);
+    CHECK(f.module->is_pending(16));
+    CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack - 0x20);
+    CHECK(stack[0x18 + 6] == ns_code + 2);
+    CHECK(f.reg("lr") == 0xFFFF'FFA9u);
+  }
+}
+
+TEST_CASE(
+    "a bus error stacking a Non-secure frame takes the derived BusFault STKERR, or HardFault_S "
+    "FORCED without BUSFAULTENA, PushStack lines 32-41 and DerivedLateArrival lines 32-37")
+{
+  constexpr address stack_top = unmapped + 0x200;
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    for(auto const enabled : {true, false})
+    {
+      CAPTURE(policy == fault_policy::stop);
+      CAPTURE(enabled);
+      auto f = booted(policy);
+      open_nonsecure_region(f);
+      poke(f, sau_rn, 1);
+      poke(f, sau_rb, unmapped);
+      poke(f, sau_rl, (unmapped + 0x3e0) | 1u);
+      tables(f, 16);
+      tables(f, armv8m::exc_busfault);
+      tables(f, armv8m::exc_hardfault);
+      if(enabled)
+      {
+        poke(f, shcsr, busfault_ena);
+      }
+      put(f, ns_code, {bkpt});
+      poke(f, itns0, 1);
+      poke(f, iser0, 1);
+      poke(f, ispr0, 1);
+      engine_write(f, UC_ARM_REG_SECURE, 0);
+      engine_write(f, UC_ARM_REG_MSP_NS, stack_top);
+      f.set("pc", ns_code | 1u);
+      auto const stopped = resume(f, 2);
+      CHECK((f.word(cfsr) & bfsr_stkerr) != 0);
+      if(policy == fault_policy::stop)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+        CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == stack_top);
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(secure_now(f));
+      CHECK(ipsr(f) == (enabled ? armv8m::exc_busfault : armv8m::exc_hardfault));
+      CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
+      CHECK(f.module->is_pending(16));
+      CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == stack_top - 0x20);
+    }
+  }
+}
+
+TEST_CASE(
+    "a bus error unstacking a Non-secure frame takes the BusFault UNSTKERR on the frame left in "
+    "place, PopStack lines 51-58 and HandleExceptionTransitions lines 18-21")
+{
+  constexpr address stack_top = unmapped + 0x200;
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    CAPTURE(policy == fault_policy::stop);
+    auto f = booted(policy);
+    open_nonsecure_region(f);
+    poke(f, sau_rn, 1);
+    poke(f, sau_rb, unmapped);
+    poke(f, sau_rl, (unmapped + 0x3e0) | 1u);
+    tables(f, 16);
+    tables(f, armv8m::exc_busfault);
+    poke(f, shcsr, busfault_ena);
+    put(f, ns_handler, {bkpt, bx_lr});
+    put(f, ns_code, {bkpt});
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    poke(f, ispr0, 1);
+    REQUIRE(run_nonsecure(f, ns_code, 2).reason == stop_reason::user);
+    engine_write(f, UC_ARM_REG_MSP_NS, stack_top - 0x20);
+    auto const stopped = resume(f, 2);
+    CHECK((f.word(cfsr) & bfsr_unstkerr) != 0);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == stack_top - 0x20);
+    if(policy == fault_policy::stop)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+      CHECK(ipsr(f) == 16);
+      CHECK(f.module->is_active(16));
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == armv8m::exc_busfault);
+    CHECK_FALSE(f.module->is_active(16));
+  }
 }
 
 TEST_CASE("a SecureFault that cannot preempt stops as hard with CFSR as status, SFSR kept apart")
