@@ -855,9 +855,10 @@ auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
   }
 }
 
-[[gnu::always_inline]] inline void cortex_m::trace_exit(std::uint32_t number)
+[[gnu::always_inline]] inline void
+    cortex_m::trace_exit(core::machine_services& services, std::uint32_t number)
 {
-  context_->services.trace(
+  services.trace(
       {.kind = core::trace_kind::irq, .flags = 0, .aux = static_cast<std::uint16_t>(number)});
 }
 
@@ -881,7 +882,7 @@ auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
     services.end_slice();
   }
   refresh_pending();
-  trace_exit(number);
+  trace_exit(services, number);
   return trap_result::resume();
 }
 
@@ -1295,7 +1296,7 @@ auto cortex_m::return_fault(
     return raised.error();
   }
   repend_level(number);
-  trace_exit(number);
+  trace_exit(context_->services, number);
   pend(raised->number, raised->state);
   auto const best = best_pending(state_.exceptions, priority_config(), state_.call_masked);
   return enter_with_frame(

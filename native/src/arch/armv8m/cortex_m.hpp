@@ -239,7 +239,7 @@ private:
   auto                           exception_return() -> trap_result;
   auto                           banked_return() -> trap_result;
   void                           repend_level(std::uint32_t number) noexcept;
-  void                           trace_exit(std::uint32_t number);
+  void                           trace_exit(core::machine_services& services, std::uint32_t number);
   auto                           returned(
       std::uint32_t number,
       std::uint32_t stacked_ipsr,
