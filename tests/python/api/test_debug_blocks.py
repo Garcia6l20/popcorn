@@ -41,3 +41,25 @@ def test_a_cti_access_from_the_firmware_reads_zero_and_warns_once(
     assert [(vars(r)["popcorn_kind"], vars(r)["popcorn_offset"]) for r in warned] == [
         ("model_warning", 4)
     ]
+
+
+@pytest.mark.parametrize("tzen", [False, True])
+def test_a_cti_access_under_strict_rules_is_a_model_error_and_the_debugger_reads_zero(
+    u575: popcorn.PartDescription, tzen: bool
+) -> None:
+    """Under strict_peripherals the firmware's first CTI load raises ModelError naming the
+    block and its offset, with no register. A debugger read of the CTI still reads 0."""
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(RCC_ELF),
+        option_bytes=OptionBytes(tzen=tzen),
+        strict_peripherals=True,
+    )
+    m.reset()
+    m.mem.write(CODE, struct.pack(f"<{len(LOAD_STORE_LOAD)}H", *LOAD_STORE_LOAD))
+    m.reg.r0 = CTI_OFFSET_4
+    m.reg.pc = CODE
+    with pytest.raises(popcorn.ModelError) as caught:
+        asyncio.run(m.run(budget=10))
+    assert (caught.value.peripheral, caught.value.register, caught.value.offset) == ("CTI", "", 4)
+    assert m.mem.u32[CTI_OFFSET_4] == 0

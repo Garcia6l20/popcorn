@@ -230,22 +230,44 @@ auto machine::run_state::map_raz_wi(std::uint32_t page)
   return mapped;
 }
 
-void machine::run_state::note_raz(raz_window& window, std::uint32_t offset, bool write)
+void machine::run_state::note_raz(
+    raz_window&   window,
+    std::uint32_t offset,
+    bool          write,
+    initiator     by)
 {
-  if(std::exchange(window.warned, true))
+  auto const strict = owner.options_.strict_peripherals;
+  if(by == initiator::debugger and strict)
   {
     return;
   }
-  owner.hooks_->log(
-      {.kind       = log_kind::model_warning,
-       .pc         = arch->pc(),
-       .peripheral = window.range->name,
-       .reg        = {},
-       .offset     = offset,
-       .write      = write,
-       .message    = std::format(
-           "{} of {} at offset {:#x}, no model: it reads as zero and ignores writes",
-           write ? "write" : "read", window.range->name, offset)});
+  auto const& name = window.range->name;
+  if(not std::exchange(window.warned, true))
+  {
+    owner.hooks_->log(
+        {.kind       = log_kind::model_warning,
+         .pc         = arch->pc(),
+         .peripheral = name,
+         .reg        = {},
+         .offset     = offset,
+         .write      = write,
+         .message    = std::format(
+             "{} of {} at offset {:#x}, no model: it reads as zero and ignores writes",
+             write ? "write" : "read", name, offset)});
+  }
+  if(strict)
+  {
+    throw model_error(name, "", offset);
+  }
+}
+
+auto machine::run_state::raz_at(address addr, std::uint8_t size) const noexcept -> raz_window*
+{
+  auto const found = std::ranges::find_if(raz_windows, [&](auto const& window) {
+    auto const start = std::uint64_t{window->range->start};
+    return addr >= start and std::uint64_t{addr} + size <= start + window->range->size;
+  });
+  return found == raz_windows.end() ? nullptr : found->get();
 }
 
 auto machine::run_state::on_raz_read(
@@ -257,7 +279,7 @@ auto machine::run_state::on_raz_read(
 {
   auto& window = *static_cast<raz_window*>(user);
   window.run->guarded([&] {
-    window.run->note_raz(window, static_cast<std::uint32_t>(offset), false);
+    window.run->note_raz(window, static_cast<std::uint32_t>(offset), false, initiator::cpu);
     return false;
   });
   return 0;
@@ -273,7 +295,7 @@ void machine::run_state::on_raz_write(
 {
   auto& window = *static_cast<raz_window*>(user);
   window.run->guarded([&] {
-    window.run->note_raz(window, static_cast<std::uint32_t>(offset), true);
+    window.run->note_raz(window, static_cast<std::uint32_t>(offset), true, initiator::cpu);
     return false;
   });
 }

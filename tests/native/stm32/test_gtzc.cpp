@@ -126,11 +126,13 @@ struct rig
       bool                        trustzone,
       stm32::option_bytes         wanted       = {.tzen = true},
       popcorn::arch::fault_policy faults       = popcorn::arch::fault_policy::stop,
-      bool                        debug_blocks = true)
+      bool                        debug_blocks = true,
+      bool                        strict       = false)
   {
     stm32::register_builtin_models();
-    auto options   = popcorn::testing::stm32_options();
-    options.faults = faults;
+    auto options               = popcorn::testing::stm32_options();
+    options.faults             = faults;
+    options.strict_peripherals = strict;
     if(debug_blocks)
     {
       options.raz_wi = stm32::raz_wi_map(u575());
@@ -812,6 +814,43 @@ TEST_CASE("a Non-secure load and store of the CTI with no SAU region over it are
     REQUIRE(faulted.reason == popcorn::stop_reason::fault);
     CHECK(faulted.fault->kind == popcorn::fault_kind::bus);
   }
+}
+
+TEST_CASE("under strict_peripherals a CPU or DMA access of a debug block is a model_error")
+{
+  constexpr address             cti = 0xe004'2004;
+  rig const                     r{false, {}, popcorn::arch::fault_policy::stop, true, true};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const cpu = [&](std::uint16_t insn) {
+    REQUIRE(r.target->mem().write(code_at, 2, insn));
+    REQUIRE(r.target->mem().write(code_at + 2, 2, bkpt));
+    set(r, "r0", cti);
+    set(r, "pc", code_at | 1u);
+    try
+    {
+      std::ignore = r.target->run_slice({.max_instructions = icount{2}});
+      FAIL("no model_error");
+    }
+    catch(popcorn::model_error const& error)
+    {
+      CHECK(error.peripheral() == "CTI");
+      CHECK(error.reg().empty());
+      CHECK(error.offset() == 4);
+    }
+  };
+  cpu(ldr_r2_r0);
+  cpu(str_r1_r0);
+  auto& bus = r.bus->services();
+  CHECK_THROWS_AS(
+      std::ignore = bus.read(cti, 4, bus_attrs{.by = initiator::dma}), popcorn::model_error);
+  CHECK_THROWS_AS(
+      std::ignore = bus.write(cti, 4, 1, bus_attrs{.by = initiator::dma}), popcorn::model_error);
+  CHECK(r.target->mem().read(0xe004'0004, 4) == 0u);
+  CHECK(r.target->mem().write(0xe004'0004, 4, 1).has_value());
+  CHECK(debug_warnings(logged, "CTI").size() == 1);
+  CHECK(debug_warnings(logged, "TPIU").empty());
 }
 
 TEST_CASE("machine_options::raz_wi refuses a range over a peripheral, unaligned or overlapping")

@@ -63,6 +63,11 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
     run_->firewall_refused = false;
     return read;
   }
+  if(auto* const raz = run_->raz_at(addr, size))
+  {
+    run_->note_raz(*raz, addr - raz->range->start, false, by);
+    return 0u;
+  }
   std::uint32_t value = 0;
   if(uc_mem_read_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
   {
@@ -110,6 +115,11 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus
     auto done              = run_->dispatch_write(*window, addr - window->base, size, value, attrs);
     run_->firewall_refused = false;
     return done;
+  }
+  if(auto* const raz = run_->raz_at(addr, size))
+  {
+    run_->note_raz(*raz, addr - raz->range->start, true, by);
+    return {};
   }
   if(uc_mem_write_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
   {

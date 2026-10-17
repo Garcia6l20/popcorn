@@ -1288,8 +1288,16 @@ struct machine::run_state
    */
   auto map_raz_wi(std::uint32_t page) -> std::vector<std::pair<std::uint64_t, std::uint64_t>>;
 
-  /** @brief Logs the first access to @p window. */
-  void note_raz(raz_window& window, std::uint32_t offset, bool write);
+  /**
+   * @brief Logs the first access to @p window, once per machine life, restore included. A
+   *        debugger access under strict_peripherals is neither logged nor refused.
+   * @throws model_error naming the range under strict_peripherals, on every CPU or DMA access.
+   */
+  void note_raz(raz_window& window, std::uint32_t offset, bool write, initiator by);
+
+  /** @brief The machine_options::raz_wi window holding [@p addr, @p addr + @p size), null when
+   * none. */
+  [[nodiscard]] auto raz_at(address addr, std::uint8_t size) const noexcept -> raz_window*;
 
   static auto on_raz_read(
       uc_struct*    engine,

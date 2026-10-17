@@ -651,7 +651,8 @@ class Machine:
             cpi: Core cycles per instruction, above 0.
             trace_capacity: Records the always-on trace ring keeps, above 0.
             spin_threshold: Iterations of a loop making no progress before a SPIN stop, 0 off.
-            strict_peripherals: Whether an unmodelled register access raises ModelError.
+            strict_peripherals: Whether an unmodelled register access raises ModelError, an
+                access to an STM32U5 debug block without a model too, such as the CTI.
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice of the machine's thread serves
                 its requests and checks its waiters.
@@ -1664,7 +1665,7 @@ class Machine:
             NotImplementedError: A parameter is a struct passed by value.
             MachineBusy: A run, step, wait or call is active.
             ModelError: A model failed during the call, or the call touched an unmodelled
-                register under strict_peripherals.
+                register or debug block under strict_peripherals.
             ConfigError: On a TrustZone core, the function is in memory of the other security
                 state than the core's current one, key `entry`, or a Non-secure call's arena
                 has Secure parts, key `arena`. A call never switches state. A Secure call may
