@@ -587,6 +587,11 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto const sp_id = [&] {
     return ids_of(background).*(use_psp ? &bank_ids::psp : &bank_ids::msp);
   };
+  auto const invalidate_fp = [&] {
+    std::array<std::uint32_t, 17> zeros{};
+    write_batch(engine, fp_frame_ids, std::span{zeros});
+    write_batch(engine, fp_callee_ids, std::span{zeros}.first(fp_callee_ids.size()));
+  };
   if(lowest < (use_psp ? special.psplim : special.msplim))
   {
     if constexpr(extension)
@@ -672,6 +677,10 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   {
     if constexpr(extension)
     {
+      if(fp_callee)
+      {
+        invalidate_fp();
+      }
       return derived_entry(
           original(),
           {.kind      = fault_kind::bus,
@@ -679,7 +688,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
            .cfsr_bits = cfsr::stkerr,
            .reported  = lowest,
            .origin    = background},
-          partial(), sp_id(), lowest);
+          partial(), sp_id(), frame_at);
     }
     state_.scs.cfsr |= cfsr::stkerr;
     return trap_result::fault(
@@ -690,6 +699,10 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   }
   if constexpr(extension)
   {
+    if(fp_callee)
+    {
+      invalidate_fp();
+    }
     if(nocp)
     {
       return derived_entry(
@@ -779,12 +792,6 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
     {
       write(UC_ARM_REG_CONTROL_S, read(UC_ARM_REG_CONTROL_S) & ~(control_fpca | control_sfpa));
       clear_caller_registers(engine, callee != 0);
-    }
-    if(fp_callee)
-    {
-      std::array<std::uint32_t, 17> zeros{};
-      write_batch(engine, fp_frame_ids, std::span{zeros});
-      write_batch(engine, fp_callee_ids, std::span{zeros}.first(fp_callee_ids.size()));
     }
     write(UC_ARM_REG_EPSR, (*vector & 1u) << 24);
     write(UC_ARM_REG_LR, exc_return);

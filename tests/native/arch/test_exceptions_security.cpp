@@ -7,6 +7,8 @@
 #include "state.hpp"
 
 #include <popcorn/core/machine.hpp>
+#include <popcorn/periph/firewall.hpp>
+#include <popcorn/periph/model.hpp>
 
 #include <doctest/doctest.h>
 
@@ -16,11 +18,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <format>
 #include <initializer_list>
+#include <memory>
 #include <random>
 #include <ranges>
+#include <span>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -77,6 +84,7 @@ constexpr std::uint16_t nop       = 0xbf00;
 
 constexpr std::uint32_t control_spsel   = 1u << 1;
 constexpr std::uint32_t control_fpca    = 1u << 2;
+constexpr std::uint32_t control_sfpa    = 1u << 3;
 constexpr std::uint32_t fill            = 0xA5A5'A5A5;
 constexpr address       shpr1           = 0xE000'ED18;
 constexpr address       ipr0            = 0xE000'E400;
@@ -1744,6 +1752,215 @@ TEST_CASE(
     CHECK(ipsr(f) == armv8m::exc_busfault);
     CHECK_FALSE(f.module->is_active(16));
   }
+}
+
+namespace
+{
+constexpr address       sram_end     = 0x200C'0000;
+constexpr std::uint32_t secure_fpscr = 0x0340'0000;
+
+class read_denied final : public popcorn::periph::model, public popcorn::periph::bus_firewall
+{
+public:
+  read_denied(popcorn::periph::model_context& ctx, address denied) : denied_{denied}
+  {
+    ctx.install_firewall(*this);
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+
+  auto check_peripheral(std::size_t, popcorn::bus_attrs, popcorn::arch::memory_op)
+      -> popcorn::periph::bus_verdict override
+  {
+    return popcorn::periph::bus_verdict::allow;
+  }
+  [[nodiscard]] auto filters_memory() const -> bool override
+  {
+    return true;
+  }
+  auto check_memory(address at, std::uint8_t, popcorn::bus_attrs, popcorn::arch::memory_op op)
+      -> popcorn::periph::bus_verdict override
+  {
+    return op == popcorn::arch::memory_op::read and at == denied_
+             ? popcorn::periph::bus_verdict::bus_error
+             : popcorn::periph::bus_verdict::allow;
+  }
+
+private:
+  address denied_;
+};
+
+auto booted_denying(address denied) -> arch_fixture
+{
+  auto options   = trustzone_options();
+  options.faults = fault_policy::enter_handler;
+  options.models.emplace(
+      "UNMODELLED",
+      [denied](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&)
+          -> std::shared_ptr<popcorn::periph::model> {
+        return std::make_shared<read_denied>(ctx, denied);
+      });
+  arch_fixture f{m33_trustzone(), "scs", std::move(options)};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  return f;
+}
+
+void secure_fp_background(arch_fixture const& f)
+{
+  poke(f, nsacr, nsacr_cp10_cp11);
+  poke(f, fpccr, f.word(fpccr) | fpccr_ts);
+  engine_write(
+      f, UC_ARM_REG_CONTROL_S, engine_read(f, UC_ARM_REG_CONTROL_S) | control_fpca | control_sfpa);
+  load_s_registers(f);
+  f.set("fpscr", secure_fpscr);
+  REQUIRE(f.reg("fpscr") == secure_fpscr);
+  set_registers(f);
+  engine_write(f, UC_ARM_REG_APSR, 0xF800'0000u);
+}
+
+void check_fp_cleared(arch_fixture const& f)
+{
+  for(int n = 0; n < 32; ++n)
+  {
+    CAPTURE(n);
+    CHECK(f.reg(std::format("s{}", n)) == 0);
+  }
+  CHECK(f.reg("fpscr") == 0);
+}
+
+void check_core_cleared(arch_fixture const& f)
+{
+  for(int n = 0; n <= 12; ++n)
+  {
+    CAPTURE(n);
+    CHECK(f.reg(std::format("r{}", n)) == 0);
+  }
+  CHECK((f.reg("xpsr") & 0xF800'0000u) == 0);
+  CHECK((engine_read(f, UC_ARM_REG_CONTROL_S) & (control_fpca | control_sfpa)) == 0);
+}
+}
+
+TEST_CASE(
+    "a bus error stacking a Secure FP frame for a Non-secure IRQ leaves the SP at the frame and "
+    "clears the Secure FP registers, for BusFault_S and for the IRQ that outranks it, PushStack "
+    "lines 78-80 and 95, ExceptionTaken lines 23-24")
+{
+  constexpr address msp      = sram_end + 0x10;
+  constexpr address frame_at = msp - 0xA8;
+  constexpr address lowest   = frame_at - 0x28;
+  for(auto const derived_first : {true, false})
+  {
+    CAPTURE(derived_first);
+    auto f = booted();
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_busfault);
+    poke(f, shcsr, busfault_ena);
+    if(not derived_first)
+    {
+      poke(f, shpr1, 0x0000'8000u);
+    }
+    put(f, ns_handler, {bkpt, bx_lr});
+    put(f, secure_code, {bkpt});
+    fill_below(f, ns_stack, 0x80);
+    engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    secure_fp_background(f);
+    engine_write(f, UC_ARM_REG_MSP_S, msp);
+    poke(f, ispr0, 1);
+    REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+    CHECK((f.word(cfsr) & bfsr_stkerr) != 0);
+    CHECK((f.word(hfsr) & hfsr_forced) == 0);
+    check_fp_cleared(f);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
+    auto const ns_words = popcorn::testing::words_at(*f.target, ns_stack - 0x80, 0x20);
+    CHECK(std::ranges::all_of(ns_words, [](std::uint32_t word) { return word == fill; }));
+    if(derived_first)
+    {
+      CHECK(secure_now(f));
+      CHECK(ipsr(f) == armv8m::exc_busfault);
+      CHECK(f.module->is_pending(16));
+      CHECK(engine_read(f, UC_ARM_REG_MSP_S) == frame_at);
+      CHECK(f.reg("lr") == 0xFFFF'FFE9u);
+      CHECK(f.word(frame_at + 0x18) == secure_code);
+      continue;
+    }
+    CHECK_FALSE(secure_now(f));
+    CHECK(ipsr(f) == 16);
+    CHECK(f.module->is_pending(armv8m::exc_busfault));
+    CHECK(engine_read(f, UC_ARM_REG_MSP_S) == lowest);
+    CHECK(f.reg("lr") == 0xFFFF'FFE8u);
+    check_core_cleared(f);
+    CHECK(f.word(lowest) == 0xFEFA'125Au);
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    CHECK((f.word(cfsr) & bfsr_unstkerr) != 0);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == armv8m::exc_busfault);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_S) == lowest);
+  }
+}
+
+TEST_CASE(
+    "a failed Non-secure IRQ vector read over a Secure FP background enters HardFault_NS with "
+    "BFHFNMINS 1 and the Secure registers cleared, B3.11 RDXYK and PushStack lines 78-80")
+{
+  auto f = booted_denying(ns_table + 4 * 16);
+  open_nonsecure_region(f);
+  tables(f, 16);
+  tables(f, armv8m::exc_hardfault);
+  poke(f, aircr, bfhfnmins);
+  put(f, secure_code, {bkpt});
+  fill_below(f, ns_stack, 0x80);
+  engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+  poke(f, itns0, 1);
+  poke(f, iser0, 1);
+  secure_fp_background(f);
+  auto const msp = engine_read(f, UC_ARM_REG_MSP_S);
+  poke(f, ispr0, 1);
+  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+  CHECK((f.word(hfsr) & hfsr_vecttbl) != 0);
+  CHECK((f.word(hfsr) & hfsr_forced) == 0);
+  CHECK_FALSE(secure_now(f));
+  CHECK(ipsr(f) == armv8m::exc_hardfault);
+  CHECK(f.reg("pc") == ns_handler + 2);
+  CHECK(f.module->is_pending(16));
+  CHECK(engine_read(f, UC_ARM_REG_MSP_S) == msp - 0xA8 - 0x28);
+  CHECK(f.reg("lr") == 0xFFFF'FFE8u);
+  check_core_cleared(f);
+  check_fp_cleared(f);
+  CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
+  auto const ns_words = popcorn::testing::words_at(*f.target, ns_stack - 0x80, 0x20);
+  CHECK(std::ranges::all_of(ns_words, [](std::uint32_t word) { return word == fill; }));
 }
 
 TEST_CASE("a SecureFault that cannot preempt stops as hard with CFSR as status, SFSR kept apart")
