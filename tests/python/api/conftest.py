@@ -8,10 +8,12 @@ import os
 import struct
 import threading
 from collections.abc import Callable, Coroutine, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn._refs import Pending
 from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms
 
@@ -215,17 +217,21 @@ def requests_inside(
 REQUESTS_INSIDE = ("read", "sample", "wait_until", "run", "step", "wait_for")
 
 
-async def stalled[T](
-    m: popcorn.Machine,
-    post: Callable[[VirtualTime], Coroutine[object, object, T]],
-    at: VirtualTime | None = None,
-) -> tuple[VirtualTime, T]:
-    """Inside `running()`, hold the machine's thread in a sample, start `post(boundary)` with
-    the sample's boundary time, and release the machine once `post` has run ten loop turns.
-    What it posts registers at that boundary, and times it derives from the boundary hold
-    however loaded the host is. Return the boundary and the result of `post`.
+@dataclass
+class Stall:
+    """A sample that holds the machine's thread at one boundary until `release` is set."""
 
-    `at` stamps the sample: the hold comes at the first boundary at or after it."""
+    reached: threading.Event
+    release: threading.Event
+    boundary: list[VirtualTime]
+    holding: Pending[None]
+
+
+def stall(m: popcorn.Machine, at: VirtualTime | None = None) -> Stall:
+    """Post a sample that holds the machine's thread at the first boundary at or after `at`.
+    Posted while the machine is parked, with `at` after `m.time`, it waits for the free run, so
+    the hold comes at a boundary fixed in virtual time however loaded the host is. Posted
+    inside `running()`, the hold comes wherever the free run has got to."""
     reached = threading.Event()
     release = threading.Event()
     boundary: list[VirtualTime] = []
@@ -235,15 +241,32 @@ async def stalled[T](
         reached.set()
         release.wait(10.0)
 
-    holding = m.sample(held, at=at)
-    while not reached.is_set():
+    return Stall(reached, release, boundary, m.sample(held, at=at))
+
+
+async def stalled[T](
+    m: popcorn.Machine,
+    post: Callable[[VirtualTime], Coroutine[object, object, T]],
+    at: VirtualTime | None = None,
+    held: Stall | None = None,
+) -> tuple[VirtualTime, T]:
+    """Inside `running()`, hold the machine's thread in a sample, start `post(boundary)` with
+    the sample's boundary time, and release the machine once `post` has run ten loop turns.
+    What it posts registers at that boundary, and times it derives from the boundary hold
+    however loaded the host is. Return the boundary and the result of `post`.
+
+    `at` stamps the sample: the hold comes at the first boundary at or after it. `held` is a
+    `stall` posted before `running()`, used in place of a new sample."""
+    if held is None:
+        held = stall(m, at)
+    while not held.reached.is_set():
         await asyncio.sleep(0.001)
-    task = asyncio.create_task(post(boundary[0]))
+    task = asyncio.create_task(post(held.boundary[0]))
     for _ in range(10):
         await asyncio.sleep(0)
-    release.set()
-    await holding
-    return boundary[0], await task
+    held.release.set()
+    await held.holding
+    return held.boundary[0], await task
 
 
 async def stalled_until_posted[T](

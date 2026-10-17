@@ -18,7 +18,7 @@ from popcorn.board import SpiController, SpiTarget
 from popcorn.pytest._cache import devices_digest
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .conftest import run_bounded, stalled
+from .conftest import run_bounded, stall, stalled
 from .test_host_binding import COLLECTED
 
 SPI_ELF = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "spi_ll.elf"
@@ -100,14 +100,15 @@ def test_a_transfer_is_alike_parked_and_running(u575: popcorn.PartDescription) -
     parked_log = finish(m)
     m, running = echo_machine(u575)
     assert m.time + START == at
+    held = stall(m, m.time + us(1))
 
-    async def post(_: VirtualTime) -> VirtualTime:
+    async def post(boundary: VirtualTime) -> VirtualTime:
+        assert boundary < at
         return await running.transfer([1, 2, 3, 4], at=at)
 
     async def body() -> None:
         async with m.running():
-            boundary, start = await stalled(m, post)
-            assert boundary < at
+            _, start = await stalled(m, post, held=held)
             assert start == at
             await m.wait_for(m.ref.var("log_len").ge(5))
 

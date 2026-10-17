@@ -18,7 +18,7 @@ from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from . import models_example
-from .conftest import run_bounded, stalled
+from .conftest import run_bounded, stall, stalled
 from .devices_example import Eeprom24, JedecDevice
 from .projects import DEVICES
 
@@ -1123,14 +1123,15 @@ def test_a_hold_is_alike_parked_and_running(u575: popcorn.PartDescription) -> No
     asyncio.run(parked.hold_bus(at=at, for_=HOLD_FOR))
     parked_log = finish(m)
     m, running, at = held_eeprom(u575)
+    held = stall(m, m.time + us(1))
 
-    async def post(_: VirtualTime) -> VirtualTime:
+    async def post(boundary: VirtualTime) -> VirtualTime:
+        assert boundary < at
         return await running.hold_bus(at=at, for_=HOLD_FOR)
 
     async def body() -> None:
         async with m.running():
-            boundary, start = await stalled(m, post)
-            assert boundary < at
+            _, start = await stalled(m, post, held=held)
             assert start == at
             await m.wait_for(m.ref.var("log_len").ge(4))
 
