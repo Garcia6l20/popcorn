@@ -2094,6 +2094,78 @@ TEST_CASE(
   });
 }
 
+TEST_CASE(
+    "a Non-secure entry with FPCA set and NSACR.CP10 0 that faults on its frame sets UFSR_S.NOCP "
+    "and takes the frame's AUVIOL, STKERR or STKOF, PushStack lines 44-54 and 84-96")
+{
+  enum class frame_fault : std::uint8_t
+  {
+    auviol,
+    stkerr,
+    stkof
+  };
+  for(auto const kind : {frame_fault::auviol, frame_fault::stkerr, frame_fault::stkof})
+  {
+    CAPTURE(static_cast<int>(kind));
+    auto f = booted();
+    open_nonsecure_region(f);
+    poke(f, sau_rn, 1);
+    poke(f, sau_rb, unmapped);
+    poke(f, sau_rl, (unmapped + 0x3e0) | 1u);
+    tables(f, 16);
+    tables(f, armv8m::exc_securefault);
+    tables(f, armv8m::exc_busfault);
+    tables(f, armv8m::exc_usagefault);
+    poke(f, shcsr, securefault_ena | busfault_ena | usagefault_ena);
+    poke(f, shcsr + scs_ns, usagefault_ena);
+    put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
+    put(f, ns_code, {bkpt, 0xe7fe});
+    engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    f.set("r3", ns_code);
+    REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+    REQUIRE_FALSE(secure_now(f));
+    REQUIRE((f.reg("control") & control_fpca) != 0);
+    switch(kind)
+    {
+      case frame_fault::auviol:
+        engine_write(f, UC_ARM_REG_MSP_NS, secure_code + 0x800);
+        break;
+      case frame_fault::stkerr:
+        engine_write(f, UC_ARM_REG_MSP_NS, unmapped + 0x200);
+        break;
+      case frame_fault::stkof:
+        engine_write(f, UC_ARM_REG_MSPLIM_NS, ns_stack - 0x10);
+        break;
+    }
+    poke(f, ispr0, 1);
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+    CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+    CHECK((f.word(hfsr) & hfsr_forced) == 0);
+    CHECK(f.module->is_pending(16));
+    switch(kind)
+    {
+      case frame_fault::auviol:
+        CHECK((f.word(sfsr) & sfsr_auviol) != 0);
+        CHECK(secure_now(f));
+        CHECK(ipsr(f) == armv8m::exc_securefault);
+        break;
+      case frame_fault::stkerr:
+        CHECK((f.word(cfsr) & bfsr_stkerr) != 0);
+        CHECK(secure_now(f));
+        CHECK(ipsr(f) == armv8m::exc_busfault);
+        break;
+      case frame_fault::stkof:
+        CHECK((f.word(cfsr + scs_ns) & ufsr_stkof) != 0);
+        CHECK_FALSE(secure_now(f));
+        CHECK(ipsr(f) == armv8m::exc_usagefault);
+        break;
+    }
+  }
+}
+
 TEST_CASE("a SecureFault that cannot preempt stops as hard with CFSR as status, SFSR kept apart")
 {
   auto f = booted();

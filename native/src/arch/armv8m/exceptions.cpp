@@ -587,6 +587,12 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto const sp_id = [&] {
     return ids_of(background).*(use_psp ? &bank_ids::psp : &bank_ids::msp);
   };
+  auto const note_nocp = [&] {
+    if(nocp)
+    {
+      state_.scs.cfsr |= cfsr::nocp;
+    }
+  };
   auto const invalidate_fp = [&] {
     std::array<std::uint32_t, 17> zeros{};
     write_batch(engine, fp_frame_ids, std::span{zeros});
@@ -598,6 +604,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
     {
       if(auto const limit = use_psp ? special.psplim : special.msplim; frame_at < limit)
       {
+        note_nocp();
         return derived_entry(
             original(),
             {.kind      = fault_kind::usage,
@@ -621,6 +628,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
     {
       if(auto const denied = first_secure_word(lowest, frame_at + size))
       {
+        note_nocp();
         return derived_entry(
             original(),
             {.kind         = fault_kind::secure,
@@ -681,6 +689,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
       {
         invalidate_fp();
       }
+      note_nocp();
       return derived_entry(
           original(),
           {.kind      = fault_kind::bus,
