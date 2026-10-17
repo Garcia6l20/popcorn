@@ -853,11 +853,15 @@ TEST_CASE("under strict_peripherals a CPU or DMA access of a debug block is a mo
   CHECK(debug_warnings(logged, "TPIU").empty());
 }
 
-TEST_CASE("machine_options::raz_wi refuses a range over a peripheral, unaligned or overlapping")
+TEST_CASE(
+    "machine_options::raz_wi refuses a range over a region, a peripheral or the scratch region, "
+    "unaligned or overlapping")
 {
-  auto const refused = [](std::vector<popcorn::address_range> ranges, std::string_view key) {
-    auto options   = popcorn::testing::stm32_options();
-    options.raz_wi = std::move(ranges);
+  popcorn::address_range const arena{.name = "arena", .start = 0xc000'0000, .size = 0x1000};
+  auto const refused = [&](std::vector<popcorn::address_range> ranges, std::string_view key) {
+    auto options    = popcorn::testing::stm32_options();
+    options.scratch = arena;
+    options.raz_wi  = std::move(ranges);
     CAPTURE(key);
     try
     {
@@ -869,6 +873,12 @@ TEST_CASE("machine_options::raz_wi refuses a range over a peripheral, unaligned 
       CHECK(error.key() == key);
     }
   };
+  refused(
+      {
+          {.name = "SRAM", .start = 0x2000'0000, .size = 0x1000}
+  },
+      "raz_wi[0]");
+  refused({arena}, "raz_wi[0]");
   refused(
       {
           {.name = "OVER", .start = 0xe004'4000, .size = 0x1000}
