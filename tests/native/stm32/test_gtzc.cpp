@@ -778,6 +778,25 @@ TEST_CASE("RM0456 75.5: the U5 debug blocks without a model are RAZ/WI with one 
 }
 
 TEST_CASE(
+    "the RAZ/WI warning names the firmware pc and stays once per machine life across a restore")
+{
+  rig const                     r{false};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const        saved = r.target->snapshot();
+  constexpr address cti   = 0xe004'2004;
+  run_cpu(r, {.insn = ldr_r2_r0}, cti, 0);
+  auto warned = debug_warnings(logged, "CTI");
+  REQUIRE(warned.size() == 1);
+  CHECK(warned.front().pc == code_at);
+  r.target->restore(saved);
+  run_cpu(r, {.insn = ldr_r2_r0}, cti, 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK(debug_warnings(logged, "CTI").size() == 1);
+}
+
+TEST_CASE(
     "RM0481 66.5 Tables 870 and 871: an STM32H5 part gets the U5 debug blocks, other families none")
 {
   auto h5 = u575();
