@@ -238,6 +238,8 @@ private:
   template <bool extension> auto enter_as(std::uint32_t number, security state) -> trap_result;
   auto                           exception_return() -> trap_result;
   auto                           banked_return() -> trap_result;
+  void                           repend_level(std::uint32_t number) noexcept;
+  void                           trace_exit(std::uint32_t number);
   auto                           returned(
       std::uint32_t number,
       std::uint32_t stacked_ipsr,

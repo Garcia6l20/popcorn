@@ -7,6 +7,7 @@
 #include "state.hpp"
 
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/trace.hpp>
 #include <popcorn/periph/firewall.hpp>
 #include <popcorn/periph/model.hpp>
 
@@ -29,6 +30,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace
@@ -2049,6 +2051,47 @@ TEST_CASE(
     CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack - 0x68);
     CHECK_FALSE(f.module->is_active(16));
   }
+}
+
+TEST_CASE(
+    "a return fault of a level IRQ with its line high pends it again and traces its exit before "
+    "the fault's entry, as a normal return does, HandleExceptionTransitions lines 18-21")
+{
+  auto f = booted();
+  tables(f, 16);
+  tables(f, armv8m::exc_usagefault);
+  poke(f, shcsr, usagefault_ena);
+  put(f, secure_handler, {bkpt, bx_lr});
+  put(f, secure_code, {bkpt});
+  poke(f, iser0, 1);
+  f.module->set_irq_line(0, true);
+  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+  REQUIRE(ipsr(f) == 16);
+  REQUIRE_FALSE(f.module->is_pending(16));
+  auto const frame_at = engine_read(f, UC_ARM_REG_MSP_S);
+  poke(f, frame_at + 0x1c, f.word(frame_at + 0x1c) | 3u);
+  auto const before = f.target->trace().records().size();
+  REQUIRE(resume(f, 2).reason == stop_reason::user);
+  CHECK(secure_now(f));
+  CHECK(ipsr(f) == armv8m::exc_usagefault);
+  CHECK((f.word(cfsr) & ufsr_invpc) != 0);
+  CHECK_FALSE(f.module->is_active(16));
+  CHECK(f.module->is_pending(16));
+  auto const                                          records = f.target->trace().records();
+  std::vector<std::pair<std::uint8_t, std::uint16_t>> irq;
+  for(auto const& record : std::span{records}.subspan(before))
+  {
+    if(record.kind == core::trace_kind::irq)
+    {
+      irq.emplace_back(record.flags, record.aux);
+    }
+  }
+  CHECK(
+      irq
+      == std::vector<std::pair<std::uint8_t, std::uint16_t>>{
+          {0, 16                                                },
+          {1, static_cast<std::uint16_t>(armv8m::exc_usagefault)}
+  });
 }
 
 TEST_CASE("a SecureFault that cannot preempt stops as hard with CFSR as status, SFSR kept apart")

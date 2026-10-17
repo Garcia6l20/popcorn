@@ -837,6 +837,21 @@ auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
   return trustzone() ? (exc_return & 0xff00'0000u) == 0xff00'0000u : valid_exc_return(exc_return);
 }
 
+[[gnu::always_inline]] inline void cortex_m::repend_level(std::uint32_t number) noexcept
+{
+  if(level_sensitive(number) and test_bit(state_.exceptions.level, number))
+  {
+    note_pending(number);
+    put_bit(state_.exceptions.pending, number, true);
+  }
+}
+
+[[gnu::always_inline]] inline void cortex_m::trace_exit(std::uint32_t number)
+{
+  context_->services.trace(
+      {.kind = core::trace_kind::irq, .flags = 0, .aux = static_cast<std::uint16_t>(number)});
+}
+
 [[gnu::always_inline]] inline auto cortex_m::returned(
     std::uint32_t number,
     std::uint32_t stacked_ipsr,
@@ -844,11 +859,7 @@ auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
     std::uint32_t scr) -> trap_result
 {
   auto& services = context_->services;
-  if(level_sensitive(number) and test_bit(state_.exceptions.level, number))
-  {
-    note_pending(number);
-    put_bit(state_.exceptions.pending, number, true);
-  }
+  repend_level(number);
   state_.event_register  = true;
   auto const idle_thread = stacked_ipsr == 0
                        and state_.exceptions.nonsecure_active == 0
@@ -861,8 +872,7 @@ auto cortex_m::valid_return(std::uint32_t exc_return) const noexcept -> bool
     services.end_slice();
   }
   refresh_pending();
-  services.trace(
-      {.kind = core::trace_kind::irq, .flags = 0, .aux = static_cast<std::uint16_t>(number)});
+  trace_exit(number);
   return trap_result::resume();
 }
 
@@ -1276,6 +1286,8 @@ auto cortex_m::return_fault(
     state_.exceptions.nonsecure_active = nonsecure_active;
     return raised.error();
   }
+  repend_level(number);
+  trace_exit(number);
   pend(raised->number, raised->state);
   auto const best = best_pending(state_.exceptions, priority_config(), state_.call_masked);
   return enter_with_frame(
