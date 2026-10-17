@@ -90,7 +90,7 @@ Unicorn CPU emulator, popcorn fork at commit
     test_mem_hook tests, the test_mem_alias tests and the test_mem_slow_path
     tests.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
-  are under LGPL-2.0, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
+  are under LGPL-2.1-or-later, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.
 
 reflex C++26 reflection library, submodule third_party/reflex
@@ -99,11 +99,13 @@ reflex C++26 reflection library, submodule third_party/reflex
 
 nanobind
   https://github.com/wjakob/nanobind
-  License: BSD-3-Clause. Its runtime is compiled into the extension.
+  License: BSD-3-Clause, see LICENSES/nanobind-LICENSE. Its runtime is
+  compiled into the extension.
 
 robin-map
   https://github.com/Tessil/robin-map
-  License: MIT. Header-only use through nanobind.
+  License: MIT, see LICENSES/robin-map-LICENSE. Header-only use through
+  nanobind.
 
 doctest
   https://github.com/doctest/doctest
