@@ -574,26 +574,29 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto const lowest = frame_at - callee;
   auto&      cfsr =
       extension and background == security::nonsecure ? state_.scs.nonsecure.cfsr : state_.scs.cfsr;
-  auto const limit    = use_psp ? special.psplim : special.msplim;
-  auto const original = pending_exception{.number = number, .state = state};
-  auto const partial  = encode_exc_return(
-      {.thread = thread, .process_stack = use_psp, .basic_frame = not fp},
-      {.secure_background = background == security::secure});
-  auto const sp_id = ids_of(background).*(use_psp ? &bank_ids::psp : &bank_ids::msp);
-  if(lowest < limit)
+  auto const original = [&] { return pending_exception{.number = number, .state = state}; };
+  auto const partial  = [&] {
+    return encode_exc_return(
+        {.thread = thread, .process_stack = use_psp, .basic_frame = not fp},
+        {.secure_background = background == security::secure});
+  };
+  auto const sp_id = [&] {
+    return ids_of(background).*(use_psp ? &bank_ids::psp : &bank_ids::msp);
+  };
+  if(lowest < (use_psp ? special.psplim : special.msplim))
   {
     if constexpr(extension)
     {
-      if(frame_at < limit)
+      if(auto const limit = use_psp ? special.psplim : special.msplim; frame_at < limit)
       {
         return derived_entry(
-            original,
+            original(),
             {.kind      = fault_kind::usage,
              .target    = exc_usagefault,
              .cfsr_bits = cfsr::stkof,
              .reported  = lowest,
              .origin    = background},
-            partial, sp_id, limit);
+            partial(), sp_id(), limit);
       }
     }
     cfsr |= cfsr::stkof;
@@ -610,13 +613,13 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
       if(auto const denied = first_secure_word(lowest, frame_at + size))
       {
         return derived_entry(
-            original,
+            original(),
             {.kind         = fault_kind::secure,
              .target       = exc_securefault,
              .cfsr_bits    = sfsr::auviol,
              .reported     = *denied,
              .data_address = *denied},
-            partial, sp_id, lowest);
+            partial(), sp_id(), lowest);
       }
       if(fp and (state_.scs.nsacr & nsacr_cp10) == 0)
       {
@@ -673,12 +676,8 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto const table =
       extension and state == security::nonsecure ? state_.scs.nonsecure.vtor : state_.scs.vtor;
   auto const slot = table + 4 * number;
-  auto const secure_slot =
-      extension and state == security::nonsecure and first_secure_word(slot, slot + 4).has_value();
-  std::uint32_t exc_return = 0;
-  if constexpr(extension)
-  {
-    exc_return = encode_exc_return(
+  auto const link = [&] {
+    return encode_exc_return(
         {.thread        = thread,
          .process_stack = state == background
                             ? use_psp
@@ -686,9 +685,9 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
          .basic_frame   = not fp},
         {.secure_background = background == security::secure,
          .secure_exception  = state == security::secure});
-  }
+  };
   std::optional<std::uint32_t> vector;
-  if(not secure_slot)
+  if(not extension or state == security::secure or not first_secure_word(slot, slot + 4))
   {
     if(auto const read_back = services.read(
            slot, 4, bus_attrs{.by = initiator::cpu, .secure = state == security::secure}))
@@ -701,21 +700,23 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
     state_.scs.hfsr |= hfsr_vecttbl;
     if constexpr(extension)
     {
+      auto const secure_slot =
+          state == security::nonsecure and first_secure_word(slot, slot + 4).has_value();
       auto const hard = pending_exception{
           .number = exc_hardfault,
           .state  = secure_slot ? security::secure
                                 : exception_target(
                                       state_.exceptions, priority_config(), exc_hardfault, state)};
       if(context_->faults != fault_policy::stop
-         and outranks(state_.exceptions, priority_config(), hard, original))
+         and outranks(state_.exceptions, priority_config(), hard, original()))
       {
-        write(sp_id, lowest);
+        write(sp_id(), lowest);
         if(state == security::nonsecure)
         {
           clear_caller_registers(engine, callee != 0);
         }
         pend(hard.number, hard.state);
-        return enter_with_frame(hard, exc_return, true);
+        return enter_with_frame(hard, link(), true);
       }
     }
     return trap_result::fault(
@@ -727,9 +728,10 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto target = special;
   if constexpr(extension)
   {
+    auto const exc_return = link();
     if(state != background)
     {
-      write(sp_id, lowest);
+      write(sp_id(), lowest);
       write_security(engine, state);
       target = read_special(engine, stack_limits());
     }
