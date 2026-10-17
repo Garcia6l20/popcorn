@@ -114,6 +114,40 @@ protected:
   ~sram_block_controller() = default;
 };
 
+/**
+ * @brief A flash memory as the memory filter sees it, found by `dynamic_cast` over the
+ *        machine's peers: the security of each of its pages, RM0456 7.5.2 to 7.5.4.
+ */
+class secure_page_controller
+{
+public:
+  /** @brief Creates the interface. */
+  secure_page_controller() = default;
+  /** @brief Not copyable. */
+  secure_page_controller(secure_page_controller const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(secure_page_controller const&) -> secure_page_controller& = delete;
+  /** @brief Not movable. */
+  secure_page_controller(secure_page_controller&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(secure_page_controller&&) -> secure_page_controller& = delete;
+
+  /**
+   * @brief Whether the page holding an address is Secure.
+   * @param at Address in any alias of the memory.
+   * @return The page's security, empty when @p at is not in the memory or the memory has no
+   *         page security, as without option bytes.
+   */
+  [[nodiscard]] virtual auto page_secure(address at) const -> std::optional<bool> = 0;
+
+  /** @brief Size of the pages of page_secure() in bytes. */
+  [[nodiscard]] virtual auto secure_page_size() const -> std::uint32_t = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~secure_page_controller() = default;
+};
+
 /** @brief What a TZSC SECCFGRx or TZIC IERx field names. */
 enum class gtzc_target : std::uint8_t
 {

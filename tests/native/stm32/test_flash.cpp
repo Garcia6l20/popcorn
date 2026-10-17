@@ -1,3 +1,4 @@
+#include "../../../native/src/core/machine_impl.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -10,6 +11,8 @@
 
 #include <doctest/doctest.h>
 #include <reflex/serde/bson.hpp>
+
+#include <unicorn/unicorn.h>
 
 #include <algorithm>
 #include <array>
@@ -177,6 +180,12 @@ auto board_options(
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = strict;
   options.trustzone          = board.flash.option_bytes and board.flash.option_bytes->tzen;
+  if(options.trustzone)
+  {
+    auto const idau = periph::stm32::idau_map(u575());
+    REQUIRE(idau.has_value());
+    options.idau.assign(idau->begin(), idau->end());
+  }
   for(auto& [name, factory] : periph::stm32::factories(board, u575()))
   {
     options.models.emplace(name, std::move(factory));
@@ -1855,9 +1864,9 @@ TEST_CASE("option bytes load into the option registers at each reset, RM0456 7.9
   flash_rig const rig{
       option_board({
                     .tzen    = true,
-                    .secwm1  = periph::stm32::page_range{.first = 2, .last = 9},
+                    .secwm1  = periph::stm32::page_range{.first = 0, .last = 9},
                     .secwm2  = periph::stm32::no_area{},
-                    .hdp1    = periph::stm32::page_range{.first = 2, .last = 5},
+                    .hdp1    = periph::stm32::page_range{.first = 0, .last = 5},
                     .secboot = 0x3000'0000,
                     .nsboot  = 0x2000'0000,
                     }
@@ -1865,7 +1874,7 @@ TEST_CASE("option bytes load into the option registers at each reset, RM0456 7.9
   };
   std::vector<std::uint32_t> const expected{
       0x9fef'f8aa, 0x2000'007f, 0x0bf9'007f, 0x3000'007c,
-      0xff89'ff82, 0xff85'7f80, 0xff80'ffff, 0x7f80'7f80,
+      0xff89'ff80, 0xff85'7f80, 0xff80'ffff, 0x7f80'7f80,
   };
   CHECK(option_readback(rig) == expected);
   for(auto const name : option_registers)
@@ -1877,6 +1886,69 @@ TEST_CASE("option bytes load into the option registers at each reset, RM0456 7.9
   CHECK(option_readback(rig) == expected);
   rig.f.target->reset(popcorn::reset_kind::software);
   CHECK(option_readback(rig) == expected);
+}
+
+namespace
+{
+constexpr address       sau_ctrl  = 0xe000'edd0;
+constexpr std::uint32_t sau_allns = 2;
+
+void engine_secure(flash_rig const& rig, bool secure)
+{
+  std::uint32_t value = secure ? 1 : 0;
+  REQUIRE(
+      uc_reg_write(core::machine_internals::engine(*rig.f.target), UC_ARM_REG_SECURE, &value)
+      == UC_ERR_OK);
+}
+}
+
+TEST_CASE(
+    "a Secure torn page under the memory filter: Non-secure DMA and CPU reads are RAZ with no ECC "
+    "report, Secure ECC stays")
+{
+  flash_rig rig{option_board({.tzen = true})};
+  rig.tear(torn_line);
+  rig.handle_nmi();
+  auto const nonsecure = popcorn::bus_attrs{.by = initiator::dma, .secure = false};
+  auto const flagged   = [&rig] {
+    auto const* sr4 = popcorn::find_register(
+        *std::ranges::find(
+            u575().peripherals, std::string_view{"GTZC1_TZIC"}, &popcorn::peripheral_desc::name),
+        "SR4");
+    auto const flash =
+        std::ranges::find(sr4->fields, std::string_view{"FLASHF"}, &popcorn::field_desc::name);
+    return (rig.word(rig.at("SR4", "GTZC1_TZIC")) >> flash->lsb & 1u) != 0;
+  };
+  CHECK(rig.probe->services().read(torn_line + 16, 4, nonsecure) == 0u);
+  CHECK(flagged());
+  CHECK(rig.eccr() == 0);
+
+  constexpr address code = 0x2002'0000;
+  rig.write("GTZC1_TZIC", "FCR4", ~0u);
+  REQUIRE_FALSE(flagged());
+  rig.write(
+      "GTZC1_MPCBB1", "SECCFGR8", rig.read_reg("GTZC1_MPCBB1", "SECCFGR8") & ~std::uint32_t{1});
+  REQUIRE(rig.f.target->mem().write(code, 2, 0x6802).has_value());
+  REQUIRE(rig.f.target->mem().write(code + 2, 2, 0xbe01).has_value());
+  REQUIRE(rig.f.target->mem().write(sau_ctrl, 4, sau_allns).has_value());
+  engine_secure(rig, false);
+  rig.f.set("r0", torn_line);
+  rig.f.set("r2", 0xdead'beef);
+  rig.f.set("pc", code | 1u);
+  auto const loaded = rig.f.target->run_slice({.max_instructions = icount{2}});
+  REQUIRE(loaded.stopped.has_value());
+  CHECK(loaded.stopped->reason == stop_reason::user);
+  CHECK(rig.f.target->regs().read(*rig.f.target->regs().find("r2")) == 0);
+  CHECK(flagged());
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  CHECK(rig.nmi_eccr.empty());
+  engine_secure(rig, true);
+  REQUIRE(rig.f.target->mem().write(sau_ctrl, 4, 0).has_value());
+
+  rig.load(torn_line);
+  CHECK(rig.nmi_eccr == std::vector<std::uint32_t>{reported(torn_line)});
+  CHECK(rig.word(sym("flash_ll", "words")) == 1);
 }
 
 TEST_CASE("with TZEN = 0 the secure option registers read as zero, RM0456 7.5.1")
@@ -1961,6 +2033,10 @@ TEST_CASE(
   auto const refusal = [](bool tzen, bool trustzone) -> std::string {
     auto options      = board_options(option_board({.tzen = tzen}), false);
     options.trustzone = trustzone;
+    if(not trustzone)
+    {
+      options.idau.clear();
+    }
     try
     {
       core::machine const built{u575(), popcorn::arch::armv8m::factory(), std::move(options)};

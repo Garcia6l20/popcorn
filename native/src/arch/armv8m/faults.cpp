@@ -21,6 +21,7 @@ constexpr std::uint32_t excp_divbyzero      = 23;
 constexpr std::uint32_t epsr_thumb          = 1u << 24;
 constexpr std::uint32_t fsr_status_mask     = 0x40f;
 constexpr std::uint32_t fsr_alignment       = 0x1;
+constexpr std::uint32_t fsr_external        = 0x8;
 
 auto enable_bit(std::uint32_t target) noexcept -> std::uint32_t
 {
@@ -133,6 +134,14 @@ auto cortex_m::engine_fault(std::uint32_t intno) -> trap_result
   switch(intno)
   {
     case excp_prefetch_abort:
+      if((read(UC_ARM_REG_FAULT_STATUS) & fsr_status_mask) == fsr_external)
+      {
+        return raise_fault(
+            {.kind      = fault_kind::bus,
+             .target    = exc_busfault,
+             .cfsr_bits = cfsr::ibuserr,
+             .reported  = at});
+      }
       return raise_fault(
           {.kind      = fault_kind::mem_manage,
            .target    = exc_memmanage,

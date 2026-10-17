@@ -123,7 +123,9 @@ void cortex_m::prepare_call(call_frame const& frame)
     throw config_error(
         "call", 0, "stack", std::format("writable memory below {:#010x}", from + below));
   }
-  if(not stack.empty() and not bus.write_block(sp, std::as_bytes(std::span{stack}), initiator::cpu))
+  auto const stacking = bus_attrs{
+      .by = initiator::cpu, .secure = not trustzone() or read_security(engine) == security::secure};
+  if(not stack.empty() and not bus.write_block(sp, std::as_bytes(std::span{stack}), stacking))
   {
     throw config_error("call", 0, "stack", std::format("writable memory at {:#010x}", sp));
   }

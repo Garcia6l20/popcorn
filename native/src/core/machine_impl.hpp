@@ -1076,6 +1076,31 @@ struct machine::run_state
   /** @brief Peripheral whose model attach_peripherals is building, the only time a firewall may
    * be installed, null otherwise. */
   peripheral_desc const* building{};
+  /** @brief Whether the firewall filters memory, its engine filter installed by install_hooks. */
+  bool memory_filter{};
+  /** @brief Whether the arch reset runs, before the models reset: its vector reads are not
+   * filtered, since the firewall still holds the policy from before the reset. */
+  bool resetting_arch{};
+  /** @brief Engine page size in bytes, read when the memory filter is installed. */
+  std::uint32_t filter_page_bytes{};
+
+  /** @brief Installs the engine's bus filter when the firewall filters memory. */
+  void install_memory_filter();
+
+  /**
+   * @brief Asks the firewall about a host memory access, when it filters memory and @p attrs
+   *        is not a debugger access.
+   * @return The verdict, `allow` when nothing filters the access.
+   */
+  [[nodiscard]] auto
+      check_memory(address addr, std::uint8_t size, bus_attrs attrs, arch::memory_op op)
+          -> periph::bus_verdict;
+
+  /** @brief Whether host accesses by @p by go through check_memory one at a time. */
+  [[nodiscard]] auto filters_host(initiator by) const noexcept -> bool
+  {
+    return memory_filter and not resetting_arch and by != initiator::debugger;
+  }
 
   /**
    * @brief Installs the machine's bus firewall.
@@ -1645,6 +1670,21 @@ struct machine::run_state
       int           size,
       std::int64_t  value,
       void*         user) noexcept;
+  static auto on_bus_page(
+      uc_struct*    engine,
+      std::uint64_t page,
+      std::uint64_t addr,
+      uc_mem_attrs  attrs,
+      uc_mem_type   type,
+      void*         user) noexcept -> unsigned;
+  static auto on_bus_access(
+      uc_struct*     engine,
+      std::uint64_t  addr,
+      unsigned       size,
+      uc_mem_attrs   attrs,
+      uc_mem_type    type,
+      std::uint64_t* value,
+      void*          user) noexcept -> int;
 
   void               clear_slice() noexcept;
   void               set_exits(std::vector<address> list);

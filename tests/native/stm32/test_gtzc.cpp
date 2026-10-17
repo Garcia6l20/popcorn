@@ -13,6 +13,8 @@
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -23,6 +25,8 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace
@@ -117,13 +121,18 @@ struct rig
   std::unique_ptr<core::machine> target;
   probe*                         bus{};
 
-  explicit rig(bool trustzone)
+  explicit rig(
+      bool                        trustzone,
+      stm32::option_bytes         wanted = {.tzen = true},
+      popcorn::arch::fault_policy faults = popcorn::arch::fault_policy::stop)
   {
     stm32::register_builtin_models();
-    auto options = popcorn::testing::stm32_options();
+    auto options   = popcorn::testing::stm32_options();
+    options.faults = faults;
     if(trustzone)
     {
-      REQUIRE(stm32::configure_option_bytes(u575(), {.tzen = true}, options).has_value());
+      wanted.tzen = true;
+      REQUIRE(stm32::configure_option_bytes(u575(), wanted, options).has_value());
     }
     options.models.emplace(
         "LPGPIO1", [this](periph::model_context& ctx, popcorn::peripheral_desc const&) {
@@ -555,14 +564,16 @@ TEST_CASE("a snapshot keeps the TZIC flags, the TZSC bits and the GTZC line")
   CHECK(r.peek("GTZC1_TZIC", "SR1") == bit("GTZC1_TZIC", "SR1", "TIM2F"));
 }
 
+constexpr address code_at = 0x2000'0000;
+
 struct cpu_access
 {
   std::uint16_t insn{};
   bool          nonsecure{};
   bool          unprivileged{};
+  address       code{code_at};
 };
 
-constexpr address       code_at   = 0x2000'0000;
 constexpr address       sau_ctrl  = 0xe000'edd0;
 constexpr std::uint32_t sau_allns = 2;
 constexpr std::uint16_t str_r1_r0 = 0x6001;
@@ -587,29 +598,49 @@ auto engine_secure(rig const& r, bool secure) -> void
       == UC_ERR_OK);
 }
 
+constexpr address sram1     = 0x2000'0000;
+constexpr address block_512 = 0x200;
+
+auto block_bits(rig const& r, address at, bool secure, bool privileged) -> void
+{
+  auto const block = (at - sram1) / block_512;
+  auto const mask  = std::uint32_t{1} << (block % 32);
+  auto const sec   = std::format("SECCFGR{}", block / 32);
+  auto const priv  = std::format("PRIVCFGR{}", block / 32);
+  auto const was   = r.peek("GTZC1_MPCBB1", sec);
+  r.write("GTZC1_MPCBB1", sec, secure ? was | mask : was & ~mask, secure_priv);
+  auto const was_priv = r.peek("GTZC1_MPCBB1", priv);
+  r.write("GTZC1_MPCBB1", priv, privileged ? was_priv | mask : was_priv & ~mask, secure_priv);
+}
+
+auto enter_state(rig const& r, bool nonsecure) -> void
+{
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, nonsecure ? sau_allns : 0));
+  engine_secure(r, not nonsecure);
+}
+
 auto run_cpu(rig const& r, cpu_access const& access, address at, std::uint32_t value) -> void
 {
+  block_bits(r, access.code, not access.nonsecure, not access.unprivileged);
   if(access.nonsecure)
   {
-    REQUIRE(r.target->mem().write(sau_ctrl, 4, sau_allns));
-    engine_secure(r, false);
+    enter_state(r, true);
   }
   set(r, "control", access.unprivileged ? 1 : 0);
-  REQUIRE(r.target->mem().write(code_at, 2, access.insn));
-  REQUIRE(r.target->mem().write(code_at + 2, 2, bkpt));
+  REQUIRE(r.target->mem().write(access.code, 2, access.insn));
+  REQUIRE(r.target->mem().write(access.code + 2, 2, bkpt));
   set(r, "r0", at);
   set(r, "r1", value);
   set(r, "r2", 0xdead'beef);
-  set(r, "pc", code_at | 1u);
+  set(r, "pc", access.code | 1u);
   auto const result = r.target->run_slice({.max_instructions = icount{2}});
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->reason == popcorn::stop_reason::user);
-  CHECK(get(r, "pc") == code_at + 4);
+  CHECK(get(r, "pc") == access.code + 4);
   set(r, "control", 0);
   if(access.nonsecure)
   {
-    engine_secure(r, true);
-    REQUIRE(r.target->mem().write(sau_ctrl, 4, 0));
+    enter_state(r, false);
   }
 }
 
@@ -776,5 +807,484 @@ TEST_CASE("GTZC_IRQn is the OR of both TZICs and drops only when the last enable
   r.write("GTZC2_TZIC", "FCR1", lpuart1, secure_priv);
   clear8();
   CHECK_FALSE(r.irq_pending(gtzc_irq));
+}
+
+constexpr address       block_1      = sram1 + block_512;
+constexpr address       block_2      = sram1 + 2 * block_512;
+constexpr address       block_3      = sram1 + 3 * block_512;
+constexpr address       loop_at      = 0x2000'2000;
+constexpr address       vectors_at   = 0x2000'3000;
+constexpr address       handler_at   = 0x2000'3100;
+constexpr address       stack_top    = 0x2000'3800;
+constexpr address       vtor         = 0xe000'ed08;
+constexpr address       cfsr         = 0xe000'ed28;
+constexpr address       hfsr         = 0xe000'ed2c;
+constexpr address       sau_rnr      = 0xe000'edd8;
+constexpr address       sau_rbar     = 0xe000'eddc;
+constexpr address       sau_rlar     = 0xe000'ede0;
+constexpr address       flash_ns     = 0x0800'0000;
+constexpr address       flash_s      = 0x0c00'0000;
+constexpr address       flash_page   = 0x2000;
+constexpr address       backup_ns    = 0x4003'6400;
+constexpr address       backup_s     = 0x5003'6400;
+constexpr std::uint32_t cfsr_ibuserr = 1u << 8;
+constexpr std::uint32_t hfsr_forced  = 1u << 30;
+constexpr std::uint16_t adds_r3_1    = 0x3301;
+constexpr std::uint16_t nop          = 0xbf00;
+
+auto sram_flag(rig const& r) -> bool
+{
+  return (r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "SRAM1F")) != 0;
+}
+
+auto clear_events(rig const& r) -> void
+{
+  r.write("GTZC1_TZIC", "FCR4", ~0u, secure_priv);
+  REQUIRE(r.peek("GTZC1_TZIC", "SR4") == 0);
+}
+
+auto put_code(rig const& r, address at, std::initializer_list<std::uint16_t> code) -> void
+{
+  for(auto const& [index, insn] : std::views::enumerate(code))
+  {
+    REQUIRE(r.target->mem().write(at + 2 * static_cast<address>(index), 2, insn));
+  }
+}
+
+auto word(rig const& r, address at) -> std::uint32_t
+{
+  auto const value = r.target->mem().read(at, 4);
+  REQUIRE(value.has_value());
+  return *value;
+}
+
+struct fetched
+{
+  popcorn::stop stopped;
+  icount        executed{};
+};
+
+auto run_from(rig const& r, address pc, icount bound, icount per_slice) -> fetched
+{
+  set(r, "pc", pc | 1u);
+  fetched out;
+  while(out.executed < bound)
+  {
+    auto const result = r.target->run_slice(
+        {.max_instructions = std::min(per_slice, icount{bound.value - out.executed.value}),
+         .wall_budget      = std::chrono::seconds{60}});
+    out.executed = icount{out.executed.value + result.executed.value};
+    if(result.stopped)
+    {
+      out.stopped = *result.stopped;
+      return out;
+    }
+  }
+  FAIL("no stop within the bound");
+  return out;
+}
+
+auto expect_fetch_fault(fetched const& run) -> void
+{
+  REQUIRE(run.stopped.reason == popcorn::stop_reason::fault);
+  REQUIRE(run.stopped.fault.has_value());
+  CHECK(run.stopped.fault->kind == popcorn::fault_kind::bus);
+  CHECK((run.stopped.fault->status & cfsr_ibuserr) != 0);
+}
+
+TEST_CASE("RM0456 5.4.2: MPCBB blocks filter the CPU data accesses of each state")
+{
+  rig const r{true};
+  block_bits(r, block_2, false, true);
+  REQUIRE(r.target->mem().write(block_1, 4, 0xcafe'f00d));
+
+  run_cpu(r, {.insn = str_r1_r0, .nonsecure = true, .code = loop_at}, block_2, 0x1234);
+  CHECK(word(r, block_2) == 0x1234);
+  run_cpu(r, {.insn = ldr_r2_r0, .nonsecure = true, .code = loop_at}, block_2, 0);
+  CHECK(get(r, "r2") == 0x1234);
+  CHECK_FALSE(sram_flag(r));
+
+  run_cpu(r, {.insn = ldr_r2_r0, .nonsecure = true, .code = loop_at}, block_1, 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK(sram_flag(r));
+  clear_events(r);
+  run_cpu(r, {.insn = str_r1_r0, .nonsecure = true, .code = loop_at}, block_1, 0x55);
+  CHECK(word(r, block_1) == 0xcafe'f00d);
+  CHECK(sram_flag(r));
+  clear_events(r);
+
+  run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, block_2, 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK(sram_flag(r));
+  clear_events(r);
+  run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, block_1, 0);
+  CHECK(get(r, "r2") == 0xcafe'f00d);
+  CHECK_FALSE(sram_flag(r));
+
+  r.write("GTZC1_MPCBB1", "CR", bit("GTZC1_MPCBB1", "CR", "SRWILADIS"), secure_priv);
+  run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, block_2, 0);
+  CHECK(get(r, "r2") == 0x1234);
+  run_cpu(r, {.insn = str_r1_r0, .code = loop_at}, block_2, 0x5678);
+  CHECK(word(r, block_2) == 0x5678);
+  CHECK_FALSE(sram_flag(r));
+
+  block_bits(r, block_1, true, true);
+  run_cpu(r, {.insn = ldr_r2_r0, .unprivileged = true, .code = loop_at}, block_1, 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK_FALSE(sram_flag(r));
+  block_bits(r, block_1, true, false);
+  run_cpu(r, {.insn = ldr_r2_r0, .unprivileged = true, .code = loop_at}, block_1, 0);
+  CHECK(get(r, "r2") == 0xcafe'f00d);
+}
+
+TEST_CASE("RM0456 5.4.2: a fetch the MPCBB refuses is a BusFault, for each state")
+{
+  rig const r{true};
+  block_bits(r, block_1, true, true);
+  put_code(r, block_1, {nop, bkpt});
+  enter_state(r, true);
+  auto const nonsecure = run_from(r, block_1, icount{4}, icount{4});
+  expect_fetch_fault(nonsecure);
+  CHECK(get(r, "pc") == block_1);
+  CHECK_FALSE(sram_flag(r));
+  enter_state(r, false);
+
+  rig const handled{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  block_bits(handled, block_1, false, true);
+  put_code(handled, block_1, {nop, bkpt});
+  put_code(handled, handler_at, {bkpt});
+  REQUIRE(handled.target->mem().write(vectors_at, 4, stack_top));
+  REQUIRE(handled.target->mem().write(vectors_at + 4 * 3, 4, handler_at | 1u));
+  REQUIRE(handled.target->mem().write(vtor, 4, vectors_at));
+  set(handled, "msp", stack_top);
+  auto const secure = run_from(handled, block_1, icount{8}, icount{8});
+  CHECK(secure.stopped.reason == popcorn::stop_reason::user);
+  CHECK(get(handled, "pc") == handler_at + 2);
+  CHECK((get(handled, "xpsr") & 0x1ff) == 3);
+  CHECK((word(handled, hfsr) & hfsr_forced) != 0);
+  CHECK((word(handled, cfsr) & cfsr_ibuserr) != 0);
+  CHECK(sram_flag(handled));
+}
+
+TEST_CASE("a 1 KB page whose two 512-byte blocks differ checks every fetch, both directions")
+{
+  rig const r{true};
+  block_bits(r, block_2, false, true);
+  put_code(
+      r, block_2 + block_512 - 16,
+      {adds_r3_1, adds_r3_1, adds_r3_1, adds_r3_1, adds_r3_1, adds_r3_1, adds_r3_1, adds_r3_1});
+  put_code(r, block_3, {adds_r3_1, bkpt});
+  set(r, "r3", 0);
+  enter_state(r, true);
+  auto const into_secure = run_from(r, block_2 + block_512 - 16, icount{32}, icount{32});
+  expect_fetch_fault(into_secure);
+  CHECK(get(r, "pc") == block_3);
+  CHECK(get(r, "r3") == 8);
+  enter_state(r, false);
+
+  rig const back{true};
+  block_bits(back, block_3, false, true);
+  put_code(back, block_3, {adds_r3_1, 0xe6fd});
+  put_code(back, block_2, {adds_r3_1, bkpt});
+  set(back, "r3", 0);
+  enter_state(back, true);
+  auto const into_lower = run_from(back, block_3, icount{8}, icount{8});
+  expect_fetch_fault(into_lower);
+  CHECK(get(back, "pc") == block_2);
+  CHECK(get(back, "r3") == 1);
+  enter_state(back, false);
+}
+
+auto chained_flip(icount per_slice) -> std::tuple<fetched, std::uint64_t, std::uint64_t, bool>
+{
+  rig const  r{true};
+  auto const seccfgr0 = address_of("GTZC1_MPCBB1", "SECCFGR0");
+  auto const opened   = ~(std::uint32_t{1} << ((loop_at - sram1) / block_512));
+  put_code(r, loop_at, {0x3b01, 0x42a3, 0xbf08, 0x4631, str_r1_r0, 0x2b00, 0xd1f8, bkpt});
+  set(r, "r0", seccfgr0);
+  set(r, "r1", 0xffff'ffff);
+  set(r, "r6", opened);
+  set(r, "r3", 100'000);
+  set(r, "r4", 99'000);
+  auto const run = run_from(r, loop_at, icount{800'000}, per_slice);
+  return {run, get(r, "pc"), get(r, "r3"), sram_flag(r)};
+}
+
+TEST_CASE("a fetch-verdict change from a store in a chained loop faults at the next instruction")
+{
+  auto const [whole, pc, r3, flagged] = chained_flip(icount{800'000});
+  expect_fetch_fault(whole);
+  CHECK(pc == loop_at + 10);
+  CHECK(r3 == 99'000);
+  CHECK(flagged);
+  CHECK(whole.executed == icount{999 * 7 + 5});
+  for(auto const per_slice : {icount{1000}, icount{6997}, icount{3499}})
+  {
+    CAPTURE(per_slice.value);
+    auto const [sliced, sliced_pc, sliced_r3, sliced_flagged] = chained_flip(per_slice);
+    expect_fetch_fault(sliced);
+    CHECK(sliced_pc == pc);
+    CHECK(sliced_r3 == r3);
+    CHECK(sliced.executed == whole.executed);
+    CHECK(sliced_flagged);
+  }
+}
+
+auto rewrite_loop(std::uint32_t toggle) -> std::pair<std::uint64_t, std::uint64_t>
+{
+  rig const  r{true};
+  auto*      engine = core::machine_internals::engine(*r.target);
+  auto const before = core::machine_internals::counters(*r.target).engine_runs;
+  put_code(r, loop_at, {0x4071, str_r1_r0, 0x682a, 0x3b01, 0xd1fa, bkpt});
+  set(r, "r0", address_of("GTZC1_MPCBB1", "SECCFGR1"));
+  set(r, "r1", 0xffff'ffff);
+  set(r, "r5", 0x2000'3000);
+  set(r, "r6", toggle);
+  set(r, "r3", 1000);
+  REQUIRE(uc_ctl_slow_path_count_reset(engine) == UC_ERR_OK);
+  auto const run = run_from(r, loop_at, icount{10'000}, icount{10'000});
+  REQUIRE(run.stopped.reason == popcorn::stop_reason::user);
+  std::uint64_t slow = 0;
+  REQUIRE(uc_ctl_slow_path_count(engine, &slow) == UC_ERR_OK);
+  return {slow, core::machine_internals::counters(*r.target).engine_runs - before};
+}
+
+TEST_CASE("rewriting an MPCBB SECCFGR word with its value keeps the page verdicts and the run")
+{
+  auto const [same_slow, same_runs]       = rewrite_loop(0);
+  auto const [changed_slow, changed_runs] = rewrite_loop(1);
+  CHECK(same_slow <= 2);
+  CHECK(same_runs <= 2);
+  CHECK(changed_slow >= 1000);
+  CHECK(changed_runs >= 1000);
+  MESSAGE(
+      "same value: ", same_slow, " slow-path loads, ", same_runs,
+      " engine runs, changed: ", changed_slow, ", ", changed_runs);
+}
+
+TEST_CASE(
+    "RM0456 Table 68: flash pages filter data and fetches by the transaction's security, SECWM1 "
+    "0 to 1")
+{
+  rig const r{
+      true, {.secwm1 = stm32::page_range{.first = 0, .last = 1}, .secwm2 = stm32::no_area{}}
+  };
+  auto const flash_flag = [&r] {
+    return (r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "FLASHF")) != 0;
+  };
+  REQUIRE(r.target->mem().write(flash_ns, 4, 0x1111'1111));
+  REQUIRE(r.target->mem().write(flash_ns + 2 * flash_page, 4, 0x2222'2222));
+
+  run_cpu(r, {.insn = ldr_r2_r0, .nonsecure = true, .code = loop_at}, flash_ns, 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK(flash_flag());
+  clear_events(r);
+  run_cpu(r, {.insn = ldr_r2_r0, .nonsecure = true, .code = loop_at}, flash_ns + 2 * flash_page, 0);
+  CHECK(get(r, "r2") == 0x2222'2222);
+  run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, flash_s, 0);
+  CHECK(get(r, "r2") == 0x1111'1111);
+  CHECK_FALSE(flash_flag());
+
+  run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, flash_s + 2 * flash_page, 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK(flash_flag());
+  clear_events(r);
+
+  REQUIRE(r.target->mem().write(sau_rnr, 4, 0));
+  REQUIRE(r.target->mem().write(sau_rbar, 4, flash_ns + 2 * flash_page));
+  REQUIRE(r.target->mem().write(sau_rlar, 4, (flash_ns + 3 * flash_page - 32) | 1u));
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, 1));
+  run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, flash_ns + 2 * flash_page, 0);
+  CHECK(get(r, "r2") == 0x2222'2222);
+  CHECK_FALSE(flash_flag());
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, 0));
+
+  REQUIRE(r.target->mem().write(flash_ns, 2, bkpt));
+  REQUIRE(r.target->mem().write(flash_ns + 2 * flash_page, 2, bkpt));
+  enter_state(r, true);
+  expect_fetch_fault(run_from(r, flash_ns, icount{2}, icount{2}));
+  CHECK(get(r, "pc") == flash_ns);
+  CHECK_FALSE(flash_flag());
+  enter_state(r, false);
+  expect_fetch_fault(run_from(r, flash_s + 2 * flash_page, icount{2}, icount{2}));
+  CHECK(get(r, "pc") == flash_s + 2 * flash_page);
+  CHECK_FALSE(flash_flag());
+  auto const control = run_from(r, flash_s, icount{2}, icount{2});
+  CHECK(control.stopped.reason == popcorn::stop_reason::user);
+}
+
+TEST_CASE("host accesses by DMA and stacking obey the memory policy, the debugger does not")
+{
+  rig const r{true};
+  REQUIRE(r.target->mem().write(block_1, 4, 0xcafe'f00d));
+  auto& bus = r.bus->services();
+  CHECK(bus.read(block_1, 4, bus_attrs{.by = initiator::dma, .secure = false}) == 0u);
+  CHECK(sram_flag(r));
+  clear_events(r);
+  CHECK(bus.write(block_1, 4, 0x55, bus_attrs{.by = initiator::dma, .secure = false}).has_value());
+  CHECK(word(r, block_1) == 0xcafe'f00d);
+  CHECK(sram_flag(r));
+  clear_events(r);
+  std::array<std::byte, 8> copied{};
+  CHECK(bus.read_block(block_1, copied, bus_attrs{.by = initiator::dma, .secure = false})
+            .has_value());
+  CHECK(std::ranges::all_of(copied, [](std::byte b) { return b == std::byte{0}; }));
+  CHECK(bus.read(block_1, 4, bus_attrs{.by = initiator::dma, .secure = true}) == 0xcafe'f00du);
+  CHECK(
+      bus.read(block_1, 4, bus_attrs{.by = initiator::debugger, .secure = false}) == 0xcafe'f00du);
+  clear_events(r);
+
+  rig const plain{false};
+  REQUIRE(plain.target->mem().write(block_1, 4, 0xcafe'f00d));
+  CHECK(
+      plain.bus->services().read(block_1, 4, bus_attrs{.by = initiator::dma, .secure = false})
+      == 0xcafe'f00du);
+}
+
+TEST_CASE("a read the MPCBB refuses reports 0 to a read watch, from the CPU and from DMA")
+{
+  rig const r{true};
+  REQUIRE(r.target->mem().write(block_1, 4, 0xcafe'f00d));
+  std::vector<core::watch_hit> hits;
+  auto const                   watch =
+      r.target->add_watch(block_1, 4, core::watch_kind::read, [&hits](core::watch_hit const& hit) {
+        hits.push_back(hit);
+        return core::watch_action::resume;
+      });
+  run_cpu(r, {.insn = ldr_r2_r0, .nonsecure = true, .code = loop_at}, block_1, 0);
+  CHECK(get(r, "r2") == 0);
+  CHECK(r.bus->services().read(block_1, 4, bus_attrs{.by = initiator::dma, .secure = false}) == 0u);
+  REQUIRE(hits.size() == 2);
+  CHECK(hits[0].by == initiator::cpu);
+  CHECK(hits[0].value == 0);
+  CHECK(hits[0].pc == loop_at);
+  CHECK(hits[1].by == initiator::dma);
+  CHECK(hits[1].value == 0);
+  run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, block_1, 0);
+  REQUIRE(hits.size() == 3);
+  CHECK(hits[2].value == 0xcafe'f00d);
+}
+
+TEST_CASE("Secure exception stacking into a Non-secure block is dropped with an event")
+{
+  auto const stacked = [](bool open) {
+    rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+    if(open)
+    {
+      block_bits(r, block_2, false, true);
+    }
+    for(address at = block_2 + 0x100 - 0x40; at < block_2 + 0x100; at += 4)
+    {
+      REQUIRE(r.target->mem().write(at, 4, 0xa5a5'a5a5));
+    }
+    put_code(r, loop_at, {0xdf00, bkpt});
+    put_code(r, handler_at, {bkpt});
+    REQUIRE(r.target->mem().write(vectors_at, 4, stack_top));
+    REQUIRE(r.target->mem().write(vectors_at + 4 * 11, 4, handler_at | 1u));
+    REQUIRE(r.target->mem().write(vtor, 4, vectors_at));
+    set(r, "msp", block_2 + 0x100);
+    set(r, "r0", 0x1234'5678);
+    auto const run = run_from(r, loop_at, icount{4}, icount{4});
+    CHECK(run.stopped.reason == popcorn::stop_reason::user);
+    CHECK(get(r, "pc") == handler_at + 2);
+    return std::pair{word(r, block_2 + 0x100 - 0x20), sram_flag(r)};
+  };
+  auto const [kept, flagged] = stacked(false);
+  CHECK(kept == 0x1234'5678);
+  CHECK_FALSE(flagged);
+  auto const [dropped, dropped_flag] = stacked(true);
+  CHECK(dropped == 0xa5a5'a5a5);
+  CHECK(dropped_flag);
+}
+
+TEST_CASE("a call in Non-secure state writes its stack arguments as Non-secure transactions")
+{
+  rig const r{true};
+  block_bits(r, loop_at, false, true);
+  block_bits(r, loop_at - block_512, false, true);
+  put_code(r, loop_at, {0x9800, 0x4770});
+  enter_state(r, true);
+  popcorn::arch::call_frame frame{
+      .entry           = loop_at | 1u,
+      .returns         = popcorn::arch::value_kind::i32,
+      .return_sentinel = loop_at + 0x100,
+      .stack           = loop_at - 0x10};
+  for(std::uint32_t arg = 1; arg <= 5; ++arg)
+  {
+    frame.args.push_back({.kind = popcorn::arch::value_kind::i32, .bits = 0x50 + arg});
+  }
+  auto const result = r.target->call(frame, icount{100});
+  CHECK(result.stopped.reason == popcorn::stop_reason::returned);
+  CHECK(result.value == 0x55);
+  CHECK_FALSE(sram_flag(r));
+  enter_state(r, false);
+}
+
+TEST_CASE("MPCWM4: BKPSRAM is Secure and privileged outside its enabled sub-region, RM0456 5.6.8")
+{
+  rig const  r{true};
+  auto&      bus  = r.bus->services();
+  auto const flag = [&r] {
+    return (r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "BKPSRAMF")) != 0;
+  };
+  auto const ns_read = [&](address at) {
+    return bus.read(at, 4, bus_attrs{.by = initiator::dma, .secure = false});
+  };
+  REQUIRE(r.target->mem().write(backup_ns + 0x20, 4, 0x2020'2020));
+  REQUIRE(r.target->mem().write(backup_ns + 0x5c, 4, 0x5c5c'5c5c));
+  REQUIRE(r.target->mem().write(backup_ns + 0x60, 4, 0x6060'6060));
+  REQUIRE(r.target->mem().write(backup_ns, 4, 0x0101'0101));
+  CHECK(ns_read(backup_ns + 0x20) == 0u);
+  CHECK(flag());
+  clear_events(r);
+
+  auto const config = std::string{"TZSC_MPCWM4ACFGR"};
+  auto const area   = std::string{"TZSC_MPCWM4AR"};
+  r.write("GTZC1_TZSC", area, 2u << 16 | 1u, secure_priv);
+  r.write("GTZC1_TZSC", config, bit("GTZC1_TZSC", config, "SREN"), secure_priv);
+  CHECK(ns_read(backup_ns + 0x20) == 0x2020'2020u);
+  CHECK(ns_read(backup_ns + 0x5c) == 0x5c5c'5c5cu);
+  CHECK(ns_read(backup_ns + 0x60) == 0u);
+  CHECK(ns_read(backup_ns) == 0u);
+  CHECK(flag());
+  clear_events(r);
+  CHECK(bus.read(backup_s + 0x20, 4, bus_attrs{.by = initiator::dma, .secure = true}) == 0u);
+  CHECK(flag());
+  clear_events(r);
+  CHECK(bus.read(backup_s, 4, bus_attrs{.by = initiator::dma, .secure = true}) == 0x0101'0101u);
+  CHECK(
+      bus.read(
+          backup_ns + 0x20, 4,
+          bus_attrs{.by = initiator::dma, .secure = false, .privileged = false})
+      == 0x2020'2020u);
+
+  r.write("GTZC1_TZSC", config, 0, nonsecure_priv);
+  CHECK(r.peek("GTZC1_TZSC", config) == bit("GTZC1_TZSC", config, "SREN"));
+  CHECK((r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "TZSC1F")) != 0);
+  CHECK(r.read("GTZC1_TZSC", area, nonsecure_priv) == 0);
+  r.write("GTZC1_TZSC", area, 0, secure_unpriv);
+  CHECK(r.peek("GTZC1_TZSC", area) == (2u << 16 | 1u));
+
+  r.write(
+      "GTZC1_TZSC", config,
+      bit("GTZC1_TZSC", config, "SREN")
+          | bit("GTZC1_TZSC", config, "PRIV")
+          | bit("GTZC1_TZSC", config, "SRLOCK"),
+      secure_priv);
+  CHECK(
+      bus.read(
+          backup_ns + 0x20, 4,
+          bus_attrs{.by = initiator::dma, .secure = false, .privileged = false})
+      == 0u);
+  r.write("GTZC1_TZSC", area, 0, secure_priv);
+  r.write("GTZC1_TZSC", config, 0, secure_priv);
+  CHECK(r.peek("GTZC1_TZSC", area) == (2u << 16 | 1u));
+  CHECK(ns_read(backup_ns + 0x20) == 0x2020'2020u);
+
+  r.target->reset(popcorn::reset_kind::software);
+  CHECK(r.peek("GTZC1_TZSC", config) == 0);
+  r.write("GTZC1_TZSC", config, bit("GTZC1_TZSC", config, "SREN"), secure_priv);
+  CHECK(r.peek("GTZC1_TZSC", config) == 0);
+  CHECK(ns_read(backup_ns + 0x20) == 0u);
 }
 }

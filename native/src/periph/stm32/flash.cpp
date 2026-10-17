@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "model_base.hpp"
 #include "voltage_range.hpp"
@@ -308,7 +309,8 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  */
 class flash final : public dispatch_model<flash, flash_state>,
                     public clock_listener,
-                    public voltage_range_listener
+                    public voltage_range_listener,
+                    public secure_page_controller
 {
 public:
   flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options);
@@ -335,6 +337,9 @@ public:
 
   void on_clock_change() override;
   void on_voltage_range_change() override;
+
+  [[nodiscard]] auto page_secure(address at) const -> std::optional<bool> override;
+  [[nodiscard]] auto secure_page_size() const -> std::uint32_t override;
 
   void access_written(std::uint32_t old, std::uint32_t now);
   void key_written(std::uint32_t old, std::uint32_t now);
@@ -860,6 +865,35 @@ auto flash::bank_base(std::uint32_t at) const -> std::uint32_t
 {
   auto const [base, size] = banks();
   return base + (at - base) / size * size;
+}
+
+auto flash::page_secure(address at) const -> std::optional<bool>
+{
+  constexpr std::size_t secwm1r1 = 4;
+  constexpr std::size_t secwm2r1 = 6;
+  if(not ctx_.trustzone or storage_ == nullptr or option_words_.size() != option_registers.size())
+  {
+    return std::nullopt;
+  }
+  auto const region = std::ranges::find_if(ctx_.part.regions, [&](region_desc const& r) {
+    return r.controller == desc_.name and at >= r.start and at - r.start < r.size;
+  });
+  if(region == ctx_.part.regions.end())
+  {
+    return std::nullopt;
+  }
+  auto const at_physical = physical(*region, at);
+  auto const page        = (at_physical - bank_base(at_physical)) / page_size;
+  auto const word        = option_words_[bank_of(at_physical) == 0 ? secwm1r1 : secwm2r1].second;
+  auto const top         = (1u << watermark_bits(ctx_.part.part)) - 1;
+  auto const first       = word & top;
+  auto const last        = word >> 16 & top;
+  return first <= page and page <= last;
+}
+
+auto flash::secure_page_size() const -> std::uint32_t
+{
+  return page_size;
 }
 
 auto flash::bank_start(std::uint32_t bank) const -> std::uint32_t

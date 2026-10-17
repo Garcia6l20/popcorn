@@ -176,6 +176,7 @@ void machine::run_state::install_hooks()
             watched.window.start, watched.window.start + watched.window.size - 1),
         std::format("adding the guest store hook at {:#010x}", watched.window.start));
   }
+  install_memory_filter();
 }
 
 void machine::run_state::reset_machine(reset_kind kind)
@@ -204,7 +205,10 @@ void machine::run_state::reset_machine(reset_kind kind)
   spin.clear();
   instant_events = 0;
   remove_step_hook();
-  owner.arch_->reset(reset_vector);
+  {
+    handler_scope const resetting{resetting_arch};
+    owner.arch_->reset(reset_vector);
+  }
   std::ranges::fill(lines.active, 0u);
   lines.nmi_active = 0;
   for(auto const& slot : owner.peripherals_)

@@ -65,6 +65,17 @@ constexpr std::array<companion, 7> companions{
 
 constexpr std::array<std::string_view, 2> memory_stems{"FLASH", "BKPSRAM"};
 
+struct watermark_memory
+{
+  std::string_view registers;
+  std::string_view region;
+  std::string_view enable_field;
+  std::uint32_t    granule;
+};
+
+constexpr std::array<watermark_memory, 1> watermark_memories{
+    {{"MPCWM4", "BKPSRAM", "BKPSRAMIE", 32}}};
+
 constexpr std::string_view gtzc_irq_name = "GTZC_IRQn";
 
 auto all_digits(std::string_view text) -> bool
@@ -189,6 +200,61 @@ auto gtzc_prefix(std::string_view name) -> std::string_view
   return name.substr(0, name.rfind('_'));
 }
 
+enum class memory_kind : std::uint8_t
+{
+  sram,
+  flash,
+  watermark,
+};
+
+struct memory_window
+{
+  address                       start{};
+  std::uint32_t                 size{};
+  address                       physical{};
+  memory_kind                   kind{};
+  sram_block_controller const*  blocks{};
+  secure_page_controller const* pages{};
+  std::uint32_t                 granule{};
+  illegal_access_controller*    events{};
+  illegal_source                source{};
+};
+
+struct memory_rule
+{
+  bool secure{};
+  bool privileged{};
+  bool secure_data{};
+};
+
+struct data_decision
+{
+  bus_verdict verdict{};
+  bool        event{};
+};
+
+auto decide_data(memory_rule rule, bus_attrs attrs) -> data_decision
+{
+  if(attrs.secure and not rule.secure and not rule.secure_data)
+  {
+    return {.verdict = bus_verdict::read_zero_write_ignore, .event = true};
+  }
+  if(not attrs.secure and rule.secure)
+  {
+    return {.verdict = bus_verdict::read_zero_write_ignore, .event = true};
+  }
+  if(not attrs.privileged and rule.privileged)
+  {
+    return {.verdict = bus_verdict::read_zero_write_ignore};
+  }
+  return {.verdict = bus_verdict::allow};
+}
+
+auto fetch_denied(memory_rule rule, bus_attrs attrs) -> bool
+{
+  return attrs.secure != rule.secure or (not attrs.privileged and rule.privileged);
+}
+
 struct gtzc_state
 {
   friend auto operator==(gtzc_state const&, gtzc_state const&) -> bool = default;
@@ -282,6 +348,23 @@ enum class tzsc_role : std::uint8_t
   control,
   security,
   privilege,
+  watermark_config,
+  watermark_area,
+};
+
+struct watermark_regs
+{
+  std::uint32_t    config{};
+  std::uint32_t    area{};
+  field_ref        enable;
+  field_ref        lock;
+  field_ref        secure;
+  field_ref        privileged;
+  field_ref        first;
+  field_ref        length;
+  std::string_view region;
+  std::string_view enable_field;
+  std::uint32_t    granule{};
 };
 
 struct tzsc_word
@@ -311,7 +394,7 @@ struct securable
  *        `PRIVCFGRx` bit changes only with a privileged transaction, Secure when the
  *        peripheral's `SECCFGRx` bit is set. A Non-secure write to `CR` or `SECCFGRx` and a
  *        Non-secure read of `CR` raise the TZSC's own TZIC event, RM0456 3.5.5. The MPCWM
- *        registers stay storage.
+ *        registers stay storage, except MPCWM4 of the BKPSRAM, RM0456 5.6.8 and 5.6.9.
  *
  *        The first TZSC of the part in description order is the machine's bus firewall for
  *        the securable peripherals of every TZSC, each from its `<NAME>SEC` and `<NAME>PRIV`
@@ -328,6 +411,22 @@ struct securable
  *        for these blocks, which have a Secure alias. The same ties hold for their TZIC events.
  *        A user model in place of this firewall's TZSC turns off the checks of every TZSC of
  *        the part, privilege included.
+ *
+ *        The firewall also filters memory, RM0456 5.4.2: the SRAM blocks of every MPCBB, the
+ *        flash pages of the FLASH model and the BKPSRAM through MPCWM4. A Non-secure data access
+ *        to a Secure block, page or sub-region, or a Secure one to a Non-secure block unless the
+ *        MPCBB's `CR.SRWILADIS` is set, reads zero, drops the write and raises the memory's
+ *        TZIC event, `SRAMnIE` with n the MPCBB's digit, `FLASHIE` or `BKPSRAMIE`, RM0456 Table
+ *        68 for flash. An unprivileged data access to a privileged block or sub-region reads zero
+ *        and drops the write with no event. An instruction fetch the same rules refuse, a Secure
+ *        fetch with `SRWILADIS` set included, is a BusFault, with the event for a Secure fetch of
+ *        a Non-secure SRAM block or BKPSRAM sub-region only. Flash pages carry no privilege in
+ *        this step. MPCWM4 registers are Secure privileged only, `SRLOCK` set-only freezes both
+ *        until a reset, a sub-region of length 0 clears `SREN`, and outside an enabled
+ *        sub-region the BKPSRAM is Secure and privileged. Every write that changes a security or
+ *        privilege bit, here or in an MPCBB, drops the engine's page verdicts and ends the
+ *        engine run after the instruction, a `SRWILADIS` change drops the verdicts only, and a
+ *        write that changes nothing does neither.
  */
 class tzsc final : public gtzc_block, public bus_firewall
 {
@@ -363,6 +462,7 @@ public:
     auto const first = std::ranges::find_if(ctx.part.peripherals, is_tzsc);
     if(first != ctx.part.peripherals.end() and first->name == desc.name)
     {
+      claim_watermark();
       build_rules();
       ctx.install_firewall(*this);
     }
@@ -375,13 +475,17 @@ public:
       regs.poke(reg(name).offset, describe(name).reset);
     }
     resolve();
+    resolve_memory();
+    ctx_.services.memory_policy_changed();
   }
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override
   {
     auto const* const word = word_at(offset);
-    if(word->role == tzsc_role::control)
+    if(word->role == tzsc_role::control
+       or word->role == tzsc_role::watermark_config
+       or word->role == tzsc_role::watermark_area)
     {
       if(not ctx.secure)
       {
@@ -440,8 +544,82 @@ public:
           regs.poke(word->offset, (merged & allowed) | (old & ~allowed));
         }
         return {};
+      case tzsc_role::watermark_config:
+      case tzsc_role::watermark_area:
+        if(not ctx.secure)
+        {
+          own_illegal_access();
+          return {};
+        }
+        if(ctx.privileged)
+        {
+          watermark_written(regs, *word, merged);
+        }
+        return {};
     }
     return {};
+  }
+
+  [[nodiscard]] auto filters_memory() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto
+      memory_page(address page, std::uint32_t size, address at, bus_attrs attrs, arch::memory_op op)
+          -> page_verdict override
+  {
+    resolve_memory();
+    auto const* const window = window_at(at);
+    if(window == nullptr)
+    {
+      return {};
+    }
+    page_verdict        verdict;
+    std::optional<bool> first_denied;
+    auto const          step = std::min(window->granule, size);
+    for(auto part = page; part - page < size; part += step)
+    {
+      if(part < window->start or part - window->start >= window->size)
+      {
+        continue;
+      }
+      auto const rule = rule_at(*window, part);
+      verdict.filter_data =
+          verdict.filter_data or decide_data(rule, attrs).verdict != bus_verdict::allow;
+      auto const denied  = fetch_denied(rule, attrs);
+      verdict.fetch_each = verdict.fetch_each or (first_denied and *first_denied != denied);
+      first_denied       = denied;
+    }
+    auto const rule    = rule_at(*window, at);
+    verdict.deny_fetch = fetch_denied(rule, attrs);
+    if(verdict.deny_fetch
+       and op == arch::memory_op::fetch
+       and attrs.secure
+       and not rule.secure
+       and window->kind != memory_kind::flash
+       and window->events != nullptr)
+    {
+      window->events->illegal_access(window->source);
+    }
+    return verdict;
+  }
+
+  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op)
+      -> bus_verdict override
+  {
+    resolve_memory();
+    auto const* const window = window_at(at);
+    if(window == nullptr)
+    {
+      return bus_verdict::allow;
+    }
+    auto const decision = decide_data(rule_at(*window, at), attrs);
+    if(decision.event and window->events != nullptr)
+    {
+      window->events->illegal_access(window->source);
+    }
+    return decision.verdict;
   }
 
   [[nodiscard]] auto check_peripheral(std::size_t unit, bus_attrs attrs, arch::memory_op)
@@ -480,6 +658,216 @@ private:
   [[nodiscard]] auto word_at(std::uint32_t offset) const -> tzsc_word const*
   {
     return &*std::ranges::find(words_, offset & ~3u, &tzsc_word::offset);
+  }
+
+  void claim_watermark()
+  {
+    for(auto const& memory : watermark_memories)
+    {
+      auto const named = [&](std::string_view suffix) -> register_desc const* {
+        auto const wanted = std::format("{}{}", memory.registers, suffix);
+        auto const found  = std::ranges::find_if(
+            desc_.registers, [&](register_desc const& r) { return r.name.ends_with(wanted); });
+        return found != desc_.registers.end() ? &*found : nullptr;
+      };
+      auto const* const config = named("ACFGR");
+      auto const* const area   = named("AR");
+      auto const        mapped = std::ranges::any_of(ctx_.part.regions, [&](region_desc const& r) {
+        return r.name.starts_with(memory.region);
+      });
+      if(config == nullptr or area == nullptr or not mapped)
+      {
+        continue;
+      }
+      claim(config->name);
+      claim(area->name);
+      watermark_ = watermark_regs{
+          .config       = config->offset & ~3u,
+          .area         = area->offset & ~3u,
+          .enable       = field(config->name, "SREN"),
+          .lock         = field(config->name, "SRLOCK"),
+          .secure       = field(config->name, "SEC"),
+          .privileged   = field(config->name, "PRIV"),
+          .first        = field(area->name, "SUBA_START"),
+          .length       = field(area->name, "SUBA_LENGTH"),
+          .region       = memory.region,
+          .enable_field = memory.enable_field,
+          .granule      = memory.granule};
+      words_.push_back(
+          {.offset   = watermark_->config,
+           .role     = tzsc_role::watermark_config,
+           .writable = fields_mask(*config)});
+      words_.push_back(
+          {.offset   = watermark_->area,
+           .role     = tzsc_role::watermark_area,
+           .writable = fields_mask(*area)});
+      return;
+    }
+  }
+
+  void watermark_written(register_file& regs, tzsc_word const& word, std::uint32_t merged)
+  {
+    auto const& w      = *watermark_;
+    auto const  config = regs.peek(w.config);
+    auto const  area   = regs.peek(w.area);
+    if(w.lock.of(config) != 0)
+    {
+      return;
+    }
+    auto next_config = config;
+    auto next_area   = area;
+    if(word.role == tzsc_role::watermark_config)
+    {
+      next_config = merged & word.writable;
+    }
+    else
+    {
+      next_area = merged & word.writable;
+    }
+    if(w.length.of(next_area) == 0)
+    {
+      next_config &= ~w.enable.mask();
+    }
+    regs.poke(w.config, next_config);
+    regs.poke(w.area, next_area);
+    auto const policy = w.enable.mask() | w.secure.mask() | w.privileged.mask();
+    if((config & policy) != (next_config & policy) or area != next_area)
+    {
+      ctx_.services.memory_policy_changed();
+      ctx_.services.end_after_instruction();
+    }
+  }
+
+  [[nodiscard]] auto watermark_rule(address offset) const -> memory_rule
+  {
+    auto const& w      = *watermark_;
+    auto const  config = ctx_.regs.peek(w.config);
+    auto const  area   = ctx_.regs.peek(w.area);
+    auto const  first  = w.first.of(area);
+    auto const  length = w.length.of(area);
+    auto const  at     = offset / w.granule;
+    if(w.enable.of(config) != 0 and length != 0 and at >= first and at - first < length)
+    {
+      return {.secure = w.secure.of(config) != 0, .privileged = w.privileged.of(config) != 0};
+    }
+    return {.secure = true, .privileged = true};
+  }
+
+  [[nodiscard]] auto rule_at(memory_window const& window, address at) const -> memory_rule
+  {
+    auto const physical = window.physical + (at - window.start);
+    switch(window.kind)
+    {
+      case memory_kind::sram:
+        return {
+            .secure      = window.blocks->block_secure(physical).value_or(true),
+            .privileged  = window.blocks->block_privileged(physical).value_or(true),
+            .secure_data = window.blocks->secure_data_allowed()};
+      case memory_kind::flash:
+        return {.secure = window.pages->page_secure(at).value_or(false)};
+      case memory_kind::watermark:
+        return watermark_rule(at - window.start);
+    }
+    return {};
+  }
+
+  [[nodiscard]] auto window_at(address at) const -> memory_window const*
+  {
+    auto const found = std::ranges::find_if(
+        windows_, [at](memory_window const& w) { return at >= w.start and at - w.start < w.size; });
+    return found != windows_.end() ? &*found : nullptr;
+  }
+
+  void resolve_memory()
+  {
+    if(memory_resolved_ or rules_.empty() or ctx_.peers.all().empty())
+    {
+      return;
+    }
+    memory_resolved_ = true;
+    std::vector<illegal_access_controller*>   tzics;
+    std::vector<sram_block_controller const*> srams;
+    secure_page_controller const*             pages{};
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto* const tzic = dynamic_cast<illegal_access_controller*>(peer))
+      {
+        tzics.push_back(tzic);
+      }
+      if(auto const* const sram = dynamic_cast<sram_block_controller const*>(peer))
+      {
+        srams.push_back(sram);
+      }
+      if(auto const* const flash = dynamic_cast<secure_page_controller const*>(peer))
+      {
+        pages = flash;
+      }
+    }
+    auto const event_of = [&](std::string_view field) {
+      for(auto* const tzic : tzics)
+      {
+        if(auto const source = tzic->source(field))
+        {
+          return std::pair{tzic, *source};
+        }
+      }
+      return std::pair<illegal_access_controller*, illegal_source>{nullptr, {}};
+    };
+    for(auto const& region : ctx_.part.regions)
+    {
+      auto const physical = region.physical.value_or(region.start);
+      auto const end      = std::uint64_t{physical} + region.size;
+      for(auto const* const sram : srams)
+      {
+        auto const blocks = sram->blocks();
+        if(not blocks)
+        {
+          continue;
+        }
+        auto const low  = std::max<std::uint64_t>(physical, blocks->start);
+        auto const high = std::min<std::uint64_t>(end, std::uint64_t{blocks->start} + blocks->size);
+        if(low >= high)
+        {
+          continue;
+        }
+        auto const digit = blocks->controller.substr(blocks->controller.rfind("MPCBB") + 5);
+        auto const [events, source] = event_of(std::format("SRAM{}IE", digit));
+        windows_.push_back(
+            {.start    = static_cast<address>(region.start + (low - physical)),
+             .size     = static_cast<std::uint32_t>(high - low),
+             .physical = static_cast<address>(low),
+             .kind     = memory_kind::sram,
+             .blocks   = sram,
+             .granule  = blocks->block_size,
+             .events   = events,
+             .source   = source});
+      }
+      if(pages != nullptr and pages->page_secure(region.start))
+      {
+        auto const [events, source] = event_of("FLASHIE");
+        windows_.push_back(
+            {.start    = region.start,
+             .size     = region.size,
+             .physical = physical,
+             .kind     = memory_kind::flash,
+             .pages    = pages,
+             .granule  = pages->secure_page_size(),
+             .events   = events,
+             .source   = source});
+      }
+      if(watermark_ and region.name.starts_with(watermark_->region))
+      {
+        auto const [events, source] = event_of(watermark_->enable_field);
+        windows_.push_back(
+            {.start    = region.start,
+             .size     = region.size,
+             .physical = physical,
+             .kind     = memory_kind::watermark,
+             .granule  = watermark_->granule,
+             .events   = events,
+             .source   = source});
+      }
+    }
   }
 
   void build_rules()
@@ -572,6 +960,9 @@ private:
   std::vector<std::string>          tzic_names_;
   std::vector<register_file const*> owners_;
   bool                              resolved_{};
+  std::optional<watermark_regs>     watermark_;
+  std::vector<memory_window>        windows_;
+  bool                              memory_resolved_{};
 };
 
 struct tzic_source
@@ -829,8 +1220,8 @@ struct mpcbb_word
  * Secure transaction, privileged when its `PRIVCFGRx` bit is set, a `PRIVCFGRx` bit only with a
  * privileged one, Secure when its `SECCFGRx` bit is set. A Non-secure write to `CR`, `CFGLOCKRx` or
  * `SECCFGRx` and a Non-secure read of `CR` or `CFGLOCKRx` raise the MPCBB's own TZIC event,
- * RM0456 3.5.5. The registers of super-blocks past the SRAM read zero and drop writes. No memory
- * access is filtered. `CR.INVSECSTATE` is storage.
+ * RM0456 3.5.5. The registers of super-blocks past the SRAM read zero and drop writes. The memory
+ * accesses are filtered by the TZSC firewall from these bits. `CR.INVSECSTATE` is storage.
  */
 class mpcbb final : public gtzc_block, public sram_block_controller
 {
@@ -921,6 +1312,7 @@ public:
     {
       regs.poke(at, implemented(static_cast<std::uint32_t>(index)) ? ~0u : 0u);
     }
+    ctx_.services.memory_policy_changed();
   }
 
   [[nodiscard]] auto blocks() const -> std::optional<sram_blocks> override
@@ -993,6 +1385,8 @@ public:
         else if(ctx.privileged and control_.of(old) == 0)
         {
           regs.poke(word->offset, merged & word->writable);
+          policy_written(
+              old & secure_data_.mask(), regs.peek(word->offset) & secure_data_.mask(), false);
         }
         return {};
       case mpcbb_role::lock:
@@ -1014,6 +1408,7 @@ public:
         {
           auto const allowed = ctx.privileged ? ~0u : ~regs.peek(privilege_[word->index]);
           regs.poke(word->offset, (merged & allowed) | (old & ~allowed));
+          policy_written(old, regs.peek(word->offset), true);
         }
         return {};
       case mpcbb_role::privilege:
@@ -1021,6 +1416,7 @@ public:
         {
           auto const allowed = ctx.secure ? ~0u : ~regs.peek(security_[word->index]);
           regs.poke(word->offset, (merged & allowed) | (old & ~allowed));
+          policy_written(old, regs.peek(word->offset), true);
         }
         return {};
     }
@@ -1028,6 +1424,19 @@ public:
   }
 
 private:
+  void policy_written(std::uint32_t old, std::uint32_t now, bool fetch)
+  {
+    if(old == now)
+    {
+      return;
+    }
+    ctx_.services.memory_policy_changed();
+    if(fetch)
+    {
+      ctx_.services.end_after_instruction();
+    }
+  }
+
   void check_geometry() const
   {
     auto const& g       = *geometry_;

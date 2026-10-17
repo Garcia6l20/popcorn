@@ -19,4 +19,7 @@ void machine_services::do_install_firewall(periph::bus_firewall&)
   throw config_error(
       "machine_services", 0, "install_firewall", "an implementation with a bus firewall");
 }
+
+void machine_services::do_memory_policy_changed()
+{}
 }

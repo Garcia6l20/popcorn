@@ -220,6 +220,111 @@ void machine::do_install_firewall(periph::bus_firewall& firewall)
   run_->install_firewall(firewall);
 }
 
+void machine::do_memory_policy_changed()
+{
+  if(run_->memory_filter)
+  {
+    check(uc_ctl_flush_tlb(engine_.get()), "flushing the TLB after a memory policy change");
+  }
+}
+
+void machine::run_state::install_memory_filter()
+{
+  if(firewall == nullptr or not firewall->filters_memory())
+  {
+    return;
+  }
+  std::uint32_t page = 0;
+  check(uc_ctl_get_page_size(engine, &page), "reading the engine page size");
+  filter_page_bytes = page;
+  check(uc_ctl_bus_filter(engine, &on_bus_page, &on_bus_access, this), "installing the bus filter");
+  memory_filter = true;
+}
+
+auto machine::run_state::check_memory(
+    address         addr,
+    std::uint8_t    size,
+    bus_attrs       attrs,
+    arch::memory_op op) -> periph::bus_verdict
+{
+  if(not filters_host(attrs.by))
+  {
+    return periph::bus_verdict::allow;
+  }
+  handler_scope const scope{in_handler};
+  return firewall->check_memory(addr, size, seen(attrs), op);
+}
+
+auto machine::run_state::on_bus_page(
+    uc_struct*,
+    std::uint64_t page,
+    std::uint64_t addr,
+    uc_mem_attrs  attrs,
+    uc_mem_type   type,
+    void*         user) noexcept -> unsigned
+{
+  auto&    run  = *static_cast<run_state*>(user);
+  unsigned bits = 0;
+  run.guarded([&] {
+    auto const           op = type == UC_MEM_FETCH ? arch::memory_op::fetch
+                            : type == UC_MEM_WRITE ? arch::memory_op::write
+                                                   : arch::memory_op::read;
+    periph::page_verdict verdict;
+    {
+      handler_scope const scope{run.in_handler};
+      verdict = run.firewall->memory_page(
+          static_cast<address>(page), run.filter_page_bytes, static_cast<address>(addr),
+          cpu_attrs(attrs), op);
+    }
+    bits = (verdict.filter_data ? unsigned{UC_BUS_FILTER_DATA} : 0u)
+         | (verdict.deny_fetch ? unsigned{UC_BUS_DENY_FETCH} : 0u)
+         | (verdict.fetch_each ? unsigned{UC_BUS_FETCH_EACH} : 0u);
+    return false;
+  });
+  return bits;
+}
+
+auto machine::run_state::on_bus_access(
+    uc_struct*,
+    std::uint64_t  addr,
+    unsigned       size,
+    uc_mem_attrs   attrs,
+    uc_mem_type    type,
+    std::uint64_t* value,
+    void*          user) noexcept -> int
+{
+  auto& run     = *static_cast<run_state*>(user);
+  auto  verdict = periph::bus_verdict::allow;
+  run.guarded([&] {
+    auto const op = type == UC_MEM_WRITE ? arch::memory_op::write : arch::memory_op::read;
+    verdict       = run.raising_access([&] {
+      handler_scope const scope{run.in_handler};
+      return run.firewall->check_memory(
+          static_cast<address>(addr), static_cast<std::uint8_t>(size), cpu_attrs(attrs), op);
+    });
+    return false;
+  });
+  if(verdict == periph::bus_verdict::read_zero_write_ignore and type != UC_MEM_WRITE)
+  {
+    *value = 0;
+    run.guarded([&] {
+      run.note_watched(
+          static_cast<address>(addr), static_cast<std::uint8_t>(size), 0, false, initiator::cpu);
+      return false;
+    });
+  }
+  switch(verdict)
+  {
+    case periph::bus_verdict::allow:
+      return UC_BUS_ALLOW;
+    case periph::bus_verdict::read_zero_write_ignore:
+      return UC_BUS_RAZ_WI;
+    case periph::bus_verdict::bus_error:
+      return UC_BUS_FAULT;
+  }
+  return UC_BUS_ALLOW;
+}
+
 auto machine::run_state::dispatch_read(
     mmio_window const& window,
     std::uint32_t      offset,

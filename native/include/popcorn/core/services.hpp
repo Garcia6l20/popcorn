@@ -285,6 +285,20 @@ public:
   }
 
   /**
+   * @brief From the model that owns the bus firewall, after a change of its memory policy, a
+   *        periph::bus_firewall::memory_page verdict: drops every page verdict the engine keeps,
+   *        so the next access of each page asks the firewall again. A data verdict then holds
+   *        from the next access. Code already running inside a page whose fetch verdict changed
+   *        runs on until the engine run ends, so the owner also calls end_after_instruction()
+   *        after a fetch-verdict change. Every page refills after it, so call it only when a
+   *        verdict changes. Safe from a register access during a run and between slices.
+   */
+  void memory_policy_changed()
+  {
+    do_memory_policy_changed();
+  }
+
+  /**
    * @brief Starts or stops reporting CPU and DMA loads of [@p at, @p at + @p size) to the
    *        controller model of the region holding it, through periph::model::on_memory_read.
    *        Covers every alias of the bytes. Idempotent per range. Host and debugger reads are
@@ -346,5 +360,6 @@ private:
   virtual void do_log(log_record record)            = 0;
   virtual void do_watch_reads(address at, std::uint32_t size, bool on);
   virtual void do_install_firewall(periph::bus_firewall& firewall);
+  virtual void do_memory_policy_changed();
 };
 }

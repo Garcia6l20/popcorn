@@ -39,6 +39,16 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
   auto const by = attrs.by;
   if(auto const* const region = mapped_region::find(memory_, addr, size))
   {
+    switch(run_->check_memory(addr, size, attrs, arch::memory_op::read))
+    {
+      case periph::bus_verdict::allow:
+        break;
+      case periph::bus_verdict::read_zero_write_ignore:
+        run_->note_watched(addr, size, 0, false, by);
+        return 0u;
+      case periph::bus_verdict::bus_error:
+        return std::unexpected(bus_error::denied);
+    }
     if(by == initiator::dma and not run_->controller_runs.empty())
     {
       run_->note_controller_read(*region, addr, size, attrs);
@@ -67,6 +77,16 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus
   auto const by = attrs.by;
   if(auto const* const region = mapped_region::find(memory_, addr, size))
   {
+    switch(run_->check_memory(addr, size, attrs, arch::memory_op::write))
+    {
+      case periph::bus_verdict::allow:
+        break;
+      case periph::bus_verdict::read_zero_write_ignore:
+        run_->note_watched(addr, size, value, true, by);
+        return {};
+      case periph::bus_verdict::bus_error:
+        return std::unexpected(bus_error::denied);
+    }
     if(not writable_by(*region->desc, by))
     {
       if(region->controller != nullptr)
@@ -114,7 +134,8 @@ auto machine::do_read_block(address addr, std::span<std::byte> out, bus_attrs at
           or run_->controller_runs.empty()
           or not run_->controller_block_hit(region->buffer.get(), first, first + bytes - 1);
     };
-    if(region != nullptr and (by == initiator::debugger or (run_->watches.empty() and misses())))
+    if(region != nullptr
+       and (by == initiator::debugger or (run_->watches.empty() and not run_->filters_host(by) and misses())))
     {
       auto const run = std::min(out.size() - done, region->remaining(at));
       std::memcpy(out.data() + done, region->host(at), run);
@@ -149,7 +170,8 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, bus_at
     {
       return std::unexpected(block_error{.error = bus_error::denied, .at = at});
     }
-    if(region != nullptr and (run_->watches.empty() or by == initiator::debugger))
+    if(region != nullptr
+       and (by == initiator::debugger or (run_->watches.empty() and not run_->filters_host(by))))
     {
       if(not writable_by(*region->desc, by))
       {

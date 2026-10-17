@@ -772,6 +772,7 @@ private:
   void do_log(log_record record) override;
   void do_watch_reads(address at, std::uint32_t size, bool on) override;
   void do_install_firewall(periph::bus_firewall& firewall) override;
+  void do_memory_policy_changed() override;
 
   friend class memory_view;
   friend class register_view;

@@ -11,6 +11,8 @@
 
 #include <sched.h>
 
+#include <unicorn/unicorn.h>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -97,15 +99,38 @@ public:
   }
 };
 
+struct ns_region
+{
+  popcorn::address base{};
+  popcorn::address limit{};
+};
+
+struct store_loop
+{
+  popcorn::address         code{};
+  popcorn::address         store{};
+  bool                     nonsecure{};
+  std::uint32_t            seccfgr0 = 0xffff'ffffu;
+  std::optional<ns_region> sau{};
+};
+
 struct row
 {
-  std::string   name;
-  std::string   entry;
-  std::uint32_t rate{};
-  std::uint32_t stores{};
-  std::int64_t  divisor = 1;
-  bool          trustzone{};
+  std::string               name;
+  std::string               entry;
+  std::uint32_t             rate{};
+  std::uint32_t             stores{};
+  std::int64_t              divisor = 1;
+  bool                      trustzone{};
+  std::optional<store_loop> loop{};
 };
+
+constexpr std::array<std::uint16_t, 3> store_loop_code{0x6001, 0x3101, 0xe7fc};
+constexpr popcorn::address             sau_ctrl  = 0xe000'edd0;
+constexpr popcorn::address             sau_rnr   = 0xe000'edd8;
+constexpr popcorn::address             sau_rbar  = 0xe000'eddc;
+constexpr popcorn::address             sau_rlar  = 0xe000'ede0;
+constexpr std::uint32_t                sau_allns = 2;
 
 struct options
 {
@@ -148,7 +173,57 @@ auto rows() -> std::vector<row>
   out.push_back({.name = "poll/100k", .entry = "irq_unmask", .rate = 100'000u});
   out.push_back(
       {.name = "poll/100k/tz", .entry = "irq_unmask", .rate = 100'000u, .trustzone = true});
+  auto const loop = [&out](std::string name, bool trustzone, store_loop how) {
+    out.push_back(
+        {.name      = std::move(name),
+         .entry     = "main",
+         .divisor   = 4,
+         .trustzone = trustzone,
+         .loop      = how});
+  };
+  loop("store/off", false, {.code = 0x2000'0400, .store = 0x2000'1000});
+  loop("store/tz-secure", true, {.code = 0x3000'0400, .store = 0x3000'1000});
+  loop(
+      "store/tz-nonsecure", true,
+      {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 0});
+  loop(
+      "store/tz-mixed", true,
+      {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 9});
+  loop(
+      "store/tz-subpage", true,
+      {
+          .code  = 0x3000'0400,
+          .store = 0x3000'1000,
+          .sau   = ns_region{.base = 0x3000'1200, .limit = 0x3000'121f}
+  });
+  loop(
+      "store/tz-subpage-code", true,
+      {
+          .code  = 0x3000'0400,
+          .store = 0x3000'2000,
+          .sau   = ns_region{.base = 0x3000'0780, .limit = 0x3000'079f}
+  });
+  loop(
+      "store/tz-mixed-code", true,
+      {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 3});
   return out;
+}
+
+auto register_address(std::string_view peripheral, std::string_view name) -> popcorn::address
+{
+  auto const& desc = u575();
+  auto const  found =
+      std::ranges::find(desc.peripherals, peripheral, &popcorn::peripheral_desc::name);
+  if(found == desc.peripherals.end())
+  {
+    throw std::runtime_error{std::format("no peripheral {}", peripheral)};
+  }
+  auto const* reg = popcorn::find_register(*found, name);
+  if(reg == nullptr)
+  {
+    throw std::runtime_error{std::format("no register {}.{}", peripheral, name)};
+  }
+  return found->base + reg->offset;
 }
 
 struct lone
@@ -194,8 +269,58 @@ struct lone
     {
       throw std::runtime_error{"the bench variables are not writable"};
     }
-    target->regs().write(*target->regs().find("pc"), symbol(r.entry));
+    if(r.loop)
+    {
+      enter_loop(*r.loop, r.trustzone);
+    }
+    else
+    {
+      target->regs().write(*target->regs().find("pc"), symbol(r.entry));
+    }
     origin = target->virtual_clock().time().ps;
+  }
+
+  void write(popcorn::address at, std::uint32_t value, std::uint8_t size = 4) const
+  {
+    if(not target->mem().write(at, size, value))
+    {
+      throw std::runtime_error{std::format("the bench cannot write {:#010x}", at)};
+    }
+  }
+
+  void enter_loop(store_loop const& how, bool trustzone) const
+  {
+    for(auto const& [index, insn] : std::views::enumerate(store_loop_code))
+    {
+      write(how.code + 2 * static_cast<popcorn::address>(index), insn, 2);
+    }
+    auto regs = target->regs();
+    regs.write(*regs.find("primask"), 1);
+    regs.write(*regs.find("r0"), how.store);
+    regs.write(*regs.find("r1"), 0);
+    regs.write(*regs.find("pc"), how.code | 1u);
+    if(not trustzone)
+    {
+      return;
+    }
+    write(register_address("GTZC1_MPCBB1", "SECCFGR0"), how.seccfgr0);
+    if(how.sau)
+    {
+      write(sau_rnr, 0);
+      write(sau_rbar, how.sau->base);
+      write(sau_rlar, (how.sau->limit & ~0x1fu) | 1u);
+      write(sau_ctrl, 1);
+    }
+    if(how.nonsecure)
+    {
+      write(sau_ctrl, sau_allns);
+      std::uint32_t value = 0;
+      if(uc_reg_write(core::machine_internals::engine(*target), UC_ARM_REG_SECURE, &value)
+         != UC_ERR_OK)
+      {
+        throw std::runtime_error{"the engine refused the Non-secure state"};
+      }
+    }
   }
 
   void run_to(std::int64_t until) const
