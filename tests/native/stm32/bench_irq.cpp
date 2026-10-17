@@ -147,11 +147,18 @@ struct options
   std::optional<std::string> dump_dir;
 };
 
+struct translation_counts
+{
+  std::uint64_t translations{};
+  std::uint64_t flushes{};
+};
+
 struct sample
 {
   double                 wall{};
   double                 virtual_s{};
   core::run_counters     counters{};
+  translation_counts     translated{};
   std::string            dump;
   std::vector<std::byte> snapshot;
 };
@@ -212,6 +219,9 @@ auto rows() -> std::vector<row>
   loop(
       "store/tz-mixed-code", true,
       {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 3});
+  loop(
+      "store/tz-mixed-code-high", true,
+      {.code = 0x2000'0600, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 2});
   loop(
       "store/tz-subpage-hop", true,
       {
@@ -364,6 +374,19 @@ struct lone
     }
   }
 
+  [[nodiscard]] auto translated() const -> translation_counts
+  {
+    auto*              engine = core::machine_internals::engine(*target);
+    translation_counts out;
+    std::uint64_t      live{};
+    if(uc_ctl_tb_translations(engine, &out.translations, &live) != UC_ERR_OK
+       or uc_ctl_tb_flushes(engine, &out.flushes) != UC_ERR_OK)
+    {
+      throw std::runtime_error{"the engine refused the translation counts"};
+    }
+    return out;
+  }
+
   [[nodiscard]] auto word(popcorn::address at) const -> std::uint64_t
   {
     return target->mem().read(at, 4).value_or(0xdead'beefu);
@@ -433,18 +456,24 @@ auto measure(options const& how, row const& r) -> sample
   auto const warmup = how.warmup_ms * ms_ps;
   auto const span   = how.virtual_ms * ms_ps / r.divisor;
   m.run_to(warmup);
-  auto const before = core::machine_internals::counters(*m.target);
-  auto const from   = clock_type::now();
+  auto const before            = core::machine_internals::counters(*m.target);
+  auto const translated_before = m.translated();
+  auto const from              = clock_type::now();
   m.run_to(warmup + span);
-  auto const wall  = std::chrono::duration<double>(clock_type::now() - from).count();
-  auto const after = core::machine_internals::counters(*m.target);
+  auto const wall             = std::chrono::duration<double>(clock_type::now() - from).count();
+  auto const after            = core::machine_internals::counters(*m.target);
+  auto const translated_after = m.translated();
   return {
       .wall      = wall,
       .virtual_s = static_cast<double>(span) / 1e12,
       .counters  = difference(after, before),
-      .dump      = m.dump(),
-      .snapshot  = how.dump_dir ? core::encode_snapshot(m.target->snapshot().data())
-                                : std::vector<std::byte>{}};
+      .translated =
+          {.translations = translated_after.translations - translated_before.translations,
+                       .flushes      = translated_after.flushes - translated_before.flushes},
+      .dump     = m.dump(),
+      .snapshot = how.dump_dir ? core::encode_snapshot(m.target->snapshot().data())
+                               : std::vector<std::byte>{}
+  };
 }
 
 auto parse_number(std::string_view text) -> std::int64_t
@@ -551,8 +580,19 @@ struct collected
 {
   std::vector<double>             per_vs;
   std::vector<core::run_counters> counters;
+  std::vector<translation_counts> translated;
   double                          virtual_s{};
 };
+
+auto translated_per_vs(collected const& c, std::uint64_t translation_counts::* field) -> double
+{
+  std::vector<double> values;
+  for(auto const& one : c.translated)
+  {
+    values.push_back(static_cast<double>(one.*field) / c.virtual_s);
+  }
+  return median(values);
+}
 
 auto per_vs(collected const& c, auto field) -> double
 {
@@ -603,9 +643,10 @@ void summary(std::vector<row> const& chosen, std::map<std::string, collected> co
 {
   std::println(
       "\n| row | median wall s/vs | min | max | spread % | entries/vs | runs/vs | runs/entry | "
-      "hooked stores/vs | stores/entry | ctl calls/vs | ctl/entry | ctl/store |{}",
+      "hooked stores/vs | stores/entry | ctl calls/vs | ctl/entry | ctl/store | translations/vs | "
+      "buffer flushes/vs |{}",
       end_names());
-  std::println("|---|---|---|---|---|---|---|---|---|---|---|---|---|{}", [] {
+  std::println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|{}", [] {
     std::string bars;
     for(std::size_t index = 0; index < core::engine_end_count; ++index)
     {
@@ -632,9 +673,11 @@ void summary(std::vector<row> const& chosen, std::map<std::string, collected> co
     }
     std::println(
         "| {} | {:.4f} | {:.4f} | {:.4f} | {:.1f} | {:.0f} | {:.0f} | {:.2f} | {:.0f} | {:.2f} | "
-        "{:.0f} | {:.2f} | {:.2f} |{}",
+        "{:.0f} | {:.2f} | {:.2f} | {:.0f} | {:.1f} |{}",
         r.name, md, lo, hi, (hi - lo) / md * 100, entries, runs, ratio(runs, entries), stores,
-        ratio(stores, entries), calls, ratio(calls, entries), ratio(calls, stores), ends);
+        ratio(stores, entries), calls, ratio(calls, entries), ratio(calls, stores),
+        translated_per_vs(c, &translation_counts::translations),
+        translated_per_vs(c, &translation_counts::flushes), ends);
   }
   std::println(
       "\n| slope over | us/entry | intercept s/vs | slope error us/entry | error % | "
@@ -769,12 +812,13 @@ auto bench(options const& how) -> int
       c.virtual_s = out.virtual_s;
       c.per_vs.push_back(out.wall / out.virtual_s);
       c.counters.push_back(out.counters);
+      c.translated.push_back(out.translated);
       std::println(
           "run={} row={} wall_s={:.4f} wall_per_vs={:.4f} entries={} engine_runs={} "
-          "hooked_stores={} dump={:016x} same={}",
+          "hooked_stores={} translations={} buffer_flushes={} dump={:016x} same={}",
           run, r.name, out.wall, out.wall / out.virtual_s, out.counters.entries,
-          out.counters.engine_runs, out.counters.guest_stores_hooked, hash.value,
-          same ? "yes" : "NO");
+          out.counters.engine_runs, out.counters.guest_stores_hooked, out.translated.translations,
+          out.translated.flushes, hash.value, same ? "yes" : "NO");
       std::fflush(stdout);
     }
   }
