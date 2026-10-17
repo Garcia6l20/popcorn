@@ -1712,6 +1712,10 @@ struct machine::run_state
    * @p cause. Off the block hook's hot path. */
   [[gnu::noinline]] void stop_at_block(uc_struct* engine, engine_end cause) noexcept;
 
+  /** @brief stop_at_block for the boundary_cause of clock @p now. Off the block hook's hot path,
+   * so the hook keeps no register across a call. */
+  [[gnu::noinline]] void stop_at_boundary(uc_struct* engine, icount now) noexcept;
+
   /** @brief Completes the watched returns at block_pc and stops the engine when the until
    * return is reached there. Off the block hook's hot path.
    * @return Whether the engine was stopped. */

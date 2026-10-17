@@ -386,7 +386,7 @@ auto machine::run_state::deliverable() noexcept -> bool
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {
-    run.stop_at_block(engine, run.boundary_cause(now));
+    run.stop_at_boundary(engine, now);
     return;
   }
   if(run.block_watch and run.watch_block(engine)) [[unlikely]]
@@ -410,6 +410,11 @@ auto machine::run_state::deliverable() noexcept -> bool
   {
     run.record_block();
   }
+}
+
+void machine::run_state::stop_at_boundary(uc_struct* engine, icount now) noexcept
+{
+  stop_at_block(engine, boundary_cause(now));
 }
 
 void machine::run_state::stop_at_block(uc_struct* engine, engine_end cause) noexcept
