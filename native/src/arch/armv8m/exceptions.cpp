@@ -529,6 +529,28 @@ void write_bank(uc_struct* engine, security bank, special_bank const& values)
   write(engine, ids.psplim, values.psplim, "PSPLIM of a bank");
 }
 
+namespace
+{
+auto outranks(
+    exception_state const& exceptions,
+    security_config const& config,
+    pending_exception      first,
+    pending_exception      second) noexcept -> bool
+{
+  auto const lhs = exception_priority(exceptions, config, first.number, first.state, false);
+  auto const rhs = exception_priority(exceptions, config, second.number, second.state, false);
+  if(lhs != rhs)
+  {
+    return lhs < rhs;
+  }
+  if(first.number != second.number)
+  {
+    return first.number < second.number;
+  }
+  return first.state == security::secure and second.state == security::nonsecure;
+}
+}
+
 template <bool extension>
 auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
 {
@@ -552,8 +574,28 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto const lowest = frame_at - callee;
   auto&      cfsr =
       extension and background == security::nonsecure ? state_.scs.nonsecure.cfsr : state_.scs.cfsr;
-  if(lowest < (use_psp ? special.psplim : special.msplim))
+  auto const limit    = use_psp ? special.psplim : special.msplim;
+  auto const original = pending_exception{.number = number, .state = state};
+  auto const partial  = encode_exc_return(
+      {.thread = thread, .process_stack = use_psp, .basic_frame = not fp},
+      {.secure_background = background == security::secure});
+  auto const sp_id = ids_of(background).*(use_psp ? &bank_ids::psp : &bank_ids::msp);
+  if(lowest < limit)
   {
+    if constexpr(extension)
+    {
+      if(frame_at < limit)
+      {
+        return derived_entry(
+            original,
+            {.kind      = fault_kind::usage,
+             .target    = exc_usagefault,
+             .cfsr_bits = cfsr::stkof,
+             .reported  = lowest,
+             .origin    = background},
+            partial, sp_id, limit);
+      }
+    }
     cfsr |= cfsr::stkof;
     return trap_result::fault(
         {.kind          = fault_kind::usage,
@@ -567,7 +609,14 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
     {
       if(auto const denied = first_secure_word(lowest, frame_at + size))
       {
-        return attribution_fault(*denied);
+        return derived_entry(
+            original,
+            {.kind         = fault_kind::secure,
+             .target       = exc_securefault,
+             .cfsr_bits    = sfsr::auviol,
+             .reported     = *denied,
+             .data_address = *denied},
+            partial, sp_id, lowest);
       }
       if(fp and (state_.scs.nsacr & nsacr_cp10) == 0)
       {
@@ -623,9 +672,23 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   }
   auto const table =
       extension and state == security::nonsecure ? state_.scs.nonsecure.vtor : state_.scs.vtor;
-  auto const                   slot = table + 4 * number;
+  auto const slot = table + 4 * number;
+  auto const secure_slot =
+      extension and state == security::nonsecure and first_secure_word(slot, slot + 4).has_value();
+  std::uint32_t exc_return = 0;
+  if constexpr(extension)
+  {
+    exc_return = encode_exc_return(
+        {.thread        = thread,
+         .process_stack = state == background
+                            ? use_psp
+                            : (read_bank(engine, state).control & control_spsel) != 0,
+         .basic_frame   = not fp},
+        {.secure_background = background == security::secure,
+         .secure_exception  = state == security::secure});
+  }
   std::optional<std::uint32_t> vector;
-  if(not extension or state == security::secure or not first_secure_word(slot, slot + 4))
+  if(not secure_slot)
   {
     if(auto const read_back = services.read(
            slot, 4, bus_attrs{.by = initiator::cpu, .secure = state == security::secure}))
@@ -636,6 +699,25 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   if(not vector)
   {
     state_.scs.hfsr |= hfsr_vecttbl;
+    if constexpr(extension)
+    {
+      auto const hard = pending_exception{
+          .number = exc_hardfault,
+          .state  = secure_slot ? security::secure
+                                : exception_target(
+                                      state_.exceptions, priority_config(), exc_hardfault, state)};
+      if(context_->faults != fault_policy::stop
+         and outranks(state_.exceptions, priority_config(), hard, original))
+      {
+        write(sp_id, lowest);
+        if(state == security::nonsecure)
+        {
+          clear_caller_registers(engine, callee != 0);
+        }
+        pend(hard.number, hard.state);
+        return enter_with_frame(hard, exc_return, true);
+      }
+    }
     return trap_result::fault(
         {.kind          = fault_kind::hard,
          .fault_address = slot,
@@ -645,17 +727,9 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   auto target = special;
   if constexpr(extension)
   {
-    auto const exc_return = encode_exc_return(
-        {.thread        = thread,
-         .process_stack = state == background
-                            ? use_psp
-                            : (read_bank(engine, state).control & control_spsel) != 0,
-         .basic_frame   = not fp},
-        {.secure_background = background == security::secure,
-         .secure_exception  = state == security::secure});
     if(state != background)
     {
-      write(ids_of(background).*(use_psp ? &bank_ids::psp : &bank_ids::msp), lowest);
+      write(sp_id, lowest);
       write_security(engine, state);
       target = read_special(engine, stack_limits());
     }
@@ -855,8 +929,8 @@ auto cortex_m::exception_return() -> trap_result
   }
   auto const number  = read(UC_ARM_REG_IPSR) & ipsr_mask;
   auto const current = read_security(engine);
-  auto const invalid = [&](security bank) {
-    auto& cfsr = bank == security::nonsecure ? state_.scs.nonsecure.cfsr : state_.scs.cfsr;
+  auto const invalid = [&] {
+    auto& cfsr = current == security::nonsecure ? state_.scs.nonsecure.cfsr : state_.scs.cfsr;
     cfsr |= cfsr::invpc;
     return trap_result::fault(
         {.kind          = fault_kind::usage,
@@ -875,16 +949,22 @@ auto cortex_m::exception_return() -> trap_result
   }
   if(not valid_return(value))
   {
-    return invalid(current);
+    return invalid();
   }
   auto const fields    = decode_exc_security(value);
   auto const returning = decode_exc_return(value);
+  auto const exception = fields.secure_exception ? security::secure : security::nonsecure;
   if((current == security::nonsecure and fields.secure_exception)
      or (not fields.secure_exception and not fields.default_callee))
   {
-    return security_fault(sfsr::inver, value);
+    auto const forced = current == security::nonsecure ? value & ~1u : value;
+    return return_fault(
+        forced, number, current == security::nonsecure ? security::nonsecure : exception, current,
+        {.kind      = fault_kind::secure,
+         .target    = exc_securefault,
+         .cfsr_bits = sfsr::inver,
+         .reported  = value});
   }
-  auto const exception     = fields.secure_exception ? security::secure : security::nonsecure;
   auto const back          = fields.secure_background ? security::secure : security::nonsecure;
   auto const banked_number = exception == security::nonsecure and banked(number);
   auto const active =
@@ -894,7 +974,12 @@ auto cortex_m::exception_return() -> trap_result
                 and (banked(number) or exception_target(state_.exceptions, priority_config(), number, exception) == exception);
   if(not active)
   {
-    return invalid(current);
+    return return_fault(
+        value, number, exception, current,
+        {.kind      = fault_kind::usage,
+         .target    = exc_usagefault,
+         .cfsr_bits = cfsr::invpc,
+         .reported  = value});
   }
   auto const spsel = (value & (1u << 2)) != 0;
   auto const bank  = read_bank(engine, back);
@@ -914,7 +999,13 @@ auto cortex_m::exception_return() -> trap_result
   {
     if(auto const denied = first_secure_word(frame_at, frame_at + callee + size))
     {
-      return attribution_fault(*denied);
+      return return_fault(
+          value, number, exception, back,
+          {.kind         = fault_kind::secure,
+           .target       = exc_securefault,
+           .cfsr_bits    = sfsr::auviol,
+           .reported     = *denied,
+           .data_address = *denied});
     }
   }
   std::vector<std::uint32_t> words((callee + size) / 4, 0);
@@ -934,13 +1025,23 @@ auto cortex_m::exception_return() -> trap_result
   }
   if(callee != 0 and words[0] != integrity_signature(core_.fpu, returning.basic_frame))
   {
-    return security_fault(sfsr::invis, frame_at);
+    return return_fault(
+        value, number, exception, back,
+        {.kind      = fault_kind::secure,
+         .target    = exc_securefault,
+         .cfsr_bits = sfsr::invis,
+         .reported  = frame_at});
   }
   auto const frame        = std::span{words}.subspan(callee / 4);
   auto const stacked_ipsr = frame[7] & ipsr_mask;
   if(returning.thread != (stacked_ipsr == 0))
   {
-    return invalid(back);
+    return return_fault(
+        value, number, exception, back,
+        {.kind      = fault_kind::usage,
+         .target    = exc_usagefault,
+         .cfsr_bits = cfsr::invpc,
+         .reported  = value});
   }
   if(banked_number)
   {
@@ -1059,20 +1160,199 @@ auto cortex_m::secure_fp_context() const noexcept -> bool
   return trustzone() and (state_.scs.fpccr & fpccr_ts) != 0;
 }
 
-auto cortex_m::security_fault(std::uint32_t bits, address at) -> trap_result
+auto cortex_m::derived_entry(
+    pending_exception  original,
+    fault_cause const& cause,
+    std::uint32_t      exc_return,
+    int                sp_id,
+    std::uint32_t      sp) -> trap_result
 {
-  state_.scs.sfsr |= bits;
-  return trap_result::fault(
-      {.kind          = fault_kind::secure,
-       .fault_address = at,
-       .status        = state_.scs.sfsr,
-       .detail        = state_.scs.hfsr});
+  auto const raised = create_exception(cause);
+  if(not raised)
+  {
+    return raised.error();
+  }
+  write(sp_id, sp);
+  auto const derived_first = outranks(state_.exceptions, priority_config(), *raised, original);
+  pend(raised->number, raised->state);
+  return enter_with_frame(derived_first ? *raised : original, exc_return, false);
 }
 
-auto cortex_m::attribution_fault(address at) -> trap_result
+auto cortex_m::return_fault(
+    std::uint32_t      exc_return,
+    std::uint32_t      number,
+    security           exception,
+    security           to,
+    fault_cause const& cause) -> trap_result
 {
-  state_.scs.sfar = static_cast<std::uint32_t>(at);
-  return security_fault(sfsr::auviol | sfsr::sfarvalid, at);
+  auto* const engine           = engine_handle();
+  auto const& ids              = ids_of(exception);
+  auto const  active           = state_.exceptions.active;
+  auto const  nonsecure_active = state_.exceptions.nonsecure_active;
+  auto const  control          = read(ids.control);
+  auto const  faultmask        = read(ids.faultmask);
+  auto const  current          = read_security(engine);
+  if(exception == security::nonsecure and banked(number))
+  {
+    state_.exceptions.nonsecure_active &= ~(1u << number);
+  }
+  else
+  {
+    put_bit(state_.exceptions.active, number, false);
+  }
+  if(number != exc_nmi)
+  {
+    write(ids.faultmask, 0);
+  }
+  write(
+      ids.control,
+      (control & ~control_spsel) | ((exc_return & (1u << 2)) != 0 ? control_spsel : 0u));
+  if(to != current)
+  {
+    write_security(engine, to);
+  }
+  auto from         = cause;
+  from.origin       = to;
+  auto const raised = create_exception(from);
+  if(not raised)
+  {
+    if(to != current)
+    {
+      write_security(engine, current);
+    }
+    write(ids.control, control);
+    write(ids.faultmask, faultmask);
+    state_.exceptions.active           = active;
+    state_.exceptions.nonsecure_active = nonsecure_active;
+    return raised.error();
+  }
+  pend(raised->number, raised->state);
+  auto const best = best_pending(state_.exceptions, priority_config(), state_.call_masked);
+  return enter_with_frame(
+      best.number != 0 and preempts(best.number, best.state) ? best : *raised, exc_return, true);
+}
+
+auto cortex_m::enter_with_frame(pending_exception taken, std::uint32_t exc_return, bool tail_chain)
+    -> trap_result
+{
+  auto* const engine         = engine_handle();
+  auto&       services       = context_->services;
+  auto const [number, state] = taken;
+  auto const fields          = decode_exc_security(exc_return);
+  auto const thread          = (exc_return & (1u << 3)) != 0;
+  auto const basic           = (exc_return & (1u << 4)) != 0;
+  auto const spsel_bit       = (exc_return & (1u << 2)) != 0;
+  auto       default_callee  = fields.default_callee;
+  auto       push            = false;
+  if(fields.secure_background)
+  {
+    if(state == security::secure)
+    {
+      default_callee = default_callee and not(tail_chain and not fields.secure_exception);
+    }
+    else
+    {
+      push           = default_callee and not(tail_chain and not fields.secure_exception);
+      default_callee = true;
+    }
+  }
+  if(push)
+  {
+    auto const bank    = read_bank(engine, security::secure);
+    auto const process = thread and (tail_chain ? spsel_bit : (bank.control & control_spsel) != 0);
+    auto const sp      = process ? bank.psp : bank.msp;
+    auto const at      = sp - callee_frame_size;
+    auto const limit   = process ? bank.psplim : bank.msplim;
+    if(at < limit)
+    {
+      state_.scs.cfsr |= cfsr::stkof;
+      return trap_result::fault(
+          {.kind          = fault_kind::usage,
+           .fault_address = at,
+           .status        = state_.scs.cfsr,
+           .detail        = state_.scs.hfsr});
+    }
+    std::array<std::uint32_t, callee_frame_size / 4> words{};
+    words[0] = integrity_signature(core_.fpu, basic);
+    read_batch(engine, callee_ids, std::span{words}.subspan(2, callee_ids.size()));
+    auto const stacking = bus_attrs{
+        .by         = initiator::cpu,
+        .secure     = true,
+        .privileged = not thread or (bank.control & control_npriv) == 0,
+    };
+    if(not services.write_block(at, std::as_bytes(std::span{words}), stacking))
+    {
+      state_.scs.cfsr |= cfsr::stkerr;
+      return trap_result::fault(
+          {.kind          = fault_kind::bus,
+           .fault_address = at,
+           .status        = state_.scs.cfsr,
+           .detail        = state_.scs.hfsr});
+    }
+    write(process ? UC_ARM_REG_PSP_S : UC_ARM_REG_MSP_S, at);
+  }
+  auto const table = state == security::nonsecure ? state_.scs.nonsecure.vtor : state_.scs.vtor;
+  auto const slot  = table + 4 * number;
+  std::optional<std::uint32_t> vector;
+  if(state == security::secure or not first_secure_word(slot, slot + 4))
+  {
+    if(auto const read_back = services.read(
+           slot, 4, bus_attrs{.by = initiator::cpu, .secure = state == security::secure}))
+    {
+      vector = static_cast<std::uint32_t>(*read_back);
+    }
+  }
+  if(not vector)
+  {
+    state_.scs.hfsr |= hfsr_vecttbl;
+    return trap_result::fault(
+        {.kind          = fault_kind::hard,
+         .fault_address = slot,
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
+  }
+  auto const link = encode_exc_return(
+      {.thread        = thread,
+       .process_stack = (read_bank(engine, state).control & control_spsel) != 0,
+       .basic_frame   = basic},
+      {.secure_background = fields.secure_background,
+       .default_callee    = default_callee,
+       .secure_exception  = state == security::secure});
+  if(read_security(engine) != state)
+  {
+    write_security(engine, state);
+  }
+  auto target    = read_special(engine, stack_limits());
+  target.ipsr    = number;
+  target.control = target.control & ~(control_spsel | control_fpca | control_sfpa);
+  if(state == security::nonsecure)
+  {
+    target.ge = 0;
+  }
+  set_context(engine, target, stack_limits());
+  if(state == security::nonsecure)
+  {
+    write(UC_ARM_REG_CONTROL_S, read(UC_ARM_REG_CONTROL_S) & ~(control_fpca | control_sfpa));
+    clear_caller_registers(engine, fields.secure_background);
+  }
+  write(UC_ARM_REG_EPSR, (*vector & 1u) << 24);
+  write(UC_ARM_REG_LR, link);
+  write(UC_ARM_REG_PC, *vector);
+  if(state == security::nonsecure and banked(number))
+  {
+    state_.exceptions.nonsecure_pending &= ~(1u << number);
+    state_.exceptions.nonsecure_active |= 1u << number;
+  }
+  else
+  {
+    put_bit(state_.exceptions.pending, number, false);
+    put_bit(state_.exceptions.active, number, true);
+  }
+  refresh_pending();
+  state_.event_register = true;
+  services.trace(
+      {.kind = core::trace_kind::irq, .flags = 1, .aux = static_cast<std::uint16_t>(number)});
+  return trap_result::resume();
 }
 
 void cortex_m::clear_caller_registers(uc_struct* engine, bool callee) const

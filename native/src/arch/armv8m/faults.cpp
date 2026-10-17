@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <expected>
 
 namespace popcorn::arch::armv8m
 {
@@ -32,7 +33,8 @@ auto enable_bit(std::uint32_t target) noexcept -> std::uint32_t
 }
 }
 
-auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
+auto cortex_m::create_exception(fault_cause const& cause)
+    -> std::expected<pending_exception, trap_result>
 {
   auto&      scs    = state_.scs;
   auto const config = priority_config();
@@ -77,18 +79,28 @@ auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
   }
   if(target == exc_hardfault and cause.synchronous and not preempts(exc_hardfault, bank))
   {
-    return trap_result::fault(
+    return std::unexpected{trap_result::fault(
         {.kind          = fault_kind::hard,
          .fault_address = pc(),
          .status        = cause.target == exc_securefault ? scs.cfsr : cfsr,
-         .detail        = scs.hfsr});
+         .detail        = scs.hfsr})};
   }
   if(context_->faults == fault_policy::stop)
   {
-    return trap_result::fault(
-        {.kind = cause.kind, .fault_address = cause.reported, .status = cfsr, .detail = scs.hfsr});
+    return std::unexpected{trap_result::fault(
+        {.kind = cause.kind, .fault_address = cause.reported, .status = cfsr, .detail = scs.hfsr})};
   }
-  pend(target, bank);
+  return pending_exception{.number = target, .state = bank};
+}
+
+auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
+{
+  auto const raised = create_exception(cause);
+  if(not raised)
+  {
+    return raised.error();
+  }
+  pend(raised->number, raised->state);
   return trap_result::resume();
 }
 

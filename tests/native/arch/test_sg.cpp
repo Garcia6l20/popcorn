@@ -630,7 +630,7 @@ TEST_CASE(
 
 TEST_CASE(
     "BLXNS with MSPLIM_S above its frame is a Secure UsageFault STKOF, B3.21 RCCSC, whose entry "
-    "then stops on the same limit")
+    "takes it with MSP_S at the limit, DerivedLateArrival lines 38-50")
 {
   for(auto const policy : {fault_policy::stop, fault_policy::enter_handler})
   {
@@ -654,11 +654,12 @@ TEST_CASE(
       CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
       continue;
     }
-    REQUIRE(stopped.reason == stop_reason::fault);
-    CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
-    CHECK(f.module->is_pending(armv8m::exc_usagefault));
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK_FALSE(f.module->is_pending(armv8m::exc_usagefault));
     CHECK(secure_now(f));
-    CHECK(ipsr(f) == 0);
+    CHECK(ipsr(f) == armv8m::exc_usagefault);
+    CHECK(f.reg("pc") == secure_handler + 2);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_S) == msp_s);
   }
 }
 

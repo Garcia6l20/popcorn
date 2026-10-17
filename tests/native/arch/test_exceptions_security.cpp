@@ -75,9 +75,21 @@ constexpr std::uint16_t ldr_r1_r0 = 0x6801;
 constexpr std::uint16_t bx_lr     = 0x4770;
 constexpr std::uint16_t nop       = 0xbf00;
 
-constexpr std::uint32_t control_spsel = 1u << 1;
-constexpr std::uint32_t control_fpca  = 1u << 2;
-constexpr std::uint32_t fill          = 0xA5A5'A5A5;
+constexpr std::uint32_t control_spsel   = 1u << 1;
+constexpr std::uint32_t control_fpca    = 1u << 2;
+constexpr std::uint32_t fill            = 0xA5A5'A5A5;
+constexpr address       shpr1           = 0xE000'ED18;
+constexpr address       ipr0            = 0xE000'E400;
+constexpr std::uint32_t sfsr_invis      = 1u << 1;
+constexpr std::uint32_t sfsr_inver      = 1u << 2;
+constexpr std::uint32_t sfsr_auviol     = 1u << 3;
+constexpr std::uint32_t sfsr_sfarvalid  = 1u << 6;
+constexpr std::uint32_t usagefault_ena  = 1u << 18;
+constexpr std::uint32_t securefault_ena = 1u << 19;
+constexpr std::uint32_t ufsr_invpc      = 1u << 18;
+constexpr std::uint32_t ufsr_stkof      = 1u << 20;
+constexpr std::uint32_t hfsr_vecttbl    = 1u << 1;
+constexpr std::uint32_t hfsr_forced     = 1u << 30;
 
 auto booted(fault_policy policy = fault_policy::enter_handler, char const* firmware = "scs")
     -> arch_fixture
@@ -642,43 +654,119 @@ TEST_CASE(
   }
 }
 
-TEST_CASE("a corrupt integrity signature on return to Secure is a SecureFault INVIS, B3.22")
+TEST_CASE(
+    "a corrupt integrity signature on return to Secure takes the SecureFault on the frame left "
+    "in place, PopStack lines 26-36 and HandleExceptionTransitions lines 18-21 and 81-90")
 {
-  auto f = booted();
-  open_nonsecure_region(f);
-  tables(f, 16);
-  put(f, ns_handler, {bkpt, bx_lr});
-  put(f, secure_code, {bkpt});
-  poke(f, itns0, 1);
-  poke(f, iser0, 1);
-  poke(f, ispr0, 1);
-  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
-  auto const callee_at = engine_read(f, UC_ARM_REG_MSP_S);
-  poke(f, callee_at, 0xFEFA'125Au);
-  auto const stopped = resume(f, 2);
-  REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::secure);
-  CHECK(f.word(sfsr) == 1u << 1);
-  CHECK_FALSE(secure_now(f));
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    CAPTURE(policy == fault_policy::stop);
+    auto f = booted(policy);
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_securefault);
+    poke(f, shcsr, securefault_ena);
+    put(f, ns_handler, {bkpt, bx_lr});
+    put(f, secure_code, {bkpt});
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    poke(f, ispr0, 1);
+    REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+    auto const callee_at = engine_read(f, UC_ARM_REG_MSP_S);
+    poke(f, callee_at, 0xFEFA'125Au);
+    auto const stopped = resume(f, 2);
+    CHECK(f.word(sfsr) == sfsr_invis);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_S) == callee_at);
+    if(policy == fault_policy::stop)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::secure);
+      CHECK_FALSE(secure_now(f));
+      CHECK(ipsr(f) == 16);
+      CHECK(f.module->is_active(16));
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == armv8m::exc_securefault);
+    CHECK(f.reg("pc") == secure_handler + 2);
+    CHECK(f.reg("lr") == 0xFFFF'FFD9u);
+    CHECK_FALSE(f.module->is_active(16));
+  }
 }
 
-TEST_CASE("a Non-secure handler returning with EXC_RETURN.ES set is a SecureFault INVER, B3.22")
+TEST_CASE(
+    "a Non-secure handler returning with EXC_RETURN.ES set takes the Secure SecureFault, the "
+    "handler deactivated and CONTROL_NS.SPSEL restored, ValidateExceptionReturn lines 17-38 and "
+    "52-60")
+{
+  for(auto const enabled : {true, false})
+  {
+    CAPTURE(enabled);
+    auto f = booted();
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_securefault);
+    tables(f, armv8m::exc_hardfault);
+    if(enabled)
+    {
+      poke(f, shcsr, securefault_ena);
+    }
+    put(f, secure_handler, {bkpt, bx_lr});
+    put(f, ns_handler, {bkpt, bx_lr});
+    put(f, ns_code, {bkpt});
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    poke(f, ispr0, 1);
+    constexpr address psp = ns_stack - 0x100;
+    engine_write(f, UC_ARM_REG_PSP_NS, psp);
+    engine_write(f, UC_ARM_REG_CONTROL_NS, control_spsel);
+    REQUIRE(run_nonsecure(f, ns_code, 2).reason == stop_reason::user);
+    REQUIRE(f.reg("lr") == 0xFFFF'FFBCu);
+    f.set("lr", 0xFFFF'FFBDu);
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == (enabled ? armv8m::exc_securefault : armv8m::exc_hardfault));
+    CHECK(f.word(sfsr) == sfsr_inver);
+    CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
+    CHECK_FALSE(f.module->is_active(16));
+    CHECK((engine_read(f, UC_ARM_REG_CONTROL_NS) & control_spsel) != 0);
+    CHECK(engine_read(f, UC_ARM_REG_PSP_NS) == psp - 0x20);
+    CHECK(f.reg("lr") == 0xFFFF'FFB9u);
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    CHECK_FALSE(secure_now(f));
+    CHECK(ipsr(f) == 0);
+    CHECK(f.reg("pc") == ns_code + 2);
+    CHECK(engine_read(f, UC_ARM_REG_PSP_NS) == psp);
+  }
+}
+
+TEST_CASE(
+    "an INVER return that cannot take a fault under FAULTMASK_S stops as hard with the handler "
+    "still active, HandleExceptionTransitions lines 23-60")
 {
   auto f = booted();
   open_nonsecure_region(f);
   tables(f, 16);
   put(f, ns_handler, {bkpt, bx_lr});
   put(f, ns_code, {bkpt});
+  poke(f, shcsr, securefault_ena);
   poke(f, itns0, 1);
   poke(f, iser0, 1);
   poke(f, ispr0, 1);
   REQUIRE(run_nonsecure(f, ns_code, 2).reason == stop_reason::user);
-  REQUIRE(f.reg("lr") == 0xFFFF'FFB8u);
+  auto const msp = engine_read(f, UC_ARM_REG_MSP_NS);
   f.set("lr", 0xFFFF'FFB9u);
+  engine_write(f, UC_ARM_REG_FAULTMASK_S, 1);
   auto const stopped = resume(f, 2);
   REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::secure);
-  CHECK(f.word(sfsr) == 1u << 2);
+  CHECK(stopped.fault->kind == popcorn::fault_kind::hard);
+  CHECK(f.word(sfsr) == sfsr_inver);
+  CHECK_FALSE(secure_now(f));
+  CHECK(ipsr(f) == 16);
+  CHECK(f.module->is_active(16));
+  CHECK(engine_read(f, UC_ARM_REG_FAULTMASK_S) == 1);
+  CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == msp);
 }
 
 TEST_CASE("a Non-secure thread on PSP_NS preempted by a Secure IRQ, B3.19 and VTOR_S")
@@ -711,111 +799,390 @@ TEST_CASE("a Non-secure thread on PSP_NS preempted by a Secure IRQ, B3.19 and VT
   CHECK((engine_read(f, UC_ARM_REG_CONTROL_NS) & control_spsel) != 0);
 }
 
-TEST_CASE("a Non-secure stack in Secure memory is a SecureFault AUVIOL before any store, B3.19")
+TEST_CASE(
+    "a Non-secure stack in Secure memory takes the SecureFault before any store, or the higher "
+    "IRQ first with the SecureFault pending, DerivedLateArrival lines 32-59")
 {
   constexpr address secure_stack = secure_code + 0x1100;
-  auto              f            = booted();
-  open_nonsecure_region(f);
-  tables(f, 16);
-  put(f, ns_code, {bkpt});
-  for(address at = secure_stack - 0x40; at < secure_stack; at += 4)
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
   {
-    poke(f, at, fill);
-  }
-  poke(f, itns0, 1);
-  poke(f, iser0, 1);
-  poke(f, ispr0, 1);
-  engine_write(f, UC_ARM_REG_SECURE, 0);
-  engine_write(f, UC_ARM_REG_MSP_NS, secure_stack);
-  f.set("pc", ns_code | 1u);
-  auto const stopped = resume(f, 2);
-  REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::secure);
-  CHECK(f.word(sfsr) == ((1u << 3) | (1u << 6)));
-  CHECK(f.word(sfar) == secure_stack - 0x20);
-  for(address at = secure_stack - 0x40; at < secure_stack; at += 4)
-  {
-    CHECK(f.word(at) == fill);
+    for(auto const derived_first : {true, false})
+    {
+      CAPTURE(policy == fault_policy::stop);
+      CAPTURE(derived_first);
+      auto f = booted(policy);
+      open_nonsecure_region(f);
+      tables(f, 16);
+      tables(f, armv8m::exc_securefault);
+      poke(f, shcsr, securefault_ena);
+      if(not derived_first)
+      {
+        poke(f, shpr1, 0x8000'0000u);
+      }
+      put(f, ns_code, {bkpt});
+      for(address at = secure_stack - 0x40; at < secure_stack; at += 4)
+      {
+        poke(f, at, fill);
+      }
+      poke(f, itns0, 1);
+      poke(f, iser0, 1);
+      poke(f, ispr0, 1);
+      engine_write(f, UC_ARM_REG_SECURE, 0);
+      engine_write(f, UC_ARM_REG_MSP_NS, secure_stack);
+      f.set("pc", ns_code | 1u);
+      auto const stopped = resume(f, 2);
+      CHECK(f.word(sfsr) == (sfsr_auviol | sfsr_sfarvalid));
+      CHECK(f.word(sfar) == secure_stack - 0x20);
+      for(address at = secure_stack - 0x40; at < secure_stack; at += 4)
+      {
+        CHECK(f.word(at) == fill);
+      }
+      if(policy == fault_policy::stop)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        CHECK(stopped.fault->kind == popcorn::fault_kind::secure);
+        CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == secure_stack);
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == secure_stack - 0x20);
+      CHECK(secure_now(f) == derived_first);
+      CHECK(ipsr(f) == (derived_first ? armv8m::exc_securefault : 16u));
+      CHECK(f.module->is_pending(derived_first ? 16 : armv8m::exc_securefault));
+      CHECK(f.reg("lr") == (derived_first ? 0xFFFF'FFB9u : 0xFFFF'FFB8u));
+    }
   }
 }
 
-TEST_CASE("MSPLIM_NS above the Non-secure frame raises a Non-secure UsageFault STKOF, B3.21")
+TEST_CASE(
+    "a Non-secure frame in Secure memory on return takes the SecureFault with SFAR, the frame "
+    "left in place, ValidateAddress lines 75-80 for AccType_STACK")
+{
+  constexpr address secure_stack = secure_code + 0x1100;
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    CAPTURE(policy == fault_policy::stop);
+    auto f = booted(policy);
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_securefault);
+    poke(f, shcsr, securefault_ena);
+    put(f, ns_handler, {bkpt, bx_lr});
+    put(f, ns_code, {bkpt});
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    poke(f, ispr0, 1);
+    REQUIRE(run_nonsecure(f, ns_code, 2).reason == stop_reason::user);
+    for(address at = secure_stack - 0x20; at < secure_stack; at += 4)
+    {
+      poke(f, at, fill);
+    }
+    engine_write(f, UC_ARM_REG_MSP_NS, secure_stack - 0x20);
+    auto const stopped = resume(f, 2);
+    CHECK(f.word(sfsr) == (sfsr_auviol | sfsr_sfarvalid));
+    CHECK(f.word(sfar) == secure_stack - 0x20);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == secure_stack - 0x20);
+    for(address at = secure_stack - 0x20; at < secure_stack; at += 4)
+    {
+      CHECK(f.word(at) == fill);
+    }
+    if(policy == fault_policy::stop)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::secure);
+      CHECK(ipsr(f) == 16);
+      CHECK(f.module->is_active(16));
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == armv8m::exc_securefault);
+    CHECK_FALSE(f.module->is_active(16));
+  }
+}
+
+TEST_CASE(
+    "MSPLIM_NS above the Non-secure frame takes the Non-secure UsageFault STKOF with MSP_NS at "
+    "the limit, or HardFault_S FORCED without USGFAULTENA_NS, _SP() lines 23-39 and "
+    "DerivedLateArrival lines 32-37")
+{
+  constexpr address limit = ns_stack - 0x10;
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    for(auto const enabled : {true, false})
+    {
+      CAPTURE(policy == fault_policy::stop);
+      CAPTURE(enabled);
+      auto f = booted(policy);
+      open_nonsecure_region(f);
+      tables(f, 16);
+      tables(f, armv8m::exc_usagefault);
+      tables(f, armv8m::exc_hardfault);
+      if(enabled)
+      {
+        poke(f, shcsr + scs_ns, usagefault_ena);
+      }
+      put(f, ns_code, {bkpt});
+      poke(f, itns0, 1);
+      poke(f, iser0, 1);
+      poke(f, ispr0, 1);
+      engine_write(f, UC_ARM_REG_MSPLIM_NS, limit);
+      auto const stopped = run_nonsecure(f, ns_code, 2);
+      CHECK((f.word(cfsr + scs_ns) & ufsr_stkof) != 0);
+      CHECK((f.word(cfsr) & ufsr_stkof) == 0);
+      if(policy == fault_policy::stop)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+        CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == ns_stack);
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(engine_read(f, UC_ARM_REG_MSP_NS) == limit);
+      CHECK(secure_now(f) != enabled);
+      CHECK(ipsr(f) == (enabled ? armv8m::exc_usagefault : armv8m::exc_hardfault));
+      CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
+      CHECK(f.module->is_pending(16));
+    }
+  }
+}
+
+TEST_CASE(
+    "a Secure handler returning with ES 0 takes the Secure UsageFault INVPC, or HardFault_S "
+    "FORCED without USGFAULTENA_S, ValidateExceptionReturn lines 42-60")
+{
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    for(auto const enabled : {true, false})
+    {
+      CAPTURE(policy == fault_policy::stop);
+      CAPTURE(enabled);
+      auto f = booted(policy);
+      tables(f, 16);
+      tables(f, armv8m::exc_usagefault);
+      tables(f, armv8m::exc_hardfault);
+      if(enabled)
+      {
+        poke(f, shcsr, usagefault_ena);
+      }
+      put(f, secure_handler, {bkpt, bx_lr});
+      put(f, secure_code, {bkpt});
+      poke(f, iser0, 1);
+      poke(f, ispr0, 1);
+      REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+      REQUIRE(ipsr(f) == 16);
+      auto const msp = engine_read(f, UC_ARM_REG_MSP_S);
+      f.set("lr", 0xFFFF'FFBCu);
+      auto const stopped = resume(f, 2);
+      CHECK((f.word(cfsr) & ufsr_invpc) != 0);
+      CHECK((f.word(cfsr + scs_ns) & ufsr_invpc) == 0);
+      CHECK(engine_read(f, UC_ARM_REG_MSP_S) == msp);
+      if(policy == fault_policy::stop)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+        CHECK(f.module->is_active(16));
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(secure_now(f));
+      CHECK(ipsr(f) == (enabled ? armv8m::exc_usagefault : armv8m::exc_hardfault));
+      CHECK(((f.word(hfsr) & hfsr_forced) != 0) != enabled);
+    }
+  }
+}
+
+TEST_CASE(
+    "a forged stacked IPSR on return to a Secure thread takes the UsageFault of the Secure "
+    "background on the frame left in place, PopStack lines 64-71")
+{
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    for(auto const enabled : {true, false})
+    {
+      CAPTURE(policy == fault_policy::stop);
+      CAPTURE(enabled);
+      auto f = booted(policy);
+      open_nonsecure_region(f);
+      tables(f, 16);
+      tables(f, armv8m::exc_usagefault);
+      tables(f, armv8m::exc_hardfault);
+      if(enabled)
+      {
+        poke(f, shcsr, usagefault_ena);
+      }
+      put(f, ns_handler, {bkpt, bx_lr});
+      put(f, secure_code, {bkpt});
+      poke(f, itns0, 1);
+      poke(f, iser0, 1);
+      poke(f, ispr0, 1);
+      REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
+      REQUIRE_FALSE(secure_now(f));
+      auto const callee_at = engine_read(f, UC_ARM_REG_MSP_S);
+      auto const frame_at  = callee_at + 0x28;
+      poke(f, frame_at + 0x1c, f.word(frame_at + 0x1c) | 3u);
+      auto const stopped = resume(f, 2);
+      CHECK((f.word(cfsr) & ufsr_invpc) != 0);
+      CHECK((f.word(cfsr + scs_ns) & ufsr_invpc) == 0);
+      CHECK(engine_read(f, UC_ARM_REG_MSP_S) == callee_at);
+      if(policy == fault_policy::stop)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+        CHECK_FALSE(secure_now(f));
+        CHECK(f.module->is_active(16));
+        continue;
+      }
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(secure_now(f));
+      CHECK(ipsr(f) == (enabled ? armv8m::exc_usagefault : armv8m::exc_hardfault));
+      CHECK(f.reg("lr") == 0xFFFF'FFD9u);
+      CHECK_FALSE(f.module->is_active(16));
+    }
+  }
+}
+
+TEST_CASE(
+    "a return fault tail-chains into a higher pending Non-secure IRQ, pushing the additional state "
+    "context below the Secure frame, ExceptionTaken lines 20-27 and PushCalleeStack lines 8-17")
 {
   auto f = booted();
   open_nonsecure_region(f);
   tables(f, 16);
-  put(f, ns_code, {bkpt});
-  poke(f, itns0, 1);
-  poke(f, iser0, 1);
-  poke(f, ispr0, 1);
-  engine_write(f, UC_ARM_REG_MSPLIM_NS, ns_stack - 0x10);
-  auto const stopped = run_nonsecure(f, ns_code, 2);
-  REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
-  CHECK((f.word(cfsr + scs_ns) >> 20 & 1u) == 1);
-  CHECK((f.word(cfsr) >> 20 & 1u) == 0);
-}
-
-TEST_CASE(
-    "a Secure handler returning with ES 0 is INVPC in UFSR_S, ValidateExceptionReturn lines "
-    "42-60")
-{
-  auto f = booted(fault_policy::stop);
-  tables(f, 16);
+  tables(f, 17);
+  tables(f, armv8m::exc_usagefault);
+  poke(f, shcsr, usagefault_ena);
+  poke(f, shpr1, 0x0040'0000u);
+  poke(f, ipr0, 0x20u);
   put(f, secure_handler, {bkpt, bx_lr});
   put(f, secure_code, {bkpt});
-  poke(f, iser0, 1);
-  poke(f, ispr0, 1);
-  REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
-  REQUIRE(ipsr(f) == 16);
-  f.set("lr", 0xFFFF'FFBCu);
-  auto const stopped = resume(f, 2);
-  REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
-  CHECK((f.word(cfsr) >> 18 & 1u) == 1);
-  CHECK((f.word(cfsr + scs_ns) >> 18 & 1u) == 0);
-}
-
-TEST_CASE(
-    "a forged stacked IPSR on return to a Secure thread is INVPC in UFSR_S, PopStack lines "
-    "64-71")
-{
-  auto f = booted(fault_policy::stop);
-  open_nonsecure_region(f);
-  tables(f, 16);
-  put(f, ns_handler, {bkpt, bx_lr});
-  put(f, secure_code, {bkpt});
   poke(f, itns0, 1);
-  poke(f, iser0, 1);
-  poke(f, ispr0, 1);
+  poke(f, iser0, 3);
+  poke(f, ispr0, 2);
+  set_registers(f);
   REQUIRE(run_secure(f, secure_code, 2).reason == stop_reason::user);
-  REQUIRE_FALSE(secure_now(f));
-  auto const frame_at = engine_read(f, UC_ARM_REG_MSP_S) + 0x28;
+  REQUIRE(ipsr(f) == 17);
+  auto const frame_at = engine_read(f, UC_ARM_REG_MSP_S);
   poke(f, frame_at + 0x1c, f.word(frame_at + 0x1c) | 3u);
-  auto const stopped = resume(f, 2);
-  REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
-  CHECK((f.word(cfsr) >> 18 & 1u) == 1);
-  CHECK((f.word(cfsr + scs_ns) >> 18 & 1u) == 0);
+  poke(f, ispr0, 1);
+  REQUIRE(f.module->is_pending(16));
+  REQUIRE(resume(f, 2).reason == stop_reason::user);
+  CHECK_FALSE(secure_now(f));
+  CHECK(ipsr(f) == 16);
+  CHECK((f.word(cfsr) & ufsr_invpc) != 0);
+  CHECK(f.module->is_pending(armv8m::exc_usagefault));
+  CHECK_FALSE(f.module->is_active(17));
+  CHECK(f.reg("lr") == 0xFFFF'FFF8u);
+  CHECK(engine_read(f, UC_ARM_REG_MSP_S) == frame_at - 0x28);
+  auto const callee = popcorn::testing::words_at(*f.target, frame_at - 0x28, 10);
+  CHECK(callee[0] == 0xFEFA'125Bu);
+  for(std::uint32_t n = 4; n <= 11; ++n)
+  {
+    CHECK(callee[n - 2] == 0x100u + n);
+  }
 }
 
 TEST_CASE(
-    "a Non-secure vector slot in Secure memory stops with HFSR.VECTTBL before the read, "
-    "ValidateAddress lines 63-69")
+    "a Non-secure vector slot in Secure memory takes HardFault_S on the stacked frame, DCRS 0, "
+    "and its return takes the IRQ again, ValidateAddress lines 63-69 and DerivedLateArrival "
+    "lines 17-31")
 {
-  auto f = booted(fault_policy::stop);
-  tables(f, 16);
-  poke(f, vtor + scs_ns, secure_table);
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    CAPTURE(policy == fault_policy::stop);
+    auto f = booted(policy);
+    tables(f, 16);
+    tables(f, armv8m::exc_hardfault);
+    poke(f, vtor + scs_ns, secure_table);
+    put(f, secure_handler, {bkpt, bx_lr});
+    put(f, secure_code, {bkpt});
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    poke(f, ispr0, 1);
+    set_registers(f);
+    auto const msp     = engine_read(f, UC_ARM_REG_MSP_S);
+    auto const stopped = run_secure(f, secure_code, 2);
+    CHECK((f.word(hfsr) & hfsr_vecttbl) != 0);
+    CHECK((f.word(hfsr) & hfsr_forced) == 0);
+    CHECK(secure_now(f));
+    if(policy == fault_policy::stop)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::hard);
+      CHECK(stopped.fault->fault_address == secure_table + 4 * 16);
+      CHECK(ipsr(f) == 0);
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(ipsr(f) == armv8m::exc_hardfault);
+    CHECK(f.module->is_pending(16));
+    CHECK_FALSE(f.module->is_active(16));
+    CHECK(engine_read(f, UC_ARM_REG_MSP_S) == msp - 0x48);
+    CHECK(f.reg("lr") == 0xFFFF'FFD9u);
+    for(int n = 0; n <= 12; ++n)
+    {
+      CAPTURE(n);
+      CHECK(f.reg(std::format("r{}", n)) == 0);
+    }
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    CHECK(ipsr(f) == armv8m::exc_hardfault);
+    CHECK(f.word(sfsr) == 0);
+    CHECK(engine_read(f, UC_ARM_REG_MSP_S) == msp - 0x48);
+  }
+}
+
+TEST_CASE(
+    "a failed vector read takes the HardFault of the state of the exception being fetched, "
+    "HardFault_NS with BFHFNMINS 1, B3.11 RDXYK and DerivedLateArrival lines 17-31")
+{
+  for(auto const nonsecure_hardfault : {false, true})
+  {
+    CAPTURE(nonsecure_hardfault);
+    auto f = booted();
+    open_nonsecure_region(f);
+    poke(f, sau_rn, 1);
+    poke(f, sau_rb, unmapped);
+    poke(f, sau_rl, (unmapped + 0x3e0) | 1u);
+    tables(f, armv8m::exc_hardfault);
+    poke(f, vtor + scs_ns, unmapped);
+    if(nonsecure_hardfault)
+    {
+      poke(f, aircr, bfhfnmins);
+    }
+    put(f, secure_code, {bkpt});
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    poke(f, ispr0, 1);
+    auto const stopped = run_secure(f, secure_code, 2);
+    CHECK((f.word(hfsr) & hfsr_vecttbl) != 0);
+    if(nonsecure_hardfault)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::hard);
+      CHECK(stopped.fault->fault_address == unmapped + 4 * armv8m::exc_hardfault);
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(secure_now(f));
+    CHECK(ipsr(f) == armv8m::exc_hardfault);
+    CHECK(f.module->is_pending(16));
+  }
+}
+
+TEST_CASE(
+    "a failed NMI vector read locks up as a hard stop at the NMI slot, DerivedLateArrival lines "
+    "25-31")
+{
+  auto f = booted();
+  tables(f, armv8m::exc_hardfault);
+  poke(f, vtor, unmapped);
   put(f, secure_code, {bkpt});
-  poke(f, itns0, 1);
-  poke(f, iser0, 1);
-  poke(f, ispr0, 1);
+  f.module->set_nmi_line(true);
   auto const stopped = run_secure(f, secure_code, 2);
   REQUIRE(stopped.reason == stop_reason::fault);
   CHECK(stopped.fault->kind == popcorn::fault_kind::hard);
-  CHECK(stopped.fault->fault_address == secure_table + 4 * 16);
-  CHECK((f.word(hfsr) >> 1 & 1u) == 1);
-  CHECK(secure_now(f));
+  CHECK(stopped.fault->fault_address == unmapped + 4 * armv8m::exc_nmi);
+  CHECK((f.word(hfsr) & hfsr_vecttbl) != 0);
   CHECK(ipsr(f) == 0);
 }
 
