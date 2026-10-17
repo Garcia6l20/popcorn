@@ -1,3 +1,4 @@
+#include "family_names.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -22,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -57,6 +59,17 @@ public:
   auto line(std::string_view name) const -> periph::irq_line&
   {
     return irq(name);
+  }
+
+  template <typename Role>
+  auto table(std::span<stm32::named_field<Role> const> names) const -> stm32::field_table<Role>
+  {
+    return {
+        names, [this](std::string_view r, std::string_view f) { return field(r, f); },
+        [this](std::string_view r, std::string_view f) {
+          return has_register(r)
+             and std::ranges::contains(describe(r).fields, f, &popcorn::field_desc::name);
+        }};
   }
 
   auto state() -> probe_state&
@@ -341,5 +354,101 @@ TEST_CASE("an IRQ resolves by its description name, a missing one is a config er
   {
     CHECK(e.key() == "peripherals.RCC.irqs.NOPE_IRQn");
     CHECK(e.expected() == "an IRQ the probe model raises");
+  }
+}
+
+namespace
+{
+enum class three
+{
+  hsion,
+  sws,
+  extra,
+};
+
+enum class gapped
+{
+  first  = 0,
+  second = 2,
+};
+
+using stm32::field_table;
+using stm32::flag_matches_roles;
+using stm32::named_field;
+using stm32::names_every_role;
+using stm32::roles_in_order;
+
+constexpr std::array<named_field<three>, 3> complete{
+    {
+     {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
+     {three::sws, {.reg = "RCC_CFGR1", .field = "SWS"}},
+     {three::extra, {.reg = "RCC_CR", .field = "NOPE", .optional = true}},
+     }
+};
+constexpr std::array<named_field<three>, 2> missing{
+    {
+     {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
+     {three::sws, {.reg = "RCC_CFGR1", .field = "SWS"}},
+     }
+};
+constexpr std::array<named_field<three>, 3> twice{
+    {
+     {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
+     {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
+     {three::sws, {.reg = "RCC_CFGR1", .field = "SWS"}},
+     }
+};
+constexpr std::array<named_field<three>, 3> lacking_extra{
+    {
+     {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
+     {three::sws, {.reg = "RCC_CFGR1", .field = "SWS"}},
+     {three::extra, {}},
+     }
+};
+constexpr std::array<named_field<three>, 3> required_absent{
+    {
+     {three::hsion, {.reg = "RCC_CR", .field = "HSION"}},
+     {three::sws, {.reg = "RCC_CFGR1", .field = "SWS"}},
+     {three::extra, {.reg = "RCC_CR", .field = "NOPE"}},
+     }
+};
+
+static_assert(names_every_role<three>(complete));
+static_assert(names_every_role<three>(lacking_extra));
+static_assert(not names_every_role<three>(missing));
+static_assert(not names_every_role<three>(twice));
+static_assert(roles_in_order<three>());
+static_assert(not roles_in_order<gapped>());
+static_assert(stm32::role_count<three> == 3);
+static_assert(flag_matches_roles<three>(complete, true, {three::extra}));
+static_assert(flag_matches_roles<three>(lacking_extra, false, {three::extra}));
+static_assert(not flag_matches_roles<three>(lacking_extra, true, {three::extra}));
+static_assert(not flag_matches_roles<three>(complete, false, {three::extra}));
+static_assert(not flag_matches_roles<three>(lacking_extra, true, {three::hsion, three::extra}));
+}
+
+TEST_CASE("a field table resolves required names, leaves absent optional and unnamed roles empty")
+{
+  bench       b;
+  probe_model model{b.ctx, b.rcc, "RCC_CR", "HSION"};
+  auto const  fields = model.table<three>(complete);
+  auto const  same   = [](stm32::field_ref x, stm32::field_ref y) {
+    return std::tie(x.offset, x.lsb, x.width) == std::tie(y.offset, y.lsb, y.width);
+  };
+  CHECK(same(fields[three::hsion], model.bits));
+  probe_model const sws{b.ctx, b.rcc, "RCC_CFGR1", "SWS"};
+  CHECK(same(fields[three::sws], sws.bits));
+  REQUIRE(fields.find(three::sws).has_value());
+  CHECK(same(*fields.find(three::sws), sws.bits));
+  CHECK_FALSE(fields.find(three::extra).has_value());
+  CHECK_FALSE(model.table<three>(lacking_extra).find(three::extra).has_value());
+  try
+  {
+    std::ignore = model.table<three>(required_absent);
+    FAIL("no config_error");
+  }
+  catch(popcorn::config_error const& e)
+  {
+    CHECK(e.key() == "peripherals.RCC.registers.RCC_CR.NOPE");
   }
 }
