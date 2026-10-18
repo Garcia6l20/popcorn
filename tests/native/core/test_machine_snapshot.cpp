@@ -518,7 +518,9 @@ public:
   {}
 
   void save(std::vector<std::byte>&) const override
-  {}
+  {
+    ++saves;
+  }
 
   void load(std::span<std::byte const>) override
   {
@@ -530,7 +532,8 @@ public:
     return true;
   }
 
-  int loads{};
+  mutable int saves{};
+  int         loads{};
 };
 
 auto with_storage_model() -> core::machine_options
@@ -552,15 +555,20 @@ auto without_model_bytes(core::snapshot_data data) -> core::snapshot
 }
 }
 
-TEST_CASE("a save with no bytes for a stateless model restores it from its register storage")
+TEST_CASE("a snapshot holds no bytes for a stateless model, restored from its register storage")
 {
   auto f = fixture{m33(), "snapshot", with_storage_model()};
   f.target->peripheral("TESTDEV").poke(test_model::data_offset, 0x1234'5678);
-  auto const taken = without_model_bytes(f.target->snapshot().data());
+  auto const taken = f.target->snapshot();
+  CHECK(std::ranges::none_of(taken.data().models, [](core::snapshot_part const& part) {
+    return part.owner == "TESTDEV";
+  }));
   f.target->peripheral("TESTDEV").poke(test_model::data_offset, 0);
   REQUIRE_NOTHROW(f.target->restore(taken));
   CHECK(f.target->peripheral("TESTDEV").peek(test_model::data_offset) == 0x1234'5678);
-  CHECK(dynamic_cast<storage_model&>(*f.target->model("TESTDEV")).loads == 0);
+  auto const& made = dynamic_cast<storage_model&>(*f.target->model("TESTDEV"));
+  CHECK(made.saves == 0);
+  CHECK(made.loads == 0);
   CHECK_NOTHROW(std::ignore = f.target->snapshot());
 }
 

@@ -113,7 +113,7 @@ auto machine::snapshot() const -> core::snapshot
       image.words.push_back(slot->regs.peek(offset));
     }
     data.peripherals.push_back(std::move(image));
-    if(slot->model)
+    if(slot->model and not slot->model->stateless())
     {
       snapshot_part part{.owner = slot->desc.name, .data = {}};
       slot->model->save(part.data);
