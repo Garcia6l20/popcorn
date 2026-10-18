@@ -692,8 +692,10 @@ class Machine:
             faults: What a processor fault does. "stop" ends the run with a FAULT stop at the
                 faulting instruction. "handler" enters the firmware's handler as the core
                 does, HardFault, MemManage, BusFault, UsageFault or SecureFault, and the run
-                goes on. Lockup and an INVSTATE fault stop under both. Without TrustZone, the
-                INVPC, UNSTKERR, STKERR, STKOF on entry and VECTTBL faults stop too.
+                goes on. Lockup and an INVSTATE fault stop under both. With TrustZone, a STKOF
+                of the additional state context alone and a fault while taking a derived
+                exception stop too. Without TrustZone, the INVPC, UNSTKERR, STKERR, STKOF on
+                entry and VECTTBL faults stop too.
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice of the machine's thread serves
                 its requests and checks its waiters.
