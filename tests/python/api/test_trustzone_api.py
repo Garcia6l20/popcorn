@@ -11,6 +11,7 @@ import popcorn
 import pytest
 from popcorn import OptionBytes
 from popcorn.arm import Reg
+from popcorn.report import fault_bits, stop_report
 from popcorn.units import ms
 
 ROOT = Path(__file__).parents[3]
@@ -499,3 +500,46 @@ def test_without_trustzone_every_interrupt_targets_secure(u575: popcorn.PartDesc
     m = tz_machine(u575, tzen=False)
     m.nvic.set_target(5, True)
     assert not m.nvic.target_nonsecure(5)
+
+
+def auviol_stop(u575: popcorn.PartDescription) -> tuple[popcorn.Machine, popcorn.Stop]:
+    """Non-secure code loads from a Secure address, DDI0553B.z B10.2: a SecureFault AUVIOL,
+    escalated with HFSR.FORCED since SHCSR.SECUREFAULTENA is clear, which stops the run under
+    the default fault policy."""
+    m = veneer_machine(u575)
+    m.mem.write(NONSECURE_CALLER, struct.pack("<2H", 0x6808, 0xE7FE))
+    m.reg.msp_ns = SRAM_NS + 0x1000
+    m.reg.secure = 0
+    m.reg.r1 = SRAM_S + 0x100
+    m.reg.pc = NONSECURE_CALLER
+    stop = asyncio.run(m.run(budget=10))
+    return m, stop
+
+
+def test_a_secure_fault_report_decodes_sfsr_and_shows_sfar(u575: popcorn.PartDescription) -> None:
+    m, stop = auviol_stop(u575)
+    assert stop.reason == popcorn.StopReason.FAULT
+    assert stop.fault is not None and stop.fault.kind == popcorn.FaultKind.SECURE
+    report = stop_report(m, stop, ring=False)
+    assert report.fault_bits == {"HFSR": ("FORCED",), "SFSR": ("AUVIOL", "SFARVALID")}
+    assert report.sfar == SRAM_S + 0x100
+    text = report.text()
+    assert "fault: SECURE" in text and "SFSR 0x00000048" in text
+    assert "  SFSR: AUVIOL SFARVALID" in text
+    assert "  SFAR: 0x30000100" in text
+
+
+def test_fault_bits_decodes_sfsr_only_when_given() -> None:
+    assert fault_bits(1 << 9, 1 << 30) == {"BFSR": ("PRECISERR",), "HFSR": ("FORCED",)}
+    assert fault_bits(0, 0, 1 << 0 | 1 << 6) == {"SFSR": ("INVEP", "SFARVALID")}
+
+
+def test_a_report_without_trustzone_reads_no_sfsr(u575: popcorn.PartDescription) -> None:
+    m = tz_machine(u575, tzen=False)
+    m.mem.write(SRAM_NS, struct.pack("<2H", 0x6808, 0xE7FE))
+    m.reg.r1 = 0x9000_0000
+    m.reg.pc = SRAM_NS
+    stop = asyncio.run(m.run(budget=10))
+    assert stop.fault is not None
+    report = stop_report(m, stop, ring=False)
+    assert "SFSR" not in report.fault_bits and report.sfar is None

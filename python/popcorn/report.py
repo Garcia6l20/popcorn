@@ -29,9 +29,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from popcorn import _core
+from popcorn._enums import FaultKind
 from popcorn._image import Location
 from popcorn._machine import Machine, stack_access
-from popcorn._stop import Stop
+from popcorn._stop import Fault, Stop
 from popcorn._unwind import RawFrame, Read32, Via, source_address, unwind
 
 _CORE_REGISTERS = (
@@ -55,6 +56,11 @@ _CORE_REGISTERS = (
 )
 
 
+_SFSR = 0xE000_EDE4
+_SFAR = 0xE000_EDE8
+_SFARVALID = 6
+
+
 def _group(bit: int) -> str:
     if bit < 8:
         return "MMFSR"
@@ -63,8 +69,9 @@ def _group(bit: int) -> str:
     return "UFSR"
 
 
-def fault_bits(cfsr: int, hfsr: int) -> dict[str, tuple[str, ...]]:
-    """Names of the bits set in CFSR, split into MMFSR, BFSR and UFSR, and in HFSR.
+def fault_bits(cfsr: int, hfsr: int, sfsr: int = 0) -> dict[str, tuple[str, ...]]:
+    """Names of the bits set in CFSR, split into MMFSR, BFSR and UFSR, in HFSR, and in the
+    SFSR of a core with TrustZone enabled.
 
     Only registers with a named bit set appear. Names are the Armv8-M ARM's.
     """
@@ -75,6 +82,9 @@ def fault_bits(cfsr: int, hfsr: int) -> dict[str, tuple[str, ...]]:
     for bit in _core.HfsrBit:
         if hfsr >> bit.value & 1:
             groups.setdefault("HFSR", []).append(bit.name.upper())
+    for bit in _core.SfsrBit:
+        if sfsr >> bit.value & 1:
+            groups.setdefault("SFSR", []).append(bit.name.upper())
     return {name: tuple(bits) for name, bits in groups.items()}
 
 
@@ -119,6 +129,7 @@ class Report:
         fault_bits: Fault status bits set, by register, when the stop is a fault.
         frames: The call stack, innermost first.
         ring: The trace ring's last records, or why it could not be read.
+        sfar: SFAR when the fault's SFSR has SFARVALID set, else None.
     """
 
     stop: Stop
@@ -126,6 +137,7 @@ class Report:
     fault_bits: Mapping[str, tuple[str, ...]] = field(default_factory=dict[str, tuple[str, ...]])
     frames: tuple[StackFrame, ...] = ()
     ring: str = ""
+    sfar: int | None = None
 
     def text(self) -> str:
         """The report as lines of text."""
@@ -138,11 +150,14 @@ class Report:
             lines.append(f"  detail: {stop.detail}")
         if stop.fault is not None:
             fault = stop.fault
+            status = "SFSR" if fault.kind is FaultKind.SECURE else "CFSR"
             lines.append(
                 f"fault: {fault.kind.name} address {fault.address:#010x} "
-                f"CFSR {fault.cfsr:#010x} HFSR {fault.hfsr:#010x}"
+                f"{status} {fault.cfsr:#010x} HFSR {fault.hfsr:#010x}"
             )
             lines.extend(f"  {name}: {' '.join(bits)}" for name, bits in self.fault_bits.items())
+            if self.sfar is not None:
+                lines.append(f"  SFAR: {self.sfar:#010x}")
         lines.append("registers:")
         names = list(self.registers)
         for row in range(0, len(names), 4):
@@ -198,14 +213,30 @@ def stop_report(
         psp,
     )
     frames = tuple(_frame(machine, read32, f) for f in raw)
-    bits = {} if stop.fault is None else fault_bits(stop.fault.cfsr, stop.fault.hfsr)
+    bits: dict[str, tuple[str, ...]] = {}
+    sfar = None
+    if stop.fault is not None:
+        fault = stop.fault
+        sfsr = _sfsr(machine, fault)
+        cfsr = 0 if fault.kind is FaultKind.SECURE else fault.cfsr
+        bits = fault_bits(cfsr, fault.hfsr, sfsr)
+        if sfsr >> _SFARVALID & 1:
+            sfar = machine.mem.u32[_SFAR]
     text = ""
     if ring:
         try:
             text = machine.ring.dump(last=ring_last, collapse=collapse)
         except OSError as error:
             text = f"ring unavailable: {error}"
-    return Report(stop, registers, bits, frames, text)
+    return Report(stop, registers, bits, frames, text, sfar)
+
+
+def _sfsr(machine: Machine, fault: Fault) -> int:
+    if fault.kind is FaultKind.SECURE:
+        return fault.cfsr
+    if machine.security_state is None:
+        return 0
+    return machine.mem.u32[_SFSR]
 
 
 def _frame(machine: Machine, read32: Read32, raw: RawFrame) -> StackFrame:
