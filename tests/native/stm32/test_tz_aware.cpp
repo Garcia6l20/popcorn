@@ -644,6 +644,13 @@ TEST_CASE("RM0456 17.4.14: a Secure channel with DSEC clear writes Non-secure, S
       words_at(r, sram1_nonsecure_block, 4)
       == std::vector<std::uint32_t>{0xc0de'0000, 0xc0de'0001, 0xc0de'0002, 0xc0de'0003});
   CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
+
+  r.write("GPDMA1", "C0FCR", bit("GPDMA1", "C0FCR", "TCF"), secure_priv);
+  copy(r, sram1_nonsecure_block, sram1_nonsecure_block + 0x100);
+  CHECK(
+      words_at(r, sram1_nonsecure_block + 0x100, 4)
+      == std::vector<std::uint32_t>{0xc0de'0000, 0xc0de'0001, 0xc0de'0002, 0xc0de'0003});
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
 }
 
 TEST_CASE("RM0456 17.8.1 to 17.8.3: GPDMA channel registers, SECCFGR, PRIVCFGR and RCFGLOCKR")
