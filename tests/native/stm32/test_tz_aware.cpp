@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
@@ -29,6 +30,7 @@ namespace periph = popcorn::periph;
 namespace stm32  = popcorn::periph::stm32;
 using popcorn::address;
 using popcorn::bus_attrs;
+using popcorn::icount;
 using popcorn::initiator;
 using popcorn::testing::u575;
 
@@ -98,6 +100,16 @@ auto bit(std::string_view peripheral, std::string_view reg, std::string_view fie
   auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
   REQUIRE(bits != found->fields.end());
   return std::uint32_t{1} << (bits->lsb + 8 * (found->offset % 4));
+}
+
+auto bit_index(std::string_view peripheral, std::string_view reg, std::string_view field)
+    -> std::uint32_t
+{
+  auto const* found = popcorn::find_register(unit(peripheral), reg);
+  REQUIRE(found != nullptr);
+  auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
+  REQUIRE(bits != found->fields.end());
+  return bits->lsb + 8 * (found->offset % 4);
 }
 
 struct rig
@@ -481,4 +493,295 @@ TEST_CASE("a SYSCFG snapshot holds no model bytes and restores from the SYSCFG s
   r.write("SYSCFG", "CFGR2", 0, nonsecure_priv);
   REQUIRE_NOTHROW(r.target->restore(taken));
   CHECK(r.peek("SYSCFG", "CFGR2") == 0x1);
+}
+
+namespace
+{
+constexpr address sram1_secure_block    = 0x2000'0000;
+constexpr address sram1_nonsecure_block = 0x2000'4000;
+constexpr address loop_at               = 0x2000'8000;
+
+void set_register(rig const& r, std::string_view name, std::uint64_t value)
+{
+  r.target->regs().write(*r.target->regs().find(name), value);
+}
+
+void fill(rig const& r, address at, std::uint32_t first, std::size_t words)
+{
+  for(std::size_t i = 0; i < words; ++i)
+  {
+    REQUIRE(r.target->mem().write(at + 4 * i, 4, first + static_cast<std::uint32_t>(i)));
+  }
+}
+
+[[nodiscard]] auto words_at(rig const& r, address at, std::size_t words)
+    -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::size_t i = 0; i < words; ++i)
+  {
+    auto const value = r.target->mem().read(at + 4 * i, 4);
+    REQUIRE(value.has_value());
+    out.push_back(static_cast<std::uint32_t>(*value));
+  }
+  return out;
+}
+
+void open_destination_block(rig const& r)
+{
+  r.write("GTZC1_MPCBB1", "SECCFGR1", 0xffff'fffe, secure_priv);
+}
+
+void copy(rig const& r, address from, address to, std::uint32_t extra_tr1 = 0)
+{
+  auto const tr1 = (2u << bit_index("GPDMA1", "C0TR1", "SDW_LOG2"))
+                 | bit("GPDMA1", "C0TR1", "SINC")
+                 | (2u << bit_index("GPDMA1", "C0TR1", "DDW_LOG2"))
+                 | bit("GPDMA1", "C0TR1", "DINC")
+                 | extra_tr1;
+  r.write("GPDMA1", "PRIVCFGR", 1, secure_priv);
+  r.write("GPDMA1", "C0TR1", tr1, secure_priv);
+  r.write("GPDMA1", "C0TR2", bit("GPDMA1", "C0TR2", "SWREQ"), secure_priv);
+  r.write("GPDMA1", "C0BR1", 16, secure_priv);
+  r.write("GPDMA1", "C0SAR", from, secure_priv);
+  r.write("GPDMA1", "C0DAR", to, secure_priv);
+  r.write(
+      "GPDMA1", "C0CR", bit("GPDMA1", "C0CR", "EN") | bit("GPDMA1", "C0CR", "TCIE"), secure_priv);
+  REQUIRE(r.target->mem().write(loop_at, 2, 0xe7fe));
+  set_register(r, "pc", loop_at | 1u);
+  auto const result = r.target->run_slice({.max_instructions = icount{20'000}});
+  REQUIRE_FALSE(result.stopped.has_value());
+}
+
+[[nodiscard]] auto status(rig const& r) -> std::uint32_t
+{
+  return r.peek("GPDMA1", "C0SR");
+}
+}
+
+TEST_CASE("RM0456 17.4.14, 5.4.2: a Non-secure channel reads Secure SRAM as zeros, no DTEF")
+{
+  rig const r{true};
+  open_destination_block(r);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
+  copy(r, sram1_secure_block, sram1_nonsecure_block);
+  CHECK(words_at(r, sram1_nonsecure_block, 4) == std::vector<std::uint32_t>(4, 0));
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
+  CHECK((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  CHECK((status(r) & bit("GPDMA1", "C0SR", "DTEF")) == 0);
+  CHECK(r.peek("GPDMA1", "MISR") == 1);
+  CHECK(r.peek("GPDMA1", "SMISR") == 0);
+}
+
+TEST_CASE("RM0456 17.4.14, 5.4.2: a Non-secure channel's writes into Secure SRAM are dropped")
+{
+  rig const r{true};
+  open_destination_block(r);
+  fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  copy(r, sram1_nonsecure_block, sram1_secure_block);
+  CHECK(
+      words_at(r, sram1_secure_block, 4)
+      == std::vector<std::uint32_t>{0xc0de'0000, 0xc0de'0001, 0xc0de'0002, 0xc0de'0003});
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
+  CHECK((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  CHECK((status(r) & bit("GPDMA1", "C0SR", "DTEF")) == 0);
+}
+
+TEST_CASE("RM0456 17.4.14: a Secure channel moves data with SSEC and DSEC, SMISR shows it")
+{
+  rig const r{true};
+  open_destination_block(r);
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  copy(
+      r, sram1_secure_block, sram1_secure_block + 0x100,
+      bit("GPDMA1", "C0TR1", "SSEC") | bit("GPDMA1", "C0TR1", "DSEC"));
+  CHECK(
+      words_at(r, sram1_secure_block + 0x100, 4)
+      == std::vector<std::uint32_t>{0xc0de'0000, 0xc0de'0001, 0xc0de'0002, 0xc0de'0003});
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
+  CHECK(r.peek("GPDMA1", "SMISR") == 1);
+  CHECK(r.peek("GPDMA1", "MISR") == 0);
+  CHECK(r.read("GPDMA1", "SMISR", nonsecure_priv) == 0);
+  CHECK(r.read("GPDMA1", "SMISR", secure_priv) == 1);
+}
+
+TEST_CASE("RM0456 17.4.14: a Secure channel with DSEC clear writes Non-secure, SSEC clear reads it")
+{
+  rig const r{true};
+  open_destination_block(r);
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  copy(r, sram1_secure_block, sram1_nonsecure_block, bit("GPDMA1", "C0TR1", "SSEC"));
+  CHECK(
+      words_at(r, sram1_nonsecure_block, 4)
+      == std::vector<std::uint32_t>{0xc0de'0000, 0xc0de'0001, 0xc0de'0002, 0xc0de'0003});
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
+}
+
+TEST_CASE("RM0456 17.8.1 to 17.8.3: GPDMA channel registers, SECCFGR, PRIVCFGR and RCFGLOCKR")
+{
+  rig const r{true};
+  r.write("GPDMA1", "SECCFGR", 1, nonsecure_priv);
+  CHECK(r.peek("GPDMA1", "SECCFGR") == 0);
+  auto const event = bit("GTZC1_TZIC", "SR4", "GPDMA1F");
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == event);
+  r.write("GTZC1_TZIC", "FCR4", event, secure_priv);
+  r.write("GPDMA1", "SECCFGR", 1, secure_unpriv);
+  CHECK(r.peek("GPDMA1", "SECCFGR") == 0);
+
+  auto const ssec = bit("GPDMA1", "C0TR1", "SSEC");
+  r.write("GPDMA1", "C0TR1", ssec, secure_priv);
+  CHECK(r.peek("GPDMA1", "C0TR1") == 0);
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  r.write("GPDMA1", "C0TR1", ssec, nonsecure_priv);
+  CHECK(r.peek("GPDMA1", "C0TR1") == 0);
+  r.write("GPDMA1", "C0TR1", ssec, secure_priv);
+  CHECK(r.peek("GPDMA1", "C0TR1") == ssec);
+  r.write("GPDMA1", "C0SAR", 0x2000'0000, secure_priv);
+  CHECK(r.read("GPDMA1", "C0SAR", nonsecure_priv) == 0);
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == event);
+  r.write("GPDMA1", "C0SAR", 0x2000'0100, nonsecure_priv);
+  CHECK(r.peek("GPDMA1", "C0SAR") == 0x2000'0000);
+  CHECK(r.read("GPDMA1", "SECCFGR", nonsecure_unpriv) == 1);
+  r.write("GPDMA1", "C1SAR", 0x2000'0100, nonsecure_priv);
+  CHECK(r.peek("GPDMA1", "C1SAR") == 0x2000'0100);
+
+  r.write("GPDMA1", "PRIVCFGR", 0x3, nonsecure_priv);
+  CHECK(r.peek("GPDMA1", "PRIVCFGR") == 0x2);
+  CHECK(r.read("GPDMA1", "C1SAR", nonsecure_unpriv) == 0);
+  r.write("GPDMA1", "C1SAR", 0, nonsecure_unpriv);
+  CHECK(r.peek("GPDMA1", "C1SAR") == 0x2000'0100);
+
+  r.write("GPDMA1", "RCFGLOCKR", 1, nonsecure_priv);
+  CHECK(r.peek("GPDMA1", "RCFGLOCKR") == 0);
+  r.write("GPDMA1", "RCFGLOCKR", 1, secure_priv);
+  r.write("GPDMA1", "RCFGLOCKR", 0, secure_priv);
+  CHECK(r.peek("GPDMA1", "RCFGLOCKR") == 1);
+  r.write("GPDMA1", "SECCFGR", 0, secure_priv);
+  CHECK(r.peek("GPDMA1", "SECCFGR") == 1);
+  r.write("GPDMA1", "SECCFGR", 0x3, secure_priv);
+  CHECK(r.peek("GPDMA1", "SECCFGR") == 0x3);
+  r.write("GPDMA1", "C1TR1", bit("GPDMA1", "C1TR1", "SSEC"), secure_priv);
+  REQUIRE(r.peek("GPDMA1", "C1TR1") == bit("GPDMA1", "C1TR1", "SSEC"));
+  r.write("GPDMA1", "SECCFGR", 0x1, secure_priv);
+  CHECK(r.peek("GPDMA1", "C1TR1") == 0);
+}
+
+TEST_CASE("RM0456 17.8.3, P1: GPDMA and LPDMA RCFGLOCKR ignore writes under TZEN=0")
+{
+  rig const r{false};
+  r.write("GPDMA1", "RCFGLOCKR", 0xffff, nonsecure_priv);
+  CHECK(r.read("GPDMA1", "RCFGLOCKR", nonsecure_priv) == 0);
+  r.write("LPDMA1", "RCFGLOCKR", 0xf, nonsecure_priv);
+  CHECK(r.read("LPDMA1", "RCFGLOCKR", nonsecure_priv) == 0);
+  r.write("GPDMA1", "SECCFGR", 0x1, nonsecure_priv);
+  CHECK(r.read("GPDMA1", "SECCFGR", nonsecure_priv) == 0x1);
+}
+
+TEST_CASE("RM0456 17.4.15, 5.4.2: an unprivileged channel reads privileged SRAM as zeros, no event")
+{
+  rig const r{true};
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  fill(r, sram1_secure_block + 0x100, 0x5555'0000, 4);
+  copy(
+      r, sram1_secure_block, sram1_secure_block + 0x100,
+      bit("GPDMA1", "C0TR1", "SSEC") | bit("GPDMA1", "C0TR1", "DSEC"));
+  r.write("GPDMA1", "PRIVCFGR", 0, secure_priv);
+  r.write("GPDMA1", "C0BR1", 16, secure_priv);
+  r.write("GPDMA1", "C0SAR", sram1_secure_block, secure_priv);
+  r.write("GPDMA1", "C0DAR", sram1_secure_block + 0x200, secure_priv);
+  r.write("GPDMA1", "C0FCR", bit("GPDMA1", "C0FCR", "TCF"), secure_priv);
+  r.write(
+      "GPDMA1", "C0CR", bit("GPDMA1", "C0CR", "EN") | bit("GPDMA1", "C0CR", "TCIE"), secure_priv);
+  REQUIRE_FALSE(r.target->run_slice({.max_instructions = icount{20'000}}).stopped.has_value());
+  CHECK(
+      words_at(r, sram1_secure_block + 0x100, 4)
+      == std::vector<std::uint32_t>{0xc0de'0000, 0xc0de'0001, 0xc0de'0002, 0xc0de'0003});
+  CHECK(words_at(r, sram1_secure_block + 0x200, 4) == std::vector<std::uint32_t>(4, 0));
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
+  CHECK((status(r) & bit("GPDMA1", "C0SR", "DTEF")) == 0);
+}
+
+TEST_CASE("RM0456 18.8.1: an LPDMA Secure channel's registers are RAZ/WI to Non-secure accesses")
+{
+  rig const r{true};
+  r.write("LPDMA1", "SECCFGR", 0x2, secure_priv);
+  r.write("LPDMA1", "C1SAR", 0x2800'0000, secure_priv);
+  CHECK(r.read("LPDMA1", "C1SAR", nonsecure_priv) == 0);
+  r.write("LPDMA1", "C1SAR", 0, nonsecure_priv);
+  CHECK(r.peek("LPDMA1", "C1SAR") == 0x2800'0000);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == bit("GTZC2_TZIC", "SR2", "LPDMA1F"));
+}
+
+TEST_CASE("Q9: RTC_SECCFGR and TAMP_SECCFGR stay storage, one warning each under TrustZone only")
+{
+  for(auto const trustzone : {true, false})
+  {
+    CAPTURE(trustzone);
+    rig const                     r{trustzone};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    r.write("RTC", "SECCFGR", 0x1, secure_priv);
+    r.write("RTC", "PRIVCR", 0x1, secure_priv);
+    r.write("TAMP", "SECCFGR", 0x1, secure_priv);
+    r.write("TAMP", "PRIVCR", 0x1, secure_priv);
+    CHECK(r.peek("RTC", "SECCFGR") == 0x1);
+    CHECK(r.peek("TAMP", "SECCFGR") == 0x1);
+    auto const count = [&](std::string_view peripheral) {
+      return std::ranges::count_if(logged, [&](core::log_record const& record) {
+        return record.kind == core::log_kind::model_warning and record.peripheral == peripheral;
+      });
+    };
+    CHECK(count("RTC") == (trustzone ? 1 : 0));
+    CHECK(count("TAMP") == (trustzone ? 1 : 0));
+  }
+}
+
+TEST_CASE("RM0456 17.4.14: a Secure channel loads its linked-list item with Secure transfers")
+{
+  rig const  r{true};
+  auto const item   = sram1_secure_block + 0x300;
+  auto const target = sram1_secure_block + 0x400;
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  fill(r, sram1_secure_block, 0xc0de'0000, 8);
+  REQUIRE(r.target->mem().write(item, 4, target));
+  REQUIRE(r.target->mem().write(item + 4, 4, 0));
+  r.write("GPDMA1", "C0LBAR", sram1_secure_block & 0xffff'0000u, secure_priv);
+  r.write(
+      "GPDMA1", "C0LLR",
+      (item & 0xfffcu) | bit("GPDMA1", "C0LLR", "UDA") | bit("GPDMA1", "C0LLR", "ULL"),
+      secure_priv);
+  copy(
+      r, sram1_secure_block, sram1_secure_block + 0x100,
+      bit("GPDMA1", "C0TR1", "SSEC") | bit("GPDMA1", "C0TR1", "DSEC"));
+  CHECK(
+      words_at(r, target, 4)
+      == std::vector<std::uint32_t>{0xc0de'0004, 0xc0de'0005, 0xc0de'0006, 0xc0de'0007});
+  CHECK((status(r) & bit("GPDMA1", "C0SR", "ULEF")) == 0);
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
+}
+
+TEST_CASE("RM0456 17.4.14: a Non-secure channel loads its linked-list item Non-secure, as zeros")
+{
+  rig const  r{true};
+  auto const item   = sram1_secure_block + 0x300;
+  auto const target = sram1_nonsecure_block + 0x180;
+  open_destination_block(r);
+  fill(r, sram1_nonsecure_block, 0x5555'0000, 8);
+  REQUIRE(r.target->mem().write(item, 4, target));
+  REQUIRE(r.target->mem().write(item + 4, 4, 0));
+  r.write("GPDMA1", "C0LBAR", sram1_secure_block & 0xffff'0000u, secure_priv);
+  r.write(
+      "GPDMA1", "C0LLR",
+      (item & 0xfffcu) | bit("GPDMA1", "C0LLR", "UDA") | bit("GPDMA1", "C0LLR", "ULL"),
+      secure_priv);
+  copy(r, sram1_nonsecure_block, sram1_nonsecure_block + 0x100);
+  CHECK(words_at(r, target, 4) == std::vector<std::uint32_t>(4, 0));
+  CHECK(r.peek("GPDMA1", "C0DAR") != target + 16);
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
 }

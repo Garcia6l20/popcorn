@@ -175,7 +175,9 @@ auto date_of(std::uint64_t days) -> std::chrono::year_month_day
  *        stays held, a brown-out, releases the RTC, and a backup domain reset keeps it frozen
  *        while the bit is set. The bit is read at the hold: without a
  *        DBGMCU model or field the RTC runs on, a warning logged once, a model_error under
- *        strict_peripherals.
+ *        strict_peripherals. `RTC_SECCFGR` and `RTC_PRIVCR` are storage: under TrustZone the
+ *        first write to either logs one warning, the security and privilege they select are not
+ *        modelled.
  */
 class rtc final : public dispatch_model<rtc, rtc_state>,
                   public clock_listener,
@@ -214,6 +216,7 @@ public:
   void alarm_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
   void plain_written(std::uint32_t old, std::uint32_t now);
+  void security_written(std::uint32_t old, std::uint32_t now);
 
 private:
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
@@ -291,6 +294,7 @@ private:
   irq_line&                                    line_;
   std::array<bool, 6>                          logged_{};
   bool                                         freeze_logged_ = false;
+  bool                                         security_logged_{};
 };
 
 constexpr std::array<write_entry<rtc>, 24> rtc_writes{
@@ -303,8 +307,8 @@ constexpr std::array<write_entry<rtc>, 24> rtc_writes{
      {"ALRMAR", &rtc::alarm_written},     {"ALRMASSR", &rtc::alarm_written},
      {"ALRMBR", &rtc::alarm_written},     {"ALRMBSSR", &rtc::alarm_written},
      {"SR", &rtc::plain_written},         {"MISR", &rtc::plain_written},
-     {"SCR", &rtc::clear_written},        {"PRIVCR", &rtc::plain_written},
-     {"SECCFGR", &rtc::plain_written},    {"ALRABINR", &rtc::plain_written},
+     {"SCR", &rtc::clear_written},        {"PRIVCR", &rtc::security_written},
+     {"SECCFGR", &rtc::security_written}, {"ALRABINR", &rtc::plain_written},
      {"ALRBBINR", &rtc::plain_written},   {"TSTR", &rtc::plain_written},
      {"TSDR", &rtc::plain_written},       {"TSSSR", &rtc::plain_written},
      }
@@ -1189,11 +1193,23 @@ void rtc::clear_written(std::uint32_t, std::uint32_t now)
 void rtc::plain_written(std::uint32_t, std::uint32_t)
 {}
 
+void rtc::security_written(std::uint32_t, std::uint32_t)
+{
+  if(ctx_.trustzone and not std::exchange(security_logged_, true))
+  {
+    warn(
+        "RTC_SECCFGR", "RTC_SECCFGR and RTC_PRIVCR are storage: the RTC security and privilege "
+                       "they select are not modelled");
+  }
+}
+
 /**
  * @brief TAMP of the STM32U5, RM0456 section 64 "Tamper and backup registers (TAMP)", as backup
  *        domain storage: every register keeps its value on every reset but power-on and a backup
  *        domain reset, the backup registers TAMP_BKP0R to TAMP_BKP31R included. Tamper
  *        detection and the monotonic counter are not modelled, their registers are plain storage.
+ *        `TAMP_SECCFGR` and `TAMP_PRIVCR` are storage: under TrustZone the first write to either
+ *        logs one warning, the security and privilege they select are not modelled.
  */
 struct tamp_state
 {
@@ -1212,9 +1228,12 @@ public:
   void backup_reset() override;
 
   void plain_written(std::uint32_t old, std::uint32_t now);
+  void security_written(std::uint32_t old, std::uint32_t now);
 
 private:
   void clear(register_file& regs);
+
+  bool security_logged_{};
 };
 
 auto tamp_writes(peripheral_desc const& desc) -> std::vector<write_entry<tamp>>
@@ -1222,7 +1241,8 @@ auto tamp_writes(peripheral_desc const& desc) -> std::vector<write_entry<tamp>>
   std::vector<write_entry<tamp>> out;
   for(auto const& described : desc.registers)
   {
-    out.push_back({described.name, &tamp::plain_written});
+    auto const security = described.name == "SECCFGR" or described.name == "PRIVCR";
+    out.push_back({described.name, security ? &tamp::security_written : &tamp::plain_written});
   }
   return out;
 }
@@ -1257,6 +1277,16 @@ void tamp::on_event(std::uint32_t, std::uint64_t)
 
 void tamp::plain_written(std::uint32_t, std::uint32_t)
 {}
+
+void tamp::security_written(std::uint32_t, std::uint32_t)
+{
+  if(ctx_.trustzone and not std::exchange(security_logged_, true))
+  {
+    warn(
+        "TAMP_SECCFGR", "TAMP_SECCFGR and TAMP_PRIVCR are storage: the TAMP security and privilege "
+                        "they select are not modelled");
+  }
+}
 }
 
 auto rtc_factory(std::optional<std::chrono::sys_seconds> initial) -> model_factory
