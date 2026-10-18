@@ -73,7 +73,7 @@ def test_a_symbols_only_image_writes_nothing_and_still_resolves(
     assert pair(u575).mem.read(start, size) != alone.mem.read(start, size)
     assert m.sym("main") == rcc.lookup("main").value
     assert m.var("SystemCoreClock").address == rcc.lookup("SystemCoreClock").value
-    assert [i.loads for i in m.images] == [True, False]
+    assert [i.loaded for i in m.images] == [True, False]
     assert m.snapshot().image_digests == alone.snapshot().image_digests
 
 
@@ -107,7 +107,7 @@ def test_a_description_carries_the_names_and_the_symbols_only_flag(
     )
     assert len({plain.digest, named.digest, named.replace(boot=popcorn.Boot()).digest}) == 3
     m = named.machine()
-    assert [(i.name, i.loads) for i in m.images] == [("app", True), (None, False)]
+    assert [(i.name, i.loaded) for i in m.images] == [("app", True), (None, False)]
     stop = asyncio.run(named.boot_machine(m))
     assert stop.pc == Image.elf(GPIO_ELF).lookup("main").value
     wrong = named.replace(boot=popcorn.Boot(until="main", image="nope"))
