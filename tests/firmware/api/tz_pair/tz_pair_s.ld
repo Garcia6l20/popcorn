@@ -17,8 +17,8 @@ SECTIONS
   .bss (NOLOAD) : { *(.bss*) *(COMMON) } > SRAM
 }
 
-__sgstubs_start = 0x08002000;
-__sgstubs_end = 0x08002200;
+__sgstubs_start = ORIGIN(NSC);
+__sgstubs_end = ORIGIN(NSC) + LENGTH(NSC);
 
 ASSERT(ADDR(.gnu.sgstubs) == __sgstubs_start, "the veneers start the Non-secure callable range")
 ASSERT(SIZEOF(.data) == 0, "the secure part keeps no initialized data")
