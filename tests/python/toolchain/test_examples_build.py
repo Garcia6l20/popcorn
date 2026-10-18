@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from popcorn_build.examples import offset_linker_script, prebuilt_elf
+from popcorn_build.examples import (
+    TrustZoneLayout,
+    nonsecure_linker_script,
+    offset_linker_script,
+    prebuilt_elf,
+    secure_linker_script,
+)
 
 ST_MEMORY = """MEMORY
 {
@@ -50,3 +56,88 @@ def test_a_script_without_the_st_rom_region_is_refused() -> None:
 def test_a_script_without_a_single_vector_table_section_is_refused() -> None:
     with pytest.raises(ValueError, match="no single KEEP"):
         offset_linker_script(ST_MEMORY.replace("KEEP(*(.isr_vector))", ""), 0xC000)
+
+
+ST_SECURE_MEMORY = """MEMORY
+{
+  RAM\t(xrw)\t: ORIGIN = 0x30000000,\tLENGTH = 256K     /* Memory is divided. */
+  ROM\t(rx)\t: ORIGIN = 0x0C000000,\tLENGTH = 1016K    /* Memory is divided. */
+  ROM_NSC\t(rx)\t: ORIGIN = 0x0C0FE000,\tLENGTH = 8K   /* Non-Secure Call-able region */
+  SRAM4\t(xrw)\t: ORIGIN = 0x38000000,\tLENGTH = 16K      /* Secure SRAM4 */
+}
+SECTIONS
+{
+  .isr_vector :
+  {
+    KEEP(*(.isr_vector))
+  } >ROM
+}
+"""
+LAYOUT = TrustZoneLayout(
+    secure_flash=(0x0800_0000, 0x8000),
+    nsc_size=0x400,
+    secure_ram=(0x2800_0000, 0x4000),
+    nonsecure_flash=(0x0800_8000, 0x3_8000),
+    nonsecure_ram=(0x2000_0000, 0x2_FE00),
+)
+
+
+def test_the_secure_script_moves_its_regions_and_exports_the_nonsecure_ranges() -> None:
+    derived = secure_linker_script(ST_SECURE_MEMORY, LAYOUT)
+    assert "  RAM\t(xrw)\t: ORIGIN = 0x28000000,\tLENGTH = 0x4000\n" in derived
+    assert "  ROM\t(rx)\t: ORIGIN = 0x08000000,\tLENGTH = 0x7c00\n" in derived
+    assert "  ROM_NSC\t(rx)\t: ORIGIN = 0x08007c00,\tLENGTH = 0x400\n" in derived
+    assert "SRAM4" not in derived
+    assert "Memory is divided" not in derived
+    assert "__nonsecure_flash_start = 0x08008000;" in derived
+    assert "__nonsecure_flash_end = 0x08040000;" in derived
+    assert "__nonsecure_ram_end = 0x2002fe00;" in derived
+    assert "__sgstubs_start = ORIGIN(ROM_NSC);" in derived
+    assert "ASSERT(ADDR(.gnu.sgstubs) == ORIGIN(ROM_NSC)" in derived
+
+
+def test_the_nonsecure_script_places_the_secure_image_first_in_its_own_region() -> None:
+    derived = nonsecure_linker_script(ST_MEMORY, LAYOUT)
+    assert "MEMORY\n{\n  SECURE\t(rx)\t: ORIGIN = 0x08000000,\tLENGTH = 0x8000\n" in derived
+    assert "  ROM\t(rx)\t: ORIGIN = 0x08008000,\tLENGTH = 0x38000\n" in derived
+    assert "  RAM\t(xrw)\t: ORIGIN = 0x20000000,\tLENGTH = 0x2fe00\n" in derived
+    assert "SRAM4" not in derived
+    image = derived.index("  .secure_image :\n  {\n    KEEP(*(.secure_image))\n  } >SECURE\n")
+    assert image < derived.index("  .isr_vector :")
+    assert 'ASSERT(ADDR(.secure_image) == ORIGIN(SECURE), "' in derived
+    assert "ASSERT(SIZEOF(.secure_image) <= LENGTH(SECURE)" in derived
+
+
+def test_a_script_without_a_named_region_is_refused() -> None:
+    with pytest.raises(ValueError, match="no single MEMORY region ROM_NSC"):
+        secure_linker_script(ST_MEMORY, LAYOUT)
+
+
+def test_a_nonsecure_script_without_a_single_vector_section_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"no single \.isr_vector output section"):
+        nonsecure_linker_script(ST_MEMORY.replace(".isr_vector :", ".text :"), LAYOUT)
+
+
+@pytest.mark.parametrize("nsc_size", [0, 0x30, 0x8000])
+def test_a_veneer_range_is_a_multiple_of_the_sau_granule_inside_the_secure_flash(
+    nsc_size: int,
+) -> None:
+    with pytest.raises(ValueError, match="multiple of 32 bytes"):
+        TrustZoneLayout(
+            secure_flash=(0x0800_0000, 0x8000),
+            nsc_size=nsc_size,
+            secure_ram=(0x2800_0000, 0x4000),
+            nonsecure_flash=(0x0800_8000, 0x3_8000),
+            nonsecure_ram=(0x2000_0000, 0x2_FE00),
+        )
+
+
+def test_an_empty_range_is_refused() -> None:
+    with pytest.raises(ValueError, match="the secure_ram range is empty"):
+        TrustZoneLayout(
+            secure_flash=(0x0800_0000, 0x8000),
+            nsc_size=0x400,
+            secure_ram=(0x2800_0000, 0),
+            nonsecure_flash=(0x0800_8000, 0x3_8000),
+            nonsecure_ram=(0x2000_0000, 0x2_FE00),
+        )
