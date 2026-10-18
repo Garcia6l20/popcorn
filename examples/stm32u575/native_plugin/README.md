@@ -214,6 +214,26 @@ cxx11-abi 1;glibcxx-debug 0;nanobind 2.13.0;nb-domain ;variant release;sdk 2b69e
 not "popcorn 0.0.0;gcc edited"
 ```
 
+### Access attributes and snapshots
+
+Each `on_read` and `on_write` gets a `periph::access_ctx` with the transaction's attributes:
+
+- `secure` is the transaction's security attribute, whatever window it came through. It is
+  false for every access, CPU, DMA or debugger, on a machine without TrustZone.
+- `via_secure_alias` is true for an access through a `SEC_` alias window, with or without
+  TrustZone. A model that read `secure` for the alias reads `via_secure_alias` now.
+- `privileged` is false for an unprivileged CPU access. DMA and debugger accesses are
+  privileged unless their master says otherwise.
+
+Two `periph::model` members change how the machine treats a model:
+
+- `stateless()` returning true says the model keeps no state beyond its register storage. A
+  snapshot holds no bytes for it, `save` and `load` are never called, and it restores from the
+  register storage. A save made by a machine with no model for that peripheral then loads too.
+- `storage_only(offset)` returning true marks a claimed register as storage the model does not
+  model. A host view access to it raises ModelError, as for a register of a peripheral without
+  a model. Peek and poke still reach it.
+
 ### Rules
 
 - One C++ namespace per plugin. The plugin library keeps default visibility, and two plugins
