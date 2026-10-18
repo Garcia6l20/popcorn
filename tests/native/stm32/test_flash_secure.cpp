@@ -672,6 +672,11 @@ TEST_CASE(
     rig const r{true, four_secure_pages};
     r.unlock(false);
     r.write("NSCR", pg, nonsecure_priv);
+    if(not sau_over)
+    {
+      r.unlock(true);
+      r.write("SECCR", pg, secure_priv);
+    }
     r.sau_region(0, page8, page8 + page_bytes - 32);
     REQUIRE(r.target->mem().write(sau_ctrl, 4, sau_over ? sau_enable : 0u));
     r.set("r0", page8);
