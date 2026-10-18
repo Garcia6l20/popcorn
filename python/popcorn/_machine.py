@@ -999,7 +999,9 @@ class Machine:
     def security_state(self) -> Literal["secure", "nonsecure"] | None:
         """The core's security state, None on a machine without TrustZone enabled: a core
         without the Security Extension, or option bytes with TZEN=0. Writing `m.reg.secure`
-        switches it, as BXNS does.
+        at a stop switches it, as BXNS does. A handler cannot write `secure`, `control_s` or
+        `control_ns`: code the core already translated would keep the old state for the rest of
+        the run, so the write raises MachineRunning.
 
         Raises:
             MachineRunning: The machine is busy, read outside its callbacks: use

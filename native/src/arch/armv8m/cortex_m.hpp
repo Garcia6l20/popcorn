@@ -64,6 +64,7 @@ public:
   [[nodiscard]] auto resume_address() const -> address override;
   [[nodiscard]] auto host_register_value(cpu_register const& reg, std::uint64_t value) const
       -> std::uint64_t override;
+  [[nodiscard]] auto translation_register(cpu_register const& reg) const -> bool override;
   [[nodiscard]] auto data_attrs(address at) const -> bus_attrs override;
   [[nodiscard]] auto security_state() const -> std::optional<bool> override;
   [[nodiscard]] auto debug_attrs(address at, bool secure) const

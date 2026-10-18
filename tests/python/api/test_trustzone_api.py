@@ -713,3 +713,31 @@ def test_coverage_and_trace_name_the_functions_of_a_symbols_only_image(
     assert sum(b.hits for b in group.blocks) > 0
     calls = [r for r in read(path) if isinstance(r, Call)]
     assert [(c.pc, c.symbol) for c in calls] == [(function & ~1, "__acle_se_tz_pair_add")]
+
+
+@pytest.mark.parametrize("name", ["secure", "control_s", "control_ns"])
+def test_a_handler_cannot_write_a_register_translated_code_holds(
+    u575: popcorn.PartDescription, name: str
+) -> None:
+    """Checklist 20: the core bakes the security state, SPSEL and nPRIV into translated code.
+    A write from a handler of the running slice would leave the rest of the block, here a
+    self-chained loop storing to Secure SRAM, in the old state."""
+    m = veneer_machine(u575)
+    m.mem.write(SECURE_CALLER, struct.pack("<2H", 0x6008, 0xE7FD))
+    m.reg.r0 = 0x1234
+    m.reg.r1 = SRAM_S + 0x100
+    m.mem.u32[SRAM_S + 0x100] = 0
+    reg = Reg(name)
+    before = m.reg[reg]
+
+    def handler(call: popcorn.Call) -> popcorn.Return:
+        m.reg[reg] = before ^ 1
+        return call.proceed()
+
+    m.intercept(SECURE_CALLER, handler, once=True)
+    with pytest.raises(popcorn.MachineRunning, match=f"{name} cannot be written from a handler"):
+        asyncio.run(m.run(budget=10))
+    assert m.reg[reg] == before
+    assert m.mem.u32[SRAM_S + 0x100] == 0
+    m.reg[reg] = before ^ 1
+    assert m.reg[reg] == before ^ 1

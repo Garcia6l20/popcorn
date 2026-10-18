@@ -178,6 +178,14 @@ auto register_view::read(arch::cpu_register const& reg) const -> std::uint64_t
 void register_view::write(arch::cpu_register const& reg, std::uint64_t value) const
 {
   machine_->require_view_access();
+  if(machine_->run_->running and machine_->arch_->translation_register(reg))
+  {
+    throw machine_running(
+        std::format(
+            "{} cannot be written from a handler: code already translated keeps the old value "
+            "for the rest of the run, write it from a stop",
+            reg.name));
+  }
   machine_->run_->coverage.has_previous = false;
   auto* const engine                    = machine_->engine_.get();
   auto const  what                      = std::format("writing register {}", reg.name);

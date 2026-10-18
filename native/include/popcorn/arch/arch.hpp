@@ -519,6 +519,19 @@ public:
   }
 
   /**
+   * @brief Whether a host write of the register changes state the engine bakes into code it
+   *        translated, so a write from a handler of a running slice would reach only blocks
+   *        translated after it. core::register_view refuses such a write from a handler. The
+   *        default is none.
+   * @param reg Register written.
+   */
+  [[nodiscard]] virtual auto translation_register([[maybe_unused]] cpu_register const& reg) const
+      -> bool
+  {
+    return false;
+  }
+
+  /**
    * @brief Bus attributes of a data access the core makes now at @p at, for an access the
    *        engine reports without them: a store into a region that only its controller
    *        writes, such as flash. Called on the machine thread under TrustZone only. The

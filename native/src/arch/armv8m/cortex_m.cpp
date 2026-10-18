@@ -519,6 +519,13 @@ auto cortex_m::host_register_value(cpu_register const& reg, std::uint64_t value)
   return (value & ~std::uint64_t{1}) | thumb;
 }
 
+auto cortex_m::translation_register(cpu_register const& reg) const -> bool
+{
+  return reg.engine_id == UC_ARM_REG_SECURE
+      or reg.engine_id == UC_ARM_REG_CONTROL_S
+      or reg.engine_id == UC_ARM_REG_CONTROL_NS;
+}
+
 auto cortex_m::registers() const -> std::span<cpu_register const>
 {
   if(trustzone())
