@@ -809,3 +809,44 @@ TEST_CASE("RM0456 17.4.14: a Non-secure channel loads its linked-list item Non-s
   CHECK(r.peek("GPDMA1", "C0DAR") != target + 16);
   CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
 }
+
+TEST_CASE("RM0456 17.8.7: a Non-secure channel's linked-list load cannot set SSEC or DSEC")
+{
+  rig const  r{true};
+  auto const item    = sram1_nonsecure_block + 0x1c0;
+  auto const secured = bit("GPDMA1", "C0TR1", "SSEC") | bit("GPDMA1", "C0TR1", "DSEC");
+  auto const reused  = sram1_nonsecure_block + 0x180;
+  auto const widths  = (2u << bit_index("GPDMA1", "C0TR1", "SDW_LOG2"))
+                     | bit("GPDMA1", "C0TR1", "SINC")
+                     | (2u << bit_index("GPDMA1", "C0TR1", "DDW_LOG2"))
+                     | bit("GPDMA1", "C0TR1", "DINC");
+  open_destination_block(r);
+  fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  fill(r, reused, 0xaaaa'0000, 4);
+  REQUIRE(r.target->mem().write(item, 4, widths | secured));
+  REQUIRE(r.target->mem().write(item + 4, 4, 0));
+  r.write("GPDMA1", "C0LBAR", sram1_nonsecure_block & 0xffff'0000u, secure_priv);
+  r.write(
+      "GPDMA1", "C0LLR",
+      (item & 0xfffcu) | bit("GPDMA1", "C0LLR", "UT1") | bit("GPDMA1", "C0LLR", "ULL"),
+      secure_priv);
+  copy(r, sram1_nonsecure_block, sram1_nonsecure_block + 0x100);
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  CHECK(r.read("GPDMA1", "C0TR1", secure_priv) == widths);
+  CHECK(r.peek("GPDMA1", "C0TR1") == widths);
+
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  REQUIRE(r.peek("GPDMA1", "SECCFGR") == 1);
+  CHECK(r.peek("GPDMA1", "C0TR1") == widths);
+  r.write("GPDMA1", "C0FCR", bit("GPDMA1", "C0FCR", "TCF"), secure_priv);
+  r.write("GPDMA1", "C0BR1", 16, secure_priv);
+  r.write("GPDMA1", "C0SAR", sram1_secure_block, secure_priv);
+  r.write("GPDMA1", "C0DAR", reused, secure_priv);
+  r.write("GPDMA1", "C0CR", bit("GPDMA1", "C0CR", "EN"), secure_priv);
+  auto const result = r.target->run_slice({.max_instructions = icount{20'000}});
+  REQUIRE_FALSE(result.stopped.has_value());
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  CHECK(words_at(r, reused, 4) == std::vector<std::uint32_t>(4, 0));
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
+}

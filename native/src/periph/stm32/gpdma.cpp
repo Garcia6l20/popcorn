@@ -266,7 +266,8 @@ class gpdma;
  *        of a Non-secure channel, data and linked-list item, is a Non-secure transaction. A
  *        Secure channel reads its source with `CxTR1.SSEC`, writes its destination with
  *        `CxTR1.DSEC` and loads its linked-list items Secure. SSEC and DSEC take Secure writes
- *        to a Secure channel only and clear when the channel turns Non-secure. A transfer is
+ *        to a Secure channel only, a linked-list load of a Non-secure channel keeps them, and
+ *        they clear when the channel turns Non-secure. A transfer is
  *        privileged when its channel is. A refused transfer is what the bus firewall decides:
  *        a Non-secure read of Secure SRAM returns 0 and a write to it is dropped, with the
  *        firewall's event and no DTEF. Under TZEN=0 `SECCFGR`, `PRIVCFGR` and `SMISR` are
@@ -1084,7 +1085,13 @@ auto gpdma::link(std::size_t ch) -> bool
     {
       return false;
     }
-    regs_.poke(target.offset, *word);
+    auto stored = *word;
+    if(&target == &c.tr1 and c.source_secure and not channel_secure(ch))
+    {
+      auto const kept = c.source_secure->mask() | c.destination_secure->mask();
+      stored          = (stored & ~kept) | (regs_.peek(c.tr1.offset) & kept);
+    }
+    regs_.poke(target.offset, stored);
     at += 4;
     return true;
   };
