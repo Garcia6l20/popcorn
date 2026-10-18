@@ -356,13 +356,12 @@ def test_ctrl_c_while_waiting_for_the_boundary_adds_nothing_and_still_removes(
         _thread.interrupt_main()
 
     calls = [lambda: m.probe("idle_main"), ticks.remove]
+    past_tick = m.sample(hold, at=reached(machines, "tick", "jump") + us(1))
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         m.start()
         for call in calls:
-            entered.clear()
-            released.clear()
-            held = m.sample(hold)
+            held = past_tick if call is calls[0] else m.sample(hold)
             assert entered.wait(HANG)
             waits = _core.interruptible_waits()
             threading.Thread(target=interrupt, args=(waits,), daemon=True).start()
@@ -371,6 +370,8 @@ def test_ctrl_c_while_waiting_for_the_boundary_adds_nothing_and_still_removes(
             assert _core.interruptible_waits() == waits + 1
             released.set()
             asyncio.run(held)
+            entered.clear()
+            released.clear()
         assert not ticks.active
         m.halt()
     finally:
