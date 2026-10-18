@@ -37,7 +37,7 @@ from popcorn import _core
 from popcorn._enums import FaultKind
 from popcorn._image import Location
 from popcorn._machine import Machine, stack_access
-from popcorn._stop import Fault, Stop
+from popcorn._stop import Stop
 from popcorn._unwind import RawFrame, Read32, Via, source_address, unwind
 
 _CORE_REGISTERS = (
@@ -61,7 +61,7 @@ _CORE_REGISTERS = (
 )
 
 
-_SFSR = 0xE000_EDE4
+_CFSR = 0xE000_ED28
 _SFAR = 0xE000_EDE8
 _SFARVALID = 6
 
@@ -131,10 +131,12 @@ class Report:
         stop: The stop.
         registers: Core registers when the report was taken, or those the stop carries for a
             fault inside a `Machine.call`.
-        fault_bits: Fault status bits set, by register, when the stop is a fault.
+        fault_bits: Fault status bits set, by register, when the stop is a fault. SFSR only for
+            a SecureFault, whose CFSR is read from the SCS: SFSR and CFSR are sticky, so for a
+            SecureFault the CFSR may hold bits of an earlier fault the handler did not clear.
         frames: The call stack, innermost first.
         ring: The trace ring's last records, or why it could not be read.
-        sfar: SFAR when the fault's SFSR has SFARVALID set, else None.
+        sfar: SFAR when the fault is a SecureFault whose SFSR has SFARVALID set, else None.
     """
 
     stop: Stop
@@ -223,8 +225,9 @@ def stop_report(
     sfar = None
     if stop.fault is not None:
         fault = stop.fault
-        sfsr = _sfsr(machine, fault)
-        cfsr = 0 if fault.kind is FaultKind.SECURE else fault.cfsr
+        secure = fault.kind is FaultKind.SECURE
+        sfsr = fault.cfsr if secure else 0
+        cfsr = machine.mem.u32[_CFSR] if secure else fault.cfsr
         bits = fault_bits(cfsr, fault.hfsr, sfsr)
         if sfsr >> _SFARVALID & 1:
             sfar = machine.mem.u32[_SFAR]
@@ -245,14 +248,6 @@ def _secure_sp(machine: Machine, xpsr: int) -> int | None:
     regs = machine.reg
     thread = xpsr & 0x1FF == 0
     return int(regs.psp_s) if thread and int(regs.control_s) >> 1 & 1 else int(regs.msp_s)
-
-
-def _sfsr(machine: Machine, fault: Fault) -> int:
-    if fault.kind is FaultKind.SECURE:
-        return fault.cfsr
-    if machine.security_state is None:
-        return 0
-    return machine.mem.u32[_SFSR]
 
 
 def _frame(machine: Machine, read32: Read32, raw: RawFrame) -> StackFrame:

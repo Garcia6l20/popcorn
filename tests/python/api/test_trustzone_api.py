@@ -813,3 +813,32 @@ def test_each_bank_holds_its_own_value_and_the_plain_register_follows_the_state(
     assert m.reg[Reg(name)] == secure
     m.reg.secure = 0
     assert m.reg[Reg(name)] == nonsecure
+
+
+def test_a_report_shows_sfsr_only_for_a_secure_fault_and_its_cfsr_from_the_scs(
+    u575: popcorn.PartDescription,
+) -> None:
+    """SFSR and CFSR are sticky, DDI0553B.z D1.2.226 and D1.2.79: a BusFault after an
+    uncleared SecureFault shows no SFSR, a SecureFault after an uncleared BusFault shows the
+    BFSR the SCS still holds."""
+    m, first = auviol_stop(u575)
+    assert first.fault is not None and first.fault.kind == popcorn.FaultKind.SECURE
+    m.mem.write(SECURE_CALLER, struct.pack("<2H", 0x6808, 0xE7FE))
+    m.reg.secure = 1
+    m.reg.r1 = 0x9000_0000
+    m.reg.pc = SECURE_CALLER
+    stop = asyncio.run(m.run(budget=10))
+    assert stop.fault is not None and stop.fault.kind != popcorn.FaultKind.SECURE
+    assert m.mem.u32[0xE000_EDE4] != 0
+    report = stop_report(m, stop, ring=False)
+    assert "SFSR" not in report.fault_bits and report.sfar is None
+    assert "BFSR" in report.fault_bits
+
+    m.mem.write(NONSECURE_CALLER, struct.pack("<2H", 0x6808, 0xE7FE))
+    m.reg.secure = 0
+    m.reg.r1 = SRAM_S + 0x100
+    m.reg.pc = NONSECURE_CALLER
+    secure = asyncio.run(m.run(budget=10))
+    assert secure.fault is not None and secure.fault.kind == popcorn.FaultKind.SECURE
+    bits = stop_report(m, secure, ring=False).fault_bits
+    assert "AUVIOL" in bits["SFSR"] and "BFSR" in bits
