@@ -572,6 +572,20 @@ TEST_CASE("a snapshot holds no bytes for a stateless model, restored from its re
   CHECK_NOTHROW(std::ignore = f.target->snapshot());
 }
 
+TEST_CASE("a save that carries bytes for a stateless model restores without loading them")
+{
+  auto       source = booted();
+  auto const taken  = source.target->snapshot();
+  REQUIRE(std::ranges::any_of(taken.data().models, [](core::snapshot_part const& part) {
+    return part.owner == "TESTDEV";
+  }));
+  auto f = fixture{m33(), "snapshot", with_storage_model()};
+  REQUIRE_NOTHROW(f.target->restore(core::snapshot{taken.data()}));
+  auto const& made = dynamic_cast<storage_model&>(*f.target->model("TESTDEV"));
+  CHECK(made.loads == 0);
+  CHECK_NOTHROW(std::ignore = f.target->snapshot());
+}
+
 TEST_CASE("a save with no bytes for a model with state is refused")
 {
   auto       f     = booted();

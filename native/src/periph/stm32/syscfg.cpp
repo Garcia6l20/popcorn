@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 
 namespace popcorn::periph::stm32
 {
@@ -19,6 +20,8 @@ struct syscfg_state
 {
   friend auto operator==(syscfg_state const&, syscfg_state const&) -> bool = default;
 };
+
+static_assert(std::is_empty_v<syscfg_state>);
 
 /**
  * @brief SYSCFG of the STM32U5, RM0456 section 15, storage with the TrustZone rules of RM0456

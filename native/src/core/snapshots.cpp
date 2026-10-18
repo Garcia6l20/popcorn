@@ -378,7 +378,7 @@ void machine::restore(core::snapshot const& saved)
     {
       continue;
     }
-    if(auto const* const bytes = *part++; bytes != nullptr)
+    if(auto const* const bytes = *part++; bytes != nullptr and not slot->model->stateless())
     {
       slot->model->load(bytes->data);
     }
