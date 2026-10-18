@@ -662,6 +662,31 @@ def test_a_symbols_only_secure_image_names_the_embedded_secure_part(
     assert m.locate(function).symbol == "__acle_se_tz_pair_add"
 
 
+def test_a_load_is_refused_while_a_call_trace_is_open(
+    u575: popcorn.PartDescription, tmp_path: Path
+) -> None:
+    """A trace file names call symbols by the ids its table took when the trace opened. A
+    loaded image inserts its symbols before those of symbols-only images, so a load inside
+    the trace would rename every later call into the secure part."""
+    m = pair_machine(u575)
+    function = m.sym("__acle_se_tz_pair_add", image="secure")
+    m.intercept(function, lambda call: call.proceed())
+    patch = popcorn.Image.elf(PAIR_NS, name="patch")
+    path = tmp_path / "calls.pctr"
+    with m.trace([TraceKind.CALL], path):
+        asyncio.run(m.run(until=m.sym("main", image="nonsecure"), budget=10_000))
+        with pytest.raises(popcorn.MachineBusy, match="close the trace first"):
+            m.load(patch)
+        with pytest.raises(popcorn.MachineBusy, match="close the trace first"):
+            m.load(popcorn.Image.elf(PAIR_S, name="symbols", load=False))
+        stop = asyncio.run(m.run(until=m.sym("tz_pair_done", image="nonsecure"), budget=10_000))
+        assert stop.reason == popcorn.StopReason.ADDRESS
+    assert [r.symbol for r in read(path) if isinstance(r, Call)] == ["__acle_se_tz_pair_add"]
+    assert [image.name for image in m.images] == ["nonsecure", "secure"]
+    m.load(patch)
+    assert [image.name for image in m.images] == ["nonsecure", "secure", "patch"]
+
+
 def test_a_linked_system_keeps_each_member_s_trustzone_its_own(
     u575: popcorn.PartDescription,
 ) -> None:

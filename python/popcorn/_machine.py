@@ -1044,6 +1044,8 @@ class Machine:
             ConfigError: The image's name is already the name of a loaded image.
             ImageError: A segment falls outside the description's memory regions.
             MachineRunning: The machine is busy, outside its handlers.
+            MachineBusy: A `trace` selecting call records is open. Close it first: the trace
+                names call symbols by the ids it was opened with.
         """
         self._require_stopped()
         _check_image_names((*self._images, image))
@@ -1493,7 +1495,8 @@ class Machine:
 
         `ranges` and `functions` limit the trace to records caused by that code, everywhere
         when both are None. Call records name the symbols of the loaded images, then of the
-        symbols-only images. Block and memory records cost a native hook while traced, nothing
+        symbols-only images, as they were when the trace opened, so `load` is refused while
+        a trace with call records is open. Block and memory records cost a native hook while traced, nothing
         crosses to Python per record. Leaving the block removes the sink, then closes the file.
 
         Raises:

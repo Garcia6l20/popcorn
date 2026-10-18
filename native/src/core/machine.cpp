@@ -191,9 +191,23 @@ auto machine::virtual_clock() const noexcept -> core::clock const&
   return clock_;
 }
 
+namespace
+{
+void refuse_during_call_trace(bool traced)
+{
+  if(traced)
+  {
+    throw machine_busy(
+        "a call trace is open and names symbols by the ids it was opened with: close the trace "
+        "first");
+  }
+}
+}
+
 void machine::load(popcorn::image::image const& loaded)
 {
   require_stopped(*this);
+  refuse_during_call_trace(run_->traces_calls());
   std::vector<mapped_region*> targets;
   targets.reserve(loaded.segments.size());
   for(auto const& seg : loaded.segments)
@@ -241,6 +255,7 @@ void machine::load(popcorn::image::image const& loaded)
 void machine::add_symbols(popcorn::image::image const& symbols)
 {
   require_stopped(*this);
+  refuse_during_call_trace(run_->traces_calls());
   images_.push_back(symbols);
   run_->build_symbol_index();
 }

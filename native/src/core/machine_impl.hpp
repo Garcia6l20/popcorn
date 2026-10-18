@@ -1040,6 +1040,15 @@ struct machine::run_state
   controller_reentry controller_guard{};
   /** @brief Trace sinks by handle id. */
   std::map<std::uint64_t, std::unique_ptr<sink_entry>> sinks{};
+
+  /** @brief Whether an attached trace sink selects call records, whose symbol ids follow the
+   * symbol index of when it was attached. */
+  [[nodiscard]] auto traces_calls() const -> bool
+  {
+    return std::ranges::any_of(sinks | std::views::values, [](auto const& entry) {
+      return entry->kinds.contains(trace_kind::call);
+    });
+  }
   /** @brief Address of the block the engine runs, the pc MMIO callbacks see without the exact
    * pc hook, read by mmio records instead of the engine register. */
   address block_pc{};

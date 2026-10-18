@@ -348,6 +348,7 @@ public:
    * @param loaded Image to load, copied for symbols, lines and digest.
    * @throws image_error naming the segment and region when a segment falls outside every
    *         region.
+   * @throws machine_busy while a trace sink selecting call records is attached.
    * @throws machine_running while a slice runs, handlers included.
    */
   void load(popcorn::image::image const& loaded);
@@ -361,6 +362,7 @@ public:
    *        loaded images give no symbol, and to its lines where they give no line, the last
    *        added first.
    * @param symbols Image whose symbols and lines are kept, copied.
+   * @throws machine_busy while a trace sink selecting call records is attached.
    * @throws machine_running while a slice runs, handlers included.
    */
   void add_symbols(popcorn::image::image const& symbols);
