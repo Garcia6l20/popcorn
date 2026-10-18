@@ -73,6 +73,7 @@ u575_programs = [
         ("stm32-caches", "test_caches.cpp"),
         ("stm32-power", "test_power.cpp"),
         ("stm32-flash", "test_flash.cpp"),
+        ("stm32-flash-secure", "test_flash_secure.cpp"),
         ("stm32-gpio", "test_gpio.cpp"),
         ("stm32-gpdma", "test_gpdma.cpp"),
         ("stm32-lpdma", "test_lpdma.cpp"),

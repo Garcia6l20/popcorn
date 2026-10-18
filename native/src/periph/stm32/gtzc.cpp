@@ -418,16 +418,18 @@ struct securable
  *        to a Secure block, page or sub-region, or a Secure one to a Non-secure block unless the
  *        MPCBB's `CR.SRWILADIS` is set, reads zero, drops the write and raises the memory's
  *        TZIC event, `SRAMnIE` with n the MPCBB's digit, `FLASHIE` or `BKPSRAMIE`, RM0456 Table
- *        68 for flash. An unprivileged data access to a privileged block or sub-region reads zero
- *        and drops the write with no event. An instruction fetch the same rules refuse, a Secure
- *        fetch with `SRWILADIS` set included, is a BusFault, with the event for a Secure fetch of
- *        a Non-secure SRAM block or BKPSRAM sub-region only. Flash pages carry no privilege in
- *        this step. MPCWM4 registers are Secure privileged only, `SRLOCK` set-only freezes both
- *        until a reset, a sub-region of length 0 clears `SREN`, and outside an enabled
- *        sub-region the BKPSRAM is Secure and privileged. Every write that changes a security or
- *        privilege bit, here or in an MPCBB, drops the engine's page verdicts and ends the
- *        engine run after the instruction, a `SRWILADIS` change drops the verdicts only, and a
- *        write that changes nothing does neither.
+ *        68 for flash. A write to flash passes to the FLASH model, which programs flash and
+ *        applies the write column of Table 68 itself. An unprivileged data access to a
+ *        privileged block or sub-region reads zero and drops the write with no event. An
+ *        instruction fetch the same rules refuse, a Secure fetch with `SRWILADIS` set included,
+ *        is a BusFault, with the event for a Secure fetch of a Non-secure SRAM block or BKPSRAM
+ *        sub-region only. Flash pages carry no privilege in this step. MPCWM4 registers are
+ *        Secure privileged only, `SRLOCK` set-only freezes both until a reset, a sub-region of
+ *        length 0 clears `SREN`, and outside an enabled sub-region the BKPSRAM is Secure and
+ *        privileged. Every write that changes a security or privilege bit, here or in an MPCBB,
+ *        drops the engine's page verdicts and ends the engine run after the instruction, a
+ *        `SRWILADIS` change drops the verdicts only, and a write that changes nothing does
+ *        neither.
  */
 class tzsc final : public gtzc_block, public bus_firewall
 {
@@ -610,12 +612,12 @@ public:
     return verdict;
   }
 
-  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op)
+  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
       -> bus_verdict override
   {
     resolve_memory();
     auto const* const window = window_at(at);
-    if(window == nullptr)
+    if(window == nullptr or (window->kind == memory_kind::flash and op == arch::memory_op::write))
     {
       return bus_verdict::allow;
     }

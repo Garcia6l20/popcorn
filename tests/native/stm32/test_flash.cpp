@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -124,6 +125,21 @@ struct new_flash_state
   friend auto operator==(new_flash_state const&, new_flash_state const&) -> bool = default;
 };
 
+struct secure_flash_state
+{
+  bool                      first_key{};
+  bool                      locked_up{};
+  bool                      buffer_secure{};
+  bool                      running_secure{};
+  std::vector<std::uint8_t> held_attrs{};
+};
+
+struct trustzone_flash_state
+{
+  new_flash_state    flash{};
+  secure_flash_state secure{};
+};
+
 class services_probe final : public periph::model
 {
 public:
@@ -210,15 +226,28 @@ struct flash_rig
   std::vector<core::log_record>   logged{};
   core::hook_handle               sink{};
 
+  bool secure_set{};
+
   explicit flash_rig(periph::stm32::board const& board = {}, bool strict = false)
-      : f{u575(), "flash_ll", board_options(board, strict, &probe)}
+      : f{u575(), "flash_ll", board_options(board, strict, &probe)},
+        secure_set{board.flash.option_bytes and board.flash.option_bytes->tzen}
   {
     sink = f.target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
     REQUIRE(f.run_to_stop().reason == stop_reason::user);
-    write("FLASH_NSKEYR", 0x4567'0123u);
-    write("FLASH_NSKEYR", 0xcdef'89abu);
-    REQUIRE(field("FLASH_NSCR", "LOCK") == 0);
+    unlock();
+  }
+
+  [[nodiscard]] auto set(std::string_view reg) const -> std::string
+  {
+    return std::format("FLASH_{}{}", secure_set ? "SEC" : "NS", reg);
+  }
+
+  void unlock() const
+  {
+    write(set("KEYR"), 0x4567'0123u);
+    write(set("KEYR"), 0xcdef'89abu);
+    REQUIRE(field(set("CR"), "LOCK") == 0);
   }
 
   [[nodiscard]] auto at(std::string_view reg, std::string_view peripheral = "FLASH") const
@@ -288,17 +317,17 @@ struct flash_rig
 
   [[nodiscard]] auto status(std::string_view name) const -> std::uint32_t
   {
-    return field("FLASH_NSSR", name);
+    return field(set("SR"), name);
   }
 
   void clear_errors() const
   {
-    write("FLASH_NSSR", all_errors);
+    write(set("SR"), all_errors);
   }
 
   void control(std::uint32_t value) const
   {
-    write("FLASH_NSCR", value);
+    write(set("CR"), value);
   }
 
   void call(std::string_view entry, std::initializer_list<std::uint32_t> args) const
@@ -364,10 +393,19 @@ struct flash_rig
   {
     std::vector<std::byte> saved;
     f.target->model("FLASH")->save(saved);
+    std::vector<std::byte> redumped;
+    if(secure_set)
+    {
+      auto const state = reflex::serde::bson::deserializer{
+          std::span<std::byte const>{
+              saved}}.load<trustzone_flash_state>();
+      reflex::serde::bson::serializer{redumped}.dump(state);
+      REQUIRE(redumped == saved);
+      return state.flash;
+    }
     auto const state = reflex::serde::bson::deserializer{
         std::span<std::byte const>{
             saved}}.load<new_flash_state>();
-    std::vector<std::byte> redumped;
     reflex::serde::bson::serializer{redumped}.dump(state);
     REQUIRE(redumped == saved);
     return state;
@@ -381,9 +419,7 @@ struct flash_rig
   void cycle() const
   {
     f.target->power_cycle();
-    write("FLASH_NSKEYR", 0x4567'0123u);
-    write("FLASH_NSKEYR", 0xcdef'89abu);
-    REQUIRE(field("FLASH_NSCR", "LOCK") == 0);
+    unlock();
   }
 
   void run_sliced(icount slice, std::optional<popcorn::vtime> until, stop_reason reason) const
@@ -1903,8 +1939,8 @@ void engine_secure(flash_rig const& rig, bool secure)
 }
 
 TEST_CASE(
-    "a Secure torn page under the memory filter: Non-secure DMA and CPU reads are RAZ with no ECC "
-    "report, Secure ECC stays")
+    "a torn Secure program through SECCR: Non-secure DMA and CPU reads are RAZ with no ECC "
+    "report, a Secure load through either alias reports the same ADDR_ECC")
 {
   flash_rig rig{option_board({.tzen = true})};
   rig.tear(torn_line);
@@ -1949,6 +1985,8 @@ TEST_CASE(
   rig.load(torn_line);
   CHECK(rig.nmi_eccr == std::vector<std::uint32_t>{reported(torn_line)});
   CHECK(rig.word(sym("flash_ll", "words")) == 1);
+  rig.load(torn_line + secure);
+  CHECK(rig.nmi_eccr == std::vector<std::uint32_t>(2, reported(torn_line)));
 }
 
 TEST_CASE("with TZEN = 0 the secure option registers read as zero, RM0456 7.5.1")
