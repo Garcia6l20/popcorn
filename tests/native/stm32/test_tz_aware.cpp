@@ -1180,6 +1180,26 @@ TEST_CASE("a DMA firewall grant stops at the MPCBB block end, the next block ask
   CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
 }
 
+TEST_CASE("a filtered debugger flash write grant ends at its page, a Secure page asked again")
+{
+  rig const r{
+      true, {.secwm1 = stm32::page_range{.first = 0, .last = 0}, .secwm2 = stm32::no_area{}}
+  };
+  auto const          secure_page    = address{0x0800'0000};
+  auto const          nonsecure_page = address{0x0800'2000};
+  constexpr bus_attrs filtered{
+      .by = initiator::debugger, .secure = false, .privileged = true, .filtered = true};
+  auto const before = r.target->mem().read(secure_page + 0x1ffc, 4);
+  REQUIRE(before.has_value());
+  core::memory_grant grant;
+  REQUIRE(r.bus->services().write(nonsecure_page, 4, 0x1234'5678, filtered, grant).has_value());
+  CHECK(r.target->mem().read(nonsecure_page, 4) == 0x1234'5678u);
+  CHECK(grant.first == nonsecure_page);
+  REQUIRE(
+      r.bus->services().write(secure_page + 0x1ffc, 4, 0x5ec0'0001, filtered, grant).has_value());
+  CHECK(r.target->mem().read(secure_page + 0x1ffc, 4) == before);
+}
+
 TEST_CASE("a filtered debugger block access goes through the bus firewall")
 {
   rig const  r{true};

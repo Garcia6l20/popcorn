@@ -647,8 +647,9 @@ public:
     return decision.verdict;
   }
 
-  [[nodiscard]] auto allowed_extent(address at, std::uint8_t size, bus_attrs, arch::memory_op op)
-      -> memory_extent override
+  [[nodiscard]] auto
+      allowed_extent(address at, std::uint8_t size, bus_attrs attrs, arch::memory_op op)
+          -> memory_extent override
   {
     auto const* const window = window_at(at);
     if(window == nullptr)
@@ -670,7 +671,9 @@ public:
       return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
     }
     auto const window_last = static_cast<address>(window->start + (window->size - 1u));
-    if(window->kind == memory_kind::flash and op == arch::memory_op::write)
+    if(window->kind == memory_kind::flash
+       and op == arch::memory_op::write
+       and attrs.by != initiator::debugger)
     {
       return {.first = window->start, .last = window_last};
     }
