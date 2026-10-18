@@ -56,6 +56,39 @@ Fault classes and addresses:
 - An access the bus firewall refuses with a bus error is a precise BusFault, BFAR its address.
   A bus error a peripheral model raises stays an imprecise BusFault with no BFAR.
 
+## Host access to unmodelled data
+
+A host access over the bus to data no model serves raises `ModelError` and logs nothing,
+whatever `strict` says, with or without TrustZone. The register storage stays reachable:
+
+```python
+cr = m.periph.RNG.CR     # the STM32U575 RNG has no model
+cr.read()                # ModelError
+cr.poke(0x4)             # stores 0x4, no model involved
+assert cr.value == 0x4   # reads the storage
+m.mem.u32[0xE004_2000]   # ModelError, the CTI has no model
+```
+
+Host accesses over the bus are `m.mem` with its `secure` and `nonsecure` views, `m.ref.mem`,
+and a register's `read()`, `write()` and `value` setter. Unmodelled data is:
+
+- every register of a peripheral without a model
+- an offset no register covers inside a modelled peripheral
+- a register a model keeps as storage only, such as every SYSCFG register but `SECCFGR`
+- the STM32U5 and STM32H5 debug blocks without a model: TPIU 0xE0040000, ETM 0xE0041000, CTI
+  0xE0042000, the MCU ROM table 0xE00FE000 and the processor ROM table 0xE00FF000
+
+The `value` getter, the field getters and `poke()` go to the register storage, without the
+model. Firmware and DMA accesses follow other rules:
+
+- A firmware access to a register without a model logs a model_warning once per register. Under
+  `strict` it raises ModelError.
+- A firmware write to a SYSCFG storage register lands and logs one model_warning per register.
+  Under `strict` it raises ModelError before the store.
+- A firmware or DMA access to a debug block without a model reads 0 and drops writes, with one
+  model_warning per block. Under `strict` it raises ModelError naming the block. The ROM tables
+  read 0, not their entries, so a ROM table walk ends at its first entry.
+
 ## Install
 
 popcorn is installed from source, the native core is compiled on your machine.
