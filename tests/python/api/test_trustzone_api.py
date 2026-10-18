@@ -386,6 +386,7 @@ def test_references_follow_the_view_they_were_built_from(
     assert m.ref.mem.nonsecure.u32[SRAM_NS].get() == 0
     with pytest.raises(popcorn.EmulationError, match="denied"):
         asyncio.run(m.read(m.ref.mem.nonsecure.u32[SRAM_S + 0x100]))
+    assert not hasattr(m.mem.nonsecure, "space") and not hasattr(m.mem.u32, "space")
 
 
 def test_no_view_access_raises_an_illegal_access_event(u575: popcorn.PartDescription) -> None:

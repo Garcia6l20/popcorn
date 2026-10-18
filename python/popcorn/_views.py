@@ -66,11 +66,6 @@ class ScalarView[T: (int, float)]:
         self._size = struct.calcsize(self._format)
         self._space = space
 
-    @property
-    def space(self) -> _core.MemorySpace:
-        """The memory view this one reads through."""
-        return self._space
-
     def __getitem__(self, address: int) -> T:
         value: T = struct.unpack(
             self._format, self._access.handle.read_memory(address, self._size, self._space)
@@ -83,6 +78,11 @@ class ScalarView[T: (int, float)]:
         except (struct.error, OverflowError) as error:
             raise ValueError(f"{value!r} does not fit {self._format[1:]}: {error}") from error
         self._access.handle.write_memory(address, data, self._space)
+
+
+def space_of[T: (int, float)](view: ScalarView[T] | Memory) -> _core.MemorySpace:
+    """The view an accessor reads through: the unfiltered debugger view or a filtered one."""
+    return view._space  # pyright: ignore[reportPrivateUsage]
 
 
 class Memory:
@@ -128,11 +128,6 @@ class Memory:
         self.i64 = ScalarView[int](access, "q", space)
         self.f32 = ScalarView[float](access, "f", space)
         self.f64 = ScalarView[float](access, "d", space)
-
-    @property
-    def space(self) -> _core.MemorySpace:
-        """Which view this is: the unfiltered debugger view or a filtered one."""
-        return self._space
 
     def _views(self) -> tuple[Memory, Memory]:
         if self._space != _core.MemorySpace.debugger:

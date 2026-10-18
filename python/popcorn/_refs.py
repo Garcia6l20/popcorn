@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, override
 from popcorn import _core
 from popcorn._enums import PinMode
 from popcorn._host import awaited
-from popcorn._views import microvolts_of
+from popcorn._views import microvolts_of, space_of
 from popcorn.units import VirtualTime
 
 if TYPE_CHECKING:
@@ -695,7 +695,7 @@ class ScalarRefs[T: (int, float)]:
         packing = "<" + _FORMATS[fmt]
         size = struct.calcsize(packing)
         handle = _handle(self._owner)
-        space = view.space
+        space = space_of(view)
 
         def put(value: T) -> None:
             view[address] = value
@@ -789,7 +789,7 @@ class MemoryRefs:
         """`size` bytes at `address`, `Memory.read` and `write`. A write takes exactly `size`
         bytes."""
         memory = self._memory
-        space = memory.space
+        space = space_of(memory)
 
         def check(value: object) -> None:
             if not isinstance(value, bytes | bytearray):
@@ -814,7 +814,7 @@ class MemoryRefs:
     def cstring(self, address: int, limit: int = 256) -> Ref[str]:
         """The NUL-terminated string at `address`, `Memory.cstring`. Read-only."""
         memory = self._memory
-        space = memory.space
+        space = space_of(memory)
         handle = _handle(self._owner)
         return Ref(
             self._owner,
