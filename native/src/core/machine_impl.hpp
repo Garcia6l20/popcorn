@@ -1939,6 +1939,12 @@ struct machine_internals
     return target;
   }
 
+  /** @brief The arch module of @p target. */
+  [[nodiscard]] static auto arch(machine const& target) noexcept -> arch::arch const&
+  {
+    return *target.arch_;
+  }
+
   /** @brief The bus firewall a model of @p target installed, or null. */
   [[nodiscard]] static auto firewall(machine const& target) noexcept -> periph::bus_firewall*
   {

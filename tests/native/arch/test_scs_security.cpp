@@ -817,3 +817,49 @@ TEST_CASE("a TZEN=1 snapshot is refused by a TZEN=0 machine of the same descript
   plain.target->restore(own);
   CHECK(plain.reg("pc") == pc);
 }
+
+TEST_CASE(
+    "the attributes of a store the engine reports without them equal TT's at every SAU and IDAU "
+    "boundary, B10.2 SecurityCheck() and D1.2.225")
+{
+  constexpr std::uint32_t tt_s = 1u << 22;
+  auto                    f    = booted();
+  auto const region            = [&f](std::uint32_t number, address base, address limit, bool nsc) {
+    poke(f, sau_rn, number);
+    poke(f, sau_rb, base);
+    poke(f, sau_rl, (limit & ~0x1fu) | (nsc ? 2u : 0u) | 1u);
+  };
+  region(0, 0x0800'4000, 0x0800'5fe0, false);
+  region(1, 0x0c00'8200, 0x0c00'83e0, false);
+  region(2, 0x2000'1000, 0x2000'10e0, true);
+  region(3, 0x3000'0000, 0x3000'0000, false);
+  region(4, 0x6000'0000, 0x6000'0fe0, false);
+  poke(f, sau, sau_enable);
+  auto const& core = core::machine_internals::arch(*f.target);
+  put(f, secure_code, {0xe840, 0xf100, 0xbe01});
+  for(address const at : std::array<address, 27>{
+          0x0800'3ffc, 0x0800'4000, 0x0800'5ffc, 0x0800'6000, 0x0bff'fffc, 0x0c00'0000, 0x0c00'81fc,
+          0x0c00'8200, 0x0c00'83fc, 0x0c00'8400, 0x0fff'fffc, 0x1000'0000, 0x2000'0ffc, 0x2000'1000,
+          0x2000'10fc, 0x2000'1100, 0x2fff'fffc, 0x3000'0000, 0x3000'001c, 0x3000'0020, 0x4fff'fffc,
+          0x5000'0000, 0x5fff'fffc, 0x6000'0000, 0x6000'0ffc, 0x6000'1000, 0xdfff'fffc})
+  {
+    CAPTURE(at);
+    f.set("r0", at);
+    REQUIRE(run_at(f, secure_code, 2).reason == stop_reason::user);
+    auto const tt    = static_cast<std::uint32_t>(f.reg("r1"));
+    auto const attrs = core.data_attrs(at);
+    CHECK(attrs.secure == ((tt & tt_s) != 0));
+    CHECK(attrs.privileged);
+    CHECK(attrs.by == popcorn::initiator::cpu);
+  }
+  f.set("control", 1);
+  CHECK_FALSE(core.data_attrs(0x0c00'0000).privileged);
+  f.set("control", 0);
+  engine_write(f, UC_ARM_REG_SECURE, 0);
+  for(address const at : std::array<address, 4>{0x0c00'0000, 0x0800'4000, 0x2000'1000, 0x3000'0000})
+  {
+    CAPTURE(at);
+    CHECK_FALSE(core.data_attrs(at).secure);
+  }
+  engine_write(f, UC_ARM_REG_SECURE, 1);
+}

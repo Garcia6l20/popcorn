@@ -64,6 +64,7 @@ public:
   [[nodiscard]] auto resume_address() const -> address override;
   [[nodiscard]] auto host_register_value(cpu_register const& reg, std::uint64_t value) const
       -> std::uint64_t override;
+  [[nodiscard]] auto data_attrs(address at) const -> bus_attrs override;
   [[nodiscard]] auto registers() const -> std::span<cpu_register const> override;
   void               prepare_call(call_frame const& frame) override;
   void               check_call(call_frame const& frame) const override;

@@ -401,6 +401,14 @@ auto cortex_m::current_security() const -> security
   return trustzone() ? read_security(engine_handle()) : security::secure;
 }
 
+auto cortex_m::data_attrs(address at) const -> bus_attrs
+{
+  auto const attributed = attribution_of(at);
+  auto const secure =
+      current_security() == security::secure and (attributed.exempt or not attributed.ns);
+  return {.by = initiator::cpu, .secure = secure, .privileged = privileged()};
+}
+
 void cortex_m::pend(std::uint32_t number, security state)
 {
   if(state == security::nonsecure and banked(number))

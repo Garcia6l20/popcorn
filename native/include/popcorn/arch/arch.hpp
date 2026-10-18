@@ -519,6 +519,18 @@ public:
   }
 
   /**
+   * @brief Bus attributes of a data access the core makes now at @p at, for an access the
+   *        engine reports without them: a store into a region that only its controller
+   *        writes, such as flash. Called on the machine thread under TrustZone only. The
+   *        default is a Secure privileged access.
+   * @param at Address of the access.
+   */
+  [[nodiscard]] virtual auto data_attrs([[maybe_unused]] address at) const -> bus_attrs
+  {
+    return {};
+  }
+
+  /**
    * @brief Reads the return value of a call that reached its sentinel.
    * @param frame Frame given to prepare_call().
    * @return Value bits of type `frame.returns`, a float as its IEEE 754 bit pattern.
