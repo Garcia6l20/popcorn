@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn import OptionBytes
 from popcorn.arm import Reg
-from popcorn.report import fault_bits, stop_report
+from popcorn.report import Via, fault_bits, stop_report
 from popcorn.units import ms
 
 ROOT = Path(__file__).parents[3]
@@ -543,3 +543,23 @@ def test_a_report_without_trustzone_reads_no_sfsr(u575: popcorn.PartDescription)
     assert stop.fault is not None
     report = stop_report(m, stop, ring=False)
     assert "SFSR" not in report.fault_bits and report.sfar is None
+
+
+def test_the_call_stack_goes_through_a_blxns_into_the_secure_caller(
+    u575: popcorn.PartDescription,
+) -> None:
+    """DDI0553B.z B3.16: BLXNS leaves FNC_RETURN in lr and pushes the return address on the
+    Secure stack. The walk leaves the Non-secure function there for the Secure caller."""
+    m = veneer_machine(u575)
+    m.mem.write(SECURE_CALLER, struct.pack("<2H", 0x47AC, 0xE7FE))
+    m.mem.write(NONSECURE_CALLER, struct.pack("<H", 0xE7FE))
+    stop = asyncio.run(m.run(budget=20))
+    assert stop.reason == popcorn.StopReason.BUDGET
+    assert m.security_state == "nonsecure"
+    assert m.reg.lr == 0xFEFF_FFFF
+    frames = stop_report(m, stop, ring=False).frames
+    assert [(f.pc, f.via) for f in frames] == [
+        (NONSECURE_CALLER, Via.PC),
+        (SECURE_CALLER + 2, Via.SECURE_CALL),
+    ]
+    assert frames[1].exact

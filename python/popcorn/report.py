@@ -20,7 +20,12 @@ Limits:
   that saves registers only on some paths after its entry, can be misread while pc is on a path
   that skipped the save.
 - Exception frames on the Non-secure stack or with additional state context are scanned: the
-  exact walk stops there and the stack scan takes over.
+  exact walk stops there and the stack scan takes over. Without TrustZone popcorn runs the
+  core Secure, so these frames never occur. With TrustZone they are the frames of an exception
+  taken across the security states.
+- A Non-secure function a Secure BLXNS called returns to FNC_RETURN: the walk goes on in the
+  Secure caller from the frame BLXNS pushed on the Secure stack. The other way, a Secure
+  function an SG veneer entered returning to its Non-secure caller, ends the walk.
 """
 
 from __future__ import annotations
@@ -211,6 +216,7 @@ def stop_report(
         registers["lr"],
         registers["sp"],
         psp,
+        _secure_sp(machine, registers["xpsr"]),
     )
     frames = tuple(_frame(machine, read32, f) for f in raw)
     bits: dict[str, tuple[str, ...]] = {}
@@ -229,6 +235,16 @@ def stop_report(
         except OSError as error:
             text = f"ring unavailable: {error}"
     return Report(stop, registers, bits, frames, text, sfar)
+
+
+def _secure_sp(machine: Machine, xpsr: int) -> int | None:
+    """The Secure stack pointer of the core's mode while it runs Non-secure, where a BLXNS
+    pushed its return frame, DDI0553B.z B3.16."""
+    if machine.security_state != "nonsecure":
+        return None
+    regs = machine.reg
+    thread = xpsr & 0x1FF == 0
+    return int(regs.psp_s) if thread and int(regs.control_s) >> 1 & 1 else int(regs.msp_s)
 
 
 def _sfsr(machine: Machine, fault: Fault) -> int:
