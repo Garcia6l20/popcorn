@@ -93,6 +93,7 @@ u575_programs = [
         ("stm32-crc", "test_crc.cpp"),
         ("stm32-hash", "test_hash.cpp"),
         ("stm32-gtzc", "test_gtzc.cpp"),
+        ("stm32-tz-aware", "test_tz_aware.cpp"),
         ("stm32-smc", "test_smc.cpp"),
         ("stm32-engine-counters", "test_engine_counters.cpp"),
     )

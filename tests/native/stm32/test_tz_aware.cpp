@@ -1,0 +1,469 @@
+#include "gtzc.hpp"
+#include "stm32_fixture.hpp"
+
+#include <popcorn/arch/armv8m/armv8m.hpp>
+#include <popcorn/core/machine.hpp>
+#include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/builtin.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
+
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace
+{
+namespace core   = popcorn::core;
+namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
+using popcorn::address;
+using popcorn::bus_attrs;
+using popcorn::initiator;
+using popcorn::testing::u575;
+
+constexpr bus_attrs secure_priv{.by = initiator::cpu, .secure = true, .privileged = true};
+constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privileged = false};
+constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
+constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
+
+class probe final : public periph::model
+{
+public:
+  explicit probe(periph::model_context& ctx) : ctx_{ctx}
+  {}
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0;
+  }
+
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  [[nodiscard]] auto services() const -> core::machine_services&
+  {
+    return ctx_.services;
+  }
+
+private:
+  periph::model_context& ctx_;
+};
+
+auto unit(std::string_view name) -> popcorn::peripheral_desc const&
+{
+  return *std::ranges::find(u575().peripherals, name, &popcorn::peripheral_desc::name);
+}
+
+auto bit(std::string_view peripheral, std::string_view reg, std::string_view field) -> std::uint32_t
+{
+  auto const* found = popcorn::find_register(unit(peripheral), reg);
+  REQUIRE(found != nullptr);
+  auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
+  REQUIRE(bits != found->fields.end());
+  return std::uint32_t{1} << (bits->lsb + 8 * (found->offset % 4));
+}
+
+struct rig
+{
+  std::unique_ptr<core::machine> target;
+  probe*                         bus{};
+
+  explicit rig(bool trustzone, stm32::option_bytes wanted = {.tzen = true})
+  {
+    stm32::register_builtin_models();
+    auto options = popcorn::testing::stm32_options();
+    if(trustzone)
+    {
+      wanted.tzen = true;
+      REQUIRE(stm32::configure_option_bytes(u575(), wanted, options).has_value());
+    }
+    options.models.emplace(
+        "LPGPIO1", [this](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+          auto made = std::make_shared<probe>(ctx);
+          bus       = made.get();
+          return made;
+        });
+    target = std::make_unique<core::machine>(u575(), popcorn::arch::armv8m::factory(), options);
+    target->reset();
+  }
+
+  [[nodiscard]] static auto at(std::string_view peripheral, std::string_view reg) -> address
+  {
+    auto const& p     = unit(peripheral);
+    auto const* found = popcorn::find_register(p, reg);
+    REQUIRE(found != nullptr);
+    return p.base + (found->offset & ~3u);
+  }
+
+  void
+      write(std::string_view peripheral, std::string_view reg, std::uint32_t value, bus_attrs attrs)
+          const
+  {
+    REQUIRE(bus->services().write(at(peripheral, reg), 4, value, attrs).has_value());
+  }
+
+  [[nodiscard]] auto read(std::string_view peripheral, std::string_view reg, bus_attrs attrs) const
+      -> std::uint32_t
+  {
+    auto const value = bus->services().read(at(peripheral, reg), 4, attrs);
+    REQUIRE(value.has_value());
+    return *value;
+  }
+
+  [[nodiscard]] auto peek(std::string_view peripheral, std::string_view reg) const -> std::uint32_t
+  {
+    return target->peripheral(peripheral).peek(at(peripheral, reg) - unit(peripheral).base);
+  }
+
+  [[nodiscard]] auto port(std::string_view name) const -> stm32::gpio_port&
+  {
+    auto* const found = dynamic_cast<stm32::gpio_port*>(target->model(name));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto irq_pending(std::uint32_t irq) const -> bool
+  {
+    auto const word = target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
+    REQUIRE(word.has_value());
+    return (*word >> (irq % 32) & 1u) != 0;
+  }
+};
+
+constexpr std::uint32_t exti3_irq = 14;
+
+TEST_CASE("RM0456 13.3.18 Table 128: a Non-secure access to a Secure pin's fields is RAZ/WI")
+{
+  rig const r{true};
+  CHECK(r.peek("GPIOA", "SECCFGR") == 0xffff);
+  CHECK(r.read("GPIOA", "SECCFGR", nonsecure_unpriv) == 0xffff);
+  auto const moder = r.peek("GPIOA", "MODER");
+  CHECK(r.read("GPIOA", "MODER", nonsecure_priv) == 0);
+  r.write("GPIOA", "MODER", 0, nonsecure_priv);
+  CHECK(r.peek("GPIOA", "MODER") == moder);
+
+  r.write("GPIOA", "SECCFGR", 0xffff & ~(1u << 5), nonsecure_priv);
+  CHECK(r.peek("GPIOA", "SECCFGR") == 0xffff);
+  r.write("GPIOA", "SECCFGR", 0xffff & ~(1u << 5), secure_unpriv);
+  CHECK(r.peek("GPIOA", "SECCFGR") == (0xffff & ~(1u << 5)));
+
+  auto const pin5 = 0x3u << 10;
+  auto const pin4 = 0x3u << 8;
+  CHECK(r.read("GPIOA", "MODER", nonsecure_priv) == (moder & pin5));
+  r.write("GPIOA", "MODER", 0x1u << 10 | 0x1u << 8, nonsecure_priv);
+  CHECK((r.peek("GPIOA", "MODER") & pin5) == 0x1u << 10);
+  CHECK((r.peek("GPIOA", "MODER") & pin4) == (moder & pin4));
+
+  r.write("GPIOA", "ODR", 0x30, nonsecure_priv);
+  CHECK(r.peek("GPIOA", "ODR") == 0x20);
+  CHECK(r.port("GPIOA").level(5));
+  CHECK_FALSE(r.port("GPIOA").level(4));
+  r.write("GPIOA", "BSRR", 1u << (16 + 5) | 1u << 4, nonsecure_priv);
+  CHECK(r.peek("GPIOA", "ODR") == 0);
+  r.write("GPIOA", "BRR", 1u << 4, secure_priv);
+  r.write("GPIOA", "BSRR", 1u << 4, secure_priv);
+  CHECK(r.peek("GPIOA", "ODR") == 0x10);
+  CHECK(r.read("GPIOA", "ODR", nonsecure_priv) == 0);
+  CHECK(r.read("GPIOA", "ODR", secure_unpriv) == 0x10);
+}
+
+TEST_CASE("RM0456 13.4.13: GPIOI_SECCFGR resets to 0x00FF under TZEN=1 on the STM32U575")
+{
+  rig const r{true};
+  CHECK(r.peek("GPIOI", "SECCFGR") == 0x00ff);
+  CHECK(r.peek("GPIOH", "SECCFGR") == 0xffff);
+}
+
+TEST_CASE("RM0456 13.4.13, P1: GPIOx_SECCFGR is RAZ/WI under TZEN=0, every pin open")
+{
+  rig const r{false};
+  CHECK(r.read("GPIOA", "SECCFGR", nonsecure_priv) == 0);
+  r.write("GPIOA", "SECCFGR", 0, nonsecure_priv);
+  CHECK(r.peek("GPIOA", "SECCFGR") == 0xffff);
+  CHECK(r.peek("GPIOI", "SECCFGR") == 0xffff);
+  r.write("GPIOA", "MODER", 0x1u << 8, nonsecure_unpriv);
+  CHECK(r.read("GPIOA", "MODER", nonsecure_unpriv) == 0x1u << 8);
+}
+
+TEST_CASE("RM0456 23.5.1: a Secure EXTI line is hidden from Non-secure accesses")
+{
+  rig const r{true};
+  r.write("GPIOA", "MODER", 0, secure_priv);
+  r.write("EXTI", "SECCFGR1", 1u << 3, nonsecure_priv);
+  CHECK(r.peek("EXTI", "SECCFGR1") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == bit("GTZC2_TZIC", "SR2", "EXTIF"));
+  r.write("EXTI", "SECCFGR1", 1u << 3, secure_priv);
+  CHECK(r.read("EXTI", "SECCFGR1", nonsecure_unpriv) == 1u << 3);
+
+  r.write("EXTI", "RTSR1", 1u << 3 | 1u << 2, nonsecure_priv);
+  CHECK(r.peek("EXTI", "RTSR1") == 1u << 2);
+  r.write("EXTI", "RTSR1", 1u << 3 | 1u << 2, secure_priv);
+  r.write("EXTI", "IMR1", 1u << 3, nonsecure_priv);
+  CHECK(r.peek("EXTI", "IMR1") == 0);
+
+  r.port("GPIOA").drive(3, true);
+  CHECK(r.peek("EXTI", "RPR1") == 1u << 3);
+  CHECK(r.read("EXTI", "RPR1", nonsecure_priv) == 0);
+  CHECK(r.read("EXTI", "RPR1", secure_priv) == 1u << 3);
+  r.write("EXTI", "RPR1", 1u << 3, nonsecure_priv);
+  CHECK(r.peek("EXTI", "RPR1") == 1u << 3);
+  CHECK_FALSE(r.irq_pending(exti3_irq));
+
+  r.write("EXTI", "IMR1", 1u << 3, secure_priv);
+  CHECK(r.irq_pending(exti3_irq));
+  r.write("EXTI", "IMR1", 0, nonsecure_priv);
+  CHECK(r.peek("EXTI", "IMR1") == 1u << 3);
+  r.write("EXTI", "RPR1", 1u << 3, secure_priv);
+  CHECK(r.peek("EXTI", "RPR1") == 0);
+}
+
+TEST_CASE("RM0456 23.5.2, 23.6.6, 23.6.7: EXTI privilege, SECCFGR1 privilege and LOCKR")
+{
+  rig const r{true};
+  r.write("EXTI", "PRIVCFGR1", 1u << 4, nonsecure_unpriv);
+  CHECK(r.peek("EXTI", "PRIVCFGR1") == 0);
+  r.write("EXTI", "PRIVCFGR1", 1u << 4, nonsecure_priv);
+  CHECK(r.peek("EXTI", "PRIVCFGR1") == 1u << 4);
+  r.write("EXTI", "FTSR1", 1u << 4 | 1u << 5, nonsecure_unpriv);
+  CHECK(r.peek("EXTI", "FTSR1") == 1u << 5);
+  r.write("EXTI", "SECCFGR1", 1u << 4 | 1u << 6, secure_unpriv);
+  CHECK(r.peek("EXTI", "SECCFGR1") == 1u << 6);
+  r.write("EXTI", "PRIVCFGR1", 1u << 4 | 1u << 6, nonsecure_priv);
+  CHECK(r.peek("EXTI", "PRIVCFGR1") == 1u << 4);
+
+  CHECK(r.read("EXTI", "LOCKR", nonsecure_priv) == 0);
+  r.write("EXTI", "LOCKR", 1, nonsecure_priv);
+  CHECK(r.peek("EXTI", "LOCKR") == 0);
+  r.write("EXTI", "LOCKR", 1, secure_priv);
+  r.write("EXTI", "LOCKR", 0, secure_priv);
+  CHECK(r.peek("EXTI", "LOCKR") == 1);
+  r.write("EXTI", "SECCFGR1", 0, secure_priv);
+  r.write("EXTI", "PRIVCFGR1", 0, secure_priv);
+  CHECK(r.peek("EXTI", "SECCFGR1") == 1u << 6);
+  CHECK(r.peek("EXTI", "PRIVCFGR1") == 1u << 4);
+}
+
+TEST_CASE("RM0456 23.6.6: EXTI_SECCFGR1 stays storage under TZEN=0")
+{
+  rig const r{false};
+  r.write("EXTI", "SECCFGR1", 1u << 3, nonsecure_priv);
+  CHECK(r.read("EXTI", "SECCFGR1", nonsecure_priv) == 1u << 3);
+  r.write("EXTI", "RTSR1", 1u << 3, nonsecure_priv);
+  CHECK(r.read("EXTI", "RTSR1", nonsecure_priv) == 1u << 3);
+}
+
+TEST_CASE("RM0456 11.5.1 Table 117: RCC_SECCFGR.PLL1SEC makes the PLL1 bits Secure")
+{
+  rig const r{true};
+  r.write("RCC", "SECCFGR", bit("RCC", "SECCFGR", "PLL1SEC"), nonsecure_priv);
+  CHECK(r.peek("RCC", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == bit("GTZC2_TZIC", "SR2", "RCCF"));
+  r.write("RCC", "SECCFGR", bit("RCC", "SECCFGR", "PLL1SEC"), secure_unpriv);
+  CHECK(r.read("RCC", "SECCFGR", nonsecure_unpriv) == bit("RCC", "SECCFGR", "PLL1SEC"));
+
+  r.write("RCC", "PLL1CFGR", 0x1, nonsecure_priv);
+  CHECK(r.peek("RCC", "PLL1CFGR") == 0);
+  r.write("RCC", "PLL1CFGR", 0x1, secure_priv);
+  CHECK(r.peek("RCC", "PLL1CFGR") == 0x1);
+  CHECK(r.read("RCC", "PLL1CFGR", nonsecure_priv) == 0);
+  r.write("RCC", "PLL2CFGR", 0x1, nonsecure_priv);
+  CHECK(r.peek("RCC", "PLL2CFGR") == 0x1);
+  auto const pll1 = bit("RCC", "CIER", "PLL1RDYIE");
+  auto const pll2 = bit("RCC", "CIER", "PLL2RDYIE");
+  r.write("RCC", "CIER", pll1 | pll2, nonsecure_priv);
+  CHECK(r.peek("RCC", "CIER") == pll2);
+}
+
+TEST_CASE("RM0456 11.5.1: a peripheral's RCC bits follow its TZSC or own security")
+{
+  rig const r{
+      true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
+  };
+  auto const tim2 = bit("RCC", "APB1ENR1", "TIM2EN");
+  auto const tim3 = bit("RCC", "APB1ENR1", "TIM3EN");
+  r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
+  r.write("RCC", "APB1ENR1", tim2 | tim3, nonsecure_priv);
+  CHECK(r.peek("RCC", "APB1ENR1") == tim3);
+  r.write("RCC", "APB1RSTR1", bit("RCC", "APB1RSTR1", "TIM2RST"), nonsecure_priv);
+  CHECK(r.peek("RCC", "APB1RSTR1") == 0);
+  r.write("RCC", "APB1ENR1", tim2 | tim3, secure_priv);
+  CHECK(r.read("RCC", "APB1ENR1", nonsecure_priv) == tim3);
+
+  auto const gpioa = bit("RCC", "AHB2ENR1", "GPIOAEN");
+  auto const reset = r.peek("RCC", "AHB2ENR1");
+  r.write("RCC", "AHB2ENR1", reset | gpioa, nonsecure_priv);
+  CHECK((r.peek("RCC", "AHB2ENR1") & gpioa) == 0);
+  r.write("GPIOA", "SECCFGR", 0, secure_priv);
+  r.write("RCC", "AHB2ENR1", reset | gpioa, nonsecure_priv);
+  CHECK((r.peek("RCC", "AHB2ENR1") & gpioa) == gpioa);
+
+  auto const flash = bit("RCC", "AHB1ENR", "FLASHEN");
+  r.write("RCC", "AHB1ENR", r.peek("RCC", "AHB1ENR") & ~flash, nonsecure_priv);
+  CHECK((r.peek("RCC", "AHB1ENR") & flash) == 0);
+  r.write("RCC", "AHB1ENR", r.peek("RCC", "AHB1ENR") | flash, secure_priv);
+  r.write("FLASH", "SEC1BBR1", 1, secure_priv);
+  r.write("RCC", "AHB1ENR", r.peek("RCC", "AHB1ENR") & ~flash, nonsecure_priv);
+  CHECK((r.peek("RCC", "AHB1ENR") & flash) == flash);
+  r.write("FLASH", "SECKEYR", 0x4567'0123, secure_priv);
+  r.write("FLASH", "SECKEYR", 0xcdef'89ab, secure_priv);
+  r.write("FLASH", "SECCR", bit("FLASH", "SECCR", "INV"), secure_priv);
+  REQUIRE(r.peek("FLASH", "SECCR") == bit("FLASH", "SECCR", "INV"));
+  r.write("RCC", "AHB1ENR", r.peek("RCC", "AHB1ENR") & ~flash, nonsecure_priv);
+  CHECK((r.peek("RCC", "AHB1ENR") & flash) == 0);
+}
+
+TEST_CASE("RM0456 11.5.2: RCC SPRIV and NSPRIV make the RCC bits privileged")
+{
+  rig const  r{true};
+  auto const pll1 = bit("RCC", "SECCFGR", "PLL1SEC");
+  r.write("RCC", "SECCFGR", pll1, secure_priv);
+  r.write("RCC", "PRIVCFGR", 0x3, nonsecure_unpriv);
+  CHECK(r.peek("RCC", "PRIVCFGR") == 0);
+  r.write("RCC", "PRIVCFGR", 0x3, nonsecure_priv);
+  CHECK(r.peek("RCC", "PRIVCFGR") == 0x2);
+  r.write("RCC", "PRIVCFGR", 0x3, secure_priv);
+  CHECK(r.peek("RCC", "PRIVCFGR") == 0x3);
+  r.write("RCC", "PLL1CFGR", 0x1, secure_unpriv);
+  CHECK(r.peek("RCC", "PLL1CFGR") == 0);
+  r.write("RCC", "PLL2CFGR", 0x1, nonsecure_unpriv);
+  CHECK(r.peek("RCC", "PLL2CFGR") == 0);
+  r.write("RCC", "SECCFGR", 0, secure_unpriv);
+  CHECK(r.peek("RCC", "SECCFGR") == pll1);
+  CHECK(r.read("RCC", "SECCFGR", nonsecure_unpriv) == pll1);
+  CHECK(r.read("RCC", "PRIVCFGR", nonsecure_unpriv) == 0x3);
+}
+
+TEST_CASE("RM0456 11.8.51, P1: RCC_SECCFGR reads 0 and ignores writes under TZEN=0")
+{
+  rig const r{false};
+  r.write("RCC", "SECCFGR", 0x1fff, nonsecure_priv);
+  CHECK(r.read("RCC", "SECCFGR", nonsecure_priv) == 0);
+  CHECK(r.peek("RCC", "SECCFGR") == 0);
+  r.write("RCC", "PLL1CFGR", 0x1, nonsecure_unpriv);
+  CHECK(r.peek("RCC", "PLL1CFGR") == 0x1);
+}
+
+TEST_CASE("RM0456 10.8 Table 109: PWR_SECCFGR, RCC and GPIO secure the PWR bits")
+{
+  rig const r{true};
+  r.write("PWR", "SECCFGR", bit("PWR", "SECCFGR", "LPMSEC"), nonsecure_priv);
+  CHECK(r.peek("PWR", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == bit("GTZC2_TZIC", "SR2", "PWRF"));
+  r.write("PWR", "CR2", 0x1, nonsecure_priv);
+  CHECK(r.peek("PWR", "CR2") == 0x1);
+  r.write("PWR", "SECCFGR", bit("PWR", "SECCFGR", "LPMSEC"), secure_priv);
+  CHECK(r.read("PWR", "SECCFGR", nonsecure_unpriv) == bit("PWR", "SECCFGR", "LPMSEC"));
+  CHECK(r.read("PWR", "CR2", nonsecure_priv) == 0);
+  r.write("PWR", "CR2", 0, nonsecure_priv);
+  CHECK(r.peek("PWR", "CR2") == 0x1);
+
+  r.write("PWR", "PUCRA", 0x3, nonsecure_priv);
+  CHECK(r.peek("PWR", "PUCRA") == 0);
+  r.write("GPIOA", "SECCFGR", 0xfffe, secure_priv);
+  r.write("PWR", "PUCRA", 0x3, nonsecure_priv);
+  CHECK(r.peek("PWR", "PUCRA") == 0x1);
+
+  auto const vos = 0x3u << 16;
+  r.write("PWR", "VOSR", vos, nonsecure_priv);
+  CHECK((r.peek("PWR", "VOSR") & vos) == vos);
+  r.write("RCC", "SECCFGR", bit("RCC", "SECCFGR", "SYSCLKSEC"), secure_priv);
+  r.write("PWR", "VOSR", 0, nonsecure_priv);
+  CHECK((r.peek("PWR", "VOSR") & vos) == vos);
+  CHECK((r.read("PWR", "VOSR", nonsecure_priv) & vos) == 0);
+
+  r.write("PWR", "PRIVCFGR", 0x1, secure_priv);
+  r.write("PWR", "CR2", 0, secure_unpriv);
+  CHECK(r.peek("PWR", "CR2") == 0x1);
+  r.write("PWR", "CR2", 0, secure_priv);
+  CHECK(r.peek("PWR", "CR2") == 0);
+}
+
+TEST_CASE("RM0456 10.8.1, P1: PWR_SECCFGR is RAZ/WI under TZEN=0")
+{
+  rig const r{false};
+  r.write("PWR", "SECCFGR", 0xf0ff, nonsecure_priv);
+  CHECK(r.read("PWR", "SECCFGR", nonsecure_priv) == 0);
+  CHECK(r.peek("PWR", "SECCFGR") == 0);
+  r.write("PWR", "CR2", 0x1, nonsecure_unpriv);
+  CHECK(r.peek("PWR", "CR2") == 0x1);
+}
+
+TEST_CASE("RM0456 15.2.2 Table 131: SYSCFG Secure registers, events and CFGR1 bits")
+{
+  rig const r{true};
+  r.write("SYSCFG", "SECCFGR", bit("SYSCFG", "SECCFGR", "CLASSBSEC"), nonsecure_priv);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == 0);
+  auto const event = bit("GTZC2_TZIC", "SR2", "SYSCFGF");
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == event);
+  r.write("GTZC2_TZIC", "FCR2", event, secure_priv);
+  r.write("SYSCFG", "CFGR2", 0x1, nonsecure_priv);
+  CHECK(r.peek("SYSCFG", "CFGR2") == 0x1);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+
+  r.write("SYSCFG", "SECCFGR", bit("SYSCFG", "SECCFGR", "CLASSBSEC"), secure_unpriv);
+  CHECK(r.read("SYSCFG", "CFGR2", nonsecure_priv) == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == event);
+  CHECK(r.read("SYSCFG", "CFGR2", secure_unpriv) == 0x1);
+
+  r.write(
+      "SYSCFG", "SECCFGR",
+      bit("SYSCFG", "SECCFGR", "FPUSEC") | bit("SYSCFG", "SECCFGR", "CLASSBSEC"), secure_unpriv);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == bit("SYSCFG", "SECCFGR", "CLASSBSEC"));
+  r.write("SYSCFG", "CSLCKR", 0x1, secure_unpriv);
+  CHECK(r.peek("SYSCFG", "CSLCKR") == 0);
+  r.write("SYSCFG", "CSLCKR", 0x1, secure_priv);
+  CHECK(r.peek("SYSCFG", "CSLCKR") == 0x1);
+  CHECK(r.read("SYSCFG", "CSLCKR", nonsecure_priv) == 0);
+
+  auto const fmp6 = bit("SYSCFG", "CFGR1", "PB6_FMP");
+  auto const fmp7 = bit("SYSCFG", "CFGR1", "PB7_FMP");
+  r.write("GPIOB", "SECCFGR", 0xffff & ~(1u << 7), secure_priv);
+  r.write("SYSCFG", "CFGR1", fmp6 | fmp7, nonsecure_priv);
+  CHECK((r.peek("SYSCFG", "CFGR1") & (fmp6 | fmp7)) == fmp7);
+}
+
+TEST_CASE("Deviation from RM0456 15.3.1: SYSCFG_SECCFGR stays storage under TZEN=0")
+{
+  rig const r{false};
+  CHECK(r.target->model("SYSCFG") == nullptr);
+  r.write("SYSCFG", "SECCFGR", 0xb, nonsecure_priv);
+  CHECK(r.read("SYSCFG", "SECCFGR", nonsecure_priv) == 0xb);
+  r.write("SYSCFG", "CFGR2", 0x1, nonsecure_unpriv);
+  CHECK(r.read("SYSCFG", "CFGR2", nonsecure_unpriv) == 0x1);
+}
+}

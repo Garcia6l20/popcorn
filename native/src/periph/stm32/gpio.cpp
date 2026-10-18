@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "gtzc.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -80,8 +81,18 @@ struct listener_table
  *        signal no peer takes are dropped once the peers exist, so a pin in USART, SPI or LPTIM
  *        alternate function mode costs a write nothing and reaches no ADC trigger of the same
  *        name.
+ *
+ *        TrustZone, RM0456 13.3.18 and Table 128: a Non-secure access reads the fields of a pin
+ *        whose `GPIOx_SECCFGR` bit is set as 0 and cannot write them, in MODER, OTYPER,
+ *        OSPEEDR, PUPDR, IDR, ODR, BSRR, LCKR, AFRL, AFRH, BRR and HSLVR, with no illegal access
+ *        event. `GPIOx_SECCFGR` reads for every transaction and takes Secure writes only.
+ *        Security filters bus access only: the pins drive and sense the same. Its reset is the
+ *        description's, except `GPIOI_SECCFGR` 0x00FF on the STM32U575 and STM32U585, RM0456
+ *        13.4.13, whose port I has 8 pins. Under TZEN=0 `GPIOx_SECCFGR` is RAZ/WI, its storage
+ *        keeps the description's reset. A `GPIOx_SECCFGR` write with the port clock off lands,
+ *        the model has no RCC clock gating.
  */
-class gpio final : public dispatch_model<gpio, gpio_state>, public gpio_port
+class gpio final : public dispatch_model<gpio, gpio_state>, public gpio_port, public trustzone_aware
 {
 public:
   gpio(model_context& ctx, peripheral_desc const& desc);
@@ -99,6 +110,10 @@ public:
       -> subscription override;
   [[nodiscard]] auto signal_level(std::string_view signal) const -> std::optional<bool> override;
   void               load(std::span<std::byte const> in) override;
+  [[nodiscard]] auto secure_function() const -> bool override;
+  [[nodiscard]] auto secure_word() const -> std::uint32_t override;
+  [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) const
+      -> bus_guard;
 
   template <std::size_t Which> void config_written(std::uint32_t old, std::uint32_t now);
   void                              output_written(std::uint32_t old, std::uint32_t now);
@@ -118,22 +133,25 @@ private:
   void               forward();
   auto               sinks() -> std::span<trigger_sink* const>;
 
-  register_file&                            regs_;
-  std::uint8_t                              port_;
-  std::array<field_ref, pins>               mode_{};
-  std::array<field_ref, pins>               type_{};
-  std::array<field_ref, pins>               speed_{};
-  std::array<field_ref, pins>               pull_{};
-  std::array<field_ref, pins>               alternate_{};
-  std::array<field_ref, pins>               input_{};
-  std::array<field_ref, pins>               output_{};
-  std::array<field_ref, pins>               set_{};
-  std::array<field_ref, pins>               clear_{};
-  std::array<field_ref, pins>               brr_{};
-  std::array<field_ref, pins>               lock_{};
-  field_ref                                 lock_key_;
-  std::uint32_t                             reported_{};
-  std::uint32_t                             notifying_{};
+  register_file&                                                         regs_;
+  std::uint8_t                                                           port_;
+  std::array<field_ref, pins>                                            mode_{};
+  std::array<field_ref, pins>                                            type_{};
+  std::array<field_ref, pins>                                            speed_{};
+  std::array<field_ref, pins>                                            pull_{};
+  std::array<field_ref, pins>                                            alternate_{};
+  std::array<field_ref, pins>                                            input_{};
+  std::array<field_ref, pins>                                            output_{};
+  std::array<field_ref, pins>                                            set_{};
+  std::array<field_ref, pins>                                            clear_{};
+  std::array<field_ref, pins>                                            brr_{};
+  std::array<field_ref, pins>                                            lock_{};
+  field_ref                                                              lock_key_;
+  reg_ref                                                                secure_pins_;
+  std::uint32_t                                                          secure_reset_{};
+  std::vector<std::pair<std::uint32_t, std::array<std::uint32_t, pins>>> pin_bits_;
+  std::uint32_t                                                          reported_{};
+  std::uint32_t                                                          notifying_{};
   std::shared_ptr<listener_table>           listeners_ = std::make_shared<listener_table>();
   std::vector<std::string>                  signals_;
   std::vector<std::array<std::uint16_t, 3>> alternates_;
@@ -146,7 +164,7 @@ private:
   bool                                      sinks_resolved_{};
 };
 
-constexpr std::array<write_entry<gpio>, 11> gpio_writes{
+constexpr std::array<write_entry<gpio>, 12> gpio_writes{
     {
      {"GPIO_MODER", &gpio::config_written<0>},
      {"GPIO_OTYPER", &gpio::config_written<1>},
@@ -159,14 +177,43 @@ constexpr std::array<write_entry<gpio>, 11> gpio_writes{
      {"GPIO_AFRL", &gpio::config_written<4>},
      {"GPIO_AFRH", &gpio::config_written<5>},
      {"GPIO_BRR", &gpio::reset_written},
+     {"GPIO_SECCFGR", nullptr},
+     }
+};
+
+constexpr std::array<write_entry<gpio>, 1> gpio_trustzone_writes{
+    {
+     {"GPIO_HSLVR", nullptr},
+     }
+};
+
+struct secure_reset
+{
+  std::string_view part_glob;
+  std::string_view port;
+  std::uint32_t    value{};
+};
+
+constexpr std::array<secure_reset, 2> secure_resets{
+    {
+     {.part_glob = "STM32U575*", .port = "GPIOI", .value = 0x00ff},
+     {.part_glob = "STM32U585*", .port = "GPIOI", .value = 0x00ff},
      }
 };
 
 gpio::gpio(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "GPIO", gpio_writes}, regs_{ctx.regs},
+    : dispatch_model{ctx, desc, "GPIO", gpio_writes, gpio_trustzone_writes}, regs_{ctx.regs},
       port_{static_cast<std::uint8_t>(desc.name.back() - 'A')},
-      lock_key_{field("GPIO_LCKR", "LCKK")}
+      lock_key_{field("GPIO_LCKR", "LCKK")}, secure_pins_{reg("GPIO_SECCFGR")},
+      secure_reset_{describe("GPIO_SECCFGR").reset}
 {
+  for(auto const& entry : secure_resets)
+  {
+    if(entry.port == desc.name and glob_match(entry.part_glob, ctx.part.part))
+    {
+      secure_reset_ = entry.value;
+    }
+  }
   for(std::size_t pin = 0; pin < pins; ++pin)
   {
     auto const n    = std::to_string(pin);
@@ -181,6 +228,25 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
     clear_[pin]     = field("GPIO_BSRR", "BR" + n);
     brr_[pin]       = field("GPIO_BRR", "BR" + n);
     lock_[pin]      = field("GPIO_LCKR", "LCK" + n);
+  }
+  auto const add = [this](field_ref f, std::size_t pin) {
+    auto found = std::ranges::find(pin_bits_, f.offset, &decltype(pin_bits_)::value_type::first);
+    if(found == pin_bits_.end())
+    {
+      pin_bits_.emplace_back(f.offset, std::array<std::uint32_t, pins>{});
+      found = pin_bits_.end() - 1;
+    }
+    found->second[pin] |= f.mask();
+  };
+  for(std::size_t pin = 0; pin < pins; ++pin)
+  {
+    for(auto const* fields :
+        {&mode_, &type_, &speed_, &pull_, &alternate_, &input_, &output_, &set_, &clear_, &brr_,
+         &lock_})
+    {
+      add((*fields)[pin], pin);
+    }
+    add(field("GPIO_HSLVR", "HSLV" + std::to_string(pin)), pin);
   }
   for(auto const& entry : desc.alternates.value_or(std::vector<alternate_desc>{}))
   {
@@ -211,6 +277,10 @@ void gpio::reset(register_file& regs, reset_kind)
   for(auto const& name : claims())
   {
     regs.poke(reg(name).offset, describe(name).reset);
+  }
+  if(ctx_.trustzone)
+  {
+    regs.poke(secure_pins_.offset, secure_reset_);
   }
   state_.lock_step  = 0;
   state_.lock_value = 0;
@@ -628,6 +698,47 @@ void gpio::lock_written(std::uint32_t old, std::uint32_t now)
     state_.lock_value = value;
   }
   regs_.poke(lock_key_.offset, lock_key_.with(now, 0));
+}
+
+auto gpio::secure_word() const -> std::uint32_t
+{
+  return ctx_.trustzone ? regs_.peek(secure_pins_.offset) & ((std::uint32_t{1} << pins) - 1u) : 0;
+}
+
+auto gpio::secure_function() const -> bool
+{
+  return secure_word() != 0;
+}
+
+auto gpio::guard(std::uint32_t word, access_ctx const& ctx, bool) const -> bus_guard
+{
+  if(word == secure_pins_.offset)
+  {
+    if(not ctx_.trustzone)
+    {
+      return bus_guard::both(~std::uint32_t{});
+    }
+    return {.wi = ctx.secure ? 0 : ~std::uint32_t{}};
+  }
+  if(not ctx_.trustzone or ctx.secure)
+  {
+    return {};
+  }
+  auto const secure = secure_word();
+  auto const found  = std::ranges::find(pin_bits_, word, &decltype(pin_bits_)::value_type::first);
+  if(secure == 0 or found == pin_bits_.end())
+  {
+    return {};
+  }
+  std::uint32_t hidden = 0;
+  for(std::size_t pin = 0; pin < pins; ++pin)
+  {
+    if((secure >> pin & 1u) != 0)
+    {
+      hidden |= found->second[pin];
+    }
+  }
+  return bus_guard::both(hidden);
 }
 
 void gpio::drive(std::uint8_t pin, std::optional<bool> level)

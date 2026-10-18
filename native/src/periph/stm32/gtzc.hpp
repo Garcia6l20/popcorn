@@ -2,6 +2,7 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <cstddef>
@@ -200,4 +201,107 @@ struct gtzc_field
  * @param part Description.
  */
 [[nodiscard]] auto gtzc_fields(part_description const& part) -> std::vector<gtzc_field>;
+
+/**
+ * @brief The TZSC that is the machine's bus firewall, as the other models see it, found by
+ *        `dynamic_cast` over the machine's peers: the security of each securable peripheral,
+ *        RM0456 5.4.3. Only built under TrustZone.
+ */
+class peripheral_security
+{
+public:
+  /** @brief Creates the interface. */
+  peripheral_security() = default;
+  /** @brief Not copyable. */
+  peripheral_security(peripheral_security const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(peripheral_security const&) -> peripheral_security& = delete;
+  /** @brief Not movable. */
+  peripheral_security(peripheral_security&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(peripheral_security&&) -> peripheral_security& = delete;
+
+  /**
+   * @brief Whether a securable peripheral is Secure, its `<NAME>SEC` bit in a TZSC SECCFGRx.
+   * @param unit Index of the peripheral in part_description::peripherals.
+   * @return The bit, empty when no TZSC field names the peripheral.
+   */
+  [[nodiscard]] virtual auto peripheral_secure(std::size_t unit) -> std::optional<bool> = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~peripheral_security() = default;
+};
+
+/**
+ * @brief A TrustZone-aware peripheral as the other models see it, found by `dynamic_cast` over
+ *        the machine's peers: whether a security feature of it is enabled through its own
+ *        bits, which makes its RCC clock and reset bits Secure, RM0456 11.5.1.
+ */
+class trustzone_aware
+{
+public:
+  /** @brief Creates the interface. */
+  trustzone_aware() = default;
+  /** @brief Not copyable. */
+  trustzone_aware(trustzone_aware const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(trustzone_aware const&) -> trustzone_aware& = delete;
+  /** @brief Not movable. */
+  trustzone_aware(trustzone_aware&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(trustzone_aware&&) -> trustzone_aware& = delete;
+
+  /** @brief Whether a security feature of the peripheral is enabled. False under TZEN=0. */
+  [[nodiscard]] virtual auto secure_function() const -> bool = 0;
+
+  /** @brief The peripheral's security configuration word as a Secure read sees it, such as
+   * the pins of `GPIOx_SECCFGR`, 0 under TZEN=0. */
+  [[nodiscard]] virtual auto secure_word() const -> std::uint32_t = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~trustzone_aware() = default;
+};
+
+/**
+ * @brief Index of a peripheral of the part by name, aliases excluded.
+ * @param part Description.
+ * @param name Peripheral name, such as `RCC`.
+ * @return The index in part_description::peripherals, empty when the part has none.
+ */
+[[nodiscard]] auto unit_named(part_description const& part, std::string_view name)
+    -> std::optional<std::size_t>;
+
+/**
+ * @brief Security of a peripheral of the part under TrustZone: its TZSC bit when a TZSC field
+ *        names it, else the security feature of its TrustZone-aware model.
+ * @param peers Models of the machine.
+ * @param part Description.
+ * @param unit Index of the peripheral in part_description::peripherals.
+ * @return Whether it is Secure, false when neither knows it or the models are not built yet.
+ */
+[[nodiscard]] auto
+    unit_secure(peer_directory const& peers, part_description const& part, std::size_t unit)
+        -> bool;
+
+/**
+ * @brief Illegal access event of one TrustZone-aware peripheral in its GTZC TZIC, RM0456 5.4.5,
+ *        linked once the machine's models exist.
+ */
+class illegal_event
+{
+public:
+  /**
+   * @brief Sets the peripheral's TZIC flag, when a TZIC has a source for it.
+   * @param peers Models of the machine.
+   * @param unit Index of the peripheral in part_description::peripherals.
+   */
+  void raise(peer_directory const& peers, std::size_t unit);
+
+private:
+  bool                       linked_{};
+  illegal_access_controller* tzic_{};
+  illegal_source             source_{};
+};
 }

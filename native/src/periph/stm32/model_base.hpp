@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -379,6 +380,49 @@ private:
 }
 
 /**
+ * @brief Bits of one register word a transaction cannot reach: a read returns 0 in the RAZ
+ *        bits, a write leaves the WI bits as they were, RM0456 3.5.5 and 3.6.3.
+ */
+struct bus_guard
+{
+  /** @brief Bits a read returns as 0. */
+  std::uint32_t raz{};
+  /** @brief Bits a write does not change. */
+  std::uint32_t wi{};
+
+  /** @brief Both RAZ and WI. */
+  [[nodiscard]] static constexpr auto both(std::uint32_t bits) noexcept -> bus_guard
+  {
+    return {.raz = bits, .wi = bits};
+  }
+
+  /** @brief The union of two guards. */
+  [[nodiscard]] friend constexpr auto operator|(bus_guard a, bus_guard b) noexcept -> bus_guard
+  {
+    return {.raz = a.raz | b.raz, .wi = a.wi | b.wi};
+  }
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(bus_guard, bus_guard) -> bool = default;
+};
+
+/**
+ * @brief Guard of bits whose security and privilege follow one rule.
+ * @param bits Bits of the register word.
+ * @param secure Whether the bits are Secure: a Non-secure transaction cannot reach them.
+ * @param privileged Whether the bits are privileged: an unprivileged transaction cannot reach
+ *        them.
+ * @param ctx Attributes of the transaction.
+ */
+[[nodiscard]] constexpr auto
+    guard_of(std::uint32_t bits, bool secure, bool privileged, access_ctx const& ctx) noexcept
+    -> bus_guard
+{
+  return bus_guard::both(
+      (secure and not ctx.secure) or (privileged and not ctx.privileged) ? bits : 0);
+}
+
+/**
  * @brief Register a model serves through a write handler.
  * @tparam Derived Model class.
  */
@@ -387,14 +431,28 @@ template <typename Derived> struct write_entry
   /** @brief Register name as the description spells it. */
   std::string_view reg;
   /** @brief Called after a guest write stored the register's writable bits, with the word
-   * before and after. */
+   * before and after. Null for a register served as storage. */
   void (Derived::*on_write)(std::uint32_t old, std::uint32_t now);
+};
+
+/**
+ * @brief A model class that guards some of its register bits per transaction: `guard(word,
+ *        ctx, write)` gives the bits of the word at byte offset `word` that the access cannot
+ *        reach, and may raise an illegal access event.
+ */
+template <typename Derived>
+concept guarded_model = requires(Derived& d, std::uint32_t word, access_ctx const& ctx) {
+  { d.guard(word, ctx, true) } -> std::same_as<bus_guard>;
 };
 
 /**
  * @brief Model serving its claimed registers through one write handler each. Reads return the
  *        stored word. A write merges the access into the stored word, keeps the bits the
  *        description marks read-only, stores the result, then calls the register's handler.
+ *        A guarded_model Derived gives per access the bits the transaction cannot reach: a read
+ *        returns them as 0, a write keeps their stored value, or the value that writes nothing
+ *        for a field whose write is an action, such as 0 for a write-1-to-clear flag, so the
+ *        handler sees no write to them.
  * @tparam Derived Model class.
  * @tparam State Serializable state, as for stm32_model.
  */
@@ -411,12 +469,16 @@ public:
     return names;
   }
 
-  auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx)
+  auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override
   {
     auto const word  = offset & ~3u;
     auto const found = std::ranges::find(bound_, word, &bound::offset);
-    auto const mask  = found != bound_.end() ? found->readable : ~std::uint32_t{};
+    auto       mask  = found != bound_.end() ? found->readable : ~std::uint32_t{};
+    if constexpr(guarded_model<Derived>)
+    {
+      mask &= ~static_cast<Derived&>(*this).guard(word, ctx, false).raz;
+    }
     return read_lanes(regs.peek(word) & mask, offset, size);
   }
 
@@ -426,17 +488,28 @@ public:
       std::uint8_t   size,
       std::uint32_t,
       std::uint32_t value,
-      access_ctx) -> std::expected<void, bus_error> override
+      access_ctx    ctx) -> std::expected<void, bus_error> override
   {
     auto const word  = offset & ~3u;
     auto const found = std::ranges::find(bound_, word, &bound::offset);
     if(found != bound_.end())
     {
-      auto const old    = regs.peek(word);
-      auto const merged = merge_write(old, offset, size, value);
-      auto const now    = (merged & found->writable) | (old & ~found->writable);
+      auto const old      = regs.peek(word);
+      auto const merged   = merge_write(old, offset, size, value);
+      auto       writable = found->writable;
+      auto       kept     = old;
+      if constexpr(guarded_model<Derived>)
+      {
+        auto const wi = static_cast<Derived&>(*this).guard(word, ctx, true).wi & writable;
+        writable &= ~wi;
+        kept = (old & ~(wi & found->actions)) | (wi & found->actions & found->idle);
+      }
+      auto const now = (merged & writable) | (kept & ~writable);
       regs.poke(word, now);
-      (static_cast<Derived&>(*this).*found->handler)(old, now);
+      if(found->handler != nullptr)
+      {
+        (static_cast<Derived&>(*this).*found->handler)(old, now);
+      }
     }
     return {};
   }
@@ -448,14 +521,31 @@ protected:
    * @param desc Description of the peripheral.
    * @param model_name Model name for configuration errors.
    * @param table Registers and their write handlers.
-   * @throws config_error when the description lacks a register of @p table.
+   * @param trustzone_table Registers claimed in addition under TrustZone only.
+   * @throws config_error when the description lacks a register of @p table, or under
+   *         TrustZone of @p trustzone_table.
    */
   dispatch_model(
       model_context&                        ctx,
       peripheral_desc const&                desc,
       std::string_view                      model_name,
-      std::span<write_entry<Derived> const> table)
+      std::span<write_entry<Derived> const> table,
+      std::span<write_entry<Derived> const> trustzone_table = {})
       : stm32_model<State>{ctx, desc, model_name}
+  {
+    bind(table);
+    if(ctx.trustzone)
+    {
+      bind(trustzone_table);
+    }
+  }
+
+  /**
+   * @brief Claims the registers of @p table and resolves them by name.
+   * @param table Registers and their write handlers.
+   * @throws config_error when the description lacks a register of @p table.
+   */
+  void bind(std::span<write_entry<Derived> const> table)
   {
     for(auto const& entry : table)
     {
@@ -463,6 +553,8 @@ protected:
       auto const    at        = this->reg(entry.reg);
       std::uint32_t writable  = 0;
       std::uint32_t readable  = 0;
+      std::uint32_t actions   = 0;
+      std::uint32_t idle      = 0;
       auto const    whole = field_ref{.offset = at.offset, .lsb = at.lsb, .width = at.width}.mask();
       if(described.fields.empty())
       {
@@ -490,12 +582,24 @@ protected:
         {
           readable |= bits;
         }
+        if(field.acc == access::write_only or field.on_write != write_effect::modify)
+        {
+          actions |= bits;
+        }
+        if(field.on_write == write_effect::zero_to_clear
+           or field.on_write == write_effect::zero_to_set
+           or field.on_write == write_effect::zero_to_toggle)
+        {
+          idle |= bits;
+        }
       }
       bound_.push_back(
           {.name     = described.name,
            .offset   = at.offset,
            .writable = writable,
            .readable = readable,
+           .actions  = actions,
+           .idle     = idle,
            .handler  = entry.on_write});
     }
   }
@@ -507,6 +611,8 @@ private:
     std::uint32_t    offset{};
     std::uint32_t    writable{};
     std::uint32_t    readable{};
+    std::uint32_t    actions{};
+    std::uint32_t    idle{};
     void (Derived::*handler)(std::uint32_t old, std::uint32_t now);
   };
 

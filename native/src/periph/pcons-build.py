@@ -30,6 +30,7 @@ stm32 = [
         "crc.cpp",
         "hash.cpp",
         "gtzc.cpp",
+        "syscfg.cpp",
     )
 ]
 stm32_entry = here / "stm32" / "plugin.cpp"

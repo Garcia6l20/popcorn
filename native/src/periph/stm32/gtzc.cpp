@@ -91,6 +91,7 @@ auto memory_stem(std::string_view stem) -> bool
       or stem.ends_with("_MEM")
       or (stem.starts_with("SRAM") and all_digits(stem.substr(4)));
 }
+}
 
 auto unit_named(part_description const& part, std::string_view name) -> std::optional<std::size_t>
 {
@@ -104,6 +105,8 @@ auto unit_named(part_description const& part, std::string_view name) -> std::opt
   return static_cast<std::size_t>(found - part.peripherals.begin());
 }
 
+namespace
+{
 auto unit_of_stem(part_description const& part, std::string_view stem) -> std::optional<std::size_t>
 {
   if(auto const renamed = std::ranges::find(renames, stem, &rename::stem); renamed != renames.end())
@@ -433,7 +436,7 @@ struct securable
  *        `SRWILADIS` change drops the verdicts only, and a write that changes nothing does
  *        neither.
  */
-class tzsc final : public gtzc_block, public bus_firewall
+class tzsc final : public gtzc_block, public bus_firewall, public peripheral_security
 {
 public:
   tzsc(model_context& ctx, peripheral_desc const& desc) : gtzc_block{ctx, desc, "GTZC TZSC"}
@@ -661,6 +664,25 @@ public:
       return bus_verdict::read_zero_write_ignore;
     }
     return bus_verdict::allow;
+  }
+
+  [[nodiscard]] auto peripheral_secure(std::size_t unit) -> std::optional<bool> override
+  {
+    if(not resolved_)
+    {
+      resolve();
+    }
+    if(unit >= rules_.size() or not rules_[unit].present)
+    {
+      return std::nullopt;
+    }
+    auto const& rule = rules_[unit];
+    auto const* regs = owners_[rule.owner];
+    if(regs == nullptr)
+    {
+      return std::nullopt;
+    }
+    return rule.sec.of(regs->peek(rule.sec.offset)) != 0;
   }
 
 private:
@@ -1581,6 +1603,48 @@ auto gtzc_fields(part_description const& part) -> std::vector<gtzc_field>
     }
   }
   return out;
+}
+
+auto unit_secure(peer_directory const& peers, part_description const& part, std::size_t unit)
+    -> bool
+{
+  for(auto* const peer : peers.all())
+  {
+    if(auto* const firewall = dynamic_cast<peripheral_security*>(peer))
+    {
+      if(auto const secure = firewall->peripheral_secure(unit))
+      {
+        return *secure;
+      }
+    }
+  }
+  auto const* const owner = peers.find(part.peripherals[unit].name);
+  auto const* const aware = dynamic_cast<trustzone_aware const*>(owner);
+  return aware != nullptr and aware->secure_function();
+}
+
+void illegal_event::raise(peer_directory const& peers, std::size_t unit)
+{
+  if(not linked_ and not peers.all().empty())
+  {
+    linked_ = true;
+    for(auto* const peer : peers.all())
+    {
+      if(auto* const tzic = dynamic_cast<illegal_access_controller*>(peer))
+      {
+        if(auto const source = tzic->source_of(unit))
+        {
+          tzic_   = tzic;
+          source_ = *source;
+          break;
+        }
+      }
+    }
+  }
+  if(tzic_ != nullptr)
+  {
+    tzic_->illegal_access(source_);
+  }
 }
 
 auto gtzc_factory() -> model_factory

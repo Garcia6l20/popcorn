@@ -399,7 +399,8 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *   privileged one, 7.9.32. FLASH_SECHDPCR bits are set-only, cleared by every reset.
  * - A write that changes SECyBBRx, PRIVyBBRx or FLASH_SECHDPCR drops the engine's page verdicts
  *   and ends the engine run after the instruction, a reset or a restore drops them too. SECCR.INV
- *   is stored, the RCC attribute it inverts, Table 62, is not modelled.
+ *   inverts the flash security state of Table 62, Secure when a page is Secure, which the RCC
+ *   FLASHEN and FLASHSMEN bits follow, RM0456 7.5.5.
  * - Option-byte programming is not modelled: OPTSTRT is cleared and logs a model_warning once.
  * - Deviation: RM0456 3.5.5 has an erase act on the pages of its own security only, the model
  *   follows Table 70 and refuses a bank or mass erase over mixed pages whole.
@@ -453,7 +454,8 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
 class flash final : public dispatch_model<flash, flash_state>,
                     public clock_listener,
                     public voltage_range_listener,
-                    public secure_page_controller
+                    public secure_page_controller,
+                    public trustzone_aware
 {
 public:
   flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options);
@@ -485,6 +487,8 @@ public:
   [[nodiscard]] auto page_secure(address at) const -> std::optional<bool> override;
   [[nodiscard]] auto page_rule(address at) const -> std::optional<page_policy> override;
   [[nodiscard]] auto secure_page_size() const -> std::uint32_t override;
+  [[nodiscard]] auto secure_function() const -> bool override;
+  [[nodiscard]] auto secure_word() const -> std::uint32_t override;
 
   void access_written(std::uint32_t old, std::uint32_t now);
   void key_written(std::uint32_t old, std::uint32_t now);
@@ -1162,6 +1166,26 @@ auto flash::block_bit(std::span<std::uint32_t const> words, std::uint32_t at) co
 auto flash::secure_page_size() const -> std::uint32_t
 {
   return page_size;
+}
+
+auto flash::secure_function() const -> bool
+{
+  if(not ctx_.trustzone or storage_ == nullptr)
+  {
+    return false;
+  }
+  auto const [base, size] = banks();
+  auto any                = false;
+  for(std::uint32_t at = base; not any and at - base < 2 * size; at += page_size)
+  {
+    any = rule_of(at).secure;
+  }
+  return any != (get(regs_, field("FLASH_SECCR", "INV")) != 0);
+}
+
+auto flash::secure_word() const -> std::uint32_t
+{
+  return secure_function() ? 1u : 0u;
 }
 
 auto flash::bank_start(std::uint32_t bank) const -> std::uint32_t
