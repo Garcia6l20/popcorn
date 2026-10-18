@@ -78,9 +78,9 @@ struct block_error
  *        during one transfer: the addresses [first, last] of one memory region where the bus
  *        firewall allows every access with the attributes and operation the grant was made for.
  *        The machine fills it on an allowed access and skips the firewall for a later access
- *        inside it, until a memory policy change, a restore or a reset makes it stale. The
- *        holder drops it, `grant = {}`, when its attributes change. Default constructed it
- *        grants nothing.
+ *        whose bytes, address to address plus size, all lie inside it, until a memory policy
+ *        change, a restore or a reset makes it stale. The holder drops it, `grant = {}`, when
+ *        its attributes change. Default constructed it grants nothing.
  */
 struct memory_grant
 {

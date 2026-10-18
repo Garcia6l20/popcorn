@@ -85,9 +85,13 @@ public:
     ++checks;
     return verdict;
   }
-  auto allowed_extent(address at, std::uint8_t, bus_attrs, memory_op)
+  auto allowed_extent(address at, std::uint8_t size, bus_attrs, memory_op)
       -> periph::memory_extent override
   {
+    if(access_only)
+    {
+      return {.first = at, .last = at + size - 1u};
+    }
     auto const first = at & ~(extent - 1u);
     return {.first = first, .last = first + extent - 1u};
   }
@@ -96,6 +100,7 @@ public:
   bool                    filtering{};
   std::size_t             checks{};
   bus_verdict             verdict = bus_verdict::allow;
+  bool                    access_only{};
 };
 
 struct rig
@@ -144,6 +149,18 @@ TEST_CASE("an access inside a grant skips the firewall, one outside it asks agai
   read_through(r, sram + extent, grant);
   CHECK(r.firewall->checks == 2);
   CHECK(grant.first == sram + extent);
+}
+
+TEST_CASE("a grant shorter than the access does not hold it")
+{
+  auto const         r = booted(true);
+  core::memory_grant grant;
+  r.firewall->access_only = true;
+  REQUIRE(services(r).read(sram + 0x10, 1, dma, grant).has_value());
+  REQUIRE(grant.first == grant.last);
+  read_through(r, sram + 0x10, grant);
+  CHECK(r.firewall->checks == 2);
+  CHECK(grant.last == sram + 0x13);
 }
 
 TEST_CASE("memory_policy_changed, a reset and a restore each make the next access ask again")

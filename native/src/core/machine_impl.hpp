@@ -1193,7 +1193,7 @@ struct machine::run_state
   {
     return grant.generation == memory_generation
        and addr >= grant.first
-       and addr - grant.first <= grant.last - grant.first - (size - 1u);
+       and std::uint64_t{addr} + size - 1u <= grant.last;
   }
 
   /**
