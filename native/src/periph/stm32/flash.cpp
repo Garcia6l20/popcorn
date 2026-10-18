@@ -374,7 +374,9 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *   set into a filling buffer being a PGSERR of that set. An erase belongs to the set whose STRT
  *   started it. Errors, EOP and OPERR go to the set of the operation, RM0456 7.3.9, and
  *   FLASH_S_IRQn follows the Secure EOP with EOPIE and OPERR with ERRIE, Table 78. A Secure
- *   access that sets the Non-secure STRT is a Non-secure PGSERR.
+ *   access that sets the Non-secure STRT is a Non-secure PGSERR. An error of one set never ends
+ *   an operation of the other: it sets its flags and leaves the running operation, its buffer
+ *   and BSY alone.
  * - A page is Secure inside the SECWMx area of its bank or with its SECyBBRx bit set, RM0456
  *   7.5.2 and 7.5.4, banks following SWAP_BANK, 7.5.8. It is in the HDP area while HDPxEN is set,
  *   HDPx_ACCDIS is set and it lies from SECWMx_PSTRT to HDPx_PEND, 7.5.3. It is privileged with its
@@ -1279,9 +1281,13 @@ void flash::fail(bool secure, set_role role)
   {
     update(regs_, field_of(secure, set_role::operation_error), 1);
   }
-  state_.filled = 0;
-  set_waiting(false);
-  if(busy())
+  auto const owner = secure == secure_.running_secure;
+  if(not busy() or owner)
+  {
+    state_.filled = 0;
+    set_waiting(false);
+  }
+  if(busy() and owner)
   {
     state_.running = static_cast<std::uint8_t>(operation::none);
     state_.held.clear();

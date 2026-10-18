@@ -899,3 +899,24 @@ TEST_CASE(
   CHECK(r.get("r3") == 50);
 }
 }
+
+TEST_CASE(
+    "a Non-secure sequence error while a Secure page erase is BSY leaves the erase running, "
+    "RM0456 7.3.9 per set, the bus stall of RM0456 7.3.5 not modelled")
+{
+  rig const r{true, four_secure_pages};
+  REQUIRE(r.target->mem().write(flash_ns + 2 * page_bytes, 4, 0));
+  r.unlock(true);
+  r.unlock(false);
+  r.write("SECCR", per | pnb(2) | strt | eopie, secure_priv);
+  REQUIRE((r.peek("SECSR") & bsy) != 0);
+  r.write("NSCR", pg | per, nonsecure_priv);
+  CHECK((r.peek("NSSR") & pgserr) != 0);
+  CHECK((r.peek("SECSR") & bsy) != 0);
+  CHECK((r.peek("SECCR") & strt) != 0);
+  r.settle();
+  CHECK(r.word(flash_ns + 2 * page_bytes) == 0xffff'ffff);
+  CHECK((r.peek("SECSR") & eop) != 0);
+  CHECK((r.peek("SECSR") & bsy) == 0);
+  CHECK(r.pending(flash_s_irq));
+}
