@@ -306,7 +306,7 @@ void machine::restore(core::snapshot const& saved)
     if(slot->model)
     {
       part = named(data.models, slot->desc.name, &snapshot_part::owner);
-      if(part == nullptr)
+      if(part == nullptr and not slot->model->stateless())
       {
         refuse(std::format("models.{}", slot->desc.name), "the bytes of its model");
       }

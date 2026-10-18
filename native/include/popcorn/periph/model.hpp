@@ -213,6 +213,18 @@ public:
    * @param in Bytes of one save() call.
    */
   virtual void load(std::span<std::byte const> in) = 0;
+
+  /**
+   * @brief Whether the model keeps no state beyond its register storage. A snapshot that holds
+   *        no bytes for such a model, saved by a machine that had no model for its peripheral,
+   *        restores it from the register storage alone, and load() is not called. A snapshot
+   *        missing the bytes of any other model is refused.
+   * @return False by default.
+   */
+  [[nodiscard]] virtual auto stateless() const -> bool
+  {
+    return false;
+  }
 };
 
 /**
