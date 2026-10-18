@@ -371,6 +371,32 @@ TEST_CASE("a claimed cross rule source needs a write handler, which applies the 
   CHECK(crosses[0].effect == popcorn::cross_effect::clear);
 }
 
+TEST_CASE("a claimed register with a non-modify write effect needs a write handler")
+{
+  bench b;
+  auto& registers = b.part.peripherals.front().registers;
+  auto  found =
+      std::ranges::find(registers, std::string_view{"RCC_WO"}, &popcorn::register_desc::name);
+  REQUIRE(found != registers.end());
+  REQUIRE_FALSE(found->fields.empty());
+  found->fields.front().on_write = popcorn::write_effect::one_to_clear;
+  std::array<stm32::write_entry<table_probe>, 1> const bare{{{"RCC_WO", nullptr}}};
+  try
+  {
+    table_probe const refused{b.ctx, b.rcc, bare};
+    FAIL("no config_error");
+  }
+  catch(popcorn::config_error const& e)
+  {
+    CHECK(
+        e.key()
+        == std::format(
+            "peripherals.RCC.registers.RCC_WO.fields.{}.on_write", found->fields.front().name));
+  }
+  std::array<stm32::write_entry<table_probe>, 1> const served{{{"RCC_WO", &table_probe::written}}};
+  CHECK_NOTHROW(table_probe{b.ctx, b.rcc, served});
+}
+
 TEST_CASE("an IRQ resolves by its description name, a missing one is a config error")
 {
   bench                           b;

@@ -597,8 +597,9 @@ protected:
    * @brief Claims the registers of @p table and resolves them by name.
    * @param table Registers and their write handlers.
    * @throws config_error when the description lacks a register of @p table, or when an entry
-   *         with no handler claims the source register of a description cross rule, which the
-   *         claim would silently drop.
+   *         with no handler claims the source register of a description cross rule or a
+   *         register with a field whose write effect is not `modify`, which the claim would
+   *         silently drop: a claimed word stores the written bits as they are.
    */
   void bind(std::span<write_entry<Derived> const> table)
   {
@@ -618,6 +619,20 @@ protected:
                 std::format(
                     "a write handler for {}, a cross rule source the model claims",
                     described.name));
+          }
+        }
+        for(auto const& field : described.fields)
+        {
+          if(field.on_write != write_effect::modify)
+          {
+            throw config_error(
+                this->ctx_.part.part, 0,
+                std::format(
+                    "peripherals.{}.registers.{}.fields.{}.on_write", this->desc_.name,
+                    described.name, field.name),
+                std::format(
+                    "a write handler for {}, whose field {} has the {} write effect",
+                    described.name, field.name, field.on_write));
           }
         }
       }
