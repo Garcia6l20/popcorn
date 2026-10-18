@@ -1359,7 +1359,7 @@ class Refs:
         registers: RegisterBank[Any],
         peripherals: Peripherals,
         scalars: Callable[[str], Callable[[], int]],
-        variable: Callable[[str], Var],
+        variable: Callable[[str, str | None], Var],
     ) -> None:
         """Build the tree. `Machine.ref` does."""
         self._owner = owner
@@ -1391,10 +1391,11 @@ class Refs:
         """Events waiting in the event queue. Read-only."""
         return self._pending
 
-    def var(self, name: str) -> VarRef[Any]:
-        """A module-scope variable, typed from DWARF.
+    def var(self, name: str, image: str | None = None) -> VarRef[Any]:
+        """A module-scope variable, typed from DWARF, looked up as `Machine.var` does: the last
+        loaded image first, or the image named `image` alone.
 
         Raises:
-            SymbolError: No loaded image declares the variable.
+            SymbolError: No loaded image declares the variable, or no image is named `image`.
         """
-        return VarRef(self._owner, self._variable(name))
+        return VarRef(self._owner, self._variable(name, image))

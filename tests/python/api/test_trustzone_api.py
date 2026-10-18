@@ -616,6 +616,9 @@ def test_the_pair_boots_secure_and_calls_back_through_its_veneer(
     assert stop.reason == popcorn.StopReason.ADDRESS
     assert m.security_state == "nonsecure"
     assert m.var("tz_pair_result", image="nonsecure").value == 42
+    assert asyncio.run(m.read(m.ref.var("tz_pair_result", image="nonsecure")))[0] == 42
+    with pytest.raises(popcorn.SymbolError):
+        m.ref.var("tz_pair_result", image="secure")
     frames = stop_report(m, stop, ring=False).frames
     assert [(f.location.symbol, f.via) for f in frames] == [
         ("tz_pair_done", Via.PC),

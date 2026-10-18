@@ -1605,7 +1605,7 @@ class Machine:
         loaded first, or of the image named `image` alone.
 
         Its reads and writes follow `mem`: parked or from a callback, and through
-        `m.ref.var(name)` while the machine is busy.
+        `m.ref.var(name, image)` while the machine is busy.
 
         Raises:
             SymbolError: No loaded image declares the variable, with close matches, or no
