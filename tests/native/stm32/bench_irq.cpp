@@ -115,6 +115,13 @@ struct store_loop
   std::optional<popcorn::address> hop{};
 };
 
+struct dma_copy
+{
+  popcorn::address source{};
+  popcorn::address destination{};
+  std::uint32_t    bytes{};
+};
+
 struct row
 {
   std::string               name;
@@ -124,6 +131,7 @@ struct row
   std::int64_t              divisor = 1;
   bool                      trustzone{};
   std::optional<store_loop> loop{};
+  std::optional<dma_copy>   dma{};
 };
 
 constexpr std::array<std::uint16_t, 3> store_loop_code{0x6001, 0x3101, 0xe7fc};
@@ -183,6 +191,9 @@ auto rows() -> std::vector<row>
     }
   }
   out.push_back({.name = "uart_tx", .entry = "uart_tx"});
+  auto const dma = dma_copy{.source = 0x2000'3000, .destination = 0x2000'3100, .bytes = 256};
+  out.push_back({.name = "dma_copy", .entry = "irq_rate", .dma = dma});
+  out.push_back({.name = "dma_copy/tz", .entry = "irq_rate", .trustzone = true, .dma = dma});
   out.push_back({.name = "poll/100k", .entry = "irq_unmask", .rate = 100'000u});
   out.push_back(
       {.name = "poll/100k/tz", .entry = "irq_unmask", .rate = 100'000u, .trustzone = true});
@@ -301,6 +312,10 @@ struct lone
     {
       target->regs().write(*target->regs().find("pc"), symbol(r.entry));
     }
+    if(r.dma)
+    {
+      start_copy(*r.dma, r.trustzone);
+    }
     origin = target->virtual_clock().time().ps;
   }
 
@@ -310,6 +325,27 @@ struct lone
     {
       throw std::runtime_error{std::format("the bench cannot write {:#010x}", at)};
     }
+  }
+
+  void start_copy(dma_copy const& how, bool trustzone) const
+  {
+    auto const at = [](std::string_view name) { return register_address("GPDMA1", name); };
+    if(trustzone)
+    {
+      write(at("SECCFGR"), 1);
+      write(at("PRIVCFGR"), 1);
+    }
+    auto const word_size          = 2u;
+    auto const secure_source      = trustzone ? 1u << 15 : 0u;
+    auto const secure_destination = trustzone ? 1u << 31 : 0u;
+    write(at("C0TR1"), word_size | word_size << 16 | secure_source | secure_destination);
+    write(at("C0TR2"), 1u << 9);
+    write(at("C0BR1"), how.bytes);
+    write(at("C0SAR"), how.source);
+    write(at("C0DAR"), how.destination);
+    write(at("C0LBAR"), how.source & 0xffff'0000u);
+    write(at("C0LLR"), how.source & 0xfffcu);
+    write(at("C0CR"), 1);
   }
 
   void enter_loop(store_loop const& how, bool trustzone) const
