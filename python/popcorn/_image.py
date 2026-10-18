@@ -100,9 +100,10 @@ class Image:
             load: False for a symbols-only image: a machine never writes its segments to
                 memory and its snapshots hold no digest of it, while its symbols and DWARF
                 feed `sym`, `fn_ptr`, `var`, `image`, the unwinder, coverage and trace as a
-                loaded image's do, after every loaded image. For a part embedded as raw bytes
-                in another image, such as a
-                secure binary placed by `.incbin` in the Non-secure ELF.
+                loaded image's do. A symbol clash goes by image order, as between loaded
+                images. Coverage and trace list it after every loaded image. For a part
+                embedded as raw bytes in another image, such as a secure binary placed by
+                `.incbin` in the Non-secure ELF.
         """
         return cls(_core.load_elf(os.fspath(path)), Path(path), elf=True, name=name, loaded=load)
 
