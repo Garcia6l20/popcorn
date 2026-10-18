@@ -45,42 +45,43 @@ constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privile
 constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
 constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
 
-constexpr address       flash_ns     = 0x0800'0000;
-constexpr address       flash_s      = 0x0c00'0000;
-constexpr address       page_bytes   = 0x2000;
-constexpr address       idle_at      = 0x2000'2000;
-constexpr address       code_at      = 0x2000'2100;
-constexpr address       vectors_at   = 0x2000'3000;
-constexpr address       handler_at   = 0x2000'3100;
-constexpr address       stack_top    = 0x2000'3800;
-constexpr address       vtor         = 0xe000'ed08;
-constexpr address       hfsr         = 0xe000'ed2c;
-constexpr address       cfsr         = 0xe000'ed28;
-constexpr address       sau_ctrl     = 0xe000'edd0;
-constexpr address       sau_rnr      = 0xe000'edd8;
-constexpr address       sau_rbar     = 0xe000'eddc;
-constexpr address       sau_rlar     = 0xe000'ede0;
-constexpr std::uint32_t sau_enable   = 1;
-constexpr std::uint32_t sau_allns    = 2;
-constexpr std::uint32_t key1         = 0x4567'0123;
-constexpr std::uint32_t key2         = 0xcdef'89ab;
-constexpr std::uint32_t pg           = 1u << 0;
-constexpr std::uint32_t per          = 1u << 1;
-constexpr std::uint32_t mer1         = 1u << 2;
-constexpr std::uint32_t strt         = 1u << 16;
-constexpr std::uint32_t optstrt      = 1u << 17;
-constexpr std::uint32_t eopie        = 1u << 24;
-constexpr std::uint32_t inv          = 1u << 29;
-constexpr std::uint32_t eop          = 1u << 0;
-constexpr std::uint32_t wrperr       = 1u << 4;
-constexpr std::uint32_t pgserr       = 1u << 7;
-constexpr std::uint32_t bsy          = 1u << 16;
-constexpr std::uint32_t flash_irq    = 6;
-constexpr std::uint32_t flash_s_irq  = 7;
-constexpr std::uint32_t cfsr_ibuserr = 1u << 8;
-constexpr std::uint32_t hfsr_forced  = 1u << 30;
-constexpr std::uint16_t bkpt         = 0xbe01;
-constexpr std::uint16_t ldr_r2_r0    = 0x6802;
+constexpr address       flash_ns       = 0x0800'0000;
+constexpr address       flash_s        = 0x0c00'0000;
+constexpr address       page_bytes     = 0x2000;
+constexpr address       idle_at        = 0x2000'2000;
+constexpr address       code_at        = 0x2000'2100;
+constexpr address       vectors_at     = 0x2000'3000;
+constexpr address       handler_at     = 0x2000'3100;
+constexpr address       stack_top      = 0x2000'3800;
+constexpr address       vtor           = 0xe000'ed08;
+constexpr address       hfsr           = 0xe000'ed2c;
+constexpr address       cfsr           = 0xe000'ed28;
+constexpr address       sau_ctrl       = 0xe000'edd0;
+constexpr address       sau_rnr        = 0xe000'edd8;
+constexpr address       sau_rbar       = 0xe000'eddc;
+constexpr address       sau_rlar       = 0xe000'ede0;
+constexpr std::uint32_t sau_enable     = 1;
+constexpr address       nonsecure_cfsr = 0xe002'ed28;
+constexpr std::uint32_t sau_allns      = 2;
+constexpr std::uint32_t key1           = 0x4567'0123;
+constexpr std::uint32_t key2           = 0xcdef'89ab;
+constexpr std::uint32_t pg             = 1u << 0;
+constexpr std::uint32_t per            = 1u << 1;
+constexpr std::uint32_t mer1           = 1u << 2;
+constexpr std::uint32_t strt           = 1u << 16;
+constexpr std::uint32_t optstrt        = 1u << 17;
+constexpr std::uint32_t eopie          = 1u << 24;
+constexpr std::uint32_t inv            = 1u << 29;
+constexpr std::uint32_t eop            = 1u << 0;
+constexpr std::uint32_t wrperr         = 1u << 4;
+constexpr std::uint32_t pgserr         = 1u << 7;
+constexpr std::uint32_t bsy            = 1u << 16;
+constexpr std::uint32_t flash_irq      = 6;
+constexpr std::uint32_t flash_s_irq    = 7;
+constexpr std::uint32_t cfsr_ibuserr   = 1u << 8;
+constexpr std::uint32_t hfsr_forced    = 1u << 30;
+constexpr std::uint16_t bkpt           = 0xbe01;
+constexpr std::uint16_t ldr_r2_r0      = 0x6802;
 
 auto pnb(std::uint32_t page) -> std::uint32_t
 {
@@ -797,6 +798,15 @@ constexpr stm32::option_bytes hidden_pages{
     .hdp1   = stm32::page_range{.first = 0, .last = 1}
 };
 
+auto secure_vectors(rig const& r) -> void
+{
+  r.put(handler_at, {bkpt});
+  REQUIRE(r.target->mem().write(vectors_at, 4, stack_top));
+  REQUIRE(r.target->mem().write(vectors_at + 4 * 3, 4, handler_at | 1u));
+  REQUIRE(r.target->mem().write(vtor, 4, vectors_at));
+  r.set("msp", stack_top);
+}
+
 auto load_from(rig const& r, address at, bool nonsecure, bool unprivileged) -> std::uint64_t
 {
   if(nonsecure)
@@ -820,7 +830,7 @@ TEST_CASE(
     "RM0456 7.5.3 and Table 68: with HDP1_ACCDIS set the HDP area reads 0 to a Secure load "
     "with no event and to a Non-secure one with FLASHF, a Secure fetch is a bus fault")
 {
-  rig const r{true, hidden_pages};
+  rig const r{true, hidden_pages, popcorn::arch::fault_policy::enter_handler};
   REQUIRE(r.target->mem().write(flash_ns + page_bytes + 0x40, 4, 0x4444'4444));
   REQUIRE(r.target->mem().write(flash_ns + 2 * page_bytes, 4, 0x2222'2222));
   r.put(flash_ns + page_bytes, {bkpt});
@@ -832,12 +842,16 @@ TEST_CASE(
   CHECK(load_from(r, flash_ns + page_bytes + 0x40, true, false) == 0);
   CHECK(r.tzic("FLASHF"));
   r.clear_events();
+  secure_vectors(r);
   r.set("pc", (flash_s + page_bytes) | 1u);
-  auto const fetched = r.target->run_slice({.max_instructions = icount{2}});
+  auto const fetched = r.target->run_slice({.max_instructions = icount{4}});
   REQUIRE(fetched.stopped.has_value());
-  REQUIRE(fetched.stopped->reason == popcorn::stop_reason::fault);
-  CHECK(fetched.stopped->fault->kind == popcorn::fault_kind::bus);
-  CHECK((fetched.stopped->fault->status & cfsr_ibuserr) != 0);
+  CHECK(fetched.stopped->reason == popcorn::stop_reason::user);
+  CHECK(r.get("pc") == handler_at + 2);
+  CHECK((r.get("xpsr") & 0x1ff) == 3);
+  CHECK((r.word(hfsr) & hfsr_forced) != 0);
+  CHECK((r.word(cfsr) & cfsr_ibuserr) != 0);
+  CHECK(r.word(static_cast<address>(r.get("msp")) + 24) == flash_s + page_bytes);
   r.target->reset(popcorn::reset_kind::software);
   REQUIRE(r.target->mem().write(idle_at, 2, 0xe7fe));
   CHECK(load_from(r, flash_s + page_bytes + 0x40, false, false) == 0x4444'4444);
@@ -848,7 +862,7 @@ TEST_CASE(
     "data to a privileged one, an unprivileged fetch is a bus fault, popcorn's deviation from the "
     "zeros of Table 73")
 {
-  rig const         r{true, four_secure_pages};
+  rig const         r{true, four_secure_pages, popcorn::arch::fault_policy::enter_handler};
   constexpr address page6 = flash_ns + 6 * page_bytes;
   REQUIRE(r.target->mem().write(page6 + 0x20, 4, 0x6666'6666));
   CHECK(load_from(r, page6 + 0x20, true, true) == 0x6666'6666);
@@ -864,11 +878,30 @@ TEST_CASE(
   auto const control = r.target->run_slice({.max_instructions = icount{2}});
   REQUIRE(control.stopped.has_value());
   CHECK(control.stopped->reason == popcorn::stop_reason::user);
+  secure_vectors(r);
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, 0));
+  r.sau_region(0, page6, page6 + 2 * page_bytes - 0x20);
+  r.sau_region(1, code_at & ~0x1ffu, (code_at & ~0x1ffu) + 0x1e0);
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, sau_enable));
+  std::uint32_t stack = (code_at & ~0x1ffu) + 0x1f0;
+  REQUIRE(
+      uc_reg_write(core::machine_internals::engine(*r.target), UC_ARM_REG_MSP_NS, &stack)
+      == UC_ERR_OK);
   r.set("pc", page6 | 1u);
-  auto const fetched = r.target->run_slice({.max_instructions = icount{2}});
+  auto const fetched = r.target->run_slice({.max_instructions = icount{4}});
   REQUIRE(fetched.stopped.has_value());
-  REQUIRE(fetched.stopped->reason == popcorn::stop_reason::fault);
-  CHECK(fetched.stopped->fault->kind == popcorn::fault_kind::bus);
+  CHECK(fetched.stopped->reason == popcorn::stop_reason::user);
+  CHECK(r.get("pc") == handler_at + 2);
+  CHECK((r.get("xpsr") & 0x1ff) == 3);
+  CHECK((r.word(hfsr) & hfsr_forced) != 0);
+  CHECK((r.word(cfsr) & cfsr_ibuserr) != 0);
+  CHECK((r.word(nonsecure_cfsr) & cfsr_ibuserr) == 0);
+  std::uint32_t framed = 0;
+  REQUIRE(
+      uc_reg_read(core::machine_internals::engine(*r.target), UC_ARM_REG_MSP_NS, &framed)
+      == UC_ERR_OK);
+  CHECK(framed == stack - 32);
+  CHECK(r.word(framed + 24) == page6);
 }
 
 TEST_CASE(
