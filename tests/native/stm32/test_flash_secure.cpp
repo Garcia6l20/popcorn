@@ -990,3 +990,27 @@ TEST_CASE("a TrustZone machine whose FLASH has no option bytes is refused at con
   options.trustzone = false;
   CHECK_NOTHROW(core::machine{u575(), popcorn::arch::armv8m::factory(), options});
 }
+
+TEST_CASE("a PRIVBB write drops the cached data verdict of its page, RM0456 7.5.6 and Table 76")
+{
+  rig const         r{true, four_secure_pages};
+  constexpr address page6 = flash_ns + 6 * page_bytes;
+  REQUIRE(r.target->mem().write(page6 + 0x20, 4, 0x6666'6666));
+  nonsecure_code(r);
+  r.set("control", 1);
+  r.put(code_at, {ldr_r2_r0, bkpt});
+  auto const load = [&r] {
+    r.set("r0", page6 + 0x20);
+    r.set("r2", 0xdead'beef);
+    r.set("pc", code_at | 1u);
+    auto const result = r.target->run_slice({.max_instructions = icount{2}});
+    REQUIRE(result.stopped.has_value());
+    REQUIRE(result.stopped->reason == popcorn::stop_reason::user);
+    return r.get("r2");
+  };
+  CHECK(load() == 0x6666'6666);
+  r.write("PRIV1BBR1", 1u << 6, secure_priv);
+  CHECK(load() == 0);
+  r.write("PRIV1BBR1", 0, secure_priv);
+  CHECK(load() == 0x6666'6666);
+}
