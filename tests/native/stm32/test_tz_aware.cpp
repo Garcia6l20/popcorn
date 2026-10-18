@@ -894,3 +894,71 @@ TEST_CASE("RM0456 17.8.7: a Non-secure channel's linked-list load cannot set SSE
   CHECK(words_at(r, reused, 4) == std::vector<std::uint32_t>(4, 0));
   CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
 }
+
+TEST_CASE("RM0456 23.5.1: a Secure line's EXTICRm byte is RAZ/WI to Non-secure accesses")
+{
+  rig const r{true};
+  r.write("EXTI", "SECCFGR1", 1u << 5, secure_priv);
+  r.write("EXTI", "EXTICR2", 0x0202, secure_priv);
+  REQUIRE(r.peek("EXTI", "EXTICR2") == 0x0202);
+  CHECK(r.read("EXTI", "EXTICR2", nonsecure_priv) == 0x0002);
+  CHECK(r.read("EXTI", "EXTICR2", secure_priv) == 0x0202);
+  r.write("EXTI", "EXTICR2", 0x0101, nonsecure_priv);
+  CHECK(r.peek("EXTI", "EXTICR2") == 0x0201);
+  r.write("EXTI", "EXTICR3", 0x0303, nonsecure_priv);
+  CHECK(r.peek("EXTI", "EXTICR3") == 0x0303);
+}
+
+TEST_CASE(
+    "RM0456 13.3.18 Table 128: a Secure pin's IDR, LCKR and HSLVR bits are RAZ/WI to Non-secure")
+{
+  rig const r{true};
+  r.write("GPIOA", "SECCFGR", 0xffff & ~(1u << 5), secure_priv);
+  r.write("GPIOA", "MODER", r.peek("GPIOA", "MODER") & ~(0xfu << 8), secure_priv);
+  r.port("GPIOA").drive(4, true);
+  r.port("GPIOA").drive(5, true);
+  REQUIRE((r.peek("GPIOA", "IDR") & 0x30u) == 0x30u);
+  CHECK((r.read("GPIOA", "IDR", nonsecure_priv) & 0x30u) == 0x20u);
+  CHECK((r.read("GPIOA", "IDR", secure_priv) & 0x30u) == 0x30u);
+
+  r.write("GPIOA", "LCKR", 1u << 4 | 1u << 5, nonsecure_priv);
+  CHECK(r.peek("GPIOA", "LCKR") == 1u << 5);
+  r.write("GPIOA", "LCKR", 1u << 4 | 1u << 5, secure_priv);
+  CHECK(r.read("GPIOA", "LCKR", nonsecure_priv) == 1u << 5);
+
+  r.write("GPIOA", "HSLVR", 1u << 4 | 1u << 5, nonsecure_priv);
+  CHECK(r.peek("GPIOA", "HSLVR") == 1u << 5);
+  r.write("GPIOA", "HSLVR", 1u << 4 | 1u << 5, secure_priv);
+  CHECK(r.peek("GPIOA", "HSLVR") == (1u << 4 | 1u << 5));
+  CHECK(r.read("GPIOA", "HSLVR", nonsecure_priv) == 1u << 5);
+}
+
+TEST_CASE("RM0456 17.4.15: GPDMA_MISR hides a privileged channel from an unprivileged read")
+{
+  rig const r{true};
+  open_destination_block(r);
+  fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
+  copy(r, sram1_nonsecure_block, sram1_nonsecure_block + 0x100);
+  REQUIRE(r.peek("GPDMA1", "PRIVCFGR") == 1);
+  REQUIRE(r.peek("GPDMA1", "MISR") == 1);
+  CHECK(r.read("GPDMA1", "MISR", nonsecure_priv) == 1);
+  CHECK(r.read("GPDMA1", "MISR", nonsecure_unpriv) == 0);
+  r.write("GPDMA1", "PRIVCFGR", 0, secure_priv);
+  CHECK(r.read("GPDMA1", "MISR", nonsecure_unpriv) == 1);
+}
+
+TEST_CASE("RM0456 10.8 Table 109: PWR_UCPDR is RAZ/WI to Non-secure while the TZSC secures UCPD1")
+{
+  rig const  r{true};
+  auto const ucpd = bit("PWR", "UCPDR", "UCPD_DBDIS");
+  r.write("PWR", "UCPDR", ucpd, nonsecure_priv);
+  REQUIRE(r.peek("PWR", "UCPDR") == ucpd);
+  r.write("PWR", "UCPDR", 0, nonsecure_priv);
+  r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "UCPD1SEC"), secure_priv);
+  r.write("PWR", "UCPDR", ucpd, nonsecure_priv);
+  CHECK(r.peek("PWR", "UCPDR") == 0);
+  r.write("PWR", "UCPDR", ucpd, secure_priv);
+  CHECK(r.peek("PWR", "UCPDR") == ucpd);
+  CHECK(r.read("PWR", "UCPDR", nonsecure_priv) == 0);
+  CHECK(r.read("PWR", "UCPDR", secure_priv) == ucpd);
+}
