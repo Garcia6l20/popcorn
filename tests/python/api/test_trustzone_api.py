@@ -166,6 +166,7 @@ FLASH_NS = 0x0800_0000
 FLASH_S = 0x0C00_0000
 PAGE = 0x2000
 MPCBB1_SECCFGR0 = 0x5003_2D00
+MPCBB3_SECCFGR31 = 0x5003_357C
 TZSC_SECCFGR2 = 0x5003_2414
 TZSC_MPCWM4ACFGR = 0x5003_2470
 TZSC_MPCWM4AR = 0x5003_2474
@@ -247,6 +248,12 @@ def test_a_non_secure_request_to_a_secure_address_is_a_debug_error(
     with pytest.raises(popcorn.EmulationError, match="denied"):
         m.mem.nonsecure.u32[SRAM_S + 0x100] = 0
     assert m.mem.u32[SRAM_S + 0x100] == SECRET
+    edge = SRAM_NS + 0x000B_FFF8
+    m.mem.u32[MPCBB3_SECCFGR31] &= ~(1 << 31)
+    m.mem.write(edge, bytes(8))
+    with pytest.raises(popcorn.BusAccessError, match="0x200c0000: denied"):
+        m.mem.nonsecure.write(edge, b"\x11" * 16)
+    assert m.mem.read(edge, 8) == b"\x11" * 8
 
 
 def test_a_non_secure_view_write_to_a_secure_block_is_dropped(

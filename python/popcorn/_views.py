@@ -171,7 +171,12 @@ class Memory:
         return self._access.handle.read_memory(address, size, self._space)
 
     def write(self, address: int, data: bytes) -> None:
-        """Write `data` at `address`."""
+        """Write `data` at `address`.
+
+        Through `secure` or `nonsecure` the bytes go out one access at a time, as a debug
+        access port does: when an access raises BusAccessError, the bytes before it are
+        written and the rest are not.
+        """
         self._access.handle.write_memory(address, data, self._space)
 
     def write_masked(self, address: int, mask: bytes, data: bytes) -> None:
