@@ -112,9 +112,9 @@ async def test_a_nonsecure_read_of_the_secure_sram1_block_reads_zero_and_raises_
 async def test_a_nonsecure_read_of_the_secure_sram1_alias_takes_securefault_auviol(
     trustzone: Machine,
 ) -> None:
-    """DDI0553B.z B10.2: 0x30000000 is Secure in the IDAU and in no SAU region, so the
-    Non-secure load raises SecureFault AUVIOL with SFAR, taken by the secure handler since
-    SHCSR_S.SECUREFAULTENA is set, with no escalation."""
+    """DDI0553B.z B10.2: 0x30000000 is NSC in the IDAU, RM0456 2.2 Table 3, and in no SAU
+    region, so it is Secure. The Non-secure load raises SecureFault AUVIOL with SFAR, taken by
+    the secure handler since SHCSR_S.SECUREFAULTENA is set, with no escalation."""
     await run_case(trustzone, "NS_CASE_SECURE_ALIAS", until="secure_fault_spin", image="secure")
     assert (trustzone.security_state, ipsr(trustzone)) == ("secure", 7)
     assert secure(trustzone, "secure_fault_sfsr") == SFSR_AUVIOL | SFSR_SFARVALID
