@@ -1818,7 +1818,7 @@ def test_a_late_command_failure_is_reported_without_the_gil_on_the_machine_threa
     assert reported == [
         (
             "a command its awaiter cancelled failed later",
-            popcorn.EmulationError,
+            popcorn.BusAccessError,
             ["reading the probe"],
         )
     ]

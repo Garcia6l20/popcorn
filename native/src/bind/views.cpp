@@ -41,7 +41,7 @@ void require_in_space(address at, std::size_t size)
       std::format(
           "bus error at {:#010x}: {}", failed.at,
           failed.error == bus_error::unmapped ? "unmapped" : "denied"),
-      failed.at);
+      failed.at, failed.error == bus_error::denied);
 }
 
 auto register_at(core::machine& target, std::uint32_t index) -> arch::cpu_register

@@ -6,8 +6,8 @@
 
 namespace popcorn::bind::detail
 {
-/** @brief A guest memory access the bus refused, raised by the views as EmulationError with the
- *        failing address. */
+/** @brief A guest memory access the bus refused, raised by the views as BusAccessError with the
+ *        failing address and whether the bus denied it. */
 class bus_access_error : public emulation_error
 {
 public:
@@ -15,8 +15,10 @@ public:
    * @brief Builds the error.
    * @param message Text of the error.
    * @param at First address of the refused access.
+   * @param denied Whether the bus denied the access, false when nothing is mapped there.
    */
-  bus_access_error(std::string const& message, address at) : emulation_error{message}, at_{at}
+  bus_access_error(std::string const& message, address at, bool denied)
+      : emulation_error{message}, at_{at}, denied_{denied}
   {}
 
   /** @brief First address of the refused access. */
@@ -25,8 +27,15 @@ public:
     return at_;
   }
 
+  /** @brief Whether the bus denied the access, false when nothing is mapped there. */
+  [[nodiscard]] auto denied() const noexcept -> bool
+  {
+    return denied_;
+  }
+
 private:
   address at_;
+  bool    denied_;
 };
 
 /**

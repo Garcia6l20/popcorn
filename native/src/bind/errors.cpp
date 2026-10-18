@@ -129,7 +129,7 @@ void translate(std::exception_ptr const& thrown)
   }
   catch(bus_access_error const& e)
   {
-    raise("EmulationError", e, nb::arg("address") = e.at());
+    raise("BusAccessError", e, nb::arg("address") = e.at(), nb::arg("denied") = e.denied());
   }
   catch(emulation_error const& e)
   {

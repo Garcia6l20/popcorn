@@ -12,6 +12,7 @@ from popcorn._dwarf_views import Var
 from popcorn._enums import FaultKind, FloatAbi, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
     BudgetExceeded,
+    BusAccessError,
     ConfigError,
     EmulationError,
     FaultError,
@@ -93,6 +94,7 @@ __all__ = [
     "Bin",
     "Boot",
     "BudgetExceeded",
+    "BusAccessError",
     "Call",
     "CallResult",
     "Condition",

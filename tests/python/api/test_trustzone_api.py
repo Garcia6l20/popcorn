@@ -235,8 +235,13 @@ def test_a_non_secure_request_to_a_secure_address_is_a_debug_error(
     m = open_machine(u575)
     m.mem.u32[SRAM_S + 0x100] = SECRET
     for at in (SRAM_S + 0x100, FLASH_S + 5 * PAGE, 0x9000_0000):
-        with pytest.raises(popcorn.EmulationError, match=f"bus error at {at:#010x}: denied"):
+        with pytest.raises(popcorn.BusAccessError, match=f"bus error at {at:#010x}: denied") as e:
             _ = m.mem.nonsecure.u32[at]
+        assert (e.value.address, e.value.denied) == (at, True)
+        assert isinstance(e.value, popcorn.EmulationError)
+    with pytest.raises(popcorn.BusAccessError, match="unmapped") as unmapped:
+        _ = m.mem.u32[0x9000_0000]
+    assert (unmapped.value.address, unmapped.value.denied) == (0x9000_0000, False)
     with pytest.raises(popcorn.EmulationError, match="0x200c0000: denied"):
         m.mem.nonsecure.read(SRAM_NS + 0x000B_FFF0, 0x20)
     with pytest.raises(popcorn.EmulationError, match="denied"):

@@ -200,8 +200,10 @@ CASES = [
     Case(
         "unmapped read",
         unmapped_read,
-        popcorn.EmulationError,
-        lambda e: isinstance(e, popcorn.EmulationError) and e.address == 0x6000_0000,
+        popcorn.BusAccessError,
+        lambda e: isinstance(e, popcorn.BusAccessError)
+        and e.address == 0x6000_0000
+        and not e.denied,
     ),
     Case("wide register", wide_register, popcorn.ConfigError, _config("r0")),
     Case("foreign snapshot", foreign_snapshot, popcorn.ConfigError, _config("machine")),
@@ -254,4 +256,4 @@ def test_every_error_class_is_covered() -> None:
         and cls is not popcorn.PopcornError
     }
     assert public <= covered | {popcorn.EmulationError}
-    assert popcorn.EmulationError in covered
+    assert popcorn.BusAccessError in covered

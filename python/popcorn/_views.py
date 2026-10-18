@@ -90,7 +90,8 @@ class Memory:
 
     `secure` and `nonsecure` are the same memory seen through the core's security
     attribution and the bus firewall, as a privileged debug access of that state. A bus error
-    raises EmulationError naming the failing address.
+    raises BusAccessError, an EmulationError, naming the failing address and whether the bus
+    denied the access or nothing is mapped there.
     """
 
     __slots__ = (
@@ -162,7 +163,8 @@ class Memory:
         """Memory as a privileged Non-secure debug access sees it, DDI0553B.z B13.3.4.
 
         An access to an address the SAU or the IDAU makes Secure or Non-secure callable raises
-        EmulationError, "bus error at <address>: denied", the debug access error of RWMRR.
+        BusAccessError with `denied` True, "bus error at <address>: denied", the debug access
+        error of RWMRR.
         Every other access goes through the bus firewall as `secure` describes, so Secure
         data never reads through this view. On a machine without TrustZone enabled it acts as
         `m.mem`.
