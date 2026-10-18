@@ -297,6 +297,11 @@ public:
 
   std::uint32_t last{};
 
+  [[nodiscard]] auto crosses(std::string_view reg) const -> std::vector<stm32::cross_ref>
+  {
+    return crosses_from(reg);
+  }
+
   void written(std::uint32_t, std::uint32_t now)
   {
     last = now;
@@ -336,6 +341,34 @@ TEST_CASE("a claimed register without fields is writable in full unless it is re
   {
     CHECK(e.key() == "peripherals.RCC.registers.RCC_RO.fields");
   }
+}
+
+TEST_CASE("a claimed cross rule source needs a write handler, which applies the rule")
+{
+  bench b;
+  b.part.peripherals.front().cross_rules.push_back(
+      {.reg          = "RCC_WO",
+       .field        = "CMD",
+       .target_reg   = "RCC_CR",
+       .target_field = "HSIRDY",
+       .effect       = popcorn::cross_effect::clear});
+  std::array<stm32::write_entry<table_probe>, 1> const bare{{{"RCC_WO", nullptr}}};
+  try
+  {
+    table_probe const refused{b.ctx, b.rcc, bare};
+    FAIL("no config_error");
+  }
+  catch(popcorn::config_error const& e)
+  {
+    CHECK(e.key() == "peripherals.RCC.cross_rules.RCC_WO.CMD");
+  }
+  std::array<stm32::write_entry<table_probe>, 1> const served{{{"RCC_WO", &table_probe::written}}};
+  table_probe const                                    model{b.ctx, b.rcc, served};
+  auto const                                           crosses = model.crosses("RCC_WO");
+  REQUIRE(crosses.size() == 1);
+  CHECK(crosses[0].source == 0x1u);
+  CHECK(crosses[0].target.mask() == 0x400u);
+  CHECK(crosses[0].effect == popcorn::cross_effect::clear);
 }
 
 TEST_CASE("an IRQ resolves by its description name, a missing one is a config error")

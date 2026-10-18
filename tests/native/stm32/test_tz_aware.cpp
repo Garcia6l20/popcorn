@@ -164,6 +164,11 @@ struct rig
     return target->peripheral(peripheral).peek(at(peripheral, reg) - unit(peripheral).base);
   }
 
+  void poke(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
+  {
+    target->peripheral(peripheral).poke(at(peripheral, reg) - unit(peripheral).base, value);
+  }
+
   [[nodiscard]] auto port(std::string_view name) const -> stm32::gpio_port&
   {
     auto* const found = dynamic_cast<stm32::gpio_port*>(target->model(name));
@@ -380,6 +385,25 @@ TEST_CASE("RM0456 11.5.2: RCC SPRIV and NSPRIV make the RCC bits privileged")
   CHECK(r.peek("RCC", "SECCFGR") == pll1);
   CHECK(r.read("RCC", "SECCFGR", nonsecure_unpriv) == pll1);
   CHECK(r.read("RCC", "PRIVCFGR", nonsecure_unpriv) == 0x3);
+}
+
+TEST_CASE("RM0456 11.8.20: RCC_CICR clears RCC_CIFR under TrustZone, by HSISEC for HSIRDYC")
+{
+  rig const  r{true};
+  auto const hsi    = bit("RCC", "CIFR", "HSIRDYF");
+  auto const pll1   = bit("RCC", "CIFR", "PLL1RDYF");
+  auto const clears = bit("RCC", "CICR", "HSIRDYC") | bit("RCC", "CICR", "PLL1RDYC");
+  r.poke("RCC", "CIFR", hsi | pll1);
+  r.write("RCC", "CICR", bit("RCC", "CICR", "HSIRDYC"), nonsecure_priv);
+  CHECK(r.peek("RCC", "CIFR") == pll1);
+  CHECK(r.peek("RCC", "CICR") == 0);
+
+  r.write("RCC", "SECCFGR", bit("RCC", "SECCFGR", "HSISEC"), secure_priv);
+  r.poke("RCC", "CIFR", hsi | pll1);
+  r.write("RCC", "CICR", clears, nonsecure_priv);
+  CHECK(r.peek("RCC", "CIFR") == hsi);
+  r.write("RCC", "CICR", clears, secure_priv);
+  CHECK(r.peek("RCC", "CIFR") == 0);
 }
 
 TEST_CASE("RM0456 11.8.51, P1: RCC_SECCFGR reads 0 and ignores writes under TZEN=0")

@@ -421,8 +421,10 @@ struct timer
  *        the Secure bits privileged, `NSPRIV` the others, RAZ/WI to an unprivileged access.
  *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
  *        set. A Non-secure write to it is ignored with an illegal access event. `RCC_PRIVCFGR`
- *        takes privileged writes, SPRIV Secure ones only. Under TZEN=0 `RCC_SECCFGR` is RAZ/WI,
- *        RM0456 11.8.51, and `RCC_PRIVCFGR` is storage.
+ *        takes privileged writes, SPRIV Secure ones only. A write of `RCC_CICR` clears the
+ *        `RCC_CIFR` flags of the description's cross rules, the flags of a Secure oscillator only
+ *        for a Secure write. Under TZEN=0 `RCC_SECCFGR` is RAZ/WI, RM0456 11.8.51, and
+ *        `RCC_PRIVCFGR` is storage.
  */
 class rcc final : public dispatch_model<rcc, rcc_state>,
                   public lsi_source,
@@ -448,6 +450,7 @@ public:
   template <std::size_t Pll> void pll_dividers_written(std::uint32_t old, std::uint32_t now);
   void                            bdcr_written(std::uint32_t old, std::uint32_t now);
   void                            csr_written(std::uint32_t old, std::uint32_t now);
+  void                            cicr_written(std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto              secure_function() const -> bool override;
   [[nodiscard]] auto              secure_word() const -> std::uint32_t override;
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
@@ -512,6 +515,7 @@ private:
   field_ref                                            nonsecure_privileged_;
   std::vector<std::pair<field_ref, field_ref>>         secured_;
   std::vector<unit_bits>                               units_;
+  std::vector<cross_ref>                               flag_clears_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> words_;
   peripheral_security*                                 firewall_{};
   bool                                                 units_resolved_{};
@@ -558,30 +562,30 @@ constexpr std::array<write_entry<rcc>, 1> rcc_secure_writes{
 };
 
 constexpr auto rcc_trustzone_writes = std::to_array<write_entry<rcc>>({
-    {"RCC_ICSCR2",     nullptr},
-    {"RCC_ICSCR3",     nullptr},
-    {"RCC_CRRCR",      nullptr},
-    {"RCC_CIER",       nullptr},
-    {"RCC_CIFR",       nullptr},
-    {"RCC_CICR",       nullptr},
-    {"RCC_AHB1RSTR",   nullptr},
-    {"RCC_AHB2RSTR1",  nullptr},
-    {"RCC_AHB2RSTR2",  nullptr},
-    {"RCC_AHB3RSTR",   nullptr},
-    {"RCC_APB1RSTR1",  nullptr},
-    {"RCC_APB1RSTR2",  nullptr},
-    {"RCC_APB2RSTR",   nullptr},
-    {"RCC_APB3RSTR",   nullptr},
-    {"RCC_AHB1SMENR",  nullptr},
-    {"RCC_AHB2SMENR1", nullptr},
-    {"RCC_AHB2SMENR2", nullptr},
-    {"RCC_AHB3SMENR",  nullptr},
-    {"RCC_APB1SMENR1", nullptr},
-    {"RCC_APB1SMENR2", nullptr},
-    {"RCC_APB2SMENR",  nullptr},
-    {"RCC_APB3SMENR",  nullptr},
-    {"RCC_SRDAMR",     nullptr},
-    {"RCC_PRIVCFGR",   nullptr},
+    {"RCC_ICSCR2",     nullptr           },
+    {"RCC_ICSCR3",     nullptr           },
+    {"RCC_CRRCR",      nullptr           },
+    {"RCC_CIER",       nullptr           },
+    {"RCC_CIFR",       nullptr           },
+    {"RCC_CICR",       &rcc::cicr_written},
+    {"RCC_AHB1RSTR",   nullptr           },
+    {"RCC_AHB2RSTR1",  nullptr           },
+    {"RCC_AHB2RSTR2",  nullptr           },
+    {"RCC_AHB3RSTR",   nullptr           },
+    {"RCC_APB1RSTR1",  nullptr           },
+    {"RCC_APB1RSTR2",  nullptr           },
+    {"RCC_APB2RSTR",   nullptr           },
+    {"RCC_APB3RSTR",   nullptr           },
+    {"RCC_AHB1SMENR",  nullptr           },
+    {"RCC_AHB2SMENR1", nullptr           },
+    {"RCC_AHB2SMENR2", nullptr           },
+    {"RCC_AHB3SMENR",  nullptr           },
+    {"RCC_APB1SMENR1", nullptr           },
+    {"RCC_APB1SMENR2", nullptr           },
+    {"RCC_APB2SMENR",  nullptr           },
+    {"RCC_APB3SMENR",  nullptr           },
+    {"RCC_SRDAMR",     nullptr           },
+    {"RCC_PRIVCFGR",   nullptr           },
 });
 
 rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options)
@@ -1116,8 +1120,15 @@ void rcc::reset(register_file& regs, reset_kind kind)
   publish(false);
 }
 
+void rcc::cicr_written(std::uint32_t, std::uint32_t now)
+{
+  apply_crosses(flag_clears_, now);
+  regs_.poke(reg("RCC_CICR").offset, 0);
+}
+
 void rcc::add_security_rules()
 {
+  flag_clears_          = crosses_from("RCC_CICR");
   privilege_            = reg("RCC_PRIVCFGR");
   secure_privileged_    = field("RCC_PRIVCFGR", "SPRIV");
   nonsecure_privileged_ = field("RCC_PRIVCFGR", "NSPRIV");

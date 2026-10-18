@@ -422,6 +422,18 @@ struct bus_guard
       (secure and not ctx.secure) or (privileged and not ctx.privileged) ? bits : 0);
 }
 
+/** @brief Cross rule of the description from one register, resolved: a write of 1 to the source
+ * bits clears or sets the target field. */
+struct cross_ref
+{
+  /** @brief Bits of the source field within the source register's word. */
+  std::uint32_t source{};
+  /** @brief Field acted on. */
+  field_ref target;
+  /** @brief What the write does to the target. */
+  cross_effect effect{};
+};
+
 /**
  * @brief Register a model serves through a write handler.
  * @tparam Derived Model class.
@@ -541,20 +553,79 @@ protected:
   }
 
   /**
+   * @brief The description's cross rules from a register, resolved. A claimed register loses
+   *        the register layer's cross rules, so its write handler applies them.
+   * @param reg Source register name or alias as the description spells it.
+   * @throws config_error when a rule names a register or field the peripheral lacks.
+   */
+  [[nodiscard]] auto crosses_from(std::string_view reg) const -> std::vector<cross_ref>
+  {
+    auto const*            source = &this->describe(reg);
+    std::vector<cross_ref> out;
+    for(auto const& rule : this->desc_.cross_rules)
+    {
+      if(find_register(this->desc_, rule.reg) == source)
+      {
+        out.push_back(
+            {.source = this->field(rule.reg, rule.field).mask(),
+             .target = this->field(rule.target_reg, rule.target_field),
+             .effect = rule.effect});
+      }
+    }
+    return out;
+  }
+
+  /**
+   * @brief Applies resolved cross rules to the storage for a written word.
+   * @param crosses Rules from crosses_from().
+   * @param written Word the write left, after the guard.
+   */
+  void apply_crosses(std::span<cross_ref const> crosses, std::uint32_t written)
+  {
+    for(auto const& cross : crosses)
+    {
+      if((written & cross.source) != 0)
+      {
+        update(
+            this->ctx_.regs, cross.target,
+            cross.effect == cross_effect::set ? ~std::uint32_t{} : std::uint32_t{});
+      }
+    }
+  }
+
+  /**
    * @brief Claims the registers of @p table and resolves them by name.
    * @param table Registers and their write handlers.
-   * @throws config_error when the description lacks a register of @p table.
+   * @throws config_error when the description lacks a register of @p table, or when an entry
+   *         with no handler claims the source register of a description cross rule, which the
+   *         claim would silently drop.
    */
   void bind(std::span<write_entry<Derived> const> table)
   {
     for(auto const& entry : table)
     {
-      auto const&   described = this->describe(entry.reg);
-      auto const    at        = this->reg(entry.reg);
-      std::uint32_t writable  = 0;
-      std::uint32_t readable  = 0;
-      std::uint32_t actions   = 0;
-      std::uint32_t idle      = 0;
+      auto const& described = this->describe(entry.reg);
+      if(entry.on_write == nullptr)
+      {
+        for(auto const& rule : this->desc_.cross_rules)
+        {
+          if(find_register(this->desc_, rule.reg) == &described)
+          {
+            throw config_error(
+                this->ctx_.part.part, 0,
+                std::format(
+                    "peripherals.{}.cross_rules.{}.{}", this->desc_.name, rule.reg, rule.field),
+                std::format(
+                    "a write handler for {}, a cross rule source the model claims",
+                    described.name));
+          }
+        }
+      }
+      auto const    at       = this->reg(entry.reg);
+      std::uint32_t writable = 0;
+      std::uint32_t readable = 0;
+      std::uint32_t actions  = 0;
+      std::uint32_t idle     = 0;
       auto const    whole = field_ref{.offset = at.offset, .lsb = at.lsb, .width = at.width}.mask();
       if(described.fields.empty())
       {
