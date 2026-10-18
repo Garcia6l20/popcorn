@@ -659,6 +659,7 @@ class Machine:
         trace_capacity: int = 4096,
         spin_threshold: int = 0,
         strict_peripherals: bool = False,
+        faults: Literal["stop", "handler"] = "stop",
         vector_table: int | None = None,
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
@@ -688,6 +689,11 @@ class Machine:
                 ModelError, an access to an STM32U5 or STM32H5 debug block without a model too,
                 such as the CTI. A host access through `m.mem`, `m.ref.mem` or a register's
                 bus `read()` and writes raises ModelError for both whatever this flag says.
+            faults: What a processor fault does. "stop" ends the run with a FAULT stop at the
+                faulting instruction. "handler" enters the firmware's handler as the core
+                does, HardFault, MemManage, BusFault, UsageFault or SecureFault, and the run
+                goes on. Lockup and an INVSTATE fault stop under both. Without TrustZone, the
+                INVPC, UNSTKERR, STKERR, STKOF on entry and VECTTBL faults stop too.
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice of the machine's thread serves
                 its requests and checks its waiters.
@@ -750,8 +756,11 @@ class Machine:
                 not aligned to 128 bytes, `dualbank=False`.
             ImageError: An image does not fit the memory map.
             TypeError: `option_bytes` is not an `OptionBytes`.
-            ValueError: `name` is empty or holds whitespace or a dot.
+            ValueError: `name` is empty or holds whitespace or a dot, or `faults` is neither
+                "stop" nor "handler".
         """
+        if faults not in ("stop", "handler"):
+            raise ValueError(f'faults is "stop" or "handler", not {faults!r}')
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
         check_machine_name(name)
@@ -763,6 +772,7 @@ class Machine:
         config.trace_capacity = trace_capacity
         config.spin_threshold = spin_threshold
         config.strict_peripherals = strict_peripherals
+        config.fault_handlers = faults == "handler"
         config.vector_table = vector_table
         config.config_digest = config_digest
         config.arena_start = arena_base

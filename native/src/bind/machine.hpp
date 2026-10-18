@@ -80,6 +80,8 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   std::uint32_t spin_threshold{};
   /** @brief Whether an unmodelled register access fails the run. */
   bool strict_peripherals{};
+  /** @brief Whether a processor fault enters the firmware's handler rather than stopping. */
+  bool fault_handlers{};
   /** @brief Address of the vector table reset reads, empty for the description's default. */
   std::optional<address> vector_table{};
   /** @brief Digest of the configuration, recorded in snapshots. */

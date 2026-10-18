@@ -227,9 +227,11 @@ auto options_of(
   options.trace_capacity     = config.trace_capacity;
   options.spin_threshold     = config.spin_threshold;
   options.strict_peripherals = config.strict_peripherals;
-  options.vector_table       = config.vector_table;
-  options.config_digest      = config.config_digest;
-  options.raz_wi             = periph::stm32::raz_wi_map(description);
+  options.faults =
+      config.fault_handlers ? arch::fault_policy::enter_handler : arch::fault_policy::stop;
+  options.vector_table  = config.vector_table;
+  options.config_digest = config.config_digest;
+  options.raz_wi        = periph::stm32::raz_wi_map(description);
   if(option_bytes)
   {
     auto const configured =

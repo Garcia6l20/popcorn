@@ -387,6 +387,9 @@ class MachineDescription:
             installed one by the SHA-256 of its library and bindings module, never by path, and
             left out when empty.
         strict: Whether an unmodelled peripheral access raises ModelError. Not in `digest`.
+        faults: What a processor fault does, as `Machine(faults=)`: "stop" ends the run with a
+            FAULT stop, "handler" enters the firmware's handler. In `digest`, left out when
+            "stop".
         missing: What the pytest plugin does with a test whose machine description raises
             MissingInput: "fail" it, or "skip" it with the missing path as the reason. Not in
             `digest`.
@@ -409,6 +412,7 @@ class MachineDescription:
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
     plugins: Sequence[Plugin] = ()
     strict: bool = False
+    faults: Literal["stop", "handler"] = "stop"
     missing: Literal["fail", "skip"] = "fail"
     configs: Mapping[str, MachineDescription] = field(
         default_factory=_FrozenMap[str, "MachineDescription"]
@@ -423,6 +427,8 @@ class MachineDescription:
         self._check_plugins()
         if self.missing not in ("fail", "skip"):
             raise _plain_error("missing", f'"fail" or "skip", not {self.missing!r}')
+        if self.faults not in ("stop", "handler"):
+            raise _plain_error("faults", f'"stop" or "handler", not {self.faults!r}')
         if not (math.isfinite(self.cpi) and self.cpi > 0.0):
             raise _plain_error("cpi", "a finite number of cycles per instruction above 0")
         if self.core_hz is not None and self.core_hz <= 0:
@@ -575,7 +581,8 @@ class MachineDescription:
     @property
     def digest(self) -> str:
         """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`,
-        without `plugins` when it is empty and without `option_bytes` when it is None.
+        without `plugins` when it is empty, without `option_bytes` when it is None and without
+        `faults` when it is "stop".
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys, plugins by name and code, never by path. It is what
@@ -712,6 +719,7 @@ class MachineDescription:
             core_hz=self.core_hz or 0,
             cpi=self.cpi,
             strict_peripherals=self.strict if strict_peripherals is None else strict_peripherals,
+            faults=self.faults,
             vector_table=boot.vtor,
             config_digest=self.digest,
             arena_base=_arena_base(boot.arena_base),
@@ -1097,6 +1105,8 @@ def _canonical(value: object) -> object:
             skipped.add("plugins")
         if value.option_bytes is None:
             skipped.add("option_bytes")
+        if value.faults == "stop":
+            skipped.add("faults")
         fields = {
             f.name: _canonical(getattr(value, f.name))
             for f in dataclasses.fields(value)
