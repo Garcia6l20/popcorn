@@ -338,23 +338,24 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *
  * Option bytes, RM0456 7.9.13 to 7.9.22: without flash_options::option_bytes, FLASH_OPTR,
  * FLASH_NSBOOTADDxR, FLASH_SECBOOTADD0R and FLASH_SECWMxRy are the description's registers, which
- * firmware writes as storage. With them, every reset loads the encoded option bytes into those
- * registers, and writes are ignored, as OPTLOCK stays set. FLASH_OPTR reads the production value
- * with TZEN, DUALBANK and SWAP_BANK replaced. FLASH_NSBOOTADD1R reads its production value
- * 0x0BF9007F. Reserved bits read their production values, and so do the bits of a SECWMx_PSTRT,
- * SECWMx_PEND or HDPx_PEND field above the part's 7 bits, 5 on the STM32U535 and U545, 8 on the
- * U59x, U5Ax, U5Fx and U5Gx: FLASH_SECWM1R1 reads 0xFFFFFF80 for the whole bank on the U575.
- * Deviation on the U535 and U545: FLASH_SECWMxR1 reads 0xFFFFFFE0 for the whole bank, bits 7:5
- * set above the 5-bit fields, where RM0456 7.9.17 and 7.9.21 give 0xFFFFFF80. The CMSIS header
- * masks the fields with 0x1F, and every other U535 row of those registers sets bits 7:5, so the
- * RM0456 value reads as the U575 row repeated. A whole-bank area encodes PSTRT = 0 and PEND = the
- * field maximum, RM0456 Table 58, no area PSTRT = the field maximum and PEND = 0, Table 61. With
- * TZEN = 0, FLASH_SECBOOTADD0R and FLASH_SECWMxRy are secure registers and read as zero,
- * RM0456 7.5.1. The checks, all made before the machine is built: watermark and HDP pages inside
- * the bank, an HDP area starting at the first page of its secure area and ending inside it, RM0456
- * Table 60, boot addresses aligned to 128 bytes. RM0456 Table 27 allows any boot address at RDP
- * level 0, so no range is checked. DUALBANK = 0, the single-bank organization, is not modelled and
- * refused.
+ * firmware writes as storage. A TrustZone machine without option bytes is refused at
+ * construction, key `option_bytes`, since its page security would have no watermark. With them,
+ * every reset loads the encoded option bytes into those registers, and writes are ignored, as
+ * OPTLOCK stays set. FLASH_OPTR reads the production value with TZEN, DUALBANK and SWAP_BANK
+ * replaced. FLASH_NSBOOTADD1R reads its production value 0x0BF9007F. Reserved bits read their
+ * production values, and so do the bits of a SECWMx_PSTRT, SECWMx_PEND or HDPx_PEND field above the
+ * part's 7 bits, 5 on the STM32U535 and U545, 8 on the U59x, U5Ax, U5Fx and U5Gx: FLASH_SECWM1R1
+ * reads 0xFFFFFF80 for the whole bank on the U575. Deviation on the U535 and U545: FLASH_SECWMxR1
+ * reads 0xFFFFFFE0 for the whole bank, bits 7:5 set above the 5-bit fields, where RM0456 7.9.17
+ * and 7.9.21 give 0xFFFFFF80. The CMSIS header masks the fields with 0x1F, and every other U535 row
+ * of those registers sets bits 7:5, so the RM0456 value reads as the U575 row repeated. A
+ * whole-bank area encodes PSTRT = 0 and PEND = the field maximum, RM0456 Table 58, no area PSTRT =
+ * the field maximum and PEND = 0, Table 61. With TZEN = 0, FLASH_SECBOOTADD0R and FLASH_SECWMxRy
+ * are secure registers and read as zero, RM0456 7.5.1. The checks, all made before the machine is
+ * built: watermark and HDP pages inside the bank, an HDP area starting at the first page of its
+ * secure area and ending inside it, RM0456 Table 60, boot addresses aligned to 128 bytes. RM0456
+ * Table 27 allows any boot address at RDP level 0, so no range is checked. DUALBANK = 0, the
+ * single-bank organization, is not modelled and refused.
  *
  * Errors, RM0456 7.3.9: PGSERR, SIZERR, PGAERR and PROGERR as its list states. For PROGERR the
  * 7.3.9 list wins over the FLASH_NSSR bit text, which accepts all-zero data over an all-zero
@@ -693,6 +694,12 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
   }
   if(not options_.option_bytes)
   {
+    if(ctx.trustzone)
+    {
+      throw config_error(
+          desc.name, 0, "option_bytes",
+          "the FLASH option bytes of a TrustZone machine, set with configure_option_bytes");
+    }
     return;
   }
   if(options_.option_bytes->tzen != ctx.trustzone)

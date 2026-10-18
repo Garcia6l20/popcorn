@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -919,4 +920,22 @@ TEST_CASE(
   CHECK((r.peek("SECSR") & eop) != 0);
   CHECK((r.peek("SECSR") & bsy) == 0);
   CHECK(r.pending(flash_s_irq));
+}
+
+TEST_CASE("a TrustZone machine whose FLASH has no option bytes is refused at construction")
+{
+  stm32::register_builtin_models();
+  auto options      = popcorn::testing::stm32_options();
+  options.trustzone = true;
+  try
+  {
+    core::machine const target{u575(), popcorn::arch::armv8m::factory(), options};
+    FAIL("built a TrustZone FLASH without option bytes");
+  }
+  catch(popcorn::config_error const& refused)
+  {
+    CHECK(refused.key() == "option_bytes");
+  }
+  options.trustzone = false;
+  CHECK_NOTHROW(core::machine{u575(), popcorn::arch::armv8m::factory(), options});
 }
