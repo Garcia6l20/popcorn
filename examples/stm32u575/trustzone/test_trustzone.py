@@ -167,9 +167,10 @@ async def test_the_secure_fp_context_survives_a_nonsecure_callback_that_clobbers
     trustzone: Machine,
 ) -> None:
     """The secure part is softfp, so `__gnu_cmse_nonsecure_call` saves the context with VLSTM
-    and restores it with VLLDM. With FPCCR_S.TS 1, DDI0553B.z C2.4.367 and C2.4.368, the lazy
-    preservation the callback's first FP instruction triggers saves S0 to S31, and VLLDM
-    restores all 32 after the callback loaded its own value into every one."""
+    and restores it with VLLDM. VLSTM stores S0 to S31 with FPCCR_S.TS 1, DDI0553B.z C2.4.368,
+    and VLLDM restores all 32 after the callback loaded its own value into every one, C2.4.367.
+    popcorn deviation: the engine forces LSPEN 0 and FPCCR.LSPACT is RAZ/WI, so popcorn stores
+    at the VLSTM, where silicon defers the store to the callback's first FP instruction."""
     clobber = trustzone.probe(trustzone.sym("ns_fp_clobber", image="nonsecure"), state="nonsecure")
     await run_case(trustzone, "NS_CASE_FP")
     assert clobber.count == 1
@@ -183,7 +184,9 @@ async def test_a_snapshot_inside_a_nonsecure_callback_loads_into_a_fresh_machine
     tmp_path: Path,
 ) -> None:
     """Saved in Non-secure state with the Secure caller's FNC_RETURN in lr and its FP context
-    lazily pending, the snapshot loaded into a new machine ends as the run without it."""
+    already stored on the Secure stack, the snapshot loaded into a new machine ends as the run
+    without it. popcorn deviation: the engine forces LSPEN 0 and FPCCR.LSPACT is RAZ/WI, so no
+    snapshot holds a pending lazy FP context."""
     await run_case(trustzone, "NS_CASE_FP", until="ns_fp_clobber")
     assert trustzone.security_state == "nonsecure"
     assert trustzone.reg.lr == FNC_RETURN
