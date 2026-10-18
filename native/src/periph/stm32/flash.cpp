@@ -1124,23 +1124,28 @@ auto flash::page_rule(address at) const -> std::optional<page_policy>
 
 auto flash::rule_of(std::uint32_t at) const -> page_policy
 {
-  constexpr std::size_t secwm1r1    = 4;
-  constexpr std::size_t secwm2r1    = 6;
-  auto const            bank        = bank_of(at);
-  auto const            page        = (at - bank_base(at)) / page_size;
-  auto const            first       = option_words_[bank == 0 ? secwm1r1 : secwm2r1].second;
-  auto const            second      = option_words_[(bank == 0 ? secwm1r1 : secwm2r1) + 1].second;
-  auto const            top         = (1u << watermark_bits(ctx_.part.part)) - 1;
-  auto const            start       = first & top;
-  auto const            watermarked = start <= page and page <= (first >> 16 & top);
-  auto const            hidden      = (second & hdp_enable) != 0
-                             and (regs_.peek(hide_word_) >> bank & 1u) != 0
-                             and start <= page
-                             and page <= (second >> 16 & top);
-  return {
-      .secure     = watermarked or block_bit(secure_blocks_, at),
-      .privileged = block_bit(privileged_blocks_, at),
-      .hidden     = hidden};
+  constexpr std::size_t secwm1r1 = 4;
+  constexpr std::size_t secwm2r1 = 6;
+  page_policy           policy{
+      .secure = block_bit(secure_blocks_, at), .privileged = block_bit(privileged_blocks_, at)};
+  if(option_words_.size() != option_registers.size())
+  {
+    return policy;
+  }
+  auto const bank        = bank_of(at);
+  auto const page        = (at - bank_base(at)) / page_size;
+  auto const first       = option_words_[bank == 0 ? secwm1r1 : secwm2r1].second;
+  auto const second      = option_words_[(bank == 0 ? secwm1r1 : secwm2r1) + 1].second;
+  auto const top         = (1u << watermark_bits(ctx_.part.part)) - 1;
+  auto const start       = first & top;
+  auto const watermarked = start <= page and page <= (first >> 16 & top);
+  auto const hidden      = (second & hdp_enable) != 0
+                  and (regs_.peek(hide_word_) >> bank & 1u) != 0
+                  and start <= page
+                  and page <= (second >> 16 & top);
+  policy.secure = policy.secure or watermarked;
+  policy.hidden = hidden;
+  return policy;
 }
 
 auto flash::block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const -> bool
@@ -1914,7 +1919,7 @@ void flash::privileged_block_written(std::uint32_t old, std::uint32_t now)
     for(std::uint32_t bit = 0; bit < pages_per_block_register; ++bit)
     {
       auto const at = bank_start(bank) + (first + bit) * page_size;
-      if(at - banks().base >= storage_->size or rule_of(at).secure)
+      if(first + bit >= banks().size / page_size or rule_of(at).secure)
       {
         allowed &= ~(1u << bit);
       }

@@ -556,6 +556,10 @@ TEST_CASE(
   CHECK(r.read("SEC1BBR1", nonsecure_unpriv) == 0x330);
   r.write("PRIV1BBR1", 0x00, nonsecure_priv);
   CHECK(r.peek("PRIV1BBR1") == 0x30);
+  r.write("PRIV1BBR2", ~0u, nonsecure_priv);
+  CHECK(r.peek("PRIV1BBR2") == ~0u);
+  r.write("PRIV1BBR3", ~0u, nonsecure_priv);
+  CHECK(r.peek("PRIV1BBR3") == 0);
   CHECK_FALSE(r.tzic("FLASH_REGF"));
 }
 
@@ -839,7 +843,8 @@ TEST_CASE(
 
 TEST_CASE(
     "RM0456 7.5.6 and Table 73: a PRIVBB page reads 0 to an unprivileged load with no event and "
-    "data to a privileged one, an unprivileged fetch is a bus fault")
+    "data to a privileged one, an unprivileged fetch is a bus fault, popcorn's deviation from the "
+    "zeros of Table 73")
 {
   rig const         r{true, four_secure_pages};
   constexpr address page6 = flash_ns + 6 * page_bytes;
