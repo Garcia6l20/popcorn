@@ -147,3 +147,26 @@ TEST_CASE("trace ring moves the symbol ids of kept call records past an insertio
   CHECK(records[2].aux == core::trace_id_overflow);
   CHECK(records[3].aux == 9);
 }
+
+TEST_CASE("trace ring shift moves ids from the insertion point on, across a wrapped ring")
+{
+  constexpr std::uint16_t from = 5;
+  core::trace_ring        ring{4};
+  auto const              call = [](std::uint16_t id) {
+    return core::trace_record{.kind = core::trace_kind::call, .aux = id};
+  };
+  ring.append(call(from), popcorn::icount{1});
+  ring.append(call(from), popcorn::icount{2});
+  ring.append(call(from - 1), popcorn::icount{3});
+  ring.append(call(from), popcorn::icount{4});
+  ring.append(call(from + 3), popcorn::icount{5});
+  ring.append(call(from), popcorn::icount{6});
+  REQUIRE(ring.appended() == 6);
+  ring.shift_call_symbols(from, 2);
+  auto const records = ring.records();
+  REQUIRE(records.size() == 4);
+  CHECK(records[0].aux == from - 1);
+  CHECK(records[1].aux == from + 2);
+  CHECK(records[2].aux == from + 5);
+  CHECK(records[3].aux == from + 2);
+}
