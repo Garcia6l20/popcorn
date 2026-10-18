@@ -263,6 +263,10 @@ uv run --no-sync pcons -B build POPCORN_BUILD_TESTS=ON POPCORN_BUILD_EXAMPLES=ON
 
 `pcons run check` passes both `ON` itself.
 
+The `release` variant, the default, builds Unicorn with `UC_LOAD_HELPER_NO_STACK_PROTECTOR`.
+It drops the stack protector from Unicorn's guest load helper, 7 host instructions fewer per
+MMIO read. The `debug`, `asan` and `tsan` variants and a Unicorn build outside popcorn keep it.
+
 ## Native plugins
 
 A native plugin adds C++ peripheral models and C++ bus devices, built against popcorn's C++ API
