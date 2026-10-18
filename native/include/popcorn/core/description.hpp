@@ -413,4 +413,17 @@ POPCORN_API auto register_at(part_description const& description, std::uint32_t 
  */
 [[nodiscard]] POPCORN_API auto
     find_register(peripheral_desc const& peripheral, std::string_view name) -> register_desc const*;
+
+/**
+ * @brief IRQ sources a peripheral's model drives: its own in description order, then under
+ *        TrustZone those of the peripherals that alias it, in description order, such as
+ *        `FLASH_S_IRQn` of `SEC_FLASH`. Without TrustZone a Secure alias raises nothing.
+ * @param description Part the peripheral belongs to.
+ * @param peripheral Peripheral that is no alias.
+ * @param trustzone Whether the machine runs with TrustZone.
+ */
+[[nodiscard]] POPCORN_API auto irq_sources(
+    part_description const& description,
+    peripheral_desc const&  peripheral,
+    bool                    trustzone) -> std::vector<std::uint16_t>;
 }

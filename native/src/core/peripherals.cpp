@@ -70,8 +70,9 @@ void machine::run_state::attach_peripherals()
     }
     auto slot = std::make_unique<peripheral_slot>(unit, owner.scheduler_, at);
     fill_trace_ids(*slot, owner.description_, at);
-    slot->irqs.reserve(unit.irqs.size());
-    for(auto const source : unit.irqs)
+    auto const sources = irq_sources(owner.description_, unit, owner.options_.trustzone);
+    slot->irqs.reserve(sources.size());
+    for(auto const source : sources)
     {
       slot->irqs.push_back(periph::irq_line{lines, source});
     }

@@ -303,10 +303,11 @@ protected:
     auto const named = std::ranges::find(ctx_.part.irqs, name, &irq_desc::name);
     if(named != ctx_.part.irqs.end())
     {
-      auto const at = std::ranges::find(desc_.irqs, named->number);
-      if(at != desc_.irqs.end())
+      auto const sources = irq_sources(ctx_.part, desc_, ctx_.trustzone);
+      auto const at      = std::ranges::find(sources, named->number);
+      if(at != sources.end())
       {
-        return ctx_.irqs[static_cast<std::size_t>(at - desc_.irqs.begin())];
+        return ctx_.irqs[static_cast<std::size_t>(at - sources.begin())];
       }
     }
     throw config_error(

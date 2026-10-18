@@ -262,7 +262,8 @@ struct POPCORN_API model_context
 {
   /** @brief Storage of the peripheral. */
   register_file& regs;
-  /** @brief IRQ lines of the peripheral, in description order. */
+  /** @brief IRQ lines of the peripheral, in the order of popcorn::irq_sources(): its own, then
+   * under TrustZone those of its Secure aliases. */
   std::span<irq_line> irqs;
   /** @brief Line to the core's non-maskable interrupt, level-sensitive and shared by every
    * model: the input is active while any model holds its line active. An NMI still active when
