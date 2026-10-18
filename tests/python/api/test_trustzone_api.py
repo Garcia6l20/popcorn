@@ -687,6 +687,20 @@ def test_a_load_is_refused_while_a_call_trace_is_open(
     assert [image.name for image in m.images] == ["nonsecure", "secure", "patch"]
 
 
+def test_the_ring_keeps_call_names_across_a_load_before_a_symbols_only_image(
+    u575: popcorn.PartDescription,
+) -> None:
+    """A loaded image takes symbol ids before those of symbols-only images, so the ring moves
+    the ids of its kept call records with them."""
+    m = pair_machine(u575)
+    m.intercept(m.sym("__acle_se_tz_pair_add", image="secure"), lambda call: call.proceed())
+    stop = asyncio.run(m.run(until=m.sym("tz_pair_done", image="nonsecure"), budget=10_000))
+    assert stop.reason == popcorn.StopReason.ADDRESS
+    assert [r.symbol for r in m.ring.records() if isinstance(r, Call)] == ["__acle_se_tz_pair_add"]
+    m.load(popcorn.Image.elf(PAIR_NS, name="patch"))
+    assert [r.symbol for r in m.ring.records() if isinstance(r, Call)] == ["__acle_se_tz_pair_add"]
+
+
 def test_a_linked_system_keeps_each_member_s_trustzone_its_own(
     u575: popcorn.PartDescription,
 ) -> None:

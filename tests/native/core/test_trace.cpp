@@ -128,3 +128,22 @@ TEST_CASE("trace ring rebases after a restore moves time backwards")
   CHECK(records[3].payload[0] == 10);
   CHECK(records[4].dt == 0);
 }
+
+TEST_CASE("trace ring moves the symbol ids of kept call records past an insertion point")
+{
+  core::trace_ring ring{4};
+  auto const       call = [](std::uint16_t id) {
+    return core::trace_record{.kind = core::trace_kind::call, .aux = id};
+  };
+  ring.append(call(3), popcorn::icount{1});
+  ring.append(call(7), popcorn::icount{2});
+  ring.append(call(0xfffe), popcorn::icount{3});
+  ring.append({.kind = core::trace_kind::mmio, .aux = 9}, popcorn::icount{4});
+  ring.shift_call_symbols(5, 2);
+  auto const records = ring.records();
+  REQUIRE(records.size() == 4);
+  CHECK(records[0].aux == 3);
+  CHECK(records[1].aux == 9);
+  CHECK(records[2].aux == core::trace_id_overflow);
+  CHECK(records[3].aux == 9);
+}

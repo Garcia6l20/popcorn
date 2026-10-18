@@ -289,6 +289,15 @@ public:
    */
   void clear(icount now) noexcept;
 
+  /**
+   * @brief Moves the symbol ids of the kept call records when symbols are inserted into the
+   *        symbol index: an id at or above @p from becomes the id plus @p by, so each record
+   *        keeps naming its symbol. An id past the u16 range becomes trace_id_overflow.
+   * @param from First symbol index the insertion moved.
+   * @param by Number of symbols inserted.
+   */
+  void shift_call_symbols(std::uint32_t from, std::uint32_t by) noexcept;
+
 private:
   void push(trace_record const& stamped);
   void push_time(icount now);

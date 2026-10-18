@@ -247,9 +247,19 @@ void machine::load(popcorn::image::image const& loaded)
     std::ranges::fill_n(out, seg.memory_size - seg.bytes.size(), std::byte{0});
     region->host_wrote(*run_, seg.start, seg.memory_size);
   }
+  std::size_t moved = 0;
+  for(auto const& before : loaded_images())
+  {
+    moved += before.symbols.size();
+  }
   images_.insert(images_.begin() + static_cast<std::ptrdiff_t>(loaded_count_), loaded);
   ++loaded_count_;
   run_->build_symbol_index();
+  if(loaded_count_ < images_.size())
+  {
+    trace_.shift_call_symbols(
+        static_cast<std::uint32_t>(moved), static_cast<std::uint32_t>(loaded.symbols.size()));
+  }
 }
 
 void machine::add_symbols(popcorn::image::image const& symbols)

@@ -95,4 +95,17 @@ void trace_ring::clear(icount now) noexcept
   origin_   = now;
   last_     = now;
 }
+
+void trace_ring::shift_call_symbols(std::uint32_t from, std::uint32_t by) noexcept
+{
+  std::size_t const first = (next_ + slots_.size() - size_) % slots_.size();
+  for(std::size_t index = 0; index < size_; ++index)
+  {
+    auto& record = slots_[(first + index) % slots_.size()];
+    if(record.kind == trace_kind::call and record.aux != trace_id_overflow and record.aux >= from)
+    {
+      record.aux = trace_id(std::uint32_t{record.aux} + by);
+    }
+  }
+}
 }
