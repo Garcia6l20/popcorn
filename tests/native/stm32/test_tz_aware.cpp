@@ -1117,6 +1117,32 @@ TEST_CASE("a DMA transfer drops its cached attributes on a CxTR1 write between t
   CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
 }
 
+TEST_CASE("RM0456 17.4.14: a Secure channel turned Non-secure and restarted reads Secure SRAM as 0")
+{
+  rig const  r{true};
+  auto const secured = bit("GPDMA1", "C0TR1", "SSEC") | bit("GPDMA1", "C0TR1", "DSEC");
+  auto const to      = sram1_nonsecure_block + 0x100;
+  open_destination_block(r);
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  copy(r, sram1_secure_block, sram1_secure_block + 0x100, secured);
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  REQUIRE(r.peek("GTZC1_TZIC", "SR4") == 0);
+
+  r.write("GPDMA1", "SECCFGR", 0, secure_priv);
+  REQUIRE((r.peek("GPDMA1", "C0TR1") & secured) == 0);
+  fill(r, to, 0xaaaa'0000, 4);
+  r.write("GPDMA1", "C0FCR", bit("GPDMA1", "C0FCR", "TCF"), nonsecure_priv);
+  r.write("GPDMA1", "C0BR1", 16, nonsecure_priv);
+  r.write("GPDMA1", "C0SAR", sram1_secure_block, nonsecure_priv);
+  r.write("GPDMA1", "C0DAR", to, nonsecure_priv);
+  r.write("GPDMA1", "C0CR", bit("GPDMA1", "C0CR", "EN"), nonsecure_priv);
+  run_for(r, 20'000);
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  CHECK(words_at(r, to, 4) == std::vector<std::uint32_t>(4, 0));
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
+}
+
 TEST_CASE("a restore drops the firewall grant a DMA transfer took after the snapshot")
 {
   rig const  r{true};
