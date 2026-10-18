@@ -524,6 +524,7 @@ public:
    *        writes, such as flash. Called on the machine thread under TrustZone only. The
    *        default is a Secure privileged access.
    * @param at Address of the access.
+   * @return Attributes of the access, Secure privileged when the core has no security extension.
    */
   [[nodiscard]] virtual auto data_attrs([[maybe_unused]] address at) const -> bus_attrs
   {

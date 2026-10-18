@@ -421,6 +421,7 @@ POPCORN_API auto register_at(part_description const& description, std::uint32_t 
  * @param description Part the peripheral belongs to.
  * @param peripheral Peripheral that is no alias.
  * @param trustzone Whether the machine runs with TrustZone.
+ * @return IRQ numbers, own first, in the order of periph::model_context::irqs.
  */
 [[nodiscard]] POPCORN_API auto irq_sources(
     part_description const& description,
