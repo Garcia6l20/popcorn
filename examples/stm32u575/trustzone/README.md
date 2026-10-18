@@ -110,6 +110,15 @@ Not modelled:
 - Option-byte programming. Option bytes come only from `OptionBytes`. OPTSTRT is cleared and
   logs one model_warning under TrustZone, so firmware that reprograms SECWM and reloads cannot
   run its reprogram path. `stm32/test_flash_secure.cpp` "SECCR.INV is stored, and OPTSTRT".
+- `OptionBytes(dualbank=False)` is refused. On the 1 MB STM32U575 it is the single-bank
+  organization, whose geometry the FLASH model does not lay out. Boot addresses are checked for
+  128-byte alignment only, RM0456 Table 27 allows any address at RDP level 0.
+  `test_option_bytes.py`
+  `test_a_value_the_u5_family_refuses_raises_before_the_machine_is_built`.
+- Without `option_bytes`, FLASH_OPTR reads 0, the description's reset, not the production
+  0x1FEFF8AA. With `option_bytes` the reserved bits read their production values.
+  `stm32/test_flash.cpp` "without option bytes the option registers are the description's
+  storage" and `test_option_bytes.py` `test_tzen_1_reads_the_encoded_option_bytes`.
 - Privilege filters without TrustZone. TZSC `PRIVCFGRx`, MPCBB `PRIVCFGRx` and FLASH `PRIVBBRx`
   filter only under TZEN=1. Under TZEN=0 they are storage. `stm32/test_gtzc.cpp` "without
   TrustZone no GTZC block has a model".
