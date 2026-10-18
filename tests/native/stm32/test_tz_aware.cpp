@@ -1091,7 +1091,9 @@ TEST_CASE("a DMA transfer drops its firewall grant on an MPCBB write between two
   CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
 }
 
-TEST_CASE("a DMA transfer drops its cached attributes on a CxTR1 write between two bursts")
+TEST_CASE(
+    "popcorn takes a CxTR1 write while EN, RM0456 17.8.10 makes it read-only: the transfer drops "
+    "its cached attributes on it between two bursts")
 {
   rig const  r{true};
   auto const to = sram1_secure_block + 0x100;

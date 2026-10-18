@@ -287,9 +287,10 @@ struct transfer_cache
  *        and keeps a core::memory_grant per side, so beats inside an allowed MPCBB block or
  *        page skip the firewall. Both drop at the channel's start, a CxTR1 write or load, a
  *        SECCFGR or PRIVCFGR write, a reset and a restore, and the machine voids the grants at
- *        every memory policy change. Under TZEN=0 `SECCFGR`, `PRIVCFGR` and `SMISR` are
- *        storage, `RCFGLOCKR` ignores writes, RM0456 17.8.3, and transfers keep the attributes
- *        of a machine without TrustZone.
+ *        every memory policy change. A deviation: `CxTR1` takes writes while its channel is
+ *        enabled, where RM0456 17.8.10 makes it read-only. Under TZEN=0 `SECCFGR`, `PRIVCFGR`
+ *        and `SMISR` are storage, `RCFGLOCKR` ignores writes, RM0456 17.8.3, and transfers keep
+ *        the attributes of a machine without TrustZone.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>,
                     public dma_controller,
