@@ -481,7 +481,8 @@ TEST_CASE(
 
 TEST_CASE(
     "RM0456 7.3.9: the Non-secure STRT set by a Secure access is a Non-secure PGSERR, a store of "
-    "the other set into a filling buffer a PGSERR of its own set")
+    "the other set into a filling buffer a PGSERR of its own set, popcorn's rule, RM0456 leaves "
+    "it unstated")
 {
   rig const r{true, four_secure_pages};
   r.unlock(true);

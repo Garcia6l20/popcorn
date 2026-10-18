@@ -371,8 +371,9 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * - The Secure set FLASH_SECKEYR, FLASH_SECCR and FLASH_SECSR works as the Non-secure one, with
  *   its own key sequence and lock, RM0456 7.3.5. One operation engine and one write buffer serve
  *   both sets: BSY and WDW read the same in both status registers. A program belongs to the set
- *   of the store's transaction, its first word fixing it for the buffer, a store of the other
- *   set into a filling buffer being a PGSERR of that set. An erase belongs to the set whose STRT
+ *   of the store's transaction, its first word fixing it for the buffer. RM0456 does not say what
+ *   a store of the other set does to a filling buffer: the model sets PGSERR in the store's set
+ *   and flushes the buffer. An erase belongs to the set whose STRT
  *   started it. Errors, EOP and OPERR go to the set of the operation, RM0456 7.3.9, and
  *   FLASH_S_IRQn follows the Secure EOP with EOPIE and OPERR with ERRIE, Table 78. A Secure
  *   access that sets the Non-secure STRT is a Non-secure PGSERR. An error of one set never ends
