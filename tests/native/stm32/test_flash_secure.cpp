@@ -634,6 +634,9 @@ TEST_CASE(
   r.write("SECHDPCR", 1, secure_priv);
   r.write("SECHDPCR", 0, secure_priv);
   CHECK(r.peek("SECHDPCR") == 1);
+  r.write("SECHDPCR", 0xffff'fffc, secure_priv);
+  CHECK(r.peek("SECHDPCR") == 1);
+  CHECK(r.read("SECHDPCR", secure_priv) == 1);
   r.store(flash_s + page_bytes + 16, {1, 2, 3, 4}, secure_priv);
   CHECK((r.peek("SECSR") & wrperr) != 0);
   CHECK_FALSE(r.tzic("FLASHF"));
