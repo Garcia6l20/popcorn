@@ -245,4 +245,5 @@ class MachineRunning(PopcornError):
 
 
 class MachineBusy(PopcornError):
-    """A run, step, call, wait or free run is already active on the machine."""
+    """A run, step, call, wait or free run is already active on the machine, or a call trace is
+    open during a load."""
