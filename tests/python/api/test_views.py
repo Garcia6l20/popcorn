@@ -107,8 +107,11 @@ def test_registers_read_back_by_attribute_and_by_enum(machines: Machines) -> Non
 
 
 def test_the_generated_enum_is_the_arch_module_register_list(machines: Machines) -> None:
+    """The enum ends with the registers only a machine with TrustZone enabled lists."""
     m = machines()
-    assert [r.value for r in Reg] == list(m.reg.names())
+    names = list(m.reg.names())
+    assert [r.value for r in Reg][: len(names)] == names
+    assert [r.value for r in Reg][len(names) :][:3] == ["secure", "msp_s", "msp_ns"]
 
 
 def test_symbols_resolve_across_images(machines: Machines, driver: popcorn.Image) -> None:

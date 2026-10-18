@@ -521,7 +521,12 @@ auto cortex_m::host_register_value(cpu_register const& reg, std::uint64_t value)
 
 auto cortex_m::registers() const -> std::span<cpu_register const>
 {
-  return core_.fpu ? std::span<cpu_register const>{fpu_registers} : integer_registers;
+  if(trustzone())
+  {
+    return core_.fpu ? std::span<cpu_register const>{fpu_trustzone_registers}
+                     : std::span<cpu_register const>{integer_trustzone_registers};
+  }
+  return core_.fpu ? fpu_registers : integer_registers;
 }
 
 void cortex_m::save(std::vector<std::byte>& out) const

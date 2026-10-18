@@ -4,6 +4,8 @@
 #include <popcorn/core/description.hpp>
 #include <popcorn/export.hpp>
 
+#include <span>
+
 namespace popcorn::arch::armv8m
 {
 /**
@@ -12,6 +14,15 @@ namespace popcorn::arch::armv8m
  * @param core Core of a part description.
  */
 [[nodiscard]] POPCORN_API auto implements(core_desc const& core) -> bool;
+
+/**
+ * @brief Registers a machine with TrustZone enabled lists after the core and floating-point
+ *        ones: `secure`, then MSP, PSP, CONTROL, PRIMASK, BASEPRI, FAULTMASK, MSPLIM and PSPLIM
+ *        of each security state, `_s` Secure then `_ns` Non-secure. Writing `secure` switches
+ *        the security state as BXNS does.
+ * @return The registers, in list order.
+ */
+[[nodiscard]] POPCORN_API auto trustzone_registers() noexcept -> std::span<cpu_register const>;
 
 /**
  * @brief Factory of the Cortex-M arch module, for machine construction.

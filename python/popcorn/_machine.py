@@ -15,7 +15,7 @@ import warnings
 import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol, cast, overload, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload, runtime_checkable
 
 from popcorn import _core
 from popcorn._arena import Arena
@@ -958,6 +958,20 @@ class Machine:
                 `m.read(m.ref.pc)`.
         """
         return self._handle.pc()
+
+    @property
+    def security_state(self) -> Literal["secure", "nonsecure"] | None:
+        """The core's security state, None on a machine without TrustZone enabled: a core
+        without the Security Extension, or option bytes with TZEN=0. Writing `m.reg.secure`
+        switches it, as BXNS does.
+
+        Raises:
+            MachineRunning: The machine is busy, read outside its callbacks: use
+                `m.read(m.ref.reg.secure)`.
+        """
+        if "secure" not in self._registers.names():
+            return None
+        return "secure" if self._registers.secure else "nonsecure"
 
     @property
     def pending_events(self) -> int:
