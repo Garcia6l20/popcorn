@@ -297,7 +297,8 @@ TEST_CASE("RM0456 23.5.2, 23.6.6, 23.6.7: EXTI privilege, SECCFGR1 privilege and
   CHECK(r.peek("EXTI", "PRIVCFGR1") == 1u << 4);
 }
 
-TEST_CASE("RM0456 23.6.6: EXTI_SECCFGR1 stays storage under TZEN=0")
+TEST_CASE(
+    "EXTI_SECCFGR1 stays storage under TZEN=0, popcorn's rule, RM0456 23.6.6 leaves it unstated")
 {
   rig const r{false};
   r.write("EXTI", "SECCFGR1", 1u << 3, nonsecure_priv);
@@ -694,7 +695,9 @@ TEST_CASE("RM0456 17.8.1 to 17.8.3: GPDMA channel registers, SECCFGR, PRIVCFGR a
   CHECK(r.peek("GPDMA1", "C1TR1") == 0);
 }
 
-TEST_CASE("RM0456 17.8.3, P1: GPDMA and LPDMA RCFGLOCKR ignore writes under TZEN=0")
+TEST_CASE(
+    "RM0456 17.8.3, P1: DMA RCFGLOCKR ignores writes under TZEN=0, SECCFGR stays storage by "
+    "popcorn's rule")
 {
   rig const r{false};
   r.write("GPDMA1", "RCFGLOCKR", 0xffff, nonsecure_priv);
