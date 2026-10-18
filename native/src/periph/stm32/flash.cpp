@@ -406,8 +406,8 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *   inverts the flash security state of Table 62, Secure when a page is Secure, which the RCC
  *   FLASHEN and FLASHSMEN bits follow, RM0456 7.5.5.
  * - Option-byte programming is not modelled: OPTSTRT is cleared and logs a model_warning once.
- * - Deviation: RM0456 3.5.5 has an erase act on the pages of its own security only, the model
- *   follows Table 70 and refuses a bank or mass erase over mixed pages whole.
+ * - Deviation from RM0456 3.5.5: it calls a bank secure when one page is secure, which would let
+ *   a Secure bank erase run over a mixed bank. The model follows Table 70 and refuses it whole.
  *
  * Latency, RM0456 7.3.3: FLASH_ACR.LATENCY is compared with Table 54, or Table 55 with LPM set,
  * for HCLK and the voltage range PWR_SVMSR.ACTVOS applies, on a FLASH_ACR write, an HCLK change
