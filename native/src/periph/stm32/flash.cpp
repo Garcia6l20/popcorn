@@ -608,6 +608,7 @@ private:
   std::vector<std::uint32_t>                                        secure_blocks_;
   std::vector<std::uint32_t>                                        privileged_blocks_;
   std::uint32_t                                                     hide_word_{};
+  field_ref                                                         invert_;
   std::optional<std::uint32_t>                                      privilege_word_;
   field_ref                                                         nonsecure_privileged_;
   field_ref                                                         secure_privileged_;
@@ -665,7 +666,7 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
       ecc_bank_{field("FLASH_ECCR", "BK_ECC")}, ecc_address_{field("FLASH_ECCR", "ADDR_ECC")},
       line_{irq("FLASH_IRQn")}, latency_{field("FLASH_ACR", "LATENCY")},
       low_power_read_{field("FLASH_ACR", "LPM")}, hclk_{ctx.clock.domain("hclk")},
-      hide_word_{reg("FLASH_SECHDPCR").offset}
+      hide_word_{reg("FLASH_SECHDPCR").offset}, invert_{field("FLASH_SECCR", "INV")}
 {
   if(ctx.trustzone)
   {
@@ -1190,7 +1191,7 @@ auto flash::secure_function() const -> bool
   {
     any = rule_of(at).secure;
   }
-  return any != (get(regs_, field("FLASH_SECCR", "INV")) != 0);
+  return any != (get(regs_, invert_) != 0);
 }
 
 auto flash::secure_word() const -> std::uint32_t
