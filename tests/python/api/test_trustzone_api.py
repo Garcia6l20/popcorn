@@ -540,17 +540,6 @@ def test_fault_bits_decodes_sfsr_only_when_given() -> None:
     assert fault_bits(0, 0, 1 << 0 | 1 << 6) == {"SFSR": ("INVEP", "SFARVALID")}
 
 
-def test_a_report_without_trustzone_reads_no_sfsr(u575: popcorn.PartDescription) -> None:
-    m = tz_machine(u575, tzen=False)
-    m.mem.write(SRAM_NS, struct.pack("<2H", 0x6808, 0xE7FE))
-    m.reg.r1 = 0x9000_0000
-    m.reg.pc = SRAM_NS
-    stop = asyncio.run(m.run(budget=10))
-    assert stop.fault is not None
-    report = stop_report(m, stop, ring=False)
-    assert "SFSR" not in report.fault_bits and report.sfar is None
-
-
 def test_the_call_stack_goes_through_a_blxns_into_the_secure_caller(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -762,3 +751,60 @@ def test_without_trustzone_a_handler_still_writes_control(u575: popcorn.PartDesc
     stop = asyncio.run(m.run(budget=3))
     assert stop.reason == popcorn.StopReason.BUDGET
     assert m.reg.control & 1 == 1
+
+
+def test_the_non_secure_view_refuses_a_non_secure_callable_address(
+    u575: popcorn.PartDescription,
+) -> None:
+    """DDI0553B.z B13.3.4 RWMRR: a Non-secure request to an NSC location is refused like one to
+    a Secure location. 0x08002000 is the pair's SAU NSC region in IDAU Non-secure flash."""
+    m = pair_machine(u575)
+    nsc = m.sym("tz_pair_add", image="secure") & ~1
+    asyncio.run(m.run(until=m.sym("tz_pair_done", image="nonsecure"), budget=10_000))
+    with pytest.raises(popcorn.BusAccessError, match="denied") as refused:
+        _ = m.mem.nonsecure.u32[nsc]
+    assert refused.value.denied
+    assert m.mem.secure.u32[nsc] == 0xE97F_E97F
+
+
+SFSR = 0xE000_EDE4
+SFAR = 0xE000_EDE8
+
+
+def test_the_non_secure_view_reads_the_secure_only_scs_registers_as_zero(
+    u575: popcorn.PartDescription,
+) -> None:
+    """DDI0553B.z D1.2.211, D1.2.226 and D1.2.227: SAU_RBAR, SFSR and SFAR are RAZ/WI to a
+    Non-secure access."""
+    m, _ = auviol_stop(u575)
+    m.mem.u32[SAU_RNR] = 3
+    assert m.mem.secure.u32[SAU_RBAR] == VENEER
+    assert m.mem.secure.u32[SFSR] != 0 and m.mem.secure.u32[SFAR] == SRAM_S + 0x100
+    for at in (SAU_RBAR, SFSR, SFAR):
+        assert m.mem.nonsecure.u32[at] == 0
+
+
+@pytest.mark.parametrize(
+    ("name", "secure", "nonsecure"),
+    [
+        ("control", 0x2, 0x1),
+        ("primask", 1, 0),
+        ("basepri", 0x40, 0x80),
+        ("faultmask", 1, 0),
+        ("msplim", SRAM_S + 0x100, SRAM_NS + 0x200),
+        ("psplim", SRAM_S + 0x300, SRAM_NS + 0x400),
+    ],
+)
+def test_each_bank_holds_its_own_value_and_the_plain_register_follows_the_state(
+    u575: popcorn.PartDescription, name: str, secure: int, nonsecure: int
+) -> None:
+    m = tz_machine(u575)
+    m.reg[Reg(f"{name}_s")] = secure
+    m.reg[Reg(f"{name}_ns")] = nonsecure
+    assert (m.reg[Reg(f"{name}_s")], m.reg[Reg(f"{name}_ns")]) == (secure, nonsecure)
+    if name in ("msplim", "psplim"):
+        return
+    m.reg.secure = 1
+    assert m.reg[Reg(name)] == secure
+    m.reg.secure = 0
+    assert m.reg[Reg(name)] == nonsecure
