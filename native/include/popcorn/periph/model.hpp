@@ -225,6 +225,19 @@ public:
   {
     return false;
   }
+
+  /**
+   * @brief Whether a register the model claims is storage it does not model. A host view,
+   *        core::memory_view and the peripheral views built on it, refuses such a register with
+   *        model_error, as a register of a peripheral without a model. peek and poke still reach
+   *        it.
+   * @param offset Byte offset of the register's word in the peripheral, a multiple of 4.
+   * @return False by default.
+   */
+  [[nodiscard]] virtual auto storage_only([[maybe_unused]] std::uint32_t offset) const -> bool
+  {
+    return false;
+  }
 };
 
 /**

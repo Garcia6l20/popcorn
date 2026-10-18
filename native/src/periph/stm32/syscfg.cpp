@@ -9,8 +9,10 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -37,10 +39,14 @@ static_assert(std::is_empty_v<syscfg_state>);
  *        RCC SYSCFG clock bits Secure. The CSLCKR and CNSLCKR locks are stored, they do not
  *        lock the core's SAU, MPU, VTOR or AIRCR. `SYSCFG_RSSCMDR` and the OTG_HS PHY registers
  *        have no rule. Under TZEN=0 `SYSCFG_SECCFGR` is RAZ/WI, its storage keeps its reset,
- *        and every other register is storage. Deviation: RM0456 Table 131 makes `SYSCFG_CSLCKR`
- *        RAZ/WI at TZEN=0, the model keeps it storage, P1 covers `SYSCFG_SECCFGR` only. The model
- *        is stateless: a save made by a machine without it restores it from the register
- *        storage.
+ *        and every other register is storage. Every register but `SYSCFG_SECCFGR` is storage
+ *        the model does not model, at TZEN=0 and 1: a firmware write that lands, past the Table
+ *        131 rules, logs one model_warning per register, and raises model_error under
+ *        strict_peripherals before it is stored. Firmware reads are silent. A host view access
+ *        to such a register raises model_error, peek and poke reach it. Deviation: RM0456 Table
+ *        131 makes `SYSCFG_CSLCKR` RAZ/WI at TZEN=0, the model keeps it storage, P1 covers
+ *        `SYSCFG_SECCFGR` only. The model is stateless: a save made by a machine without it
+ *        restores it from the register storage.
  */
 class syscfg final : public dispatch_model<syscfg, syscfg_state>, public trustzone_aware
 {
@@ -53,10 +59,13 @@ public:
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
   [[nodiscard]] auto stateless() const -> bool override;
+  [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
 private:
+  [[nodiscard]] auto rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
   [[nodiscard]] auto register_guard(std::uint32_t word, access_ctx const& ctx) -> bus_guard;
+  void               note_storage_write(std::uint32_t word);
   [[nodiscard]] auto secure_peripheral(std::optional<std::size_t> unit) const -> bool;
 
   register_file&               regs_;
@@ -76,28 +85,24 @@ private:
   std::optional<std::size_t>   adc4_;
   std::optional<std::size_t>   unit_;
   illegal_event                illegal_;
+  std::vector<std::uint32_t>   logged_;
 };
 
-constexpr std::array<write_entry<syscfg>, 1> syscfg_writes{
+auto syscfg_writes(peripheral_desc const& desc) -> std::vector<write_entry<syscfg>>
+{
+  std::vector<write_entry<syscfg>> out;
+  for(auto const& described : desc.registers)
+  {
+    if(not described.alternate_of)
     {
-     {"SYSCFG_SECCFGR", nullptr},
-     }
-};
-
-constexpr auto syscfg_trustzone_writes = std::to_array<write_entry<syscfg>>({
-    {"SYSCFG_CFGR1",   nullptr},
-    {"SYSCFG_FPUIMR",  nullptr},
-    {"SYSCFG_CNSLCKR", nullptr},
-    {"SYSCFG_CSLCKR",  nullptr},
-    {"SYSCFG_CFGR2",   nullptr},
-    {"SYSCFG_MESR",    nullptr},
-    {"SYSCFG_CCCSR",   nullptr},
-    {"SYSCFG_CCVR",    nullptr},
-    {"SYSCFG_CCCR",    nullptr},
-});
+      out.push_back({described.name, nullptr});
+    }
+  }
+  return out;
+}
 
 syscfg::syscfg(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "SYSCFG", syscfg_writes, syscfg_trustzone_writes}, regs_{ctx.regs},
+    : dispatch_model{ctx, desc, "SYSCFG", syscfg_writes(desc)}, regs_{ctx.regs},
       secure_{reg("SYSCFG_SECCFGR")}, system_{field("SYSCFG_SECCFGR", "SYSCFGSEC")},
       class_b_{field("SYSCFG_SECCFGR", "CLASSBSEC")}, fpu_{field("SYSCFG_SECCFGR", "FPUSEC")},
       adc1_{unit_named(ctx.part, "ADC1")}, adc4_{unit_named(ctx.part, "ADC4")},
@@ -153,7 +158,43 @@ auto syscfg::secure_peripheral(std::optional<std::size_t> unit) const -> bool
   return unit and unit_secure(ctx_.peers, ctx_.part, *unit);
 }
 
+auto syscfg::storage_only(std::uint32_t offset) const -> bool
+{
+  return offset != secure_.offset;
+}
+
 auto syscfg::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+{
+  auto const result = rule(word, ctx, write);
+  if(write
+     and ctx.by != initiator::debugger
+     and word != secure_.offset
+     and result.wi != ~std::uint32_t{})
+  {
+    note_storage_write(word);
+  }
+  return result;
+}
+
+void syscfg::note_storage_write(std::uint32_t word)
+{
+  auto const found = std::ranges::find_if(desc_.registers, [word](register_desc const& r) {
+    return not r.alternate_of and (r.offset & ~3u) == word;
+  });
+  auto const name  = found != desc_.registers.end() ? found->name : std::string{};
+  if(not std::ranges::contains(logged_, word))
+  {
+    logged_.push_back(word);
+    warn(
+        name, std::format("{} is storage: the SYSCFG functions it selects are not modelled", name));
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(desc_.name, name, word);
+  }
+}
+
+auto syscfg::rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const all = ~std::uint32_t{};
   if(word == secure_.offset)

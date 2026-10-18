@@ -1327,7 +1327,8 @@ struct machine::run_state
 
   /**
    * @brief Refuses a host view access, memory_view, to data no model serves: a register of a
-   *        peripheral without a model, an offset no register covers, a raz_wi range. Logs
+   *        peripheral without a model, a claimed register its model calls storage only, an offset
+   *        no register covers, a raz_wi range. Logs
    *        nothing. Scans up to the first byte outside every region, window and range, where the
    *        access itself fails.
    * @param addr First guest address of the access.

@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -20,6 +21,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -117,10 +119,11 @@ struct rig
   std::unique_ptr<core::machine> target;
   probe*                         bus{};
 
-  explicit rig(bool trustzone, stm32::option_bytes wanted = {.tzen = true})
+  explicit rig(bool trustzone, stm32::option_bytes wanted = {.tzen = true}, bool strict = false)
   {
     stm32::register_builtin_models();
-    auto options = popcorn::testing::stm32_options();
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = strict;
     if(trustzone)
     {
       wanted.tzen = true;
@@ -505,6 +508,86 @@ TEST_CASE("RM0456 15.3.1, P1: SYSCFG_SECCFGR is RAZ/WI under TZEN=0")
   r.write("SYSCFG", "CFGR2", 0x1, nonsecure_unpriv);
   CHECK(r.read("SYSCFG", "CFGR2", nonsecure_unpriv) == 0x1);
 }
+}
+
+namespace
+{
+auto warnings_of(std::vector<core::log_record> const& logged, std::string_view reg)
+    -> std::ptrdiff_t
+{
+  return std::ranges::count_if(logged, [&](core::log_record const& record) {
+    return record.kind == core::log_kind::model_warning
+       and record.peripheral == "SYSCFG"
+       and record.reg == reg;
+  });
+}
+}
+
+TEST_CASE("SYSCFG storage registers log one warning per register on the first landed write")
+{
+  for(auto const trustzone : {false, true})
+  {
+    CAPTURE(trustzone);
+    rig const                     r{trustzone};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    r.write("SYSCFG", "CFGR2", 0x1, secure_priv);
+    r.write("SYSCFG", "CFGR2", 0x0, secure_priv);
+    r.write("SYSCFG", "CCCR", 0x1, secure_priv);
+    r.write("SYSCFG", "SECCFGR", 0x1, secure_priv);
+    std::ignore = r.read("SYSCFG", "MESR", secure_priv);
+    CHECK(warnings_of(logged, "CFGR2") == 1);
+    CHECK(warnings_of(logged, "CCCR") == 1);
+    CHECK(warnings_of(logged, "SECCFGR") == 0);
+    CHECK(warnings_of(logged, "MESR") == 0);
+  }
+}
+
+TEST_CASE("RM0456 15.2.2 Table 131: a SYSCFG write the TrustZone rules refuse logs no warning")
+{
+  rig const                     r{true};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  r.write("SYSCFG", "SECCFGR", bit("SYSCFG", "SECCFGR", "SYSCFGSEC"), secure_priv);
+  r.write("SYSCFG", "CCCSR", 0x1, nonsecure_priv);
+  CHECK(r.peek("SYSCFG", "CCCSR") != 0x1);
+  CHECK(warnings_of(logged, "CCCSR") == 0);
+  r.write("SYSCFG", "CCCSR", 0x1, secure_priv);
+  CHECK(warnings_of(logged, "CCCSR") == 1);
+}
+
+TEST_CASE("under strict_peripherals a SYSCFG storage register write raises model_error, unstored")
+{
+  for(auto const trustzone : {false, true})
+  {
+    CAPTURE(trustzone);
+    rig const  r{trustzone, {.tzen = true}, true};
+    auto const at = rig::at("SYSCFG", "CFGR2");
+    CHECK_THROWS_AS(
+        std::ignore = r.bus->services().write(at, 4, 0x1, secure_priv), popcorn::model_error);
+    CHECK(r.peek("SYSCFG", "CFGR2") == 0);
+    CHECK_THROWS_AS(
+        std::ignore = r.bus->services().write(at, 4, 0x1, secure_priv), popcorn::model_error);
+    CHECK_NOTHROW(std::ignore = r.read("SYSCFG", "CFGR2", secure_priv));
+    CHECK_NOTHROW(r.write("SYSCFG", "SECCFGR", 0x1, secure_priv));
+  }
+}
+
+TEST_CASE("a host view access to a SYSCFG storage register raises model_error, SECCFGR opens")
+{
+  for(auto const trustzone : {false, true})
+  {
+    CAPTURE(trustzone);
+    rig const  r{trustzone};
+    auto const at = rig::at("SYSCFG", "CFGR1");
+    CHECK_THROWS_AS(std::ignore = r.target->mem().read(at, 4), popcorn::model_error);
+    CHECK_THROWS_AS(std::ignore = r.target->mem().write(at, 4, 0x1), popcorn::model_error);
+    CHECK_NOTHROW(std::ignore = r.target->mem().read(rig::at("SYSCFG", "SECCFGR"), 4));
+    r.poke("SYSCFG", "CFGR1", 0x1);
+    CHECK(r.peek("SYSCFG", "CFGR1") == 0x1);
+  }
 }
 
 TEST_CASE("a SYSCFG snapshot holds no model bytes and restores from the SYSCFG storage")

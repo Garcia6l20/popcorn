@@ -849,7 +849,7 @@ void machine::run_state::refuse_unmodelled(address addr, std::size_t size) const
       auto const  word   = offset / 4;
       auto const* rules  = word < slot.layout.words() ? slot.layout.find(word) : nullptr;
       auto const  served = word < slot.layout.words() and slot.claimed[word] != 0;
-      if(not served and (rules == nullptr or not slot.model))
+      if(served ? slot.model->storage_only(word * 4) : (rules == nullptr or not slot.model))
       {
         throw model_error(
             window->unit->name, rules == nullptr ? std::string{} : register_name(slot.desc, word),
