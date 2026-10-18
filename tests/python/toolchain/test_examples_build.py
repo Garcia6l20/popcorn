@@ -141,3 +141,37 @@ def test_an_empty_range_is_refused() -> None:
             nonsecure_flash=(0x0800_8000, 0x3_8000),
             nonsecure_ram=(0x2000_0000, 0x2_FE00),
         )
+
+
+@pytest.mark.parametrize(
+    ("bound", "layout"),
+    [
+        ("secure_flash end", {"secure_flash": (0x0800_0000, 0x8010)}),
+        ("nonsecure_flash start", {"nonsecure_flash": (0x0800_8010, 0x3_7FF0)}),
+        ("nonsecure_flash end", {"nonsecure_flash": (0x0800_8000, 0x3_7FF0)}),
+        ("nonsecure_ram start", {"nonsecure_ram": (0x2000_0010, 0x2_FDF0)}),
+        ("nonsecure_ram end", {"nonsecure_ram": (0x2000_0000, 0x2_FE10)}),
+    ],
+)
+def test_a_bound_the_sau_sets_is_a_multiple_of_its_granule(
+    bound: str, layout: dict[str, tuple[int, int]]
+) -> None:
+    ranges = {
+        "secure_flash": (0x0800_0000, 0x8000),
+        "secure_ram": (0x2800_0000, 0x4000),
+        "nonsecure_flash": (0x0800_8000, 0x3_8000),
+        "nonsecure_ram": (0x2000_0000, 0x2_FE00),
+    } | layout
+    with pytest.raises(ValueError, match=f"the {bound} is a multiple of the 32-byte SAU granule"):
+        TrustZoneLayout(nsc_size=0x400, **ranges)
+
+
+def test_the_nonsecure_ram_end_is_a_multiple_of_the_mpcbb_block() -> None:
+    with pytest.raises(ValueError, match="nonsecure_ram end is a multiple of the 512-byte MPCBB"):
+        TrustZoneLayout(
+            secure_flash=(0x0800_0000, 0x8000),
+            nsc_size=0x400,
+            secure_ram=(0x2800_0000, 0x4000),
+            nonsecure_flash=(0x0800_8000, 0x3_8000),
+            nonsecure_ram=(0x2000_0000, 0x2_FE20),
+        )

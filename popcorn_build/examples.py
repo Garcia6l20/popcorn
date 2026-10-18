@@ -42,6 +42,7 @@ MEMORY_REGION = (
     r"[ \t]*LENGTH[ \t]*=[ \t]*\d+K[^\n]*\n"
 )
 SAU_GRANULE = 32
+MPCBB_BLOCK = 512
 
 SECURE_CPU_FLAGS = tuple(
     "-mfloat-abi=softfp" if flag == "-mfloat-abi=hard" else flag for flag in CPU_FLAGS
@@ -132,8 +133,10 @@ class TrustZoneLayout:
         nonsecure_ram: Non-secure data, heap and stack.
 
     Raises:
-        ValueError: A range is empty, or `nsc_size` is not a positive multiple of 32 bytes, the
-            SAU granule, below the size of `secure_flash`.
+        ValueError: A range is empty, `nsc_size` is not a positive multiple of 32 bytes, the
+            SAU granule, below the size of `secure_flash`, the end of `secure_flash` or a bound
+            of a Non-secure range is off the SAU granule, or the end of `nonsecure_ram` is off a
+            512-byte MPCBB block.
     """
 
     secure_flash: tuple[int, int]
@@ -150,6 +153,24 @@ class TrustZoneLayout:
             raise ValueError(
                 f"nsc_size is a positive multiple of {SAU_GRANULE} bytes below the secure flash "
                 f"size, not {self.nsc_size:#x}"
+            )
+        bounds = {
+            "secure_flash end": sum(self.secure_flash),
+            "nonsecure_flash start": self.nonsecure_flash[0],
+            "nonsecure_flash end": sum(self.nonsecure_flash),
+            "nonsecure_ram start": self.nonsecure_ram[0],
+            "nonsecure_ram end": sum(self.nonsecure_ram),
+        }
+        for name, bound in bounds.items():
+            if bound % SAU_GRANULE:
+                raise ValueError(
+                    f"the {name} is a multiple of the {SAU_GRANULE}-byte SAU granule, "
+                    f"not {bound:#x}"
+                )
+        if sum(self.nonsecure_ram) % MPCBB_BLOCK:
+            raise ValueError(
+                f"the nonsecure_ram end is a multiple of the {MPCBB_BLOCK}-byte MPCBB block, "
+                f"not {sum(self.nonsecure_ram):#x}"
             )
 
 
