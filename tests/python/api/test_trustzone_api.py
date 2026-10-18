@@ -636,6 +636,7 @@ def test_a_symbols_only_secure_image_names_the_embedded_secure_part(
     changed = patched_text(PAIR_S, patched)
     alone = popcorn.Machine(u575, image=popcorn.Image.elf(PAIR_NS))
     m = pair_machine(u575, patched)
+    assert [image.loaded for image in m.images] == [True, False]
     assert m.mem.read(0x0800_0000, SECURE_PART) == alone.mem.read(0x0800_0000, SECURE_PART)
     loaded = pair_machine(u575, patched, loaded=True)
     assert loaded.mem.u8[changed] != m.mem.u8[changed]

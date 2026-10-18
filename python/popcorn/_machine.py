@@ -1037,7 +1037,7 @@ class Machine:
         """
         self._require_stopped()
         _check_image_names((*self._images, image))
-        if image.loads:
+        if image.loaded:
             self._handle.load(image.native)
         else:
             self._handle.add_symbols(image.native)

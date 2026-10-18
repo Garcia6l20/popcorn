@@ -86,7 +86,7 @@ class MachineCoverage:
         images = self._images()
         sources = [
             os.path.abspath(image.path) if image.is_elf and image.path is not None else ""
-            for image in (*(i for i in images if i.loads), *(i for i in images if not i.loads))
+            for image in (*(i for i in images if i.loaded), *(i for i in images if not i.loaded))
         ]
         return Coverage(self._handle.coverage_pcov(sources))
 

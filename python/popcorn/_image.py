@@ -65,7 +65,7 @@ def symbol_of(native: _core.SymbolInfo) -> Symbol:
 class Image:
     """A firmware image, immutable, loadable into any number of machines."""
 
-    __slots__ = ("_elf", "_loads", "_name", "_native", "_path")
+    __slots__ = ("_elf", "_loaded", "_name", "_native", "_path")
 
     def __init__(
         self,
@@ -74,14 +74,14 @@ class Image:
         *,
         elf: bool = False,
         name: str | None = None,
-        loads: bool = True,
+        loaded: bool = True,
     ) -> None:
         """Wrap a native image. Use Image.elf, Image.bin or Image.hex instead."""
         self._native = native
         self._path = path
         self._elf = elf
         self._name = name
-        self._loads = loads
+        self._loaded = loaded
 
     @property
     def native(self) -> _core.Image:
@@ -104,7 +104,7 @@ class Image:
                 in another image, such as a
                 secure binary placed by `.incbin` in the Non-secure ELF.
         """
-        return cls(_core.load_elf(os.fspath(path)), Path(path), elf=True, name=name, loads=load)
+        return cls(_core.load_elf(os.fspath(path)), Path(path), elf=True, name=name, loaded=load)
 
     @classmethod
     def bin(cls, path: str | os.PathLike[str], at: int) -> Image:
@@ -127,10 +127,10 @@ class Image:
         return self._name
 
     @property
-    def loads(self) -> bool:
+    def loaded(self) -> bool:
         """Whether a machine writes the image's segments to memory, False for a symbols-only
         image."""
-        return self._loads
+        return self._loaded
 
     @property
     def is_elf(self) -> bool:
@@ -175,5 +175,5 @@ class Image:
 
     def __repr__(self) -> str:
         named = "" if self._name is None else f", name={self._name!r}"
-        loads = "" if self._loads else ", load=False"
-        return f"Image({self._path!s}, digest={self.digest[:12]}{named}{loads})"
+        symbols_only = "" if self._loaded else ", load=False"
+        return f"Image({self._path!s}, digest={self.digest[:12]}{named}{symbols_only})"
