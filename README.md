@@ -22,13 +22,39 @@ assert rcc.register("RCC_CR").name == "CR"
 Nothing is mapped at address 0. Under the default `faults="stop"`, a firmware load or store through
 a NULL pointer stops the run with a FAULT stop, `stop.fault.kind` `FaultKind.BUS` and
 `stop.fault.address` 0, PRECISERR and BFARVALID set in `stop.fault.cfsr` and BFAR 0. An instruction fetch at 0 stops it the same way with IBUSERR.
-`m.mem` at 0 raises `EmulationError`. On the STM32U5 this matches the hardware. 0x0000_0000 to
+`m.mem` at 0 raises `BusAccessError`, an `EmulationError`, with `denied` False. On the STM32U5 this matches the hardware. 0x0000_0000 to
 0x07FF_FFFF is the code-region window the ICACHE remaps onto external memories, RM0456 2.3 Table 3
 and 8.4.7. Boot does not alias flash at 0: BOOT0 and the NSBOOTADDx and SECBOOTADD0 option bytes
 give the address the core takes its initial SP and PC from, RM0456 chapter 4, and flash stays at
 0x0800_0000. popcorn does not model the ICACHE remap: the ICACHE registers `CRR0` to `CRR3` store
 what the firmware writes and map nothing, so address 0 stays unmapped even with a remap region
 enabled. Parts that alias boot memory at 0, such as the STM32F4 and STM32L4, are not modelled.
+
+## Faults
+
+`faults=` on `MachineDescription` and `Machine` sets what a processor fault does:
+
+```python
+popcorn.MachineDescription(part="STM32U575QGIx", images=[popcorn.Elf(ELF)], faults="handler")
+```
+
+- `"stop"`, the default, ends the run with a FAULT stop at the faulting instruction.
+  `stop.fault` holds the kind, the address and the fault status registers.
+- `"handler"` enters the firmware's HardFault, MemManage, BusFault, UsageFault or SecureFault
+  handler, as the core does, and the run goes on.
+- Under both, lockup and an INVSTATE fault stop the run.
+- Without TrustZone, INVPC, UNSTKERR, STKERR, a STKOF on entry and VECTTBL stop the run too.
+- With TrustZone, a STKOF of the additional state context alone and a fault while taking a
+  derived exception stop the run too.
+- `faults` enters `MachineDescription.digest` only when it is not `"stop"`.
+
+Fault classes and addresses:
+
+- An alignment abort, such as an unaligned LDREX, is a UsageFault UNALIGNED on Armv7-M and
+  Armv8-M, not a BusFault.
+- A data abort reports the data address the access faulted at, not the PC.
+- An access the bus firewall refuses with a bus error is a precise BusFault, BFAR its address.
+  A bus error a peripheral model raises stays an imprecise BusFault with no BFAR.
 
 ## Install
 
