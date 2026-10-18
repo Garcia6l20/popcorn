@@ -181,6 +181,7 @@ void machine::run_state::install_hooks()
 
 void machine::run_state::reset_machine(reset_kind kind)
 {
+  ++memory_generation;
   owner.scheduler_.restore({}, 0);
   held_through.reset();
   auto fresh            = owner.clock_driver_.state();

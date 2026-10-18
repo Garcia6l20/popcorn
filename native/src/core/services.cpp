@@ -23,6 +23,27 @@ void machine_services::do_install_firewall(periph::bus_firewall&)
 void machine_services::do_memory_policy_changed()
 {}
 
+auto machine_services::do_read_granted(
+    address       addr,
+    std::uint8_t  size,
+    bus_attrs     attrs,
+    memory_grant& grant) -> std::expected<std::uint32_t, bus_error>
+{
+  grant = {};
+  return do_read(addr, size, attrs);
+}
+
+auto machine_services::do_write_granted(
+    address       addr,
+    std::uint8_t  size,
+    std::uint32_t value,
+    bus_attrs     attrs,
+    memory_grant& grant) -> std::expected<void, bus_error>
+{
+  grant = {};
+  return do_write(addr, size, value, attrs);
+}
+
 auto machine_services::do_emulated_instruction(address) -> emulated_arrival
 {
   return emulated_arrival::proceed;

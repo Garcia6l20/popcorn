@@ -74,6 +74,25 @@ struct block_error
 };
 
 /**
+ * @brief Firewall decision a host bus master keeps across its accesses, such as a DMA channel
+ *        during one transfer: the addresses [first, last] of one memory region where the bus
+ *        firewall allows every access with the attributes and operation the grant was made for.
+ *        The machine fills it on an allowed access and skips the firewall for a later access
+ *        inside it, until a memory policy change, a restore or a reset makes it stale. The
+ *        holder drops it, `grant = {}`, when its attributes change. Default constructed it
+ *        grants nothing.
+ */
+struct memory_grant
+{
+  /** @brief Policy generation the grant was made in, 0 for none. */
+  std::uint64_t generation{};
+  /** @brief First granted address. */
+  address first{};
+  /** @brief Last granted address, included. */
+  address last{};
+};
+
+/**
  * @brief What the machine decided at an instruction the arch module emulates,
  *        machine_services::emulated_instruction(). `proceed`: counted, probed and covered, the
  *        module applies the instruction. `returned`: an intercept returned to the caller
@@ -181,6 +200,24 @@ public:
   }
 
   /**
+   * @brief Reads as read() with attributes, through a grant: an access inside a current
+   *        @p grant skips the bus firewall, another access asks it and refills or drops the
+   *        grant. The result is what read() gives.
+   * @param addr Guest address, aligned to @p size.
+   * @param size Access size in bytes, 1, 2 or 4.
+   * @param attrs Bus master and transaction attributes of the access, those the grant was made
+   *        for.
+   * @param grant Grant of the caller, kept for these attributes and reads only.
+   * @return Value right-aligned to @p size, or why the bus refused the access.
+   */
+  auto read(address addr, std::uint8_t const size, bus_attrs attrs, memory_grant& grant)
+      -> std::expected<std::uint32_t, bus_error> pre(size == 1 or size == 2 or size == 4)
+          pre(addr % size == 0) post(result : not result.has_value() or fits_access(*result, size))
+  {
+    return do_read_granted(addr, size, attrs, grant);
+  }
+
+  /**
    * @brief Reads as read() with attributes, as a Secure privileged access made by @p by.
    * @param addr Guest address, aligned to @p size.
    * @param size Access size in bytes, 1, 2 or 4.
@@ -207,6 +244,28 @@ public:
           pre(addr % size == 0) pre(fits_access(value, size))
   {
     return do_write(addr, size, value, attrs);
+  }
+
+  /**
+   * @brief Writes as write() with attributes, through a grant, as read() with a grant does.
+   * @param addr Guest address, aligned to @p size.
+   * @param size Access size in bytes, 1, 2 or 4.
+   * @param value Value right-aligned to @p size.
+   * @param attrs Bus master and transaction attributes of the access, those the grant was made
+   *        for.
+   * @param grant Grant of the caller, kept for these attributes and writes only.
+   * @return Nothing, or why the bus refused the access.
+   */
+  auto write(
+      address       addr,
+      std::uint8_t  size,
+      std::uint32_t value,
+      bus_attrs     attrs,
+      memory_grant& grant)
+      -> std::expected<void, bus_error> pre(size == 1 or size == 2 or size == 4)
+          pre(addr % size == 0) pre(fits_access(value, size))
+  {
+    return do_write_granted(addr, size, value, attrs, grant);
   }
 
   /**
@@ -386,6 +445,15 @@ private:
       -> std::expected<std::uint32_t, bus_error> = 0;
   virtual auto do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
       -> std::expected<void, bus_error> = 0;
+  virtual auto
+      do_read_granted(address addr, std::uint8_t size, bus_attrs attrs, memory_grant& grant)
+          -> std::expected<std::uint32_t, bus_error>;
+  virtual auto do_write_granted(
+      address       addr,
+      std::uint8_t  size,
+      std::uint32_t value,
+      bus_attrs     attrs,
+      memory_grant& grant) -> std::expected<void, bus_error>;
   virtual auto do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)
       -> std::expected<void, block_error> = 0;
   virtual auto do_write_block(address addr, std::span<std::byte const> in, bus_attrs attrs)

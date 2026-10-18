@@ -384,6 +384,7 @@ void machine::restore(core::snapshot const& saved)
     }
   }
 
+  ++run.memory_generation;
   run.restore_hook_state(data.intercepts, data.return_hooks);
   run.core_held    = data.core_held;
   run.held_through = data.held_through;

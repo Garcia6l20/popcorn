@@ -352,6 +352,7 @@ void machine::do_install_firewall(periph::bus_firewall& firewall)
 
 void machine::do_memory_policy_changed()
 {
+  ++run_->memory_generation;
   if(run_->memory_filter)
   {
     check(uc_ctl_flush_tlb(engine_.get()), "flushing the TLB after a memory policy change");
@@ -383,6 +384,25 @@ auto machine::run_state::check_memory(
   }
   handler_scope const scope{in_handler};
   return firewall->check_memory(addr, size, seen(attrs), op);
+}
+
+auto machine::run_state::grant(
+    region_desc const& region,
+    address            addr,
+    std::uint8_t       size,
+    bus_attrs          attrs,
+    arch::memory_op    op) -> memory_grant
+{
+  auto first = region.start;
+  auto last  = static_cast<address>(region.start + (region.size - 1u));
+  if(filters_host(attrs))
+  {
+    handler_scope const scope{in_handler};
+    auto const          allowed = firewall->allowed_extent(addr, size, seen(attrs), op);
+    first                       = std::max(first, allowed.first);
+    last                        = std::min(last, allowed.last);
+  }
+  return {.generation = memory_generation, .first = first, .last = last};
 }
 
 [[gnu::hot]] auto machine::run_state::on_bus_page(

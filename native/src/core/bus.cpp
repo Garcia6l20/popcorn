@@ -33,6 +33,49 @@ auto read_host(std::byte const* bytes, std::uint8_t size) noexcept -> std::uint3
 }
 }
 
+[[gnu::always_inline]] inline auto machine::read_memory(
+    mapped_region const& region,
+    address              addr,
+    std::uint8_t         size,
+    bus_attrs            attrs) -> std::uint32_t
+{
+  if(attrs.by == initiator::dma and not run_->controller_runs.empty())
+  {
+    run_->note_controller_read(region, addr, size, attrs);
+  }
+  auto const value = read_host(region.host(addr), size);
+  run_->note_watched(addr, size, value, false, attrs.by);
+  return value;
+}
+
+auto machine::do_read_granted(address addr, std::uint8_t size, bus_attrs attrs, memory_grant& grant)
+    -> std::expected<std::uint32_t, bus_error>
+{
+  auto const* const region = mapped_region::find(memory_, addr, size);
+  if(region == nullptr)
+  {
+    grant = {};
+    return do_read(addr, size, attrs);
+  }
+  if(not run_->granted(grant, addr, size))
+  {
+    switch(run_->check_memory(addr, size, attrs, arch::memory_op::read))
+    {
+      case periph::bus_verdict::allow:
+        break;
+      case periph::bus_verdict::read_zero_write_ignore:
+        grant = {};
+        run_->note_watched(addr, size, 0, false, attrs.by);
+        return 0u;
+      case periph::bus_verdict::bus_error:
+        grant = {};
+        return std::unexpected(bus_error::denied);
+    }
+    grant = run_->grant(*region->desc, addr, size, attrs, arch::memory_op::read);
+  }
+  return read_memory(*region, addr, size, attrs);
+}
+
 auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
     -> std::expected<std::uint32_t, bus_error>
 {
@@ -49,13 +92,7 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
       case periph::bus_verdict::bus_error:
         return std::unexpected(bus_error::denied);
     }
-    if(by == initiator::dma and not run_->controller_runs.empty())
-    {
-      run_->note_controller_read(*region, addr, size, attrs);
-    }
-    auto const value = read_host(region->host(addr), size);
-    run_->note_watched(addr, size, value, false, by);
-    return value;
+    return read_memory(*region, addr, size, attrs);
   }
   if(auto const* const window = run_->window_at(addr, size))
   {
@@ -76,6 +113,64 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
   return value;
 }
 
+[[gnu::always_inline]] inline auto machine::write_memory(
+    mapped_region const& region,
+    address              addr,
+    std::uint8_t         size,
+    std::uint32_t        value,
+    bus_attrs            attrs) -> std::expected<void, bus_error>
+{
+  if(not writable_by(*region.desc, attrs.by))
+  {
+    if(region.controller != nullptr)
+    {
+      return run_->dispatch_controller_write(region, addr, size, value, attrs);
+    }
+    return std::unexpected(bus_error::denied);
+  }
+  auto bits = value;
+  for(auto& byte : std::span{region.host(addr), size})
+  {
+    byte = static_cast<std::byte>(bits & 0xff);
+    bits >>= 8;
+  }
+  region.host_wrote(*run_, addr, size);
+  run_->note_watched(addr, size, value, true, attrs.by);
+  return {};
+}
+
+auto machine::do_write_granted(
+    address       addr,
+    std::uint8_t  size,
+    std::uint32_t value,
+    bus_attrs     attrs,
+    memory_grant& grant) -> std::expected<void, bus_error>
+{
+  auto const* const region = mapped_region::find(memory_, addr, size);
+  if(region == nullptr)
+  {
+    grant = {};
+    return do_write(addr, size, value, attrs);
+  }
+  if(not run_->granted(grant, addr, size))
+  {
+    switch(run_->check_memory(addr, size, attrs, arch::memory_op::write))
+    {
+      case periph::bus_verdict::allow:
+        break;
+      case periph::bus_verdict::read_zero_write_ignore:
+        grant = {};
+        run_->note_watched(addr, size, value, true, attrs.by);
+        return {};
+      case periph::bus_verdict::bus_error:
+        grant = {};
+        return std::unexpected(bus_error::denied);
+    }
+    grant = run_->grant(*region->desc, addr, size, attrs, arch::memory_op::write);
+  }
+  return write_memory(*region, addr, size, value, attrs);
+}
+
 auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
     -> std::expected<void, bus_error>
 {
@@ -92,23 +187,7 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus
       case periph::bus_verdict::bus_error:
         return std::unexpected(bus_error::denied);
     }
-    if(not writable_by(*region->desc, by))
-    {
-      if(region->controller != nullptr)
-      {
-        return run_->dispatch_controller_write(*region, addr, size, value, attrs);
-      }
-      return std::unexpected(bus_error::denied);
-    }
-    auto bits = value;
-    for(auto& byte : std::span{region->host(addr), size})
-    {
-      byte = static_cast<std::byte>(bits & 0xff);
-      bits >>= 8;
-    }
-    region->host_wrote(*run_, addr, size);
-    run_->note_watched(addr, size, value, true, by);
-    return {};
+    return write_memory(*region, addr, size, value, attrs);
   }
   if(auto const* const window = run_->window_at(addr, size))
   {

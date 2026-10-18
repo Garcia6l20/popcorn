@@ -55,6 +55,18 @@ struct page_verdict
   friend auto operator==(page_verdict, page_verdict) -> bool = default;
 };
 
+/** @brief Bus addresses from @p first to @p last, both included. */
+struct memory_extent
+{
+  /** @brief First address. */
+  address first{};
+  /** @brief Last address, included. */
+  address last{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(memory_extent, memory_extent) -> bool = default;
+};
+
 /**
  * @brief Security and privilege filter in front of every peripheral window of a machine, as an
  *        SoC bus firewall such as the STM32 GTZC TZSC. At most one per machine, installed by a
@@ -151,6 +163,27 @@ struct POPCORN_API bus_firewall
       [[maybe_unused]] arch::memory_op op) -> bus_verdict
   {
     return bus_verdict::allow;
+  }
+
+  /**
+   * @brief The addresses around an access check_memory() just allowed over which every access
+   *        with the same attributes and operation is allowed too, with no event, until the next
+   *        core::machine_services::memory_policy_changed. A host bus master keeps it in a
+   *        core::memory_grant to skip check_memory() for later accesses. Called only when
+   *        filters_memory() is true.
+   * @param at Bus address of the allowed access.
+   * @param size Its size in bytes.
+   * @param attrs Its attributes.
+   * @param op Its operation.
+   * @return The extent, at least the access itself, which the default returns.
+   */
+  [[nodiscard]] virtual auto allowed_extent(
+      address                          at,
+      std::uint8_t                     size,
+      [[maybe_unused]] bus_attrs       attrs,
+      [[maybe_unused]] arch::memory_op op) -> memory_extent
+  {
+    return {.first = at, .last = at + size - 1};
   }
 };
 }

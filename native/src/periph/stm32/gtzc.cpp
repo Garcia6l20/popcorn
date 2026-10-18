@@ -647,6 +647,45 @@ public:
     return decision.verdict;
   }
 
+  [[nodiscard]] auto allowed_extent(address at, std::uint8_t size, bus_attrs, arch::memory_op op)
+      -> memory_extent override
+  {
+    auto const* const window = window_at(at);
+    if(window == nullptr)
+    {
+      std::uint64_t first = 0;
+      std::uint64_t last  = ~address{};
+      for(auto const& w : windows_)
+      {
+        auto const end = std::uint64_t{w.start} + w.size;
+        if(end <= at)
+        {
+          first = std::max(first, end);
+        }
+        else if(w.start > at)
+        {
+          last = std::min<std::uint64_t>(last, w.start - 1u);
+        }
+      }
+      return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
+    }
+    auto const window_last = static_cast<address>(window->start + (window->size - 1u));
+    if(window->kind == memory_kind::flash and op == arch::memory_op::write)
+    {
+      return {.first = window->start, .last = window_last};
+    }
+    auto const granule = window->granule;
+    if(granule == 0 or (granule & (granule - 1u)) != 0)
+    {
+      return {.first = at, .last = static_cast<address>(at + size - 1u)};
+    }
+    auto const physical = window->physical + (at - window->start);
+    auto const unit     = std::uint64_t{at} - (physical & (granule - 1u));
+    return {
+        .first = static_cast<address>(std::max<std::uint64_t>(window->start, unit)),
+        .last  = static_cast<address>(std::min<std::uint64_t>(window_last, unit + granule - 1u))};
+  }
+
   [[nodiscard]] auto check_peripheral(std::size_t unit, bus_attrs attrs, arch::memory_op)
       -> bus_verdict override
   {

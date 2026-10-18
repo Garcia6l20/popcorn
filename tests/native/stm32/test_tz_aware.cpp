@@ -640,7 +640,7 @@ void open_destination_block(rig const& r)
   r.write("GTZC1_MPCBB1", "SECCFGR1", 0xffff'fffe, secure_priv);
 }
 
-void copy(rig const& r, address from, address to, std::uint32_t extra_tr1 = 0)
+void arm_copy(rig const& r, address from, address to, std::uint32_t extra_tr1 = 0)
 {
   auto const tr1 = (2u << bit_index("GPDMA1", "C0TR1", "SDW_LOG2"))
                  | bit("GPDMA1", "C0TR1", "SINC")
@@ -657,8 +657,18 @@ void copy(rig const& r, address from, address to, std::uint32_t extra_tr1 = 0)
       "GPDMA1", "C0CR", bit("GPDMA1", "C0CR", "EN") | bit("GPDMA1", "C0CR", "TCIE"), secure_priv);
   REQUIRE(r.target->mem().write(loop_at, 2, 0xe7fe));
   set_register(r, "pc", loop_at | 1u);
-  auto const result = r.target->run_slice({.max_instructions = icount{20'000}});
+}
+
+void run_for(rig const& r, std::uint64_t instructions)
+{
+  auto const result = r.target->run_slice({.max_instructions = icount{instructions}});
   REQUIRE_FALSE(result.stopped.has_value());
+}
+
+void copy(rig const& r, address from, address to, std::uint32_t extra_tr1 = 0)
+{
+  arm_copy(r, from, to, extra_tr1);
+  run_for(r, 20'000);
 }
 
 [[nodiscard]] auto status(rig const& r) -> std::uint32_t
@@ -1054,4 +1064,91 @@ TEST_CASE("RM0456 10.8 Table 109: PWR_UCPDR is RAZ/WI to Non-secure while the TZ
   CHECK(r.peek("PWR", "UCPDR") == ucpd);
   CHECK(r.read("PWR", "UCPDR", nonsecure_priv) == 0);
   CHECK(r.read("PWR", "UCPDR", secure_priv) == ucpd);
+}
+
+TEST_CASE("a DMA transfer drops its firewall grant on an MPCBB write between two bursts")
+{
+  rig const  r{true};
+  auto const to = sram1_nonsecure_block + 0x100;
+  open_destination_block(r);
+  fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
+  fill(r, to, 0xaaaa'0000, 4);
+  arm_copy(r, sram1_nonsecure_block, to);
+  run_for(r, 6);
+  auto const done = (16 - r.peek("GPDMA1", "C0BR1")) / 4;
+  REQUIRE(done >= 1);
+  REQUIRE(done < 4);
+  r.write("GTZC1_MPCBB1", "SECCFGR1", 0xffff'ffff, secure_priv);
+  run_for(r, 20'000);
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  auto const words = words_at(r, to, 4);
+  for(std::uint32_t i = 0; i < 4; ++i)
+  {
+    CAPTURE(i);
+    CHECK(words[i] == (i < done ? 0x5555'0000 + i : 0xaaaa'0000 + i));
+  }
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
+}
+
+TEST_CASE("a DMA transfer drops its cached attributes on a CxTR1 write between two bursts")
+{
+  rig const  r{true};
+  auto const to = sram1_secure_block + 0x100;
+  r.write("GPDMA1", "SECCFGR", 1, secure_priv);
+  fill(r, sram1_secure_block, 0xc0de'0000, 4);
+  fill(r, to, 0xaaaa'0000, 4);
+  auto const secured = bit("GPDMA1", "C0TR1", "SSEC") | bit("GPDMA1", "C0TR1", "DSEC");
+  arm_copy(r, sram1_secure_block, to, secured);
+  run_for(r, 6);
+  auto const done = (16 - r.peek("GPDMA1", "C0BR1")) / 4;
+  REQUIRE(done >= 1);
+  REQUIRE(done < 4);
+  r.write(
+      "GPDMA1", "C0TR1", r.peek("GPDMA1", "C0TR1") & ~bit("GPDMA1", "C0TR1", "SSEC"), secure_priv);
+  run_for(r, 20'000);
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  auto const words = words_at(r, to, 4);
+  for(std::uint32_t i = 0; i < 4; ++i)
+  {
+    CAPTURE(i);
+    CHECK(words[i] == (i < done ? 0xc0de'0000 + i : 0));
+  }
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
+}
+
+TEST_CASE("a restore drops the firewall grant a DMA transfer took after the snapshot")
+{
+  rig const  r{true};
+  auto const to = sram1_nonsecure_block + 0x100;
+  fill(r, sram1_nonsecure_block, 0x5555'0000, 4);
+  fill(r, to, 0xaaaa'0000, 4);
+  arm_copy(r, sram1_nonsecure_block, to);
+  run_for(r, 6);
+  auto const done = (16 - r.peek("GPDMA1", "C0BR1")) / 4;
+  REQUIRE(done >= 1);
+  REQUIRE(done < 3);
+  auto const saved = r.target->snapshot();
+  open_destination_block(r);
+  run_for(r, 4);
+  REQUIRE((16 - r.peek("GPDMA1", "C0BR1")) / 4 > done);
+  r.target->restore(saved);
+  run_for(r, 20'000);
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  CHECK(
+      words_at(r, to, 4)
+      == std::vector<std::uint32_t>{0xaaaa'0000, 0xaaaa'0001, 0xaaaa'0002, 0xaaaa'0003});
+}
+
+TEST_CASE("a DMA firewall grant stops at the MPCBB block end, the next block asked again")
+{
+  rig const  r{true};
+  auto const from = sram1_nonsecure_block + 0x1f8;
+  auto const to   = sram1_nonsecure_block + 0x100;
+  open_destination_block(r);
+  fill(r, from, 0x5555'0000, 4);
+  fill(r, to, 0xaaaa'0000, 4);
+  copy(r, from, to);
+  REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
+  CHECK(words_at(r, to, 4) == std::vector<std::uint32_t>{0x5555'0000, 0x5555'0001, 0, 0});
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
 }

@@ -801,6 +801,22 @@ private:
       -> std::expected<std::uint32_t, bus_error> override;
   auto do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
       -> std::expected<void, bus_error> override;
+  auto do_read_granted(address addr, std::uint8_t size, bus_attrs attrs, memory_grant& grant)
+      -> std::expected<std::uint32_t, bus_error> override;
+  auto do_write_granted(
+      address       addr,
+      std::uint8_t  size,
+      std::uint32_t value,
+      bus_attrs     attrs,
+      memory_grant& grant) -> std::expected<void, bus_error> override;
+  auto read_memory(mapped_region const& region, address addr, std::uint8_t size, bus_attrs attrs)
+      -> std::uint32_t;
+  auto write_memory(
+      mapped_region const& region,
+      address              addr,
+      std::uint8_t         size,
+      std::uint32_t        value,
+      bus_attrs            attrs) -> std::expected<void, bus_error>;
   auto do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)
       -> std::expected<void, block_error> override;
   auto do_write_block(address addr, std::span<std::byte const> in, bus_attrs attrs)

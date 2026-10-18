@@ -1173,6 +1173,30 @@ struct machine::run_state
   bool resetting_arch{};
   /** @brief Engine page size in bytes, read when the memory filter is installed. */
   std::uint32_t filter_page_bytes{};
+  /** @brief Generation of the memory policy, which memory_grant holders compare: bumped by
+   * every memory_policy_changed, restore and reset. */
+  std::uint64_t memory_generation{1};
+
+  /** @brief Whether @p grant is current and holds every byte of the access. */
+  [[nodiscard]] auto
+      granted(memory_grant const& grant, address addr, std::uint8_t size) const noexcept -> bool
+  {
+    return grant.generation == memory_generation
+       and addr >= grant.first
+       and addr - grant.first <= grant.last - grant.first - (size - 1u);
+  }
+
+  /**
+   * @brief A grant for an access check_memory() just allowed: the region, or the part of it the
+   *        firewall's bus_firewall::allowed_extent gives when it filters the access.
+   * @param region Region of the access.
+   */
+  [[nodiscard]] auto grant(
+      region_desc const& region,
+      address            addr,
+      std::uint8_t       size,
+      bus_attrs          attrs,
+      arch::memory_op    op) -> memory_grant;
 
   /** @brief Installs the engine's bus filter when the firewall filters memory. */
   void install_memory_filter();
