@@ -454,7 +454,7 @@ TEST_CASE(
 
 TEST_CASE(
     "RM0456 Table 70: a bank erase over Secure and Non-secure pages is refused whole by either "
-    "set, a mass erase of an all-Secure flash runs")
+    "set, a bank erase of an all-Secure bank runs")
 {
   {
     rig const r{true, four_secure_pages};
