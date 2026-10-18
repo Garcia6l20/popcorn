@@ -417,7 +417,8 @@ struct timer
  *        Secure peripheral, are RAZ/WI to a Non-secure access, with no event. A peripheral is
  *        Secure by its TZSC bit, or for a TrustZone-aware model by its own security bits, the
  *        FLASH by RM0456 Table 62. A bit whose name gives no peripheral of the part stays
- *        Non-secure, such as the SRAMn, GTZCn and shared kernel clock selections. `SPRIV` makes
+ *        Non-secure, such as the SRAMn, GTZCn and shared kernel clock selections. `BDRST` is
+ *        Secure while the RTC or the TAMP has a secure function, RM0456 11.5.1. `SPRIV` makes
  *        the Secure bits privileged, `NSPRIV` the others, RAZ/WI to an unprivileged access.
  *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
  *        set. A Non-secure write to it is ignored with an illegal access event. `RCC_PRIVCFGR`
@@ -516,6 +517,7 @@ private:
   std::vector<std::pair<field_ref, field_ref>>         secured_;
   std::vector<unit_bits>                               units_;
   std::vector<cross_ref>                               flag_clears_;
+  std::array<trustzone_aware const*, 2>                backup_units_{};
   std::vector<std::pair<std::uint32_t, std::uint32_t>> words_;
   peripheral_security*                                 firewall_{};
   bool                                                 units_resolved_{};
@@ -1198,6 +1200,9 @@ void rcc::resolve_units()
     rule.aware = dynamic_cast<trustzone_aware const*>(
         ctx_.peers.find(ctx_.part.peripherals[rule.unit].name));
   }
+  backup_units_ = {
+      dynamic_cast<trustzone_aware const*>(ctx_.peers.find("RTC")),
+      dynamic_cast<trustzone_aware const*>(ctx_.peers.find("TAMP"))};
 }
 
 auto rcc::unit_is_secure(unit_bits const& rule) const -> bool
@@ -1271,6 +1276,12 @@ auto rcc::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
     {
       secured |= rule.bits;
     }
+  }
+  if(word == bdcr_.offset and std::ranges::any_of(backup_units_, [](trustzone_aware const* unit) {
+       return unit != nullptr and unit->secure_function();
+     }))
+  {
+    secured |= backup_reset_.mask();
   }
   auto const known =
       std::ranges::find(words_, word, &std::pair<std::uint32_t, std::uint32_t>::first);

@@ -766,6 +766,50 @@ TEST_CASE("Q9: RTC_SECCFGR and TAMP_SECCFGR stay storage, one warning each under
   }
 }
 
+TEST_CASE(
+    "RM0456 11.5.1: BDRST and the RTC clock bits are Secure with a Secure RTC or TAMP function")
+{
+  rig const  r{true};
+  auto const reset = bit("RCC", "BDCR", "BDRST");
+  auto const pulse = [&](bus_attrs attrs) {
+    r.write("RCC", "BDCR", r.peek("RCC", "BDCR") | reset, attrs);
+    r.write("RCC", "BDCR", r.peek("RCC", "BDCR") & ~reset, secure_priv);
+  };
+  auto const kept = [&](std::uint32_t seccfgr_tamp, std::uint32_t seccfgr_rtc) {
+    r.write("TAMP", "SECCFGR", seccfgr_tamp, secure_priv);
+    r.write("RTC", "SECCFGR", seccfgr_rtc, secure_priv);
+    r.write("TAMP", "BKP0R", 0x5ec0'0001, secure_priv);
+    pulse(nonsecure_priv);
+    return r.peek("TAMP", "BKP0R") == 0x5ec0'0001;
+  };
+  auto const rwsec = std::uint32_t{8} << bit_index("TAMP", "SECCFGR", "BKPRWSEC");
+  auto const wsec  = std::uint32_t{2} << bit_index("TAMP", "SECCFGR", "BKPWSEC");
+
+  CHECK(kept(rwsec, 0));
+  CHECK((r.peek("RCC", "BDCR") & reset) == 0);
+  CHECK(r.read("RCC", "BDCR", nonsecure_priv) == (r.peek("RCC", "BDCR") & ~reset));
+  pulse(secure_priv);
+  CHECK(r.peek("TAMP", "BKP0R") == 0);
+  CHECK(r.peek("TAMP", "SECCFGR") == 0);
+
+  CHECK(kept(wsec, 0));
+  CHECK(kept(bit("TAMP", "SECCFGR", "TAMPSEC"), 0));
+  CHECK(kept(bit("TAMP", "SECCFGR", "CNT1SEC"), 0));
+  CHECK(kept(0, bit("RTC", "SECCFGR", "INITSEC")));
+  CHECK(kept(0, bit("RTC", "SECCFGR", "SEC")));
+  CHECK_FALSE(kept(bit("TAMP", "SECCFGR", "BHKLOCK"), 0));
+  CHECK_FALSE(kept(0, 0));
+
+  auto const clock = bit("RCC", "APB3ENR", "RTCAPBEN");
+  r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") & ~clock, nonsecure_priv);
+  REQUIRE((r.peek("RCC", "APB3ENR") & clock) == 0);
+  r.write("RTC", "SECCFGR", bit("RTC", "SECCFGR", "SEC"), secure_priv);
+  r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") | clock, nonsecure_priv);
+  CHECK((r.peek("RCC", "APB3ENR") & clock) == 0);
+  r.write("RCC", "APB3ENR", r.peek("RCC", "APB3ENR") | clock, secure_priv);
+  CHECK((r.peek("RCC", "APB3ENR") & clock) == clock);
+}
+
 TEST_CASE("RM0456 17.4.14: a Secure channel loads its linked-list item with Secure transfers")
 {
   rig const  r{true};
