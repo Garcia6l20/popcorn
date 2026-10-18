@@ -297,6 +297,7 @@ public:
   template <std::size_t Ch> void clear_written(std::uint32_t old, std::uint32_t now);
   void                           plain_written(std::uint32_t old, std::uint32_t now);
   void                           security_written(std::uint32_t old, std::uint32_t now);
+  void                           privilege_written(std::uint32_t old, std::uint32_t now);
   void                           lock_written(std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto             secure_function() const -> bool override;
   [[nodiscard]] auto             secure_word() const -> std::uint32_t override;
@@ -428,7 +429,7 @@ gpdma::gpdma(
     auto const masked_name    = std::format("{}_SMISR", layout.ip);
     auto const extra          = std::array<write_entry<gpdma>, 3>{
         {{secure_name, &gpdma::security_written},
-         {privilege_name, &gpdma::security_written},
+         {privilege_name, &gpdma::privilege_written},
          {masked_name, &gpdma::plain_written}}
     };
     bind(extra);
@@ -578,6 +579,14 @@ void gpdma::security_written(std::uint32_t old, std::uint32_t)
       update(regs_, *c.source_secure, 0);
       update(regs_, *c.destination_secure, 0);
     }
+    interrupts(ch);
+  }
+}
+
+void gpdma::privilege_written(std::uint32_t, std::uint32_t)
+{
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
+  {
     interrupts(ch);
   }
 }
