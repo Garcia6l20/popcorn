@@ -171,12 +171,13 @@ def add_trustzone_firmware(
     secure.private.link_flags.append(f"-Wl,--cmse-implib,--out-implib={implib}")
     secure.private.link_libs.append("gcc")
     image = secure_path.with_name(f"{name}_s_image.o")
+    script = Path(__file__).with_name("secure_image.py")
     embedded = env.Command(
         target=image,
-        source=[secure],
+        source=[secure, script],
         command=[
             sys.executable,
-            str(Path(__file__).with_name("secure_image.py")),
+            str(script),
             "arm-none-eabi-objcopy",
             str(secure_path),
             str(image),
