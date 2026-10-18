@@ -515,9 +515,10 @@ def unwind(
 
 
 def source_address(read32: Read32, frame: RawFrame) -> int:
-    """The address whose source line a frame shows: the call for a return address, the SVC
-    for an exception frame that returns after one, the frame's pc otherwise."""
-    if frame.via in (Via.PROLOGUE, Via.SCAN, Via.LR):
+    """The address whose source line a frame shows: the call for a return address, a BLXNS's
+    included, the SVC for an exception frame that returns after one, the frame's pc
+    otherwise."""
+    if frame.via in (Via.PROLOGUE, Via.SCAN, Via.LR, Via.SECURE_CALL):
         return frame.pc - 2
     if frame.via is Via.EXCEPTION:
         before = _read16(read32, frame.pc - 2)

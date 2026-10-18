@@ -564,6 +564,7 @@ def test_the_call_stack_goes_through_a_blxns_into_the_secure_caller(
         (SECURE_CALLER + 2, Via.SECURE_CALL),
     ]
     assert frames[1].exact
+    assert frames[1].location.pc == SECURE_CALLER
 
 
 PAIR = ROOT / "tests" / "firmware" / "api" / "prebuilt"
