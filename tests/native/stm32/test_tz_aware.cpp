@@ -14,6 +14,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -1151,4 +1152,20 @@ TEST_CASE("a DMA firewall grant stops at the MPCBB block end, the next block ask
   REQUIRE((status(r) & bit("GPDMA1", "C0SR", "TCF")) != 0);
   CHECK(words_at(r, to, 4) == std::vector<std::uint32_t>{0x5555'0000, 0x5555'0001, 0, 0});
   CHECK(r.peek("GTZC1_TZIC", "SR4") == bit("GTZC1_TZIC", "SR4", "SRAM1F"));
+}
+
+TEST_CASE("a filtered debugger block access goes through the bus firewall")
+{
+  rig const  r{true};
+  auto const secret = std::uint32_t{0x5ec0'0001};
+  REQUIRE(r.target->mem().write(sram1_secure_block, 4, secret));
+  constexpr bus_attrs filtered{
+      .by = initiator::debugger, .secure = false, .privileged = true, .filtered = true};
+  std::array<std::byte, 8> out{};
+  out.fill(std::byte{0xff});
+  REQUIRE(r.bus->services().read_block(sram1_secure_block, out, filtered).has_value());
+  CHECK(std::ranges::all_of(out, [](std::byte b) { return b == std::byte{0}; }));
+  std::array<std::byte, 4> const in{};
+  REQUIRE(r.bus->services().write_block(sram1_secure_block, in, filtered).has_value());
+  CHECK(words_at(r, sram1_secure_block, 1) == std::vector<std::uint32_t>{secret});
 }
