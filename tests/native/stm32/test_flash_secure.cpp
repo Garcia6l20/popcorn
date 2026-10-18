@@ -733,14 +733,21 @@ TEST_CASE("rewriting SECBB with its value keeps the page verdicts and the engine
     r.set("r6", toggle);
     r.set("r3", 1000);
     r.set("pc", code_at | 1u);
-    for(;;)
+    auto const limit   = r.target->virtual_clock().now().value + 10'000;
+    auto       stopped = false;
+    while(not stopped and r.target->virtual_clock().now().value < limit)
     {
-      auto const result = r.target->run_slice({.max_instructions = icount{10'000}});
+      auto const left   = limit - r.target->virtual_clock().now().value;
+      auto const result = r.target->run_slice({.max_instructions = icount{left}});
       if(result.stopped)
       {
         REQUIRE(result.stopped->reason == popcorn::stop_reason::user);
-        break;
+        stopped = true;
       }
+    }
+    if(not stopped)
+    {
+      FAIL("the SECBB loop did not reach its bkpt within 10'000 instructions");
     }
     return core::machine_internals::counters(*r.target).engine_runs - before;
   };
