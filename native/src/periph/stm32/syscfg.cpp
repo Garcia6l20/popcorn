@@ -37,8 +37,10 @@ static_assert(std::is_empty_v<syscfg_state>);
  *        RCC SYSCFG clock bits Secure. The CSLCKR and CNSLCKR locks are stored, they do not
  *        lock the core's SAU, MPU, VTOR or AIRCR. `SYSCFG_RSSCMDR` and the OTG_HS PHY registers
  *        have no rule. Under TZEN=0 `SYSCFG_SECCFGR` is RAZ/WI, its storage keeps its reset,
- *        and every other register is storage. The model is stateless: a save made by a machine
- *        without it restores it from the register storage.
+ *        and every other register is storage. Deviation: RM0456 Table 131 makes `SYSCFG_CSLCKR`
+ *        RAZ/WI at TZEN=0, the model keeps it storage, P1 covers `SYSCFG_SECCFGR` only. The model
+ *        is stateless: a save made by a machine without it restores it from the register
+ *        storage.
  */
 class syscfg final : public dispatch_model<syscfg, syscfg_state>, public trustzone_aware
 {
