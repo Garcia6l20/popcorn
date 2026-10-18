@@ -294,6 +294,13 @@ public:
       load(image const& loaded);
 
   /**
+   * @brief Adds a symbols-only image, as core::machine::add_symbols.
+   * @param symbols Image.
+   */
+  [[= py::doc{"Add a symbols-only image: stops locate in it, nothing is written."}]] void
+      add_symbols(image const& symbols);
+
+  /**
    * @brief Resets the machine.
    * @param kind Reset kind.
    */

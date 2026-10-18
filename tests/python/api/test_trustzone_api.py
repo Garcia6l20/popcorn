@@ -563,3 +563,88 @@ def test_the_call_stack_goes_through_a_blxns_into_the_secure_caller(
         (SECURE_CALLER + 2, Via.SECURE_CALL),
     ]
     assert frames[1].exact
+
+
+PAIR = ROOT / "tests" / "firmware" / "api" / "prebuilt"
+PAIR_NS = PAIR / "tz_pair.elf"
+PAIR_S = PAIR / "tz_pair_s.elf"
+SECURE_PART = 0x2020
+
+
+def patched_text(elf: Path, out: Path) -> int:
+    """A copy of `elf` with the first byte of `.text` inverted, from the ELF32 section headers.
+    Returns the byte's guest address."""
+    data = bytearray(elf.read_bytes())
+    shoff = struct.unpack_from("<I", data, 0x20)[0]
+    entsize, count, names = struct.unpack_from("<3H", data, 0x2E)
+    strtab = struct.unpack_from("<I", data, shoff + names * entsize + 0x10)[0]
+    for index in range(count):
+        header = shoff + index * entsize
+        name, _, _, addr, offset = struct.unpack_from("<5I", data, header)
+        if bytes(data[strtab + name : strtab + name + 6]) == b".text\0":
+            data[offset] ^= 0xFF
+            out.write_bytes(bytes(data))
+            return addr
+    raise AssertionError(f"{elf} has no .text")
+
+
+def pair_machine(
+    u575: popcorn.PartDescription, secure: Path = PAIR_S, loaded: bool = False
+) -> popcorn.Machine:
+    """The fixture pair: the Non-secure ELF embeds the secure binary at 0x08000000, the
+    secure ELF gives its symbols only. SECWM1 makes pages 0 to 7 Secure."""
+    m = popcorn.Machine(
+        u575,
+        image=[
+            popcorn.Image.elf(PAIR_NS, name="nonsecure"),
+            popcorn.Image.elf(secure, name="secure", load=loaded),
+        ],
+        option_bytes=OptionBytes(tzen=True, secwm1=(0, 7), secwm2=None),
+    )
+    m.reset()
+    return m
+
+
+def test_the_pair_boots_secure_and_calls_back_through_its_veneer(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = pair_machine(u575)
+    assert m.security_state == "secure"
+    assert m.pc == m.sym("Reset_Handler", image="secure")
+    stop = asyncio.run(m.run(until=m.sym("tz_pair_done", image="nonsecure"), budget=10_000))
+    assert stop.reason == popcorn.StopReason.ADDRESS
+    assert m.security_state == "nonsecure"
+    assert m.var("tz_pair_result", image="nonsecure").value == 42
+    frames = stop_report(m, stop, ring=False).frames
+    assert [(f.location.symbol, f.via) for f in frames] == [
+        ("tz_pair_done", Via.PC),
+        ("main", Via.PROLOGUE),
+        ("__gnu_cmse_nonsecure_call", Via.SECURE_CALL),
+        ("main", Via.PROLOGUE),
+    ]
+    assert frames[3].pc in range(0x0800_0000, 0x0800_0000 + SECURE_PART)
+    assert frames[3].location.file.endswith("tz_pair_s.c")
+
+
+def test_a_symbols_only_secure_image_names_the_embedded_secure_part(
+    u575: popcorn.PartDescription, tmp_path: Path
+) -> None:
+    """The memory holds the Non-secure ELF's `.secure_image` bytes, not the patched secure
+    ELF's, while the secure ELF's symbols resolve inside the secure part. In a CMSE build the
+    entry name is the SG veneer in both images, `__acle_se_` names the function."""
+    patched = tmp_path / "tz_pair_s_patched.elf"
+    changed = patched_text(PAIR_S, patched)
+    alone = popcorn.Machine(u575, image=popcorn.Image.elf(PAIR_NS))
+    m = pair_machine(u575, patched)
+    assert m.mem.read(0x0800_0000, SECURE_PART) == alone.mem.read(0x0800_0000, SECURE_PART)
+    loaded = pair_machine(u575, patched, loaded=True)
+    assert loaded.mem.u8[changed] != m.mem.u8[changed]
+    secure_main, nonsecure_main = m.sym("main", image="secure"), m.sym("main", image="nonsecure")
+    assert secure_main in range(0x0800_0000, 0x0800_0000 + SECURE_PART)
+    assert nonsecure_main >= 0x0801_0000
+    assert m.sym("main") == secure_main
+    function = m.sym("__acle_se_tz_pair_add", image="secure")
+    assert function in range(0x0800_0000, 0x0800_2000)
+    assert m.sym("tz_pair_add", image="nonsecure") == m.sym("tz_pair_add", image="secure")
+    assert m.sym("tz_pair_add", image="nonsecure") == 0x0800_2000
+    assert m.locate(function).symbol == "__acle_se_tz_pair_add"

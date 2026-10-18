@@ -1036,6 +1036,8 @@ class Machine:
         _check_image_names((*self._images, image))
         if image.loads:
             self._handle.load(image.native)
+        else:
+            self._handle.add_symbols(image.native)
         self._images.append(image)
 
     def model(self, peripheral: str) -> Model | None:

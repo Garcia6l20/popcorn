@@ -237,6 +237,12 @@ void machine::load(popcorn::image::image const& loaded)
   run_->build_symbol_index();
 }
 
+void machine::add_symbols(popcorn::image::image const& symbols)
+{
+  require_stopped(*this);
+  symbol_images_.push_back(symbols);
+}
+
 auto machine::loaded_images() const noexcept -> std::span<popcorn::image::image const>
 {
   return images_;

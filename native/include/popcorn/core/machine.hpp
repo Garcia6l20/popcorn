@@ -352,6 +352,17 @@ public:
    */
   void load(popcorn::image::image const& loaded);
 
+  /**
+   * @brief Adds a symbols-only image, such as the ELF of a secure part embedded as raw bytes in
+   *        a loaded image: nothing is written to memory, and it adds no image digest, no
+   *        coverage range and no trace symbol. locate() falls back to its symbols where the
+   *        loaded images give no symbol, and to its lines where they give no line, the last
+   *        added first.
+   * @param symbols Image whose symbols and lines are kept, copied.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void add_symbols(popcorn::image::image const& symbols);
+
   /** @brief Images loaded so far, in load order. Their symbols concatenated in this order are the
    * symbol table call trace records index. */
   [[nodiscard]] auto loaded_images() const noexcept -> std::span<popcorn::image::image const>;
@@ -818,6 +829,7 @@ private:
   std::unique_ptr<arch::arch>                   arch_;
   std::vector<std::unique_ptr<peripheral_slot>> peripherals_{};
   std::vector<popcorn::image::image>            images_{};
+  std::vector<popcorn::image::image>            symbol_images_{};
   trace_ring                                    trace_;
   std::shared_ptr<hook_registry>                hooks_;
   std::unique_ptr<run_state>                    run_;

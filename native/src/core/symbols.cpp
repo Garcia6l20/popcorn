@@ -82,6 +82,28 @@ auto machine::run_state::locate(address pc) const -> location
     where.file        = source.file;
     where.line        = source.line;
   }
+  for(auto const& extra : owner.symbol_images_ | std::views::reverse)
+  {
+    if(where.symbol.empty())
+    {
+      auto const found = std::ranges::find_if(extra.symbols, [pc](image::symbol const& entry) {
+        return entry.kind != image::symbol_kind::other
+           and entry.value <= pc
+           and pc - entry.value < std::max<std::uint32_t>(entry.size, 1);
+      });
+      if(found != extra.symbols.end())
+      {
+        where.symbol = found->name;
+        where.offset = pc - found->value;
+      }
+    }
+    if(where.file.empty() and holds(extra))
+    {
+      auto const source = extra.locate(pc);
+      where.file        = source.file;
+      where.line        = source.line;
+    }
+  }
   return where;
 }
 }

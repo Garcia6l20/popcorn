@@ -544,6 +544,11 @@ void machine_handle::load(image const& loaded)
   access([&](core::machine& target) { target.load(loaded.native()); });
 }
 
+void machine_handle::add_symbols(image const& symbols)
+{
+  access([&](core::machine& target) { target.add_symbols(symbols.native()); });
+}
+
 void machine_handle::reset(reset_kind kind)
 {
   if(not is_enumerator(kind))
