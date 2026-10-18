@@ -3,6 +3,7 @@
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
@@ -18,6 +19,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -457,13 +459,26 @@ TEST_CASE("RM0456 15.2.2 Table 131: SYSCFG Secure registers, events and CFGR1 bi
   CHECK((r.peek("SYSCFG", "CFGR1") & (fmp6 | fmp7)) == fmp7);
 }
 
-TEST_CASE("Deviation from RM0456 15.3.1: SYSCFG_SECCFGR stays storage under TZEN=0")
+TEST_CASE("RM0456 15.3.1, P1: SYSCFG_SECCFGR is RAZ/WI under TZEN=0")
 {
   rig const r{false};
-  CHECK(r.target->model("SYSCFG") == nullptr);
   r.write("SYSCFG", "SECCFGR", 0xb, nonsecure_priv);
-  CHECK(r.read("SYSCFG", "SECCFGR", nonsecure_priv) == 0xb);
+  CHECK(r.read("SYSCFG", "SECCFGR", nonsecure_priv) == 0);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == 0);
   r.write("SYSCFG", "CFGR2", 0x1, nonsecure_unpriv);
   CHECK(r.read("SYSCFG", "CFGR2", nonsecure_unpriv) == 0x1);
 }
+}
+
+TEST_CASE("a SYSCFG snapshot holds no model bytes and restores from the SYSCFG storage")
+{
+  rig const r{false};
+  r.write("SYSCFG", "CFGR2", 0x1, nonsecure_priv);
+  auto const taken = r.target->snapshot();
+  CHECK(std::ranges::none_of(taken.data().models, [](core::snapshot_part const& part) {
+    return part.owner == "SYSCFG";
+  }));
+  r.write("SYSCFG", "CFGR2", 0, nonsecure_priv);
+  REQUIRE_NOTHROW(r.target->restore(taken));
+  CHECK(r.peek("SYSCFG", "CFGR2") == 0x1);
 }

@@ -33,8 +33,9 @@ struct syscfg_state
  *        ADC1 or ADC4 Secure, RAZ/WI to a Non-secure access with no event. SYSCFGSEC makes the
  *        RCC SYSCFG clock bits Secure. The CSLCKR and CNSLCKR locks are stored, they do not
  *        lock the core's SAU, MPU, VTOR or AIRCR. `SYSCFG_RSSCMDR` and the OTG_HS PHY registers
- *        have no rule. Only built under TrustZone: under TZEN=0 SYSCFG stays storage, so a save
- *        from a machine without the model still loads.
+ *        have no rule. Under TZEN=0 `SYSCFG_SECCFGR` is RAZ/WI, its storage keeps its reset,
+ *        and every other register is storage. The model is stateless: a save made by a machine
+ *        without it restores it from the register storage.
  */
 class syscfg final : public dispatch_model<syscfg, syscfg_state>, public trustzone_aware
 {
@@ -46,6 +47,7 @@ public:
 
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
+  [[nodiscard]] auto stateless() const -> bool override;
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
 private:
@@ -71,8 +73,13 @@ private:
   illegal_event                illegal_;
 };
 
-constexpr auto syscfg_writes = std::to_array<write_entry<syscfg>>({
-    {"SYSCFG_SECCFGR", nullptr},
+constexpr std::array<write_entry<syscfg>, 1> syscfg_writes{
+    {
+     {"SYSCFG_SECCFGR", nullptr},
+     }
+};
+
+constexpr auto syscfg_trustzone_writes = std::to_array<write_entry<syscfg>>({
     {"SYSCFG_CFGR1",   nullptr},
     {"SYSCFG_FPUIMR",  nullptr},
     {"SYSCFG_CNSLCKR", nullptr},
@@ -85,12 +92,16 @@ constexpr auto syscfg_writes = std::to_array<write_entry<syscfg>>({
 });
 
 syscfg::syscfg(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "SYSCFG", syscfg_writes}, regs_{ctx.regs},
+    : dispatch_model{ctx, desc, "SYSCFG", syscfg_writes, syscfg_trustzone_writes}, regs_{ctx.regs},
       secure_{reg("SYSCFG_SECCFGR")}, system_{field("SYSCFG_SECCFGR", "SYSCFGSEC")},
       class_b_{field("SYSCFG_SECCFGR", "CLASSBSEC")}, fpu_{field("SYSCFG_SECCFGR", "FPUSEC")},
       adc1_{unit_named(ctx.part, "ADC1")}, adc4_{unit_named(ctx.part, "ADC4")},
       unit_{unit_named(ctx.part, desc.name)}
 {
+  if(not ctx.trustzone)
+  {
+    return;
+  }
   fpu_mask_       = reg("SYSCFG_FPUIMR").offset;
   config1_        = reg("SYSCFG_CFGR1").offset;
   config2_        = reg("SYSCFG_CFGR2").offset;
@@ -119,7 +130,12 @@ void syscfg::on_event(std::uint32_t, std::uint64_t)
 
 auto syscfg::secure_word() const -> std::uint32_t
 {
-  return regs_.peek(secure_.offset);
+  return ctx_.trustzone ? regs_.peek(secure_.offset) : 0;
+}
+
+auto syscfg::stateless() const -> bool
+{
+  return true;
 }
 
 auto syscfg::secure_function() const -> bool
@@ -137,6 +153,10 @@ auto syscfg::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus
   auto const all = ~std::uint32_t{};
   if(word == secure_.offset)
   {
+    if(not ctx_.trustzone)
+    {
+      return bus_guard::both(all);
+    }
     if(not ctx.secure)
     {
       if(write and unit_)
@@ -146,6 +166,10 @@ auto syscfg::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus
       return {.wi = all};
     }
     return {.wi = ctx.privileged ? 0 : fpu_.mask()};
+  }
+  if(not ctx_.trustzone)
+  {
+    return {};
   }
   return register_guard(word, ctx);
 }
@@ -210,10 +234,6 @@ auto syscfg::register_guard(std::uint32_t word, access_ctx const& ctx) -> bus_gu
 auto syscfg_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    if(not ctx.trustzone)
-    {
-      return nullptr;
-    }
     return std::make_shared<syscfg>(ctx, desc);
   };
 }

@@ -115,8 +115,7 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the CRC model, RM0456 section 24. */
 [[nodiscard]] auto crc_factory() -> model_factory;
 
-/** @brief Factory of the SYSCFG model, RM0456 section 15. Returns no model without TrustZone:
- * SYSCFG then stays storage at its description reset values. */
+/** @brief Factory of the SYSCFG model, RM0456 section 15. */
 [[nodiscard]] auto syscfg_factory() -> model_factory;
 
 /** @brief Factory of the HASH model, RM0456 section 51. */
