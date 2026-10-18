@@ -114,9 +114,24 @@ protected:
   ~sram_block_controller() = default;
 };
 
+/** @brief Policy of one flash page, RM0456 7.5.2 to 7.5.6. */
+struct page_policy
+{
+  /** @brief Secure, by watermark or block bit. */
+  bool secure{};
+  /** @brief Privileged, by block bit. */
+  bool privileged{};
+  /** @brief In a hide-protection area whose access is disabled, denied to every access. */
+  bool hidden{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(page_policy const&, page_policy const&) -> bool = default;
+};
+
 /**
  * @brief A flash memory as the memory filter sees it, found by `dynamic_cast` over the
- *        machine's peers: the security of each of its pages, RM0456 7.5.2 to 7.5.4.
+ *        machine's peers: the security, privilege and hide protection of each of its pages,
+ *        RM0456 7.5.2 to 7.5.6.
  */
 class secure_page_controller
 {
@@ -139,6 +154,13 @@ public:
    *         page security, as without option bytes.
    */
   [[nodiscard]] virtual auto page_secure(address at) const -> std::optional<bool> = 0;
+
+  /**
+   * @brief Policy of the page holding an address.
+   * @param at Address in any alias of the memory.
+   * @return The policy, empty exactly when page_secure() is.
+   */
+  [[nodiscard]] virtual auto page_rule(address at) const -> std::optional<page_policy> = 0;
 
   /** @brief Size of the pages of page_secure() in bytes. */
   [[nodiscard]] virtual auto secure_page_size() const -> std::uint32_t = 0;

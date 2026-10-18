@@ -378,7 +378,10 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * - A page is Secure inside the SECWMx area of its bank or with its SECyBBRx bit set, RM0456
  *   7.5.2 and 7.5.4, banks following SWAP_BANK, 7.5.8. It is in the HDP area while HDPxEN is set,
  *   HDPx_ACCDIS is set and it lies from SECWMx_PSTRT to HDPx_PEND, 7.5.3. It is privileged with its
- *   PRIVyBBRx bit set, 7.5.6.
+ *   PRIVyBBRx bit set, 7.5.6. The GTZC memory filter reads the same policy: the HDP area reads
+ *   zero to every load and refuses every fetch, a privileged page does so to unprivileged
+ *   accesses. Deviation: RM0456 Table 73 gives an unprivileged fetch of a privileged page zeros,
+ *   the model a BusFault, as for an MPCBB block.
  * - A store whose transaction security differs from its page, into the HDP area, or
  *   unprivileged into a privileged page is dropped with WRPERR in its set, Tables 68 and 73. A
  *   page, bank or mass erase covering such a page, judged by the set and the privilege of the
@@ -480,6 +483,7 @@ public:
   void on_voltage_range_change() override;
 
   [[nodiscard]] auto page_secure(address at) const -> std::optional<bool> override;
+  [[nodiscard]] auto page_rule(address at) const -> std::optional<page_policy> override;
   [[nodiscard]] auto secure_page_size() const -> std::uint32_t override;
 
   void access_written(std::uint32_t old, std::uint32_t now);
@@ -521,13 +525,6 @@ private:
     std::uint32_t         clearable{};
   };
 
-  struct page_rule
-  {
-    bool secure{};
-    bool privileged{};
-    bool hidden{};
-  };
-
   [[nodiscard]] auto make_set(std::string_view prefix) const -> register_set;
   [[nodiscard]] auto field_of(bool secure, set_role role) const -> field_ref;
   [[nodiscard]] auto flag(bool secure, set_role role) const -> bool;
@@ -558,7 +555,7 @@ private:
   [[nodiscard]] auto bank_of(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_start(std::uint32_t bank) const -> std::uint32_t;
-  [[nodiscard]] auto rule_of(std::uint32_t at) const -> page_rule;
+  [[nodiscard]] auto rule_of(std::uint32_t at) const -> page_policy;
   [[nodiscard]] auto block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const
       -> bool;
   [[nodiscard]] auto
@@ -1106,6 +1103,11 @@ auto flash::bank_base(std::uint32_t at) const -> std::uint32_t
 
 auto flash::page_secure(address at) const -> std::optional<bool>
 {
+  return page_rule(at).transform([](page_policy const& page) { return page.secure; });
+}
+
+auto flash::page_rule(address at) const -> std::optional<page_policy>
+{
   if(not ctx_.trustzone or storage_ == nullptr or option_words_.size() != option_registers.size())
   {
     return std::nullopt;
@@ -1117,10 +1119,10 @@ auto flash::page_secure(address at) const -> std::optional<bool>
   {
     return std::nullopt;
   }
-  return rule_of(physical(*region, at)).secure;
+  return rule_of(physical(*region, at));
 }
 
-auto flash::rule_of(std::uint32_t at) const -> page_rule
+auto flash::rule_of(std::uint32_t at) const -> page_policy
 {
   constexpr std::size_t secwm1r1    = 4;
   constexpr std::size_t secwm2r1    = 6;

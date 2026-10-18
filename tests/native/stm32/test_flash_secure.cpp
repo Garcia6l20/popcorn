@@ -333,8 +333,11 @@ struct rig
 auto nonsecure_code(rig const& r) -> void
 {
   auto const block = (code_at - 0x2000'0000) / 0x200;
-  auto const name  = std::format("SECCFGR{}", block / 32);
-  r.write("GTZC1_MPCBB1", name, r.peek("GTZC1_MPCBB1", name) & ~(1u << (block % 32)));
+  for(auto const prefix : {"SECCFGR", "PRIVCFGR"})
+  {
+    auto const name = std::format("{}{}", prefix, block / 32);
+    r.write("GTZC1_MPCBB1", name, r.peek("GTZC1_MPCBB1", name) & ~(1u << (block % 32)));
+  }
   REQUIRE(r.target->mem().write(sau_ctrl, 4, sau_allns));
   r.engine_secure(false);
 }
@@ -779,5 +782,115 @@ TEST_CASE(
       == UC_ERR_OK);
   CHECK(secure == 1);
   CHECK((r.get("pc") & ~1u) == (r.word(flash_s + 4) & ~1u));
+}
+
+constexpr stm32::option_bytes hidden_pages{
+    .tzen   = true,
+    .secwm1 = stm32::page_range{.first = 0, .last = 3},
+    .secwm2 = stm32::no_area{},
+    .hdp1   = stm32::page_range{.first = 0, .last = 1}
+};
+
+auto load_from(rig const& r, address at, bool nonsecure, bool unprivileged) -> std::uint64_t
+{
+  if(nonsecure)
+  {
+    nonsecure_code(r);
+  }
+  r.set("control", unprivileged ? 1 : 0);
+  r.set("r0", at);
+  r.set("r2", 0xdead'beef);
+  REQUIRE(r.run_code({ldr_r2_r0, bkpt}, icount{2}).reason == popcorn::stop_reason::user);
+  r.set("control", 0);
+  if(nonsecure)
+  {
+    r.engine_secure(true);
+    REQUIRE(r.target->mem().write(sau_ctrl, 4, 0));
+  }
+  return r.get("r2");
+}
+
+TEST_CASE(
+    "RM0456 7.5.3 and Table 68: with HDP1_ACCDIS set the HDP area reads 0 to a Secure load "
+    "with no event and to a Non-secure one with FLASHF, a Secure fetch is a bus fault")
+{
+  rig const r{true, hidden_pages};
+  REQUIRE(r.target->mem().write(flash_ns + page_bytes + 0x40, 4, 0x4444'4444));
+  REQUIRE(r.target->mem().write(flash_ns + 2 * page_bytes, 4, 0x2222'2222));
+  r.put(flash_ns + page_bytes, {bkpt});
+  CHECK(load_from(r, flash_s + page_bytes + 0x40, false, false) == 0x4444'4444);
+  r.write("SECHDPCR", 1, secure_priv);
+  CHECK(load_from(r, flash_s + page_bytes + 0x40, false, false) == 0);
+  CHECK_FALSE(r.tzic("FLASHF"));
+  CHECK(load_from(r, flash_s + 2 * page_bytes, false, false) == 0x2222'2222);
+  CHECK(load_from(r, flash_ns + page_bytes + 0x40, true, false) == 0);
+  CHECK(r.tzic("FLASHF"));
+  r.clear_events();
+  r.set("pc", (flash_s + page_bytes) | 1u);
+  auto const fetched = r.target->run_slice({.max_instructions = icount{2}});
+  REQUIRE(fetched.stopped.has_value());
+  REQUIRE(fetched.stopped->reason == popcorn::stop_reason::fault);
+  CHECK(fetched.stopped->fault->kind == popcorn::fault_kind::bus);
+  CHECK((fetched.stopped->fault->status & cfsr_ibuserr) != 0);
+  r.target->reset(popcorn::reset_kind::software);
+  REQUIRE(r.target->mem().write(idle_at, 2, 0xe7fe));
+  CHECK(load_from(r, flash_s + page_bytes + 0x40, false, false) == 0x4444'4444);
+}
+
+TEST_CASE(
+    "RM0456 7.5.6 and Table 73: a PRIVBB page reads 0 to an unprivileged load with no event and "
+    "data to a privileged one, an unprivileged fetch is a bus fault")
+{
+  rig const         r{true, four_secure_pages};
+  constexpr address page6 = flash_ns + 6 * page_bytes;
+  REQUIRE(r.target->mem().write(page6 + 0x20, 4, 0x6666'6666));
+  CHECK(load_from(r, page6 + 0x20, true, true) == 0x6666'6666);
+  r.write("PRIV1BBR1", 1u << 6, secure_priv);
+  CHECK(load_from(r, page6 + 0x20, true, true) == 0);
+  CHECK(load_from(r, page6 + 0x20, true, false) == 0x6666'6666);
+  CHECK_FALSE(r.tzic("FLASHF"));
+  r.put(page6, {bkpt});
+  r.put(page6 + page_bytes, {bkpt});
+  nonsecure_code(r);
+  r.set("control", 1);
+  r.set("pc", (page6 + page_bytes) | 1u);
+  auto const control = r.target->run_slice({.max_instructions = icount{2}});
+  REQUIRE(control.stopped.has_value());
+  CHECK(control.stopped->reason == popcorn::stop_reason::user);
+  r.set("pc", page6 | 1u);
+  auto const fetched = r.target->run_slice({.max_instructions = icount{2}});
+  REQUIRE(fetched.stopped.has_value());
+  REQUIRE(fetched.stopped->reason == popcorn::stop_reason::fault);
+  CHECK(fetched.stopped->fault->kind == popcorn::fault_kind::bus);
+}
+
+TEST_CASE(
+    "an SECHDPCR store that hides the running Secure loop's flash page faults its next fetch in "
+    "an SAU-split page, RM0456 7.5.3 and B3.11 RJQMQ")
+{
+  rig const         r{true, hidden_pages, popcorn::arch::fault_policy::enter_handler};
+  constexpr address page1 = flash_ns + page_bytes;
+  r.put(handler_at, {bkpt});
+  REQUIRE(r.target->mem().write(vectors_at, 4, stack_top));
+  REQUIRE(r.target->mem().write(vectors_at + 4 * 3, 4, handler_at | 1u));
+  REQUIRE(r.target->mem().write(vtor, 4, vectors_at));
+  r.set("msp", stack_top);
+  r.put(page1, {0x3b01, 0x42a3, 0xd100, 0x6001, 0x2b00, 0xd1f9, bkpt});
+  r.sau_region(0, page1 + 0x200, page1 + 0x3e0);
+  REQUIRE(r.target->mem().write(sau_ctrl, 4, sau_enable));
+  r.set("r0", address_of("FLASH", "SECHDPCR"));
+  r.set("r1", 1);
+  r.set("r3", 100);
+  r.set("r4", 50);
+  r.set("pc", page1 | 1u);
+  auto const result = r.target->run_slice({.max_instructions = icount{2000}});
+  REQUIRE(result.stopped.has_value());
+  CHECK(result.stopped->reason == popcorn::stop_reason::user);
+  CHECK(r.get("pc") == handler_at + 2);
+  CHECK((r.get("xpsr") & 0x1ff) == 3);
+  CHECK((r.word(hfsr) & hfsr_forced) != 0);
+  CHECK((r.word(cfsr) & cfsr_ibuserr) != 0);
+  CHECK(r.word(static_cast<address>(r.get("msp")) + 24) == page1 + 8);
+  CHECK(r.get("r3") == 50);
 }
 }

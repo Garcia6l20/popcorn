@@ -226,6 +226,7 @@ struct memory_rule
   bool secure{};
   bool privileged{};
   bool secure_data{};
+  bool hidden{};
 };
 
 struct data_decision
@@ -244,7 +245,7 @@ struct data_decision
   {
     return {.verdict = bus_verdict::read_zero_write_ignore, .event = true};
   }
-  if(not attrs.privileged and rule.privileged)
+  if(rule.hidden or (not attrs.privileged and rule.privileged))
   {
     return {.verdict = bus_verdict::read_zero_write_ignore};
   }
@@ -253,7 +254,7 @@ struct data_decision
 
 auto fetch_denied(memory_rule rule, bus_attrs attrs) -> bool
 {
-  return attrs.secure != rule.secure or (not attrs.privileged and rule.privileged);
+  return attrs.secure != rule.secure or rule.hidden or (not attrs.privileged and rule.privileged);
 }
 
 struct gtzc_state
@@ -423,7 +424,8 @@ struct securable
  *        privileged block or sub-region reads zero and drops the write with no event. An
  *        instruction fetch the same rules refuse, a Secure fetch with `SRWILADIS` set included,
  *        is a BusFault, with the event for a Secure fetch of a Non-secure SRAM block or BKPSRAM
- *        sub-region only. Flash pages carry no privilege in this step. MPCWM4 registers are
+ *        sub-region only. A flash page in an HDP area whose access is disabled refuses every data
+ *        access and fetch, with the event only for a Non-secure one. MPCWM4 registers are
  *        Secure privileged only, `SRLOCK` set-only freezes both until a reset, a sub-region of
  *        length 0 clears `SREN`, and outside an enabled sub-region the BKPSRAM is Secure and
  *        privileged. Every write that changes a security or privilege bit, here or in an MPCBB,
@@ -771,7 +773,10 @@ private:
             .privileged  = window.blocks->block_privileged(physical).value_or(true),
             .secure_data = window.blocks->secure_data_allowed()};
       case memory_kind::flash:
-        return {.secure = window.pages->page_secure(at).value_or(false)};
+      {
+        auto const page = window.pages->page_rule(at).value_or(page_policy{});
+        return {.secure = page.secure, .privileged = page.privileged, .hidden = page.hidden};
+      }
       case memory_kind::watermark:
         return watermark_rule(at - window.start);
     }
