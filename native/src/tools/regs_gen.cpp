@@ -92,7 +92,8 @@ auto main(int argc, char** argv) -> int
   std::println(
       out, "    \"\"\"Core registers as typed attributes. A core without an FPU has no s0-s31, "
            "fpscr. Only a machine with TrustZone enabled has secure and the _s and _ns "
-           "registers. secure, control_s and control_ns are written from a stop only: a "
+           "registers. secure, control_s and control_ns, and control with TrustZone enabled, "
+           "are written from a stop only: a "
            "handler's write raises MachineRunning, since code already translated would keep "
            "the old value.\"\"\"");
   for(auto const& reg : registers)

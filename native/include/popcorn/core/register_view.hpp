@@ -66,7 +66,8 @@ public:
    * @param value Value right-aligned to `reg.bits`.
    * @throws machine_running while a slice runs, outside its handlers, and from a handler for
    *         a register arch::arch::translation_register names, such as the Cortex-M `secure`,
-   *         `control_s` and `control_ns`: the code already translated would keep the old value.
+   *         `control_s` and `control_ns`, and `control` with TrustZone enabled: the code already
+   *         translated would keep the old value.
    */
   void write(arch::cpu_register const& reg, std::uint64_t value) const
       pre(fits_register(value, reg.bits));

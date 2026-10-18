@@ -720,7 +720,7 @@ def test_coverage_and_trace_name_the_functions_of_a_symbols_only_image(
     assert [(c.pc, c.symbol) for c in calls] == [(function & ~1, "__acle_se_tz_pair_add")]
 
 
-@pytest.mark.parametrize("name", ["secure", "control_s", "control_ns"])
+@pytest.mark.parametrize("name", ["secure", "control_s", "control_ns", "control"])
 def test_a_handler_cannot_write_a_register_translated_code_holds(
     u575: popcorn.PartDescription, name: str
 ) -> None:
@@ -746,3 +746,19 @@ def test_a_handler_cannot_write_a_register_translated_code_holds(
     assert m.mem.u32[SRAM_S + 0x100] == 0
     m.reg[reg] = before ^ 1
     assert m.reg[reg] == before ^ 1
+
+
+def test_without_trustzone_a_handler_still_writes_control(u575: popcorn.PartDescription) -> None:
+    m = tz_machine(u575, tzen=False)
+    at = SRAM_NS + 0x100
+    m.mem.write(at, struct.pack("<2H", 0xBF00, 0xE7FE))
+    m.reg.pc = at
+
+    def handler(call: popcorn.Call) -> popcorn.Return:
+        m.reg.control = m.reg.control | 1
+        return call.proceed()
+
+    m.intercept(at, handler, once=True)
+    stop = asyncio.run(m.run(budget=3))
+    assert stop.reason == popcorn.StopReason.BUDGET
+    assert m.reg.control & 1 == 1

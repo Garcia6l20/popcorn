@@ -523,7 +523,8 @@ auto cortex_m::translation_register(cpu_register const& reg) const -> bool
 {
   return reg.engine_id == UC_ARM_REG_SECURE
       or reg.engine_id == UC_ARM_REG_CONTROL_S
-      or reg.engine_id == UC_ARM_REG_CONTROL_NS;
+      or reg.engine_id == UC_ARM_REG_CONTROL_NS
+      or (reg.engine_id == UC_ARM_REG_CONTROL and trustzone());
 }
 
 auto cortex_m::registers() const -> std::span<cpu_register const>
