@@ -75,7 +75,7 @@ from popcorn._hooks import (
 )
 from popcorn._host import awaited, watch_logs
 from popcorn._image import Image, Location, Symbol, location_of
-from popcorn._image_view import ImageView, debug_infos, find_variable
+from popcorn._image_view import ImageView, debug_infos, find_variable, selected_images
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import (
@@ -316,7 +316,8 @@ def error_prefix(machine: Machine) -> str:
 
 def stack_access(machine: Machine) -> tuple[Read32, Functions]:
     """A word reader for the unwinder, None outside the regions of `machine`'s description or
-    on an access error, and the function symbols of its loaded images."""
+    on an access error, and the function symbols of its loaded images, every image's own
+    where two define one name."""
     regions = [(r.start, r.start + r.size) for r in machine.description.regions]
 
     def read32(address: int) -> int | None:
@@ -327,7 +328,9 @@ def stack_access(machine: Machine) -> tuple[Read32, Functions]:
         except EmulationError:
             return None
 
-    functions = Functions((s.name, s.value, s.size) for s in machine.symbols.values() if s.function)
+    functions = Functions(
+        (s.name, s.value, s.size) for image in machine.images for s in image.symbols if s.function
+    )
     return read32, functions
 
 
@@ -485,6 +488,21 @@ class _Linked(Protocol):
     async def _close_open(self, machine: Machine) -> Stop | None: ...
 
     def reset(self, member: str, kind: ResetKind = ResetKind.POWER_ON) -> None: ...
+
+
+def _check_image_names(images: Sequence[Image]) -> None:
+    seen: set[str] = set()
+    for index, image in enumerate(images):
+        if image.name is None:
+            continue
+        if image.name in seen:
+            raise ConfigError(
+                f"two images are named {image.name}",
+                file="images",
+                key=f"images[{index}].name",
+                expected="a name no other image has",
+            )
+        seen.add(image.name)
 
 
 def _probe_state(state: object, registers: Sequence[str]) -> bool | None:
@@ -713,7 +731,8 @@ class Machine:
                 models key names no peripheral, a model is refused, or devices are refused:
                 a peripheral that is not a built-in bus of their kind or has a board model,
                 a chip select pin the description lacks, a device already serving a live
-                machine or listed twice, an `SpiController` next to another device on its SPI.
+                machine or listed twice, an `SpiController` next to another device on its SPI,
+                or two images share a name.
                 With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz or above 1 MHz, an RCC
                 with a Python model or one no built-in model serves.
                 With `audio`: a key that is not an SAI with the built-in model, two keys naming
@@ -771,6 +790,8 @@ class Machine:
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
         config.models_context = self._model_context
+        images = (image,) if isinstance(image, Image) else tuple(image)
+        _check_image_names(images)
         self._handle = _core.MachineHandle(description, config)
         self._images: list[Image] = []
         self._refs: Refs | None = None
@@ -849,7 +870,7 @@ class Machine:
         self._sentinel = (
             self._arena.sentinel if self._arena is not None else _free_sentinel(description)
         )
-        for one in (image,) if isinstance(image, Image) else image:
+        for one in images:
             self.load(one)
 
     def __del__(self) -> None:
@@ -1002,14 +1023,19 @@ class Machine:
         return self._handle.pending_events()
 
     def load(self, image: Image) -> None:
-        """Load one more image over memory, such as an application after a bootloader.
+        """Load one more image over memory, such as an application after a bootloader. A
+        symbols-only image, `Image.elf(path, load=False)`, writes nothing: it only adds its
+        symbols and DWARF.
 
         Raises:
+            ConfigError: The image's name is already the name of a loaded image.
             ImageError: A segment falls outside the description's memory regions.
             MachineRunning: The machine is busy, outside its handlers.
         """
         self._require_stopped()
-        self._handle.load(image.native)
+        _check_image_names((*self._images, image))
+        if image.loads:
+            self._handle.load(image.native)
         self._images.append(image)
 
     def model(self, peripheral: str) -> Model | None:
@@ -1503,16 +1529,19 @@ class Machine:
         """
         return self._peripherals
 
-    def sym(self, name: str) -> int:
-        """Address of a symbol of the loaded images, the last loaded first. A function's address
-        has bit 0 clear, `fn_ptr` gives the value a function pointer holds.
+    def sym(self, name: str, image: str | None = None) -> int:
+        """Address of a symbol of the loaded images, the last loaded first, or of the image
+        named `image` alone, for a name such as `main` both images of a secure and Non-secure
+        pair define. A function's address has bit 0 clear, `fn_ptr` gives the value a function
+        pointer holds.
 
         Raises:
-            SymbolError: No loaded image has the name, with close matches.
+            SymbolError: No loaded image has the name, with close matches, or no image is named
+                `image`, with the image names.
         """
-        return self.address_of(name)
+        return self._symbol(name, image).value
 
-    def fn_ptr(self, function: str | Symbol) -> int:
+    def fn_ptr(self, function: str | Symbol, image: str | None = None) -> int:
         """The value a C function pointer to `function` holds: its address with bit 0 set, the
         Thumb state bit every Cortex-M function pointer carries. Pass it to `call` where the
         firmware expects a callback, or write it to a function-pointer variable.
@@ -1520,14 +1549,16 @@ class Machine:
             await m.call("HAL_DMA_RegisterCallback", handle, 0, m.fn_ptr("on_done"))
 
         Reads the loaded images only, never the machine: works parked or running, from any
-        thread. A name is looked up as `sym` does, the last loaded image first.
+        thread. A name is looked up as `sym` does, the last loaded image first, or in the image
+        named `image`.
 
         A routine defined in assembly without `.type name, %function` is STT_NOTYPE and raises
         TypeError here. The loader leaves such a symbol's value as written, often already odd:
         use `m.sym(name)` for it, with bit 0 as the assembler set it.
 
         Raises:
-            SymbolError: No loaded image has the name, with close matches.
+            SymbolError: No loaded image has the name, with close matches, or no image is named
+                `image`.
             TypeError: The symbol is not a function, STT_FUNC, or `function` is an address.
         """
         if not isinstance(cast(object, function), str | Symbol):
@@ -1535,7 +1566,7 @@ class Machine:
                 f"fn_ptr takes a function name or Symbol, not {function!r}: an address carries"
                 " no symbol type"
             )
-        symbol = function if isinstance(function, Symbol) else self._symbol(function)
+        symbol = function if isinstance(function, Symbol) else self._symbol(function, image)
         if not symbol.function:
             raise TypeError(
                 f"{symbol.name} is not a function symbol: for a routine without"
@@ -1543,14 +1574,17 @@ class Machine:
             )
         return symbol.value | 1
 
-    def _symbol(self, name: str) -> Symbol:
+    def _symbol(self, name: str, image: str | None = None) -> Symbol:
         missing: SymbolError | None = None
-        for image in reversed(self._images):
+        for one in reversed(self._selected(image)):
             try:
-                return image.lookup(name)
+                return one.lookup(name)
             except SymbolError as error:
                 missing = missing or error
         raise missing or SymbolError(f"no image loaded to look up {name}", name=name)
+
+    def _selected(self, image: str | None) -> list[Image]:
+        return selected_images(self._images, image)
 
     @property
     def symbols(self) -> dict[str, Symbol]:
@@ -1560,16 +1594,18 @@ class Machine:
             merged.update((s.name, s) for s in image.symbols)
         return merged
 
-    def var(self, name: str) -> Var:
-        """A module-scope variable of the loaded ELF images, typed from their DWARF.
+    def var(self, name: str, image: str | None = None) -> Var:
+        """A module-scope variable of the loaded ELF images, typed from their DWARF, the last
+        loaded first, or of the image named `image` alone.
 
         Its reads and writes follow `mem`: parked or from a callback, and through
         `m.ref.var(name)` while the machine is busy.
 
         Raises:
-            SymbolError: No loaded image declares the variable, with close matches.
+            SymbolError: No loaded image declares the variable, with close matches, or no
+                image is named `image`.
         """
-        _, info, variable = find_variable(self._images, name)
+        _, info, variable = find_variable(self._selected(image), name)
         return Var(self._memory, info, variable.type, variable.address, name)
 
     @property

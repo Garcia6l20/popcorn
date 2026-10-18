@@ -97,13 +97,20 @@ class Elf:
 
     Attributes:
         path: The file, an absolute path. It is read by `MachineDescription.machine`.
+        name: Name `image=` of `Machine.sym`, `fn_ptr`, `var`, `image.var` and `Boot` selects
+            the image by, None for none. Unique among the images.
+        loaded: False for a symbols-only image, see `Image.elf`: its sections are never
+            written to memory, while its symbols and DWARF serve the lookups, the unwinder and
+            coverage.
     """
 
     path: Path
+    name: str | None = None
+    loaded: bool = True
 
     def load(self) -> Image:
         """Read the file."""
-        return Image.elf(self.path)
+        return Image.elf(self.path, name=self.name, load=self.loaded)
 
     @property
     def constants(self) -> Constants:
@@ -307,6 +314,8 @@ class Boot:
     Attributes:
         vtor: Vector table reset reads, None for the description's default.
         until: Symbol boot runs to, None to only reset.
+        image: Name of the image `until` is looked up in, as `Machine.sym(image=)`, None for
+            the last image defining it.
         budget: Instructions boot may take, None for no limit.
         memory_init: Memory written after the images load.
         arena_base: First address of the call arena, None for the default, False for none.
@@ -319,6 +328,7 @@ class Boot:
     memory_init: Sequence[MemoryInit] = ()
     arena_base: int | Literal[False] | None = None
     arena_size: int | None = None
+    image: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "memory_init", tuple(self.memory_init))
@@ -451,6 +461,13 @@ class MachineDescription:
                     f"images[{index}]", f"an Elf, Bin or Hex, not {type(image).__qualname__}"
                 )
             self._check_path(f"images[{index}].path", image.path)
+        names: set[str] = set()
+        for index, image in enumerate(self.images):
+            if not isinstance(image, Elf) or image.name is None:
+                continue
+            if image.name in names:
+                raise _plain_error(f"images[{index}].name", "a name no other image has")
+            names.add(image.name)
         self._check_path("svd", self.svd)
         self._check_path("description", self.description)
         for name, periph in cast(Mapping[object, object], self.board).items():
@@ -734,7 +751,8 @@ class MachineDescription:
             The ADDRESS stop at `until`.
 
         Raises:
-            ConfigError: `boot.until` is not set or names no symbol.
+            ConfigError: `boot.until` is not set or names no symbol, or `boot.image` names no
+                loaded image.
             FaultError: The firmware faulted before reaching `until`.
             BudgetExceeded: The budget ran out before `until`.
             EmulationError: Any other stop before `until`.
@@ -743,8 +761,10 @@ class MachineDescription:
         if boot.until is None:
             raise _plain_error("boot.until", "a symbol boot runs to")
         try:
-            target = machine.address_of(boot.until)
+            target = machine.sym(boot.until, image=boot.image)
         except SymbolError as error:
+            if boot.image is not None and boot.image not in {i.name for i in machine.images}:
+                raise _plain_error("boot.image", "the name of a loaded image") from error
             raise _plain_error("boot.until", "a symbol of the loaded images") from error
         machine.reset()
         stop = await machine.run(until=target, budget=boot.budget)
@@ -1087,6 +1107,20 @@ def _canonical(value: object) -> object:
         return _plugin_identity(value)
     if isinstance(value, PluginModel):
         return {"$": "PluginModel", "plugin": value.plugin.name, "model": value.name}
+    if isinstance(value, Boot):
+        boot = {
+            f.name: _canonical(getattr(value, f.name))
+            for f in dataclasses.fields(value)
+            if f.name != "image" or value.image is not None
+        }
+        return {"$": "Boot", **boot}
+    if isinstance(value, Elf):
+        elf: dict[str, object] = {"$": "Elf", "path": _canonical(value.path)}
+        if value.name is not None:
+            elf["name"] = value.name
+        if not value.loaded:
+            elf["loaded"] = False
+        return elf
     if dataclasses.is_dataclass(value):
         fields = {f.name: _canonical(getattr(value, f.name)) for f in dataclasses.fields(value)}
         return {"$": type(value).__qualname__, **fields}
