@@ -17,6 +17,7 @@ TRUSTZONE = popcorn.MachineDescription(
     ],
     option_bytes=popcorn.OptionBytes(tzen=True, secwm1=(0, 3), secwm2=None),
     boot=popcorn.Boot(until="main", image="nonsecure", budget=100_000),
+    faults="handler",
 )
 
 

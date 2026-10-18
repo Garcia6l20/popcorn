@@ -8,8 +8,10 @@ Non-secure ELF embeds the secure binary in `.secure_image` and calls the secure 
 functions through the SG veneers of the CMSE import library. The secure ELF is a symbols-only
 image: `image="secure"` resolves its names, its bytes are never loaded.
 
-Boot stops at the Non-secure `main`. Each test writes `ns_case`, an `enum ns_case` the
-Non-secure `main` dispatches on, then runs until `ns_done` or the case's own end point.
+`faults="handler"` lets SecureFault and HardFault reach the firmware's handlers, which each
+spin at a named symbol. Boot stops at the Non-secure `main`. Each test writes `ns_case`, an
+`enum ns_case` the Non-secure `main` dispatches on, then runs until `ns_done` or the case's
+own end point.
 """
 
 from pathlib import Path
@@ -24,9 +26,19 @@ HERE = Path(__file__).parent
 SECURE_CODE = range(0x0800_0000, 0x0800_7C00)
 NSC = range(0x0800_7C00, 0x0800_8000)
 FNC_RETURN = 0xFEFF_FFFF
+SRAM1_SECURE_ALIAS = 0x3000_0000
+HFSR = 0xE000_ED2C
+HFSR_FORCED = 1 << 30
+SFSR_INVEP = 1 << 0
+SFSR_AUVIOL = 1 << 3
+SFSR_SFARVALID = 1 << 6
 CASE_BUDGET = 20_000
 
 pytestmark = pytest.mark.popcorn(budget=1_000_000)
+
+
+def ipsr(m: Machine) -> int:
+    return m.reg.xpsr & 0x1FF
 
 
 def ns(m: Machine, name: str) -> int:
@@ -55,7 +67,7 @@ async def test_boot_reaches_the_nonsecure_main_in_nonsecure_state(trustzone: Mac
 async def test_an_entry_runs_secure_behind_its_veneer_entered_from_nonsecure(
     trustzone: Machine,
 ) -> None:
-    """The veneer's SG executes in Non-secure state, DDI0553B.z B3.20, the function behind it
+    """The veneer's SG executes in Non-secure state, DDI0553B.z B3.15, the function behind it
     in Secure state. Each probe pair is the state's count and its control."""
     function = trustzone.sym("__acle_se_secure_counter_add", image="secure")
     veneer = trustzone.sym("secure_counter_add", image="nonsecure")
@@ -95,6 +107,51 @@ async def test_a_nonsecure_read_of_the_secure_sram1_block_reads_zero_and_raises_
     assert ns(trustzone, "ns_flag") == 1
     assert secure(trustzone, "secure_illegal_accesses") == 1
     assert trustzone.mem.u32[block] == 0x5EC2_E7ED
+
+
+async def test_a_nonsecure_read_of_the_secure_sram1_alias_takes_securefault_auviol(
+    trustzone: Machine,
+) -> None:
+    """DDI0553B.z B10.2: 0x30000000 is Secure in the IDAU and in no SAU region, so the
+    Non-secure load raises SecureFault AUVIOL with SFAR, taken by the secure handler since
+    SHCSR_S.SECUREFAULTENA is set, with no escalation."""
+    await run_case(trustzone, "NS_CASE_SECURE_ALIAS", until="secure_fault_spin", image="secure")
+    assert (trustzone.security_state, ipsr(trustzone)) == ("secure", 7)
+    assert secure(trustzone, "secure_fault_sfsr") == SFSR_AUVIOL | SFSR_SFARVALID
+    assert secure(trustzone, "secure_fault_sfar") == SRAM1_SECURE_ALIAS
+    assert not trustzone.mem.u32[HFSR] & HFSR_FORCED
+
+
+async def test_a_nonsecure_call_past_the_veneer_takes_securefault_invep(
+    trustzone: Machine,
+) -> None:
+    """DDI0553B.z B3.15: a Non-secure branch to Secure code that is not an SG in NSC memory
+    raises SecureFault INVEP."""
+    function = trustzone.sym("__acle_se_secure_counter_add", image="secure")
+    trustzone.var("ns_target", image="nonsecure").value = function | 1
+    await run_case(trustzone, "NS_CASE_NO_VENEER", until="secure_fault_spin", image="secure")
+    assert (trustzone.security_state, ipsr(trustzone)) == ("secure", 7)
+    assert secure(trustzone, "secure_fault_sfsr") == SFSR_INVEP
+    assert ns(trustzone, "ns_result") == 0
+    assert not trustzone.mem.u32[HFSR] & HFSR_FORCED
+
+
+@pytest.mark.parametrize(
+    ("case", "handler", "state"),
+    [
+        ("NS_CASE_UNDEFINED", ("ns_hard_fault_spin", "nonsecure"), "nonsecure"),
+        ("NS_CASE_SECURE_UNDEFINED", ("secure_hard_fault_spin", "secure"), "secure"),
+    ],
+)
+async def test_with_bfhfnmins_1_a_usagefault_escalates_to_the_hardfault_of_its_state(
+    trustzone: Machine, case: str, handler: tuple[str, str], state: str
+) -> None:
+    """DDI0553B.z B3.11 and B3.12: UsageFault is disabled in both states, so a UDF escalates to
+    HardFault with HFSR.FORCED. With AIRCR.BFHFNMINS 1 an escalated HardFault targets the
+    Security state of the original exception."""
+    await run_case(trustzone, case, until=handler[0], image=handler[1])
+    assert (trustzone.security_state, ipsr(trustzone)) == (state, 3)
+    assert trustzone.mem.u32[HFSR] & HFSR_FORCED
 
 
 async def test_secure_and_nonsecure_systick_tick_at_their_own_rates(trustzone: Machine) -> None:

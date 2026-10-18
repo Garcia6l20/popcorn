@@ -46,7 +46,11 @@ uv run pytest -q examples/stm32u575/trustzone
   ],
   option_bytes=popcorn.OptionBytes(tzen=True, secwm1=(0, 3), secwm2=None),
   boot=popcorn.Boot(until="main", image="nonsecure", budget=100_000),
+  faults="handler",
   ```
+
+  `faults="handler"` makes a fault enter the firmware's handler, where the default stops the
+  run at the faulting instruction.
 
 - `test_trustzone.py`: one behaviour per test. Each test selects a case of the Non-secure
   `main` through `ns_case`, set with `m.var("ns_case", image="nonsecure").value` and the
@@ -55,14 +59,16 @@ uv run pytest -q examples/stm32u575/trustzone
   - `m.probe(state=)` on the veneer and on the function behind it
   - PA5 driven from Non-secure code
   - the RAZ read and GTZC interrupt of a Secure MPCBB block
+  - SecureFault AUVIOL with SFAR, and INVEP for a call past the veneer
+  - the HardFault each state's escalated UsageFault takes with AIRCR.BFHFNMINS set
   - the two SysTick timers
   - the FP context across BLXNS
   - a snapshot taken inside a Non-secure callback, loaded into a new machine
   - `m.sym(image=)` and the embedded secure bytes
 - `firmware/secure/main.c`: the setup, the entry functions, `GTZC_IRQHandler`,
-  `SecureFault_Handler`.
-- `firmware/nonsecure/main.c`: the cases, and `fp_clobber.s`, a callback that overwrites S0
-  to S31.
+  `SecureFault_Handler` recording SFSR and SFAR, the Secure `HardFault_Handler`.
+- `firmware/nonsecure/main.c`: the cases and the Non-secure `HardFault_Handler`, and
+  `fp_clobber.s`, a callback that overwrites S0 to S31.
 - `firmware/secure_entry.h`: the entry functions both parts share.
 
 In a CMSE build an entry's name is its SG veneer, in the import library and in the secure ELF
