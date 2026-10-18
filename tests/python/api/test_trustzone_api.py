@@ -471,3 +471,31 @@ def test_a_probe_state_is_checked_before_anything_is_posted(
     with pytest.raises(popcorn.ConfigError, match="TrustZone"):
         plain.probe(VENEER, state="secure")
     assert plain.probe(VENEER).count == 0
+
+
+NVIC_ITNS0 = 0xE000_E380
+
+
+def test_an_interrupt_target_is_set_through_the_secure_view_of_itns(
+    u575: popcorn.PartDescription,
+) -> None:
+    """DDI0553B.z D1.2.188: NVIC_ITNSn is RAZ/WI to a Non-secure access."""
+    m = open_machine(u575)
+    assert not m.nvic.target_nonsecure(5)
+    m.nvic.set_target(5, True)
+    m.nvic.set_target(37, True)
+    assert m.nvic.target_nonsecure(5) and m.nvic.target_nonsecure(37)
+    assert not m.nvic.target_nonsecure(4)
+    assert m.mem.u32[NVIC_ITNS0] == 1 << 5
+    assert m.mem.u32[NVIC_ITNS0 + 4] == 1 << 5
+    assert m.mem.nonsecure.u32[NVIC_ITNS0] == 0
+    m.nvic.set_target(5, False)
+    assert m.mem.u32[NVIC_ITNS0] == 0
+    with pytest.raises(ValueError, match="not below"):
+        m.nvic.set_target(1000, True)
+
+
+def test_without_trustzone_every_interrupt_targets_secure(u575: popcorn.PartDescription) -> None:
+    m = tz_machine(u575, tzen=False)
+    m.nvic.set_target(5, True)
+    assert not m.nvic.target_nonsecure(5)
