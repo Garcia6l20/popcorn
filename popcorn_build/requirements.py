@@ -16,7 +16,7 @@ from pcons.packages.fetch.cli import (
     load_deps_file,
 )
 
-from popcorn_build.config import build_dir, project_dir
+from popcorn_build.config import VARIANT, build_dir, project_dir
 from popcorn_build.firmware import toolchain_found
 from popcorn_build.manifest import is_firmware_only, packages_to_fetch
 from popcorn_build.options import build_examples, build_tests
@@ -35,6 +35,8 @@ unicorn_cmake_options = {
     "CMAKE_C_VISIBILITY_PRESET": "hidden",
     "CMAKE_C_FLAGS": "-fvisibility=hidden",
 }
+if VARIANT == "release":
+    unicorn_cmake_options["CMAKE_C_FLAGS"] += " -DUC_LOAD_HELPER_NO_STACK_PROTECTOR"
 
 
 @functools.cache
