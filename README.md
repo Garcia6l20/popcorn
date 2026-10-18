@@ -19,9 +19,9 @@ assert rcc.register("RCC_CR").name == "CR"
 
 ## Address 0
 
-Nothing is mapped at address 0. A firmware load or store through a NULL pointer stops the run with a
-FAULT stop, `stop.fault.kind` `FaultKind.BUS` and `stop.fault.address` 0, PRECISERR and BFARVALID
-set in `stop.fault.cfsr` and BFAR 0. An instruction fetch at 0 stops it the same way with IBUSERR.
+Nothing is mapped at address 0. Under the default `faults="stop"`, a firmware load or store through
+a NULL pointer stops the run with a FAULT stop, `stop.fault.kind` `FaultKind.BUS` and
+`stop.fault.address` 0, PRECISERR and BFARVALID set in `stop.fault.cfsr` and BFAR 0. An instruction fetch at 0 stops it the same way with IBUSERR.
 `m.mem` at 0 raises `EmulationError`. On the STM32U5 this matches the hardware. 0x0000_0000 to
 0x07FF_FFFF is the code-region window the ICACHE remaps onto external memories, RM0456 2.3 Table 3
 and 8.4.7. Boot does not alias flash at 0: BOOT0 and the NSBOOTADDx and SECBOOTADD0 option bytes
