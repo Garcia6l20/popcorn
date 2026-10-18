@@ -463,10 +463,12 @@ TEST_CASE(
     r.unlock(false);
     r.write("SECCR", mer1 | strt, secure_priv);
     CHECK((r.peek("SECSR") & wrperr) != 0);
+    CHECK(r.tzic("FLASHF"));
+    r.clear_events();
     r.write("NSCR", mer1 | strt, nonsecure_priv);
     CHECK((r.peek("NSSR") & wrperr) != 0);
-    CHECK(r.word(flash_ns + 5 * page_bytes) == 0);
     CHECK(r.tzic("FLASHF"));
+    CHECK(r.word(flash_ns + 5 * page_bytes) == 0);
   }
   {
     rig const r{true};
