@@ -417,7 +417,9 @@ struct timer
  *        Secure peripheral, are RAZ/WI to a Non-secure access, with no event. A peripheral is
  *        Secure by its TZSC bit, or for a TrustZone-aware model by its own security bits, the
  *        FLASH by RM0456 Table 62. A bit whose name gives no peripheral of the part stays
- *        Non-secure, such as the SRAMn, GTZCn and shared kernel clock selections. `BDRST` is
+ *        Non-secure, such as the GTZCn and shared kernel clock selections. Deviation: SRAMnEN
+ *        and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of RM0456 5.4 is not
+ *        modelled. `BDRST` is
  *        Secure while the RTC or the TAMP has a secure function, RM0456 11.5.1. `SPRIV` makes
  *        the Secure bits privileged, `NSPRIV` the others, RAZ/WI to an unprivileged access.
  *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
