@@ -675,3 +675,15 @@ def test_a_linked_system_keeps_each_member_s_trustzone_its_own(
         assert secure.security_state == "nonsecure"
         assert (secure.reg.msp_s, secure.reg.msp_ns, secure.reg.sp) == banked
         assert plain.security_state is None
+
+
+def test_coverage_collects_on_a_machine_with_a_symbols_only_image(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = pair_machine(u575)
+    m.coverage.enable()
+    stop = asyncio.run(m.run(until=m.sym("tz_pair_done", image="nonsecure"), budget=10_000))
+    assert stop.reason == popcorn.StopReason.ADDRESS
+    coverage = m.coverage.collect()
+    assert len(coverage.groups) == 1
+    assert [Path(i.path).name for i in coverage.groups[0].images] == ["tz_pair.elf"]
