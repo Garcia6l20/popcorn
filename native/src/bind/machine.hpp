@@ -991,11 +991,13 @@ public:
    *        the machine runs, it is added on the machine's thread at the next block boundary and
    *        this call waits for it, without the GIL.
    * @param at Code address.
+   * @param secure Security state an arrival must run in, None for any.
+   * @throws config_error for @p secure on a machine without TrustZone enabled.
    * @throws machine_running from a handler of this machine during a slice.
    * @throws std::runtime_error from a callback of another machine.
    */
   [[= py::doc{"Count arrivals at an address, added at the next boundary while running."}]] auto
-      add_probe(address at) -> probe_hook;
+      add_probe(address at, std::optional<bool> secure) -> probe_hook;
 
   /**
    * @brief Removes a probe as add_probe() adds one: at once while parked, at the next block

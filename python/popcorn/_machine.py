@@ -487,6 +487,21 @@ class _Linked(Protocol):
     def reset(self, member: str, kind: ResetKind = ResetKind.POWER_ON) -> None: ...
 
 
+def _probe_state(state: object, registers: Sequence[str]) -> bool | None:
+    if state is None:
+        return None
+    if state not in ("secure", "nonsecure"):
+        raise ValueError(f'a probe state is "secure", "nonsecure" or None, not {state!r}')
+    if "secure" not in registers:
+        raise ConfigError(
+            "a probe state needs a machine with TrustZone enabled",
+            file="probe",
+            key="state",
+            expected="no state on a machine without TrustZone enabled",
+        )
+    return state == "secure"
+
+
 class Machine:
     """One emulated MCU: a description, the images loaded into it and its run state.
 
@@ -2000,7 +2015,9 @@ class Machine:
         watch = self._keep(Watch(hook, self._callback_table, keys[0]))
         return watch
 
-    def probe(self, target: int | str | Symbol) -> Probe:
+    def probe(
+        self, target: int | str | Symbol, state: Literal["secure", "nonsecure"] | None = None
+    ) -> Probe:
         """Count the core's arrivals at an address or symbol, natively, with no handler and no
         GIL: `Probe.count`, `Probe.first_at`, `await Probe.hit(within=)`. It never stops the
         run.
@@ -2020,18 +2037,25 @@ class Machine:
         exact at the instruction, also inside a translated block, and kept across `restore()`
         like every hook. `remove_hooks()` removes it.
 
+        With `state`, "secure" or "nonsecure", an arrival counts only when the core runs in
+        that security state, read at the arrival, so a function both states run counts the
+        arrivals of one. Without it every arrival counts and no state is read.
+
         On a member of a linked system, add it before the system's `running()` or `start()`.
         While the system runs, the member counts and `wait_until` or `wait_for(Reached)` on the
         member wait for an arrival, but `hit()` cannot read its start.
 
         Raises:
+            ValueError: `state` is neither None, "secure" nor "nonsecure".
+            ConfigError: `state` on a machine without TrustZone enabled.
             SymbolError: `target` names no symbol.
             MachineRunning: Called from a handler of this machine during a slice, or the machine
                 is a member of a linked system that runs.
             RuntimeError: Called from a callback of another machine.
         """
+        secure = _probe_state(state, self._registers.names())
         address = self.address_of(target)
-        hook = self._handle.add_probe(address)
+        hook = self._handle.add_probe(address, secure)
         return self._keep(Probe(hook, address, self._probe_hit, self._handle.remove_probe))
 
     async def _probe_hit(self, hook: _core.ProbeHook, within: VirtualDuration) -> bool:
@@ -2726,7 +2750,7 @@ class Machine:
     async def _reached_free(
         self, address: int, for_: VirtualDuration | None, deadline: VirtualTime | None
     ) -> Stop:
-        hook = self._handle.add_probe(address)
+        hook = self._handle.add_probe(address, None)
         try:
             return await self._waited(
                 _Native(self._handle.predicate_probe_hit(hook)), for_, deadline

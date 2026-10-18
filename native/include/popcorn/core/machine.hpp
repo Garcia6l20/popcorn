@@ -617,11 +617,16 @@ public:
    *        An arrival counts once, before the instruction executes and before every intercept
    *        of the address, whatever their add order, also when an intercept then skips the
    *        function or stops the run: resuming from that stop does not count it again.
+   *        With @p secure, an arrival counts only when the core runs in that security state,
+   *        read from the engine at the arrival. Without it no state is read.
    * @param at Code address, any instruction, not only a block start.
+   * @param secure Security state an arrival must run in, empty for any.
    * @return The handle removing the probe, and the counts, which outlive it.
    * @throws machine_running while a slice runs, handlers included.
+   * @throws config_error for @p secure on a machine without TrustZone enabled.
    */
-  [[nodiscard]] auto add_probe(address at) -> probe_handle;
+  [[nodiscard]] auto add_probe(address at, std::optional<bool> secure = std::nullopt)
+      -> probe_handle;
 
   /**
    * @brief Calls a handler when a function returns: captures the arguments at entry and the

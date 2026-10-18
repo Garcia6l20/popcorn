@@ -166,6 +166,21 @@ auto nonsecure_irq_run(std::uint32_t count) -> measured
   return timed(*target, {.max_instructions = icount{1'000'000'000}}, stop_reason::user);
 }
 
+auto probe_run(std::optional<bool> secure) -> measured
+{
+  auto       target = booted();
+  auto const probe  = target->add_probe(symbol("bench_empty"), secure);
+  set(*target, "pc", symbol("bench_plain_irq"));
+  set(*target, "r0", irq_count);
+  auto const result =
+      timed(*target, {.max_instructions = icount{1'000'000'000}}, stop_reason::user);
+  if(probe.hits->count() < irq_count)
+  {
+    throw std::runtime_error{"the probe missed interrupt handler arrivals"};
+  }
+  return result;
+}
+
 auto rtos_run(std::string_view entry, std::uint64_t virtual_ms) -> measured
 {
   auto target = booted();
@@ -216,6 +231,7 @@ auto main(int argc, char** argv) -> int
       {"masked-pending", [] { return entry_run("bench_masked", alu_loops); }    },
       {"plain-irq",      [] { return entry_run("bench_plain_irq", irq_count); } },
       {"tail-chain",     [] { return entry_run("bench_tail_chain", irq_count); }},
+      {"probe",          [] { return probe_run(std::nullopt); }                 },
       {"rtos-idle",      [] { return rtos_run("rtos_idle", 10'000); }           },
       {"rtos-busy",      [] { return rtos_run("rtos_busy", 1'000); }            },
   };
@@ -223,11 +239,16 @@ auto main(int argc, char** argv) -> int
   {
     std::erase_if(scenarios, [](scenario const& entry) { return entry.name.starts_with("rtos-"); });
     scenarios.push_back({"ns-irq", [] { return nonsecure_irq_run(irq_count); }});
+    scenarios.push_back({"probe-state", [] { return probe_run(true); }});
   }
   if(auto const only = option(args, "--only"))
   {
-    auto const base =
-        *only == "plain-irq" or *only == "tail-chain" or *only == "ns-irq" ? "plain-irq" : "alu";
+    auto const base = *only == "plain-irq"
+                           or *only == "tail-chain"
+                           or *only == "ns-irq"
+                           or only->starts_with("probe")
+                        ? "plain-irq"
+                        : "alu";
     std::erase_if(scenarios, [&](scenario const& entry) {
       return entry.name != *only and entry.name != base;
     });

@@ -532,6 +532,16 @@ public:
   }
 
   /**
+   * @brief The core's security state now, read from the engine. Called on the machine thread.
+   * @return True Secure, false Non-secure, empty on a core without the security extension or
+   *         with TrustZone disabled.
+   */
+  [[nodiscard]] virtual auto security_state() const -> std::optional<bool>
+  {
+    return std::nullopt;
+  }
+
+  /**
    * @brief Bus attributes of a privileged debugger access that requests security @p secure
    *        at @p at, after the core's security attribution, DDI0553B.z B13.3.4 RWMRR and
    *        B10.2 RXSPQ. Called by a filtered core::memory_view on a machine with TrustZone

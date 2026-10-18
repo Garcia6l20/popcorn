@@ -294,9 +294,21 @@ auto machine::run_state::visit_site(code_site& site, address addr, bool in_block
   std::size_t const first   = resumed ? std::exchange(resume_past, std::nullopt)->second : 0;
   if(not resumed and not site.probes.empty())
   {
-    auto const at = arrival_time(addr);
+    auto const          at = arrival_time(addr);
+    std::optional<bool> secure;
     for(auto const& probe : site.probes)
     {
+      if(probe.secure)
+      {
+        if(not secure)
+        {
+          secure = arch->security_state();
+        }
+        if(secure != probe.secure)
+        {
+          continue;
+        }
+      }
       probe.hits->record(at);
     }
   }
@@ -587,12 +599,17 @@ auto machine::add_intercept(address at, intercept_handler handler, intercept_mod
   return hook_handle{hooks_, id};
 }
 
-auto machine::add_probe(address at) -> probe_handle
+auto machine::add_probe(address at, std::optional<bool> secure) -> probe_handle
 {
   require_stopped(*this);
+  if(secure and not arch_->security_state())
+  {
+    throw config_error(
+        "probe", 0, "state", "no security state on a machine without TrustZone enabled");
+  }
   auto const id   = ++hooks_->last_id;
   auto       hits = std::make_shared<probe_hits>();
-  run_->add_probe_to_site(at, {.id = id, .hits = hits});
+  run_->add_probe_to_site(at, {.id = id, .hits = hits, .secure = secure});
   run_->probes.emplace(id, at);
   return {
       .hook = hook_handle{hooks_, id},

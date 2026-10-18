@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 from pathlib import Path
 
 import popcorn
 import pytest
 from popcorn import OptionBytes
 from popcorn.arm import Reg
+from popcorn.units import ms
 
 ROOT = Path(__file__).parents[3]
 RCC_ELF = ROOT / "tests" / "firmware" / "periph" / "prebuilt" / "rcc_ll.elf"
@@ -393,3 +395,79 @@ def test_no_view_access_raises_an_illegal_access_event(u575: popcorn.PartDescrip
     _ = m.mem.nonsecure.u32[0x4002_2024]
     assert [m.mem.u32[at + 0x1000_0000] for at in writes] == stored
     assert events(m) == before
+
+
+SECURE_CALLER = SRAM_S + 0x4000
+VENEER = SRAM_S + 0x6000
+NONSECURE_CALLER = SRAM_NS + 0x2000
+STACK_S = SRAM_S + 0x8000
+
+
+def veneer_machine(u575: popcorn.PartDescription) -> popcorn.Machine:
+    """Secure code calls an SG veneer twice and BLXNS to Non-secure code that calls it three
+    times then loops on itself. The veneer is SG then BXNS LR in a Non-secure callable SAU
+    region, DDI0553B.z B3.15: run by the Secure caller in Secure state, entered from the
+    Non-secure caller in Non-secure state."""
+    m = open_machine(u575)
+    m.mem.u32[MPCBB1_SECCFGR0] &= ~(1 << ((NONSECURE_CALLER - SRAM_NS) // 0x200))
+    m.mem.u32[SAU_RNR] = 3
+    m.mem.u32[SAU_RBAR] = VENEER
+    m.mem.u32[SAU_RLAR] = VENEER | 3
+    m.mem.write(VENEER, struct.pack("<3H", 0xE97F, 0xE97F, 0x4774))
+    m.mem.write(SECURE_CALLER, struct.pack("<3H", 0x47A0, 0x47A0, 0x47AC))
+    m.mem.write(NONSECURE_CALLER, struct.pack("<4H", 0x47A0, 0x47A0, 0x47A0, 0xE7FE))
+    m.reg.msp_s = STACK_S
+    m.reg.r4 = VENEER | 1
+    m.reg.r5 = NONSECURE_CALLER
+    m.reg.pc = SECURE_CALLER
+    return m
+
+
+def veneer_counts(u575: popcorn.PartDescription, running: bool) -> tuple[int, int, int, str | None]:
+    m = veneer_machine(u575)
+    ns = m.probe(VENEER, state="nonsecure")
+    s = m.probe(VENEER, state="secure")
+    every = m.probe(VENEER)
+    end = NONSECURE_CALLER + 6
+    if running:
+        loop = m.probe(end)
+
+        async def free() -> bool:
+            async with m.running():
+                return await loop.hit(within=ms(1))
+
+        assert asyncio.run(free())
+    else:
+        stop = asyncio.run(m.run(until=end, budget=100))
+        assert stop.reason == popcorn.StopReason.ADDRESS
+    return ns.count, s.count, every.count, m.security_state
+
+
+@pytest.fixture(scope="module")
+def parked_veneer_counts(u575: popcorn.PartDescription) -> tuple[int, int, int, str | None]:
+    return veneer_counts(u575, False)
+
+
+def test_a_probe_with_a_state_counts_the_arrivals_in_that_state(
+    parked_veneer_counts: tuple[int, int, int, str | None],
+) -> None:
+    assert parked_veneer_counts == (3, 2, 5, "nonsecure")
+
+
+def test_a_probe_with_a_state_counts_the_same_parked_and_running(
+    u575: popcorn.PartDescription,
+    parked_veneer_counts: tuple[int, int, int, str | None],
+) -> None:
+    assert veneer_counts(u575, True) == parked_veneer_counts
+
+
+def test_a_probe_state_is_checked_before_anything_is_posted(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = open_machine(u575)
+    with pytest.raises(ValueError, match="'Secure'"):
+        m.probe(VENEER, state="Secure")  # pyright: ignore[reportArgumentType]
+    plain = tz_machine(u575, tzen=False)
+    with pytest.raises(popcorn.ConfigError, match="TrustZone"):
+        plain.probe(VENEER, state="secure")
+    assert plain.probe(VENEER).count == 0

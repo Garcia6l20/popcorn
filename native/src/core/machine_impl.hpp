@@ -740,6 +740,8 @@ struct machine::run_state
     /** @brief Arrivals counted, shared with the handle, so a probe left in its site after
      * removal still counts through a live object. */
     std::shared_ptr<probe_hits> hits{};
+    /** @brief Security state an arrival must run in to count, empty for any. */
+    std::optional<bool> secure{};
   };
 
   /** @brief A watch added with machine::add_watch(). */

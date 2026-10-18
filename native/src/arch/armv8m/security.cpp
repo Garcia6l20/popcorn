@@ -411,6 +411,15 @@ auto cortex_m::data_attrs(address at) const -> bus_attrs
   return {.by = initiator::cpu, .secure = secure, .privileged = privileged()};
 }
 
+auto cortex_m::security_state() const -> std::optional<bool>
+{
+  if(not trustzone())
+  {
+    return std::nullopt;
+  }
+  return read_security(engine_handle()) == security::secure;
+}
+
 auto cortex_m::debug_attrs(address at, bool secure) const -> std::optional<bus_attrs>
 {
   bus_attrs attrs{.by = initiator::debugger, .secure = secure, .filtered = true};
