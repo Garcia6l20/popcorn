@@ -310,8 +310,12 @@ protected:
     claims_.emplace_back(describe(name).name);
   }
 
-  void own_illegal_access()
+  void own_illegal_access(initiator by)
   {
+    if(by == initiator::debugger)
+    {
+      return;
+    }
     if(not own_linked_ and not ctx_.peers.all().empty())
     {
       own_linked_ = true;
@@ -435,6 +439,12 @@ struct securable
  *        drops the engine's page verdicts and ends the engine run after the instruction, a
  *        `SRWILADIS` change drops the verdicts only, and a write that changes nothing does
  *        neither.
+ *
+ *        A filtered debugger access, a `m.mem.secure` or `m.mem.nonsecure` view, is decided
+ *        as a CPU access of its attributes, and a write to flash follows the read rule of its
+ *        page since no FLASH model programs it. Deviation: no debugger access raises a TZIC
+ *        event, here, in the MPCBBs or in a TrustZone-aware model, so a view leaves the
+ *        firmware's TZIC flags and GTZC_IRQn as they are.
  */
 class tzsc final : public gtzc_block, public bus_firewall, public peripheral_security
 {
@@ -497,7 +507,7 @@ public:
     {
       if(not ctx.secure)
       {
-        own_illegal_access();
+        own_illegal_access(ctx.by);
         return 0;
       }
       if(not ctx.privileged)
@@ -525,7 +535,7 @@ public:
       case tzsc_role::control:
         if(not ctx.secure)
         {
-          own_illegal_access();
+          own_illegal_access(ctx.by);
           return {};
         }
         if(ctx.privileged)
@@ -536,7 +546,7 @@ public:
       case tzsc_role::security:
         if(not ctx.secure)
         {
-          own_illegal_access();
+          own_illegal_access(ctx.by);
           return {};
         }
         if(not locked)
@@ -556,7 +566,7 @@ public:
       case tzsc_role::watermark_area:
         if(not ctx.secure)
         {
-          own_illegal_access();
+          own_illegal_access(ctx.by);
           return {};
         }
         if(ctx.privileged)
@@ -622,12 +632,15 @@ public:
   {
     resolve_memory();
     auto const* const window = window_at(at);
-    if(window == nullptr or (window->kind == memory_kind::flash and op == arch::memory_op::write))
+    if(window == nullptr
+       or (window->kind == memory_kind::flash
+           and op == arch::memory_op::write
+           and attrs.by != initiator::debugger))
     {
       return bus_verdict::allow;
     }
     auto const decision = decide_data(rule_at(*window, at), attrs);
-    if(decision.event and window->events != nullptr)
+    if(decision.event and window->events != nullptr and attrs.by != initiator::debugger)
     {
       window->events->illegal_access(window->source);
     }
@@ -653,7 +666,7 @@ public:
     }
     if(not attrs.secure and rule.sec.of(regs->peek(rule.sec.offset)) != 0)
     {
-      if(rule.events != nullptr)
+      if(rule.events != nullptr and attrs.by != initiator::debugger)
       {
         rule.events->illegal_access(rule.source);
       }
@@ -1164,7 +1177,7 @@ public:
   {
     if(not ctx.secure)
     {
-      own_illegal_access();
+      own_illegal_access(ctx.by);
       return 0;
     }
     auto const* const word = word_at(offset);
@@ -1185,7 +1198,7 @@ public:
   {
     if(not ctx.secure)
     {
-      own_illegal_access();
+      own_illegal_access(ctx.by);
       return {};
     }
     auto const* const word = word_at(offset);
@@ -1410,7 +1423,7 @@ public:
       case mpcbb_role::lock:
         if(not ctx.secure)
         {
-          own_illegal_access();
+          own_illegal_access(ctx.by);
           return 0;
         }
         if(not ctx.privileged)
@@ -1445,7 +1458,7 @@ public:
       case mpcbb_role::control:
         if(not ctx.secure)
         {
-          own_illegal_access();
+          own_illegal_access(ctx.by);
         }
         else if(ctx.privileged and control_.of(old) == 0)
         {
@@ -1457,7 +1470,7 @@ public:
       case mpcbb_role::lock:
         if(not ctx.secure)
         {
-          own_illegal_access();
+          own_illegal_access(ctx.by);
         }
         else if(ctx.privileged)
         {
@@ -1467,7 +1480,7 @@ public:
       case mpcbb_role::security:
         if(not ctx.secure)
         {
-          own_illegal_access();
+          own_illegal_access(ctx.by);
         }
         else if(implemented(word->index) and not locked(word->index))
         {
@@ -1623,8 +1636,12 @@ auto unit_secure(peer_directory const& peers, part_description const& part, std:
   return aware != nullptr and aware->secure_function();
 }
 
-void illegal_event::raise(peer_directory const& peers, std::size_t unit)
+void illegal_event::raise(peer_directory const& peers, std::size_t unit, initiator by)
 {
+  if(by == initiator::debugger)
+  {
+    return;
+  }
   if(not linked_ and not peers.all().empty())
   {
     linked_ = true;

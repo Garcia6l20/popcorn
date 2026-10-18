@@ -293,11 +293,13 @@ class illegal_event
 {
 public:
   /**
-   * @brief Sets the peripheral's TZIC flag, when a TZIC has a source for it.
+   * @brief Sets the peripheral's TZIC flag, when a TZIC has a source for it and the access
+   *        is not a debugger access: a filtered debugger view raises no event.
    * @param peers Models of the machine.
    * @param unit Index of the peripheral in part_description::peripherals.
+   * @param by Bus master of the illegal access.
    */
-  void raise(peer_directory const& peers, std::size_t unit);
+  void raise(peer_directory const& peers, std::size_t unit, initiator by);
 
 private:
   bool                       linked_{};

@@ -20,11 +20,84 @@ void machine::require_view_access() const
   }
 }
 
+auto memory_view::filtered() const noexcept -> bool
+{
+  return secure_.has_value() and machine_->options_.trustzone;
+}
+
+auto memory_view::filtered_attrs(address addr) const -> std::optional<bus_attrs>
+{
+  return machine_->arch_->debug_attrs(addr, *secure_);
+}
+
+auto memory_view::read_filtered(address addr, std::span<std::byte> out) const
+    -> std::expected<void, block_error>
+{
+  std::size_t done = 0;
+  while(done < out.size())
+  {
+    auto const at    = static_cast<address>(addr + done);
+    auto const size  = block_access_size(at, out.size() - done);
+    auto const attrs = filtered_attrs(at);
+    if(not attrs)
+    {
+      return std::unexpected(block_error{.error = bus_error::denied, .at = at});
+    }
+    auto const value = machine_->do_read(at, size, *attrs);
+    if(not value)
+    {
+      return std::unexpected(block_error{.error = value.error(), .at = at});
+    }
+    for(std::size_t i = 0; i < size; ++i)
+    {
+      out[done + i] = static_cast<std::byte>(*value >> (8 * i));
+    }
+    done += size;
+  }
+  return {};
+}
+
+auto memory_view::write_filtered(address addr, std::span<std::byte const> in) const
+    -> std::expected<void, block_error>
+{
+  std::size_t done = 0;
+  while(done < in.size())
+  {
+    auto const at    = static_cast<address>(addr + done);
+    auto const size  = block_access_size(at, in.size() - done);
+    auto const attrs = filtered_attrs(at);
+    if(not attrs)
+    {
+      return std::unexpected(block_error{.error = bus_error::denied, .at = at});
+    }
+    std::uint32_t value = 0;
+    for(std::size_t i = size; i-- > 0;)
+    {
+      value = value << 8 | std::to_integer<std::uint32_t>(in[done + i]);
+    }
+    if(auto const written = machine_->do_write(at, size, value, *attrs); not written)
+    {
+      return std::unexpected(block_error{.error = written.error(), .at = at});
+    }
+    done += size;
+  }
+  return {};
+}
+
 auto memory_view::read(address addr, std::uint8_t size) const
     -> std::expected<std::uint32_t, bus_error>
 {
   machine_->require_view_access();
   machine_->run_->refuse_unmodelled(addr, size);
+  if(filtered())
+  {
+    auto const attrs = filtered_attrs(addr);
+    if(not attrs)
+    {
+      return std::unexpected(bus_error::denied);
+    }
+    return machine_->do_read(addr, size, *attrs);
+  }
   return machine_->do_read(addr, size, bus_attrs{.by = initiator::debugger});
 }
 
@@ -38,6 +111,15 @@ auto memory_view::write(address addr, std::uint8_t size, std::uint32_t value) co
 {
   machine_->require_view_access();
   machine_->run_->refuse_unmodelled(addr, size);
+  if(filtered())
+  {
+    auto const attrs = filtered_attrs(addr);
+    if(not attrs)
+    {
+      return std::unexpected(bus_error::denied);
+    }
+    return machine_->do_write(addr, size, value, *attrs);
+  }
   return machine_->do_write(addr, size, value, bus_attrs{.by = initiator::debugger});
 }
 
@@ -46,6 +128,10 @@ auto memory_view::read_block(address addr, std::span<std::byte> out) const
 {
   machine_->require_view_access();
   machine_->run_->refuse_unmodelled(addr, out.size());
+  if(filtered())
+  {
+    return read_filtered(addr, out);
+  }
   return machine_->do_read_block(addr, out, bus_attrs{.by = initiator::debugger});
 }
 
@@ -54,6 +140,10 @@ auto memory_view::write_block(address addr, std::span<std::byte const> in) const
 {
   machine_->require_view_access();
   machine_->run_->refuse_unmodelled(addr, in.size());
+  if(filtered())
+  {
+    return write_filtered(addr, in);
+  }
   return machine_->do_write_block(addr, in, bus_attrs{.by = initiator::debugger});
 }
 

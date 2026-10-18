@@ -330,7 +330,7 @@ private:
   [[nodiscard]] auto transfer(std::size_t ch, std::optional<field_ref> secure) const
       -> popcorn::bus_attrs;
   [[nodiscard]] auto busy_channels() const -> std::uint32_t;
-  void               raise_illegal(bool raise);
+  void               raise_illegal(bool raise, initiator by);
 
   dma_layout const&                                   layout_;
   register_file&                                      regs_;
@@ -632,11 +632,11 @@ auto gpdma::busy_channels() const -> std::uint32_t
   return busy;
 }
 
-void gpdma::raise_illegal(bool raise)
+void gpdma::raise_illegal(bool raise, initiator by)
 {
   if(raise and unit_)
   {
-    illegal_.raise(ctx_.peers, *unit_);
+    illegal_.raise(ctx_.peers, *unit_, by);
   }
 }
 
@@ -652,7 +652,7 @@ auto gpdma::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_
   auto const frozen     = regs_.peek(lock_.offset) | busy_channels();
   if(word == secure_.offset)
   {
-    raise_illegal(write and not ctx.secure);
+    raise_illegal(write and not ctx.secure, ctx.by);
     return {.wi = not ctx.secure or not ctx.privileged ? all : frozen};
   }
   if(word == privilege_.offset)
@@ -661,7 +661,7 @@ auto gpdma::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_
   }
   if(word == lock_.offset)
   {
-    raise_illegal(write and not ctx.secure);
+    raise_illegal(write and not ctx.secure, ctx.by);
     return {.wi = ctx.secure and ctx.privileged ? 0 : all};
   }
   auto const hidden_privileged = ctx.privileged ? 0 : privileged;
@@ -671,7 +671,7 @@ auto gpdma::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_
   }
   if(word == secure_misr_.offset)
   {
-    raise_illegal(not ctx.secure);
+    raise_illegal(not ctx.secure, ctx.by);
     return bus_guard::both(ctx.secure ? hidden_privileged : all);
   }
   auto const found =
@@ -683,7 +683,7 @@ auto gpdma::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_
   auto const ch = found->second;
   if(not ctx.secure and (secure >> ch & 1u) != 0)
   {
-    raise_illegal(true);
+    raise_illegal(true, ctx.by);
     return bus_guard::both(all);
   }
   if(not ctx.privileged and (privileged >> ch & 1u) != 0)

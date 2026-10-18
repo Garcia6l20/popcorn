@@ -532,6 +532,22 @@ public:
   }
 
   /**
+   * @brief Bus attributes of a privileged debugger access that requests security @p secure
+   *        at @p at, after the core's security attribution, DDI0553B.z B13.3.4 RWMRR and
+   *        B10.2 RXSPQ. Called by a filtered core::memory_view on a machine with TrustZone
+   *        enabled. The default, for a core without the security extension, keeps @p secure.
+   * @param at Address of the access.
+   * @param secure Whether the access requests the Secure state.
+   * @return Attributes with initiator::debugger and `filtered` set, or empty when the core
+   *         refuses the access, a Non-secure request to a Secure or Non-secure callable address.
+   */
+  [[nodiscard]] virtual auto debug_attrs([[maybe_unused]] address at, bool secure) const
+      -> std::optional<bus_attrs>
+  {
+    return bus_attrs{.by = initiator::debugger, .secure = secure, .filtered = true};
+  }
+
+  /**
    * @brief Reads the return value of a call that reached its sentinel.
    * @param frame Frame given to prepare_call().
    * @return Value bits of type `frame.returns`, a float as its IEEE 754 bit pattern.

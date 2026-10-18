@@ -145,7 +145,7 @@ auto machine::do_read_block(address addr, std::span<std::byte> out, bus_attrs at
           or not run_->controller_block_hit(region->buffer.get(), first, first + bytes - 1);
     };
     if(region != nullptr
-       and (by == initiator::debugger or (run_->watches.empty() and not run_->filters_host(by) and misses())))
+       and (by == initiator::debugger or (run_->watches.empty() and not run_->filters_host(attrs) and misses())))
     {
       auto const run = std::min(out.size() - done, region->remaining(at));
       std::memcpy(out.data() + done, region->host(at), run);
@@ -181,7 +181,7 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, bus_at
       return std::unexpected(block_error{.error = bus_error::denied, .at = at});
     }
     if(region != nullptr
-       and (by == initiator::debugger or (run_->watches.empty() and not run_->filters_host(by))))
+       and (by == initiator::debugger or (run_->watches.empty() and not run_->filters_host(attrs))))
     {
       if(not writable_by(*region->desc, by))
       {

@@ -115,6 +115,10 @@ struct bus_attrs
   bool secure{true};
   /** @brief Whether the transaction is privileged. */
   bool privileged{true};
+  /** @brief For an initiator::debugger access: whether the bus firewall filters it as a DAP
+   * access with these attributes. Clear, a debugger access is never filtered. Ignored for the
+   * other initiators, which are always filtered. */
+  bool filtered{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(bus_attrs, bus_attrs) -> bool = default;

@@ -1177,17 +1177,20 @@ struct machine::run_state
 
   /**
    * @brief Asks the firewall about a host memory access, when it filters memory and @p attrs
-   *        is not a debugger access.
+   *        is not an unfiltered debugger access.
    * @return The verdict, `allow` when nothing filters the access.
    */
   [[nodiscard]] auto
       check_memory(address addr, std::uint8_t size, bus_attrs attrs, arch::memory_op op)
           -> periph::bus_verdict;
 
-  /** @brief Whether host accesses by @p by go through check_memory one at a time. */
-  [[nodiscard]] auto filters_host(initiator by) const noexcept -> bool
+  /** @brief Whether host accesses with @p attrs go through check_memory one at a time: CPU
+   * and DMA accesses, and filtered debugger accesses. */
+  [[nodiscard]] auto filters_host(bus_attrs attrs) const noexcept -> bool
   {
-    return memory_filter and not resetting_arch and by != initiator::debugger;
+    return memory_filter
+       and not resetting_arch
+       and (attrs.by != initiator::debugger or attrs.filtered);
   }
 
   /**

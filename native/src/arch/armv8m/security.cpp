@@ -89,6 +89,15 @@ void require(uc_err err, std::string_view what)
   *nsc             = found->nsc;
 }
 
+auto cortex_m::architecture_exempt(address at) noexcept -> bool
+{
+  return (at >= 0xE000'0000 and at <= 0xE000'2FFF)
+      or (at >= 0xE000'E000 and at <= 0xE000'EFFF)
+      or (at >= 0xE002'E000 and at <= 0xE002'EFFF)
+      or (at >= 0xE004'0000 and at <= 0xE004'1FFF)
+      or (at >= 0xE00F'F000 and at <= 0xE00F'FFFF);
+}
+
 auto cortex_m::attribution_of(address at) const noexcept -> attribution
 {
   auto const& scs = state_.scs;
@@ -135,15 +144,8 @@ auto cortex_m::attribution_of(address at) const noexcept -> attribution
 
 auto cortex_m::nonsecure_address(address at) const noexcept -> bool
 {
-  auto const exempt = [](address a) {
-    return (a >= 0xE000'0000 and a <= 0xE000'2FFF)
-        or (a >= 0xE000'E000 and a <= 0xE000'EFFF)
-        or (a >= 0xE002'E000 and a <= 0xE002'EFFF)
-        or (a >= 0xE004'0000 and a <= 0xE004'1FFF)
-        or (a >= 0xE00F'F000 and a <= 0xE00F'FFFF);
-  };
   auto const attributed = attribution_of(at);
-  return exempt(at) or attributed.exempt or attributed.ns;
+  return architecture_exempt(at) or attributed.exempt or attributed.ns;
 }
 
 auto cortex_m::secure_entry(address at) -> trap_result
@@ -407,6 +409,26 @@ auto cortex_m::data_attrs(address at) const -> bus_attrs
   auto const secure =
       current_security() == security::secure and (attributed.exempt or not attributed.ns);
   return {.by = initiator::cpu, .secure = secure, .privileged = privileged()};
+}
+
+auto cortex_m::debug_attrs(address at, bool secure) const -> std::optional<bus_attrs>
+{
+  bus_attrs attrs{.by = initiator::debugger, .secure = secure, .filtered = true};
+  if(not trustzone())
+  {
+    return attrs;
+  }
+  auto const attributed = attribution_of(at);
+  if(architecture_exempt(at) or attributed.exempt)
+  {
+    return attrs;
+  }
+  if(not secure and not attributed.ns)
+  {
+    return std::nullopt;
+  }
+  attrs.secure = secure and not attributed.ns;
+  return attrs;
 }
 
 void cortex_m::pend(std::uint32_t number, security state)

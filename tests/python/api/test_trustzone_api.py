@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -149,3 +150,246 @@ def test_a_save_restores_the_state_and_both_banks_on_another_machine(
         0x2000_0400,
     )
     assert fresh.reg.msp_s == m.reg.msp_s
+
+
+SAU_CTRL = 0xE000_EDD0
+SAU_RNR = 0xE000_EDD8
+SAU_RBAR = 0xE000_EDDC
+SAU_RLAR = 0xE000_EDE0
+SRAM_NS = 0x2000_0000
+SRAM_S = 0x3000_0000
+FLASH_NS = 0x0800_0000
+FLASH_S = 0x0C00_0000
+PAGE = 0x2000
+MPCBB1_SECCFGR0 = 0x5003_2D00
+TZSC_SECCFGR2 = 0x5003_2414
+TZSC_MPCWM4ACFGR = 0x5003_2470
+TZSC_MPCWM4AR = 0x5003_2474
+TZIC_SR = tuple(0x5003_2810 + 4 * n for n in range(4))
+USART1SEC = 1 << 3
+FLASH_SEC1BBR1 = 0x5002_2080
+FLASH_SECHDPCR = 0x5002_20C0
+GPIOA_ODR = 0x0202_0014
+USART1_BRR = 0x0001_380C
+BKPSRAM = 0x4003_6400
+SECRET = 0x5EC2_E7A5
+PUBLIC = 0x0BAD_F00D
+
+
+def open_machine(u575: popcorn.PartDescription) -> popcorn.Machine:
+    """TZEN=1, SECWM1 pages 0 to 7 with HDP1 pages 0 to 3, bank 2 Non-secure. The SAU makes
+    the Non-secure flash, SRAM and peripheral aliases Non-secure. MPCBB1 block 1 is
+    Non-secure, block 0 stays Secure."""
+    m = popcorn.Machine(
+        u575,
+        image=popcorn.Image.elf(RCC_ELF),
+        option_bytes=OptionBytes(tzen=True, secwm1=(0, 7), secwm2=None, hdp1=(0, 3)),
+    )
+    m.reset()
+    for number, (base, limit) in enumerate(
+        (
+            (FLASH_NS, FLASH_NS + 0x000F_FFE0),
+            (SRAM_NS, SRAM_NS + 0x000B_FFE0),
+            (0x4000_0000, 0x4FFF_FFE0),
+        )
+    ):
+        m.mem.u32[SAU_RNR] = number
+        m.mem.u32[SAU_RBAR] = base
+        m.mem.u32[SAU_RLAR] = limit | 1
+    m.mem.u32[SAU_CTRL] = 1
+    m.mem.u32[MPCBB1_SECCFGR0] &= ~(1 << 1)
+    return m
+
+
+def events(m: popcorn.Machine) -> tuple[int, ...]:
+    return tuple(m.mem.u32[at] for at in TZIC_SR)
+
+
+def test_the_non_secure_view_never_reads_secure_sram(u575: popcorn.PartDescription) -> None:
+    """Block 0 of SRAM1 is Secure in MPCBB1: a Non-secure transaction reads 0, the Secure
+    alias reads the data, and a Secure request to the Non-secure alias goes out Non-secure,
+    DDI0553B.z RXSPQ."""
+    m = open_machine(u575)
+    m.mem.u32[SRAM_S + 0x100] = SECRET
+    m.mem.u32[SRAM_S + 0x200] = PUBLIC
+    before = events(m)
+    assert m.mem.u32[SRAM_NS + 0x100] == SECRET
+    assert m.mem.nonsecure.u32[SRAM_NS + 0x100] == 0
+    assert m.mem.nonsecure.read(SRAM_NS + 0xF0, 0x20) == bytes(0x20)
+    assert m.mem.secure.u32[SRAM_S + 0x100] == SECRET
+    assert m.mem.secure.u32[SRAM_NS + 0x100] == 0
+    assert m.mem.nonsecure.u32[SRAM_NS + 0x200] == PUBLIC
+    assert m.mem.secure.u32[SRAM_NS + 0x200] == PUBLIC
+    assert events(m) == before
+
+
+def test_a_non_secure_request_to_a_secure_address_is_a_debug_error(
+    u575: popcorn.PartDescription,
+) -> None:
+    """DDI0553B.z B13.3.4 RWMRR: the IDAU makes 0x3xxxxxxx and 0x0Cxxxxxx Secure, the SAU
+    leaves 0x9xxxxxxx Secure. A block stops at the first refused access."""
+    m = open_machine(u575)
+    m.mem.u32[SRAM_S + 0x100] = SECRET
+    for at in (SRAM_S + 0x100, FLASH_S + 5 * PAGE, 0x9000_0000):
+        with pytest.raises(popcorn.EmulationError, match=f"bus error at {at:#010x}: denied"):
+            _ = m.mem.nonsecure.u32[at]
+    with pytest.raises(popcorn.EmulationError, match="0x200c0000: denied"):
+        m.mem.nonsecure.read(SRAM_NS + 0x000B_FFF0, 0x20)
+    with pytest.raises(popcorn.EmulationError, match="denied"):
+        m.mem.nonsecure.u32[SRAM_S + 0x100] = 0
+    assert m.mem.u32[SRAM_S + 0x100] == SECRET
+
+
+def test_a_non_secure_view_write_to_a_secure_block_is_dropped(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = open_machine(u575)
+    m.mem.u32[SRAM_S + 0x100] = SECRET
+    before = events(m)
+    m.mem.nonsecure.u32[SRAM_NS + 0x100] = PUBLIC
+    m.mem.nonsecure.u32[SRAM_NS + 0x200] = PUBLIC
+    assert m.mem.u32[SRAM_S + 0x100] == SECRET
+    assert m.mem.u32[SRAM_S + 0x200] == PUBLIC
+    assert events(m) == before
+
+
+def test_the_non_secure_view_never_reads_secure_flash(u575: popcorn.PartDescription) -> None:
+    """Page 5 is in SECWM1, page 12 Secure by SEC1BBR1, page 10 Non-secure, RM0456 7.5.2 and
+    7.5.4. A write follows the read rule: the Secure pages keep their bytes."""
+    m = open_machine(u575)
+    m.mem.u32[FLASH_S + 5 * PAGE] = SECRET
+    m.mem.u32[FLASH_S + 12 * PAGE] = SECRET
+    m.mem.u32[FLASH_S + 10 * PAGE] = PUBLIC
+    m.mem.u32[FLASH_SEC1BBR1] = 1 << 12
+    before = events(m)
+    assert m.mem.nonsecure.u32[FLASH_NS + 5 * PAGE] == 0
+    assert m.mem.nonsecure.u32[FLASH_NS + 12 * PAGE] == 0
+    assert m.mem.nonsecure.u32[FLASH_NS + 10 * PAGE] == PUBLIC
+    assert m.mem.secure.u32[FLASH_S + 5 * PAGE] == SECRET
+    assert m.mem.secure.u32[FLASH_S + 12 * PAGE] == SECRET
+    m.mem.nonsecure.u32[FLASH_NS + 5 * PAGE] = PUBLIC
+    m.mem.nonsecure.u32[FLASH_NS + 12 * PAGE] = PUBLIC
+    m.mem.nonsecure.u32[FLASH_NS + 10 * PAGE + 4] = PUBLIC
+    assert m.mem.u32[FLASH_S + 5 * PAGE] == SECRET
+    assert m.mem.u32[FLASH_S + 12 * PAGE] == SECRET
+    assert m.mem.u32[FLASH_S + 10 * PAGE + 4] == PUBLIC
+    assert events(m) == before
+
+
+def test_the_hide_protection_area_reads_zero_to_the_secure_view(
+    u575: popcorn.PartDescription,
+) -> None:
+    """RM0456 7.5.3: with HDP1_ACCDIS set, the HDP area reads 0 to every load and keeps its
+    bytes. m.mem still reads it."""
+    m = open_machine(u575)
+    m.mem.u32[FLASH_S + 2 * PAGE] = SECRET
+    assert m.mem.secure.u32[FLASH_S + 2 * PAGE] == SECRET
+    m.mem.u32[FLASH_SECHDPCR] = 1
+    assert m.mem.secure.u32[FLASH_S + 2 * PAGE] == 0
+    assert m.mem.secure.u32[FLASH_S + 5 * PAGE] == m.mem.u32[FLASH_S + 5 * PAGE]
+    m.mem.secure.u32[FLASH_S + 2 * PAGE] = PUBLIC
+    assert m.mem.u32[FLASH_S + 2 * PAGE] == SECRET
+
+
+def test_the_non_secure_view_never_reads_a_secure_peripheral_register(
+    u575: popcorn.PartDescription,
+) -> None:
+    """GPIOA pins are Secure at reset, RM0456 Table 128, and USART1 once its TZSC bit is set,
+    RM0456 5.4.2: the Non-secure transaction reads 0 and its write is dropped."""
+    m = open_machine(u575)
+    m.mem.u32[TZSC_SECCFGR2] |= USART1SEC
+    m.mem.u32[0x5000_0000 + GPIOA_ODR] = 0xA5A5
+    m.mem.u32[0x5000_0000 + USART1_BRR] = 0x1234
+    before = events(m)
+    assert m.mem.nonsecure.u32[0x4000_0000 + GPIOA_ODR] == 0
+    assert m.mem.nonsecure.u32[0x4000_0000 + USART1_BRR] == 0
+    assert m.mem.secure.u32[0x4000_0000 + USART1_BRR] == 0
+    assert m.mem.secure.u32[0x5000_0000 + GPIOA_ODR] == 0xA5A5
+    assert m.mem.secure.u32[0x5000_0000 + USART1_BRR] == 0x1234
+    m.mem.nonsecure.u32[0x4000_0000 + USART1_BRR] = 0x99
+    assert m.mem.u32[0x5000_0000 + USART1_BRR] == 0x1234
+    m.mem.u32[TZSC_SECCFGR2] &= ~USART1SEC
+    assert m.mem.nonsecure.u32[0x4000_0000 + USART1_BRR] == 0x1234
+    assert events(m) == before
+
+
+def test_the_non_secure_view_follows_the_backup_sram_watermark(
+    u575: popcorn.PartDescription,
+) -> None:
+    """MPCWM4, RM0456 5.6.8: BKPSRAM is Secure outside its enabled Non-secure sub-region of
+    32-byte granules."""
+    m = open_machine(u575)
+    m.mem.u32[0x5003_6400 + 0x20] = SECRET
+    m.mem.u32[0x5003_6400 + 0x60] = SECRET
+    assert m.mem.nonsecure.u32[BKPSRAM + 0x20] == 0
+    m.mem.u32[TZSC_MPCWM4AR] = 2 << 16 | 1
+    m.mem.u32[TZSC_MPCWM4ACFGR] = 1
+    assert m.mem.nonsecure.u32[BKPSRAM + 0x20] == SECRET
+    assert m.mem.nonsecure.u32[BKPSRAM + 0x60] == 0
+
+
+def test_the_views_see_their_own_bank_of_the_system_control_space(
+    u575: popcorn.PartDescription,
+) -> None:
+    """The SCS is exempt from attribution: each view reads the bank of its state, and the
+    Non-secure view reads the SCS_NS alias as zero, DDI0553B.z RPMNV."""
+    m = open_machine(u575)
+    m.mem.u32[0xE000_ED08] = 0x0C00_0000
+    m.mem.u32[0xE002_ED08] = 0x0801_0000
+    assert m.mem.secure.u32[0xE000_ED08] == 0x0C00_0000
+    assert m.mem.secure.u32[0xE002_ED08] == 0x0801_0000
+    assert m.mem.nonsecure.u32[0xE000_ED08] == 0x0801_0000
+    assert m.mem.nonsecure.u32[0xE002_ED08] == 0
+
+
+def test_the_views_raise_model_error_on_unmodelled_data(u575: popcorn.PartDescription) -> None:
+    """The CTI has no model, GPIOA has no register at 0x3FC: ModelError before any access,
+    even where the view would refuse it."""
+    m = open_machine(u575)
+    for view in (m.mem.secure, m.mem.nonsecure):
+        for at in (0xE004_2004, 0x4202_03FC, 0x5202_03FC):
+            with pytest.raises(popcorn.ModelError):
+                _ = view.u32[at]
+            with pytest.raises(popcorn.ModelError):
+                view.u32[at] = 0
+
+
+def test_without_trustzone_both_views_act_as_mem(u575: popcorn.PartDescription) -> None:
+    m = tz_machine(u575, tzen=False)
+    m.mem.u32[SRAM_NS + 0x100] = SECRET
+    m.mem.u32[0x4000_0000 + GPIOA_ODR] = 0xA5A5
+    for view in (m.mem.secure, m.mem.nonsecure):
+        for at in (SRAM_NS + 0x100, SRAM_S + 0x100, 0x4000_0000 + GPIOA_ODR):
+            assert view.u32[at] == m.mem.u32[at]
+        assert view.read(SRAM_NS, 0x200) == m.mem.read(SRAM_NS, 0x200)
+    m.mem.nonsecure.u32[SRAM_S + 0x104] = PUBLIC
+    assert m.mem.u32[SRAM_NS + 0x104] == PUBLIC
+
+
+def test_references_follow_the_view_they_were_built_from(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = open_machine(u575)
+    m.mem.u32[SRAM_S + 0x100] = SECRET
+    assert asyncio.run(m.read(m.ref.mem.nonsecure.u32[SRAM_NS + 0x100]))[0] == 0
+    assert asyncio.run(m.read(m.ref.mem.secure.u32[SRAM_S + 0x100]))[0] == SECRET
+    assert asyncio.run(m.read(m.ref.mem.nonsecure.block(SRAM_NS + 0x100, 4)))[0] == bytes(4)
+    assert m.ref.mem.nonsecure.u32[SRAM_NS].get() == 0
+    with pytest.raises(popcorn.EmulationError, match="denied"):
+        asyncio.run(m.read(m.ref.mem.nonsecure.u32[SRAM_S + 0x100]))
+
+
+def test_no_view_access_raises_an_illegal_access_event(u575: popcorn.PartDescription) -> None:
+    """Non-secure writes to the SECCFGR of RCC, PWR, EXTI, SYSCFG and GPDMA1 and Non-secure
+    reads of GTZC1_TZSC_CR and FLASH_SECSR are illegal accesses, RM0456 5.4.5: through a view
+    they are refused and set no TZIC flag."""
+    m = open_machine(u575)
+    writes = (0x4602_0D10, 0x4602_0830, 0x4602_2014, 0x4600_0400, 0x4002_0000)
+    stored = [m.mem.u32[at + 0x1000_0000] for at in writes]
+    before = events(m)
+    for at in writes:
+        m.mem.nonsecure.u32[at] = 0x5A
+    assert m.mem.nonsecure.u32[0x4003_2400] == 0
+    _ = m.mem.nonsecure.u32[0x4002_2024]
+    assert [m.mem.u32[at + 0x1000_0000] for at in writes] == stored
+    assert events(m) == before

@@ -254,7 +254,7 @@ auto exti::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_g
     {
       if(write and unit_)
       {
-        illegal_.raise(ctx_.peers, *unit_);
+        illegal_.raise(ctx_.peers, *unit_, ctx.by);
       }
       return word == lock_ ? bus_guard::both(all) : bus_guard{.wi = all};
     }

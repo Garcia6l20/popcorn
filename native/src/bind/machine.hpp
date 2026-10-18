@@ -179,6 +179,18 @@ struct[[= py::rename{"CallOutcome"}]] call_outcome
   [[= py::readonly]] std::vector<std::uint32_t> held_exceptions{};
 };
 
+/**
+ * @brief Which memory view an access goes through: the unfiltered debugger view, or a DAP
+ *        access of one security state filtered by the SAU, the IDAU and the bus firewall, see
+ *        core::memory_view.
+ */
+enum class[[= py::rename{"MemorySpace"}]] memory_space : std::uint8_t
+{
+  debugger,
+  secure,
+  nonsecure,
+};
+
 namespace detail
 {
 /**
@@ -633,23 +645,26 @@ public:
    * @brief Writes bytes into guest memory, as the debugger.
    * @param at First guest address.
    * @param bytes Bytes to write.
+   * @param space View the access goes through.
    * @throws config_error naming the address when the range leaves the 32-bit address space.
    * @throws emulation_error naming the failing address on a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Write bytes into guest memory as the debugger."}]] void
-      write_memory(address at, reflex::py::nb::bytes const& bytes);
+      write_memory(address at, reflex::py::nb::bytes const& bytes, memory_space space);
 
   /**
    * @brief Reads bytes of guest memory, as the debugger.
    * @param at First guest address.
    * @param size Byte count.
+   * @param space View the access goes through.
    * @throws config_error naming the address when the range leaves the 32-bit address space.
    * @throws emulation_error naming the failing address on a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Read bytes of guest memory as the debugger."}]] [[nodiscard]] auto
-      read_memory(address at, std::uint32_t size) const -> reflex::py::nb::bytes;
+      read_memory(address at, std::uint32_t size, memory_space space) const
+      -> reflex::py::nb::bytes;
 
   /**
    * @brief Writes the bits of @p value that @p mask selects into guest memory, reading and
@@ -658,6 +673,7 @@ public:
    * @param at First guest address.
    * @param mask Bits written, one byte per byte of memory.
    * @param value Bytes whose masked bits are written, as long as @p mask.
+   * @param space View the access goes through.
    * @throws config_error for lengths that differ or a range outside the 32-bit address space.
    * @throws emulation_error naming the failing address on a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
@@ -666,17 +682,19 @@ public:
       write_memory_masked(
           address                      at,
           reflex::py::nb::bytes const& mask,
-          reflex::py::nb::bytes const& value);
+          reflex::py::nb::bytes const& value,
+          memory_space                 space);
 
   /**
    * @brief The bytes of the NUL-terminated string at @p at, without the NUL, at most @p limit
-   *        bytes, read 64-byte block by block and byte by byte where a block meets a bus error.
+   *        bytes, read 64-byte block by block and byte by byte where a block meets a bus error,
+   *        through the view @p space.
    * @throws emulation_error when the bytes before a NUL meet a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{
       "Bytes of the NUL-terminated string at an address, at most limit."}]] [[nodiscard]] auto
-      cstring(address at, std::uint32_t limit) const -> reflex::py::nb::bytes;
+      cstring(address at, std::uint32_t limit, memory_space space) const -> reflex::py::nb::bytes;
 
   /** @brief Names of the core registers, in the arch module's order. */
   [[= py::doc{"Names of the core registers, in the arch module's order."}]] [[nodiscard]] auto
@@ -771,18 +789,20 @@ public:
 
   /** @brief read_memory() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of read_memory."}]] [[nodiscard]] auto
-      op_read_memory(address at, std::uint32_t size) const -> access_op;
+      op_read_memory(address at, std::uint32_t size, memory_space space) const -> access_op;
   /** @brief write_memory() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of write_memory."}]] [[nodiscard]] auto
-      op_write_memory(address at, reflex::py::nb::bytes const& bytes) const -> access_op;
+      op_write_memory(address at, reflex::py::nb::bytes const& bytes, memory_space space) const
+      -> access_op;
   /** @brief write_memory_masked() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of write_memory_masked."}]] [[nodiscard]] auto op_memory_masked(
       address                      at,
       reflex::py::nb::bytes const& mask,
-      reflex::py::nb::bytes const& value) const -> access_op;
+      reflex::py::nb::bytes const& value,
+      memory_space                 space) const -> access_op;
   /** @brief cstring() as an op of submit_ops(). */
   [[= py::doc{"Op of cstring."}]] [[nodiscard]] auto
-      op_cstring(address at, std::uint32_t limit) const -> access_op;
+      op_cstring(address at, std::uint32_t limit, memory_space space) const -> access_op;
   /** @brief read_register() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of read_register."}]] [[nodiscard]] auto
       op_read_register(std::uint32_t index) const -> access_op;

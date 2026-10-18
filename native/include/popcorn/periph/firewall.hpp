@@ -67,7 +67,8 @@ struct page_verdict
  *        engine asks memory_page() when it maps a page for some transaction attributes, then
  *        check_memory() for each data access of a page whose verdict filters data. Host
  *        accesses made by the CPU or DMA initiator, such as exception stacking and DMA
- *        transfers, ask check_memory() for every access. Debugger accesses are never filtered.
+ *        transfers, ask check_memory() for every access. A debugger access asks it only with
+ *        bus_attrs::filtered set, an access of a filtered core::memory_view.
  */
 struct POPCORN_API bus_firewall
 {
@@ -134,8 +135,8 @@ struct POPCORN_API bus_firewall
 
   /**
    * @brief Decides one data access to memory: a CPU access of a page whose verdict filters
-   *        data, or a host access by the CPU or DMA initiator. Called only when
-   *        filters_memory() is true.
+   *        data, a host access by the CPU or DMA initiator, or a filtered debugger access.
+   *        Called only when filters_memory() is true.
    * @param at Bus address, aligned to @p size.
    * @param size Access size in bytes, 1, 2 or 4.
    * @param attrs Attributes of the transaction.

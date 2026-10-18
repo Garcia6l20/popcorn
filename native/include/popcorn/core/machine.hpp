@@ -518,6 +518,13 @@ public:
   /** @brief Guest memory view, valid while the machine lives. */
   [[nodiscard]] auto mem() noexcept -> memory_view;
 
+  /**
+   * @brief Guest memory view filtered as DAP accesses of one security state, see memory_view.
+   * @param secure Whether the view requests Secure accesses.
+   * @return The view, valid while the machine lives.
+   */
+  [[nodiscard]] auto mem(bool secure) noexcept -> memory_view;
+
   /** @brief CPU register view, valid while the machine lives. */
   [[nodiscard]] auto regs() noexcept -> register_view;
 

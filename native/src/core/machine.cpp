@@ -327,6 +327,11 @@ auto machine::mem() noexcept -> memory_view
   return memory_view{*this};
 }
 
+auto machine::mem(bool secure) noexcept -> memory_view
+{
+  return memory_view{*this, secure};
+}
+
 auto machine::regs() noexcept -> register_view
 {
   return register_view{*this};

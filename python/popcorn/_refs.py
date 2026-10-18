@@ -672,6 +672,12 @@ def _memory_layout(address: int, fmt: str) -> ScalarLayout:
     return ScalarLayout(address, size, 0, 8 * size, kind)
 
 
+def _memory_label(space: _core.MemorySpace) -> str:
+    if space == _core.MemorySpace.debugger:
+        return "mem"
+    return f"mem.{space.name}"
+
+
 class ScalarRefs[T: (int, float)]:
     """References to little-endian scalars of one type, `m.ref.mem.u32[addr]`."""
 
@@ -689,6 +695,7 @@ class ScalarRefs[T: (int, float)]:
         packing = "<" + _FORMATS[fmt]
         size = struct.calcsize(packing)
         handle = _handle(self._owner)
+        space = view.space
 
         def put(value: T) -> None:
             view[address] = value
@@ -699,14 +706,14 @@ class ScalarRefs[T: (int, float)]:
 
         return MemoryRef(
             self._owner,
-            f"mem.{fmt}[{address:#010x}]",
+            f"{_memory_label(space)}.{fmt}[{address:#010x}]",
             lambda: view[address],
             put,
             _packs(packing),
             lambda: _memory_layout(address, fmt),
-            read=lambda: handle.op_read_memory(address, size),
+            read=lambda: handle.op_read_memory(address, size, space),
             decode=decode,
-            write=lambda value: handle.op_write_memory(address, struct.pack(packing, value)),
+            write=lambda value: handle.op_write_memory(address, struct.pack(packing, value), space),
         )
 
 
@@ -725,9 +732,11 @@ _FORMATS = {
 
 
 class MemoryRefs:
-    """References to guest memory, `m.ref.mem`."""
+    """References to guest memory, `m.ref.mem`, and through the filtered views,
+    `m.ref.mem.secure` and `m.ref.mem.nonsecure`."""
 
     __slots__ = (
+        "_filtered",
         "_memory",
         "_owner",
         "f32",
@@ -746,6 +755,7 @@ class MemoryRefs:
         """Wrap the memory view. Use `m.ref.mem` instead."""
         self._owner = owner
         self._memory = memory
+        self._filtered: tuple[MemoryRefs, MemoryRefs] | None = None
         self.u8 = ScalarRefs[int](owner, memory.u8, "u8")
         self.u16 = ScalarRefs[int](owner, memory.u16, "u16")
         self.u32 = ScalarRefs[int](owner, memory.u32, "u32")
@@ -757,10 +767,29 @@ class MemoryRefs:
         self.f32 = ScalarRefs[float](owner, memory.f32, "f32")
         self.f64 = ScalarRefs[float](owner, memory.f64, "f64")
 
+    def _views(self) -> tuple[MemoryRefs, MemoryRefs]:
+        if self._filtered is None:
+            self._filtered = (
+                MemoryRefs(self._owner, self._memory.secure),
+                MemoryRefs(self._owner, self._memory.nonsecure),
+            )
+        return self._filtered
+
+    @property
+    def secure(self) -> MemoryRefs:
+        """References through `m.mem.secure`."""
+        return self._views()[0]
+
+    @property
+    def nonsecure(self) -> MemoryRefs:
+        """References through `m.mem.nonsecure`."""
+        return self._views()[1]
+
     def block(self, address: int, size: int) -> Ref[bytes]:
         """`size` bytes at `address`, `Memory.read` and `write`. A write takes exactly `size`
         bytes."""
         memory = self._memory
+        space = memory.space
 
         def check(value: object) -> None:
             if not isinstance(value, bytes | bytearray):
@@ -773,24 +802,25 @@ class MemoryRefs:
         handle = _handle(self._owner)
         return Ref(
             self._owner,
-            f"mem.block({address:#010x}, {size})",
+            f"{_memory_label(space)}.block({address:#010x}, {size})",
             lambda: memory.read(address, size),
             lambda data: memory.write(address, bytes(data)),
             check,
-            read=lambda: handle.op_read_memory(address, size),
+            read=lambda: handle.op_read_memory(address, size, space),
             decode=lambda raw: bytes(cast(bytes, raw)),
-            write=lambda data: handle.op_write_memory(address, bytes(data)),
+            write=lambda data: handle.op_write_memory(address, bytes(data), space),
         )
 
     def cstring(self, address: int, limit: int = 256) -> Ref[str]:
         """The NUL-terminated string at `address`, `Memory.cstring`. Read-only."""
         memory = self._memory
+        space = memory.space
         handle = _handle(self._owner)
         return Ref(
             self._owner,
-            f"mem.cstring({address:#010x})",
+            f"{_memory_label(space)}.cstring({address:#010x})",
             lambda: memory.cstring(address, limit),
-            read=lambda: handle.op_cstring(address, limit),
+            read=lambda: handle.op_cstring(address, limit, space),
             decode=lambda raw: cast(bytes, raw).decode("utf-8", errors="replace"),
         )
 
@@ -891,9 +921,11 @@ class RegisterRef(Ref[int]):
             view.read,
             view.write,
             _integer(width, "register"),
-            read=lambda: handle.op_read_memory(at, size),
+            read=lambda: handle.op_read_memory(at, size, _core.MemorySpace.debugger),
             decode=lambda raw: int.from_bytes(cast(bytes, raw), "little"),
-            write=lambda value: handle.op_write_memory(at, value.to_bytes(size, "little")),
+            write=lambda value: handle.op_write_memory(
+                at, value.to_bytes(size, "little"), _core.MemorySpace.debugger
+            ),
         )
 
     def __getattr__(self, name: str) -> Ref[int]:
@@ -1248,13 +1280,13 @@ class VarRef[T: (int, float, bool)](MemoryRef[Any]):
 
         def read() -> _core.AccessOp:
             size = var.span()
-            return handle.op_read_memory(var.address, size)
+            return handle.op_read_memory(var.address, size, _core.MemorySpace.debugger)
 
         def write(value: int | float | bool) -> _core.AccessOp:
             data, mask = var.encode(value)
             if mask is None:
-                return handle.op_write_memory(var.address, data)
-            return handle.op_memory_masked(var.address, mask, data)
+                return handle.op_write_memory(var.address, data, _core.MemorySpace.debugger)
+            return handle.op_memory_masked(var.address, mask, data, _core.MemorySpace.debugger)
 
         super().__init__(
             owner,
@@ -1307,7 +1339,7 @@ class VarRef[T: (int, float, bool)](MemoryRef[Any]):
             self.owner,
             f"{self.label}.enum_name",
             lambda: var.enum_name,
-            read=lambda: handle.op_read_memory(var.address, var.span()),
+            read=lambda: handle.op_read_memory(var.address, var.span(), _core.MemorySpace.debugger),
             decode=lambda raw: names.get(var.decode(cast(bytes, raw))),
         )
 

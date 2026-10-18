@@ -161,7 +161,7 @@ auto syscfg::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus
     {
       if(write and unit_)
       {
-        illegal_.raise(ctx_.peers, *unit_);
+        illegal_.raise(ctx_.peers, *unit_, ctx.by);
       }
       return {.wi = all};
     }
@@ -183,7 +183,7 @@ auto syscfg::register_guard(std::uint32_t word, access_ctx const& ctx) -> bus_gu
     {
       if(unit_)
       {
-        illegal_.raise(ctx_.peers, *unit_);
+        illegal_.raise(ctx_.peers, *unit_, ctx.by);
       }
       return bus_guard::both(all);
     }

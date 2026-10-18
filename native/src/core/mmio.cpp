@@ -377,7 +377,7 @@ auto machine::run_state::check_memory(
     bus_attrs       attrs,
     arch::memory_op op) -> periph::bus_verdict
 {
-  if(not filters_host(attrs.by))
+  if(not filters_host(attrs))
   {
     return periph::bus_verdict::allow;
   }

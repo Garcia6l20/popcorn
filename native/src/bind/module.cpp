@@ -53,6 +53,7 @@ REFLEX_PY_MODULE(_core, m)
   m.bind<popcorn::arch::call_arg>("CallArg");
   m.bind<popcorn::arch::call_frame>("CallFrame");
   m.bind_enum<popcorn::initiator>("Initiator");
+  m.bind_enum<popcorn::bind::memory_space>("MemorySpace");
   m.bind_enum<popcorn::core::intercept_action>("InterceptAction");
   m.bind_enum<popcorn::core::watch_kind>("WatchKind");
   m.bind_enum<popcorn::core::watch_action>("WatchAction");

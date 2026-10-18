@@ -1368,7 +1368,10 @@ auto flash::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> 
   {
     if(not ctx.secure)
     {
-      illegal_access("FLASH_REGIE");
+      if(ctx.by != initiator::debugger)
+      {
+        illegal_access("FLASH_REGIE");
+      }
       return true;
     }
     return not ctx.privileged and get(regs_, secure_privileged_) != 0;
@@ -1377,7 +1380,10 @@ auto flash::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> 
   {
     if(write and not ctx.secure)
     {
-      illegal_access("FLASH_REGIE");
+      if(ctx.by != initiator::debugger)
+      {
+        illegal_access("FLASH_REGIE");
+      }
       return true;
     }
     return false;

@@ -65,6 +65,8 @@ public:
   [[nodiscard]] auto host_register_value(cpu_register const& reg, std::uint64_t value) const
       -> std::uint64_t override;
   [[nodiscard]] auto data_attrs(address at) const -> bus_attrs override;
+  [[nodiscard]] auto debug_attrs(address at, bool secure) const
+      -> std::optional<bus_attrs> override;
   [[nodiscard]] auto registers() const -> std::span<cpu_register const> override;
   void               prepare_call(call_frame const& frame) override;
   void               check_call(call_frame const& frame) const override;
@@ -252,8 +254,10 @@ private:
   [[nodiscard]] auto attribution_of(address at) const noexcept -> attribution;
   void               check_call_state(call_frame const& frame) const;
   [[nodiscard]] auto nonsecure_address(address at) const noexcept -> bool;
-  [[nodiscard]] auto secure_fp_context() const noexcept -> bool;
-  [[nodiscard]] auto first_secure_word(address from, address to) const noexcept
+  /** @brief Whether SecurityCheck() exempts @p at, the requester's state applying there. */
+  [[nodiscard]] static auto architecture_exempt(address at) noexcept -> bool;
+  [[nodiscard]] auto        secure_fp_context() const noexcept -> bool;
+  [[nodiscard]] auto        first_secure_word(address from, address to) const noexcept
       -> std::optional<address>;
   [[nodiscard]] auto valid_return(std::uint32_t exc_return) const noexcept -> bool;
 

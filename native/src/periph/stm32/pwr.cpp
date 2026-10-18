@@ -346,7 +346,7 @@ auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
     {
       if(write and unit_)
       {
-        illegal_.raise(ctx_.peers, *unit_);
+        illegal_.raise(ctx_.peers, *unit_, ctx.by);
       }
       return {.wi = all};
     }
