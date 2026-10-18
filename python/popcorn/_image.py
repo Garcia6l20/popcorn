@@ -99,8 +99,9 @@ class Image:
             name: Name that `image=` of the symbol lookups selects it by, None for none.
             load: False for a symbols-only image: a machine never writes its segments to
                 memory and its snapshots hold no digest of it, while its symbols and DWARF
-                feed `sym`, `fn_ptr`, `var`, `image`, the unwinder and coverage as a loaded
-                image's do. For a part embedded as raw bytes in another image, such as a
+                feed `sym`, `fn_ptr`, `var`, `image`, the unwinder, coverage and trace as a
+                loaded image's do, after every loaded image. For a part embedded as raw bytes
+                in another image, such as a
                 secure binary placed by `.incbin` in the Non-secure ELF.
         """
         return cls(_core.load_elf(os.fspath(path)), Path(path), elf=True, name=name, loads=load)

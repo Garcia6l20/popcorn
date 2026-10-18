@@ -1025,7 +1025,7 @@ class Machine:
     def load(self, image: Image) -> None:
         """Load one more image over memory, such as an application after a bootloader. A
         symbols-only image, `Image.elf(path, load=False)`, writes nothing: it only adds its
-        symbols and DWARF.
+        symbols and DWARF, and coverage and trace see it after every loaded image.
 
         Raises:
             ConfigError: The image's name is already the name of a loaded image.
@@ -1479,12 +1479,13 @@ class Machine:
         every kind.
 
         `ranges` and `functions` limit the trace to records caused by that code, everywhere
-        when both are None. Block and memory records cost a native hook while traced, nothing
+        when both are None. Call records name the symbols of the loaded images, then of the
+        symbols-only images. Block and memory records cost a native hook while traced, nothing
         crosses to Python per record. Leaving the block removes the sink, then closes the file.
 
         Raises:
             ConfigError: A kind is not selectable, or a range is invalid.
-            SymbolError: No loaded image has a function name.
+            SymbolError: No loaded or symbols-only image has a function name.
             FormatError: The file cannot be created, written or closed, from `popcorn._obs`.
             MachineRunning: The machine is busy, outside its handlers.
         """

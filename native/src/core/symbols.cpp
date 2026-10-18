@@ -8,22 +8,30 @@ namespace popcorn::core
 void machine::run_state::build_symbol_index()
 {
   symbols.clear();
-  symbol_index.clear();
-  for(auto const& loaded : owner.images_)
+  symbol_index       = index_symbols(owner.loaded_images());
+  extra_symbol_index = index_symbols(owner.observed_images().subspan(owner.loaded_count_));
+}
+
+auto machine::run_state::index_symbols(std::span<popcorn::image::image const> images)
+    -> symbol_lookup
+{
+  symbol_lookup out;
+  auto&         index = out.entries;
+  for(auto const& loaded : images)
   {
     for(auto const& entry : loaded.symbols)
     {
-      auto const index = static_cast<std::uint32_t>(symbols.size());
+      auto const at = static_cast<std::uint32_t>(symbols.size());
       symbols.push_back(&entry);
       if(entry.kind != image::symbol_kind::other)
       {
-        symbol_index.push_back(
-            {.value = entry.value, .end = std::uint64_t{entry.value} + entry.size, .index = index});
+        index.push_back(
+            {.value = entry.value, .end = std::uint64_t{entry.value} + entry.size, .index = at});
       }
     }
   }
-  std::ranges::stable_sort(symbol_index, {}, &symbol_entry::value);
-  for(auto [position, entry] : std::views::enumerate(symbol_index))
+  std::ranges::stable_sort(index, {}, &symbol_entry::value);
+  for(auto [position, entry] : std::views::enumerate(index))
   {
     if(entry.end != entry.value)
     {
@@ -33,33 +41,48 @@ void machine::run_state::build_symbol_index()
     auto const limit = region == nullptr ? std::uint64_t{entry.value} + 1
                                          : std::uint64_t{region->desc->start} + region->desc->size;
     auto const next  = std::ranges::upper_bound(
-        symbol_index.begin() + position + 1, symbol_index.end(), entry.value, {},
-        &symbol_entry::value);
-    entry.end = next == symbol_index.end() ? limit : std::min<std::uint64_t>(next->value, limit);
+        index.begin() + position + 1, index.end(), entry.value, {}, &symbol_entry::value);
+    entry.end = next == index.end() ? limit : std::min<std::uint64_t>(next->value, limit);
   }
-  symbol_max_end.clear();
   std::uint64_t reach = 0;
-  for(auto const& entry : symbol_index)
+  for(auto const& entry : index)
   {
     reach = std::max(reach, entry.end);
-    symbol_max_end.push_back(reach);
+    out.max_end.push_back(reach);
   }
+  return out;
 }
 
-auto machine::run_state::symbol_at(address pc) const noexcept
+namespace
+{
+template <typename Lookup>
+auto lookup_symbol(Lookup const& lookup, address pc) noexcept
     -> std::optional<std::pair<std::uint32_t, std::uint32_t>>
 {
-  auto position = static_cast<std::size_t>(
-      std::ranges::upper_bound(symbol_index, pc, {}, &symbol_entry::value) - symbol_index.begin());
-  while(position > 0 and symbol_max_end[position - 1] > pc)
+  auto const& index    = lookup.entries;
+  auto        position = static_cast<std::size_t>(
+      std::ranges::upper_bound(index, pc, {}, [](auto const& entry) { return entry.value; })
+      - index.begin());
+  while(position > 0 and lookup.max_end[position - 1] > pc)
   {
-    auto const& found = symbol_index[--position];
+    auto const& found = index[--position];
     if(pc < found.end)
     {
       return std::pair{found.index, pc - found.value};
     }
   }
   return std::nullopt;
+}
+}
+
+auto machine::run_state::symbol_at(address pc) const noexcept
+    -> std::optional<std::pair<std::uint32_t, std::uint32_t>>
+{
+  if(auto const found = lookup_symbol(symbol_index, pc))
+  {
+    return found;
+  }
+  return lookup_symbol(extra_symbol_index, pc);
 }
 
 auto machine::run_state::locate(address pc) const -> location
@@ -75,28 +98,16 @@ auto machine::run_state::locate(address pc) const -> location
       return seg.start <= pc and pc < std::uint64_t{seg.start} + seg.memory_size;
     });
   };
-  auto const images = owner.images_ | std::views::reverse;
+  auto const images = owner.loaded_images() | std::views::reverse;
   if(auto const holder = std::ranges::find_if(images, holds); holder != images.end())
   {
     auto const source = holder->locate(pc);
     where.file        = source.file;
     where.line        = source.line;
   }
-  for(auto const& extra : owner.symbol_images_ | std::views::reverse)
+  for(auto const& extra :
+      owner.observed_images().subspan(owner.loaded_count_) | std::views::reverse)
   {
-    if(where.symbol.empty())
-    {
-      auto const found = std::ranges::find_if(extra.symbols, [pc](image::symbol const& entry) {
-        return entry.kind != image::symbol_kind::other
-           and entry.value <= pc
-           and pc - entry.value < std::max<std::uint32_t>(entry.size, 1);
-      });
-      if(found != extra.symbols.end())
-      {
-        where.symbol = found->name;
-        where.offset = pc - found->value;
-      }
-    }
     if(where.file.empty() and holds(extra))
     {
       auto const source = extra.locate(pc);

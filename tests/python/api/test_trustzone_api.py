@@ -12,6 +12,7 @@ import pytest
 from popcorn import OptionBytes
 from popcorn.arm import Reg
 from popcorn.report import Via, fault_bits, stop_report
+from popcorn.trace import Call, TraceKind, read
 from popcorn.units import VirtualTime, ms, us
 
 ROOT = Path(__file__).parents[3]
@@ -678,7 +679,7 @@ def test_a_linked_system_keeps_each_member_s_trustzone_its_own(
 
 
 def test_coverage_collects_on_a_machine_with_a_symbols_only_image(
-    u575: popcorn.PartDescription,
+    u575: popcorn.PartDescription, tmp_path: Path
 ) -> None:
     m = pair_machine(u575)
     m.coverage.enable()
@@ -686,4 +687,28 @@ def test_coverage_collects_on_a_machine_with_a_symbols_only_image(
     assert stop.reason == popcorn.StopReason.ADDRESS
     coverage = m.coverage.collect()
     assert len(coverage.groups) == 1
-    assert [Path(i.path).name for i in coverage.groups[0].images] == ["tz_pair.elf"]
+    group = coverage.groups[0]
+    assert [Path(i.path).name for i in group.images] == ["tz_pair.elf", "tz_pair_s.elf"]
+    secure = range(0x0800_0000, 0x0800_0000 + SECURE_PART)
+    assert any(b.start in secure and b.hits > 0 for b in group.blocks)
+    worker = tmp_path / "worker.pcov"
+    assert m.coverage.merge_into(worker) == coverage
+    assert m.coverage.merge_into(worker).groups[0].images == group.images
+
+
+def test_coverage_and_trace_name_the_functions_of_a_symbols_only_image(
+    u575: popcorn.PartDescription, tmp_path: Path
+) -> None:
+    m = pair_machine(u575)
+    function = m.sym("__acle_se_tz_pair_add", image="secure")
+    m.coverage.enable(functions=["__acle_se_tz_pair_add"])
+    m.intercept(function, lambda call: call.proceed())
+    path = tmp_path / "pair.pctr"
+    with m.trace([TraceKind.CALL], path):
+        stop = asyncio.run(m.run(until=m.sym("tz_pair_done", image="nonsecure"), budget=10_000))
+    assert stop.reason == popcorn.StopReason.ADDRESS
+    group = m.coverage.collect().groups[0]
+    assert [r.name for r in group.ranges] == ["__acle_se_tz_pair_add"]
+    assert sum(b.hits for b in group.blocks) > 0
+    calls = [r for r in read(path) if isinstance(r, Call)]
+    assert [(c.pc, c.symbol) for c in calls] == [(function & ~1, "__acle_se_tz_pair_add")]

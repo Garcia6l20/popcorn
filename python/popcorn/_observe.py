@@ -46,10 +46,10 @@ class MachineCoverage:
 
     def enable(self, ranges: Ranges | None = None, functions: Iterable[str] | None = None) -> None:
         """Start counting over `ranges` and the code of `functions`, every executable segment
-        of the loaded images when both are None. Enabling again adds ranges.
+        of the loaded and symbols-only images when both are None. Enabling again adds ranges.
 
         Raises:
-            SymbolError: No loaded image has a function name.
+            SymbolError: No loaded or symbols-only image has a function name.
             ConfigError: A range is empty or leaves the 32-bit address space.
             MachineRunning: The machine is busy, outside its handlers.
         """
@@ -77,15 +77,16 @@ class MachineCoverage:
         return self._handle.coverage_enabled()
 
     def collect(self) -> Coverage:
-        """The coverage counted so far, one group over the loaded images.
+        """The coverage counted so far, one group over the loaded images, then the symbols-only
+        images.
 
         ELF images are recorded by absolute path and digest, others as raw images.
         """
         self._check()
+        images = self._images()
         sources = [
             os.path.abspath(image.path) if image.is_elf and image.path is not None else ""
-            for image in self._images()
-            if image.loads
+            for image in (*(i for i in images if i.loads), *(i for i in images if not i.loads))
         ]
         return Coverage(self._handle.coverage_pcov(sources))
 

@@ -898,6 +898,15 @@ struct machine::run_state
     std::uint32_t index{};
   };
 
+  /** @brief Function and object symbols of some images by address. */
+  struct symbol_lookup
+  {
+    /** @brief Entries sorted by address. */
+    std::vector<symbol_entry> entries{};
+    /** @brief Largest end of entries up to each position, which bounds the scan back. */
+    std::vector<std::uint64_t> max_end{};
+  };
+
   /** @brief Records a sink collects before its batch is delivered. */
   static constexpr std::size_t sink_batch = 4096;
 
@@ -1089,12 +1098,13 @@ struct machine::run_state
   bool sink_mem_active = false;
   /** @brief Memory hooks feeding mem records while some sink selects them. */
   std::vector<uc_hook> sink_mem_hooks{};
-  /** @brief Symbols of the loaded images, concatenated in load order. */
+  /** @brief Symbols of machine::observed_images(), concatenated in that order. */
   std::vector<popcorn::image::symbol const*> symbols{};
-  /** @brief Function and object symbols by address. */
-  std::vector<symbol_entry> symbol_index{};
-  /** @brief Largest end of symbol_index up to each position, which bounds the scan back. */
-  std::vector<std::uint64_t> symbol_max_end{};
+  /** @brief Symbols of the loaded images by address. */
+  symbol_lookup symbol_index{};
+  /** @brief Symbols of the symbols-only images by address, asked where the loaded ones give
+   * none. */
+  symbol_lookup extra_symbol_index{};
   /** @brief Code hook sites by address. */
   std::map<address, std::unique_ptr<code_site>> sites{};
   /** @brief Calls in flight, innermost last. */
@@ -1615,10 +1625,14 @@ struct machine::run_state
   /** @brief Removes a sink, delivering its batch first, its failure dropped. */
   void remove_sink(std::uint64_t id) noexcept;
 
-  /** @brief Rebuilds the symbol table and its address index from the loaded images. */
+  /** @brief Rebuilds the symbol table and its address indexes from the observed images. */
   void build_symbol_index();
 
-  /** @brief Symbol index and offset of the symbol holding @p pc, empty when none does. */
+  /** @brief Address index of @p images, whose symbols are appended to the symbol table. */
+  [[nodiscard]] auto index_symbols(std::span<popcorn::image::image const> images) -> symbol_lookup;
+
+  /** @brief Symbol index and offset of the symbol holding @p pc, empty when none does: the
+   * loaded images first, then the symbols-only images. */
   [[nodiscard]] auto symbol_at(address pc) const noexcept
       -> std::optional<std::pair<std::uint32_t, std::uint32_t>>;
 

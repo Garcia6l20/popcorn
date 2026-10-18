@@ -354,8 +354,10 @@ public:
 
   /**
    * @brief Adds a symbols-only image, such as the ELF of a secure part embedded as raw bytes in
-   *        a loaded image: nothing is written to memory, and it adds no image digest, no
-   *        coverage range and no trace symbol. locate() falls back to its symbols where the
+   *        a loaded image: nothing is written to memory and it adds no image digest. Coverage
+   *        and trace see it as a loaded image, after every loaded one: its executable segments
+   *        are default coverage ranges and its symbols take trace symbol ids after the loaded
+   *        images' ones, see observed_images(). locate() falls back to its symbols where the
    *        loaded images give no symbol, and to its lines where they give no line, the last
    *        added first.
    * @param symbols Image whose symbols and lines are kept, copied.
@@ -363,9 +365,14 @@ public:
    */
   void add_symbols(popcorn::image::image const& symbols);
 
-  /** @brief Images loaded so far, in load order. Their symbols concatenated in this order are the
-   * symbol table call trace records index. */
+  /** @brief Images loaded so far, in load order, the symbols-only images left out. */
   [[nodiscard]] auto loaded_images() const noexcept -> std::span<popcorn::image::image const>;
+
+  /** @brief The loaded images in load order, then the symbols-only images in the order
+   * add_symbols() added them: the images coverage and trace see. Their symbols concatenated in
+   * this order are the symbol table call trace records index, so a later load moves the ids of
+   * symbols-only images, never those of loaded images. */
+  [[nodiscard]] auto observed_images() const noexcept -> std::span<popcorn::image::image const>;
 
   /**
    * @brief Locates an address the way a stop's `where` does: the function or object containing
@@ -845,7 +852,7 @@ private:
   std::unique_ptr<arch::arch>                   arch_;
   std::vector<std::unique_ptr<peripheral_slot>> peripherals_{};
   std::vector<popcorn::image::image>            images_{};
-  std::vector<popcorn::image::image>            symbol_images_{};
+  std::size_t                                   loaded_count_{};
   trace_ring                                    trace_;
   std::shared_ptr<hook_registry>                hooks_;
   std::unique_ptr<run_state>                    run_;

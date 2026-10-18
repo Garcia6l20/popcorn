@@ -29,7 +29,7 @@ auto pctr_writer_for(core::machine const& target, std::filesystem::path path)
          .name  = name});
     names.registers.push_back(std::move(name));
   }
-  for(auto const& loaded : target.loaded_images())
+  for(auto const& loaded : target.observed_images())
   {
     for(auto const& symbol : loaded.symbols)
     {

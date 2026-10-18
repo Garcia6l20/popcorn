@@ -182,7 +182,7 @@ void machine::run_state::remove_hook(std::uint64_t id) noexcept
 
 auto machine::run_state::abi_at(address at) const -> arch::float_abi
 {
-  for(auto const& loaded : owner.images_)
+  for(auto const& loaded : owner.loaded_images())
   {
     auto const holds = std::ranges::any_of(loaded.segments, [at](image::segment const& seg) {
       return seg.start <= at and at < std::uint64_t{seg.start} + seg.memory_size;

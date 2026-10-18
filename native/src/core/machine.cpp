@@ -233,17 +233,24 @@ void machine::load(popcorn::image::image const& loaded)
     std::ranges::fill_n(out, seg.memory_size - seg.bytes.size(), std::byte{0});
     region->host_wrote(*run_, seg.start, seg.memory_size);
   }
-  images_.push_back(loaded);
+  images_.insert(images_.begin() + static_cast<std::ptrdiff_t>(loaded_count_), loaded);
+  ++loaded_count_;
   run_->build_symbol_index();
 }
 
 void machine::add_symbols(popcorn::image::image const& symbols)
 {
   require_stopped(*this);
-  symbol_images_.push_back(symbols);
+  images_.push_back(symbols);
+  run_->build_symbol_index();
 }
 
 auto machine::loaded_images() const noexcept -> std::span<popcorn::image::image const>
+{
+  return std::span{images_}.first(loaded_count_);
+}
+
+auto machine::observed_images() const noexcept -> std::span<popcorn::image::image const>
 {
   return images_;
 }

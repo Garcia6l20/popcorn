@@ -68,7 +68,7 @@ auto machine::snapshot() const -> core::snapshot
       .popcorn_version    = std::string{version()},
       .unicorn_commit     = POPCORN_UNICORN_COMMIT,
       .description_digest = run.description_digest,
-      .image_digests      = digests(images_),
+      .image_digests      = digests(loaded_images()),
       .config_digest      = options_.config_digest,
       .generation         = generation_,
       .trustzone          = options_.trustzone,
@@ -183,7 +183,7 @@ void machine::restore(core::snapshot const& saved)
           "description_digest",
           std::format("the digest of {}, {}", description_.part, run_->description_digest));
     }
-    auto const loaded = digests(images_);
+    auto const loaded = digests(loaded_images());
     if(data.image_digests != loaded)
     {
       refuse("image_digests", std::format("the digests of the loaded images, {}", loaded));

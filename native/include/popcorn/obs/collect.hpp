@@ -38,12 +38,14 @@ struct image_source
  * into the block's middle when that is larger.
  *
  * @param target Machine, stopped or inside one of its handlers.
- * @param sources One source per loaded image, in load order. An ELF source's path is stored
- *        made absolute.
+ * @param sources One source per image of core::machine::observed_images(), in that order: the
+ *        loaded images, then the symbols-only images. An ELF source's path is stored made
+ *        absolute. Block sizes come from the loaded images and memory, never from the bytes of a
+ *        symbols-only image.
  * @return One group.
  * @throws config_error for an ELF source with an empty path or a raw source with a path.
  * @throws machine_running while a slice runs, outside its handlers.
  */
 POPCORN_API auto collect(core::machine& target, std::span<image_source const> sources)
-    -> coverage_set pre(sources.size() == target.loaded_images().size());
+    -> coverage_set pre(sources.size() == target.observed_images().size());
 }
