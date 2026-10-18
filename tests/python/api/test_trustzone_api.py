@@ -12,7 +12,7 @@ import pytest
 from popcorn import OptionBytes
 from popcorn.arm import Reg
 from popcorn.report import Via, fault_bits, stop_report
-from popcorn.units import ms
+from popcorn.units import VirtualTime, ms, us
 
 ROOT = Path(__file__).parents[3]
 RCC_ELF = ROOT / "tests" / "firmware" / "periph" / "prebuilt" / "rcc_ll.elf"
@@ -589,7 +589,10 @@ def patched_text(elf: Path, out: Path) -> int:
 
 
 def pair_machine(
-    u575: popcorn.PartDescription, secure: Path = PAIR_S, loaded: bool = False
+    u575: popcorn.PartDescription,
+    secure: Path = PAIR_S,
+    loaded: bool = False,
+    name: str | None = None,
 ) -> popcorn.Machine:
     """The fixture pair: the Non-secure ELF embeds the secure binary at 0x08000000, the
     secure ELF gives its symbols only. SECWM1 makes pages 0 to 7 Secure."""
@@ -600,6 +603,7 @@ def pair_machine(
             popcorn.Image.elf(secure, name="secure", load=loaded),
         ],
         option_bytes=OptionBytes(tzen=True, secwm1=(0, 7), secwm2=None),
+        name=name,
     )
     m.reset()
     return m
@@ -648,3 +652,26 @@ def test_a_symbols_only_secure_image_names_the_embedded_secure_part(
     assert m.sym("tz_pair_add", image="nonsecure") == m.sym("tz_pair_add", image="secure")
     assert m.sym("tz_pair_add", image="nonsecure") == 0x0800_2000
     assert m.locate(function).symbol == "__acle_se_tz_pair_add"
+
+
+def test_a_linked_system_keeps_each_member_s_trustzone_its_own(
+    u575: popcorn.PartDescription,
+) -> None:
+    """A TZEN=1 member next to a TZEN=0 one: each reads as alone, and a system snapshot
+    restores the security state and the banked registers of the TrustZone member."""
+    secure = pair_machine(u575, name="tz")
+    plain = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF), name="plain")
+    plain.reset()
+    link = popcorn.UartLink("tz.USART1", "plain.USART1", latency=us(20), baud=460_800)
+    with popcorn.System({"tz": secure, "plain": plain}, [link]) as system:
+        asyncio.run(system.run(until=VirtualTime(us(100).ps)))
+        assert (secure.security_state, plain.security_state) == ("nonsecure", None)
+        assert "secure" not in plain.reg.names()
+        banked = (secure.reg.msp_s, secure.reg.msp_ns, secure.reg.sp)
+        taken = system.snapshot()
+        system.reset("tz")
+        assert secure.security_state == "secure"
+        system.restore(taken)
+        assert secure.security_state == "nonsecure"
+        assert (secure.reg.msp_s, secure.reg.msp_ns, secure.reg.sp) == banked
+        assert plain.security_state is None
