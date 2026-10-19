@@ -18,7 +18,8 @@ from popcorn.stm32.description._sources import (
 _SCHEMA_VERSION = next(f.default for f in fields(PartDescription) if f.name == "schema_version")
 
 
-def _default_cache_dir() -> Path:
+def default_cache_dir() -> Path:
+    """Description cache directory, `$XDG_CACHE_HOME/popcorn/mcu` or `~/.cache/popcorn/mcu`."""
     xdg = os.environ.get("XDG_CACHE_HOME")
     base = Path(xdg).expanduser() if xdg else Path("~/.cache").expanduser()
     return base / "popcorn" / "mcu"
@@ -51,7 +52,7 @@ def cached_description(
     generator = generator_string()
     key = cache_key(sources.part, core, generator, digests)
 
-    cache_root = cache_dir or _default_cache_dir()
+    cache_root = cache_dir or default_cache_dir()
     suffix = f"-{core}" if core else ""
     path = cache_root / f"{sources.part}{suffix}-{key[:16]}.json"
     if path.is_file():

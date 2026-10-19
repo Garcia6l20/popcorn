@@ -87,12 +87,10 @@ def default_search_paths() -> SearchPaths:
     return SearchPaths(svd_dirs=svd_dirs, cubemx_db=cubemx_db, cmsis_device_dirs=cmsis_device_dirs)
 
 
-def resolve_part(part: str, db_dir: Path) -> str:
-    """db RefName for @p part: exact, then @p part read as a CPN matched against every RefName's
-    'x' wildcard positions (each 'x' matches any one character of @p part), DescriptionError with
-    difflib close matches when none match, listing every candidate when several do."""
-    mcu_dir = db_dir / "mcu"
-    refnames = sorted(p.stem for p in mcu_dir.glob("*.xml"))
+def match_refname(part: str, refnames: Sequence[str], *, file: str) -> str | None:
+    """The one of @p refnames that @p part names: exact, then @p part read as a CPN matched
+    against every RefName's 'x' wildcard positions, each 'x' matching any one character of
+    @p part. None when none matches, DescriptionError listing every candidate when several do."""
     if part in refnames:
         return part
     candidates = [
@@ -100,12 +98,21 @@ def resolve_part(part: str, db_dir: Path) -> str:
         for ref in refnames
         if len(ref) == len(part) and all(r == "x" or r == p for r, p in zip(ref, part, strict=True))
     ]
-    if len(candidates) == 1:
-        return candidates[0]
     if len(candidates) > 1:
         raise DescriptionError(
-            str(db_dir), 0, part, f"exactly one match expected, found {', '.join(candidates)}"
+            file, 0, part, f"exactly one match expected, found {', '.join(candidates)}"
         )
+    return candidates[0] if candidates else None
+
+
+def resolve_part(part: str, db_dir: Path) -> str:
+    """db RefName for @p part, by match_refname over the db's part files, DescriptionError with
+    difflib close matches when none match, listing every candidate when several do."""
+    mcu_dir = db_dir / "mcu"
+    refnames = sorted(p.stem for p in mcu_dir.glob("*.xml"))
+    found = match_refname(part, refnames, file=str(db_dir))
+    if found is not None:
+        return found
     close = difflib.get_close_matches(part, refnames, n=5)
     if close:
         raise DescriptionError(

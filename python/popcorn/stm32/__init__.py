@@ -25,6 +25,6 @@ def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> PartD
         ConfigError: The part is unknown, with close matches, or ST's files are missing.
     """
     from popcorn._part_description import load_description
-    from popcorn.stm32.description import cached_description
+    from popcorn.stm32.description import description_path
 
-    return load_description(cached_description(part, core=core, svd=svd))
+    return load_description(description_path(part, core=core, svd=svd))

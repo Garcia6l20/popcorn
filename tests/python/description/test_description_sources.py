@@ -10,6 +10,7 @@ from popcorn.stm32.description._sources import (
     compute_source_digests,
     default_svd_dirs,
     facts_path,
+    match_refname,
     find_sources,
     resolve_part,
     resolve_svd_stem,
@@ -203,3 +204,13 @@ def test_source_digests_key_the_rzone_or_the_facts_file(tmp_path: Path) -> None:
     )
     assert set(compute_source_digests(local)) == {"svd", "mcu_db", "rzone"}
     assert set(compute_source_digests(shipped)) == {"svd", "mcu_db", "rzone_facts"}
+
+
+def test_match_refname_returns_none_or_the_one_match() -> None:
+    names = ["STM32T001ABCx", "STM32T001ABDx", "STM32T002xBCx"]
+    assert match_refname("STM32T001ABCx", names, file="list") == "STM32T001ABCx"
+    assert match_refname("STM32T001ABC6", names, file="list") == "STM32T001ABCx"
+    assert match_refname("STM32T003ABC6", names, file="list") is None
+    with pytest.raises(DescriptionError) as excinfo:
+        match_refname("STM32T001ABC6", ["STM32T001ABCx", "STM32T001ABxx"], file="list")
+    assert "exactly one match expected" in excinfo.value.expected
