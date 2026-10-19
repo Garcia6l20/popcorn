@@ -674,10 +674,21 @@ def _resolve_variables(candidates: dict[str, list[tuple[Variable, bool]]]) -> di
     return resolved
 
 
-def _merge_function(functions: dict[str, Function], name: str, function: Function) -> None:
-    existing = functions.get(name)
-    if existing is None or (existing.address is None and function.address is not None):
-        functions[name] = function
+def _merge_function(
+    functions: dict[str, Function],
+    function_is_decl: dict[str, bool],
+    function: Function,
+    is_decl: bool,
+) -> None:
+    existing = functions.get(function.name)
+    rank = (function.address is not None, not is_decl)
+    if (
+        existing is not None
+        and (existing.address is not None, not function_is_decl[function.name]) >= rank
+    ):
+        return
+    functions[function.name] = function
+    function_is_decl[function.name] = is_decl
 
 
 def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
@@ -701,7 +712,7 @@ def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
     return min(starts) if starts else None
 
 
-def _build_function(cu: CompileUnit, die: DIE) -> tuple[str, Function] | None:
+def _build_function(cu: CompileUnit, die: DIE) -> Function | None:
     chain = _origin_chain(die)
     origin_die = chain[-1]
 
@@ -723,7 +734,7 @@ def _build_function(cu: CompileUnit, die: DIE) -> tuple[str, Function] | None:
     if address is None:
         address = address_from_ranges(cu, die)
 
-    function = Function(
+    return Function(
         name=name,
         address=address,
         returns=_type_ref(origin_die),
@@ -731,7 +742,6 @@ def _build_function(cu: CompileUnit, die: DIE) -> tuple[str, Function] | None:
         variadic=variadic,
         decl=_chain_decl(chain),
     )
-    return name, function
 
 
 def _walk_cu(
@@ -741,6 +751,7 @@ def _walk_cu(
     type_is_decl: dict[str, bool],
     variable_candidates: dict[str, list[tuple[Variable, bool]]],
     functions: dict[str, Function],
+    function_is_decl: dict[str, bool],
 ) -> None:
     top = cu.get_top_DIE()
     comp_dir = _attr_str(top, "DW_AT_comp_dir") or ""
@@ -761,9 +772,10 @@ def _walk_cu(
                 name, variable, external = built
                 variable_candidates.setdefault(name, []).append((variable, external))
         elif module_scope and die.tag == "DW_TAG_subprogram":
-            built = _build_function(cu, die)
-            if built is not None:
-                _merge_function(functions, built[0], built[1])
+            function = _build_function(cu, die)
+            if function is not None:
+                is_decl = die.attributes.get("DW_AT_declaration") is not None
+                _merge_function(functions, function_is_decl, function, is_decl)
 
         for child in _safe_children(die):
             stack.append((child, False))
@@ -826,13 +838,16 @@ def _load(path: Path) -> DebugInfo:
             type_is_decl: dict[str, bool] = {}
             variable_candidates: dict[str, list[tuple[Variable, bool]]] = {}
             functions: dict[str, Function] = {}
+            function_is_decl: dict[str, bool] = {}
 
             cus = list(dwarf_info.iter_CUs())
             if not cus:
                 raise NoDebugInfo(f"{path}: no .debug_info compile units")
             units: list[DwarfUnit] = []
             for cu in cus:
-                _walk_cu(cu, by_id, types, type_is_decl, variable_candidates, functions)
+                _walk_cu(
+                    cu, by_id, types, type_is_decl, variable_candidates, functions, function_is_decl
+                )
                 name = _attr_str(cu.get_top_DIE(), "DW_AT_name") or ""
                 units.append(DwarfUnit(name, cu.cu_offset, cu.cu_offset + cu.size))
             _fill_addresses_from_symtab(elf, functions)

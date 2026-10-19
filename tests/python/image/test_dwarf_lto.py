@@ -87,3 +87,14 @@ def test_function_decl_read_from_its_origin_unit(info: DebugInfo) -> None:
     function = info.functions["Reset_Handler"]
     assert function.address == 0x08000008
     assert function.decl == Decl(file=MAIN_SOURCE, line=11)
+
+
+def test_inlined_function_read_from_its_definition_not_a_prototype(info: DebugInfo) -> None:
+    function = info.functions["lto_bump"]
+    assert function.address is None
+    assert [param.name for param in function.params] == ["step"]
+    assert function.decl == Decl(file=PEER_SOURCE, line=13)
+    assert function.returns is not None
+    returns = info.resolve(function.returns)
+    assert isinstance(returns, Typedef)
+    assert returns.name == "uint32_t"
