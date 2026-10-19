@@ -1,8 +1,14 @@
 from pathlib import Path
 
+from pcons import PathToken
+
+from popcorn_build.config import project_dir
 from popcorn_build.firmware import add_firmware
 
 here = Path(__file__).resolve().parent
+prefix_map = PathToken(
+    prefix="-ffile-prefix-map=", path=project_dir, path_type="absolute", suffix="=."
+)
 sources = [here / "main.c", here / "shapes.c"]
 
 add_firmware("image", "image", sources)
@@ -28,4 +34,24 @@ lto_sources = [here / "lto_main.c", here / "lto_peer.c", here / "lto_memcpy.c"]
 _, image_lto = add_firmware("image", "image-lto", lto_sources)
 if image_lto is not None:
     image_lto.private.compile_flags.append("-flto")
-    image_lto.private.link_flags.extend(["-flto", "-Os", "-g"])
+    image_lto.private.link_flags.extend(["-flto", "-Os", "-g", prefix_map])
+
+cxx_flags = [
+    "-std=c++23",
+    "-Os",
+    "-g",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    prefix_map,
+]
+cxx_sources = [here / "cxx_methods.cpp"]
+_, image_cxx = add_firmware("image", "image-cxx", cxx_sources)
+if image_cxx is not None:
+    image_cxx.private.compile_flags.extend(cxx_flags)
+_, image_cxx_lto = add_firmware("image", "image-cxx-lto", cxx_sources)
+if image_cxx_lto is not None:
+    image_cxx_lto.private.compile_flags.extend([*cxx_flags, "-flto"])
+    image_cxx_lto.private.link_flags.extend(["-flto", "-Os", "-g", prefix_map])

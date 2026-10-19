@@ -173,10 +173,12 @@ class Variable:
 
 @dataclass(frozen=True, slots=True)
 class Parameter:
-    """One formal parameter of a Function."""
+    """One formal parameter of a Function. `artificial` marks one the compiler adds, DWARF's
+    DW_AT_artificial, such as a C++ method's `this`."""
 
     name: str | None
     type: TypeId
+    artificial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,6 +469,8 @@ def _decl_file_path(cu: CompileUnit, comp_dir: str, file_idx: int | None) -> str
         dir_index = cast(int, entry.dir_index)
         if dir_index == 0:
             return _join(comp_dir, "", name)
+        if dir_index > len(include_dirs):
+            return None
         directory = cast(bytes, include_dirs[dir_index - 1]).decode("utf-8", "surrogateescape")
         return _join(comp_dir, directory, name)
 
@@ -777,9 +781,66 @@ def _range_pairs(cu: CompileUnit, die: DIE) -> list[tuple[int, int]]:
     return pairs
 
 
+type _RangeStarts = tuple[int | None, int | None]
+type _RangeKey = tuple[bool, int, int | None]
+
+
+def _ranges_offset(die: DIE) -> int | None:
+    attr = die.attributes.get("DW_AT_ranges")
+    if attr is None or attr.form in _REF_FORMS:
+        return None
+    offset = attr.value
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        return None
+    return offset
+
+
+def _range_starts(cu: CompileUnit, offset: int) -> _RangeStarts:
+    range_lists = cu.dwarfinfo.range_lists()
+    if range_lists is None:
+        return (None, None)
+    absolute: int | None = None
+    relative: int | None = None
+    base: int | None = None
+    for entry in range_lists.get_range_list_at_offset(offset, cu=cu):
+        if isinstance(entry, BaseAddressEntry):
+            base = entry.base_address
+        elif entry.is_absolute or base is not None:
+            start = (
+                entry.begin_offset
+                if entry.is_absolute or base is None
+                else base + entry.begin_offset
+            )
+            absolute = start if absolute is None else min(absolute, start)
+        else:
+            relative = entry.begin_offset if relative is None else min(relative, entry.begin_offset)
+    return (absolute, relative)
+
+
+def _first_start(cu: CompileUnit, starts: _RangeStarts) -> int | None:
+    absolute, relative = starts
+    if relative is not None:
+        relative += _attr_int(cu.get_top_DIE(), "DW_AT_low_pc") or 0
+    found = [start for start in (absolute, relative) if start is not None]
+    return min(found) if found else None
+
+
 def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
-    starts = [low for low, _ in _range_pairs(cu, die)]
-    return min(starts) if starts else None
+    offset = _ranges_offset(die)
+    return None if offset is None else _first_start(cu, _range_starts(cu, offset))
+
+
+def _cached_address_from_ranges(unit: _Unit, die: DIE) -> int | None:
+    offset = _ranges_offset(die)
+    if offset is None:
+        return None
+    top = unit.cu.get_top_DIE()
+    key = (cast(int, unit.cu.header.version) >= 5, offset, _attr_int(top, "DW_AT_addr_base"))
+    starts = unit.range_starts.get(key)
+    if starts is None:
+        starts = _range_starts(unit.cu, offset)
+        unit.range_starts[key] = starts
+    return _first_start(unit.cu, starts)
 
 
 type _Location = bytes | tuple[LocationRange, ...] | None
@@ -797,6 +858,9 @@ class _Unit:
         default_factory=dict[tuple[str, int], _Location]
     )
     range_lists: dict[int, _Ranges] = field(default_factory=dict[int, _Ranges])
+    range_starts: dict[_RangeKey, _RangeStarts] = field(
+        default_factory=dict[_RangeKey, _RangeStarts]
+    )
 
 
 def _pc_ranges(unit: _Unit, die: DIE) -> _Ranges:
@@ -914,6 +978,29 @@ def _collect_locals(unit: _Unit, die: DIE) -> tuple[Local, ...]:
     return tuple(found)
 
 
+_PARAMETER_TAGS = frozenset(("DW_TAG_formal_parameter", "DW_TAG_unspecified_parameters"))
+
+
+def _parameters_die(chain: list[DIE]) -> DIE:
+    for link in reversed(chain):
+        if link.attributes.get("DW_AT_declaration") is None and any(
+            child.tag in _PARAMETER_TAGS for child in _safe_children(link)
+        ):
+            return link
+    return chain[-1]
+
+
+def _build_parameter(die: DIE) -> Parameter | None:
+    type_id = _type_ref(die)
+    if type_id is None:
+        return None
+    return Parameter(
+        name=_attr_str(die, "DW_AT_name"),
+        type=type_id,
+        artificial=die.attributes.get("DW_AT_artificial") is not None,
+    )
+
+
 def _build_function(unit: _Unit, source: _LocalsSource, die: DIE) -> Function | None:
     chain = _origin_chain(die)
     origin_die = chain[-1]
@@ -924,17 +1011,17 @@ def _build_function(unit: _Unit, source: _LocalsSource, die: DIE) -> Function | 
 
     params: list[Parameter] = []
     variadic = False
-    for child in _safe_children(origin_die):
+    for child in _safe_children(_parameters_die(chain)):
         if child.tag == "DW_TAG_formal_parameter":
-            type_id = _type_ref(child)
-            if type_id is not None:
-                params.append(Parameter(name=_attr_str(child, "DW_AT_name"), type=type_id))
+            parameter = _build_parameter(child)
+            if parameter is not None:
+                params.append(parameter)
         elif child.tag == "DW_TAG_unspecified_parameters":
             variadic = True
 
     address = _attr_int(die, "DW_AT_low_pc")
     if address is None:
-        address = address_from_ranges(unit.cu, die)
+        address = _cached_address_from_ranges(unit, die)
     has_code = address is not None
 
     return Function(
@@ -1033,10 +1120,11 @@ def _walk_cu(
     functions: dict[str, Function],
     function_is_decl: dict[str, bool],
     source: _LocalsSource,
+    range_starts: dict[_RangeKey, _RangeStarts],
 ) -> None:
     top = cu.get_top_DIE()
     comp_dir = _attr_str(top, "DW_AT_comp_dir") or ""
-    unit = _Unit(cu, LocationParser(cu.dwarfinfo.location_lists()))
+    unit = _Unit(cu, LocationParser(cu.dwarfinfo.location_lists()), range_starts=range_starts)
 
     stack: list[tuple[DIE, bool]] = [(child, True) for child in _safe_children(top)]
     seen: set[int] = set()
@@ -1114,6 +1202,7 @@ def _load(path: Path) -> DebugInfo:
             variable_candidates: dict[str, list[tuple[Variable, bool]]] = {}
             functions: dict[str, Function] = {}
             function_is_decl: dict[str, bool] = {}
+            range_starts: dict[_RangeKey, _RangeStarts] = {}
 
             cus = list(dwarf_info.iter_CUs())
             if not cus:
@@ -1129,6 +1218,7 @@ def _load(path: Path) -> DebugInfo:
                     functions,
                     function_is_decl,
                     source,
+                    range_starts,
                 )
                 name = _attr_str(cu.get_top_DIE(), "DW_AT_name") or ""
                 units.append(DwarfUnit(name, cu.cu_offset, cu.cu_offset + cu.size))

@@ -1,11 +1,14 @@
 """Checks declaration files of image.elf, built with plain `-g`: GCC writes version 5 units and
-the assembler a version 3 line table, whose file indexes start at 1.
+the assembler a version 3 line table, whose file indexes start at 1. data/bad_include_dir.s
+builds a version 4 line table whose file entry names a directory past its table.
 
 Expected lines were read from tests/firmware/image/main.c and shapes.c.
 """
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -43,3 +46,14 @@ def test_function_decls(info: DebugInfo) -> None:
     assert info.functions["scale"].decl == Decl(file=MAIN_SOURCE, line=12)
     assert info.functions["Reset_Handler"].decl == Decl(file=MAIN_SOURCE, line=17)
     assert info.functions["shapes_perimeter"].decl == Decl(file=SHAPES_SOURCE, line=12)
+
+
+@pytest.mark.skipif(shutil.which("arm-none-eabi-as") is None, reason="no arm-none-eabi-as")
+def test_include_dir_index_past_the_table_gives_no_decl(tmp_path: Path) -> None:
+    elf = tmp_path / "bad_include_dir.o"
+    source = Path(__file__).resolve().parent / "data" / "bad_include_dir.s"
+    subprocess.run(["arm-none-eabi-as", "-o", str(elf), str(source)], check=True)
+    info = load_debug_info(elf)
+    assert info.variables["bad"].address == 0x20000000
+    assert info.variables["bad"].decl is None
+    assert info.variables["good"].decl == Decl(file="/w/inc/good.c", line=4)
