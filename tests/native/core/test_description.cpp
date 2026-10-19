@@ -442,3 +442,12 @@ TEST_CASE("descriptions differing in one region size have different digests")
   changed.regions[0].size *= 2;
   CHECK(popcorn::description_digest(toy) != popcorn::description_digest(changed));
 }
+
+TEST_CASE("a description with schema_version 0 has the digest of its loaded form")
+{
+  auto       changed     = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  auto const toy         = changed;
+  changed.schema_version = 0;
+  REQUIRE(changed != toy);
+  CHECK(popcorn::description_digest(toy) == popcorn::description_digest(changed));
+}

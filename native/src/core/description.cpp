@@ -307,6 +307,9 @@ auto description_digest(part_description const& description) -> std::string
                    std::meta::nonstatic_data_members_of(
                        ^^part_description, std::meta::access_context::current())))
   {
+    static_assert(
+        not reflex::serde::omits_when_empty(member),
+        "the digest writes every member, a member the dump omits when empty needs the same rule");
     if constexpr(not reflex::meta::has_annotation(member, ^^provenance))
     {
       serializer.write_char(separator);
