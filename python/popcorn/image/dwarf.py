@@ -782,6 +782,7 @@ def _range_pairs(cu: CompileUnit, die: DIE) -> list[tuple[int, int]]:
 
 
 type _RangeStarts = tuple[int | None, int | None]
+type _RangeKey = tuple[bool, int, int | None]
 
 
 def _ranges_offset(die: DIE) -> int | None:
@@ -833,7 +834,8 @@ def _cached_address_from_ranges(unit: _Unit, die: DIE) -> int | None:
     offset = _ranges_offset(die)
     if offset is None:
         return None
-    key = (offset, _attr_int(unit.cu.get_top_DIE(), "DW_AT_addr_base"))
+    top = unit.cu.get_top_DIE()
+    key = (cast(int, unit.cu.header.version) >= 5, offset, _attr_int(top, "DW_AT_addr_base"))
     starts = unit.range_starts.get(key)
     if starts is None:
         starts = _range_starts(unit.cu, offset)
@@ -856,8 +858,8 @@ class _Unit:
         default_factory=dict[tuple[str, int], _Location]
     )
     range_lists: dict[int, _Ranges] = field(default_factory=dict[int, _Ranges])
-    range_starts: dict[tuple[int, int | None], _RangeStarts] = field(
-        default_factory=dict[tuple[int, int | None], _RangeStarts]
+    range_starts: dict[_RangeKey, _RangeStarts] = field(
+        default_factory=dict[_RangeKey, _RangeStarts]
     )
 
 
@@ -1118,7 +1120,7 @@ def _walk_cu(
     functions: dict[str, Function],
     function_is_decl: dict[str, bool],
     source: _LocalsSource,
-    range_starts: dict[tuple[int, int | None], _RangeStarts],
+    range_starts: dict[_RangeKey, _RangeStarts],
 ) -> None:
     top = cu.get_top_DIE()
     comp_dir = _attr_str(top, "DW_AT_comp_dir") or ""
@@ -1200,7 +1202,7 @@ def _load(path: Path) -> DebugInfo:
             variable_candidates: dict[str, list[tuple[Variable, bool]]] = {}
             functions: dict[str, Function] = {}
             function_is_decl: dict[str, bool] = {}
-            range_starts: dict[tuple[int, int | None], _RangeStarts] = {}
+            range_starts: dict[_RangeKey, _RangeStarts] = {}
 
             cus = list(dwarf_info.iter_CUs())
             if not cus:
