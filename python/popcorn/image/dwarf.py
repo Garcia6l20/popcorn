@@ -618,7 +618,22 @@ def _addr_from_location(attr: AttributeValue) -> int | None:
     return struct.unpack_from("<I", raw, 1)[0]
 
 
-def _build_variable(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Variable, bool] | None:
+def _origin_chain(die: DIE) -> list[DIE]:
+    chain = [die]
+    for attribute in ("DW_AT_abstract_origin", "DW_AT_specification"):
+        if attribute in chain[-1].attributes:
+            chain.append(chain[-1].get_DIE_from_attribute(attribute))
+    return chain
+
+
+def _unit_decl(die: DIE) -> Decl | None:
+    cu = die.cu
+    if not isinstance(cu, CompileUnit):
+        return None
+    return _decl(cu, _attr_str(cu.get_top_DIE(), "DW_AT_comp_dir") or "", die)
+
+
+def _build_variable(die: DIE) -> tuple[str, Variable, bool] | None:
     location = die.attributes.get("DW_AT_location")
     if location is None:
         return None
@@ -626,19 +641,14 @@ def _build_variable(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Vari
     if address is None:
         return None
 
-    name_die = die
-    if "DW_AT_specification" in die.attributes:
-        name_die = die.get_DIE_from_attribute("DW_AT_specification")
-
-    name = _attr_str(name_die, "DW_AT_name")
-    type_id = _type_ref(name_die)
+    chain = _origin_chain(die)
+    name = _attr_str(chain[-1], "DW_AT_name")
+    type_id = _type_ref(chain[-1])
     if name is None or type_id is None:
         return None
-    external = (
-        die.attributes.get("DW_AT_external") is not None
-        or name_die.attributes.get("DW_AT_external") is not None
-    )
-    variable = Variable(name=name, address=address, type=type_id, decl=_decl(cu, comp_dir, die))
+    external = any(link.attributes.get("DW_AT_external") is not None for link in chain)
+    decl = next((found for link in chain if (found := _unit_decl(link)) is not None), None)
+    variable = Variable(name=name, address=address, type=type_id, decl=decl)
     return name, variable, external
 
 
@@ -681,12 +691,8 @@ def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
     return min(starts) if starts else None
 
 
-def _build_function(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Function] | None:
-    origin_die = die
-    if "DW_AT_abstract_origin" in origin_die.attributes:
-        origin_die = origin_die.get_DIE_from_attribute("DW_AT_abstract_origin")
-    if "DW_AT_specification" in origin_die.attributes:
-        origin_die = origin_die.get_DIE_from_attribute("DW_AT_specification")
+def _build_function(cu: CompileUnit, die: DIE) -> tuple[str, Function] | None:
+    origin_die = _origin_chain(die)[-1]
 
     name = _attr_str(origin_die, "DW_AT_name")
     if name is None:
@@ -712,7 +718,7 @@ def _build_function(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Func
         returns=_type_ref(origin_die),
         params=tuple(params),
         variadic=variadic,
-        decl=_decl(cu, comp_dir, origin_die),
+        decl=_unit_decl(origin_die),
     )
     return name, function
 
@@ -739,12 +745,12 @@ def _walk_cu(
         if die.tag in _TYPE_TAGS:
             _record_type(cu, comp_dir, die, by_id, types, type_is_decl)
         elif module_scope and die.tag == "DW_TAG_variable":
-            built = _build_variable(cu, comp_dir, die)
+            built = _build_variable(die)
             if built is not None:
                 name, variable, external = built
                 variable_candidates.setdefault(name, []).append((variable, external))
         elif module_scope and die.tag == "DW_TAG_subprogram":
-            built = _build_function(cu, comp_dir, die)
+            built = _build_function(cu, die)
             if built is not None:
                 _merge_function(functions, built[0], built[1])
 
