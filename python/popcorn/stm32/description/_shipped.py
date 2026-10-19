@@ -8,9 +8,11 @@ import re
 from pathlib import Path
 
 from popcorn._errors import absent
+from popcorn.stm32.description._binder import check_bounds, dump_json
+from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cache import cached_description, default_cache_dir
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
-from popcorn.stm32.description._sources import match_refname
+from popcorn.stm32.description._sources import match_refname, pin_data_sources
 
 SHIPPED_DIR = Path(__file__).parents[1] / "data"
 """Directory of the shipped `<RefName>[-<core>].json.xz` descriptions."""
@@ -153,3 +155,28 @@ def description_path(
             f"a shipped description, shipped: {shipped_parts}, or ST's files: {exc.expected}",
             path=exc.path,
         ) from exc
+
+
+def build_shipped(part: str, *, pin_data: Path, core: str | None = None) -> tuple[str, bytes]:
+    """Name, `<RefName>[-<core>]`, and xz bytes of the shipped description of @p part, built
+    from pin_data_sources. Equal inputs give equal bytes. DescriptionError when no CMSIS device
+    header is found: a description without its IRQ names would differ from a local build."""
+    sources = pin_data_sources(part, pin_data=pin_data, core=core)
+    if sources.cmsis_header is None:
+        raise DescriptionError(
+            sources.part, 0, "cmsis_header", "a CMSIS device header for the IRQ names"
+        )
+    name = f"{sources.part}-{core}" if core else sources.part
+    description = build_description(sources)
+    check_bounds(description, file=name)
+    text = dump_json(description)
+    packed = lzma.compress(
+        text.encode("utf-8"), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64, preset=9
+    )
+    return name, packed
+
+
+def shipped_text(packed: bytes, *, file: str) -> str:
+    """JSON text of the shipped description bytes @p packed, decompressed under
+    MAX_SHIPPED_BYTES, errors naming @p file."""
+    return bounded_xz(packed, MAX_SHIPPED_BYTES, file=file).decode("utf-8")

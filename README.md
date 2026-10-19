@@ -306,4 +306,6 @@ and a device, and documents dev and packaged builds and the rules a plugin follo
 
 ## License
 
-MIT, see `LICENSE`. Third-party components and their licences are listed in `NOTICE`.
+MIT, see `LICENSE`. Third-party components and their licences are listed in `NOTICE`. The shipped
+STM32 part descriptions under `python/popcorn/stm32/data` derive from ST files under Apache-2.0 and
+BSD-3-Clause, whose notices `NOTICE` carries.

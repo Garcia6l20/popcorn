@@ -225,6 +225,21 @@ def _svd_dirs(svd_dirs: Sequence[Path]) -> list[Path]:
     )
 
 
+def _svd_path(
+    refname: str, *, core: str | None, svd: Path | None, search: SearchPaths, file: str
+) -> Path:
+    if svd is not None:
+        return svd
+    exception = _svd_exception(refname, search=search)
+    if exception is not None:
+        name, svd_dir = exception
+        svd_path = svd_dir / f"{name}.svd"
+        _require(svd_path, str(svd_dir), refname, f"an SVD file at {svd_path}")
+        return svd_path
+    stem, svd_dir = resolve_svd_stem(refname, _svd_dirs(search.svd_dirs), core=core, file=file)
+    return svd_dir / f"{stem}.svd"
+
+
 def find_sources(
     part: str,
     *,
@@ -264,20 +279,7 @@ def find_sources(
     if gpio_modes is not None and not gpio_modes.is_file():
         gpio_modes = None
 
-    if svd is not None:
-        svd_path = svd
-    else:
-        exception = _svd_exception(refname, search=search)
-        if exception is not None:
-            name, svd_dir = exception
-            svd_path = svd_dir / f"{name}.svd"
-            _require(svd_path, str(svd_dir), refname, f"an SVD file at {svd_path}")
-        else:
-            stem, svd_dir = resolve_svd_stem(
-                refname, _svd_dirs(search.svd_dirs), core=core, file=str(db_dir)
-            )
-            svd_path = svd_dir / f"{stem}.svd"
-
+    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(db_dir))
     cmsis_header_path = (
         cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
     )
@@ -292,6 +294,58 @@ def find_sources(
         cmsis_header=cmsis_header_path,
         patches=[loaded.path for loaded in patches],
         gpio_modes=gpio_modes,
+    )
+
+
+def pin_data_sources(
+    part: str,
+    *,
+    pin_data: Path,
+    core: str | None = None,
+    svd: Path | None = None,
+    cmsis_header: Path | None = None,
+    search: SearchPaths | None = None,
+) -> Sources:
+    """Sources of @p part for a shipped description: the part and GPIO modes files of a
+    STM32_open_pin_data checkout at @p pin_data, laid out as a CubeMX db's `mcu/` and `mcu/IP/`,
+    the packaged rzone facts file in place of the rzone, and the SVD, CMSIS header and patches
+    as find_sources finds them. Reads no file of the CubeMX db. MissingSource naming the path
+    when the checkout, the part or modes file, or the SVD does not exist. DescriptionError for
+    an unknown part, a part without a GPIO IP version, or no packaged facts file for its rzone."""
+    search = search or default_search_paths()
+    if absent(pin_data / "mcu"):
+        raise MissingSource(
+            str(pin_data),
+            "pin_data",
+            f"a STM32_open_pin_data checkout with an mcu directory at {pin_data}",
+            path=pin_data,
+        )
+    refname = resolve_part(part, pin_data)
+    mcu_db = pin_data / "mcu" / f"{refname}.xml"
+    _require(mcu_db, str(pin_data), refname, f"a part file at {mcu_db}")
+    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
+    modes_name = gpio_modes_file_name(db_part)
+    if modes_name is None:
+        raise DescriptionError(str(mcu_db), 0, "GPIO", "a GPIO IP with a version")
+    gpio_modes = pin_data / "mcu" / "IP" / modes_name
+    _require(gpio_modes, str(pin_data), refname, f"a GPIO modes file at {gpio_modes}")
+    facts = facts_path(db_part)
+    if not facts.is_file():
+        raise DescriptionError(str(mcu_db), 0, refname, f"a packaged rzone facts file at {facts}")
+    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(pin_data))
+    cmsis_header_path = (
+        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
+    )
+    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name)
+    return Sources(
+        part=refname,
+        svd=svd_path,
+        mcu_db=mcu_db,
+        rzone=None,
+        cmsis_header=cmsis_header_path,
+        patches=[loaded.path for loaded in patches],
+        gpio_modes=gpio_modes,
+        rzone_facts=facts,
     )
 
 
