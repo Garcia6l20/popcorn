@@ -173,10 +173,12 @@ class Variable:
 
 @dataclass(frozen=True, slots=True)
 class Parameter:
-    """One formal parameter of a Function."""
+    """One formal parameter of a Function. `artificial` marks one the compiler adds, DWARF's
+    DW_AT_artificial, such as a C++ method's `this`."""
 
     name: str | None
     type: TypeId
+    artificial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,6 +976,29 @@ def _collect_locals(unit: _Unit, die: DIE) -> tuple[Local, ...]:
     return tuple(found)
 
 
+_PARAMETER_TAGS = frozenset(("DW_TAG_formal_parameter", "DW_TAG_unspecified_parameters"))
+
+
+def _parameters_die(chain: list[DIE]) -> DIE:
+    for link in reversed(chain):
+        if link.attributes.get("DW_AT_declaration") is None and any(
+            child.tag in _PARAMETER_TAGS for child in _safe_children(link)
+        ):
+            return link
+    return chain[-1]
+
+
+def _build_parameter(die: DIE) -> Parameter | None:
+    type_id = _type_ref(die)
+    if type_id is None:
+        return None
+    return Parameter(
+        name=_attr_str(die, "DW_AT_name"),
+        type=type_id,
+        artificial=die.attributes.get("DW_AT_artificial") is not None,
+    )
+
+
 def _build_function(unit: _Unit, source: _LocalsSource, die: DIE) -> Function | None:
     chain = _origin_chain(die)
     origin_die = chain[-1]
@@ -984,11 +1009,11 @@ def _build_function(unit: _Unit, source: _LocalsSource, die: DIE) -> Function | 
 
     params: list[Parameter] = []
     variadic = False
-    for child in _safe_children(origin_die):
+    for child in _safe_children(_parameters_die(chain)):
         if child.tag == "DW_TAG_formal_parameter":
-            type_id = _type_ref(child)
-            if type_id is not None:
-                params.append(Parameter(name=_attr_str(child, "DW_AT_name"), type=type_id))
+            parameter = _build_parameter(child)
+            if parameter is not None:
+                params.append(parameter)
         elif child.tag == "DW_TAG_unspecified_parameters":
             variadic = True
 
