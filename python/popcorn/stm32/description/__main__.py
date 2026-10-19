@@ -104,8 +104,12 @@ def _cmd_ship(args: argparse.Namespace) -> int:
         return 0
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp_path.write_bytes(packed)
-    os.replace(tmp_path, path)
+    try:
+        tmp_path.write_bytes(packed)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     print(path)
     return 0
 

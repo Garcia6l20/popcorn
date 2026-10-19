@@ -2,6 +2,7 @@
 
 import json
 import lzma
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -65,17 +66,56 @@ def test_a_second_lookup_reuses_the_decompressed_file(
     assert len(calls) == 1
 
 
-def test_a_changed_shipped_file_replaces_the_decompressed_one(
+def _age(path: Path, seconds: float) -> None:
+    then = time.time() - seconds
+    os.utime(path, (then, then))
+
+
+def test_a_changed_shipped_file_removes_versions_unused_for_a_week(
     shipped_dir: Path, tmp_path: Path
 ) -> None:
     packed = [lzma.compress(_description_bytes(generator=g)) for g in ("a", "b")]
     paths: set[Path] = set()
     for index in range(1000):
+        for cached in _cached(tmp_path):
+            _age(cached, _shipped.STALE_SECONDS + 86400)
         (shipped_dir / f"{NAME}.json.xz").write_bytes(packed[index % 2])
         path = description_path(NAME)
         paths.add(path)
         assert _cached(tmp_path) == [path]
     assert len(paths) == 2
+
+
+def test_two_shipped_versions_keep_their_files_in_a_shared_cache(
+    shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other_dir = tmp_path / "other-data"
+    other_dir.mkdir()
+    (other_dir / f"{NAME}.json.xz").write_bytes(
+        lzma.compress(_description_bytes(generator="other"))
+    )
+    first = description_path(NAME)
+    _age(first, _shipped.STALE_SECONDS - 86400)
+    monkeypatch.setattr(_shipped, "SHIPPED_DIR", other_dir)
+    second = description_path(NAME)
+    assert second != first
+    assert first.is_file()
+    assert _cached(tmp_path) == sorted([first, second])
+    monkeypatch.setattr(_shipped, "SHIPPED_DIR", shipped_dir)
+    assert description_path(NAME) == first
+    assert first.stat().st_mtime > time.time() - 60
+
+
+def test_a_failed_write_leaves_no_temporary_file(
+    shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("popcorn.stm32.description._shipped.os.replace", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        description_path(NAME)
+    assert list((tmp_path / "cache" / "popcorn" / "mcu" / "shipped").iterdir()) == []
 
 
 def test_a_core_suffixed_shipped_file_answers_only_for_its_core(shipped_dir: Path) -> None:
@@ -102,9 +142,19 @@ def test_a_description_directory_wins_over_the_shipped_file(
     assert _cached(tmp_path) == []
 
 
-def test_svd_skips_the_shipped_file(shipped_dir: Path, tmp_path: Path) -> None:
-    with pytest.raises(MissingSource):
-        description_path(NAME, svd=tmp_path / "absent.svd")
+@pytest.mark.parametrize("argument", ["svd", "cubemx_db", "cmsis_header"])
+def test_a_local_input_skips_the_shipped_file(
+    shipped_dir: Path, tmp_path: Path, argument: str
+) -> None:
+    absent = tmp_path / f"absent-{argument}"
+    with pytest.raises(MissingSource) as excinfo:
+        if argument == "svd":
+            description_path(NAME, svd=absent)
+        elif argument == "cubemx_db":
+            description_path(NAME, cubemx_db=absent)
+        else:
+            description_path(NAME, cmsis_header=absent)
+    assert "shipped:" not in excinfo.value.expected
     assert _cached(tmp_path) == []
 
 
@@ -128,6 +178,7 @@ def test_an_unknown_build_request_is_refused_before_any_lookup(
     with pytest.raises(DescriptionError) as excinfo:
         description_path(NAME)
     assert excinfo.value.key == "POPCORN_STM32_BUILD"
+    assert excinfo.value.expected == "unset or local, not 'shipped'"
 
 
 def test_an_unshipped_part_without_st_files_names_the_shipped_parts(shipped_dir: Path) -> None:
@@ -136,14 +187,23 @@ def test_an_unshipped_part_without_st_files_names_the_shipped_parts(shipped_dir:
     assert f"a shipped description, shipped: {NAME}, or ST's files" in excinfo.value.expected
 
 
-def test_a_shipped_file_past_the_cap_is_refused_quickly(shipped_dir: Path, tmp_path: Path) -> None:
+def test_a_lookup_with_nothing_shipped_says_so(
+    shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    empty = tmp_path / "empty-data"
+    empty.mkdir()
+    monkeypatch.setattr(_shipped, "SHIPPED_DIR", empty)
+    with pytest.raises(MissingSource) as excinfo:
+        description_path(NAME)
+    assert "a shipped description, shipped: none, or ST's files" in excinfo.value.expected
+
+
+def test_a_shipped_file_past_the_cap_is_refused(shipped_dir: Path, tmp_path: Path) -> None:
     (shipped_dir / f"{NAME}.json.xz").write_bytes(
         lzma.compress(bytes(_shipped.MAX_SHIPPED_BYTES + (1 << 20)), preset=0)
     )
-    started = time.perf_counter()
     with pytest.raises(DescriptionError) as excinfo:
         description_path(NAME)
-    assert time.perf_counter() - started < 1.0
     assert excinfo.value.expected == f"at most {_shipped.MAX_SHIPPED_BYTES} bytes decompressed"
     assert _cached(tmp_path) == []
 

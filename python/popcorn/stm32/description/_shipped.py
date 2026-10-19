@@ -5,6 +5,7 @@ import hashlib
 import lzma
 import os
 import re
+import time
 from pathlib import Path
 
 from popcorn._errors import absent
@@ -19,6 +20,9 @@ SHIPPED_DIR = Path(__file__).parents[1] / "data"
 
 MAX_SHIPPED_BYTES = 64 * 1024 * 1024
 """Largest decompressed shipped description, 12 times the 5.1 MB of the STM32U575QGIx one."""
+
+STALE_SECONDS = 7 * 24 * 3600
+"""Age after which a decompressed shipped description of another xz version is removed."""
 
 DESCRIPTION_DIRS_VARIABLE = "POPCORN_STM32_DESCRIPTION_DIRS"
 BUILD_VARIABLE = "POPCORN_STM32_BUILD"
@@ -65,8 +69,10 @@ def shipped_description(
     """Path of the decompressed shipped description of @p part, None when none ships.
 
     Decompressed once into `<cache>/shipped/<name>-<sha16>.json`, sha16 the first 16 hex digits
-    of the SHA-256 of the `.json.xz`. Writing a new one removes the older files of the same
-    name, so the cache holds at most one file per shipped description."""
+    of the SHA-256 of the `.json.xz`. The cache is shared by every popcorn of the user, so each
+    xz version keeps its own file: a hit refreshes its mtime, and a write removes the files of
+    the same name and another version unused for STALE_SECONDS. Bound: one file per shipped
+    name per xz version used in the last 7 days."""
     name = _match(part, core, shipped_names(), file=str(SHIPPED_DIR))
     if name is None:
         return None
@@ -75,17 +81,31 @@ def shipped_description(
     digest = hashlib.sha256(packed).hexdigest()[:16]
     directory = (cache_dir or default_cache_dir()) / "shipped"
     path = directory / f"{name}-{digest}.json"
-    if path.is_file():
+    try:
+        os.utime(path)
+    except FileNotFoundError:
+        pass
+    else:
         return path
     data = bounded_xz(packed, MAX_SHIPPED_BYTES, file=str(packed_path))
     directory.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp_path.write_bytes(data)
-    os.replace(tmp_path, path)
-    older = re.compile(rf"{re.escape(name)}-[0-9a-f]{{16}}\.json")
+    try:
+        tmp_path.write_bytes(data)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    other = re.compile(rf"{re.escape(name)}-[0-9a-f]{{16}}\.json")
+    cutoff = time.time() - STALE_SECONDS
     for stale in directory.iterdir():
-        if stale != path and older.fullmatch(stale.name):
-            stale.unlink(missing_ok=True)
+        if stale == path or not other.fullmatch(stale.name):
+            continue
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
     return path
 
 
@@ -102,7 +122,7 @@ def _local_build_forced() -> bool:
         return False
     if value == "local":
         return True
-    raise DescriptionError(BUILD_VARIABLE, 0, BUILD_VARIABLE, "unset or local")
+    raise DescriptionError(BUILD_VARIABLE, 0, BUILD_VARIABLE, f"unset or local, not {value!r}")
 
 
 def description_path(
@@ -123,7 +143,8 @@ def description_path(
     3. A description built from ST's files and cached, cached_description.
 
     DescriptionError when POPCORN_STM32_BUILD is set to anything but `local`, checked first.
-    MissingSource when no step finds one and ST's files are missing, naming the shipped parts."""
+    MissingSource when no step finds one and ST's files are missing, naming the shipped parts
+    unless step 2 was skipped."""
     local_only = _local_build_forced() or any(
         value is not None for value in (svd, cubemx_db, cmsis_header)
     )
@@ -148,6 +169,8 @@ def description_path(
             cmsis_header=cmsis_header,
         )
     except MissingSource as exc:
+        if local_only:
+            raise
         shipped_parts = ", ".join(shipped_names()) or "none"
         raise MissingSource(
             exc.file,
