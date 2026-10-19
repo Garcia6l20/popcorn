@@ -127,6 +127,7 @@ def test_build_u575_from_open_pin_data_namespaced_copies_has_the_same_content(
     )
     local = build_description(u575_sources)
     assert opened.sources["mcu_db"] != local.sources["mcu_db"]
+    assert opened.sources["gpio_modes"] != local.sources["gpio_modes"]
 
     def content(text: str) -> dict[str, object]:
         data = cast(dict[str, object], json.loads(text))

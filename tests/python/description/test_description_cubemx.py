@@ -58,7 +58,12 @@ def test_namespace_less_part_is_a_description_error() -> None:
 
 CUBEMX_NS = b"http://mcd.rou.st.com/modules.php?name=mcu"
 OPEN_PIN_DATA_NS = b"http://dummy.com"
-OTHER_NS = b"http://example.com/mcu"
+OTHER_NAMESPACES = [
+    b"http://example.com/mcu",
+    b"http://dummy.com/",
+    b"http://dummy.com?name=mcu2",
+    b"http://mcd.rou.st.com/modules.php?name=mcu2",
+]
 
 
 def _renamespaced(data: bytes, namespace: bytes) -> bytes:
@@ -72,10 +77,11 @@ def test_an_open_pin_data_part_reads_as_its_cubemx_copy() -> None:
     assert read_part(opened, file="open.xml") == read_part(data, file="STM32T001ABCx.xml")
 
 
-def test_a_part_of_another_namespace_is_a_description_error() -> None:
+@pytest.mark.parametrize("namespace", OTHER_NAMESPACES, ids=lambda ns: ns.decode())
+def test_a_part_of_another_namespace_is_a_description_error(namespace: bytes) -> None:
     data = (DATA_DIR / "mcu" / "STM32T001ABCx.xml").read_bytes()
     with pytest.raises(DescriptionError) as excinfo:
-        read_part(_renamespaced(data, OTHER_NS), file="other.xml")
+        read_part(_renamespaced(data, namespace), file="other.xml")
     assert excinfo.value.key == "Mcu"
     assert "http://dummy.com" in str(excinfo.value)
 
@@ -343,11 +349,12 @@ def test_open_pin_data_gpio_alternates_read_as_their_cubemx_copy() -> None:
     assert sum(len(entries) for entries in cubemx.values()) == 3
 
 
-def test_gpio_alternates_of_another_namespace_are_a_description_error() -> None:
+@pytest.mark.parametrize("namespace", OTHER_NAMESPACES, ids=lambda ns: ns.decode())
+def test_gpio_alternates_of_another_namespace_are_a_description_error(namespace: bytes) -> None:
     data = _modes(("PA6", [_signal("TIM3_CH1", "GPIO_AF2_TIM3")]))
     with pytest.raises(DescriptionError) as excinfo:
         read_gpio_alternates(
-            _renamespaced(data, OTHER_NS), file="other.xml", pins={"PA6": frozenset({"TIM3_CH1"})}
+            _renamespaced(data, namespace), file="other.xml", pins={"PA6": frozenset({"TIM3_CH1"})}
         )
     assert excinfo.value.key == "IP"
 
@@ -355,6 +362,12 @@ def test_gpio_alternates_of_another_namespace_are_a_description_error() -> None:
 def test_gpio_alternates_outside_the_namespace_are_a_description_error() -> None:
     with pytest.raises(DescriptionError) as excinfo:
         read_gpio_alternates(b"<IP/>", file="modes.xml", pins={})
+    assert excinfo.value.key == "IP"
+
+
+def test_a_part_root_given_as_the_modes_file_is_a_description_error() -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        read_gpio_alternates(b'<Mcu xmlns="http://dummy.com"/>', file="modes.xml", pins={})
     assert excinfo.value.key == "IP"
 
 
