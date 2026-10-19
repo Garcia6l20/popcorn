@@ -714,7 +714,8 @@ TEST_CASE(
   r.set("r3", 100);
   r.set("r4", 50);
   r.set("pc", page4 | 1u);
-  auto const result = r.target->run_slice({.max_instructions = icount{2000}});
+  auto const result = r.target->run_slice(
+      {.max_instructions = icount{2000}, .wall_budget = std::chrono::seconds{60}});
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->reason == popcorn::stop_reason::user);
   CHECK(r.get("pc") == handler_at + 2);
@@ -741,7 +742,8 @@ TEST_CASE("rewriting SECBB with its value keeps the page verdicts and the engine
     while(not stopped and r.target->virtual_clock().now().value < limit)
     {
       auto const left   = limit - r.target->virtual_clock().now().value;
-      auto const result = r.target->run_slice({.max_instructions = icount{left}});
+      auto const result = r.target->run_slice(
+          {.max_instructions = icount{left}, .wall_budget = std::chrono::seconds{60}});
       if(result.stopped)
       {
         REQUIRE(result.stopped->reason == popcorn::stop_reason::user);
@@ -861,7 +863,8 @@ TEST_CASE(
   r.clear_events();
   secure_vectors(r);
   r.set("pc", (flash_s + page_bytes) | 1u);
-  auto const fetched = r.target->run_slice({.max_instructions = icount{4}});
+  auto const fetched =
+      r.target->run_slice({.max_instructions = icount{4}, .wall_budget = std::chrono::seconds{60}});
   REQUIRE(fetched.stopped.has_value());
   CHECK(fetched.stopped->reason == popcorn::stop_reason::user);
   CHECK(r.get("pc") == handler_at + 2);
@@ -905,7 +908,8 @@ TEST_CASE(
       uc_reg_write(core::machine_internals::engine(*r.target), UC_ARM_REG_MSP_NS, &stack)
       == UC_ERR_OK);
   r.set("pc", page6 | 1u);
-  auto const fetched = r.target->run_slice({.max_instructions = icount{4}});
+  auto const fetched =
+      r.target->run_slice({.max_instructions = icount{4}, .wall_budget = std::chrono::seconds{60}});
   REQUIRE(fetched.stopped.has_value());
   CHECK(fetched.stopped->reason == popcorn::stop_reason::user);
   CHECK(r.get("pc") == handler_at + 2);
@@ -940,7 +944,8 @@ TEST_CASE(
   r.set("r3", 100);
   r.set("r4", 50);
   r.set("pc", page1 | 1u);
-  auto const result = r.target->run_slice({.max_instructions = icount{2000}});
+  auto const result = r.target->run_slice(
+      {.max_instructions = icount{2000}, .wall_budget = std::chrono::seconds{60}});
   REQUIRE(result.stopped.has_value());
   CHECK(result.stopped->reason == popcorn::stop_reason::user);
   CHECK(r.get("pc") == handler_at + 2);
