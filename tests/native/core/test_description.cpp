@@ -376,12 +376,12 @@ TEST_CASE("flat register ids number registers peripheral by peripheral")
   CHECK_FALSE(popcorn::register_at(toy, 3).has_value());
 }
 
-TEST_CASE("toy description digest matches the value computed independently from its dump")
+TEST_CASE("toy description digest matches the value computed from its content dump")
 {
   auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
   CHECK(
       popcorn::description_digest(toy)
-      == "b811faf7a695fa3e258a09d9bfbd353d3d8cf0e574b883684e85cdb4d1c974e3");
+      == "2874ef8a7b8801ea1b200926bd21158bcdfc333a94f787b6774fb455edb80fdb");
 }
 
 TEST_CASE("digest is 64 lower-case hex characters")
@@ -406,4 +406,48 @@ TEST_CASE("descriptions differing in one register reset value have different dig
   changed.peripherals[0].registers[0].reset += 1;
   auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
   CHECK(popcorn::description_digest(toy) != popcorn::description_digest(changed));
+}
+
+TEST_CASE("descriptions differing only in generator have equal digests")
+{
+  auto       changed = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  auto const toy     = changed;
+  changed.generator  = "popcorn 9.9.9 builder 0123456789ab";
+  REQUIRE(changed != toy);
+  CHECK(popcorn::description_digest(toy) == popcorn::description_digest(changed));
+}
+
+TEST_CASE("descriptions differing only in sources have equal digests")
+{
+  auto       changed     = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  auto const toy         = changed;
+  changed.sources["svd"] = std::string(64, 'a');
+  changed.sources.emplace("cmsis_header", std::string(64, 'b'));
+  REQUIRE(changed != toy);
+  CHECK(popcorn::description_digest(toy) == popcorn::description_digest(changed));
+}
+
+TEST_CASE("descriptions differing in part have different digests")
+{
+  auto       changed = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  auto const toy     = changed;
+  changed.part += "x";
+  CHECK(popcorn::description_digest(toy) != popcorn::description_digest(changed));
+}
+
+TEST_CASE("descriptions differing in one region size have different digests")
+{
+  auto       changed = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  auto const toy     = changed;
+  changed.regions[0].size *= 2;
+  CHECK(popcorn::description_digest(toy) != popcorn::description_digest(changed));
+}
+
+TEST_CASE("a description with schema_version 0 has the digest of its loaded form")
+{
+  auto       changed     = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
+  auto const toy         = changed;
+  changed.schema_version = 0;
+  REQUIRE(changed != toy);
+  CHECK(popcorn::description_digest(toy) == popcorn::description_digest(changed));
 }

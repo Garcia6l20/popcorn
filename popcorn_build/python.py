@@ -114,7 +114,9 @@ def add_stub(
 def package_files(package_dir: Path) -> list[Path]:
     """Python sources and package data under @p package_dir, recursively, sorted."""
     return sorted(
-        path for pattern in ("*.py", "*.toml", "py.typed") for path in package_dir.rglob(pattern)
+        path
+        for pattern in ("*.py", "*.toml", "*.json.xz", "py.typed")
+        for path in package_dir.rglob(pattern)
     )
 
 

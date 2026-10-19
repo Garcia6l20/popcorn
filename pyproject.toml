@@ -6,7 +6,7 @@ build-backend = "pcons.pyproject"
 name = "popcorn"
 version = "0.1.0.dev0"
 requires-python = ">=3.14"
-license = "MIT AND GPL-2.0-only AND LGPL-2.1-or-later AND BSD-3-Clause"
+license = "MIT AND GPL-2.0-only AND LGPL-2.1-or-later AND BSD-3-Clause AND Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "LICENSES/*"]
 dependencies = [
     "pyelftools",
@@ -67,4 +67,4 @@ executionEnvironments = [
 no-build-isolation-package = ["popcorn"]
 
 [tool.uv.sources]
-pcons = { git = "https://github.com/Garcia6l20/pcons.git", rev = "d5be306ae23109cf0b5729da19ebd265308bd4c1" }
+pcons = { git = "https://github.com/Garcia6l20/pcons.git", rev = "devel" }

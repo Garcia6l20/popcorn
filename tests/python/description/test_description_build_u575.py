@@ -12,6 +12,7 @@ from popcorn.stm32.description._builder import (
     build_description,
     resolve_ip,
 )
+from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
     AlternateDesc,
@@ -107,6 +108,41 @@ def test_build_u575_round_trips_through_load_json(u575_sources: Sources) -> None
     text = dump_json(description)
     reloaded = load_json(text, file="in-memory")
     assert reloaded == description
+
+
+def test_build_u575_from_open_pin_data_namespaced_copies_has_the_same_content(
+    u575_sources: Sources, tmp_path: Path
+) -> None:
+    assert u575_sources.gpio_modes is not None
+    copies: dict[str, Path] = {}
+    for role, source in (("mcu_db", u575_sources.mcu_db), ("gpio_modes", u575_sources.gpio_modes)):
+        data = source.read_bytes()
+        assert data.count(b'xmlns="http://mcd.rou.st.com/modules.php?name=mcu"') == 1
+        copies[role] = tmp_path / source.name
+        copies[role].write_bytes(
+            data.replace(b"http://mcd.rou.st.com/modules.php?name=mcu", b"http://dummy.com")
+        )
+    opened = build_description(
+        replace(u575_sources, mcu_db=copies["mcu_db"], gpio_modes=copies["gpio_modes"])
+    )
+    local = build_description(u575_sources)
+    assert opened.sources["mcu_db"] != local.sources["mcu_db"]
+    assert opened.sources["gpio_modes"] != local.sources["gpio_modes"]
+
+    def content(text: str) -> dict[str, object]:
+        data = cast(dict[str, object], json.loads(text))
+        del data["generator"], data["sources"]
+        return data
+
+    assert content(dump_json(opened)) == content(dump_json(local))
+
+
+def test_a_build_with_neither_rzone_nor_facts_is_a_description_error(
+    u575_sources: Sources,
+) -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        build_description(replace(u575_sources, rzone=None))
+    assert excinfo.value.key == "rzone"
 
 
 def test_build_u575_adc12_ip_avoids_collision(u575_sources: Sources) -> None:

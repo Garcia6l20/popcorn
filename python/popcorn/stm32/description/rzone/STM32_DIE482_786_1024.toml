@@ -1,0 +1,108 @@
+format = 1
+rzone = "STM32_DIE482_786_1024.xml"
+
+[core]
+fpu_double = false
+dsp = true
+trustzone = true
+mpu_regions = 8
+mpu_regions_secure = 8
+sau_regions = 8
+num_interrupts = 126
+source = "DS13737 rev 10, 2 and 3.1: Cortex-M33 with a single-precision FPU, a set of DSP instructions and Arm TrustZone. RM0456 rev 7, 3.7.1: secure and nonsecure MPUs of up to eight regions each, so 8 nonsecure and 8 secure, DS13737 3.1: up to 16 regions for secure and nonsecure. RM0456 2.2: up to eight SAU regions. RM0456 22.3 table 186: vector positions 0 to 125 for STM32U575/585, LSECSS and MSI_PLL_UNLOCK sharing 125, so 126 lines. Table 186 note 2: position 125 is reserved on STM32U575/585 rev. X and present on every other revision, so DS13737 3.20.1 counts 125 maskable channels"
+
+[[regions]]
+name = "Flash_NS"
+start = 0x08000000
+size = 0x00100000
+kind = "rom"
+acc = { read = true, write = false, execute = true }
+secure = false
+source = "RM0456 rev 7, 2.3.2 figure 4: nonsecure FLASH at 0x0800 0000 in the code region. DS13737 rev 10, 7 ordering information: G = 1 Mbyte of flash. RM0456 7.3.5 to 7.3.7: flash is written through the FLASH interface program and erase sequences, not by a plain store"
+
+[[regions]]
+name = "RAM_C_NS"
+start = 0x0A000000
+size = 0x000C0000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = false
+physical = 0x20000000
+source = "RM0456 rev 7, 2.3.2 figure 4: nonsecure SRAM1, SRAM2 and SRAM3 at 0x0A00 0000 to 0x0A0C 0000 in the code region. 2.1.1: the fast C-bus maps SRAM1, SRAM2 and SRAM3 continuously in the code region, the SRAM at 0x2000 0000. DS13737 rev 10, 3.5: SRAM1 192 Kbytes, SRAM2 64 Kbytes, SRAM3 512 Kbytes"
+
+[[regions]]
+name = "Flash_S"
+start = 0x0C000000
+size = 0x00100000
+kind = "rom"
+acc = { read = true, write = false, execute = true }
+secure = true
+physical = 0x08000000
+source = "RM0456 rev 7, 2.3.2 figure 4: secure FLASH alias at 0x0C00 0000. 2.2: flash memory is aliased for secure and nonsecure states. 4 table 26: boot address 0x0C00 0000 for STM32U575/585 with TZEN = 1. DS13737 rev 10, 7: 1 Mbyte"
+
+[[regions]]
+name = "RAM_C_S"
+start = 0x0E000000
+size = 0x000C0000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = true
+physical = 0x20000000
+source = "RM0456 rev 7, 2.3.2 figure 4: secure SRAM1, SRAM2 and SRAM3 at 0x0E00 0000 to 0x0E0C 0000. 2.2: system SRAMs are aliased for secure and nonsecure states. 2.1.1: the code-region mapping of the SRAM at 0x2000 0000"
+
+[[regions]]
+name = "SRAM_NS"
+start = 0x20000000
+size = 0x000C0000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = false
+source = "RM0456 rev 7, 2.3.2 figure 4: nonsecure SRAM1/2/3 at 0x2000 0000 to 0x200C 0000. DS13737 rev 10, 3.5: 768 Kbytes in SRAM1, SRAM2 and SRAM3. ARMv8-M ARM B8.1: the SRAM region 0x2000 0000 to 0x3FFF FFFF is executable"
+
+[[regions]]
+name = "SRAM_SRD_NS"
+start = 0x28000000
+size = 0x00004000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = false
+source = "RM0456 rev 7, 2.3.2 figure 4: nonsecure SRAM4 at 0x2800 0000 to 0x2800 4000. 2.1.13: SRAM4 belongs to the SmartRun domain. DS13737 rev 10, 3.5: SRAM4 16 Kbytes. ARMv8-M ARM B8.1: the SRAM region is executable"
+
+[[regions]]
+name = "SRAM_S"
+start = 0x30000000
+size = 0x000C0000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = true
+physical = 0x20000000
+source = "RM0456 rev 7, 2.3.2 figure 4: secure SRAM1/2/3 at 0x3000 0000 to 0x300C 0000. 2.2: system SRAMs are aliased for secure and nonsecure states"
+
+[[regions]]
+name = "SRAM_SRD_S"
+start = 0x38000000
+size = 0x00004000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = true
+physical = 0x28000000
+source = "RM0456 rev 7, 2.3.2 figure 4: secure SRAM4 at 0x3800 0000 to 0x3800 4000. 2.2: system SRAMs are aliased for secure and nonsecure states"
+
+[[regions]]
+name = "BKPSRAM_NS"
+start = 0x40036400
+size = 0x00000800
+kind = "ram"
+acc = { read = true, write = true, execute = false }
+secure = false
+source = "RM0456 rev 7, 2.3.2 table 6: BKPSRAM at 0x4003 6400 to 0x4003 6BFF, 2 Kbytes, on AHB1. DS13737 rev 10, 3.5: BKPSRAM 2 Kbytes. ARMv8-M ARM B8.1: the peripheral region 0x4000 0000 to 0x5FFF FFFF is execute-never"
+
+[[regions]]
+name = "BKPSRAM_S"
+start = 0x50036400
+size = 0x00000800
+kind = "ram"
+acc = { read = true, write = true, execute = false }
+secure = true
+physical = 0x40036400
+source = "RM0456 rev 7, 2.3.2 table 6: secure BKPSRAM at 0x5003 6400 to 0x5003 6BFF. 2.2: peripherals are aliased for secure and nonsecure states. ARMv8-M ARM B8.1: the peripheral region is execute-never"

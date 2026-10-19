@@ -183,7 +183,7 @@ wheels = [
 [[package]]
 name = "pcons"
 version = "0.30.0"
-source = { git = "https://github.com/Garcia6l20/pcons.git?rev=d5be306ae23109cf0b5729da19ebd265308bd4c1#d5be306ae23109cf0b5729da19ebd265308bd4c1" }
+source = { git = "https://github.com/Garcia6l20/pcons.git?rev=devel#c1a41c7d0a143eebaecbf9e09592ddc84bdcdea6" }
 dependencies = [
     { name = "click" },
     { name = "tomli-w" },
@@ -240,7 +240,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ninja", marker = "extra == 'plugin'" },
-    { name = "pcons", marker = "extra == 'plugin'", git = "https://github.com/Garcia6l20/pcons.git?rev=d5be306ae23109cf0b5729da19ebd265308bd4c1" },
+    { name = "pcons", marker = "extra == 'plugin'", git = "https://github.com/Garcia6l20/pcons.git?rev=devel" },
     { name = "pyelftools" },
     { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.1" },
 ]
@@ -250,7 +250,7 @@ provides-extras = ["pytest", "plugin"]
 dev = [
     { name = "black" },
     { name = "jsonschema" },
-    { name = "pcons", git = "https://github.com/Garcia6l20/pcons.git?rev=d5be306ae23109cf0b5729da19ebd265308bd4c1" },
+    { name = "pcons", git = "https://github.com/Garcia6l20/pcons.git?rev=devel" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio", specifier = "==1.4.0" },

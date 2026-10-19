@@ -43,6 +43,7 @@ def _phase_breakdown(sources: Sources) -> None:
 
     start = time.perf_counter()
     read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
+    assert sources.rzone is not None
     read_rzone(sources.rzone.read_bytes(), file=str(sources.rzone))
     if sources.cmsis_header is not None:
         read_cmsis_irqs(

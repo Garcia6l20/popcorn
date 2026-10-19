@@ -7,11 +7,14 @@ import re
 from collections.abc import Mapping, Sequence
 
 from popcorn.stm32.description._cubemx import (
+    Rzone,
     instance_ips,
     read_gpio_alternates,
     read_part,
     read_rzone,
+    read_rzone_facts,
 )
+from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
 from popcorn.stm32.description._model import CoreDesc, IrqDesc, PartDescription, PeripheralDesc
 from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
@@ -84,6 +87,14 @@ def _ancestors(name: str, derived_from: Mapping[str, str | None]) -> list[str]:
     return chain
 
 
+def _read_rzone_source(sources: Sources) -> Rzone:
+    if sources.rzone is not None:
+        return read_rzone(sources.rzone.read_bytes(), file=str(sources.rzone))
+    if sources.rzone_facts is not None:
+        return read_rzone_facts(sources.rzone_facts.read_bytes(), file=str(sources.rzone_facts))
+    raise DescriptionError(sources.part, 0, "rzone", "an rzone file or an rzone facts file")
+
+
 def build_description(sources: Sources) -> PartDescription:
     """PartDescription assembled from @p sources."""
     description, _ = build_description_with_report(sources)
@@ -95,7 +106,7 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
     apply_patches applied while assembling it."""
     svd = expand_svd(sources.svd.read_bytes(), file=str(sources.svd))
     db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
-    rzone = read_rzone(sources.rzone.read_bytes(), file=str(sources.rzone))
+    rzone = _read_rzone_source(sources)
     cmsis = (
         read_cmsis_irqs(
             sources.cmsis_header.read_text(encoding="utf-8"), file=str(sources.cmsis_header)

@@ -10,11 +10,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from popcorn._errors import absent
-from popcorn.stm32.description._cubemx import gpio_modes_file_name, read_part, rzone_file_name
+from popcorn.stm32.description._cubemx import (
+    DbPart,
+    gpio_modes_file_name,
+    read_part,
+    rzone_file_name,
+)
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._patches import load_patches
 
 _PATCHES_DIR = Path(__file__).parent / "patches"
+_RZONE_FACTS_DIR = Path(__file__).parent / "rzone"
 
 _CORE_SUFFIX_RE = re.compile(r"_CM[0-9][A-Za-z0-9]*$")
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)$")
@@ -29,13 +35,18 @@ class SearchPaths:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class Sources:
+    """Files a description is built from. The memory map and core values come from `rzone`
+    when set, else from `rzone_facts`, and the source digests record only the one read. Neither
+    set is a DescriptionError at build time."""
+
     part: str
     svd: Path
     mcu_db: Path
-    rzone: Path
+    rzone: Path | None
     cmsis_header: Path | None
     patches: list[Path]
     gpio_modes: Path | None = None
+    rzone_facts: Path | None = None
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
@@ -80,12 +91,10 @@ def default_search_paths() -> SearchPaths:
     return SearchPaths(svd_dirs=svd_dirs, cubemx_db=cubemx_db, cmsis_device_dirs=cmsis_device_dirs)
 
 
-def resolve_part(part: str, db_dir: Path) -> str:
-    """db RefName for @p part: exact, then @p part read as a CPN matched against every RefName's
-    'x' wildcard positions (each 'x' matches any one character of @p part), DescriptionError with
-    difflib close matches when none match, listing every candidate when several do."""
-    mcu_dir = db_dir / "mcu"
-    refnames = sorted(p.stem for p in mcu_dir.glob("*.xml"))
+def match_refname(part: str, refnames: Sequence[str], *, file: str) -> str | None:
+    """The one of @p refnames that @p part names: exact, then @p part read as a CPN matched
+    against every RefName's 'x' wildcard positions, each 'x' matching any one character of
+    @p part. None when none matches, DescriptionError listing every candidate when several do."""
     if part in refnames:
         return part
     candidates = [
@@ -93,12 +102,21 @@ def resolve_part(part: str, db_dir: Path) -> str:
         for ref in refnames
         if len(ref) == len(part) and all(r == "x" or r == p for r, p in zip(ref, part, strict=True))
     ]
-    if len(candidates) == 1:
-        return candidates[0]
     if len(candidates) > 1:
         raise DescriptionError(
-            str(db_dir), 0, part, f"exactly one match expected, found {', '.join(candidates)}"
+            file, 0, part, f"exactly one match expected, found {', '.join(candidates)}"
         )
+    return candidates[0] if candidates else None
+
+
+def resolve_part(part: str, db_dir: Path) -> str:
+    """db RefName for @p part, by match_refname over the db's part files, DescriptionError with
+    difflib close matches when none match, listing every candidate when several do."""
+    mcu_dir = db_dir / "mcu"
+    refnames = sorted(p.stem for p in mcu_dir.glob("*.xml"))
+    found = match_refname(part, refnames, file=str(db_dir))
+    if found is not None:
+        return found
     close = difflib.get_close_matches(part, refnames, n=5)
     if close:
         raise DescriptionError(
@@ -207,6 +225,21 @@ def _svd_dirs(svd_dirs: Sequence[Path]) -> list[Path]:
     )
 
 
+def _svd_path(
+    refname: str, *, core: str | None, svd: Path | None, search: SearchPaths, file: str
+) -> Path:
+    if svd is not None:
+        return svd
+    exception = _svd_exception(refname, search=search)
+    if exception is not None:
+        name, svd_dir = exception
+        svd_path = svd_dir / f"{name}.svd"
+        _require(svd_path, str(svd_dir), refname, f"an SVD file at {svd_path}")
+        return svd_path
+    stem, svd_dir = resolve_svd_stem(refname, _svd_dirs(search.svd_dirs), core=core, file=file)
+    return svd_dir / f"{stem}.svd"
+
+
 def find_sources(
     part: str,
     *,
@@ -246,20 +279,7 @@ def find_sources(
     if gpio_modes is not None and not gpio_modes.is_file():
         gpio_modes = None
 
-    if svd is not None:
-        svd_path = svd
-    else:
-        exception = _svd_exception(refname, search=search)
-        if exception is not None:
-            name, svd_dir = exception
-            svd_path = svd_dir / f"{name}.svd"
-            _require(svd_path, str(svd_dir), refname, f"an SVD file at {svd_path}")
-        else:
-            stem, svd_dir = resolve_svd_stem(
-                refname, _svd_dirs(search.svd_dirs), core=core, file=str(db_dir)
-            )
-            svd_path = svd_dir / f"{stem}.svd"
-
+    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(db_dir))
     cmsis_header_path = (
         cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
     )
@@ -277,18 +297,74 @@ def find_sources(
     )
 
 
+def pin_data_sources(
+    part: str,
+    *,
+    pin_data: Path,
+    core: str | None = None,
+    svd: Path | None = None,
+    cmsis_header: Path | None = None,
+    search: SearchPaths | None = None,
+) -> Sources:
+    """Sources of @p part for a shipped description: the part and GPIO modes files of a
+    STM32_open_pin_data checkout at @p pin_data, laid out as a CubeMX db's `mcu/` and `mcu/IP/`,
+    the packaged rzone facts file in place of the rzone, and the SVD, CMSIS header and patches
+    as find_sources finds them. Reads no file of the CubeMX db. MissingSource naming the path
+    when the checkout, the part or modes file, or the SVD does not exist. DescriptionError for
+    an unknown part, a part without a GPIO IP version, or no packaged facts file for its rzone."""
+    search = search or default_search_paths()
+    if absent(pin_data / "mcu"):
+        raise MissingSource(
+            str(pin_data),
+            "pin_data",
+            f"a STM32_open_pin_data checkout with an mcu directory at {pin_data}",
+            path=pin_data,
+        )
+    refname = resolve_part(part, pin_data)
+    mcu_db = pin_data / "mcu" / f"{refname}.xml"
+    _require(mcu_db, str(pin_data), refname, f"a part file at {mcu_db}")
+    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
+    modes_name = gpio_modes_file_name(db_part)
+    if modes_name is None:
+        raise DescriptionError(str(mcu_db), 0, "GPIO", "a GPIO IP with a version")
+    gpio_modes = pin_data / "mcu" / "IP" / modes_name
+    _require(gpio_modes, str(pin_data), refname, f"a GPIO modes file at {gpio_modes}")
+    facts = facts_path(db_part)
+    if not facts.is_file():
+        raise DescriptionError(str(mcu_db), 0, refname, f"a packaged rzone facts file at {facts}")
+    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(pin_data))
+    cmsis_header_path = (
+        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
+    )
+    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name)
+    return Sources(
+        part=refname,
+        svd=svd_path,
+        mcu_db=mcu_db,
+        rzone=None,
+        cmsis_header=cmsis_header_path,
+        patches=[loaded.path for loaded in patches],
+        gpio_modes=gpio_modes,
+        rzone_facts=facts,
+    )
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def compute_source_digests(sources: Sources) -> dict[str, str]:
-    """SHA-256 hex digest of each of @p sources's files, keyed svd/mcu_db/rzone, cmsis_header and
-    gpio_modes when present, and patch:<file name> per patch file."""
+    """SHA-256 hex digest of each of @p sources's files, keyed svd and mcu_db, rzone when set
+    or else rzone_facts when set, cmsis_header and gpio_modes when present, and patch:<file
+    name> per patch file."""
     digests = {
         "svd": _sha256_bytes(sources.svd.read_bytes()),
         "mcu_db": _sha256_bytes(sources.mcu_db.read_bytes()),
-        "rzone": _sha256_bytes(sources.rzone.read_bytes()),
     }
+    if sources.rzone is not None:
+        digests["rzone"] = _sha256_bytes(sources.rzone.read_bytes())
+    elif sources.rzone_facts is not None:
+        digests["rzone_facts"] = _sha256_bytes(sources.rzone_facts.read_bytes())
     if sources.cmsis_header is not None:
         digests["cmsis_header"] = _sha256_bytes(sources.cmsis_header.read_bytes())
     if sources.gpio_modes is not None:
@@ -298,11 +374,19 @@ def compute_source_digests(sources: Sources) -> dict[str, str]:
     return digests
 
 
+def facts_path(part: DbPart) -> Path:
+    """Path of the packaged rzone facts file standing for the CubeMX rzone of @p part,
+    `rzone/<rzone file stem>.toml`, whether or not it exists."""
+    return _RZONE_FACTS_DIR / f"{Path(rzone_file_name(part)).stem}.toml"
+
+
 def builder_digest() -> str:
-    """SHA-256 over this package's own .py files and patches/*.toml bytes, sorted path order, so
-    a builder edit invalidates the cache without a version bump."""
+    """SHA-256 over this package's own .py files, patches/*.toml and rzone/*.toml bytes, sorted
+    path order, so a builder edit invalidates the cache without a version bump."""
     package_dir = Path(__file__).parent
-    paths = sorted({*package_dir.rglob("*.py"), *_PATCHES_DIR.glob("*.toml")})
+    paths = sorted(
+        {*package_dir.rglob("*.py"), *_PATCHES_DIR.glob("*.toml"), *_RZONE_FACTS_DIR.glob("*.toml")}
+    )
     hasher = hashlib.sha256()
     for path in paths:
         hasher.update(str(path.relative_to(package_dir)).encode())

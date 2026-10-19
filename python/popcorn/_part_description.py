@@ -21,5 +21,6 @@ def parse_description(text: str, source: str = "<string>") -> PartDescription:
 
 
 def description_digest(description: PartDescription) -> str:
-    """SHA-256 of the canonical JSON of a description, what snapshots record."""
+    """SHA-256 of the canonical JSON of a description without `generator` and `sources`, which
+    record provenance. What snapshots record."""
     return _core.description_digest(description)

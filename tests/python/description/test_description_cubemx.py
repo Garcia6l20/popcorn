@@ -12,10 +12,11 @@ from popcorn.stm32.description._cubemx import (
     read_gpio_alternates,
     read_part,
     read_rzone,
+    read_rzone_facts,
     rzone_file_name,
 )
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._model import AlternateDesc, RegionKind
+from popcorn.stm32.description._model import AlternateDesc, RegionAccess, RegionDesc, RegionKind
 from popcorn.stm32.description._svd import expand_svd
 
 DATA_DIR = Path(__file__).parents[3] / "tests" / "data" / "stm32" / "db"
@@ -53,6 +54,36 @@ def test_namespace_less_part_is_a_description_error() -> None:
     with pytest.raises(DescriptionError) as excinfo:
         read_part(data, file="nons.xml")
     assert excinfo.value.key == "Mcu"
+
+
+CUBEMX_NS = b"http://mcd.rou.st.com/modules.php?name=mcu"
+OPEN_PIN_DATA_NS = b"http://dummy.com"
+OTHER_NAMESPACES = [
+    b"http://example.com/mcu",
+    b"http://dummy.com/",
+    b"http://dummy.com?name=mcu2",
+    b"http://mcd.rou.st.com/modules.php?name=mcu2",
+]
+
+
+def _renamespaced(data: bytes, namespace: bytes) -> bytes:
+    assert data.count(CUBEMX_NS) == 1
+    return data.replace(CUBEMX_NS, namespace)
+
+
+def test_an_open_pin_data_part_reads_as_its_cubemx_copy() -> None:
+    data = (DATA_DIR / "mcu" / "STM32T001ABCx.xml").read_bytes()
+    opened = _renamespaced(data, OPEN_PIN_DATA_NS)
+    assert read_part(opened, file="open.xml") == read_part(data, file="STM32T001ABCx.xml")
+
+
+@pytest.mark.parametrize("namespace", OTHER_NAMESPACES, ids=lambda ns: ns.decode())
+def test_a_part_of_another_namespace_is_a_description_error(namespace: bytes) -> None:
+    data = (DATA_DIR / "mcu" / "STM32T001ABCx.xml").read_bytes()
+    with pytest.raises(DescriptionError) as excinfo:
+        read_part(_renamespaced(data, namespace), file="other.xml")
+    assert excinfo.value.key == "Mcu"
+    assert "http://dummy.com" in str(excinfo.value)
 
 
 def test_malformed_part_xml_is_a_description_error() -> None:
@@ -306,9 +337,37 @@ def test_gpio_alternates_keep_package_pins_and_signals_sorted_lower_case() -> No
     }
 
 
+def test_open_pin_data_gpio_alternates_read_as_their_cubemx_copy() -> None:
+    data = _modes(
+        ("PA6", [_signal("TIM3_CH1", "GPIO_AF2_TIM3"), _signal("SPI1_MISO", "GPIO_AF5_SPI1")]),
+        ("PB2", [_signal("TIM4_CH2", "GPIO_AF2_TIM4")]),
+    )
+    pins = {"PA6": frozenset({"TIM3_CH1", "SPI1_MISO"}), "PB2": frozenset({"TIM4_CH2"})}
+    cubemx = read_gpio_alternates(data, file="modes.xml", pins=pins)
+    opened = read_gpio_alternates(_renamespaced(data, OPEN_PIN_DATA_NS), file="open.xml", pins=pins)
+    assert opened == cubemx
+    assert sum(len(entries) for entries in cubemx.values()) == 3
+
+
+@pytest.mark.parametrize("namespace", OTHER_NAMESPACES, ids=lambda ns: ns.decode())
+def test_gpio_alternates_of_another_namespace_are_a_description_error(namespace: bytes) -> None:
+    data = _modes(("PA6", [_signal("TIM3_CH1", "GPIO_AF2_TIM3")]))
+    with pytest.raises(DescriptionError) as excinfo:
+        read_gpio_alternates(
+            _renamespaced(data, namespace), file="other.xml", pins={"PA6": frozenset({"TIM3_CH1"})}
+        )
+    assert excinfo.value.key == "IP"
+
+
 def test_gpio_alternates_outside_the_namespace_are_a_description_error() -> None:
     with pytest.raises(DescriptionError) as excinfo:
         read_gpio_alternates(b"<IP/>", file="modes.xml", pins={})
+    assert excinfo.value.key == "IP"
+
+
+def test_a_part_root_given_as_the_modes_file_is_a_description_error() -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        read_gpio_alternates(b'<Mcu xmlns="http://dummy.com"/>', file="modes.xml", pins={})
     assert excinfo.value.key == "IP"
 
 
@@ -342,4 +401,97 @@ def test_a_modes_file_over_the_cap_is_refused_within_a_second() -> None:
     with pytest.raises(DescriptionError) as excinfo:
         read_gpio_alternates(data, file="modes.xml", pins={"PA6": frozenset({"TIM3_CH1"})})
     assert time.perf_counter() - started < 1.0
+    assert excinfo.value.key == "<root>"
+
+
+_FACTS = """
+format = 1
+rzone = "STM32_DIE000_16_64.xml"
+
+[core]
+fpu_double = false
+dsp = true
+trustzone = true
+mpu_regions = 8
+mpu_regions_secure = 4
+sau_regions = 8
+num_interrupts = 100
+source = "a manual section"
+
+[[regions]]
+name = "Flash_NS"
+start = 0x08000000
+size = 0x10000
+kind = "rom"
+acc = { read = true, write = false, execute = true }
+secure = false
+source = "a manual figure"
+
+[[regions]]
+name = "SRAM_S"
+start = 0x30000000
+size = 0x4000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = true
+physical = 0x20000000
+source = "a manual table"
+"""
+
+
+def test_rzone_facts_read_as_the_rzone_the_builder_reads() -> None:
+    rzone = read_rzone_facts(_FACTS.encode(), file="facts.toml")
+    processor = rzone.processor
+    assert (processor.fpu, processor.dsp, processor.tz) == (None, True, True)
+    assert processor.mpu_regions - processor.sec_mpu_regions == 8
+    assert (processor.sec_mpu_regions, processor.sau_regions) == (4, 8)
+    assert processor.num_interrupts == 100
+    assert (processor.clock_hz, processor.core, processor.mpu) == (None, None, None)
+    assert rzone.regions == [
+        RegionDesc(
+            name="Flash_NS",
+            start=0x0800_0000,
+            size=0x1_0000,
+            kind=RegionKind.ROM,
+            acc=RegionAccess(read=True, write=False, execute=True),
+            secure=False,
+        ),
+        RegionDesc(
+            name="SRAM_S",
+            start=0x3000_0000,
+            size=0x4000,
+            kind=RegionKind.RAM,
+            acc=RegionAccess(read=True, write=True, execute=True),
+            secure=True,
+            physical=0x2000_0000,
+        ),
+    ]
+    double = _FACTS.replace("fpu_double = false", "fpu_double = true")
+    assert read_rzone_facts(double.encode(), file="facts.toml").processor.fpu == "DP_FPU"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "key"),
+    [
+        ("sau_regions = 8\n", "", "core.sau_regions"),
+        ("size = 0x4000", "size = -1", "regions[1].size"),
+        ('kind = "ram"', 'kind = "flash"', "regions[1].kind"),
+        ('source = "a manual table"', 'source = " "', "regions[1].source"),
+        ('source = "a manual section"', 'source = ""', "core.source"),
+        ("format = 1", "format = 2", "format"),
+        ("start = 0x30000000", "start = 0xFFFFE000", "regions[1].size"),
+        ("mpu_regions_secure = 4", "mpu_regions_secure = true", "core.mpu_regions_secure"),
+        ("secure = true\n", "secure = true\ncontroller = 'FLASH'\n", "regions[1]"),
+    ],
+)
+def test_rzone_facts_errors_name_the_key(old: str, new: str, key: str) -> None:
+    assert _FACTS.count(old) == 1
+    with pytest.raises(DescriptionError) as excinfo:
+        read_rzone_facts(_FACTS.replace(old, new).encode(), file="facts.toml")
+    assert excinfo.value.key.startswith(key)
+
+
+def test_malformed_rzone_facts_are_a_description_error() -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        read_rzone_facts(b"format = ", file="facts.toml")
     assert excinfo.value.key == "<root>"

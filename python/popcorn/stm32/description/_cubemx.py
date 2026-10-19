@@ -2,15 +2,18 @@
 functions."""
 
 import re
+import tomllib
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from xml.etree.ElementTree import Element
 
+from popcorn.stm32.description._binder import from_mapping
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import AlternateDesc, RegionAccess, RegionDesc, RegionKind
 
-_MCU_NS = "http://mcd.rou.st.com/modules.php?name=mcu"
+_MCU_NAMESPACES = ("http://mcd.rou.st.com/modules.php?name=mcu", "http://dummy.com")
+"""Namespaces of a part or GPIO modes file: CubeMX's db, then ST's STM32_open_pin_data copy."""
 _PIN_RE = re.compile(r"P([A-Z])(\d+)")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
 MAX_GPIO_MODES_BYTES = 8 << 20
@@ -39,17 +42,17 @@ class DbPart:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class RzoneProcessor:
-    clock_hz: int
-    core: str
-    core_version: str
     fpu: str | None
     dsp: bool
-    mpu: bool
     tz: bool
     num_interrupts: int
     mpu_regions: int
     sec_mpu_regions: int
     sau_regions: int
+    clock_hz: int | None = None
+    core: str | None = None
+    core_version: str | None = None
+    mpu: bool | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -66,19 +69,27 @@ def _text(el: Element, tag: str) -> str | None:
     return text or None
 
 
+def _mcu_namespace(root: Element, key: str, *, file: str, local: str | None = None) -> str:
+    """Namespace URI of @p root, DescriptionError under @p key unless it is one of
+    _MCU_NAMESPACES and, when @p local is given, the root's local name is @p local."""
+    expected = f"namespace {' or '.join(_MCU_NAMESPACES)}"
+    if not root.tag.startswith("{"):
+        raise DescriptionError(file, 0, key, expected)
+    uri, name = root.tag[1:].split("}", 1)
+    if uri not in _MCU_NAMESPACES or (local is not None and name != local):
+        raise DescriptionError(file, 0, key, expected)
+    return uri
+
+
 def read_part(data: bytes, *, file: str) -> DbPart:
     """DbPart of a `db/mcu/<part>.xml` document, DescriptionError when it is malformed or does
-    not carry the CubeMX Mcu namespace."""
+    not carry the Mcu namespace of CubeMX or of ST's STM32_open_pin_data."""
     try:
         root = ET.fromstring(data)
     except ET.ParseError as exc:
         line = exc.position[0] if exc.position else 0
         raise DescriptionError(file, line, "<root>", "valid XML") from exc
-    if not root.tag.startswith("{"):
-        raise DescriptionError(file, 0, "Mcu", f"namespace {_MCU_NS}")
-    uri = root.tag[1:].split("}", 1)[0]
-    if uri != _MCU_NS:
-        raise DescriptionError(file, 0, "Mcu", f"namespace {_MCU_NS}")
+    uri = _mcu_namespace(root, "Mcu", file=file)
 
     def q(tag: str) -> str:
         return f"{{{uri}}}{tag}"
@@ -273,7 +284,8 @@ def read_gpio_alternates(
     part, and of each the signals @p pins gives it, so AF15 `EVENTOUT`, which no MCU file lists,
     never enters the table. Only `GPIO_AF<n>_` selections are read: the STM32F1 modes files remap
     through AFIO and give an empty table. DescriptionError when @p data is larger than
-    MAX_GPIO_MODES_BYTES, malformed, or does not carry the CubeMX Mcu namespace."""
+    MAX_GPIO_MODES_BYTES, malformed, or does not carry the Mcu namespace of CubeMX or of ST's
+    STM32_open_pin_data."""
     if len(data) > MAX_GPIO_MODES_BYTES:
         raise DescriptionError(
             file, 0, "<root>", f"a GPIO modes file of at most {MAX_GPIO_MODES_BYTES} bytes"
@@ -283,11 +295,10 @@ def read_gpio_alternates(
     except ET.ParseError as exc:
         line = exc.position[0] if exc.position else 0
         raise DescriptionError(file, line, "<root>", "valid XML") from exc
-    if root.tag != f"{{{_MCU_NS}}}IP":
-        raise DescriptionError(file, 0, "IP", f"namespace {_MCU_NS}")
+    uri = _mcu_namespace(root, "IP", file=file, local="IP")
 
     def q(tag: str) -> str:
-        return f"{{{_MCU_NS}}}{tag}"
+        return f"{{{uri}}}{tag}"
 
     ports: dict[str, set[tuple[int, int, str]]] = {}
     for pin_el in root.iter(q("GPIO_Pin")):
@@ -309,3 +320,82 @@ def read_gpio_alternates(
         port: [AlternateDesc(pin=pin, af=af, signal=signal) for pin, af, signal in sorted(entries)]
         for port, entries in sorted(ports.items())
     }
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _FactsCore:
+    fpu_double: bool
+    dsp: bool
+    trustzone: bool
+    mpu_regions: int = field(metadata={"minimum": 0, "maximum": 16})
+    mpu_regions_secure: int = field(metadata={"minimum": 0, "maximum": 16})
+    sau_regions: int = field(metadata={"minimum": 0, "maximum": 8})
+    num_interrupts: int = field(metadata={"minimum": 0, "maximum": 480})
+    source: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _FactsRegion:
+    name: str
+    start: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    size: int = field(metadata={"minimum": 1, "maximum": 4294967295})
+    kind: RegionKind
+    acc: RegionAccess
+    secure: bool
+    physical: int | None = field(default=None, metadata={"minimum": 0, "maximum": 4294967295})
+    source: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _Facts:
+    format: int = field(metadata={"const": 1})
+    rzone: str
+    core: _FactsCore
+    regions: list[_FactsRegion]
+
+
+def read_rzone_facts(data: bytes, *, file: str) -> Rzone:
+    """Rzone of a popcorn rzone facts TOML document, the manual-sourced stand-in for a CubeMX
+    rzone. `[core]` holds the CoreDesc values, so `mpu_regions` is the nonsecure count: the
+    processor's `mpu_regions` is set to the sum, as an rzone counts them. The processor's `fpu`
+    is `DP_FPU` when `fpu_double` is true and None otherwise, the only reading the builder makes
+    of it. Regions keep their order. DescriptionError naming the key when a value is missing, of
+    the wrong type or out of range, or a `source` is empty."""
+    try:
+        raw = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        line = exc.lineno if isinstance(exc, tomllib.TOMLDecodeError) else 0
+        raise DescriptionError(file, line or 0, "<root>", "valid UTF-8 TOML") from exc
+    facts = from_mapping(_Facts, raw, file=file)
+    if not facts.core.source.strip():
+        raise DescriptionError(file, 0, "core.source", "a non-empty source")
+    for index, region in enumerate(facts.regions):
+        if not region.source.strip():
+            raise DescriptionError(file, 0, f"regions[{index}].source", "a non-empty source")
+        if region.start + region.size > 1 << 32:
+            raise DescriptionError(file, 0, f"regions[{index}].size", "an end at most 1 << 32")
+    core = facts.core
+    processor = RzoneProcessor(
+        fpu="DP_FPU" if core.fpu_double else None,
+        dsp=core.dsp,
+        tz=core.trustzone,
+        num_interrupts=core.num_interrupts,
+        mpu_regions=core.mpu_regions + core.mpu_regions_secure,
+        sec_mpu_regions=core.mpu_regions_secure,
+        sau_regions=core.sau_regions,
+    )
+    regions = [
+        RegionDesc(
+            name=region.name,
+            start=region.start,
+            size=region.size,
+            kind=region.kind,
+            acc=RegionAccess(
+                read=region.acc.read, write=region.acc.write, execute=region.acc.execute
+            ),
+            secure=region.secure,
+            physical=region.physical,
+        )
+        for region in facts.regions
+    ]
+    return Rzone(processor=processor, regions=regions)

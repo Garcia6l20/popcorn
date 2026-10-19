@@ -19,6 +19,7 @@ plugin's script carries that name. A dev-mode build runs `popcorn-plugin.py`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sysconfig
@@ -41,6 +42,14 @@ from popcorn.plugin._sdk import MANIFEST, Sdk, package_directory, sdk
 get_var: Callable[[str, bool], bool] = import_module("pcons").get_var
 
 _REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?(.*)", re.DOTALL)
+
+
+def _without_build_rpath(target: Target) -> None:
+    """Keep pcons from adding an rpath to the build's own shared libraries to @p target, on a
+    pcons that adds one: the installed files carry only the rpaths set here. An older pcons,
+    which adds none, refuses the option."""
+    with contextlib.suppress(ValueError):
+        target.set_option("build_rpath", False)
 
 
 def _exact_pin(requirement: str, version: str) -> bool | None:
@@ -158,6 +167,7 @@ class PluginProject:
         )
         module.private.link_flags.extend(f"-Wl,-rpath,{rpath}" for rpath in rpaths)
         module.link(self._native)
+        _without_build_rpath(module)
         module.private.link_dirs.append(str(self._package))
         module.private.link_libs.append("popcorn_core")
         self._bindings = module

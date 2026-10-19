@@ -26,6 +26,7 @@ from popcorn.stm32.description._model import (
     RegisterDesc,
     WriteEffect,
 )
+from popcorn.stm32.description._shipped import description_path
 from popcorn.stm32.description._sources import Sources, find_sources, resolve_part
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "build_description",
     "cached_description",
     "check_bounds",
+    "description_path",
     "dump_json",
     "find_sources",
     "from_mapping",

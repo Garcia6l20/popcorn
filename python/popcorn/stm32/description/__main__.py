@@ -1,6 +1,7 @@
-"""CLI: python -m popcorn.stm32.description build|sources|golden <part> [options]."""
+"""CLI: python -m popcorn.stm32.description build|sources|golden|ship <part> [options]."""
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,6 +10,7 @@ from popcorn.stm32.description._builder import build_description_with_report
 from popcorn.stm32.description._cache import cached_description
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._golden import compute_golden, dump_tables, load_golden, write_golden
+from popcorn.stm32.description._shipped import SHIPPED_DIR, build_shipped, shipped_text
 from popcorn.stm32.description._sources import find_sources
 
 
@@ -75,6 +77,49 @@ def _cmd_golden(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ship(args: argparse.Namespace) -> int:
+    if args.out is None and not args.check:
+        print(
+            "ship: --out is required to write, the package data directory of the source tree",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        name, packed = build_shipped(args.part, pin_data=Path(args.pin_data), core=args.core)
+    except DescriptionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    out_dir = SHIPPED_DIR if args.out is None else Path(args.out)
+    path = out_dir / f"{name}.json.xz"
+    if args.check:
+        from popcorn._part_description import description_digest, parse_description
+
+        if not path.is_file():
+            print(f"{path}: no shipped description", file=sys.stderr)
+            return 1
+        fresh = description_digest(
+            parse_description(shipped_text(packed, file="fresh build"), "fresh build")
+        )
+        shipped = description_digest(
+            parse_description(shipped_text(path.read_bytes(), file=str(path)), str(path))
+        )
+        if fresh != shipped:
+            print(f"{path}: shipped {shipped}, fresh build {fresh}", file=sys.stderr)
+            return 1
+        print(path)
+        return 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp_path.write_bytes(packed)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    print(path)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m popcorn.stm32.description")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -96,6 +141,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     golden.add_argument("--update", action="store_true")
     golden.add_argument("--dump")
     golden.set_defaults(func=_cmd_golden)
+
+    ship = subparsers.add_parser("ship")
+    ship.add_argument("part")
+    ship.add_argument("--core")
+    ship.add_argument("--pin-data", required=True)
+    ship.add_argument("--check", action="store_true")
+    ship.add_argument("--out", help="directory to write the .json.xz into, required unless --check")
+    ship.set_defaults(func=_cmd_ship)
 
     args = parser.parse_args(argv)
     result: int = args.func(args)
