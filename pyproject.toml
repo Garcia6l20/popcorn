@@ -67,4 +67,4 @@ executionEnvironments = [
 no-build-isolation-package = ["popcorn"]
 
 [tool.uv.sources]
-pcons = { git = "https://github.com/Garcia6l20/pcons.git", rev = "d5be306ae23109cf0b5729da19ebd265308bd4c1" }
+pcons = { git = "https://github.com/Garcia6l20/pcons.git", rev = "devel" }
