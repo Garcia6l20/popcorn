@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import lzma
 import os
 import stat
@@ -92,6 +93,31 @@ def test_a_changed_image_or_config_is_refused_naming_the_digest(tmp_path: Path) 
     with pytest.raises(popcorn.ConfigError) as config:
         changed.machine().load_snapshot(tmp_path / "boot.snap")
     assert config.value.key == "config_digest"
+
+
+def test_a_snapshot_loads_across_provenance_but_not_across_content(tmp_path: Path) -> None:
+    raw = json.loads(M33_JSON.read_text())
+
+    def machine(name: str, **changes: object) -> popcorn.Machine:
+        path = tmp_path / name
+        path.write_text(json.dumps(raw | changes))
+        return popcorn.Machine(path, image=popcorn.Image.elf(DRIVER_ELF))
+
+    first = machine("a.json", generator="a", sources={"svd": "0" * 64})
+    first.reset()
+    asyncio.run(first.run(budget=5_000))
+    first.snapshot().save(tmp_path / "a.snap")
+
+    second = machine("b.json", generator="b", sources={"svd": "1" * 64})
+    second.load_snapshot(tmp_path / "a.snap")
+    assert state(second) == state(first)
+
+    regions = [dict(region) for region in raw["regions"]]
+    regions[-1]["size"] += 0x400
+    resized = machine("c.json", generator="a", sources={"svd": "0" * 64}, regions=regions)
+    with pytest.raises(popcorn.ConfigError) as refused:
+        resized.load_snapshot(tmp_path / "a.snap")
+    assert refused.value.key == "description_digest"
 
 
 def test_restoring_another_machines_snapshot_is_refused(machines: Machines) -> None:

@@ -169,6 +169,21 @@ def test_description_digest_is_stable(m33: popcorn.PartDescription, m33_json: Pa
     assert len(popcorn.description_digest(m33)) == 64
 
 
+def test_description_digest_ignores_generator_and_sources(m33_json: Path, tmp_path: Path) -> None:
+    raw = json.loads(m33_json.read_text())
+    digests: list[str] = []
+    for name, generator, sources in (
+        ("a.json", "popcorn 0.1.0 builder 000000000000", {"svd": "0" * 64}),
+        ("b.json", "popcorn 9.9.9 builder ffffffffffff", {"svd": "1" * 64, "rzone": "2" * 64}),
+    ):
+        path = tmp_path / name
+        path.write_text(json.dumps(raw | {"generator": generator, "sources": sources}))
+        digests.append(popcorn.description_digest(popcorn.load_description(path)))
+    assert (
+        digests[0] == digests[1] == popcorn.description_digest(popcorn.load_description(m33_json))
+    )
+
+
 def test_import_brings_coverage_and_trace() -> None:
     assert popcorn.coverage.Coverage is not None
     assert popcorn.trace is not None

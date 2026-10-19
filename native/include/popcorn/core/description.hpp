@@ -302,6 +302,13 @@ struct core_desc
   friend auto operator==(core_desc const&, core_desc const&) -> bool = default;
 };
 
+/**
+ * @brief Annotation on a part_description member that records where the description came from,
+ *        not what it describes. description_digest() leaves such members out.
+ */
+struct provenance
+{};
+
 /** @brief What an MCU is: core, memory map, peripherals and interrupts. */
 struct part_description
 {
@@ -310,10 +317,10 @@ struct part_description
   /** @brief Part name, such as `STM32U575QGIx`. */
   std::string part;
   /** @brief Tool that generated the description, name and version. */
-  std::string generator;
+  [[= provenance{}]] std::string generator;
   /** @brief SHA-256 of each source the description was built from, keyed by role, such as
    * `svd`, `rzone`, `cmsis_header`, `patch` or `mcu_db`. */
-  std::map<std::string, std::string> sources;
+  [[= provenance{}]] std::map<std::string, std::string> sources;
   /** @brief Processor core. */
   core_desc core;
   /** @brief Memory regions. */
@@ -362,9 +369,11 @@ POPCORN_API auto dump_description(part_description const& description) -> std::s
 POPCORN_API auto description_json_schema() -> std::string;
 
 /**
- * @brief Digest identifying a description: SHA-256 of dump_description() output, lower-case hex.
- *        dump_description() is canonical, members in declaration order and compact, so equal
- *        descriptions have equal digests. A saved snapshot records it.
+ * @brief Digest identifying a description's content: SHA-256, lower-case hex, of the
+ *        dump_description() form without the members annotated provenance, `generator` and
+ *        `sources`. The form is canonical, members in declaration order and compact, so
+ *        descriptions equal but for their provenance have equal digests. A saved snapshot
+ *        records it.
  * @param description Description to digest.
  * @return 64 hex digits.
  */

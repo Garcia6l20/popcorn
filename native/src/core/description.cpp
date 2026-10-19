@@ -123,6 +123,13 @@ template <typename T> consteval auto definition_names_are_unique() -> bool
 
 template <typename T> auto schema_of(json::object& defs) -> json::value;
 
+template <std::meta::info Member> consteval auto quoted_key() -> std::string_view
+{
+  std::string const key =
+      "\"" + std::string(std::string_view(reflex::serde::serialized_name(Member))) + "\":";
+  return {std::define_static_string(key), key.size()};
+}
+
 template <reflex::enum_c T> auto definition_of(json::object&) -> json::value
 {
   json::array names;
@@ -293,7 +300,30 @@ auto description_json_schema() -> std::string
 
 auto description_digest(part_description const& description) -> std::string
 {
-  auto const digest = reflex::sha256_of(dump_description(description));
+  std::string      content;
+  json::serializer serializer{content};
+  char             separator = '{';
+  template for(constexpr auto member : std::define_static_array(
+                   std::meta::nonstatic_data_members_of(
+                       ^^part_description, std::meta::access_context::current())))
+  {
+    if constexpr(not reflex::meta::has_annotation(member, ^^provenance))
+    {
+      serializer.write_char(separator);
+      separator = ',';
+      serializer.write_raw(quoted_key<member>());
+      if constexpr(member == ^^part_description::schema_version)
+      {
+        serializer.dump(description_schema_version);
+      }
+      else
+      {
+        serializer.dump(description.[:member:]);
+      }
+    }
+  }
+  serializer.write_char('}');
+  auto const digest = reflex::sha256_of(content);
   auto const hex    = reflex::to_hex(digest);
   return std::string{hex.begin(), hex.end()};
 }
