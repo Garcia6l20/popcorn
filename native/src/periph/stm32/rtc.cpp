@@ -304,7 +304,7 @@ private:
   std::uint32_t                                security_bits_{};
 };
 
-constexpr std::array<write_entry<rtc>, 24> rtc_writes{
+constexpr std::array<write_entry<rtc>, 23> rtc_writes{
     {
      {"TR", &rtc::time_written},          {"DR", &rtc::date_written},
      {"SSR", &rtc::plain_written},        {"ICSR", &rtc::status_written},
@@ -314,10 +314,10 @@ constexpr std::array<write_entry<rtc>, 24> rtc_writes{
      {"ALRMAR", &rtc::alarm_written},     {"ALRMASSR", &rtc::alarm_written},
      {"ALRMBR", &rtc::alarm_written},     {"ALRMBSSR", &rtc::alarm_written},
      {"SR", &rtc::plain_written},         {"MISR", &rtc::plain_written},
-     {"SCR", &rtc::clear_written},        {"PRIVCR", &rtc::security_written},
-     {"SECCFGR", &rtc::security_written}, {"ALRABINR", &rtc::plain_written},
-     {"ALRBBINR", &rtc::plain_written},   {"TSTR", &rtc::plain_written},
-     {"TSDR", &rtc::plain_written},       {"TSSSR", &rtc::plain_written},
+     {"SCR", &rtc::clear_written},        {"SECCFGR", &rtc::security_written},
+     {"ALRABINR", &rtc::plain_written},   {"ALRBBINR", &rtc::plain_written},
+     {"TSTR", &rtc::plain_written},       {"TSDR", &rtc::plain_written},
+     {"TSSSR", &rtc::plain_written},
      }
 };
 
@@ -340,6 +340,11 @@ rtc::rtc(
       sub_hour_{field("CR", "SUB1H")}, reference_{field("CR", "REFCKON")},
       domain_{ctx.clock.domain("rtc")}, line_{irq("RTC_IRQn")}, security_{reg("SECCFGR")}
 {
+  static constexpr std::array<write_entry<rtc>, 1> privilege_cr{
+      {{"PRIVCR", &rtc::security_written}}};
+  static constexpr std::array<write_entry<rtc>, 1> privilege_cfgr{
+      {{"PRIVCFGR", &rtc::security_written}}};
+  bind(has_register("PRIVCFGR") ? privilege_cfgr : privilege_cr);
   for(auto const& bits : describe("SECCFGR").fields)
   {
     security_bits_ |= field("SECCFGR", bits.name).mask();
@@ -1274,7 +1279,8 @@ auto tamp_writes(peripheral_desc const& desc) -> std::vector<write_entry<tamp>>
   std::vector<write_entry<tamp>> out;
   for(auto const& described : desc.registers)
   {
-    auto const security = described.name == "SECCFGR" or described.name == "PRIVCR";
+    auto const security =
+        described.name == "SECCFGR" or described.name == "PRIVCR" or described.name == "PRIVCFGR";
     out.push_back({described.name, security ? &tamp::security_written : &tamp::plain_written});
   }
   return out;

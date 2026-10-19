@@ -339,12 +339,16 @@ sai::sai(
 
 auto sai::fields_of(char prefix) const -> block_fields
 {
-  auto const   name = [prefix](std::string_view reg) { return std::format("{}{}", prefix, reg); };
-  auto const   cr1  = name("CR1");
-  auto const   cr2  = name("CR2");
-  auto const   sr   = name("SR");
-  auto const   im   = name("IM");
-  auto const   clr  = name("CLRFR");
+  auto const name = [prefix](std::string_view reg) { return std::format("{}{}", prefix, reg); };
+  auto const cr1  = name("CR1");
+  auto const cr2  = name("CR2");
+  auto const sr   = name("SR");
+  auto const im   = name("IM");
+  auto const clr  = name("CLRFR");
+  auto const enable =
+      std::ranges::contains(describe(cr1).fields, std::string_view{"SAIEN"}, &field_desc::name)
+          ? std::string_view{"SAIEN"}
+          : std::string_view{"SAIAEN"};
   block_fields out{
       .mode             = field(cr1, "MODE"),
       .protocol         = field(cr1, "PRTCFG"),
@@ -352,7 +356,7 @@ auto sai::fields_of(char prefix) const -> block_fields
       .sync             = field(cr1, "SYNCEN"),
       .mono             = field(cr1, "MONO"),
       .dma              = field(cr1, "DMAEN"),
-      .enable           = field(cr1, "SAIAEN"),
+      .enable           = field(cr1, enable),
       .no_divider       = field(cr1, "NODIV"),
       .divider          = field(cr1, "MCKDIV"),
       .oversampling     = field(cr1, "OSR"),

@@ -238,8 +238,8 @@ private:
   irq_line&                                    error_line_;
   field_ref                                    tx_dma_enable_;
   field_ref                                    rx_dma_enable_;
-  field_ref                                    complete_dma_enable_;
-  field_ref                                    reload_dma_enable_;
+  std::optional<field_ref>                     complete_dma_enable_;
+  std::optional<field_ref>                     reload_dma_enable_;
   dma_signal                                   tx_dma_;
   dma_signal                                   rx_dma_;
   dma_signal                                   event_dma_;
@@ -263,28 +263,41 @@ constexpr std::array<write_entry<i2c>, 11> i2c_writes{
      }
 };
 
+static_assert(i2c_writes.back().reg == "I2C_AUTOCR");
+
+auto i2c_table(peripheral_desc const& desc) -> std::span<write_entry<i2c> const>
+{
+  auto const all = std::span{i2c_writes};
+  return find_register(desc, "I2C_AUTOCR") != nullptr ? all : all.first(all.size() - 1);
+}
+
 i2c::i2c(
     model_context&                           ctx,
     peripheral_desc const&                   desc,
     std::vector<std::shared_ptr<i2c_target>> targets)
-    : dispatch_model{ctx, desc, "I2C", i2c_writes}, regs_{ctx.regs}, targets_{std::move(targets)},
-      command_{reg("CR2")}, status_{reg("ISR")}, clear_{reg("ICR")}, transmit_{reg("TXDR")},
-      receive_{reg("RXDR")}, enable_{field("CR1", "PE")}, start_{field("CR2", "START")},
-      stop_{field("CR2", "STOP")}, count_{field("CR2", "NBYTES")}, reload_{field("CR2", "RELOAD")},
-      autoend_{field("CR2", "AUTOEND")}, direction_{field("CR2", "RD_WRN")},
-      address_{field("CR2", "SADD")}, ten_bit_{field("CR2", "ADD10")},
-      scl_low_{field("TIMINGR", "SCLL")}, scl_high_{field("TIMINGR", "SCLH")},
-      prescaler_{field("TIMINGR", "PRESC")}, tx_empty_{field("ISR", "TXE")},
-      tx_interrupt_{field("ISR", "TXIS")}, rx_full_{field("ISR", "RXNE")},
-      transfer_complete_{field("ISR", "TC")}, reload_complete_{field("ISR", "TCR")},
-      stop_detected_{field("ISR", "STOPF")}, nack_received_{field("ISR", "NACKF")},
-      busy_{field("ISR", "BUSY")}, bus_error_{field("ISR", "BERR")},
-      arbitration_lost_{field("ISR", "ARLO")}, overrun_{field("ISR", "OVR")},
-      error_enable_{field("CR1", "ERRIE")}, kernel_{ctx.clock.domain(lower(desc.name))},
-      event_line_{irq(desc.name + "_EV_IRQn")}, error_line_{irq(desc.name + "_ER_IRQn")},
-      tx_dma_enable_{field("CR1", "TXDMAEN")}, rx_dma_enable_{field("CR1", "RXDMAEN")},
-      complete_dma_enable_{field("I2C_AUTOCR", "TCDMAEN")},
-      reload_dma_enable_{field("I2C_AUTOCR", "TCRDMAEN")},
+    : dispatch_model{ctx, desc, "I2C", i2c_table(desc)}, regs_{ctx.regs},
+      targets_{std::move(targets)}, command_{reg("CR2")}, status_{reg("ISR")}, clear_{reg("ICR")},
+      transmit_{reg("TXDR")}, receive_{reg("RXDR")}, enable_{field("CR1", "PE")},
+      start_{field("CR2", "START")}, stop_{field("CR2", "STOP")}, count_{field("CR2", "NBYTES")},
+      reload_{field("CR2", "RELOAD")}, autoend_{field("CR2", "AUTOEND")},
+      direction_{field("CR2", "RD_WRN")}, address_{field("CR2", "SADD")},
+      ten_bit_{field("CR2", "ADD10")}, scl_low_{field("TIMINGR", "SCLL")},
+      scl_high_{field("TIMINGR", "SCLH")}, prescaler_{field("TIMINGR", "PRESC")},
+      tx_empty_{field("ISR", "TXE")}, tx_interrupt_{field("ISR", "TXIS")},
+      rx_full_{field("ISR", "RXNE")}, transfer_complete_{field("ISR", "TC")},
+      reload_complete_{field("ISR", "TCR")}, stop_detected_{field("ISR", "STOPF")},
+      nack_received_{field("ISR", "NACKF")}, busy_{field("ISR", "BUSY")},
+      bus_error_{field("ISR", "BERR")}, arbitration_lost_{field("ISR", "ARLO")},
+      overrun_{field("ISR", "OVR")}, error_enable_{field("CR1", "ERRIE")},
+      kernel_{ctx.clock.domain(lower(desc.name))}, event_line_{irq(desc.name + "_EV_IRQn")},
+      error_line_{irq(desc.name + "_ER_IRQn")}, tx_dma_enable_{field("CR1", "TXDMAEN")},
+      rx_dma_enable_{field("CR1", "RXDMAEN")},
+      complete_dma_enable_{
+          has_register("I2C_AUTOCR") ? std::optional{field("I2C_AUTOCR", "TCDMAEN")}
+                                     : std::nullopt},
+      reload_dma_enable_{
+          has_register("I2C_AUTOCR") ? std::optional{field("I2C_AUTOCR", "TCRDMAEN")}
+                                     : std::nullopt},
       tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
       rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"},
       event_dma_{ctx.peers, lower(desc.name) + "_evc_dma"}
@@ -339,7 +352,10 @@ i2c::i2c(
            }
   })
   {
-    unsupported_.push_back(field(reg_name, name));
+    if(has_register(reg_name))
+    {
+      unsupported_.push_back(field(reg_name, name));
+    }
   }
 }
 
@@ -794,9 +810,11 @@ void i2c::flags()
   {
     error_line_.lower();
   }
-  auto const complete =
-      get(regs_, complete_dma_enable_) != 0 and get(regs_, transfer_complete_) != 0;
-  auto const reload = get(regs_, reload_dma_enable_) != 0 and get(regs_, reload_complete_) != 0;
+  auto const enabled = [this](std::optional<field_ref> const& enable) {
+    return enable and get(regs_, *enable) != 0;
+  };
+  auto const complete = enabled(complete_dma_enable_) and get(regs_, transfer_complete_) != 0;
+  auto const reload   = enabled(reload_dma_enable_) and get(regs_, reload_complete_) != 0;
   tx_dma_.set(get(regs_, tx_dma_enable_) != 0 and get(regs_, tx_interrupt_) != 0);
   rx_dma_.set(get(regs_, rx_dma_enable_) != 0 and get(regs_, rx_full_) != 0);
   event_dma_.set(complete or reload);

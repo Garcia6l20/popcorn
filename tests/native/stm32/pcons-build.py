@@ -109,6 +109,7 @@ u575_programs = [
         ("stm32-tz-aware", "test_tz_aware.cpp"),
         ("stm32-smc", "test_smc.cpp"),
         ("stm32-engine-counters", "test_engine_counters.cpp"),
+        ("stm32-h5-names", "test_h5_names.cpp"),
     )
 ]
 for program in u575_programs:

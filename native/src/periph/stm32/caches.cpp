@@ -201,7 +201,7 @@ dcache::dcache(model_context& ctx, peripheral_desc const& desc, cache_options co
       error_irq_{field("DCACHE_IER", "ERRIE")}, command_end_irq_{field("DCACHE_IER", "CMDENDIE")},
       clear_busy_end_{field("DCACHE_FCR", "CBSYENDF")}, clear_error_{field("DCACHE_FCR", "CERRF")},
       clear_command_end_{field("DCACHE_FCR", "CCMDENDF")}, fcr_{reg("DCACHE_FCR")},
-      line_{irq("DCACHE1_IRQn")}
+      line_{irq(has_irq("DCACHE1_IRQn") ? "DCACHE1_IRQn" : "DCACHE_IRQn")}
 {}
 
 void dcache::reset(register_file& regs, reset_kind)

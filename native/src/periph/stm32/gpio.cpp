@@ -172,24 +172,24 @@ private:
 
 constexpr std::array<write_entry<gpio>, 12> gpio_writes{
     {
-     {"GPIO_MODER", &gpio::config_written<0>},
-     {"GPIO_OTYPER", &gpio::config_written<1>},
-     {"GPIO_OSPEEDR", &gpio::config_written<2>},
-     {"GPIO_PUPDR", &gpio::config_written<3>},
-     {"GPIO_IDR", &gpio::input_written},
-     {"GPIO_ODR", &gpio::output_written},
-     {"GPIO_BSRR", &gpio::set_reset_written},
-     {"GPIO_LCKR", &gpio::lock_written},
-     {"GPIO_AFRL", &gpio::config_written<4>},
-     {"GPIO_AFRH", &gpio::config_written<5>},
-     {"GPIO_BRR", &gpio::reset_written},
-     {"GPIO_SECCFGR", nullptr},
+     {"MODER", &gpio::config_written<0>},
+     {"OTYPER", &gpio::config_written<1>},
+     {"OSPEEDR", &gpio::config_written<2>},
+     {"PUPDR", &gpio::config_written<3>},
+     {"IDR", &gpio::input_written},
+     {"ODR", &gpio::output_written},
+     {"BSRR", &gpio::set_reset_written},
+     {"LCKR", &gpio::lock_written},
+     {"AFRL", &gpio::config_written<4>},
+     {"AFRH", &gpio::config_written<5>},
+     {"BRR", &gpio::reset_written},
+     {"SECCFGR", nullptr},
      }
 };
 
 constexpr std::array<write_entry<gpio>, 1> gpio_trustzone_writes{
     {
-     {"GPIO_HSLVR", nullptr},
+     {"HSLVR", nullptr},
      }
 };
 
@@ -209,9 +209,8 @@ constexpr std::array<secure_reset, 2> secure_resets{
 
 gpio::gpio(model_context& ctx, peripheral_desc const& desc)
     : dispatch_model{ctx, desc, "GPIO", gpio_writes, gpio_trustzone_writes}, regs_{ctx.regs},
-      port_{static_cast<std::uint8_t>(desc.name.back() - 'A')},
-      lock_key_{field("GPIO_LCKR", "LCKK")}, secure_pins_{reg("GPIO_SECCFGR")},
-      secure_reset_{describe("GPIO_SECCFGR").reset}
+      port_{static_cast<std::uint8_t>(desc.name.back() - 'A')}, lock_key_{field("LCKR", "LCKK")},
+      secure_pins_{reg("SECCFGR")}, secure_reset_{describe("SECCFGR").reset}
 {
   for(auto const& entry : secure_resets)
   {
@@ -223,17 +222,17 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
   for(std::size_t pin = 0; pin < pins; ++pin)
   {
     auto const n    = std::to_string(pin);
-    mode_[pin]      = field("GPIO_MODER", "MODE" + n);
-    type_[pin]      = field("GPIO_OTYPER", "OT" + n);
-    speed_[pin]     = field("GPIO_OSPEEDR", "OSPEED" + n);
-    pull_[pin]      = field("GPIO_PUPDR", "PUPD" + n);
-    alternate_[pin] = field(pin < 8 ? "GPIO_AFRL" : "GPIO_AFRH", "AFSEL" + n);
-    input_[pin]     = field("GPIO_IDR", "ID" + n);
-    output_[pin]    = field("GPIO_ODR", "OD" + n);
-    set_[pin]       = field("GPIO_BSRR", "BS" + n);
-    clear_[pin]     = field("GPIO_BSRR", "BR" + n);
-    brr_[pin]       = field("GPIO_BRR", "BR" + n);
-    lock_[pin]      = field("GPIO_LCKR", "LCK" + n);
+    mode_[pin]      = field("MODER", "MODE" + n);
+    type_[pin]      = field("OTYPER", "OT" + n);
+    speed_[pin]     = field("OSPEEDR", "OSPEED" + n);
+    pull_[pin]      = field("PUPDR", "PUPD" + n);
+    alternate_[pin] = field(pin < 8 ? "AFRL" : "AFRH", "AFSEL" + n);
+    input_[pin]     = field("IDR", "ID" + n);
+    output_[pin]    = field("ODR", "OD" + n);
+    set_[pin]       = field("BSRR", "BS" + n);
+    clear_[pin]     = field("BSRR", "BR" + n);
+    brr_[pin]       = field("BRR", "BR" + n);
+    lock_[pin]      = field("LCKR", "LCK" + n);
   }
   auto const add = [this](field_ref f, std::size_t pin) {
     auto found = std::ranges::find(pin_bits_, f.offset, &decltype(pin_bits_)::value_type::first);
@@ -252,7 +251,7 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
     {
       add((*fields)[pin], pin);
     }
-    add(field("GPIO_HSLVR", "HSLV" + std::to_string(pin)), pin);
+    add(field("HSLVR", "HSLV" + std::to_string(pin)), pin);
   }
   for(auto const& entry : desc.alternates.value_or(std::vector<alternate_desc>{}))
   {

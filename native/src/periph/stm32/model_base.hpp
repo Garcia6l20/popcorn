@@ -304,19 +304,23 @@ protected:
    */
   [[nodiscard]] auto irq(std::string_view name) const -> irq_line&
   {
-    auto const named = std::ranges::find(ctx_.part.irqs, name, &irq_desc::name);
-    if(named != ctx_.part.irqs.end())
+    if(auto* const line = find_irq(name))
     {
-      auto const sources = irq_sources(ctx_.part, desc_, ctx_.trustzone);
-      auto const at      = std::ranges::find(sources, named->number);
-      if(at != sources.end())
-      {
-        return ctx_.irqs[static_cast<std::size_t>(at - sources.begin())];
-      }
+      return *line;
     }
     throw config_error(
         ctx_.part.part, 0, std::format("peripherals.{}.irqs.{}", desc_.name, name),
         std::format("an IRQ the {} model raises", model_name_));
+  }
+
+  /**
+   * @brief Whether the part names an IRQ of that name that the peripheral raises, so irq()
+   *        would find it.
+   * @param name IRQ name as the description spells it.
+   */
+  [[nodiscard]] auto has_irq(std::string_view name) const -> bool
+  {
+    return find_irq(name) != nullptr;
   }
 
   /**
@@ -337,6 +341,21 @@ protected:
   State state_{};
 
 private:
+  [[nodiscard]] auto find_irq(std::string_view name) const -> irq_line*
+  {
+    auto const named = std::ranges::find(ctx_.part.irqs, name, &irq_desc::name);
+    if(named != ctx_.part.irqs.end())
+    {
+      auto const sources = irq_sources(ctx_.part, desc_, ctx_.trustzone);
+      auto const at      = std::ranges::find(sources, named->number);
+      if(at != sources.end())
+      {
+        return &ctx_.irqs[static_cast<std::size_t>(at - sources.begin())];
+      }
+    }
+    return nullptr;
+  }
+
   [[nodiscard]] static auto word_of(register_desc const& found) noexcept -> std::uint32_t
   {
     return found.offset & ~3u;

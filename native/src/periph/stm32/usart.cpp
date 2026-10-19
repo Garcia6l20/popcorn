@@ -487,7 +487,7 @@ private:
   std::optional<field_ref>                     retransmissions_;
 };
 
-auto usart_writes(bool low_power) -> std::span<write_entry<usart> const>
+auto usart_writes(bool plain_names) -> std::span<write_entry<usart> const>
 {
   static constexpr std::array<write_entry<usart>, 10> with_views{
       {
@@ -517,7 +517,18 @@ auto usart_writes(bool low_power) -> std::span<write_entry<usart> const>
        {"PRESC", &usart::control_written},
        }
   };
-  return low_power ? std::span<write_entry<usart> const>{plain} : with_views;
+  return plain_names ? std::span<write_entry<usart> const>{plain} : with_views;
+}
+
+auto line_name(part_description const& part, peripheral_desc const& desc) -> std::string
+{
+  auto own = desc.name + "_IRQn";
+  if(desc.irqs.size() != 1 or std::ranges::contains(part.irqs, own, &irq_desc::name))
+  {
+    return own;
+  }
+  auto const only = std::ranges::find(part.irqs, desc.irqs.front(), &irq_desc::number);
+  return only != part.irqs.end() ? only->name : own;
 }
 
 auto lower(std::string_view name) -> std::string
@@ -532,8 +543,9 @@ usart::usart(
     model_context&                 ctx,
     peripheral_desc const&         desc,
     std::shared_ptr<uart_endpoint> far_end)
-    : dispatch_model{ctx, desc, desc.ip, usart_writes(desc.ip == "LPUART")}, regs_{ctx.regs},
-      far_end_{std::move(far_end)}, low_power_{desc.ip == "LPUART"},
+    : dispatch_model{
+          ctx, desc, desc.ip, usart_writes(find_register(desc, "CR1_enabled") == nullptr)},
+      regs_{ctx.regs}, far_end_{std::move(far_end)}, low_power_{desc.ip == "LPUART"},
       cr1_{name_of("CR1_enabled", "CR1")}, isr_{name_of("ISR_enabled", "ISR")}, rdr_{reg("RDR")},
       tdr_{reg("TDR")}, icr_{reg("ICR")}, enable_{field(cr1_, "UE")}, transmit_{field(cr1_, "TE")},
       receive_{field(cr1_, "RE")}, fifo_enable_{field(cr1_, "FIFOEN")},
@@ -569,7 +581,7 @@ usart::usart(
               &field_desc::name)
               ? std::optional{field("CR3", "ONEBIT")}
               : std::nullopt},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")}
+      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(line_name(ctx.part, desc))}
 {
   for(auto const& clear : describe("ICR").fields)
   {
