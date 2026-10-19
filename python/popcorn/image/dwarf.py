@@ -467,6 +467,8 @@ def _decl_file_path(cu: CompileUnit, comp_dir: str, file_idx: int | None) -> str
         dir_index = cast(int, entry.dir_index)
         if dir_index == 0:
             return _join(comp_dir, "", name)
+        if dir_index > len(include_dirs):
+            return None
         directory = cast(bytes, include_dirs[dir_index - 1]).decode("utf-8", "surrogateescape")
         return _join(comp_dir, directory, name)
 
