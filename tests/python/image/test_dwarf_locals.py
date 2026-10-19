@@ -2,7 +2,9 @@
 
 Expected locations and scopes were read with `arm-none-eabi-readelf --debug-dump=info,loc,Ranges`
 on the committed image-lto.elf and image-types.elf. data/shared_lists.s builds a unit whose
-locals and lexical blocks all share one location list or one range list.
+locals and lexical blocks all share one location list or one range list, frame_base_units.s
+many units whose frame bases share one location list, and local_forms.s a block bounded by
+indexed addresses holding a block-scope extern declaration.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ from popcorn.image import DebugInfo, DebugInfoError, Decl, Local, LocationRange,
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PREBUILT = REPO_ROOT / "tests" / "firmware" / "image" / "prebuilt"
-SHARED_LISTS = Path(__file__).resolve().parent / "data" / "shared_lists.s"
+DATA = Path(__file__).resolve().parent / "data"
+NO_ASSEMBLER = shutil.which("arm-none-eabi-as") is None
 MAIN_SOURCE = "tests/firmware/image/lto_main.c"
 PEER_SOURCE = "tests/firmware/image/lto_peer.c"
 DW_OP_CALL_FRAME_CFA = b"\x9c"
@@ -36,6 +39,13 @@ def lto() -> DebugInfo:
 @pytest.fixture(scope="module")
 def types() -> DebugInfo:
     return load_debug_info(PREBUILT / "image-types.elf")
+
+
+def _assemble(tmp_path: Path, source: str, symbols: dict[str, int]) -> Path:
+    elf = tmp_path / f"{source}.o"
+    defsyms = [arg for name, value in symbols.items() for arg in ("--defsym", f"{name}={value}")]
+    subprocess.run(["arm-none-eabi-as", *defsyms, "-o", str(elf), str(DATA / source)], check=True)
+    return elf
 
 
 def _locals(info: DebugInfo, function: str) -> dict[str, list[Local]]:
@@ -128,7 +138,7 @@ def test_location_valid_at_no_pc_is_none(types: DebugInfo) -> None:
     assert inlined.scopes == ((0x08000058, 0x0800005C),)
 
 
-@pytest.mark.skipif(shutil.which("arm-none-eabi-as") is None, reason="no arm-none-eabi-as")
+@pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
 @pytest.mark.parametrize(
     ("locals_", "blocks", "entries", "ranges"),
     [(3000, 0, 3000, 1), (0, 3000, 1, 3000)],
@@ -137,10 +147,8 @@ def test_location_valid_at_no_pc_is_none(types: DebugInfo) -> None:
 def test_shared_lists_are_read_once(
     tmp_path: Path, locals_: int, blocks: int, entries: int, ranges: int
 ) -> None:
-    elf = tmp_path / "shared.o"
     symbols = {"LOCALS": locals_, "BLOCKS": blocks, "ENTRIES": entries, "RANGES": ranges}
-    defsyms = [arg for name, value in symbols.items() for arg in ("--defsym", f"{name}={value}")]
-    subprocess.run(["arm-none-eabi-as", *defsyms, "-o", str(elf), str(SHARED_LISTS)], check=True)
+    elf = _assemble(tmp_path, "shared_lists.s", symbols)
     started = time.perf_counter()
     found = load_debug_info(elf).functions["f"].locals
     elapsed = time.perf_counter() - started
@@ -150,6 +158,40 @@ def test_shared_lists_are_read_once(
     assert len(first.location) == entries
     assert len(first.scopes) == (ranges if blocks else 0)
     assert elapsed < 1.0
+
+
+@pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
+def test_frame_base_location_lists_are_not_parsed(tmp_path: Path) -> None:
+    elf = _assemble(tmp_path, "frame_base_units.s", {"UNITS": 400, "ENTRIES": 3000})
+    started = time.perf_counter()
+    info = load_debug_info(elf)
+    elapsed = time.perf_counter() - started
+    assert len(info.units) == 400
+    assert info.functions["f"].frame_base is None
+    assert elapsed < 1.0
+
+
+@pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
+def test_block_scope_extern_is_not_a_local(tmp_path: Path) -> None:
+    function = load_debug_info(_assemble(tmp_path, "local_forms.s", {})).functions["f"]
+    assert [local.name for local in function.locals] == ["kept"]
+
+
+@pytest.mark.skipif(NO_ASSEMBLER, reason="no arm-none-eabi-as")
+def test_block_bounds_from_indexed_addresses(tmp_path: Path) -> None:
+    function = load_debug_info(_assemble(tmp_path, "local_forms.s", {})).functions["f"]
+    (kept,) = function.locals
+    assert kept.scopes == ((0x08000010, 0x08000020),)
+    assert kept.location == b"\x50"
+
+
+def test_dwarf4_location_list() -> None:
+    info = load_debug_info(PREBUILT / "image-dw4.elf")
+    (x,) = info.functions["scale"].locals
+    assert _spans(x.location) == [
+        (0x08000008, 0x0800000A, b"\x50"),
+        (0x0800000A, 0x0800000C, b"\xf3\x03\xf5\x00\x25\xf7\x2c\xf7\x00\x9f"),
+    ]
 
 
 def _fresh_copy(tmp_path: Path) -> Path:

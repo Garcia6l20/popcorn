@@ -193,9 +193,11 @@ class Local:
     function inlined into it.
 
     `location` is a DWARF expression valid wherever the local is in scope, a location list, or
-    None when the compiler kept no location. `scopes` are the pc ranges of the innermost
-    lexical block or inlined subroutine holding the local, empty when that is the function.
-    `inlined` names the inlined function the local belongs to, None for the function's own.
+    None when the compiler kept no location, a local folded to a DW_AT_const_value included.
+    A location list leaves out DW_LLE_default_location entries. `scopes` are the pc ranges of
+    the innermost lexical block or inlined subroutine holding the local, empty when that is
+    the function. `inlined` names the inlined function the local belongs to, None for the
+    function's own.
     """
 
     name: str
@@ -212,7 +214,7 @@ class Function:
     """A module-scope DW_TAG_subprogram; `address` is None for an inline-only function.
 
     `frame_base` is the DW_AT_frame_base expression of the DIE with code, None for a function
-    without one.
+    without one or with a location list as frame base, which is never parsed.
     """
 
     name: str
@@ -228,8 +230,14 @@ class Function:
     def locals(self) -> tuple[Local, ...]:
         """The locals of the body of the DIE with code, empty for a function without one.
 
-        Read on first access from the ELF `load_debug_info` read, reopened once per load and
-        kept in memory. Equality, hashing, repr and pickling never read them.
+        A local with no name along its origin chain and a block-scope `extern` declaration
+        are left out, so the parameters here need not line up with `params`.
+
+        Read on first access from the ELF `load_debug_info` read, reopened once per load. Its
+        DWARF and every DIE read stay in memory while any Function of that load lives, about 15
+        times the ELF size once every function's locals were read: on a 7.9 MB LTO ELF, 12 MB
+        after the load, 18 MB after one function's locals, 119 MB after all of them.
+        Equality, hashing, repr and pickling never read them.
 
         Raises:
             DebugInfoError: The ELF changed or vanished since it was loaded, or its DWARF is
@@ -797,7 +805,7 @@ def _pc_ranges(unit: _Unit, die: DIE) -> _Ranges:
         high = high_attr.value
         if isinstance(high, bool) or not isinstance(high, int):
             return ()
-        end = high if high_attr.form in ("DW_FORM_addr", "DW_FORM_addrx") else low + high
+        end = high if high_attr.form.startswith("DW_FORM_addr") else low + high
         return ((low, end),) if end > low else ()
     attr = die.attributes.get("DW_AT_ranges")
     if attr is None or isinstance(attr.value, bool) or not isinstance(attr.value, int):
@@ -866,8 +874,13 @@ def _build_local(unit: _Unit, die: DIE, scopes: _Ranges, inlined: str | None) ->
 
 
 def _frame_base(unit: _Unit, die: DIE) -> bytes | None:
-    location = _location(unit, die, "DW_AT_frame_base")
-    return location if isinstance(location, bytes) else None
+    attr = die.attributes.get("DW_AT_frame_base")
+    if attr is None:
+        return None
+    version = cast(int, unit.cu.header.version)
+    if attr.form == "DW_FORM_exprloc" or (version < 4 and attr.form.startswith("DW_FORM_block")):
+        return _expr(attr.value)
+    return None
 
 
 def _collect_locals(unit: _Unit, die: DIE) -> tuple[Local, ...]:
@@ -881,6 +894,8 @@ def _collect_locals(unit: _Unit, die: DIE) -> tuple[Local, ...]:
         if child.offset in seen:
             continue
         seen.add(child.offset)
+        if child.attributes.get("DW_AT_declaration") is not None:
+            continue
         if child.tag in ("DW_TAG_variable", "DW_TAG_formal_parameter"):
             local = _build_local(unit, child, scopes, inlined)
             if local is not None:
