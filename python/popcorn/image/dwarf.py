@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import os
 import posixpath
 import struct
 import threading
@@ -948,24 +949,31 @@ def _build_function(unit: _Unit, source: _LocalsSource, die: DIE) -> Function | 
     )
 
 
+type _FileIdentity = tuple[int, int, int, int]
+
+
+def _file_identity(descriptor: int) -> _FileIdentity:
+    stat = os.fstat(descriptor)
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
 class _LocalsSource:
     """The ELF one load read, reopened on the first access to a function's locals. Its DWARF
     sections then stay in memory, each unit's lists are parsed once and each function's locals
     are kept. A lock serialises the reads, pyelftools streams are not thread-safe."""
 
-    __slots__ = ("_collected", "_dwarf", "_lock", "_mtime_ns", "_path", "_size", "_units")
+    __slots__ = ("_collected", "_dwarf", "_identity", "_lock", "_path", "_units")
 
-    def __init__(self, path: Path, mtime_ns: int, size: int) -> None:
+    def __init__(self, path: Path, identity: _FileIdentity) -> None:
         self._path = path
-        self._mtime_ns = mtime_ns
-        self._size = size
+        self._identity = identity
         self._lock = threading.Lock()
         self._dwarf: DWARFInfo | None = None
         self._units: dict[int, _Unit] = {}
         self._collected: dict[int, tuple[Local, ...]] = {}
 
-    def __reduce__(self) -> tuple[type[_LocalsSource], tuple[Path, int, int]]:
-        return (_LocalsSource, (self._path, self._mtime_ns, self._size))
+    def __reduce__(self) -> tuple[type[_LocalsSource], tuple[Path, _FileIdentity]]:
+        return (_LocalsSource, (self._path, self._identity))
 
     def locals_at(self, offset: int) -> tuple[Local, ...]:
         with self._lock:
@@ -985,10 +993,9 @@ class _LocalsSource:
 
     def _collect(self, offset: int) -> tuple[Local, ...]:
         if self._dwarf is None:
-            stat = self._path.stat()
-            if (stat.st_mtime_ns, stat.st_size) != (self._mtime_ns, self._size):
-                raise DebugInfoError(f"{self._path}: changed since its debug info was read")
             with self._path.open("rb") as stream:
+                if _file_identity(stream.fileno()) != self._identity:
+                    raise DebugInfoError(f"{self._path}: changed since its debug info was read")
                 self._dwarf = ELFFile(stream).get_dwarf_info()
         die = self._dwarf.get_DIE_from_refaddr(offset)
         cu = die.cu
@@ -1094,10 +1101,10 @@ _DECODE_ERRORS: tuple[type[Exception], ...] = (
 )
 
 
-def _load(path: Path, mtime_ns: int, size: int) -> DebugInfo:
-    source = _LocalsSource(path, mtime_ns, size)
+def _load(path: Path) -> DebugInfo:
     try:
         with path.open("rb") as stream:
+            source = _LocalsSource(path, _file_identity(stream.fileno()))
             elf = ELFFile(stream)
             dwarf_info = elf.get_dwarf_info()
 
@@ -1145,7 +1152,7 @@ def _load(path: Path, mtime_ns: int, size: int) -> DebugInfo:
 
 @functools.lru_cache(maxsize=4)
 def _load_cached(resolved: str, mtime_ns: int, size: int) -> DebugInfo:
-    return _load(Path(resolved), mtime_ns, size)
+    return _load(Path(resolved))
 
 
 def load_debug_info(elf: Path) -> DebugInfo:

@@ -10,6 +10,7 @@ indexed addresses holding a block-scope extern declaration.
 from __future__ import annotations
 
 import gc
+import os
 import pickle
 import shutil
 import subprocess
@@ -243,11 +244,40 @@ def test_locals_read_leaves_no_file_open(tmp_path: Path) -> None:
     assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
 
 
-def test_locals_of_a_changed_file_raise(tmp_path: Path) -> None:
+def test_locals_of_a_file_grown_in_place_raise(tmp_path: Path) -> None:
     elf = _fresh_copy(tmp_path)
     function = load_debug_info(elf).functions["Reset_Handler"]
+    loaded = elf.stat()
     with elf.open("ab") as stream:
         stream.write(b"\0")
+    os.utime(elf, ns=(loaded.st_atime_ns, loaded.st_mtime_ns))
+    assert elf.stat().st_mtime_ns == loaded.st_mtime_ns
+    with pytest.raises(DebugInfoError, match="changed since"):
+        _ = function.locals
+
+
+def test_locals_of_a_file_replaced_by_rename_raise(tmp_path: Path) -> None:
+    elf = _fresh_copy(tmp_path)
+    function = load_debug_info(elf).functions["Reset_Handler"]
+    loaded = elf.stat()
+    replacement = tmp_path / "replacement.elf"
+    shutil.copyfile(elf, replacement)
+    os.utime(replacement, ns=(loaded.st_atime_ns, loaded.st_mtime_ns))
+    replacement.replace(elf)
+    assert elf.stat().st_size == loaded.st_size
+    assert elf.stat().st_mtime_ns == loaded.st_mtime_ns
+    with pytest.raises(DebugInfoError, match="changed since"):
+        _ = function.locals
+
+
+def test_locals_of_a_same_size_rewrite_raise(tmp_path: Path) -> None:
+    elf = _fresh_copy(tmp_path)
+    function = load_debug_info(elf).functions["Reset_Handler"]
+    loaded = elf.stat()
+    elf.write_bytes(elf.read_bytes())
+    os.utime(elf, ns=(loaded.st_atime_ns, loaded.st_mtime_ns + 1_000_000_000))
+    assert elf.stat().st_ino == loaded.st_ino
+    assert elf.stat().st_size == loaded.st_size
     with pytest.raises(DebugInfoError, match="changed since"):
         _ = function.locals
 
