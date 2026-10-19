@@ -25,10 +25,11 @@ def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> PartD
         svd: SVD file to build from instead of the one of the local ST install.
 
     Raises:
-        ConfigError: The part is unknown, with close matches, or `POPCORN_STM32_BUILD` is set
-            to anything but `local`.
-        MissingInput: The part is not shipped and ST's files are missing. The message names
-            the shipped parts and the missing path.
+        ConfigError: The part is unknown, with close matches, `POPCORN_STM32_BUILD` is set to
+            anything but `local`, or a shipped or description-directory file is not a valid
+            description.
+        MissingInput: ST's files are missing for a build, for an unshipped part or when the
+            shipped one is skipped. For an unshipped part the message names the shipped parts.
     """
     from popcorn._part_description import load_description
     from popcorn.stm32.description import description_path

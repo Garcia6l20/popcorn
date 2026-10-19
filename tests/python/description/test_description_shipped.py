@@ -221,3 +221,23 @@ def test_a_broken_shipped_file_is_refused(shipped_dir: Path, data: bytes, expect
     with pytest.raises(DescriptionError) as excinfo:
         description_path(NAME)
     assert excinfo.value.expected == expected
+
+
+def test_a_read_only_cache_still_serves_its_file(
+    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = description_path(NAME)
+    calls: list[int] = []
+    real: Callable[..., bytes] = _shipped.bounded_xz
+
+    def counting(data: bytes, limit: int, *, file: str) -> bytes:
+        calls.append(len(data))
+        return real(data, limit, file=file)
+
+    def read_only(path: object, times: object = None) -> None:
+        raise PermissionError("read-only cache")
+
+    monkeypatch.setattr(_shipped, "bounded_xz", counting)
+    monkeypatch.setattr("popcorn.stm32.description._shipped.os.utime", read_only)
+    assert description_path(NAME) == first
+    assert calls == []

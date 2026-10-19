@@ -78,6 +78,12 @@ def _cmd_golden(args: argparse.Namespace) -> int:
 
 
 def _cmd_ship(args: argparse.Namespace) -> int:
+    if args.out is None and not args.check:
+        print(
+            "ship: --out is required to write, the package data directory of the source tree",
+            file=sys.stderr,
+        )
+        return 1
     try:
         name, packed = build_shipped(args.part, pin_data=Path(args.pin_data), core=args.core)
     except DescriptionError as exc:
@@ -141,7 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ship.add_argument("--core")
     ship.add_argument("--pin-data", required=True)
     ship.add_argument("--check", action="store_true")
-    ship.add_argument("--out", help="directory of the .json.xz, default the package data directory")
+    ship.add_argument("--out", help="directory to write the .json.xz into, required unless --check")
     ship.set_defaults(func=_cmd_ship)
 
     args = parser.parse_args(argv)

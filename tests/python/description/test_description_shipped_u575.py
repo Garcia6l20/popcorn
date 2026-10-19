@@ -10,7 +10,7 @@ from typing import cast
 import popcorn
 import pytest
 from popcorn.stm32.description.__main__ import main
-from popcorn.stm32.description._errors import DescriptionError
+from popcorn.stm32.description._errors import MissingSource
 from popcorn.stm32.description._shipped import (
     SHIPPED_DIR,
     build_shipped,
@@ -49,7 +49,7 @@ def test_the_shipped_description_matches_a_fresh_ship_build(name: str) -> None:
     part, _, core = name.partition("-")
     try:
         sources = pin_data_sources(part, pin_data=pin_data, core=core or None)
-    except DescriptionError as exc:
+    except MissingSource as exc:
         pytest.skip(f"{name} sources not found: {exc}")
     local = compute_source_digests(sources)
     shipped_sources = _sources_of(path)
@@ -68,7 +68,7 @@ def test_ship_refuses_a_part_without_a_cmsis_header(
     pin_data = _pin_data()
     try:
         svd = pin_data_sources("STM32U575QGIx", pin_data=pin_data).svd
-    except DescriptionError as exc:
+    except MissingSource as exc:
         pytest.skip(f"STM32U575QGIx sources not found: {exc}")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("POPCORN_STM32_SVD_DIRS", str(svd.parent))
@@ -80,3 +80,11 @@ def test_ship_refuses_a_part_without_a_cmsis_header(
     assert status == 1
     assert "cmsis_header" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_ship_refuses_to_write_without_out(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status = main(["ship", "STM32U575QGIx", "--pin-data", str(tmp_path / "absent")])
+    assert status == 1
+    assert "--out is required" in capsys.readouterr().err

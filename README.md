@@ -264,8 +264,8 @@ needed only for an unshipped part, or to rebuild a shipped one from your own ST 
      or `POPCORN_CMSIS_DEVICE_DIRS`, for the CMSIS IRQ names
 
 `POPCORN_STM32_BUILD` accepts `local` only, any other value is refused. An unshipped part with
-no ST install raises an error naming the shipped parts and the missing path, which the pytest
-plugin reports as a skip. To see the ST files a build would use:
+no ST install raises an error naming the shipped parts and the missing path, which a
+`MachineDescription` with `missing="skip"` turns into a skip. To see the ST files a build would use:
 
 ```sh
 uv run python -m popcorn.stm32.description sources STM32U575QGIx

@@ -70,7 +70,8 @@ def shipped_description(
 
     Decompressed once into `<cache>/shipped/<name>-<sha16>.json`, sha16 the first 16 hex digits
     of the SHA-256 of the `.json.xz`. The cache is shared by every popcorn of the user, so each
-    xz version keeps its own file: a hit refreshes its mtime, and a write removes the files of
+    xz version keeps its own file: a hit refreshes its mtime when the cache is writable, and a
+    write removes the files of
     the same name and another version unused for STALE_SECONDS. Bound: one file per shipped
     name per xz version used in the last 7 days."""
     name = _match(part, core, shipped_names(), file=str(SHIPPED_DIR))
@@ -85,6 +86,10 @@ def shipped_description(
         os.utime(path)
     except FileNotFoundError:
         pass
+    except OSError:
+        if path.is_file():
+            return path
+        raise
     else:
         return path
     data = bounded_xz(packed, MAX_SHIPPED_BYTES, file=str(packed_path))

@@ -127,7 +127,7 @@ python/popcorn/stm32/data/STM32U575QGIx.json.xz:
   stm32u575xx.h, STM32Cube_FW_U5 V1.8.0, Copyright (c) 2021 STMicroelectronics
     License: Apache-2.0, see LICENSES/Apache-2.0.txt.
   mcu/STM32U575QGIx.xml and mcu/IP/GPIO-STM32U5x_gpio_v1_0_Modes.xml,
-  Copyright (c) 2020 STMicroelectronics
+  Copyright (c) 2020, 2025 STMicroelectronics
     https://github.com/STMicroelectronics/STM32_open_pin_data, commit
     7d1f1514ed5583ec5007ad91236b4e1d377295b1
     License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
