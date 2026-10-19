@@ -24,7 +24,7 @@ _, image_types = add_firmware("image", "image-types", types_sources)
 if image_types is not None:
     image_types.private.compile_flags.extend(["-gdwarf-5", "-Wa,--gdwarf-5"])
 
-lto_sources = [here / "lto_main.c", here / "lto_peer.c"]
+lto_sources = [here / "lto_main.c", here / "lto_peer.c", here / "lto_memcpy.c"]
 _, image_lto = add_firmware("image", "image-lto", lto_sources)
 if image_lto is not None:
     image_lto.private.compile_flags.append("-flto")

@@ -85,7 +85,7 @@ def test_global_wins_over_a_static_of_the_same_name(info: DebugInfo) -> None:
 
 def test_function_decl_read_from_its_origin_unit(info: DebugInfo) -> None:
     function = info.functions["Reset_Handler"]
-    assert function.address == 0x08000008
+    assert function.address == 0x0800001A
     assert function.decl == Decl(file=MAIN_SOURCE, line=11)
 
 
@@ -98,3 +98,9 @@ def test_inlined_function_read_from_its_definition_not_a_prototype(info: DebugIn
     returns = info.resolve(function.returns)
     assert isinstance(returns, Typedef)
     assert returns.name == "uint32_t"
+
+
+def test_builtin_declared_at_line_zero_has_no_decl(info: DebugInfo) -> None:
+    function = info.functions["__builtin_memcpy"]
+    assert function.address is None
+    assert function.decl is None

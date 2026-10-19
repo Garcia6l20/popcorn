@@ -632,7 +632,7 @@ def _chain_decl(chain: list[DIE]) -> Decl | None:
         None,
     )
     file_link = next((link for link in chain if "DW_AT_decl_file" in link.attributes), None)
-    if line is None or file_link is None:
+    if not line or file_link is None:
         return None
     cu = file_link.cu
     if not isinstance(cu, CompileUnit):
