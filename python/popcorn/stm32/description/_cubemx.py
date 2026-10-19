@@ -10,7 +10,8 @@ from xml.etree.ElementTree import Element
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import AlternateDesc, RegionAccess, RegionDesc, RegionKind
 
-_MCU_NS = "http://mcd.rou.st.com/modules.php?name=mcu"
+_MCU_NAMESPACES = ("http://mcd.rou.st.com/modules.php?name=mcu", "http://dummy.com")
+"""Namespaces of a part or GPIO modes file: CubeMX's db, then ST's STM32_open_pin_data copy."""
 _PIN_RE = re.compile(r"P([A-Z])(\d+)")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
 MAX_GPIO_MODES_BYTES = 8 << 20
@@ -66,19 +67,27 @@ def _text(el: Element, tag: str) -> str | None:
     return text or None
 
 
+def _mcu_namespace(root: Element, key: str, *, file: str, local: str | None = None) -> str:
+    """Namespace URI of @p root, DescriptionError under @p key unless it is one of
+    _MCU_NAMESPACES and, when @p local is given, the root's local name is @p local."""
+    expected = f"namespace {' or '.join(_MCU_NAMESPACES)}"
+    if not root.tag.startswith("{"):
+        raise DescriptionError(file, 0, key, expected)
+    uri, name = root.tag[1:].split("}", 1)
+    if uri not in _MCU_NAMESPACES or (local is not None and name != local):
+        raise DescriptionError(file, 0, key, expected)
+    return uri
+
+
 def read_part(data: bytes, *, file: str) -> DbPart:
     """DbPart of a `db/mcu/<part>.xml` document, DescriptionError when it is malformed or does
-    not carry the CubeMX Mcu namespace."""
+    not carry the Mcu namespace of CubeMX or of ST's STM32_open_pin_data."""
     try:
         root = ET.fromstring(data)
     except ET.ParseError as exc:
         line = exc.position[0] if exc.position else 0
         raise DescriptionError(file, line, "<root>", "valid XML") from exc
-    if not root.tag.startswith("{"):
-        raise DescriptionError(file, 0, "Mcu", f"namespace {_MCU_NS}")
-    uri = root.tag[1:].split("}", 1)[0]
-    if uri != _MCU_NS:
-        raise DescriptionError(file, 0, "Mcu", f"namespace {_MCU_NS}")
+    uri = _mcu_namespace(root, "Mcu", file=file)
 
     def q(tag: str) -> str:
         return f"{{{uri}}}{tag}"
@@ -273,7 +282,8 @@ def read_gpio_alternates(
     part, and of each the signals @p pins gives it, so AF15 `EVENTOUT`, which no MCU file lists,
     never enters the table. Only `GPIO_AF<n>_` selections are read: the STM32F1 modes files remap
     through AFIO and give an empty table. DescriptionError when @p data is larger than
-    MAX_GPIO_MODES_BYTES, malformed, or does not carry the CubeMX Mcu namespace."""
+    MAX_GPIO_MODES_BYTES, malformed, or does not carry the Mcu namespace of CubeMX or of ST's
+    STM32_open_pin_data."""
     if len(data) > MAX_GPIO_MODES_BYTES:
         raise DescriptionError(
             file, 0, "<root>", f"a GPIO modes file of at most {MAX_GPIO_MODES_BYTES} bytes"
@@ -283,11 +293,10 @@ def read_gpio_alternates(
     except ET.ParseError as exc:
         line = exc.position[0] if exc.position else 0
         raise DescriptionError(file, line, "<root>", "valid XML") from exc
-    if root.tag != f"{{{_MCU_NS}}}IP":
-        raise DescriptionError(file, 0, "IP", f"namespace {_MCU_NS}")
+    uri = _mcu_namespace(root, "IP", file=file, local="IP")
 
     def q(tag: str) -> str:
-        return f"{{{_MCU_NS}}}{tag}"
+        return f"{{{uri}}}{tag}"
 
     ports: dict[str, set[tuple[int, int, str]]] = {}
     for pin_el in root.iter(q("GPIO_Pin")):
