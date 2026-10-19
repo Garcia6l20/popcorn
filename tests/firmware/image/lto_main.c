@@ -6,11 +6,14 @@ extern uint32_t _estack;
 
 static int32_t lto_main_count = 7;
 
+static uint16_t lto_shared = 5;
+
 [[noreturn]] void Reset_Handler(void)
 {
   for(;;)
   {
-    lto_main_count += (int32_t)lto_bump((uint32_t)lto_main_count);
+    lto_shared = (uint16_t)(lto_shared + 1);
+    lto_main_count += (int32_t)lto_bump((uint32_t)lto_main_count + lto_shared);
     __asm__ volatile("bkpt #0" : : : "memory");
   }
 }

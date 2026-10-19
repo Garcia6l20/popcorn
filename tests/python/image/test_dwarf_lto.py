@@ -32,8 +32,8 @@ def test_ltrans_unit_holds_the_locations(info: DebugInfo) -> None:
 def test_global_reached_through_origin_and_specification(info: DebugInfo) -> None:
     variable = info.variables["lto_global"]
     assert variable.name == "lto_global"
-    assert variable.address == 0x20000008
-    assert variable.decl == Decl(file=PEER_SOURCE, line=3)
+    assert variable.address == 0x20000014
+    assert variable.decl == Decl(file=PEER_SOURCE, line=5)
     pair = info.resolve(variable.type)
     assert isinstance(pair, StructType)
     assert pair.name == "lto_pair"
@@ -46,7 +46,7 @@ def test_global_reached_through_origin_and_specification(info: DebugInfo) -> Non
 
 def test_static_of_the_main_unit(info: DebugInfo) -> None:
     variable = info.variables["lto_main_count"]
-    assert variable.address == 0x20000000
+    assert variable.address == 0x20000004
     assert variable.decl == Decl(file=MAIN_SOURCE, line=7)
     typedef = info.resolve(variable.type)
     assert isinstance(typedef, Typedef)
@@ -58,8 +58,8 @@ def test_static_of_the_main_unit(info: DebugInfo) -> None:
 
 def test_static_of_the_peer_unit(info: DebugInfo) -> None:
     variable = info.variables["lto_peer_hits"]
-    assert variable.address == 0x20000004
-    assert variable.decl == Decl(file=PEER_SOURCE, line=5)
+    assert variable.address == 0x20000008
+    assert variable.decl == Decl(file=PEER_SOURCE, line=9)
     typedef = info.resolve(variable.type)
     assert isinstance(typedef, Typedef)
     assert typedef.name == "uint8_t"
@@ -68,7 +68,22 @@ def test_static_of_the_peer_unit(info: DebugInfo) -> None:
     assert base.size == 1
 
 
+def test_definition_line_overrides_the_declaration_line(info: DebugInfo) -> None:
+    variable = info.variables["lto_late"]
+    assert variable.address == 0x20000010
+    assert variable.decl == Decl(file=PEER_SOURCE, line=11)
+
+
+def test_global_wins_over_a_static_of_the_same_name(info: DebugInfo) -> None:
+    variable = info.variables["lto_shared"]
+    assert variable.address == 0x2000000C
+    assert variable.decl == Decl(file=PEER_SOURCE, line=7)
+    typedef = info.resolve(variable.type)
+    assert isinstance(typedef, Typedef)
+    assert typedef.name == "uint32_t"
+
+
 def test_function_decl_read_from_its_origin_unit(info: DebugInfo) -> None:
     function = info.functions["Reset_Handler"]
     assert function.address == 0x08000008
-    assert function.decl == Decl(file=MAIN_SOURCE, line=9)
+    assert function.decl == Decl(file=MAIN_SOURCE, line=11)

@@ -626,11 +626,22 @@ def _origin_chain(die: DIE) -> list[DIE]:
     return chain
 
 
-def _unit_decl(die: DIE) -> Decl | None:
-    cu = die.cu
+def _chain_decl(chain: list[DIE]) -> Decl | None:
+    line = next(
+        (found for link in chain if (found := _attr_int(link, "DW_AT_decl_line")) is not None),
+        None,
+    )
+    file_link = next((link for link in chain if "DW_AT_decl_file" in link.attributes), None)
+    if line is None or file_link is None:
+        return None
+    cu = file_link.cu
     if not isinstance(cu, CompileUnit):
         return None
-    return _decl(cu, _attr_str(cu.get_top_DIE(), "DW_AT_comp_dir") or "", die)
+    comp_dir = _attr_str(cu.get_top_DIE(), "DW_AT_comp_dir") or ""
+    path = _decl_file_path(cu, comp_dir, _attr_int(file_link, "DW_AT_decl_file"))
+    if path is None:
+        return None
+    return Decl(file=path, line=line)
 
 
 def _build_variable(die: DIE) -> tuple[str, Variable, bool] | None:
@@ -647,8 +658,7 @@ def _build_variable(die: DIE) -> tuple[str, Variable, bool] | None:
     if name is None or type_id is None:
         return None
     external = any(link.attributes.get("DW_AT_external") is not None for link in chain)
-    decl = next((found for link in chain if (found := _unit_decl(link)) is not None), None)
-    variable = Variable(name=name, address=address, type=type_id, decl=decl)
+    variable = Variable(name=name, address=address, type=type_id, decl=_chain_decl(chain))
     return name, variable, external
 
 
@@ -692,7 +702,8 @@ def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
 
 
 def _build_function(cu: CompileUnit, die: DIE) -> tuple[str, Function] | None:
-    origin_die = _origin_chain(die)[-1]
+    chain = _origin_chain(die)
+    origin_die = chain[-1]
 
     name = _attr_str(origin_die, "DW_AT_name")
     if name is None:
@@ -718,7 +729,7 @@ def _build_function(cu: CompileUnit, die: DIE) -> tuple[str, Function] | None:
         returns=_type_ref(origin_die),
         params=tuple(params),
         variadic=variadic,
-        decl=_unit_decl(origin_die),
+        decl=_chain_decl(chain),
     )
     return name, function
 
