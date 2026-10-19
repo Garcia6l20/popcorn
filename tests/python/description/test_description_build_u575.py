@@ -12,6 +12,7 @@ from popcorn.stm32.description._builder import (
     build_description,
     resolve_ip,
 )
+from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
     AlternateDesc,
@@ -133,6 +134,14 @@ def test_build_u575_from_open_pin_data_namespaced_copies_has_the_same_content(
         return data
 
     assert content(dump_json(opened)) == content(dump_json(local))
+
+
+def test_a_build_with_neither_rzone_nor_facts_is_a_description_error(
+    u575_sources: Sources,
+) -> None:
+    with pytest.raises(DescriptionError) as excinfo:
+        build_description(replace(u575_sources, rzone=None))
+    assert excinfo.value.key == "rzone"
 
 
 def test_build_u575_adc12_ip_avoids_collision(u575_sources: Sources) -> None:

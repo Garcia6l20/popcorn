@@ -10,11 +10,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from popcorn._errors import absent
-from popcorn.stm32.description._cubemx import gpio_modes_file_name, read_part, rzone_file_name
+from popcorn.stm32.description._cubemx import (
+    DbPart,
+    gpio_modes_file_name,
+    read_part,
+    rzone_file_name,
+)
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._patches import load_patches
 
 _PATCHES_DIR = Path(__file__).parent / "patches"
+_RZONE_FACTS_DIR = Path(__file__).parent / "rzone"
 
 _CORE_SUFFIX_RE = re.compile(r"_CM[0-9][A-Za-z0-9]*$")
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)$")
@@ -32,10 +38,11 @@ class Sources:
     part: str
     svd: Path
     mcu_db: Path
-    rzone: Path
+    rzone: Path | None
     cmsis_header: Path | None
     patches: list[Path]
     gpio_modes: Path | None = None
+    rzone_facts: Path | None = None
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
@@ -282,13 +289,16 @@ def _sha256_bytes(data: bytes) -> str:
 
 
 def compute_source_digests(sources: Sources) -> dict[str, str]:
-    """SHA-256 hex digest of each of @p sources's files, keyed svd/mcu_db/rzone, cmsis_header and
-    gpio_modes when present, and patch:<file name> per patch file."""
+    """SHA-256 hex digest of each of @p sources's files, keyed svd and mcu_db, rzone, rzone_facts,
+    cmsis_header and gpio_modes when present, and patch:<file name> per patch file."""
     digests = {
         "svd": _sha256_bytes(sources.svd.read_bytes()),
         "mcu_db": _sha256_bytes(sources.mcu_db.read_bytes()),
-        "rzone": _sha256_bytes(sources.rzone.read_bytes()),
     }
+    if sources.rzone is not None:
+        digests["rzone"] = _sha256_bytes(sources.rzone.read_bytes())
+    if sources.rzone_facts is not None:
+        digests["rzone_facts"] = _sha256_bytes(sources.rzone_facts.read_bytes())
     if sources.cmsis_header is not None:
         digests["cmsis_header"] = _sha256_bytes(sources.cmsis_header.read_bytes())
     if sources.gpio_modes is not None:
@@ -298,11 +308,19 @@ def compute_source_digests(sources: Sources) -> dict[str, str]:
     return digests
 
 
+def facts_path(part: DbPart) -> Path:
+    """Path of the packaged rzone facts file standing for the CubeMX rzone of @p part,
+    `rzone/<rzone file stem>.toml`, whether or not it exists."""
+    return _RZONE_FACTS_DIR / f"{Path(rzone_file_name(part)).stem}.toml"
+
+
 def builder_digest() -> str:
-    """SHA-256 over this package's own .py files and patches/*.toml bytes, sorted path order, so
-    a builder edit invalidates the cache without a version bump."""
+    """SHA-256 over this package's own .py files, patches/*.toml and rzone/*.toml bytes, sorted
+    path order, so a builder edit invalidates the cache without a version bump."""
     package_dir = Path(__file__).parent
-    paths = sorted({*package_dir.rglob("*.py"), *_PATCHES_DIR.glob("*.toml")})
+    paths = sorted(
+        {*package_dir.rglob("*.py"), *_PATCHES_DIR.glob("*.toml"), *_RZONE_FACTS_DIR.glob("*.toml")}
+    )
     hasher = hashlib.sha256()
     for path in paths:
         hasher.update(str(path.relative_to(package_dir)).encode())

@@ -2,11 +2,13 @@
 functions."""
 
 import re
+import tomllib
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from xml.etree.ElementTree import Element
 
+from popcorn.stm32.description._binder import from_mapping
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import AlternateDesc, RegionAccess, RegionDesc, RegionKind
 
@@ -40,17 +42,17 @@ class DbPart:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class RzoneProcessor:
-    clock_hz: int
-    core: str
-    core_version: str
     fpu: str | None
     dsp: bool
-    mpu: bool
     tz: bool
     num_interrupts: int
     mpu_regions: int
     sec_mpu_regions: int
     sau_regions: int
+    clock_hz: int | None = None
+    core: str | None = None
+    core_version: str | None = None
+    mpu: bool | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -318,3 +320,80 @@ def read_gpio_alternates(
         port: [AlternateDesc(pin=pin, af=af, signal=signal) for pin, af, signal in sorted(entries)]
         for port, entries in sorted(ports.items())
     }
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _FactsCore:
+    fpu_double: bool
+    dsp: bool
+    trustzone: bool
+    mpu_regions: int = field(metadata={"minimum": 0, "maximum": 16})
+    mpu_regions_secure: int = field(metadata={"minimum": 0, "maximum": 16})
+    sau_regions: int = field(metadata={"minimum": 0, "maximum": 8})
+    num_interrupts: int = field(metadata={"minimum": 0, "maximum": 480})
+    source: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _FactsRegion:
+    name: str
+    start: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    size: int = field(metadata={"minimum": 1, "maximum": 4294967295})
+    kind: RegionKind
+    acc: RegionAccess
+    secure: bool
+    physical: int | None = field(default=None, metadata={"minimum": 0, "maximum": 4294967295})
+    source: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _Facts:
+    format: int = field(metadata={"const": 1})
+    rzone: str
+    core: _FactsCore
+    regions: list[_FactsRegion]
+
+
+def read_rzone_facts(data: bytes, *, file: str) -> Rzone:
+    """Rzone of a popcorn rzone facts TOML document, the manual-sourced stand-in for a CubeMX
+    rzone. `[core]` holds the CoreDesc values, so `mpu_regions` is the nonsecure count: the
+    processor's `mpu_regions` is set to the sum, as an rzone counts them. The processor's `fpu`
+    is `DP_FPU` when `fpu_double` is true and None otherwise, the only reading the builder makes
+    of it. Regions keep their order. DescriptionError naming the key when a value is missing, of
+    the wrong type or out of range, or a `source` is empty."""
+    try:
+        raw = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        line = exc.lineno if isinstance(exc, tomllib.TOMLDecodeError) else 0
+        raise DescriptionError(file, line or 0, "<root>", "valid UTF-8 TOML") from exc
+    facts = from_mapping(_Facts, raw, file=file)
+    if not facts.core.source.strip():
+        raise DescriptionError(file, 0, "core.source", "a non-empty source")
+    for index, region in enumerate(facts.regions):
+        if not region.source.strip():
+            raise DescriptionError(file, 0, f"regions[{index}].source", "a non-empty source")
+    core = facts.core
+    processor = RzoneProcessor(
+        fpu="DP_FPU" if core.fpu_double else None,
+        dsp=core.dsp,
+        tz=core.trustzone,
+        num_interrupts=core.num_interrupts,
+        mpu_regions=core.mpu_regions + core.mpu_regions_secure,
+        sec_mpu_regions=core.mpu_regions_secure,
+        sau_regions=core.sau_regions,
+    )
+    regions = [
+        RegionDesc(
+            name=region.name,
+            start=region.start,
+            size=region.size,
+            kind=region.kind,
+            acc=RegionAccess(
+                read=region.acc.read, write=region.acc.write, execute=region.acc.execute
+            ),
+            secure=region.secure,
+            physical=region.physical,
+        )
+        for region in facts.regions
+    ]
+    return Rzone(processor=processor, regions=regions)

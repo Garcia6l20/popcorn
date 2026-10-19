@@ -553,6 +553,7 @@ def test_u575_alias_rule_sets_98_peripherals(
     )
     db_ips = {ip.instance: ip for ip in part.ips}
     target = target_from_svd(device, db_ips)
+    assert u575_sources.rzone is not None
     target.regions = read_rzone(
         u575_sources.rzone.read_bytes(), file=str(u575_sources.rzone)
     ).regions

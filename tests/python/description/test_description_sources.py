@@ -2,10 +2,14 @@ from pathlib import Path
 
 import pytest
 from popcorn import MissingInput
+from popcorn.stm32.description._cubemx import read_part
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._sources import (
     SearchPaths,
+    Sources,
+    compute_source_digests,
     default_svd_dirs,
+    facts_path,
     find_sources,
     resolve_part,
     resolve_svd_stem,
@@ -104,7 +108,9 @@ def test_find_sources_real_u575(st_svd_u575: Path, st_cubemx_db: Path) -> None:
     assert sources.part == "STM32U575QGIx"
     assert sources.svd == st_svd_u575
     assert sources.mcu_db == st_cubemx_db / "mcu" / "STM32U575QGIx.xml"
+    assert sources.rzone is not None
     assert sources.rzone.name == "STM32_DIE482_786_1024.xml"
+    assert sources.rzone_facts is None
     assert sources.cmsis_header is not None
     assert sources.cmsis_header.name == "stm32u575xx.h"
     assert len(sources.patches) == 2
@@ -162,3 +168,38 @@ def test_an_st_root_without_tools_names_the_tools_it_lacks(
     with pytest.raises(MissingInput) as caught:
         find_sources("STM32U575QGIx", cubemx_db=st_cubemx_db)
     assert caught.value.path == tmp_path / "st" / "stm32cubeclt_*"
+
+
+def test_facts_path_follows_the_rzone_file_name() -> None:
+    part = read_part(
+        (DATA_DIR / "db" / "mcu" / "STM32T001ABCx.xml").read_bytes(), file="STM32T001ABCx.xml"
+    )
+    path = facts_path(part)
+    assert path.name == "STM32_DIE000_16_64.toml"
+    assert path.parent.name == "rzone"
+    assert path.parent.parent.name == "description"
+
+
+def test_source_digests_key_the_rzone_or_the_facts_file(tmp_path: Path) -> None:
+    files = {name: tmp_path / name for name in ("a.svd", "part.xml", "rzone.xml", "facts.toml")}
+    for name, path in files.items():
+        path.write_text(name)
+    local = Sources(
+        part="P",
+        svd=files["a.svd"],
+        mcu_db=files["part.xml"],
+        rzone=files["rzone.xml"],
+        cmsis_header=None,
+        patches=[],
+    )
+    shipped = Sources(
+        part="P",
+        svd=files["a.svd"],
+        mcu_db=files["part.xml"],
+        rzone=None,
+        cmsis_header=None,
+        patches=[],
+        rzone_facts=files["facts.toml"],
+    )
+    assert set(compute_source_digests(local)) == {"svd", "mcu_db", "rzone"}
+    assert set(compute_source_digests(shipped)) == {"svd", "mcu_db", "rzone_facts"}
