@@ -391,7 +391,7 @@ def _decl_file_path(cu: CompileUnit, comp_dir: str, file_idx: int | None) -> str
     if line_program is None:
         return None
     header = line_program.header
-    version = cast(int, cu.header.version)
+    version = cast(int, header["version"])
     file_entries = header["file_entry"]
     include_dirs = header["include_directory"]
 
