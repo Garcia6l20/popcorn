@@ -177,6 +177,8 @@ slow = await machine_factory.booted(i2c_description, config="slow-eeprom")
 `i2c_description` is a plain `pytest.fixture` of the conftest that returns the description, as
 `spi_mock_description` does in `spi_mock`.
 
+The examples use the shipped `STM32U575QGIx` description and need no ST tools.
+
 Run one example from the repository root:
 
 ```sh

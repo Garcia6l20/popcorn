@@ -239,6 +239,38 @@ git clone --recurse-submodules <repository-url>
 git submodule update --init
 ```
 
+### STM32 parts
+
+`popcorn.stm32.mcu(part)` returns the description of an STM32 part. Shipped parts need no ST
+tool: popcorn ships `STM32U575QGIx`, decompressed on first use into
+`$XDG_CACHE_HOME/popcorn/mcu/shipped`, `~/.cache` when the variable is unset. ST's tools are
+needed only for an unshipped part, or to rebuild a shipped one from your own ST install.
+
+`mcu()` takes the first of:
+
+1. `<RefName>.json`, or `<RefName>-<core>.json` for a multi-core part, in a directory of
+   `POPCORN_STM32_DESCRIPTION_DIRS`, a `:`-separated list searched in order. The part is matched
+   as in the CubeMX db: exact name first, then the `x` positions of the RefName as wildcards. A
+   file found here wins over every other source, an explicit `svd=` included.
+2. The shipped description, unless `svd=` is given or `POPCORN_STM32_BUILD=local` is set. With
+   it, a local CubeMX install is not read for a shipped part.
+3. A description built from ST's files on first use and cached under
+   `$XDG_CACHE_HOME/popcorn/mcu`:
+   - the CubeMX db, `~/STM32CubeMX/db` or `POPCORN_CUBEMX_DB`, for the part file, its memory
+     file and its GPIO modes file
+   - the SVD, from STM32CubeCLT or STM32CubeIDE under `~/st`, or `POPCORN_STM32_SVD_DIRS`, a
+     `:`-separated list
+   - optional, the CMSIS device header, from `~/STM32Cube/Repository/STM32Cube_FW_<family>_V*`
+     or `POPCORN_CMSIS_DEVICE_DIRS`, for the CMSIS IRQ names
+
+`POPCORN_STM32_BUILD` accepts `local` only, any other value is refused. An unshipped part with
+no ST install raises an error naming the shipped parts and the missing path, which the pytest
+plugin reports as a skip. To see the ST files a build would use:
+
+```sh
+uv run python -m popcorn.stm32.description sources STM32U575QGIx
+```
+
 ## Build variables
 
 The package build, `uv sync` or `pip install`, compiles the package only: `[tool.pcons]` in
