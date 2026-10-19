@@ -2,8 +2,10 @@
 
 `load_debug_info` walks every compile unit's whole DIE tree once: every type-kind DIE
 wherever it occurs (including nested inside a struct or a subprogram), module-scope
-variables with a single DW_OP_addr location, and module-scope subprograms. It never runs
-on the `load_elf` path; callers use it lazily, on first access to a type or symbol view.
+variables with a single DW_OP_addr location, and module-scope subprograms. A function's locals
+are read on first access to `Function.locals`, from the ELF reopened once per load; a location
+list or range list is then read once per unit, whatever the number of DIEs sharing it. It never
+runs on the `load_elf` path; callers use it lazily, on first access to a type or symbol view.
 
 The input is an untrusted, possibly malformed or adversarial ELF: every DWARF attribute is
 read defensively (form and type checked before use), and the whole walk is wrapped so any
@@ -14,10 +16,12 @@ from __future__ import annotations
 
 import bisect
 import functools
+import os
 import posixpath
 import struct
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+import threading
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -26,6 +30,9 @@ from elftools.common.exceptions import DWARFError, ELFError
 from elftools.construct import ConstructError
 from elftools.dwarf.compileunit import CompileUnit
 from elftools.dwarf.die import DIE, AttributeValue
+from elftools.dwarf.dwarfinfo import DWARFInfo
+from elftools.dwarf.locationlists import BaseAddressEntry as LocationBaseEntry
+from elftools.dwarf.locationlists import LocationEntry, LocationExpr, LocationParser
 from elftools.dwarf.ranges import BaseAddressEntry
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
@@ -173,8 +180,43 @@ class Parameter:
 
 
 @dataclass(frozen=True, slots=True)
+class LocationRange:
+    """One entry of a location list: `expr` locates the value while `low <= pc < high`."""
+
+    low: int
+    high: int
+    expr: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class Local:
+    """A DW_TAG_variable or DW_TAG_formal_parameter in a function body, its own or one of a
+    function inlined into it.
+
+    `location` is a DWARF expression valid wherever the local is in scope, a location list, or
+    None when the compiler kept no location, a local folded to a DW_AT_const_value included.
+    A location list leaves out DW_LLE_default_location entries. `scopes` are the pc ranges of
+    the innermost lexical block or inlined subroutine holding the local, empty when that is
+    the function. `inlined` names the inlined function the local belongs to, None for the
+    function's own.
+    """
+
+    name: str
+    type: TypeId
+    parameter: bool
+    location: bytes | tuple[LocationRange, ...] | None
+    scopes: tuple[tuple[int, int], ...]
+    inlined: str | None
+    decl: Decl | None
+
+
+@dataclass(frozen=True, slots=True)
 class Function:
-    """A module-scope DW_TAG_subprogram; `address` is None for an inline-only function."""
+    """A module-scope DW_TAG_subprogram; `address` is None for an inline-only function.
+
+    `frame_base` is the DW_AT_frame_base expression of the DIE with code, None for a function
+    without one or with a location list as frame base, which is never parsed.
+    """
 
     name: str
     address: int | None
@@ -182,6 +224,27 @@ class Function:
     params: tuple[Parameter, ...]
     variadic: bool
     decl: Decl | None
+    frame_base: bytes | None = None
+    _locals: _LazyLocals | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def locals(self) -> tuple[Local, ...]:
+        """The locals of the body of the DIE with code, empty for a function without one.
+
+        A local with no name along its origin chain and a block-scope `extern` declaration
+        are left out, so the parameters here need not line up with `params`.
+
+        Read on first access from the ELF `load_debug_info` read, reopened once per load. Its
+        DWARF and every DIE read stay in memory while any Function of that load lives, about 15
+        times the ELF size once every function's locals were read: on a 7.9 MB LTO ELF, 12 MB
+        after the load, 18 MB after one function's locals, 119 MB after all of them.
+        Equality, hashing, repr and pickling never read them.
+
+        Raises:
+            DebugInfoError: The ELF changed or vanished since it was loaded, or its DWARF is
+                malformed.
+        """
+        return () if self._locals is None else self._locals.get()
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,7 +454,7 @@ def _decl_file_path(cu: CompileUnit, comp_dir: str, file_idx: int | None) -> str
     if line_program is None:
         return None
     header = line_program.header
-    version = cast(int, cu.header.version)
+    version = cast(int, header["version"])
     file_entries = header["file_entry"]
     include_dirs = header["include_directory"]
 
@@ -618,7 +681,33 @@ def _addr_from_location(attr: AttributeValue) -> int | None:
     return struct.unpack_from("<I", raw, 1)[0]
 
 
-def _build_variable(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Variable, bool] | None:
+def _origin_chain(die: DIE) -> list[DIE]:
+    chain = [die]
+    for attribute in ("DW_AT_abstract_origin", "DW_AT_specification"):
+        if attribute in chain[-1].attributes:
+            chain.append(chain[-1].get_DIE_from_attribute(attribute))
+    return chain
+
+
+def _chain_decl(chain: list[DIE]) -> Decl | None:
+    line = next(
+        (found for link in chain if (found := _attr_int(link, "DW_AT_decl_line")) is not None),
+        None,
+    )
+    file_link = next((link for link in chain if "DW_AT_decl_file" in link.attributes), None)
+    if not line or file_link is None:
+        return None
+    cu = file_link.cu
+    if not isinstance(cu, CompileUnit):
+        return None
+    comp_dir = _attr_str(cu.get_top_DIE(), "DW_AT_comp_dir") or ""
+    path = _decl_file_path(cu, comp_dir, _attr_int(file_link, "DW_AT_decl_file"))
+    if path is None:
+        return None
+    return Decl(file=path, line=line)
+
+
+def _build_variable(die: DIE) -> tuple[str, Variable, bool] | None:
     location = die.attributes.get("DW_AT_location")
     if location is None:
         return None
@@ -626,19 +715,13 @@ def _build_variable(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Vari
     if address is None:
         return None
 
-    name_die = die
-    if "DW_AT_specification" in die.attributes:
-        name_die = die.get_DIE_from_attribute("DW_AT_specification")
-
-    name = _attr_str(name_die, "DW_AT_name")
-    type_id = _type_ref(name_die)
+    chain = _origin_chain(die)
+    name = _attr_str(chain[-1], "DW_AT_name")
+    type_id = _type_ref(chain[-1])
     if name is None or type_id is None:
         return None
-    external = (
-        die.attributes.get("DW_AT_external") is not None
-        or name_die.attributes.get("DW_AT_external") is not None
-    )
-    variable = Variable(name=name, address=address, type=type_id, decl=_decl(cu, comp_dir, die))
+    external = any(link.attributes.get("DW_AT_external") is not None for link in chain)
+    variable = Variable(name=name, address=address, type=type_id, decl=_chain_decl(chain))
     return name, variable, external
 
 
@@ -654,39 +737,186 @@ def _resolve_variables(candidates: dict[str, list[tuple[Variable, bool]]]) -> di
     return resolved
 
 
-def _merge_function(functions: dict[str, Function], name: str, function: Function) -> None:
-    existing = functions.get(name)
-    if existing is None or (existing.address is None and function.address is not None):
-        functions[name] = function
+def _merge_function(
+    functions: dict[str, Function],
+    function_is_decl: dict[str, bool],
+    function: Function,
+    is_decl: bool,
+) -> None:
+    existing = functions.get(function.name)
+    rank = (function.address is not None, not is_decl)
+    if (
+        existing is not None
+        and (existing.address is not None, not function_is_decl[function.name]) >= rank
+    ):
+        return
+    functions[function.name] = function
+    function_is_decl[function.name] = is_decl
 
 
-def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
+def _range_pairs(cu: CompileUnit, die: DIE) -> list[tuple[int, int]]:
     attr = die.attributes.get("DW_AT_ranges")
     if attr is None or attr.form in _REF_FORMS:
-        return None
+        return []
     offset = attr.value
     if isinstance(offset, bool) or not isinstance(offset, int):
-        return None
+        return []
     range_lists = cu.dwarfinfo.range_lists()
     if range_lists is None:
-        return None
+        return []
     entries = range_lists.get_range_list_at_offset(offset, cu=cu)
     base = _attr_int(cu.get_top_DIE(), "DW_AT_low_pc") or 0
-    starts: list[int] = []
+    pairs: list[tuple[int, int]] = []
     for entry in entries:
         if isinstance(entry, BaseAddressEntry):
             base = entry.base_address
+        elif entry.is_absolute:
+            pairs.append((entry.begin_offset, entry.end_offset))
         else:
-            starts.append(entry.begin_offset if entry.is_absolute else base + entry.begin_offset)
+            pairs.append((base + entry.begin_offset, base + entry.end_offset))
+    return pairs
+
+
+def address_from_ranges(cu: CompileUnit, die: DIE) -> int | None:
+    starts = [low for low, _ in _range_pairs(cu, die)]
     return min(starts) if starts else None
 
 
-def _build_function(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Function] | None:
-    origin_die = die
-    if "DW_AT_abstract_origin" in origin_die.attributes:
-        origin_die = origin_die.get_DIE_from_attribute("DW_AT_abstract_origin")
-    if "DW_AT_specification" in origin_die.attributes:
-        origin_die = origin_die.get_DIE_from_attribute("DW_AT_specification")
+type _Location = bytes | tuple[LocationRange, ...] | None
+type _Ranges = tuple[tuple[int, int], ...]
+
+
+@dataclass(slots=True)
+class _Unit:
+    """One compile unit's location and range lists, each parsed once whatever the number of
+    DIEs that share it."""
+
+    cu: CompileUnit
+    parser: LocationParser
+    location_lists: dict[tuple[str, int], _Location] = field(
+        default_factory=dict[tuple[str, int], _Location]
+    )
+    range_lists: dict[int, _Ranges] = field(default_factory=dict[int, _Ranges])
+
+
+def _pc_ranges(unit: _Unit, die: DIE) -> _Ranges:
+    low = _attr_int(die, "DW_AT_low_pc")
+    high_attr = die.attributes.get("DW_AT_high_pc")
+    if low is not None and high_attr is not None:
+        high = high_attr.value
+        if isinstance(high, bool) or not isinstance(high, int):
+            return ()
+        end = high if high_attr.form.startswith("DW_FORM_addr") else low + high
+        return ((low, end),) if end > low else ()
+    attr = die.attributes.get("DW_AT_ranges")
+    if attr is None or isinstance(attr.value, bool) or not isinstance(attr.value, int):
+        return ()
+    cached = unit.range_lists.get(attr.value)
+    if cached is None:
+        cached = tuple(pair for pair in _range_pairs(unit.cu, die) if pair[1] > pair[0])
+        unit.range_lists[attr.value] = cached
+    return cached
+
+
+def _expr(value: object) -> bytes | None:
+    if not isinstance(value, list):
+        return None
+    return bytes(cast("list[int]", value))
+
+
+def _location_list(unit: _Unit, entries: Iterable[object]) -> _Location:
+    base = _attr_int(unit.cu.get_top_DIE(), "DW_AT_low_pc") or 0
+    ranges: list[LocationRange] = []
+    for entry in entries:
+        if isinstance(entry, LocationBaseEntry):
+            base = entry.base_address
+        elif isinstance(entry, LocationEntry):
+            expr = _expr(entry.loc_expr)
+            low = entry.begin_offset if entry.is_absolute else base + entry.begin_offset
+            high = entry.end_offset if entry.is_absolute else base + entry.end_offset
+            if expr is not None and high > low:
+                ranges.append(LocationRange(low=low, high=high, expr=expr))
+    return tuple(ranges) or None
+
+
+def _location(unit: _Unit, die: DIE, name: str) -> _Location:
+    attr = die.attributes.get(name)
+    version = cast(int, unit.cu.header.version)
+    if attr is None or not LocationParser.attribute_has_location(attr, version):
+        return None
+    value = attr.value
+    key = (attr.form, value) if isinstance(value, int) and not isinstance(value, bool) else None
+    if key is not None and key in unit.location_lists:
+        return unit.location_lists[key]
+    parsed = unit.parser.parse_from_attribute(attr, version, die)
+    if isinstance(parsed, LocationExpr):
+        return _expr(parsed.loc_expr)
+    location = _location_list(unit, parsed)
+    if key is not None:
+        unit.location_lists[key] = location
+    return location
+
+
+def _build_local(unit: _Unit, die: DIE, scopes: _Ranges, inlined: str | None) -> Local | None:
+    chain = _origin_chain(die)
+    name = next((found for link in chain if (found := _attr_str(link, "DW_AT_name"))), None)
+    type_id = next((ref for link in chain if (ref := _type_ref(link)) is not None), None)
+    if name is None or type_id is None:
+        return None
+    return Local(
+        name=name,
+        type=type_id,
+        parameter=die.tag == "DW_TAG_formal_parameter",
+        location=_location(unit, die, "DW_AT_location"),
+        scopes=scopes,
+        inlined=inlined,
+        decl=_chain_decl(chain),
+    )
+
+
+def _frame_base(unit: _Unit, die: DIE) -> bytes | None:
+    attr = die.attributes.get("DW_AT_frame_base")
+    if attr is None:
+        return None
+    version = cast(int, unit.cu.header.version)
+    if attr.form == "DW_FORM_exprloc" or (version < 4 and attr.form.startswith("DW_FORM_block")):
+        return _expr(attr.value)
+    return None
+
+
+def _collect_locals(unit: _Unit, die: DIE) -> tuple[Local, ...]:
+    found: list[Local] = []
+    stack: list[tuple[DIE, _Ranges, str | None]] = [
+        (child, (), None) for child in reversed(list(_safe_children(die)))
+    ]
+    seen: set[int] = set()
+    while stack:
+        child, scopes, inlined = stack.pop()
+        if child.offset in seen:
+            continue
+        seen.add(child.offset)
+        if child.attributes.get("DW_AT_declaration") is not None:
+            continue
+        if child.tag in ("DW_TAG_variable", "DW_TAG_formal_parameter"):
+            local = _build_local(unit, child, scopes, inlined)
+            if local is not None:
+                found.append(local)
+            continue
+        if child.tag == "DW_TAG_lexical_block":
+            inner = _pc_ranges(unit, child) or scopes
+        elif child.tag == "DW_TAG_inlined_subroutine":
+            inner = _pc_ranges(unit, child) or scopes
+            inlined = _attr_str(_origin_chain(child)[-1], "DW_AT_name")
+        else:
+            continue
+        grandchildren = reversed(list(_safe_children(child)))
+        stack.extend((grandchild, inner, inlined) for grandchild in grandchildren)
+    return tuple(found)
+
+
+def _build_function(unit: _Unit, source: _LocalsSource, die: DIE) -> Function | None:
+    chain = _origin_chain(die)
+    origin_die = chain[-1]
 
     name = _attr_str(origin_die, "DW_AT_name")
     if name is None:
@@ -704,17 +934,94 @@ def _build_function(cu: CompileUnit, comp_dir: str, die: DIE) -> tuple[str, Func
 
     address = _attr_int(die, "DW_AT_low_pc")
     if address is None:
-        address = address_from_ranges(cu, die)
+        address = address_from_ranges(unit.cu, die)
+    has_code = address is not None
 
-    function = Function(
+    return Function(
         name=name,
         address=address,
         returns=_type_ref(origin_die),
         params=tuple(params),
         variadic=variadic,
-        decl=_decl(cu, comp_dir, origin_die),
+        decl=_chain_decl(chain),
+        frame_base=_frame_base(unit, die) if has_code else None,
+        _locals=_LazyLocals(source, die.offset) if has_code else None,
     )
-    return name, function
+
+
+type _FileIdentity = tuple[int, int, int, int]
+
+
+def _file_identity(descriptor: int) -> _FileIdentity:
+    stat = os.fstat(descriptor)
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+class _LocalsSource:
+    """The ELF one load read, reopened on the first access to a function's locals. Its DWARF
+    sections then stay in memory, each unit's lists are parsed once and each function's locals
+    are kept. A lock serialises the reads, pyelftools streams are not thread-safe."""
+
+    __slots__ = ("_collected", "_dwarf", "_identity", "_lock", "_path", "_units")
+
+    def __init__(self, path: Path, identity: _FileIdentity) -> None:
+        self._path = path
+        self._identity = identity
+        self._lock = threading.Lock()
+        self._dwarf: DWARFInfo | None = None
+        self._units: dict[int, _Unit] = {}
+        self._collected: dict[int, tuple[Local, ...]] = {}
+
+    def __reduce__(self) -> tuple[type[_LocalsSource], tuple[Path, _FileIdentity]]:
+        return (_LocalsSource, (self._path, self._identity))
+
+    def locals_at(self, offset: int) -> tuple[Local, ...]:
+        with self._lock:
+            found = self._collected.get(offset)
+            if found is not None:
+                return found
+            try:
+                found = self._collect(offset)
+            except DebugInfoError:
+                raise
+            except OSError as exc:
+                raise DebugInfoError(f"{self._path}: {exc}") from exc
+            except _DECODE_ERRORS as exc:
+                raise DebugInfoError(f"{self._path}: malformed DWARF: {exc!r}") from exc
+            self._collected[offset] = found
+            return found
+
+    def _collect(self, offset: int) -> tuple[Local, ...]:
+        if self._dwarf is None:
+            with self._path.open("rb") as stream:
+                if _file_identity(stream.fileno()) != self._identity:
+                    raise DebugInfoError(f"{self._path}: changed since its debug info was read")
+                self._dwarf = ELFFile(stream).get_dwarf_info()
+        die = self._dwarf.get_DIE_from_refaddr(offset)
+        cu = die.cu
+        if not isinstance(cu, CompileUnit):
+            return ()
+        unit = self._units.get(cu.cu_offset)
+        if unit is None:
+            unit = _Unit(cu, LocationParser(cu.dwarfinfo.location_lists()))
+            self._units[cu.cu_offset] = unit
+        return _collect_locals(unit, die)
+
+
+class _LazyLocals:
+    """The locals of the function DIE at `offset`, read from `source` on first access."""
+
+    __slots__ = ("_offset", "_source")
+
+    def __init__(self, source: _LocalsSource, offset: int) -> None:
+        self._source = source
+        self._offset = offset
+
+    def __reduce__(self) -> tuple[type[_LazyLocals], tuple[_LocalsSource, int]]:
+        return (_LazyLocals, (self._source, self._offset))
+
+    def get(self) -> tuple[Local, ...]:
+        return self._source.locals_at(self._offset)
 
 
 def _walk_cu(
@@ -724,9 +1031,12 @@ def _walk_cu(
     type_is_decl: dict[str, bool],
     variable_candidates: dict[str, list[tuple[Variable, bool]]],
     functions: dict[str, Function],
+    function_is_decl: dict[str, bool],
+    source: _LocalsSource,
 ) -> None:
     top = cu.get_top_DIE()
     comp_dir = _attr_str(top, "DW_AT_comp_dir") or ""
+    unit = _Unit(cu, LocationParser(cu.dwarfinfo.location_lists()))
 
     stack: list[tuple[DIE, bool]] = [(child, True) for child in _safe_children(top)]
     seen: set[int] = set()
@@ -739,14 +1049,15 @@ def _walk_cu(
         if die.tag in _TYPE_TAGS:
             _record_type(cu, comp_dir, die, by_id, types, type_is_decl)
         elif module_scope and die.tag == "DW_TAG_variable":
-            built = _build_variable(cu, comp_dir, die)
+            built = _build_variable(die)
             if built is not None:
                 name, variable, external = built
                 variable_candidates.setdefault(name, []).append((variable, external))
         elif module_scope and die.tag == "DW_TAG_subprogram":
-            built = _build_function(cu, comp_dir, die)
-            if built is not None:
-                _merge_function(functions, built[0], built[1])
+            function = _build_function(unit, source, die)
+            if function is not None:
+                is_decl = die.attributes.get("DW_AT_declaration") is not None
+                _merge_function(functions, function_is_decl, function, is_decl)
 
         for child in _safe_children(die):
             stack.append((child, False))
@@ -772,15 +1083,7 @@ def _fill_addresses_from_symtab(elf: ELFFile, functions: dict[str, Function]) ->
     for name, values in candidates.items():
         if len(values) != 1:
             continue
-        fn = functions[name]
-        functions[name] = Function(
-            name=fn.name,
-            address=next(iter(values)) & ~1,
-            returns=fn.returns,
-            params=fn.params,
-            variadic=fn.variadic,
-            decl=fn.decl,
-        )
+        functions[name] = replace(functions[name], address=next(iter(values)) & ~1)
 
 
 _DECODE_ERRORS: tuple[type[Exception], ...] = (
@@ -801,6 +1104,7 @@ _DECODE_ERRORS: tuple[type[Exception], ...] = (
 def _load(path: Path) -> DebugInfo:
     try:
         with path.open("rb") as stream:
+            source = _LocalsSource(path, _file_identity(stream.fileno()))
             elf = ELFFile(stream)
             dwarf_info = elf.get_dwarf_info()
 
@@ -809,13 +1113,23 @@ def _load(path: Path) -> DebugInfo:
             type_is_decl: dict[str, bool] = {}
             variable_candidates: dict[str, list[tuple[Variable, bool]]] = {}
             functions: dict[str, Function] = {}
+            function_is_decl: dict[str, bool] = {}
 
             cus = list(dwarf_info.iter_CUs())
             if not cus:
                 raise NoDebugInfo(f"{path}: no .debug_info compile units")
             units: list[DwarfUnit] = []
             for cu in cus:
-                _walk_cu(cu, by_id, types, type_is_decl, variable_candidates, functions)
+                _walk_cu(
+                    cu,
+                    by_id,
+                    types,
+                    type_is_decl,
+                    variable_candidates,
+                    functions,
+                    function_is_decl,
+                    source,
+                )
                 name = _attr_str(cu.get_top_DIE(), "DW_AT_name") or ""
                 units.append(DwarfUnit(name, cu.cu_offset, cu.cu_offset + cu.size))
             _fill_addresses_from_symtab(elf, functions)
